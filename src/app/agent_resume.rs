@@ -326,7 +326,7 @@ fn derived_pending_agent_resume_pane_infos(
     pane_outer_borders: bool,
 ) -> Vec<crate::layout::PaneInfo> {
     crate::ui::apply_pane_chrome(
-        tab.layout.panes(terminal_area),
+        tab.pane_layout(terminal_area),
         pane_borders,
         pane_gaps,
         pane_outer_borders,

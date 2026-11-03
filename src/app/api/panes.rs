@@ -2424,7 +2424,7 @@ impl App {
         direction: PaneDirection,
     ) -> Option<PaneId> {
         let tab = self.state.workspaces.get(ws_idx)?.tabs.get(tab_idx)?;
-        let panes = tab.layout.panes(self.state.view.terminal_area);
+        let panes = tab.pane_layout(self.state.view.terminal_area);
         let source = panes.iter().find(|pane| pane.id == source_pane_id)?;
         find_in_direction(source, direction.into(), &panes)
     }
@@ -2440,7 +2440,7 @@ impl App {
         let focused = tab.layout.focused();
         let focused_pane_id = self.public_pane_id(ws_idx, focused)?;
         let panes = crate::ui::apply_pane_chrome(
-            tab.layout.panes(area),
+            tab.pane_layout(area),
             self.state.pane_borders,
             self.state.pane_gaps,
             self.state.pane_outer_borders,
@@ -2455,8 +2455,7 @@ impl App {
         })
         .collect();
         let splits = tab
-            .layout
-            .splits(area)
+            .split_layout(area)
             .into_iter()
             .enumerate()
             .map(|(idx, split)| PaneLayoutSplit {

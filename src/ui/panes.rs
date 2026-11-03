@@ -134,7 +134,8 @@ pub(crate) fn apply_pane_chrome(
             let right_neighbor = multi_pane.then(|| pane_to_right(&info, &panes)).flatten();
             let below_neighbor = multi_pane.then(|| pane_below(&info, &panes)).flatten();
 
-            if multi_pane && pane_gaps && !pane_borders.draws_borders() {
+            let independent = info.borders == Borders::ALL;
+            if !independent && multi_pane && pane_gaps && !pane_borders.draws_borders() {
                 if right_neighbor.is_some() {
                     info.rect.width = shrink_for_one_cell_gap(info.rect.width);
                 }
@@ -143,7 +144,9 @@ pub(crate) fn apply_pane_chrome(
                 }
             }
 
-            info.borders = if !bordered {
+            info.borders = if independent {
+                Borders::ALL
+            } else if !bordered {
                 Borders::NONE
             } else {
                 let mut borders = Borders::ALL;
@@ -288,7 +291,7 @@ pub(super) fn resize_tab_panes_except(
     }
 
     for info in apply_pane_chrome(
-        tab.layout.panes(area),
+        tab.pane_layout(area),
         app.pane_borders,
         app.pane_gaps,
         app.pane_outer_borders,
@@ -341,7 +344,9 @@ pub(super) fn compute_pane_infos_for_tab(
 
     if tab.zoomed {
         let focused_id = tab.layout.focused();
-        let borders = if app.pane_borders.shows_borders(multi_pane) && app.pane_outer_borders {
+        let borders = if tab.layout.view_at(focused_id).is_some()
+            || (app.pane_borders.shows_borders(multi_pane) && app.pane_outer_borders)
+        {
             Borders::ALL
         } else {
             Borders::NONE
@@ -383,7 +388,7 @@ pub(super) fn compute_pane_infos_for_tab(
     }
 
     let mut pane_infos = apply_pane_chrome(
-        tab.layout.panes(area),
+        tab.pane_layout(area),
         app.pane_borders,
         app.pane_gaps,
         app.pane_outer_borders,
@@ -449,6 +454,59 @@ fn compute_pane_infos(
         resize_panes,
         cell_size,
     )
+}
+
+pub(super) fn render_box_frames(
+    app: &AppState,
+    target: Option<super::tab_surface::TabSurfaceTarget>,
+    boxes: &[crate::layout::BoxFrame],
+    panes: &[PaneInfo],
+    frame: &mut Frame,
+) {
+    let Some(target) = target else {
+        return;
+    };
+    let Some(ws) = app.workspaces.get(target.workspace_index) else {
+        return;
+    };
+    let Some(tab) = ws.tabs.get(target.tab_index) else {
+        return;
+    };
+    let focused = panes
+        .iter()
+        .find(|pane| pane.is_focused)
+        .map(|pane| pane.rect);
+    for group in boxes {
+        let label = group
+            .stack
+            .and_then(|id| tab.legacy_box_label(id))
+            .map(str::to_owned)
+            .or_else(|| {
+                group
+                    .title_pane
+                    .and_then(|id| ws.pane_state(id))
+                    .and_then(|pane| app.terminals.get(&pane.attached_terminal_id))
+                    .and_then(|terminal| {
+                        terminal
+                            .border_label(app.show_agent_labels_on_pane_borders)
+                            .or_else(|| terminal.agent_name.clone())
+                    })
+            })
+            .unwrap_or_else(|| "box".to_owned());
+        let active = focused.is_some_and(|pane| group.rect.intersection(pane) == pane);
+        let color = if active {
+            app.palette.accent
+        } else {
+            app.palette.overlay0
+        };
+        let mut block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(color));
+        if let Some(title) = pane_border_title(&label, group.rect.width, active) {
+            block = block.title(title);
+        }
+        frame.render_widget(block, group.rect);
+    }
 }
 
 pub(super) fn render_panes(
@@ -538,7 +596,7 @@ fn render_pane_borders(
     split_borders: &[crate::layout::SplitBorder],
     frame: &mut Frame,
 ) {
-    if !app.pane_borders.draws_borders() || pane_infos.iter().all(|info| info.borders.is_empty()) {
+    if pane_infos.iter().all(|info| info.borders.is_empty()) {
         return;
     }
 
@@ -588,6 +646,9 @@ fn add_split_border_cells(
     }
 
     for split in split_borders {
+        if split.independent_borders {
+            continue;
+        }
         match split.direction {
             ratatui::layout::Direction::Horizontal => {
                 let x = split.pos;
@@ -1213,6 +1274,7 @@ mod tests {
                 ratio: 0.5,
                 area: Rect::new(0, 0, 4, 4),
                 path: vec![],
+                independent_borders: false,
             },
             crate::layout::SplitBorder {
                 pos: 2,
@@ -1220,6 +1282,7 @@ mod tests {
                 ratio: 0.5,
                 area: Rect::new(0, 0, 4, 4),
                 path: vec![false],
+                independent_borders: false,
             },
         ];
         let ws = Workspace::test_new("test");
@@ -1333,7 +1396,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn collection_preview_reserves_one_header_row_from_terminal_geometry() {
+    async fn named_collection_reserves_nested_frames_and_one_header_row() {
         let mut app = AppState::test_new();
         app.pane_borders = PaneBordersConfig::Off;
         app.pane_scrollbars = false;
@@ -1369,8 +1432,25 @@ mod tests {
         let preview = infos.iter().find(|info| info.id == member).unwrap();
 
         assert_eq!(tiled.inner_rect, tiled.rect);
-        assert_eq!(preview.inner_rect.y, preview.rect.y + 1);
-        assert_eq!(preview.inner_rect.height, preview.rect.height - 1);
+        assert_eq!(preview.borders, Borders::ALL);
+        assert_eq!(
+            preview.inner_rect.y,
+            preview.rect.y + 2,
+            "child top border plus one stack header row"
+        );
+        assert_eq!(
+            preview.inner_rect.height,
+            preview.rect.height - 3,
+            "two child borders plus one stack header row"
+        );
+        assert_eq!(preview.inner_rect.width, preview.rect.width - 2);
+        let frames = app.workspaces[0].tabs[0].box_frames(Rect::new(0, 0, 80, 20));
+        assert_eq!(frames.len(), 1);
+        assert_eq!(
+            preview.rect.y,
+            frames[0].rect.y + 1,
+            "outer group border is reserved before the child"
+        );
         assert_eq!(
             app.workspaces[0].tabs[0].runtimes[&member].current_size(),
             (preview.inner_rect.height, preview.inner_rect.width)

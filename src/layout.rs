@@ -1,6 +1,8 @@
 //! BSP tree layout for tiling panes within a workspace.
 
+mod frames;
 mod nested;
+pub(crate) use frames::BoxFrame;
 
 use std::cmp::Reverse;
 
@@ -164,6 +166,8 @@ pub struct SplitBorder {
     pub area: Rect,
     /// Path from root to this split node (false=first, true=second).
     pub path: Vec<bool>,
+    /// Child panes inside a box retain independent perimeters, not joined seams.
+    pub independent_borders: bool,
 }
 
 /// Cardinal direction for pane navigation.
@@ -492,18 +496,49 @@ impl TileLayout {
     }
 
     pub fn panes(&self, area: Rect) -> Vec<PaneInfo> {
+        self.panes_with_box_frames(area, &[])
+    }
+
+    pub(crate) fn panes_with_box_frames(
+        &self,
+        area: Rect,
+        named: &[TerminalContainerId],
+    ) -> Vec<PaneInfo> {
         let mut result = Vec::new();
-        typed_collect_panes(&self.root, area, self.focus, &mut result);
+        typed_collect_panes(&self.root, area, self.focus, named, false, &mut result);
         result
     }
 
     pub(crate) fn leaf_rect(&self, leaf: LayoutLeaf, area: Rect) -> Option<Rect> {
-        typed_leaf_rect(&self.root, leaf, area)
+        self.leaf_rect_with_box_frames(leaf, area, &[])
+    }
+
+    pub(crate) fn leaf_rect_with_box_frames(
+        &self,
+        leaf: LayoutLeaf,
+        area: Rect,
+        named: &[TerminalContainerId],
+    ) -> Option<Rect> {
+        typed_leaf_rect(&self.root, leaf, area, named)
     }
 
     pub fn splits(&self, area: Rect) -> Vec<SplitBorder> {
+        self.splits_with_box_frames(area, &[])
+    }
+
+    pub(crate) fn splits_with_box_frames(
+        &self,
+        area: Rect,
+        named: &[TerminalContainerId],
+    ) -> Vec<SplitBorder> {
         let mut result = Vec::new();
-        typed_collect_splits(&self.root, area, &mut Vec::new(), &mut result);
+        typed_collect_splits(&self.root, area, named, false, &mut Vec::new(), &mut result);
+        result
+    }
+
+    pub(crate) fn box_frames(&self, area: Rect, named: &[TerminalContainerId]) -> Vec<BoxFrame> {
+        let mut result = Vec::new();
+        frames::collect(&self.root, area, named, &mut result);
         result
     }
 
@@ -868,7 +903,7 @@ impl TileLayout {
     }
 
     pub fn resize_focused(&mut self, nav: NavDirection, delta: f32, area: Rect) {
-        let Some(focused_rect) = typed_leaf_rect(&self.root, self.focus, area) else {
+        let Some(focused_rect) = self.leaf_rect(self.focus, area) else {
             return;
         };
         let target_dir = match nav {
@@ -1016,7 +1051,13 @@ fn typed_collect_leaves(node: &TypedNode, result: &mut Vec<LayoutLeaf>) {
     }
 }
 
-fn typed_leaf_rect(node: &TypedNode, target: LayoutLeaf, area: Rect) -> Option<Rect> {
+fn typed_leaf_rect(
+    node: &TypedNode,
+    target: LayoutLeaf,
+    area: Rect,
+    named: &[TerminalContainerId],
+) -> Option<Rect> {
+    let (content, _) = frames::content_rect(node, area, named);
     match node {
         TypedNode::Leaf(pane) => (LayoutLeaf::Pane(*pane) == target).then_some(area),
         TypedNode::View { pane, .. } => (LayoutLeaf::Pane(*pane) == target).then_some(area),
@@ -1030,7 +1071,7 @@ fn typed_leaf_rect(node: &TypedNode, target: LayoutLeaf, area: Rect) -> Option<R
             } else {
                 children
                     .get(*selected)
-                    .and_then(|child| typed_leaf_rect(child, target, area))
+                    .and_then(|child| typed_leaf_rect(child, target, content, named))
             }
         }
         TypedNode::Split {
@@ -1039,9 +1080,9 @@ fn typed_leaf_rect(node: &TypedNode, target: LayoutLeaf, area: Rect) -> Option<R
             first,
             second,
         } => {
-            let (first_area, second_area) = split_rect(area, *direction, *ratio);
-            typed_leaf_rect(first, target, first_area)
-                .or_else(|| typed_leaf_rect(second, target, second_area))
+            let (first_area, second_area) = split_rect(content, *direction, *ratio);
+            typed_leaf_rect(first, target, first_area, named)
+                .or_else(|| typed_leaf_rect(second, target, second_area, named))
         }
     }
 }
@@ -1050,8 +1091,12 @@ fn typed_collect_panes(
     node: &TypedNode,
     area: Rect,
     focus: LayoutLeaf,
+    named: &[TerminalContainerId],
+    inside_frame: bool,
     result: &mut Vec<PaneInfo>,
 ) {
+    let (content, framed) = frames::content_rect(node, area, named);
+    let inside_frame = inside_frame || framed;
     let pane = match node {
         TypedNode::Leaf(id) => Some((*id, focus == LayoutLeaf::Pane(*id))),
         TypedNode::View { pane, .. } => Some((*pane, focus == LayoutLeaf::Pane(*pane))),
@@ -1066,7 +1111,7 @@ fn typed_collect_panes(
                 } else {
                     focus
                 };
-                typed_collect_panes(child, area, focus, result);
+                typed_collect_panes(child, content, focus, named, inside_frame, result);
             }
             None
         }
@@ -1076,9 +1121,9 @@ fn typed_collect_panes(
             first,
             second,
         } => {
-            let (first_area, second_area) = split_rect(area, *direction, *ratio);
-            typed_collect_panes(first, first_area, focus, result);
-            typed_collect_panes(second, second_area, focus, result);
+            let (first_area, second_area) = split_rect(content, *direction, *ratio);
+            typed_collect_panes(first, first_area, focus, named, inside_frame, result);
+            typed_collect_panes(second, second_area, focus, named, inside_frame, result);
             None
         }
     };
@@ -1088,7 +1133,11 @@ fn typed_collect_panes(
             rect: area,
             inner_rect: area,
             scrollbar_rect: None,
-            borders: Borders::NONE,
+            borders: if inside_frame || matches!(node, TypedNode::View { .. }) {
+                Borders::ALL
+            } else {
+                Borders::NONE
+            },
             is_focused,
         });
     }
@@ -1097,9 +1146,13 @@ fn typed_collect_panes(
 fn typed_collect_splits(
     node: &TypedNode,
     area: Rect,
+    named: &[TerminalContainerId],
+    inside_frame: bool,
     path: &mut Vec<bool>,
     result: &mut Vec<SplitBorder>,
 ) {
+    let (content, framed) = frames::content_rect(node, area, named);
+    let inside_frame = inside_frame || framed;
     if let TypedNode::Split {
         direction,
         ratio,
@@ -1107,7 +1160,7 @@ fn typed_collect_splits(
         second,
     } = node
     {
-        let (first_area, second_area) = split_rect(area, *direction, *ratio);
+        let (first_area, second_area) = split_rect(content, *direction, *ratio);
         let pos = match direction {
             Direction::Horizontal => first_area.x + first_area.width,
             Direction::Vertical => first_area.y + first_area.height,
@@ -1116,14 +1169,15 @@ fn typed_collect_splits(
             pos,
             direction: *direction,
             ratio: *ratio,
-            area,
+            area: content,
             path: path.clone(),
+            independent_borders: inside_frame,
         });
         path.push(false);
-        typed_collect_splits(first, first_area, path, result);
+        typed_collect_splits(first, first_area, named, inside_frame, path, result);
         path.pop();
         path.push(true);
-        typed_collect_splits(second, second_area, path, result);
+        typed_collect_splits(second, second_area, named, inside_frame, path, result);
         path.pop();
     }
 }

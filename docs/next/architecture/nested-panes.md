@@ -31,7 +31,7 @@ implementation mandate only when accepted.
 | 2026-10-04 | **Nesting depth is capped at four levels of boxes** inside a tab; the cap may be raised later. |
 | 2026-10-04 | **Agent start rule details** accepted as written in [Agent start rule](#agent-start-rule). |
 | 2026-10-04 | **Interaction model accepted as provisional**: good for the first build, explicitly open to iteration. See [Interaction](#interaction-provisional). |
-| 2026-10-04 | **Frame style**: a view pane that shares a box with what it covers gets a **light frame**: the divider carries its title, scope and count, using no extra row. Every other pane, including a view standing alone or zoomed, gets the normal full frame. Focus highlights the divider and title like a focused terminal border; dragging the divider resizes and dragging the title moves. See [Frame style](#frame-style). |
+| 2026-11-02 | **Frame style (supersedes the 2026-10-04 light frame)**: one outer perimeter encloses the agent's box, including both its terminal pane and view. Each child, including the view, has its own complete, visible one-cell perimeter inside it, side by side or with the view below. No view is a header-only strip outside its agent's box. See [Frame style](#frame-style). |
 | 2026-10-04 | **Vqro core owns boxes completely, including their names.** The Collections extension and archiving are dropped. Core absorbs the base features (named boxes, stacks with the `n/m` switcher and list view, adding and reordering members, moving a member out, closing a box). Archiving may return later as a separate design. This supersedes the package authority in [Collections authority transition](collections-authority-transition.md) once accepted. See [Collections become boxes](#collections-become-boxes). |
 | 2026-10-04 | **No compatibility floor while Vqro is in development (option B).** This design may change the client protocol and frozen generation-1 formats and fixtures freely; older clients are not supported. The frozen-floor rule is meant for when community and ecosystem building starts. This requires changing the "Stable client endpoint contract" section of `AGENTS.md` and replacing the frozen fixtures. `PROTOCOL_VERSION` is still bumped so mismatched client and server refuse cleanly. |
 | 2026-10-04 | **Identity and persistence** as in [Identity and persistence](#identity-and-persistence): stable box IDs; view panes keep their place and show "unavailable" when their extension is missing, recovering by themselves; live server upgrade keeps running terminals by converting the old layout on the way in; downgrade is unsupported; the old session file is backed up before conversion. |
@@ -186,21 +186,47 @@ dropping onto agent2:
 
 ## Frame style
 
-```
-light frame (view next to what it covers)
-┌ agent1 $ pi … ──────────────────────┐
-│ $ pi …                              │
-│                                     │
-├ Tasks · agent1 ─────────── 2 active ┤   ← divider doubles as title
-│ ▸ Spike fix   owes report · 12m     │
-└─────────────────────────────────────┘
+The human required a nested box on 2026-11-02, superseding the light frame.
+One outer perimeter encloses both panes; the view and terminal each retain a
+complete inner perimeter. The same rule applies with the view below:
 
-full frame (view standing alone or zoomed)
-┌ Tasks · 3 terminals ─── 4 active ───┐
-│ ▾ Spike fix     ● agent1            │
-│   owes report · 12m                 │
-└─────────────────────────────────────┘
 ```
+┌ agent1 ──────────────────────────────────────┐
+│┌ pi … ─────────────────┐┌ Tasks · agent1 ───┐│
+││ $ pi …                ││ ▸ Spike fix      ││
+│└───────────────────────┘└───────────────────┘│
+└──────────────────────────────────────────────┘
+
+┌ agent1 ──────────────────────────────────────┐
+│┌ pi … ──────────────────────────────────────┐│
+││ $ pi …                                     ││
+│└────────────────────────────────────────────┘│
+│┌ Tasks · agent1 ────────────────────────────┐│
+││ ▸ Spike fix                                ││
+│└────────────────────────────────────────────┘│
+└──────────────────────────────────────────────┘
+```
+
+Every border is one cell thick, with no additional blank gutter. The outer
+frame costs two columns and two rows. Children are split inside that inset,
+then each child's complete border is subtracted for its terminal or view
+content. Adjacent child perimeters are independent, not a title-only divider.
+`pane view add --ratio R` gives the **view** share of the parent's available
+split area, before child borders, in either direction. Integer cell allocation
+quantizes this ratio; tiny panes can have zero content after their borders.
+The accepted range is 0.1 through 0.9, default 0.5.
+
+**Depth economy is a prototype for human visual review, not a final decision.**
+The coordinator authorized one policy function that frames a box directly
+holding a view, or an already named box; ordinary unnamed terminal-only splits
+retain their existing rendering. Existing legacy names are read, not moved into
+the canonical tree or given new authority. Screenshots include an all-box nested
+comparison so the human can choose the final rule before stage 4.
+
+A standalone or zoomed view keeps its complete pane frame, without a redundant
+outer group frame. Zoom does not change placement-derived scope. The earlier
+schematic examples above describe placement/scope only; their light-divider
+appearance is superseded by these perimeters.
 
 ## Collections become boxes
 

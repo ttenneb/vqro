@@ -277,6 +277,51 @@ impl Tab {
             .flatten()
     }
 
+    /// Transient presentation input, derived from actual legacy labels rather
+    /// than sidecar presence. Box names are not copied into the layout tree.
+    fn named_box_ids(&self) -> Vec<TerminalContainerId> {
+        self.legacy_collection_snapshots
+            .iter()
+            .filter_map(|(id, snapshot)| {
+                snapshot
+                    .label
+                    .as_deref()
+                    .filter(|label| !label.trim().is_empty())
+                    .map(|_| *id)
+            })
+            .collect()
+    }
+
+    pub(crate) fn legacy_box_label(&self, id: TerminalContainerId) -> Option<&str> {
+        self.legacy_collection_snapshots.get(&id)?.label.as_deref()
+    }
+
+    pub(crate) fn pane_layout(&self, area: ratatui::layout::Rect) -> Vec<crate::layout::PaneInfo> {
+        self.layout
+            .panes_with_box_frames(area, &self.named_box_ids())
+    }
+
+    pub(crate) fn split_layout(
+        &self,
+        area: ratatui::layout::Rect,
+    ) -> Vec<crate::layout::SplitBorder> {
+        self.layout
+            .splits_with_box_frames(area, &self.named_box_ids())
+    }
+
+    pub(crate) fn box_frames(&self, area: ratatui::layout::Rect) -> Vec<crate::layout::BoxFrame> {
+        self.layout.box_frames(area, &self.named_box_ids())
+    }
+
+    pub(crate) fn layout_leaf_rect(
+        &self,
+        leaf: crate::layout::LayoutLeaf,
+        area: ratatui::layout::Rect,
+    ) -> Option<ratatui::layout::Rect> {
+        self.layout
+            .leaf_rect_with_box_frames(leaf, area, &self.named_box_ids())
+    }
+
     pub(crate) fn collection(&self, collection_id: CollectionId) -> Option<PaneCollection<'_>> {
         let container_id = TerminalContainerId::from(collection_id);
         Some(PaneCollection {

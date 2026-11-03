@@ -1,8 +1,8 @@
-//! Pane split panels: Vqro lays out and draws views that extensions publish.
+//! View panes: Vqro draws extension views inside complete pane perimeters.
 //!
 //! Meaning, hierarchy and state text belong to the publishing extension. This
-//! module only selects the views published for a pane, lays them out in the
-//! pane's bottom edge slot, draws cached content in the same shape as the
+//! module only selects the views published for a pane, draws cached content
+//! within the host-projected inner rectangle in the same shape as the
 //! surrounding UI (tree connectors, state glyphs, one line per row) and joins
 //! the live terminal and agent facts Vqro owns. Nothing here reads a terminal,
 //! the filesystem or a process tree: the work is bounded by the panes on screen
@@ -13,6 +13,9 @@ use super::render::{display_width, put_text};
 use super::*;
 use crate::extension_contract::{HostDocumentItem, HostViewState, HostViewTone};
 use crate::protocol::endpoint::HostDocumentsProjectionV1;
+
+#[cfg(test)]
+mod frame_tests;
 
 /// A published view that fills one pane's slot.
 struct PanelView<'a> {
@@ -302,24 +305,28 @@ fn draw_view_header(
     title: &str,
     scope: &str,
     summary: &str,
-    light_frame: bool,
+    focused: bool,
     palette: &Palette,
 ) {
     if rect.width == 0 || rect.height == 0 {
         return;
     }
     let bg = palette.panel_bg;
-    let dim = Style::default().fg(palette.overlay0).bg(bg);
+    let dim = Style::default()
+        .fg(if focused {
+            palette.accent
+        } else {
+            palette.overlay0
+        })
+        .bg(bg);
     let strong = Style::default()
         .fg(palette.text)
         .bg(bg)
         .add_modifier(Modifier::BOLD);
-    // A light frame draws the divider itself: the pane's top row is the shared
-    // divider the title rides on. A full frame draws a box corner first.
-    let leading = if light_frame { "─ " } else { "┌─" };
+    // The caller supplies only the top edge's interior, preserving both corners.
     let line = "─".repeat(rect.width as usize);
     put_text(buffer, rect.x, rect.y, rect.width, &line, dim);
-    let left = format!("{leading} {title} · {scope} ");
+    let left = format!(" {title} · {scope} ");
     let left_width = display_width(&left).min(rect.width.saturating_sub(2));
     put_text(
         buffer,
@@ -353,7 +360,6 @@ pub(super) fn render_view_pane(
     snapshot: &ClientShellSnapshot,
     pane: &PaneHit,
     projection: &ViewPaneProjection<'_>,
-    light_frame: bool,
     palette: &Palette,
 ) {
     let outer = pane.rect.intersection(buffer.area);
@@ -368,45 +374,32 @@ pub(super) fn render_view_pane(
         .find(|text| !text.is_empty())
         .unwrap_or("read-only");
     let scope = scope_label(&snapshot.agents, projection.scope);
-    let header = Rect::new(outer.x, outer.y, outer.width, 1);
-    draw_view_header(buffer, header, title, &scope, summary, light_frame, palette);
+    let header = Rect::new(outer.x + 1, outer.y, outer.width.saturating_sub(2), 1);
     let background = Style::default().bg(palette.panel_bg);
-    let edge = Style::default().fg(palette.overlay0).bg(palette.panel_bg);
-    let (body, columns) = if light_frame {
-        (
-            Rect::new(
-                outer.x,
-                outer.y.saturating_add(1),
-                outer.width,
-                outer.height.saturating_sub(1),
-            ),
-            outer.width,
-        )
-    } else {
-        (
-            Rect::new(
-                outer.x.saturating_add(1),
-                outer.y.saturating_add(1),
-                outer.width.saturating_sub(2),
-                outer.height.saturating_sub(2),
-            ),
-            outer.width.saturating_sub(2),
-        )
-    };
-    if !light_frame {
-        for y in outer.y..outer.bottom() {
-            put_text(buffer, outer.x, y, 1, "│", edge);
-            put_text(buffer, outer.right().saturating_sub(1), y, 1, "│", edge);
-        }
-        let bottom = "─".repeat(outer.width as usize);
-        put_text(
-            buffer,
-            outer.x,
-            outer.bottom().saturating_sub(1),
-            outer.width,
-            &bottom,
-            edge,
-        );
+    let focused = snapshot.focused_pane_id.as_deref() == Some(pane.pane_id.as_str());
+    let edge = Style::default()
+        .fg(if focused {
+            palette.accent
+        } else {
+            palette.overlay0
+        })
+        .bg(palette.panel_bg);
+    ratatui::widgets::Widget::render(
+        ratatui::widgets::Block::default()
+            .borders(ratatui::widgets::Borders::ALL)
+            .border_style(edge),
+        outer,
+        buffer,
+    );
+    draw_view_header(buffer, header, title, &scope, summary, focused, palette);
+    // Host geometry already accounts for child borders and any stack header.
+    let body = pane
+        .inner_rect
+        .intersection(outer)
+        .intersection(buffer.area);
+    let columns = body.width;
+    if body.is_empty() {
+        return;
     }
     for y in body.y..body.bottom() {
         for x in body.x..body.right() {

@@ -629,7 +629,7 @@ impl ClientShellState {
             }
         }
         // View panes: the host projected a content identity and a placement-derived
-        // scope for each one. The client draws the view content and the light or full
+        // scope for each one. The client draws view content within its full pane
         // frame; panes that are not visible are absent from `hits.panes`, so a hidden
         // view does no presentation work.
         let view_panes = self
@@ -652,9 +652,6 @@ impl ClientShellState {
             })
             .flatten();
         if let (Some(index), Some(documents)) = (index.as_ref(), host_documents) {
-            // Any focused tab being zoomed means the surface shows one pane only;
-            // a zoomed view gets the full frame, like a view standing alone.
-            let zoomed = snapshot.tabs.iter().any(|tab| tab.focused && tab.zoomed);
             for (pane_id, extension, view, scope) in view_panes {
                 let Some(pane) = self.hits.panes.iter().find(|hit| hit.pane_id == pane_id) else {
                     continue;
@@ -664,9 +661,6 @@ impl ClientShellState {
                     view: &view,
                     scope: &scope,
                 };
-                // A view that shares its box with a covered terminal rides the
-                // shared divider (light frame); a lone or zoomed view gets a full frame.
-                let light_frame = !scope.is_empty() && !zoomed;
                 pane_panel::render_view_pane(
                     &mut composed,
                     index,
@@ -674,7 +668,6 @@ impl ClientShellState {
                     snapshot,
                     pane,
                     &projection,
-                    light_frame,
                     &self.config.palette,
                 );
             }

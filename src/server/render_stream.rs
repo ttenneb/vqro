@@ -512,6 +512,7 @@ pub(crate) fn render_tab_surface_virtual(
         target: layout.target,
         pane_infos: &layout.pane_infos,
         split_borders: &layout.split_borders,
+        box_frames: &layout.box_frames,
     };
     let cursor = crate::ui::tab_surface_cursor(app_state, terminal_runtimes, surface);
     let hyperlinks = crate::ui::tab_surface_hyperlinks(app_state, terminal_runtimes, surface);

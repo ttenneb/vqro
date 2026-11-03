@@ -620,9 +620,10 @@ pub(super) fn render_pane_surface(
                     .collection_ids()
                     .into_iter()
                     .filter_map(|collection_id| {
-                        let rect = tab
-                            .layout
-                            .leaf_rect(crate::layout::LayoutLeaf::Stack(collection_id), area)?;
+                        let rect = tab.layout_leaf_rect(
+                            crate::layout::LayoutLeaf::Stack(collection_id),
+                            area,
+                        )?;
                         let inner_rect = Rect::new(
                             rect.x,
                             rect.y.saturating_add(1),
@@ -790,6 +791,25 @@ fn split_hit_rect(
     pane_gaps: bool,
     pane_frames: &[Rect],
 ) -> Option<Rect> {
+    if split.independent_borders {
+        // Both child perimeters are resize handles; neither is terminal content.
+        let hit = match split.direction {
+            ratatui::layout::Direction::Horizontal => Rect::new(
+                split.pos.saturating_sub(1),
+                split.area.y,
+                2,
+                split.area.height,
+            ),
+            ratatui::layout::Direction::Vertical => Rect::new(
+                split.area.x,
+                split.pos.saturating_sub(1),
+                split.area.width,
+                2,
+            ),
+        }
+        .intersection(split.area);
+        return (!hit.is_empty()).then_some(hit);
+    }
     let hit = match (split.direction, pane_borders, pane_gaps) {
         (ratatui::layout::Direction::Horizontal, true, false) => {
             Rect::new(split.pos, split.area.y, 1, split.area.height)
@@ -1276,7 +1296,29 @@ mod tests {
             .find(|pane| pane.pane_id == root_public)
             .map(|pane| pane.rect)
             .expect("terminal pane geometry");
-        assert_eq!(view_rect.width + root_rect.width, 80);
+        assert_eq!(
+            view_rect.width + root_rect.width,
+            78,
+            "outer box consumes exactly two columns"
+        );
+        assert_eq!(view_rect.height, 18);
+        assert_eq!(view_rect.y, 1);
+        let split = &rendered.splits[0];
+        let hit = Rect::new(
+            split.hit_rect.x,
+            split.hit_rect.y,
+            split.hit_rect.width,
+            split.hit_rect.height,
+        );
+        let split_area = Rect::new(
+            split.area.x,
+            split.area.y,
+            split.area.width,
+            split.area.height,
+        );
+        assert_eq!(hit.width, 2, "both independent perimeters resize");
+        assert_eq!(hit.intersection(split_area), hit);
+        assert_eq!(split_area, Rect::new(1, 1, 78, 18));
     }
 
     #[test]
@@ -1460,6 +1502,7 @@ mod tests {
             ratio: 0.5,
             area: Rect::new(2, 3, 40, 12),
             path: vec![false],
+            independent_borders: false,
         };
         assert_eq!(
             split_hit_rect(&horizontal, true, false, &[]),
@@ -1481,6 +1524,7 @@ mod tests {
             ratio: 0.5,
             area: Rect::new(2, 3, 40, 12),
             path: vec![true],
+            independent_borders: false,
         };
         assert_eq!(
             split_hit_rect(&vertical, true, true, &[]),
@@ -1493,6 +1537,7 @@ mod tests {
             ratio: 0.5,
             area: Rect::new(0, 0, 1, 4),
             path: Vec::new(),
+            independent_borders: false,
         };
         assert_eq!(
             split_hit_rect(&edge, true, true, &[]),

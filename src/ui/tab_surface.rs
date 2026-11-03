@@ -1,7 +1,8 @@
 use ratatui::{layout::Rect, Frame};
 
 use super::panes::{
-    compute_pane_infos_for_tab, render_panes, resize_tab_panes, resize_tab_panes_except,
+    compute_pane_infos_for_tab, render_box_frames, render_panes, resize_tab_panes,
+    resize_tab_panes_except,
 };
 use crate::app::AppState;
 use crate::layout::{PaneInfo, SplitBorder};
@@ -18,6 +19,7 @@ pub(crate) struct TabSurfaceLayout {
     pub(crate) target: Option<TabSurfaceTarget>,
     pub(crate) pane_infos: Vec<PaneInfo>,
     pub(crate) split_borders: Vec<SplitBorder>,
+    pub(crate) box_frames: Vec<crate::layout::BoxFrame>,
 }
 
 #[derive(Clone, Copy)]
@@ -25,6 +27,7 @@ pub(crate) struct TabSurfaceView<'a> {
     pub(crate) target: Option<TabSurfaceTarget>,
     pub(crate) pane_infos: &'a [PaneInfo],
     pub(crate) split_borders: &'a [SplitBorder],
+    pub(crate) box_frames: &'a [crate::layout::BoxFrame],
 }
 
 pub(crate) fn compute_tab_surface(
@@ -70,9 +73,13 @@ pub(crate) fn compute_tab_surface_for(
             if tab.zoomed {
                 Vec::new()
             } else {
-                tab.layout.splits(area)
+                tab.split_layout(area)
             }
         })
+        .unwrap_or_default();
+    let box_frames = tab
+        .filter(|tab| !tab.zoomed)
+        .map(|tab| tab.box_frames(area))
         .unwrap_or_default();
     let pane_infos = target.map_or_else(Vec::new, |target| {
         compute_pane_infos_for_tab(
@@ -90,6 +97,7 @@ pub(crate) fn compute_tab_surface_for(
         target,
         pane_infos,
         split_borders,
+        box_frames,
     }
 }
 
@@ -151,6 +159,13 @@ pub(crate) fn render_tab_surface(
     surface: TabSurfaceView<'_>,
     frame: &mut Frame,
 ) {
+    render_box_frames(
+        app,
+        surface.target,
+        surface.box_frames,
+        surface.pane_infos,
+        frame,
+    );
     render_panes(
         app,
         terminal_runtimes,
@@ -246,6 +261,129 @@ mod tests {
     use ratatui::Terminal;
 
     #[tokio::test]
+    async fn nested_box_perimeters_and_pty_size_use_the_same_geometry() {
+        for direction in [Direction::Horizontal, Direction::Vertical] {
+            let mut workspace = Workspace::test_new("views");
+            let root = workspace.tabs[0].root_pane;
+            workspace
+                .split_pane_with_view(root, "vqro.tasks", "tasks", direction, 0.7, false)
+                .unwrap();
+            workspace.insert_test_runtime(
+                root,
+                crate::terminal::TerminalRuntime::test_with_screen_bytes(8, 4, b"terminal"),
+            );
+            let mut app = AppState::test_new();
+            app.workspaces = vec![workspace];
+            app.active = Some(0);
+            app.ensure_test_terminals();
+            let terminal_id = app.workspaces[0].terminal_id(root).unwrap().clone();
+            app.terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .set_agent_name("agent1".into());
+            let runtimes = TerminalRuntimeRegistry::new();
+            let area = Rect::new(0, 0, 80, 20);
+            let layout = compute_tab_surface(
+                &app,
+                &runtimes,
+                area,
+                true,
+                crate::kitty_graphics::HostCellSize::default(),
+            );
+            assert_eq!(layout.box_frames.len(), 1);
+            assert_eq!(layout.box_frames[0].rect, area);
+            assert!(layout
+                .pane_infos
+                .iter()
+                .all(|pane| pane.borders == ratatui::widgets::Borders::ALL));
+            let terminal = layout
+                .pane_infos
+                .iter()
+                .find(|pane| pane.id == root)
+                .unwrap();
+            let runtime = app
+                .runtime_for_pane_in_workspace(&runtimes, 0, root)
+                .unwrap();
+            assert_eq!(
+                runtime.current_size(),
+                (terminal.inner_rect.height, terminal.inner_rect.width)
+            );
+            let surface = TabSurfaceView {
+                target: layout.target,
+                pane_infos: &layout.pane_infos,
+                split_borders: &layout.split_borders,
+                box_frames: &layout.box_frames,
+            };
+            let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+            terminal
+                .draw(|frame| render_tab_surface(&app, &runtimes, surface, frame))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            assert_eq!(buffer[(0, 0)].symbol(), "┌");
+            assert_eq!(buffer[(79, 19)].symbol(), "┘");
+            let title = (0..80).map(|x| buffer[(x, 0)].symbol()).collect::<String>();
+            assert!(
+                title.contains("agent1"),
+                "outer frame names the agent it encloses: {title}"
+            );
+            for pane in &layout.pane_infos {
+                assert_eq!(buffer[(pane.rect.x, pane.rect.y)].symbol(), "┌");
+                assert_eq!(
+                    buffer[(pane.rect.right() - 1, pane.rect.bottom() - 1)].symbol(),
+                    "┘"
+                );
+            }
+            app.workspaces[0].assert_invariants_for_test();
+            app.assert_invariants_for_test();
+        }
+    }
+
+    #[test]
+    fn zoomed_view_keeps_full_frame_and_scope_but_no_group_geometry() {
+        let mut workspace = Workspace::test_new("views");
+        let root = workspace.tabs[0].root_pane;
+        let (_, view) = workspace
+            .split_pane_with_view(
+                root,
+                "vqro.tasks",
+                "tasks",
+                Direction::Horizontal,
+                0.7,
+                true,
+            )
+            .unwrap();
+        workspace.tabs[0].zoomed = true;
+        let mut app = AppState::test_new();
+        app.workspaces = vec![workspace];
+        app.active = Some(0);
+        app.ensure_test_terminals();
+        let area = Rect::new(0, 0, 80, 20);
+        let surface = compute_tab_surface(
+            &app,
+            &TerminalRuntimeRegistry::new(),
+            area,
+            false,
+            crate::kitty_graphics::HostCellSize::default(),
+        );
+        assert!(surface.box_frames.is_empty());
+        assert!(surface.split_borders.is_empty());
+        assert_eq!(surface.pane_infos.len(), 1);
+        assert_eq!(surface.pane_infos[0].id, view);
+        assert_eq!(
+            surface.pane_infos[0].borders,
+            ratatui::widgets::Borders::ALL
+        );
+        assert_eq!(surface.pane_infos[0].inner_rect, Rect::new(1, 1, 78, 18));
+        assert_eq!(
+            app.workspaces[0].tabs[0].layout.view_scope(view),
+            vec![root]
+        );
+        assert!(app.workspaces[0].terminal_id(view).is_none());
+        app.workspaces[0].assert_invariants_for_test();
+        app.assert_invariants_for_test();
+    }
+
+    #[tokio::test]
     async fn explicit_surface_layout_drives_render_cursor_and_hyperlinks() {
         let uri = "https://example.com/surface";
         let mut workspace = Workspace::test_new("shell-workspace");
@@ -288,6 +426,7 @@ mod tests {
             target: surface.target,
             pane_infos: &surface.pane_infos,
             split_borders: &surface.split_borders,
+            box_frames: &surface.box_frames,
         };
         let mut terminal =
             Terminal::new(TestBackend::new(full_area.width, full_area.height)).unwrap();

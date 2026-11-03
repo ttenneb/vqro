@@ -108,9 +108,10 @@ content kind `(extension, view_id)` instead of a PTY. It has no terminal.
   covers. The extension keeps the meaning; core supplies only the covered
   terminals. Re-keying the request to a scope in the host<->extension contract is
   a later, separate change.
-- **Frame.** A view pane sharing its box with a covered terminal gets the light
-  frame: the pane's top divider carries `title · scope · count` and no extra row
-  is spent. A view standing alone or zoomed gets the full frame.
+- **Frame.** One outer box perimeter encloses both the terminal and its view;
+  each child has a complete one-cell perimeter inside it, in either split
+  direction. A view standing alone or zoomed keeps its full pane frame. This
+  supersedes the light-divider frame; see [Nested panes](../architecture/nested-panes.md#frame-style).
 - A view pane that is not visible in the composed tab does no presentation work;
   background panes still parse output as today.
 
@@ -140,7 +141,9 @@ provider returns, the view is drawn again.
 ## User-facing entry points
 
 - `vqro pane view add <pane> <extension>:<view> [--direction right|down]
-  [--ratio FLOAT] [--focus]` adds a view pane beside a pane. `vqro pane view
+  [--ratio FLOAT] [--focus]` adds a view pane beside a pane. The ratio is the
+  **view's share**, in either direction (0.1 through 0.9, default 0.5), before
+  child border insets and subject to integer cell quantization. `vqro pane view
   close <view-pane>` drops it. Both are neutral: core stores the content
   identity and the placement, never a Tasks literal, and a view pane keeps a
   public pane identity like any pane.
