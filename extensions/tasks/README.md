@@ -34,6 +34,9 @@ Messages panel per pane - which Vqro draws in the pane's top slot
 the tab pane entry is gone from the manifest, and a badge click opens the pane
 panels instead of launching another terminal app. `view.py` stays as the
 extension's formatting library and as the shape reference for the retired tab.
+Human-owned tasks remain available when their recorded terminal closes; missing
+placement is Global, not a human liveness warning. Agent-owned tasks retain the
+unavailable/not-running indication when their execution has no placement.
 
 - [Windows interpreter setup, identity and native trial](../../docs/next/api/tasks-windows.md)
 - [Tasks policy, CLI, receipts and limits](../../docs/next/api/tasks-core-v0.md)

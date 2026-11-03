@@ -112,7 +112,7 @@ def durable_attention(task, placements):
         result.add("blocked")
     if placements is not None:
         owner = task.get("owner") or {}
-        if owner.get("terminal_id") and owner["terminal_id"] not in placements:
+        if owner.get("class") == "agent" and owner.get("terminal_id") and owner["terminal_id"] not in placements:
             result.add("unavailable")
         bindings = debtors(owed) if owed.get("role") == "acceptors" else []
         if bindings and all(binding.get("class") == "agent" and binding.get("terminal_id") not in placements for binding in bindings):
