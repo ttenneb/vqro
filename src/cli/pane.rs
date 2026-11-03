@@ -246,7 +246,11 @@ fn parse_pane_view_args(args: &[String]) -> Result<PaneViewParams, String> {
                 let Some(value) = args.get(index + 1) else {
                     return Err("missing value for --ratio".into());
                 };
-                ratio = Some(value.parse::<f32>().map_err(|_| USAGE.to_string())?);
+                let parsed = value.parse::<f32>().map_err(|_| USAGE.to_string())?;
+                if !parsed.is_finite() || !(0.1..=0.9).contains(&parsed) {
+                    return Err("view ratio must be between 0.1 and 0.9".into());
+                }
+                ratio = Some(parsed);
                 index += 2;
             }
             "--focus" => {
@@ -1800,6 +1804,41 @@ mod tests {
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn parse_pane_view_ratio_rejects_values_that_json_would_turn_into_null() {
+        for value in ["NaN", "inf", "-inf", "0", "1", "-0.3", "0.09", "0.91"] {
+            let result = parse_pane_view_args(&args(&[
+                "add",
+                "w1:p1",
+                "vqro.tasks:tasks",
+                "--ratio",
+                value,
+            ]));
+            assert!(
+                result.is_err(),
+                "invalid explicit ratio {value} must never reach JSON"
+            );
+        }
+        for value in ["0.1", "0.3", "0.9"] {
+            let params = parse_pane_view_args(&args(&[
+                "add",
+                "w1:p1",
+                "vqro.tasks:tasks",
+                "--ratio",
+                value,
+            ]))
+            .unwrap();
+            let json = serde_json::to_value(&params).unwrap();
+            assert!(json["ratio"].is_number());
+            assert_eq!(
+                serde_json::from_value::<PaneViewParams>(json)
+                    .unwrap()
+                    .ratio,
+                params.ratio
+            );
+        }
     }
 
     #[test]

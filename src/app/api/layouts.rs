@@ -793,7 +793,9 @@ fn subtree_has_terminal(node: &TypedNode) -> bool {
     match node {
         TypedNode::Leaf(_) => true,
         TypedNode::View { .. } => false,
-        TypedNode::Stack { children, .. } => children.iter().any(subtree_has_terminal),
+        TypedNode::Stack {
+            selected, children, ..
+        } => children.get(*selected).is_some_and(subtree_has_terminal),
         TypedNode::Split { first, second, .. } => {
             subtree_has_terminal(first) || subtree_has_terminal(second)
         }
@@ -1027,6 +1029,48 @@ mod tests {
             serde_json::from_str(r#"{"type":"future_box","children":[]}"#).unwrap();
         assert_eq!(unknown, LayoutTreeNode::Unknown);
         assert_eq!(app.layout_description(0, 0).unwrap(), legacy);
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn legacy_export_ignores_hidden_terminals_behind_a_selected_view() {
+        let mut app = app_with_workspace();
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+        let hidden = app.state.workspaces[0].test_split(Direction::Horizontal);
+        let (_, view_pane) = app.state.workspaces[0]
+            .split_pane_with_view(
+                root,
+                "vqro.tasks",
+                "tasks",
+                Direction::Horizontal,
+                0.5,
+                false,
+            )
+            .unwrap();
+        let id = crate::terminal_container::TerminalContainerId::parse(9_777).unwrap();
+        app.state.workspaces[0].tabs[0]
+            .layout
+            .replace_typed_root_for_test(TypedNode::Split {
+                direction: Direction::Horizontal,
+                ratio: 0.5,
+                first: Box::new(TypedNode::Stack {
+                    id,
+                    selected: 0,
+                    children: vec![
+                        TypedNode::view(view_pane, "vqro.tasks", "tasks"),
+                        TypedNode::Leaf(hidden),
+                    ],
+                }),
+                second: Box::new(TypedNode::Leaf(root)),
+            });
+        app.state.ensure_test_terminals();
+        let legacy = app
+            .layout_description(0, 0)
+            .expect("visible terminal remains exportable");
+        assert!(
+            matches!(legacy.root, LayoutNode::Pane { pane } if pane.pane_id == app.public_pane_id(0, root))
+        );
+        assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), 3);
         app.state.assert_invariants_for_test();
     }
 

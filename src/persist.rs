@@ -13,6 +13,7 @@ pub mod plugin_registry;
 mod recovery;
 mod restore;
 mod snapshot;
+mod view_aliases;
 
 #[cfg(test)]
 pub use self::io::load;

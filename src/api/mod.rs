@@ -64,6 +64,7 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
             | Method::DelegationReparent(_)
             | Method::DelegationReorder(_)
             | Method::PaneSplit(_)
+            | Method::PaneView(_)
             | Method::PaneSwap(_)
             | Method::PaneMove(_)
             | Method::PaneZoom(_)

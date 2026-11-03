@@ -1,6 +1,7 @@
 //! Native export integration tests for file delivery, retirement, and fallback.
 #![cfg(unix)]
 
+use super::read_graphics_message as read_server_message;
 use super::*;
 use crate::kitty_graphics::surface::{DeliveryCache, NATIVE_SLOT_BIT, NATIVE_TRANSFER_BIT};
 use crate::protocol::{

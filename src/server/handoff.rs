@@ -1339,6 +1339,73 @@ mod tests {
     }
 
     #[test]
+    fn malformed_live_view_alias_is_refused_before_runtime_ownership_changes() {
+        for shape in 0..3 {
+            let mut snapshot = one_pane_snapshot();
+            snapshot.workspaces[0].tabs[0]
+                .panes
+                .get_mut(&1)
+                .unwrap()
+                .agent_start_view_applied = true;
+            let view = crate::persist::LayoutSnapshot::View {
+                pane: 1,
+                extension: "vqro.tasks".into(),
+                view: "tasks".into(),
+            };
+            let terminal = crate::persist::LayoutSnapshot::Pane(1);
+            snapshot.workspaces[0].tabs[0].layout = match shape {
+                0 => crate::persist::LayoutSnapshot::Split {
+                    direction: crate::persist::DirectionSnapshot::Horizontal,
+                    ratio: 0.5,
+                    first: Box::new(terminal),
+                    second: Box::new(view),
+                },
+                1 => crate::persist::LayoutSnapshot::Split {
+                    direction: crate::persist::DirectionSnapshot::Horizontal,
+                    ratio: 0.5,
+                    first: Box::new(view),
+                    second: Box::new(terminal),
+                },
+                _ => view,
+            };
+            let terminal_id = crate::persist::terminal_id_for_pane_snapshot(
+                &snapshot.workspaces[0].tabs[0].panes[&1],
+            )
+            .unwrap();
+            let manifest = HandoffManifest {
+                version: HANDOFF_VERSION,
+                source_version: "alias".into(),
+                source_protocol: crate::protocol::PROTOCOL_VERSION,
+                expected_version: None,
+                expected_protocol: None,
+                snapshot,
+                panes: vec![runtime_for(1, Some(terminal_id.to_string()))],
+                deferred_panes: Vec::new(),
+                api_window_title: None,
+                host_shutdown_intent: None,
+            };
+            let mut parsed: HandoffManifest =
+                serde_json::from_str(&serde_json::to_string(&manifest).unwrap()).unwrap();
+            assert!(
+                validate_and_normalize_manifest(&mut parsed).is_err(),
+                "a live transfer cannot repair public structure behind running PTYs"
+            );
+            assert_eq!(parsed.panes.len(), 1);
+            assert_eq!(parsed.panes[0].pane_id, 1);
+            assert_eq!(
+                parsed.panes[0].terminal_id.as_deref(),
+                Some(terminal_id.as_str())
+            );
+            let saved = &parsed.snapshot.workspaces[0].tabs[0].panes[&1];
+            assert_eq!(
+                crate::persist::terminal_id_for_pane_snapshot(saved).unwrap(),
+                terminal_id
+            );
+            assert!(saved.agent_start_view_applied);
+        }
+    }
+
+    #[test]
     fn future_snapshot_is_rejected_unchanged_before_fd_admission() {
         let mut snapshot = one_pane_snapshot();
         snapshot.version = crate::persist::SNAPSHOT_VERSION + 1;

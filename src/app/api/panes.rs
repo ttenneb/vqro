@@ -5373,6 +5373,7 @@ mod tests {
             crate::api::schema::SplitDirection::Down,
         ] {
             let mut app = app_with_linked_worktree();
+            app.state.active = Some(0);
             let root = app.state.workspaces[0].tabs[0].root_pane;
             let public = app.public_pane_id(0, root).unwrap();
             let mut params = add_view_request(&public);
@@ -5396,6 +5397,7 @@ mod tests {
     fn api_pane_view_invalid_ratio_is_atomic() {
         for ratio in [f32::NAN, f32::INFINITY, -0.1, 0.0, 1.0] {
             let mut app = app_with_linked_worktree();
+            app.state.active = Some(0);
             let root = app.state.workspaces[0].tabs[0].root_pane;
             let public = app.public_pane_id(0, root).unwrap();
             let mut params = add_view_request(&public);

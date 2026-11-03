@@ -1383,12 +1383,12 @@ pub struct SemanticNotification {
 
 /// Messages sent from the server to the client over the client protocol socket.
 ///
-/// Variant order is frozen for endpoint generation 1, with one recorded,
-/// generation-scoped extension: [`ServerMessage::PaneSurfaceV2`] is appended
-/// after `EndpointControl` under the human 2026-10-04 option-B no-floor decision
+/// Variant order is historically frozen for endpoint generation 1, with one
+/// recorded extension served under endpoint generation 2: [`ServerMessage::PaneSurfaceV2`]
+/// is appended after `EndpointControl` under the human 2026-10-04 option-B no-floor decision
 /// (`docs/next/architecture/nested-panes.md`). bincode cannot add an optional
 /// field to the `shell.surface.v1` frame, and the endpoint hello checks codec
-/// names only, so a generation-1 peer would desync on an in-place field. Serving
+/// names only, so a same-generation peer would desync on an in-place field. Serving
 /// is `shell.surface.v2` only: a peer that did not advertise it is refused
 /// client-locally and never receives the appended variant, and a patch is the
 /// unchanged [`ServerMessage::PaneSurfacePatch`]. Remove the variant when the
@@ -1519,8 +1519,8 @@ pub enum ServerMessage {
     /// `shell.surface.v2` full pane surface: the unchanged v1 frame plus view
     /// descriptors.
     ///
-    /// Appended after `EndpointControl` under the recorded generation-scoped
-    /// extension (see the enum doc), so tags `0..=20` are unchanged. Only a peer
+    /// Appended after `EndpointControl` under the recorded generation-2-scoped
+    /// extension (see the enum doc), so historical tags `0..=20` are unchanged. Only a peer
     /// that negotiated `shell.surface.v2` ever receives it; patches stay
     /// [`ServerMessage::PaneSurfacePatch`].
     PaneSurfaceV2(PaneSurfaceFrameV2),

@@ -2415,7 +2415,7 @@ mod tests {
                 pixel_mouse: false,
             },
             ClientMessage::TerminalHello {
-                version: 25,
+                version: PROTOCOL_VERSION + 1,
                 cols: 80,
                 rows: 24,
                 cell_width_px: 8,

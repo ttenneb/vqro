@@ -3264,6 +3264,112 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn malformed_view_aliases_preserve_real_terminals_in_both_orders_and_view_only_tree() {
+        for (shape, version) in (0..3).flat_map(|shape| {
+            [
+                super::super::snapshot::PREDECESSOR_SNAPSHOT_VERSION,
+                super::super::snapshot::SNAPSHOT_VERSION,
+            ]
+            .map(|version| (shape, version))
+        }) {
+            let mut state = crate::app::state::AppState::test_new();
+            state.workspaces = vec![Workspace::test_adversarial_identity_state()];
+            state.active = Some(0);
+            state.selected = 0;
+            state.ensure_test_terminals();
+            let mut saved = crate::persist::capture(
+                &state.workspaces,
+                &state.repositories,
+                &state.space_order,
+                &state.terminals,
+                &crate::terminal::TerminalRuntimeRegistry::new(),
+                state.active,
+                state.selected,
+            );
+            saved.version = version;
+            let expected = state.terminals.keys().cloned().collect::<HashSet<_>>();
+            let tab = &mut saved.workspaces[0].tabs[0];
+            let raw_id = *tab.panes.keys().min().unwrap();
+            let terminal_id =
+                super::super::snapshot::terminal_id_for_pane_snapshot(&tab.panes[&raw_id]).unwrap();
+            tab.panes.get_mut(&raw_id).unwrap().agent_start_view_applied = true;
+            let alias = LayoutSnapshot::View {
+                pane: raw_id,
+                extension: "vqro.tasks".into(),
+                view: "tasks".into(),
+            };
+            let original = tab.layout.clone();
+            tab.layout = match shape {
+                0 => LayoutSnapshot::Split {
+                    direction: super::super::snapshot::DirectionSnapshot::Horizontal,
+                    ratio: 0.5,
+                    first: Box::new(original),
+                    second: Box::new(alias),
+                },
+                1 => LayoutSnapshot::Split {
+                    direction: super::super::snapshot::DirectionSnapshot::Horizontal,
+                    ratio: 0.5,
+                    first: Box::new(alias),
+                    second: Box::new(original),
+                },
+                _ => alias,
+            };
+            let parsed =
+                crate::persist::parse_snapshot(&serde_json::to_string(&saved).unwrap()).unwrap();
+            assert_eq!(
+                super::super::snapshot::terminal_id_for_pane_snapshot(
+                    &parsed.workspaces[0].tabs[0].panes[&raw_id]
+                )
+                .unwrap(),
+                terminal_id
+            );
+            let (events, _event_rx) = mpsc::channel(4);
+            let (workspaces, terminals, runtimes) = restore(
+                &parsed,
+                None,
+                24,
+                80,
+                0,
+                test_restore_shell(),
+                crate::config::ShellModeConfig::NonLogin,
+                false,
+                events,
+                Arc::new(Notify::new()),
+                Arc::new(RenderSignal::new()),
+            )
+            .unwrap();
+            let mut restored = crate::app::state::AppState::test_new();
+            restored.workspaces = workspaces;
+            restored.terminals = terminals;
+            restored.active = Some(0);
+            restored.selected = 0;
+            assert_eq!(
+                restored.terminals.keys().cloned().collect::<HashSet<_>>(),
+                expected,
+                "shape {shape}"
+            );
+            let workspace = &restored.workspaces[0];
+            let terminal_pane = workspace
+                .tabs
+                .iter()
+                .flat_map(|tab| &tab.panes)
+                .find(|(_, pane)| pane.attached_terminal_id == terminal_id)
+                .unwrap()
+                .1;
+            assert!(terminal_pane.agent_start_view_applied);
+            assert!(
+                runtimes.contains_key(&terminal_id),
+                "real terminal runtime survives"
+            );
+            let views = workspace.tabs[0].layout.view_panes();
+            assert_eq!(views.len(), 1);
+            assert!(workspace.terminal_id(views[0]).is_none());
+            workspace.assert_invariants_for_test();
+            restored.assert_invariants_for_test();
+        }
+    }
+
+    #[tokio::test]
     async fn cold_restore_preserves_a_view_pane_and_its_agent_start_marker() {
         let mut state = crate::app::state::AppState::test_new();
         let mut workspace = Workspace::test_new("views");

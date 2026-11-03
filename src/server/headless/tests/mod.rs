@@ -5,6 +5,7 @@ mod event_fairness_tests;
 mod native_graphics;
 #[path = "pane_graphics.rs"]
 mod pane_graphics_tests;
+mod pane_view_mutations;
 #[path = "shutdown.rs"]
 mod shutdown_tests;
 #[path = "surface_interest.rs"]
@@ -122,6 +123,16 @@ fn shutdown_test_runtimes(server: &mut HeadlessServer) {
 fn read_server_message(bytes: Vec<u8>) -> ServerMessage {
     let mut cursor = std::io::Cursor::new(bytes);
     protocol::read_message(&mut cursor, MAX_FRAME_SIZE).expect("decode server message")
+}
+
+// Graphics assertions target the unchanged inner frame, but must first prove
+// that a full surface arrived on the negotiated v2 lane, never retired v1.
+fn read_graphics_message(bytes: Vec<u8>) -> ServerMessage {
+    match read_server_message(bytes) {
+        ServerMessage::PaneSurfaceV2(surface) => ServerMessage::PaneSurface(surface.frame),
+        ServerMessage::PaneSurface(_) => panic!("retired v1 surface was served"),
+        message => message,
+    }
 }
 
 /// Unwrap the pane-surface frame from whichever surface codec arrived.
