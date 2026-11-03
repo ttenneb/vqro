@@ -151,7 +151,7 @@ impl App {
             .and_then(|ws| ws.terminal_id(pane))
             .and_then(|id| self.state.terminals.get(id));
         let label = terminal
-            .filter(|terminal| terminal.effective_agent_label().is_some())
+            .filter(|terminal| terminal.is_agent_terminal())
             .and_then(|terminal| {
                 terminal
                     .effective_display_agent()
@@ -575,11 +575,11 @@ mod tests {
             .unwrap()
             .clone();
         let metadata = app.state.terminals.get_mut(&terminal).unwrap();
-        metadata.set_detected_state(
-            Some(crate::detect::Agent::Pi),
-            crate::detect::AgentState::Idle,
-        );
         metadata.set_agent_name("a".repeat(64));
+        assert!(
+            metadata.effective_agent_label().is_none(),
+            "regression uses a named-only terminal, not a detected agent"
+        );
         app.refresh_auto_view_label(0, roots[0]);
         assert_eq!(crate::layout::TileLayout::take_auto_gathers_for_test(), 0);
         assert_eq!(
