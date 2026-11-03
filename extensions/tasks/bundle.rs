@@ -14,6 +14,7 @@ pub(crate) const BUNDLE: DefaultBundle = DefaultBundle {
         ("decision_queue.py", include_str!("decision_queue.py")),
         ("messages.py", include_str!("messages.py")),
         ("graph.py", include_str!("graph.py")),
+        ("ids.py", include_str!("ids.py")),
         ("cli.py", include_str!("cli.py")),
         ("local_platform.py", include_str!("local_platform.py")),
         ("windows_api.py", include_str!("windows_api.py")),

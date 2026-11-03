@@ -187,7 +187,7 @@ fn attention_rows_state() -> ClientShellState {
                  "terminal":{"terminal_id":"term_1","placement":{"pane_id":"pane_1",
                    "workspace_id":"ws_1","tab_id":"tab_1"}}},
                 {"id":"context:attention.row:task-2","role":"section","label":"Yesterday's smoke test",
-                 "detail":"pi @2222 · accept"}
+                 "detail":"not running"}
             ],
             "actions":[],"required_capabilities":[]
         }}]
@@ -199,6 +199,36 @@ fn attention_rows_state() -> ClientShellState {
         Box::new(projection),
     );
     state
+}
+
+#[test]
+fn unlinked_attention_rows_preserve_package_detail_with_execution_fallback() {
+    for (supplied, expected) in [("human · unblock", "human · unblock"), ("", "not running")] {
+        let mut state = attention_rows_state();
+        let nav = state
+            .endpoints
+            .iter_mut()
+            .find(|endpoint| endpoint.endpoint_id == ClientEndpointId::Local)
+            .and_then(|endpoint| endpoint.attention.as_mut())
+            .expect("attention");
+        nav.rows[1].detail = supplied.into();
+        let frame = state.compose(106, 30).expect("frame");
+        let text = frame
+            .cells
+            .iter()
+            .map(|cell| cell.symbol.as_str())
+            .collect::<String>();
+        assert!(
+            text.contains(expected),
+            "package detail or fallback: {text}"
+        );
+        if !supplied.is_empty() {
+            assert!(
+                !text.contains("not running"),
+                "no fabricated execution warning: {text}"
+            );
+        }
+    }
 }
 
 #[test]

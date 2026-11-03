@@ -15,6 +15,9 @@ MESSAGE_USAGE = "usage: vqro message <send TARGET TEXT [--reply-to ID]|list|clai
 MUTATIONS = {"create", "decision", "delegate", "start", "block", "report", "accept", "done", "answer", "decision_seen", "decision_timer", "decision_revert", "plan", "depends", "update"}
 
 
+ID_USAGE = "IDs accept exact values or unique prefixes (task_/msg_ optional, minimum 6 hex characters); ambiguous prefixes list candidates. Writes still require the inspected --rev."
+
+
 def encoded(value):
     return json.dumps(value, ensure_ascii=True, separators=(",", ":"))
 
@@ -329,12 +332,12 @@ def render_decisions(value):
     return "\n".join(lines)
 
 
-def human_output(value):
+def human_output(value, short_ids=None):
     if not isinstance(value, dict): return encoded(value)
     if "task" in value: return render_tree([dict(value["task"], parent=None)]).rstrip()
     if "tasks" in value and isinstance(value["tasks"], list):
         # A page/list need not contain all parents, unlike the full tree.
-        return "\n".join(f"{visible(task['id'])} [{visible(task.get('state'))} r{task.get('revision')}] {visible(task.get('title'))}" for task in value["tasks"]) or "(no tasks)"
+        return "\n".join(f"{visible((short_ids or {}).get(task['id'], task['id']))} [{visible(task.get('state'))} r{task.get('revision')}] {visible(task.get('title'))}" for task in value["tasks"]) or "(no tasks)"
     if "message" in value: messages = [value["message"]]
     elif "claimed" in value: messages = value["claimed"]
     elif "waiting" in value: messages = value["waiting"] + value.get("messages", [])
@@ -386,7 +389,7 @@ def main(args=None):
     kind = args.pop(0)
     args, forced = output_options(kind, args)
     if not args or args[0] in ("help", "--help", "-h") or (len(args) == 2 and args[1] in ("--help", "-h")):
-        print(TASK_USAGE if kind == "task" else MESSAGE_USAGE); return 0 if args else 2
+        print((TASK_USAGE if kind == "task" else MESSAGE_USAGE) + "\n" + ID_USAGE); return 0 if args else 2
     json_output = forced or not sys.stdout.isatty()
     try:
         if kind == "task" and args[0] == "tree":
@@ -397,7 +400,16 @@ def main(args=None):
         payload, mutation = parse_payload(args) if kind == "task" else parse_message(args)
         status, value = execute(payload, mutation)
         if status in ("success", "unscoped"):
-            print(encoded(value) if json_output else render_decisions(value) if payload["action"] == "decision_digest" else human_output(value))
+            short_ids = None
+            if not json_output and payload["action"] in ("list", "ready"):
+                from ids import short_forms
+                # Resolve against the whole durable namespace, not just this page.
+                # Failure of this optional presentation read keeps full IDs usable.
+                try:
+                    short_ids = short_forms(task["id"] for task in tree_read()["tasks"])
+                except (OSError, ValueError):
+                    pass
+            print(encoded(value) if json_output else render_decisions(value) if payload["action"] == "decision_digest" else human_output(value, short_ids))
             if status == "unscoped":
                 print("not an authoritative result for the original caller; use --caller with its binding", file=sys.stderr); return 2
             return 0

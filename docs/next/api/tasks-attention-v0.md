@@ -8,15 +8,20 @@ to a flat, owner-labelled attention list. Agents remains available through its
 toggle, with neutral facts and terminal navigation unchanged.
 
 Tasks owns the policy: decisions/acceptance owed to the local human, durable
-blocked/missing-acceptor debt, and unavailable owner placement. Ordinary human
+blocked/missing-acceptor debt, and unavailable agent-owner placement. Ordinary human
 self-work is not answer/acceptance debt. Live execution/stall categories stay in
 the full pane; native placement never proves execution or acceptance authority.
 
 The host supplies optional `agent.activity.v1.terminals`: when present, complete
 current placed terminal references, including non-agent terminals; absent means
 unknown. Only the bound owner's terminal places a task. Missing placement is
-global/unavailable, never inferred from a parent, acceptor or name. Space grouping
-uses Spaces' admitted checkout membership; tabs use current host placement.
+global, never inferred from a parent, acceptor or name. For agent owners it also
+means unavailable; an unlinked agent row explicitly says `not running`. Human
+owners (`human_unverified`) remain available across same-account panes even when
+the recorded terminal is gone: no unavailable category or not-running detail is
+added. Human decisions/blockers still appear with their human/action detail.
+Space grouping uses Spaces' admitted checkout membership; tabs use current host
+placement. These are presentation rules, not changes to caller or receipt identity.
 
 Native rendering reads admitted cached documents, not task stores, processes or
 terminal bytes. A successful action may return optional opaque
@@ -44,7 +49,10 @@ A publisher supplies `context:attention.view:<plugin>:<entrypoint>`, optional
 `context:attention.badge:<workspace|tab|session>:<id>:<n>:<n>:<n>` items and flat
 `context:attention.row:<id>` items. All are bounded actionless sections. Native
 code treats rows/labels as opaque, and only sums counters over admitted Space
-membership. This is a narrow presentation convention, not a host task ontology.
+membership. Unlinked rows retain package-supplied detail; only absent/empty detail
+falls back to `not running`. A terminal link is a navigation affordance, not a
+requirement that every row describe an execution. This is a narrow presentation
+convention, not a host task ontology.
 
 Badge/list clicks open the existing plugin pane with read-only
 `VQRO_ATTENTION_SCOPE` JSON (`kind`, `ids`). Its durable filter shares Tasks policy

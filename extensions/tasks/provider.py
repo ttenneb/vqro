@@ -3,6 +3,7 @@
 import argparse
 import datetime
 import hashlib
+import ids
 import json
 import os
 from pathlib import Path
@@ -507,6 +508,22 @@ class Store:
             self.set_dependencies(task_id, payload["depends_on"])
         return task_id
 
+    def resolve_ids(self, payload):
+        payload = dict(payload)
+        table = "messages" if payload["action"].startswith("message_") else "tasks"
+        for field in ("id", "parent", "reply_to"):
+            if payload.get(field) is not None:
+                payload[field] = ids.resolve(self.db, "messages" if field == "reply_to" else table, payload[field])
+        if "depends_on" in payload:
+            payload["depends_on"] = [ids.resolve(self.db, "tasks", ref) for ref in graph.dependencies(payload["depends_on"])]
+        if payload["action"] == "plan" and isinstance(payload.get("nodes"), list):
+            local = {node.get("key") for node in payload["nodes"] if isinstance(node, dict) and isinstance(node.get("key"), str)}
+            payload["nodes"] = [
+                {**node, "depends_on": [ref if ref in local else ids.resolve(self.db, "tasks", ref)
+                                        for ref in graph.dependencies(node.get("depends_on", []))]}
+                if isinstance(node, dict) else node for node in payload["nodes"]]
+        return payload
+
     def document_revision(self):
         """State-derived version of everything the published document draws.
 
@@ -557,9 +574,10 @@ class Store:
         if action == "whoami":
             return {"caller": binding(caller) if caller.get("class") != "unknown" else {"class": "unknown"}}
         if action in ("list", "ready"):
-            return self.list_tasks(payload.get("after"), ready=action == "ready")
+            after = payload.get("after")
+            return self.list_tasks(ids.resolve(self.db, "tasks", after) if after is not None else None, ready=action == "ready")
         if action == "get":
-            return {"task": self.task(payload["id"])}
+            return {"task": self.task(ids.resolve(self.db, "tasks", payload["id"]))}
         if action == "op":
             return self.lookup(payload, caller)
         if action == "message_list":
@@ -582,6 +600,9 @@ class Store:
                     raise ValueError("operation payload conflict")
                 self.commit()
                 return json.loads(old["outcome"])
+            # Hash and replay the original intent first. Resolution is atomic with
+            # the write, but a later collision must not invalidate an old receipt.
+            payload = self.resolve_ids(payload)
             at = timestamp()
             if action == "decision_seen":
                 self.quota({"operations": 1})
