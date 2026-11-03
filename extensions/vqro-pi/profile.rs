@@ -827,14 +827,10 @@ mod tests {
     fn profile_lifecycle_preserves_generation_bytes_and_registry_choices() {
         let fixture = ProfileFixture::new("distribution");
         fixture.prepare();
-        // Refactor characterization, not a public pin: deliberate future asset
-        // edits may change these expected content addresses. The Tasks address
-        // was independently recomputed from the unchanged host declaration at
-        // c41ecdc2 after integrating its UI-framework asset changes, and again
-        // on this branch after its label and panel-row asset edits (a deliberate
-        // asset change, which is what this characterization exists to notice).
-        // Enabling macOS in the Tasks manifest deliberately changes its address;
-        // it was independently recomputed using the declared asset order.
+        // Content-address characterization, not a frozen wire pin: deliberate
+        // asset edits change these addresses. The Tasks address was independently
+        // recomputed over all 11 declared assets in order, including ids.py and
+        // the human-attention/short-ID UX changes, with generation_id separators.
         assert_eq!(generation_dir().file_name().unwrap(), "pi-14d420aa1fdb11d9");
         let installed = crate::persist::plugin_registry::load();
         let tasks = installed
@@ -843,7 +839,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             Path::new(&tasks.plugin_root).file_name().unwrap(),
-            "tasks-953b15d93aca7427"
+            "tasks-b9f0e697ad034891"
         );
         crate::persist::plugin_registry::update(|entries| {
             entries
