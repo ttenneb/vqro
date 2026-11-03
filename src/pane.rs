@@ -3546,6 +3546,13 @@ impl PaneRuntime {
         Self::test_with_channel_and_scrollback_bytes(cols, rows, 0, &[], capacity)
     }
 
+    pub(crate) fn test_resize_observer(&self) -> Option<watch::Receiver<(u16, u16, u32, u32)>> {
+        match &self.io {
+            PaneRuntimeIo::TestChannel { resize_tx, .. } => Some(resize_tx.subscribe()),
+            _ => None,
+        }
+    }
+
     pub(crate) fn test_with_screen_bytes(cols: u16, rows: u16, bytes: &[u8]) -> Self {
         Self::test_with_scrollback_bytes(cols, rows, 0, bytes)
     }

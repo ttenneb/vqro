@@ -260,6 +260,69 @@ mod tests {
     use ratatui::Terminal;
 
     #[tokio::test]
+    async fn wrapped_stack_header_debt_reserves_four_actual_terminal_rows() {
+        let mut workspace = Workspace::test_new("wrapped");
+        let root = workspace.tabs[0].root_pane;
+        let (_, view) = workspace
+            .split_pane_with_view(
+                root,
+                "sample.views",
+                "rows",
+                Direction::Vertical,
+                0.5,
+                false,
+            )
+            .unwrap();
+        assert!(workspace.tabs[0].layout.new_stack_at(
+            &[],
+            crate::terminal_container::TerminalContainerId::parse(9_888).unwrap()
+        ));
+        let measures = std::collections::HashMap::from([(
+            view,
+            crate::view_sizing::ViewMeasure { rows: 1, width: 32 },
+        )]);
+        let area = Rect::new(0, 0, 80, 8);
+        workspace.tabs[0].layout.auto_size_views(area, &measures);
+        workspace.insert_test_runtime(
+            root,
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"terminal"),
+        );
+        let mut app = AppState::test_new();
+        app.workspaces = vec![workspace];
+        app.active = Some(0);
+        app.ensure_test_terminals();
+        let layout = compute_tab_surface(
+            &app,
+            &TerminalRuntimeRegistry::new(),
+            area,
+            true,
+            crate::kitty_graphics::HostCellSize::default(),
+        );
+        let body = layout
+            .pane_infos
+            .iter()
+            .find(|pane| pane.id == root)
+            .unwrap()
+            .inner_rect;
+        assert_eq!(
+            body.height, 4,
+            "header debt belongs to the actual terminal branch, not its wrapper minimum"
+        );
+        assert_eq!(
+            layout
+                .pane_infos
+                .iter()
+                .find(|pane| pane.id == view)
+                .unwrap()
+                .rect
+                .height,
+            1,
+            "terminal minimum wins when view minimum cannot fit"
+        );
+        app.assert_invariants_for_test();
+    }
+
+    #[tokio::test]
     async fn nested_box_perimeters_and_pty_size_use_the_same_geometry() {
         for direction in [Direction::Horizontal, Direction::Vertical] {
             let mut workspace = Workspace::test_new("views");
@@ -276,10 +339,10 @@ mod tests {
             app.active = Some(0);
             app.ensure_test_terminals();
             let terminal_id = app.workspaces[0].terminal_id(root).unwrap().clone();
-            app.terminals
-                .get_mut(&terminal_id)
-                .unwrap()
-                .set_agent_name("agent1".into());
+            app.show_agent_labels_on_pane_borders = false;
+            let metadata = app.terminals.get_mut(&terminal_id).unwrap();
+            metadata.set_agent_name("agent1".into());
+            metadata.set_manual_label("outer-only-title".into());
             let runtimes = TerminalRuntimeRegistry::new();
             let area = Rect::new(0, 0, 80, 20);
             let layout = compute_tab_surface(
@@ -336,8 +399,8 @@ mod tests {
             assert_eq!(buffer[(79, 19)].symbol(), "┘");
             let title = (0..80).map(|x| buffer[(x, 0)].symbol()).collect::<String>();
             assert!(
-                title.contains("agent1"),
-                "outer frame names the agent it encloses: {title}"
+                title.contains("outer-only-title"),
+                "explicit terminal title appears on its outer frame: {title}"
             );
             for pane in &layout.pane_infos {
                 assert_eq!(buffer[(pane.rect.x, pane.rect.y)].symbol(), "┌");
@@ -346,6 +409,25 @@ mod tests {
                     "┘"
                 );
             }
+            let inner_text = (1..20)
+                .flat_map(|y| (0..80).map(move |x| (x, y)))
+                .map(|position| buffer[position].symbol())
+                .collect::<String>();
+            assert!(
+                !inner_text.contains("outer-only-title"),
+                "terminal title is not duplicated inside its frame"
+            );
+            app.terminals.get_mut(&terminal_id).unwrap().manual_label = None;
+            terminal
+                .draw(|frame| render_tab_surface(&app, &runtimes, surface, frame))
+                .unwrap();
+            let blank_title = (0..80)
+                .map(|x| terminal.backend().buffer()[(x, 0)].symbol())
+                .collect::<String>();
+            assert!(
+                !blank_title.contains("box") && !blank_title.contains("agent1"),
+                "no invented box title or disabled agent-label fallback: {blank_title}"
+            );
             app.workspaces[0].assert_invariants_for_test();
             app.assert_invariants_for_test();
         }

@@ -653,6 +653,12 @@ impl TerminalRuntime {
         (Self::wrap(runtime), rx)
     }
 
+    pub(crate) fn test_resize_observer(
+        &self,
+    ) -> Option<tokio::sync::watch::Receiver<(u16, u16, u32, u32)>> {
+        self.0.test_resize_observer()
+    }
+
     pub(crate) fn test_with_screen_bytes(cols: u16, rows: u16, bytes: &[u8]) -> Self {
         Self::wrap(crate::pane::PaneRuntime::test_with_screen_bytes(
             cols, rows, bytes,

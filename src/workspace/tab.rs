@@ -277,10 +277,6 @@ impl Tab {
             .flatten()
     }
 
-    pub(crate) fn legacy_box_label(&self, id: TerminalContainerId) -> Option<&str> {
-        self.legacy_collection_snapshots.get(&id)?.label.as_deref()
-    }
-
     pub(crate) fn pane_layout(&self, area: ratatui::layout::Rect) -> Vec<crate::layout::PaneInfo> {
         self.layout.panes(area)
     }

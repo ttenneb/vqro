@@ -5394,6 +5394,12 @@ mod tests {
         );
         let view = app.state.workspaces[0].tabs[0].layout.view_panes()[0];
         assert!(app.state.view_sizing.active.contains_key(&view));
+        app.resize_auto_views(
+            target,
+            Rect::new(0, 0, 100, 40),
+            crate::kitty_graphics::HostCellSize::default(),
+        );
+        app.state.view_sizing.pending_geometry.clear();
         assert!(!app.resize_auto_views(
             target,
             Rect::new(0, 0, 100, 40),

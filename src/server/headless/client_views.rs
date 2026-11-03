@@ -160,6 +160,92 @@ impl HeadlessServer {
             });
             location.reconcile(&topology);
         }
+        self.sync_live_auto_viewports();
+    }
+
+    pub(super) fn sync_live_auto_viewports(&mut self) {
+        // Input/topology events only. Historical geometry-controller ownership
+        // is not evidence that a tab is currently presented by a client.
+        let visible = self
+            .clients
+            .iter()
+            .filter(|(_, client)| client.is_active_shell_client() && client.writer.is_some())
+            .filter_map(|(&id, _)| self.shell_tab_id_for_client(id))
+            .collect::<HashSet<_>>();
+        let tabs = visible
+            .iter()
+            .filter_map(|id| self.app.parse_tab_id(id))
+            .map(|(wi, ti)| self.app.state.workspaces[wi].tabs[ti].id.clone())
+            .collect::<HashSet<_>>();
+        self.app
+            .state
+            .view_sizing
+            .viewports
+            .retain(|id, _| tabs.contains(id));
+        self.app.state.view_sizing.visible_tabs = visible;
+    }
+
+    pub(super) fn flush_auto_view_geometry(&mut self) {
+        if self.app.state.view_sizing.pending_geometry.is_empty()
+            || self.app.collections_mutations_blocked
+            || self.app.session_persistence_blocked
+        {
+            return;
+        }
+        let pending = std::mem::take(&mut self.app.state.view_sizing.pending_geometry);
+        self.sync_live_auto_viewports();
+        for id in pending {
+            let target = self
+                .app
+                .state
+                .workspaces
+                .iter()
+                .enumerate()
+                .find_map(|(wi, ws)| {
+                    ws.tabs.iter().position(|tab| tab.id == id).map(|ti| {
+                        crate::ui::TabSurfaceTarget {
+                            workspace_index: wi,
+                            tab_index: ti,
+                        }
+                    })
+                });
+            let Some(target) = target else {
+                continue;
+            };
+            let Some(public) = self
+                .app
+                .public_tab_id(target.workspace_index, target.tab_index)
+            else {
+                continue;
+            };
+            if !self.app.state.view_sizing.visible_tabs.contains(&public) {
+                continue;
+            }
+            let Some(&controller) = self.tab_geometry_controllers.get(&public) else {
+                continue;
+            };
+            if !self
+                .shell_target_for_client(controller)
+                .is_some_and(|shown| {
+                    shown.workspace_index == target.workspace_index
+                        && shown.tab_index == target.tab_index
+                })
+            {
+                continue;
+            }
+            if self.resize_shell_tab_geometry_to_target(controller, target) {
+                for client in self.clients.values_mut() {
+                    if client
+                        .shell_location
+                        .as_ref()
+                        .and_then(|location| location.focused_tab_id())
+                        == Some(public.as_str())
+                    {
+                        client.request_repaint();
+                    }
+                }
+            }
+        }
     }
 
     pub(super) fn focus_all_shell_clients_on_default_target(&mut self) {
@@ -545,6 +631,7 @@ impl HeadlessServer {
         client_id: u64,
         start_pending_agent_resumes: bool,
     ) -> bool {
+        self.sync_live_auto_viewports();
         let Some(target) = self.shell_target_for_client(client_id) else {
             return false;
         };
@@ -624,7 +711,15 @@ impl HeadlessServer {
             .collect::<HashSet<_>>();
         let no_excluded_panes = HashSet::new();
         let area = Rect::new(0, 0, cols, rows);
-        self.app.resize_auto_views(target, area, cell_size);
+        if self
+            .shell_target_for_client(client_id)
+            .is_some_and(|shown| {
+                shown.workspace_index == target.workspace_index
+                    && shown.tab_index == target.tab_index
+            })
+        {
+            self.app.resize_auto_views(target, area, cell_size);
+        }
         if self.app_client_count() == 1 {
             for (workspace_index, workspace) in self.app.state.workspaces.iter().enumerate() {
                 for tab_index in 0..workspace.tabs.len() {
@@ -774,6 +869,7 @@ impl HeadlessServer {
         &mut self,
         start_pending_agent_resumes: bool,
     ) -> bool {
+        self.sync_live_auto_viewports();
         let mut viewed_tabs = HashMap::<String, Vec<u64>>::new();
         for (&client_id, client) in &self.clients {
             if !client.is_active_shell_client() || client.writer.is_none() {

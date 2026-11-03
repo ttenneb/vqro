@@ -772,6 +772,7 @@ impl HeadlessServer {
     }
 
     fn render_and_stream_with_graphics_limit(&mut self, graphics_frame_limit: usize) {
+        self.flush_auto_view_geometry();
         let full_started = crate::render_prof::timer();
         let render_targets = render_targets(&self.clients, self.foreground_client_id);
 

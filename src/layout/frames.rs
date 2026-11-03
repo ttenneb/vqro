@@ -1,6 +1,5 @@
 //! One transient membership/geometry pass; no session/tree or provider authority.
 use super::{LayoutLeaf, PaneFramePolicy, PaneId, PaneInfo, SplitBorder, TypedNode};
-use crate::terminal_container::TerminalContainerId;
 use ratatui::{
     layout::{Direction, Rect},
     widgets::Borders,
@@ -12,6 +11,12 @@ mod tests;
 #[cfg(test)]
 std::thread_local! { static GATHERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 #[cfg(test)]
+std::thread_local! { static AUTO_GATHERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+#[cfg(test)]
+pub(crate) fn take_auto_gathers() -> usize {
+    AUTO_GATHERS.with(|count| count.replace(0))
+}
+#[cfg(test)]
 pub(crate) fn take_gathers() -> usize {
     GATHERS.with(|count| count.replace(0))
 }
@@ -20,7 +25,6 @@ pub(crate) fn take_gathers() -> usize {
 pub(crate) struct BoxFrame {
     pub rect: Rect,
     pub title_pane: Option<PaneId>,
-    pub stack: Option<TerminalContainerId>,
 }
 #[derive(Default)]
 pub(crate) struct LayoutGeometry {
@@ -140,16 +144,60 @@ struct Group {
     outer: Rect,
 }
 
+pub(super) fn single_terminal_view_scopes(root: &TypedNode) -> HashMap<PaneId, PaneId> {
+    fn visit(node: &TypedNode, facts: &HashMap<usize, Facts>, out: &mut HashMap<PaneId, PaneId>) {
+        let terminal = facts
+            .get(&key(node))
+            .filter(|fact| fact.terminals == 1)
+            .and_then(|fact| fact.terminal);
+        let mut child = |child: &TypedNode| {
+            if let (TypedNode::View { pane, .. }, Some(terminal)) = (child, terminal) {
+                out.insert(*pane, terminal);
+            }
+            visit(child, facts, out);
+        };
+        match node {
+            TypedNode::Split { first, second, .. } => {
+                child(first);
+                child(second);
+            }
+            TypedNode::Stack { children, .. } => {
+                for item in children {
+                    child(item);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut facts = HashMap::new();
+    gather(root, &mut facts);
+    let mut scopes = HashMap::new();
+    visit(root, &facts, &mut scopes);
+    scopes
+}
+
 pub(super) fn auto_size(
     root: &mut TypedNode,
     area: Rect,
     measures: &HashMap<PaneId, crate::view_sizing::ViewMeasure>,
+    headers: &std::collections::HashSet<PaneId>,
 ) -> bool {
+    let measures = measures
+        .iter()
+        .map(|(&pane, &measure)| {
+            let mut measure = measure;
+            measure.rows = measure
+                .rows
+                .saturating_add(u16::from(headers.contains(&pane)));
+            (pane, measure)
+        })
+        .collect::<HashMap<_, _>>();
     fn minimum(
         node: &TypedNode,
         facts: &HashMap<usize, Facts>,
         measures: &HashMap<PaneId, crate::view_sizing::ViewMeasure>,
         inside: bool,
+        headers: &std::collections::HashSet<PaneId>,
         out: &mut HashMap<usize, (u16, u16)>,
     ) -> (u16, u16) {
         let grouped = !inside
@@ -163,16 +211,13 @@ pub(super) fn auto_size(
         let mut size = match node {
             // Reserve twenty body columns plus the existing optional scrollbar
             // gutter. The conservative extra cell also works with scrollbars off.
-            TypedNode::Leaf(_) => (21, 4),
-            TypedNode::View { .. } => (8, 3),
+            TypedNode::Leaf(pane) => (21, 4 + u16::from(headers.contains(pane))),
+            TypedNode::View { pane, .. } => (8, 3 + u16::from(headers.contains(pane))),
             TypedNode::Stack {
                 selected, children, ..
             } => children
                 .get(*selected)
-                .map(|child| {
-                    let (w, h) = minimum(child, facts, measures, inside, out);
-                    (w, h.saturating_add(1))
-                })
+                .map(|child| minimum(child, facts, measures, inside, headers, out))
                 .unwrap_or((0, 0)),
             TypedNode::Split {
                 direction,
@@ -180,16 +225,16 @@ pub(super) fn auto_size(
                 first,
                 second,
             } => {
-                let a = minimum(first, facts, measures, inside, out);
-                let b = minimum(second, facts, measures, inside, out);
+                let a = minimum(first, facts, measures, inside, headers, out);
+                let b = minimum(second, facts, measures, inside, headers, out);
                 let automatic = [first.as_ref(), second.as_ref()].iter().any(|child| matches!(child, TypedNode::View { pane, .. } if measures.contains_key(pane)));
                 let axis = |a: u16, b: u16| {
                     if automatic {
                         a.saturating_add(b)
                     } else {
-                        ((a as f32 / ratio.max(0.1))
+                        ((a as f32 / ratio.max(f32::EPSILON))
                             .ceil()
-                            .max((b as f32 / (1.0 - ratio).max(0.1)).ceil()))
+                            .max((b as f32 / (1.0 - ratio).max(f32::EPSILON)).ceil()))
                         .min(u16::MAX as f32) as u16
                     }
                 };
@@ -276,7 +321,11 @@ pub(super) fn auto_size(
                             } else {
                                 extent.saturating_sub(wanted)
                             };
-                            let next = (first_cells as f32 / extent as f32).clamp(0.1, 0.9);
+                            // Automatic cell bounds, unlike explicit manual ratios,
+                            // may require a share below ten percent. Keep a valid
+                            // interior saved ratio even for a zero-cell tiny view.
+                            let next = (first_cells as f32 / extent as f32)
+                                .clamp(f32::EPSILON, 1.0 - f32::EPSILON);
                             if (extent as f32 * next).round() as u16
                                 != (extent as f32 * *ratio).round() as u16
                             {
@@ -297,11 +346,13 @@ pub(super) fn auto_size(
     if measures.is_empty() {
         return false;
     }
+    #[cfg(test)]
+    AUTO_GATHERS.with(|count| count.set(count.get() + 1));
     let mut facts = HashMap::new();
     gather(root, &mut facts);
     let mut minima = HashMap::new();
-    minimum(root, &facts, measures, false, &mut minima);
-    apply(root, area, false, &facts, &minima, measures)
+    minimum(root, &facts, &measures, false, headers, &mut minima);
+    apply(root, area, false, &facts, &minima, &measures)
 }
 
 pub(super) fn geometry(root: &TypedNode, focus: LayoutLeaf, area: Rect) -> LayoutGeometry {
@@ -334,7 +385,6 @@ fn walk(
             out.boxes.push(BoxFrame {
                 rect: area,
                 title_pane: Some(terminal),
-                stack: None,
             });
             group = Some(Group {
                 terminal,

@@ -1023,6 +1023,7 @@ impl App {
     }
 
     pub(crate) fn emit_pane_updated(&mut self, ws_idx: usize, pane_id: crate::layout::PaneId) {
+        self.refresh_auto_view_label(ws_idx, pane_id);
         if let Some(pane) = self.pane_info(ws_idx, pane_id) {
             self.emit_event(crate::api::schema::EventEnvelope {
                 event: crate::api::schema::EventKind::PaneUpdated,

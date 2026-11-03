@@ -1,7 +1,12 @@
-//! Actor/event adapters for the neutral transient sizing facts.
+//! Actor/event adapters for neutral, transient sizing facts. Never called by render.
 use super::App;
-use crate::{layout::PaneId, ui::TabSurfaceTarget};
+use crate::{
+    layout::PaneId,
+    ui::TabSurfaceTarget,
+    view_sizing::{CachedDocument, DocumentMeasure, ViewMeasure},
+};
 use ratatui::layout::Rect;
+use unicode_width::UnicodeWidthStr;
 
 impl App {
     pub(crate) fn activate_auto_view(&mut self, workspace: usize, tab_index: usize, pane: PaneId) {
@@ -34,6 +39,39 @@ impl App {
         self.state
             .view_sizing
             .activate(pane, &content.extension, &content.view, scope[0]);
+        let mut keys = std::collections::HashSet::new();
+        let mut tabs = std::collections::HashSet::new();
+        for (wi, workspace) in self.state.workspaces.iter().enumerate() {
+            for (ti, tab) in workspace.tabs.iter().enumerate() {
+                tabs.insert(tab.id.clone());
+                if let Some(scope) = self.public_tab_id(wi, ti) {
+                    for view in tab.layout.view_panes() {
+                        if let Some(entry) = self.state.view_sizing.active.get(&view) {
+                            keys.insert((entry.extension.clone(), scope.clone()));
+                        }
+                    }
+                }
+            }
+        }
+        let terminals = self
+            .state
+            .view_sizing
+            .active
+            .values()
+            .map(|entry| entry.terminal)
+            .collect::<std::collections::HashSet<_>>();
+        self.state
+            .view_sizing
+            .documents
+            .retain(|key, _| keys.contains(key));
+        self.state
+            .view_sizing
+            .label_widths
+            .retain(|pane, _| terminals.contains(pane));
+        self.state
+            .view_sizing
+            .viewports
+            .retain(|tab, _| tabs.contains(tab));
         if let Some(scope_id) = self.public_tab_id(workspace, tab_index) {
             self.refresh_auto_view_document(&content.extension, &scope_id, 0, 0);
         }
@@ -100,6 +138,55 @@ impl App {
         }
     }
 
+    fn auto_scope_width(&self, workspace: usize, pane: PaneId) -> u16 {
+        let public = self.public_pane_id(workspace, pane).unwrap_or_default();
+        let terminal = self
+            .state
+            .workspaces
+            .get(workspace)
+            .and_then(|ws| ws.terminal_id(pane))
+            .and_then(|id| self.state.terminals.get(id));
+        let label = terminal
+            .filter(|terminal| terminal.effective_agent_label().is_some())
+            .and_then(|terminal| {
+                terminal
+                    .effective_display_agent()
+                    .or_else(|| terminal.agent_name.clone())
+                    .or_else(|| terminal.effective_agent_label().map(str::to_owned))
+            })
+            .unwrap_or(public);
+        label.width().min(4092) as u16
+    }
+
+    fn cached_auto_measure(
+        &self,
+        workspace: usize,
+        scope: &str,
+        entry: &crate::view_sizing::AutoView,
+    ) -> (ViewMeasure, Option<(u64, String, u64)>, u16) {
+        let width = self.auto_scope_width(workspace, entry.terminal);
+        let public = self
+            .public_pane_id(workspace, entry.terminal)
+            .unwrap_or_default();
+        let document = self
+            .state
+            .view_sizing
+            .documents
+            .get(&(entry.extension.clone(), scope.to_owned()));
+        let measure = document
+            .and_then(|document| document.measurements.get(&(entry.view.clone(), public)))
+            .copied()
+            .unwrap_or(DocumentMeasure {
+                body: ViewMeasure::default(),
+                header: entry.view.width().saturating_add(15).min(4092) as u16,
+            });
+        (
+            measure.with_scope(width),
+            document.map(|document| document.incarnation.clone()),
+            width,
+        )
+    }
+
     pub(crate) fn refresh_auto_view_document(
         &mut self,
         namespace: &str,
@@ -110,94 +197,103 @@ impl App {
         if self.state.view_sizing.active.is_empty() {
             return;
         }
+        let Some((wi, ti)) = self.parse_tab_id(scope_id) else {
+            return;
+        };
+        if !self.state.workspaces[wi].tabs[ti]
+            .layout
+            .view_panes()
+            .iter()
+            .any(|pane| {
+                self.state
+                    .view_sizing
+                    .active
+                    .get(pane)
+                    .is_some_and(|entry| entry.extension == namespace)
+            })
+        {
+            return;
+        }
         let key = (namespace.to_owned(), scope_id.to_owned());
-        let (metrics, incarnation) = self
+        let document = self
             .host_document_caches
             .get(&key)
             .and_then(|cache| cache.current())
-            .filter(|document| document.namespace == namespace)
-            .map(|document| {
-                (
-                    crate::view_sizing::measure_document(document),
-                    (document.generation, scope_id.to_owned(), document.revision),
-                )
+            .filter(|document| document.namespace == namespace);
+        let cached = document
+            .map(|document| CachedDocument {
+                incarnation: (document.generation, scope_id.to_owned(), document.revision),
+                measurements: crate::view_sizing::measure_document(document),
             })
-            .unwrap_or_else(|| {
-                (
-                    Default::default(),
-                    (generation, scope_id.to_owned(), revision),
-                )
+            .unwrap_or(CachedDocument {
+                incarnation: (generation, scope_id.to_owned(), revision),
+                measurements: Default::default(),
             });
-        let mut updates = Vec::new();
-        for (&pane, entry) in &self.state.view_sizing.active {
-            if entry.extension != namespace {
-                continue;
-            }
-            let Some((wi, ti)) = self
-                .state
-                .workspaces
-                .iter()
-                .enumerate()
-                .find_map(|(wi, ws)| ws.find_tab_index_for_pane(pane).map(|ti| (wi, ti)))
-            else {
-                continue;
-            };
-            if self.public_tab_id(wi, ti).as_deref() != Some(scope_id) {
-                continue;
-            }
-            let scope = self.state.workspaces[wi].tabs[ti].layout.view_scope(pane);
-            if scope.len() != 1 {
-                continue;
-            }
-            let Some(public) = self.public_pane_id(wi, scope[0]) else {
-                continue;
-            };
-            updates.push((
-                pane,
-                scope[0],
-                metrics
-                    .get(&(entry.view.clone(), public))
-                    .copied()
-                    .unwrap_or_default(),
-            ));
+        self.state.view_sizing.documents.insert(key, cached);
+        self.refresh_cached_auto_target(wi, ti);
+    }
+
+    /// Metadata notifications only invalidate a target if the actual host label
+    /// width changed. Status/age updates do not visit geometry or other tabs.
+    pub(crate) fn refresh_auto_view_label(&mut self, workspace: usize, pane: PaneId) {
+        let Some(before) = self.state.view_sizing.label_widths.get(&pane).copied() else {
+            return;
+        };
+        if before == self.auto_scope_width(workspace, pane) {
+            return;
         }
-        for (pane, terminal, measure) in updates {
-            if let Some(entry) = self.state.view_sizing.active.get_mut(&pane) {
-                entry.terminal = terminal;
-                entry.measure = measure;
-                entry.incarnation = Some(incarnation.clone());
-            }
-        }
-        let mut targets = Vec::new();
-        for (wi, ws) in self.state.workspaces.iter().enumerate() {
-            for (ti, tab) in ws.tabs.iter().enumerate() {
-                if let Some(viewport) = self.state.view_sizing.viewports.get(&tab.id).copied() {
-                    targets.push((wi, ti, viewport));
-                }
-            }
-        }
-        for (wi, ti, (area, cells)) in targets {
-            if self.resize_auto_views(
-                TabSurfaceTarget {
-                    workspace_index: wi,
-                    tab_index: ti,
-                },
-                area,
-                cells,
-            ) {
-                crate::ui::resize_tab_surface(
-                    &self.state,
-                    &self.terminal_runtimes,
-                    wi,
-                    ti,
-                    area,
-                    cells,
-                );
-            }
+        if let Some(ti) = self
+            .state
+            .workspaces
+            .get(workspace)
+            .and_then(|ws| ws.find_tab_index_for_pane(pane))
+        {
+            self.refresh_cached_auto_target(workspace, ti);
         }
     }
 
-    /// Geometry-authority event only, never a per-client render call.
+    pub(crate) fn refresh_cached_auto_target(&mut self, workspace: usize, tab_index: usize) {
+        let Some(scope) = self.public_tab_id(workspace, tab_index) else {
+            return;
+        };
+        let views = self.state.workspaces[workspace].tabs[tab_index]
+            .layout
+            .view_panes();
+        let mut dirty = false;
+        for pane in views {
+            let Some(entry) = self.state.view_sizing.active.get(&pane) else {
+                continue;
+            };
+            if !entry.scope_valid {
+                continue;
+            }
+            let terminal = entry.terminal;
+            let (measure, incarnation, width) = self.cached_auto_measure(workspace, &scope, entry);
+            if let Some(entry) = self.state.view_sizing.active.get_mut(&pane) {
+                entry.dirty |= entry.measure != measure;
+                entry.measure = measure;
+                entry.incarnation = incarnation;
+                dirty |= entry.dirty;
+            }
+            self.state.view_sizing.label_widths.insert(terminal, width);
+        }
+        if !dirty || !self.state.view_sizing.visible_tabs.contains(&scope) {
+            return;
+        }
+        let tab = &self.state.workspaces[workspace].tabs[tab_index];
+        if self.state.view_sizing.viewports.contains_key(&tab.id) {
+            // The host geometry controller owns actual sizing, including
+            // accessory/preview exclusions. A document event only invalidates
+            // its affected target; it never resizes a PTY itself.
+            self.state
+                .view_sizing
+                .pending_geometry
+                .insert(tab.id.clone());
+        }
+    }
+
+    /// Geometry-authority event only. Rebind placement against current complete
+    /// membership and seed from accepted cached metrics, never a document scan.
     pub(crate) fn resize_auto_views(
         &mut self,
         target: TabSurfaceTarget,
@@ -207,56 +303,352 @@ impl App {
         if self.collections_mutations_blocked || self.session_persistence_blocked {
             return false;
         }
-        if self.state.view_sizing.viewports.len() >= crate::admission::MAX_SESSION_PANES {
-            let tabs = self
-                .state
-                .workspaces
-                .iter()
-                .flat_map(|ws| &ws.tabs)
-                .map(|tab| tab.id.clone())
-                .collect::<std::collections::HashSet<_>>();
-            self.state
-                .view_sizing
-                .viewports
-                .retain(|id, _| tabs.contains(id));
-        }
+        let Some(scope_id) = self.public_tab_id(target.workspace_index, target.tab_index) else {
+            return false;
+        };
         let Some(tab) = self
             .state
             .workspaces
-            .get_mut(target.workspace_index)
-            .and_then(|ws| ws.tabs.get_mut(target.tab_index))
+            .get(target.workspace_index)
+            .and_then(|ws| ws.tabs.get(target.tab_index))
         else {
             return false;
         };
         if tab.zoomed {
             return false;
         }
+        let tab_id = tab.id.clone();
+        let bindings = tab.layout.single_terminal_view_scopes();
+        let placed = tab.layout.view_panes();
+        for pane in placed {
+            if !bindings.contains_key(&pane) {
+                if let Some(entry) = self.state.view_sizing.active.get_mut(&pane) {
+                    entry.scope_valid = false;
+                    entry.incarnation = None;
+                    entry.dirty = false;
+                }
+            }
+        }
+        self.state.view_sizing.visible_tabs.insert(scope_id.clone());
         self.state
             .view_sizing
             .viewports
-            .insert(tab.id.clone(), (area, cells));
+            .insert(tab_id, (area, cells));
         let mut measures = std::collections::HashMap::new();
-        for (&pane, entry) in &mut self.state.view_sizing.active {
-            if tab.layout.view_at(pane).is_none() {
+        for (pane, terminal) in bindings {
+            let Some(entry) = self.state.view_sizing.active.get_mut(&pane) else {
                 continue;
+            };
+            entry.terminal = terminal;
+            entry.scope_valid = true;
+            let (measure, incarnation, width) = self.cached_auto_measure(
+                target.workspace_index,
+                &scope_id,
+                &self.state.view_sizing.active[&pane],
+            );
+            if let Some(entry) = self.state.view_sizing.active.get_mut(&pane) {
+                entry.measure = measure;
+                entry.incarnation = incarnation;
+                entry.dirty = false;
             }
-            let scope = tab.layout.view_scope(pane);
-            if scope.len() != 1 {
-                entry.incarnation = None;
-                continue;
-            }
-            if entry.terminal != scope[0] {
-                entry.terminal = scope[0];
-                entry.incarnation = None;
-                entry.measure = Default::default();
-            }
-            measures.insert(pane, entry.measure);
+            self.state.view_sizing.label_widths.insert(terminal, width);
+            measures.insert(pane, measure);
         }
-        let changed = tab.layout.auto_size_views(area, &measures);
+        let changed = self.state.workspaces[target.workspace_index].tabs[target.tab_index]
+            .layout
+            .auto_size_views(area, &measures);
         if changed {
             self.schedule_session_save();
             self.emit_layout_updated_event(target.workspace_index, target.tab_index);
         }
         changed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn moving_the_same_terminal_and_view_to_another_tab_cannot_consume_old_scope_metrics() {
+        let (_send, receive) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            receive,
+            crate::api::EventHub::default(),
+        );
+        let mut workspace = crate::workspace::Workspace::test_new("move");
+        let root = workspace.tabs[0].root_pane;
+        let (_, view) = workspace
+            .split_pane_with_view(
+                root,
+                "sample.views",
+                "rows",
+                ratatui::layout::Direction::Horizontal,
+                0.5,
+                false,
+            )
+            .unwrap();
+        workspace.test_add_tab(Some("destination"));
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        let area = Rect::new(0, 0, 200, 40);
+        let cells = crate::kitty_graphics::HostCellSize::default();
+        app.resize_auto_views(
+            TabSurfaceTarget {
+                workspace_index: 0,
+                tab_index: 0,
+            },
+            area,
+            cells,
+        );
+        app.activate_auto_view(0, 0, view);
+        let old = app.public_tab_id(0, 0).unwrap();
+        let public = app.public_pane_id(0, root).unwrap();
+        app.state.view_sizing.documents.insert(
+            ("sample.views".into(), old.clone()),
+            CachedDocument {
+                incarnation: (7, old.clone(), 9),
+                measurements: std::collections::HashMap::from([(
+                    ("rows".into(), public),
+                    DocumentMeasure {
+                        body: ViewMeasure { rows: 7, width: 80 },
+                        header: 20,
+                    },
+                )]),
+            },
+        );
+        app.resize_auto_views(
+            TabSurfaceTarget {
+                workspace_index: 0,
+                tab_index: 0,
+            },
+            area,
+            cells,
+        );
+        assert_eq!(app.state.view_sizing.active[&view].measure.width, 80);
+        // Move each complete content bundle while keeping the two host tab
+        // identities/numbers: the terminal and view PaneIds stay unchanged.
+        let tabs = &mut app.state.workspaces[0].tabs;
+        let identities = [
+            (tabs[0].id.clone(), tabs[0].number),
+            (tabs[1].id.clone(), tabs[1].number),
+        ];
+        tabs.swap(0, 1);
+        for (tab, (id, number)) in tabs.iter_mut().zip(identities) {
+            tab.id = id;
+            tab.number = number;
+        }
+        let new = app.public_tab_id(0, 1).unwrap();
+        assert_ne!(old, new);
+        app.resize_auto_views(
+            TabSurfaceTarget {
+                workspace_index: 0,
+                tab_index: 1,
+            },
+            area,
+            cells,
+        );
+        let policy = &app.state.view_sizing.active[&view];
+        assert_eq!(policy.terminal, root);
+        assert_eq!(policy.measure.rows, 1);
+        assert_eq!(policy.measure.width, 32);
+        assert!(
+            policy.incarnation.is_none(),
+            "old namespace/tab incarnation is not reused before a new scoped publication"
+        );
+        app.state.assert_invariants_for_test();
+    }
+
+    #[tokio::test]
+    async fn cached_metrics_only_touch_the_changed_live_target_and_names_invalidate_width() {
+        let (_send, receive) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            receive,
+            crate::api::EventHub::default(),
+        );
+        let mut roots = Vec::new();
+        let mut views = Vec::new();
+        for index in 0..2 {
+            let mut workspace = crate::workspace::Workspace::test_new(&format!("target {index}"));
+            let root = workspace.tabs[0].root_pane;
+            let (_, view) = workspace
+                .split_pane_with_view(
+                    root,
+                    "sample.views",
+                    "rows",
+                    ratatui::layout::Direction::Horizontal,
+                    0.5,
+                    false,
+                )
+                .unwrap();
+            roots.push(root);
+            views.push(view);
+            app.state.workspaces.push(workspace);
+        }
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        let area = Rect::new(0, 0, 200, 40);
+        let cells = crate::kitty_graphics::HostCellSize::default();
+        for (index, &view) in views.iter().enumerate() {
+            app.resize_auto_views(
+                TabSurfaceTarget {
+                    workspace_index: index,
+                    tab_index: 0,
+                },
+                area,
+                cells,
+            );
+            app.activate_auto_view(index, 0, view);
+            app.resize_auto_views(
+                TabSurfaceTarget {
+                    workspace_index: index,
+                    tab_index: 0,
+                },
+                area,
+                cells,
+            );
+            app.state.view_sizing.pending_geometry.clear();
+        }
+        let scope_a = app.public_tab_id(0, 0).unwrap();
+        let scope_b = app.public_tab_id(1, 0).unwrap();
+        let public_a = app.public_pane_id(0, roots[0]).unwrap();
+        app.state.view_sizing.documents.insert(
+            ("sample.views".into(), scope_a.clone()),
+            CachedDocument {
+                incarnation: (1, scope_a, 1),
+                measurements: std::collections::HashMap::from([(
+                    ("rows".into(), public_a),
+                    DocumentMeasure {
+                        body: ViewMeasure { rows: 2, width: 70 },
+                        header: 20,
+                    },
+                )]),
+            },
+        );
+        let other = app.state.workspaces[1].tabs[0].layout.typed_root().clone();
+        crate::layout::TileLayout::take_auto_gathers_for_test();
+        app.refresh_cached_auto_target(0, 0);
+        assert_eq!(
+            crate::layout::TileLayout::take_auto_gathers_for_test(),
+            0,
+            "document callback never owns PTY/layout resize"
+        );
+        let pending = std::mem::take(&mut app.state.view_sizing.pending_geometry);
+        assert_eq!(pending.len(), 1);
+        assert!(pending.contains(&app.state.workspaces[0].tabs[0].id));
+        app.resize_auto_views(
+            TabSurfaceTarget {
+                workspace_index: 0,
+                tab_index: 0,
+            },
+            area,
+            cells,
+        );
+        assert_eq!(
+            crate::layout::TileLayout::take_auto_gathers_for_test(),
+            1,
+            "only changed target allocates at authority callback"
+        );
+        assert_eq!(
+            &other,
+            app.state.workspaces[1].tabs[0].layout.typed_root(),
+            "unrelated target unchanged"
+        );
+        app.refresh_cached_auto_target(0, 0);
+        assert_eq!(
+            crate::layout::TileLayout::take_auto_gathers_for_test(),
+            0,
+            "equal facts do not gather or resize"
+        );
+        let terminal = app.state.workspaces[0]
+            .terminal_id(roots[0])
+            .unwrap()
+            .clone();
+        let metadata = app.state.terminals.get_mut(&terminal).unwrap();
+        metadata.set_detected_state(
+            Some(crate::detect::Agent::Pi),
+            crate::detect::AgentState::Idle,
+        );
+        metadata.set_agent_name("a".repeat(64));
+        app.refresh_auto_view_label(0, roots[0]);
+        assert_eq!(crate::layout::TileLayout::take_auto_gathers_for_test(), 0);
+        assert_eq!(
+            std::mem::take(&mut app.state.view_sizing.pending_geometry).len(),
+            1
+        );
+        app.resize_auto_views(
+            TabSurfaceTarget {
+                workspace_index: 0,
+                tab_index: 0,
+            },
+            area,
+            cells,
+        );
+        assert_eq!(
+            crate::layout::TileLayout::take_auto_gathers_for_test(),
+            1,
+            "rename invalidates only its target"
+        );
+        let info = app.state.workspaces[0].tabs[0]
+            .layout
+            .panes(area)
+            .into_iter()
+            .find(|info| info.id == views[0])
+            .unwrap();
+        assert!(
+            info.rect.width >= 84,
+            "full permitted host scope label fits below the max cap"
+        );
+        app.refresh_auto_view_label(0, roots[0]);
+        assert_eq!(
+            crate::layout::TileLayout::take_auto_gathers_for_test(),
+            0,
+            "unchanged label/status tick does no geometry work"
+        );
+        let public_b = app.public_pane_id(1, roots[1]).unwrap();
+        app.state.view_sizing.documents.insert(
+            ("sample.views".into(), scope_b.clone()),
+            CachedDocument {
+                incarnation: (1, scope_b.clone(), 2),
+                measurements: std::collections::HashMap::from([(
+                    ("rows".into(), public_b),
+                    DocumentMeasure {
+                        body: ViewMeasure { rows: 2, width: 80 },
+                        header: 20,
+                    },
+                )]),
+            },
+        );
+        app.state.view_sizing.visible_tabs.remove(&scope_b);
+        let tab = app.state.workspaces[1].tabs[0].id.clone();
+        app.state.view_sizing.viewports.remove(&tab);
+        let before = app.state.workspaces[1].tabs[0].layout.typed_root().clone();
+        app.refresh_cached_auto_target(1, 0);
+        assert_eq!(
+            crate::layout::TileLayout::take_auto_gathers_for_test(),
+            0,
+            "hidden target caches facts, never replays an old viewport"
+        );
+        assert_eq!(&before, app.state.workspaces[1].tabs[0].layout.typed_root());
+        app.resize_auto_views(
+            TabSurfaceTarget {
+                workspace_index: 1,
+                tab_index: 0,
+            },
+            Rect::new(0, 0, 160, 40),
+            cells,
+        );
+        assert_eq!(
+            crate::layout::TileLayout::take_auto_gathers_for_test(),
+            1,
+            "selection applies cached facts at fresh controlling geometry"
+        );
+        app.state.assert_invariants_for_test();
     }
 }

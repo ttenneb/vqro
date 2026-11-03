@@ -487,30 +487,20 @@ pub(super) fn render_box_frames(
     let Some(ws) = app.workspaces.get(target.workspace_index) else {
         return;
     };
-    let Some(tab) = ws.tabs.get(target.tab_index) else {
+    if ws.tabs.get(target.tab_index).is_none() {
         return;
-    };
+    }
     let focused = panes
         .iter()
         .find(|pane| pane.is_focused)
         .map(|pane| pane.rect);
     for group in boxes {
         let label = group
-            .stack
-            .and_then(|id| tab.legacy_box_label(id))
-            .map(str::to_owned)
-            .or_else(|| {
-                group
-                    .title_pane
-                    .and_then(|id| ws.pane_state(id))
-                    .and_then(|pane| app.terminals.get(&pane.attached_terminal_id))
-                    .and_then(|terminal| {
-                        terminal
-                            .border_label(app.show_agent_labels_on_pane_borders)
-                            .or_else(|| terminal.agent_name.clone())
-                    })
-            })
-            .unwrap_or_else(|| "box".to_owned());
+            .title_pane
+            .and_then(|id| ws.pane_state(id))
+            .and_then(|pane| app.terminals.get(&pane.attached_terminal_id))
+            .and_then(|terminal| terminal.border_label(app.show_agent_labels_on_pane_borders))
+            .unwrap_or_default();
         let active = focused.is_some_and(|pane| group.rect.intersection(pane) == pane);
         let color = if active {
             app.palette.accent

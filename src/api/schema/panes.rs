@@ -309,7 +309,8 @@ pub struct PaneViewParams {
     /// Split direction for `add`; defaults to right.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direction: Option<SplitDirection>,
-    /// The new VIEW's share of the split, in either direction (0.1..=0.9; default 0.5).
+    /// Explicit manual VIEW share (0.1..=0.9). Omit for transient auto sizing;
+    /// the initial tree fallback is 0.5, not a persistent auto policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ratio: Option<f32>,
     #[serde(default)]

@@ -17,6 +17,58 @@ fn nested_snapshot(cwd: &std::path::Path) -> SessionSnapshot {
 }
 
 #[tokio::test]
+async fn cold_v9_preserves_sub_ten_percent_actual_view_ratios_in_both_orders() {
+    for ratio in [0.02, 0.98] {
+        let cwd = std::env::current_dir().unwrap();
+        let terminal = serde_json::json!({"Pane":1});
+        let view = serde_json::json!({"View":{"pane":2,"extension":"sample.views","view":"rows"}});
+        let (first, second) = if ratio < 0.5 {
+            (view, terminal)
+        } else {
+            (terminal, view)
+        };
+        let snapshot = super::super::snapshot::parse_snapshot(&serde_json::json!({
+            "version":9,"workspaces":[{"id":"wautosize","identity_cwd":cwd,"tabs":[{
+            "layout":{"Split":{"direction":"Vertical","ratio":ratio,"first":first,"second":second}},
+            "panes":{"1":{"cwd":cwd}},"root_pane":1,"focused":1,"zoomed":false}],"active_tab":0}],"active":0,"selected":0,"collections_authority":crate::collections_extension_contract::CollectionsAuthorityV1::default()
+        }).to_string()).unwrap();
+        let (events, _receive) = mpsc::channel(32);
+        let (workspaces, _terminals, runtimes) = restore(
+            &snapshot,
+            None,
+            200,
+            100,
+            4096,
+            "__vqro_missing_shell__",
+            crate::config::ShellModeConfig::NonLogin,
+            false,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        )
+        .unwrap();
+        assert!(runtimes.is_empty());
+        let crate::layout::TypedNode::Split { ratio: actual, .. } =
+            workspaces[0].tabs[0].layout.typed_root()
+        else {
+            panic!("saved split lost")
+        };
+        assert_eq!(
+            *actual, ratio,
+            "actual ratio cannot be normalized to a manual/API floor"
+        );
+        workspaces[0].assert_invariants_for_test();
+        assert!(
+            crate::app::AppState::test_new()
+                .view_sizing
+                .active
+                .is_empty(),
+            "restore never rearms transient auto sizing"
+        );
+    }
+}
+
+#[tokio::test]
 async fn missing_cwd_and_failed_shell_keep_hidden_nested_leaves_and_resume_facts() {
     let missing = std::env::temp_dir().join(format!(
         "vqro-missing-{}-{}",

@@ -98,6 +98,7 @@ class ViewPaneDemo(ReadinessDemo):
         self.remember_pane(a)
         self.launch("view-a", a)
         self.agent("view-a", "view-a-identity", ["whoami"])
+        self.api("pane.rename", {"pane_id": a, "label": "view-a"})
         self.human(human, "view-human-identity", ["whoami"])
         plan = {
             "nodes": [
@@ -130,6 +131,8 @@ class ViewPaneDemo(ReadinessDemo):
             "automatic_size": True,
             "show_agent_labels_on_pane_borders": False,
             "title_setting_default": True,
+            "explicit_terminal_label": "view-a",
+            "terminal_label_mechanism": "pane.rename",
             "header": header.strip(),
             "row_visible": child["title"] in screen_text,
             "capture_text": str(text_path),

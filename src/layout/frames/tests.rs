@@ -1,5 +1,6 @@
 use super::*;
 use crate::layout::TileLayout;
+use crate::terminal_container::TerminalContainerId;
 fn pane(id: u32) -> PaneId {
     PaneId::from_raw(id)
 }
@@ -163,6 +164,32 @@ fn multiple_automatic_views_reserve_the_terminal_body_minimum() {
             assert!(
                 TileLayout::from_tree(layout.root.clone(), LayoutLeaf::Pane(pane(1))).is_some()
             );
+        }
+    }
+}
+#[test]
+fn tall_automatic_views_fit_rows_and_keep_the_twelve_row_cap() {
+    for height in [200, 202, 4000] {
+        let mut layout =
+            TileLayout::from_tree(view_group(Direction::Vertical), LayoutLeaf::Pane(pane(1)))
+                .unwrap();
+        let area = Rect::new(0, 0, 100, height);
+        for rows in [1, 2, 500] {
+            let measures =
+                HashMap::from([(pane(2), crate::view_sizing::ViewMeasure { rows, width: 40 })]);
+            layout.auto_size_views(area, &measures);
+            let view = layout
+                .geometry(area)
+                .panes
+                .into_iter()
+                .find(|info| info.id == pane(2))
+                .unwrap();
+            assert_eq!(
+                view.rect.height,
+                rows.saturating_add(2).min(12),
+                "height {height}, rows {rows}"
+            );
+            assert!(!layout.auto_size_views(area, &measures));
         }
     }
 }

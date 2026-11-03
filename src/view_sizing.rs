@@ -17,6 +17,30 @@ impl Default for ViewMeasure {
         Self { rows: 1, width: 32 }
     }
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DocumentMeasure {
+    pub body: ViewMeasure,
+    pub header: u16,
+}
+impl DocumentMeasure {
+    pub fn with_scope(self, scope_width: u16) -> ViewMeasure {
+        let width = self
+            .body
+            .width
+            .max(self.header.saturating_add(scope_width))
+            .min(4092)
+            .div_ceil(4)
+            * 4;
+        ViewMeasure {
+            rows: self.body.rows,
+            width,
+        }
+    }
+}
+pub(crate) struct CachedDocument {
+    pub incarnation: (u64, String, u64),
+    pub measurements: HashMap<(String, String), DocumentMeasure>,
+}
 #[derive(Clone)]
 pub(crate) struct AutoView {
     pub extension: String,
@@ -24,10 +48,16 @@ pub(crate) struct AutoView {
     pub terminal: PaneId,
     pub measure: ViewMeasure,
     pub incarnation: Option<(u64, String, u64)>,
+    pub dirty: bool,
+    pub scope_valid: bool,
 }
 #[derive(Default)]
 pub(crate) struct ViewSizing {
     pub active: HashMap<PaneId, AutoView>,
+    pub documents: HashMap<(String, String), CachedDocument>,
+    pub visible_tabs: std::collections::HashSet<String>,
+    pub pending_geometry: std::collections::HashSet<crate::workspace::TabId>,
+    pub label_widths: HashMap<PaneId, u16>,
     pub viewports: HashMap<
         crate::workspace::TabId,
         (ratatui::layout::Rect, crate::kitty_graphics::HostCellSize),
@@ -41,6 +71,8 @@ impl ViewSizing {
             terminal,
             measure: ViewMeasure::default(),
             incarnation: None,
+            dirty: true,
+            scope_valid: true,
         });
     }
     pub fn manual(&mut self, panes: impl IntoIterator<Item = PaneId>) {
@@ -54,7 +86,7 @@ impl ViewSizing {
 /// Fixed status budgets avoid age/status ticks changing terminal dimensions.
 pub(crate) fn measure_document(
     document: &HostDocumentV1,
-) -> HashMap<(String, String), ViewMeasure> {
+) -> HashMap<(String, String), DocumentMeasure> {
     let mut children: HashMap<&str, Vec<&crate::extension_contract::HostDocumentItem>> =
         HashMap::new();
     for item in &document.items {
@@ -74,11 +106,19 @@ pub(crate) fn measure_document(
             continue;
         }
         let mut rows = 0u16;
-        let mut width = root
+        let header = root
             .label
             .width()
-            .saturating_add(root.detail.as_deref().unwrap_or("").width())
-            .saturating_add(22);
+            .saturating_add(
+                root.detail
+                    .as_deref()
+                    .filter(|detail| !detail.is_empty())
+                    .unwrap_or("read-only")
+                    .width(),
+            )
+            .saturating_add(6)
+            .min(4092) as u16;
+        let mut width = 0usize;
         let mut pending = vec![(root.id.as_str(), 0usize)];
         let mut budget = document.items.len().min(512);
         while let Some((id, depth)) = pending.pop() {
@@ -108,9 +148,12 @@ pub(crate) fn measure_document(
         let width = width.min(4092).div_ceil(4) * 4;
         result.insert(
             (view_id.clone(), pane.clone()),
-            ViewMeasure {
-                rows: rows.max(1),
-                width: width as u16,
+            DocumentMeasure {
+                body: ViewMeasure {
+                    rows: rows.max(1),
+                    width: width as u16,
+                },
+                header,
             },
         );
     }
@@ -132,8 +175,12 @@ mod tests {
         document.items[1].view.as_mut().unwrap().since = Some(999_999);
         assert_eq!(measure_document(&document), before);
         let measure = before.get(&("rows".into(), "w1:p1".into())).unwrap();
-        assert_eq!(measure.rows, 2);
-        assert_eq!(measure.width % 4, 0);
+        assert_eq!(measure.body.rows, 2);
+        assert_eq!(measure.body.width % 4, 0);
+        assert!(
+            measure.with_scope(64).width >= 64 + measure.header,
+            "host scope names participate in header width"
+        );
         document.items[0].view.as_mut().unwrap().pane_id = Some("w1:p2".into());
         let after = measure_document(&document);
         assert!(!after.contains_key(&("rows".into(), "w1:p1".into())));

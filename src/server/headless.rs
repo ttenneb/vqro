@@ -1075,6 +1075,7 @@ impl HeadlessServer {
         });
         let was_foreground = self.foreground_client_id == Some(client_id);
         let removed = self.clients.remove(&client_id);
+        self.sync_live_auto_viewports();
         self.tab_geometry_controllers
             .retain(|_, controller_id| *controller_id != client_id);
         if let Some(mut removed) = removed {

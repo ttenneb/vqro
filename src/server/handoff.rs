@@ -1237,7 +1237,7 @@ mod tests {
     }
 
     #[test]
-    fn live_handoff_preserves_a_view_pane_and_its_agent_start_marker() {
+    fn live_handoff_preserves_small_actual_view_share_and_agent_start_marker() {
         // A view pane beside a terminal whose once-per-terminal agent-start marker
         // is set. A live transfer must keep both the view identity and the marker,
         // so the replacement neither loses the view nor re-adds one for a terminal
@@ -1245,8 +1245,8 @@ mod tests {
         let mut snapshot = one_pane_snapshot();
         let tab = &mut snapshot.workspaces[0].tabs[0];
         tab.layout = crate::persist::LayoutSnapshot::Split {
-            direction: crate::persist::DirectionSnapshot::Horizontal,
-            ratio: 0.5,
+            direction: crate::persist::DirectionSnapshot::Vertical,
+            ratio: 0.98,
             first: Box::new(crate::persist::LayoutSnapshot::Pane(1)),
             second: Box::new(crate::persist::LayoutSnapshot::View {
                 pane: 2,
@@ -1275,8 +1275,26 @@ mod tests {
             api_window_title: None,
             host_shutdown_intent: None,
         };
+        let encoded = serde_json::to_vec(&manifest).unwrap();
+        manifest = serde_json::from_slice(&encoded).unwrap();
         validate_and_normalize_manifest(&mut manifest)
             .expect("view-bearing live handoff is admitted");
+        let crate::persist::LayoutSnapshot::Split { ratio, .. } =
+            &manifest.snapshot.workspaces[0].tabs[0].layout
+        else {
+            panic!("split lost")
+        };
+        assert_eq!(
+            *ratio, 0.98,
+            "live handoff preserves actual auto share, not a manual floor"
+        );
+        assert!(
+            serde_json::to_value(&manifest.snapshot)
+                .unwrap()
+                .get("view_sizing")
+                .is_none(),
+            "transient auto mode is never transferred"
+        );
 
         // Only the terminal pane owns a runtime/terminal, and its identity is kept.
         assert_eq!(manifest.panes.len(), 1, "only the terminal has a runtime");

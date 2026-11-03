@@ -223,19 +223,26 @@ view-border cell, never terminal content.
 
 New views with no explicit ratio, including agent-start defaults, opt in to
 cached neutral row/header/label metrics. Accepted document publication measures
-once, with namespace/incarnation/scope/revision identity. There are no provider
+once, with namespace/incarnation/scope/revision identity. Host scope-label widths
+are included and width-changing metadata renames invalidate only their target. There are no provider
 calls or document scans during frame/layout/client fanout. Age ticks use fixed
-status budgets, widths use four-cell buckets, and unchanged integer allocations
-do not change ratios or request PTY geometry work.
+status budgets, widths use four-cell buckets, and equal metrics do not visit
+geometry. Hidden targets retain metrics only. A changed live target queues a
+neutral invalidation; existing host geometry control applies it with current
+viewport/accessory exclusions. Document callbacks never resize PTYs themselves.
+Unchanged integer allocations do not change ratios or request PTY geometry work.
 
 Side views target their text width within 25–60% of the available split;
 stacked views target row count plus two border rows, capped at twelve rows and
 35%. Aggregate minima reserve twenty terminal body columns plus a possible
 scrollbar gutter, four terminal rows, and view minima. Existing stack headers
-are reserved too. Manual splits retain their ratios. When the viewport cannot
+are charged to the actual selected terminal/view branch. Manual splits retain
+their ratios. When the viewport cannot
 satisfy all minima, terminal allocation wins, then nearest-to-terminal attached
-views before outer views; existing valid ratio bounds and saturating cell
-geometry take precedence over otherwise impossible pixel minima. Content may
+views before outer views; saturating cell geometry handles otherwise impossible
+pixel minima. AUTO allocations may use any finite interior ratio, including a
+view share below ten percent, to preserve the actual row cap. Their saved ratios
+round-trip unchanged. Manual/API ratio limits remain 0.1–0.9. Content may
 truncate or become zero-sized, never escape its rectangle.
 
 `pane view add --ratio R` is explicit manual view share (0.1–0.9), quantized to

@@ -511,7 +511,17 @@ impl TileLayout {
         area: Rect,
         measures: &std::collections::HashMap<PaneId, crate::view_sizing::ViewMeasure>,
     ) -> bool {
-        frames::auto_size(&mut self.root, area, measures)
+        let headers = self.selected_stack_panes().into_iter().collect();
+        frames::auto_size(&mut self.root, area, measures, &headers)
+    }
+
+    pub(crate) fn single_terminal_view_scopes(&self) -> std::collections::HashMap<PaneId, PaneId> {
+        frames::single_terminal_view_scopes(&self.root)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_auto_gathers_for_test() -> usize {
+        frames::take_auto_gathers()
     }
 
     #[cfg(test)]
@@ -1401,6 +1411,8 @@ fn range_center_distance(a_start: u16, a_len: u16, b_start: u16, b_len: u16) -> 
 
 // --- Tree operations ---
 
+// Manual construction/admission bounds, not a saved-tree normalizer. Actual
+// automatic cell allocations can require smaller finite interior shares.
 fn valid_split_ratio(ratio: f32) -> f32 {
     if ratio.is_finite() {
         ratio.clamp(0.1, 0.9)

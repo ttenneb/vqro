@@ -150,7 +150,9 @@ provider returns, the view is drawn again.
   cached neutral document facts (initial tree fallback 0.5). Explicit ratios
   and divider drags opt the affected view out; directional pane resize opts
   its terminal group out. New defaults do not rearm earlier manual choices.
-  Restart/handoff preserves the last actual ratio, never the auto policy.
+  AUTO bounds may produce a finite interior share below ten percent; only
+  explicit manual/API ratios have the 0.1–0.9 limit. Restart/handoff preserves
+  that last actual ratio unchanged, never the auto policy.
   `vqro pane view
   close <view-pane>` drops it. Both are neutral: core stores the content
   identity and the placement, never a Tasks literal, and a view pane keeps a
