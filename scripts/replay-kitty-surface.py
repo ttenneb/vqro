@@ -84,8 +84,13 @@ def verify(path, font_path):
     image.save(path.with_suffix(".png"))
     cw, ch = record["cell_width"], record["cell_height"]
     body, view = record["body"], record["view"]
-    if view["y"] > body["y"]:
-        seam = (0, max(0, body["y"] + body["height"] - 3) * ch, image.width, image.height)
+    if view["x"] == body["x"]:
+        if view["y"] < body["y"]:
+            seam = (0, 0, image.width, min(image.height, (body["y"] + 3) * ch))
+        else:
+            seam = (0, max(0, body["y"] + body["height"] - 3) * ch, image.width, image.height)
+    elif view["x"] < body["x"]:
+        seam = (0, 0, min(image.width, (body["x"] + 3) * cw), image.height)
     else:
         seam = (max(0, body["x"] + body["width"] - 3) * cw, 0, image.width, image.height)
     image.crop(seam).save(path.with_name(path.stem + "-seam.png"))

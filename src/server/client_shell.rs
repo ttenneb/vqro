@@ -1415,9 +1415,11 @@ mod tests {
 
     #[tokio::test]
     async fn nested_kitty_placements_clip_to_terminal_body_side_and_stacked() {
-        for direction in [
-            ratatui::layout::Direction::Horizontal,
-            ratatui::layout::Direction::Vertical,
+        for (direction, before) in [
+            (ratatui::layout::Direction::Horizontal, false),
+            (ratatui::layout::Direction::Vertical, false),
+            (ratatui::layout::Direction::Horizontal, true),
+            (ratatui::layout::Direction::Vertical, true),
         ] {
             let (_send, receive) = tokio::sync::mpsc::unbounded_channel();
             let mut app = crate::app::App::new(
@@ -1432,6 +1434,27 @@ mod tests {
             let (_, view) = workspace
                 .split_pane_with_view(terminal, "sample.views", "rows", direction, 0.7, false)
                 .unwrap();
+            if before {
+                let crate::layout::TypedNode::Split {
+                    ratio,
+                    first,
+                    second,
+                    ..
+                } = workspace.tabs[0].layout.typed_root().clone()
+                else {
+                    panic!("expected split")
+                };
+                workspace.tabs[0].layout = crate::layout::TileLayout::from_tree(
+                    crate::layout::TypedNode::Split {
+                        direction,
+                        ratio: 1.0 - ratio,
+                        first: second,
+                        second: first,
+                    },
+                    crate::layout::LayoutLeaf::Pane(terminal),
+                )
+                .unwrap();
+            }
             // Real Kitty bytes enter the real terminal parser; the placement is
             // intentionally much larger than either allocated terminal body.
             workspace.insert_test_runtime(
@@ -1486,10 +1509,11 @@ mod tests {
             );
             if let Ok(root) = std::env::var("VQRO_IMAGE_EVIDENCE_ROOT") {
                 let record = serde_json::json!({"columns":80,"rows":20,"cell_width":10,"cell_height":20,"panes":&rendered.panes,"graphics":&rendered.graphics,"frame":&rendered.frame,"body":{"x":body.x,"y":body.y,"width":body.width,"height":body.height},"view":{"x":view_rect.x,"y":view_rect.y,"width":view_rect.width,"height":view_rect.height}});
-                let name = if direction == ratatui::layout::Direction::Horizontal {
-                    "side"
-                } else {
-                    "stacked"
+                let name = match (direction, before) {
+                    (ratatui::layout::Direction::Horizontal, false) => "side",
+                    (ratatui::layout::Direction::Horizontal, true) => "side-before",
+                    (_, false) => "stacked",
+                    (_, true) => "stacked-before",
                 };
                 std::fs::create_dir_all(&root).unwrap();
                 std::fs::write(
