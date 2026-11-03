@@ -1071,6 +1071,16 @@ mod tests {
             matches!(legacy.root, LayoutNode::Pane { pane } if pane.pane_id == app.public_pane_id(0, root))
         );
         assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), 3);
+        app.state.workspaces[0].tabs[0].layout.focus_pane(view_pane);
+        let focused_view = app.layout_description(0, 0).unwrap();
+        assert_eq!(
+            focused_view.focused_pane_id,
+            app.public_pane_id(0, view_pane).unwrap(),
+            "legacy export reports actual host focus even when the view is omitted"
+        );
+        assert!(
+            matches!(focused_view.root, LayoutNode::Pane { pane } if pane.pane_id == app.public_pane_id(0, root))
+        );
         app.state.assert_invariants_for_test();
     }
 

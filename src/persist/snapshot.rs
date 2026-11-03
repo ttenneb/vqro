@@ -527,13 +527,6 @@ where
     let mut public_identities_changed = false;
     let mut structural_state_changed = false;
 
-    // Content aliases must be disambiguated before restore decides which raw
-    // pane references have no terminal record. Tree-order pruning is too late.
-    if super::view_aliases::repair(snapshot)? {
-        changed = true;
-        structural_state_changed = true;
-    }
-
     fn collect_layout_panes(layout: &LayoutSnapshot, panes: &mut Vec<u32>) {
         match layout {
             LayoutSnapshot::Pane(id) => panes.push(*id),
@@ -568,6 +561,14 @@ where
                 }
             }
         }
+    }
+
+    // Content aliases must be disambiguated after legacy terminal-row rescue
+    // but before restore decides which panes lack terminals. Allocate no new
+    // logical identity here: admitted terminals must remain within their caps.
+    if super::view_aliases::repair(snapshot) {
+        changed = true;
+        structural_state_changed = true;
     }
 
     // Reserve every valid unique workspace handle before assigning the lowest

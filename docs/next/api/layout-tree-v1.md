@@ -1,7 +1,7 @@
-# Neutral layout tree export and session v8
+# Neutral layout tree export and session durability
 
-Status: implemented by nested-panes session durability work. This adds no box
-interaction or view content kind.
+Status: implemented. Session v8 established canonical nested trees; session v9
+adds view leaves without adding stage-4 box interactions.
 
 ## Optional API
 
@@ -14,6 +14,7 @@ The response result contains `layout` with `kind: "layout.tree.v1"`, public
 `workspace_id`, public `tab_id`, `zoomed`, `focused`, and `root`. Node objects:
 
 - `{"type":"pane","pane_id":"w1:p1"}`
+- `{"type":"view","pane_id":"w1:p2","extension":"vqro.tasks","view":"tasks"}`
 - `{"type":"stack","box_id":"container_000000000000002a","selected":0,"children":[...]}`
 - `{"type":"split","direction":"right","ratio":0.5,"first":{...},"second":{...}}`
 
@@ -25,7 +26,12 @@ syntax; unnamed binary splits have no allocated identity. Focus is a pane with
 
 Existing `layout.export`, `layout.apply` and `layout.set_split_ratio` retain
 pane-only, selected-branch response semantics. Their parameter shapes are
-unchanged. The new method does not imply nested tree application support.
+unchanged. The portable terminal-only `layout.export` omits view leaves and
+collapses branches whose selected path has no terminal, without searching hidden
+stack members. Its `focused_pane_id` remains the **actual host focus**, which can
+name an omitted view; clients must not infer a first-terminal focus from the
+exported tree. A view-only tree has no portable terminal layout. The new method
+does not imply nested tree application support.
 
 ## Pane content kind
 
@@ -39,13 +45,18 @@ by `pane.get`, `pane.focus` and the move responses names its content:
 
 ## Persistence and upgrade
 
-All writers produce session version 8, independently of Collections authority.
-The durable tree contains `Pane`, `Stack { id, selected, children }` and `Split`;
+All writers produce session version 9, independently of Collections authority.
+The durable tree contains `Pane`, `View { pane, extension, view }`,
+`Stack { id, selected, children }` and `Split`;
 Collections records retain only label/archive policy, never membership or
 selection. Terminal identities and public workspace/tab/pane numbering remain
 host facts. History remains independently versioned at 4.
 
-The separate one-way legacy converter admits v6 writers and v7 authority files.
+The separate one-way legacy converter admits v6 writers, v7 authority files,
+and predecessor v8 trees. A valid view has no terminal row. An ambiguous view
+reference sharing an ID with a saved terminal row is repaired in favor of that
+existing terminal before runtime admission; duplicate placement is pruned by the
+usual recovery, without allocating a new identity or exceeding pane caps.
 An old Collection placement becomes a stack with the same stable identity,
 ordered pane children, and selected child index. Split direction and ratio are
 preserved. Older pre-v6 identity normalization remains available. Conversion
@@ -61,7 +72,7 @@ The surface is retained for that consumer, not a new privileged product path;
 remove it if stage3 does not consume it.
 
 Untrusted session input stays bounded to 16 MiB and the existing serde_json
-128-level JSON recursion budget, for version 8 as well as legacy input. This
+128-level JSON recursion budget, for versions 8/9 as well as legacy input. This
 budget applies during the first raw JSON decode, before semantic admission or
 construction of a typed layout; no unbounded-recursion feature/path is enabled.
 Excessive nesting refuses the complete snapshot and preserves its bytes rather
@@ -69,14 +80,14 @@ than partially restoring it. The maximal admitted legacy split chain (31 splits,
 32 panes, ending in a Stack) survives conversion and a v8 reader roundtrip.
 
 Before replacing an older session, the host creates a private, create-new sibling
-`session.json.pre-v8-v<old-version>.<random>.bak` with the exact original bytes.
+`session.json.pre-v9-v<old-version>.<random>.bak` with the exact original bytes.
 The backup file and containing directory are synced before publication. Failure
 before replacement leaves the old file intact; every conversion/publication
 failure retains the backup, including an uncertain post-replacement sync outcome.
 The same guard covers ordinary saves, checkpoint writes and handoff publication.
 It operates in the resolved target directory when the session is a symlink.
 
-Handoff v3 admits explicitly session v6, v7 and v8. Legacy layouts convert before
+Handoff v3 admits explicitly session v6, v7, v8 and v9. Legacy layouts convert before
 terminal descriptor admission; schema conversion is permitted but public,
 internal, structural or projection identity repair is not permitted for v3.
 The receiver adopts `max(manifest.collections_action_sequence, durable checkpoint
@@ -184,6 +195,10 @@ transactions refuse handoff. Requests, subscriptions and client sockets are
 volatile, not missing durable fields. No additional durable host-fact omission
 was found; stale pane/agent/identity data is never overlaid from disk.
 
-Private protocol version remains 23 and endpoint generation remains 1. This
-change does not alter a type reachable from the binary protocol; session JSON
-schema changes do not by themselves require a binary protocol bump.
+The original session-v8 tree change used private protocol 23 / endpoint
+generation 1 without altering binary payloads. Terminal admission later moved to
+24 / 2. View panes now use private protocol **25**, endpoint generation **2**,
+and negotiated **shell.surface.v2**, with historical named v1 payloads preserved
+as decode inputs and surface v1 retired from serving. The private bump covers
+the appended surface-v2 bincode message, not session JSON itself. See the
+[surface codec decision](../architecture/endpoint-surface-codec-v2.md).

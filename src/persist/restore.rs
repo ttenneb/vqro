@@ -3361,9 +3361,10 @@ mod tests {
                 runtimes.contains_key(&terminal_id),
                 "real terminal runtime survives"
             );
-            let views = workspace.tabs[0].layout.view_panes();
-            assert_eq!(views.len(), 1);
-            assert!(workspace.terminal_id(views[0]).is_none());
+            assert!(
+                workspace.tabs[0].layout.view_panes().is_empty(),
+                "only the malformed ambiguous view is dropped"
+            );
             workspace.assert_invariants_for_test();
             restored.assert_invariants_for_test();
         }
