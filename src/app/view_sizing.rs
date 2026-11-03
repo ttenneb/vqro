@@ -9,6 +9,10 @@ use ratatui::layout::Rect;
 use unicode_width::UnicodeWidthStr;
 
 impl App {
+    pub(crate) fn auto_view_geometry_blocked(&self) -> bool {
+        self.collections_mutations_blocked || self.session_persistence_blocked
+    }
+
     pub(crate) fn activate_auto_view(&mut self, workspace: usize, tab_index: usize, pane: PaneId) {
         let Some(tab) = self
             .state
@@ -300,7 +304,7 @@ impl App {
         area: Rect,
         cells: crate::kitty_graphics::HostCellSize,
     ) -> bool {
-        if self.collections_mutations_blocked || self.session_persistence_blocked {
+        if self.auto_view_geometry_blocked() {
             return false;
         }
         let Some(scope_id) = self.public_tab_id(target.workspace_index, target.tab_index) else {

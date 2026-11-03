@@ -187,8 +187,7 @@ impl HeadlessServer {
 
     pub(super) fn flush_auto_view_geometry(&mut self) {
         if self.app.state.view_sizing.pending_geometry.is_empty()
-            || self.app.collections_mutations_blocked
-            || self.app.session_persistence_blocked
+            || self.app.auto_view_geometry_blocked()
         {
             return;
         }
