@@ -161,6 +161,7 @@ impl HeadlessServer {
             location.reconcile(&topology);
         }
         self.sync_live_auto_viewports();
+        self.app.prune_auto_view_sizing();
     }
 
     pub(super) fn sync_live_auto_viewports(&mut self) {
@@ -232,7 +233,7 @@ impl HeadlessServer {
             {
                 continue;
             }
-            if self.resize_shell_tab_geometry_to_target(controller, target) {
+            if self.resize_shell_tab_geometry_scoped(controller, target, false) {
                 for client in self.clients.values_mut() {
                     if client
                         .shell_location
@@ -655,6 +656,15 @@ impl HeadlessServer {
         client_id: u64,
         target: crate::ui::TabSurfaceTarget,
     ) -> bool {
+        self.resize_shell_tab_geometry_scoped(client_id, target, true)
+    }
+
+    fn resize_shell_tab_geometry_scoped(
+        &mut self,
+        client_id: u64,
+        target: crate::ui::TabSurfaceTarget,
+        include_background_tabs: bool,
+    ) -> bool {
         let Some(client) = self.clients.get(&client_id) else {
             return false;
         };
@@ -719,7 +729,7 @@ impl HeadlessServer {
         {
             self.app.resize_auto_views(target, area, cell_size);
         }
-        if self.app_client_count() == 1 {
+        if include_background_tabs && self.app_client_count() == 1 {
             for (workspace_index, workspace) in self.app.state.workspaces.iter().enumerate() {
                 for tab_index in 0..workspace.tabs.len() {
                     let exclusions = if workspace_index == target.workspace_index

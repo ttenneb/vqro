@@ -2211,80 +2211,96 @@ async fn repeated_layout_action_reapplies_controller_geometry() {
 
 #[tokio::test]
 async fn automatic_document_geometry_keeps_preview_resize_authority_without_churn() {
-    let mut server = test_headless_server();
-    let mut workspace = crate::workspace::Workspace::test_new("auto-preview");
-    let pane = workspace.tabs[0].root_pane;
-    let (_, view) = workspace
-        .split_pane_with_view(
+    for unrelated in [0, 15] {
+        let mut server = test_headless_server();
+        let mut workspace = crate::workspace::Workspace::test_new("auto-preview");
+        let pane = workspace.tabs[0].root_pane;
+        let (_, view) = workspace
+            .split_pane_with_view(
+                pane,
+                "sample.views",
+                "rows",
+                ratatui::layout::Direction::Horizontal,
+                0.5,
+                false,
+            )
+            .unwrap();
+        workspace.insert_test_runtime(
             pane,
-            "sample.views",
-            "rows",
-            ratatui::layout::Direction::Horizontal,
-            0.5,
-            false,
-        )
-        .unwrap();
-    workspace.insert_test_runtime(
-        pane,
-        crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"ready"),
-    );
-    server.app.state.workspaces = vec![workspace];
-    server.app.state.active = Some(0);
-    server.app.state.ensure_test_terminals();
-    let (control, _) = connect_test_shell(&mut server, 166, 100, 30);
-    let _ = control.recv().unwrap();
-    server
-        .clients
-        .get_mut(&166)
-        .unwrap()
-        .shell_pane_viewport_enabled = true;
-    server.app.activate_auto_view(0, 0, view);
-    let public = server.app.public_pane_id(0, pane).unwrap();
-    let revision = server.clients[&166].shell_projection_revision;
-    assert!(
-        server.handle_server_event(ServerEvent::ClientShellPaneViewport {
-            client_id: 166,
-            viewport: crate::protocol::endpoint::ClientPaneViewportRequest {
-                boot_id: server.client_shell_boot_id.clone(),
-                projection_revision: revision,
-                pane_id: public.clone(),
-                size: Some(crate::protocol::ClientSurfaceSize { cols: 40, rows: 10 })
-            }
-        })
-    );
-    let observer = server.app.state.workspaces[0].test_runtimes[&pane]
-        .test_resize_observer()
-        .unwrap();
-    let scope = server.app.public_tab_id(0, 0).unwrap();
-    server.app.state.view_sizing.documents.insert(
-        ("sample.views".into(), scope.clone()),
-        crate::view_sizing::CachedDocument {
-            incarnation: (1, scope, 2),
-            measurements: std::collections::HashMap::from([(
-                ("rows".into(), public),
-                crate::view_sizing::DocumentMeasure {
-                    body: crate::view_sizing::ViewMeasure { rows: 2, width: 56 },
-                    header: 20,
-                },
-            )]),
-        },
-    );
-    server.app.refresh_cached_auto_target(0, 0);
-    assert!(
-        !observer.has_changed().unwrap(),
-        "document callback cannot resize preview to ordinary leaf"
-    );
-    server.flush_auto_view_geometry();
-    assert_eq!(
-        server.app.state.workspaces[0].test_runtimes[&pane].current_size(),
-        (10, 40)
-    );
-    assert!(
-        !observer.has_changed().unwrap(),
-        "controller exclusions prevent intermediate resize and restore churn"
-    );
-    assert!(server.app.state.view_sizing.pending_geometry.is_empty());
-    server.app.state.assert_invariants_for_test();
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"ready"),
+        );
+        for _ in 0..unrelated {
+            workspace.test_add_tab(Some("unrelated"));
+        }
+        workspace.active_tab = 0;
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.active = Some(0);
+        server.app.state.ensure_test_terminals();
+        let (control, _) = connect_test_shell(&mut server, 166, 100, 30);
+        let _ = control.recv().unwrap();
+        server
+            .clients
+            .get_mut(&166)
+            .unwrap()
+            .shell_pane_viewport_enabled = true;
+        server.app.activate_auto_view(0, 0, view);
+        let public = server.app.public_pane_id(0, pane).unwrap();
+        let revision = server.clients[&166].shell_projection_revision;
+        assert!(
+            server.handle_server_event(ServerEvent::ClientShellPaneViewport {
+                client_id: 166,
+                viewport: crate::protocol::endpoint::ClientPaneViewportRequest {
+                    boot_id: server.client_shell_boot_id.clone(),
+                    projection_revision: revision,
+                    pane_id: public.clone(),
+                    size: Some(crate::protocol::ClientSurfaceSize { cols: 40, rows: 10 })
+                }
+            })
+        );
+        let observer = server.app.state.workspaces[0].test_runtimes[&pane]
+            .test_resize_observer()
+            .unwrap();
+        let scope = server.app.public_tab_id(0, 0).unwrap();
+        server.app.state.view_sizing.documents.insert(
+            ("sample.views".into(), scope.clone()),
+            crate::view_sizing::CachedDocument {
+                incarnation: (1, scope, 2),
+                measurements: std::collections::HashMap::from([(
+                    ("rows".into(), public),
+                    crate::view_sizing::DocumentMeasure {
+                        body: crate::view_sizing::ViewMeasure { rows: 2, width: 56 },
+                        header: 20,
+                    },
+                )]),
+            },
+        );
+        crate::layout::TileLayout::take_geometry_gathers_for_test();
+        server.app.refresh_cached_auto_target(0, 0);
+        assert_eq!(
+            crate::layout::TileLayout::take_geometry_gathers_for_test(),
+            0
+        );
+        assert!(
+            !observer.has_changed().unwrap(),
+            "document callback cannot resize preview to ordinary leaf"
+        );
+        server.flush_auto_view_geometry();
+        assert_eq!(
+            crate::layout::TileLayout::take_geometry_gathers_for_test(),
+            2,
+            "target event projection plus target PTY plan, independent of {unrelated} unrelated tabs"
+        );
+        assert_eq!(
+            server.app.state.workspaces[0].test_runtimes[&pane].current_size(),
+            (10, 40)
+        );
+        assert!(
+            !observer.has_changed().unwrap(),
+            "controller exclusions prevent intermediate resize and restore churn"
+        );
+        assert!(server.app.state.view_sizing.pending_geometry.is_empty());
+        server.app.state.assert_invariants_for_test();
+    }
 }
 
 #[tokio::test]

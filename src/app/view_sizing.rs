@@ -29,6 +29,18 @@ impl App {
         if scope.len() != 1 {
             return;
         }
+        self.state
+            .view_sizing
+            .activate(pane, &content.extension, &content.view, scope[0]);
+        self.prune_auto_view_sizing();
+        if let Some(scope_id) = self.public_tab_id(workspace, tab_index) {
+            self.refresh_auto_view_document(&content.extension, &scope_id, 0, 0);
+        }
+    }
+
+    /// Topology invalidation, not a render/provider polling path. Keep valid
+    /// hidden scopes, but never retain a history of moved/closed ownership.
+    pub(crate) fn prune_auto_view_sizing(&mut self) {
         let live = self
             .state
             .workspaces
@@ -40,15 +52,14 @@ impl App {
             .view_sizing
             .active
             .retain(|pane, _| live.contains(pane));
-        self.state
-            .view_sizing
-            .activate(pane, &content.extension, &content.view, scope[0]);
         let mut keys = std::collections::HashSet::new();
         let mut tabs = std::collections::HashSet::new();
+        let mut public_tabs = std::collections::HashSet::new();
         for (wi, workspace) in self.state.workspaces.iter().enumerate() {
             for (ti, tab) in workspace.tabs.iter().enumerate() {
                 tabs.insert(tab.id.clone());
                 if let Some(scope) = self.public_tab_id(wi, ti) {
+                    public_tabs.insert(scope.clone());
                     for view in tab.layout.view_panes() {
                         if let Some(entry) = self.state.view_sizing.active.get(&view) {
                             keys.insert((entry.extension.clone(), scope.clone()));
@@ -57,6 +68,13 @@ impl App {
                 }
             }
         }
+        let live_terminals = self
+            .state
+            .workspaces
+            .iter()
+            .flat_map(|ws| &ws.tabs)
+            .flat_map(|tab| tab.layout.pane_ids())
+            .collect::<std::collections::HashSet<_>>();
         let terminals = self
             .state
             .view_sizing
@@ -71,14 +89,19 @@ impl App {
         self.state
             .view_sizing
             .label_widths
-            .retain(|pane, _| terminals.contains(pane));
+            .retain(|pane, _| terminals.contains(pane) && live_terminals.contains(pane));
         self.state
             .view_sizing
             .viewports
             .retain(|tab, _| tabs.contains(tab));
-        if let Some(scope_id) = self.public_tab_id(workspace, tab_index) {
-            self.refresh_auto_view_document(&content.extension, &scope_id, 0, 0);
-        }
+        self.state
+            .view_sizing
+            .pending_geometry
+            .retain(|tab| tabs.contains(tab));
+        self.state
+            .view_sizing
+            .visible_tabs
+            .retain(|tab| public_tabs.contains(tab));
     }
 
     pub(crate) fn manual_view_sizing_for_pane(
@@ -202,6 +225,14 @@ impl App {
             return;
         }
         let Some((wi, ti)) = self.parse_tab_id(scope_id) else {
+            if self
+                .state
+                .view_sizing
+                .documents
+                .contains_key(&(namespace.to_owned(), scope_id.to_owned()))
+            {
+                self.prune_auto_view_sizing();
+            }
             return;
         };
         if !self.state.workspaces[wi].tabs[ti]
@@ -260,9 +291,15 @@ impl App {
         let Some(scope) = self.public_tab_id(workspace, tab_index) else {
             return;
         };
-        let views = self.state.workspaces[workspace].tabs[tab_index]
-            .layout
-            .view_panes();
+        let tab = &self.state.workspaces[workspace].tabs[tab_index];
+        let views = tab.layout.view_panes();
+        let mut visible = std::collections::HashSet::new();
+        if !tab.zoomed {
+            tab.layout.any_visible_pane(|pane| {
+                visible.insert(pane);
+                false
+            });
+        }
         let mut dirty = false;
         for pane in views {
             let Some(entry) = self.state.view_sizing.active.get(&pane) else {
@@ -277,7 +314,7 @@ impl App {
                 entry.dirty |= entry.measure != measure;
                 entry.measure = measure;
                 entry.incarnation = incarnation;
-                dirty |= entry.dirty;
+                dirty |= entry.dirty && visible.contains(&pane);
             }
             self.state.view_sizing.label_widths.insert(terminal, width);
         }
@@ -373,6 +410,116 @@ impl App {
 mod tests {
     use super::*;
     #[tokio::test]
+    async fn hidden_stack_view_metrics_cache_without_pending_or_geometry() {
+        let (_send, receive) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            receive,
+            crate::api::EventHub::default(),
+        );
+        let mut workspace = crate::workspace::Workspace::test_new("hidden");
+        let root = workspace.tabs[0].root_pane;
+        let (_, view) = workspace
+            .split_pane_with_view(
+                root,
+                "sample.views",
+                "rows",
+                ratatui::layout::Direction::Horizontal,
+                0.5,
+                false,
+            )
+            .unwrap();
+        let outer = crate::terminal_container::TerminalContainerId::parse(91_001).unwrap();
+        let empty = crate::terminal_container::TerminalContainerId::parse(91_002).unwrap();
+        assert!(workspace.tabs[0].layout.new_stack_at(&[], outer));
+        assert!(workspace.tabs[0].layout.insert_into_stack(
+            outer,
+            1,
+            crate::layout::TypedNode::empty_stack(empty)
+        ));
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        let target = TabSurfaceTarget {
+            workspace_index: 0,
+            tab_index: 0,
+        };
+        let area = Rect::new(0, 0, 200, 40);
+        let cells = crate::kitty_graphics::HostCellSize::default();
+        app.resize_auto_views(target, area, cells);
+        app.activate_auto_view(0, 0, view);
+        app.resize_auto_views(target, area, cells);
+        app.state.view_sizing.pending_geometry.clear();
+        assert!(app.state.workspaces[0].tabs[0]
+            .layout
+            .select_stack_child(outer, 1));
+        let scope = app.public_tab_id(0, 0).unwrap();
+        let public = app.public_pane_id(0, root).unwrap();
+        app.state.view_sizing.documents.insert(
+            ("sample.views".into(), scope.clone()),
+            CachedDocument {
+                incarnation: (1, scope, 2),
+                measurements: std::collections::HashMap::from([(
+                    ("rows".into(), public),
+                    DocumentMeasure {
+                        body: ViewMeasure { rows: 2, width: 80 },
+                        header: 20,
+                    },
+                )]),
+            },
+        );
+        let before = app.state.workspaces[0].tabs[0].layout.typed_root().clone();
+        crate::layout::TileLayout::take_auto_gathers_for_test();
+        crate::layout::TileLayout::take_geometry_gathers_for_test();
+        app.refresh_cached_auto_target(0, 0);
+        assert!(
+            app.state.view_sizing.pending_geometry.is_empty(),
+            "a hidden member in a visible tab cannot invalidate presentation"
+        );
+        assert_eq!(crate::layout::TileLayout::take_auto_gathers_for_test(), 0);
+        assert_eq!(
+            crate::layout::TileLayout::take_geometry_gathers_for_test(),
+            0
+        );
+        assert_eq!(&before, app.state.workspaces[0].tabs[0].layout.typed_root());
+        assert_eq!(
+            app.state.view_sizing.active[&view].measure.width, 80,
+            "hidden metrics are cached"
+        );
+        let live = app.public_tab_id(0, 0).unwrap();
+        let closed = format!("{}:t2", app.state.workspaces[0].id);
+        app.state.workspaces[0].next_public_tab_number = 3;
+        app.state.view_sizing.documents.insert(
+            ("sample.views".into(), closed.clone()),
+            CachedDocument {
+                incarnation: (1, closed.clone(), 1),
+                measurements: Default::default(),
+            },
+        );
+        app.refresh_auto_view_document("sample.views", &closed, 1, 1);
+        assert!(
+            app.state
+                .view_sizing
+                .documents
+                .contains_key(&("sample.views".into(), live)),
+            "topology cleanup preserves a valid hidden cache"
+        );
+        assert!(app.state.view_sizing.active.contains_key(&view));
+        assert!(app.state.workspaces[0].tabs[0]
+            .layout
+            .select_stack_child(outer, 0));
+        app.resize_auto_views(target, area, cells);
+        assert_eq!(
+            crate::layout::TileLayout::take_auto_gathers_for_test(),
+            1,
+            "selection applies cached facts"
+        );
+        app.state.assert_invariants_for_test();
+    }
+
+    #[tokio::test]
     async fn moving_the_same_terminal_and_view_to_another_tab_cannot_consume_old_scope_metrics() {
         let (_send, receive) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
@@ -463,6 +610,58 @@ mod tests {
             policy.incarnation.is_none(),
             "old namespace/tab incarnation is not reused before a new scoped publication"
         );
+        let retired = app.state.workspaces[0].tabs[0].root_pane;
+        let retired_terminal = app.state.workspaces[0]
+            .terminal_id(retired)
+            .unwrap()
+            .clone();
+        app.state.workspaces[0].active_tab = 0;
+        assert!(app.state.workspaces[0].close_active_tab());
+        app.state.terminals.remove(&retired_terminal);
+        app.refresh_auto_view_document("sample.views", &old, 7, 9);
+        assert!(
+            app.state.view_sizing.documents.is_empty(),
+            "closed source scope is evicted without another activation"
+        );
+        let live = app.public_tab_id(0, 0).unwrap();
+        app.state.view_sizing.documents.insert(
+            ("sample.views".into(), live.clone()),
+            CachedDocument {
+                incarnation: (7, live.clone(), 10),
+                measurements: Default::default(),
+            },
+        );
+        app.state.workspaces[0].next_public_tab_number = 2000;
+        for index in 0..32 {
+            let closed = format!("{}:t{}", app.state.workspaces[0].id, 1000 + index);
+            app.state.view_sizing.documents.insert(
+                ("sample.views".into(), closed.clone()),
+                CachedDocument {
+                    incarnation: (7, closed.clone(), 1),
+                    measurements: Default::default(),
+                },
+            );
+            app.state
+                .view_sizing
+                .label_widths
+                .insert(PaneId::from_raw(1_000_000 + index), 42);
+            app.refresh_auto_view_document("sample.views", &closed, 7, 1);
+            assert_eq!(
+                app.state.view_sizing.documents.len(),
+                1,
+                "scope history cannot accumulate"
+            );
+            assert!(app
+                .state
+                .view_sizing
+                .documents
+                .contains_key(&("sample.views".into(), live.clone())));
+            assert!(
+                app.state.view_sizing.label_widths.len() <= 1,
+                "closed-terminal history cannot accumulate"
+            );
+            assert!(app.state.view_sizing.active.contains_key(&view));
+        }
         app.state.assert_invariants_for_test();
     }
 

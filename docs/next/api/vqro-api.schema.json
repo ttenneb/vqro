@@ -4492,7 +4492,7 @@
               ]
             },
             "ratio": {
-              "description": "The new VIEW's share of the split, in either direction (0.1..=0.9; default 0.5).",
+              "description": "Explicit manual VIEW share (0.1..=0.9). Omit for transient auto sizing;\nthe initial tree fallback is 0.5, not a persistent auto policy.",
               "format": "float",
               "type": [
                 "number",
