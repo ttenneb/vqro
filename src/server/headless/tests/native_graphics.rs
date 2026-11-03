@@ -533,10 +533,10 @@ fn drain_native_render_messages(writer: &ClientWriter) -> Vec<ServerMessage> {
         let len = batch.len() as u64;
         let mut cursor = std::io::Cursor::new(batch);
         while cursor.position() < len {
-            messages.push(
+            messages.push(super::graphics_message(
                 protocol::read_message(&mut cursor, protocol::MAX_GRAPHICS_FRAME_SIZE)
                     .expect("decode ordered scene/file transaction"),
-            );
+            ));
         }
     }
     messages

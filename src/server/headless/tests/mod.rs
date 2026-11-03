@@ -128,7 +128,11 @@ fn read_server_message(bytes: Vec<u8>) -> ServerMessage {
 // Graphics assertions target the unchanged inner frame, but must first prove
 // that a full surface arrived on the negotiated v2 lane, never retired v1.
 fn read_graphics_message(bytes: Vec<u8>) -> ServerMessage {
-    match read_server_message(bytes) {
+    graphics_message(read_server_message(bytes))
+}
+
+fn graphics_message(message: ServerMessage) -> ServerMessage {
+    match message {
         ServerMessage::PaneSurfaceV2(surface) => ServerMessage::PaneSurface(surface.frame),
         ServerMessage::PaneSurface(_) => panic!("retired v1 surface was served"),
         message => message,
