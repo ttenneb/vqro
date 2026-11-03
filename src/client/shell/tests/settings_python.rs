@@ -244,6 +244,123 @@ fn stale_settings_replies_cannot_mutate_a_reopened_overlay() {
 }
 
 #[test]
+fn endpoint_switch_with_reused_boot_id_discards_tasks_path_and_confirmation() {
+    for submitted in [false, true] {
+        let (mut state, remote) = super::endpoints::state_with_remote();
+        // Different endpoint, deliberately identical server boot ID. The existing
+        // endpoint-scoped projection reset must fence Settings as well as requests.
+        state.set_endpoint_snapshot(&remote, Box::new(snapshot()));
+        state.open_settings_overlay();
+        state.select_settings_section(
+            ClientSettingsSection::Tasks,
+            &mut ClientShellInput::default(),
+        );
+        let old = generation(&state);
+        let path = "C:\\Python313\\python.exe";
+        reply(
+            &mut state,
+            PendingEndpointKind::SettingsInterpreterStatus(old),
+            Some(status(Some(path), false)),
+        );
+        state.apply_settings_choice(&mut ClientShellInput::default());
+        text(&mut state, 110, 34);
+        assert!(
+            matches!(state.overlay.as_ref(), Some(ClientShellOverlay::Settings(settings)) if settings.tasks.confirmation_path.as_deref() == Some(path))
+        );
+        if submitted {
+            state.apply_settings_choice(&mut ClientShellInput::default());
+            assert!(state.settings_python_mutating());
+        }
+        assert!(state.activate_endpoint_projection(&remote));
+        assert!(!matches!(
+            state.overlay,
+            Some(ClientShellOverlay::Settings(_))
+        ));
+        state.open_settings_overlay();
+        state.select_settings_section(
+            ClientSettingsSection::Tasks,
+            &mut ClientShellInput::default(),
+        );
+        let new = generation(&state);
+        assert_ne!(old, new);
+        reply(
+            &mut state,
+            PendingEndpointKind::SettingsInterpreterStatus(old),
+            Some(status(Some(path), true)),
+        );
+        reply(
+            &mut state,
+            PendingEndpointKind::SettingsInterpreterConfirm(old),
+            Some(status(Some(path), true)),
+        );
+        assert!(
+            matches!(state.overlay.as_ref(), Some(ClientShellOverlay::Settings(settings)) if settings.tasks.pending && settings.tasks.interpreter.is_none() && !settings.tasks.confirming)
+        );
+        reply(
+            &mut state,
+            PendingEndpointKind::SettingsInterpreterStatus(new),
+            Some(status(Some(path), false)),
+        );
+        let mut outcome = ClientShellInput::default();
+        state.apply_settings_choice(&mut outcome);
+        assert_eq!(
+            confirmations(&outcome),
+            0,
+            "same path on another endpoint still needs a freshly drawn review"
+        );
+        assert!(
+            matches!(state.overlay.as_ref(), Some(ClientShellOverlay::Settings(settings)) if settings.tasks.confirming)
+        );
+        text(&mut state, 110, 34);
+        if submitted {
+            state.apply_settings_choice(&mut ClientShellInput::default());
+        }
+        assert!(
+            state.activate_endpoint_projection(&crate::client::endpoint::ClientEndpointId::Local)
+        );
+        assert!(!matches!(
+            state.overlay,
+            Some(ClientShellOverlay::Settings(_))
+        ));
+        state.open_settings_overlay();
+        state.select_settings_section(
+            ClientSettingsSection::Tasks,
+            &mut ClientShellInput::default(),
+        );
+        let returned = generation(&state);
+        assert_ne!(returned, old);
+        assert_ne!(returned, new);
+        for stale in [old, new] {
+            reply(
+                &mut state,
+                PendingEndpointKind::SettingsInterpreterStatus(stale),
+                Some(status(Some(path), true)),
+            );
+            reply(
+                &mut state,
+                PendingEndpointKind::SettingsInterpreterConfirm(stale),
+                Some(status(Some(path), true)),
+            );
+        }
+        assert!(
+            matches!(state.overlay.as_ref(), Some(ClientShellOverlay::Settings(settings)) if settings.tasks.pending && settings.tasks.interpreter.is_none() && !settings.tasks.confirming)
+        );
+        reply(
+            &mut state,
+            PendingEndpointKind::SettingsInterpreterStatus(returned),
+            Some(status(Some(path), false)),
+        );
+        let mut outcome = ClientShellInput::default();
+        state.apply_settings_choice(&mut outcome);
+        assert_eq!(
+            confirmations(&outcome),
+            0,
+            "switching back cannot reuse either endpoint's prior review"
+        );
+    }
+}
+
+#[test]
 fn confirmed_or_unsupported_settings_status_does_not_reprompt_or_break_other_tabs() {
     let mut state = ready(Some("C:\\Python313\\python.exe"), true);
     assert!(text(&mut state, 110, 34).contains("refresh"));
