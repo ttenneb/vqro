@@ -270,6 +270,28 @@ impl App {
         generation: u64,
         revision: u64,
     ) {
+        let source_key = (namespace.to_owned(), scope_id.to_owned());
+        let source = self
+            .host_document_caches
+            .get(&source_key)
+            .and_then(|cache| cache.current())
+            .filter(|document| document.namespace == namespace);
+        // Withdrawal retires derived facts even while every consumer is manual.
+        // Otherwise a later default could revive observations no longer accepted
+        // by the authoritative host cache.
+        if source.is_none() {
+            if let Some(cached) = self
+                .state
+                .view_sizing
+                .session_documents
+                .get_mut(namespace)
+                .filter(|cached| cached.document.incarnation.1 == scope_id)
+            {
+                cached.available = false;
+                cached.document.measurements.clear();
+                cached.document.incarnation = (generation, scope_id.to_owned(), revision);
+            }
+        }
         if !self
             .state
             .view_sizing
@@ -279,12 +301,6 @@ impl App {
         {
             return;
         }
-        let source_key = (namespace.to_owned(), scope_id.to_owned());
-        let source = self
-            .host_document_caches
-            .get(&source_key)
-            .and_then(|cache| cache.current())
-            .filter(|document| document.namespace == namespace);
         let session = source
             .map(|document| document.target == crate::extension_contract::HostTarget::Session)
             .unwrap_or_else(|| {
@@ -627,11 +643,55 @@ mod tests {
                 .height,
             5
         );
+        let mut revived = app.host_document_caches[&key].current().unwrap().clone();
         app.host_document_caches.get_mut(&key).unwrap().disable();
-        app.emit_host_document_updated("vqro.tasks".into(), source, 8, 3, false);
+        app.emit_host_document_updated("vqro.tasks".into(), source.clone(), 8, 3, false);
         assert_eq!(
             app.state.view_sizing.active[&view].measure.rows, 1,
             "provider unavailability clears session metrics"
+        );
+        revived.items.pop();
+        revived.revision = 3;
+        app.host_document_caches
+            .get_mut(&key)
+            .unwrap()
+            .publish_for_namespace("vqro.tasks", 7, 0, &Default::default(), revived)
+            .unwrap();
+        app.emit_host_document_updated("vqro.tasks".into(), source.clone(), 7, 3, true);
+        assert_eq!(app.state.view_sizing.active[&view].measure.rows, 2);
+        let manual=crate::api::schema::Request { id:"manual-session".into(),method:crate::api::schema::Method::LayoutSetSplitRatio(serde_json::from_value(serde_json::json!({"pane_id":app.public_pane_id(0,root).unwrap(),"path":[],"ratio":0.7})).unwrap()) };
+        let response = app.handle_api_request(manual);
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&response)
+                .unwrap()
+                .get("result")
+                .is_some(),
+            "{response}"
+        );
+        assert!(
+            app.state.view_sizing.active.is_empty(),
+            "actual manual path disarms the last consumer"
+        );
+        app.host_document_caches.get_mut(&key).unwrap().disable();
+        app.emit_host_document_updated("vqro.tasks".into(), source, 8, 4, false);
+        let (_, new_view) = app.state.workspaces[0]
+            .split_pane_with_view(
+                root,
+                "vqro.tasks",
+                "tasks",
+                ratatui::layout::Direction::Vertical,
+                0.5,
+                false,
+            )
+            .unwrap();
+        app.activate_auto_view(0, 0, new_view);
+        assert_eq!(
+            app.state.view_sizing.active[&new_view].measure.rows, 1,
+            "a new default cannot revive withdrawn rows across a manual gap"
+        );
+        assert!(
+            !app.state.view_sizing.active.contains_key(&view),
+            "manual view is never rearmed"
         );
         app.state.assert_invariants_for_test();
     }
