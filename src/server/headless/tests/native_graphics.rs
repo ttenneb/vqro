@@ -757,7 +757,10 @@ async fn oversized_inline_trims_largest_and_sends_fitting_asset_without_retry_sp
         .assets
         .retain(|asset| asset.key.image_width == 16);
     let exact_small_limit = HeadlessServer::frame_server_message_with_max(
-        &ServerMessage::PaneSurface(measured_surface),
+        &ServerMessage::PaneSurfaceV2(crate::protocol::PaneSurfaceFrameV2 {
+            frame: measured_surface,
+            views: Vec::new(),
+        }),
         crate::protocol::MAX_GRAPHICS_FRAME_SIZE,
     )
     .unwrap()
@@ -1392,10 +1395,10 @@ async fn failed_source_read_retries_after_identical_suppression_without_producer
         .render_state
         .prepare_pane_surface(surface, Vec::new())
         .expect("recovered pixels must not be suppressed as identical");
-    let ServerMessage::PaneSurface(recovered) = prepared.message() else {
-        panic!("expected recovered surface");
+    let ServerMessage::PaneSurfaceV2(recovered) = prepared.message() else {
+        panic!("expected recovered v2 surface");
     };
-    assert_eq!(recovered.graphics.assets[0].data, pixels);
+    assert_eq!(recovered.frame.graphics.assets[0].data, pixels);
     client.render_state.commit_sent_frame(prepared);
     client.clear_deferred_render();
     assert!(
