@@ -3018,7 +3018,13 @@ impl App {
                 .cmp(&right.load_order)
                 .then_with(|| left.name.cmp(&right.name))
         });
-        encode_success(id, ResponseResult::ExtensionList { extensions })
+        encode_success(
+            id,
+            ResponseResult::ExtensionList {
+                extensions,
+                interpreter: crate::platform::tasks_python_status(),
+            },
+        )
     }
 
     pub(super) fn handle_extension_install(
@@ -3104,6 +3110,26 @@ impl App {
                 extension: self.extension_info(&extension),
             },
         )
+    }
+
+    pub(super) fn handle_extension_interpreter_confirm(
+        &mut self,
+        id: String,
+        params: crate::api::schema::ExtensionInterpreterConfirmParams,
+    ) -> String {
+        if !params.confirmed {
+            return encode_error(
+                id,
+                "confirmation_required",
+                "confirm the exact displayed Python path",
+            );
+        }
+        let config = match crate::extension_interpreter::confirm(&params.expected_path) {
+            Ok(config) => config,
+            Err(error) => return encode_error(id, "interpreter_confirmation_failed", error),
+        };
+        self.apply_tasks_python_confirmation(&config);
+        self.handle_extension_list(id, ExtensionListParams::default())
     }
 
     pub(super) fn handle_extension_enable(
@@ -3557,7 +3583,7 @@ mod tests {
             id: "extensions".into(),
             method: Method::ExtensionList(ExtensionListParams::default()),
         });
-        let ResponseResult::ExtensionList { extensions } = result(&response) else {
+        let ResponseResult::ExtensionList { extensions, .. } = result(&response) else {
             panic!("extension list response");
         };
         let installed = extensions
@@ -3600,7 +3626,7 @@ mod tests {
             id: "extensions".into(),
             method: Method::ExtensionList(ExtensionListParams::default()),
         });
-        let ResponseResult::ExtensionList { extensions } = result(&response) else {
+        let ResponseResult::ExtensionList { extensions, .. } = result(&response) else {
             panic!("extension list response");
         };
         assert!(extensions

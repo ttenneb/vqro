@@ -43,6 +43,7 @@ mod extension_health;
 mod extension_host_invocation;
 mod extension_host_state;
 mod extension_host_terminals;
+mod extension_interpreter;
 pub mod extension_package;
 pub mod extension_resource;
 mod extension_runtime;

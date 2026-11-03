@@ -1477,6 +1477,18 @@
           "type": "list of strings",
           "default": "[]",
           "description": "Disable default-enabled bundled extension providers by namespace, including vqro.delegation or vqro.agent-status."
+        },
+        {
+          "key": "extensions.tasks_python",
+          "type": "string",
+          "default": "unset",
+          "description": "Optional absolute Windows Tasks Python executable candidate. Overrides registry discovery and requires exact-path confirmation."
+        },
+        {
+          "key": "extensions.confirmed_tasks_python",
+          "type": "string",
+          "default": "unset",
+          "description": "Host-recorded approved Windows Tasks Python path. A different candidate requires separate confirmation; removing this value revokes approval."
         }
       ]
     },

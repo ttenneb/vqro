@@ -78,6 +78,7 @@ pub(crate) const CLIENT_SHELL_OPTIONAL_METHODS: &[&str] = &[
     "extension.data.delete",
     "extension.enable",
     "extension.install",
+    "extension.interpreter.confirm",
     "extension.list",
     "extension.package.disable",
     "extension.package.enable",
@@ -396,6 +397,10 @@ mod tests {
         assert_eq!(
             actual.remove("extension.action.invoke").as_deref(),
             Some("8f6a921fed93464104d14d1a019b9056d3a0cf6f819688f8f82509c89c9c59f9")
+        );
+        assert_eq!(
+            actual.remove("extension.interpreter.confirm").as_deref(),
+            Some("2f12fab2ec6f897e4878eb8923aeaf38cb2d6af642ac3940eb7a56d6e3472db6")
         );
         let additive: BTreeMap<String, String> = serde_json::from_value(serde_json::json!({
             "extension.package.disable": "135f469b07ad4cc2d8385ede5fdd9093486d72b48157d1abea512eff05404b56",

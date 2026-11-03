@@ -481,12 +481,59 @@ pub(super) fn render_extensions_overlay(
         }
     }
 
+    // Interpreter state is host-supplied. Preserve literal path whitespace,
+    // and never offer approval for a path clipped by a small terminal.
+    let python_confirmation = extensions.confirmation == Some(ClientExtensionConfirmation::Python);
+    let mut python_path_visible = false;
+    if python_confirmation {
+        if let Some(status) = extensions.interpreter.as_ref() {
+            for y in details.y..details.bottom() {
+                for x in details.x..details.right() {
+                    buffer[(x, y)]
+                        .set_symbol(" ")
+                        .set_style(base.bg(palette.surface0));
+                }
+            }
+            let path_lines = wrap_literal(
+                extensions
+                    .interpreter_confirmation_path
+                    .as_deref()
+                    .unwrap_or("No usable Python executable"),
+                details.width.saturating_sub(2),
+            );
+            python_path_visible = extensions.interpreter_confirmation_path.is_some()
+                && path_lines.len() + 2 <= usize::from(details.height);
+            let mut lines = vec!["Tasks Python — exact executable path:".into()];
+            lines.extend(path_lines);
+            lines.extend(wrap_text(&status.message, details.width.saturating_sub(2)));
+            if !python_path_visible {
+                lines.insert(
+                    0,
+                    "Enlarge terminal to display the full path before approval.".into(),
+                );
+            }
+            for (line, y) in lines.into_iter().zip(details.y..details.bottom()) {
+                put_text(
+                    buffer,
+                    details.x + 1,
+                    y,
+                    details.width.saturating_sub(2),
+                    &line,
+                    base.fg(palette.yellow),
+                );
+            }
+        }
+    }
+
     let footer = Rect::new(inner.x, footer_y, inner.width, 2);
     buffer.set_style(footer, base.bg(palette.surface0));
     let footer_text = if extensions.mutating {
         " Working…"
     } else if let Some(confirmation) = extensions.confirmation {
         match confirmation {
+            ClientExtensionConfirmation::Python => {
+                " Approve only the exact Python executable path shown above?"
+            }
             ClientExtensionConfirmation::Install => {
                 " Confirm the exact source, revision, and capabilities shown above?"
             }
@@ -510,7 +557,11 @@ pub(super) fn render_extensions_overlay(
     let unsupported_install = extensions
         .selected_extension()
         .is_some_and(|extension| !extension.installed && !extension.install_supported);
-    let action = if extensions.mutating || unsupported_install || footer.width < 18 {
+    let action = if extensions.mutating
+        || (unsupported_install && !python_confirmation)
+        || footer.width < 18
+        || (python_confirmation && !python_path_visible)
+    {
         Rect::default()
     } else {
         Rect::new(footer.right().saturating_sub(17), footer.y, 17, 1)
@@ -536,12 +587,30 @@ pub(super) fn render_extensions_overlay(
         };
         button(buffer, action, label, selected_style);
     }
-    if let Some(message) = extensions.message.as_deref() {
+    let python_button = if extensions.interpreter.is_some()
+        && !extensions.mutating
+        && !python_confirmation
+        && footer.width >= 18
+    {
+        Rect::new(footer.right().saturating_sub(17), footer.y + 1, 17, 1)
+    } else {
+        Rect::default()
+    };
+    let notice = extensions
+        .interpreter
+        .as_ref()
+        .filter(|status| !status.confirmed)
+        .map(|status| status.message.as_str());
+    if let Some(message) = extensions.message.as_deref().or(notice) {
         put_text(
             buffer,
             footer.x,
             footer.y + 1,
-            footer.width,
+            if python_button.is_empty() {
+                footer.width
+            } else {
+                footer.width.saturating_sub(17)
+            },
             message,
             base.fg(palette.yellow).bg(palette.surface0),
         );
@@ -556,6 +625,10 @@ pub(super) fn render_extensions_overlay(
         );
     }
 
+    if !python_button.is_empty() {
+        button(buffer, python_button, " p Python setup ", selected_style);
+    }
+
     Some(OverlayRender {
         area: outer,
         primary: action,
@@ -568,6 +641,7 @@ pub(super) fn render_extensions_overlay(
         extensions_categories: category_hits,
         extensions_rows: row_hits,
         extensions_search: search,
+        extensions_python: python_button,
         cursor: extensions
             .search_focused
             .then_some(crate::protocol::CursorState {
@@ -582,6 +656,21 @@ pub(super) fn render_extensions_overlay(
             }),
         ..OverlayRender::default()
     })
+}
+
+fn wrap_literal(text: &str, width: u16) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for character in text.chars() {
+        let mut next = line.clone();
+        next.push(character);
+        if display_width(&next) > width && !line.is_empty() {
+            lines.push(std::mem::take(&mut line));
+        }
+        line.push(character);
+    }
+    lines.push(line);
+    lines
 }
 
 fn wrap_text(text: &str, width: u16) -> Vec<String> {

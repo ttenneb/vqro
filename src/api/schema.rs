@@ -318,6 +318,8 @@ pub enum Method {
     ExtensionInstall(ExtensionConfirmedParams),
     #[serde(rename = "extension.enable")]
     ExtensionEnable(ExtensionSetEnabledParams),
+    #[serde(rename = "extension.interpreter.confirm")]
+    ExtensionInterpreterConfirm(ExtensionInterpreterConfirmParams),
     #[serde(rename = "extension.remove")]
     ExtensionRemove(ExtensionConfirmedParams),
     #[serde(rename = "extension.data.delete")]

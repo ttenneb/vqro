@@ -8,29 +8,73 @@ Tasks is a trusted local Python extension, not a sandbox. Installation does not
 grant API or package-to-package authority. Generic terminal recovery remains
 available if Tasks cannot start.
 
-## Interpreter and exact artifact setup
+## Interpreter discovery and confirmation
 
-Windows requires a trusted CPython installation with the standard library and
-SQLite. Do not assume `python3`, `python`, the `py` launcher, or a Microsoft Store
-application-execution alias names that installation. Vqro does not probe these
-names or fall back to another interpreter.
+Install CPython **3.9 or newer** from [python.org](https://www.python.org/),
+including its standard library and SQLite. Bundled Tasks needs no extension
+copying, manifest editing, disabling, or manual linking. Open **Extensions →
+Python setup** (mouse button or `p`), inspect the complete absolute `python.exe`
+path, and confirm it once. Cancel leaves Tasks blocked without affecting other
+extensions or terminal recovery. If the path does not fit, enlarge the terminal
+before approval; a clipped path cannot be approved.
 
-For Windows, prepare a separate operator-owned copy of the Tasks extension,
-outside Vqro's managed bundled generations. In that copy's `vqro-extension.toml`,
-replace **all three** `python3` program tokens (both CLI declarations and the
-provider service command) with the absolute path to the trusted `python.exe`.
-Use TOML literal strings for Windows paths or forward slashes. Preserve the
-remaining static argv tokens. Register/enable that exact local manifest using
-the ordinary extension mechanism and explicitly approve its requested
-capabilities. Do not edit an immutable bundled generation, reuse old artifact
-consent for changed bytes, or enable two competing `task`/`message` aliases.
-Interpreter/package installation and enabling on a real installation are
-operator actions, not performed by validation scripts.
+Discovery reads only PEP 514 `Software\Python\PythonCore\<tag>\InstallPath`
+registrations: HKCU before HKLM, both registry views, numeric newest supported
+version within the first usable hive, native-width view preferred on a version
+tie. It uses `ExecutablePath`, or the default InstallPath plus `python.exe` only
+when ExecutablePath is absent. Enumeration and string reads are bounded;
+enumeration errors or a capped/incomplete tag enumeration fail closed rather than
+electing a possibly non-newest prefix.
+Candidates must be existing regular absolute `.exe` files outside WindowsApps.
+Registrations are candidate data, not publisher attestations. Discovery does not
+execute candidates, use PATH, invoke `py`, or probe `python`/`python3`/Store aliases.
 
-Missing setup fails explicitly. Windows foreground CLI programs must be `.exe`
-executables, not batch files or implicit shell commands. Transparent human
-attribution additionally requires an absolute declared executable. Linux/macOS
-retain the shipped `python3` argv and their existing interpreter requirements.
+An explicit candidate override wins, but still requires exact-path confirmation:
+
+```toml
+[extensions]
+tasks_python = 'C:\Users\you\AppData\Local\Programs\Python\Python313\python.exe'
+```
+
+The host records the approved path in `confirmed_tasks_python` in the same
+section. A valid confirmed path is pinned across registry upgrades. Changing the
+override never transfers consent; an invalid override fails without fallback.
+Removing the confirmation revokes approval. After manually changing configuration,
+reload configuration (or restart Vqro) to retire existing provider generations;
+new launches always revalidate the current binding. Confirmation rechecks the
+exact displayed path against the current candidate, preserves unrelated config
+edits, and rebuilds provider generations. Install Python before confirming;
+Vqro does not install it. Missing/unconfirmed CLI and Extensions status name the
+python.org/configuration remedy. Path approval grants no package capabilities
+and is not binary publisher/hash attestation; executable/image identity remains
+subject to the loaded-image proof below.
+
+The manifest's literal `vqro:python3` executable token is a **narrow managed-Tasks
+bootstrap**, accepted only for the exact current compiled bundle generation and
+asset bytes, not for an extension merely claiming the Tasks name. It is not a
+general legacy-extension interpreter contract. Its removal condition is an
+explicitly approved public interpreter contract replacing this bootstrap; other
+extensions cannot use it to inherit Tasks approval. Only argv[0] is substituted;
+static arguments and user tails stay literal. CLI execution, fresh launcher
+proof, and actual provider startup/restart use one resolver. Manifest hashes,
+ordinary exact-package consent, and immutable generations remain unchanged in
+meaning. Linux/macOS resolve the token to `python3` as before.
+
+### Host API
+
+On Windows, the `extension.list` result includes an optional `interpreter` fact:
+`{path: string|null, confirmed: boolean, message: string}`. This is outside curated
+inventory entries; absence on other hosts/older servers does not break inventory.
+The separately advertised optional `extension.interpreter.confirm` method takes
+`{expected_path: string, confirmed: true}`. The server re-resolves the current
+candidate, rejects invalid/stale paths without storing approval, atomically saves
+only the confirmation key, and retires provider generations. This JSON API adds
+no frozen endpoint-codec fields or legacy bridge methods. Confirmation is an
+explicit operator action, not extension package capability consent.
+
+Windows foreground CLI programs must be `.exe` executables, not batch files or
+implicit shell commands. Transparent human attribution additionally requires the
+confirmed absolute declared executable.
 
 ## Identity and foreground execution
 

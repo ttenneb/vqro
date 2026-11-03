@@ -4,11 +4,13 @@ pub(crate) enum ConfigEdit<'a> {
     StatusIndicators(super::StatusIndicatorStyle),
     Sound(bool),
     ToastDelivery(super::ToastDelivery),
+    ConfirmedTasksPython(&'a str),
 }
 
 impl ConfigEdit<'_> {
     pub(crate) fn description(self) -> &'static str {
         match self {
+            Self::ConfirmedTasksPython(_) => "Tasks Python confirmation",
             Self::Theme(_) => "theme",
             Self::StatusIndicators(_) => "status indicators",
             Self::Sound(_) => "sound setting",
@@ -18,6 +20,28 @@ impl ConfigEdit<'_> {
 
     pub(crate) fn apply(self, content: &str) -> String {
         match self {
+            Self::ConfirmedTasksPython(path) => {
+                let Ok(mut document) = content.parse::<toml_edit::DocumentMut>() else {
+                    return content.into();
+                };
+                if document
+                    .get("extensions")
+                    .is_some_and(|item| !item.is_table() && !item.is_inline_table())
+                {
+                    return content.into();
+                }
+                let decor = document
+                    .get("extensions")
+                    .and_then(|table| table.get("confirmed_tasks_python"))
+                    .and_then(toml_edit::Item::as_value)
+                    .map(|value| value.decor().clone());
+                let mut value = toml_edit::Value::from(path);
+                if let Some(decor) = decor {
+                    *value.decor_mut() = decor;
+                }
+                document["extensions"]["confirmed_tasks_python"] = toml_edit::Item::Value(value);
+                document.to_string()
+            }
             Self::Theme(name) => {
                 let content =
                     super::upsert_section_value(content, "theme", "name", &format!("\"{name}\""));
@@ -51,21 +75,54 @@ pub(crate) fn update_file_at(
     description: &str,
     update: impl FnOnce(&str) -> String,
 ) -> Result<(), String> {
+    let content = config_before_edit(path, description)?;
+    std::fs::write(path, update(&content))
+        .map_err(|error| format!("failed to save {description}: {error}"))
+}
+
+fn config_before_edit(path: &std::path::Path, description: &str) -> Result<String, String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("failed to create config directory: {error}"))?;
     }
-    let content = match super::io::read_optional_config(path) {
-        Ok(Some(content)) => content,
-        Ok(None) => String::new(),
-        Err(error) => {
-            return Err(format!(
-                "failed to read config before saving {description}: {error}"
-            ));
+    match super::io::read_optional_config(path) {
+        Ok(Some(content)) => Ok(content),
+        Ok(None) => Ok(String::new()),
+        Err(error) => Err(format!(
+            "failed to read config before saving {description}: {error}"
+        )),
+    }
+}
+
+pub(crate) fn try_update_file_at(
+    path: &std::path::Path,
+    description: &str,
+    update: impl FnOnce(&str) -> Result<String, String>,
+) -> Result<(), String> {
+    let content = config_before_edit(path, description)?;
+    let updated = update(&content)?;
+    // Keep the previous config intact on failure, including symlink targets.
+    use std::io::Write;
+    static NEXT_EDIT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let target = crate::platform::resolve_write_target(path).map_err(|error| error.to_string())?;
+    let sequence = NEXT_EDIT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temporary = target.with_extension(format!("toml.{}.{}.tmp", std::process::id(), sequence));
+    // Do not remove a pre-existing temp file if exclusive creation fails.
+    let mut file = crate::platform::create_private_state_file(&temporary)
+        .map_err(|error| format!("failed to save {description}: {error}"))?;
+    let result = (|| -> std::io::Result<()> {
+        if let Ok(metadata) = std::fs::metadata(&target) {
+            file.set_permissions(metadata.permissions())?;
         }
-    };
-    std::fs::write(path, update(&content))
-        .map_err(|error| format!("failed to save {description}: {error}"))
+        file.write_all(updated.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        crate::platform::durable_replace_file(&temporary, &target)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result.map_err(|error| format!("failed to save {description}: {error}"))
 }
 
 pub(crate) fn write_edit(edit: ConfigEdit<'_>) -> Result<(), String> {

@@ -231,6 +231,7 @@ pub struct App {
     pub(crate) host_document_services: crate::extension_service::HostDocumentServiceCatalog,
     pub(crate) extension_index: crate::extensions::CuratedIndex,
     pub(crate) marketplace_state: crate::extensions::MarketplaceStateFile,
+    configured_tasks_python: (Option<String>, Option<String>),
     pub(crate) configured_disabled_extensions: std::collections::BTreeSet<String>,
     pub(crate) disabled_extensions: std::collections::BTreeSet<String>,
     pub(crate) host_document_caches:
@@ -1029,6 +1030,10 @@ impl App {
             host_document_services,
             extension_index,
             marketplace_state,
+            configured_tasks_python: (
+                config.extensions.tasks_python.clone(),
+                config.extensions.confirmed_tasks_python.clone(),
+            ),
             configured_disabled_extensions: config.extensions.disabled.clone(),
             disabled_extensions,
             host_document_caches: HashMap::new(),
@@ -1245,6 +1250,17 @@ impl App {
         }
     }
 
+    pub(crate) fn apply_tasks_python_confirmation(
+        &mut self,
+        config: &crate::config::ExtensionsConfig,
+    ) {
+        self.configured_tasks_python = (
+            config.tasks_python.clone(),
+            config.confirmed_tasks_python.clone(),
+        );
+        self.rebuild_extension_catalogs();
+    }
+
     pub(crate) fn reload_config(&mut self) -> crate::config::ConfigReloadReport {
         self.apply_config_from_disk(true)
     }
@@ -1457,6 +1473,15 @@ impl App {
         if !invalid_section("extensions") {
             self.configured_disabled_extensions = config.extensions.disabled.clone();
             self.apply_bundled_extension_state();
+            let binding = (
+                config.extensions.tasks_python.clone(),
+                config.extensions.confirmed_tasks_python.clone(),
+            );
+            if self.configured_tasks_python != binding {
+                self.configured_tasks_python = binding;
+                // Interpreter selection/revocation retires existing provider authority.
+                self.rebuild_extension_catalogs();
+            }
         }
 
         let status = if diagnostics.is_empty() {
@@ -2307,6 +2332,64 @@ mod tests {
         std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
         restore_xdg_state_home(original_xdg_state_home);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn confirmed_interpreter_then_unchanged_reload_keeps_provider_generation() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("confirmed-python-reload");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let original = "[extensions]\ntasks_python = 'C:\\Python A\\python.exe'\n";
+        std::fs::write(&path, original).unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+        let mut app = test_app();
+        app.reload_config();
+        let confirmed = format!("{original}confirmed_tasks_python = 'C:\\Python A\\python.exe'\n");
+        std::fs::write(&path, &confirmed).unwrap();
+        let config: crate::config::Config = toml::from_str(&confirmed).unwrap();
+        app.apply_tasks_python_confirmation(&config.extensions);
+        assert!(app.extension_catalog_rebuilt);
+        app.extension_catalog_rebuilt = false;
+        app.reload_config();
+        assert!(
+            !app.extension_catalog_rebuilt,
+            "confirmation synchronized the cached binding"
+        );
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn reload_config_interpreter_binding_change_retires_provider_catalogs() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("reload-python-binding");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "[extensions]\ntasks_python = 'C:\\Python A\\python.exe'\n",
+        )
+        .unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+        let mut app = test_app();
+        app.reload_config();
+        app.extension_catalog_rebuilt = false;
+        app.reload_config();
+        assert!(
+            !app.extension_catalog_rebuilt,
+            "unchanged binding keeps its generation"
+        );
+        std::fs::write(&path, "[extensions]\ntasks_python = 'C:\\Python B\\python.exe'\nconfirmed_tasks_python = 'C:\\Python A\\python.exe'\n").unwrap();
+        app.reload_config();
+        assert!(
+            app.extension_catalog_rebuilt,
+            "selection change retires previous authority"
+        );
+        assert_eq!(
+            app.configured_tasks_python.0.as_deref(),
+            Some("C:\\Python B\\python.exe")
+        );
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]
