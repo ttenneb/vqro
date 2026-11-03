@@ -333,7 +333,7 @@ fn derived_pending_agent_resume_pane_infos(
     )
     .into_iter()
     .map(|mut info| {
-        let pane_inner = crate::ui::pane_inner_rect(info.rect, info.borders);
+        let pane_inner = crate::ui::pane_content_rect(&info);
         info.inner_rect = stable_terminal_inner_rect(pane_inner);
         info
     })
@@ -775,6 +775,7 @@ mod tests {
             inner_rect: ratatui::layout::Rect::new(1, 1, 98, 28),
             scrollbar_rect: None,
             borders: ratatui::widgets::Borders::ALL,
+            frame_policy: crate::layout::PaneFramePolicy::Normal,
             is_focused: true,
         }];
         app.state.view.terminal_area = ratatui::layout::Rect::new(0, 0, 100, 30);
@@ -894,6 +895,7 @@ mod tests {
             inner_rect: ratatui::layout::Rect::new(1, 1, 98, 28),
             scrollbar_rect: None,
             borders: ratatui::widgets::Borders::ALL,
+            frame_policy: crate::layout::PaneFramePolicy::Normal,
             is_focused: true,
         }];
         app.state.view.terminal_area = ratatui::layout::Rect::new(0, 0, 100, 30);

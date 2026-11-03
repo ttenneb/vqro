@@ -781,6 +781,7 @@ impl App {
             .and_then(|ws| ws.tabs.get_mut(tab_idx))
             .is_some_and(|tab| tab.resize_pane(pane_id, direction, amount, area));
         if changed {
+            self.manual_view_sizing_for_pane(ws_idx, tab_idx, pane_id);
             self.schedule_session_save();
         }
 
@@ -1670,6 +1671,7 @@ impl App {
             crate::api::schema::SplitDirection::Right => ratatui::layout::Direction::Horizontal,
             crate::api::schema::SplitDirection::Down => ratatui::layout::Direction::Vertical,
         };
+        let automatic = params.ratio.is_none();
         let view_share = params.ratio.unwrap_or(0.5);
         if !view_share.is_finite() || !(0.1..=0.9).contains(&view_share) {
             return encode_error(
@@ -1695,6 +1697,9 @@ impl App {
                 "could not add a view pane beside that pane",
             );
         };
+        if automatic {
+            self.activate_auto_view(ws_idx, target_tab_idx, new_pane);
+        }
         if params.focus {
             self.state.switch_workspace_tab(ws_idx, target_tab_idx);
             self.state
@@ -1958,10 +1963,10 @@ impl App {
         {
             return;
         }
-        if self.state.workspaces[ws_idx]
+        if let Some((tab_index, view_pane)) = self.state.workspaces[ws_idx]
             .split_pane_with_view(pane_id, &extension, &view, direction, 0.5, false)
-            .is_some()
         {
+            self.activate_auto_view(ws_idx, tab_index, view_pane);
             self.mark_agent_start_view_applied(ws_idx, pane_id);
             self.schedule_session_save();
             self.emit_layout_updated_event(ws_idx, tab_idx);
@@ -2439,8 +2444,9 @@ impl App {
         let area = self.state.view.terminal_area;
         let focused = tab.layout.focused();
         let focused_pane_id = self.public_pane_id(ws_idx, focused)?;
+        let geometry = tab.layout.geometry(area);
         let panes = crate::ui::apply_pane_chrome(
-            tab.pane_layout(area),
+            geometry.panes,
             self.state.pane_borders,
             self.state.pane_gaps,
             self.state.pane_outer_borders,
@@ -2454,8 +2460,8 @@ impl App {
             })
         })
         .collect();
-        let splits = tab
-            .split_layout(area)
+        let splits = geometry
+            .splits
             .into_iter()
             .enumerate()
             .map(|(idx, split)| PaneLayoutSplit {
@@ -2640,6 +2646,7 @@ mod tests {
         detect::{Agent, AgentState},
         workspace::Workspace,
     };
+    use ratatui::layout::Rect;
 
     fn app_with_test_workspace() -> (App, String) {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -5363,6 +5370,87 @@ mod tests {
             ratio: Some(0.5),
             focus: false,
         }
+    }
+
+    #[tokio::test]
+    async fn default_view_auto_policy_is_transient_incarnation_keyed_and_manual_resize_is_final() {
+        let (mut app, root) = app_with_test_workspace();
+        app.state.active = Some(0);
+        let target = crate::ui::TabSurfaceTarget {
+            workspace_index: 0,
+            tab_index: 0,
+        };
+        app.resize_auto_views(
+            target,
+            Rect::new(0, 0, 100, 40),
+            crate::kitty_graphics::HostCellSize::default(),
+        );
+        let mut params = add_view_request(&root);
+        params.ratio = None;
+        let response = app.handle_pane_view("auto".into(), params);
+        assert!(
+            serde_json::from_str::<SuccessResponse>(&response).is_ok(),
+            "{response}"
+        );
+        let view = app.state.workspaces[0].tabs[0].layout.view_panes()[0];
+        assert!(app.state.view_sizing.active.contains_key(&view));
+        assert!(!app.resize_auto_views(
+            target,
+            Rect::new(0, 0, 100, 40),
+            crate::kitty_graphics::HostCellSize::default()
+        ));
+        let scope = app.public_tab_id(0, 0).unwrap();
+        app.refresh_auto_view_document("vqro.tasks", &scope, 999, 0);
+        assert_eq!(
+            app.state.view_sizing.active[&view]
+                .incarnation
+                .as_ref()
+                .unwrap()
+                .0,
+            999
+        );
+        let invalid =
+            serde_json::from_value(serde_json::json!({"pane_id":root,"path":[true],"ratio":0.8}))
+                .unwrap();
+        assert!(serde_json::from_str::<crate::api::schema::ErrorResponse>(
+            &app.handle_layout_set_split_ratio("bad".into(), invalid)
+        )
+        .is_ok());
+        assert!(
+            app.state.view_sizing.active.contains_key(&view),
+            "rejected mutation cannot opt out"
+        );
+        let manual =
+            serde_json::from_value(serde_json::json!({"pane_id":root,"path":[],"ratio":0.8}))
+                .unwrap();
+        let response = app.handle_layout_set_split_ratio("manual".into(), manual);
+        assert!(
+            serde_json::from_str::<SuccessResponse>(&response).is_ok(),
+            "{response}"
+        );
+        assert!(!app.state.view_sizing.active.contains_key(&view));
+        let mut another = add_view_request(&root);
+        another.ratio = None;
+        let response = app.handle_pane_view("another".into(), another);
+        assert!(
+            serde_json::from_str::<SuccessResponse>(&response).is_ok(),
+            "{response}"
+        );
+        assert!(
+            !app.state.view_sizing.active.contains_key(&view),
+            "another default must not rearm the earlier manual view"
+        );
+        assert_eq!(app.state.view_sizing.active.len(), 1);
+        let crate::layout::TypedNode::Split { ratio, .. } =
+            app.state.workspaces[0].tabs[0].layout.typed_root()
+        else {
+            panic!("expected parent split")
+        };
+        assert_eq!(
+            *ratio, 0.8,
+            "last admitted manual ratio survives new default views"
+        );
+        app.state.assert_invariants_for_test();
     }
 
     #[test]

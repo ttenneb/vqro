@@ -21,6 +21,11 @@ from demo_readiness import ReadinessDemo
 CRITERION = "The observable result is recorded."
 
 
+def view_add_args(pane, direction):
+    """Omitting --ratio opts new views into transient host auto-sizing."""
+    return ["pane", "view", "add", pane, "vqro.tasks:tasks", "--direction", direction, "--focus"]
+
+
 class ViewPaneDemo(ReadinessDemo):
     def _drain_pty(self, master):
         self.pty_master = master
@@ -80,6 +85,7 @@ class ViewPaneDemo(ReadinessDemo):
 
     def run(self):
         config = self.root / "config/config.toml"
+        # Keep normal UI defaults for the human visual gate.
         config.write_text("onboarding = false\n" + config.read_text())
         self.start()
         human = self.cli("workspace", "create", "--cwd", str(self.root / "work"), "--focus")[
@@ -103,10 +109,7 @@ class ViewPaneDemo(ReadinessDemo):
         imported = self.human(human, "view-plan", ["plan", str(self.root / "view-plan.json"), "--op", "view-plan"])
         child = self.cli("task", "get", imported["tasks"]["child"])["task"]
         self.wait_view(a, "tasks")
-        added = self.cli(
-            # --ratio is the VIEW's share, not the agent's share, in either direction.
-            "pane", "view", "add", a, "vqro.tasks:tasks", "--direction", self.direction, "--ratio", "0.3", "--focus"
-        )
+        added = self.cli(*view_add_args(a, self.direction))
         view = added["result"]["view"]
         assert view["extension"] == "vqro.tasks" and view["view"] == "tasks", view
         self.wait_screen("Tasks · ", seconds=30)
@@ -124,6 +127,9 @@ class ViewPaneDemo(ReadinessDemo):
             "view_pane": view["pane_id"],
             "view": view,
             "model_calls": 0,
+            "automatic_size": True,
+            "show_agent_labels_on_pane_borders": False,
+            "title_setting_default": True,
             "header": header.strip(),
             "row_visible": child["title"] in screen_text,
             "capture_text": str(text_path),

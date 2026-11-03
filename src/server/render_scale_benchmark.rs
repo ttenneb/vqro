@@ -292,9 +292,11 @@ fn view_populated(view_count: usize) -> Workspace {
             .layout
             .panes(surface)
             .into_iter()
-            .max_by_key(|pane| u32::from(pane.rect.width) * u32::from(pane.rect.height))
+            // A terminal parent rect includes its attached views. Split the
+            // largest actual allocation, not that overlapping outer identity.
+            .max_by_key(|pane| pane.inner_rect.area())
             .map(|pane| {
-                let direction = if pane.rect.width >= pane.rect.height {
+                let direction = if pane.inner_rect.width >= pane.inner_rect.height {
                     Direction::Horizontal
                 } else {
                     Direction::Vertical
@@ -316,6 +318,35 @@ fn view_populated(view_count: usize) -> Workspace {
 
 fn view_panes(view_count: usize) -> Vec<Workspace> {
     vec![view_populated(view_count)]
+}
+
+fn named_view_groups(count: usize) -> Vec<Workspace> {
+    let mut workspace = populated_panes(count);
+    for tab_index in 0..workspace.tabs.len() {
+        let terminals = workspace.tabs[tab_index]
+            .layout
+            .panes(pane_surface_rect())
+            .into_iter()
+            .map(|pane| pane.id)
+            .collect::<Vec<_>>();
+        for (index, pane) in terminals.into_iter().enumerate() {
+            let collection = workspace.tabs[tab_index]
+                .create_collection_near(
+                    crate::layout::LayoutLeaf::Pane(pane),
+                    Direction::Horizontal,
+                    0.5,
+                    Some(format!("named {index}")),
+                )
+                .expect("named fixture box");
+            workspace.tabs[tab_index]
+                .collect_tiled_pane(pane, collection)
+                .expect("populated named member");
+            workspace
+                .split_pane_with_view(pane, "bench.views", "v", Direction::Horizontal, 0.7, false)
+                .expect("attached fixture view");
+        }
+    }
+    vec![workspace]
 }
 
 /// Output keeps arriving between samples, so each sample renders a screen that
@@ -550,6 +581,10 @@ async fn render_scale_profile() {
     print_token_rule_profiles();
     print_recovery_browser_profile();
     print_view_panes_profile();
+    let named = [1usize, 15].map(|count| (count, profile(named_view_groups, count)));
+    println!("populated named terminal/view groups (no document fixture)");
+    print_stage("server pane surface", &named, |stats| stats.server);
+    print_stage("combined pipeline", &named, |stats| stats.total);
     print_terminal_views_profile();
 }
 

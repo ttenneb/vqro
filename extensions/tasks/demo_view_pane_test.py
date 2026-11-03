@@ -6,6 +6,13 @@ from unittest.mock import Mock, patch
 
 @unittest.skipUnless(os.name == "posix", "the process demo is Unix-only")
 class ViewPaneCleanupTest(unittest.TestCase):
+    def test_first_party_views_request_auto_sizing_in_each_direction(self):
+        from demo_view_pane import view_add_args
+        for direction in ("right", "down"):
+            args = view_add_args("pane", direction)
+            self.assertNotIn("--ratio", args)
+            self.assertIn(direction, args)
+
     def test_stop_remembers_terminals_but_still_stops_with_a_view_present(self):
         from demo import Demo
         from demo_readiness import ReadinessDemo

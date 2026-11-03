@@ -343,6 +343,12 @@ impl ClientShellState {
                 }
             })
             .collect();
+        // Parent terminal rects include attached views. Prefer the smallest
+        // containing child for every existing hit route; parent borders/titles
+        // still focus the terminal. In-place scalar sorting allocates nothing.
+        self.hits
+            .panes
+            .sort_unstable_by_key(|pane| pane.rect.area());
         let collection_surfaces = surface
             .collections
             .iter()

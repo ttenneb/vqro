@@ -20,6 +20,7 @@ pub(crate) struct TabSurfaceLayout {
     pub(crate) pane_infos: Vec<PaneInfo>,
     pub(crate) split_borders: Vec<SplitBorder>,
     pub(crate) box_frames: Vec<crate::layout::BoxFrame>,
+    pub(crate) leaf_rects: std::collections::HashMap<crate::layout::LayoutLeaf, Rect>,
 }
 
 #[derive(Clone, Copy)]
@@ -68,26 +69,23 @@ pub(crate) fn compute_tab_surface_for(
             .tabs
             .get(target.tab_index)
     });
-    let split_borders = tab
-        .map(|tab| {
-            if tab.zoomed {
-                Vec::new()
-            } else {
-                tab.split_layout(area)
-            }
-        })
-        .unwrap_or_default();
-    let box_frames = tab
+    let geometry = tab
         .filter(|tab| !tab.zoomed)
-        .map(|tab| tab.box_frames(area))
+        .map(|tab| tab.layout.geometry(area))
         .unwrap_or_default();
+    let crate::layout::LayoutGeometry {
+        panes: raw_panes,
+        splits: split_borders,
+        boxes: box_frames,
+        leaf_rects,
+    } = geometry;
     let pane_infos = target.map_or_else(Vec::new, |target| {
         compute_pane_infos_for_tab(
             app,
             terminal_runtimes,
-            target.workspace_index,
-            target.tab_index,
+            target,
             area,
+            raw_panes,
             resize_panes,
             cell_size,
         )
@@ -98,6 +96,7 @@ pub(crate) fn compute_tab_surface_for(
         pane_infos,
         split_borders,
         box_frames,
+        leaf_rects,
     }
 }
 
@@ -292,10 +291,24 @@ mod tests {
             );
             assert_eq!(layout.box_frames.len(), 1);
             assert_eq!(layout.box_frames[0].rect, area);
-            assert!(layout
-                .pane_infos
-                .iter()
-                .all(|pane| pane.borders == ratatui::widgets::Borders::ALL));
+            assert_eq!(
+                layout
+                    .pane_infos
+                    .iter()
+                    .find(|pane| pane.id == root)
+                    .unwrap()
+                    .borders,
+                ratatui::widgets::Borders::NONE
+            );
+            assert_eq!(
+                layout
+                    .pane_infos
+                    .iter()
+                    .find(|pane| pane.id != root)
+                    .unwrap()
+                    .borders,
+                ratatui::widgets::Borders::ALL
+            );
             let terminal = layout
                 .pane_infos
                 .iter()

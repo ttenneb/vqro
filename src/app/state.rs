@@ -845,6 +845,8 @@ pub struct AppState {
     /// starts there, once per terminal. `agent_start_view` is the
     /// `<extension>:<view>` identity to add; unset disables the rule.
     pub agent_start_view: Option<(String, String)>,
+    /// Transient default-view sizing only. Restore deliberately does not rearm.
+    pub(crate) view_sizing: crate::view_sizing::ViewSizing,
     pub tab_bar_right: Vec<TabBarStatusSegment>,
     pub tab_bar_right_separator: String,
     /// Expose the focused pane's cursor anchor to the outer terminal even when
@@ -1117,6 +1119,7 @@ impl AppState {
             pane_gaps: false,
             show_agent_labels_on_pane_borders: false,
             agent_start_view: None,
+            view_sizing: Default::default(),
             tab_bar_right: Vec::new(),
             tab_bar_right_separator: " ".into(),
             reveal_hidden_cursor_for_cjk_ime: false,

@@ -620,10 +620,9 @@ pub(super) fn render_pane_surface(
                     .collection_ids()
                     .into_iter()
                     .filter_map(|collection_id| {
-                        let rect = tab.layout_leaf_rect(
-                            crate::layout::LayoutLeaf::Stack(collection_id),
-                            area,
-                        )?;
+                        let rect = *layout
+                            .leaf_rects
+                            .get(&crate::layout::LayoutLeaf::Stack(collection_id))?;
                         let inner_rect = Rect::new(
                             rect.x,
                             rect.y.saturating_add(1),
@@ -795,16 +794,24 @@ fn split_hit_rect(
         // Both child perimeters are resize handles; neither is terminal content.
         let hit = match split.direction {
             ratatui::layout::Direction::Horizontal => Rect::new(
-                split.pos.saturating_sub(1),
+                if split.view_before {
+                    split.pos.saturating_sub(1)
+                } else {
+                    split.pos
+                },
                 split.area.y,
-                2,
+                1,
                 split.area.height,
             ),
             ratatui::layout::Direction::Vertical => Rect::new(
                 split.area.x,
-                split.pos.saturating_sub(1),
+                if split.view_before {
+                    split.pos.saturating_sub(1)
+                } else {
+                    split.pos
+                },
                 split.area.width,
-                2,
+                1,
             ),
         }
         .intersection(split.area);
@@ -1294,13 +1301,24 @@ mod tests {
             .panes
             .iter()
             .find(|pane| pane.pane_id == root_public)
-            .map(|pane| pane.rect)
             .expect("terminal pane geometry");
         assert_eq!(
-            view_rect.width + root_rect.width,
-            78,
-            "outer box consumes exactly two columns"
+            (
+                root_rect.rect.x,
+                root_rect.rect.y,
+                root_rect.rect.width,
+                root_rect.rect.height
+            ),
+            (0, 0, 80, 20),
+            "terminal identity owns the actual outer frame"
         );
+        assert_eq!(
+            view_rect.width + (view_rect.x - root_rect.inner_rect.x),
+            78,
+            "body allocation plus view occupy the outer inset"
+        );
+        assert_eq!(root_rect.inner_rect.x, 1);
+        assert!(root_rect.inner_rect.x + root_rect.inner_rect.width <= view_rect.x);
         assert_eq!(view_rect.height, 18);
         assert_eq!(view_rect.y, 1);
         let split = &rendered.splits[0];
@@ -1316,9 +1334,190 @@ mod tests {
             split.area.width,
             split.area.height,
         );
-        assert_eq!(hit.width, 2, "both independent perimeters resize");
+        assert_eq!(
+            hit.width, 1,
+            "only the view border resizes, never terminal content"
+        );
         assert_eq!(hit.intersection(split_area), hit);
         assert_eq!(split_area, Rect::new(1, 1, 78, 18));
+    }
+
+    #[tokio::test]
+    async fn named_view_geometry_is_gathered_once_for_one_and_fifteen_populated_boxes() {
+        for count in [1, 15] {
+            let (_send, receive) = tokio::sync::mpsc::unbounded_channel();
+            let mut app = crate::app::App::new(
+                &crate::config::Config::default(),
+                crate::app::AppPolicy::TEST,
+                None,
+                receive,
+                crate::api::EventHub::default(),
+            );
+            let mut workspace = crate::workspace::Workspace::test_new("named views");
+            let mut terminals = vec![workspace.tabs[0].root_pane];
+            for _ in 1..count {
+                terminals.push(workspace.test_split(ratatui::layout::Direction::Horizontal));
+            }
+            for (index, pane) in terminals.into_iter().enumerate() {
+                let collection = workspace.tabs[0]
+                    .create_collection_near(
+                        crate::layout::LayoutLeaf::Pane(pane),
+                        ratatui::layout::Direction::Horizontal,
+                        0.5,
+                        Some(format!("box {index}")),
+                    )
+                    .unwrap();
+                workspace.tabs[0]
+                    .collect_tiled_pane(pane, collection)
+                    .unwrap();
+                workspace
+                    .split_pane_with_view(
+                        pane,
+                        "sample.views",
+                        "rows",
+                        ratatui::layout::Direction::Horizontal,
+                        0.7,
+                        false,
+                    )
+                    .unwrap();
+                workspace.insert_test_runtime(
+                    pane,
+                    crate::terminal::TerminalRuntime::test_with_screen_bytes(
+                        80,
+                        24,
+                        b"populated terminal\r\nrow two",
+                    ),
+                );
+            }
+            app.state.workspaces = vec![workspace];
+            app.state.active = Some(0);
+            app.state.ensure_test_terminals();
+            crate::layout::TileLayout::take_geometry_gathers_for_test();
+            let rendered = render_pane_surface(
+                &mut app,
+                Some(crate::ui::TabSurfaceTarget {
+                    workspace_index: 0,
+                    tab_index: 0,
+                }),
+                Rect::new(0, 0, 160, 48),
+                false,
+                false,
+                crate::kitty_graphics::HostCellSize::default(),
+                &crate::kitty_graphics::surface::DeliveryCache::default(),
+                1,
+            );
+            assert_eq!(crate::layout::TileLayout::take_geometry_gathers_for_test(),1,"{count} populated named/view groups share a single fact pass including collection projection");
+            assert_eq!(rendered.collections.len(), count);
+            assert_eq!(rendered.views.len(), count);
+            app.state.assert_invariants_for_test();
+        }
+    }
+
+    #[tokio::test]
+    async fn nested_kitty_placements_clip_to_terminal_body_side_and_stacked() {
+        for direction in [
+            ratatui::layout::Direction::Horizontal,
+            ratatui::layout::Direction::Vertical,
+        ] {
+            let (_send, receive) = tokio::sync::mpsc::unbounded_channel();
+            let mut app = crate::app::App::new(
+                &crate::config::Config::default(),
+                crate::app::AppPolicy::TEST,
+                None,
+                receive,
+                crate::api::EventHub::default(),
+            );
+            let mut workspace = crate::workspace::Workspace::test_new("image clipping");
+            let terminal = workspace.tabs[0].root_pane;
+            let (_, view) = workspace
+                .split_pane_with_view(terminal, "sample.views", "rows", direction, 0.7, false)
+                .unwrap();
+            // Real Kitty bytes enter the real terminal parser; the placement is
+            // intentionally much larger than either allocated terminal body.
+            workspace.insert_test_runtime(
+                terminal,
+                crate::terminal::TerminalRuntime::test_with_screen_bytes(
+                    80,
+                    24,
+                    b"\x1b_Ga=T,f=32,t=d,i=7,p=3,s=4,v=4,c=120,r=90,C=1,q=2;/wAA/wD/AP8AAP////8A//8AAP8A/wD/AAD/////AP//AAD/AP8A/wAA/////wD//wAA/wD/AP8AAP////8A/w==\x1b\\",
+                ),
+            );
+            app.state.workspaces = vec![workspace];
+            app.state.active = Some(0);
+            app.state.ensure_test_terminals();
+            let terminal_public = app.public_pane_id(0, terminal).unwrap();
+            let view_public = app.public_pane_id(0, view).unwrap();
+            let rendered = render_pane_surface(
+                &mut app,
+                Some(crate::ui::TabSurfaceTarget {
+                    workspace_index: 0,
+                    tab_index: 0,
+                }),
+                Rect::new(0, 0, 80, 20),
+                true,
+                false,
+                crate::kitty_graphics::HostCellSize {
+                    width_px: 10,
+                    height_px: 20,
+                },
+                &crate::kitty_graphics::surface::DeliveryCache::default(),
+                1,
+            );
+            let terminal = rendered
+                .panes
+                .iter()
+                .find(|pane| pane.pane_id == terminal_public)
+                .unwrap();
+            let view = rendered
+                .panes
+                .iter()
+                .find(|pane| pane.pane_id == view_public)
+                .unwrap();
+            let body = Rect::new(
+                terminal.inner_rect.x,
+                terminal.inner_rect.y,
+                terminal.inner_rect.width,
+                terminal.inner_rect.height,
+            );
+            let view_rect = Rect::new(view.rect.x, view.rect.y, view.rect.width, view.rect.height);
+            assert!(
+                !rendered.graphics.placements.is_empty(),
+                "test must actually project a Kitty image"
+            );
+            if let Ok(root) = std::env::var("VQRO_IMAGE_EVIDENCE_ROOT") {
+                let record = serde_json::json!({"columns":80,"rows":20,"cell_width":10,"cell_height":20,"panes":&rendered.panes,"graphics":&rendered.graphics,"frame":&rendered.frame,"body":{"x":body.x,"y":body.y,"width":body.width,"height":body.height},"view":{"x":view_rect.x,"y":view_rect.y,"width":view_rect.width,"height":view_rect.height}});
+                let name = if direction == ratatui::layout::Direction::Horizontal {
+                    "side"
+                } else {
+                    "stacked"
+                };
+                std::fs::create_dir_all(&root).unwrap();
+                std::fs::write(
+                    std::path::Path::new(&root).join(format!("{name}.json")),
+                    serde_json::to_vec_pretty(&record).unwrap(),
+                )
+                .unwrap();
+            }
+            for placement in &rendered.graphics.placements {
+                let image = Rect::new(
+                    placement.x,
+                    placement.y,
+                    u16::try_from(placement.cols).unwrap(),
+                    u16::try_from(placement.rows).unwrap(),
+                );
+                assert_eq!(
+                    image.intersection(body),
+                    image,
+                    "image cannot escape terminal body into parent title/border"
+                );
+                assert!(
+                    image.intersection(view_rect).is_empty(),
+                    "image cannot cover view/title/frame"
+                );
+                assert_eq!(placement.x_offset, 0);
+                assert_eq!(placement.y_offset, 0);
+            }
+        }
     }
 
     #[test]
@@ -1503,6 +1702,7 @@ mod tests {
             area: Rect::new(2, 3, 40, 12),
             path: vec![false],
             independent_borders: false,
+            view_before: false,
         };
         assert_eq!(
             split_hit_rect(&horizontal, true, false, &[]),
@@ -1525,6 +1725,7 @@ mod tests {
             area: Rect::new(2, 3, 40, 12),
             path: vec![true],
             independent_borders: false,
+            view_before: false,
         };
         assert_eq!(
             split_hit_rect(&vertical, true, true, &[]),
@@ -1538,6 +1739,7 @@ mod tests {
             area: Rect::new(0, 0, 1, 4),
             path: Vec::new(),
             independent_borders: false,
+            view_before: false,
         };
         assert_eq!(
             split_hit_rect(&edge, true, true, &[]),

@@ -263,6 +263,7 @@ mod tests {
             inner_rect: ratatui::layout::Rect::new(0, 0, 80, 24),
             scrollbar_rect: None,
             borders: ratatui::widgets::Borders::NONE,
+            frame_policy: crate::layout::PaneFramePolicy::Normal,
             is_focused: true,
         });
         (app, pane_id)

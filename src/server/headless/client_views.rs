@@ -624,6 +624,7 @@ impl HeadlessServer {
             .collect::<HashSet<_>>();
         let no_excluded_panes = HashSet::new();
         let area = Rect::new(0, 0, cols, rows);
+        self.app.resize_auto_views(target, area, cell_size);
         if self.app_client_count() == 1 {
             for (workspace_index, workspace) in self.app.state.workspaces.iter().enumerate() {
                 for tab_index in 0..workspace.tabs.len() {

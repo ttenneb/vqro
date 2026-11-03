@@ -990,13 +990,14 @@ impl App {
     }
 
     pub(crate) fn emit_host_document_updated(
-        &self,
+        &mut self,
         namespace: String,
         scope_id: String,
         generation: u64,
         revision: u64,
         available: bool,
     ) {
+        self.refresh_auto_view_document(&namespace, &scope_id, generation, revision);
         self.event_hub.push(crate::api::schema::EventEnvelope {
             event: crate::api::schema::EventKind::HostDocumentUpdated,
             data: crate::api::schema::EventData::HostDocumentUpdated {

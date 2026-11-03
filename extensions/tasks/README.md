@@ -39,8 +39,8 @@ the shape reference for the retired tab.
 
 `vqro pane view add <pane> vqro.tasks:tasks --direction right --ratio 0.3`
 reserves **30% for the view**, leaving 70% for the existing pane. The same ratio
-meaning applies to `--direction down` (view below). The default is 0.5; accepted
-values are 0.1 through 0.9.
+meaning applies to `--direction down` (view below). Explicit accepted values are
+0.1 through 0.9. Omit `--ratio` for bounded automatic sizing of a new view.
 
 For fresh terminal-capture evidence in both layouts, using an already-built
 binary and already-installed Pi:
@@ -51,7 +51,12 @@ python3 -B extensions/tasks/demo_view_pane.py --vqro /absolute/path/to/vqro --di
 ```
 
 Each run owns a private root; view panes are excluded from process-tree cleanup
-because they never own a terminal or process.
+because they never own a terminal or process. First-party agent-start views and
+this demo omit explicit ratios, opting into transient automatic sizing from
+cached neutral document metrics. Side width fits text within bounds; stacked
+height fits rows plus chrome up to its cap. Manual ratios/drag opt out and
+restart preserves only the last actual ratio. The demo retains normal UI
+settings, including agent-border labels **off by default**.
 
 - [Windows interpreter setup, identity and native trial](../../docs/next/api/tasks-windows.md)
 - [Tasks policy, CLI, receipts and limits](../../docs/next/api/tasks-core-v0.md)

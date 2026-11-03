@@ -31,7 +31,7 @@ implementation mandate only when accepted.
 | 2026-10-04 | **Nesting depth is capped at four levels of boxes** inside a tab; the cap may be raised later. |
 | 2026-10-04 | **Agent start rule details** accepted as written in [Agent start rule](#agent-start-rule). |
 | 2026-10-04 | **Interaction model accepted as provisional**: good for the first build, explicitly open to iteration. See [Interaction](#interaction-provisional). |
-| 2026-11-02 | **Frame style (supersedes the 2026-10-04 light frame)**: one outer perimeter encloses the agent's box, including both its terminal pane and view. Each child, including the view, has its own complete, visible one-cell perimeter inside it, side by side or with the view below. No view is a header-only strip outside its agent's box. See [Frame style](#frame-style). |
+| 2026-11-02 | **Frame-v2 (supersedes the earlier double-frame prototype)**: one terminal outer perimeter encloses its unframed terminal body and fully framed attached views, side by side or inside the bottom. Ordinary boxes keep normal pane frames. Automatic default sizing is transient; restore keeps only the last actual ratio. See [Frame style](#frame-style). |
 | 2026-10-04 | **Vqro core owns boxes completely, including their names.** The Collections extension and archiving are dropped. Core absorbs the base features (named boxes, stacks with the `n/m` switcher and list view, adding and reordering members, moving a member out, closing a box). Archiving may return later as a separate design. This supersedes the package authority in [Collections authority transition](collections-authority-transition.md) once accepted. See [Collections become boxes](#collections-become-boxes). |
 | 2026-10-04 | **No compatibility floor while Vqro is in development (option B).** This design may change the client protocol and frozen generation-1 formats and fixtures freely; older clients are not supported. The frozen-floor rule is meant for when community and ecosystem building starts. This requires changing the "Stable client endpoint contract" section of `AGENTS.md` and replacing the frozen fixtures. `PROTOCOL_VERSION` is still bumped so mismatched client and server refuse cleanly. |
 | 2026-10-04 | **Identity and persistence** as in [Identity and persistence](#identity-and-persistence): stable box IDs; view panes keep their place and show "unavailable" when their extension is missing, recovering by themselves; live server upgrade keeps running terminals by converting the old layout on the way in; downgrade is unsupported; the old session file is backed up before conversion. |
@@ -186,47 +186,64 @@ dropping onto agent2:
 
 ## Frame style
 
-The human required a nested box on 2026-11-02, superseding the light frame.
-One outer perimeter encloses both panes; the view and terminal each retain a
-complete inner perimeter. The same rule applies with the view below:
+The human's 2026-11-02 frame-v2 brief supersedes the earlier double-terminal-frame
+prototype. This is a render/sizing policy over the accepted tree, not new box
+identity, persistence, or protocol. Source acceptance and human visual approval
+remain separate gates.
 
 ```
 ┌ agent1 ──────────────────────────────────────┐
-│┌ pi … ─────────────────┐┌ Tasks · agent1 ───┐│
-││ $ pi …                ││ ▸ Spike fix      ││
-│└───────────────────────┘└───────────────────┘│
+│ $ pi …                 ┌ Tasks · agent1 ────┐│
+│                        │ ▸ Spike fix       ││
+│                        └───────────────────┘│
 └──────────────────────────────────────────────┘
 
 ┌ agent1 ──────────────────────────────────────┐
-│┌ pi … ──────────────────────────────────────┐│
-││ $ pi …                                     ││
-│└────────────────────────────────────────────┘│
+│ $ pi …                                      │
 │┌ Tasks · agent1 ────────────────────────────┐│
-││ ▸ Spike fix                                ││
-│└────────────────────────────────────────────┘│
+││ ▸ Spike fix                               ││
+│└───────────────────────────────────────────┘│
 └──────────────────────────────────────────────┘
 ```
 
-Every border is one cell thick, with no additional blank gutter. The outer
-frame costs two columns and two rows. Children are split inside that inset,
-then each child's complete border is subtracted for its terminal or view
-content. Adjacent child perimeters are independent, not a title-only divider.
-`pane view add --ratio R` gives the **view** share of the parent's available
-split area, before child borders, in either direction. Integer cell allocation
-quantizes this ratio; tiny panes can have zero content after their borders.
-The accepted range is 0.1 through 0.9, default 0.5.
+A maximal qualifying subtree has exactly one terminal across **all** membership,
+including hidden stack children, and all its views scoped to that terminal.
+It gets one outer terminal frame/title and an unframed terminal body inside;
+every view retains a full frame. Ordinary/named/multi-terminal boxes keep normal
+pane frames. Labels never grant grouping authority. Hidden branches emit no
+presentation work; standalone or zoomed views keep a full view frame. Scope is
+unchanged by zoom. The earlier schematics describe placement, not final chrome.
 
-**Depth economy is a prototype for human visual review, not a final decision.**
-The coordinator authorized one policy function that frames a box directly
-holding a view, or an already named box; ordinary unnamed terminal-only splits
-retain their existing rendering. Existing legacy names are read, not moved into
-the canonical tree or given new authority. Screenshots include an all-box nested
-comparison so the human can choose the final rule before stage 4.
+One shared geometry plan supplies the body used by PTY sizing, rendering,
+cursor, hits, hyperlinks and Kitty clipping. Parent border/title hits belong to
+the terminal; child view hits take precedence. Divider drag hits use only the
+view-border cell, never terminal content.
 
-A standalone or zoomed view keeps its complete pane frame, without a redundant
-outer group frame. Zoom does not change placement-derived scope. The earlier
-schematic examples above describe placement/scope only; their light-divider
-appearance is superseded by these perimeters.
+### Transient automatic sizing
+
+New views with no explicit ratio, including agent-start defaults, opt in to
+cached neutral row/header/label metrics. Accepted document publication measures
+once, with namespace/incarnation/scope/revision identity. There are no provider
+calls or document scans during frame/layout/client fanout. Age ticks use fixed
+status budgets, widths use four-cell buckets, and unchanged integer allocations
+do not change ratios or request PTY geometry work.
+
+Side views target their text width within 25–60% of the available split;
+stacked views target row count plus two border rows, capped at twelve rows and
+35%. Aggregate minima reserve twenty terminal body columns plus a possible
+scrollbar gutter, four terminal rows, and view minima. Existing stack headers
+are reserved too. Manual splits retain their ratios. When the viewport cannot
+satisfy all minima, terminal allocation wins, then nearest-to-terminal attached
+views before outer views; existing valid ratio bounds and saturating cell
+geometry take precedence over otherwise impossible pixel minima. Content may
+truncate or become zero-sized, never escape its rectangle.
+
+`pane view add --ratio R` is explicit manual view share (0.1–0.9), quantized to
+cells. A successful explicit ratio/drag disarms its directly attached view;
+directional pane resize disarms the affected terminal group. Rejected mutations
+do not disarm. Adding another default never rearms an older manual choice.
+Only actual ratios persist: restart/handoff restores them with auto **off**.
+Persistent auto/manual policy is deliberately deferred.
 
 ## Collections become boxes
 

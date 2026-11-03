@@ -2,7 +2,14 @@
 
 mod frames;
 mod nested;
-pub(crate) use frames::BoxFrame;
+pub(crate) use frames::{BoxFrame, LayoutGeometry};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaneFramePolicy {
+    Normal,
+    Full,
+    Unframed,
+}
 
 use std::cmp::Reverse;
 
@@ -150,6 +157,8 @@ pub struct PaneInfo {
     pub scrollbar_rect: Option<Rect>,
     /// Borders drawn around this pane after UI chrome is applied.
     pub borders: Borders,
+    /// Transient chrome only; never persisted or sent as a named codec field.
+    pub frame_policy: PaneFramePolicy,
     pub is_focused: bool,
 }
 
@@ -168,6 +177,8 @@ pub struct SplitBorder {
     pub path: Vec<bool>,
     /// Child panes inside a box retain independent perimeters, not joined seams.
     pub independent_borders: bool,
+    /// In an attached group the resize seam is the view's own border.
+    pub view_before: bool,
 }
 
 /// Cardinal direction for pane navigation.
@@ -495,51 +506,34 @@ impl TileLayout {
         find(&self.root, pane_id, None)
     }
 
+    pub(crate) fn auto_size_views(
+        &mut self,
+        area: Rect,
+        measures: &std::collections::HashMap<PaneId, crate::view_sizing::ViewMeasure>,
+    ) -> bool {
+        frames::auto_size(&mut self.root, area, measures)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_geometry_gathers_for_test() -> usize {
+        frames::take_gathers()
+    }
+
+    pub(crate) fn geometry(&self, area: Rect) -> LayoutGeometry {
+        frames::geometry(&self.root, self.focus, area)
+    }
+
     pub fn panes(&self, area: Rect) -> Vec<PaneInfo> {
-        self.panes_with_box_frames(area, &[])
-    }
-
-    pub(crate) fn panes_with_box_frames(
-        &self,
-        area: Rect,
-        named: &[TerminalContainerId],
-    ) -> Vec<PaneInfo> {
-        let mut result = Vec::new();
-        typed_collect_panes(&self.root, area, self.focus, named, false, &mut result);
-        result
-    }
-
-    pub(crate) fn leaf_rect(&self, leaf: LayoutLeaf, area: Rect) -> Option<Rect> {
-        self.leaf_rect_with_box_frames(leaf, area, &[])
-    }
-
-    pub(crate) fn leaf_rect_with_box_frames(
-        &self,
-        leaf: LayoutLeaf,
-        area: Rect,
-        named: &[TerminalContainerId],
-    ) -> Option<Rect> {
-        typed_leaf_rect(&self.root, leaf, area, named)
+        self.geometry(area).panes
     }
 
     pub fn splits(&self, area: Rect) -> Vec<SplitBorder> {
-        self.splits_with_box_frames(area, &[])
+        self.geometry(area).splits
     }
 
-    pub(crate) fn splits_with_box_frames(
-        &self,
-        area: Rect,
-        named: &[TerminalContainerId],
-    ) -> Vec<SplitBorder> {
-        let mut result = Vec::new();
-        typed_collect_splits(&self.root, area, named, false, &mut Vec::new(), &mut result);
-        result
-    }
-
-    pub(crate) fn box_frames(&self, area: Rect, named: &[TerminalContainerId]) -> Vec<BoxFrame> {
-        let mut result = Vec::new();
-        frames::collect(&self.root, area, named, &mut result);
-        result
+    #[cfg(test)]
+    pub(crate) fn box_frames(&self, area: Rect) -> Vec<BoxFrame> {
+        self.geometry(area).boxes
     }
 
     #[cfg(test)]
@@ -903,7 +897,14 @@ impl TileLayout {
     }
 
     pub fn resize_focused(&mut self, nav: NavDirection, delta: f32, area: Rect) {
-        let Some(focused_rect) = self.leaf_rect(self.focus, area) else {
+        let geometry = self.geometry(area);
+        let Some(focused_rect) = geometry
+            .panes
+            .iter()
+            .find(|pane| pane.is_focused)
+            .map(navigation_rect)
+            .or_else(|| geometry.leaf_rects.get(&self.focus).copied())
+        else {
             return;
         };
         let target_dir = match nav {
@@ -1048,137 +1049,6 @@ fn typed_collect_leaves(node: &TypedNode, result: &mut Vec<LayoutLeaf>) {
             typed_collect_leaves(first, result);
             typed_collect_leaves(second, result);
         }
-    }
-}
-
-fn typed_leaf_rect(
-    node: &TypedNode,
-    target: LayoutLeaf,
-    area: Rect,
-    named: &[TerminalContainerId],
-) -> Option<Rect> {
-    let (content, _) = frames::content_rect(node, area, named);
-    match node {
-        TypedNode::Leaf(pane) => (LayoutLeaf::Pane(*pane) == target).then_some(area),
-        TypedNode::View { pane, .. } => (LayoutLeaf::Pane(*pane) == target).then_some(area),
-        TypedNode::Stack {
-            id,
-            selected,
-            children,
-        } => {
-            if target == LayoutLeaf::Stack(*id) {
-                Some(area)
-            } else {
-                children
-                    .get(*selected)
-                    .and_then(|child| typed_leaf_rect(child, target, content, named))
-            }
-        }
-        TypedNode::Split {
-            direction,
-            ratio,
-            first,
-            second,
-        } => {
-            let (first_area, second_area) = split_rect(content, *direction, *ratio);
-            typed_leaf_rect(first, target, first_area, named)
-                .or_else(|| typed_leaf_rect(second, target, second_area, named))
-        }
-    }
-}
-
-fn typed_collect_panes(
-    node: &TypedNode,
-    area: Rect,
-    focus: LayoutLeaf,
-    named: &[TerminalContainerId],
-    inside_frame: bool,
-    result: &mut Vec<PaneInfo>,
-) {
-    let (content, framed) = frames::content_rect(node, area, named);
-    let inside_frame = inside_frame || framed;
-    let pane = match node {
-        TypedNode::Leaf(id) => Some((*id, focus == LayoutLeaf::Pane(*id))),
-        TypedNode::View { pane, .. } => Some((*pane, focus == LayoutLeaf::Pane(*pane))),
-        TypedNode::Stack {
-            id,
-            selected,
-            children,
-        } => {
-            if let Some(child) = children.get(*selected) {
-                let focus = if focus == LayoutLeaf::Stack(*id) {
-                    child.selected_pane().map(LayoutLeaf::Pane).unwrap_or(focus)
-                } else {
-                    focus
-                };
-                typed_collect_panes(child, content, focus, named, inside_frame, result);
-            }
-            None
-        }
-        TypedNode::Split {
-            direction,
-            ratio,
-            first,
-            second,
-        } => {
-            let (first_area, second_area) = split_rect(content, *direction, *ratio);
-            typed_collect_panes(first, first_area, focus, named, inside_frame, result);
-            typed_collect_panes(second, second_area, focus, named, inside_frame, result);
-            None
-        }
-    };
-    if let Some((id, is_focused)) = pane {
-        result.push(PaneInfo {
-            id,
-            rect: area,
-            inner_rect: area,
-            scrollbar_rect: None,
-            borders: if inside_frame || matches!(node, TypedNode::View { .. }) {
-                Borders::ALL
-            } else {
-                Borders::NONE
-            },
-            is_focused,
-        });
-    }
-}
-
-fn typed_collect_splits(
-    node: &TypedNode,
-    area: Rect,
-    named: &[TerminalContainerId],
-    inside_frame: bool,
-    path: &mut Vec<bool>,
-    result: &mut Vec<SplitBorder>,
-) {
-    let (content, framed) = frames::content_rect(node, area, named);
-    let inside_frame = inside_frame || framed;
-    if let TypedNode::Split {
-        direction,
-        ratio,
-        first,
-        second,
-    } = node
-    {
-        let (first_area, second_area) = split_rect(content, *direction, *ratio);
-        let pos = match direction {
-            Direction::Horizontal => first_area.x + first_area.width,
-            Direction::Vertical => first_area.y + first_area.height,
-        };
-        result.push(SplitBorder {
-            pos,
-            direction: *direction,
-            ratio: *ratio,
-            area: content,
-            path: path.clone(),
-            independent_borders: inside_frame,
-        });
-        path.push(false);
-        typed_collect_splits(first, first_area, named, inside_frame, path, result);
-        path.pop();
-        path.push(true);
-        typed_collect_splits(second, second_area, named, inside_frame, path, result);
-        path.pop();
     }
 }
 
@@ -1402,14 +1272,14 @@ pub fn find_in_direction(
     direction: NavDirection,
     panes: &[PaneInfo],
 ) -> Option<PaneId> {
-    let fr = focused.rect;
+    let fr = navigation_rect(focused);
 
     panes
         .iter()
         .enumerate()
         .filter(|(_, p)| p.id != focused.id)
         .filter(|(_, p)| {
-            let r = p.rect;
+            let r = navigation_rect(p);
             match direction {
                 NavDirection::Left => {
                     r.x + r.width <= fr.x && ranges_overlap(r.y, r.height, fr.y, fr.height)
@@ -1426,7 +1296,7 @@ pub fn find_in_direction(
             }
         })
         .min_by_key(|(index, p)| {
-            let r = p.rect;
+            let r = navigation_rect(p);
             let edge_distance = match direction {
                 NavDirection::Left => fr.x.saturating_sub(r.x + r.width),
                 NavDirection::Right => r.x.saturating_sub(fr.x + fr.width),
@@ -1452,6 +1322,14 @@ pub fn find_in_direction(
             (edge_distance, Reverse(overlap), center_distance, *index)
         })
         .map(|(_, p)| p.id)
+}
+
+fn navigation_rect(pane: &PaneInfo) -> Rect {
+    if pane.frame_policy == PaneFramePolicy::Unframed {
+        pane.inner_rect
+    } else {
+        pane.rect
+    }
 }
 
 fn ranges_overlap(a_start: u16, a_len: u16, b_start: u16, b_len: u16) -> bool {
@@ -2224,6 +2102,7 @@ mod tests {
             inner_rect: Rect::new(10, 10, 10, 10),
             scrollbar_rect: None,
             borders: Borders::NONE,
+            frame_policy: PaneFramePolicy::Normal,
             is_focused: true,
         };
         let small_overlap_first = PaneInfo {
@@ -2232,6 +2111,7 @@ mod tests {
             inner_rect: Rect::new(0, 10, 10, 2),
             scrollbar_rect: None,
             borders: Borders::NONE,
+            frame_policy: PaneFramePolicy::Normal,
             is_focused: false,
         };
         let larger_overlap_second = PaneInfo {
@@ -2240,6 +2120,7 @@ mod tests {
             inner_rect: Rect::new(0, 10, 10, 8),
             scrollbar_rect: None,
             borders: Borders::NONE,
+            frame_policy: PaneFramePolicy::Normal,
             is_focused: false,
         };
         let panes = vec![focused.clone(), small_overlap_first, larger_overlap_second];

@@ -25,6 +25,7 @@ pub(crate) fn collect_retained(
                 inner_rect: rect(pane.inner_rect),
                 scrollbar_rect: pane.scrollbar_rect.map(rect),
                 borders: ratatui::widgets::Borders::NONE,
+                frame_policy: crate::layout::PaneFramePolicy::Normal,
                 is_focused: pane.focused,
             })
         })

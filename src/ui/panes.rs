@@ -13,7 +13,7 @@ use super::text::truncate_end;
 use super::widgets::panel_contrast_fg;
 use crate::app::state::Palette;
 use crate::app::AppState;
-use crate::layout::PaneInfo;
+use crate::layout::{PaneFramePolicy, PaneInfo};
 use crate::popup_size::resolve_popup_geometry;
 use crate::terminal::{TerminalRuntime, TerminalRuntimeRegistry};
 
@@ -51,6 +51,14 @@ pub(crate) fn pane_inner_rect(area: Rect, borders: Borders) -> Rect {
         area
     } else {
         Block::default().borders(borders).inner(area)
+    }
+}
+
+pub(crate) fn pane_content_rect(info: &PaneInfo) -> Rect {
+    if info.frame_policy == PaneFramePolicy::Unframed {
+        info.inner_rect
+    } else {
+        pane_inner_rect(info.rect, info.borders)
     }
 }
 
@@ -134,8 +142,10 @@ pub(crate) fn apply_pane_chrome(
             let right_neighbor = multi_pane.then(|| pane_to_right(&info, &panes)).flatten();
             let below_neighbor = multi_pane.then(|| pane_below(&info, &panes)).flatten();
 
-            let independent = info.borders == Borders::ALL;
-            if !independent && multi_pane && pane_gaps && !pane_borders.draws_borders() {
+            let independent = info.frame_policy == PaneFramePolicy::Full;
+            let unframed = info.frame_policy == PaneFramePolicy::Unframed;
+            if !independent && !unframed && multi_pane && pane_gaps && !pane_borders.draws_borders()
+            {
                 if right_neighbor.is_some() {
                     info.rect.width = shrink_for_one_cell_gap(info.rect.width);
                 }
@@ -144,7 +154,9 @@ pub(crate) fn apply_pane_chrome(
                 }
             }
 
-            info.borders = if independent {
+            info.borders = if unframed {
+                Borders::NONE
+            } else if independent {
                 Borders::ALL
             } else if !bordered {
                 Borders::NONE
@@ -296,11 +308,8 @@ pub(super) fn resize_tab_panes_except(
         app.pane_gaps,
         app.pane_outer_borders,
     ) {
-        let pane_inner = collection_content_rect(
-            &selected_stack_panes,
-            info.id,
-            pane_inner_rect(info.rect, info.borders),
-        );
+        let pane_inner =
+            collection_content_rect(&selected_stack_panes, info.id, pane_content_rect(&info));
 
         if let Some((terminal_id, rt)) =
             runtime_for_tab_pane(app, terminal_runtimes, workspace_index, tab, info.id)
@@ -325,12 +334,14 @@ pub(super) fn resize_tab_panes_except(
 pub(super) fn compute_pane_infos_for_tab(
     app: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
-    ws_idx: usize,
-    tab_idx: usize,
+    target: super::tab_surface::TabSurfaceTarget,
     area: Rect,
+    raw_panes: Vec<PaneInfo>,
     resize_panes: bool,
     cell_size: crate::kitty_graphics::HostCellSize,
 ) -> Vec<PaneInfo> {
+    let ws_idx = target.workspace_index;
+    let tab_idx = target.tab_index;
     let Some(tab) = app
         .workspaces
         .get(ws_idx)
@@ -383,23 +394,25 @@ pub(super) fn compute_pane_infos_for_tab(
             inner_rect,
             scrollbar_rect,
             borders,
+            frame_policy: if tab.layout.view_at(focused_id).is_some() {
+                PaneFramePolicy::Full
+            } else {
+                PaneFramePolicy::Normal
+            },
             is_focused: true,
         }];
     }
 
     let mut pane_infos = apply_pane_chrome(
-        tab.pane_layout(area),
+        raw_panes,
         app.pane_borders,
         app.pane_gaps,
         app.pane_outer_borders,
     );
 
     for info in &mut pane_infos {
-        let pane_inner = collection_content_rect(
-            &selected_stack_panes,
-            info.id,
-            pane_inner_rect(info.rect, info.borders),
-        );
+        let pane_inner =
+            collection_content_rect(&selected_stack_panes, info.id, pane_content_rect(info));
 
         let mut inner_rect = pane_inner;
         let mut scrollbar_rect = None;
@@ -448,9 +461,14 @@ fn compute_pane_infos(
     compute_pane_infos_for_tab(
         app,
         terminal_runtimes,
-        workspace_index,
-        tab_index,
+        super::tab_surface::TabSurfaceTarget {
+            workspace_index,
+            tab_index,
+        },
         area,
+        app.workspaces[workspace_index].tabs[tab_index]
+            .layout
+            .panes(area),
         resize_panes,
         cell_size,
     )
@@ -1056,6 +1074,7 @@ mod tests {
             inner_rect: Rect::default(),
             scrollbar_rect: None,
             borders: Borders::ALL,
+            frame_policy: PaneFramePolicy::Normal,
             is_focused: false,
         }];
 
@@ -1240,6 +1259,7 @@ mod tests {
                 inner_rect: Rect::default(),
                 scrollbar_rect: None,
                 borders: Borders::TOP | Borders::LEFT,
+                frame_policy: PaneFramePolicy::Normal,
                 is_focused: true,
             },
             PaneInfo {
@@ -1248,6 +1268,7 @@ mod tests {
                 inner_rect: Rect::default(),
                 scrollbar_rect: None,
                 borders: Borders::TOP | Borders::LEFT | Borders::RIGHT,
+                frame_policy: PaneFramePolicy::Normal,
                 is_focused: false,
             },
             PaneInfo {
@@ -1256,6 +1277,7 @@ mod tests {
                 inner_rect: Rect::default(),
                 scrollbar_rect: None,
                 borders: Borders::TOP | Borders::LEFT | Borders::BOTTOM,
+                frame_policy: PaneFramePolicy::Normal,
                 is_focused: false,
             },
             PaneInfo {
@@ -1264,6 +1286,7 @@ mod tests {
                 inner_rect: Rect::default(),
                 scrollbar_rect: None,
                 borders: Borders::ALL,
+                frame_policy: PaneFramePolicy::Normal,
                 is_focused: false,
             },
         ];
@@ -1275,6 +1298,7 @@ mod tests {
                 area: Rect::new(0, 0, 4, 4),
                 path: vec![],
                 independent_borders: false,
+                view_before: false,
             },
             crate::layout::SplitBorder {
                 pos: 2,
@@ -1283,6 +1307,7 @@ mod tests {
                 area: Rect::new(0, 0, 4, 4),
                 path: vec![false],
                 independent_borders: false,
+                view_before: false,
             },
         ];
         let ws = Workspace::test_new("test");
@@ -1312,6 +1337,7 @@ mod tests {
                 inner_rect: Rect::default(),
                 scrollbar_rect: None,
                 borders: Borders::ALL,
+                frame_policy: PaneFramePolicy::Normal,
                 is_focused: true,
             },
             PaneInfo {
@@ -1320,6 +1346,7 @@ mod tests {
                 inner_rect: Rect::default(),
                 scrollbar_rect: None,
                 borders: Borders::ALL,
+                frame_policy: PaneFramePolicy::Normal,
                 is_focused: false,
             },
         ];
@@ -1396,7 +1423,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn named_collection_reserves_nested_frames_and_one_header_row() {
+    async fn ordinary_named_collection_keeps_normal_frames_and_one_header_row() {
         let mut app = AppState::test_new();
         app.pane_borders = PaneBordersConfig::Off;
         app.pane_scrollbars = false;
@@ -1432,25 +1459,17 @@ mod tests {
         let preview = infos.iter().find(|info| info.id == member).unwrap();
 
         assert_eq!(tiled.inner_rect, tiled.rect);
-        assert_eq!(preview.borders, Borders::ALL);
+        assert_eq!(preview.borders, Borders::NONE);
         assert_eq!(
             preview.inner_rect.y,
-            preview.rect.y + 2,
-            "child top border plus one stack header row"
+            preview.rect.y + 1,
+            "one stack header row, not a nested terminal frame"
         );
-        assert_eq!(
-            preview.inner_rect.height,
-            preview.rect.height - 3,
-            "two child borders plus one stack header row"
-        );
-        assert_eq!(preview.inner_rect.width, preview.rect.width - 2);
-        let frames = app.workspaces[0].tabs[0].box_frames(Rect::new(0, 0, 80, 20));
-        assert_eq!(frames.len(), 1);
-        assert_eq!(
-            preview.rect.y,
-            frames[0].rect.y + 1,
-            "outer group border is reserved before the child"
-        );
+        assert_eq!(preview.inner_rect.height, preview.rect.height - 1);
+        assert_eq!(preview.inner_rect.width, preview.rect.width);
+        assert!(app.workspaces[0].tabs[0]
+            .box_frames(Rect::new(0, 0, 80, 20))
+            .is_empty());
         assert_eq!(
             app.workspaces[0].tabs[0].runtimes[&member].current_size(),
             (preview.inner_rect.height, preview.inner_rect.width)

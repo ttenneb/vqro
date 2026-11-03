@@ -418,6 +418,7 @@ impl App {
             return encode_error(id, "split_not_found", "split path not found");
         }
 
+        self.manual_view_sizing_for_split(ws_idx, tab_idx, &params.path);
         self.schedule_session_save();
         let Some(layout) = self.layout_description(ws_idx, tab_idx) else {
             return encode_error(id, "layout_not_found", "layout unavailable");

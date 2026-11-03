@@ -108,10 +108,12 @@ content kind `(extension, view_id)` instead of a PTY. It has no terminal.
   covers. The extension keeps the meaning; core supplies only the covered
   terminals. Re-keying the request to a scope in the host<->extension contract is
   a later, separate change.
-- **Frame.** One outer box perimeter encloses both the terminal and its view;
-  each child has a complete one-cell perimeter inside it, in either split
-  direction. A view standing alone or zoomed keeps its full pane frame. This
-  supersedes the light-divider frame; see [Nested panes](../architecture/nested-panes.md#frame-style).
+- **Frame.** One outer terminal perimeter encloses its unframed terminal body
+  and fully framed attached views, side by side or stacked inside the bottom.
+  Membership includes hidden children: only a maximal subtree with exactly one
+  terminal and views scoped to it qualifies. Other boxes keep normal pane
+  frames, independent of names. A standalone/zoomed view keeps its full frame.
+  See [Nested panes](../architecture/nested-panes.md#frame-style).
 - A view pane that is not visible in the composed tab does no presentation work;
   background panes still parse output as today.
 
@@ -142,8 +144,14 @@ provider returns, the view is drawn again.
 
 - `vqro pane view add <pane> <extension>:<view> [--direction right|down]
   [--ratio FLOAT] [--focus]` adds a view pane beside a pane. The ratio is the
-  **view's share**, in either direction (0.1 through 0.9, default 0.5), before
-  child border insets and subject to integer cell quantization. `vqro pane view
+  **view's share**, in either direction (0.1 through 0.9), before
+  child border insets and subject to integer cell quantization. Omitting it
+  opts a new qualifying view into transient automatic sizing from accepted,
+  cached neutral document facts (initial tree fallback 0.5). Explicit ratios
+  and divider drags opt the affected view out; directional pane resize opts
+  its terminal group out. New defaults do not rearm earlier manual choices.
+  Restart/handoff preserves the last actual ratio, never the auto policy.
+  `vqro pane view
   close <view-pane>` drops it. Both are neutral: core stores the content
   identity and the placement, never a Tasks literal, and a view pane keeps a
   public pane identity like any pane.
