@@ -90,6 +90,7 @@ impl App {
             .collect::<Vec<_>>();
         self.host_document_caches
             .retain(|(namespace, _), _| package_namespaces.contains(&namespace.as_str()));
+        self.sync_view_headers();
         for (namespace, scope_id, generation, revision) in retired_documents {
             self.event_hub.push(crate::api::schema::EventEnvelope {
                 event: crate::api::schema::EventKind::HostDocumentUpdated,

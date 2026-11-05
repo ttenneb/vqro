@@ -101,6 +101,7 @@ mod thread_spawn;
 mod ui;
 mod update;
 mod view_document;
+mod view_headers;
 mod view_sizing;
 mod workspace;
 mod worktree;

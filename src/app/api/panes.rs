@@ -2491,6 +2491,7 @@ impl App {
     }
 
     pub(crate) fn emit_layout_updated_event(&mut self, ws_idx: usize, tab_idx: usize) {
+        self.sync_view_headers();
         if let Some(layout) = self.pane_layout_snapshot(ws_idx, tab_idx) {
             self.emit_layout_updated_snapshot(layout);
         }

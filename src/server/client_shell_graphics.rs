@@ -61,6 +61,7 @@ pub(crate) fn collect(
             pane_infos,
             split_borders,
             box_frames: &[],
+            collapsed_frames: &[],
         },
         popup_content_size,
         cell_size,

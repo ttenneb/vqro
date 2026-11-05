@@ -5409,6 +5409,41 @@ fn terminal_observe_allows_multiple_clients_without_attach_ownership() {
 }
 
 #[test]
+fn collapsed_panes_keep_membership_without_raw_output_presentation_invalidation() {
+    let mut server = test_headless_server();
+    let mut workspace = crate::workspace::Workspace::test_new("collapsed visibility");
+    let visible = workspace.tabs[0].root_pane;
+    let hidden = workspace.test_split(ratatui::layout::Direction::Vertical);
+    assert!(workspace.tabs[0].layout.set_collapsed(&[1], true));
+    server.app.state.workspaces = vec![workspace];
+    server.app.state.active = Some(0);
+    server.app.state.selected = 0;
+    server.app.state.ensure_test_terminals();
+    let (writer, _control, _render) = test_client_writer();
+    let mut client = ClientConnection::new(
+        (120, 40),
+        crate::kitty_graphics::HostCellSize::default(),
+        1,
+        RenderEncoding::SemanticFrame,
+        Some(writer),
+    );
+    client.shell_terminal_views_enabled = true;
+    client.shell_projection_revision = 1;
+    server.clients.insert(1, client);
+    assert!(server.pty_sources_visible_to_any_render_target(&HashSet::from([visible])));
+    assert!(!server.pty_sources_visible_to_any_render_target(&HashSet::from([hidden])));
+    let _ = server.app.render_dirty.take();
+    server.sync_immediate_pty_sources();
+    assert!(server.app.render_dirty.request_pty(hidden));
+    assert!(!server.app.render_dirty.has_immediate_work());
+    assert_eq!(
+        server.app.state.workspaces[0].tabs[0].layout.pane_count(),
+        2
+    );
+    server.app.state.assert_invariants_for_test();
+}
+
+#[test]
 fn collection_hidden_members_parse_but_do_not_trigger_presentation_work() {
     let mut server = test_headless_server();
     let mut workspace = crate::workspace::Workspace::test_new("nested-visibility");

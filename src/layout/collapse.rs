@@ -23,6 +23,24 @@ impl TypedNode {
 }
 
 impl TileLayout {
+    pub(crate) fn pane_path(&self, pane: PaneId) -> Option<Vec<usize>> {
+        super::leaf_path(&self.root, pane)
+    }
+
+    pub(crate) fn node_members(&self, path: &[usize]) -> Option<Vec<PaneId>> {
+        let mut members = Vec::new();
+        self.root.at(path)?.collect_all_panes(&mut members);
+        members.sort_by_key(|pane| pane.raw());
+        Some(members)
+    }
+
+    pub(crate) fn has_ancestor_members(&self, anchor: PaneId, members: &[PaneId]) -> bool {
+        let Some(path) = self.pane_path(anchor) else {
+            return false;
+        };
+        (0..=path.len()).any(|depth| self.node_members(&path[..depth]).as_deref() == Some(members))
+    }
+
     /// Desired-state edit. Paths address structural children, never wrappers.
     /// Public callers must validate their incarnation/tree fence before this edit.
     pub(crate) fn set_collapsed(&mut self, path: &[usize], collapsed: bool) -> bool {

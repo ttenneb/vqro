@@ -847,6 +847,7 @@ pub struct AppState {
     pub agent_start_view: Option<(String, String)>,
     /// Transient default-view sizing only. Restore deliberately does not rearm.
     pub(crate) view_sizing: crate::view_sizing::ViewSizing,
+    pub(crate) view_headers: crate::view_headers::ViewHeaders,
     pub tab_bar_right: Vec<TabBarStatusSegment>,
     pub tab_bar_right_separator: String,
     /// Expose the focused pane's cursor anchor to the outer terminal even when
@@ -1120,6 +1121,7 @@ impl AppState {
             show_agent_labels_on_pane_borders: false,
             agent_start_view: None,
             view_sizing: Default::default(),
+            view_headers: Default::default(),
             tab_bar_right: Vec::new(),
             tab_bar_right_separator: " ".into(),
             reveal_hidden_cursor_for_cjk_ime: false,

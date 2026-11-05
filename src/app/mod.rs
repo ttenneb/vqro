@@ -7,6 +7,8 @@ pub(crate) mod actions;
 mod agent_resume;
 pub(crate) mod agent_view;
 mod agents;
+mod collapse;
+mod view_headers;
 mod view_sizing;
 pub(crate) use agents::{AGENT_START_SETTLE_DELAY, MAX_AGENT_START_TIMEOUT};
 mod api;
@@ -830,6 +832,7 @@ impl App {
             show_agent_labels_on_pane_borders: config.ui.show_agent_labels_on_pane_borders,
             agent_start_view: parse_agent_start_view(config.ui.agent_start_view.as_deref()),
             view_sizing: Default::default(),
+            view_headers: Default::default(),
             tab_bar_right: Vec::new(),
             tab_bar_right_separator: String::new(),
             reveal_hidden_cursor_for_cjk_ime: config.experimental.reveal_hidden_cursor_for_cjk_ime,
