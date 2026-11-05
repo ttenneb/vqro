@@ -11,14 +11,14 @@ use crate::workspace::Workspace;
 
 /// Current structural session snapshot format version.
 /// Maximum snapshot version this binary can read.
-pub(crate) const SNAPSHOT_VERSION: u32 = 9;
+pub(crate) const SNAPSHOT_VERSION: u32 = 10;
 /// Admitted input version from pre-tree legacy-authority writers. Never written.
 #[cfg(any(unix, test))]
 pub(crate) const LEGACY_SNAPSHOT_WRITER_VERSION: u32 = 6;
 /// Snapshot version written by the immediately previous release. Kept as an
 /// admitted live-handoff input so a normal upgrade from that build is not
 /// rejected before FD admission; its `Pane` leaf is unchanged and parses as-is.
-pub(crate) const PREDECESSOR_SNAPSHOT_VERSION: u32 = 8;
+pub(crate) const PREDECESSOR_SNAPSHOT_VERSION: u32 = 9;
 /// Pane history has no terminal-identity fields and remains wire-compatible at v4.
 pub(super) const HISTORY_SNAPSHOT_VERSION: u32 = 4;
 pub(super) const MAX_SESSION_SNAPSHOT_BYTES: u64 = 16 * 1024 * 1024;
@@ -323,6 +323,9 @@ pub struct PaneHistorySnapshot {
 /// Canonical durable tree. Membership and selection have no parallel record.
 #[derive(Clone, Serialize, Deserialize)]
 pub enum LayoutSnapshot {
+    Collapsed {
+        node: Box<LayoutSnapshot>,
+    },
     Pane(u32),
     /// A view pane: a pane whose content is an extension view, not a terminal.
     View {
@@ -529,6 +532,7 @@ where
 
     fn collect_layout_panes(layout: &LayoutSnapshot, panes: &mut Vec<u32>) {
         match layout {
+            LayoutSnapshot::Collapsed { node } => collect_layout_panes(node, panes),
             LayoutSnapshot::Pane(id) => panes.push(*id),
             // A view is a structural pane with no terminal record. Rescuing it
             // as a terminal would fabricate an identity and misreport a valid
@@ -940,6 +944,7 @@ fn legacy_identity_cwd(snap: &LegacyWorkspaceSnapshot) -> PathBuf {
 
 fn first_pane_id_in_layout(layout: &LayoutSnapshot) -> Option<u32> {
     match layout {
+        LayoutSnapshot::Collapsed { node } => first_pane_id_in_layout(node),
         LayoutSnapshot::Pane(id) => Some(*id),
         LayoutSnapshot::View { pane, .. } => Some(*pane),
         LayoutSnapshot::Stack {
@@ -969,6 +974,9 @@ pub(crate) fn reserve_empty_collection(
         ratio: f32,
     ) -> bool {
         match node {
+            LayoutSnapshot::Collapsed { node } => {
+                insert(node, target, collection_id, direction, ratio)
+            }
             LayoutSnapshot::Pane(pane) if *pane == target => {
                 let old = std::mem::replace(node, LayoutSnapshot::Pane(target));
                 *node = LayoutSnapshot::Split {
@@ -1274,6 +1282,9 @@ fn capture_layout_leaf(leaf: crate::layout::LayoutLeaf) -> LayoutLeafSnapshot {
 
 fn capture_typed_node(node: &crate::layout::TypedNode) -> LayoutSnapshot {
     match node {
+        crate::layout::TypedNode::Collapsed { node } => LayoutSnapshot::Collapsed {
+            node: Box::new(capture_typed_node(node)),
+        },
         crate::layout::TypedNode::Leaf(id) => LayoutSnapshot::Pane(id.raw()),
         crate::layout::TypedNode::View {
             pane,
@@ -1509,7 +1520,8 @@ mod tests {
     fn root_split_ratio(tab: &TabSnapshot) -> Option<f32> {
         match &tab.layout {
             LayoutSnapshot::Split { ratio, .. } => Some(*ratio),
-            LayoutSnapshot::Pane(_)
+            LayoutSnapshot::Collapsed { .. }
+            | LayoutSnapshot::Pane(_)
             | LayoutSnapshot::View { .. }
             | LayoutSnapshot::Stack { .. } => None,
         }
@@ -1625,6 +1637,45 @@ mod tests {
         )
         .is_err());
         assert_eq!(serde_json::to_vec(&rejected).unwrap(), before);
+    }
+
+    #[test]
+    fn collapsed_snapshot_roundtrip_preserves_tree_identities_and_v9_stays_expanded() {
+        let mut state = crate::app::state::AppState::test_with_adversarial_identity_state();
+        state.assert_invariants_for_test();
+        let expanded = capture_from_state(&state);
+        let mut v9 = serde_json::to_value(&expanded).unwrap();
+        v9["version"] = serde_json::json!(9);
+        let upgraded = parse_snapshot(&serde_json::to_string(&v9).unwrap()).unwrap();
+        assert_eq!(upgraded.version, 10);
+        assert_eq!(
+            serde_json::to_value(&upgraded.workspaces).unwrap(),
+            serde_json::to_value(&expanded.workspaces).unwrap()
+        );
+        for workspace in &mut state.workspaces {
+            for tab in &mut workspace.tabs {
+                assert!(tab.layout.set_collapsed(&[], true));
+            }
+        }
+        state.assert_invariants_for_test();
+        let captured = capture_from_state(&state);
+        assert_eq!(captured.version, 10);
+        let encoded = serde_json::to_string(&captured).unwrap();
+        let decoded = parse_snapshot(&encoded).unwrap();
+        for (before, after) in captured.workspaces.iter().zip(&decoded.workspaces) {
+            for (before, after) in before.tabs.iter().zip(&after.tabs) {
+                assert!(matches!(&after.layout, LayoutSnapshot::Collapsed { .. }));
+                assert_eq!(
+                    serde_json::to_value(&before.layout).unwrap(),
+                    serde_json::to_value(&after.layout).unwrap()
+                );
+                assert_eq!(
+                    serde_json::to_value(&before.panes).unwrap(),
+                    serde_json::to_value(&after.panes).unwrap()
+                );
+                assert_eq!(before.focused, after.focused);
+            }
+        }
     }
 
     #[test]
@@ -2937,6 +2988,7 @@ mod tests {
             LayoutSnapshot::Split { first, second, .. } => {
                 stack_in_snapshot(first, target).or_else(|| stack_in_snapshot(second, target))
             }
+            LayoutSnapshot::Collapsed { node } => stack_in_snapshot(node, target),
             LayoutSnapshot::Pane(_) | LayoutSnapshot::View { .. } => None,
         }
     }

@@ -6,6 +6,7 @@ use super::snapshot::{LayoutSnapshot, SessionSnapshot};
 pub(super) fn repair(snapshot: &mut SessionSnapshot) -> bool {
     fn repair_node(node: &mut LayoutSnapshot, terminals: &HashSet<u32>) -> bool {
         match node {
+            LayoutSnapshot::Collapsed { node } => repair_node(node, terminals),
             LayoutSnapshot::View { pane, .. } if terminals.contains(pane) => {
                 // A saved terminal row outranks an ambiguous view alias. Refer
                 // to that SAME terminal, letting ordinary duplicate pruning

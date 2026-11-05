@@ -213,6 +213,8 @@ pub struct LayoutTreeDescription {
 pub enum LayoutTreeNode {
     Pane {
         pane_id: String,
+        #[serde(default, skip_serializing_if = "super::is_false")]
+        collapsed: bool,
     },
     /// A pane whose content is an extension view rather than a terminal. Its
     /// scope is derived from placement and is not part of this export.
@@ -220,17 +222,23 @@ pub enum LayoutTreeNode {
         pane_id: String,
         extension: String,
         view: String,
+        #[serde(default, skip_serializing_if = "super::is_false")]
+        collapsed: bool,
     },
     Stack {
         box_id: String,
         selected: usize,
         children: Vec<LayoutTreeNode>,
+        #[serde(default, skip_serializing_if = "super::is_false")]
+        collapsed: bool,
     },
     Split {
         direction: SplitDirection,
         ratio: f32,
         first: Box<LayoutTreeNode>,
         second: Box<LayoutTreeNode>,
+        #[serde(default, skip_serializing_if = "super::is_false")]
+        collapsed: bool,
     },
     #[serde(other)]
     Unknown,

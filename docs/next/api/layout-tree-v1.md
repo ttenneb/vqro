@@ -1,7 +1,8 @@
 # Neutral layout tree export and session durability
 
 Status: implemented. Session v8 established canonical nested trees; session v9
-adds view leaves without adding stage-4 box interactions.
+adds view leaves. Session v10 adds generic collapsed-node state without adding
+stage-4 box selection, naming, or close authority.
 
 ## Optional API
 
@@ -23,6 +24,10 @@ child index, not a pane identity; children can be panes, stacks or splits. The
 empty-stack sentinel is index zero. Box IDs use the host's stable container-ID
 syntax; unnamed binary splits have no allocated identity. Focus is a pane with
 `pane_id` or a stack with `box_id`. Node and focus enums have `Unknown` fallbacks.
+Every node can carry optional `"collapsed": true`; absent means expanded and
+expanded nodes omit the field. Collapse preserves the node's kind and children.
+The export is observational, not a conditional mutation token; see the
+[generic collapse contract](../architecture/generic-pane-collapse.md).
 
 Existing `layout.export`, `layout.apply` and `layout.set_split_ratio` retain
 pane-only, selected-branch response semantics. Their parameter shapes are
@@ -45,9 +50,15 @@ by `pane.get`, `pane.focus` and the move responses names its content:
 
 ## Persistence and upgrade
 
-All writers produce session version 9, independently of Collections authority.
+All writers produce session version 10, independently of Collections authority.
 The durable tree contains `Pane`, `View { pane, extension, view }`,
-`Stack { id, selected, children }` and `Split`;
+`Stack { id, selected, children }`, `Split` and `Collapsed { node }`;
+the wrapper adds no identity, path step, scope boundary, or box depth. Adjacent
+wrappers coalesce during recovery, and deleting/promoting a child preserves the
+survivor's collapsed state. Older trees default expanded; all previously admitted
+v0–v9 input conversions remain available. The v9 view-leaf and older frozen input
+fixtures are retained, with separate v10 writer/roundtrip expectations.
+
 Collections records retain only label/archive policy, never membership or
 selection. Terminal identities and public workspace/tab/pane numbering remain
 host facts. History remains independently versioned at 4.
@@ -72,7 +83,7 @@ The surface is retained for that consumer, not a new privileged product path;
 remove it if stage3 does not consume it.
 
 Untrusted session input stays bounded to 16 MiB and the existing serde_json
-128-level JSON recursion budget, for versions 8/9 as well as legacy input. This
+128-level JSON recursion budget, for versions 8/9/10 as well as legacy input. This
 budget applies during the first raw JSON decode, before semantic admission or
 construction of a typed layout; no unbounded-recursion feature/path is enabled.
 Excessive nesting refuses the complete snapshot and preserves its bytes rather
@@ -80,14 +91,14 @@ than partially restoring it. The maximal admitted legacy split chain (31 splits,
 32 panes, ending in a Stack) survives conversion and a v8 reader roundtrip.
 
 Before replacing an older session, the host creates a private, create-new sibling
-`session.json.pre-v9-v<old-version>.<random>.bak` with the exact original bytes.
+`session.json.pre-v10-v<old-version>.<random>.bak` with the exact original bytes.
 The backup file and containing directory are synced before publication. Failure
 before replacement leaves the old file intact; every conversion/publication
 failure retains the backup, including an uncertain post-replacement sync outcome.
 The same guard covers ordinary saves, checkpoint writes and handoff publication.
 It operates in the resolved target directory when the session is a symlink.
 
-Handoff v3 admits explicitly session v6, v7, v8 and v9. Legacy layouts convert before
+Handoff v3 admits explicitly session v6, v7, v8, v9 and v10. Legacy layouts convert before
 terminal descriptor admission; schema conversion is permitted but public,
 internal, structural or projection identity repair is not permitted for v3.
 The receiver adopts `max(manifest.collections_action_sequence, durable checkpoint

@@ -14,6 +14,7 @@ impl TypedNode {
     /// The pane identity of a pane leaf (terminal or view). Containers are `None`.
     pub(crate) fn pane_leaf(&self) -> Option<PaneId> {
         match self {
+            Self::Collapsed { node } => node.pane_leaf(),
             Self::Leaf(pane) => Some(*pane),
             Self::View { pane, .. } => Some(*pane),
             Self::Stack { .. } | Self::Split { .. } => None,
@@ -23,6 +24,7 @@ impl TypedNode {
     /// The content identity when this node is a view pane.
     pub(crate) fn view_ref(&self) -> Option<ViewRef> {
         match self {
+            Self::Collapsed { node } => node.view_ref(),
             Self::View {
                 pane,
                 extension,
@@ -63,6 +65,7 @@ impl TypedNode {
             return Some(self);
         };
         match self {
+            Self::Collapsed { node } => node.at(path),
             Self::Split { first, second, .. } => match index {
                 0 => first.at(rest),
                 1 => second.at(rest),
@@ -78,6 +81,7 @@ impl TypedNode {
             return Some(self);
         };
         match self {
+            Self::Collapsed { node } => node.at_mut(path),
             Self::Split { first, second, .. } => match index {
                 0 => first.at_mut(rest),
                 1 => second.at_mut(rest),
@@ -90,6 +94,7 @@ impl TypedNode {
 
     pub(crate) fn stack(&self, id: TerminalContainerId) -> Option<&Self> {
         match self {
+            Self::Collapsed { node } => node.stack(id),
             Self::Stack { id: own, .. } if *own == id => Some(self),
             Self::Stack { children, .. } => children.iter().find_map(|node| node.stack(id)),
             Self::Split { first, second, .. } => first.stack(id).or_else(|| second.stack(id)),
@@ -99,6 +104,7 @@ impl TypedNode {
 
     pub(crate) fn stack_mut(&mut self, id: TerminalContainerId) -> Option<&mut Self> {
         match self {
+            Self::Collapsed { node } => node.stack_mut(id),
             Self::Stack { id: own, .. } if *own == id => Some(self),
             Self::Stack { children, .. } => children.iter_mut().find_map(|node| node.stack_mut(id)),
             Self::Split { first, second, .. } => {
@@ -116,6 +122,9 @@ impl TypedNode {
             boxes: &mut HashSet<TerminalContainerId>,
         ) -> bool {
             match node {
+                TypedNode::Collapsed { node } => {
+                    !matches!(**node, TypedNode::Collapsed { .. }) && visit(node, panes, boxes)
+                }
                 TypedNode::Leaf(id) => panes.insert(*id),
                 TypedNode::View { pane, .. } => panes.insert(*pane),
                 TypedNode::Split { first, second, .. } => {
@@ -141,6 +150,7 @@ impl TypedNode {
 
     pub(crate) fn select_pane(&mut self, pane: PaneId) -> bool {
         match self {
+            Self::Collapsed { node } => node.select_pane(pane),
             Self::Leaf(id) => *id == pane,
             Self::View {
                 pane: view_pane, ..
@@ -164,6 +174,7 @@ impl TypedNode {
 
     pub(crate) fn selected_pane(&self) -> Option<PaneId> {
         match self {
+            Self::Collapsed { node } => node.selected_pane(),
             Self::Leaf(id) => Some(*id),
             Self::View { pane, .. } => Some(*pane),
             Self::Split { first, second, .. } => {
@@ -177,6 +188,7 @@ impl TypedNode {
 
     pub(crate) fn contains_pane(&self, pane: PaneId) -> bool {
         match self {
+            Self::Collapsed { node } => node.contains_pane(pane),
             Self::Leaf(id) => *id == pane,
             Self::View {
                 pane: view_pane, ..
@@ -190,6 +202,7 @@ impl TypedNode {
 
     pub(crate) fn pane_count(&self) -> usize {
         match self {
+            Self::Collapsed { node } => node.pane_count(),
             Self::Leaf(_) | Self::View { .. } => 1,
             Self::Split { first, second, .. } => first.pane_count() + second.pane_count(),
             Self::Stack { children, .. } => children.iter().map(Self::pane_count).sum(),
@@ -198,6 +211,7 @@ impl TypedNode {
 
     pub(crate) fn collect_stack_ids(&self, ids: &mut Vec<TerminalContainerId>) {
         match self {
+            Self::Collapsed { node } => node.collect_stack_ids(ids),
             Self::Leaf(_) | Self::View { .. } => {}
             Self::Split { first, second, .. } => {
                 first.collect_stack_ids(ids);
@@ -214,6 +228,7 @@ impl TypedNode {
 
     pub(crate) fn collect_all_panes(&self, panes: &mut Vec<PaneId>) {
         match self {
+            Self::Collapsed { node } => node.collect_all_panes(panes),
             Self::Leaf(id) => panes.push(*id),
             Self::View { pane, .. } => panes.push(*pane),
             Self::Split { first, second, .. } => {
@@ -232,6 +247,7 @@ impl TypedNode {
     /// terminals and are excluded: a view covers terminals, not other views.
     pub(crate) fn collect_terminal_panes(&self, panes: &mut Vec<PaneId>) {
         match self {
+            Self::Collapsed { node } => node.collect_terminal_panes(panes),
             Self::Leaf(id) => panes.push(*id),
             Self::View { .. } => {}
             Self::Split { first, second, .. } => {
@@ -252,6 +268,7 @@ impl TypedNode {
     pub(crate) fn view_scope(&self, view_pane: PaneId) -> Vec<PaneId> {
         fn find(node: &TypedNode, pane: PaneId) -> Option<Vec<PaneId>> {
             let found = match node {
+                TypedNode::Collapsed { node } => return find(node, pane),
                 TypedNode::View { pane: own, .. } => return (*own == pane).then(Vec::new),
                 TypedNode::Leaf(_) => return None,
                 TypedNode::Split { first, second, .. } => {
@@ -315,6 +332,7 @@ pub(super) fn reorder_child(
 fn depths(node: &TypedNode) -> HashMap<LayoutLeaf, usize> {
     fn visit(node: &TypedNode, depth: usize, result: &mut HashMap<LayoutLeaf, usize>) {
         match node {
+            TypedNode::Collapsed { node } => visit(node, depth, result),
             TypedNode::Leaf(pane) => {
                 result.insert(LayoutLeaf::Pane(*pane), depth);
             }
@@ -352,6 +370,10 @@ fn take_at(node: TypedNode, path: &[usize]) -> Option<(Option<TypedNode>, TypedN
         return Some((None, node));
     };
     match node {
+        TypedNode::Collapsed { node } => {
+            let (remaining, removed) = take_at(*node, path)?;
+            Some((remaining.map(TypedNode::collapsed), removed))
+        }
         TypedNode::Split {
             direction,
             ratio,

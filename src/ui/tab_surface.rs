@@ -20,6 +20,7 @@ pub(crate) struct TabSurfaceLayout {
     pub(crate) pane_infos: Vec<PaneInfo>,
     pub(crate) split_borders: Vec<SplitBorder>,
     pub(crate) box_frames: Vec<crate::layout::BoxFrame>,
+    pub(crate) collapsed_frames: Vec<crate::layout::CollapsedFrame>,
     pub(crate) leaf_rects: std::collections::HashMap<crate::layout::LayoutLeaf, Rect>,
 }
 
@@ -77,6 +78,7 @@ pub(crate) fn compute_tab_surface_for(
         panes: raw_panes,
         splits: split_borders,
         boxes: box_frames,
+        collapsed: collapsed_frames,
         leaf_rects,
     } = geometry;
     let pane_infos = target.map_or_else(Vec::new, |target| {
@@ -96,6 +98,7 @@ pub(crate) fn compute_tab_surface_for(
         pane_infos,
         split_borders,
         box_frames,
+        collapsed_frames,
         leaf_rects,
     }
 }

@@ -11368,6 +11368,9 @@
           "oneOf": [
             {
               "properties": {
+                "collapsed": {
+                  "type": "boolean"
+                },
                 "pane_id": {
                   "type": "string"
                 },
@@ -11385,6 +11388,9 @@
             {
               "description": "A pane whose content is an extension view rather than a terminal. Its\nscope is derived from placement and is not part of this export.",
               "properties": {
+                "collapsed": {
+                  "type": "boolean"
+                },
                 "extension": {
                   "type": "string"
                 },
@@ -11418,6 +11424,9 @@
                   },
                   "type": "array"
                 },
+                "collapsed": {
+                  "type": "boolean"
+                },
                 "selected": {
                   "format": "uint",
                   "minimum": 0,
@@ -11438,6 +11447,9 @@
             },
             {
               "properties": {
+                "collapsed": {
+                  "type": "boolean"
+                },
                 "direction": {
                   "$ref": "#/schemas/success_response/$defs/SplitDirection"
                 },

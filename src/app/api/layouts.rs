@@ -72,8 +72,20 @@ impl App {
 
     fn layout_tree_node(&self, ws_idx: usize, node: &TypedNode) -> Option<LayoutTreeNode> {
         Some(match node {
+            TypedNode::Collapsed { node } => {
+                let mut result = self.layout_tree_node(ws_idx, node)?;
+                match &mut result {
+                    LayoutTreeNode::Pane { collapsed, .. }
+                    | LayoutTreeNode::View { collapsed, .. }
+                    | LayoutTreeNode::Stack { collapsed, .. }
+                    | LayoutTreeNode::Split { collapsed, .. } => *collapsed = true,
+                    LayoutTreeNode::Unknown => {}
+                }
+                result
+            }
             TypedNode::Leaf(pane) => LayoutTreeNode::Pane {
                 pane_id: self.public_pane_id(ws_idx, *pane)?,
+                collapsed: false,
             },
             TypedNode::View {
                 pane,
@@ -83,6 +95,7 @@ impl App {
                 pane_id: self.public_pane_id(ws_idx, *pane)?,
                 extension: extension.clone(),
                 view: view.clone(),
+                collapsed: false,
             },
             TypedNode::Stack {
                 id,
@@ -95,6 +108,7 @@ impl App {
                     .iter()
                     .map(|child| self.layout_tree_node(ws_idx, child))
                     .collect::<Option<Vec<_>>>()?,
+                collapsed: false,
             },
             TypedNode::Split {
                 direction,
@@ -109,6 +123,7 @@ impl App {
                 ratio: *ratio,
                 first: Box::new(self.layout_tree_node(ws_idx, first)?),
                 second: Box::new(self.layout_tree_node(ws_idx, second)?),
+                collapsed: false,
             },
         })
     }
@@ -476,6 +491,7 @@ impl App {
     ) -> Option<LayoutNode> {
         // Published pane-only API semantics stay here, not in the canonical layout.
         match node {
+            TypedNode::Collapsed { node } => self.layout_node_description(ws_idx, tab_idx, node),
             TypedNode::Leaf(pane_id) => Some(LayoutNode::Pane {
                 pane: self.layout_pane_description(ws_idx, tab_idx, *pane_id)?,
             }),
@@ -792,6 +808,7 @@ fn layout_pane_count(node: &LayoutNode) -> usize {
 
 fn subtree_has_terminal(node: &TypedNode) -> bool {
     match node {
+        TypedNode::Collapsed { node } => subtree_has_terminal(node),
         TypedNode::Leaf(_) => true,
         TypedNode::View { .. } => false,
         TypedNode::Stack {
@@ -1006,6 +1023,7 @@ mod tests {
             box_id,
             selected,
             children,
+            ..
         } = *second
         else {
             panic!("tree stack")
@@ -1019,10 +1037,12 @@ mod tests {
             children,
             vec![
                 LayoutTreeNode::Pane {
-                    pane_id: app.public_pane_id(0, selected_pane).unwrap()
+                    pane_id: app.public_pane_id(0, selected_pane).unwrap(),
+                    collapsed: false,
                 },
                 LayoutTreeNode::Pane {
-                    pane_id: app.public_pane_id(0, hidden).unwrap()
+                    pane_id: app.public_pane_id(0, hidden).unwrap(),
+                    collapsed: false,
                 },
             ]
         );
