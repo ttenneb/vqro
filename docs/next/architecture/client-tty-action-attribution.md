@@ -46,7 +46,24 @@ JSON PIDs are not credentials; readers bind the live endpoint to its kernel peer
 A missing or unusable namespace/publication must never prevent server startup,
 PTY creation, import, restore or handoff. A failed publisher logs prominently,
 disables new client-human authority locally and retries on later ownership
-changes. No heartbeat or process/file-descriptor census is introduced.
+changes or explicit native-client attachment. Each coalesced worker signal makes
+at most eight lock-contention attempts, spaced 10 ms apart; other errors fail
+immediately. Exhaustion remains incomplete until another such explicit trigger.
+No heartbeat or process/file-descriptor census is introduced. Cached status reads
+never trigger retries. PTY lifecycle code never waits for these attempts.
+
+Only explicit server bootstrap initializes a publisher, before normal or handoff
+import PTY construction. Ordinary CLI processes do not publish. Startup errors
+unwind App/PTY handles before scope cleanup; handled CLI process exits finalize
+any existing own publisher. Abrupt termination cannot run destructors: private
+test fixtures may remove only their own exact boot/PID/birth records after kernel
+proof of death/reuse and actual descriptor release. Production readers do not
+remove other records.
+
+The record cap applies to 64 live publishers, after positive dead/reused
+filtering. Independent bounds remain: 4096 directory entries, 128 KiB per live
+record, 4096 aggregate owned PTYs, and the caller's observation deadline. Unknown
+liveness and bound exhaustion fail closed; dead files are not a live-slot census.
 
 A file's `complete` flag is not freshness proof. Before each ownership change,
 the server marks its authoritative cached ownership epoch dirty. The proposed
@@ -62,8 +79,8 @@ Recheck observed epochs after asynchronous peer proof and checked audit writing.
 Carry proof epochs into final admission and recheck the local authoritative epoch,
 connection, caller, document, provider and confirmation identity immediately
 before queueing. A preparation token never bypasses fresh ownership proof.
-Publication/observation is bounded and off rendering; only lifecycle changes
-publish. Old ownership is removed only after actual release/transfer; handoff
+Publication/observation is bounded and off rendering; lifecycle changes and
+explicit attachment retries are the only publication triggers. Old ownership is removed only after actual release/transfer; handoff
 attempts overlapping publication without making terminal recovery depend on it.
 
 ### Explicit coverage limits
@@ -71,7 +88,7 @@ attempts overlapping publication without making terminal recovery depend on it.
 Pre-change servers that publish no record are invisible to record enumeration.
 A current server whose **first** publication fails is also invisible to peers:
 it logs prominently, disables its own new authority and retries on later ownership
-changes. Peers cannot infer a missing file that never existed. These residuals are
+changes or explicit native-client attachment. Peers cannot infer a missing file that never existed. These residuals are
 explicitly accepted limits, not a universal absence/completeness guarantee.
 Complete ancestry exclusion remains mandatory. No adversarial same-user or
 cross-version authentication guarantee is made.

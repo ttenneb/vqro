@@ -5,6 +5,7 @@ pub fn run_server() -> io::Result<()> {
     init_logging();
     crate::platform::ignore_server_hangup();
     crate::platform::raise_server_nofile_limit();
+    let _ownership_scope = crate::pty_ownership::publisher::server_scope();
 
     let args: Vec<String> = std::env::args().collect();
     if args.get(2).map(String::as_str) == Some("--handoff-import") {
@@ -40,7 +41,7 @@ pub fn run_server() -> io::Result<()> {
         Err(err) if err.kind() == io::ErrorKind::AddrInUse => {
             eprintln!("error: herdr server is already running");
             eprintln!("api socket: {}", api::socket_path().display());
-            std::process::exit(1);
+            return Err(err);
         }
         Err(err) => return Err(err),
     };
@@ -73,7 +74,9 @@ pub fn run_server() -> io::Result<()> {
             Err(err) if err.kind() == io::ErrorKind::AddrInUse => {
                 eprintln!("error: herdr server is already running");
                 eprintln!("client socket: {}", client_socket_path().display());
-                std::process::exit(1);
+                // Unwind App/PTY ownership before publisher cleanup. A hard
+                // exit here would skip descriptor drops and leave our record.
+                return Err(err);
             }
             Err(err) => return Err(err),
         };

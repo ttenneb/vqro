@@ -531,6 +531,11 @@ where
 }
 
 fn finish_cli(outcome: io::Result<cli::CommandOutcome>) -> io::Result<()> {
+    // process::exit skips Rust drops. Ordinary CLI paths never initialize a
+    // publisher, but a handled command must finalize any existing own record.
+    if !matches!(outcome, Ok(cli::CommandOutcome::NotCli)) {
+        crate::pty_ownership::publisher::stop();
+    }
     match outcome {
         Ok(cli::CommandOutcome::Handled(code)) => std::process::exit(code),
         Ok(cli::CommandOutcome::NotCli) => Ok(()),

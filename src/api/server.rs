@@ -126,7 +126,6 @@ fn start_server_inner(
         }
     };
 
-    crate::pty_ownership::publisher::start();
     Ok(ServerHandle {
         _thread: thread,
         path,

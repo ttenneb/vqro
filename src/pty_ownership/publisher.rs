@@ -16,6 +16,24 @@ struct Publisher {
 
 static GLOBAL: OnceLock<Option<Arc<Publisher>>> = OnceLock::new();
 
+pub(super) const MAX_PUBLICATION_ATTEMPTS: usize = 8;
+pub(super) fn retry_publication(
+    mut publish: impl FnMut() -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    for attempt in 1..=MAX_PUBLICATION_ATTEMPTS {
+        match publish() {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    && attempt < MAX_PUBLICATION_ATTEMPTS =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            result => return result,
+        }
+    }
+    Err(std::io::Error::from(std::io::ErrorKind::WouldBlock))
+}
+
 fn global() -> Option<Arc<Publisher>> {
     GLOBAL.get_or_init(|| {
         // Unit tests use injected state/directories; only real private binaries
@@ -33,7 +51,8 @@ fn global() -> Option<Arc<Publisher>> {
                     let base = crate::platform::ownership_runtime_base().ok_or("fixed user runtime directory is unavailable")?;
                     let directory = RegistryDirectory::prepare(&base).map_err(|error| error.to_string())?;
                     let endpoint = worker.endpoint.clone().ok_or("ownership endpoint is not bounded UTF-8")?;
-                    directory.publish(&RegistryEntry { endpoint, ownership: record.clone() }).map_err(|error| error.to_string())?;
+                    let entry = RegistryEntry { endpoint, ownership: record.clone() };
+                    retry_publication(|| directory.publish(&entry)).map_err(|error| error.to_string())?;
                     Ok(directory)
                 })();
                 match result {
@@ -46,13 +65,14 @@ fn global() -> Option<Arc<Publisher>> {
                         }
                         let empty = worker.state.lock().is_ok_and(|state| state.members.is_empty() && state.pending.is_empty());
                         if worker.stopping.load(Ordering::Acquire) && empty {
-                            if let Err(error) = directory.remove(&record.server) { tracing::warn!(%error, "could not remove own ownership record"); }
+                            if let Err(error) = retry_publication(|| directory.remove(&record.server)) { tracing::warn!(%error, "could not remove own ownership record"); }
                             break;
                         }
                     }
                     Err(error) => {
                         // Core lifecycle never waits for or depends on this write.
-                        // No timer retry: a later ownership change sends another signal.
+                        // No heartbeat. Later ownership changes or explicit native
+                        // client attachment can coalesce one further bounded attempt.
                         tracing::error!(%error, "PTY ownership publication unavailable; client-human actions are read-only");
                         if worker.stopping.load(Ordering::Acquire) { break; }
                     }
@@ -68,8 +88,34 @@ fn global() -> Option<Arc<Publisher>> {
     }).clone()
 }
 
-pub(crate) fn start() {
+pub(crate) struct ServerPublicationScope;
+impl Drop for ServerPublicationScope {
+    fn drop(&mut self) {
+        stop();
+    }
+}
+
+/// Entered before any normal or handoff-import PTY construction. Plain CLI
+/// processes never enter this scope. Drop also covers early startup failures.
+pub(crate) fn server_scope() -> ServerPublicationScope {
     let _ = global();
+    ServerPublicationScope
+}
+
+/// Explicit attachment, not a heartbeat or status-read side effect. This only
+/// queues work for an existing incomplete publisher; never probes or waits here.
+pub(crate) fn retry_on_client_attach() {
+    let Some(Some(publisher)) = GLOBAL.get() else {
+        return;
+    };
+    if !publisher.stopping.load(Ordering::Acquire)
+        && publisher
+            .state
+            .lock()
+            .is_ok_and(|state| !state.status().complete)
+    {
+        let _ = publisher.signal.try_send(());
+    }
 }
 
 /// Pure cached read: the status endpoint must not initialize/probe a publisher.
@@ -89,7 +135,9 @@ pub(crate) struct OwnershipChange {
 }
 
 pub(crate) fn begin_change() -> OwnershipChange {
-    let publisher = global();
+    // Only explicit server startup initializes publication. Offline CLI PTYs
+    // do not create records or turn a CLI process into a session publisher.
+    let publisher = GLOBAL.get().and_then(Clone::clone);
     let change = publisher.as_ref().and_then(|publisher| {
         publisher
             .state
@@ -179,7 +227,7 @@ pub(crate) fn stop() {
                     .map(|state| state.server.clone()),
             ) {
                 if let Ok(directory) = RegistryDirectory::prepare(&base) {
-                    if let Err(error) = directory.remove(&key) {
+                    if let Err(error) = retry_publication(|| directory.remove(&key)) {
                         tracing::warn!(%error, "could not clean own ownership record");
                     }
                 }

@@ -1132,6 +1132,7 @@ pub(crate) fn handle_client_handshake(
     // This thread's ordered sends put evidence after connection registration
     // and before any endpoint action/input. No identity comes from the client.
     if endpoint_control_writer.is_some() {
+        crate::pty_ownership::publisher::retry_on_client_attach();
         if let Some(evidence) = invocation {
             let _ = server_event_tx.blocking_send(ServerEvent::ClientInvocationEvidence {
                 client_id,

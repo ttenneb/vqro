@@ -82,13 +82,15 @@ impl RegistryDirectory {
         crate::platform::private_ownership_file_options(&mut options);
         let file = options.open(&path)?;
         crate::platform::validate_private_ownership_path(&path, false)?;
-        if exclusive {
+        let result = if exclusive {
             file.try_lock()
-                .map_err(|error| invalid(error.to_string()))?;
         } else {
             file.try_lock_shared()
-                .map_err(|error| invalid(error.to_string()))?;
-        }
+        };
+        result.map_err(|error| match error {
+            std::fs::TryLockError::WouldBlock => io::Error::from(io::ErrorKind::WouldBlock),
+            std::fs::TryLockError::Error(error) => error,
+        })?;
         Ok(file)
     }
 
@@ -143,7 +145,9 @@ impl RegistryDirectory {
         let mut seen = 0;
         for entry in std::fs::read_dir(&self.root)? {
             seen += 1;
-            if seen > MAX_SERVERS * 2 + 1 {
+            // Dead files do not consume a live slot, but enumeration itself
+            // remains bounded independently of kernel liveness results.
+            if seen > 4096 {
                 return Err(invalid("ownership directory enumeration exceeds bound"));
             }
             let entry = entry?;
@@ -154,13 +158,13 @@ impl RegistryDirectory {
             if name == ".lock" || name.starts_with(".tmp-") {
                 continue;
             }
-            if !name.ends_with(".json") || paths.len() >= MAX_SERVERS {
+            if !name.ends_with(".json") {
                 return Err(invalid("unknown or excessive ownership entries"));
             }
             paths.push(entry.path());
         }
         paths.sort();
-        let mut entries = Vec::with_capacity(paths.len());
+        let mut entries = Vec::with_capacity(paths.len().min(MAX_SERVERS));
         let mut tty_count = 0;
         for path in paths {
             let name = path
@@ -192,6 +196,9 @@ impl RegistryDirectory {
                 super::ServerLiveness::Live(observed) if observed == key => {}
                 super::ServerLiveness::Dead | super::ServerLiveness::Reused => continue,
                 _ => return Err(invalid("ownership server liveness is unprovable")),
+            }
+            if entries.len() >= MAX_SERVERS {
+                return Err(invalid("live ownership server count exceeds bound"));
             }
             crate::platform::validate_private_ownership_path(&path, false)?;
             let mut options = OpenOptions::new();

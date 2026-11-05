@@ -152,6 +152,73 @@ fn publication_failure_leaves_old_file_but_live_status_detects_its_staleness() {
 }
 
 #[test]
+fn positively_dead_files_do_not_consume_the_live_server_cap() {
+    let root = Root::new();
+    let directory = RegistryDirectory::prepare(&root.0).expect("directory");
+    for pid in 1000..1065 {
+        directory.publish(&entry(pid)).expect("old private fixture");
+    }
+    let live = entry(5000);
+    directory.publish(&live).expect("live fixture");
+    let records = directory
+        .entries_with_liveness(|key| {
+            if key.pid == 5000 {
+                ServerLiveness::Live(key.clone())
+            } else {
+                ServerLiveness::Dead
+            }
+        })
+        .expect("dead files are not live slots");
+    assert_eq!(records, vec![live]);
+}
+
+#[test]
+fn transient_lock_recovery_does_not_need_a_second_lifecycle_change() {
+    use std::sync::atomic::AtomicUsize;
+    let root = Root::new();
+    let directory = RegistryDirectory::prepare(&root.0).expect("directory");
+    let first = entry(42);
+    directory.publish(&first).expect("R1");
+    let lock_path = directory
+        .record_path(&first.ownership.server)
+        .parent()
+        .expect("parent")
+        .join(".lock");
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(lock_path)
+        .expect("existing private lock");
+    lock.lock().expect("hold namespace briefly");
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        drop(lock);
+    });
+    let attempts = AtomicUsize::new(0);
+    let mut second = first.clone();
+    second.ownership.epoch += 1;
+    let result = super::publisher::retry_publication(|| {
+        attempts.fetch_add(1, Ordering::SeqCst);
+        directory.publish(&second)
+    });
+    release.join().expect("release own lock");
+    result.expect("bounded retry recovers without any further ownership signal");
+    assert!(attempts.load(Ordering::SeqCst) > 1);
+    assert_eq!(directory.entries().expect("R2"), vec![second]);
+}
+
+#[test]
+fn permanent_lock_retry_has_a_deterministic_attempt_bound_and_fails_closed() {
+    let mut attempts = 0;
+    let result = super::publisher::retry_publication(|| {
+        attempts += 1;
+        Err(std::io::Error::from(std::io::ErrorKind::WouldBlock))
+    });
+    assert!(result.is_err());
+    assert_eq!(attempts, super::publisher::MAX_PUBLICATION_ATTEMPTS);
+}
+
+#[test]
 fn failed_exclusive_creation_never_unlinks_a_temporary_file_this_write_did_not_create() {
     let root = Root::new();
     let directory = RegistryDirectory::prepare(&root.0).expect("directory");

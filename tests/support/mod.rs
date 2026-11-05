@@ -1,4 +1,5 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+mod owned_pty_registry;
 use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
@@ -7,7 +8,7 @@ use std::sync::{Mutex, Once, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-static PID_REGISTRY: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
+static PID_REGISTRY: OnceLock<Mutex<HashMap<u32, Option<u64>>>> = OnceLock::new();
 static RUNTIME_DIR_REGISTRY: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 static INIT: Once = Once::new();
 static CLEANUP_GUARD: OnceLock<CleanupGuard> = OnceLock::new();
@@ -40,7 +41,7 @@ pub fn register_spawned_herdr_pid(pid: Option<u32>) {
 
     ensure_cleanup_hooks();
     let mut registry = pid_registry_lock();
-    registry.insert(pid);
+    registry.insert(pid, owned_pty_registry::birth(pid).ok().flatten());
 }
 
 /// portable-pty's kill sends SIGHUP, which detached servers now ignore.
@@ -68,7 +69,9 @@ pub fn unregister_spawned_herdr_pid(pid: Option<u32>) {
         let mut guard = registry
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        guard.remove(&pid);
+        let birth = guard.remove(&pid).flatten();
+        drop(guard);
+        owned_pty_registry::cleanup(&HashSet::new(), &HashMap::from([(pid, birth)]));
     }
 }
 
@@ -118,6 +121,7 @@ pub fn cleanup_test_base(base: &Path) {
     let runtime_dirs = HashSet::from([runtime_dir.clone()]);
 
     terminate_servers_for_runtime_dirs(&runtime_dirs);
+    owned_pty_registry::cleanup(&runtime_dirs, &HashMap::new());
     unregister_runtime_dir(&runtime_dir);
     let _ = fs::remove_dir_all(base);
 }
@@ -553,13 +557,14 @@ pub fn wait_for_disconnect(stream: &mut UnixStream, timeout: Duration) -> Result
 }
 
 pub fn cleanup_registered_herdr_pids() {
-    let pids: Vec<u32> = {
+    let pids: Vec<(u32, Option<u64>)> = {
         let mut registry = pid_registry_lock();
         registry.drain().collect()
     };
 
-    for pid in pids {
+    for (pid, birth) in pids {
         terminate_pid(pid);
+        owned_pty_registry::cleanup(&HashSet::new(), &HashMap::from([(pid, birth)]));
     }
 
     let runtime_dirs: HashSet<PathBuf> = {
@@ -568,6 +573,7 @@ pub fn cleanup_registered_herdr_pids() {
     };
 
     terminate_servers_for_runtime_dirs(&runtime_dirs);
+    owned_pty_registry::cleanup(&runtime_dirs, &HashMap::new());
     let _ = cleanup_servers_with_missing_runtime_dir();
 }
 
@@ -595,9 +601,9 @@ fn ensure_cleanup_hooks() {
     });
 }
 
-fn pid_registry_lock() -> std::sync::MutexGuard<'static, HashSet<u32>> {
+fn pid_registry_lock() -> std::sync::MutexGuard<'static, HashMap<u32, Option<u64>>> {
     PID_REGISTRY
-        .get_or_init(|| Mutex::new(HashSet::new()))
+        .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
