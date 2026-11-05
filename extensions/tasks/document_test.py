@@ -1,4 +1,5 @@
 """Native attention policy and read-only producer characterization."""
+import copy
 import json
 import os
 from pathlib import Path
@@ -252,3 +253,133 @@ class DocumentTests(unittest.TestCase):
         self.assertEqual([1,2,2],[result["document_revision"] for result in results])
         self.assertEqual(results[0]["value"],results[2]["value"])
         self.assertTrue(all("document_revision" not in json.loads(row[0]) for row in self.store.db.execute("SELECT outcome FROM operations")))
+
+    def panel_rows(self, doc):
+        return [row for row in doc["items"] if row["id"].startswith("panel:") and ":task:" in row["id"]]
+
+    def agent_snapshot(self):
+        return self.snapshot([{"terminal_id": "a", "placement": P}])
+
+    def test_reported_human_debt_describes_inert_acceptance_at_displayed_revision(self):
+        task = self.invoke({"action": "create", "title": "Agent report", "operation_id": "report-root"}, caller=A)["task"]
+        task = self.change(task, "report", text=f"> {task['done_when']}\nEvidence for review")
+        doc = document.project(self.store, self.agent_snapshot())
+        row = next(row for row in self.panel_rows(doc) if row["id"].endswith(task["id"]))
+        self.assertEqual("you", row["view"]["waiting"])
+        self.assertEqual({"kind": "action", "label": "Accept work",
+                          "subject": {"id": task["id"], "revision": task["revision"]}}, row["view"]["affordance"])
+        self.assertEqual([], doc["actions"])
+        self.assertTrue(all(not row.get("action_ids") for row in doc["items"]))
+        self.assertNotIn("caller", json.dumps(row["view"]["affordance"]))
+        task = self.change(task, "accept")
+        self.assertFalse(any(row["id"].endswith(task["id"]) for row in self.panel_rows(document.project(self.store, self.agent_snapshot()))))
+
+    def test_decision_lists_exact_choices_default_and_decision_wide_reversibility(self):
+        for reversible in (True, False):
+            with self.subTest(reversible=reversible):
+                task = self.invoke({"action": "decision", "title": "Choose a route", "operation_id": f"decision-{reversible}",
+                                    "options": [{"key": "wait", "label": "Wait"}, {"key": "go", "label": "Go now"}],
+                                    "default": "wait", "reversible": reversible}, caller=A)["task"]
+                doc = document.project(self.store, self.agent_snapshot())
+                row = next(row for row in self.panel_rows(doc) if row["id"].endswith(task["id"]))
+                self.assertEqual("you", row["view"]["waiting"])
+                hint = row["view"]["affordance"]
+                self.assertEqual({"kind": "choice", "label": "Answer", "subject": {"id": task["id"], "revision": task["revision"]},
+                                  "options": task["decision"]["options"], "default": "wait", "reversible": reversible}, hint)
+                self.assertFalse(any("reversible" in option for option in hint["options"]))
+                self.assertEqual([], doc["actions"])
+                # A hint is not authorization: the ordinary provider still rejects an agent.
+                with self.assertRaisesRegex(ValueError, "human-only"):
+                    self.invoke({"action": "answer", "id": task["id"], "revision": task["revision"],
+                                 "option": "go", "operation_id": f"agent-answer-{reversible}"}, caller=A)
+
+    def test_human_class_metadata_does_not_assume_the_server_account_is_the_caller(self):
+        task = self.invoke({"action": "create", "title": "Human review", "operation_id": "human-review"})["task"]
+        task = self.change(task, "report", text=f"> {task['done_when']}\nEvidence")
+        # Same presentation for human roles and explicit human accounts, including
+        # a foreign account: actual eligibility belongs only to provider invocation.
+        for binding in ({"class": "human_unverified"}, {"role": "human_unverified"},
+                        {**H, "uid": (H["uid"] + 1) % 2**32},
+                        {"class": "human_unverified", "terminal_id": "elsewhere", "sid": "S-1-5-21-123"}):
+            candidate = {**task, "owed_to": {"role": "acceptors", "bindings": [A, binding]}}
+            self.assertIsNotNone(document.human_affordance(candidate, set()))
+        for owed in (None, A, {"role": "acceptors", "bindings": []}, {"role": "acceptors", "bindings": [A]}):
+            self.assertIsNone(document.human_affordance({**task, "owed_to": owed}, set()))
+        for state in ("open", "in_progress", "blocked", "accepted", "done"):
+            self.assertIsNone(document.human_affordance({**task, "state": state}, set()))
+        for action in ("start", "work/report", "unblock", "acceptor_missing"):
+            self.assertIsNone(document.human_affordance({**task, "owed_action": action}, set()))
+
+    def test_decision_dependencies_and_legacy_unfinished_children_keep_rows_read_only(self):
+        prerequisite = self.invoke({"action": "create", "title": "Prerequisite", "operation_id": "prerequisite"}, caller=A)["task"]
+        task = self.invoke({"action": "decision", "title": "Blocked decision", "depends_on": [prerequisite["id"]],
+                            "operation_id": "dependent-decision"}, caller=A)["task"]
+        row = next(row for row in self.panel_rows(document.project(self.store, self.agent_snapshot())) if row["id"].endswith(task["id"]))
+        self.assertNotIn("affordance", row["view"])
+        self.assertIsNone(document.human_affordance({**task, "waiting_on": []}, {task["id"]}))
+        self.assertIsNotNone(document.human_affordance({**task, "waiting_on": []}, set()))
+        # Current creation rejects decision children; characterize restored legacy
+        # records too, rather than advertising an answer the provider cannot apply.
+        self.store.db.execute("DELETE FROM dependencies WHERE task_id=?", (task["id"],))
+        self.store.db.execute("UPDATE tasks SET parent=? WHERE id=?", (task["id"], prerequisite["id"]))
+        row = next(row for row in self.panel_rows(document.project(self.store, self.agent_snapshot())) if row["id"].endswith(task["id"]))
+        self.assertNotIn("affordance", row["view"])
+        self.store.db.execute("UPDATE tasks SET state='done' WHERE id=?", (prerequisite["id"],))
+        row = next(row for row in self.panel_rows(document.project(self.store, self.agent_snapshot())) if row["id"].endswith(task["id"]))
+        self.assertIn("affordance", row["view"])
+
+    def test_unsupported_or_malformed_optional_hints_never_offer_free_text(self):
+        task = self.invoke({"action": "decision", "title": "Listed choices only", "operation_id": "malformed"}, caller=A)["task"]
+        terms = task["decision"]
+        malformed = [None, {}, {**terms, "options": []}, {**terms, "options": terms["options"] * 3},
+                     {**terms, "options": [terms["options"][0]] * 2}, {**terms, "default": "missing"},
+                     {**terms, "reversible": "yes"}, {**terms, "resolution": {"option": "yes"}},
+                     {**terms, "options": [{"key": "a", "label": "x" * 257}, {"key": "b", "label": "B"}]},
+                     {**terms, "options": [{"key": "a b", "label": "A"}, {"key": "b", "label": "B"}]},
+                     {**terms, "options": [{"key": "a", "label": "bad\nlabel"}, {"key": "b", "label": "B"}]},
+                     {**terms, "options": [{"key": "a", "label": "A", "text": "free"}, {"key": "b", "label": "B"}]}]
+        for value in malformed:
+            with self.subTest(terms=value):
+                self.assertIsNone(document.human_affordance({**task, "decision": value}, set()))
+        for revision in (None, True, 0, -1, "1", 2**63):
+            self.assertIsNone(document.human_affordance({**task, "revision": revision}, set()))
+        for kind in ("legacy", "unknown"):
+            self.assertIsNone(document.human_affordance({**task, "kind": kind}, set()))
+        # A legacy unstructured decision is still displayed but has no hint.
+        self.store.db.execute("UPDATE tasks SET decision=NULL WHERE id=?", (task["id"],))
+        row = next(row for row in self.panel_rows(document.project(self.store, self.agent_snapshot())) if row["id"].endswith(task["id"]))
+        self.assertNotIn("affordance", row["view"])
+        self.assertEqual(task["title"], row["label"])
+
+    def test_serialized_hint_budget_preserves_read_only_overflow_and_never_writes_store(self):
+        options = [{"key": str(n), "label": "é" * 128} for n in range(4)]
+        for n in range(document.PANEL_ROW_LIMIT + 1):
+            self.invoke({"action": "decision", "title": f"Question {n}", "operation_id": f"budget-{n}",
+                         "options": options, "default": "0"}, caller=A)
+        before = self.store.db.total_changes, self.store.document_revision(), list(self.store.db.iterdump())
+        observed = provider.read_only_store(self.root.name)
+        try:
+            doc = document.project(observed, self.agent_snapshot())
+            encoded = provider.canonical(doc).encode()
+            rows = self.panel_rows(doc)
+            hints = [row["view"]["affordance"] for row in rows if "affordance" in row["view"]]
+            self.assertGreater(len(hints), 0)
+            self.assertLess(len(hints), len(rows))
+            self.assertLessEqual(len(doc["items"]), 256)
+            self.assertLessEqual(len(encoded), document.DOCUMENT_BYTES)
+            self.assertLessEqual(sum(len(provider.canonical(hint).encode()) for hint in hints), document.AFFORDANCES_BYTES)
+            self.assertTrue(all(len(provider.canonical(hint).encode()) <= document.AFFORDANCE_BYTES for hint in hints))
+            self.assertEqual([], doc["actions"])
+            self.assertTrue(all(not row.get("action_ids") for row in doc["items"]))
+            self.assertEqual(0, observed.db.total_changes)
+        finally:
+            observed.db.close()
+        self.assertEqual(before, (self.store.db.total_changes, self.store.document_revision(), list(self.store.db.iterdump())))
+
+    def test_hint_is_a_detached_copy_of_the_displayed_task_not_a_mutation(self):
+        task = self.invoke({"action": "decision", "title": "Snapshot", "operation_id": "snapshot"}, caller=A)["task"]
+        original = copy.deepcopy(task)
+        hint = document.human_affordance(task, set())
+        hint["options"][0]["label"] = "Local presentation only"
+        hint["subject"]["revision"] += 1
+        self.assertEqual(original, task)

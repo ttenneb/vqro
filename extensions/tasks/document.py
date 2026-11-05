@@ -9,6 +9,7 @@ import json
 import re
 import sqlite3
 from collections import Counter
+from decision_queue import text as decision_text
 from provider import canonical
 from view import clean, debtors, durable_attention as attention, label, recipient
 
@@ -16,6 +17,11 @@ PREFIX = "context:attention."
 VIEW_CONTRACT = "host.view.v1"
 PANEL_VIEW = "tasks"
 PANEL_ROW_LIMIT = 24
+# Optional, inert presentation hints. Current hosts ignore this field; it grants
+# no caller authority and must never become an executable document action.
+AFFORDANCE_BYTES = 4096
+AFFORDANCES_BYTES = 32 * 1024
+DOCUMENT_BYTES = 256 * 1024
 # The one word Vqro composes "waiting on ..." around.
 OWED_TEXT = {
     "start": "start",
@@ -75,6 +81,56 @@ def summary(counts):
     return " · ".join(parts)
 
 
+def human_debt(task):
+    """Stored human debt, not proof that any particular client may act."""
+    return task.get("owed_action") in ("accept", "answer") and any(
+        binding.get("class") == "human_unverified" or binding.get("role") == "human_unverified"
+        for binding in debtors(task.get("owed_to"))
+    )
+
+
+def human_affordance(task, unfinished_parents):
+    """Describe only listed choices/acceptance; malformed hints stay read-only.
+
+    The subject is opaque to the host. Any future invocation must independently
+    authorize its caller and recheck this displayed revision in the provider.
+    """
+    if not human_debt(task) or task.get("waiting_on") or task["id"] in unfinished_parents:
+        return None
+    try:
+        decision_text(task["id"], 128, "subject id")
+        if type(task.get("revision")) is not int or not 1 <= task["revision"] <= 2**63 - 1:
+            return None
+        subject = {"id": task["id"], "revision": task["revision"]}
+        if task.get("kind") == "task" and task["state"] == "reported" and task["owed_action"] == "accept":
+            hint = {"kind": "action", "label": "Accept work", "subject": subject}
+        elif task.get("kind") == "decision" and task["state"] == "open" and task["owed_action"] == "answer":
+            terms = task.get("decision")
+            if not isinstance(terms, dict) or terms.get("resolution") is not None:
+                return None
+            options = terms.get("options")
+            if not isinstance(options, list) or not 2 <= len(options) <= 4 or type(terms.get("reversible")) is not bool:
+                return None
+            keys, choices = [], []
+            for option in options:
+                if not isinstance(option, dict) or set(option) != {"key", "label"}:
+                    return None
+                key = decision_text(option["key"], 32, "option key")
+                if not all(c.isascii() and (c.isalnum() or c in "_-.") for c in key):
+                    return None
+                keys.append(key)
+                choices.append({"key": key, "label": decision_text(option["label"], 256, "option label")})
+            if len(set(keys)) != len(keys) or terms.get("default") not in keys:
+                return None
+            hint = {"kind": "choice", "label": "Answer", "subject": subject,
+                    "options": choices, "default": terms["default"], "reversible": terms["reversible"]}
+        else:
+            return None
+        return hint if len(canonical(hint).encode()) <= AFFORDANCE_BYTES else None
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def pane_slices(tasks, placements):
     """Per-pane slices: counts over the whole slice, rows for open work.
 
@@ -96,7 +152,11 @@ def pane_slices(tasks, placements):
         if owner_placement:
             entries.append((owner_placement["pane_id"], "you", owed, creditor, creditor_placement))
         if creditor_placement and creditor_placement["pane_id"] != (owner_placement or {}).get("pane_id"):
-            entries.append((creditor_placement["pane_id"], "them", owed, owner, owner_placement))
+            # A human answer is shown in its filer's actual pane, not in an
+            # invented human terminal. This wording is presentation, not a
+            # binding to the client currently viewing the document.
+            waiting = "you" if human_debt(task) else "them"
+            entries.append((creditor_placement["pane_id"], waiting, owed, owner, owner_placement))
         for pane_id, waiting, action, counterparty, counterparty_placement in entries:
             bucket = slices.setdefault(pane_id, {"counts": Counter(), "rows": []})
             bucket["counts"][count_word(task)] += 1
@@ -275,6 +335,8 @@ def message_panel_items(tasks, placements, messages, known, room):
 def panel_items(tasks, placements, room):
     """One panel view per pane with rows, bounded by the remaining item room."""
     items = []
+    unfinished_parents = {task.get("parent") for task in tasks if not final(task)}
+    remaining = AFFORDANCES_BYTES
     for pane_id, bucket in sorted(pane_slices(tasks, placements).items()):
         if len(items) + 2 > room:
             break
@@ -294,6 +356,12 @@ def panel_items(tasks, placements, room):
                     "view": {"state": row["state"], "waiting": row["waiting"], "action": row["action"]}}
             if row["since"] is not None:
                 item["view"]["since"] = row["since"]
+            hint = human_affordance(task, unfinished_parents)
+            if hint is not None:
+                size = len(canonical(hint).encode())
+                if size <= remaining:
+                    item["view"]["affordance"] = hint
+                    remaining -= size
             parent = task.get("parent")
             item["parent_id"] = f"panel:{pane_id}:task:{parent}" if parent in in_slice else root_id
             terminal = panel_terminal(row["counterparty"], row["counterparty_placement"])
@@ -373,6 +441,11 @@ def project(store, snapshot):
         items.append({"id": PREFIX + "overflow:tasks", "role": "section", "label": f"{len(rows)} more · open full Tasks view"})
     if len(items) > 256:
         raise ValueError("attention scopes exceed document item bound")
-    return {"contract": VIEW_CONTRACT, "namespace": "vqro.tasks", "generation": snapshot["generation"],
-            "revision": snapshot["revision"], "surface": "navigation", "target": {"kind": "session"},
-            "items": items, "actions": [], "required_capabilities": []}
+    document = {"contract": VIEW_CONTRACT, "namespace": "vqro.tasks", "generation": snapshot["generation"],
+                "revision": snapshot["revision"], "surface": "navigation", "target": {"kind": "session"},
+                "items": items, "actions": [], "required_capabilities": []}
+    if len(canonical(document).encode()) > DOCUMENT_BYTES:
+        # Hints must not make an otherwise readable document unavailable.
+        for item in items:
+            item.get("view", {}).pop("affordance", None)
+    return document

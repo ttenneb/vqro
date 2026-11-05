@@ -830,7 +830,7 @@ mod tests {
         // Content-address characterization, not a frozen wire pin: deliberate
         // asset edits change these addresses. The Tasks address was independently
         // recomputed over all 11 declared assets in order, including ids.py and
-        // the human-attention/short-ID UX changes, with generation_id separators.
+        // the inert human-debt view affordances, with generation_id separators.
         assert_eq!(generation_dir().file_name().unwrap(), "pi-14d420aa1fdb11d9");
         let installed = crate::persist::plugin_registry::load();
         let tasks = installed
@@ -839,7 +839,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             Path::new(&tasks.plugin_root).file_name().unwrap(),
-            "tasks-b9f0e697ad034891"
+            "tasks-229e45135a1ce4b9"
         );
         crate::persist::plugin_registry::update(|entries| {
             entries
