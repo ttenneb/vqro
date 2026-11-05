@@ -31,6 +31,10 @@ use super::super::api_helpers::{
 use super::super::api_helpers::{METADATA_SOURCE_MAX_CHARS, METADATA_TTL_MAX_MS};
 use super::responses::{encode_error, encode_success};
 
+#[cfg(test)]
+#[path = "panes/tests/collapse_navigation.rs"]
+mod collapse_navigation_tests;
+
 impl App {
     pub(super) fn handle_pane_split(&mut self, id: String, params: PaneSplitParams) -> String {
         let target = if let Some(target_pane_id) = params.target_pane_id.as_deref() {
@@ -2433,9 +2437,23 @@ impl App {
         direction: PaneDirection,
     ) -> Option<PaneId> {
         let tab = self.state.workspaces.get(ws_idx)?.tabs.get(tab_idx)?;
-        let panes = tab.pane_layout(self.state.view.terminal_area);
-        let source = panes.iter().find(|pane| pane.id == source_pane_id)?;
-        find_in_direction(source, direction.into(), &panes)
+        let geometry = tab.layout.geometry(self.state.view.terminal_area);
+        if let Some(source) = geometry.panes.iter().find(|pane| pane.id == source_pane_id) {
+            return find_in_direction(source, direction.into(), &geometry.panes);
+        }
+        let path = tab
+            .layout
+            .tagged_path(&tab.layout.pane_path(source_pane_id)?)?;
+        let header = geometry
+            .collapsed
+            .iter()
+            .find(|header| path.starts_with(&header.path) && !header.rect.is_empty())?;
+        crate::layout::find_in_direction_from_rect(
+            source_pane_id,
+            header.rect,
+            direction.into(),
+            &geometry.panes,
+        )
     }
 
     pub(super) fn pane_layout_snapshot(

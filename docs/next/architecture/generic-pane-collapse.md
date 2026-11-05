@@ -105,6 +105,9 @@ existing child-header context menu, the matching ancestor-picker key, or CLI.
 Collapsed headers/strips expand directly. A client-local active header uses its
 fenced target, not a new shared anonymous-box focus type. Cold restore/attach and
 remote collapse must establish this state, not rely on the initiating client.
+Directional focus uses the current visible ancestor header/strip as its origin
+and ordinary visible-body neighbors, without inventing a body descriptor or box
+selection identity.
 Ordinary typing has no hidden-body target; held key/mouse release cleanup remains
 intact. Later zoom-on of a collapsed pane or box descendant rejects with
 `pane_collapsed`; zoom never implicitly expands or overwrites retained hidden PTY

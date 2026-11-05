@@ -1349,12 +1349,21 @@ pub fn find_in_direction(
     direction: NavDirection,
     panes: &[PaneInfo],
 ) -> Option<PaneId> {
-    let fr = navigation_rect(focused);
+    find_in_direction_from_rect(focused.id, navigation_rect(focused), direction, panes)
+}
 
+/// Header-only origins share ordinary navigation ranking without becoming body
+/// descriptors or acquiring a separate selection identity.
+pub(crate) fn find_in_direction_from_rect(
+    source: PaneId,
+    fr: Rect,
+    direction: NavDirection,
+    panes: &[PaneInfo],
+) -> Option<PaneId> {
     panes
         .iter()
         .enumerate()
-        .filter(|(_, p)| p.id != focused.id)
+        .filter(|(_, p)| p.id != source)
         .filter(|(_, p)| {
             let r = navigation_rect(p);
             match direction {
