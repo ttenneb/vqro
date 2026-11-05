@@ -57,8 +57,8 @@ fn key(node: &TypedNode) -> usize {
 }
 
 // All membership (including hidden terminals) participates in scope validation.
-// Only the selected stack branch contributes visibility. A direct view's scope
-// is resolved against its immediate parent's complete terminal membership.
+// Only the selected stack branch contributes visibility. View-only containers
+// inherit the nearest enclosing nonempty complete terminal membership.
 fn gather(node: &TypedNode, facts: &mut HashMap<usize, Facts>) -> Facts {
     let result = match node {
         TypedNode::Leaf(pane) => Facts {
@@ -93,8 +93,8 @@ fn gather(node: &TypedNode, facts: &mut HashMap<usize, Facts>) -> Facts {
                 views: a.views || b.views,
                 valid_scopes: a.valid_scopes
                     && b.valid_scopes
-                    && (!matches!(**first, TypedNode::View { .. }) || terminals == 1)
-                    && (!matches!(**second, TypedNode::View { .. }) || terminals == 1),
+                    && (!matches!(**first, TypedNode::View { .. }) || terminals <= 1)
+                    && (!matches!(**second, TypedNode::View { .. }) || terminals <= 1),
             }
         }
         TypedNode::Stack {
@@ -123,7 +123,7 @@ fn gather(node: &TypedNode, facts: &mut HashMap<usize, Facts>) -> Facts {
             if result.terminals != 1 {
                 result.terminal = None;
             }
-            result.valid_scopes &= !direct_view || result.terminals == 1;
+            result.valid_scopes &= !direct_view || result.terminals <= 1;
             result
         }
     };
@@ -145,16 +145,22 @@ struct Group {
 }
 
 pub(super) fn single_terminal_view_scopes(root: &TypedNode) -> HashMap<PaneId, PaneId> {
-    fn visit(node: &TypedNode, facts: &HashMap<usize, Facts>, out: &mut HashMap<PaneId, PaneId>) {
-        let terminal = facts
-            .get(&key(node))
-            .filter(|fact| fact.terminals == 1)
-            .and_then(|fact| fact.terminal);
+    fn visit(
+        node: &TypedNode,
+        inherited: Option<PaneId>,
+        facts: &HashMap<usize, Facts>,
+        out: &mut HashMap<PaneId, PaneId>,
+    ) {
+        let terminal = match facts.get(&key(node)) {
+            Some(fact) if fact.terminals == 0 => inherited,
+            Some(fact) if fact.terminals == 1 => fact.terminal,
+            _ => None,
+        };
         let mut child = |child: &TypedNode| {
             if let (TypedNode::View { pane, .. }, Some(terminal)) = (child, terminal) {
                 out.insert(*pane, terminal);
             }
-            visit(child, facts, out);
+            visit(child, terminal, facts, out);
         };
         match node {
             TypedNode::Split { first, second, .. } => {
@@ -172,7 +178,7 @@ pub(super) fn single_terminal_view_scopes(root: &TypedNode) -> HashMap<PaneId, P
     let mut facts = HashMap::new();
     gather(root, &mut facts);
     let mut scopes = HashMap::new();
-    visit(root, &facts, &mut scopes);
+    visit(root, None, &facts, &mut scopes);
     scopes
 }
 

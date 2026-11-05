@@ -246,44 +246,29 @@ impl TypedNode {
         }
     }
 
-    /// The scope of a view pane: every terminal in the view's nearest parent
-    /// container, in tree order. Placement is the only configuration; a view at
-    /// the tab root covers the terminals of the root subtree. An unknown pane, or
-    /// a view that is the only node, covers nothing.
+    /// Every terminal in the nearest enclosing container with nonempty terminal
+    /// membership, in tree order. View-only containers inherit that scope; hidden
+    /// stack members still count. A standalone view or unknown pane has no scope.
     pub(crate) fn view_scope(&self, view_pane: PaneId) -> Vec<PaneId> {
-        let Some(parent) = self.parent_container_of(view_pane) else {
-            return Vec::new();
-        };
-        let mut panes = Vec::new();
-        parent.collect_terminal_panes(&mut panes);
-        panes
-    }
-
-    /// The nearest container that directly holds `pane` (as a view or a terminal).
-    /// Returns the container node itself, not the child.
-    fn parent_container_of(&self, pane: PaneId) -> Option<&Self> {
-        fn is_direct(node: &TypedNode, pane: PaneId) -> bool {
-            node.pane_leaf() == Some(pane)
-        }
-        match self {
-            Self::Split { first, second, .. } => {
-                if is_direct(first, pane) || is_direct(second, pane) {
-                    return Some(self);
+        fn find(node: &TypedNode, pane: PaneId) -> Option<Vec<PaneId>> {
+            let found = match node {
+                TypedNode::View { pane: own, .. } => return (*own == pane).then(Vec::new),
+                TypedNode::Leaf(_) => return None,
+                TypedNode::Split { first, second, .. } => {
+                    find(first, pane).or_else(|| find(second, pane))
                 }
-                first
-                    .parent_container_of(pane)
-                    .or_else(|| second.parent_container_of(pane))
-            }
-            Self::Stack { children, .. } => {
-                if children.iter().any(|child| is_direct(child, pane)) {
-                    return Some(self);
+                TypedNode::Stack { children, .. } => {
+                    children.iter().find_map(|child| find(child, pane))
                 }
-                children
-                    .iter()
-                    .find_map(|child| child.parent_container_of(pane))
-            }
-            Self::Leaf(_) | Self::View { .. } => None,
+            };
+            found.map(|mut scope| {
+                if scope.is_empty() {
+                    node.collect_terminal_panes(&mut scope);
+                }
+                scope
+            })
         }
+        find(self, view_pane).unwrap_or_default()
     }
 }
 

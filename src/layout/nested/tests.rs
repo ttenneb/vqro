@@ -342,6 +342,77 @@ fn view_scope_uses_the_nearest_parent_container_not_the_root() {
 }
 
 #[test]
+fn view_only_box_inherits_the_nearest_nonempty_scope() {
+    let root = split(
+        split(
+            pane(1),
+            split(
+                view_node(8, "sample.views", "tasks"),
+                view_node(9, "sample.views", "messages"),
+            ),
+        ),
+        pane(2),
+    );
+    let tree = layout(root, 1);
+    for view in [8, 9] {
+        assert_eq!(
+            tree.view_scope(PaneId::from_raw(view)),
+            vec![PaneId::from_raw(1)]
+        );
+        assert_eq!(
+            tree.single_terminal_view_scopes()
+                .get(&PaneId::from_raw(view)),
+            Some(&PaneId::from_raw(1))
+        );
+    }
+    assert!(tree.typed_root().valid_structure());
+}
+
+#[test]
+fn inherited_view_scope_keeps_hidden_terminals_and_empty_root_stays_empty() {
+    let views = split(
+        view_node(8, "sample.views", "tasks"),
+        stack(2, 0, vec![view_node(9, "sample.views", "messages")]),
+    );
+    let empty = layout(views.clone(), 8);
+    assert!(empty.view_scope(PaneId::from_raw(8)).is_empty());
+    assert!(empty.view_scope(PaneId::from_raw(9)).is_empty());
+    let tree = layout(split(stack(1, 0, vec![pane(1), pane(2)]), views), 1);
+    for view in [8, 9] {
+        assert_eq!(
+            tree.view_scope(PaneId::from_raw(view)),
+            vec![PaneId::from_raw(1), PaneId::from_raw(2)]
+        );
+        assert!(!tree
+            .single_terminal_view_scopes()
+            .contains_key(&PaneId::from_raw(view)));
+    }
+}
+
+#[test]
+fn moving_a_view_only_box_rederives_scope_without_terminal_pins() {
+    let views = split(
+        view_node(8, "sample.views", "tasks"),
+        view_node(9, "sample.views", "messages"),
+    );
+    let mut tree = layout(split(split(pane(1), views), stack(1, 0, vec![pane(2)])), 1);
+    assert_eq!(
+        tree.view_scope(PaneId::from_raw(8)),
+        vec![PaneId::from_raw(1)]
+    );
+    assert!(tree.move_into_stack(&[0, 1], box_id(1), 1));
+    assert_eq!(
+        tree.view_scope(PaneId::from_raw(8)),
+        vec![PaneId::from_raw(2)]
+    );
+    assert_eq!(
+        tree.view_scope(PaneId::from_raw(9)),
+        vec![PaneId::from_raw(2)]
+    );
+    assert!(tree.typed_root().valid_structure());
+}
+
+#[test]
 fn lone_view_has_no_scope_and_is_still_one_pane() {
     let tree = layout(view_node(9, "vqro.tasks", "tasks"), 9);
     assert!(tree.view_scope(PaneId::from_raw(9)).is_empty());

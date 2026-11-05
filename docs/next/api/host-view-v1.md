@@ -98,9 +98,15 @@ zoom, move and close through the same layout engine as a terminal pane, and the
 content kind `(extension, view_id)` instead of a PTY. It has no terminal.
 
 - **Scope comes from placement, not configuration.** A view pane covers every
-  terminal in its nearest parent container, in tree order. A view at the tab
-  root covers the terminals of the root subtree. The host derives the scope from
-  the shared layout, so every client sees the same set.
+  terminal in its nearest enclosing container with nonempty terminal membership,
+  in tree order. Terminal-free containers inherit that enclosing scope: a box
+  containing only Tasks and Messages beside one terminal gives both views that
+  terminal's scope. Hidden stack members count; a nonempty container remains a
+  boundary even when it covers multiple terminals. A view-only tab with no such
+  ancestor has empty scope. Moving a view-only group rederives the scope; no
+  terminal binding is stored. The host derives scope from the shared layout,
+  so every client sees the same set. Frame qualification and automatic sizing
+  use the same full-membership rule.
 - The header always shows the scope: `Tasks · agent1` for one covered terminal,
   `Tasks · 3 terminals` for several.
 - The composition above is still per terminal pane: the host publishes each

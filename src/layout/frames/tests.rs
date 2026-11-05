@@ -51,6 +51,36 @@ fn maximal_single_terminal_group_does_not_repeat_outer_frames_for_more_views() {
     assert_eq!(geometry.panes[0].frame_policy, PaneFramePolicy::Unframed);
 }
 #[test]
+fn terminal_free_views_box_uses_one_outer_frame_and_two_inner_frames() {
+    for direction in [Direction::Horizontal, Direction::Vertical] {
+        let root = TypedNode::Split {
+            direction,
+            ratio: 0.7,
+            first: Box::new(TypedNode::Leaf(pane(1))),
+            second: Box::new(TypedNode::Split {
+                direction: Direction::Vertical,
+                ratio: 0.5,
+                first: Box::new(TypedNode::view(pane(2), "sample.views", "tasks")),
+                second: Box::new(TypedNode::view(pane(3), "sample.views", "messages")),
+            }),
+        };
+        let layout = TileLayout::from_tree(root, LayoutLeaf::Pane(pane(1))).unwrap();
+        let area = Rect::new(3, 4, 100, 40);
+        take_gathers();
+        let geometry = layout.geometry(area);
+        assert_eq!(take_gathers(), 1);
+        assert_eq!(geometry.boxes.len(), 1);
+        assert_eq!(geometry.boxes[0].rect, area);
+        assert_eq!(geometry.panes.len(), 3);
+        assert_eq!(geometry.panes[0].frame_policy, PaneFramePolicy::Unframed);
+        for view in &geometry.panes[1..] {
+            assert_eq!(view.frame_policy, PaneFramePolicy::Full);
+            assert_eq!(view.borders, Borders::ALL);
+        }
+    }
+}
+
+#[test]
 fn hidden_terminal_membership_prevents_a_false_single_terminal_parent() {
     let id = TerminalContainerId::parse(9_777).unwrap();
     let root = TypedNode::Split {
