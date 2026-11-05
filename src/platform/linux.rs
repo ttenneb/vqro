@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod client_tty_tests;
 mod native_image_sources;
 pub(crate) use native_image_sources::clone_native_image_source;
 
@@ -14,6 +16,101 @@ mod shutdown;
 pub(crate) use shutdown::monitor_host_shutdown;
 
 pub(super) const REMOTE_BRIDGE_CLOCK: libc::clockid_t = libc::CLOCK_BOOTTIME;
+
+pub(crate) fn client_ancestry_complete(peer: &crate::action_invocation::InvocationPeer) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let crate::action_invocation::InvocationAccount::Unix { uid } = peer.account else {
+        return false;
+    };
+    peer.ancestry.len() <= 64
+        && peer
+            .ancestry
+            .last()
+            .is_some_and(|last| last.parent_pid == 0)
+        && peer.ancestry.first().is_some_and(|first| {
+            std::fs::metadata(format!("/proc/{}", first.pid))
+                .is_ok_and(|metadata| metadata.uid() == uid)
+        })
+}
+
+pub(crate) fn ownership_runtime_base() -> Option<PathBuf> {
+    // Fixed OS-user namespace, deliberately independent of config/env overrides.
+    // SAFETY: geteuid has no memory preconditions.
+    let root = PathBuf::from(format!("/run/user/{}", unsafe { libc::geteuid() }));
+    super::validate_private_ownership_path(&root, true).ok()?;
+    Some(root)
+}
+
+pub(crate) fn ownership_server_key() -> Option<crate::pty_ownership::ServerKey> {
+    Some(crate::pty_ownership::ServerKey {
+        boot_id: std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+            .ok()?
+            .trim()
+            .to_owned(),
+        pid: std::process::id(),
+        birth: invocation_process_birth(std::process::id())?,
+    })
+}
+
+pub(crate) fn pty_slave_identity_from_master(
+    fd: RawFd,
+) -> Option<crate::pty_ownership::TtyIdentity> {
+    use std::os::fd::FromRawFd;
+    // SAFETY: fd is an owned PTY master; ioctl returns a NEW owned descriptor.
+    // Query the actual peer rather than confusing ptmx rdev with its slave.
+    let slave = unsafe {
+        libc::ioctl(
+            fd,
+            libc::TIOCGPTPEER,
+            libc::O_RDONLY | libc::O_NOCTTY | libc::O_NONBLOCK | libc::O_CLOEXEC,
+        )
+    };
+    if slave < 0 {
+        return None;
+    }
+    let file = unsafe { std::fs::File::from_raw_fd(slave) };
+    super::tty_identity_from_file(&file)
+}
+
+pub(crate) fn client_controlling_tty(pid: u32) -> Option<(crate::pty_ownership::TtyIdentity, u64)> {
+    fn stat(pid: u32) -> Option<(u64, u64)> {
+        let mut text = String::new();
+        std::fs::File::open(format!("/proc/{pid}/stat"))
+            .ok()?
+            .take(8192)
+            .read_to_string(&mut text)
+            .ok()?;
+        if text.len() >= 8192 {
+            return None;
+        }
+        let fields: Vec<_> = text
+            .get(text.rfind(')')? + 2..)?
+            .split_whitespace()
+            .collect();
+        let tty: i32 = fields.get(4)?.parse().ok()?;
+        let birth = fields.get(19)?.parse().ok()?;
+        (tty != 0).then_some((tty as u32 as u64, birth))
+    }
+    let (device, birth) = stat(pid)?;
+    for fd in 0..=2 {
+        let Ok(path) = std::fs::read_link(format!("/proc/{pid}/fd/{fd}")) else {
+            continue;
+        };
+        if path.as_os_str().len() > 4096 {
+            continue;
+        }
+        let Some(identity) = super::tty_identity_from_path(&path) else {
+            continue;
+        };
+        if libc::major(identity.rdev) == libc::major(device)
+            && libc::minor(identity.rdev) == libc::minor(device)
+            && stat(pid) == Some((device, birth))
+        {
+            return Some((identity, birth));
+        }
+    }
+    None
+}
 
 pub(crate) fn socket_peer_birth(stream: &crate::ipc::LocalStream) -> Option<(u32, u64)> {
     use interprocess::local_socket::traits::StreamCommon;

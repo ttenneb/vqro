@@ -2276,6 +2276,7 @@ impl PaneRuntime {
             PaneRuntimeIo::Actor(PtyIoActor::spawn(PtyIoActorConfig {
                 pane_id: pane_id.raw(),
                 master_fd,
+                ownership: None,
                 initially_quiesced: true,
                 on_read,
                 on_reader_exit: Some(on_reader_exit),
@@ -2466,6 +2467,8 @@ impl PaneRuntime {
                 pane_id: pane_id.raw(),
                 #[cfg(unix)]
                 master_fd: spawned.master_fd,
+                #[cfg(unix)]
+                ownership: spawned.ownership,
                 #[cfg(windows)]
                 master: spawned.master,
                 initially_quiesced: false,

@@ -282,6 +282,31 @@ pub(crate) fn sample_terminal_telemetry(
     TerminalTelemetrySample::Unsupported
 }
 
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn client_ancestry_complete(_peer: &crate::action_invocation::InvocationPeer) -> bool {
+    false
+}
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn ownership_runtime_base() -> Option<std::path::PathBuf> {
+    None
+}
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn ownership_server_key() -> Option<crate::pty_ownership::ServerKey> {
+    None
+}
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn pty_slave_identity_from_master(
+    _fd: i32,
+) -> Option<crate::pty_ownership::TtyIdentity> {
+    None
+}
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn client_controlling_tty(
+    _pid: u32,
+) -> Option<(crate::pty_ownership::TtyIdentity, u64)> {
+    None
+}
+
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 pub(crate) fn socket_peer_birth(_stream: &crate::ipc::LocalStream) -> Option<(u32, u64)> {
     None
@@ -675,6 +700,46 @@ mod remote_bridge;
 mod remote_bridge_tests;
 #[cfg(unix)]
 mod unix_common;
+#[cfg(unix)]
+mod unix_ownership_probe;
+#[cfg(all(test, target_os = "linux"))]
+mod unix_ownership_probe_tests;
+#[cfg(unix)]
+mod unix_tty_identity;
+#[cfg(unix)]
+pub(crate) use unix_ownership_probe::{ownership_server_liveness, ownership_status_at};
+#[cfg(not(unix))]
+pub(crate) fn ownership_server_liveness(
+    _key: &crate::pty_ownership::ServerKey,
+    _boot_id: &str,
+) -> crate::pty_ownership::ServerLiveness {
+    crate::pty_ownership::ServerLiveness::Unknown
+}
+#[cfg(not(unix))]
+pub(crate) fn ownership_status_at(
+    _path: &std::path::Path,
+    _key: &crate::pty_ownership::ServerKey,
+    _deadline: std::time::Instant,
+) -> Result<crate::pty_ownership::OwnershipStatus, String> {
+    Err("peer console ownership observation is unavailable".into())
+}
+#[cfg(unix)]
+pub(crate) use unix_tty_identity::{
+    private_ownership_file_options, tty_identity_from_file, tty_identity_from_path,
+    validate_private_ownership_path,
+};
+#[cfg(not(unix))]
+pub(crate) fn validate_private_ownership_path(
+    _path: &std::path::Path,
+    _directory: bool,
+) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "client TTY ownership publication is unsupported",
+    ))
+}
+#[cfg(not(unix))]
+pub(crate) fn private_ownership_file_options(_options: &mut std::fs::OpenOptions) {}
 /// Other Unix platforms keep their existing input admission policy; their
 /// _PC_MAX_CANON values need not describe actual queue capacity.
 #[cfg(all(unix, not(target_os = "macos")))]

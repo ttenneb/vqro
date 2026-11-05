@@ -50,6 +50,9 @@ pub enum ResponseResult {
         #[serde(default)]
         capabilities: Option<ServerCapabilities>,
     },
+    PtyOwnershipStatus {
+        status: Option<crate::pty_ownership::OwnershipStatus>,
+    },
     SessionSnapshot {
         snapshot: Box<SessionSnapshot>,
     },

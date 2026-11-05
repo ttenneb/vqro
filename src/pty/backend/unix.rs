@@ -7,6 +7,7 @@ use crate::pty::fd;
 pub(crate) struct SpawnedPty {
     pub master_fd: OwnedFd,
     pub child: Box<dyn Child + Send + Sync>,
+    pub ownership: Option<std::sync::Arc<crate::pty_ownership::publisher::OwnershipLease>>,
 }
 
 pub(crate) fn spawn_with_portable_pty(
@@ -14,6 +15,8 @@ pub(crate) fn spawn_with_portable_pty(
     cols: u16,
     cmd: CommandBuilder,
 ) -> std::io::Result<SpawnedPty> {
+    // Dirty before allocation/child exposure; registry failure never gates PTYs.
+    let ownership_change = crate::pty_ownership::publisher::begin_change();
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -29,6 +32,8 @@ pub(crate) fn spawn_with_portable_pty(
         .ok_or_else(|| std::io::Error::other("pty master fd is unavailable"))?;
     let actor_fd = fd::duplicate_cloexec_fd(master_fd)?;
     let actor_fd = unsafe { OwnedFd::from_raw_fd(actor_fd) };
+    let ownership =
+        ownership_change.attach(crate::platform::pty_slave_identity_from_master(master_fd));
     let child = pair
         .slave
         .spawn_command(cmd)
@@ -38,6 +43,7 @@ pub(crate) fn spawn_with_portable_pty(
     Ok(SpawnedPty {
         master_fd: actor_fd,
         child,
+        ownership,
     })
 }
 

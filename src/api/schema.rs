@@ -64,6 +64,8 @@ pub struct Request {
 pub enum Method {
     #[serde(rename = "ping")]
     Ping(PingParams),
+    #[serde(rename = "server.pty_ownership.status.v1")]
+    ServerPtyOwnershipStatus(EmptyParams),
     #[serde(rename = "server.stop")]
     ServerStop(EmptyParams),
     #[serde(rename = "server.live_handoff")]

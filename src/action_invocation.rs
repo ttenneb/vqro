@@ -52,6 +52,14 @@ pub(crate) enum InvocationCaller {
         #[serde(flatten)]
         account: InvocationAccount,
     },
+    /// Explicitly negotiated client source, never sent to legacy
+    /// action.invoke.v1 providers. It carries no synthetic terminal identity.
+    #[serde(rename = "human_unverified")]
+    ClientHumanUnverified {
+        #[serde(flatten)]
+        account: InvocationAccount,
+        client: crate::client_invocation::ClientIdentity,
+    },
     Agent {
         terminal_id: String,
         agent: String,

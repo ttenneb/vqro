@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::protocol::{
     ClientKeyCode, ClientKeyKind, ClientMouseButton, ClientMouseKind, ClientPaneInputEvent,
@@ -158,6 +159,8 @@ pub(crate) struct PendingPaneEffectConfirmation {
 pub(crate) struct ClientConnection {
     /// Whether this connection owns the Herdr shell or one direct terminal stream.
     pub(crate) mode: ClientConnectionMode,
+    /// Kernel observations from attach, not a granted caller credential.
+    pub(crate) invocation: Option<Arc<crate::client_invocation::ClientAttachEvidence>>,
     /// The client's terminal size after clamping.
     pub(crate) terminal_size: (u16, u16),
     /// Pixel size of one client terminal cell.
@@ -269,6 +272,7 @@ impl ClientConnection {
     ) -> Self {
         Self {
             mode,
+            invocation: None,
             terminal_size,
             cell_size,
             last_activity,

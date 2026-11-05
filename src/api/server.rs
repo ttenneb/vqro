@@ -126,6 +126,7 @@ fn start_server_inner(
         }
     };
 
+    crate::pty_ownership::publisher::start();
     Ok(ServerHandle {
         _thread: thread,
         path,
@@ -611,6 +612,15 @@ fn handle_request(
     server_stop: Option<&Arc<AtomicBool>>,
     response_write_complete: Option<std::sync::mpsc::Receiver<()>>,
 ) -> String {
+    if matches!(&request.method, Method::ServerPtyOwnershipStatus(_)) {
+        return serde_json::to_string(&SuccessResponse {
+            id: request.id,
+            result: ResponseResult::PtyOwnershipStatus {
+                status: crate::pty_ownership::publisher::current_status(),
+            },
+        })
+        .unwrap_or_else(|_| "{}".into());
+    }
     if matches!(&request.method, Method::Ping(_)) {
         return serde_json::to_string(&SuccessResponse {
             id: request.id,
@@ -664,6 +674,7 @@ fn handle_request(
 pub(crate) fn api_method_name(method: &Method) -> &'static str {
     match method {
         Method::Ping(_) => "ping",
+        Method::ServerPtyOwnershipStatus(_) => "server.pty_ownership.status.v1",
         Method::ServerStop(_) => "server.stop",
         Method::ServerLiveHandoff(_) => "server.live_handoff",
         Method::ServerReloadConfig(_) => "server.reload_config",
@@ -1550,6 +1561,23 @@ mod tests {
         let response: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert_eq!(response["id"], "ordinary");
         assert_eq!(response["result"]["type"], "pong");
+    }
+
+    #[test]
+    fn pty_ownership_status_is_cached_and_does_not_need_the_app_actor() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let request: Request = serde_json::from_value(serde_json::json!({"id":"ownership","method":"server.pty_ownership.status.v1","params":{}})).expect("optional named method");
+        let response = handle_request(request, &tx, None, None, None);
+        let value: serde_json::Value = serde_json::from_str(&response).expect("status response");
+        assert_eq!(value["result"]["type"], "pty_ownership_status");
+        assert!(
+            value["result"]["status"].is_null(),
+            "unit tests do not initialize a real fixed-namespace publisher"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "no recursive App request or blocking ownership work"
+        );
     }
 
     #[test]

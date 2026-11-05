@@ -1206,6 +1206,12 @@ impl App {
         }
 
         let response = match request.method {
+            Method::ServerPtyOwnershipStatus(_) => SuccessResponse {
+                id: request.id,
+                result: ResponseResult::PtyOwnershipStatus {
+                    status: crate::pty_ownership::publisher::current_status(),
+                },
+            },
             Method::ServerStop(_) => {
                 self.state.should_quit = true;
                 SuccessResponse {

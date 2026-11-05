@@ -66,6 +66,105 @@ fn socket_peer_credentials_fd(fd: RawFd) -> Option<(u32, u32)> {
     Some((u32::try_from(pid).ok()?, uid))
 }
 
+pub(crate) fn client_ancestry_complete(peer: &crate::action_invocation::InvocationPeer) -> bool {
+    let Some(last) = peer.ancestry.last() else {
+        return false;
+    };
+    if peer.ancestry.len() > 64 {
+        return false;
+    }
+    if last.parent_pid == 0 {
+        return true;
+    }
+    if peer.ancestry.len() == 64 {
+        return false;
+    }
+    let crate::action_invocation::InvocationAccount::Unix { uid } = &peer.account else {
+        return false;
+    };
+    // Existing macOS capture stops BEFORE a positively observed foreign-euid
+    // ancestor. Explicitly prove that boundary, never equate a gap with one.
+    invocation_bsdinfo(last.parent_pid).is_some_and(|info| info.pbi_uid != *uid)
+}
+
+pub(crate) fn ownership_runtime_base() -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    let mut bytes = vec![0_u8; 4096];
+    // SAFETY: confstr receives a writable buffer of the stated size.
+    let needed = unsafe {
+        libc::confstr(
+            libc::_CS_DARWIN_USER_TEMP_DIR,
+            bytes.as_mut_ptr().cast(),
+            bytes.len(),
+        )
+    };
+    if needed == 0 || needed > bytes.len() {
+        return None;
+    }
+    bytes.truncate(needed.saturating_sub(1));
+    let root = PathBuf::from(std::ffi::OsString::from_vec(bytes));
+    super::validate_private_ownership_path(&root, true).ok()?;
+    Some(root)
+}
+
+pub(crate) fn ownership_server_key() -> Option<crate::pty_ownership::ServerKey> {
+    Some(crate::pty_ownership::ServerKey {
+        boot_id: invocation_boot_id()?,
+        pid: std::process::id(),
+        birth: invocation_process_birth(std::process::id())?,
+    })
+}
+
+fn copied_tty_device_name(get: impl FnOnce() -> *mut libc::c_char) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    static NAMES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = NAMES.lock().ok()?;
+    let pointer = get();
+    if pointer.is_null() {
+        return None;
+    }
+    // SAFETY: devname/ptsname return a NUL-terminated static C string or NULL;
+    // copy while serialized rather than retain the shared library buffer.
+    let bytes = unsafe { std::ffi::CStr::from_ptr(pointer) }.to_bytes();
+    if bytes.is_empty() || bytes.len() > 4096 {
+        return None;
+    }
+    Some(PathBuf::from(std::ffi::OsStr::from_bytes(bytes)))
+}
+
+pub(crate) fn pty_slave_identity_from_master(
+    fd: RawFd,
+) -> Option<crate::pty_ownership::TtyIdentity> {
+    // SAFETY: fd is the owned imported/fresh PTY master, and its name is copied.
+    let path = copied_tty_device_name(|| unsafe { libc::ptsname(fd) })?;
+    super::tty_identity_from_path(&path)
+}
+
+pub(crate) fn client_controlling_tty(pid: u32) -> Option<(crate::pty_ownership::TtyIdentity, u64)> {
+    let before = invocation_bsdinfo(pid)?;
+    let birth = invocation_birth(&before)?;
+    if before.e_tdev == u32::MAX || before.e_tpgid == 0 || before.e_tpgid == u32::MAX {
+        return None;
+    }
+    // SAFETY: devname resolves a kernel-observed character-device number.
+    let name = copied_tty_device_name(|| unsafe {
+        libc::devname(before.e_tdev as libc::dev_t, libc::S_IFCHR as libc::mode_t)
+    })?;
+    if name.components().count() != 1 {
+        return None;
+    }
+    let identity = super::tty_identity_from_path(&Path::new("/dev").join(name))?;
+    let after = invocation_bsdinfo(pid)?;
+    if identity.rdev != u64::from(before.e_tdev)
+        || after.e_tdev != before.e_tdev
+        || invocation_birth(&after) != Some(birth)
+        || after.pbi_uid != before.pbi_uid
+    {
+        return None;
+    }
+    Some((identity, birth))
+}
+
 pub(crate) fn socket_peer_birth(stream: &crate::ipc::LocalStream) -> Option<(u32, u64)> {
     let (pid, _) = socket_peer_credentials(stream)?;
     Some((pid, invocation_process_birth(pid)?))

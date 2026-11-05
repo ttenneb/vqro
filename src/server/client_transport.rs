@@ -451,6 +451,12 @@ pub(crate) enum ServerEvent {
         terminal_views_enabled: bool,
         writer: ClientWriter,
     },
+    /// Attach-time kernel evidence arrives before this connection's input loop.
+    /// Internal only: no published codec or client-supplied identity field.
+    ClientInvocationEvidence {
+        client_id: u64,
+        evidence: Arc<crate::client_invocation::ClientAttachEvidence>,
+    },
     /// A client sent an input message.
     ClientInput { client_id: u64, data: Vec<u8> },
     /// A client reported the one armed Kitty regular-file response.
@@ -809,6 +815,9 @@ pub(crate) fn handle_client_handshake(
         client_id,
     )?;
 
+    // Capture kernel provenance before accepting any handshake claims. This
+    // worker is off actor; uncertain evidence never disconnects the client.
+    let invocation = crate::client_invocation::capture(&stream).map(Arc::new);
     // Read the handshake message.
     let hello = match protocol::read_client_hello(&mut stream, MAX_FRAME_SIZE) {
         Ok(protocol::ClientHello::Message(msg)) => msg,
@@ -1120,6 +1129,16 @@ pub(crate) fn handle_client_handshake(
         }
     }
 
+    // This thread's ordered sends put evidence after connection registration
+    // and before any endpoint action/input. No identity comes from the client.
+    if endpoint_control_writer.is_some() {
+        if let Some(evidence) = invocation {
+            let _ = server_event_tx.blocking_send(ServerEvent::ClientInvocationEvidence {
+                client_id,
+                evidence,
+            });
+        }
+    }
     // Enter read loop — read client messages and forward to main loop.
     client_read_loop_with_endpoint_controls(
         stream,

@@ -97,6 +97,7 @@ pub(crate) const CLIENT_SHELL_OPTIONAL_METHODS: &[&str] = &[
     "layout.tree.export",
     "pane.telemetry",
     "plugin.pane.open",
+    "server.pty_ownership.status.v1",
 ];
 
 pub(crate) fn supported_client_shell_method_names() -> &'static [&'static str] {

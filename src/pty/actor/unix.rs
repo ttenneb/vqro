@@ -66,6 +66,7 @@ struct SharedPtyControls {
 pub(crate) struct PtyIoActorConfig {
     pub pane_id: u32,
     pub master_fd: OwnedFd,
+    pub ownership: Option<Arc<crate::pty_ownership::publisher::OwnershipLease>>,
     pub initially_quiesced: bool,
     pub on_read: ReadCallback,
     pub on_reader_exit: Option<ReaderExitCallback>,
@@ -99,6 +100,8 @@ pub(crate) struct PtyIoActorHandle {
     controls: Arc<Mutex<SharedPtyControls>>,
     response_order: Arc<Mutex<()>>,
     input_guard: crate::platform::PtyInputGuard,
+    // Kept after input_guard so its retained master descriptor closes first.
+    _ownership: Option<Arc<crate::pty_ownership::publisher::OwnershipLease>>,
 }
 
 #[derive(Debug)]
@@ -398,6 +401,13 @@ impl PtyIoActor {
         }));
         let controls = Arc::new(Mutex::new(SharedPtyControls::default()));
         let response_order = Arc::new(Mutex::new(()));
+        // Fresh allocations already registered before child launch. Imports
+        // prove their actual slave here; an unproved identity stays incomplete.
+        let ownership = config.ownership.or_else(|| {
+            crate::pty_ownership::publisher::begin_change().attach(
+                crate::platform::pty_slave_identity_from_master(config.master_fd.as_raw_fd()),
+            )
+        });
         let file = Arc::new(std::fs::File::from(config.master_fd));
         let handle = PtyIoActorHandle {
             data_tx,
@@ -407,6 +417,7 @@ impl PtyIoActor {
             controls: Arc::clone(&controls),
             response_order: Arc::clone(&response_order),
             input_guard: crate::platform::PtyInputGuard::new(&file),
+            _ownership: ownership.clone(),
         };
 
         let mut runner = PtyIoActorRunner {
@@ -429,6 +440,7 @@ impl PtyIoActor {
             on_read: config.on_read,
             on_reader_exit: config.on_reader_exit,
             poll_observer,
+            _ownership: ownership,
         };
         std::thread::Builder::new()
             .name(format!("herdr-pty-{}", config.pane_id))
@@ -463,6 +475,9 @@ struct PtyIoActorRunner {
     on_read: ReadCallback,
     on_reader_exit: Option<ReaderExitCallback>,
     poll_observer: Option<std_mpsc::Sender<()>>,
+    // file is dropped first; an observation handle can conservatively retain
+    // ownership longer, but never remove it while it retains the master.
+    _ownership: Option<Arc<crate::pty_ownership::publisher::OwnershipLease>>,
 }
 
 struct ActiveSubmission {
@@ -1076,6 +1091,7 @@ mod tests {
         let config = PtyIoActorConfig {
             pane_id: 1,
             master_fd: owned,
+            ownership: None,
             initially_quiesced,
             on_read: Box::new(move |bytes| {
                 read_tx
@@ -1119,6 +1135,7 @@ mod tests {
             on_read: Box::new(|_| PtyReadResult::empty()),
             on_reader_exit: None,
             poll_observer: None,
+            _ownership: None,
         };
         (runner, peer)
     }
@@ -1329,6 +1346,7 @@ mod tests {
         let config = PtyIoActorConfig {
             pane_id: 1,
             master_fd: owned,
+            ownership: None,
             initially_quiesced: false,
             on_read: Box::new(|_| PtyReadResult::empty()),
             on_reader_exit: Some(Box::new({
@@ -1421,6 +1439,7 @@ mod tests {
         let handle = PtyIoActor::spawn(PtyIoActorConfig {
             pane_id: 1,
             master_fd: owned,
+            ownership: None,
             initially_quiesced: false,
             on_read: Box::new(move |bytes| {
                 read_tx
@@ -1650,6 +1669,7 @@ mod tests {
             controls: Arc::clone(&controls),
             response_order: Arc::new(Mutex::new(())),
             input_guard: Default::default(),
+            _ownership: None,
         };
 
         handle.resize(20, 80, 8, 16, vec![Bytes::from_static(b"old")]);
@@ -1721,6 +1741,7 @@ mod tests {
             }),
             on_reader_exit: None,
             poll_observer: None,
+            _ownership: None,
         };
         let handle = PtyIoActorHandle {
             data_tx,
@@ -1730,6 +1751,7 @@ mod tests {
             controls,
             response_order,
             input_guard: crate::platform::PtyInputGuard::new(&runner.file),
+            _ownership: None,
         };
         let (changed_tx, changed_rx) = std_mpsc::channel();
         let (continue_tx, continue_rx) = std_mpsc::channel();
@@ -1800,6 +1822,7 @@ mod tests {
             controls: Arc::new(Mutex::new(SharedPtyControls::default())),
             response_order: Arc::new(Mutex::new(())),
             input_guard: Default::default(),
+            _ownership: None,
         };
 
         let handoff = std::thread::spawn(move || handle.begin_handoff(Duration::from_secs(1)));
@@ -1852,6 +1875,7 @@ mod tests {
             on_read: Box::new(|_| PtyReadResult::empty()),
             on_reader_exit: None,
             poll_observer: None,
+            _ownership: None,
         };
 
         runner.begin_handoff().expect("handoff drains queued write");

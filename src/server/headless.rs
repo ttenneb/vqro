@@ -2008,6 +2008,15 @@ impl HeadlessServer {
                 self.clients.insert(client_id, connection);
                 false
             }
+            ServerEvent::ClientInvocationEvidence {
+                client_id,
+                evidence,
+            } => {
+                if let Some(connection) = self.clients.get_mut(&client_id) {
+                    connection.invocation = Some(evidence);
+                }
+                false
+            }
             ServerEvent::ClientShellConnected {
                 client_id,
                 surface_cols,

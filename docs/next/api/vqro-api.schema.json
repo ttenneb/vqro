@@ -5883,6 +5883,22 @@
         {
           "properties": {
             "method": {
+              "const": "server.pty_ownership.status.v1",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/EmptyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "server.stop",
               "type": "string"
             },
@@ -11489,6 +11505,28 @@
           ],
           "type": "string"
         },
+        "OwnershipStatus": {
+          "additionalProperties": false,
+          "properties": {
+            "complete": {
+              "type": "boolean"
+            },
+            "epoch": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "server": {
+              "$ref": "#/schemas/success_response/$defs/ServerKey"
+            }
+          },
+          "required": [
+            "server",
+            "epoch",
+            "complete"
+          ],
+          "type": "object"
+        },
         "PaneContent": {
           "description": "What a pane holds. The nested-panes design makes a pane's content kind either\na terminal or an extension view.\n\nA client that does not know a future kind degrades to [`PaneContent::Unknown`]\nrather than rejecting the response, and an omitted value means\n[`PaneContent::Terminal`] for older servers and clients.",
           "enum": [
@@ -13260,6 +13298,28 @@
             },
             {
               "properties": {
+                "status": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/schemas/success_response/$defs/OwnershipStatus"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "type": {
+                  "const": "pty_ownership_status",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "snapshot": {
                   "$ref": "#/schemas/success_response/$defs/SessionSnapshot"
                 },
@@ -14928,6 +14988,30 @@
           },
           "required": [
             "live_handoff"
+          ],
+          "type": "object"
+        },
+        "ServerKey": {
+          "additionalProperties": false,
+          "properties": {
+            "birth": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "boot_id": {
+              "type": "string"
+            },
+            "pid": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "boot_id",
+            "pid",
+            "birth"
           ],
           "type": "object"
         },

@@ -90,6 +90,7 @@ pub fn run_server() -> io::Result<()> {
     });
 
     rt.shutdown_timeout(Duration::from_millis(100));
+    crate::pty_ownership::publisher::stop();
     crate::logging::shutdown("server");
     result
 }
@@ -237,6 +238,7 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
     });
 
     rt.shutdown_timeout(Duration::from_millis(100));
+    crate::pty_ownership::publisher::stop();
     crate::logging::shutdown("server");
     result
 }
