@@ -265,7 +265,7 @@ class ReadinessDemo(Demo):
         assert len(linked) == 1 and linked[0]["enabled"] is True, f"tasks not auto-linked: {registry}"
         tasks_dir = Path(linked[0]["plugin_root"])
         assert tasks_dir.parent == bundled and tasks_dir.name.startswith("tasks-"), tasks_dir
-        for name in ("vqro-extension.toml", "provider.py", "view.py", "document.py", "decision_queue.py", "messages.py", "graph.py", "cli.py"):
+        for name in ("vqro-extension.toml", "provider.py", "view.py", "document.py", "decision_queue.py", "messages.py", "graph.py", "ids.py", "cli.py"):
             assert (tasks_dir / name).is_file(), name
 
         self.wait_fresh_empty_attention()

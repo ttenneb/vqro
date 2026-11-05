@@ -33,7 +33,164 @@ impl ClientShellState {
             selected: theme_index(&self.config.theme_name),
             original_theme_name: self.config.theme_name.clone(),
             original_palette: self.config.palette.clone(),
+            tasks: ClientTasksSettings {
+                generation: self.next_request_id,
+                ..Default::default()
+            },
         }));
+    }
+
+    pub(super) fn settings_python_mutating(&self) -> bool {
+        matches!(self.overlay.as_ref(), Some(ClientShellOverlay::Settings(settings)) if settings.tasks.confirming && settings.tasks.pending)
+    }
+
+    pub(super) fn cancel_settings_action(&mut self, outcome: &mut ClientShellInput) {
+        if self.settings_python_mutating() {
+            return;
+        }
+        if let Some(ClientShellOverlay::Settings(settings)) = self.overlay.as_mut() {
+            if settings.tasks.confirming {
+                settings.tasks.confirming = false;
+                settings.tasks.confirmation_path = None;
+                outcome.repaint = true;
+                return;
+            }
+        }
+        self.cancel_settings_overlay();
+        outcome.repaint = true;
+    }
+
+    fn queue_settings_interpreter(
+        &mut self,
+        method: crate::api::schema::Method,
+        kind: PendingEndpointKind,
+        outcome: &mut ClientShellInput,
+    ) {
+        if let Some(ClientShellOverlay::Settings(settings)) = self.overlay.as_mut() {
+            settings.tasks.pending = true;
+            settings.tasks.message = None;
+        }
+        if !self.push_endpoint_method_with_kind(method, kind, outcome) {
+            if let Some(ClientShellOverlay::Settings(settings)) = self.overlay.as_mut() {
+                settings.tasks.pending = false;
+                settings.tasks.confirming = false;
+                settings.tasks.confirmation_path = None;
+                settings.tasks.message = Some(
+                    "This server does not support Python setup. Update the host and retry.".into(),
+                );
+            }
+        }
+        outcome.repaint = true;
+    }
+
+    fn request_settings_interpreter(&mut self, outcome: &mut ClientShellInput) {
+        let generation = match self.overlay.as_mut() {
+            Some(ClientShellOverlay::Settings(settings)) if !settings.tasks.pending => {
+                settings.tasks.loaded = false;
+                settings.tasks.interpreter = None;
+                settings.tasks.confirming = false;
+                settings.tasks.confirmation_path = None;
+                settings.tasks.generation
+            }
+            _ => return,
+        };
+        self.queue_settings_interpreter(
+            crate::api::schema::Method::ExtensionList(
+                crate::api::schema::ExtensionListParams::default(),
+            ),
+            PendingEndpointKind::SettingsInterpreterStatus(generation),
+            outcome,
+        );
+    }
+
+    fn apply_tasks_python_choice(&mut self, outcome: &mut ClientShellInput) {
+        let Some(ClientShellOverlay::Settings(settings)) = self.overlay.as_mut() else {
+            return;
+        };
+        if settings.tasks.pending {
+            return;
+        }
+        if settings.tasks.confirming {
+            // A new confirmation invalidates old hit geometry until the full
+            // captured path has actually been drawn, including after resize.
+            if self.hits.overlay_primary.is_empty() {
+                return;
+            }
+            let Some(path) = settings.tasks.confirmation_path.clone() else {
+                return;
+            };
+            let generation = settings.tasks.generation;
+            self.queue_settings_interpreter(
+                crate::api::schema::Method::ExtensionInterpreterConfirm(
+                    crate::api::schema::ExtensionInterpreterConfirmParams {
+                        expected_path: path,
+                        confirmed: true,
+                    },
+                ),
+                PendingEndpointKind::SettingsInterpreterConfirm(generation),
+                outcome,
+            );
+        } else if let Some(status) = settings
+            .tasks
+            .interpreter
+            .as_ref()
+            .filter(|status| !status.confirmed && status.path.is_some())
+        {
+            settings.tasks.confirmation_path = status.path.clone();
+            settings.tasks.confirming = true;
+            self.hits.overlay_primary = Rect::default();
+            outcome.repaint = true;
+        } else {
+            self.request_settings_interpreter(outcome);
+        }
+    }
+
+    pub(super) fn handle_settings_interpreter_result(
+        &mut self,
+        kind: PendingEndpointKind,
+        result: Result<crate::api::schema::ResponseResult, ClientShellEndpointError>,
+    ) -> (bool, Vec<ClientShellAction>) {
+        let (generation, confirming) = match kind {
+            PendingEndpointKind::SettingsInterpreterStatus(generation) => (generation, false),
+            PendingEndpointKind::SettingsInterpreterConfirm(generation) => (generation, true),
+            _ => return (false, Vec::new()),
+        };
+        let Some(ClientShellOverlay::Settings(settings)) = self.overlay.as_mut() else {
+            return (false, Vec::new());
+        };
+        if settings.tasks.generation != generation {
+            return (false, Vec::new());
+        }
+        settings.tasks.pending = false;
+        settings.tasks.loaded = true;
+        match result {
+            Ok(crate::api::schema::ResponseResult::ExtensionList { interpreter, .. }) => {
+                let approved = interpreter.as_ref().is_some_and(|status| {
+                    status.confirmed && status.path == settings.tasks.confirmation_path
+                });
+                settings.tasks.interpreter = interpreter;
+                settings.tasks.message = confirming.then(|| if approved {
+                    "Python path confirmed. No package capabilities were granted.".into()
+                } else {
+                    "The host did not confirm the captured path. Review current setup status before trying again.".into()
+                });
+                if confirming {
+                    settings.tasks.confirming = false;
+                    settings.tasks.confirmation_path = None;
+                }
+            }
+            result => {
+                settings.tasks.interpreter = None;
+                settings.tasks.confirming = false;
+                settings.tasks.confirmation_path = None;
+                settings.tasks.message = Some(match result {
+                    Err(error) => error.message,
+                    Ok(_) => "Unexpected Python setup response. Retry to refresh the current path."
+                        .into(),
+                });
+            }
+        }
+        (true, Vec::new())
     }
 
     fn selected_index_for_settings_section(&self, section: ClientSettingsSection) -> usize {
@@ -42,6 +199,7 @@ impl ClientShellState {
             ClientSettingsSection::Indicators => indicator_index(self.config.status_indicators),
             ClientSettingsSection::Sound => usize::from(!self.config.sound_enabled),
             ClientSettingsSection::Toast => toast_index(self.config.toast_delivery),
+            ClientSettingsSection::Tasks => 0,
         }
     }
 
@@ -50,10 +208,22 @@ impl ClientShellState {
         section: ClientSettingsSection,
         outcome: &mut ClientShellInput,
     ) {
+        if self.settings_python_mutating() {
+            return;
+        }
         let selected = self.selected_index_for_settings_section(section);
         if let Some(ClientShellOverlay::Settings(settings)) = self.overlay.as_mut() {
+            if settings.section != section {
+                settings.tasks.confirming = false;
+                settings.tasks.confirmation_path = None;
+            }
             settings.section = section;
             settings.selected = selected;
+        }
+        if section == ClientSettingsSection::Tasks
+            && matches!(self.overlay.as_ref(), Some(ClientShellOverlay::Settings(settings)) if !settings.tasks.loaded && !settings.tasks.pending)
+        {
+            self.request_settings_interpreter(outcome);
         }
         outcome.repaint = true;
     }
@@ -77,6 +247,7 @@ impl ClientShellState {
                 ClientSettingsSection::Theme => crate::config::THEME_NAMES.len(),
                 ClientSettingsSection::Indicators | ClientSettingsSection::Sound => 2,
                 ClientSettingsSection::Toast => 4,
+                ClientSettingsSection::Tasks => 0,
             },
             _ => 0,
         }
@@ -165,6 +336,7 @@ impl ClientShellState {
         let section = settings.section;
         let selected = settings.selected;
         match section {
+            ClientSettingsSection::Tasks => self.apply_tasks_python_choice(outcome),
             ClientSettingsSection::Theme => {
                 let Some(name) = crate::config::THEME_NAMES.get(selected).copied() else {
                     return;
@@ -210,10 +382,12 @@ impl ClientShellState {
         if !matches!(self.overlay, Some(ClientShellOverlay::Settings(_))) {
             return false;
         }
+        if self.settings_python_mutating() {
+            return true;
+        }
         let (code, modifiers) = crate::config::normalize_key_combo((key.code, key.modifiers));
         if code == KeyCode::Esc {
-            self.cancel_settings_overlay();
-            outcome.repaint = true;
+            self.cancel_settings_action(outcome);
             return true;
         }
         if matches!(code, KeyCode::Tab | KeyCode::Right | KeyCode::Char('l'))

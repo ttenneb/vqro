@@ -339,9 +339,9 @@ pub(super) fn render_panel(
             &format!(" {}", row.label),
             label_style,
         );
-        // The stale marker is the whole line: appended to the entry's own detail it
-        // would be the part that gets truncated, and this is the line that matters.
-        let detail = if live {
+        // Packages own row meaning: an unlinked row need not describe execution.
+        // Retain the execution fallback only when no detail was supplied.
+        let detail = if live || !row.detail.is_empty() {
             row.detail.clone()
         } else {
             "not running".to_string()

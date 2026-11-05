@@ -1664,8 +1664,6 @@ impl ClientShellState {
                         extensions.search_focused = false;
                     }
                     outcome.repaint = true;
-                } else if super::contains(self.hits.extensions_python, point) {
-                    self.begin_python_confirmation(outcome);
                 } else if super::contains(self.hits.extensions_search, point) {
                     if let Some(ClientShellOverlay::Extensions(extensions)) = self.overlay.as_mut()
                     {
@@ -1726,6 +1724,9 @@ impl ClientShellState {
             return;
         }
         if matches!(self.overlay, Some(ClientShellOverlay::Settings(_))) {
+            if self.settings_python_mutating() {
+                return;
+            }
             if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
                 if let Some((_, section)) = self
                     .hits
@@ -1758,9 +1759,9 @@ impl ClientShellState {
                     outcome.repaint = true;
                 } else if super::contains(self.hits.overlay_primary, point) {
                     self.apply_settings_choice(outcome);
-                } else if super::contains(self.hits.overlay_cancel, point)
-                    || !super::contains(self.hits.settings_popup, point)
-                {
+                } else if super::contains(self.hits.overlay_cancel, point) {
+                    self.cancel_settings_action(outcome);
+                } else if !super::contains(self.hits.settings_popup, point) {
                     self.cancel_settings_overlay();
                     outcome.repaint = true;
                 }

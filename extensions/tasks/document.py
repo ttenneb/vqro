@@ -309,8 +309,8 @@ def attention_row_target(task, placements):
     A click goes to the owner's pane. When the task is waiting on the human there is
     no pane of theirs to go to, so it goes to the pane of the agent that reported the
     task instead, which is where the human usually acts on it. When neither has a live
-    placement the entry carries no link, and the client says the agent is not running
-    rather than offering a jump that cannot happen.
+    placement the entry carries no link. The package supplies execution warnings
+    only for agent-owned work; a human does not disappear with their terminal.
     """
     owed_to = task.get("owed_to") or {}
     on_the_human = owed_to.get("class") == "human_unverified" or owed_to.get("role") == "human_unverified"
@@ -350,6 +350,8 @@ def project(store, snapshot):
         target = attention_row_target(task, placements)
         if target is not None:
             row["terminal"] = target
+        elif (task.get("owner") or {}).get("class") == "agent":
+            row["detail"] = "not running"
         rows.append(row)
     for (kind, key), value in sorted(counts.items()):
         items.append({"id": PREFIX + f"badge:{kind}:{key}:{value['human']}:{value['blocked']}:{value['unavailable']}",

@@ -1159,6 +1159,10 @@ impl ClientShellState {
                 };
                 return (repaint, Vec::new());
             }
+            kind @ (PendingEndpointKind::SettingsInterpreterStatus(_)
+            | PendingEndpointKind::SettingsInterpreterConfirm(_)) => {
+                return self.handle_settings_interpreter_result(kind, result);
+            }
             kind @ (PendingEndpointKind::ExtensionList(_)
             | PendingEndpointKind::ExtensionPackageList(_)
             | PendingEndpointKind::ExtensionPackageInspect(_)

@@ -265,6 +265,7 @@ mod mobile;
 mod mouse_selection;
 mod popup_focus_projection;
 mod recovery;
+mod settings_python;
 mod startup_overlays;
 
 #[test]

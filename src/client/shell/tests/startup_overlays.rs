@@ -1258,10 +1258,15 @@ fn client_settings_preview_restore_and_sections_are_owned_by_overlay() {
         ClientSettingsSection::Indicators,
         ClientSettingsSection::Sound,
         ClientSettingsSection::Toast,
+        ClientSettingsSection::Tasks,
         ClientSettingsSection::Theme,
     ] {
         let next = state.handle_input_bytes(b"\t");
-        assert!(next.actions.is_empty());
+        if expected == ClientSettingsSection::Tasks {
+            assert!(next.actions.iter().any(|action| matches!(action, ClientShellAction::Endpoint { request, .. } if matches!(request.method, crate::api::schema::Method::ExtensionList(_)))));
+        } else {
+            assert!(next.actions.is_empty());
+        }
         assert!(matches!(
             state.overlay,
             Some(ClientShellOverlay::Settings(ClientSettingsOverlay { section, .. }))

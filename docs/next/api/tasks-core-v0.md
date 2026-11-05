@@ -51,6 +51,22 @@ No automatic read-and-update, client retry, activation or messaging occurs. The
 extension's recorded reversible decision defaults are the explicit policy exception
 below, not automatic work execution.
 
+Task and message references accept exact IDs or unique hex prefixes, either
+with their family prefix (`task_`, `msg_`) or bare (for example `ea2d5cc3`).
+Exact match wins, including legacy IDs; abbreviations require at least six hex
+characters. An ambiguous prefix rejects with the matching full IDs, without a
+write. This covers task targets, parents, dependencies, list cursors, message
+edits and `--reply-to`; plan-local keys remain local and win over durable prefixes.
+Operation IDs are not abbreviated. Resolution belongs to the Tasks provider and
+is atomic with writes, after checking any existing operation receipt: a later
+collision cannot invalidate an identical replay. The inspected `--rev` and all
+caller/ownership checks still apply.
+
+TTY `task list`/`ready` output uses unique `task_` prefixes of at least eight hex
+characters when possible, checked against the whole store rather than one page.
+If that optional read is unavailable, it keeps full IDs. Redirected/`--json`
+output keeps full IDs and unchanged record shapes.
+
 `--owner` is the assignee's own `whoami` caller binding, not a pane/name. Assignment
 chooses an exact binding, not proof of liveness. Caller facts are host-derived:
 agents have `class`, `terminal_id`, `agent`, process-lifetime `execution`; humans

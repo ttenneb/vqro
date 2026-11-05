@@ -28,6 +28,11 @@ in-flight work, or a human turn that wins the race, is therefore not auto-replie
 and a delivered reply is never re-answered automatically. `vqro agent prompt` is human-only, so agents address
 each other with messages rather than pane input.
 
+Task/message ID references accept a unique prefix with at least six hex digits,
+with or without `task_`/`msg_`. Exact IDs win; ambiguity lists the full candidates.
+Existing-task/message writes still require `--rev`. TTY `task list`/`ready` uses
+unique short IDs; JSON keeps full IDs. Resolution and replay stay provider-owned.
+
 Presentation: this extension publishes **views** - a Tasks view and a Messages
 view - which Vqro draws in a **view pane**: a pane whose content is an extension
 view instead of a terminal (`vqro pane view add <pane> vqro.tasks:tasks`). A view
@@ -57,6 +62,10 @@ cached neutral document metrics. Side width fits text within bounds; stacked
 height fits rows plus chrome up to its cap. Manual ratios/drag opt out and
 restart preserves only the last actual ratio. The demo retains normal UI
 settings, including agent-border labels **off by default**.
+
+Human-owned tasks remain available when their recorded terminal closes; missing
+placement is Global, not a human liveness warning. Agent-owned tasks retain the
+unavailable/not-running indication when their execution has no placement.
 
 - [Windows interpreter setup, identity and native trial](../../docs/next/api/tasks-windows.md)
 - [Tasks policy, CLI, receipts and limits](../../docs/next/api/tasks-core-v0.md)

@@ -12,9 +12,10 @@ available if Tasks cannot start.
 
 Install CPython **3.9 or newer** from [python.org](https://www.python.org/),
 including its standard library and SQLite. Bundled Tasks needs no extension
-copying, manifest editing, disabling, or manual linking. Open **Extensions →
-Python setup** (mouse button or `p`), inspect the complete absolute `python.exe`
-path, and confirm it once. Cancel leaves Tasks blocked without affecting other
+copying, manifest editing, disabling, or manual linking. Open **Settings → Tasks**
+using the ordinary Settings tabs, review the complete absolute `python.exe` path,
+and confirm it once. Setup controls live inside that tab, not in Extensions or a
+floating corner element. Cancel leaves Tasks blocked without affecting other
 extensions or terminal recovery. If the path does not fit, enlarge the terminal
 before approval; a clipped path cannot be approved.
 
@@ -44,7 +45,7 @@ reload configuration (or restart Vqro) to retire existing provider generations;
 new launches always revalidate the current binding. Confirmation rechecks the
 exact displayed path against the current candidate, preserves unrelated config
 edits, and rebuilds provider generations. Install Python before confirming;
-Vqro does not install it. Missing/unconfirmed CLI and Extensions status name the
+Vqro does not install it. Missing/unconfirmed CLI and Settings → Tasks status name the
 python.org/configuration remedy. Path approval grants no package capabilities
 and is not binary publisher/hash attestation; executable/image identity remains
 subject to the loaded-image proof below.

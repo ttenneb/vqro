@@ -145,9 +145,29 @@ class DocumentTests(unittest.TestCase):
         self.assertNotIn(badge["id"],[row["id"] for row in new["items"]])
         self.assertTrue(any("badge:tab:w2:t3" in row["id"] for row in new["items"]))
         global_doc=document.project(self.store,self.snapshot([]))
-        self.assertTrue(any("badge:session:global:0:1:1" in row["id"] for row in global_doc["items"]))
+        self.assertTrue(any("badge:session:global:0:1:0" in row["id"] for row in global_doc["items"]))
         self.assertNotIn("unavailable",view.durable_attention(task,None))
+        human_row=next(row for row in global_doc["items"] if row["id"]==document.PREFIX+"row:"+task["id"])
+        self.assertNotIn("terminal",human_row)
+        self.assertNotIn("not running",human_row["detail"])
+        self.assertEqual({"blocked"},view.durable_attention(task,{}))
         self.assertEqual([],view.project(tasks,None,{},set(),True,set(),7,100,100,scope={"kind":"tab","ids":["w1:t1"]},placements={"human":moved}))
+    def test_owner_kind_and_terminal_presence_control_unavailability(self):
+        for owner in (H,A):
+            for present in (False,True):
+                with self.subTest(owner=owner["class"],present=present):
+                    task=self.invoke({"action":"create","title":"placement","operation_id":f"create-{owner['class']}-{present}"})["task"]
+                    for action,fields in (("delegate",{"owner":owner}),("start",{}),("block",{"text":"needs help"})):
+                        task=self.invoke({"action":action,"id":task["id"],"revision":task["revision"],
+                                          "operation_id":f"{action}-{owner['class']}-{present}",**fields},caller=H)["task"]
+                    refs=[{"terminal_id":owner["terminal_id"],"placement":P}] if present else []
+                    doc=document.project(self.store,self.snapshot(refs))
+                    row=next(row for row in doc["items"] if row["id"]==document.PREFIX+"row:"+task["id"])
+                    categories=view.durable_attention(task,{owner["terminal_id"]:P} if present else {})
+                    self.assertEqual(owner==A and not present,"unavailable" in categories)
+                    self.assertEqual(owner==A and not present,row["detail"]=="not running")
+                    self.assertEqual(present,"terminal" in row)
+
     def test_no_parent_or_acceptor_placement_guess_and_no_self_work_human_debt(self):
         task={"id":"child","state":"reported","owner":A,"owed_action":"accept","owed_to":{"role":"acceptors","bindings":[H]}}
         self.assertEqual({"human","unavailable"},view.durable_attention(task,{"human":P}))
