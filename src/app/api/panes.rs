@@ -1744,7 +1744,11 @@ impl App {
             PaneZoomMode::Off => PaneZoomCommand::Off,
         };
         let Some(outcome) = self.state.apply_pane_zoom(ws_idx, pane_id, command) else {
-            return pane_not_found(id, &pane_public_id);
+            return encode_error(
+                id,
+                "pane_collapsed",
+                "expand the pane or its containing box before zooming",
+            );
         };
         if outcome.changed || outcome.focus_changed {
             self.schedule_session_save();

@@ -929,6 +929,17 @@ impl AppState {
             .workspaces
             .get(ws_idx)?
             .find_tab_index_for_pane(pane_id)?;
+        let target = self.workspaces.get(ws_idx)?.tabs.get(tab_idx)?;
+        let desired = match command {
+            PaneZoomCommand::Toggle => !target.zoomed,
+            PaneZoomCommand::On => true,
+            PaneZoomCommand::Off => false,
+        };
+        // Zoom is not expansion. Reject before focus/geometry mutations so the
+        // collapsed wrapper and retained hidden PTY dimensions remain intact.
+        if desired && !target.layout.pane_is_expanded(pane_id) {
+            return None;
+        }
         let focus_changed = self.focus_pane_in_workspace(ws_idx, pane_id);
         let tab = self
             .workspaces
@@ -943,11 +954,6 @@ impl AppState {
             });
         }
 
-        let desired = match command {
-            PaneZoomCommand::Toggle => !tab.zoomed,
-            PaneZoomCommand::On => true,
-            PaneZoomCommand::Off => false,
-        };
         let reason = match (command, tab.zoomed) {
             (PaneZoomCommand::On, true) => Some(PaneZoomNoopReason::AlreadyZoomed),
             (PaneZoomCommand::Off, false) => Some(PaneZoomNoopReason::AlreadyUnzoomed),

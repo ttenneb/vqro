@@ -106,7 +106,9 @@ Collapsed headers/strips expand directly. A client-local active header uses its
 fenced target, not a new shared anonymous-box focus type. Cold restore/attach and
 remote collapse must establish this state, not rely on the initiating client.
 Ordinary typing has no hidden-body target; held key/mouse release cleanup remains
-intact. Explicit authorized terminal-write APIs keep their execution semantics.
+intact. Later zoom-on of a collapsed pane or box descendant rejects with
+`pane_collapsed`; zoom never implicitly expands or overwrites retained hidden PTY
+size. Explicit authorized terminal-write APIs keep their execution semantics.
 Close appears only where an existing authorized close path and process
 confirmation apply, never a newly invented generic anonymous-box close action.
 

@@ -2,10 +2,123 @@ use super::*;
 use crate::protocol::collapse::{CollapseProjectionV1, LAYOUT_COLLAPSE_KIND};
 
 #[tokio::test]
+async fn later_zoom_on_or_toggle_cannot_reveal_a_collapsed_leaf_or_containing_box() {
+    for containing_box in [false, true] {
+        let mut server = test_headless_server();
+        let _input = install_focused_test_runtime(&mut server, b"live");
+        let root = server.app.state.workspaces[0].tabs[0].root_pane;
+        let pane_id = server.app.public_pane_id(0, root).unwrap();
+        server.app.state.workspaces[0]
+            .split_pane_with_view(
+                root,
+                "example.views",
+                "summary",
+                ratatui::layout::Direction::Horizontal,
+                0.5,
+                false,
+            )
+            .unwrap();
+        let (_control, render) = add_client(&mut server, 1, true);
+        server.render_and_stream();
+        let _ = render.try_recv().unwrap();
+        let size = server
+            .app
+            .state
+            .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 0, root)
+            .unwrap()
+            .current_size();
+        let method = if containing_box {
+            api::schema::Method::LayoutCollapse(api::schema::LayoutCollapseTarget {
+                boot_id: server.app.runtime_incarnation.clone(),
+                tab_id: server.app.public_tab_id(0, 0).unwrap(),
+                tree_fingerprint: server.app.state.workspaces[0].tabs[0]
+                    .layout
+                    .tree_fingerprint()
+                    .into(),
+                path: Vec::new(),
+            })
+        } else {
+            api::schema::Method::PaneCollapse(api::schema::PaneTarget {
+                pane_id: pane_id.clone(),
+            })
+        };
+        let response = server.app.handle_api_request(api::schema::Request {
+            id: "collapse-before-zoom".into(),
+            method,
+        });
+        assert!(serde_json::from_str::<serde_json::Value>(&response)
+            .unwrap()
+            .get("error")
+            .is_none());
+        for mode in [
+            api::schema::PaneZoomMode::On,
+            api::schema::PaneZoomMode::Toggle,
+        ] {
+            let response = server.app.handle_api_request(api::schema::Request {
+                id: "zoom-collapsed".into(),
+                method: api::schema::Method::PaneZoom(api::schema::PaneZoomParams {
+                    pane_id: Some(pane_id.clone()),
+                    mode,
+                }),
+            });
+            assert!(
+                serde_json::from_str::<serde_json::Value>(&response)
+                    .unwrap()
+                    .get("error")
+                    .is_some(),
+                "zoom-on must not resurrect a collapsed body"
+            );
+            assert!(!server.app.state.workspaces[0].tabs[0].zoomed);
+            assert!(!server.app.state.workspaces[0].tabs[0]
+                .layout
+                .pane_is_expanded(root));
+            server.clients.get_mut(&1).unwrap().request_repaint();
+            server.render_and_stream();
+            let (surface, _) = decode_pair(render.try_recv().unwrap());
+            assert!(surface.panes.iter().all(|pane| pane.pane_id != pane_id));
+            assert_eq!(
+                server
+                    .app
+                    .state
+                    .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 0, root)
+                    .unwrap()
+                    .current_size(),
+                size
+            );
+        }
+        assert!(server
+            .app
+            .state
+            .apply_pane_zoom(0, root, crate::app::actions::PaneZoomCommand::Toggle)
+            .is_none());
+        shutdown_test_runtimes(&mut server);
+    }
+}
+
+#[tokio::test]
 async fn two_clients_cannot_type_from_a_stale_legacy_surface_after_remote_collapse() {
+    for containing_box in [false, true] {
+        check_stale_client_input_after_collapse(containing_box).await;
+    }
+}
+
+async fn check_stale_client_input_after_collapse(containing_box: bool) {
     let mut server = test_headless_server();
     let mut input = install_focused_test_runtime(&mut server, b"\x1b[>3u");
     let pane_id = server.app.session_snapshot().focused_pane_id.unwrap();
+    if containing_box {
+        let root = server.app.state.workspaces[0].tabs[0].root_pane;
+        server.app.state.workspaces[0]
+            .split_pane_with_view(
+                root,
+                "example.views",
+                "summary",
+                ratatui::layout::Direction::Horizontal,
+                0.5,
+                false,
+            )
+            .unwrap();
+    }
     let (_control1, render1) = add_client(&mut server, 1, false);
     let (_control2, _render2) = add_client(&mut server, 2, true);
     server.render_and_stream();
@@ -35,9 +148,21 @@ async fn two_clients_cannot_type_from_a_stale_legacy_surface_after_remote_collap
         boot_id: server.client_shell_boot_id.clone(),
         request: Box::new(api::schema::Request {
             id: "collapse-from-other-client".into(),
-            method: api::schema::Method::PaneCollapse(api::schema::PaneTarget {
-                pane_id: pane_id.clone(),
-            }),
+            method: if containing_box {
+                api::schema::Method::LayoutCollapse(api::schema::LayoutCollapseTarget {
+                    boot_id: server.app.runtime_incarnation.clone(),
+                    tab_id: server.app.public_tab_id(0, 0).unwrap(),
+                    tree_fingerprint: server.app.state.workspaces[0].tabs[0]
+                        .layout
+                        .tree_fingerprint()
+                        .into(),
+                    path: Vec::new(),
+                })
+            } else {
+                api::schema::Method::PaneCollapse(api::schema::PaneTarget {
+                    pane_id: pane_id.clone(),
+                })
+            },
         }),
     });
     assert!(server.app.state.workspaces[0].tabs[0]
