@@ -1119,6 +1119,11 @@ impl HeadlessServer {
                 .map(|client| client.shell_graphics_delivery.clone())
                 .unwrap_or_default();
             let mut surface_parts = None;
+            let mut collapse_metadata = None;
+            let collapse_enabled = self
+                .clients
+                .get(&client_id)
+                .is_some_and(|client| client.shell_collapse_enabled);
             let frame = match mode {
                 ClientConnectionMode::ClientShell => {
                     let render_started = crate::render_prof::timer();
@@ -1137,6 +1142,7 @@ impl HeadlessServer {
                         graphics,
                         graphics_delivery: next_graphics_delivery,
                         graphics_sources,
+                        collapse,
                     } = render_client_shell_pane_surface(
                         &mut self.app,
                         shell_target,
@@ -1146,7 +1152,9 @@ impl HeadlessServer {
                         render_cell_size,
                         &shell_graphics_delivery,
                         client_id,
+                        collapse_enabled,
                     );
+                    collapse_metadata = collapse;
                     crate::render_prof::duration_since(
                         "full_render.render_tab_surface_virtual",
                         render_started,
@@ -1266,6 +1274,8 @@ impl HeadlessServer {
                             || !graphics.retained_assets.is_empty()
                     });
             let mut next_shell_graphics_delivery = None;
+            let collapse_metadata_changed = collapse_enabled
+                && client.shell_collapse_metadata.as_ref() != collapse_metadata.as_ref();
             let prepared =
                 if let Some((panes, views, collections, splits, popup, graphics, delivery, _)) =
                     surface_parts
@@ -1284,7 +1294,7 @@ impl HeadlessServer {
                             graphics,
                         },
                         views,
-                        native_upload.is_some(),
+                        native_upload.is_some() || collapse_metadata_changed,
                     )
                 } else {
                     client.render_state.prepare_frame(frame)
@@ -1392,6 +1402,29 @@ impl HeadlessServer {
                 && next_shell_graphics_delivery
                     .as_ref()
                     .is_some_and(crate::kitty_graphics::surface::DeliveryCache::has_pending);
+            if let Some(body) = collapse_metadata.as_ref() {
+                let ServerMessage::PaneSurfaceV2(surface) = prepared.message() else {
+                    continue;
+                };
+                let companion = match crate::server::collapse::projection_message(
+                    &surface.frame.boot_id,
+                    surface.frame.projection_revision,
+                    surface.frame.surface_revision,
+                    body,
+                )
+                .ok()
+                .and_then(|message| Self::frame_server_message(&message).ok())
+                {
+                    Some(companion) => companion,
+                    None => {
+                        client.defer_full_render();
+                        continue;
+                    }
+                };
+                // One render-queue packet commits the full base and its companion.
+                // Clients still accept either queue order relative to snapshots.
+                serialized.extend_from_slice(&companion);
+            }
             if let Some((_, message)) = &native_upload {
                 let Ok(file_frame) =
                     Self::frame_server_message_with_max(message, MAX_GRAPHICS_FRAME_SIZE)
@@ -1419,6 +1452,9 @@ impl HeadlessServer {
                         client.shell_graphics_delivery = delivery;
                     }
                     client.render_state.commit_sent_frame(prepared);
+                    if collapse_enabled {
+                        client.shell_collapse_metadata = collapse_metadata;
+                    }
                     let terminal_views_deferred = terminal_views_render
                         .is_some_and(|framed| writer.render.send_ordered(framed).is_err());
                     if shell_graphics_pending || shell_assets_deferred || terminal_views_deferred {

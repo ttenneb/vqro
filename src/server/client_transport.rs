@@ -446,6 +446,7 @@ pub(crate) enum ServerEvent {
         structure_enabled: bool,
         host_documents_enabled: bool,
         host_views_enabled: bool,
+        collapse_enabled: bool,
         pane_viewport_enabled: bool,
         pane_view_enabled: bool,
         terminal_views_enabled: bool,
@@ -739,6 +740,7 @@ struct ClientShellHandshakeOptions {
     structure_enabled: bool,
     host_documents_enabled: bool,
     host_views_enabled: bool,
+    collapse_enabled: bool,
     pane_viewport_enabled: bool,
     pane_view_enabled: bool,
     terminal_views_enabled: bool,
@@ -758,6 +760,7 @@ fn client_shell_handshake_options(
         structure_enabled: has(crate::protocol::endpoint::SESSION_STRUCTURE_KIND),
         host_documents_enabled: has(crate::protocol::endpoint::HOST_DOCUMENTS_KIND),
         host_views_enabled: has(crate::protocol::endpoint::HOST_VIEWS_KIND),
+        collapse_enabled: has(crate::protocol::collapse::LAYOUT_COLLAPSE_KIND),
         pane_viewport_enabled: has(crate::protocol::endpoint::PANE_VIEWPORT_KIND),
         pane_view_enabled: [
             crate::protocol::endpoint::PANE_VIEW_REQUEST_KIND,
@@ -1021,6 +1024,14 @@ pub(crate) fn handle_client_handshake(
         }
         if shell_options
             .as_ref()
+            .is_some_and(|options| options.collapse_enabled)
+        {
+            welcome
+                .capabilities
+                .push(crate::protocol::collapse::LAYOUT_COLLAPSE_CAPABILITY.into());
+        }
+        if shell_options
+            .as_ref()
             .is_some_and(|options| options.terminal_views_enabled)
         {
             welcome
@@ -1094,6 +1105,7 @@ pub(crate) fn handle_client_handshake(
             structure_enabled: options.structure_enabled,
             host_documents_enabled: options.host_documents_enabled,
             host_views_enabled: options.host_views_enabled,
+            collapse_enabled: options.collapse_enabled,
             pane_viewport_enabled: options.pane_viewport_enabled,
             pane_view_enabled: options.pane_view_enabled,
             terminal_views_enabled: options.terminal_views_enabled,
@@ -2619,6 +2631,7 @@ mod tests {
                 terminal_views_enabled,
                 writer,
                 host_views_enabled: false,
+                collapse_enabled: false,
             } => {
                 assert_eq!(client_id, 43);
                 assert_eq!((surface_cols, surface_rows), (80, 29));

@@ -1,8 +1,8 @@
 # Conditional layout collapse
 
-Status: implemented neutral JSON API and CLI. TUI companion and input controls
-are not yet advertised. Private protocol remains 25; published binary codecs and
-endpoint generation 2 are unchanged. See [accepted design](../architecture/generic-pane-collapse.md).
+Status: implemented neutral JSON API, CLI and optional TUI companion/controls.
+Private protocol remains 25; published binary codecs and endpoint generation 2
+are unchanged. See [accepted design](../architecture/generic-pane-collapse.md).
 
 ## Methods
 
@@ -42,6 +42,40 @@ bytes, provider text and presentation geometry. A derived cached value is
 refreshed at canonical tree mutation boundaries for projection; conditional
 mutation independently verifies current state even if that cache is stale. It
 is concurrency provenance, not a stable box identity or authorization token.
+
+## Optional TUI companion
+
+Clients request `layout.collapse.v1` in hello `control_kinds`; servers advertise
+`layout_collapse_v1` and send existing
+`EndpointControl { kind: "layout.collapse.v1", data: JSON }` messages. Data
+contains `boot_id`, `projection_revision`, `base_surface_revision`, and `body`:
+current `tab_id`/`tree_fingerprint`, surface `width`/`height`, `enabled`, optional
+`unavailable`, `headers`, `anchors`, and `containers`. Header entries carry a
+surface-relative `rect`, `action_rect`, tagged `path`, `collapsed` and `focused`;
+anchors map visible `pane_id` to a path; containers carry a path and `stack`
+observation. These are ephemeral conditional addresses, not new box identities.
+
+A client installs a full surface and companion only as an exact boot, projection,
+base-revision, tab and geometry pair, in either arrival order. Verified patches
+advance the admitted base; metadata-only changes force a full pair. Newer pending
+metadata disables body/header input until coherent. Existing held releases still
+reach their original target; suppressed presses acquire no forwarded lease.
+Collapsed bodies have no pane/view descriptors, body interests or graphics.
+Independent explicit viewers retain their own interests. Legacy peers never wait
+for metadata and receive safe raster without new controls.
+
+Projection is bounded to 4,096 combined headers/anchors/containers, 128 path steps,
+validated rectangles and half the transport frame byte budget. Invalid or
+unavailable optional metadata disables only collapse controls; visible ordinary
+body input and the connection remain usable. Controls also require the explicitly
+advertised `layout.collapse`/`layout.expand` methods.
+
+Existing framed headers get a collapse hit cell. Anonymous expanded boxes do not
+get new frames: use **Collapse box** in a child header's context menu, the ancestor
+picker, or CLI. The picker exposes only collapse, not box-close/selection authority.
+Collapsed headers/strips expand directly. Configurable `[keys]` defaults are
+`collapse_pane = "prefix+m"` (collapse pane or expand focused header) and
+`collapse_box = "prefix+shift+m"` (choose a containing box).
 
 ## CLI
 

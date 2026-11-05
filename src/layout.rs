@@ -402,8 +402,13 @@ impl TileLayout {
                     selected, children, ..
                 } => {
                     if let Some(child) = children.get(*selected) {
-                        if let Some(pane) = child.selected_pane() {
-                            panes.push(pane);
+                        // Collapse-aware stack geometry reserves its structural
+                        // header before walking children, rather than charging a
+                        // hidden selected pane or overlapping a compact header.
+                        if !child.has_visible_collapse() {
+                            if let Some(pane) = child.selected_pane() {
+                                panes.push(pane);
+                            }
                         }
                         collect(child, panes);
                     }

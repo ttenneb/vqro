@@ -85,6 +85,21 @@ pub(super) fn fingerprint(node: &TypedNode) -> String {
 mod tests;
 
 impl TypedNode {
+    pub(crate) fn has_visible_collapse(&self) -> bool {
+        match self {
+            Self::Collapsed { .. } => true,
+            Self::Split { first, second, .. } => {
+                first.has_visible_collapse() || second.has_visible_collapse()
+            }
+            Self::Stack {
+                selected, children, ..
+            } => children
+                .get(*selected)
+                .is_some_and(Self::has_visible_collapse),
+            Self::Leaf(_) | Self::View { .. } => false,
+        }
+    }
+
     pub(crate) fn content(&self) -> &Self {
         match self {
             Self::Collapsed { node } => node.content(),
@@ -124,6 +139,30 @@ impl TileLayout {
 
     pub(crate) fn pane_path(&self, pane: PaneId) -> Option<Vec<usize>> {
         super::leaf_path(&self.root, pane)
+    }
+
+    pub(crate) fn tagged_path(&self, path: &[usize]) -> Option<Vec<LayoutPathStep>> {
+        let mut node = &self.root;
+        let mut tagged = Vec::with_capacity(path.len());
+        for &index in path {
+            let (next, step) = match node.content() {
+                TypedNode::Split { first, .. } if index == 0 => (
+                    first.as_ref(),
+                    LayoutPathStep::Split(LayoutSplitChild::First),
+                ),
+                TypedNode::Split { second, .. } if index == 1 => (
+                    second.as_ref(),
+                    LayoutPathStep::Split(LayoutSplitChild::Second),
+                ),
+                TypedNode::Stack { children, .. } => {
+                    (children.get(index)?, LayoutPathStep::StackChild(index))
+                }
+                _ => return None,
+            };
+            tagged.push(step);
+            node = next;
+        }
+        Some(tagged)
     }
 
     pub(crate) fn node_members(&self, path: &[usize]) -> Option<Vec<PaneId>> {

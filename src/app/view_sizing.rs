@@ -433,6 +433,7 @@ impl App {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn refresh_cached_auto_target(&mut self, workspace: usize, tab_index: usize) {
         self.refresh_cached_auto_target_for_event(workspace, tab_index, None, false);
     }

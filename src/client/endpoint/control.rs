@@ -12,6 +12,7 @@ pub(crate) enum EndpointControlMessage {
     Snapshot(Box<crate::protocol::ClientShellSnapshot>),
     Structure(Box<crate::protocol::endpoint::ClientShellStructureProjection>),
     HostDocuments(Box<crate::protocol::endpoint::HostDocumentsProjectionV1>),
+    CollapseProjection(Result<Box<crate::protocol::collapse::CollapseProjectionV1>, String>),
     TerminalViewsSurface(Box<crate::protocol::endpoint::ServerTerminalViewsSurface>),
     PaneViewResult(Box<crate::protocol::endpoint::ServerPaneViewResult>),
     PaneViewActionResult(Box<crate::protocol::endpoint::ServerPaneViewActionResult>),
@@ -76,6 +77,12 @@ pub(crate) fn decode_endpoint_control(
         return Ok(EndpointControlMessage::TerminalViewsSurface(Box::new(
             surface,
         )));
+    }
+    if kind == crate::protocol::collapse::LAYOUT_COLLAPSE_KIND {
+        let projection = serde_json::from_str(data)
+            .map(Box::new)
+            .map_err(|error| format!("invalid optional collapse projection: {error}"));
+        return Ok(EndpointControlMessage::CollapseProjection(projection));
     }
     if kind == crate::protocol::endpoint::HOST_DOCUMENTS_KIND {
         let projection: crate::protocol::endpoint::HostDocumentsProjectionV1 =

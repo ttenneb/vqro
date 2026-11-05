@@ -378,7 +378,7 @@ fn every_dialog_and_menu_occludes_its_panel_not_the_whole_screen() {
         let snapshot = state.snapshot.as_deref().unwrap();
         let rendered = match &overlay {
             ClientShellOverlay::ContextMenu(menu) => {
-                render::render_context_menu(&mut buffer, menu, &state.config.palette)
+                render::render_context_menu(&mut buffer, menu, &state.config.palette, false)
             }
             ClientShellOverlay::GlobalMenu(menu) => render::render_global_menu(
                 &mut buffer,

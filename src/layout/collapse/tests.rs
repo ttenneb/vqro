@@ -154,6 +154,33 @@ fn collapsed_root_and_tiny_both_collapsed_children_never_escape_the_viewport() {
 }
 
 #[test]
+fn compact_children_do_not_overlap_existing_stack_headers() {
+    for direction in [Direction::Horizontal, Direction::Vertical] {
+        for selected_child in [0, 1] {
+            let id = crate::terminal_container::TerminalContainerId::parse(916_001).unwrap();
+            let mut tree = layout(TypedNode::Stack {
+                id,
+                selected: 0,
+                children: vec![split(direction, pane(1), pane(2))],
+            });
+            assert!(tree.set_collapsed(&[0, selected_child], true));
+            let area = Rect::new(0, 0, 100, 40);
+            let geometry = tree.geometry(area);
+            assert_eq!(geometry.leaf_rects[&LayoutLeaf::Stack(id)], area);
+            assert!(
+                geometry.collapsed[0].rect.y > area.y,
+                "compact child must not cover stack controls"
+            );
+            assert!(geometry.panes.iter().all(|pane| pane.inner_rect.y > area.y));
+            assert!(
+                tree.selected_stack_panes().is_empty(),
+                "already reserved structural header must not be charged twice"
+            );
+        }
+    }
+}
+
+#[test]
 fn collapse_does_not_buy_box_depth_and_duplicate_wrappers_are_invalid() {
     let root = (0..4).fold(pane(1), |node, index| TypedNode::Stack {
         id: crate::terminal_container::TerminalContainerId::parse(913_001 + index).unwrap(),

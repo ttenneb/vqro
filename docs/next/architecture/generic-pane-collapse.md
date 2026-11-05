@@ -2,7 +2,9 @@
 
 Status: accepted design (2026-11-05). Canonical tree/session, compact geometry,
 header raster, transient resume fencing and the [neutral API/CLI](../api/layout-collapse-v1.md)
-are implemented; TUI controls and the optional companion below are not yet advertised. This does not grant box naming, selection, or new box-close authority.
+and optional TUI controls/companion are implemented. Default start composition
+below remains the next implementation slice. This does not grant box naming,
+selection, or new box-close authority.
 
 ## State, membership, and recovery
 
@@ -57,7 +59,7 @@ Manual opt-out and restored unarmed views must never be rearmed by expansion.
 
 ## Optional client projection and conditional targets
 
-The proposed optional **`layout.collapse.v1`** JSON endpoint control uses existing
+The optional **`layout.collapse.v1`** JSON endpoint control uses existing
 `EndpointControl { kind, data }`, with no change to frozen `shell.surface.v2`,
 `PaneSurfacePatch`, snapshot, input or key-action wire shapes. Clients advertise
 support in hello. Legacy peers do not wait for the companion and have no collapse

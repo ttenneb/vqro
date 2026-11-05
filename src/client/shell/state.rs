@@ -152,6 +152,7 @@ pub(super) struct ShellHitMap {
     pub(super) attention: Vec<AttentionHit>,
     pub(super) attention_toggle: Rect,
     pub(super) panes: Vec<PaneHit>,
+    pub(super) collapse_headers: Vec<super::collapse::CollapseHeaderHit>,
     pub(super) collections: Vec<CollectionChromeHit>,
     pub(super) collection_members: Vec<CollectionMemberHit>,
     pub(super) popup: Option<PaneHit>,
@@ -727,6 +728,9 @@ pub(super) enum ClientContextMenuAction {
     SplitRight,
     SplitDown,
     Zoom,
+    CollapsePane,
+    CollapseBox,
+    CollapseAncestor(usize),
     ToggleRightClickPassthrough,
     ArchiveCollectionMember,
     RestoreCollectionMember,
@@ -738,6 +742,9 @@ pub(super) enum ClientContextMenuAction {
 
 #[derive(Debug)]
 pub(super) enum ClientContextMenuTarget {
+    CollapseBoxes {
+        targets: Vec<crate::api::schema::LayoutCollapseTarget>,
+    },
     Workspace {
         workspace_id: String,
         is_git: bool,
@@ -2002,6 +2009,7 @@ impl ClientShellState {
                 self.pending_pane_surface_views = pending_views;
             }
         }
+        self.try_install_collapse_pair();
         self.resume_mobile_switcher_if_ready();
         self.reconcile_input_source();
     }
@@ -2011,6 +2019,7 @@ impl ClientShellState {
     }
 
     /// Install a terminal-only frame with no view panes.
+    #[cfg(test)]
     pub(crate) fn set_pane_surface(&mut self, surface: PaneSurfaceFrame) {
         self.set_pane_surface_with_views(surface, Vec::new());
     }
@@ -2019,7 +2028,17 @@ impl ClientShellState {
     /// view descriptors: a patch never changes them.
     pub(crate) fn reinstall_patched_surface(&mut self, surface: PaneSurfaceFrame) {
         let views = std::mem::take(&mut self.pane_surface_views);
-        self.set_pane_surface_with_views(surface, views);
+        if !self.supports_endpoint_capability(crate::protocol::collapse::LAYOUT_COLLAPSE_CAPABILITY)
+        {
+            self.set_pane_surface_with_views(surface, views);
+            return;
+        }
+        self.advance_collapse_patch(
+            &surface.boot_id,
+            surface.projection_revision,
+            surface.surface_revision,
+        );
+        self.install_pane_surface(surface, views, false);
     }
 
     /// Install a `shell.surface.v2` frame together with its view descriptors.
@@ -2028,6 +2047,27 @@ impl ClientShellState {
         surface: PaneSurfaceFrame,
         views: Vec<crate::protocol::PaneSurfaceViewEntryV2>,
     ) {
+        if self.supports_endpoint_capability(crate::protocol::collapse::LAYOUT_COLLAPSE_CAPABILITY)
+        {
+            let endpoint_id = self.active_endpoint_id.clone();
+            let generation = self
+                .endpoints
+                .iter()
+                .find(|endpoint| endpoint.endpoint_id == endpoint_id)
+                .and_then(|endpoint| {
+                    endpoint
+                        .snapshot_generation
+                        .or(endpoint.collapse.generation)
+                })
+                .unwrap_or(0);
+            self.set_pane_surface_with_views_for_generation(
+                &endpoint_id,
+                generation,
+                surface,
+                views,
+            );
+            return;
+        }
         let Some(snapshot) = self.snapshot.as_ref() else {
             return;
         };
@@ -2056,7 +2096,7 @@ impl ClientShellState {
         self.install_pane_surface(surface, views, true);
     }
 
-    fn install_pane_surface(
+    pub(super) fn install_pane_surface(
         &mut self,
         mut surface: PaneSurfaceFrame,
         views: Vec<crate::protocol::PaneSurfaceViewEntryV2>,

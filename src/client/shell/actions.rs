@@ -20,6 +20,18 @@ impl ClientShellState {
                 self.persist_chrome_preferences(outcome);
             }
             crate::input::KeybindMatch::Action(action) => {
+                if action == crate::input::KeybindAction::CollapsePane {
+                    self.toggle_focused_collapse(outcome);
+                    return;
+                }
+                if action == crate::input::KeybindAction::CollapseBox {
+                    let area = self
+                        .last_composed_size
+                        .map(|(cols, rows)| self.layout(cols, rows).pane_surface)
+                        .unwrap_or_default();
+                    self.open_collapse_box_picker(None, area.x, area.y, outcome);
+                    return;
+                }
                 if self.workspace_preview_action_blocked()
                     && matches!(
                         action,

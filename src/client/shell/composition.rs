@@ -678,6 +678,8 @@ impl ClientShellState {
                 );
             }
         }
+        self.hits.collapse_headers =
+            self.render_collapse_affordances(&mut composed, layout.pane_surface);
         frame.replace_from_ratatui_buffer_preserving_effects(&composed, cursor.clone());
         frame.cursor = cursor;
         self.hits.inspector_body = Rect::default();
@@ -1116,8 +1118,12 @@ impl ClientShellState {
         if let Some(overlay) = self.overlay.as_ref() {
             let mut composed = frame.to_ratatui_buffer()?;
             let cursor = if let ClientShellOverlay::ContextMenu(menu) = overlay {
-                let rendered =
-                    render::render_context_menu(&mut composed, menu, &self.config.palette)?;
+                let rendered = render::render_context_menu(
+                    &mut composed,
+                    menu,
+                    &self.config.palette,
+                    self.collapse_controls_available(),
+                )?;
                 occlusion.cover(rendered.area);
                 self.hits.context_menu_rows = rendered.menu_rows;
                 None

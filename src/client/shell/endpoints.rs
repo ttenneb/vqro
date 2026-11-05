@@ -20,6 +20,7 @@ pub(crate) struct ClientShellEndpoint {
     pub(crate) structure_generation: Option<u64>,
     pub(crate) host_documents: Option<Box<crate::protocol::endpoint::HostDocumentsProjectionV1>>,
     pub(crate) host_documents_generation: Option<u64>,
+    pub(super) collapse: super::collapse::CollapsePairState,
     pub(super) attention: Option<super::attention::AttentionNavigation>,
     pub(crate) agent_recency: HashMap<String, u64>,
     pub(super) agent_presentation: super::endpoint_agent_state::EndpointAgentPresentation,
@@ -104,6 +105,9 @@ impl ClientShellState {
                 host_documents: previous.and_then(|endpoint| endpoint.host_documents.clone()),
                 host_documents_generation: previous
                     .and_then(|endpoint| endpoint.host_documents_generation),
+                collapse: previous
+                    .map(|endpoint| endpoint.collapse.clone())
+                    .unwrap_or_default(),
                 attention: previous.and_then(|endpoint| endpoint.attention.clone()),
                 agent_recency: previous
                     .map(|endpoint| endpoint.agent_recency.clone())
@@ -169,6 +173,7 @@ impl ClientShellState {
             endpoint.agent_view_projection = None;
             endpoint.pending_agent_view_projection = None;
             endpoint.agent_view_projection_supported = false;
+            endpoint.collapse = Default::default();
         }
         self.refresh_recovery_overlay(endpoint_id);
     }
@@ -194,6 +199,9 @@ impl ClientShellState {
             .find(|endpoint| &endpoint.endpoint_id == endpoint_id)
         {
             endpoint.status = status;
+            if status != ClientEndpointStatus::Online {
+                endpoint.collapse = Default::default();
+            }
         }
     }
 
@@ -340,6 +348,7 @@ impl ClientShellState {
         }
         self.apply_active_snapshot(snapshot);
         self.apply_cached_endpoint_structure(endpoint_id);
+        self.try_install_collapse_pair();
         true
     }
 
@@ -1142,6 +1151,7 @@ pub(super) fn local_endpoint() -> ClientShellEndpoint {
         structure_generation: None,
         host_documents: None,
         host_documents_generation: None,
+        collapse: Default::default(),
         attention: None,
         agent_recency: HashMap::new(),
         agent_presentation: Default::default(),

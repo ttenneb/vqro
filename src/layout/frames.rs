@@ -63,6 +63,7 @@ struct Facts {
     views: bool,
     valid_scopes: bool,
     compact: Option<(u16, u16)>,
+    visible_collapse: bool,
 }
 impl Facts {
     fn group_terminal(self) -> Option<PaneId> {
@@ -86,6 +87,7 @@ fn gather(node: &TypedNode, facts: &mut HashMap<usize, Facts>) -> Facts {
         TypedNode::Collapsed { node } => {
             let mut result = gather(node, facts);
             result.compact = Some((1, 1));
+            result.visible_collapse = true;
             result
         }
         TypedNode::Leaf(pane) => Facts {
@@ -122,6 +124,7 @@ fn gather(node: &TypedNode, facts: &mut HashMap<usize, Facts>) -> Facts {
                     && b.valid_scopes
                     && (!matches!(first.content(), TypedNode::View { .. }) || terminals <= 1)
                     && (!matches!(second.content(), TypedNode::View { .. }) || terminals <= 1),
+                visible_collapse: a.visible_collapse || b.visible_collapse,
                 compact: a.compact.zip(b.compact).map(|(a, b)| {
                     if matches!(
                         node,
@@ -158,7 +161,10 @@ fn gather(node: &TypedNode, facts: &mut HashMap<usize, Facts>) -> Facts {
                 if index == *selected {
                     result.visible_terminals = child_facts.visible_terminals;
                     result.visible_views = child_facts.visible_views;
-                    result.compact = child_facts.compact;
+                    result.compact = child_facts
+                        .compact
+                        .map(|(width, height)| (width, height.saturating_add(1)));
+                    result.visible_collapse = child_facts.visible_collapse;
                 }
             }
             if result.terminals != 1 {
@@ -177,6 +183,15 @@ fn inset(area: Rect) -> Rect {
         area.y.saturating_add(area.height.min(1)),
         area.width.saturating_sub(2),
         area.height.saturating_sub(2),
+    )
+}
+fn below_stack_header(area: Rect) -> Rect {
+    let row = area.height.min(1);
+    Rect::new(
+        area.x,
+        area.y.saturating_add(row),
+        area.width,
+        area.height.saturating_sub(row),
     )
 }
 #[derive(Clone, Copy)]
@@ -264,10 +279,20 @@ pub(super) fn auto_size(
             TypedNode::View { pane, .. } => (8, 3 + u16::from(headers.contains(pane))),
             TypedNode::Stack {
                 selected, children, ..
-            } => children
-                .get(*selected)
-                .map(|child| minimum(child, facts, measures, inside, headers, out))
-                .unwrap_or((0, 0)),
+            } => {
+                let (width, height) = children
+                    .get(*selected)
+                    .map(|child| minimum(child, facts, measures, inside, headers, out))
+                    .unwrap_or((0, 0));
+                (
+                    width,
+                    height.saturating_add(u16::from(
+                        facts
+                            .get(&key(node))
+                            .is_some_and(|facts| facts.visible_collapse),
+                    )),
+                )
+            }
             TypedNode::Split {
                 direction,
                 ratio,
@@ -319,12 +344,26 @@ pub(super) fn auto_size(
         if grouped {
             area = inset(area);
         }
+        let reserve_stack_header = facts
+            .get(&key(node))
+            .is_some_and(|facts| facts.visible_collapse);
         match node {
             TypedNode::Stack {
                 selected, children, ..
-            } => children
-                .get_mut(*selected)
-                .is_some_and(|child| apply(child, area, inside, facts, minima, measures)),
+            } => children.get_mut(*selected).is_some_and(|child| {
+                apply(
+                    child,
+                    if reserve_stack_header {
+                        below_stack_header(area)
+                    } else {
+                        area
+                    },
+                    inside,
+                    facts,
+                    minima,
+                    measures,
+                )
+            }),
             TypedNode::Split {
                 direction,
                 ratio,
@@ -588,10 +627,18 @@ fn walk(
                 // inherited interaction limit; geometry still projects correctly.
                 let start = out.splits.len();
                 address.push(LayoutPathStep::StackChild(*selected));
+                let content = if facts
+                    .get(&key(node))
+                    .is_some_and(|facts| facts.visible_collapse)
+                {
+                    below_stack_header(area)
+                } else {
+                    area
+                };
                 walk(
                     child,
                     focus,
-                    area,
+                    content,
                     group,
                     facts,
                     path,

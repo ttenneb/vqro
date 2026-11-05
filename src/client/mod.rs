@@ -1520,6 +1520,8 @@ async fn run_client_loop(
                             &mut state,
                             &mut write_stream,
                             &mut prefix_input_source,
+                            &endpoint_id,
+                            generation,
                             surface,
                         );
                     }
@@ -1554,6 +1556,8 @@ async fn run_client_loop(
                             &mut state,
                             &mut write_stream,
                             &mut prefix_input_source,
+                            &endpoint_id,
+                            generation,
                             frame,
                             views,
                         );
@@ -2113,6 +2117,35 @@ async fn run_client_loop(
                                         generation,
                                         projection,
                                     );
+                                }
+                                continue;
+                            }
+                            Ok(endpoint::EndpointControlMessage::CollapseProjection(
+                                projection,
+                            )) => {
+                                if let Some(shell) = state.shell.as_mut() {
+                                    shell.set_endpoint_collapse_projection_for_generation(
+                                        &endpoint_id,
+                                        generation,
+                                        projection,
+                                    );
+                                }
+                                if endpoint_active {
+                                    finish_endpoint_pane_surface(
+                                        &mut state,
+                                        &mut write_stream,
+                                        &mut prefix_input_source,
+                                    );
+                                }
+                                if activation_message {
+                                    if let Some(event) = complete_endpoint_activation(
+                                        &mut state,
+                                        &mut write_stream,
+                                        &mut pending_activation,
+                                        &mut endpoint_commands,
+                                    )? {
+                                        scheduled_activation = Some(event);
+                                    }
                                 }
                                 continue;
                             }
