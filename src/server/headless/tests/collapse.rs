@@ -1,6 +1,100 @@
 use super::*;
 use crate::protocol::collapse::{CollapseProjectionV1, LAYOUT_COLLAPSE_KIND};
 
+#[tokio::test]
+async fn two_clients_cannot_type_from_a_stale_legacy_surface_after_remote_collapse() {
+    let mut server = test_headless_server();
+    let mut input = install_focused_test_runtime(&mut server, b"\x1b[>3u");
+    let pane_id = server.app.session_snapshot().focused_pane_id.unwrap();
+    let (_control1, render1) = add_client(&mut server, 1, false);
+    let (_control2, _render2) = add_client(&mut server, 2, true);
+    server.render_and_stream();
+    let ServerMessage::PaneSurfaceV2(stale) = read_server_message(render1.recv().unwrap()) else {
+        panic!("legacy full surface")
+    };
+    assert!(stale.frame.panes.iter().any(|pane| pane.pane_id == pane_id));
+    let key = |kind| crate::protocol::ClientPaneInputEvent::Key {
+        code: crate::protocol::ClientKeyCode::Char('x'),
+        modifiers: 0,
+        kind,
+        repeat_count: 1,
+        shifted_codepoint: None,
+        generated_text: (kind == crate::protocol::ClientKeyKind::Press).then(|| "x".to_owned()),
+        tracks_release: true,
+        physical_key_id: Some(0x2d),
+        windows_record: None,
+    };
+    server.handle_server_event(ServerEvent::ClientShellPaneInput {
+        client_id: 1,
+        pane_id: pane_id.clone(),
+        events: vec![key(crate::protocol::ClientKeyKind::Press)],
+    });
+    assert!(!input.recv().await.unwrap().is_empty());
+    server.handle_server_event(ServerEvent::NativeEndpointRequest {
+        client_id: 2,
+        boot_id: server.client_shell_boot_id.clone(),
+        request: Box::new(api::schema::Request {
+            id: "collapse-from-other-client".into(),
+            method: api::schema::Method::PaneCollapse(api::schema::PaneTarget {
+                pane_id: pane_id.clone(),
+            }),
+        }),
+    });
+    assert!(server.app.state.workspaces[0].tabs[0]
+        .layout
+        .typed_root()
+        .has_visible_collapse());
+    server.promote_client_to_foreground(2);
+    // Client 1 has not received/applied a replacement surface. Its previously
+    // valid target must still be rejected from current canonical host state.
+    assert!(
+        !server.handle_server_event(ServerEvent::ClientShellPaneInput {
+            client_id: 1,
+            pane_id: pane_id.clone(),
+            events: vec![
+                key(crate::protocol::ClientKeyKind::Press),
+                crate::protocol::ClientPaneInputEvent::TextCommit("stale-text".into()),
+                crate::protocol::ClientPaneInputEvent::Paste("stale-paste".into()),
+            ],
+        }),
+        "collapsed body input cannot claim geometry or foreground"
+    );
+    assert!(
+        input.try_recv().is_err(),
+        "stale client wrote into a collapsed PTY"
+    );
+    assert_eq!(server.foreground_client_id, Some(2));
+    assert!(
+        !server.handle_server_event(ServerEvent::ClientShellPaneInput {
+            client_id: 1,
+            pane_id: pane_id.clone(),
+            events: vec![key(crate::protocol::ClientKeyKind::Release)]
+        })
+    );
+    assert!(
+        !input.recv().await.unwrap().is_empty(),
+        "held release must survive remote collapse"
+    );
+    assert_eq!(server.foreground_client_id, Some(2));
+    let response = server.app.handle_api_request(api::schema::Request {
+        id: "authorized-explicit-write".into(),
+        method: api::schema::Method::PaneSendText(api::schema::PaneSendTextParams {
+            pane_id,
+            text: "authorized".into(),
+        }),
+    });
+    assert!(serde_json::from_str::<serde_json::Value>(&response)
+        .unwrap()
+        .get("error")
+        .is_none());
+    assert_eq!(input.recv().await.unwrap().as_ref(), b"authorized");
+    assert!(server.app.state.workspaces[0].tabs[0]
+        .layout
+        .typed_root()
+        .has_visible_collapse());
+    shutdown_test_runtimes(&mut server);
+}
+
 fn decode_pair(bytes: Vec<u8>) -> (crate::protocol::PaneSurfaceFrame, CollapseProjectionV1) {
     let mut cursor = std::io::Cursor::new(bytes);
     let ServerMessage::PaneSurfaceV2(surface) =

@@ -18,6 +18,23 @@ fn layout(root: TypedNode) -> TileLayout {
 }
 
 #[test]
+fn expanded_membership_rejects_leaf_and_ancestor_collapse_but_keeps_stack_selection_separate() {
+    let mut tree = layout(TypedNode::Stack {
+        id: crate::layout::CollectionId::from_raw(9).unwrap().into(),
+        selected: 0,
+        children: vec![pane(1), pane(2)],
+    });
+    assert!(tree.pane_is_expanded(PaneId::from_raw(2)));
+    assert!(!tree.is_pane_visible(PaneId::from_raw(2)));
+    assert!(tree.set_collapsed(&[1], true));
+    assert!(!tree.pane_is_expanded(PaneId::from_raw(2)));
+    assert!(tree.pane_is_expanded(PaneId::from_raw(1)));
+    assert!(tree.set_collapsed(&[], true));
+    assert!(!tree.pane_is_expanded(PaneId::from_raw(1)));
+    assert!(!tree.pane_is_expanded(PaneId::from_raw(999)));
+}
+
+#[test]
 fn collapse_is_idempotent_and_does_not_change_identity_membership_or_ratios() {
     let mut tree = layout(split(Direction::Vertical, pane(1), pane(2)));
     let before = tree.clone();

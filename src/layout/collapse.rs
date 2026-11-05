@@ -118,6 +118,27 @@ impl TypedNode {
 }
 
 impl TileLayout {
+    /// Complete membership excluding a collapsed pane or any collapsed ancestor.
+    /// Stack selection remains separate: legacy explicit previews may show an
+    /// unselected member without expanding a collapsed canonical subtree.
+    pub(crate) fn pane_is_expanded(&self, pane: super::PaneId) -> bool {
+        fn visit(node: &TypedNode, pane: super::PaneId) -> Option<bool> {
+            match node {
+                TypedNode::Collapsed { node } => node.contains_pane(pane).then_some(false),
+                TypedNode::Leaf(id) | TypedNode::View { pane: id, .. } => {
+                    (*id == pane).then_some(true)
+                }
+                TypedNode::Split { first, second, .. } => {
+                    visit(first, pane).or_else(|| visit(second, pane))
+                }
+                TypedNode::Stack { children, .. } => {
+                    children.iter().find_map(|child| visit(child, pane))
+                }
+            }
+        }
+        visit(&self.root, pane).unwrap_or(false)
+    }
+
     /// Cached at canonical layout edits, never hashed per byte/frame/client.
     pub(crate) fn tree_fingerprint(&self) -> &str {
         &self.tree_fingerprint

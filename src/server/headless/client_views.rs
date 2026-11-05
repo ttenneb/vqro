@@ -611,11 +611,10 @@ impl HeadlessServer {
         else {
             return false;
         };
-        if tab.zoomed {
-            tab.layout.focused() == pane_id
-        } else {
-            tab.layout.pane_ids().contains(&pane_id)
-        }
+        // Validate the current canonical collapse fact, not a client's retained
+        // surface or complete structural membership. Keep existing uncollapsed
+        // collection-preview targeting independent of stack selection.
+        tab.layout.pane_is_expanded(pane_id) && (!tab.zoomed || tab.layout.focused() == pane_id)
     }
 
     fn finish_shell_tab_geometry_change(&mut self, start_pending_agent_resumes: bool) {
