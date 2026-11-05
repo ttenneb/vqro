@@ -57,21 +57,13 @@ pub(crate) fn capture(stream: &crate::ipc::LocalStream) -> Option<ClientAttachEv
 }
 
 fn server_ancestor(process: &crate::platform::ForegroundProcess) -> bool {
-    let basename = |name: &str| {
-        name.rsplit(['/', '\\'])
-            .next()
-            .unwrap_or("")
-            .trim_end_matches(".exe")
-            .to_ascii_lowercase()
-    };
-    let vqro = [Some(process.name.as_str()), process.argv0.as_deref()]
-        .into_iter()
-        .flatten()
-        .any(|name| matches!(basename(name).as_str(), "vqro" | "vqro-dev"));
-    vqro && process
+    // Exact observed server incarnations are checked separately. For absent
+    // publishers, conservatively deny ANY executable's `server` argument; do
+    // not assume a filename, fixed argv position, or run the mutating CLI parser.
+    process
         .argv
         .as_ref()
-        .is_some_and(|argv| argv.get(1).is_some_and(|arg| arg == "server"))
+        .is_some_and(|argv| argv.iter().skip(1).any(|arg| arg == "server"))
 }
 
 fn coherent(peer: &InvocationPeer) -> bool {
@@ -79,6 +71,10 @@ fn coherent(peer: &InvocationPeer) -> bool {
         || peer.ancestry.len() > 64
         || peer.boot_id.is_empty()
         || peer.boot_id.len() > 128
+        || !peer
+            .ancestry
+            .last()
+            .is_some_and(|last| last.parent_pid == 0)
     {
         return false;
     }
@@ -98,7 +94,7 @@ pub(crate) fn classify_external(
     current: &ClientAttachEvidence,
     attached: &ClientAttachEvidence,
     owned_pane: bool,
-    owned_ttys: &[TtyIdentity],
+    ownership: &crate::pty_ownership::observation::ObservedOwnership,
 ) -> Result<ClientIdentity, String> {
     let rejected = || {
         "client provenance is unproved or belongs to a Vqro-owned pane/TTY; actions remain read-only".to_owned()
@@ -127,12 +123,19 @@ pub(crate) fn classify_external(
     if current.tty != attached.tty
         || tty.inode == 0
         || tty.rdev == 0
-        || owned_ttys.iter().any(|owned| owned.may_match(tty))
+        || ownership
+            .owned_ttys
+            .iter()
+            .any(|owned| owned.may_match(tty))
     {
         return Err(rejected());
     }
     for entry in &current.peer.ancestry {
-        if server_ancestor(&entry.process) {
+        if ownership
+            .proof
+            .contains_process(&current.peer.boot_id, entry.pid, entry.birth)
+            || server_ancestor(&entry.process)
+        {
             return Err(rejected());
         }
         let job = crate::platform::ForegroundJob {

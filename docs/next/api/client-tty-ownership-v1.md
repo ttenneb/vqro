@@ -2,7 +2,9 @@
 
 Status: **experimental implementation**. Linux ownership publication and cached
 status have private real-server verification. Native macOS execution remains
-unverified. Windows has no proved peer-console path for new human clicks and
+unverified. A macOS foreign-euid ancestry stop is not complete-root proof and
+keeps that client read-only; legacy positive CLI attribution is unchanged. Windows
+has no proved peer-console path for new human clicks and
 remains read-only; existing CLI actions are unchanged. This method alone does not
 enable view actions or grant a human caller.
 
@@ -58,3 +60,17 @@ servers may publish short-lived records in this real private namespace, and remo
 only their own exact record after release/transfer. Totally absent pre-change or
 first-publication-failed publishers remain the explicitly documented cooperative
 coverage limits, not universal absence detection or authentication.
+
+## Opt-in Linux lifecycle verification
+
+`scripts/demo-client-tty-ownership.py --vqro /absolute/candidate/vqro` starts a
+private server/config, verifies its kernel identity, creates a real PTY child,
+checks live epoch/publication and removes only its own record on graceful exit.
+Add `--missing-runtime` to use an isolated user namespace where the fixed native
+runtime root is unavailable: startup and PTY creation must still work, status must
+stay incomplete, and the publication failure must be logged. This never changes
+the real runtime directory's permissions or contents. It requires working Linux
+unprivileged user namespaces and reports failure, not a false pass, if unavailable.
+Use `--scratch-root` for a private artifact parent with a short Unix socket path.
+This is explicit opt-in because a normal positive run publishes its own short-lived
+record in the real fixed namespace; it is not part of read-only unit-test startup.

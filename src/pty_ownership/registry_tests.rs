@@ -152,6 +152,25 @@ fn publication_failure_leaves_old_file_but_live_status_detects_its_staleness() {
 }
 
 #[test]
+fn failed_exclusive_creation_never_unlinks_a_temporary_file_this_write_did_not_create() {
+    let root = Root::new();
+    let directory = RegistryDirectory::prepare(&root.0).expect("directory");
+    let first = entry(42);
+    let target = directory.record_path(&first.ownership.server);
+    let collision = target
+        .parent()
+        .expect("namespace")
+        .join(format!(".tmp-{}-41", std::process::id()));
+    std::fs::write(&collision, b"belongs to a different publication").expect("private fixture");
+    assert!(directory.publish_with_nonce(&first, 41).is_err());
+    assert_eq!(
+        std::fs::read(&collision).expect("unowned collision must survive"),
+        b"belongs to a different publication"
+    );
+    assert!(!target.exists());
+}
+
+#[test]
 fn positively_dead_records_are_ignored_but_unprovable_liveness_is_not() {
     let root = Root::new();
     let directory = RegistryDirectory::prepare(&root.0).expect("directory");

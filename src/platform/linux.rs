@@ -73,6 +73,7 @@ pub(crate) fn pty_slave_identity_from_master(
 }
 
 pub(crate) fn client_controlling_tty(pid: u32) -> Option<(crate::pty_ownership::TtyIdentity, u64)> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
     fn stat(pid: u32) -> Option<(u64, u64)> {
         let mut text = String::new();
         std::fs::File::open(format!("/proc/{pid}/stat"))
@@ -97,6 +98,17 @@ pub(crate) fn client_controlling_tty(pid: u32) -> Option<(crate::pty_ownership::
             continue;
         };
         if path.as_os_str().len() > 4096 {
+            continue;
+        }
+        // Do not open an arbitrary fd target (FIFO or unrelated device) merely
+        // to discover afterwards that it was not the kernel controlling TTY.
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !metadata.file_type().is_char_device()
+            || libc::major(metadata.rdev()) != libc::major(device)
+            || libc::minor(metadata.rdev()) != libc::minor(device)
+        {
             continue;
         }
         let Some(identity) = super::tty_identity_from_path(&path) else {

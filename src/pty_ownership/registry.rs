@@ -93,6 +93,11 @@ impl RegistryDirectory {
     }
 
     pub(crate) fn publish(&self, entry: &RegistryEntry) -> io::Result<()> {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        self.publish_with_nonce(entry, NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+
+    pub(super) fn publish_with_nonce(&self, entry: &RegistryEntry, nonce: u64) -> io::Result<()> {
         let bytes = serde_json::to_vec(entry).map_err(|error| invalid(error.to_string()))?;
         parse_entry(&bytes).map_err(invalid)?;
         let _lock = self.lock(true)?;
@@ -102,24 +107,23 @@ impl RegistryDirectory {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
         }
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let temporary = self.root.join(format!(
-            ".tmp-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
+        let temporary = self
+            .root
+            .join(format!(".tmp-{}-{nonce}", std::process::id()));
+        let mut created = false;
         let result = (|| {
             let mut options = OpenOptions::new();
             options.write(true).create_new(true);
             crate::platform::private_ownership_file_options(&mut options);
             let mut file = options.open(&temporary)?;
+            created = true;
             file.write_all(&bytes)?;
             file.flush()?;
             file.sync_all()?;
             drop(file);
             std::fs::rename(&temporary, &target)
         })();
-        if result.is_err() {
+        if result.is_err() && created {
             let _ = std::fs::remove_file(&temporary);
         }
         result

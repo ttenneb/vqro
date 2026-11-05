@@ -239,6 +239,12 @@ impl OwnershipProof {
         Ok(Self(epochs))
     }
 
+    pub(crate) fn contains_process(&self, boot_id: &str, pid: u32, birth: u64) -> bool {
+        self.0
+            .keys()
+            .any(|server| server.boot_id == boot_id && server.pid == pid && server.birth == birth)
+    }
+
     pub(crate) fn same_epochs(&self, other: &Self) -> bool {
         self.0 == other.0
     }

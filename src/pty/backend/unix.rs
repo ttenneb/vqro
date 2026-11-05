@@ -17,6 +17,28 @@ pub(crate) fn spawn_with_portable_pty(
 ) -> std::io::Result<SpawnedPty> {
     // Dirty before allocation/child exposure; registry failure never gates PTYs.
     let ownership_change = crate::pty_ownership::publisher::begin_change();
+    let (master_fd, child, ownership) = spawn_with_guard(rows, cols, cmd, |identity| {
+        ownership_change.attach(identity)
+    })?;
+    Ok(SpawnedPty {
+        master_fd,
+        child,
+        ownership,
+    })
+}
+
+// The factory is a narrow test seam for deterministic rollback release order;
+// production supplies the real ownership lease, never a fake authority source.
+fn spawn_with_guard<G>(
+    rows: u16,
+    cols: u16,
+    cmd: CommandBuilder,
+    attach: impl FnOnce(Option<crate::pty_ownership::TtyIdentity>) -> G,
+) -> std::io::Result<(OwnedFd, Box<dyn Child + Send + Sync>, G)> {
+    // Declare the guard BEFORE every PTY handle. On spawn_command failure,
+    // reverse local destruction closes both masters/slave before removing the
+    // ownership observation. Successful transfer keeps the same RAII ordering.
+    let ownership;
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -32,19 +54,14 @@ pub(crate) fn spawn_with_portable_pty(
         .ok_or_else(|| std::io::Error::other("pty master fd is unavailable"))?;
     let actor_fd = fd::duplicate_cloexec_fd(master_fd)?;
     let actor_fd = unsafe { OwnedFd::from_raw_fd(actor_fd) };
-    let ownership =
-        ownership_change.attach(crate::platform::pty_slave_identity_from_master(master_fd));
+    ownership = attach(crate::platform::pty_slave_identity_from_master(master_fd));
     let child = pair
         .slave
         .spawn_command(cmd)
         .map_err(|err| std::io::Error::other(err.to_string()))?;
     drop(pair);
 
-    Ok(SpawnedPty {
-        master_fd: actor_fd,
-        child,
-        ownership,
-    })
+    Ok((actor_fd, child, ownership))
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -73,6 +90,47 @@ mod tests {
 
     fn parent_pty_fd_count() -> usize {
         parent_pty_fd_targets().len()
+    }
+
+    #[test]
+    fn spawn_failure_releases_all_host_pty_handles_before_ownership_guard() {
+        use std::sync::{
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+            Arc,
+        };
+        struct Witness {
+            path: std::path::PathBuf,
+            still_open: Arc<AtomicBool>,
+            released: Arc<AtomicUsize>,
+        }
+        impl Drop for Witness {
+            fn drop(&mut self) {
+                self.still_open.store(self.path.exists(), Ordering::SeqCst);
+                self.released.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let _guard = pty_fd_test_lock().lock().expect("private PTY fixture lock");
+        let still_open = Arc::new(AtomicBool::new(false));
+        let released = Arc::new(AtomicUsize::new(0));
+        let mut command = CommandBuilder::new("/vqro-private-nonexistent-command/spawn-failure");
+        command.env_clear();
+        let result = spawn_with_guard(24, 80, command, |identity| {
+            let identity = identity.expect("actual Linux slave identity");
+            Witness {
+                path: std::path::PathBuf::from(format!("/dev/pts/{}", libc::minor(identity.rdev))),
+                still_open: Arc::clone(&still_open),
+                released: Arc::clone(&released),
+            }
+        });
+        assert!(
+            result.is_err(),
+            "must exercise the real spawn_command error unwind"
+        );
+        assert_eq!(released.load(Ordering::SeqCst), 1);
+        assert!(
+            !still_open.load(Ordering::SeqCst),
+            "lease removal must follow closing every host master/slave handle"
+        );
     }
 
     #[test]

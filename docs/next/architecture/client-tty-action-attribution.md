@@ -13,14 +13,22 @@ account, and runs the existing ancestry classifier. Complete, current ancestry i
 required: a bounded capture that stopped before its real platform boundary is not
 proof of nonownership. Any Vqro server in the ancestry, any Vqro-owned pane, an
 agent/unknown classification, uncertain evidence, or an absent controlling TTY
-prevents an external-human upgrade. Neither a gesture nor a pane/client identifier
-is human authority.
+prevents an external-human upgrade. Known server ancestors are matched by
+kernel-observed boot/PID/birth from the live ownership proof, regardless of their
+executable name or argv. As a conservative fallback for absent publishers, any
+ancestor with a literal `server` command argument also denies authority, regardless
+of executable name or argument position; this can deny unrelated server launchers.
+The CLI parser is not invoked during attribution. Neither a gesture nor a pane/client
+identifier is human authority.
 
 A real controlling TTY must be corroborated by platform-local kernel/device
 observations and must not match an observed owned PTY. Compare actual slave or
 controlling-device identity, not generic ptmx master device identity or server
 stdin. Linux and macOS use their existing peer/process provenance plus native TTY
-observations. Windows does not yet have an equivalent proved peer-console path:
+observations. The macOS legacy foreign-euid boundary is not complete negative
+ancestry proof: clients stopped there remain read-only unless a genuine complete
+root chain is available. Legacy positive CLI attribution is unchanged. Windows
+does not yet have an equivalent proved peer-console path:
 these clicks remain read-only with a CLI pointer. Unsupported checks fail closed.
 This is cooperative same-user process classification, **not authentication** or
 proof of a physical human gesture.

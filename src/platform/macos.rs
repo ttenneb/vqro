@@ -67,24 +67,15 @@ fn socket_peer_credentials_fd(fd: RawFd) -> Option<(u32, u32)> {
 }
 
 pub(crate) fn client_ancestry_complete(peer: &crate::action_invocation::InvocationPeer) -> bool {
-    let Some(last) = peer.ancestry.last() else {
-        return false;
-    };
-    if peer.ancestry.len() > 64 {
-        return false;
-    }
-    if last.parent_pid == 0 {
-        return true;
-    }
-    if peer.ancestry.len() == 64 {
-        return false;
-    }
-    let crate::action_invocation::InvocationAccount::Unix { uid } = &peer.account else {
-        return false;
-    };
-    // Existing macOS capture stops BEFORE a positively observed foreign-euid
-    // ancestor. Explicitly prove that boundary, never equate a gap with one.
-    invocation_bsdinfo(last.parent_pid).is_some_and(|info| info.pbi_uid != *uid)
+    // A foreign-euid boundary remains valid for legacy positive owned-root
+    // attribution, but cannot prove that no server/agent exists above it.
+    // New external-client authority requires the genuine complete root chain;
+    // otherwise this client stays read-only. Do not query foreign argv here.
+    peer.ancestry.len() <= 64
+        && peer
+            .ancestry
+            .last()
+            .is_some_and(|last| last.parent_pid == 0)
 }
 
 pub(crate) fn ownership_runtime_base() -> Option<PathBuf> {
