@@ -65,7 +65,10 @@ fn collapsed_node_releases_axis_space_and_expand_restores_exact_geometry() {
         assert_eq!(geometry.panes.len(), 1);
         assert_eq!(geometry.collapsed.len(), 1);
         let header = &geometry.collapsed[0];
-        assert_eq!(header.path, vec![1]);
+        assert_eq!(
+            header.path,
+            vec![LayoutPathStep::Split(LayoutSplitChild::Second)]
+        );
         assert_eq!(header.direction, direction);
         match direction {
             Direction::Horizontal => {
@@ -117,7 +120,10 @@ fn collapsed_stack_paths_keep_selection_and_hidden_members() {
     assert!(tree.is_pane_visible(PaneId::from_raw(3)));
     assert_eq!(
         tree.geometry(Rect::new(0, 0, 100, 40)).collapsed[0].path,
-        vec![1, 0]
+        vec![
+            LayoutPathStep::StackChild(1),
+            LayoutPathStep::Split(LayoutSplitChild::First)
+        ]
     );
     assert!(tree.typed_root().valid_structure());
 }
@@ -190,6 +196,34 @@ fn collapsed_view_content_changes_do_not_rewrite_expanded_share_memory() {
     assert_eq!(crate::layout::typed_split_ratios(tree.typed_root()), before);
     assert!(tree.set_collapsed(&[1], false));
     assert_eq!(crate::layout::typed_split_ratios(tree.typed_root()), before);
+}
+
+#[test]
+fn tree_fingerprint_covers_hidden_structure_selection_shares_and_collapse() {
+    let id = crate::terminal_container::TerminalContainerId::parse(914_001).unwrap();
+    let mut tree = layout(split(
+        Direction::Vertical,
+        pane(1),
+        TypedNode::Stack {
+            id,
+            selected: 0,
+            children: vec![pane(2), pane(3)],
+        },
+    ));
+    let original = tree.tree_fingerprint().to_owned();
+    assert_eq!(original, tree.authoritative_fingerprint());
+    assert!(tree.select_stack_child(id, 1));
+    assert_ne!(tree.tree_fingerprint(), original);
+    assert_eq!(tree.tree_fingerprint(), tree.authoritative_fingerprint());
+    let selected = tree.tree_fingerprint().to_owned();
+    assert!(tree.set_collapsed(&[1, 0], true));
+    assert_ne!(tree.tree_fingerprint(), selected);
+    assert_eq!(tree.tree_fingerprint(), tree.authoritative_fingerprint());
+    assert!(tree.set_collapsed(&[1, 0], false));
+    assert_eq!(tree.tree_fingerprint(), selected);
+    assert!(tree.set_ratio_at(&[], 0.6));
+    assert_ne!(tree.tree_fingerprint(), selected);
+    assert_eq!(tree.tree_fingerprint(), tree.authoritative_fingerprint());
 }
 
 #[test]

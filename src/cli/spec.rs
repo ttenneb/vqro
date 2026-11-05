@@ -697,6 +697,8 @@ fn pane_command() -> Command {
                 .arg(option("amount", "FLOAT"))
                 .args(current_pane_args()),
         )
+        .subcommand(id_command("collapse", "pane_id", "Collapse a pane or its containing box").arg(flag("box")))
+        .subcommand(id_command("expand", "pane_id", "Expand a pane or its containing box").arg(flag("box")))
         .subcommand(
             Command::new("zoom")
                 .about("Toggle or set pane zoom")

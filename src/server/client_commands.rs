@@ -94,7 +94,12 @@ pub(crate) const CLIENT_SHELL_OPTIONAL_METHODS: &[&str] = &[
     "extension.rollback",
     "extension.update",
     "host.document.action",
+    "layout.collapse",
+    "layout.collapse.describe",
+    "layout.expand",
     "layout.tree.export",
+    "pane.collapse",
+    "pane.expand",
     "pane.telemetry",
     "plugin.pane.open",
 ];

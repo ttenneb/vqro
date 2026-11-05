@@ -1,5 +1,8 @@
 //! One transient membership/geometry pass; no session/tree or provider authority.
-use super::{LayoutLeaf, PaneFramePolicy, PaneId, PaneInfo, SplitBorder, TypedNode};
+use super::{
+    LayoutLeaf, LayoutPathStep, LayoutSplitChild, PaneFramePolicy, PaneId, PaneInfo, SplitBorder,
+    TypedNode,
+};
 use ratatui::{
     layout::{Direction, Rect},
     widgets::Borders,
@@ -29,9 +32,17 @@ pub(crate) struct BoxFrame {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CollapsedFrame {
     pub rect: Rect,
-    pub path: Vec<usize>,
+    pub path: Vec<LayoutPathStep>,
     pub direction: Direction,
     pub title_pane: Option<PaneId>,
+    pub focused: bool,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ContainerGeometry {
+    pub path: Vec<LayoutPathStep>,
+    pub rect: Rect,
+    pub framed: bool,
+    pub stack: bool,
 }
 #[derive(Default)]
 pub(crate) struct LayoutGeometry {
@@ -39,6 +50,8 @@ pub(crate) struct LayoutGeometry {
     pub splits: Vec<SplitBorder>,
     pub boxes: Vec<BoxFrame>,
     pub collapsed: Vec<CollapsedFrame>,
+    pub containers: Vec<ContainerGeometry>,
+    pub pane_paths: HashMap<PaneId, Vec<LayoutPathStep>>,
     pub leaf_rects: HashMap<LayoutLeaf, Rect>,
 }
 #[derive(Clone, Copy, Default)]
@@ -475,7 +488,7 @@ fn walk(
     mut group: Option<Group>,
     facts: &HashMap<usize, Facts>,
     path: &mut Vec<bool>,
-    address: &mut Vec<usize>,
+    address: &mut Vec<LayoutPathStep>,
     parent_direction: Direction,
     out: &mut LayoutGeometry,
 ) {
@@ -485,14 +498,32 @@ fn walk(
         } else {
             area.height = area.height.min(1);
         }
+        let focused = match focus {
+            LayoutLeaf::Pane(pane) => node.contains_pane(pane),
+            LayoutLeaf::Stack(id) => node.stack(id).is_some(),
+        };
         out.collapsed.push(CollapsedFrame {
             rect: area,
             path: address.clone(),
             direction: parent_direction,
             title_pane: node.selected_pane(),
+            focused,
         });
+        if matches!(
+            node.content(),
+            TypedNode::Split { .. } | TypedNode::Stack { .. }
+        ) {
+            out.containers.push(ContainerGeometry {
+                path: address.clone(),
+                rect: area,
+                framed: false,
+                stack: matches!(node.content(), TypedNode::Stack { .. }),
+            });
+        }
         return;
     }
+    let frame_rect = area;
+    let mut own_frame = false;
     if group.is_none() && matches!(node, TypedNode::Split { .. }) {
         if let Some(terminal) = facts
             .get(&key(node))
@@ -507,6 +538,7 @@ fn walk(
                 terminal,
                 outer: area,
             });
+            own_frame = true;
             area = inset(area);
         }
     }
@@ -517,6 +549,7 @@ fn walk(
             let terminal_group = group.filter(|group| group.terminal == *pane && !view);
             let rect = terminal_group.map_or(area, |group| group.outer);
             out.leaf_rects.insert(LayoutLeaf::Pane(*pane), rect);
+            out.pane_paths.insert(*pane, address.clone());
             out.panes.push(PaneInfo {
                 id: *pane,
                 rect,
@@ -539,6 +572,12 @@ fn walk(
             children,
         } => {
             out.leaf_rects.insert(LayoutLeaf::Stack(*id), area);
+            out.containers.push(ContainerGeometry {
+                path: address.clone(),
+                rect: area,
+                framed: true,
+                stack: true,
+            });
             if let Some(child) = children.get(*selected) {
                 let focus = if focus == LayoutLeaf::Stack(*id) {
                     child.selected_pane().map(LayoutLeaf::Pane).unwrap_or(focus)
@@ -548,7 +587,7 @@ fn walk(
                 // Existing split paths cannot address stack children. Keep that
                 // inherited interaction limit; geometry still projects correctly.
                 let start = out.splits.len();
-                address.push(*selected);
+                address.push(LayoutPathStep::StackChild(*selected));
                 walk(
                     child,
                     focus,
@@ -570,6 +609,12 @@ fn walk(
             first,
             second,
         } => {
+            out.containers.push(ContainerGeometry {
+                path: address.clone(),
+                rect: if own_frame { frame_rect } else { area },
+                framed: own_frame,
+                stack: false,
+            });
             let (a, b) = effective_split(area, *direction, *ratio, first, second, facts);
             let compact = facts
                 .get(&key(first))
@@ -598,14 +643,14 @@ fn walk(
                 });
             }
             path.push(false);
-            address.push(0);
+            address.push(LayoutPathStep::Split(LayoutSplitChild::First));
             walk(
                 first, focus, a, group, facts, path, address, *direction, out,
             );
             address.pop();
             path.pop();
             path.push(true);
-            address.push(1);
+            address.push(LayoutPathStep::Split(LayoutSplitChild::Second));
             walk(
                 second, focus, b, group, facts, path, address, *direction, out,
             );

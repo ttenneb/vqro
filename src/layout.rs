@@ -3,7 +3,8 @@
 mod collapse;
 mod frames;
 mod nested;
-pub(crate) use frames::{BoxFrame, CollapsedFrame, LayoutGeometry};
+pub use collapse::{LayoutPathStep, LayoutSplitChild};
+pub(crate) use frames::{BoxFrame, CollapsedFrame, ContainerGeometry, LayoutGeometry};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaneFramePolicy {
@@ -300,6 +301,7 @@ impl StackRef<'_> {
 #[derive(Clone)]
 pub struct TileLayout {
     root: TypedNode,
+    tree_fingerprint: String,
     focus: LayoutLeaf,
     /// Pane focused before the current leaf/member. Targeted tree edits do not
     /// disturb this history, so closing a newly focused pane can return there.
@@ -309,9 +311,11 @@ pub struct TileLayout {
 impl TileLayout {
     pub fn new() -> (Self, PaneId) {
         let root_id = PaneId::alloc();
+        let root = TypedNode::Leaf(root_id);
         (
             Self {
-                root: TypedNode::Leaf(root_id),
+                tree_fingerprint: collapse::fingerprint(&root),
+                root,
                 focus: LayoutLeaf::Pane(root_id),
                 prev_focus: None,
             },
@@ -481,6 +485,7 @@ impl TileLayout {
     #[cfg(test)]
     pub(crate) fn replace_typed_root_for_test(&mut self, root: TypedNode) {
         self.root = root;
+        self.refresh_tree_fingerprint();
     }
 
     pub fn placement(&self, pane_id: PaneId) -> Option<PanePlacement> {
@@ -520,7 +525,11 @@ impl TileLayout {
         measures: &std::collections::HashMap<PaneId, crate::view_sizing::ViewMeasure>,
     ) -> bool {
         let headers = self.selected_stack_panes().into_iter().collect();
-        frames::auto_size(&mut self.root, area, measures, &headers)
+        let changed = frames::auto_size(&mut self.root, area, measures, &headers);
+        if changed {
+            self.refresh_tree_fingerprint();
+        }
+        changed
     }
 
     pub(crate) fn single_terminal_view_scopes(&self) -> std::collections::HashMap<PaneId, PaneId> {
@@ -591,14 +600,17 @@ impl TileLayout {
         let new_id = PaneId::alloc();
         // Split the target leaf in place: rebuilding from the root recreated
         // every node on the path and on every split of a deep layout.
-        typed_split_leaf_in_place(
+        let changed = typed_split_leaf_in_place(
             &mut self.root,
             target_leaf,
             direction,
             TypedNode::Leaf(new_id),
             valid_split_ratio(ratio),
-        )
-        .then_some(new_id)
+        );
+        if changed {
+            self.refresh_tree_fingerprint();
+        }
+        changed.then_some(new_id)
     }
 
     /// Split `target` with a view pane. The view pane carries its own content
@@ -625,14 +637,17 @@ impl TileLayout {
         if !content.validate() {
             return None;
         }
-        typed_split_leaf_in_place(
+        let changed = typed_split_leaf_in_place(
             &mut self.root,
             target_leaf,
             direction,
             TypedNode::view(new_id, &content.extension, &content.view),
             valid_split_ratio(ratio),
-        )
-        .then_some((new_id, content))
+        );
+        if changed {
+            self.refresh_tree_fingerprint();
+        }
+        changed.then_some((new_id, content))
     }
 
     /// The content identity of a placed view pane.
@@ -707,6 +722,7 @@ impl TileLayout {
         ) {
             return false;
         }
+        self.refresh_tree_fingerprint();
         if focus {
             self.focus_pane(moved);
         }
@@ -727,7 +743,7 @@ impl TileLayout {
         if self.root.stack(collection_id).is_some() || !self.can_insert_collection_near(target) {
             return false;
         }
-        typed_split_leaf_in_place(
+        let changed = typed_split_leaf_in_place(
             &mut self.root,
             target,
             direction,
@@ -737,7 +753,11 @@ impl TileLayout {
                 children: Vec::new(),
             },
             valid_split_ratio(ratio),
-        )
+        );
+        if changed {
+            self.refresh_tree_fingerprint();
+        }
+        changed
     }
 
     pub fn focus_leaf(&mut self, leaf: LayoutLeaf) -> bool {
@@ -769,6 +789,7 @@ impl TileLayout {
             return false;
         };
         children.push(TypedNode::Leaf(pane));
+        self.refresh_tree_fingerprint();
         true
     }
 
@@ -787,6 +808,7 @@ impl TileLayout {
             return false;
         };
         *stack = root;
+        self.refresh_tree_fingerprint();
         true
     }
 
@@ -798,7 +820,11 @@ impl TileLayout {
         let Some(stack) = self.root.stack_mut(id) else {
             return false;
         };
-        stack.select_pane(pane)
+        let selected = stack.select_pane(pane);
+        if selected {
+            self.refresh_tree_fingerprint();
+        }
+        selected
     }
 
     pub(crate) fn reorder_collection_member(
@@ -819,7 +845,11 @@ impl TileLayout {
         else {
             return false;
         };
-        nested::reorder_child(children, selected, from, index)
+        let changed = nested::reorder_child(children, selected, from, index);
+        if changed {
+            self.refresh_tree_fingerprint();
+        }
+        changed
     }
 
     // Retained as the pure layout primitive exercised by collection invariant tests.
@@ -909,11 +939,16 @@ impl TileLayout {
             return false;
         }
         typed_swap_panes(&mut self.root, first, second);
+        self.refresh_tree_fingerprint();
         true
     }
 
     pub fn set_ratio_at(&mut self, path: &[bool], ratio: f32) -> bool {
-        typed_set_ratio(&mut self.root, path, ratio.clamp(0.1, 0.9))
+        let changed = typed_set_ratio(&mut self.root, path, ratio.clamp(0.1, 0.9));
+        if changed {
+            self.refresh_tree_fingerprint();
+        }
+        changed
     }
 
     pub fn resize_focused(&mut self, nav: NavDirection, delta: f32, area: Rect) {
@@ -993,8 +1028,10 @@ impl TileLayout {
     }
 
     pub(crate) fn for_pane(pane: PaneId) -> Self {
+        let root = TypedNode::Leaf(pane);
         Self {
-            root: TypedNode::Leaf(pane),
+            tree_fingerprint: collapse::fingerprint(&root),
+            root,
             focus: LayoutLeaf::Pane(pane),
             prev_focus: None,
         }
@@ -1002,8 +1039,10 @@ impl TileLayout {
 
     #[cfg(test)]
     pub fn from_saved(root: Node, focus: PaneId) -> Self {
+        let root = typed_from_legacy(&root);
         Self {
-            root: typed_from_legacy(&root),
+            tree_fingerprint: collapse::fingerprint(&root),
+            root,
             focus: LayoutLeaf::Pane(focus),
             prev_focus: None,
         }
@@ -1026,6 +1065,7 @@ impl TileLayout {
             return false;
         };
         self.root = root;
+        self.refresh_tree_fingerprint();
         if self.focus == target {
             if let Some(replacement) = replacement {
                 self.focus = replacement;

@@ -139,6 +139,8 @@ pub struct App {
     pub state: AppState,
     pub(crate) pixel_mouse_available: bool,
     pub(crate) terminal_runtimes: crate::terminal::TerminalRuntimeRegistry,
+    /// Process incarnation shared by conditional layout edits and endpoint projections.
+    pub(crate) runtime_incarnation: String,
     #[cfg(test)]
     terminal_id_candidates:
         std::collections::VecDeque<std::io::Result<crate::terminal::TerminalId>>,
@@ -957,6 +959,14 @@ impl App {
             state,
             pixel_mouse_available: false,
             terminal_runtimes: restored_terminal_runtimes,
+            runtime_incarnation: format!(
+                "{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            ),
             #[cfg(test)]
             terminal_id_candidates: std::collections::VecDeque::new(),
             #[cfg(test)]

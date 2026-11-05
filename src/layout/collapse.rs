@@ -1,5 +1,85 @@
 //! Generic collapse state belongs to the canonical tree, never to pane runtimes.
 use super::{PaneId, TileLayout, TypedNode};
+use sha2::{Digest, Sha256};
+
+/// Structural request-local addresses; wrappers consume no step or identity.
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum LayoutPathStep {
+    Split(LayoutSplitChild),
+    StackChild(usize),
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum LayoutSplitChild {
+    First,
+    Second,
+}
+
+pub(super) fn fingerprint(node: &TypedNode) -> String {
+    fn text(hash: &mut Sha256, value: &str) {
+        hash.update((value.len() as u64).to_le_bytes());
+        hash.update(value.as_bytes());
+    }
+    fn visit(hash: &mut Sha256, node: &TypedNode) {
+        match node {
+            TypedNode::Leaf(pane) => {
+                hash.update([0]);
+                hash.update(pane.raw().to_le_bytes());
+            }
+            TypedNode::View {
+                pane,
+                extension,
+                view,
+            } => {
+                hash.update([1]);
+                hash.update(pane.raw().to_le_bytes());
+                text(hash, extension);
+                text(hash, view);
+            }
+            TypedNode::Stack {
+                id,
+                selected,
+                children,
+            } => {
+                hash.update([2]);
+                hash.update(id.raw().to_le_bytes());
+                hash.update((*selected as u64).to_le_bytes());
+                hash.update((children.len() as u64).to_le_bytes());
+                for child in children {
+                    visit(hash, child);
+                }
+            }
+            TypedNode::Split {
+                direction,
+                ratio,
+                first,
+                second,
+            } => {
+                hash.update([
+                    3,
+                    u8::from(*direction == ratatui::layout::Direction::Horizontal),
+                ]);
+                hash.update(ratio.to_bits().to_le_bytes());
+                visit(hash, first);
+                visit(hash, second);
+            }
+            TypedNode::Collapsed { node } => {
+                hash.update([4]);
+                visit(hash, node);
+            }
+        }
+    }
+    let mut hash = Sha256::new();
+    hash.update(b"vqro.layout.tree-fingerprint.v1\0");
+    visit(&mut hash, node);
+    format!("{:x}", hash.finalize())
+}
 
 #[cfg(test)]
 mod tests;
@@ -23,6 +103,25 @@ impl TypedNode {
 }
 
 impl TileLayout {
+    /// Cached at canonical layout edits, never hashed per byte/frame/client.
+    pub(crate) fn tree_fingerprint(&self) -> &str {
+        &self.tree_fingerprint
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_projection_fingerprint_for_test(&mut self, fingerprint: String) {
+        self.tree_fingerprint = fingerprint;
+    }
+
+    /// Independent request-time verification fences missed projection invalidation.
+    pub(crate) fn authoritative_fingerprint(&self) -> String {
+        fingerprint(&self.root)
+    }
+
+    pub(super) fn refresh_tree_fingerprint(&mut self) {
+        self.tree_fingerprint = fingerprint(&self.root);
+    }
+
     pub(crate) fn pane_path(&self, pane: PaneId) -> Option<Vec<usize>> {
         super::leaf_path(&self.root, pane)
     }
@@ -58,6 +157,7 @@ impl TileLayout {
         } else {
             old
         };
+        self.refresh_tree_fingerprint();
         true
     }
 }

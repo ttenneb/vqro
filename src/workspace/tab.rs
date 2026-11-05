@@ -303,6 +303,11 @@ impl Tab {
 
     #[cfg(test)]
     pub(super) fn assert_collection_invariants_for_test(&self) {
+        assert_eq!(
+            self.layout.tree_fingerprint(),
+            self.layout.authoritative_fingerprint(),
+            "cached collapse target token must match the authoritative tree"
+        );
         assert!(
             self.layout.typed_root().valid_structure(),
             "canonical tree ownership and selection must be valid"

@@ -455,6 +455,7 @@ impl TileLayout {
             return None;
         }
         let mut layout = Self {
+            tree_fingerprint: super::collapse::fingerprint(&root),
             root,
             focus,
             prev_focus: None,
@@ -550,6 +551,7 @@ impl TileLayout {
                 self.focus = LayoutLeaf::Stack(id);
             }
         }
+        self.refresh_tree_fingerprint();
         true
     }
 
@@ -565,7 +567,11 @@ impl TileLayout {
         else {
             return false;
         };
-        reorder_child(children, selected, from, to)
+        let changed = reorder_child(children, selected, from, to);
+        if changed {
+            self.refresh_tree_fingerprint();
+        }
+        changed
     }
 
     fn commit_nested(&mut self, root: TypedNode, check_depth: bool) -> bool {
@@ -588,6 +594,7 @@ impl TileLayout {
             self.focus_pane(previous);
         }
         self.prev_focus = previous_history.filter(|id| self.placement(*id).is_some());
+        self.refresh_tree_fingerprint();
         true
     }
 }

@@ -45,6 +45,7 @@ fn test_headless_server_with_event_hub(event_hub: api::EventHub) -> HeadlessServ
     );
 
     app.state.default_shell = crate::app::exiting_test_command().into();
+    app.runtime_incarnation = "test-boot".into();
     let dir = std::env::temp_dir().join(format!(
         "hh-{}-{}",
         std::process::id(),

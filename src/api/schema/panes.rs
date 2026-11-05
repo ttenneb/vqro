@@ -150,6 +150,25 @@ pub struct LayoutExportParams {
     pub pane_id: Option<String>,
 }
 
+pub use crate::layout::{LayoutPathStep, LayoutSplitChild};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LayoutCollapseTarget {
+    pub boot_id: String,
+    pub tab_id: String,
+    pub tree_fingerprint: String,
+    pub path: Vec<LayoutPathStep>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct LayoutCollapseDescription {
+    pub kind: String,
+    pub boot_id: String,
+    pub tree_fingerprint: String,
+    pub layout: LayoutTreeDescription,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct LayoutApplyParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -1,8 +1,8 @@
 # Generic pane and box collapse
 
-Status: accepted design (2026-11-05). Canonical tree/session and compact geometry
-are implemented; client controls and the optional companion below are not yet
-advertised. This does not grant box naming, selection, or new box-close authority.
+Status: accepted design (2026-11-05). Canonical tree/session, compact geometry,
+header raster, transient resume fencing and the [neutral API/CLI](../api/layout-collapse-v1.md)
+are implemented; TUI controls and the optional companion below are not yet advertised. This does not grant box naming, selection, or new box-close authority.
 
 ## State, membership, and recovery
 

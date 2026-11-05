@@ -46,7 +46,7 @@ impl App {
         encode_success(id, ResponseResult::LayoutTreeExport { layout })
     }
 
-    fn layout_tree_description(
+    pub(super) fn layout_tree_description(
         &self,
         ws_idx: usize,
         tab_idx: usize,
@@ -442,7 +442,10 @@ impl App {
         encode_success(id, ResponseResult::LayoutSplitRatioSet { layout })
     }
 
-    fn resolve_layout_export_target(&self, params: &LayoutExportParams) -> Option<(usize, usize)> {
+    pub(super) fn resolve_layout_export_target(
+        &self,
+        params: &LayoutExportParams,
+    ) -> Option<(usize, usize)> {
         match (params.tab_id.as_deref(), params.pane_id.as_deref()) {
             (Some(_), Some(_)) => None,
             (Some(tab_id), None) => self.parse_tab_id(tab_id),

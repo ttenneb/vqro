@@ -46,7 +46,11 @@ pub(super) fn render_collapsed_frames(
             header.rect,
             header.direction,
             text,
-            Style::default().fg(app.palette.overlay0),
+            Style::default().fg(if header.focused {
+                app.palette.accent
+            } else {
+                app.palette.overlay0
+            }),
         );
     }
 }
