@@ -94,7 +94,9 @@ impl App {
         }
         let tab = &mut self.state.workspaces[workspace].tabs[tab_index];
         let changed = tab.layout.set_collapsed(path, collapsed);
-        if changed && collapsed {
+        if changed {
+            // An expansion restores saved shares, not a latent zoom flag that
+            // could have followed focus into this collapsed subtree.
             tab.zoomed = false;
         }
         changed

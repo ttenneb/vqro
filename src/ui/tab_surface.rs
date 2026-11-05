@@ -75,7 +75,7 @@ pub(crate) fn compute_tab_surface_for(
             .get(target.tab_index)
     });
     let geometry = tab
-        .filter(|tab| !tab.zoomed)
+        .filter(|tab| !tab.body_zoomed())
         .map(|tab| tab.layout.geometry(area))
         .unwrap_or_default();
     let crate::layout::LayoutGeometry {

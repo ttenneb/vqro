@@ -2,6 +2,91 @@ use super::*;
 use crate::protocol::collapse::{CollapseProjectionV1, LAYOUT_COLLAPSE_KIND};
 
 #[tokio::test]
+async fn zoom_focus_or_restored_flag_never_exposes_collapsed_bodies_or_latent_zoom_on_expand() {
+    for containing_box in [false, true] {
+        for restored_flag in [false, true] {
+            let mut server = test_headless_server();
+            let _input = install_focused_test_runtime(&mut server, b"live");
+            let root = server.app.state.workspaces[0].tabs[0].root_pane;
+            let pane_id = server.app.public_pane_id(0, root).unwrap();
+            let sibling =
+                server.app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+            if containing_box {
+                server.app.state.workspaces[0]
+                    .split_pane_with_view(
+                        root,
+                        "example.views",
+                        "summary",
+                        ratatui::layout::Direction::Vertical,
+                        0.5,
+                        false,
+                    )
+                    .unwrap();
+            }
+            server.app.state.ensure_test_terminals();
+            server.app.state.focus_pane_in_workspace(0, root);
+            let (_control, render) = add_client(&mut server, 1, true);
+            server.render_and_stream();
+            let (initial, _) = decode_pair(render.try_recv().unwrap());
+            let original = initial
+                .panes
+                .iter()
+                .find(|pane| pane.pane_id == pane_id)
+                .unwrap()
+                .rect;
+            let size = server
+                .app
+                .state
+                .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 0, root)
+                .unwrap()
+                .current_size();
+            assert!(server.app.set_node_collapsed(0, 0, &[0], true));
+            if restored_flag {
+                server.app.state.workspaces[0].tabs[0].zoomed = true;
+            } else {
+                server
+                    .app
+                    .state
+                    .apply_pane_zoom(0, sibling, crate::app::actions::PaneZoomCommand::On)
+                    .unwrap();
+                server.app.state.focus_pane_in_workspace(0, root);
+            }
+            server.clients.get_mut(&1).unwrap().request_repaint();
+            server.render_and_stream();
+            let (hidden, _) = decode_pair(render.try_recv().unwrap());
+            assert!(
+                hidden.panes.iter().all(|pane| pane.pane_id != pane_id),
+                "focus/restore must not bypass collapsed body visibility"
+            );
+            assert_eq!(
+                server
+                    .app
+                    .state
+                    .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 0, root)
+                    .unwrap()
+                    .current_size(),
+                size
+            );
+            assert!(server.app.set_node_collapsed(0, 0, &[0], false));
+            server.clients.get_mut(&1).unwrap().request_repaint();
+            server.render_and_stream();
+            let (expanded, _) = decode_pair(render.try_recv().unwrap());
+            assert_eq!(
+                expanded
+                    .panes
+                    .iter()
+                    .find(|pane| pane.pane_id == pane_id)
+                    .unwrap()
+                    .rect,
+                original,
+                "expand restores shares, not a latent zoom mode"
+            );
+            shutdown_test_runtimes(&mut server);
+        }
+    }
+}
+
+#[tokio::test]
 async fn later_zoom_on_or_toggle_cannot_reveal_a_collapsed_leaf_or_containing_box() {
     for containing_box in [false, true] {
         let mut server = test_headless_server();

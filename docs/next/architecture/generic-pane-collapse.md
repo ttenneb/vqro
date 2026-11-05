@@ -111,7 +111,10 @@ selection identity.
 Ordinary typing has no hidden-body target; held key/mouse release cleanup remains
 intact. Later zoom-on of a collapsed pane or box descendant rejects with
 `pane_collapsed`; zoom never implicitly expands or overwrites retained hidden PTY
-size. Explicit authorized terminal-write APIs keep their execution semantics.
+size. Shared body geometry/resize also checks current collapsed ancestry, so
+focus changes or a restored zoom flag cannot bypass that boundary. Expansion
+exits any retained zoom mode before restoring shares. Explicit authorized
+terminal-write APIs keep their execution semantics.
 Close appears only where an existing authorized close path and process
 confirmation apply, never a newly invented generic anonymous-box close action.
 

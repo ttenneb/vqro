@@ -347,6 +347,12 @@ impl Tab {
         self.layout.focus_leaf(leaf)
     }
 
+    /// Collapse wins over any retained zoom flag, including focus changes and
+    /// restored state that did not pass through the zoom command mutation.
+    pub(crate) fn body_zoomed(&self) -> bool {
+        self.zoomed && self.layout.pane_is_expanded(self.layout.focused())
+    }
+
     pub(crate) fn focus_pane(&mut self, pane_id: PaneId) {
         self.layout.focus_pane(pane_id);
     }
