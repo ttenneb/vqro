@@ -851,7 +851,7 @@ impl AppState {
         let Some(tab) = self.workspaces.get(ws_idx).and_then(|ws| ws.active_tab()) else {
             return;
         };
-        let panes = if tab.zoomed {
+        let panes = if tab.body_zoomed() {
             tab.layout.panes(self.view.terminal_area)
         } else {
             self.view.pane_infos.clone()
@@ -872,7 +872,7 @@ impl AppState {
         let Some(tab) = self.workspaces.get(ws_idx).and_then(|ws| ws.active_tab()) else {
             return false;
         };
-        let panes = if tab.zoomed {
+        let panes = if tab.body_zoomed() {
             tab.layout.panes(self.view.terminal_area)
         } else {
             self.view.pane_infos.clone()
@@ -950,7 +950,7 @@ impl AppState {
                 changed: false,
                 focus_changed,
                 reason: Some(PaneZoomNoopReason::SinglePane),
-                zoomed: tab.zoomed,
+                zoomed: tab.body_zoomed(),
             });
         }
 
@@ -964,12 +964,12 @@ impl AppState {
                 changed: false,
                 focus_changed,
                 reason,
-                zoomed: tab.zoomed,
+                zoomed: tab.body_zoomed(),
             });
         }
 
         tab.zoomed = desired;
-        let zoomed = tab.zoomed;
+        let zoomed = tab.body_zoomed();
         self.mark_session_dirty();
         Some(PaneZoomOutcome {
             changed: true,

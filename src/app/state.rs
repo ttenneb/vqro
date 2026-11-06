@@ -1022,11 +1022,8 @@ impl AppState {
         else {
             return false;
         };
-        if tab.zoomed {
-            tab.layout.focused() == pane_id
-        } else {
-            tab.layout.pane_ids().contains(&pane_id)
-        }
+        tab.layout.pane_is_expanded(pane_id)
+            && (!tab.body_zoomed() || tab.layout.focused() == pane_id)
     }
 
     pub fn is_active_pane(

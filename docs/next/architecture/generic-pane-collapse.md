@@ -113,8 +113,8 @@ Ordinary typing has no hidden-body target; held key/mouse release cleanup remain
 intact. Later zoom-on of a collapsed pane or box descendant rejects with
 `pane_collapsed`; zoom never implicitly expands or overwrites retained hidden PTY
 size. One effective-zoom fact, derived from current collapsed ancestry, governs
-body geometry/resize, input, output visibility, immediate sources, pixel mouse,
-auto-sizing and projected ZOOM status. Focus changes or a restored policy flag
+body geometry/resize, input, checked pane links, output visibility, immediate
+sources, pixel mouse, move guards, auto-sizing and projected ZOOM status. Focus changes or a restored policy flag
 cannot bypass that boundary. Saved policy fields are not rewritten in render. Expansion
 exits any retained zoom mode before restoring shares. Explicit authorized
 terminal-write APIs keep their execution semantics.

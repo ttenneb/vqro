@@ -28,6 +28,10 @@ Unavailable providers retain the ordinary unavailable-view behavior.
 
 ## Admission and intent
 
+This slice retains the existing `pane.report_agent` status-adapter trigger. A
+bare managed start with all status extensions disabled is not an additional
+trigger. Normal integrated agent launches report through the neutral adapter.
+
 The existing once-per-terminal marker is preserved in session state. A terminal
 already marked or covered by existing views is left alone: existing views are
 not moved, retrofitted or reopened. Closing either child uses ordinary view close

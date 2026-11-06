@@ -1041,7 +1041,7 @@ impl App {
             identity_cwd: self.state.workspaces[source_ws_idx].identity_cwd.clone(),
         };
 
-        if self.state.workspaces[source_ws_idx].tabs[source_tab_idx].zoomed {
+        if self.state.workspaces[source_ws_idx].tabs[source_tab_idx].body_zoomed() {
             let Some(layout) = self.pane_layout_snapshot(source_ws_idx, source_tab_idx) else {
                 return encode_error(id, "pane_layout_unavailable", "pane layout unavailable");
             };
@@ -1093,7 +1093,7 @@ impl App {
                         layout,
                     );
                 }
-                if self.state.workspaces[target_ws_idx].tabs[target_tab_idx].zoomed {
+                if self.state.workspaces[target_ws_idx].tabs[target_tab_idx].body_zoomed() {
                     let Some(source_layout) =
                         self.pane_layout_snapshot(source_ws_idx, source_tab_idx)
                     else {
