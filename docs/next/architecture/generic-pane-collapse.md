@@ -2,9 +2,8 @@
 
 Status: accepted design (2026-11-05). Canonical tree/session, compact geometry,
 header raster, transient resume fencing and the [neutral API/CLI](../api/layout-collapse-v1.md)
-and optional TUI controls/companion are implemented. Default start composition
-below remains the next implementation slice. This does not grant box naming,
-selection, or new box-close authority.
+and optional TUI controls/companion and default start composition are implemented.
+This does not grant box naming, selection, or new box-close authority.
 
 ## State, membership, and recovery
 
@@ -102,7 +101,9 @@ mutation. There is no retry-inverting toggle API and no new stable box identity.
 Existing framed panes/groups get a collapse hit cell distinct from close/drag.
 An anonymous expanded split gets no new frame/header: use **Collapse box** in an
 existing child-header context menu, the matching ancestor-picker key, or CLI.
-Collapsed headers/strips expand directly. A client-local active header uses its
+Collapsed headers/strips expand directly. Their right-click menu offers Expand
+only for generic containers; leaf headers reuse the existing pane menu and close
+authority. A client-local active header uses its
 fenced target, not a new shared anonymous-box focus type. Cold restore/attach and
 remote collapse must establish this state, not rely on the initiating client.
 Directional focus uses the current visible ancestor header/strip as its origin
@@ -136,4 +137,5 @@ once-per-terminal marker preserves close intent across restart. Existing views
 are not silently moved. Configuration can disable the rule or choose its views.
 The outer frame belongs to the agent group, the terminal body is unframed, and
 view children contribute inner frames. Existing layout operations can place the
-whole box beside the terminal; no new expanded side-width cap is chosen.
+whole box beside the terminal; no new expanded side-width cap is chosen. See
+[configuration and admission](../api/agent-start-views.md).

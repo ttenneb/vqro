@@ -130,9 +130,24 @@ impl AppPolicy {
 
 /// Parse `<extension>:<view>` for the server-side agent-start rule. A malformed
 /// value disables the rule rather than guessing an identity.
-fn parse_agent_start_view(value: Option<&str>) -> Option<(String, String)> {
-    let (extension, view) = value?.split_once(':')?;
-    (!extension.is_empty() && !view.is_empty()).then(|| (extension.to_owned(), view.to_owned()))
+fn parse_agent_start_views(config: &Config) -> Vec<(String, String)> {
+    let ui = &config.ui;
+    // The earlier singular setting remains an explicit input override, not a
+    // second runtime authority. Invalid/empty input disables the whole rule.
+    let configured = ui
+        .agent_start_view
+        .as_ref()
+        .map(std::slice::from_ref)
+        .unwrap_or(&ui.agent_start_views);
+    configured
+        .iter()
+        .map(|value| {
+            let (extension, view) = value.split_once(':')?;
+            (!extension.is_empty() && !view.is_empty())
+                .then(|| (extension.to_owned(), view.to_owned()))
+        })
+        .collect::<Option<Vec<_>>>()
+        .unwrap_or_default()
 }
 
 pub struct App {
@@ -832,7 +847,7 @@ impl App {
             pane_scrollbars: config.ui.pane_scrollbars,
             pane_gaps: config.ui.pane_gaps,
             show_agent_labels_on_pane_borders: config.ui.show_agent_labels_on_pane_borders,
-            agent_start_view: parse_agent_start_view(config.ui.agent_start_view.as_deref()),
+            agent_start_views: parse_agent_start_views(config),
             view_sizing: Default::default(),
             view_headers: Default::default(),
             tab_bar_right: Vec::new(),
@@ -1375,8 +1390,7 @@ impl App {
                 self.state.pane_gaps = config.ui.pane_gaps;
                 self.state.show_agent_labels_on_pane_borders =
                     config.ui.show_agent_labels_on_pane_borders;
-                self.state.agent_start_view =
-                    parse_agent_start_view(config.ui.agent_start_view.as_deref());
+                self.state.agent_start_views = parse_agent_start_views(config);
                 self.configure_tab_bar_status(
                     &config.ui.tab_bar_right,
                     &config.ui.tab_bar_right_separator,

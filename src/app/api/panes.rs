@@ -1909,16 +1909,15 @@ impl App {
         encode_success(id, ResponseResult::Ok {})
     }
 
-    /// The server-side agent-start rule: when an agent is reported on a pane, add
-    /// the configured view beside it, once per terminal. Neutral: the extension
-    /// and view come from `ui.agent_start_view`; core holds no Tasks literal. It
-    /// does nothing when no view identity is set, the terminal already ran it, or
-    /// a view pane already covers the terminal. Setting the identity is the only
-    /// switch: there is no second on/off setting for the same rule.
+    /// Compose configured views below a terminal once, using ordinary tree nodes.
+    /// Empty configuration disables this rule. The durable marker and existing
+    /// covering views preserve close/layout intent; no product literals or
+    /// terminal pins belong in this structural composition path.
     fn maybe_add_agent_start_view(&mut self, pane_id: PaneId) {
-        let Some((extension, view)) = self.state.agent_start_view.clone() else {
+        let views = self.state.agent_start_views.clone();
+        if views.is_empty() {
             return;
-        };
+        }
         let Some(ws_idx) = self
             .state
             .workspaces
@@ -1948,33 +1947,26 @@ impl App {
             self.schedule_session_save();
             return;
         }
-        // Beside when the pane is wide, below when it is narrow, at a fixed size.
-        let wide = self
-            .state
-            .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, pane_id)
-            .map(|runtime| {
-                let (rows, cols) = runtime.current_size();
-                cols >= rows.saturating_mul(2)
-            })
-            .unwrap_or(true);
-        let direction = if wide {
-            ratatui::layout::Direction::Horizontal
-        } else {
-            ratatui::layout::Direction::Vertical
-        };
+        // Product placement is deterministic. The complete ordinary view group
+        // goes below; existing layout operations can subsequently move it beside.
         // Refuse rather than mark applied when the structural limits are full:
         // the marker records that a view was actually added, and a layout restore
         // would reject must never be created.
         if self
-            .admit_new_panes(Some(ws_idx), Some(tab_idx), 1)
+            .admit_new_panes(Some(ws_idx), Some(tab_idx), views.len())
             .is_err()
         {
             return;
         }
-        if let Some((tab_index, view_pane)) = self.state.workspaces[ws_idx]
-            .split_pane_with_view(pane_id, &extension, &view, direction, 0.5, false)
-        {
-            self.activate_auto_view(ws_idx, tab_index, view_pane);
+        if let Some((tab_index, panes)) = self.state.workspaces[ws_idx].split_pane_with_view_box(
+            pane_id,
+            &views,
+            ratatui::layout::Direction::Vertical,
+            0.5,
+        ) {
+            for pane in panes {
+                self.activate_auto_view(ws_idx, tab_index, pane);
+            }
             self.mark_agent_start_view_applied(ws_idx, pane_id);
             self.schedule_session_save();
             self.emit_layout_updated_event(ws_idx, tab_idx);
@@ -2661,6 +2653,7 @@ fn invalid_agent(id: String) -> String {
 
 #[cfg(test)]
 mod tests {
+    mod agent_start;
     use super::super::test_support::{exiting_test_command, shutdown_test_runtimes};
     use super::*;
     use crate::{
@@ -5356,7 +5349,7 @@ mod tests {
         let mut app = app_with_linked_worktree();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.agent_start_view = Some(("vqro.tasks".into(), "tasks".into()));
+        app.state.agent_start_views = vec![("vqro.tasks".into(), "tasks".into())];
         let root = app.state.workspaces[0].tabs[0].root_pane;
 
         app.maybe_add_agent_start_view(root);
@@ -5559,7 +5552,7 @@ mod tests {
         let mut app = app_with_linked_worktree();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.agent_start_view = Some(("vqro.tasks".into(), "tasks".into()));
+        app.state.agent_start_views = vec![("vqro.tasks".into(), "tasks".into())];
         let root = app.state.workspaces[0].tabs[0].root_pane;
         // Fill the tab with views beside a second terminal, so the root terminal
         // stays uncovered and the rule must take its add path, not the covered no-op.
@@ -5695,15 +5688,15 @@ mod tests {
     }
 
     #[test]
-    fn agent_start_rule_does_nothing_when_no_identity_is_set() {
+    fn agent_start_rule_does_nothing_for_an_empty_view_list() {
         let mut app = app_with_linked_worktree();
         app.state.active = Some(0);
         app.state.selected = 0;
         let root = app.state.workspaces[0].tabs[0].root_pane;
 
-        // No identity is passed in: core invents no Tasks literal, and setting the
-        // identity is the only switch, so the rule is off.
-        app.state.agent_start_view = None;
+        // An empty configured list disables the rule without product-specific
+        // behavior in the structural composition path.
+        app.state.agent_start_views.clear();
         app.maybe_add_agent_start_view(root);
         assert!(app.state.workspaces[0].tabs[0]
             .layout
@@ -5722,7 +5715,7 @@ mod tests {
         let mut app = app_with_linked_worktree();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.agent_start_view = Some(("vqro.tasks".into(), "tasks".into()));
+        app.state.agent_start_views = vec![("vqro.tasks".into(), "tasks".into())];
         let root = app.state.workspaces[0].tabs[0].root_pane;
         // A view already covers this terminal (added explicitly by the user).
         app.state.workspaces[0]

@@ -731,6 +731,8 @@ pub(super) enum ClientContextMenuAction {
     CollapsePane,
     CollapseBox,
     CollapseAncestor(usize),
+    ExpandPane,
+    ExpandHeader,
     ToggleRightClickPassthrough,
     ArchiveCollectionMember,
     RestoreCollectionMember,
@@ -742,6 +744,9 @@ pub(super) enum ClientContextMenuAction {
 
 #[derive(Debug)]
 pub(super) enum ClientContextMenuTarget {
+    CollapsedHeader {
+        target: crate::api::schema::LayoutCollapseTarget,
+    },
     CollapseBoxes {
         targets: Vec<crate::api::schema::LayoutCollapseTarget>,
     },
@@ -763,6 +768,7 @@ pub(super) enum ClientContextMenuTarget {
         pane_id: String,
         workspace_id: String,
         source_pane_id: Option<String>,
+        collapsed: bool,
         has_manual_label: bool,
         right_click_passthrough: bool,
         collection_id: Option<String>,

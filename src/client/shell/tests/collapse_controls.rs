@@ -8,12 +8,17 @@ use crate::{
 use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
 
 fn header_state(collapsed: bool) -> ClientShellState {
+    header_state_with_leaf(collapsed, false)
+}
+fn header_state_with_leaf(collapsed: bool, leaf: bool) -> ClientShellState {
     let mut state = feature_shell();
     let mut frame = surface();
     let mut metadata = projection(&frame);
     if collapsed {
         frame.panes.clear();
-        metadata.body.anchors.clear();
+        if !leaf {
+            metadata.body.anchors.clear();
+        }
     }
     metadata.body.headers.push(CollapseHeaderV1 {
         rect: SurfaceRect {
@@ -58,6 +63,46 @@ fn mouse(rect: Rect, kind: MouseEventKind) -> MouseEvent {
         column: rect.x,
         row: rect.y,
         modifiers: KeyModifiers::NONE,
+    }
+}
+
+#[test]
+fn collapsed_generic_header_menu_can_only_expand_while_leaf_menu_reuses_close() {
+    for leaf in [false, true] {
+        let mut state = header_state_with_leaf(true, leaf);
+        assert!(
+            state.collapse_projection().is_some(),
+            "a visible collapsed leaf header is a valid anchor, not a body"
+        );
+        let hit = state.hits.collapse_headers[0].rect;
+        state.handle_raw_events(vec![RawInputEvent::Mouse(mouse(
+            hit,
+            MouseEventKind::Down(MouseButton::Right),
+        ))]);
+        let Some(ClientShellOverlay::ContextMenu(menu)) = state.overlay.as_ref() else {
+            panic!("collapsed-header menu")
+        };
+        let items = menu.available_items(true);
+        if leaf {
+            assert!(
+                matches!(&menu.target, ClientContextMenuTarget::Pane { pane_id, .. } if pane_id == "pane_1")
+            );
+            assert!(items
+                .iter()
+                .any(|item| item.action == ClientContextMenuAction::ClosePane));
+        } else {
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].display_label(), "Expand");
+        }
+        let expand = items
+            .iter()
+            .position(|item| item.display_label().starts_with("Expand"))
+            .unwrap();
+        let mut outcome = ClientShellInput::default();
+        state.activate_context_menu_item(expand, &mut outcome);
+        assert!(
+            matches!(method(&outcome), Some(Method::LayoutExpand(target)) if target.path.is_empty())
+        );
     }
 }
 

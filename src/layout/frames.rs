@@ -35,6 +35,7 @@ pub(crate) struct CollapsedFrame {
     pub path: Vec<LayoutPathStep>,
     pub direction: Direction,
     pub title_pane: Option<PaneId>,
+    pub leaf_pane: Option<PaneId>,
     pub focused: bool,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -546,6 +547,7 @@ fn walk(
             path: address.clone(),
             direction: parent_direction,
             title_pane: node.selected_pane(),
+            leaf_pane: node.pane_leaf(),
             focused,
         });
         if matches!(

@@ -942,14 +942,11 @@ pub struct UiConfig {
     pub mobile_width_threshold: u16,
     /// Capture mouse input for Herdr's mouse UI. Default: true.
     pub mouse_capture: bool,
-    /// Open a pane's published views when an agent starts there. Default: true,
-    /// because the owner's rule is that views are hidden by default and appear
-    /// when the user toggles them or when an agent starts. Set false to opt out.
-    /// The view added beside a pane when an agent starts there, as
-    /// `<extension>:<view>` (for example `vqro.tasks:tasks`). Unset means the
-    /// rule adds nothing: core holds no Tasks literal, and the identity is
-    /// passed in until the extension declares its own agent-start view. One
-    /// switch: setting the identity turns the rule on.
+    /// Ordered `<extension>:<view>` identities in the agent-start views box,
+    /// below the terminal. Default: Tasks above Messages. Empty disables it.
+    pub agent_start_views: Vec<String>,
+    /// Earlier singular input overrides `agent_start_views` when explicitly set.
+    /// An empty string disables the rule. Runtime retains only the resolved list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_start_view: Option<String>,
     /// Copy text selected with the mouse. Default: true.
@@ -1211,6 +1208,7 @@ impl Default for UiConfig {
             sidebar_collapsed_mode: SidebarCollapsedModeConfig::Compact,
             mobile_width_threshold: DEFAULT_MOBILE_WIDTH_THRESHOLD,
             mouse_capture: true,
+            agent_start_views: vec!["vqro.tasks:tasks".into(), "vqro.tasks:messages".into()],
             agent_start_view: None,
             copy_on_select: true,
             host_cursor: HostCursorModeConfig::Auto,

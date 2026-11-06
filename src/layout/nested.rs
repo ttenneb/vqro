@@ -450,6 +450,57 @@ fn take_at(node: TypedNode, path: &[usize]) -> Option<(Option<TypedNode>, TypedN
 // Mutations are infrequent layout events, O(nodes) on a candidate tree, never PTY/frame work.
 #[allow(dead_code)] // New box operations are consumed by the later nested interaction slice.
 impl TileLayout {
+    /// Atomically add an ordinary terminal-free vertical view group beside the
+    /// same spatial leaf as a normal view split. New depth must fit per identity.
+    pub(crate) fn split_pane_with_view_box(
+        &mut self,
+        target: PaneId,
+        views: &[(String, String)],
+        direction: ratatui::layout::Direction,
+        ratio: f32,
+    ) -> Option<Vec<PaneId>> {
+        if views.is_empty()
+            || self.pane_count().checked_add(views.len())? > crate::admission::MAX_TAB_PANES
+        {
+            return None;
+        }
+        let leaf = match self.placement(target)? {
+            super::PanePlacement::Tiled => LayoutLeaf::Pane(target),
+            super::PanePlacement::Stack(id) => LayoutLeaf::Stack(id),
+        };
+        fn vertical(mut children: Vec<TypedNode>) -> Option<TypedNode> {
+            if children.len() <= 1 {
+                return children.pop();
+            }
+            let total = children.len();
+            let second = children.split_off(total.div_ceil(2));
+            Some(TypedNode::Split {
+                direction: ratatui::layout::Direction::Vertical,
+                ratio: children.len() as f32 / total as f32,
+                first: Box::new(vertical(children)?),
+                second: Box::new(vertical(second)?),
+            })
+        }
+        let panes = views.iter().map(|_| PaneId::alloc()).collect::<Vec<_>>();
+        let nodes = views
+            .iter()
+            .zip(&panes)
+            .map(|((extension, view), pane)| TypedNode::view(*pane, extension, view))
+            .collect();
+        let added = vertical(nodes)?;
+        let mut root = self.root.clone();
+        if !super::typed_split_leaf_in_place(
+            &mut root,
+            leaf,
+            direction,
+            added,
+            super::valid_split_ratio(ratio),
+        ) {
+            return None;
+        }
+        self.commit_nested(root, true).then_some(panes)
+    }
+
     pub(crate) fn from_tree(root: TypedNode, focus: LayoutLeaf) -> Option<Self> {
         if !root.valid_structure() {
             return None;

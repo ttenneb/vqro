@@ -143,6 +143,11 @@ impl CollapseProjectionV1 {
                     .panes
                     .iter()
                     .any(|pane| pane.pane_id == anchor.pane_id)
+                    || self
+                        .body
+                        .headers
+                        .iter()
+                        .any(|header| header.collapsed && header.path == anchor.path)
             })
     }
 }

@@ -52,8 +52,9 @@ contains `boot_id`, `projection_revision`, `base_surface_revision`, and `body`:
 current `tab_id`/`tree_fingerprint`, surface `width`/`height`, `enabled`, optional
 `unavailable`, `headers`, `anchors`, and `containers`. Header entries carry a
 surface-relative `rect`, `action_rect`, tagged `path`, `collapsed` and `focused`;
-anchors map visible `pane_id` to a path; containers carry a path and `stack`
-observation. These are ephemeral conditional addresses, not new box identities.
+anchors map visible leaf-header/body `pane_id` to a path; containers carry a path
+and `stack` observation. A collapsed leaf-header anchor is not a body descriptor:
+it enables the existing stable-pane menu, never ordinary typing. These are ephemeral conditional addresses, not new box identities.
 
 A client installs a full surface and companion only as an exact boot, projection,
 base-revision, tab and geometry pair, in either arrival order. Verified patches
@@ -73,7 +74,9 @@ advertised `layout.collapse`/`layout.expand` methods.
 Existing framed headers get a collapse hit cell. Anonymous expanded boxes do not
 get new frames: use **Collapse box** in a child header's context menu, the ancestor
 picker, or CLI. The picker exposes only collapse, not box-close/selection authority.
-Collapsed headers/strips expand directly. Configurable `[keys]` defaults are
+Collapsed headers/strips expand directly. Right click offers Expand only for a
+generic container, or the existing pane menu/close authority for a leaf; it adds
+no anonymous box-close scope. Configurable `[keys]` defaults are
 `collapse_pane = "prefix+m"` (collapse pane or expand focused header) and
 `collapse_box = "prefix+shift+m"` (choose a containing box).
 

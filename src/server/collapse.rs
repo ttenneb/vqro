@@ -38,6 +38,7 @@ pub(super) fn projection_body(app: &App, layout: &TabSurfaceLayout, area: Rect) 
     if layout
         .collapsed_frames
         .len()
+        .saturating_mul(2)
         .saturating_add(layout.container_geometry.len())
         .saturating_add(layout.pane_infos.len())
         > MAX_COLLAPSE_ITEMS
@@ -59,6 +60,15 @@ pub(super) fn projection_body(app: &App, layout: &TabSurfaceLayout, area: Rect) 
             collapsed: true,
             focused: header.focused,
         });
+        if let Some(pane_id) = header
+            .leaf_pane
+            .and_then(|pane| app.public_pane_id(target.workspace_index, pane))
+        {
+            body.anchors.push(CollapseAnchorV1 {
+                pane_id,
+                path: header.path.clone(),
+            });
+        }
     }
     for container in &layout.container_geometry {
         body.containers.push(CollapseContainerV1 {

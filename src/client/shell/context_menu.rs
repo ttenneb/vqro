@@ -6,7 +6,8 @@ impl ClientContextMenuOverlay {
 
         let item = |label, action| ClientContextMenuItem { label, action };
         match &self.target {
-            ClientContextMenuTarget::CollapseBoxes { .. } => Vec::new(),
+            ClientContextMenuTarget::CollapseBoxes { .. }
+            | ClientContextMenuTarget::CollapsedHeader { .. } => Vec::new(),
             ClientContextMenuTarget::Workspace { is_git: false, .. } => {
                 vec![item("Rename", Action::Rename), item("Close", Action::Close)]
             }
@@ -112,6 +113,16 @@ impl ClientContextMenuOverlay {
 
 impl ClientContextMenuOverlay {
     pub(super) fn available_items(&self, collapse: bool) -> Vec<ClientContextMenuItem> {
+        if matches!(self.target, ClientContextMenuTarget::CollapsedHeader { .. }) {
+            return if collapse {
+                vec![ClientContextMenuItem {
+                    label: "Expand",
+                    action: ClientContextMenuAction::ExpandHeader,
+                }]
+            } else {
+                Vec::new()
+            };
+        }
         if let ClientContextMenuTarget::CollapseBoxes { targets } = &self.target {
             return if collapse {
                 targets
@@ -128,9 +139,24 @@ impl ClientContextMenuOverlay {
         }
         let mut items = self.items();
         if collapse && matches!(self.target, ClientContextMenuTarget::Pane { .. }) {
+            let collapsed = matches!(
+                self.target,
+                ClientContextMenuTarget::Pane {
+                    collapsed: true,
+                    ..
+                }
+            );
             items.push(ClientContextMenuItem {
-                label: "Collapse pane",
-                action: ClientContextMenuAction::CollapsePane,
+                label: if collapsed {
+                    "Expand pane"
+                } else {
+                    "Collapse pane"
+                },
+                action: if collapsed {
+                    ClientContextMenuAction::ExpandPane
+                } else {
+                    ClientContextMenuAction::CollapsePane
+                },
             });
             items.push(ClientContextMenuItem {
                 label: "Collapse box",
@@ -275,6 +301,7 @@ impl ClientShellState {
                 pane_id,
                 workspace_id: pane.workspace_id.clone(),
                 source_pane_id,
+                collapsed: false,
                 has_manual_label: pane.label.is_some(),
                 right_click_passthrough: pane.right_click_passthrough,
                 collection_id: membership
@@ -320,9 +347,23 @@ impl ClientShellState {
         match (&menu.target, action) {
             (
                 ClientContextMenuTarget::Pane { pane_id, .. },
+                ClientContextMenuAction::ExpandPane,
+            ) => {
+                self.set_pane_collapsed(Some(pane_id), false, outcome);
+                return;
+            }
+            (
+                ClientContextMenuTarget::CollapsedHeader { target },
+                ClientContextMenuAction::ExpandHeader,
+            ) => {
+                self.request_collapse_target(target.clone(), false, outcome);
+                return;
+            }
+            (
+                ClientContextMenuTarget::Pane { pane_id, .. },
                 ClientContextMenuAction::CollapsePane,
             ) => {
-                self.collapse_pane(Some(pane_id), outcome);
+                self.set_pane_collapsed(Some(pane_id), true, outcome);
                 return;
             }
             (
@@ -344,7 +385,8 @@ impl ClientShellState {
             _ => {}
         }
         match menu.target {
-            ClientContextMenuTarget::CollapseBoxes { .. } => {}
+            ClientContextMenuTarget::CollapseBoxes { .. }
+            | ClientContextMenuTarget::CollapsedHeader { .. } => {}
             ClientContextMenuTarget::Workspace { workspace_id, .. } => {
                 self.activate_workspace_context_action(workspace_id, action, outcome)
             }

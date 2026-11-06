@@ -358,7 +358,12 @@ impl ClientShellState {
         })
     }
 
-    pub(super) fn collapse_pane(&mut self, pane_id: Option<&str>, outcome: &mut ClientShellInput) {
+    pub(super) fn set_pane_collapsed(
+        &mut self,
+        pane_id: Option<&str>,
+        collapsed: bool,
+        outcome: &mut ClientShellInput,
+    ) {
         let path = self.collapse_projection().and_then(|projection| {
             let pane = pane_id.or_else(|| self.snapshot.as_ref()?.focused_pane_id.as_deref())?;
             projection
@@ -369,7 +374,7 @@ impl ClientShellState {
                 .map(|anchor| anchor.path.clone())
         });
         if let Some(target) = path.and_then(|path| self.collapse_target(path)) {
-            self.request_collapse_target(target, true, outcome);
+            self.request_collapse_target(target, collapsed, outcome);
         }
     }
 
@@ -382,7 +387,7 @@ impl ClientShellState {
         if let Some(target) = active.and_then(|path| self.collapse_target(path)) {
             self.request_collapse_target(target, false, outcome);
         } else {
-            self.collapse_pane(None, outcome);
+            self.set_pane_collapsed(None, true, outcome);
         }
     }
 
@@ -488,6 +493,37 @@ impl ClientShellState {
             if let Some(target) = self.collapse_target(header.path) {
                 self.request_collapse_target(target, !header.collapsed, outcome);
             }
+        } else if header.collapsed && mouse.kind == MouseEventKind::Down(MouseButton::Right) {
+            let pane = self
+                .collapse_projection()
+                .and_then(|projection| {
+                    projection
+                        .body
+                        .anchors
+                        .iter()
+                        .find(|anchor| anchor.path == header.path)
+                })
+                .map(|anchor| anchor.pane_id.clone());
+            if let Some(pane) = pane {
+                self.open_pane_context_menu(pane, mouse.column, mouse.row);
+                if let Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
+                    target: ClientContextMenuTarget::Pane { collapsed, .. },
+                    ..
+                })) = self.overlay.as_mut()
+                {
+                    *collapsed = true;
+                }
+            } else if let Some(target) = self.collapse_target(header.path) {
+                self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
+                    target: ClientContextMenuTarget::CollapsedHeader { target },
+                    x: mouse.column,
+                    y: mouse.row,
+                    highlighted: 0,
+                }));
+            }
+            outcome.repaint = true;
+        } else if !header.collapsed {
+            return false;
         }
         true
     }

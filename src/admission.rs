@@ -68,8 +68,21 @@ pub(crate) fn workspace_pane(
     workspace_panes: usize,
     tab_panes: usize,
 ) -> Result<(), AdmissionError> {
-    admit_one(workspace_panes, MAX_WORKSPACE_PANES, "workspace pane")?;
-    admit_one(tab_panes, MAX_TAB_PANES, "tab pane")
+    workspace_panes_additional(workspace_panes, tab_panes, 1)
+}
+
+pub(crate) fn workspace_panes_additional(
+    workspace_panes: usize,
+    tab_panes: usize,
+    additional: usize,
+) -> Result<(), AdmissionError> {
+    admit(
+        workspace_panes,
+        additional,
+        MAX_WORKSPACE_PANES,
+        "workspace pane",
+    )?;
+    admit(tab_panes, additional, MAX_TAB_PANES, "tab pane")
 }
 
 pub(crate) fn group(groups_in_tab: usize) -> Result<(), AdmissionError> {
