@@ -118,6 +118,32 @@ impl TypedNode {
 }
 
 impl TileLayout {
+    /// The title source of each logically visible collapsed header. Hidden stack
+    /// branches and descendants of an outer collapsed header do not consume it.
+    pub(crate) fn any_visible_collapsed_header_title(
+        &self,
+        mut eligible: impl FnMut(super::PaneId) -> bool,
+    ) -> bool {
+        fn visit(node: &TypedNode, eligible: &mut impl FnMut(super::PaneId) -> bool) -> bool {
+            match node {
+                TypedNode::Collapsed { node } => match node.selected_pane() {
+                    Some(pane) => eligible(pane),
+                    None => false,
+                },
+                TypedNode::Split { first, second, .. } => {
+                    visit(first, eligible) || visit(second, eligible)
+                }
+                TypedNode::Stack {
+                    selected, children, ..
+                } => children
+                    .get(*selected)
+                    .is_some_and(|child| visit(child, eligible)),
+                TypedNode::Leaf(_) | TypedNode::View { .. } => false,
+            }
+        }
+        visit(&self.root, &mut eligible)
+    }
+
     /// Complete membership excluding a collapsed pane or any collapsed ancestor.
     /// Stack selection remains separate: legacy explicit previews may show an
     /// unselected member without expanding a collapsed canonical subtree.

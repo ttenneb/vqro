@@ -1240,6 +1240,27 @@ impl Default for UiConfig {
 }
 
 impl UiConfig {
+    pub(crate) fn resolved_agent_start_views(&self) -> Result<Vec<(String, String)>, String> {
+        if self.agent_start_view.as_deref() == Some("") {
+            return Ok(Vec::new());
+        }
+        let singular = self.agent_start_view.is_some();
+        let configured = self
+            .agent_start_view
+            .as_ref()
+            .map(std::slice::from_ref)
+            .unwrap_or(&self.agent_start_views);
+        configured.iter().enumerate().map(|(index, value)| {
+            let invalid = || {
+                let field = if singular { "ui.agent_start_view".to_owned() } else { format!("ui.agent_start_views[{index}]") };
+                format!("invalid {field}: expected ASCII <extension>:<view> identity (namespace 1..120 bytes, view 1..64 bytes, alphanumeric/._-); agent-start rule disabled")
+            };
+            let (extension, view) = value.split_once(':').ok_or_else(invalid)?;
+            if !crate::layout::ViewRef::validate_identity(extension, view) { return Err(invalid()); }
+            Ok((extension.to_owned(), view.to_owned()))
+        }).collect()
+    }
+
     pub fn mouse_scroll_lines(&self) -> usize {
         self.mouse_scroll_lines
             .map(NonZeroUsize::get)

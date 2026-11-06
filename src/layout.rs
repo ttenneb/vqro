@@ -245,6 +245,10 @@ pub(crate) struct ViewRef {
 impl ViewRef {
     /// Bounds mirror the host view contract's local-id and namespace rules.
     pub(crate) fn validate(&self) -> bool {
+        Self::validate_identity(&self.extension, &self.view)
+    }
+
+    pub(crate) fn validate_identity(extension: &str, view: &str) -> bool {
         fn ok(value: &str, max: usize) -> bool {
             !value.is_empty()
                 && value.len() <= max
@@ -252,7 +256,7 @@ impl ViewRef {
                     .bytes()
                     .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
         }
-        ok(&self.extension, 120) && ok(&self.view, 64)
+        ok(extension, 120) && ok(view, 64)
     }
 }
 

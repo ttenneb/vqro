@@ -451,7 +451,7 @@ impl App {
         let tab = &self.state.workspaces[workspace].tabs[tab_index];
         let views = tab.layout.view_panes();
         let mut visible = std::collections::HashSet::new();
-        if !tab.zoomed {
+        if !tab.body_zoomed() {
             tab.layout.any_visible_pane(|pane| {
                 visible.insert(pane);
                 false
@@ -540,7 +540,7 @@ impl App {
         else {
             return false;
         };
-        if tab.zoomed {
+        if tab.body_zoomed() {
             return false;
         }
         let tab_id = tab.id.clone();

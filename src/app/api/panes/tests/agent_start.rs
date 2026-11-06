@@ -189,6 +189,64 @@ fn default_box_needs_all_slots_or_leaves_tree_numbers_and_marker_unchanged() {
 }
 
 #[test]
+fn group_constructor_defends_identity_validation_without_the_config_parser() {
+    let (mut app, root) = start(&Config::default());
+    app.state.agent_start_views = vec![
+        ("example.good".into(), "summary".into()),
+        ("bad namespace".into(), "messages".into()),
+    ];
+    app.maybe_add_agent_start_view(root);
+    assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), 1);
+    assert!(
+        !app.state.workspaces[0]
+            .pane_state(root)
+            .unwrap()
+            .agent_start_view_applied
+    );
+    app.state.assert_invariants_for_test();
+}
+
+#[test]
+fn invalid_identity_rejects_the_complete_group_and_reports_config_diagnostics() {
+    for bad in [
+        "bad namespace:messages".to_owned(),
+        format!("{}:summary", "x".repeat(121)),
+        format!("example.views:{}", "x".repeat(65)),
+        "example.包:summary".to_owned(),
+        "example.views:bad:id".to_owned(),
+    ] {
+        let mut config = Config::default();
+        config.ui.agent_start_views = vec!["example.good:summary".into(), bad];
+        let (mut app, root) = start(&config);
+        let before = app.state.workspaces[0].tabs[0].layout.typed_root().clone();
+        let numbers = app.state.workspaces[0].public_pane_numbers.clone();
+        let next = app.state.workspaces[0].next_public_pane_number;
+        app.maybe_add_agent_start_view(root);
+        assert!(
+            app.state.workspaces[0].tabs[0]
+                .layout
+                .view_panes()
+                .is_empty(),
+            "reject the entire invalid group"
+        );
+        assert_eq!(app.state.workspaces[0].tabs[0].layout.typed_root(), &before);
+        assert_eq!(app.state.workspaces[0].public_pane_numbers, numbers);
+        assert_eq!(app.state.workspaces[0].next_public_pane_number, next);
+        assert!(
+            !app.state.workspaces[0]
+                .pane_state(root)
+                .unwrap()
+                .agent_start_view_applied
+        );
+        assert!(config
+            .collect_diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.contains("ui.agent_start_views")));
+        app.state.assert_invariants_for_test();
+    }
+}
+
+#[test]
 fn configurable_box_can_be_disabled_or_choose_ordered_views_without_product_literals() {
     for (text, expected) in [
         ("[ui]\nagent_start_views=[]", vec![]),

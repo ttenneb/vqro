@@ -288,7 +288,7 @@ pub(super) fn snapshot(
                 number: tab.number,
                 label: tab.label,
                 custom_label: !state.is_auto_named(),
-                zoomed: state.zoomed,
+                zoomed: state.body_zoomed(),
                 agent_status: tab.agent_status,
             }
         })
@@ -369,7 +369,7 @@ pub(super) fn snapshot(
                 .tabs
                 .get(tab_index)
         })
-        .is_some_and(|tab| tab.zoomed);
+        .is_some_and(|tab| tab.body_zoomed());
     let tab_bar_right = app
         .state
         .tab_bar_right

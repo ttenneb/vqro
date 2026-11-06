@@ -554,11 +554,11 @@ impl HeadlessServer {
                     needs_full_render = true;
                     crate::render_prof::event("full_render_cause.generic_dirty");
                 }
-                let (sidebar_title_changed, outer_title_synced) =
+                let (presentation_title_changed, outer_title_synced) =
                     self.sync_terminal_title_sources(&render_request.terminal_title_sources);
-                if sidebar_title_changed {
+                if presentation_title_changed {
                     needs_full_render = true;
-                    crate::render_prof::event("full_render_cause.terminal_title_sidebar");
+                    crate::render_prof::event("full_render_cause.terminal_title_presentation");
                 }
                 if needs_full_render && !outer_title_synced {
                     self.sync_window_title();
@@ -1542,9 +1542,45 @@ impl HeadlessServer {
         true
     }
 
-    /// Pulls only titles reported dirty by the PTY parser. A focused pane title
-    /// is forwarded as an independent client side effect; only sidebar title
-    /// tokens require a UI render.
+    /// A title-dirty event invalidates only its visible title consumers. This
+    /// remains true if an API read already synchronized the metadata cache; it
+    /// does not make the terminal's hidden body a presentation source.
+    fn collapsed_title_sources_visible(&self, sources: &HashSet<crate::layout::PaneId>) -> bool {
+        let terminals = sources
+            .iter()
+            .filter_map(|pane| {
+                self.app
+                    .find_pane(*pane)
+                    .map(|(_, pane)| &pane.attached_terminal_id)
+            })
+            .collect::<HashSet<_>>();
+        if terminals.is_empty() {
+            return false;
+        }
+        self.clients.iter().any(|(&client_id, client)| {
+            if !client.is_active_shell_client() || client.writer.is_none() {
+                return false;
+            }
+            let Some(target) = self.shell_target_for_client(client_id) else {
+                return false;
+            };
+            let Some(workspace) = self.app.state.workspaces.get(target.workspace_index) else {
+                return false;
+            };
+            let Some(tab) = workspace.tabs.get(target.tab_index) else {
+                return false;
+            };
+            !tab.body_zoomed()
+                && tab.layout.any_visible_collapsed_header_title(|pane| {
+                    workspace
+                        .terminal_id(pane)
+                        .is_some_and(|terminal| terminals.contains(&terminal))
+                })
+        })
+    }
+
+    /// Pull only title-dirty sources; outer titles stay independent side effects,
+    /// while sidebar tokens and visible collapsed headers require presentation.
     fn sync_terminal_title_sources(
         &mut self,
         sources: &HashSet<crate::layout::PaneId>,
@@ -1556,13 +1592,14 @@ impl HeadlessServer {
             .and_then(|ws_idx| self.app.state.workspaces.get(ws_idx))
             .and_then(|workspace| workspace.focused_pane_id())
             .is_some_and(|pane_id| sources.contains(&pane_id));
+        let header_changed = self.collapsed_title_sources_visible(sources);
         let changes = self.app.sync_terminal_titles(sources);
         let outer_title_synced = focused_source && self.app.window_title_uses_terminal_title();
         if outer_title_synced {
             self.sync_window_title();
         }
         (
-            self.app.terminal_title_sidebar_changed(&changes),
+            header_changed || self.app.terminal_title_sidebar_changed(&changes),
             outer_title_synced,
         )
     }

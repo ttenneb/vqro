@@ -2,15 +2,78 @@ use super::*;
 use crate::protocol::collapse::{CollapseProjectionV1, LAYOUT_COLLAPSE_KIND};
 
 #[tokio::test]
+async fn collapsed_terminal_title_schedules_only_its_visible_header_consumer() {
+    let (mut server, _control) = window_title_test_server();
+    server.app.configure_window_title("fixed");
+    server.app.state.sidebar_agents.rows.clear();
+    server.app.state.sidebar_agents.rows_by_agent.clear();
+    server.app.state.ensure_test_terminals();
+    let pane = server.app.state.workspaces[0].tabs[0].root_pane;
+    let terminal = server.app.state.workspaces[0]
+        .terminal_id(pane)
+        .unwrap()
+        .clone();
+    assert!(server.app.state.workspaces[0].tabs[0]
+        .layout
+        .set_collapsed(&[], true));
+    let runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(
+        80,
+        24,
+        b"\x1b]0;changed collapsed title\x07",
+    );
+    server
+        .app
+        .terminal_runtimes
+        .insert(terminal.clone(), runtime);
+    let _ = server.app.render_dirty.take();
+    server.app.render_dirty.request_terminal_title(pane);
+    // An API metadata read may synchronize the title before the render loop.
+    server.app.sync_pending_terminal_titles();
+    let request = server.app.render_dirty.take();
+    let (presentation, _) = server.sync_terminal_title_sources(&request.terminal_title_sources);
+    assert!(
+        presentation,
+        "visible header title must schedule presentation without sidebar tokens"
+    );
+    assert!(
+        !server.sync_terminal_title_sources(&HashSet::new()).0,
+        "without a new title event there is no header repaint"
+    );
+    for client in server.clients.values_mut() {
+        client.shell_surface_active = false;
+    }
+    server
+        .app
+        .terminal_runtimes
+        .get(&terminal)
+        .unwrap()
+        .test_process_pty_bytes(b"\x1b]0;hidden title\x07");
+    assert!(
+        !server.sync_terminal_title_sources(&HashSet::from([pane])).0,
+        "a header with no active surface does not repaint"
+    );
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
 async fn zoom_focus_or_restored_flag_never_exposes_collapsed_bodies_or_latent_zoom_on_expand() {
     for containing_box in [false, true] {
         for restored_flag in [false, true] {
             let mut server = test_headless_server();
-            let _input = install_focused_test_runtime(&mut server, b"live");
+            let mut hidden_input = install_focused_test_runtime(&mut server, b"live");
             let root = server.app.state.workspaces[0].tabs[0].root_pane;
             let pane_id = server.app.public_pane_id(0, root).unwrap();
             let sibling =
                 server.app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+            let (runtime, mut sibling_input) =
+                crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                    80,
+                    24,
+                    0,
+                    b"visible sibling\x1b[?1000h\x1b[?1006h\x1b[?1016h",
+                    4,
+                );
+            server.app.state.workspaces[0].insert_test_runtime(sibling, runtime);
             if containing_box {
                 server.app.state.workspaces[0]
                     .split_pane_with_view(
@@ -58,6 +121,62 @@ async fn zoom_focus_or_restored_flag_never_exposes_collapsed_bodies_or_latent_zo
                 hidden.panes.iter().all(|pane| pane.pane_id != pane_id),
                 "focus/restore must not bypass collapsed body visibility"
             );
+            assert!(
+                server.any_shell_surface_contains_pane(sibling),
+                "displayed sibling output must remain visible"
+            );
+            server.sync_immediate_pty_sources();
+            let _ = server.app.render_dirty.take();
+            server.app.render_dirty.request_pty(sibling);
+            assert!(
+                server.app.render_dirty.has_immediate_work(),
+                "displayed sibling output is immediate"
+            );
+            let _ = server.app.render_dirty.take();
+            server.app.render_dirty.request_pty(root);
+            assert!(
+                !server.app.render_dirty.has_immediate_work(),
+                "hidden body output is not immediate"
+            );
+            let _ = server.app.render_dirty.take();
+            assert!(
+                server.shell_visible_pane_wants_sgr_pixels(1),
+                "visible sibling pixel mouse must remain eligible"
+            );
+            let projected = crate::server::client_shell::snapshot(
+                &server.app,
+                &server.client_shell_boot_id,
+                1,
+                None,
+                None,
+            );
+            assert!(
+                !projected.tabs[0].zoomed,
+                "ZOOM status must describe effective geometry"
+            );
+            let sibling_id = server.app.public_pane_id(0, sibling).unwrap();
+            server.handle_server_event(ServerEvent::ClientShellPaneInput {
+                client_id: 1,
+                pane_id: sibling_id,
+                events: vec![crate::protocol::ClientPaneInputEvent::TextCommit(
+                    "visible-sibling".into(),
+                )],
+            });
+            assert_eq!(
+                sibling_input
+                    .try_recv()
+                    .expect("visible sibling gets input")
+                    .as_ref(),
+                b"visible-sibling"
+            );
+            server.handle_server_event(ServerEvent::ClientShellPaneInput {
+                client_id: 1,
+                pane_id: pane_id.clone(),
+                events: vec![crate::protocol::ClientPaneInputEvent::TextCommit(
+                    "hidden".into(),
+                )],
+            });
+            assert!(hidden_input.try_recv().is_err());
             assert_eq!(
                 server
                     .app

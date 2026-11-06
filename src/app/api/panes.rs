@@ -2496,7 +2496,7 @@ impl App {
         Some(PaneLayoutSnapshot {
             workspace_id: self.public_workspace_id(ws_idx),
             tab_id: self.public_tab_id(ws_idx, tab_idx)?,
-            zoomed: tab.zoomed,
+            zoomed: tab.body_zoomed(),
             area: area.into(),
             focused_pane_id,
             panes,

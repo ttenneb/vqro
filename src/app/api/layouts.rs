@@ -64,7 +64,7 @@ impl App {
             kind: "layout.tree.v1".into(),
             workspace_id: self.public_workspace_id(ws_idx),
             tab_id: self.public_tab_id(ws_idx, tab_idx)?,
-            zoomed: tab.zoomed,
+            zoomed: tab.body_zoomed(),
             focused,
             root: self.layout_tree_node(ws_idx, tab.layout.typed_root())?,
         })
@@ -472,7 +472,7 @@ impl App {
         Some(LayoutDescription {
             workspace_id: self.public_workspace_id(ws_idx),
             tab_id: self.public_tab_id(ws_idx, tab_idx)?,
-            zoomed: tab.zoomed,
+            zoomed: tab.body_zoomed(),
             focused_pane_id: self.public_pane_id(ws_idx, tab.layout.focused())?,
             root: if tab.layout.typed_root().selected_pane().is_some() {
                 self.layout_node_description(ws_idx, tab_idx, tab.layout.typed_root())?

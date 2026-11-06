@@ -18,6 +18,19 @@ fn layout(root: TypedNode) -> TileLayout {
 }
 
 #[test]
+fn visible_header_title_consumers_stop_at_outer_collapse_and_hidden_stack_branches() {
+    let mut tree = layout(TypedNode::Stack {
+        id: crate::layout::CollectionId::from_raw(10).unwrap().into(),
+        selected: 0,
+        children: vec![pane(1), pane(2).collapsed()],
+    });
+    assert!(!tree.any_visible_collapsed_header_title(|pane| pane == PaneId::from_raw(2)));
+    assert!(tree.set_collapsed(&[], true));
+    assert!(tree.any_visible_collapsed_header_title(|pane| pane == PaneId::from_raw(1)));
+    assert!(!tree.any_visible_collapsed_header_title(|pane| pane == PaneId::from_raw(2)));
+}
+
+#[test]
 fn expanded_membership_rejects_leaf_and_ancestor_collapse_but_keeps_stack_selection_separate() {
     let mut tree = layout(TypedNode::Stack {
         id: crate::layout::CollectionId::from_raw(9).unwrap().into(),

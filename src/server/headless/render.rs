@@ -141,13 +141,7 @@ impl HeadlessServer {
     /// Whether a pane the client shows asked for SGR pixel mouse reports. Host
     /// reports go to whichever pane is under the pointer, so an unfocused pane
     /// needs pixels from the host too (#4750); others get them as cells.
-    fn shell_visible_pane_wants_sgr_pixels(&self, client_id: u64) -> bool {
-        if self
-            .shell_focused_runtime(client_id)
-            .is_some_and(|(runtime, _)| runtime.sgr_pixel_mouse_enabled())
-        {
-            return true;
-        }
+    pub(super) fn shell_visible_pane_wants_sgr_pixels(&self, client_id: u64) -> bool {
         let Some(target) = self.shell_target_for_client(client_id) else {
             return false;
         };
@@ -160,7 +154,22 @@ impl HeadlessServer {
         else {
             return false;
         };
-        if tab.zoomed {
+        if self
+            .shell_focused_runtime(client_id)
+            .is_some_and(|(runtime, pane)| {
+                (self
+                    .app
+                    .state
+                    .popup_pane
+                    .as_ref()
+                    .is_some_and(|popup| popup.pane_id == pane)
+                    || tab.layout.pane_is_expanded(pane))
+                    && runtime.sgr_pixel_mouse_enabled()
+            })
+        {
+            return true;
+        }
+        if tab.body_zoomed() {
             return false;
         }
         tab.layout.any_visible_pane(|pane_id| {
@@ -384,15 +393,13 @@ impl HeadlessServer {
                 else {
                     continue;
                 };
-                if tab.zoomed {
+                if tab.body_zoomed() {
                     pane_ids.insert(tab.layout.focused());
                 } else {
-                    pane_ids.extend(
-                        tab.layout
-                            .panes(Rect::new(0, 0, 1, 1))
-                            .into_iter()
-                            .map(|pane| pane.id),
-                    );
+                    tab.layout.any_visible_pane(|pane| {
+                        pane_ids.insert(pane);
+                        false
+                    });
                 }
                 if let Some(interest) = client.shell_terminal_views_interest.as_ref() {
                     pane_ids.extend(interest.views.iter().filter_map(|view| {
@@ -500,7 +507,7 @@ impl HeadlessServer {
             .map(|(_, pane)| &pane.attached_terminal_id)
     }
 
-    fn any_shell_surface_contains_pane(&self, pane_id: crate::layout::PaneId) -> bool {
+    pub(super) fn any_shell_surface_contains_pane(&self, pane_id: crate::layout::PaneId) -> bool {
         self.clients.iter().any(|(&client_id, client)| {
             if !client.is_active_shell_client() || client.writer.is_none() {
                 return false;
@@ -541,7 +548,7 @@ impl HeadlessServer {
                     });
             terminal_view_visible
                 || (tab.layout.is_pane_visible(pane_id)
-                    && (!tab.zoomed || tab.layout.focused() == pane_id))
+                    && (!tab.body_zoomed() || tab.layout.focused() == pane_id))
         })
     }
 

@@ -460,6 +460,9 @@ impl TileLayout {
         ratio: f32,
     ) -> Option<Vec<PaneId>> {
         if views.is_empty()
+            || views
+                .iter()
+                .any(|(extension, view)| !ViewRef::validate_identity(extension, view))
             || self.pane_count().checked_add(views.len())? > crate::admission::MAX_TAB_PANES
         {
             return None;

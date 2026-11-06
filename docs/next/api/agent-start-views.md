@@ -16,8 +16,11 @@ agent_start_views = ["vqro.tasks:tasks", "vqro.tasks:messages"]
 Set `agent_start_views = []` to disable the rule, or supply an ordered list of
 other `<extension>:<view>` identities. The earlier optional `agent_start_view`
 setting remains an explicit single-view input override; an empty string disables
-the rule. Only the resolved list is retained in runtime state. An invalid entry
-cannot produce a partial group.
+the rule. Only the resolved list is retained in runtime state. Every identity
+uses the existing ASCII alphanumeric/`._-` validator, with a 1–120-byte namespace
+and 1–64-byte view ID. An invalid entry rejects the complete group and produces
+a startup/live-config diagnostic; it cannot create a valid prefix or set the
+once marker.
 
 The rule creates layout nodes only. It does not install an interpreter, grant
 package capabilities, alter artifact/service bindings, or infer product counts.

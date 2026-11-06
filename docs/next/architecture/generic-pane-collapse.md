@@ -112,8 +112,10 @@ selection identity.
 Ordinary typing has no hidden-body target; held key/mouse release cleanup remains
 intact. Later zoom-on of a collapsed pane or box descendant rejects with
 `pane_collapsed`; zoom never implicitly expands or overwrites retained hidden PTY
-size. Shared body geometry/resize also checks current collapsed ancestry, so
-focus changes or a restored zoom flag cannot bypass that boundary. Expansion
+size. One effective-zoom fact, derived from current collapsed ancestry, governs
+body geometry/resize, input, output visibility, immediate sources, pixel mouse,
+auto-sizing and projected ZOOM status. Focus changes or a restored policy flag
+cannot bypass that boundary. Saved policy fields are not rewritten in render. Expansion
 exits any retained zoom mode before restoring shares. Explicit authorized
 terminal-write APIs keep their execution semantics.
 Close appears only where an existing authorized close path and process
@@ -127,7 +129,10 @@ facts; box titles remain bounded neutral presentation. Render is pure and makes
 no provider calls. Collapsed terminals keep parsing/detection and their last
 nonzero PTY dimensions, with no body presentation work. Sibling collapse/expand
 uses the existing single geometry/resize authority. Independent explicit viewers
-retain their own interests.
+retain their own interests. Title-dirty events separately invalidate only live
+collapsed-header consumers (including aliases), even when an API read already
+synchronized title metadata. A hidden body remains absent from PTY presentation
+interests and is not made visible merely to refresh its header.
 
 ## Default composition
 

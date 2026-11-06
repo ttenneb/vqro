@@ -131,23 +131,9 @@ impl AppPolicy {
 /// Parse `<extension>:<view>` for the server-side agent-start rule. A malformed
 /// value disables the rule rather than guessing an identity.
 fn parse_agent_start_views(config: &Config) -> Vec<(String, String)> {
-    let ui = &config.ui;
-    // The earlier singular setting remains an explicit input override, not a
-    // second runtime authority. Invalid/empty input disables the whole rule.
-    let configured = ui
-        .agent_start_view
-        .as_ref()
-        .map(std::slice::from_ref)
-        .unwrap_or(&ui.agent_start_views);
-    configured
-        .iter()
-        .map(|value| {
-            let (extension, view) = value.split_once(':')?;
-            (!extension.is_empty() && !view.is_empty())
-                .then(|| (extension.to_owned(), view.to_owned()))
-        })
-        .collect::<Option<Vec<_>>>()
-        .unwrap_or_default()
+    // Config load/reload surfaces the same validator's error as a diagnostic;
+    // runtime refuses the complete group instead of admitting a valid prefix.
+    config.ui.resolved_agent_start_views().unwrap_or_default()
 }
 
 pub struct App {
