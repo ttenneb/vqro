@@ -5,24 +5,49 @@ fn fixture() -> (HeadlessServer, PrepareParams) {
     let mut server = super::super::tests::test_headless_server();
     server.app.state = crate::app::AppState::test_with_adversarial_identity_state();
     server.app.state.assert_invariants_for_test();
-    let pane = server
+    let (workspace_index, source) = server
         .app
         .state
         .workspaces
         .iter()
         .enumerate()
-        .find_map(|(index, workspace)| {
-            workspace.tabs.iter().find_map(|tab| {
-                tab.panes
-                    .keys()
-                    .find_map(|pane| server.app.public_pane_id(index, *pane))
-            })
-        })
-        .expect("pure pane");
+        .flat_map(|(index, workspace)| workspace.tabs.iter().map(move |tab| (index, tab)))
+        .max_by_key(|(_, tab)| tab.panes.len())
+        .and_then(|(index, tab)| tab.panes.keys().next().copied().map(|pane| (index, pane)))
+        .expect("pure source");
+    let pane = server.app.public_pane_id(workspace_index, source).unwrap();
+    let (tab_index, consumer) = server.app.state.workspaces[workspace_index]
+        .split_pane_with_view(
+            source,
+            "example.docs",
+            "work",
+            ratatui::layout::Direction::Horizontal,
+            0.5,
+            false,
+        )
+        .unwrap();
+    let consumer_pane_id = server
+        .app
+        .public_pane_id(workspace_index, consumer)
+        .unwrap();
+    let terminal_scope = server.app.state.workspaces[workspace_index].tabs[tab_index]
+        .layout
+        .view_scope(consumer)
+        .into_iter()
+        .map(|pane| server.app.public_pane_id(workspace_index, pane).unwrap())
+        .collect::<Vec<_>>();
+    let tab_id = server
+        .app
+        .public_tab_id(workspace_index, tab_index)
+        .unwrap();
+    let workspace_id = server.app.public_workspace_id(workspace_index);
+    server.app.state.assert_invariants_for_test();
     let selection = PrepareParams {
         namespace: "example.docs".into(),
         scope_id: "session".into(),
         pane_id: pane.clone(),
+        consumer_pane_id: consumer_pane_id.clone(),
+        terminal_scope: terminal_scope.clone(),
         generation: 7,
         revision: 8,
         item_id: "row".into(),
@@ -69,6 +94,20 @@ fn fixture() -> (HeadlessServer, PrepareParams) {
     );
     client.shell_host_views_enabled = true;
     client.shell_host_documents_enabled = true;
+    client.shell_location = Some(crate::server::clients::ClientShellLocation {
+        focused_workspace_id: Some(workspace_id.clone()),
+        active_tab_ids: HashMap::from([(workspace_id, tab_id)]),
+    });
+    client.render_state = crate::server::render_stream::ClientRenderState::Semantic {
+        last_surface: None,
+        last_views: vec![crate::protocol::PaneSurfaceViewEntryV2 {
+            pane_id: consumer_pane_id,
+            extension: "example.docs".into(),
+            view: "work".into(),
+            scope: terminal_scope,
+        }],
+        surface_revision: 1,
+    };
     client.shell_host_documents = vec![crate::protocol::endpoint::HostDocumentProjectionEntryV1 {
         provider_priority: 1,
         document,
@@ -82,6 +121,309 @@ fn origin(server: &HeadlessServer, id: u64) -> api::ApiOrigin {
         client_id: id,
         boot_id: server.client_shell_boot_id.clone(),
     }
+}
+
+fn publish_test_document(
+    server: &mut HeadlessServer,
+    document: crate::extension_contract::HostDocumentV1,
+) {
+    let namespace = document.namespace.clone();
+    let generation = document.generation;
+    let revision = document.revision;
+    server
+        .app
+        .host_document_caches
+        .get_mut(&(namespace.clone(), "session".into()))
+        .unwrap()
+        .publish_for_namespace(
+            &namespace,
+            generation,
+            1,
+            &Default::default(),
+            document.clone(),
+        )
+        .unwrap();
+    server
+        .app
+        .host_document_services
+        .set_desired_revision_for_test(&namespace, "session".into(), generation, revision);
+    server.clients.get_mut(&1).unwrap().shell_host_documents[0].document = document;
+}
+
+#[tokio::test]
+async fn admission_scope_rejects_other_tab_and_workspace_roots_in_the_same_session_document() {
+    let (mut server, selection) = fixture();
+    server
+        .app
+        .state
+        .workspaces
+        .push(crate::workspace::Workspace::test_new("other-workspace"));
+    server.app.state.ensure_test_terminals();
+    server.app.state.assert_invariants_for_test();
+    let (wi, consumer) = server
+        .app
+        .parse_pane_id(&selection.consumer_pane_id)
+        .unwrap();
+    let ti = server.app.state.workspaces[wi]
+        .find_tab_index_for_pane(consumer)
+        .unwrap();
+    let other_tab = server.app.state.workspaces[wi]
+        .tabs
+        .iter()
+        .enumerate()
+        .find(|(index, _)| *index != ti)
+        .and_then(|(_, tab)| tab.panes.keys().next())
+        .and_then(|pane| server.app.public_pane_id(wi, *pane))
+        .unwrap();
+    let other_workspace = server.app.state.workspaces[1].tabs[0]
+        .panes
+        .keys()
+        .next()
+        .and_then(|pane| server.app.public_pane_id(1, *pane))
+        .unwrap();
+    for (index, pane) in [other_tab, other_workspace].into_iter().enumerate() {
+        let mut document = server.app.host_document_caches
+            [&("example.docs".into(), "session".into())]
+            .current()
+            .unwrap()
+            .clone();
+        document.revision += 1;
+        let mut root = document.items[0].clone();
+        root.id = format!("other-root-{index}");
+        root.view.as_mut().unwrap().pane_id = Some(pane.clone());
+        let mut row = document.items[1].clone();
+        row.id = format!("other-row-{index}");
+        row.parent_id = Some(root.id.clone());
+        document.items.extend([root, row.clone()]);
+        let mut attack = selection.clone();
+        attack.revision = document.revision;
+        attack.item_id = row.id;
+        attack.pane_id = pane.clone();
+        attack.terminal_scope = vec![pane];
+        publish_test_document(&mut server, document);
+        assert!(
+            server.view_action_binding(1, &attack).is_err(),
+            "global delivery is not scope authority"
+        );
+    }
+}
+
+#[tokio::test]
+async fn admission_scope_rejects_a_background_consumer_and_wrong_view_identity() {
+    let (mut server, selection) = fixture();
+    let (wi, consumer) = server
+        .app
+        .parse_pane_id(&selection.consumer_pane_id)
+        .unwrap();
+    let ti = server.app.state.workspaces[wi]
+        .find_tab_index_for_pane(consumer)
+        .unwrap();
+    let other = server.app.state.workspaces[wi]
+        .tabs
+        .iter()
+        .enumerate()
+        .find(|(index, _)| *index != ti)
+        .map(|(index, _)| server.app.public_tab_id(wi, index).unwrap())
+        .unwrap();
+    let workspace = server.app.public_workspace_id(wi);
+    server
+        .clients
+        .get_mut(&1)
+        .unwrap()
+        .shell_location
+        .as_mut()
+        .unwrap()
+        .active_tab_ids
+        .insert(workspace, other);
+    assert!(
+        server.view_action_binding(1, &selection).is_err(),
+        "cannot borrow global/previous surface location"
+    );
+    let (mut server, selection) = fixture();
+    if let crate::server::render_stream::ClientRenderState::Semantic { last_views, .. } =
+        &mut server.clients.get_mut(&1).unwrap().render_state
+    {
+        last_views[0].view = "different-view".into();
+    }
+    assert!(server.view_action_binding(1, &selection).is_err());
+}
+
+#[tokio::test]
+async fn admission_scope_rejects_a_rescoped_consumer_with_unchanged_document_and_identity() {
+    let (mut server, selection) = fixture();
+    let (wi, consumer) = server
+        .app
+        .parse_pane_id(&selection.consumer_pane_id)
+        .unwrap();
+    let ti = server.app.state.workspaces[wi]
+        .find_tab_index_for_pane(consumer)
+        .unwrap();
+    let source = server.app.parse_pane_id(&selection.pane_id).unwrap().1;
+    let terminals = server.app.state.workspaces[wi].tabs[ti]
+        .layout
+        .pane_ids()
+        .into_iter()
+        .filter(|pane| {
+            server.app.state.workspaces[wi].tabs[ti]
+                .layout
+                .view_at(*pane)
+                .is_none()
+        })
+        .collect::<Vec<_>>();
+    let other = *terminals.iter().find(|pane| **pane != source).unwrap();
+    let mut remainder = terminals
+        .into_iter()
+        .filter(|pane| *pane != other)
+        .map(crate::layout::TypedNode::Leaf);
+    let first = remainder.next().unwrap();
+    let retained = remainder.fold(first, |first, second| crate::layout::TypedNode::Split {
+        direction: ratatui::layout::Direction::Horizontal,
+        ratio: 0.5,
+        first: Box::new(first),
+        second: Box::new(second),
+    });
+    let moved = crate::layout::TypedNode::Split {
+        direction: ratatui::layout::Direction::Horizontal,
+        ratio: 0.5,
+        first: Box::new(crate::layout::TypedNode::Leaf(other)),
+        second: Box::new(crate::layout::TypedNode::View {
+            pane: consumer,
+            extension: "example.docs".into(),
+            view: "work".into(),
+        }),
+    };
+    server.app.state.workspaces[wi].tabs[ti]
+        .layout
+        .replace_typed_root_for_test(crate::layout::TypedNode::Split {
+            direction: ratatui::layout::Direction::Vertical,
+            ratio: 0.5,
+            first: Box::new(retained),
+            second: Box::new(moved),
+        });
+    server.app.state.assert_invariants_for_test();
+    assert!(server.view_action_binding(1, &selection).is_err());
+}
+
+#[tokio::test]
+async fn admission_scope_keeps_hidden_members_and_rejects_a_selected_only_scope() {
+    let (mut server, mut selection) = fixture();
+    let (wi, consumer) = server
+        .app
+        .parse_pane_id(&selection.consumer_pane_id)
+        .unwrap();
+    let ti = server.app.state.workspaces[wi]
+        .find_tab_index_for_pane(consumer)
+        .unwrap();
+    let terminals = server.app.state.workspaces[wi].tabs[ti]
+        .layout
+        .pane_ids()
+        .into_iter()
+        .filter(|pane| {
+            server.app.state.workspaces[wi].tabs[ti]
+                .layout
+                .view_at(*pane)
+                .is_none()
+        })
+        .collect::<Vec<_>>();
+    assert!(terminals.len() > 1);
+    let scope = terminals
+        .iter()
+        .map(|pane| server.app.public_pane_id(wi, *pane).unwrap())
+        .collect::<Vec<_>>();
+    let hidden = crate::layout::TypedNode::Stack {
+        id: crate::terminal_container::TerminalContainerId::alloc().unwrap(),
+        selected: 0,
+        children: terminals
+            .into_iter()
+            .map(crate::layout::TypedNode::Leaf)
+            .collect(),
+    };
+    server.app.state.workspaces[wi].tabs[ti]
+        .layout
+        .replace_typed_root_for_test(crate::layout::TypedNode::Split {
+            direction: ratatui::layout::Direction::Horizontal,
+            ratio: 0.5,
+            first: Box::new(hidden),
+            second: Box::new(crate::layout::TypedNode::View {
+                pane: consumer,
+                extension: "example.docs".into(),
+                view: "work".into(),
+            }),
+        });
+    if let crate::server::render_stream::ClientRenderState::Semantic { last_views, .. } =
+        &mut server.clients.get_mut(&1).unwrap().render_state
+    {
+        last_views[0].scope = scope.clone();
+    }
+    server.app.state.assert_invariants_for_test();
+    selection.terminal_scope = scope;
+    assert!(server.view_action_binding(1, &selection).is_ok());
+    selection.terminal_scope = vec![selection.pane_id.clone()];
+    assert!(server.view_action_binding(1, &selection).is_err());
+}
+
+fn ready_sentinel(
+    server: &mut HeadlessServer,
+    selection: &PrepareParams,
+    deadline: Instant,
+) -> ProofReady {
+    let binding = server.view_action_binding(1, selection).unwrap();
+    let client = server.clients.get_mut(&1).unwrap();
+    client.view_actions.busy = Some("proof-job".into());
+    let (respond_to, _) = std::sync::mpsc::channel();
+    ProofReady {
+        client_id: 1,
+        nonce: client.view_actions.nonce.clone(),
+        job: "proof-job".into(),
+        binding,
+        previous: None,
+        request_id: "proof-request".into(),
+        respond_to,
+        result: Err("proof sentinel: must not be considered".into()),
+        deadline,
+        slot: crate::extension_service::ExtensionWorkSlotGuard::acquire().unwrap(),
+    }
+}
+
+#[tokio::test]
+async fn admission_rejects_root_without_a_matching_placed_consumer() {
+    let (mut server, selection) = fixture();
+    let (workspace, pane) = server
+        .app
+        .parse_pane_id(&selection.consumer_pane_id)
+        .unwrap();
+    server.app.state.workspaces[workspace].close_pane(pane);
+    assert!(
+        server.view_action_binding(1, &selection).is_err(),
+        "global SESSION root and terminal existence are not a placed consumer scope"
+    );
+}
+
+#[tokio::test]
+async fn admission_rejects_a_delayed_ready_before_reading_its_proof() {
+    let (mut server, selection) = fixture();
+    let ready = ready_sentinel(
+        &mut server,
+        &selection,
+        Instant::now() - Duration::from_secs(1),
+    );
+    let message = server.finish_view_action_inner(ready).unwrap_err();
+    assert!(message.contains("expired"), "{message}");
+    assert!(server.clients[&1].view_actions.prepared.is_none());
+}
+
+#[tokio::test]
+async fn admission_rejects_stop_intent_before_reading_its_proof() {
+    let (mut server, selection) = fixture();
+    let ready = ready_sentinel(
+        &mut server,
+        &selection,
+        Instant::now() + Duration::from_secs(3),
+    );
+    server.should_quit.store(true, Ordering::Release);
+    let message = server.finish_view_action_inner(ready).unwrap_err();
+    assert!(message.contains("stopping"), "{message}");
+    assert!(server.clients[&1].view_actions.prepared.is_none());
 }
 
 #[tokio::test]
@@ -153,7 +495,7 @@ async fn session_view_binding_rejects_missing_grant_or_replaced_publisher() {
 }
 #[tokio::test]
 async fn session_view_origin_does_not_borrow_foreground_or_payload_identity() {
-    let (mut server, _) = fixture();
+    let (mut server, selection) = fixture();
     server.foreground_client_id = Some(999);
     assert_eq!(server.view_action_client(&origin(&server, 1)).unwrap(), 1);
     assert!(server
@@ -165,7 +507,9 @@ async fn session_view_origin_does_not_borrow_foreground_or_payload_identity() {
             boot_id: "other-boot".into()
         })
         .is_err());
-    assert!(serde_json::from_value::<PrepareParams>(json!({"namespace":"example.docs","scope_id":"session","pane_id":"w1:p1","generation":7,"revision":8,"item_id":"row","operation_id":"op","client_id":1})).is_err());
+    let mut forged = serde_json::to_value(selection).unwrap();
+    forged["client_id"] = json!(1);
+    assert!(serde_json::from_value::<PrepareParams>(forged).is_err());
 }
 #[tokio::test]
 async fn session_view_cancel_consumes_only_this_connections_exact_token_without_proof_or_write() {

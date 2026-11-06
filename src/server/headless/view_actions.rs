@@ -16,6 +16,7 @@ pub(crate) struct ProofReady {
     request_id: String,
     respond_to: std::sync::mpsc::Sender<String>,
     result: Result<Proved, String>,
+    deadline: Instant,
     slot: crate::extension_service::ExtensionWorkSlotGuard,
 }
 #[derive(Debug)]
@@ -68,7 +69,7 @@ fn audit(
     outcome: &str,
 ) -> Value {
     json!({"event":"view.action.authority.v1","request_id":request,"client_id":client,"boot_id":boot,"caller":caller,
-        "namespace":binding.selection.namespace,"scope_id":binding.selection.scope_id,"document_generation":binding.selection.generation,
+        "namespace":binding.selection.namespace,"scope_id":binding.selection.scope_id,"consumer_pane_id":binding.consumer.pane_id,"terminal_scope":binding.consumer.scope,"document_generation":binding.selection.generation,
         "document_revision":binding.selection.revision,"item_id":binding.selection.item_id,"subject":binding.affordance.subject(),
         "option":binding.selection.option,"operation_id":binding.selection.operation_id,"service_id":binding.service_id,
         "service_generation":binding.service_generation,"outcome":outcome})
@@ -169,6 +170,79 @@ impl HeadlessServer {
         Ok(id)
     }
 
+    fn view_action_consumer(
+        &self,
+        client_id: u64,
+        selection: &PrepareParams,
+        view_id: &str,
+    ) -> Result<crate::protocol::PaneSurfaceViewEntryV2, String> {
+        let client = self.clients.get(&client_id).ok_or("client disconnected")?;
+        let accepted = client
+            .render_state
+            .committed_view(&selection.consumer_pane_id)
+            .ok_or("stale: this client has no committed placed consumer")?;
+        let tab_id = client
+            .shell_location
+            .as_ref()
+            .and_then(crate::server::clients::ClientShellLocation::focused_tab_id)
+            .ok_or("stale: exact client location unavailable")?;
+        let (workspace_index, pane) = self
+            .app
+            .parse_pane_id(&selection.consumer_pane_id)
+            .ok_or("stale: view consumer closed")?;
+        let workspace = &self.app.state.workspaces[workspace_index];
+        let tab_index = workspace
+            .find_tab_index_for_pane(pane)
+            .ok_or("stale: view consumer moved")?;
+        if self
+            .app
+            .public_tab_id(workspace_index, tab_index)
+            .as_deref()
+            != Some(tab_id)
+        {
+            return Err("stale: view consumer is outside this client's current tab".into());
+        }
+        let tab = &workspace.tabs[tab_index];
+        let content = tab
+            .layout
+            .view_at(pane)
+            .ok_or("stale: consumer is no longer a placed view")?;
+        let scope = tab
+            .layout
+            .view_scope(pane)
+            .into_iter()
+            .map(|terminal| self.app.public_pane_id(workspace_index, terminal))
+            .collect::<Option<Vec<_>>>()
+            .ok_or("stale: terminal scope is unavailable")?;
+        if accepted.extension != selection.namespace
+            || accepted.view != view_id
+            || content.extension != accepted.extension
+            || content.view != accepted.view
+            || accepted.scope != selection.terminal_scope
+            || scope != accepted.scope
+            || !scope.contains(&selection.pane_id)
+        {
+            return Err(
+                "stale: placed consumer/view/full terminal scope changed or excludes this root"
+                    .into(),
+            );
+        }
+        Ok(accepted.clone())
+    }
+
+    fn check_view_action_admission(&self, deadline: Instant) -> Result<(), String> {
+        if self.shutting_down
+            || self.host_shutdown_requested()
+            || self.should_quit.load(Ordering::Acquire)
+        {
+            return Err("server is stopping; dispatch not started".into());
+        }
+        if Instant::now() >= deadline {
+            return Err("fresh proof expired before admission; dispatch not started".into());
+        }
+        Ok(())
+    }
+
     fn view_action_binding(
         &self,
         client_id: u64,
@@ -239,6 +313,12 @@ impl HeadlessServer {
         {
             return Err("view action source pane does not match its document root".into());
         }
+        let view_id = ancestor
+            .view
+            .as_ref()
+            .and_then(|view| view.view_id.as_deref())
+            .ok_or("stale: root has no view identity")?;
+        let consumer = self.view_action_consumer(client_id, selection, view_id)?;
         let pane_exists = self
             .app
             .state
@@ -278,6 +358,7 @@ impl HeadlessServer {
             selection: selection.clone(),
             service_id,
             service_generation,
+            consumer,
             affordance,
         })
     }
@@ -360,8 +441,8 @@ impl HeadlessServer {
         let boot = self.client_shell_boot_id.clone();
         let events = self.server_event_tx.clone();
         let error_job = job.clone();
+        let deadline = Instant::now() + Duration::from_secs(3);
         let spawned = crate::thread_spawn::spawn_named("vqro-view-action-proof", move || {
-            let deadline = Instant::now() + Duration::from_secs(3);
             let result = (|| {
                 if canceled.load(Ordering::Acquire) {
                     return Err("client disconnected".into());
@@ -415,6 +496,7 @@ impl HeadlessServer {
                 request_id: msg.request.id,
                 respond_to: msg.respond_to,
                 result,
+                deadline,
                 slot,
             };
             if let Err(failure) =
@@ -457,6 +539,7 @@ impl HeadlessServer {
             return Err("client connection/preparation changed".into());
         }
         client.view_actions.busy = None;
+        self.check_view_action_admission(ready.deadline)?;
         let proved = ready.result?;
         if ready
             .previous
@@ -477,6 +560,7 @@ impl HeadlessServer {
         if !proved.ownership.matches_local(&local) {
             return Err("local ownership epoch changed before admission".into());
         }
+        self.check_view_action_admission(ready.deadline)?;
         let client = self
             .clients
             .get_mut(&ready.client_id)
@@ -508,6 +592,8 @@ impl HeadlessServer {
             let provider = rx.recv_timeout(Duration::from_secs(6)).ok().and_then(|value| serde_json::from_str::<Value>(&value).ok()).unwrap_or_else(||json!({"error":{"code":"outcome_unknown","message":"provider result unavailable; inspect the original operation"}}));
             let outcome = if provider.get("result").is_some() {
                 "provider_result"
+            } else if provider["error"]["code"] == "provider_error" {
+                "provider_reply"
             } else if provider["error"]["code"] == "action_rejected" {
                 "dispatch_not_started"
             } else {
@@ -539,7 +625,12 @@ impl HeadlessServer {
         if let Some(option) = current.selection.option {
             payload["option"] = json!(option);
         }
-        // Last local fence is immediately before the existing bounded queue.
+        // Last age/stop and local epoch fences immediately precede the queue.
+        if let Err(message) = self.check_view_action_admission(ready.deadline) {
+            let _ =
+                tx.send(json!({"error":{"code":"action_rejected","message":message}}).to_string());
+            return Ok(());
+        }
         if !crate::pty_ownership::publisher::current_status()
             .is_some_and(|status| proved.ownership.matches_local(&status))
         {

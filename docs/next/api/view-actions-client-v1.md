@@ -2,6 +2,15 @@
 
 Status: experimental implementation, pending independent principal/action admission review. Foundation acceptance alone does not enable or accept this path. Linux is the native validation target; macOS execution remains unverified and Windows new clicks remain read-only with existing Tasks CLI guidance. Attribution is cooperative same-user classification, not authentication or proof of a physical gesture.
 
+## Pre-publication shape finalization
+
+The v1 pair was finalized before first publication/admission. The unpushed,
+unmerged, unadmitted8b92e80b draft omitted placed-consumer context; it is not a
+published compatibility contract. Final v1 requires `consumer_pane_id` and
+`terminal_scope`. Old draft requests are rejected for missing required fields;
+there is no weaker fallback. This finalization changes no frozen codec or
+published method fixture.
+
 ## Optional public methods
 
 `host.view.action.prepare.v1` and `host.view.action.submit.v1` use the raw JSON API or its advertised native endpoint tunnel. No named binary codec changes. Missing support disables only these actions. Existing tab-only `host.document.action` is unchanged.
@@ -9,10 +18,18 @@ Status: experimental implementation, pending independent principal/action admiss
 Prepare parameters:
 
 ```json
-{"namespace":"provider.namespace","scope_id":"session","pane_id":"w1:p1","generation":1,"revision":2,"item_id":"row-id","option":"listed-key","operation_id":"one-original-operation-id"}
+{"namespace":"provider.namespace","scope_id":"session","pane_id":"w1:p1","consumer_pane_id":"w1:p2","terminal_scope":["w1:p1"],"generation":1,"revision":2,"item_id":"row-id","option":"listed-key","operation_id":"one-original-operation-id"}
 ```
 
-`option` is absent for an action, mandatory for a choice. No default is applied implicitly. IDs/generation/revision refer to the exact document accepted by this connection, not a fresh substitute. The item must have an enabled hierarchy rooted at the named existing pane in a current SESSION view. Both document publisher and action service must remain current; the action service is the exact service recorded by the document catalog, with its independent generation and ActionInvoke grant. No task-specific state or ID interpretation occurs in the host.
+`option` is absent for an action, mandatory for a choice. No default is applied implicitly. IDs/generation/revision refer to the exact document accepted by this connection, not a fresh substitute. The item must have an enabled hierarchy rooted at the named existing pane in a current SESSION view. `consumer_pane_id` identifies an actually placed view in this connection's exact
+current tab, with the matching namespace/view ID and a committed surface-v2
+descriptor. Its live `layout.view_scope` must match that committed descriptor and
+the complete `terminal_scope` expectation, including hidden/collapsed members.
+The expectation is only a fence, never scope authority. Another global SESSION
+root, an unplaced/background/moved consumer or a selected-only scope is rejected.
+Prepare/submit/final admission bind and recheck these facts.
+
+Both document publisher and action service must remain current; the action service is the exact service recorded by the document catalog, with its independent generation and ActionInvoke grant. No task-specific state or ID interpretation occurs in the host.
 
 Caller identity is not a parameter. Native requests have their exact connection. Raw socket requests require kernel PID/birth/account matching exactly one registered connection; neither a payload client ID nor the foreground client supplies authority. Fresh complete ancestry, corroborated real controlling TTY, owned-pane exclusion and live fixed-namespace ownership epochs are mandatory. See [client TTY attribution](../architecture/client-tty-action-attribution.md).
 
@@ -24,7 +41,7 @@ Submit parameters:
 {"token":"exact-prepare-token","confirmation_token":"exact-irreversible-choice-token"}
 ```
 
-The confirmation token is sent only after the client presents and explicitly confirms the exact irreversible question/choice. A Boolean cannot replace this binding. Reversible actions omit it. `{"token":"...","cancel":true}` consumes only this connection's matching pending token without executing anything. A successfully submitted token is single-use. Submission repeats the fresh peer/TTY/ownership proof, checked audit and final local/document/provider/connection fences. No execution retry is performed.
+The confirmation token is sent only after the client presents and explicitly confirms the exact irreversible question/choice. A Boolean cannot replace this binding. Reversible actions omit it. `{"token":"...","cancel":true}` consumes only this connection's matching pending token without executing anything. A successfully submitted token is single-use. Submission repeats the fresh peer/TTY/ownership proof, checked audit and final local/document/provider/connection fences. The three-second proof deadline starts before worker spawn, travels with its completion and is checked by the actor before token creation and immediately before queueing. Shutdown/stop intent rejects undispatched completions without actor peer/TTY I/O; already-dispatched known replies remain a separate lane. No execution retry is performed.
 
 ## Neutral view metadata
 
@@ -51,6 +68,6 @@ There is no invented `terminal_id`. The host derives and overwrites the complete
 
 Checked writes/flushes use the existing rotating server-log writer independently of tracing filters. A missing/disabled/failed attempt writer rejects before dispatch and never blocks startup, PTYs or recovery. Host records correlate connection/boot/request, full caller, publisher/document/subject revision, option and original operation ID. Post-audit ownership observation and final local epoch admission fences are mandatory.
 
-`host_view_action_submitted` retains the original operation ID, caller and complete `provider_response`, plus optional `audit_warning`. Dispatch-not-started, provider reply and outcome-unknown are distinct. A known provider reply is preserved even if later audit writing fails or its client-action provider retires after replying. Unknown outcomes require inspection of the existing operation/receipt; no fresh-ID retry button or blind replay. Cancellation after provider dispatch cannot undo an effect.
+`host_view_action_submitted` retains the original operation ID, caller and complete `provider_response`, plus optional `audit_warning`. Dispatch-not-started, provider reply and outcome-unknown are distinct. A known provider reply is preserved even if later audit writing fails or its client-action provider retires after replying. A matching RPC error is preserved verbatim as `provider_error`, including after retirement, rather than relabeled as transport uncertainty. A known error reply does not itself prove no effect; original operation correlation remains mandatory. The queue pins the exact generation snapshot that was checked and never adopts a later instance via a second load. Unknown outcomes require inspection of the existing operation/receipt; no fresh-ID retry button or blind replay. Cancellation after provider dispatch cannot undo an effect.
 
 New method/result shapes are additive JSON contracts. Frozen named codecs, historical method fixtures, terminal recovery and legacy invocation authority remain unchanged. No install, push or shipping approval is implied.

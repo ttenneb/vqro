@@ -62,6 +62,9 @@ for line in sys.stdin:
  (root/('entered-'+tag)).touch()
  if payload.get('block'):
   while not (root/('release-'+tag)).exists(): time.sleep(.002)
+ if payload.get('remote_error'):
+  print(json.dumps({'type':'response','id':request['id'],'error':'explicit-provider-policy-rejection'}),flush=True)
+  continue
  print(json.dumps({'type':'response','id':request['id'],'result':{'ok':True,'tag':tag,'caller':request['params']['caller'],'method':request['method']}}),flush=True)
 "#;
         let script = if client {
@@ -238,6 +241,74 @@ fn client_known_reply_survives_later_provider_retirement() {
         .fetch_add(1, Ordering::AcqRel);
     fixture.release("known");
     assert_eq!(reply(result)["result"]["value"]["tag"], "known");
+}
+
+#[test]
+fn admission_preserves_known_remote_error_with_and_without_retirement() {
+    for retire in [false, true] {
+        let fixture = Fixture::new();
+        let manager = fixture.manager_with_options(Duration::ZERO, true);
+        let (tx, rx) = mpsc::channel();
+        manager.request_client_action(
+            "known-error".into(),
+            ExtensionActionInvokeParams {
+                service_id: "test.generic".into(),
+                payload: json!({"tag":"known-error","remote_error":true,"block":true}),
+            },
+            client_caller(),
+            tx,
+            manager.action_generation("test.generic").unwrap(),
+            Arc::new(AtomicBool::new(false)),
+        );
+        fixture.wait_entered("known-error");
+        if retire {
+            manager.workers["test.generic"]
+                .generation
+                .fetch_add(1, Ordering::AcqRel);
+        }
+        fixture.release("known-error");
+        let value = reply(rx);
+        assert_ne!(
+            value["error"]["code"], "outcome_unknown",
+            "matching provider reply, retire={retire}: {value}"
+        );
+        assert!(
+            value
+                .to_string()
+                .contains("explicit-provider-policy-rejection"),
+            "original reply lost: {value}"
+        );
+    }
+}
+
+#[test]
+fn admission_never_adopts_a_generation_that_changed_after_its_check() {
+    let fixture = Fixture::new();
+    let manager = fixture.manager_with_options(Duration::ZERO, true);
+    let generation = manager.action_generation("test.generic").unwrap();
+    let observed = manager.workers["test.generic"].generation.clone();
+    GENERIC_GENERATION_ADMISSION_HOOK.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            observed.fetch_add(1, Ordering::AcqRel);
+        }))
+    });
+    let (tx, rx) = mpsc::channel();
+    manager.request_client_action(
+        "generation-race".into(),
+        ExtensionActionInvokeParams {
+            service_id: "test.generic".into(),
+            payload: json!({"tag":"generation-race"}),
+        },
+        client_caller(),
+        tx,
+        generation,
+        Arc::new(AtomicBool::new(false)),
+    );
+    assert_eq!(reply(rx)["error"]["code"], "action_rejected");
+    assert!(
+        fixture.calls().is_empty(),
+        "old intent cannot adopt a new provider"
+    );
 }
 
 fn wait_slots(expected: usize) {

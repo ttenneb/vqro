@@ -75,6 +75,11 @@ pub struct ExtensionRequestIdentity {
     pub contribution_revision: u64,
 }
 
+#[cfg(test)]
+thread_local! {
+    static GENERIC_GENERATION_ADMISSION_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
 struct GenericActionRequest {
     client_source: bool,
     canceled: Option<Arc<AtomicBool>>,
@@ -2075,10 +2080,11 @@ fn manager_for_specs_with_documents(
                                 && Instant::now() < action.deadline
                                 && !action.canceled.as_ref().is_some_and(|canceled| canceled.load(Ordering::Acquire));
                             if !current {
-                                send_generic_action_response(&action, Err("action rejected before execution: expired or retired provider".into()), false);
+                                send_generic_action_response(&action, Err("action rejected before execution: expired or retired provider".into()), false, false);
                                 continue;
                             }
                             let (result, executed) = supervisor.invoke_generic_action_cancellable(action.client_source, action.canceled.as_deref(), action.params.clone(), &thread_revoked);
+                            let received_remote = matches!(&result, Err(ExtensionServiceError::Remote(_)));
                             let result = result.map_err(|error| error.to_string());
                             let still_current = !thread_revoked.load(Ordering::Acquire)
                                 && thread_generation.load(Ordering::Acquire) == action.generation;
@@ -2103,8 +2109,8 @@ fn manager_for_specs_with_documents(
                             // A known client-action reply remains a known receipt even
                             // if its provider retired after returning it. Do not publish
                             // stale document revisions, and preserve legacy behavior.
-                            let keep_result = still_current || (action.client_source && result.is_ok());
-                            send_generic_action_response(&action, if keep_result { result } else { Err("provider retired during execution".into()) }, executed);
+                            let keep_result = still_current || received_remote || (action.client_source && result.is_ok());
+                            send_generic_action_response(&action, if keep_result { result } else { Err("provider retired during execution".into()) }, executed, received_remote);
                             continue;
                         }
                         request => request,
@@ -2302,13 +2308,14 @@ fn send_generic_action_response(
     action: &GenericActionRequest,
     result: Result<serde_json::Value, String>,
     executed: bool,
+    received_remote: bool,
 ) {
     let response = match result {
         Ok(value) => {
             serde_json::json!({"id": action.request_id, "result": {"type": "extension_action_invoked", "value": value}})
         }
         Err(message) => {
-            serde_json::json!({"id": action.request_id, "error": {"code": if executed { "outcome_unknown" } else { "action_rejected" }, "message": message}})
+            serde_json::json!({"id": action.request_id, "error": {"code": if received_remote { "provider_error" } else if executed { "outcome_unknown" } else { "action_rejected" }, "message": message}})
         }
     };
     let _ = action.respond_to.send(response.to_string());
@@ -2371,8 +2378,8 @@ impl ExtensionServiceManager {
             reject("action_invoke capability not granted");
             return;
         }
-        if expected_generation
-            .is_some_and(|generation| worker.generation.load(Ordering::Acquire) != generation)
+        let generation = worker.generation.load(Ordering::Acquire);
+        if expected_generation.is_some_and(|expected| generation != expected)
             || canceled
                 .as_ref()
                 .is_some_and(|flag| flag.load(Ordering::Acquire))
@@ -2387,13 +2394,19 @@ impl ExtensionServiceManager {
                 return;
             }
         };
+        #[cfg(test)]
+        GENERIC_GENERATION_ADMISSION_HOOK.with(|hook| {
+            if let Some(callback) = hook.borrow_mut().take() {
+                callback();
+            }
+        });
         let action = GenericActionRequest {
             canceled,
             client_source: matches!(
                 &caller,
                 crate::action_invocation::InvocationCaller::ClientHumanUnverified { .. }
             ),
-            generation: worker.generation.load(Ordering::Acquire),
+            generation,
             deadline: Instant::now() + Duration::from_secs(2),
             params: serde_json::json!({"caller": caller, "payload": request.payload}),
             request_id,
@@ -2413,6 +2426,7 @@ impl ExtensionServiceManager {
                 send_generic_action_response(
                     &action,
                     Err("action queue full or provider unavailable".into()),
+                    false,
                     false,
                 );
             }

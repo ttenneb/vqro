@@ -46,6 +46,17 @@ impl ClientRenderState {
         }
     }
 
+    /// Last committed surface-v2 consumer facts. Explicit action lookup only;
+    /// there is no fallback to global focus or a freshly guessed scope.
+    pub(crate) fn committed_view(&self, pane_id: &str) -> Option<&PaneSurfaceViewEntryV2> {
+        match self {
+            Self::Semantic { last_views, .. } => {
+                last_views.iter().find(|view| view.pane_id == pane_id)
+            }
+            Self::TerminalAnsi { .. } => None,
+        }
+    }
+
     pub(crate) fn reset_baseline(&mut self) {
         match self {
             Self::Semantic {

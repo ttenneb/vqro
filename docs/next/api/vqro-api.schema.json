@@ -4988,6 +4988,9 @@
         "PrepareParams": {
           "additionalProperties": false,
           "properties": {
+            "consumer_pane_id": {
+              "type": "string"
+            },
             "generation": {
               "format": "uint64",
               "minimum": 0,
@@ -5018,12 +5021,20 @@
             },
             "scope_id": {
               "type": "string"
+            },
+            "terminal_scope": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
             }
           },
           "required": [
             "namespace",
             "scope_id",
             "pane_id",
+            "consumer_pane_id",
+            "terminal_scope",
             "generation",
             "revision",
             "item_id",

@@ -9,6 +9,8 @@ pub struct PrepareParams {
     pub namespace: String,
     pub scope_id: String,
     pub pane_id: String,
+    pub consumer_pane_id: String,
+    pub terminal_scope: Vec<String>,
     pub generation: u64,
     pub revision: u64,
     pub item_id: String,
@@ -126,9 +128,14 @@ impl PrepareParams {
         if self.scope_id != "session"
             || self.generation == 0
             || self.revision == 0
-            || [&self.namespace, &self.pane_id, &self.item_id]
-                .iter()
-                .any(|value| !text(value, 256))
+            || [
+                &self.namespace,
+                &self.pane_id,
+                &self.consumer_pane_id,
+                &self.item_id,
+            ]
+            .iter()
+            .any(|value| !text(value, 256))
             || !text(&self.operation_id, 128)
             || !self
                 .operation_id
@@ -136,6 +143,18 @@ impl PrepareParams {
                 .all(|value| value.is_ascii_alphanumeric() || b"._:-".contains(&value))
         {
             return Err("invalid session view-action identity".into());
+        }
+        let unique = self
+            .terminal_scope
+            .iter()
+            .collect::<std::collections::HashSet<_>>();
+        if self.terminal_scope.is_empty()
+            || self.terminal_scope.len() > crate::admission::MAX_SESSION_PANES
+            || unique.len() != self.terminal_scope.len()
+            || self.terminal_scope.iter().any(|pane| !text(pane, 256))
+            || !self.terminal_scope.contains(&self.pane_id)
+        {
+            return Err("invalid expected full terminal scope".into());
         }
         Ok(())
     }
@@ -145,6 +164,7 @@ pub(crate) struct Binding {
     pub selection: PrepareParams,
     pub service_id: String,
     pub service_generation: u64,
+    pub consumer: crate::protocol::PaneSurfaceViewEntryV2,
     pub affordance: Affordance,
 }
 #[derive(Debug, Clone)]
@@ -244,6 +264,8 @@ mod tests {
             namespace: "example".into(),
             scope_id: "session".into(),
             pane_id: "w1:p1".into(),
+            consumer_pane_id: "w1:p2".into(),
+            terminal_scope: vec!["w1:p1".into()],
             generation: 1,
             revision: 2,
             item_id: "row".into(),
@@ -254,6 +276,12 @@ mod tests {
             selection,
             service_id: "example.actions".into(),
             service_generation: 3,
+            consumer: crate::protocol::PaneSurfaceViewEntryV2 {
+                pane_id: "w1:p2".into(),
+                extension: "example".into(),
+                view: "work".into(),
+                scope: vec!["w1:p1".into()],
+            },
             affordance: Affordance::parse(&choice()).unwrap(),
         };
         let identity = crate::client_invocation::ClientIdentity {

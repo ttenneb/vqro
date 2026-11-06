@@ -93,8 +93,9 @@ fn aborted_creation_and_actual_release_can_restore_a_complete_snapshot() {
 fn proof_rejects_epoch_drift_during_async_proof_audit_or_final_admission() {
     let mut state = ready();
     let status = state.status();
-    let proof = OwnershipProof::capture(&[status.clone()]).expect("complete live observation");
-    assert!(proof.matches(&[status.clone()]));
+    let proof =
+        OwnershipProof::capture(std::slice::from_ref(&status)).expect("complete live observation");
+    assert!(proof.matches(std::slice::from_ref(&status)));
     assert!(proof.matches_local(&status));
     let change = state.begin_change();
     assert!(!proof.matches_local(&state.status()));

@@ -71,10 +71,7 @@ fn coherent(peer: &InvocationPeer) -> bool {
         || peer.ancestry.len() > 64
         || peer.boot_id.is_empty()
         || peer.boot_id.len() > 128
-        || !peer
-            .ancestry
-            .last()
-            .is_some_and(|last| last.parent_pid == 0)
+        || peer.ancestry.last().is_none_or(|last| last.parent_pid != 0)
     {
         return false;
     }
