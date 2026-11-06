@@ -457,8 +457,17 @@ pub(crate) enum ServerEvent {
         client_id: u64,
         evidence: Arc<crate::client_invocation::ClientAttachEvidence>,
     },
+    ViewActionProofReady(Box<crate::server::headless::view_actions::ProofReady>),
+    ViewActionFinished {
+        client_id: u64,
+        nonce: String,
+        job: String,
+    },
     /// A client sent an input message.
-    ClientInput { client_id: u64, data: Vec<u8> },
+    ClientInput {
+        client_id: u64,
+        data: Vec<u8>,
+    },
     /// A client reported the one armed Kitty regular-file response.
     GraphicsTransmissionResult {
         client_id: u64,
@@ -491,7 +500,10 @@ pub(crate) enum ServerEvent {
         takeover: bool,
     },
     /// A client requested read-only observation of one terminal.
-    ClientObserveTerminal { client_id: u64, target: String },
+    ClientObserveTerminal {
+        client_id: u64,
+        target: String,
+    },
     /// A client requested writable control of one terminal.
     ClientControlTerminal {
         client_id: u64,
@@ -553,11 +565,20 @@ pub(crate) enum ServerEvent {
         update: crate::protocol::ClientHostThemeUpdate,
     },
     /// A client-owned shell reported whether its outer terminal has focus.
-    ClientShellFocus { client_id: u64, focused: bool },
+    ClientShellFocus {
+        client_id: u64,
+        focused: bool,
+    },
     /// A client-owned shell updated its local mouse-capture preference.
-    ClientShellMouseCapture { client_id: u64, enabled: bool },
+    ClientShellMouseCapture {
+        client_id: u64,
+        enabled: bool,
+    },
     /// The committed shell asks the server to replay presentation effects before input resumes.
-    ClientShellPresentationSync { client_id: u64, token: String },
+    ClientShellPresentationSync {
+        client_id: u64,
+        token: String,
+    },
     ClientShellPaneViewport {
         client_id: u64,
         viewport: crate::protocol::endpoint::ClientPaneViewportRequest,
@@ -618,11 +639,17 @@ pub(crate) enum ServerEvent {
         data: Vec<u8>,
     },
     /// A client detached gracefully.
-    ClientDetach { client_id: u64 },
+    ClientDetach {
+        client_id: u64,
+    },
     /// A client connection was lost.
-    ClientDisconnected { client_id: u64 },
+    ClientDisconnected {
+        client_id: u64,
+    },
     /// A client writer drained its render slot and can accept another render.
-    ClientWriterDrained { client_id: u64 },
+    ClientWriterDrained {
+        client_id: u64,
+    },
     /// Ctrl+C or external shutdown signal received.
     QuitSignal,
 }

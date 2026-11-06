@@ -45,6 +45,10 @@ impl Fixture {
     }
 
     fn manager_with_startup(&self, delay: Duration) -> ExtensionServiceManager {
+        self.manager_with_options(delay, false)
+    }
+
+    fn manager_with_options(&self, delay: Duration, client: bool) -> ExtensionServiceManager {
         let script = r#"
 import json,sys,time,pathlib
 root=pathlib.Path(sys.argv[1])
@@ -58,8 +62,16 @@ for line in sys.stdin:
  (root/('entered-'+tag)).touch()
  if payload.get('block'):
   while not (root/('release-'+tag)).exists(): time.sleep(.002)
- print(json.dumps({'type':'response','id':request['id'],'result':{'ok':True,'tag':tag,'caller':request['params']['caller']}}),flush=True)
+ print(json.dumps({'type':'response','id':request['id'],'result':{'ok':True,'tag':tag,'caller':request['params']['caller'],'method':request['method']}}),flush=True)
 "#;
+        let script = if client {
+            script.replace(
+                "'methods':['action.invoke.v1']",
+                "'methods':['action.invoke.v1','action.invoke.client.v1']",
+            )
+        } else {
+            script.to_owned()
+        };
         let (event_tx, _event_rx) = tokio::sync::mpsc::channel(1);
         manager_for_test_spec(
             ExtensionServiceSpec {
@@ -125,6 +137,109 @@ fn reply(rx: mpsc::Receiver<String>) -> Value {
     .unwrap()
 }
 
+fn client_caller() -> InvocationCaller {
+    InvocationCaller::ClientHumanUnverified {
+        account: crate::action_invocation::InvocationAccount::Unix { uid: 1000 },
+        client: crate::client_invocation::ClientIdentity {
+            boot_id: "boot".into(),
+            pid: 123,
+            birth: 456,
+            tty: crate::client_invocation::ClientTtyDescriptor {
+                kind: "unix".into(),
+                device: "1:2:3".into(),
+            },
+        },
+    }
+}
+
+fn invoke_client(
+    manager: &ExtensionServiceManager,
+    tag: &str,
+    block: bool,
+) -> mpsc::Receiver<String> {
+    let (tx, rx) = mpsc::channel();
+    manager.request_generic_action(
+        tag.into(),
+        ExtensionActionInvokeParams {
+            service_id: "test.generic".into(),
+            payload: json!({"tag":tag,"block":block}),
+        },
+        client_caller(),
+        tx,
+    );
+    rx
+}
+
+#[test]
+fn client_caller_never_falls_back_to_legacy_provider_method() {
+    let fixture = Fixture::new();
+    let manager = fixture.manager();
+    let value = reply(invoke_client(&manager, "no-client-method", false));
+    assert_eq!(value["error"]["code"], "action_rejected");
+    assert!(
+        fixture.calls().is_empty(),
+        "no caller sent to legacy-only provider"
+    );
+}
+
+#[test]
+fn client_caller_uses_explicit_negotiation_without_changing_legacy_envelope() {
+    let fixture = Fixture::new();
+    let manager = fixture.manager_with_options(Duration::ZERO, true);
+    let value = reply(invoke_client(&manager, "client", false));
+    assert_eq!(
+        value["result"]["value"]["method"],
+        "action.invoke.client.v1"
+    );
+    assert_eq!(
+        value["result"]["value"]["caller"],
+        serde_json::to_value(client_caller()).unwrap()
+    );
+    assert_eq!(
+        reply(invoke(&manager, "legacy", false))["result"]["value"]["method"],
+        "action.invoke.v1"
+    );
+}
+
+#[test]
+fn client_canceled_queued_action_never_reaches_provider() {
+    let fixture = Fixture::new();
+    let manager = fixture.manager_with_options(Duration::ZERO, true);
+    let first = invoke(&manager, "first", true);
+    fixture.wait_entered("first");
+    let canceled = Arc::new(AtomicBool::new(false));
+    let (tx, rx) = mpsc::channel();
+    manager.request_client_action(
+        "canceled".into(),
+        ExtensionActionInvokeParams {
+            service_id: "test.generic".into(),
+            payload: json!({"tag":"canceled"}),
+        },
+        client_caller(),
+        tx,
+        manager.action_generation("test.generic").unwrap(),
+        canceled.clone(),
+    );
+    canceled.store(true, Ordering::Release);
+    fixture.release("first");
+    assert!(reply(first).get("result").is_some());
+    assert_eq!(reply(rx)["error"]["code"], "action_rejected");
+    assert_eq!(fixture.calls(), ["first"]);
+}
+
+#[test]
+fn client_known_reply_survives_later_provider_retirement() {
+    let fixture = Fixture::new();
+    let manager = fixture.manager_with_options(Duration::ZERO, true);
+    let result = invoke_client(&manager, "known", true);
+    fixture.wait_entered("known");
+    manager.workers["test.generic"]
+        .generation
+        .fetch_add(1, Ordering::AcqRel);
+    fixture.release("known");
+    assert_eq!(reply(result)["result"]["value"]["tag"], "known");
+}
+
 fn wait_slots(expected: usize) {
     let deadline = Instant::now() + Duration::from_secs(5);
     while EXTENSION_WORK_SLOTS.load(Ordering::Acquire) != expected {
@@ -147,6 +262,8 @@ fn generic_expired_queued_action_never_executes_and_returns_slot() {
     worker
         .requests
         .try_send(ExtensionWorkerRequest::Generic(GenericActionRequest {
+            client_source: false,
+            canceled: None,
             generation: worker.generation.load(Ordering::Acquire),
             deadline: Instant::now(),
             params: json!({"caller":{"class":"unknown"},"payload":{"tag":"expired"}}),

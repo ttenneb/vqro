@@ -76,6 +76,8 @@ pub struct ExtensionRequestIdentity {
 }
 
 struct GenericActionRequest {
+    client_source: bool,
+    canceled: Option<Arc<AtomicBool>>,
     generation: u64,
     deadline: Instant,
     params: serde_json::Value,
@@ -149,7 +151,7 @@ impl Drop for PaneExtensionProviderSlotGuard {
 }
 
 #[derive(Debug)]
-struct ExtensionWorkSlotGuard {
+pub(crate) struct ExtensionWorkSlotGuard {
     armed: bool,
 }
 
@@ -166,7 +168,7 @@ fn try_acquire_bounded_slot(
 }
 
 impl ExtensionWorkSlotGuard {
-    fn acquire() -> Result<Self, String> {
+    pub(crate) fn acquire() -> Result<Self, String> {
         try_acquire_bounded_slot(
             &EXTENSION_WORK_SLOTS,
             "global extension service work queue is full",
@@ -293,6 +295,7 @@ type ActiveRenderSlots =
     Arc<Mutex<std::collections::HashMap<String, (u64, u64, Arc<HostDocumentRenderSlotGuard>)>>>;
 
 struct HostDocumentWorkerHandle {
+    action_service_id: Option<String>,
     source: crate::api::schema::HostDocumentSourceKind,
     _provider_slot: Option<HostDocumentProviderSlotGuard>,
     pending: Arc<(Mutex<HostDocumentPending>, std::sync::Condvar)>,
@@ -768,6 +771,7 @@ impl HostDocumentServiceCatalog {
                 (
                     (*namespace).into(),
                     HostDocumentWorkerHandle {
+                        action_service_id: None,
                         source: *source,
                         _provider_slot: None,
                         pending: Arc::new((
@@ -852,6 +856,7 @@ impl HostDocumentServiceCatalog {
             requests: std::collections::BTreeMap::from([(
                 namespace.into(),
                 HostDocumentWorkerHandle {
+                    action_service_id: None,
                     source: crate::api::schema::HostDocumentSourceKind::TerminalGroups,
                     _provider_slot: None,
                     pending,
@@ -909,6 +914,7 @@ impl HostDocumentServiceCatalog {
             requests: std::collections::BTreeMap::from([(
                 namespace.into(),
                 HostDocumentWorkerHandle {
+                    action_service_id: None,
                     source: crate::api::schema::HostDocumentSourceKind::TerminalGroups,
                     _provider_slot: None,
                     pending,
@@ -1119,6 +1125,7 @@ impl HostDocumentServiceCatalog {
                 continue;
             };
             let provider_source = provider.source;
+            let action_service_id = Some(provider.supervisor.spec.id.clone());
             let worker_pending = pending.clone();
             let worker_desired_revisions = desired_revisions.clone();
             let worker_active_actions = active_actions.clone();
@@ -1365,6 +1372,7 @@ impl HostDocumentServiceCatalog {
                 requests.insert(
                     namespace,
                     HostDocumentWorkerHandle {
+                        action_service_id,
                         source: provider_source,
                         _provider_slot: Some(provider_slot),
                         pending,
@@ -1416,6 +1424,22 @@ impl HostDocumentServiceCatalog {
         self.generations.get(namespace).copied()
     }
 
+    pub(crate) fn action_service(&self, namespace: &str) -> Option<&str> {
+        let worker = self.requests.get(namespace)?;
+        (!worker.revoked.load(Ordering::Acquire)).then_some(())?;
+        worker.action_service_id.as_deref()
+    }
+
+    pub(crate) fn current_revision(&self, namespace: &str, scope: &str) -> Option<(u64, u64)> {
+        self.requests
+            .get(namespace)?
+            .desired_revisions
+            .lock()
+            .ok()?
+            .get(scope)
+            .copied()
+    }
+
     pub(crate) fn retire_desired_revisions(&self, namespace: &str) {
         if let Some(handle) = self.requests.get(namespace) {
             handle
@@ -1423,6 +1447,44 @@ impl HostDocumentServiceCatalog {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .clear();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_action_identity(
+        namespace: &str,
+        generation: u64,
+        revision: u64,
+        service: &str,
+    ) -> Self {
+        Self {
+            test_render_slots: Vec::new(),
+            complete_catalog: true,
+            generations: std::collections::BTreeMap::from([(namespace.into(), generation)]),
+            requests: std::collections::BTreeMap::from([(
+                namespace.into(),
+                HostDocumentWorkerHandle {
+                    action_service_id: Some(service.into()),
+                    source: crate::api::schema::HostDocumentSourceKind::Relationships,
+                    _provider_slot: None,
+                    pending: Arc::new((
+                        Mutex::new(HostDocumentPending::default()),
+                        std::sync::Condvar::new(),
+                    )),
+                    desired_revisions: Arc::new(Mutex::new(std::collections::HashMap::from([(
+                        "session".into(),
+                        (generation, revision),
+                    )]))),
+                    active_actions: Arc::new(Mutex::new(std::collections::HashMap::new())),
+                    active_renders: Arc::new(Mutex::new(std::collections::HashMap::new())),
+                    active_render_slots: Arc::new(Mutex::new(std::collections::HashMap::new())),
+                    event_pending: None,
+                    revoked: Arc::new(AtomicBool::new(false)),
+                    join: None,
+                    event_join: None,
+                },
+            )]),
+            event_tx: None,
         }
     }
 
@@ -2010,12 +2072,14 @@ fn manager_for_specs_with_documents(
                         ExtensionWorkerRequest::Generic(action) => {
                             let current = !thread_revoked.load(Ordering::Acquire)
                                 && thread_generation.load(Ordering::Acquire) == action.generation
-                                && Instant::now() < action.deadline;
+                                && Instant::now() < action.deadline
+                                && !action.canceled.as_ref().is_some_and(|canceled| canceled.load(Ordering::Acquire));
                             if !current {
                                 send_generic_action_response(&action, Err("action rejected before execution: expired or retired provider".into()), false);
                                 continue;
                             }
-                            let result = supervisor.invoke_generic_action_cancellable(action.params.clone(), &thread_revoked).map_err(|error| error.to_string());
+                            let (result, executed) = supervisor.invoke_generic_action_cancellable(action.client_source, action.canceled.as_deref(), action.params.clone(), &thread_revoked);
+                            let result = result.map_err(|error| error.to_string());
                             let still_current = !thread_revoked.load(Ordering::Acquire)
                                 && thread_generation.load(Ordering::Acquire) == action.generation;
                             if supervisor.runtime.is_none() {
@@ -2036,7 +2100,11 @@ fn manager_for_specs_with_documents(
                                     }
                                 }
                             }
-                            send_generic_action_response(&action, if still_current { result } else { Err("provider retired during execution".into()) }, true);
+                            // A known client-action reply remains a known receipt even
+                            // if its provider retired after returning it. Do not publish
+                            // stale document revisions, and preserve legacy behavior.
+                            let keep_result = still_current || (action.client_source && result.is_ok());
+                            send_generic_action_response(&action, if keep_result { result } else { Err("provider retired during execution".into()) }, executed);
                             continue;
                         }
                         request => request,
@@ -2254,6 +2322,37 @@ impl ExtensionServiceManager {
         caller: crate::action_invocation::InvocationCaller,
         respond_to: std::sync::mpsc::Sender<String>,
     ) {
+        self.enqueue_generic_action(request_id, request, caller, respond_to, None, None);
+    }
+
+    pub(crate) fn request_client_action(
+        &self,
+        request_id: String,
+        request: crate::api::schema::ExtensionActionInvokeParams,
+        caller: crate::action_invocation::InvocationCaller,
+        respond_to: std::sync::mpsc::Sender<String>,
+        generation: u64,
+        canceled: Arc<AtomicBool>,
+    ) {
+        self.enqueue_generic_action(
+            request_id,
+            request,
+            caller,
+            respond_to,
+            Some(generation),
+            Some(canceled),
+        );
+    }
+
+    fn enqueue_generic_action(
+        &self,
+        request_id: String,
+        request: crate::api::schema::ExtensionActionInvokeParams,
+        caller: crate::action_invocation::InvocationCaller,
+        respond_to: std::sync::mpsc::Sender<String>,
+        expected_generation: Option<u64>,
+        canceled: Option<Arc<AtomicBool>>,
+    ) {
         let reject = |message: &str| {
             let _ = respond_to.send(serde_json::json!({"id": request_id, "error": {"code": "action_rejected", "message": message}}).to_string());
         };
@@ -2272,6 +2371,15 @@ impl ExtensionServiceManager {
             reject("action_invoke capability not granted");
             return;
         }
+        if expected_generation
+            .is_some_and(|generation| worker.generation.load(Ordering::Acquire) != generation)
+            || canceled
+                .as_ref()
+                .is_some_and(|flag| flag.load(Ordering::Acquire))
+        {
+            reject("action provider or connection retired before admission");
+            return;
+        }
         let slot = match ExtensionWorkSlotGuard::acquire() {
             Ok(slot) => slot,
             Err(error) => {
@@ -2280,6 +2388,11 @@ impl ExtensionServiceManager {
             }
         };
         let action = GenericActionRequest {
+            canceled,
+            client_source: matches!(
+                &caller,
+                crate::action_invocation::InvocationCaller::ClientHumanUnverified { .. }
+            ),
             generation: worker.generation.load(Ordering::Acquire),
             deadline: Instant::now() + Duration::from_secs(2),
             params: serde_json::json!({"caller": caller, "payload": request.payload}),
@@ -2511,6 +2624,18 @@ impl ExtensionServiceManager {
             tombstones.push_back(identity.clone());
         }
         true
+    }
+
+    pub(crate) fn action_generation(&self, service_id: &str) -> Option<u64> {
+        let worker = self.workers.get(service_id)?;
+        if worker.revoked.load(Ordering::Acquire)
+            || !worker
+                .granted_capabilities
+                .contains(&crate::api::schema::ExtensionServiceCapability::ActionInvoke)
+        {
+            return None;
+        }
+        Some(worker.generation.load(Ordering::Acquire))
     }
 
     pub fn matches_generation(&self, service_id: &str, generation: u64) -> bool {
@@ -3127,39 +3252,68 @@ impl ExtensionServiceSupervisor {
 
     fn invoke_generic_action_cancellable(
         &mut self,
+        client_source: bool,
+        external_cancel: Option<&AtomicBool>,
         params: serde_json::Value,
         canceled: &AtomicBool,
-    ) -> Result<serde_json::Value, ExtensionServiceError> {
-        if !self
-            .spec
-            .granted_capabilities
-            .contains(&crate::api::schema::ExtensionServiceCapability::ActionInvoke)
-        {
-            return Err(ExtensionServiceError::Protocol(
-                "action_invoke capability not granted".into(),
-            ));
+    ) -> (Result<serde_json::Value, ExtensionServiceError>, bool) {
+        let method = if client_source {
+            "action.invoke.client.v1"
+        } else {
+            "action.invoke.v1"
+        };
+        let preflight = (|| {
+            if !self
+                .spec
+                .granted_capabilities
+                .contains(&crate::api::schema::ExtensionServiceCapability::ActionInvoke)
+            {
+                return Err(ExtensionServiceError::Protocol(
+                    "action_invoke capability not granted".into(),
+                ));
+            }
+            // Durable extension work is not a render: include startup in a separate
+            // bounded deadline, long enough for SQLite's one-second lock wait.
+            let deadline = Instant::now() + Duration::from_millis(2500);
+            self.ensure_running_cancellable(Instant::now(), canceled)?;
+            let runtime = self
+                .runtime
+                .as_mut()
+                .ok_or_else(|| ExtensionServiceError::Protocol("service is not running".into()))?;
+            let _ = runtime;
+            Ok(deadline)
+        })();
+        let deadline = match preflight {
+            Ok(deadline) => deadline,
+            Err(error) => return (self.finish_request(Err(error)), false),
+        };
+        let Some(runtime) = self.runtime.as_mut() else {
+            return (
+                Err(ExtensionServiceError::Protocol(
+                    "service stopped before dispatch".into(),
+                )),
+                false,
+            );
+        };
+        if external_cancel.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+            return (
+                Err(ExtensionServiceError::Protocol(
+                    "connection retired before provider dispatch".into(),
+                )),
+                false,
+            );
         }
-        // Durable extension work is not a render: include startup in a separate
-        // bounded deadline, long enough for SQLite's one-second lock wait.
-        let deadline = Instant::now() + Duration::from_millis(2500);
-        self.ensure_running_cancellable(Instant::now(), canceled)?;
-        let runtime = self
-            .runtime
-            .as_mut()
-            .ok_or_else(|| ExtensionServiceError::Protocol("service is not running".into()))?;
-        if !runtime.methods().contains("action.invoke.v1") {
-            return Err(ExtensionServiceError::Protocol(
-                "service did not advertise action.invoke.v1".into(),
-            ));
+        if !runtime.methods().contains(method) {
+            // Optional-method rejection must not retire a compatible legacy runtime.
+            return (
+                Err(ExtensionServiceError::Protocol(format!(
+                    "service did not advertise {method}"
+                ))),
+                false,
+            );
         }
-        let result = runtime.invoke(
-            "action.invoke.v1",
-            params,
-            self.runtime_generation,
-            deadline,
-            canceled,
-        );
-        self.finish_request(result)
+        let result = runtime.invoke(method, params, self.runtime_generation, deadline, canceled);
+        (self.finish_request(result), true)
     }
 
     pub(crate) fn conformance_request(
@@ -3953,6 +4107,7 @@ sleep 2
             requests: std::collections::BTreeMap::from([(
                 "example.docs".into(),
                 HostDocumentWorkerHandle {
+                    action_service_id: None,
                     source: crate::api::schema::HostDocumentSourceKind::TerminalGroups,
                     _provider_slot: None,
                     pending: pending.clone(),
@@ -4003,6 +4158,7 @@ sleep 2
             requests: std::collections::BTreeMap::from([(
                 "example.docs".into(),
                 HostDocumentWorkerHandle {
+                    action_service_id: None,
                     source: crate::api::schema::HostDocumentSourceKind::TerminalGroups,
                     _provider_slot: None,
                     pending,
@@ -4095,6 +4251,7 @@ sleep 2
             requests: std::collections::BTreeMap::from([(
                 "example.docs".into(),
                 HostDocumentWorkerHandle {
+                    action_service_id: None,
                     source: crate::api::schema::HostDocumentSourceKind::TerminalGroups,
                     _provider_slot: None,
                     pending,
@@ -4177,6 +4334,7 @@ sleep 2
             requests: std::collections::BTreeMap::from([(
                 "example.docs".into(),
                 HostDocumentWorkerHandle {
+                    action_service_id: None,
                     source: crate::api::schema::HostDocumentSourceKind::TerminalGroups,
                     _provider_slot: None,
                     pending,
@@ -4591,6 +4749,7 @@ exit 0
             requests: std::collections::BTreeMap::from([(
                 "example.docs".into(),
                 HostDocumentWorkerHandle {
+                    action_service_id: None,
                     source: crate::api::schema::HostDocumentSourceKind::TerminalGroups,
                     _provider_slot: None,
                     pending: pending.clone(),

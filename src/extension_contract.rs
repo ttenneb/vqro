@@ -282,6 +282,10 @@ pub struct HostViewItem {
     /// link, which is the only party it can speak about live.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting: Option<HostViewWaiting>,
+    /// Optional neutral presentation metadata, never executable by itself.
+    /// Only JSON host-document controls carry this type; no frozen binary lane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub affordance: Option<serde_json::Value>,
     /// Unix epoch seconds whose age Vqro draws. Only the extension knows what
     /// the instant means.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1053,6 +1057,13 @@ fn validate_view_item_fields(
     let Some(view) = &item.view else {
         return Ok(());
     };
+    if view
+        .affordance
+        .as_ref()
+        .is_some_and(|value| value.to_string().len() > 8192)
+    {
+        return invalid("view affordance exceeds byte bound");
+    }
     if let Some(action) = &view.action {
         if action.trim().is_empty() || action.chars().count() > MAX_VIEW_ACTION_CHARS {
             return invalid("invalid view action text");
@@ -1379,6 +1390,7 @@ mod tests {
                 action: parent.is_some().then(|| "unblock".to_owned()),
                 waiting: parent.is_some().then_some(HostViewWaiting::Them),
                 since: parent.is_some().then_some(1_700_000_000),
+                affordance: None,
             }),
         }
     }

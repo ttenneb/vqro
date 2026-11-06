@@ -210,6 +210,8 @@ pub(crate) enum ServerLiveness {
     Unknown,
 }
 
+// Test-only truth table; production readers retain per-record error context.
+#[cfg(test)]
 pub(crate) fn check_liveness(liveness: ServerLiveness) -> Result<bool, String> {
     match liveness {
         ServerLiveness::Live(key) if key.valid() => Ok(true),
@@ -249,6 +251,8 @@ impl OwnershipProof {
         self.0 == other.0
     }
 
+    // Characterization helper; production re-observes through the bounded reader.
+    #[cfg(test)]
     pub(crate) fn matches(&self, after_audit: &[OwnershipStatus]) -> bool {
         Self::capture(after_audit).is_ok_and(|proof| proof.0 == self.0)
     }

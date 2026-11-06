@@ -330,6 +330,7 @@ impl HeadlessServer {
                 unreachable!("variant checked above");
             };
             self.app.handle_host_relationships_document_result(*result);
+            self.prune_prepared_view_actions();
             return true;
         }
         if matches!(&ev, AppEvent::HostAgentActivityDocumentFinished(_)) {
@@ -337,6 +338,7 @@ impl HeadlessServer {
                 unreachable!("variant checked above");
             };
             self.app.handle_host_agent_activity_document_result(*result);
+            self.prune_prepared_view_actions();
             return true;
         }
         if matches!(&ev, AppEvent::HostDocumentFinished(_)) {
@@ -344,6 +346,16 @@ impl HeadlessServer {
                 unreachable!("variant checked above");
             };
             self.app.handle_host_document_result(*result);
+            self.prune_prepared_view_actions();
+            return true;
+        }
+        if matches!(
+            &ev,
+            AppEvent::ExtensionDocumentRevisionChanged { .. }
+                | AppEvent::HostDocumentProviderRetired { .. }
+        ) {
+            self.app.handle_internal_event(ev);
+            self.prune_prepared_view_actions();
             return true;
         }
         if matches!(&ev, AppEvent::ExtensionServiceFinished(_)) {

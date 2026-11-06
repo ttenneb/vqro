@@ -68,6 +68,22 @@ pub enum ResponseResult {
     HostDocumentList {
         documents: Vec<super::HostDocumentProjection>,
     },
+    HostViewActionPrepared {
+        token: String,
+        confirmation_token: Option<String>,
+        requires_confirmation: bool,
+        expires_in_ms: u64,
+        operation_id: String,
+    },
+    HostViewActionSubmitted {
+        operation_id: String,
+        caller: serde_json::Value,
+        provider_response: serde_json::Value,
+        audit_warning: Option<String>,
+    },
+    HostViewActionCanceled {
+        canceled: bool,
+    },
     WorkspaceInfo {
         workspace: WorkspaceInfo,
     },

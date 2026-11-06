@@ -81,6 +81,7 @@ mod notifications;
 mod render;
 mod retained_surface;
 mod surface_interest;
+pub(super) mod view_actions;
 
 // Producers can refill even a bounded channel while it is being drained.
 // Yield to scheduled work and rendering between batches; the select loop
@@ -2008,6 +2009,24 @@ impl HeadlessServer {
                 self.clients.insert(client_id, connection);
                 false
             }
+            ServerEvent::ViewActionProofReady(ready) => {
+                self.finish_view_action_proof(*ready);
+                false
+            }
+            ServerEvent::ViewActionFinished {
+                client_id,
+                nonce,
+                job,
+            } => {
+                if let Some(client) = self.clients.get_mut(&client_id) {
+                    if client.view_actions.nonce == nonce
+                        && client.view_actions.busy.as_deref() == Some(job.as_str())
+                    {
+                        client.view_actions.busy = None;
+                    }
+                }
+                false
+            }
             ServerEvent::ClientInvocationEvidence {
                 client_id,
                 evidence,
@@ -3547,6 +3566,14 @@ impl HeadlessServer {
             return false;
         }
 
+        if matches!(
+            &msg.request.method,
+            api::schema::Method::HostViewActionPrepare(_)
+                | api::schema::Method::HostViewActionSubmit(_)
+        ) {
+            self.start_view_action(msg);
+            return false;
+        }
         if let api::schema::Method::ExtensionActionInvoke(params) = &msg.request.method {
             let caller = match &msg.origin {
                 api::ApiOrigin::LocalSocketPeer(peer) => self.app.invocation_caller(peer),

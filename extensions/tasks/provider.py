@@ -31,6 +31,10 @@ class OutcomeUnknown(Exception):
     """A commit/rollback error cannot be reported as a safe-to-retry rejection."""
 
 
+class StaleRevision(ValueError):
+    """Displayed revision changed; never retry a mutation."""
+
+
 def operation_id(value):
     if not isinstance(value, str) or not 1 <= len(value) <= 128 or not all(char.isascii() and (char.isalnum() or char in "._:-") for char in value):
         raise ValueError("operation_id must be 1..128 ASCII letters, digits, . _ : or -")
@@ -40,6 +44,30 @@ def operation_id(value):
 def checked_binding(value):
     if not isinstance(value, dict):
         raise ValueError("caller binding must be an object")
+    if "client" in value:
+        if set(value) != {"class", "uid", "client"} or value.get("class") != "human_unverified":
+            raise ValueError("invalid client caller binding")
+        if type(value["uid"]) is not int or not 0 <= value["uid"] <= 0xffffffff:
+            raise ValueError("invalid client caller uid")
+        client = value["client"]
+        if not isinstance(client, dict) or set(client) != {"boot_id", "pid", "birth", "tty"}:
+            raise ValueError("invalid client caller identity")
+        boot = client["boot_id"]
+        if not isinstance(boot, str) or not 1 <= len(boot) <= 128 or not all(c.isascii() and (c.isalnum() or c in "_-:") for c in boot):
+            raise ValueError("invalid client boot identity")
+        for key, maximum in (("pid", 2**32-1), ("birth", 2**64-1)):
+            if type(client[key]) is not int or not 1 <= client[key] <= maximum:
+                raise ValueError("invalid client process identity")
+        tty = client["tty"]
+        if not isinstance(tty, dict) or set(tty) != {"kind", "device"} or tty.get("kind") != "unix":
+            raise ValueError("unsupported client tty identity")
+        device = tty["device"]
+        if not isinstance(device, str) or not 1 <= len(device) <= 128:
+            raise ValueError("invalid client tty identity")
+        parts = device.split(":")
+        if len(parts) != 3 or any(not part.isascii() or not part.isdecimal() or int(part) > 2**64-1 for part in parts) or int(parts[1]) == 0 or int(parts[2]) == 0:
+            raise ValueError("invalid client tty identity")
+        return value
     keys = {"class", "terminal_id", "agent", "execution"} if value.get("class") == "agent" else {"class", "terminal_id", "sid" if "sid" in value else "uid"}
     if set(value) != keys or value.get("class") not in ("agent", "human_unverified"):
         raise ValueError("invalid caller binding")
@@ -393,7 +421,7 @@ class Store:
         task = self.task(payload.get("id"))
         revision = payload.get("revision")
         if type(revision) is not int or revision != task["revision"]:
-            raise ValueError("stale task revision")
+            raise StaleRevision("stale task revision")
         action = payload["action"]
         if action in ("decision_timer", "decision_revert"):
             destination, detail = self.decisions.change(task, payload, caller, at)
@@ -535,6 +563,31 @@ class Store:
         messages = self.db.execute("SELECT COALESCE(MAX(revision),0) FROM messages").fetchone()[0]
         return transitions + messages
 
+    def view_action(self, caller, payload):
+        """Package-owned mapping into ordinary mutation/authorization/receipts."""
+        allowed = {"action", "subject", "option", "operation_id", "expected_caller"}
+        if set(payload) - allowed or len(canonical(payload).encode()) > 64 * 1024:
+            raise ValueError("invalid view action fields")
+        subject = payload.get("subject")
+        if not isinstance(subject, dict) or set(subject) != {"id", "revision"}:
+            raise ValueError("invalid view action subject")
+        task_id, revision = subject["id"], subject["revision"]
+        if not isinstance(task_id, str) or not 1 <= len(task_id) <= 128 or type(revision) is not int or revision < 1:
+            raise ValueError("invalid view action subject")
+        task = self.task(task_id)
+        if task["kind"] == "decision":
+            if task["decision"] is None:
+                raise ValueError("structured decision required for a view answer")
+            mapped = {"action": "answer", "option": payload.get("option")}
+        elif task["kind"] == "task" and "option" not in payload:
+            mapped = {"action": "accept"}
+        else:
+            raise ValueError("unsupported view action")
+        mapped.update(id=task_id, revision=revision, operation_id=payload.get("operation_id"))
+        if "expected_caller" in payload:
+            mapped["expected_caller"] = payload["expected_caller"]
+        return self.invoke({"caller": caller, "payload": mapped})
+
     def invoke(self, params):
         if set(params) != {"caller", "payload"}:
             raise ValueError("invalid host action envelope")
@@ -542,6 +595,8 @@ class Store:
         if not isinstance(payload, dict):
             raise ValueError("payload must be an object")
         action = payload.get("action")
+        if action == "view_action":
+            return self.view_action(caller, payload)
         fields = {
             "list": {"action", "after"}, "ready": {"action", "after"}, "get": {"action", "id"},
             "whoami": {"action"}, "status": {"action"},
@@ -678,7 +733,8 @@ def main():
     directory = args.data_dir or state_directory()
     store, document_store = None, None
     capabilities = ["action_invoke", "host_document"] if args.native_attention else ["action_invoke"]
-    methods = ["action.invoke.v1", "host.document.render"] if args.native_attention else ["action.invoke.v1"]
+    required_methods = ["action.invoke.v1", "host.document.render"] if args.native_attention else ["action.invoke.v1"]
+    methods = [*required_methods, "action.invoke.client.v1"]
     emit({"type": "hello", "protocol": 2, "service_id": SERVICE, "requested_capabilities": capabilities, "methods": methods})
     pending = bytearray()
     windows_input = stdin_lines() if os.name == "nt" else None
@@ -703,7 +759,7 @@ def main():
     while welcome_line is None:
         welcome_line = read_line(None)
     welcome = json.loads(welcome_line)
-    if welcome.get("type") != "welcome" or set(welcome.get("granted_capabilities", [])) != set(capabilities) or not set(methods) <= set(welcome.get("methods", [])):
+    if welcome.get("type") != "welcome" or set(welcome.get("granted_capabilities", [])) != set(capabilities) or not set(required_methods) <= set(welcome.get("methods", [])):
         raise ValueError("action capability not granted")
     while True:
         applied = 0
@@ -745,9 +801,16 @@ def main():
                     document_store = None
                 emit({"type": "response", "id": request["id"], "error": str(error)})
             continue
-        if request.get("type") != "request" or request.get("method") != "action.invoke.v1":
+        if request.get("type") != "request" or request.get("method") not in ("action.invoke.v1", "action.invoke.client.v1"):
             raise ValueError("unexpected request")
         try:
+            caller = request.get("params", {}).get("caller")
+            client_source = isinstance(caller, dict) and "client" in caller
+            client_method = request["method"] == "action.invoke.client.v1"
+            if client_source != client_method or (client_method and request["method"] not in welcome.get("methods", [])):
+                raise ValueError("client caller requires negotiated action.invoke.client.v1")
+            if client_source:
+                checked_binding(caller)
             if store is None:
                 store = Store(directory, args.decision_delay_seconds)
                 try:
@@ -760,7 +823,9 @@ def main():
             emit({"type": "response", "id": request["id"], "error": str(error)})
             return
         except (ValueError, KeyError, TypeError, sqlite3.Error) as error:
-            result = {"ok": False, "error": str(error)}
+            result = {"ok": False, "error": str(error), "code": "stale" if isinstance(error, StaleRevision) else "rejected"}
+            if store is not None:
+                result["document_revision"] = store.document_revision()
         if len(canonical(result).encode()) > MAX_REPLY_BYTES:
             emit({"type": "response", "id": request["id"], "error": "response exceeds bounded task result; inspect operation"})
             return

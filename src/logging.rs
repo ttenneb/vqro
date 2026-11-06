@@ -1,7 +1,9 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
+
+static SERVER_AUDIT_WRITER: OnceLock<Arc<Mutex<RotatingFileState>>> = OnceLock::new();
 
 use tracing_subscriber::fmt::writer::MakeWriter;
 use tracing_subscriber::EnvFilter;
@@ -19,6 +21,9 @@ pub(crate) fn init_file_logging(file_name: &str) {
         return;
     };
 
+    if file_name == crate::product::SERVER_LOG_FILE {
+        let _ = SERVER_AUDIT_WRITER.set(Arc::clone(&make_writer.state));
+    }
     let filter = EnvFilter::try_from_env(crate::product::LOG_ENV)
         .unwrap_or_else(|_| EnvFilter::new("vqro=info"));
 
@@ -28,6 +33,50 @@ pub(crate) fn init_file_logging(file_name: &str) {
         .with_ansi(false)
         .with_target(true)
         .try_init();
+}
+
+/// Checked authority audit through the same rotating server file, independent
+/// of tracing filters. Never use this on startup, PTY lifecycle or render paths.
+pub(crate) fn checked_action_audit(value: &serde_json::Value) -> io::Result<()> {
+    let writer = SERVER_AUDIT_WRITER
+        .get()
+        .ok_or_else(|| io::Error::other("server audit writer unavailable"))?;
+    checked_write(writer, value)
+}
+
+fn checked_write(
+    writer: &Arc<Mutex<RotatingFileState>>,
+    value: &serde_json::Value,
+) -> io::Result<()> {
+    let bytes = serde_json::to_vec(value).map_err(io::Error::other)?;
+    if bytes.len() > 16 * 1024 {
+        return Err(io::Error::other("action audit exceeds bound"));
+    }
+    let mut state = writer
+        .lock()
+        .map_err(|_| io::Error::other("server audit writer poisoned"))?;
+    if state.disabled {
+        return Err(io::Error::other("server audit writer disabled"));
+    }
+    let result = (|| {
+        state.rotate_if_needed(bytes.len() as u64 + 2)?;
+        let file = state
+            .file
+            .as_mut()
+            .ok_or_else(|| io::Error::other("server audit file unavailable"))?;
+        // A leading newline isolates this complete JSON record even when ordinary
+        // tracing formatting spans more than one individual write call.
+        file.write_all(b"\n")?;
+        file.write_all(&bytes)?;
+        file.write_all(b"\n")?;
+        file.flush()?;
+        state.current_size = state.current_size.saturating_add(bytes.len() as u64 + 2);
+        Ok(())
+    })();
+    if result.is_err() {
+        state.disabled = true;
+    }
+    result
 }
 
 pub(crate) fn help_log_paths_summary() -> String {
@@ -612,6 +661,20 @@ mod tests {
         assert!(!path.exists());
 
         let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn checked_audit_does_not_swallow_disabled_or_rotation_errors() {
+        let path = temp_log_path("checked");
+        let dir = path.parent().unwrap().to_path_buf();
+        fs::create_dir_all(&dir).unwrap();
+        let writer = RotatingFileMakeWriter::new(dir.clone(), "herdr.log", 4096, 0).unwrap();
+        let value = serde_json::json!({"event":"view.action","operation_id":"original"});
+        checked_write(&writer.state, &value).unwrap();
+        assert!(fs::read_to_string(&path).unwrap().contains("original"));
+        writer.state.lock().unwrap().disabled = true;
+        assert!(checked_write(&writer.state, &value).is_err());
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

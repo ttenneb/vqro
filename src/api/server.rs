@@ -503,7 +503,9 @@ fn handle_connection_with_stop(
                 wait_for_output(request_id.clone(), params, &mut stream, api_tx, running)?;
             finish_wait_response(&mut stream, response, &request_id, method, changes_ui)
         }
-        Method::ExtensionActionInvoke(params) => {
+        action_method @ (Method::ExtensionActionInvoke(_)
+        | Method::HostViewActionPrepare(_)
+        | Method::HostViewActionSubmit(_)) => {
             let Some(peer) = crate::platform::invocation_peer(&stream) else {
                 return write_text_line_allow_disconnect(
                     &mut stream,
@@ -529,7 +531,7 @@ fn handle_connection_with_stop(
                 origin: crate::api::ApiOrigin::LocalSocketPeer(peer),
                 request: Request {
                     id: request_id.clone(),
-                    method: Method::ExtensionActionInvoke(params),
+                    method: action_method,
                 },
                 respond_to,
                 response_write_complete: None,
@@ -729,6 +731,8 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::CollectionPromote(_) => "collection.promote",
         Method::HostDocumentList(_) => "host.document.list",
         Method::HostDocumentAction(_) => "host.document.action",
+        Method::HostViewActionPrepare(_) => "host.view.action.prepare.v1",
+        Method::HostViewActionSubmit(_) => "host.view.action.submit.v1",
         Method::CollectionSelect(_) => "collection.select",
         Method::CollectionReorder(_) => "collection.reorder",
         Method::CollectionArchive(_) => "collection.archive",

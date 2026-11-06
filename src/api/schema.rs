@@ -176,6 +176,10 @@ pub enum Method {
     HostDocumentList(HostDocumentListParams),
     #[serde(rename = "host.document.action")]
     HostDocumentAction(HostDocumentActionParams),
+    #[serde(rename = "host.view.action.prepare.v1")]
+    HostViewActionPrepare(crate::view_action::PrepareParams),
+    #[serde(rename = "host.view.action.submit.v1")]
+    HostViewActionSubmit(crate::view_action::SubmitParams),
     #[serde(rename = "collection.select")]
     CollectionSelect(CollectionSelectParams),
     #[serde(rename = "collection.reorder")]

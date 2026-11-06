@@ -266,7 +266,7 @@ class DocumentTests(unittest.TestCase):
         doc = document.project(self.store, self.agent_snapshot())
         row = next(row for row in self.panel_rows(doc) if row["id"].endswith(task["id"]))
         self.assertEqual("you", row["view"]["waiting"])
-        self.assertEqual({"kind": "action", "label": "Accept work",
+        self.assertEqual({"kind": "action", "label": "Accept work", "detail": task["title"],
                           "subject": {"id": task["id"], "revision": task["revision"]}}, row["view"]["affordance"])
         self.assertEqual([], doc["actions"])
         self.assertTrue(all(not row.get("action_ids") for row in doc["items"]))
@@ -284,7 +284,7 @@ class DocumentTests(unittest.TestCase):
                 row = next(row for row in self.panel_rows(doc) if row["id"].endswith(task["id"]))
                 self.assertEqual("you", row["view"]["waiting"])
                 hint = row["view"]["affordance"]
-                self.assertEqual({"kind": "choice", "label": "Answer", "subject": {"id": task["id"], "revision": task["revision"]},
+                self.assertEqual({"kind": "choice", "label": "Answer", "detail": task["title"], "subject": {"id": task["id"], "revision": task["revision"]},
                                   "options": task["decision"]["options"], "default": "wait", "reversible": reversible}, hint)
                 self.assertFalse(any("reversible" in option for option in hint["options"]))
                 self.assertEqual([], doc["actions"])

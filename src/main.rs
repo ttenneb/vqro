@@ -102,6 +102,7 @@ mod terminal_theme;
 mod thread_spawn;
 mod ui;
 mod update;
+mod view_action;
 mod view_document;
 mod view_sizing;
 mod workspace;

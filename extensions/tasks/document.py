@@ -19,7 +19,7 @@ PANEL_VIEW = "tasks"
 PANEL_ROW_LIMIT = 24
 # Optional, inert presentation hints. Current hosts ignore this field; it grants
 # no caller authority and must never become an executable document action.
-AFFORDANCE_BYTES = 4096
+AFFORDANCE_BYTES = 8192
 AFFORDANCES_BYTES = 32 * 1024
 DOCUMENT_BYTES = 256 * 1024
 # The one word Vqro composes "waiting on ..." around.
@@ -126,6 +126,7 @@ def human_affordance(task, unfinished_parents):
                     "options": choices, "default": terms["default"], "reversible": terms["reversible"]}
         else:
             return None
+        hint["detail"] = decision_text(clean(task["title"]), 1024, "action detail")
         return hint if len(canonical(hint).encode()) <= AFFORDANCE_BYTES else None
     except (KeyError, TypeError, ValueError):
         return None

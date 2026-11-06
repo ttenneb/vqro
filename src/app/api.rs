@@ -1438,6 +1438,13 @@ impl App {
             Method::HostDocumentList(params) => {
                 return self.handle_host_document_list(request.id, params)
             }
+            Method::HostViewActionPrepare(_) | Method::HostViewActionSubmit(_) => {
+                return responses::encode_error(
+                    request.id,
+                    "view_action_requires_server_dispatch",
+                    "view actions require the exact connected-client server context",
+                );
+            }
             Method::HostDocumentAction(params) => {
                 let action = match self.authorize_host_document_action(&params) {
                     Ok(action) => action,

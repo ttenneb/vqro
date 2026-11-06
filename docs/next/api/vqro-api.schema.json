@@ -4985,6 +4985,52 @@
             }
           ]
         },
+        "PrepareParams": {
+          "additionalProperties": false,
+          "properties": {
+            "generation": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "item_id": {
+              "type": "string"
+            },
+            "namespace": {
+              "type": "string"
+            },
+            "operation_id": {
+              "type": "string"
+            },
+            "option": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "scope_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "namespace",
+            "scope_id",
+            "pane_id",
+            "generation",
+            "revision",
+            "item_id",
+            "operation_id"
+          ],
+          "type": "object"
+        },
         "ProductAnnouncementDismissParams": {
           "properties": {
             "id": {
@@ -5058,6 +5104,28 @@
             "down"
           ],
           "type": "string"
+        },
+        "SubmitParams": {
+          "additionalProperties": false,
+          "properties": {
+            "cancel": {
+              "default": false,
+              "type": "boolean"
+            },
+            "confirmation_token": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "token": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "token"
+          ],
+          "type": "object"
         },
         "Subscription": {
           "oneOf": [
@@ -6752,6 +6820,38 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/HostDocumentActionParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "host.view.action.prepare.v1",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PrepareParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "host.view.action.submit.v1",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/SubmitParams"
             }
           },
           "required": [
@@ -10805,6 +10905,9 @@
                 "null"
               ]
             },
+            "affordance": {
+              "description": "Optional neutral presentation metadata, never executable by itself.\nOnly JSON host-document controls carry this type; no frozen binary lane."
+            },
             "kind": {
               "description": "What this block is, as a free string so the set can grow: `section` and\n`row` are known, and anything else is drawn as \"unsupported\" in place\nrather than dropped. Never a closed enum: an unknown variant would make\nan older client reject the whole view.",
               "type": [
@@ -13398,6 +13501,84 @@
               "required": [
                 "type",
                 "documents"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "confirmation_token": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "expires_in_ms": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "operation_id": {
+                  "type": "string"
+                },
+                "requires_confirmation": {
+                  "type": "boolean"
+                },
+                "token": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "host_view_action_prepared",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "token",
+                "requires_confirmation",
+                "expires_in_ms",
+                "operation_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "audit_warning": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "caller": true,
+                "operation_id": {
+                  "type": "string"
+                },
+                "provider_response": true,
+                "type": {
+                  "const": "host_view_action_submitted",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "operation_id",
+                "caller",
+                "provider_response"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "canceled": {
+                  "type": "boolean"
+                },
+                "type": {
+                  "const": "host_view_action_canceled",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "canceled"
               ],
               "type": "object"
             },

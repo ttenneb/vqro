@@ -470,6 +470,13 @@ impl ProcessRuntime {
             .contains(&crate::api::schema::ExtensionServiceCapability::ActionInvoke)
         {
             host_methods.push("action.invoke.v1");
+            if hello
+                .methods
+                .iter()
+                .any(|method| method == "action.invoke.client.v1")
+            {
+                host_methods.push("action.invoke.client.v1");
+            }
         }
         if requires_choices {
             host_methods.push(crate::action_choices::ACTION_CHOICES_LIST_METHOD_V1);

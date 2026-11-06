@@ -661,6 +661,9 @@
                 "null"
               ]
             },
+            "affordance": {
+              "description": "Optional neutral presentation metadata, never executable by itself.\nOnly JSON host-document controls carry this type; no frozen binary lane."
+            },
             "kind": {
               "description": "What this block is, as a free string so the set can grow: `section` and\n`row` are known, and anything else is drawn as \"unsupported\" in place\nrather than dropped. Never a closed enum: an unknown variant would make\nan older client reject the whole view.",
               "type": [

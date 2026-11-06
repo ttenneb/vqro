@@ -161,6 +161,7 @@ pub(crate) struct ClientConnection {
     pub(crate) mode: ClientConnectionMode,
     /// Kernel observations from attach, not a granted caller credential.
     pub(crate) invocation: Option<Arc<crate::client_invocation::ClientAttachEvidence>>,
+    pub(crate) view_actions: crate::view_action::ClientState,
     /// The client's terminal size after clamping.
     pub(crate) terminal_size: (u16, u16),
     /// Pixel size of one client terminal cell.
@@ -273,6 +274,7 @@ impl ClientConnection {
         Self {
             mode,
             invocation: None,
+            view_actions: Default::default(),
             terminal_size,
             cell_size,
             last_activity,

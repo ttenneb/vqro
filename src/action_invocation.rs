@@ -210,6 +210,13 @@ pub(crate) fn observed_execution(
 }
 
 impl crate::app::App {
+    pub(crate) fn client_peer_in_owned_pane(&self, peer: &InvocationPeer) -> bool {
+        self.terminal_runtimes
+            .values()
+            .filter_map(|runtime| runtime.child_pid())
+            .any(|root| peer.ancestry.iter().any(|entry| entry.pid == root))
+    }
+
     pub(crate) fn invocation_caller(&self, peer: &InvocationPeer) -> InvocationCaller {
         for (terminal_id, runtime) in self.terminal_runtimes.iter() {
             let Some(root_pid) = runtime.child_pid() else {
