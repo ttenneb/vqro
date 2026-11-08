@@ -282,6 +282,47 @@ fn admission_preserves_known_remote_error_with_and_without_retirement() {
 }
 
 #[test]
+fn legacy_remote_error_keeps_its_existing_classification_and_retirement_behavior() {
+    for retire in [false, true] {
+        let fixture = Fixture::new();
+        let manager = fixture.manager_with_options(Duration::ZERO, true);
+        let (tx, rx) = mpsc::channel();
+        manager.request_generic_action(
+            "legacy-error".into(),
+            ExtensionActionInvokeParams {
+                service_id: "test.generic".into(),
+                payload: json!({"tag":"legacy-error","remote_error":true,"block":true}),
+            },
+            InvocationCaller::Unknown,
+            tx,
+        );
+        fixture.wait_entered("legacy-error");
+        if retire {
+            manager.workers["test.generic"]
+                .generation
+                .fetch_add(1, Ordering::AcqRel);
+        }
+        fixture.release("legacy-error");
+        let value = reply(rx);
+        assert_eq!(
+            value["error"]["code"], "outcome_unknown",
+            "legacy lane must not be reinterpreted"
+        );
+        if retire {
+            assert!(value["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("provider retired"));
+        } else {
+            assert!(value["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("explicit-provider-policy-rejection"));
+        }
+    }
+}
+
+#[test]
 fn admission_never_adopts_a_generation_that_changed_after_its_check() {
     let fixture = Fixture::new();
     let manager = fixture.manager_with_options(Duration::ZERO, true);

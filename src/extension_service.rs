@@ -2084,7 +2084,7 @@ fn manager_for_specs_with_documents(
                                 continue;
                             }
                             let (result, executed) = supervisor.invoke_generic_action_cancellable(action.client_source, action.canceled.as_deref(), action.params.clone(), &thread_revoked);
-                            let received_remote = matches!(&result, Err(ExtensionServiceError::Remote(_)));
+                            let received_remote = action.client_source && matches!(&result, Err(ExtensionServiceError::Remote(_)));
                             let result = result.map_err(|error| error.to_string());
                             let still_current = !thread_revoked.load(Ordering::Acquire)
                                 && thread_generation.load(Ordering::Acquire) == action.generation;
