@@ -32,7 +32,18 @@ impl App {
         if matches!(node, TypedNode::Collapsed { .. }) == collapsed {
             return false;
         }
-        if !collapsed {
+        let box_views = tab.layout.auto_view_box_child_members(path);
+        let refit_child = !box_views.is_empty()
+            && box_views.iter().all(|pane| {
+                self.state
+                    .view_sizing
+                    .active
+                    .get(pane)
+                    .is_some_and(|entry| entry.scope_valid)
+            });
+        // Child intent inside an armed designated box re-fits immediately. Do
+        // not replace/remove a fence from an earlier enclosing collapse.
+        if !collapsed && !refit_child {
             let tab_id = tab.id.clone();
             let parent = &path[..path.len().saturating_sub(1)];
             let Some(members) = tab.layout.node_members(parent) else {

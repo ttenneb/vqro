@@ -140,6 +140,102 @@ async fn withdrawal_clears_header_without_resuming_old_work_and_fresh_recovery_c
     assert_ne!(view_height(&app, view), before);
 }
 
+fn setup_box() -> (App, PaneId, Vec<PaneId>) {
+    let (mut app, _, _) = setup();
+    let mut workspace = crate::workspace::Workspace::test_new("designated box");
+    let terminal = workspace.tabs[0].root_pane;
+    let (_, views) = workspace
+        .split_pane_with_view_box(
+            terminal,
+            &[
+                ("sample.views".into(), "one".into()),
+                ("sample.views".into(), "two".into()),
+            ],
+            Direction::Vertical,
+            0.5,
+        )
+        .unwrap();
+    app.state.workspaces = vec![workspace];
+    app.state.terminals.clear();
+    app.state.ensure_test_terminals();
+    app.prune_auto_view_sizing();
+    for view in &views {
+        app.activate_auto_view(0, 0, *view);
+    }
+    resize(&mut app, Rect::new(0, 0, 100, 40));
+    (app, terminal, views)
+}
+
+#[tokio::test]
+async fn designated_box_child_expansion_refits_without_rearming_manual_or_latent_zoom() {
+    let (mut app, _, views) = setup_box();
+    let before = view_height(&app, views[0]);
+    assert!(app.set_node_collapsed(0, 0, &[1, 1], true));
+    resize(&mut app, Rect::new(0, 0, 100, 40));
+    assert_eq!(view_height(&app, views[0]), before);
+    // A restored policy flag on a collapsed child must not prevent its sibling
+    // from being sized, and expansion must clear that latent zoom policy.
+    app.state.workspaces[0].tabs[0].layout.focus_pane(views[1]);
+    app.state.workspaces[0].tabs[0].zoomed = true;
+    resize(&mut app, Rect::new(0, 0, 100, 40));
+    assert!(app.set_node_collapsed(0, 0, &[1, 1], false));
+    assert!(!app.state.workspaces[0].tabs[0].zoomed);
+    assert!(!app.state.view_sizing.fenced(views[0]));
+    assert!(!app.state.view_sizing.fenced(views[1]));
+    resize(&mut app, Rect::new(0, 0, 100, 40));
+    assert_eq!(view_height(&app, views[0]), before);
+    app.manual_view_sizing_for_split(0, 0, &[]);
+    assert!(
+        app.state.view_sizing.active.is_empty(),
+        "outer box drag disarms every child"
+    );
+    let shares = app.state.workspaces[0].tabs[0].layout.typed_root().clone();
+    assert!(app.set_node_collapsed(0, 0, &[1, 1], true));
+    assert!(app.set_node_collapsed(0, 0, &[1, 1], false));
+    resize(&mut app, Rect::new(0, 0, 100, 40));
+    assert!(app.state.view_sizing.active.is_empty());
+    assert_eq!(app.state.workspaces[0].tabs[0].layout.typed_root(), &shares);
+    app.state.assert_invariants_for_test();
+}
+
+#[tokio::test]
+async fn designated_child_refit_never_clears_whole_box_or_enclosing_fences() {
+    for path in [vec![1], vec![]] {
+        let (mut app, _, views) = setup_box();
+        assert!(app.set_node_collapsed(0, 0, &path, true));
+        assert!(app.set_node_collapsed(0, 0, &path, false));
+        assert!(views.iter().all(|view| app.state.view_sizing.fenced(*view)));
+        assert!(app.set_node_collapsed(0, 0, &[1, 1], true));
+        assert!(app.set_node_collapsed(0, 0, &[1, 1], false));
+        resize(&mut app, Rect::new(0, 0, 100, 40));
+        assert!(views.iter().all(|view| app.state.view_sizing.fenced(*view)));
+    }
+}
+
+#[tokio::test]
+async fn restored_box_document_arrival_and_child_expansion_never_rearm_auto_fit() {
+    let (mut app, terminal, _) = setup_box();
+    let tab = &mut app.state.workspaces[0].tabs[0];
+    tab.layout = crate::layout::TileLayout::from_tree(
+        tab.layout.typed_root().clone(),
+        tab.layout.focused_leaf(),
+    )
+    .unwrap();
+    app.state.view_sizing = Default::default();
+    let before = app.state.workspaces[0].tabs[0].layout.typed_root().clone();
+    let public = app.public_pane_id(0, terminal).unwrap();
+    let mut document: HostDocumentV1 = serde_json::from_value(serde_json::json!({"contract":"host.view.v1","namespace":"sample.views","generation":7,"revision":1,"surface":"navigation","target":{"kind":"session"},"items":[
+        {"id":"root","role":"section","label":"Rows","view":{"pane_id":public,"view_id":"one"}}
+    ]})).unwrap();
+    publish(&mut app, &mut document, 2, 200, true);
+    assert!(app.set_node_collapsed(0, 0, &[1, 1], true));
+    assert!(app.set_node_collapsed(0, 0, &[1, 1], false));
+    resize(&mut app, Rect::new(0, 0, 100, 40));
+    assert!(app.state.view_sizing.active.is_empty());
+    assert_eq!(app.state.workspaces[0].tabs[0].layout.typed_root(), &before);
+    app.state.assert_invariants_for_test();
+}
+
 #[tokio::test]
 async fn manual_opt_out_clears_an_existing_resume_fence() {
     let (mut app, view, _) = setup();

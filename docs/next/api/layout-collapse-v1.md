@@ -92,5 +92,8 @@ subtree. Other ancestors are addressable through the public conditional API.
 Collapse releases vertical space as one header row or horizontal space as a
 one-column title strip, preserving remembered shares. Root collapse can leave
 unused space. Expansion first restores those shares, with transient auto-sizing
-resume fences as specified by the accepted design. Shared pane/terminal identity,
+resume fences as specified by the accepted design. An individual child inside an
+already-armed designated views box instead immediately re-fits that box within
+its sizing caps; this neither rearms a manual/restored box nor removes a fence
+from collapsing the whole box or an enclosing group. Shared pane/terminal identity,
 PTY parsing and last hidden nonzero terminal size remain intact.

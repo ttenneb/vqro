@@ -501,7 +501,13 @@ impl TileLayout {
         ) {
             return None;
         }
-        self.commit_nested(root, true).then_some(panes)
+        if !self.commit_nested(root, true) {
+            return None;
+        }
+        let group = *panes.first()?;
+        self.auto_view_boxes
+            .extend(panes.iter().map(|pane| (*pane, group)));
+        Some(panes)
     }
 
     pub(crate) fn from_tree(root: TypedNode, focus: LayoutLeaf) -> Option<Self> {
@@ -513,6 +519,7 @@ impl TileLayout {
             root,
             focus,
             prev_focus: None,
+            auto_view_boxes: Default::default(),
         };
         match focus {
             LayoutLeaf::Pane(pane) if layout.placement(pane).is_some() => layout.focus_pane(pane),
@@ -568,10 +575,16 @@ impl TileLayout {
         let Some((Some(mut root), node)) = take_at(self.root.clone(), source) else {
             return false;
         };
+        let mut moved = Vec::new();
+        node.collect_all_panes(&mut moved);
         if node.stack(id).is_some() || !insert(&mut root, id, index, node) {
             return false;
         }
-        self.commit_nested(root, true)
+        if !self.commit_nested(root, true) {
+            return false;
+        }
+        self.forget_auto_view_boxes(moved);
+        true
     }
 
     pub(crate) fn remove_node_at(&mut self, path: &[usize]) -> bool {

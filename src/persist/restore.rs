@@ -3485,6 +3485,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cold_restore_keeps_designated_box_ratios_without_transferring_auto_fit() {
+        let mut state = crate::app::state::AppState::test_new();
+        let mut workspace = Workspace::test_new("auto box restore");
+        let terminal = workspace.tabs[0].root_pane;
+        let (_, views) = workspace
+            .split_pane_with_view_box(
+                terminal,
+                &[
+                    ("sample.views".into(), "one".into()),
+                    ("sample.views".into(), "two".into()),
+                ],
+                Direction::Vertical,
+                0.5,
+            )
+            .unwrap();
+        let area = ratatui::layout::Rect::new(0, 0, 100, 40);
+        let measures = views
+            .iter()
+            .map(|pane| (*pane, crate::view_sizing::ViewMeasure::default()))
+            .collect();
+        assert!(workspace.tabs[0].layout.auto_size_views(area, &measures));
+        state.workspaces = vec![workspace];
+        state.active = Some(0);
+        state.ensure_test_terminals();
+        let (mut workspaces, _) = capture_parse_restore(&state);
+        let restored = &mut workspaces[0].tabs[0].layout;
+        let before = restored.typed_root().clone();
+        let measures = restored
+            .view_panes()
+            .into_iter()
+            .map(|pane| {
+                (
+                    pane,
+                    crate::view_sizing::ViewMeasure {
+                        rows: 200,
+                        width: 200,
+                    },
+                )
+            })
+            .collect();
+        assert!(!restored.auto_size_views(area, &measures));
+        assert!(restored.set_collapsed(&[1, 1], true));
+        assert!(restored.set_collapsed(&[1, 1], false));
+        assert!(!restored.auto_size_views(area, &measures));
+        assert_eq!(restored.typed_root(), &before);
+        assert_eq!(
+            restored
+                .geometry(area)
+                .panes
+                .iter()
+                .skip(1)
+                .map(|pane| pane.rect.height)
+                .sum::<u16>(),
+            6
+        );
+        workspaces[0].assert_invariants_for_test();
+    }
+
+    #[tokio::test]
     async fn cold_restore_of_a_view_only_tab_keeps_the_view_and_both_helpers() {
         let mut state = crate::app::state::AppState::test_new();
         let mut workspace = Workspace::test_new("views");

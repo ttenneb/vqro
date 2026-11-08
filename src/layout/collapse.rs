@@ -182,6 +182,13 @@ impl TileLayout {
 
     pub(super) fn refresh_tree_fingerprint(&mut self) {
         self.tree_fingerprint = fingerprint(&self.root);
+        if !self.auto_view_boxes.is_empty() {
+            let live = self
+                .view_panes()
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>();
+            self.auto_view_boxes.retain(|pane, _| live.contains(pane));
+        }
     }
 
     pub(crate) fn pane_path(&self, pane: PaneId) -> Option<Vec<usize>> {

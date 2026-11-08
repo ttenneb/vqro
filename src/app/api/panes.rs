@@ -5475,6 +5475,65 @@ mod tests {
         app.state.assert_invariants_for_test();
     }
 
+    #[tokio::test]
+    async fn designated_box_manual_divider_and_directional_resize_disarm_all_children() {
+        for mode in [0, 1, 2] {
+            let (mut app, root) = app_with_test_workspace();
+            app.state.active = Some(0);
+            app.state.view.terminal_area = Rect::new(0, 0, 100, 40);
+            let terminal = app.parse_pane_id(&root).unwrap().1;
+            let (_, views) = app.state.workspaces[0]
+                .split_pane_with_view_box(
+                    terminal,
+                    &[
+                        ("sample.views".into(), "one".into()),
+                        ("sample.views".into(), "two".into()),
+                    ],
+                    ratatui::layout::Direction::Vertical,
+                    0.5,
+                )
+                .unwrap();
+            for pane in &views {
+                app.activate_auto_view(0, 0, *pane);
+            }
+            let response = if mode == 2 {
+                app.handle_pane_resize(
+                    "key-api".into(),
+                    PaneResizeParams {
+                        pane_id: Some(root.clone()),
+                        direction: crate::api::schema::PaneDirection::Down,
+                        amount: Some(0.1),
+                    },
+                )
+            } else {
+                app.handle_layout_set_split_ratio("mouse-api".into(), serde_json::from_value(serde_json::json!({
+                    "pane_id": root, "path": if mode == 0 { vec![] } else { vec![true] }, "ratio": 0.7
+                })).unwrap())
+            };
+            assert!(
+                serde_json::from_str::<SuccessResponse>(&response).is_ok(),
+                "{response}"
+            );
+            assert!(
+                app.state.view_sizing.active.is_empty(),
+                "mode {mode} must disarm the complete box"
+            );
+            let before = app.state.workspaces[0].tabs[0].layout.typed_root().clone();
+            assert!(app.set_node_collapsed(0, 0, &[1, 1], true));
+            assert!(app.set_node_collapsed(0, 0, &[1, 1], false));
+            app.resize_auto_views(
+                crate::ui::TabSurfaceTarget {
+                    workspace_index: 0,
+                    tab_index: 0,
+                },
+                Rect::new(0, 0, 100, 40),
+                crate::kitty_graphics::HostCellSize::default(),
+            );
+            assert_eq!(app.state.workspaces[0].tabs[0].layout.typed_root(), &before);
+            app.state.assert_invariants_for_test();
+        }
+    }
+
     #[test]
     fn api_pane_view_ratio_is_the_views_share_in_both_directions() {
         for direction in [

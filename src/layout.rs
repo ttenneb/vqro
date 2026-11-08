@@ -310,6 +310,9 @@ pub struct TileLayout {
     /// Pane focused before the current leaf/member. Targeted tree edits do not
     /// disturb this history, so closing a newly focused pane can return there.
     prev_focus: Option<PaneId>,
+    /// Transient creation provenance, never saved or exposed through a codec.
+    /// Values identify the original group; keys are its live view members.
+    auto_view_boxes: std::collections::HashMap<PaneId, PaneId>,
 }
 
 impl TileLayout {
@@ -322,6 +325,7 @@ impl TileLayout {
                 root,
                 focus: LayoutLeaf::Pane(root_id),
                 prev_focus: None,
+                auto_view_boxes: Default::default(),
             },
             root_id,
         )
@@ -534,11 +538,85 @@ impl TileLayout {
         measures: &std::collections::HashMap<PaneId, crate::view_sizing::ViewMeasure>,
     ) -> bool {
         let headers = self.selected_stack_panes().into_iter().collect();
-        let changed = frames::auto_size(&mut self.root, area, measures, &headers);
+        let changed = frames::auto_size(
+            &mut self.root,
+            area,
+            measures,
+            &headers,
+            &self.auto_view_boxes,
+        );
         if changed {
             self.refresh_tree_fingerprint();
         }
         changed
+    }
+
+    /// Pure view membership is not sufficient: all leaves must retain the same
+    /// explicit creation provenance. New ordinary splits cannot broaden it.
+    fn auto_view_group(&self, node: &TypedNode) -> Option<PaneId> {
+        match node {
+            TypedNode::Collapsed { node } => self.auto_view_group(node),
+            TypedNode::View { pane, .. } => self.auto_view_boxes.get(pane).copied(),
+            TypedNode::Split { first, second, .. } => {
+                let group = self.auto_view_group(first)?;
+                (self.auto_view_group(second) == Some(group)).then_some(group)
+            }
+            _ => None,
+        }
+    }
+
+    fn forget_auto_view_boxes(&mut self, panes: impl IntoIterator<Item = PaneId>) {
+        let groups = panes
+            .into_iter()
+            .filter_map(|pane| self.auto_view_boxes.get(&pane).copied())
+            .collect::<std::collections::HashSet<_>>();
+        self.auto_view_boxes
+            .retain(|_, group| !groups.contains(group));
+    }
+
+    fn auto_view_members(&self, group: PaneId) -> Vec<PaneId> {
+        self.auto_view_boxes
+            .iter()
+            .filter_map(|(pane, id)| (*id == group).then_some(*pane))
+            .collect()
+    }
+
+    /// A child inside a complete designated box, not its outer allocation edge.
+    pub(crate) fn auto_view_box_child_members(&self, path: &[usize]) -> Vec<PaneId> {
+        let Some(parent) = path.len().checked_sub(1) else {
+            return Vec::new();
+        };
+        let Some(group) = self
+            .root
+            .at(&path[..parent])
+            .and_then(|node| self.auto_view_group(node))
+        else {
+            return Vec::new();
+        };
+        let members = self.auto_view_members(group);
+        let complete = (0..=parent).any(|depth| {
+            self.root.at(&path[..depth]).is_some_and(|node| {
+                self.auto_view_group(node) == Some(group) && node.pane_count() == members.len()
+            })
+        });
+        if complete {
+            members
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Manual resizing opts out the touched box, not unrelated boxes contained
+    /// in the terminal-bearing siblings of an ordinary outer split.
+    pub(crate) fn auto_views_for_split(&self, path: &[usize]) -> Vec<PaneId> {
+        let Some(TypedNode::Split { first, second, .. }) = self.root.at(path) else {
+            return Vec::new();
+        };
+        [first.as_ref(), second.as_ref()]
+            .into_iter()
+            .filter_map(|node| self.auto_view_group(node))
+            .flat_map(|group| self.auto_view_members(group))
+            .collect()
     }
 
     pub(crate) fn single_terminal_view_scopes(&self) -> std::collections::HashMap<PaneId, PaneId> {
@@ -617,6 +695,7 @@ impl TileLayout {
             valid_split_ratio(ratio),
         );
         if changed {
+            self.forget_auto_view_boxes([target]);
             self.refresh_tree_fingerprint();
         }
         changed.then_some(new_id)
@@ -654,6 +733,7 @@ impl TileLayout {
             valid_split_ratio(ratio),
         );
         if changed {
+            self.auto_view_boxes.insert(new_id, new_id);
             self.refresh_tree_fingerprint();
         }
         changed.then_some((new_id, content))
@@ -731,6 +811,7 @@ impl TileLayout {
         ) {
             return false;
         }
+        self.forget_auto_view_boxes([target]);
         self.refresh_tree_fingerprint();
         if focus {
             self.focus_pane(moved);
@@ -948,6 +1029,7 @@ impl TileLayout {
             return false;
         }
         typed_swap_panes(&mut self.root, first, second);
+        self.forget_auto_view_boxes([first, second]);
         self.refresh_tree_fingerprint();
         true
     }
@@ -1043,6 +1125,7 @@ impl TileLayout {
             root,
             focus: LayoutLeaf::Pane(pane),
             prev_focus: None,
+            auto_view_boxes: Default::default(),
         }
     }
 
@@ -1054,6 +1137,7 @@ impl TileLayout {
             root,
             focus: LayoutLeaf::Pane(focus),
             prev_focus: None,
+            auto_view_boxes: Default::default(),
         }
     }
 

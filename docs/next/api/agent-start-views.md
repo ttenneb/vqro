@@ -47,5 +47,11 @@ enclosing nonempty full terminal membership, including hidden/collapsed members.
 Placement is deterministically below, independent of terminal aspect ratio. The
 outer frame belongs to the terminal-bearing agent group; its terminal body is
 unframed and view children keep their inner frames. A single configured view
-naturally reduces to a leaf. Existing layout operations can put the whole group
-beside the terminal; this change chooses no new expanded side-width cap.
+naturally reduces to a leaf. While newly armed, this designated box auto-fits its
+children's cached neutral content metrics: stacked height sums body rows and each
+child's frame/header chrome, capped at 35% and twelve rows; side width uses the
+maximum child width within 25–60%. Child collapse/expand re-fits the box. Ordinary
+user splits never acquire this policy merely by containing views. Manual resizing
+disarms the affected box. As with `pane view add`, only the last actual ratios
+persist; restart/handoff restores them with auto off. Existing layout operations
+can put the whole group beside the terminal.

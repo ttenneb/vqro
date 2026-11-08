@@ -449,6 +449,81 @@ fn print_stage(
     }
 }
 
+#[test]
+#[ignore = "release-only event sizing profile; run with just bench-render-scale"]
+fn render_scale_profile_armed_boxes_with_populated_documents() {
+    println!("cached sizing EVENT pass; fixed 300x200; populated terminal history; two accepted four-row view roots per box");
+    println!("boxes median_us p95_us max_us");
+    for count in [1, 15] {
+        let mut pipeline = RenderPipeline::new(active_panes(count));
+        let terminals = pipeline.app.state.workspaces[0].tabs[0].layout.pane_ids();
+        let mut views = Vec::new();
+        let mut items = Vec::new();
+        for (index, terminal) in terminals.into_iter().enumerate() {
+            let public = pipeline.app.public_pane_id(0, terminal).unwrap();
+            let (_, added) = pipeline.app.state.workspaces[0]
+                .split_pane_with_view_box(
+                    terminal,
+                    &[
+                        ("bench.views".into(), "one".into()),
+                        ("bench.views".into(), "two".into()),
+                    ],
+                    Direction::Vertical,
+                    0.5,
+                )
+                .unwrap();
+            views.extend(added);
+            for view in ["one", "two"] {
+                let root = format!("{index}-{view}");
+                items.push(serde_json::json!({"id":root,"role":"section","label":"Populated view","view":{"pane_id":public,"view_id":view}}));
+                for row in 0..4 {
+                    items.push(serde_json::json!({"id":format!("{root}-{row}"),"parent_id":root,"role":"section","label":"A populated neutral document row"}));
+                }
+            }
+        }
+        let document = serde_json::from_value(serde_json::json!({"contract":"host.view.v1","namespace":"bench.views","generation":1,"revision":1,"surface":"navigation","target":{"kind":"session"},"items":items})).unwrap();
+        pipeline
+            .app
+            .host_document_caches
+            .entry(("bench.views".into(), "session".into()))
+            .or_default()
+            .publish_for_namespace("bench.views", 1, 0, &Default::default(), document)
+            .unwrap();
+        for view in views {
+            pipeline.app.activate_auto_view(0, 0, view);
+        }
+        assert!(pipeline
+            .app
+            .state
+            .view_sizing
+            .active
+            .values()
+            .all(|view| view.measure.rows == 4));
+        let target = crate::ui::TabSurfaceTarget {
+            workspace_index: 0,
+            tab_index: 0,
+        };
+        let mut samples = Vec::new();
+        for sample in 0..WARMUP_COUNT + SAMPLE_COUNT {
+            let started = Instant::now();
+            black_box(pipeline.app.resize_auto_views(
+                target,
+                Rect::new(0, 0, 300, 200),
+                HostCellSize::default(),
+            ));
+            let elapsed = started.elapsed();
+            if sample >= WARMUP_COUNT {
+                samples.push(elapsed);
+            }
+        }
+        let stats = summarize(samples);
+        println!(
+            "{count} {} {} {}",
+            stats.median_us, stats.p95_us, stats.max_us
+        );
+    }
+}
+
 fn print_profiles(label: &str, build: fn(usize) -> Vec<Workspace>) {
     let rows = CARDINALITIES.map(|count| (count, profile(build, count)));
     println!("{label}");
