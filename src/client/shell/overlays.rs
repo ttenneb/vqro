@@ -7,6 +7,7 @@ mod worktree_overlays;
 #[derive(Default)]
 pub(crate) struct OverlayRender {
     pub(crate) area: Rect,
+    pub(crate) view_action_popup: Rect,
     pub(crate) menu_rows: Vec<(Rect, usize)>,
     pub(crate) primary: Rect,
     pub(crate) clear: Rect,

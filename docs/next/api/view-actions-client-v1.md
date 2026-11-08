@@ -39,7 +39,11 @@ Both document publisher and action service must remain current; the action servi
 ### TUI consumer
 
 Expanded view bodies expose neutral action/choice labels, never task commands or
-subject interpretation. A choice dialog lists only published options, marks the
+subject interpretation. This lane requires the exact SESSION target; TAB/PANE/
+WORKSPACE content remains readable without redirecting its actions to SESSION.
+Retained intent revalidates that target too. Layout-changing input closes choice
+activation until a usable dialog is composed again; an undersized popup border
+is not confirmation. A choice dialog lists only published options, marks the
 default without applying it, and displays reversibility and the full bounded
 question/options through scrolling. Irreversible answers need a matching prepared
 confirmation and an additional explicit confirm; cancel discards preparation.

@@ -427,12 +427,16 @@ pub(super) fn render_view_pane(
     let mut y = body.y;
     let mut drew_row = false;
     for view in &views {
+        let actions_supported =
+            actions::supports_document(&documents.documents[view.document_index].document);
         for row in &view.rows {
             if y >= body.bottom() {
                 break;
             }
             let rect = Rect::new(body.x, y, columns, 1);
-            let label = actions::action_label(row.item);
+            let label = actions_supported
+                .then(|| actions::action_label(row.item))
+                .flatten();
             let button = label
                 .map(|label| actions::action_rect(rect, label))
                 .unwrap_or_default();

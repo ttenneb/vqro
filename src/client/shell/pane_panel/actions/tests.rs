@@ -18,7 +18,13 @@ fn fixture(choice: bool, reversible: bool) -> ClientShellState {
     } else {
         json!({"kind":"action","label":"Accept","detail":"Accept reported work","subject":{"id":"opaque"}})
     };
-    let documents:HostDocumentsProjectionV1=serde_json::from_value(json!({"boot_id":"boot-1","revision":1,"documents":[{"provider_priority":1,"document":{"contract":"host.document.v1","namespace":"example.docs","generation":7,"revision":8,"surface":"pane","target":{"kind":"session"},"items":[{"id":"root","role":"section","label":"Work","view":{"pane_id":"pane_1","view_id":"work"}},{"id":"row","parent_id":"root","role":"section","label":"Reported work","view":{"kind":"row","affordance":affordance}}]}}]})).unwrap();
+    let documents:HostDocumentsProjectionV1=serde_json::from_value(json!({"boot_id":"boot-1","revision":1,"documents":[{"provider_priority":1,"document":{"contract":"host.view.v1","namespace":"example.docs","generation":7,"revision":8,"surface":"pane","target":{"kind":"session"},"items":[{"id":"root","role":"section","label":"Work","view":{"pane_id":"pane_1","view_id":"work"}},{"id":"row","parent_id":"root","role":"section","label":"Reported work","view":{"kind":"row","affordance":affordance}}]}}]})).unwrap();
+    for entry in &documents.documents {
+        entry
+            .document
+            .validate()
+            .expect("runtime-valid view fixture");
+    }
     state.endpoints[0].host_documents = Some(Box::new(documents));
     let rect = Rect::new(0, 0, 80, 24);
     let inner = Rect::new(1, 1, 78, 22);
@@ -67,18 +73,37 @@ fn click(x: u16, y: u16) -> MouseEvent {
         modifiers: KeyModifiers::NONE,
     }
 }
+fn validate_documents(state: &ClientShellState) {
+    for entry in &state.endpoints[0]
+        .host_documents
+        .as_ref()
+        .unwrap()
+        .documents
+    {
+        entry
+            .document
+            .validate()
+            .expect("runtime-valid displayed document");
+    }
+}
 fn open(state: &mut ClientShellState) -> ClientShellInput {
+    validate_documents(state);
     let mut outcome = ClientShellInput::default();
     assert!(state.handle_view_action_mouse(click(77, 1), &mut outcome));
     outcome
 }
 fn paint(state: &mut ClientShellState) -> Vec<(Rect, usize)> {
+    paint_size(state, Rect::new(0, 0, 100, 32))
+}
+fn paint_size(state: &mut ClientShellState, area: Rect) -> Vec<(Rect, usize)> {
     let Some(ClientShellOverlay::ViewAction(value)) = state.overlay.as_ref() else {
         panic!("dialog")
     };
-    let mut buffer = Buffer::empty(Rect::new(0, 0, 100, 32));
+    Affordance::parse(&serde_json::to_value(&value.intent.affordance).unwrap())
+        .expect("valid bounded dialog fixture");
+    let mut buffer = Buffer::empty(area);
     let rendered = render_dialog(&mut buffer, value, &state.config.palette).unwrap();
-    state.hits.view_action_popup = rendered.area;
+    state.hits.view_action_popup = rendered.view_action_popup;
     state.hits.overlay_primary = rendered.primary;
     state.hits.overlay_cancel = rendered.cancel;
     dialog::layout(value, rendered.area).options
@@ -113,6 +138,246 @@ fn prepared(operation_id: String, irreversible: bool) -> ResponseResult {
 }
 fn is_submit(action: &ClientShellAction, cancel: bool) -> bool {
     matches!(action,ClientShellAction::Endpoint{request,..} if matches!(&request.method,Method::HostViewActionSubmit(params) if params.cancel==cancel))
+}
+#[test]
+fn unsupported_displayed_targets_do_not_redirect_to_colliding_session_intent() {
+    use crate::extension_contract::HostTarget;
+    for target in [
+        HostTarget::Tab {
+            tab_id: "tab_1".into(),
+        },
+        HostTarget::Pane {
+            pane_id: "pane_1".into(),
+        },
+        HostTarget::Workspace {
+            workspace_id: "ws_1".into(),
+        },
+    ] {
+        let mut state = fixture(true, true);
+        let documents = state.endpoints[0].host_documents.as_mut().unwrap();
+        let session = documents.documents[0].clone();
+        documents.documents[0].document.target = target;
+        documents.documents[0].document.items[1]
+            .view
+            .as_mut()
+            .unwrap()
+            .affordance
+            .as_mut()
+            .unwrap()["subject"] = json!({"id":"displayed-non-session"});
+        documents.documents.push(session);
+        validate_documents(&state);
+        let mut outcome = ClientShellInput::default();
+        state.handle_view_action_mouse(click(77, 1), &mut outcome);
+        if matches!(state.overlay, Some(ClientShellOverlay::ViewAction(_))) {
+            outcome.actions.extend(choose(&mut state, 0).actions);
+        }
+        assert!(
+            outcome.actions.is_empty(),
+            "unsupported displayed target must not prepare the different SESSION subject"
+        );
+        assert!(state.pending_requests.is_empty());
+        assert!(state.overlay.is_none());
+    }
+}
+#[test]
+fn retained_intent_revalidates_session_target_not_just_numeric_ids() {
+    let mut state = fixture(false, true);
+    open(&mut state);
+    let (id, intent, _) = pending(&state);
+    state.endpoints[0]
+        .host_documents
+        .as_mut()
+        .unwrap()
+        .documents[0]
+        .document
+        .target = crate::extension_contract::HostTarget::Tab {
+        tab_id: "tab_1".into(),
+    };
+    validate_documents(&state);
+    let (_, actions) = state.handle_endpoint_result(
+        "boot-1",
+        &id,
+        Ok(prepared(intent.selection.operation_id, false)),
+    );
+    assert!(
+        !actions.iter().any(|action| is_submit(action, false)),
+        "target changed despite identical namespace/generation/revision"
+    );
+    assert!(actions.iter().any(|action| is_submit(action, true)));
+}
+fn no_paint_scroll_batch(page_down: bool) {
+    let mut state = fixture(true, true);
+    open(&mut state);
+    if let Some(ClientShellOverlay::ViewAction(dialog)) = &mut state.overlay {
+        if let Affordance::Choice {
+            detail, options, ..
+        } = &mut dialog.intent.affordance
+        {
+            *detail = "long question ".repeat(55);
+            options[0].label = "A".repeat(145);
+            options[1].label = "B".repeat(145);
+        }
+    }
+    let area = Rect::new(0, 0, 100, 18);
+    paint_size(&mut state, area);
+    if !page_down {
+        if let Some(ClientShellOverlay::ViewAction(dialog)) = &mut state.overlay {
+            dialog.scroll = dialog::layout(dialog, state.hits.view_action_popup)
+                .max_scroll
+                .saturating_sub(3);
+        }
+    }
+    let old_rows = paint_size(&mut state, area);
+    let Some(ClientShellOverlay::ViewAction(dialog)) = state.overlay.as_ref() else {
+        panic!("dialog")
+    };
+    let mut moved = dialog.clone();
+    moved.scroll = moved.scroll.saturating_add(if page_down { 8 } else { 3 });
+    let future = dialog::layout(&moved, state.hits.view_action_popup);
+    let point =
+        if page_down {
+            let rect = future
+                .options
+                .iter()
+                .find(|(_, index)| *index == 1)
+                .unwrap()
+                .0;
+            assert!(
+                !old_rows
+                    .iter()
+                    .any(|(old, _)| super::super::super::contains(*old, (rect.x, rect.y))),
+                "fixture click is still on painted question text"
+            );
+            (rect.x, rect.y)
+        } else {
+            let rect = old_rows.iter().find(|(_, index)| *index == 0).unwrap().0;
+            assert!(
+                future.options.iter().any(|(new, index)| *index == 1
+                    && super::super::super::contains(*new, (rect.x, rect.y))),
+                "fixture must remap old A to unseen B"
+            );
+            (rect.x, rect.y)
+        };
+    let scroll = if page_down {
+        RawInputEvent::Key(crate::input::TerminalKey::new(
+            crossterm::event::KeyCode::PageDown,
+            KeyModifiers::NONE,
+        ))
+    } else {
+        RawInputEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: point.0,
+            row: point.1,
+            modifiers: KeyModifiers::NONE,
+        })
+    };
+    let events = vec![
+        scroll,
+        RawInputEvent::Mouse(click(point.0, point.1)),
+        RawInputEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: point.0,
+            row: point.1,
+            modifiers: KeyModifiers::NONE,
+        }),
+    ];
+    let outcome = state.handle_raw_events(events);
+    assert!(
+        outcome.actions.is_empty(),
+        "no intervening composition may not authorize newly mapped option B"
+    );
+    assert!(state.pending_requests.is_empty());
+    let rows = paint_size(&mut state, area);
+    let rect = rows.iter().find(|(_, index)| *index == 1).unwrap().0;
+    let outcome = state.handle_raw_events(vec![RawInputEvent::Mouse(click(rect.x, rect.y))]);
+    assert!(!outcome.actions.is_empty());
+    assert_eq!(pending(&state).1.selection.option.as_deref(), Some("wait"));
+}
+#[test]
+fn wheel_and_click_in_one_raw_batch_cannot_pick_an_unpainted_option() {
+    no_paint_scroll_batch(false);
+}
+#[test]
+fn page_down_and_click_in_one_raw_batch_cannot_pick_an_unpainted_option() {
+    no_paint_scroll_batch(true);
+}
+#[test]
+fn unreadable_small_confirmation_cannot_authorize_enter() {
+    let mut state = fixture(true, false);
+    open(&mut state);
+    choose(&mut state, 0);
+    let (id, intent, _) = pending(&state);
+    state.handle_endpoint_result(
+        "boot-1",
+        &id,
+        Ok(prepared(intent.selection.operation_id, true)),
+    );
+    paint_size(&mut state, Rect::new(0, 0, 24, 8));
+    let Some(ClientShellOverlay::ViewAction(dialog)) = &state.overlay else {
+        panic!("dialog")
+    };
+    assert!(
+        dialog::layout(dialog, Rect::new(2, 1, 20, 6))
+            .body
+            .is_empty(),
+        "fixture must have zero readable confirmation body"
+    );
+    let mut outcome = ClientShellInput::default();
+    state.activate_view_action_dialog(None, &mut outcome);
+    assert!(
+        outcome.actions.is_empty(),
+        "a nonempty popup border is not usable confirmation"
+    );
+}
+#[test]
+fn resize_before_confirmation_repaint_keeps_activation_closed() {
+    let mut state = fixture(true, false);
+    open(&mut state);
+    choose(&mut state, 0);
+    let (id, intent, _) = pending(&state);
+    state.handle_endpoint_result(
+        "boot-1",
+        &id,
+        Ok(prepared(intent.selection.operation_id, true)),
+    );
+    paint(&mut state);
+    let surface = state.pane_surface.clone();
+    let views = state.pane_surface_views.clone();
+    state.invalidate_pane_surface();
+    // The ordinary resize path clears hit maps; a fresh server pair may arrive
+    // before its next local composition. Neither step is a confirmation paint.
+    state.pane_surface = surface;
+    state.pane_surface_views = views;
+    let mut outcome = ClientShellInput::default();
+    state.activate_view_action_dialog(None, &mut outcome);
+    assert!(outcome.actions.is_empty());
+    paint(&mut state);
+    state.activate_view_action_dialog(None, &mut outcome);
+    assert!(outcome
+        .actions
+        .iter()
+        .any(|action| is_submit(action, false)));
+}
+#[test]
+fn unsupported_method_notice_survives_following_input() {
+    let mut state = fixture(false, true);
+    state.set_endpoint_methods(Some(vec!["host.document.action".into()]));
+    open(&mut state);
+    state.handle_raw_events(vec![RawInputEvent::Key(
+        crate::input::TerminalKey::new(crossterm::event::KeyCode::Char('x'), KeyModifiers::NONE)
+            .with_kind(crossterm::event::KeyEventKind::Release),
+    )]);
+    assert!(
+        state
+            .visible_endpoint_notice
+            .as_ref()
+            .is_some_and(
+                |notice| notice.key.kind == ClientEndpointNoticeKind::Unsupported
+                    && notice.body.contains("CLI")
+            ),
+        "unsupported guidance must not be cleared by typing/release"
+    );
+    assert!(state.pending_requests.is_empty());
 }
 #[test]
 fn choosing_is_explicit_and_never_applies_the_default() {
@@ -343,6 +608,45 @@ fn provider_error_and_timeout_remain_inspectable_without_retry() {
         assert!(message.contains(&intent.selection.operation_id));
         assert!(message.contains("retry"));
     }
+}
+#[test]
+fn non_session_rows_remain_readable_without_action_buttons() {
+    let mut state = fixture(false, true);
+    state.endpoints[0]
+        .host_documents
+        .as_mut()
+        .unwrap()
+        .documents[0]
+        .document
+        .target = crate::extension_contract::HostTarget::Tab {
+        tab_id: "tab_1".into(),
+    };
+    validate_documents(&state);
+    let documents = state.endpoints[0].current_host_documents().unwrap();
+    let pane = &state.hits.panes[0];
+    let scope = vec!["pane_1".into()];
+    let projection = ViewPaneProjection {
+        extension: "example.docs",
+        view: "work",
+        scope: &scope,
+    };
+    let mut buffer = Buffer::empty(pane.rect);
+    render_view_pane(
+        &mut buffer,
+        &PanelIndex::with_rows(documents, true),
+        documents,
+        state.snapshot.as_ref().unwrap(),
+        pane,
+        &projection,
+        &state.config.palette,
+    );
+    let text = buffer
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(text.contains("Reported work"));
+    assert!(!text.contains("[Accept]"));
 }
 #[test]
 fn action_buttons_change_only_the_expanded_body_not_the_frame() {

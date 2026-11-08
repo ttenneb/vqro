@@ -1173,7 +1173,7 @@ impl ClientShellState {
                     &self.config.palette,
                 )?;
                 if matches!(overlay, ClientShellOverlay::ViewAction(_)) {
-                    self.hits.view_action_popup = rendered.area;
+                    self.hits.view_action_popup = rendered.view_action_popup;
                 }
                 occlusion.cover(rendered.area);
                 self.hits.overlay_primary = rendered.primary;

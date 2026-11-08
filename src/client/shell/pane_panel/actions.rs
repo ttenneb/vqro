@@ -28,6 +28,13 @@ pub(in crate::client::shell) struct Dialog {
     pub highlighted: Option<usize>,
 }
 
+pub(super) fn supports_document(document: &crate::extension_contract::HostDocumentV1) -> bool {
+    matches!(
+        document.target,
+        crate::extension_contract::HostTarget::Session
+    )
+}
+
 /// Borrow just presentation scalars in the pane-scaled drawing loop. Full,
 /// bounded parsing and opaque-subject cloning happen only on explicit input.
 pub(super) fn action_label(item: &HostDocumentItem) -> Option<&str> {
@@ -138,6 +145,9 @@ impl ClientShellState {
                     continue;
                 }
                 let document = &documents.documents[section.document_index].document;
+                if !supports_document(document) {
+                    continue;
+                }
                 let Some(value) = row
                     .item
                     .view
@@ -196,9 +206,7 @@ impl ClientShellState {
         };
         // This is platform policy, not an OS API or a client identity claim.
         if cfg!(windows) {
-            self.set_endpoint_error(
-                "View actions are read-only on Windows; use the publishing extension's CLI instead.",
-            );
+            self.push_endpoint_notice(ClientEndpointNoticeKind::Unsupported,"view-action-platform","View actions are read-only","View actions are read-only on Windows; use the publishing extension's CLI instead.");
             outcome.repaint = true;
             return true;
         }
@@ -224,7 +232,7 @@ impl ClientShellState {
                 cancel: false,
             },
         )) {
-            self.set_endpoint_error("This server has no negotiated view actions; use the publishing extension's CLI instead.");
+            self.push_endpoint_notice(ClientEndpointNoticeKind::Unsupported,"view-action-methods","View action unavailable","This server has no negotiated view actions; use the publishing extension's CLI instead.");
             outcome.repaint = true;
             return true;
         }
@@ -255,7 +263,8 @@ impl ClientShellState {
             .and_then(ClientShellEndpoint::current_host_documents)
             .is_some_and(|documents| {
                 documents.documents.iter().any(|entry| {
-                    entry.document.namespace == intent.selection.namespace
+                    supports_document(&entry.document)
+                        && entry.document.namespace == intent.selection.namespace
                         && entry.document.generation == intent.selection.generation
                         && entry.document.revision == intent.selection.revision
                 })
@@ -485,6 +494,12 @@ impl ClientShellState {
         let Some(ClientShellOverlay::ViewAction(dialog)) = &mut self.overlay else {
             return true;
         };
+        if matches!(
+            key.code,
+            KeyCode::PageDown | KeyCode::PageUp | KeyCode::Down | KeyCode::Up
+        ) {
+            self.hits.view_action_popup = Rect::default();
+        }
         match key.code {
             KeyCode::PageDown => dialog.scroll = dialog.scroll.saturating_add(8),
             KeyCode::PageUp => dialog.scroll = dialog.scroll.saturating_sub(8),
@@ -551,11 +566,13 @@ impl ClientShellState {
         let layout = dialog::layout(dialog, self.hits.view_action_popup);
         match mouse.kind {
             MouseEventKind::ScrollDown => {
+                self.hits.view_action_popup = Rect::default();
                 if let Some(ClientShellOverlay::ViewAction(dialog)) = &mut self.overlay {
                     dialog.scroll = dialog.scroll.saturating_add(3).min(layout.max_scroll);
                 }
             }
             MouseEventKind::ScrollUp => {
+                self.hits.view_action_popup = Rect::default();
                 if let Some(ClientShellOverlay::ViewAction(dialog)) = &mut self.overlay {
                     dialog.scroll = dialog.scroll.saturating_sub(3);
                 }

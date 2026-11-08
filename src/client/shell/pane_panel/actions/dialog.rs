@@ -186,7 +186,14 @@ pub(in crate::client::shell) fn render_dialog(
     )?;
     panel(buffer, area, palette.accent, palette.panel_bg)?;
     let layout = layout(dialog, area);
-    let title = if matches!(dialog.phase, Phase::Confirm(_)) {
+    // A painted border alone cannot authorize a choice/confirmation. Keep
+    // readable content and distinct standard footer controls available.
+    let usable = layout.body.width >= 44
+        && layout.body.height >= 3
+        && layout.primary.intersection(layout.cancel).is_empty();
+    let title = if !usable {
+        "Enlarge terminal to choose or confirm"
+    } else if matches!(dialog.phase, Phase::Confirm(_)) {
         "Confirm irreversible answer"
     } else {
         "View action"
@@ -230,7 +237,7 @@ pub(in crate::client::shell) fn render_dialog(
                 }),
         );
     }
-    if !layout.primary.is_empty() {
+    if usable && !layout.primary.is_empty() {
         button(
             buffer,
             layout.primary,
@@ -266,7 +273,12 @@ pub(in crate::client::shell) fn render_dialog(
     );
     Some(OverlayRender {
         area,
-        primary: layout.primary,
+        view_action_popup: if usable { area } else { Rect::default() },
+        primary: if usable {
+            layout.primary
+        } else {
+            Rect::default()
+        },
         cancel: layout.cancel,
         ..Default::default()
     })
