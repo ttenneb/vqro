@@ -19,7 +19,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use interprocess::local_socket::traits::Listener as _;
 #[cfg(windows)]
@@ -344,6 +344,7 @@ impl HeadlessServer {
             server_config_diagnostic_summaries(config_diagnostics);
         #[cfg(not(unix))]
         let _ = api_tx;
+        let client_shell_boot_id = app.runtime_incarnation.clone();
         Ok(Self {
             app,
             #[cfg(unix)]
@@ -362,14 +363,7 @@ impl HeadlessServer {
             foreground_client_id: None,
             tab_geometry_controllers: HashMap::new(),
             popup_owner_tab_id: None,
-            client_shell_boot_id: format!(
-                "{}-{}",
-                std::process::id(),
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos()
-            ),
+            client_shell_boot_id,
             sent_window_title: None,
             api_window_title: None,
             server_keybindings,
@@ -561,11 +555,11 @@ impl HeadlessServer {
                     needs_full_render = true;
                     crate::render_prof::event("full_render_cause.generic_dirty");
                 }
-                let (sidebar_title_changed, outer_title_synced) =
+                let (presentation_title_changed, outer_title_synced) =
                     self.sync_terminal_title_sources(&render_request.terminal_title_sources);
-                if sidebar_title_changed {
+                if presentation_title_changed {
                     needs_full_render = true;
-                    crate::render_prof::event("full_render_cause.terminal_title_sidebar");
+                    crate::render_prof::event("full_render_cause.terminal_title_presentation");
                 }
                 if needs_full_render && !outer_title_synced {
                     self.sync_window_title();
@@ -1549,9 +1543,45 @@ impl HeadlessServer {
         true
     }
 
-    /// Pulls only titles reported dirty by the PTY parser. A focused pane title
-    /// is forwarded as an independent client side effect; only sidebar title
-    /// tokens require a UI render.
+    /// A title-dirty event invalidates only its visible title consumers. This
+    /// remains true if an API read already synchronized the metadata cache; it
+    /// does not make the terminal's hidden body a presentation source.
+    fn collapsed_title_sources_visible(&self, sources: &HashSet<crate::layout::PaneId>) -> bool {
+        let terminals = sources
+            .iter()
+            .filter_map(|pane| {
+                self.app
+                    .find_pane(*pane)
+                    .map(|(_, pane)| &pane.attached_terminal_id)
+            })
+            .collect::<HashSet<_>>();
+        if terminals.is_empty() {
+            return false;
+        }
+        self.clients.iter().any(|(&client_id, client)| {
+            if !client.is_active_shell_client() || client.writer.is_none() {
+                return false;
+            }
+            let Some(target) = self.shell_target_for_client(client_id) else {
+                return false;
+            };
+            let Some(workspace) = self.app.state.workspaces.get(target.workspace_index) else {
+                return false;
+            };
+            let Some(tab) = workspace.tabs.get(target.tab_index) else {
+                return false;
+            };
+            !tab.body_zoomed()
+                && tab.layout.any_visible_collapsed_header_title(|pane| {
+                    workspace
+                        .terminal_id(pane)
+                        .is_some_and(|terminal| terminals.contains(&terminal))
+                })
+        })
+    }
+
+    /// Pull only title-dirty sources; outer titles stay independent side effects,
+    /// while sidebar tokens and visible collapsed headers require presentation.
     fn sync_terminal_title_sources(
         &mut self,
         sources: &HashSet<crate::layout::PaneId>,
@@ -1563,13 +1593,14 @@ impl HeadlessServer {
             .and_then(|ws_idx| self.app.state.workspaces.get(ws_idx))
             .and_then(|workspace| workspace.focused_pane_id())
             .is_some_and(|pane_id| sources.contains(&pane_id));
+        let header_changed = self.collapsed_title_sources_visible(sources);
         let changes = self.app.sync_terminal_titles(sources);
         let outer_title_synced = focused_source && self.app.window_title_uses_terminal_title();
         if outer_title_synced {
             self.sync_window_title();
         }
         (
-            self.app.terminal_title_sidebar_changed(&changes),
+            header_changed || self.app.terminal_title_sidebar_changed(&changes),
             outer_title_synced,
         )
     }
@@ -2050,6 +2081,7 @@ impl HeadlessServer {
                 structure_enabled,
                 host_documents_enabled,
                 host_views_enabled,
+                collapse_enabled,
                 pane_viewport_enabled,
                 pane_view_enabled,
                 terminal_views_enabled,
@@ -2100,6 +2132,7 @@ impl HeadlessServer {
                 connection.shell_structure_enabled = structure_enabled;
                 connection.shell_host_documents_enabled = host_documents_enabled;
                 connection.shell_host_views_enabled = host_views_enabled;
+                connection.shell_collapse_enabled = collapse_enabled;
                 connection.shell_pane_viewport_enabled = pane_viewport_enabled;
                 connection.shell_pane_view_enabled = pane_view_enabled;
                 connection.shell_terminal_views_enabled = terminal_views_enabled;

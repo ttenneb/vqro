@@ -221,6 +221,7 @@ pub(super) fn do_handshake(
                 SESSION_STRUCTURE_KIND.into(),
                 HOST_DOCUMENTS_KIND.into(),
                 HOST_VIEWS_KIND.into(),
+                crate::protocol::collapse::LAYOUT_COLLAPSE_KIND.into(),
                 PANE_VIEWPORT_KIND.into(),
                 PANE_VIEW_REQUEST_KIND.into(),
                 PANE_VIEW_CANCEL_KIND.into(),

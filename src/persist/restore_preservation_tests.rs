@@ -17,6 +17,79 @@ fn nested_snapshot(cwd: &std::path::Path) -> SessionSnapshot {
 }
 
 #[tokio::test]
+async fn cold_v10_preserves_collapsed_root_hidden_children_focus_and_terminal_identity() {
+    let cwd = std::env::current_dir().unwrap();
+    let mut snapshot = nested_snapshot(&cwd);
+    let tab = &mut snapshot.workspaces[0].tabs[0];
+    let LayoutSnapshot::Stack { children, .. } = &mut tab.layout else {
+        panic!("stack")
+    };
+    children[0] = LayoutSnapshot::Collapsed {
+        node: Box::new(children[0].clone()),
+    };
+    tab.layout = LayoutSnapshot::Collapsed {
+        node: Box::new(tab.layout.clone()),
+    };
+    let saved = &snapshot.workspaces[0];
+    let saved_terminals: HashSet<_> = saved.tabs[0]
+        .panes
+        .values()
+        .map(|pane| super::super::snapshot::terminal_id_for_pane_snapshot(pane).unwrap())
+        .collect();
+    let (events, _receive) = mpsc::channel(32);
+    let (mut workspaces, terminals, runtimes) = restore(
+        &snapshot,
+        None,
+        40,
+        100,
+        4096,
+        "__vqro_missing_shell__",
+        crate::config::ShellModeConfig::NonLogin,
+        false,
+        events,
+        Arc::new(Notify::new()),
+        Arc::new(RenderSignal::new()),
+    )
+    .unwrap();
+    assert!(runtimes.is_empty());
+    let workspace = &mut workspaces[0];
+    workspace.assert_invariants_for_test();
+    assert_eq!(workspace.tabs[0].layout.pane_count(), 3);
+    assert_eq!(
+        workspace.public_pane_number(workspace.tabs[0].root_pane),
+        Some(7)
+    );
+    let actual_terminals: HashSet<_> = workspace.tabs[0]
+        .panes
+        .values()
+        .map(|pane| pane.attached_terminal_id.clone())
+        .collect();
+    assert_eq!(actual_terminals, saved_terminals);
+    assert_eq!(terminals.len(), 3);
+    let geometry = workspace.tabs[0]
+        .layout
+        .geometry(ratatui::layout::Rect::new(0, 0, 100, 40));
+    assert!(geometry.panes.is_empty());
+    assert_eq!(geometry.collapsed.len(), 1);
+    let focus = workspace.tabs[0].layout.focused_leaf();
+    assert!(matches!(focus, LayoutLeaf::Stack(_)));
+    assert!(workspace.tabs[0].layout.set_collapsed(&[], false));
+    assert_eq!(workspace.tabs[0].layout.focused_leaf(), focus);
+    let outer = TerminalContainerId::parse(7_600_001).unwrap();
+    assert!(workspace.tabs[0].layout.select_stack_child(outer, 0));
+    assert!(!workspace.tabs[0].layout.any_visible_pane(|_| true));
+    assert_eq!(
+        workspace.tabs[0]
+            .layout
+            .geometry(ratatui::layout::Rect::new(0, 0, 100, 40))
+            .collapsed
+            .len(),
+        1
+    );
+    workspace.assert_invariants_for_test();
+}
+
+#[tokio::test]
 async fn cold_v9_preserves_sub_ten_percent_actual_view_ratios_in_both_orders() {
     for ratio in [0.02, 0.98] {
         let cwd = std::env::current_dir().unwrap();

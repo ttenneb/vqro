@@ -382,6 +382,7 @@ fn load_live_config_from_str(content: &str) -> Result<LoadedConfig, Vec<String>>
     );
 
     diagnostics.extend(config.theme.diagnostics());
+    diagnostics.extend(config.ui.resolved_agent_start_views().err());
 
     Ok(LoadedConfig {
         config,
@@ -895,6 +896,20 @@ mod tests {
 
         std::env::remove_var(CONFIG_PATH_ENV_VAR);
         let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn live_invalid_agent_view_group_reports_error_and_resolves_to_no_partial_group() {
+        let loaded = load_live_config_from_str(
+            "[ui]\nagent_start_views=['example.good:summary','bad namespace:messages']",
+        )
+        .unwrap();
+        assert!(loaded.config.ui.resolved_agent_start_views().is_err());
+        assert!(loaded
+            .diagnostics
+            .iter()
+            .any(|error| error.contains("ui.agent_start_views[1]") && error.contains("disabled")));
+        assert!(config_diagnostic_summary(&loaded.diagnostics).is_some());
     }
 
     #[test]

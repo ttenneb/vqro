@@ -104,6 +104,7 @@ mod ui;
 mod update;
 mod view_action;
 mod view_document;
+mod view_headers;
 mod view_sizing;
 mod workspace;
 mod worktree;

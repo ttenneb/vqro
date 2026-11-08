@@ -841,12 +841,12 @@ pub struct AppState {
     pub pane_scrollbars: bool,
     pub pane_gaps: bool,
     pub show_agent_labels_on_pane_borders: bool,
-    /// Server-side agent-start rule: add a view pane beside a pane when an agent
-    /// starts there, once per terminal. `agent_start_view` is the
-    /// `<extension>:<view>` identity to add; unset disables the rule.
-    pub agent_start_view: Option<(String, String)>,
+    /// Ordered agent-start view identities, composed in an ordinary terminal-free
+    /// box once per terminal. Empty disables this rule; no terminal pin is stored.
+    pub agent_start_views: Vec<(String, String)>,
     /// Transient default-view sizing only. Restore deliberately does not rearm.
     pub(crate) view_sizing: crate::view_sizing::ViewSizing,
+    pub(crate) view_headers: crate::view_headers::ViewHeaders,
     pub tab_bar_right: Vec<TabBarStatusSegment>,
     pub tab_bar_right_separator: String,
     /// Expose the focused pane's cursor anchor to the outer terminal even when
@@ -1022,11 +1022,8 @@ impl AppState {
         else {
             return false;
         };
-        if tab.zoomed {
-            tab.layout.focused() == pane_id
-        } else {
-            tab.layout.pane_ids().contains(&pane_id)
-        }
+        tab.layout.pane_is_expanded(pane_id)
+            && (!tab.body_zoomed() || tab.layout.focused() == pane_id)
     }
 
     pub fn is_active_pane(
@@ -1118,8 +1115,9 @@ impl AppState {
             pane_scrollbars: true,
             pane_gaps: false,
             show_agent_labels_on_pane_borders: false,
-            agent_start_view: None,
+            agent_start_views: Vec::new(),
             view_sizing: Default::default(),
+            view_headers: Default::default(),
             tab_bar_right: Vec::new(),
             tab_bar_right_separator: " ".into(),
             reveal_hidden_cursor_for_cjk_ime: false,

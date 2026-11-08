@@ -60,6 +60,7 @@ impl App {
     /// Topology invalidation, not a render/provider polling path. Keep valid
     /// hidden scopes, but never retain a history of moved/closed ownership.
     pub(crate) fn prune_auto_view_sizing(&mut self) {
+        self.sync_view_headers();
         let live = self
             .state
             .workspaces
@@ -71,6 +72,7 @@ impl App {
             .view_sizing
             .active
             .retain(|pane, _| live.contains(pane));
+        self.prune_resume_fences();
         let mut keys = std::collections::HashSet::new();
         let mut tabs = std::collections::HashSet::new();
         let mut public_tabs = std::collections::HashSet::new();
@@ -215,12 +217,12 @@ impl App {
         label.width().min(4092) as u16
     }
 
-    fn cached_auto_measure(
+    pub(super) fn cached_auto_measure(
         &self,
         workspace: usize,
         scope: &str,
         entry: &crate::view_sizing::AutoView,
-    ) -> (ViewMeasure, Option<(u64, String, u64)>, u16) {
+    ) -> (ViewMeasure, Option<(u64, String, u64)>, u16, bool) {
         let width = self.auto_scope_width(workspace, entry.terminal);
         let public = self
             .public_pane_id(workspace, entry.terminal)
@@ -244,22 +246,23 @@ impl App {
             .or_else(|| session.filter(|document| document.measurements.contains_key(&key)))
             .or(session)
             .or(specific);
-        let measure = document
+        let accepted_measure = document
             .and_then(|document| document.measurements.get(&key))
-            .copied()
-            .unwrap_or(DocumentMeasure {
-                body: ViewMeasure::default(),
-                header: crate::view_sizing::measured_header_width(
-                    entry.view.width() as u32,
-                    0,
-                    crate::view_sizing::READ_ONLY_SUMMARY.width() as u32,
-                )
-                .min(4092) as u16,
-            });
+            .copied();
+        let measure = accepted_measure.unwrap_or(DocumentMeasure {
+            body: ViewMeasure::default(),
+            header: crate::view_sizing::measured_header_width(
+                entry.view.width() as u32,
+                0,
+                crate::view_sizing::READ_ONLY_SUMMARY.width() as u32,
+            )
+            .min(4092) as u16,
+        });
         (
             measure.with_scope(width),
             document.map(|document| document.incarnation.clone()),
             width,
+            accepted_measure.is_some(),
         )
     }
 
@@ -271,6 +274,13 @@ impl App {
         revision: u64,
     ) {
         let source_key = (namespace.to_owned(), scope_id.to_owned());
+        let event = crate::view_sizing::ResumeEvent {
+            namespace,
+            scope: scope_id,
+            stamp: (generation, revision),
+            issued: self.host_document_request_watermarks.get(&source_key)
+                == Some(&(generation, revision)),
+        };
         let source = self
             .host_document_caches
             .get(&source_key)
@@ -356,7 +366,7 @@ impl App {
                 }
             }
             for (wi, ti) in targets {
-                self.refresh_cached_auto_target(wi, ti);
+                self.refresh_cached_auto_target_for_event(wi, ti, Some(event), false);
             }
             return;
         }
@@ -401,7 +411,7 @@ impl App {
                 measurements: Default::default(),
             });
         self.state.view_sizing.documents.insert(key, cached);
-        self.refresh_cached_auto_target(wi, ti);
+        self.refresh_cached_auto_target_for_event(wi, ti, Some(event), false);
     }
 
     /// Metadata notifications only invalidate a target if the actual host label
@@ -419,18 +429,29 @@ impl App {
             .get(workspace)
             .and_then(|ws| ws.find_tab_index_for_pane(pane))
         {
-            self.refresh_cached_auto_target(workspace, ti);
+            self.refresh_cached_auto_target_for_event(workspace, ti, None, true);
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn refresh_cached_auto_target(&mut self, workspace: usize, tab_index: usize) {
+        self.refresh_cached_auto_target_for_event(workspace, tab_index, None, false);
+    }
+
+    fn refresh_cached_auto_target_for_event(
+        &mut self,
+        workspace: usize,
+        tab_index: usize,
+        event: Option<crate::view_sizing::ResumeEvent<'_>>,
+        local_metric: bool,
+    ) {
         let Some(scope) = self.public_tab_id(workspace, tab_index) else {
             return;
         };
         let tab = &self.state.workspaces[workspace].tabs[tab_index];
         let views = tab.layout.view_panes();
         let mut visible = std::collections::HashSet::new();
-        if !tab.zoomed {
+        if !tab.body_zoomed() {
             tab.layout.any_visible_pane(|pane| {
                 visible.insert(pane);
                 false
@@ -445,12 +466,39 @@ impl App {
                 continue;
             }
             let terminal = entry.terminal;
-            let (measure, incarnation, width) = self.cached_auto_measure(workspace, &scope, entry);
+            let relevant =
+                local_metric || event.is_some_and(|event| event.namespace == entry.extension);
+            let (measure, incarnation, width, available) =
+                self.cached_auto_measure(workspace, &scope, entry);
+            let source = incarnation
+                .as_ref()
+                .map(|(generation, scope, _)| (*generation, scope.clone()));
+            let previous_source = entry
+                .incarnation
+                .as_ref()
+                .map(|(generation, scope, _)| (*generation, scope.clone()));
+            let changed = entry.measure != measure
+                || previous_source != source
+                || entry.available != available;
+            if relevant && changed && self.state.view_sizing.fenced(pane) {
+                let fact = crate::view_sizing::ResumeFact {
+                    measure,
+                    source,
+                    available,
+                };
+                let released =
+                    self.state
+                        .view_sizing
+                        .observe_resume_fact(pane, &fact, event, local_metric);
+                dirty |= released && visible.contains(&pane);
+            }
+            let fenced = self.state.view_sizing.fenced(pane);
             if let Some(entry) = self.state.view_sizing.active.get_mut(&pane) {
-                entry.dirty |= entry.measure != measure;
+                entry.dirty |= changed;
                 entry.measure = measure;
                 entry.incarnation = incarnation;
-                dirty |= entry.dirty && visible.contains(&pane);
+                entry.available = available;
+                dirty |= entry.dirty && visible.contains(&pane) && !fenced;
             }
             self.state.view_sizing.label_widths.insert(terminal, width);
         }
@@ -480,6 +528,7 @@ impl App {
         if self.auto_view_geometry_blocked() {
             return false;
         }
+        self.prune_resume_fences();
         let Some(scope_id) = self.public_tab_id(target.workspace_index, target.tab_index) else {
             return false;
         };
@@ -491,7 +540,7 @@ impl App {
         else {
             return false;
         };
-        if tab.zoomed {
+        if tab.body_zoomed() {
             return false;
         }
         let tab_id = tab.id.clone();
@@ -506,6 +555,9 @@ impl App {
                 }
             }
         }
+        self.state
+            .view_sizing
+            .resume_viewport(&tab_id, area.width, area.height, cells);
         self.state.view_sizing.visible_tabs.insert(scope_id.clone());
         self.state
             .view_sizing
@@ -518,7 +570,7 @@ impl App {
             };
             entry.terminal = terminal;
             entry.scope_valid = true;
-            let (measure, incarnation, width) = self.cached_auto_measure(
+            let (measure, incarnation, width, available) = self.cached_auto_measure(
                 target.workspace_index,
                 &scope_id,
                 &self.state.view_sizing.active[&pane],
@@ -526,10 +578,13 @@ impl App {
             if let Some(entry) = self.state.view_sizing.active.get_mut(&pane) {
                 entry.measure = measure;
                 entry.incarnation = incarnation;
+                entry.available = available;
                 entry.dirty = false;
             }
             self.state.view_sizing.label_widths.insert(terminal, width);
-            measures.insert(pane, measure);
+            if !self.state.view_sizing.fenced(pane) {
+                measures.insert(pane, measure);
+            }
         }
         let changed = self.state.workspaces[target.workspace_index].tabs[target.tab_index]
             .layout

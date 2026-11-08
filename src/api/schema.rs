@@ -222,6 +222,16 @@ pub enum Method {
     LayoutExport(LayoutExportParams),
     #[serde(rename = "layout.tree.export")]
     LayoutTreeExport(LayoutExportParams),
+    #[serde(rename = "layout.collapse.describe")]
+    LayoutCollapseDescribe(LayoutExportParams),
+    #[serde(rename = "layout.collapse")]
+    LayoutCollapse(LayoutCollapseTarget),
+    #[serde(rename = "layout.expand")]
+    LayoutExpand(LayoutCollapseTarget),
+    #[serde(rename = "pane.collapse")]
+    PaneCollapse(PaneTarget),
+    #[serde(rename = "pane.expand")]
+    PaneExpand(PaneTarget),
     #[serde(rename = "layout.apply")]
     LayoutApply(LayoutApplyParams),
     #[serde(rename = "layout.set_split_ratio")]

@@ -270,7 +270,7 @@ pub(super) fn resize_tab_panes_except(
     let multi_pane = tab.layout.pane_count() > 1;
     let selected_stack_panes = tab.layout.selected_stack_panes();
 
-    if tab.zoomed {
+    if tab.body_zoomed() {
         let focused_id = tab.layout.focused();
         if let Some((terminal_id, rt)) =
             runtime_for_tab_pane(app, terminal_runtimes, workspace_index, tab, focused_id)
@@ -353,7 +353,7 @@ pub(super) fn compute_pane_infos_for_tab(
     let multi_pane = tab.layout.pane_count() > 1;
     let selected_stack_panes = tab.layout.selected_stack_panes();
 
-    if tab.zoomed {
+    if tab.body_zoomed() {
         let focused_id = tab.layout.focused();
         let borders = if tab.layout.view_at(focused_id).is_some()
             || (app.pane_borders.shows_borders(multi_pane) && app.pane_outer_borders)

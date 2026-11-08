@@ -2381,6 +2381,9 @@ impl ClientShellState {
         if self.scroll_in_progress_selection(mouse, outcome) {
             return;
         }
+        if self.handle_collapse_header_mouse(mouse, outcome) {
+            return;
+        }
 
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Right) => {
@@ -3033,6 +3036,15 @@ impl ClientShellState {
         let Some(kind) = crate::protocol::ClientMouseKind::from_crossterm(mouse.kind) else {
             return;
         };
+        let target = if hit.popup {
+            ClientInputTarget::Popup(hit.pane_id.clone())
+        } else {
+            ClientInputTarget::Pane(hit.pane_id.clone())
+        };
+        if !matches!(mouse.kind, MouseEventKind::Up(_)) && !self.collapse_allows_pane_input(&target)
+        {
+            return;
+        }
         let position = self.pane_mouse_position(hit, mouse);
         let geometry = matches!(position, ClientMousePosition::Pixels { .. }).then_some(
             crate::protocol::ClientMouseGeometry {
@@ -3042,11 +3054,6 @@ impl ClientShellState {
                 height_px: hit.pixel_height,
             },
         );
-        let target = if hit.popup {
-            ClientInputTarget::Popup(hit.pane_id.clone())
-        } else {
-            ClientInputTarget::Pane(hit.pane_id.clone())
-        };
         push_target_event(
             target,
             ClientPaneInputEvent::Mouse {

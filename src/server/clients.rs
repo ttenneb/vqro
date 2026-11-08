@@ -197,6 +197,8 @@ pub(crate) struct ClientConnection {
     pub(crate) shell_host_documents_enabled: bool,
     /// The client advertises that it can parse view documents.
     pub(crate) shell_host_views_enabled: bool,
+    pub(crate) shell_collapse_enabled: bool,
+    pub(crate) shell_collapse_metadata: Option<crate::protocol::collapse::CollapseBodyV1>,
     /// Whether this client may reserve terminal geometry for pane contributions.
     pub(crate) shell_pane_viewport_enabled: bool,
     pub(crate) shell_pane_view_enabled: bool,
@@ -293,6 +295,8 @@ impl ClientConnection {
             shell_structure_enabled: false,
             shell_host_documents_enabled: false,
             shell_host_views_enabled: false,
+            shell_collapse_enabled: false,
+            shell_collapse_metadata: None,
             shell_pane_viewport_enabled: false,
             shell_pane_view_enabled: false,
             shell_terminal_views_enabled: false,

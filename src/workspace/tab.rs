@@ -303,6 +303,11 @@ impl Tab {
 
     #[cfg(test)]
     pub(super) fn assert_collection_invariants_for_test(&self) {
+        assert_eq!(
+            self.layout.tree_fingerprint(),
+            self.layout.authoritative_fingerprint(),
+            "cached collapse target token must match the authoritative tree"
+        );
         assert!(
             self.layout.typed_root().valid_structure(),
             "canonical tree ownership and selection must be valid"
@@ -340,6 +345,12 @@ impl Tab {
 
     pub(crate) fn focus_layout_leaf(&mut self, leaf: LayoutLeaf) -> bool {
         self.layout.focus_leaf(leaf)
+    }
+
+    /// Collapse wins over any retained zoom flag, including focus changes and
+    /// restored state that did not pass through the zoom command mutation.
+    pub(crate) fn body_zoomed(&self) -> bool {
+        self.zoomed && self.layout.pane_is_expanded(self.layout.focused())
     }
 
     pub(crate) fn focus_pane(&mut self, pane_id: PaneId) {

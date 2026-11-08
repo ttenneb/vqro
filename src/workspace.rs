@@ -778,6 +778,31 @@ impl Workspace {
         )
     }
 
+    /// Admit and commit the complete view group before assigning public numbers.
+    /// No terminal state/runtime is created for any member.
+    pub(crate) fn split_pane_with_view_box(
+        &mut self,
+        target: PaneId,
+        views: &[(String, String)],
+        direction: Direction,
+        ratio: f32,
+    ) -> Option<(usize, Vec<PaneId>)> {
+        let tab = self.find_tab_index_for_pane(target)?;
+        crate::admission::workspace_panes_additional(
+            self.structural_pane_count(),
+            self.tabs[tab].layout.pane_count(),
+            views.len(),
+        )
+        .ok()?;
+        let panes = self.tabs[tab]
+            .layout
+            .split_pane_with_view_box(target, views, direction, ratio)?;
+        for pane in &panes {
+            self.register_new_pane_with_number(*pane, self.next_public_pane_number);
+        }
+        Some((tab, panes))
+    }
+
     /// Add a view pane beside `target`. Neutral: the caller names the extension
     /// and view; core records the identity in the canonical tree only and gives
     /// the pane a public number like any other pane. No terminal or runtime is

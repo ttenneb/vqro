@@ -39,6 +39,7 @@ implementation mandate only when accepted.
 | 2026-10-04 | **Build stages approved** as in [Build stages](#build-stages). |
 | 2026-10-04 | **Views are kept as a pane content kind**, alongside terminals, for the reasons in [Why views](#why-views). Terminal programs remain the escape hatch when an extension needs full control. |
 | 2026-10-04 | **View scope rule**: a view covers every terminal inside its parent container. Placement is the only configuration. The view header always shows its scope ("Tasks · agent1", "Tasks · 3 terminals"). Vqro supplies the covered terminals; the extension decides what they mean. An explicit "pin" override may come later; scoping by the nearest named Collection was rejected. |
+| 2026-11-05 | **View-only group scope**: terminal-free containers inherit the nearest enclosing container with nonempty full terminal membership. Hidden stack members count; existing nonempty boundaries, including multiple-terminal scopes, are unchanged. A view-only root has empty scope. Placement changes rederive scope without stored pins or new box IDs. Frame qualification and sizing use the same rule. This permits an ordinary terminal-free Tasks/Messages box inside an agent's frame. |
 
 ## Tree model
 
@@ -56,7 +57,7 @@ pane      = terminal(terminal id) | view(extension view)
 | Resize | The program is told its new size (PTY resize) | Vqro redraws |
 | Close | Ends the process | Drops the view |
 | Restart or reattach | The process keeps running and is reattached | Vqro fetches a fresh view |
-| Scope | None | The terminals in its parent container |
+| Scope | None | Full terminal membership of the nearest nonempty enclosing container; terminal-free groups inherit |
 
 ### Why views
 

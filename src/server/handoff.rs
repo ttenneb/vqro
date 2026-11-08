@@ -331,6 +331,7 @@ fn validate_handoff_version_numbers(handoff_version: u32, snapshot_version: u32)
         HANDOFF_VERSION => {
             snapshot_version == crate::persist::LEGACY_SNAPSHOT_WRITER_VERSION
                 || snapshot_version == 7
+                || snapshot_version == 8
                 || snapshot_version == crate::persist::PREDECESSOR_SNAPSHOT_VERSION
                 || snapshot_version == crate::persist::SNAPSHOT_VERSION
         }
@@ -1233,6 +1234,52 @@ mod tests {
             let before = serde_json::to_vec(&manifest.snapshot).unwrap();
             assert!(validate_and_normalize_manifest(&mut manifest).is_err());
             assert_eq!(serde_json::to_vec(&manifest.snapshot).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn live_handoff_accepts_v8_v9_and_v10_collapsed_root_without_identity_repair() {
+        for version in [8, 9, 10] {
+            let mut snapshot = one_pane_snapshot();
+            snapshot.version = version;
+            if version == 10 {
+                let tab = &mut snapshot.workspaces[0].tabs[0];
+                tab.layout = crate::persist::LayoutSnapshot::Collapsed {
+                    node: Box::new(tab.layout.clone()),
+                };
+            }
+            let terminal_id = crate::persist::terminal_id_for_pane_snapshot(
+                &snapshot.workspaces[0].tabs[0].panes[&1],
+            )
+            .unwrap()
+            .to_string();
+            let mut manifest = HandoffManifest {
+                host_shutdown_intent: None,
+                version: HANDOFF_VERSION,
+                source_version: "collapse".into(),
+                source_protocol: crate::protocol::PROTOCOL_VERSION,
+                expected_version: None,
+                expected_protocol: None,
+                snapshot,
+                panes: vec![runtime_for(1, Some(terminal_id.clone()))],
+                deferred_panes: Vec::new(),
+                api_window_title: None,
+            };
+            manifest = serde_json::from_slice(&serde_json::to_vec(&manifest).unwrap()).unwrap();
+            validate_and_normalize_manifest(&mut manifest).unwrap();
+            assert_eq!(manifest.snapshot.version, 10);
+            assert_eq!(
+                manifest.panes[0].terminal_id.as_deref(),
+                Some(terminal_id.as_str())
+            );
+            assert_eq!(manifest.panes[0].pane_id, 1);
+            assert_eq!(
+                matches!(
+                    manifest.snapshot.workspaces[0].tabs[0].layout,
+                    crate::persist::LayoutSnapshot::Collapsed { .. }
+                ),
+                version == 10
+            );
         }
     }
 

@@ -9,6 +9,7 @@ pub(crate) mod collections_create;
 pub(crate) use collections::DeferredHostDocumentSnapshot;
 pub(crate) use collections::HostDocumentConfirmationGrant;
 pub(crate) use collections::COLLECTIONS_ACTION_IDEMPOTENCY_PREFIXES;
+mod collapse;
 pub(crate) mod collections_candidate;
 mod delegations;
 #[cfg(test)]
@@ -1533,6 +1534,21 @@ impl App {
             Method::LayoutExport(params) => return self.handle_layout_export(request.id, params),
             Method::LayoutTreeExport(params) => {
                 return self.handle_layout_tree_export(request.id, params)
+            }
+            Method::LayoutCollapseDescribe(params) => {
+                return self.handle_layout_collapse_describe(request.id, params)
+            }
+            Method::LayoutCollapse(target) => {
+                return self.handle_layout_collapse(request.id, target, true)
+            }
+            Method::LayoutExpand(target) => {
+                return self.handle_layout_collapse(request.id, target, false)
+            }
+            Method::PaneCollapse(target) => {
+                return self.handle_pane_collapse(request.id, target, true)
+            }
+            Method::PaneExpand(target) => {
+                return self.handle_pane_collapse(request.id, target, false)
             }
             Method::LayoutApply(params) => return self.handle_layout_apply(request.id, params),
             Method::LayoutSetSplitRatio(params) => {

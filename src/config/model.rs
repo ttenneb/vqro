@@ -451,6 +451,10 @@ pub struct KeysConfig {
     pub split_horizontal: BindingConfig,
     /// Close the focused pane. Default: "prefix+x"
     pub close_pane: BindingConfig,
+    /// Collapse the focused pane, or expand its focused header. Default: "prefix+m".
+    pub collapse_pane: BindingConfig,
+    /// Choose a containing box to collapse. Default: "prefix+shift+m".
+    pub collapse_box: BindingConfig,
     /// Toggle zoom for the focused pane. Default: "prefix+z"
     #[serde(alias = "fullscreen")]
     pub zoom: BindingConfig,
@@ -582,6 +586,10 @@ pub(crate) struct KeysConfigOverlay {
     split_horizontal: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     close_pane: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    collapse_pane: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    collapse_box: Option<BindingConfig>,
     #[serde(alias = "fullscreen", skip_serializing_if = "Option::is_none")]
     zoom: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -677,6 +685,8 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(split_vertical);
         apply_field!(split_horizontal);
         apply_field!(close_pane);
+        apply_field!(collapse_pane);
+        apply_field!(collapse_box);
         apply_field!(zoom);
         apply_field!(resize_mode);
         apply_field!(resize_pane_left);
@@ -781,6 +791,8 @@ impl KeysConfig {
         copy_effective_action_field!(split_vertical, keybinds.split_vertical);
         copy_effective_action_field!(split_horizontal, keybinds.split_horizontal);
         copy_effective_action_field!(close_pane, keybinds.close_pane);
+        copy_effective_action_field!(collapse_pane, keybinds.collapse_pane);
+        copy_effective_action_field!(collapse_box, keybinds.collapse_box);
         copy_effective_action_field!(zoom, keybinds.zoom);
         copy_effective_action_field!(resize_mode, keybinds.resize_mode);
         copy_effective_action_field!(resize_pane_left, keybinds.resize_pane_left);
@@ -930,14 +942,11 @@ pub struct UiConfig {
     pub mobile_width_threshold: u16,
     /// Capture mouse input for Herdr's mouse UI. Default: true.
     pub mouse_capture: bool,
-    /// Open a pane's published views when an agent starts there. Default: true,
-    /// because the owner's rule is that views are hidden by default and appear
-    /// when the user toggles them or when an agent starts. Set false to opt out.
-    /// The view added beside a pane when an agent starts there, as
-    /// `<extension>:<view>` (for example `vqro.tasks:tasks`). Unset means the
-    /// rule adds nothing: core holds no Tasks literal, and the identity is
-    /// passed in until the extension declares its own agent-start view. One
-    /// switch: setting the identity turns the rule on.
+    /// Ordered `<extension>:<view>` identities in the agent-start views box,
+    /// below the terminal. Default: Tasks above Messages. Empty disables it.
+    pub agent_start_views: Vec<String>,
+    /// Earlier singular input overrides `agent_start_views` when explicitly set.
+    /// An empty string disables the rule. Runtime retains only the resolved list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_start_view: Option<String>,
     /// Copy text selected with the mouse. Default: true.
@@ -1165,6 +1174,8 @@ impl Default for KeysConfig {
             split_vertical: BindingConfig::one("prefix+v"),
             split_horizontal: BindingConfig::one("prefix+minus"),
             close_pane: BindingConfig::one("prefix+x"),
+            collapse_pane: BindingConfig::one("prefix+m"),
+            collapse_box: BindingConfig::one("prefix+shift+m"),
             zoom: BindingConfig::one("prefix+z"),
             resize_mode: BindingConfig::one("prefix+r"),
             resize_pane_left: BindingConfig::empty(),
@@ -1197,6 +1208,7 @@ impl Default for UiConfig {
             sidebar_collapsed_mode: SidebarCollapsedModeConfig::Compact,
             mobile_width_threshold: DEFAULT_MOBILE_WIDTH_THRESHOLD,
             mouse_capture: true,
+            agent_start_views: vec!["vqro.tasks:tasks".into(), "vqro.tasks:messages".into()],
             agent_start_view: None,
             copy_on_select: true,
             host_cursor: HostCursorModeConfig::Auto,
@@ -1228,6 +1240,27 @@ impl Default for UiConfig {
 }
 
 impl UiConfig {
+    pub(crate) fn resolved_agent_start_views(&self) -> Result<Vec<(String, String)>, String> {
+        if self.agent_start_view.as_deref() == Some("") {
+            return Ok(Vec::new());
+        }
+        let singular = self.agent_start_view.is_some();
+        let configured = self
+            .agent_start_view
+            .as_ref()
+            .map(std::slice::from_ref)
+            .unwrap_or(&self.agent_start_views);
+        configured.iter().enumerate().map(|(index, value)| {
+            let invalid = || {
+                let field = if singular { "ui.agent_start_view".to_owned() } else { format!("ui.agent_start_views[{index}]") };
+                format!("invalid {field}: expected ASCII <extension>:<view> identity (namespace 1..120 bytes, view 1..64 bytes, alphanumeric/._-); agent-start rule disabled")
+            };
+            let (extension, view) = value.split_once(':').ok_or_else(invalid)?;
+            if !crate::layout::ViewRef::validate_identity(extension, view) { return Err(invalid()); }
+            Ok((extension.to_owned(), view.to_owned()))
+        }).collect()
+    }
+
     pub fn mouse_scroll_lines(&self) -> usize {
         self.mouse_scroll_lines
             .map(NonZeroUsize::get)

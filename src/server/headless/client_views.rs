@@ -316,6 +316,10 @@ impl HeadlessServer {
         matches!(
             method,
             Method::CommandInvoke(_)
+                | Method::LayoutCollapse(_)
+                | Method::LayoutExpand(_)
+                | Method::PaneCollapse(_)
+                | Method::PaneExpand(_)
                 | Method::PaneClose(_)
                 | Method::PaneEditScrollback(_)
                 | Method::PaneSplit(_)
@@ -337,6 +341,10 @@ impl HeadlessServer {
             Method::AgentFocus(_)
                 | Method::CommandInvoke(_)
                 | Method::LayoutSetSplitRatio(_)
+                | Method::LayoutCollapse(_)
+                | Method::LayoutExpand(_)
+                | Method::PaneCollapse(_)
+                | Method::PaneExpand(_)
                 | Method::PaneClose(_)
                 | Method::PaneCopyMotion(_)
                 | Method::PaneCopySearch(_)
@@ -378,6 +386,10 @@ impl HeadlessServer {
             Method::AgentFocus(_)
                 | Method::CommandInvoke(_)
                 | Method::LayoutSetSplitRatio(_)
+                | Method::LayoutCollapse(_)
+                | Method::LayoutExpand(_)
+                | Method::PaneCollapse(_)
+                | Method::PaneExpand(_)
                 | Method::PaneClose(_)
                 | Method::PaneEditScrollback(_)
                 | Method::PaneFocus(_)
@@ -599,11 +611,11 @@ impl HeadlessServer {
         else {
             return false;
         };
-        if tab.zoomed {
-            tab.layout.focused() == pane_id
-        } else {
-            tab.layout.pane_ids().contains(&pane_id)
-        }
+        // Validate the current canonical collapse fact, not a client's retained
+        // surface or complete structural membership. Keep existing uncollapsed
+        // collection-preview targeting independent of stack selection.
+        tab.layout.pane_is_expanded(pane_id)
+            && (!tab.body_zoomed() || tab.layout.focused() == pane_id)
     }
 
     fn finish_shell_tab_geometry_change(&mut self, start_pending_agent_resumes: bool) {

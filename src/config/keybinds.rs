@@ -183,12 +183,12 @@ impl ActionKeybinds {
 
     #[cfg(test)]
     pub fn prefix(label: &str) -> Self {
-        let raw = if label.starts_with("prefix+") {
+        let binding_text = if label.starts_with("prefix+") {
             label.to_string()
         } else {
             format!("prefix+{label}")
         };
-        let trigger = parse_binding_string(&raw)
+        let trigger = parse_binding_string(&binding_text)
             .and_then(|parsed| match parsed {
                 ParsedBinding::Single(binding) => Some(binding),
                 ParsedBinding::Range(_) => None,
@@ -362,6 +362,8 @@ pub struct Keybinds {
     pub split_vertical: ActionKeybinds,
     pub split_horizontal: ActionKeybinds,
     pub close_pane: ActionKeybinds,
+    pub collapse_pane: ActionKeybinds,
+    pub collapse_box: ActionKeybinds,
     pub zoom: ActionKeybinds,
     pub resize_mode: ActionKeybinds,
     pub resize_pane_left: ActionKeybinds,
@@ -530,6 +532,8 @@ impl Config {
             split_vertical: empty_action!(),
             split_horizontal: empty_action!(),
             close_pane: empty_action!(),
+            collapse_pane: empty_action!(),
+            collapse_box: empty_action!(),
             zoom: empty_action!(),
             resize_mode: empty_action!(),
             resize_pane_left: empty_action!(),
@@ -677,6 +681,8 @@ impl Config {
             apply_action!(keybinds.split_vertical, split_vertical, source);
             apply_action!(keybinds.split_horizontal, split_horizontal, source);
             apply_action!(keybinds.close_pane, close_pane, source);
+            apply_action!(keybinds.collapse_pane, collapse_pane, source);
+            apply_action!(keybinds.collapse_box, collapse_box, source);
             apply_action!(keybinds.zoom, zoom, source);
             apply_action!(keybinds.resize_mode, resize_mode, source);
             apply_action!(keybinds.resize_pane_left, resize_pane_left, source);

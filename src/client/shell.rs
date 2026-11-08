@@ -5,6 +5,7 @@ mod agent_sidebar;
 mod aggregate_navigation;
 mod workspace_navigation;
 use workspace_navigation::WorkspaceNavigationTarget;
+mod collapse;
 mod collections;
 mod composition;
 mod config;

@@ -150,6 +150,25 @@ pub struct LayoutExportParams {
     pub pane_id: Option<String>,
 }
 
+pub use crate::layout::{LayoutPathStep, LayoutSplitChild};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LayoutCollapseTarget {
+    pub boot_id: String,
+    pub tab_id: String,
+    pub tree_fingerprint: String,
+    pub path: Vec<LayoutPathStep>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct LayoutCollapseDescription {
+    pub kind: String,
+    pub boot_id: String,
+    pub tree_fingerprint: String,
+    pub layout: LayoutTreeDescription,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct LayoutApplyParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -213,6 +232,8 @@ pub struct LayoutTreeDescription {
 pub enum LayoutTreeNode {
     Pane {
         pane_id: String,
+        #[serde(default, skip_serializing_if = "super::is_false")]
+        collapsed: bool,
     },
     /// A pane whose content is an extension view rather than a terminal. Its
     /// scope is derived from placement and is not part of this export.
@@ -220,17 +241,23 @@ pub enum LayoutTreeNode {
         pane_id: String,
         extension: String,
         view: String,
+        #[serde(default, skip_serializing_if = "super::is_false")]
+        collapsed: bool,
     },
     Stack {
         box_id: String,
         selected: usize,
         children: Vec<LayoutTreeNode>,
+        #[serde(default, skip_serializing_if = "super::is_false")]
+        collapsed: bool,
     },
     Split {
         direction: SplitDirection,
         ratio: f32,
         first: Box<LayoutTreeNode>,
         second: Box<LayoutTreeNode>,
+        #[serde(default, skip_serializing_if = "super::is_false")]
+        collapsed: bool,
     },
     #[serde(other)]
     Unknown,

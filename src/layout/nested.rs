@@ -14,6 +14,7 @@ impl TypedNode {
     /// The pane identity of a pane leaf (terminal or view). Containers are `None`.
     pub(crate) fn pane_leaf(&self) -> Option<PaneId> {
         match self {
+            Self::Collapsed { node } => node.pane_leaf(),
             Self::Leaf(pane) => Some(*pane),
             Self::View { pane, .. } => Some(*pane),
             Self::Stack { .. } | Self::Split { .. } => None,
@@ -23,6 +24,7 @@ impl TypedNode {
     /// The content identity when this node is a view pane.
     pub(crate) fn view_ref(&self) -> Option<ViewRef> {
         match self {
+            Self::Collapsed { node } => node.view_ref(),
             Self::View {
                 pane,
                 extension,
@@ -63,6 +65,7 @@ impl TypedNode {
             return Some(self);
         };
         match self {
+            Self::Collapsed { node } => node.at(path),
             Self::Split { first, second, .. } => match index {
                 0 => first.at(rest),
                 1 => second.at(rest),
@@ -78,6 +81,7 @@ impl TypedNode {
             return Some(self);
         };
         match self {
+            Self::Collapsed { node } => node.at_mut(path),
             Self::Split { first, second, .. } => match index {
                 0 => first.at_mut(rest),
                 1 => second.at_mut(rest),
@@ -90,6 +94,7 @@ impl TypedNode {
 
     pub(crate) fn stack(&self, id: TerminalContainerId) -> Option<&Self> {
         match self {
+            Self::Collapsed { node } => node.stack(id),
             Self::Stack { id: own, .. } if *own == id => Some(self),
             Self::Stack { children, .. } => children.iter().find_map(|node| node.stack(id)),
             Self::Split { first, second, .. } => first.stack(id).or_else(|| second.stack(id)),
@@ -99,6 +104,7 @@ impl TypedNode {
 
     pub(crate) fn stack_mut(&mut self, id: TerminalContainerId) -> Option<&mut Self> {
         match self {
+            Self::Collapsed { node } => node.stack_mut(id),
             Self::Stack { id: own, .. } if *own == id => Some(self),
             Self::Stack { children, .. } => children.iter_mut().find_map(|node| node.stack_mut(id)),
             Self::Split { first, second, .. } => {
@@ -116,6 +122,9 @@ impl TypedNode {
             boxes: &mut HashSet<TerminalContainerId>,
         ) -> bool {
             match node {
+                TypedNode::Collapsed { node } => {
+                    !matches!(**node, TypedNode::Collapsed { .. }) && visit(node, panes, boxes)
+                }
                 TypedNode::Leaf(id) => panes.insert(*id),
                 TypedNode::View { pane, .. } => panes.insert(*pane),
                 TypedNode::Split { first, second, .. } => {
@@ -141,6 +150,7 @@ impl TypedNode {
 
     pub(crate) fn select_pane(&mut self, pane: PaneId) -> bool {
         match self {
+            Self::Collapsed { node } => node.select_pane(pane),
             Self::Leaf(id) => *id == pane,
             Self::View {
                 pane: view_pane, ..
@@ -164,6 +174,7 @@ impl TypedNode {
 
     pub(crate) fn selected_pane(&self) -> Option<PaneId> {
         match self {
+            Self::Collapsed { node } => node.selected_pane(),
             Self::Leaf(id) => Some(*id),
             Self::View { pane, .. } => Some(*pane),
             Self::Split { first, second, .. } => {
@@ -177,6 +188,7 @@ impl TypedNode {
 
     pub(crate) fn contains_pane(&self, pane: PaneId) -> bool {
         match self {
+            Self::Collapsed { node } => node.contains_pane(pane),
             Self::Leaf(id) => *id == pane,
             Self::View {
                 pane: view_pane, ..
@@ -190,6 +202,7 @@ impl TypedNode {
 
     pub(crate) fn pane_count(&self) -> usize {
         match self {
+            Self::Collapsed { node } => node.pane_count(),
             Self::Leaf(_) | Self::View { .. } => 1,
             Self::Split { first, second, .. } => first.pane_count() + second.pane_count(),
             Self::Stack { children, .. } => children.iter().map(Self::pane_count).sum(),
@@ -198,6 +211,7 @@ impl TypedNode {
 
     pub(crate) fn collect_stack_ids(&self, ids: &mut Vec<TerminalContainerId>) {
         match self {
+            Self::Collapsed { node } => node.collect_stack_ids(ids),
             Self::Leaf(_) | Self::View { .. } => {}
             Self::Split { first, second, .. } => {
                 first.collect_stack_ids(ids);
@@ -214,6 +228,7 @@ impl TypedNode {
 
     pub(crate) fn collect_all_panes(&self, panes: &mut Vec<PaneId>) {
         match self {
+            Self::Collapsed { node } => node.collect_all_panes(panes),
             Self::Leaf(id) => panes.push(*id),
             Self::View { pane, .. } => panes.push(*pane),
             Self::Split { first, second, .. } => {
@@ -232,6 +247,7 @@ impl TypedNode {
     /// terminals and are excluded: a view covers terminals, not other views.
     pub(crate) fn collect_terminal_panes(&self, panes: &mut Vec<PaneId>) {
         match self {
+            Self::Collapsed { node } => node.collect_terminal_panes(panes),
             Self::Leaf(id) => panes.push(*id),
             Self::View { .. } => {}
             Self::Split { first, second, .. } => {
@@ -246,44 +262,30 @@ impl TypedNode {
         }
     }
 
-    /// The scope of a view pane: every terminal in the view's nearest parent
-    /// container, in tree order. Placement is the only configuration; a view at
-    /// the tab root covers the terminals of the root subtree. An unknown pane, or
-    /// a view that is the only node, covers nothing.
+    /// Every terminal in the nearest enclosing container with nonempty terminal
+    /// membership, in tree order. View-only containers inherit that scope; hidden
+    /// stack members still count. A standalone view or unknown pane has no scope.
     pub(crate) fn view_scope(&self, view_pane: PaneId) -> Vec<PaneId> {
-        let Some(parent) = self.parent_container_of(view_pane) else {
-            return Vec::new();
-        };
-        let mut panes = Vec::new();
-        parent.collect_terminal_panes(&mut panes);
-        panes
-    }
-
-    /// The nearest container that directly holds `pane` (as a view or a terminal).
-    /// Returns the container node itself, not the child.
-    fn parent_container_of(&self, pane: PaneId) -> Option<&Self> {
-        fn is_direct(node: &TypedNode, pane: PaneId) -> bool {
-            node.pane_leaf() == Some(pane)
-        }
-        match self {
-            Self::Split { first, second, .. } => {
-                if is_direct(first, pane) || is_direct(second, pane) {
-                    return Some(self);
+        fn find(node: &TypedNode, pane: PaneId) -> Option<Vec<PaneId>> {
+            let found = match node {
+                TypedNode::Collapsed { node } => return find(node, pane),
+                TypedNode::View { pane: own, .. } => return (*own == pane).then(Vec::new),
+                TypedNode::Leaf(_) => return None,
+                TypedNode::Split { first, second, .. } => {
+                    find(first, pane).or_else(|| find(second, pane))
                 }
-                first
-                    .parent_container_of(pane)
-                    .or_else(|| second.parent_container_of(pane))
-            }
-            Self::Stack { children, .. } => {
-                if children.iter().any(|child| is_direct(child, pane)) {
-                    return Some(self);
+                TypedNode::Stack { children, .. } => {
+                    children.iter().find_map(|child| find(child, pane))
                 }
-                children
-                    .iter()
-                    .find_map(|child| child.parent_container_of(pane))
-            }
-            Self::Leaf(_) | Self::View { .. } => None,
+            };
+            found.map(|mut scope| {
+                if scope.is_empty() {
+                    node.collect_terminal_panes(&mut scope);
+                }
+                scope
+            })
         }
+        find(self, view_pane).unwrap_or_default()
     }
 }
 
@@ -330,6 +332,7 @@ pub(super) fn reorder_child(
 fn depths(node: &TypedNode) -> HashMap<LayoutLeaf, usize> {
     fn visit(node: &TypedNode, depth: usize, result: &mut HashMap<LayoutLeaf, usize>) {
         match node {
+            TypedNode::Collapsed { node } => visit(node, depth, result),
             TypedNode::Leaf(pane) => {
                 result.insert(LayoutLeaf::Pane(*pane), depth);
             }
@@ -367,6 +370,10 @@ fn take_at(node: TypedNode, path: &[usize]) -> Option<(Option<TypedNode>, TypedN
         return Some((None, node));
     };
     match node {
+        TypedNode::Collapsed { node } => {
+            let (remaining, removed) = take_at(*node, path)?;
+            Some((remaining.map(TypedNode::collapsed), removed))
+        }
         TypedNode::Split {
             direction,
             ratio,
@@ -443,11 +450,66 @@ fn take_at(node: TypedNode, path: &[usize]) -> Option<(Option<TypedNode>, TypedN
 // Mutations are infrequent layout events, O(nodes) on a candidate tree, never PTY/frame work.
 #[allow(dead_code)] // New box operations are consumed by the later nested interaction slice.
 impl TileLayout {
+    /// Atomically add an ordinary terminal-free vertical view group beside the
+    /// same spatial leaf as a normal view split. New depth must fit per identity.
+    pub(crate) fn split_pane_with_view_box(
+        &mut self,
+        target: PaneId,
+        views: &[(String, String)],
+        direction: ratatui::layout::Direction,
+        ratio: f32,
+    ) -> Option<Vec<PaneId>> {
+        if views.is_empty()
+            || views
+                .iter()
+                .any(|(extension, view)| !ViewRef::validate_identity(extension, view))
+            || self.pane_count().checked_add(views.len())? > crate::admission::MAX_TAB_PANES
+        {
+            return None;
+        }
+        let leaf = match self.placement(target)? {
+            super::PanePlacement::Tiled => LayoutLeaf::Pane(target),
+            super::PanePlacement::Stack(id) => LayoutLeaf::Stack(id),
+        };
+        fn vertical(mut children: Vec<TypedNode>) -> Option<TypedNode> {
+            if children.len() <= 1 {
+                return children.pop();
+            }
+            let total = children.len();
+            let second = children.split_off(total.div_ceil(2));
+            Some(TypedNode::Split {
+                direction: ratatui::layout::Direction::Vertical,
+                ratio: children.len() as f32 / total as f32,
+                first: Box::new(vertical(children)?),
+                second: Box::new(vertical(second)?),
+            })
+        }
+        let panes = views.iter().map(|_| PaneId::alloc()).collect::<Vec<_>>();
+        let nodes = views
+            .iter()
+            .zip(&panes)
+            .map(|((extension, view), pane)| TypedNode::view(*pane, extension, view))
+            .collect();
+        let added = vertical(nodes)?;
+        let mut root = self.root.clone();
+        if !super::typed_split_leaf_in_place(
+            &mut root,
+            leaf,
+            direction,
+            added,
+            super::valid_split_ratio(ratio),
+        ) {
+            return None;
+        }
+        self.commit_nested(root, true).then_some(panes)
+    }
+
     pub(crate) fn from_tree(root: TypedNode, focus: LayoutLeaf) -> Option<Self> {
         if !root.valid_structure() {
             return None;
         }
         let mut layout = Self {
+            tree_fingerprint: super::collapse::fingerprint(&root),
             root,
             focus,
             prev_focus: None,
@@ -543,6 +605,7 @@ impl TileLayout {
                 self.focus = LayoutLeaf::Stack(id);
             }
         }
+        self.refresh_tree_fingerprint();
         true
     }
 
@@ -558,7 +621,11 @@ impl TileLayout {
         else {
             return false;
         };
-        reorder_child(children, selected, from, to)
+        let changed = reorder_child(children, selected, from, to);
+        if changed {
+            self.refresh_tree_fingerprint();
+        }
+        changed
     }
 
     fn commit_nested(&mut self, root: TypedNode, check_depth: bool) -> bool {
@@ -581,6 +648,7 @@ impl TileLayout {
             self.focus_pane(previous);
         }
         self.prev_focus = previous_history.filter(|id| self.placement(*id).is_some());
+        self.refresh_tree_fingerprint();
         true
     }
 }

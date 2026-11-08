@@ -198,6 +198,9 @@ pub enum ResponseResult {
     LayoutTreeExport {
         layout: super::panes::LayoutTreeDescription,
     },
+    LayoutCollapseDescription {
+        collapse: super::panes::LayoutCollapseDescription,
+    },
     LayoutApply {
         layout: LayoutDescription,
     },

@@ -243,6 +243,7 @@ pub(crate) fn validate_snapshot_admission(snapshot: &SessionSnapshot) -> Result<
 fn reserve_restored_collection_ids(snapshot: &SessionSnapshot) {
     fn reserve_layout(layout: &LayoutSnapshot) {
         match layout {
+            LayoutSnapshot::Collapsed { node } => reserve_layout(node),
             LayoutSnapshot::Pane(_) => {}
             LayoutSnapshot::View { .. } => {}
             LayoutSnapshot::Stack { id, children, .. } => {
@@ -278,6 +279,7 @@ fn reserve_restored_collection_ids(snapshot: &SessionSnapshot) {
 fn restored_tab_identity_count(tab: &super::snapshot::TabSnapshot) -> usize {
     fn collect_layout_ids(layout: &super::snapshot::LayoutSnapshot, ids: &mut HashSet<u32>) {
         match layout {
+            super::snapshot::LayoutSnapshot::Collapsed { node } => collect_layout_ids(node, ids),
             super::snapshot::LayoutSnapshot::Pane(id) => {
                 ids.insert(*id);
             }
@@ -393,6 +395,7 @@ fn migrated_public_pane_numbers_by_old_raw(
 
 fn collect_layout_snapshot_pane_ids(node: &LayoutSnapshot, ids: &mut Vec<u32>) {
     match node {
+        LayoutSnapshot::Collapsed { node } => collect_layout_snapshot_pane_ids(node, ids),
         LayoutSnapshot::Pane(id) => ids.push(*id),
         LayoutSnapshot::View { pane, .. } => ids.push(*pane),
         LayoutSnapshot::Stack { children, .. } => {
@@ -1224,6 +1227,7 @@ fn restore_typed_node_remapped(snap: &TabSnapshot) -> (TypedNode, HashMap<u32, P
     let mut old_ids: HashSet<u32> = snap.panes.keys().copied().collect();
     fn collect(node: &LayoutSnapshot, ids: &mut HashSet<u32>) {
         match node {
+            LayoutSnapshot::Collapsed { node } => collect(node, ids),
             LayoutSnapshot::Pane(id) => {
                 ids.insert(*id);
             }
@@ -1250,6 +1254,7 @@ fn restore_typed_node_remapped(snap: &TabSnapshot) -> (TypedNode, HashMap<u32, P
         .collect();
     fn remap(node: &LayoutSnapshot, ids: &HashMap<u32, PaneId>) -> TypedNode {
         match node {
+            LayoutSnapshot::Collapsed { node } => remap(node, ids).collapsed(),
             LayoutSnapshot::Pane(old) => TypedNode::Leaf(ids[old]),
             LayoutSnapshot::View {
                 pane,
@@ -1286,6 +1291,7 @@ fn restore_typed_node_remapped(snap: &TabSnapshot) -> (TypedNode, HashMap<u32, P
 
 fn collect_view_panes(node: &TypedNode, out: &mut HashSet<PaneId>) {
     match node {
+        TypedNode::Collapsed { node } => collect_view_panes(node, out),
         TypedNode::View { pane, .. } => {
             out.insert(*pane);
         }
@@ -1311,6 +1317,7 @@ fn recover_typed_layout(
 ) -> Option<RecoveredTabLayout> {
     fn count_collection_leaves(node: &TypedNode, counts: &mut HashMap<TerminalContainerId, usize>) {
         match node {
+            TypedNode::Collapsed { node } => count_collection_leaves(node, counts),
             TypedNode::Leaf(_) => {}
             TypedNode::View { .. } => {}
             TypedNode::Stack { id, children, .. } => {
@@ -1342,6 +1349,9 @@ fn recover_typed_layout(
         placed: &mut HashSet<PaneId>,
     ) -> Option<TypedNode> {
         match node {
+            TypedNode::Collapsed { node } => {
+                prune(*node, surviving, views, valid_ids, placed).map(TypedNode::collapsed)
+            }
             TypedNode::Leaf(id) => {
                 // A dangling terminal reference cannot claim a view-only
                 // survivor merely because their malformed raw IDs coincide.
@@ -1412,6 +1422,7 @@ fn recover_typed_layout(
     // `prune` consumes the tree.
     fn collect_view_identities(node: &TypedNode, views: &mut HashMap<PaneId, (String, String)>) {
         match node {
+            TypedNode::Collapsed { node } => collect_view_identities(node, views),
             TypedNode::View {
                 pane,
                 extension,
@@ -1478,6 +1489,7 @@ fn recover_typed_layout(
     let mut leaves = Vec::new();
     fn collect_leaves(node: &TypedNode, leaves: &mut Vec<LayoutLeaf>) {
         match node {
+            TypedNode::Collapsed { node } => collect_leaves(node, leaves),
             TypedNode::Leaf(pane) => leaves.push(LayoutLeaf::Pane(*pane)),
             TypedNode::View { pane, .. } => leaves.push(LayoutLeaf::Pane(*pane)),
             TypedNode::Stack { id, children, .. } => {
@@ -1564,6 +1576,7 @@ pub(super) fn restore_node_remapped(snap: &LayoutSnapshot) -> (Node, HashMap<u32
 #[cfg(test)]
 fn remap_inner(snap: &LayoutSnapshot, id_map: &mut HashMap<u32, PaneId>) -> Node {
     match snap {
+        LayoutSnapshot::Collapsed { node } => remap_inner(node, id_map),
         LayoutSnapshot::Pane(old_id) => {
             let new_id = PaneId::alloc();
             id_map.insert(*old_id, new_id);

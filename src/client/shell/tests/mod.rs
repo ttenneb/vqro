@@ -250,6 +250,8 @@ mod agents_worktrees_notifications;
 mod attention;
 mod attention_profile;
 mod chrome_context;
+mod collapse;
+mod collapse_controls;
 mod committed_text;
 mod copy;
 mod endpoint_requests;

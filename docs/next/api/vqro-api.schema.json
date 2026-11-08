@@ -3346,6 +3346,33 @@
           ],
           "type": "object"
         },
+        "LayoutCollapseTarget": {
+          "additionalProperties": false,
+          "properties": {
+            "boot_id": {
+              "type": "string"
+            },
+            "path": {
+              "items": {
+                "$ref": "#/schemas/request/$defs/LayoutPathStep"
+              },
+              "type": "array"
+            },
+            "tab_id": {
+              "type": "string"
+            },
+            "tree_fingerprint": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "boot_id",
+            "tab_id",
+            "tree_fingerprint",
+            "path"
+          ],
+          "type": "object"
+        },
         "LayoutExportParams": {
           "properties": {
             "pane_id": {
@@ -3441,6 +3468,37 @@
             }
           ]
         },
+        "LayoutPathStep": {
+          "description": "Structural request-local addresses; wrappers consume no step or identity.",
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "split": {
+                  "$ref": "#/schemas/request/$defs/LayoutSplitChild"
+                }
+              },
+              "required": [
+                "split"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "stack_child": {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "stack_child"
+              ],
+              "type": "object"
+            }
+          ]
+        },
         "LayoutSetSplitRatioParams": {
           "properties": {
             "pane_id": {
@@ -3471,6 +3529,13 @@
             "ratio"
           ],
           "type": "object"
+        },
+        "LayoutSplitChild": {
+          "enum": [
+            "first",
+            "second"
+          ],
+          "type": "string"
         },
         "NotificationShowParams": {
           "properties": {
@@ -7199,6 +7264,86 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/LayoutExportParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "layout.collapse.describe",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/LayoutExportParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "layout.collapse",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/LayoutCollapseTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "layout.expand",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/LayoutCollapseTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "pane.collapse",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "pane.expand",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneTarget"
             }
           },
           "required": [
@@ -11309,6 +11454,29 @@
           ],
           "type": "object"
         },
+        "LayoutCollapseDescription": {
+          "properties": {
+            "boot_id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string"
+            },
+            "layout": {
+              "$ref": "#/schemas/success_response/$defs/LayoutTreeDescription"
+            },
+            "tree_fingerprint": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "boot_id",
+            "tree_fingerprint",
+            "layout"
+          ],
+          "type": "object"
+        },
         "LayoutDescription": {
           "properties": {
             "focused_pane_id": {
@@ -11498,6 +11666,9 @@
           "oneOf": [
             {
               "properties": {
+                "collapsed": {
+                  "type": "boolean"
+                },
                 "pane_id": {
                   "type": "string"
                 },
@@ -11515,6 +11686,9 @@
             {
               "description": "A pane whose content is an extension view rather than a terminal. Its\nscope is derived from placement and is not part of this export.",
               "properties": {
+                "collapsed": {
+                  "type": "boolean"
+                },
                 "extension": {
                   "type": "string"
                 },
@@ -11548,6 +11722,9 @@
                   },
                   "type": "array"
                 },
+                "collapsed": {
+                  "type": "boolean"
+                },
                 "selected": {
                   "format": "uint",
                   "minimum": 0,
@@ -11568,6 +11745,9 @@
             },
             {
               "properties": {
+                "collapsed": {
+                  "type": "boolean"
+                },
                 "direction": {
                   "$ref": "#/schemas/success_response/$defs/SplitDirection"
                 },
@@ -14197,6 +14377,22 @@
               "required": [
                 "type",
                 "layout"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "collapse": {
+                  "$ref": "#/schemas/success_response/$defs/LayoutCollapseDescription"
+                },
+                "type": {
+                  "const": "layout_collapse_description",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "collapse"
               ],
               "type": "object"
             },

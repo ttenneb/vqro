@@ -7,6 +7,9 @@ use crate::{
 use std::collections::HashMap;
 use unicode_width::UnicodeWidthStr;
 
+mod resume;
+pub(crate) use resume::{ResumeEvent, ResumeFact, ResumeFence};
+
 pub(crate) const READ_ONLY_SUMMARY: &str = "read-only";
 
 /// Includes the strict three-cell separator (four cells required) and the two
@@ -68,6 +71,7 @@ pub(crate) struct AutoView {
     pub incarnation: Option<(u64, String, u64)>,
     pub dirty: bool,
     pub scope_valid: bool,
+    pub available: bool,
 }
 #[derive(Default)]
 pub(crate) struct ViewSizing {
@@ -77,6 +81,7 @@ pub(crate) struct ViewSizing {
     pub visible_tabs: std::collections::HashSet<String>,
     pub pending_geometry: std::collections::HashSet<crate::workspace::TabId>,
     pub label_widths: HashMap<PaneId, u16>,
+    pub resume_fences: Vec<ResumeFence>,
     pub viewports: HashMap<
         crate::workspace::TabId,
         (ratatui::layout::Rect, crate::kitty_graphics::HostCellSize),
@@ -92,11 +97,14 @@ impl ViewSizing {
             incarnation: None,
             dirty: true,
             scope_valid: true,
+            available: false,
         });
     }
     pub fn manual(&mut self, panes: impl IntoIterator<Item = PaneId>) {
         for pane in panes {
             self.active.remove(&pane);
+            self.resume_fences
+                .retain(|fence| !fence.views.contains_key(&pane));
         }
     }
 }

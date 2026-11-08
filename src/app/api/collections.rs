@@ -997,6 +997,7 @@ impl App {
         revision: u64,
         available: bool,
     ) {
+        self.sync_view_headers();
         self.refresh_auto_view_document(&namespace, &scope_id, generation, revision);
         self.event_hub.push(crate::api::schema::EventEnvelope {
             event: crate::api::schema::EventKind::HostDocumentUpdated,

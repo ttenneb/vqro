@@ -384,7 +384,11 @@ impl ClientShellState {
         match key.kind {
             KeyEventKind::Press => {
                 let initial_context = self.input_context();
-                let target = self.route_key_press(&key, outcome);
+                // A hidden/unpaired body must not acquire a forwarded lease:
+                // its later release would otherwise be legitimate cleanup input.
+                let target = self
+                    .route_key_press(&key, outcome)
+                    .filter(|target| self.collapse_allows_pane_input(target));
                 if let Some(target) = target.as_ref() {
                     self.push_pane_key(target.clone(), key.clone(), outcome);
                 }
@@ -1501,6 +1505,9 @@ impl ClientShellState {
         key: crate::input::TerminalKey,
         outcome: &mut ClientShellInput,
     ) {
+        if key.kind != KeyEventKind::Release && !self.collapse_allows_pane_input(&target) {
+            return;
+        }
         if let Some(event) = ClientPaneInputEvent::from_terminal_key(key) {
             super::push_target_event(target, event, outcome);
         }
@@ -1514,6 +1521,9 @@ impl ClientShellState {
         event: ClientPaneInputEvent,
         outcome: &mut ClientShellInput,
     ) -> bool {
+        if !self.collapse_interactions_current() {
+            return true;
+        }
         let list_collection = self.snapshot.as_deref().and_then(|snapshot| {
             let focused_pane_id = snapshot.focused_pane_id.as_deref()?;
             self.structure
@@ -1537,11 +1547,10 @@ impl ClientShellState {
                         .get(&collection.collection_id)
                         .is_some_and(|expanded| expanded.contains(*pane_id))
             }) {
-                super::push_target_event(
-                    ClientInputTarget::Pane(entered_pane.to_owned()),
-                    event,
-                    outcome,
-                );
+                let target = ClientInputTarget::Pane(entered_pane.to_owned());
+                if self.collapse_allows_pane_input(&target) {
+                    super::push_target_event(target, event, outcome);
+                }
             }
             return true;
         }
@@ -1555,11 +1564,10 @@ impl ClientShellState {
                 .iter()
                 .any(|pane| pane.pane_id == inspector.pane_id && !pane.inner_rect.is_empty())
             {
-                super::push_target_event(
-                    ClientInputTarget::Pane(inspector.pane_id.clone()),
-                    event,
-                    outcome,
-                );
+                let target = ClientInputTarget::Pane(inspector.pane_id.clone());
+                if self.collapse_allows_pane_input(&target) {
+                    super::push_target_event(target, event, outcome);
+                }
                 return true;
             }
         }
@@ -1568,7 +1576,10 @@ impl ClientShellState {
 
     fn push_focused_pane_event(&self, event: ClientPaneInputEvent, outcome: &mut ClientShellInput) {
         if let Some(pane_id) = self.focused_pane_id() {
-            super::push_target_event(ClientInputTarget::Pane(pane_id), event, outcome);
+            let target = ClientInputTarget::Pane(pane_id);
+            if self.collapse_allows_pane_input(&target) {
+                super::push_target_event(target, event, outcome);
+            }
         }
     }
 }

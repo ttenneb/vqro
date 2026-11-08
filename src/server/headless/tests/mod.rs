@@ -1,5 +1,6 @@
 use super::*;
 
+mod collapse;
 #[path = "event_fairness.rs"]
 mod event_fairness_tests;
 mod native_graphics;
@@ -45,6 +46,7 @@ fn test_headless_server_with_event_hub(event_hub: api::EventHub) -> HeadlessServ
     );
 
     app.state.default_shell = crate::app::exiting_test_command().into();
+    app.runtime_incarnation = "test-boot".into();
     let dir = std::env::temp_dir().join(format!(
         "hh-{}-{}",
         std::process::id(),
@@ -667,6 +669,7 @@ async fn client_shell_attach_seeds_workspace() {
             terminal_views_enabled: false,
             writer,
             host_views_enabled: false,
+            collapse_enabled: false,
         })
     );
 
@@ -703,6 +706,7 @@ async fn client_shell_endpoint_request_uses_the_selected_connection() {
             terminal_views_enabled: false,
             writer,
             host_views_enabled: false,
+            collapse_enabled: false,
         })
     );
     let _initial_snapshot = control_rx.recv().expect("initial shell snapshot");
@@ -798,6 +802,7 @@ async fn native_endpoint_lane_dispatches_methods_outside_the_frozen_bridge() {
             terminal_views_enabled: false,
             writer,
             host_views_enabled: false,
+            collapse_enabled: false,
         })
     );
     let _initial_snapshot = control_rx.recv().expect("initial shell snapshot");
@@ -894,6 +899,7 @@ async fn client_shell_pairs_agent_view_set_replacement_and_clear_with_snapshots(
             terminal_views_enabled: false,
             writer,
             host_views_enabled: false,
+            collapse_enabled: false,
         })
     );
     let initial = client_shell_snapshot(read_server_message(
@@ -989,6 +995,7 @@ async fn host_documents_control_is_sent_only_when_negotiated() {
                 terminal_views_enabled: false,
                 writer,
                 host_views_enabled: false,
+                collapse_enabled: false,
             })
         );
         let _snapshot = client_shell_snapshot(read_server_message(
@@ -1056,6 +1063,7 @@ async fn client_shell_receives_metadata_then_shell_free_pane_surface() {
             terminal_views_enabled: false,
             writer,
             host_views_enabled: false,
+            collapse_enabled: false,
         })
     );
     let snapshot = client_shell_snapshot(read_server_message(
@@ -1240,6 +1248,7 @@ fn connect_test_shell(
             terminal_views_enabled: false,
             writer,
             host_views_enabled: false,
+            collapse_enabled: false,
         })
     );
     (control, render)
@@ -1707,6 +1716,7 @@ async fn client_shell_config_diagnostics_follow_keybinding_ownership() {
             terminal_views_enabled: false,
             writer: local_writer,
             host_views_enabled: false,
+            collapse_enabled: false,
         })
     );
     let local_snapshot = client_shell_snapshot(read_server_message(
@@ -1737,6 +1747,7 @@ async fn client_shell_config_diagnostics_follow_keybinding_ownership() {
             terminal_views_enabled: false,
             writer: endpoint_writer,
             host_views_enabled: false,
+            collapse_enabled: false,
         })
     );
     let endpoint_snapshot = client_shell_snapshot(read_server_message(
@@ -3832,6 +3843,7 @@ async fn public_api_focus_replaces_every_client_shell_projection() {
             terminal_views_enabled: false,
             writer,
             host_views_enabled: false,
+            collapse_enabled: false,
         })
     );
     let initial_revision = client_shell_snapshot(read_server_message(
@@ -4191,6 +4203,7 @@ async fn client_shell_streams_and_targets_popup_terminal_content() {
             terminal_views_enabled: false,
             writer,
             host_views_enabled: false,
+            collapse_enabled: false,
         })
     );
     let _snapshot = client_shell_snapshot(read_server_message(
@@ -5406,6 +5419,41 @@ fn terminal_observe_allows_multiple_clients_without_attach_ownership() {
             2
         );
     });
+}
+
+#[test]
+fn collapsed_panes_keep_membership_without_raw_output_presentation_invalidation() {
+    let mut server = test_headless_server();
+    let mut workspace = crate::workspace::Workspace::test_new("collapsed visibility");
+    let visible = workspace.tabs[0].root_pane;
+    let hidden = workspace.test_split(ratatui::layout::Direction::Vertical);
+    assert!(workspace.tabs[0].layout.set_collapsed(&[1], true));
+    server.app.state.workspaces = vec![workspace];
+    server.app.state.active = Some(0);
+    server.app.state.selected = 0;
+    server.app.state.ensure_test_terminals();
+    let (writer, _control, _render) = test_client_writer();
+    let mut client = ClientConnection::new(
+        (120, 40),
+        crate::kitty_graphics::HostCellSize::default(),
+        1,
+        RenderEncoding::SemanticFrame,
+        Some(writer),
+    );
+    client.shell_terminal_views_enabled = true;
+    client.shell_projection_revision = 1;
+    server.clients.insert(1, client);
+    assert!(server.pty_sources_visible_to_any_render_target(&HashSet::from([visible])));
+    assert!(!server.pty_sources_visible_to_any_render_target(&HashSet::from([hidden])));
+    let _ = server.app.render_dirty.take();
+    server.sync_immediate_pty_sources();
+    assert!(server.app.render_dirty.request_pty(hidden));
+    assert!(!server.app.render_dirty.has_immediate_work());
+    assert_eq!(
+        server.app.state.workspaces[0].tabs[0].layout.pane_count(),
+        2
+    );
+    server.app.state.assert_invariants_for_test();
 }
 
 #[test]
@@ -7433,6 +7481,7 @@ async fn client_shell_requests_host_pixels_for_an_unfocused_pixel_pane() {
             structure_enabled: false,
             host_documents_enabled: false,
             host_views_enabled: false,
+            collapse_enabled: false,
             pane_viewport_enabled: false,
             pane_view_enabled: false,
             terminal_views_enabled: false,

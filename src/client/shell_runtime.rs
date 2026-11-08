@@ -162,10 +162,17 @@ pub(super) fn apply_endpoint_pane_surface_v1(
     state: &mut ClientState,
     endpoints: &mut endpoint::EndpointRegistry,
     prefix_input_source: &mut impl crate::platform::PrefixInputSource,
+    endpoint_id: &endpoint::ClientEndpointId,
+    generation: u64,
     surface: crate::protocol::PaneSurfaceFrame,
 ) {
     if let Some(shell) = &mut state.shell {
-        shell.set_pane_surface(surface);
+        shell.set_pane_surface_with_views_for_generation(
+            endpoint_id,
+            generation,
+            surface,
+            Vec::new(),
+        );
     }
     finish_endpoint_pane_surface(state, endpoints, prefix_input_source);
 }
@@ -176,18 +183,20 @@ pub(super) fn apply_endpoint_pane_surface_v2(
     state: &mut ClientState,
     endpoints: &mut endpoint::EndpointRegistry,
     prefix_input_source: &mut impl crate::platform::PrefixInputSource,
+    endpoint_id: &endpoint::ClientEndpointId,
+    generation: u64,
     surface: crate::protocol::PaneSurfaceFrame,
     views: Vec<crate::protocol::PaneSurfaceViewEntryV2>,
 ) {
     if let Some(shell) = &mut state.shell {
-        shell.set_pane_surface_with_views(surface, views);
+        shell.set_pane_surface_with_views_for_generation(endpoint_id, generation, surface, views);
     }
     finish_endpoint_pane_surface(state, endpoints, prefix_input_source);
 }
 
 /// Reconcile host input-source side effects for the just-installed surface and
 /// present the composed frame.
-fn finish_endpoint_pane_surface(
+pub(super) fn finish_endpoint_pane_surface(
     state: &mut ClientState,
     endpoints: &mut endpoint::EndpointRegistry,
     prefix_input_source: &mut impl crate::platform::PrefixInputSource,

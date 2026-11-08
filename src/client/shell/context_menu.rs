@@ -6,6 +6,8 @@ impl ClientContextMenuOverlay {
 
         let item = |label, action| ClientContextMenuItem { label, action };
         match &self.target {
+            ClientContextMenuTarget::CollapseBoxes { .. }
+            | ClientContextMenuTarget::CollapsedHeader { .. } => Vec::new(),
             ClientContextMenuTarget::Workspace { is_git: false, .. } => {
                 vec![item("Rename", Action::Rename), item("Close", Action::Close)]
             }
@@ -105,6 +107,73 @@ impl ClientContextMenuOverlay {
                 ]);
                 items
             }
+        }
+    }
+}
+
+impl ClientContextMenuOverlay {
+    pub(super) fn available_items(&self, collapse: bool) -> Vec<ClientContextMenuItem> {
+        if matches!(self.target, ClientContextMenuTarget::CollapsedHeader { .. }) {
+            return if collapse {
+                vec![ClientContextMenuItem {
+                    label: "Expand",
+                    action: ClientContextMenuAction::ExpandHeader,
+                }]
+            } else {
+                Vec::new()
+            };
+        }
+        if let ClientContextMenuTarget::CollapseBoxes { targets } = &self.target {
+            return if collapse {
+                targets
+                    .iter()
+                    .enumerate()
+                    .map(|(index, _)| ClientContextMenuItem {
+                        label: "Box",
+                        action: ClientContextMenuAction::CollapseAncestor(index),
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+        }
+        let mut items = self.items();
+        if collapse && matches!(self.target, ClientContextMenuTarget::Pane { .. }) {
+            let collapsed = matches!(
+                self.target,
+                ClientContextMenuTarget::Pane {
+                    collapsed: true,
+                    ..
+                }
+            );
+            items.push(ClientContextMenuItem {
+                label: if collapsed {
+                    "Expand pane"
+                } else {
+                    "Collapse pane"
+                },
+                action: if collapsed {
+                    ClientContextMenuAction::ExpandPane
+                } else {
+                    ClientContextMenuAction::CollapsePane
+                },
+            });
+            items.push(ClientContextMenuItem {
+                label: "Collapse box",
+                action: ClientContextMenuAction::CollapseBox,
+            });
+        }
+        items
+    }
+}
+impl ClientContextMenuItem {
+    pub(super) fn display_label(&self) -> std::borrow::Cow<'static, str> {
+        match self.action {
+            ClientContextMenuAction::CollapseAncestor(0) => "Parent box".into(),
+            ClientContextMenuAction::CollapseAncestor(index) => {
+                format!("Outer box {}", index + 1).into()
+            }
+            _ => self.label.into(),
         }
     }
 }
@@ -232,6 +301,7 @@ impl ClientShellState {
                 pane_id,
                 workspace_id: pane.workspace_id.clone(),
                 source_pane_id,
+                collapsed: false,
                 has_manual_label: pane.label.is_some(),
                 right_click_passthrough: pane.right_click_passthrough,
                 collection_id: membership
@@ -246,10 +316,11 @@ impl ClientShellState {
     }
 
     pub(super) fn move_context_menu_selection(&mut self, delta: isize) {
+        let collapse = self.collapse_controls_available();
         let Some(ClientShellOverlay::ContextMenu(menu)) = self.overlay.as_mut() else {
             return;
         };
-        let item_count = menu.items().len();
+        let item_count = menu.available_items(collapse).len();
         if item_count == 0 {
             return;
         }
@@ -265,11 +336,57 @@ impl ClientShellState {
         let Some(ClientShellOverlay::ContextMenu(menu)) = self.overlay.take() else {
             return;
         };
-        let Some(action) = menu.items().get(index).map(|item| item.action) else {
+        let Some(action) = menu
+            .available_items(self.collapse_controls_available())
+            .get(index)
+            .map(|item| item.action)
+        else {
             outcome.repaint = true;
             return;
         };
+        match (&menu.target, action) {
+            (
+                ClientContextMenuTarget::Pane { pane_id, .. },
+                ClientContextMenuAction::ExpandPane,
+            ) => {
+                self.set_pane_collapsed(Some(pane_id), false, outcome);
+                return;
+            }
+            (
+                ClientContextMenuTarget::CollapsedHeader { target },
+                ClientContextMenuAction::ExpandHeader,
+            ) => {
+                self.request_collapse_target(target.clone(), false, outcome);
+                return;
+            }
+            (
+                ClientContextMenuTarget::Pane { pane_id, .. },
+                ClientContextMenuAction::CollapsePane,
+            ) => {
+                self.set_pane_collapsed(Some(pane_id), true, outcome);
+                return;
+            }
+            (
+                ClientContextMenuTarget::Pane { pane_id, .. },
+                ClientContextMenuAction::CollapseBox,
+            ) => {
+                self.open_collapse_box_picker(Some(pane_id), menu.x, menu.y, outcome);
+                return;
+            }
+            (
+                ClientContextMenuTarget::CollapseBoxes { targets },
+                ClientContextMenuAction::CollapseAncestor(index),
+            ) => {
+                if let Some(target) = targets.get(index) {
+                    self.request_collapse_target(target.clone(), true, outcome);
+                }
+                return;
+            }
+            _ => {}
+        }
         match menu.target {
+            ClientContextMenuTarget::CollapseBoxes { .. }
+            | ClientContextMenuTarget::CollapsedHeader { .. } => {}
             ClientContextMenuTarget::Workspace { workspace_id, .. } => {
                 self.activate_workspace_context_action(workspace_id, action, outcome)
             }

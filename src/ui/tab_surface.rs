@@ -20,6 +20,10 @@ pub(crate) struct TabSurfaceLayout {
     pub(crate) pane_infos: Vec<PaneInfo>,
     pub(crate) split_borders: Vec<SplitBorder>,
     pub(crate) box_frames: Vec<crate::layout::BoxFrame>,
+    pub(crate) collapsed_frames: Vec<crate::layout::CollapsedFrame>,
+    pub(crate) container_geometry: Vec<crate::layout::ContainerGeometry>,
+    pub(crate) pane_paths:
+        std::collections::HashMap<crate::layout::PaneId, Vec<crate::layout::LayoutPathStep>>,
     pub(crate) leaf_rects: std::collections::HashMap<crate::layout::LayoutLeaf, Rect>,
 }
 
@@ -29,6 +33,7 @@ pub(crate) struct TabSurfaceView<'a> {
     pub(crate) pane_infos: &'a [PaneInfo],
     pub(crate) split_borders: &'a [SplitBorder],
     pub(crate) box_frames: &'a [crate::layout::BoxFrame],
+    pub(crate) collapsed_frames: &'a [crate::layout::CollapsedFrame],
 }
 
 pub(crate) fn compute_tab_surface(
@@ -70,13 +75,16 @@ pub(crate) fn compute_tab_surface_for(
             .get(target.tab_index)
     });
     let geometry = tab
-        .filter(|tab| !tab.zoomed)
+        .filter(|tab| !tab.body_zoomed())
         .map(|tab| tab.layout.geometry(area))
         .unwrap_or_default();
     let crate::layout::LayoutGeometry {
         panes: raw_panes,
         splits: split_borders,
         boxes: box_frames,
+        collapsed: collapsed_frames,
+        containers: container_geometry,
+        pane_paths,
         leaf_rects,
     } = geometry;
     let pane_infos = target.map_or_else(Vec::new, |target| {
@@ -96,6 +104,9 @@ pub(crate) fn compute_tab_surface_for(
         pane_infos,
         split_borders,
         box_frames,
+        collapsed_frames,
+        container_geometry,
+        pane_paths,
         leaf_rects,
     }
 }
@@ -165,6 +176,7 @@ pub(crate) fn render_tab_surface(
         surface.pane_infos,
         frame,
     );
+    super::collapsed::render_collapsed_frames(app, surface.target, surface.collapsed_frames, frame);
     render_panes(
         app,
         terminal_runtimes,
@@ -258,6 +270,83 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::layout::Direction;
     use ratatui::Terminal;
+
+    #[tokio::test]
+    async fn collapsing_sibling_resizes_only_visible_body_and_preserves_hidden_parser_size() {
+        for direction in [Direction::Horizontal, Direction::Vertical] {
+            let mut workspace = Workspace::test_new("collapse resize");
+            let first = workspace.tabs[0].root_pane;
+            let second = workspace.test_split(direction);
+            let first_runtime =
+                crate::terminal::TerminalRuntime::test_with_screen_bytes(8, 4, b"first");
+            let second_runtime =
+                crate::terminal::TerminalRuntime::test_with_screen_bytes(8, 4, b"second");
+            workspace.insert_test_runtime(first, first_runtime);
+            workspace.insert_test_runtime(second, second_runtime);
+            let mut app = AppState::test_new();
+            app.workspaces = vec![workspace];
+            app.active = Some(0);
+            app.ensure_test_terminals();
+            let area = Rect::new(0, 0, 100, 40);
+            let cells = crate::kitty_graphics::HostCellSize::default();
+            let before =
+                compute_tab_surface(&app, &TerminalRuntimeRegistry::new(), area, true, cells);
+            let runtimes = TerminalRuntimeRegistry::new();
+            let size = |state: &AppState, pane| {
+                state
+                    .runtime_for_pane_in_workspace(&runtimes, 0, pane)
+                    .unwrap()
+                    .current_size()
+            };
+            let first_size = size(&app, first);
+            let second_size = size(&app, second);
+            assert_eq!(before.pane_infos.len(), 2);
+            assert!(app.workspaces[0].tabs[0].layout.set_collapsed(&[1], true));
+            let collapsed =
+                compute_tab_surface(&app, &TerminalRuntimeRegistry::new(), area, true, cells);
+            assert_eq!(collapsed.pane_infos.len(), 1);
+            assert_eq!(collapsed.collapsed_frames.len(), 1);
+            assert_eq!(size(&app, second), second_size);
+            assert_ne!(size(&app, first), first_size);
+            let visible = &collapsed.pane_infos[0].inner_rect;
+            assert_eq!(size(&app, first), (visible.height, visible.width));
+            let hidden = app
+                .runtime_for_pane_in_workspace(&runtimes, 0, second)
+                .unwrap();
+            hidden.test_process_pty_bytes(b"\r\nhidden-output");
+            assert!(hidden.detection_text().contains("hidden-output"));
+            let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render_tab_surface(
+                        &app,
+                        &TerminalRuntimeRegistry::new(),
+                        TabSurfaceView {
+                            target: collapsed.target,
+                            pane_infos: &collapsed.pane_infos,
+                            split_borders: &collapsed.split_borders,
+                            box_frames: &collapsed.box_frames,
+                            collapsed_frames: &collapsed.collapsed_frames,
+                        },
+                        frame,
+                    )
+                })
+                .unwrap();
+            let rendered: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            assert!(!rendered.contains("hidden-output"));
+            assert!(app.workspaces[0].tabs[0].layout.set_collapsed(&[1], false));
+            compute_tab_surface(&app, &TerminalRuntimeRegistry::new(), area, true, cells);
+            assert_eq!(size(&app, first), first_size);
+            assert_eq!(size(&app, second), second_size);
+            app.assert_invariants_for_test();
+        }
+    }
 
     #[tokio::test]
     async fn wrapped_stack_header_debt_reserves_four_actual_terminal_rows() {
@@ -389,6 +478,7 @@ mod tests {
                 pane_infos: &layout.pane_infos,
                 split_borders: &layout.split_borders,
                 box_frames: &layout.box_frames,
+                collapsed_frames: &layout.collapsed_frames,
             };
             let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
             terminal
@@ -522,6 +612,7 @@ mod tests {
             pane_infos: &surface.pane_infos,
             split_borders: &surface.split_borders,
             box_frames: &surface.box_frames,
+            collapsed_frames: &surface.collapsed_frames,
         };
         let mut terminal =
             Terminal::new(TestBackend::new(full_area.width, full_area.height)).unwrap();

@@ -253,6 +253,11 @@ impl ClientShellState {
             if !applied {
                 return ClientPaneSurfacePatchOutcome::Rejected;
             }
+            self.advance_collapse_patch(
+                &patch.boot_id,
+                patch.projection_revision,
+                patch.surface_revision,
+            );
             for updated in &patch.panes {
                 let Some(hit) = self
                     .hits

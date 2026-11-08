@@ -44,6 +44,7 @@ struct RenderPipeline {
     app: App,
     client: ClientShellState,
     graphics_delivery: crate::kitty_graphics::surface::DeliveryCache,
+    surface_revision: u64,
 }
 
 impl RenderPipeline {
@@ -66,6 +67,14 @@ impl RenderPipeline {
         app.state.pane_scrollbars = true;
 
         let mut client = ClientShellState::new(ClientShellConfig::from_config(config));
+        client.set_endpoint_capabilities_for(
+            &crate::client::endpoint::ClientEndpointId::Local,
+            vec![
+                crate::protocol::collapse::LAYOUT_COLLAPSE_CAPABILITY.into(),
+                crate::native_api::NATIVE_API_CAPABILITY_V1.into(),
+            ],
+        );
+        client.set_endpoint_methods(Some(vec!["layout.collapse".into(), "layout.expand".into()]));
         client.set_snapshot(Box::new(super::client_shell::snapshot(
             &app,
             "bench-boot",
@@ -78,6 +87,7 @@ impl RenderPipeline {
             app,
             client,
             graphics_delivery: crate::kitty_graphics::surface::DeliveryCache::default(),
+            surface_revision: 0,
         }
     }
 
@@ -104,16 +114,19 @@ impl RenderPipeline {
             },
             &self.graphics_delivery,
             1,
+            true,
         );
         let server_elapsed = started.elapsed();
         self.graphics_delivery = rendered.graphics_delivery;
 
         let started = Instant::now();
+        self.surface_revision += 1;
+        let collapse = rendered.collapse;
         self.client.set_pane_surface_with_views(
             PaneSurfaceFrame {
                 boot_id: "bench-boot".into(),
                 projection_revision: 1,
-                surface_revision: 0,
+                surface_revision: self.surface_revision,
                 frame: rendered.frame,
                 panes: rendered.panes,
                 collections: rendered.collections,
@@ -123,6 +136,18 @@ impl RenderPipeline {
             },
             rendered.views,
         );
+        if let Some(body) = collapse {
+            self.client.set_endpoint_collapse_projection_for_generation(
+                &crate::client::endpoint::ClientEndpointId::Local,
+                0,
+                Ok(Box::new(crate::protocol::collapse::CollapseProjectionV1 {
+                    boot_id: "bench-boot".into(),
+                    projection_revision: 1,
+                    base_surface_revision: self.surface_revision,
+                    body,
+                })),
+            );
+        }
         black_box(
             self.client
                 .compose(COLS, ROWS)
@@ -271,6 +296,12 @@ fn workspaces(workspace_count: usize) -> Vec<Workspace> {
 
 fn active_panes(pane_count: usize) -> Vec<Workspace> {
     vec![populated_panes(pane_count)]
+}
+
+fn zoomed_panes(pane_count: usize) -> Vec<Workspace> {
+    let mut workspaces = active_panes(pane_count);
+    workspaces[0].tabs[0].zoomed = true;
+    workspaces
 }
 
 /// A workspace whose active tab holds `view_count` view panes beside a populated
@@ -577,6 +608,10 @@ async fn render_scale_profile() {
     print_profiles("background workspaces (one pane each)", workspaces);
     print_snapshot_encoding_profiles("background workspaces", workspaces);
     print_profiles("active panes (one workspace)", active_panes);
+    print_profiles(
+        "zoomed populated panes (fixed visible body, canonical ancestry guard)",
+        zoomed_panes,
+    );
     print_snapshot_encoding_profiles("active panes", active_panes);
     print_token_rule_profiles();
     print_recovery_browser_profile();

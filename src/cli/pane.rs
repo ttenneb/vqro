@@ -1,3 +1,5 @@
+mod collapse;
+
 use crate::api::schema::{
     Method, OutputMatch, PaneCurrentParams, PaneDirection, PaneEdgesParams,
     PaneFocusDirectionParams, PaneInputSetParams, PaneLayoutParams, PaneListParams,
@@ -34,6 +36,8 @@ pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
         "swap" => pane_swap(&args[1..]),
         "move" => pane_move(&args[1..]),
         "close" => pane_close(&args[1..]),
+        "collapse" => collapse::run(&args[1..], true),
+        "expand" => collapse::run(&args[1..], false),
         "send-text" => pane_send_text(&args[1..]),
         "send-keys" => pane_send_keys(&args[1..]),
         "wait-output" => pane_wait_output(&args[1..]),
@@ -1788,6 +1792,7 @@ fn print_pane_help() {
     );
     eprintln!("  vqro pane move <pane_id> --new-workspace [--label TEXT] [--tab-label TEXT] [--focus|--no-focus]");
     eprintln!("  vqro pane close <pane_id>");
+    eprintln!("  vqro pane collapse|expand <pane_id> [--box]");
     eprintln!("  vqro pane send-text <pane_id> <text>");
     eprintln!("  vqro pane send-keys <pane_id> <key> [key ...]");
     eprintln!("  vqro pane wait-output <pane_id> (--match TEXT | --regex PATTERN) [--source visible|recent|recent-unwrapped] [--lines N] [--timeout MS] [--raw]");

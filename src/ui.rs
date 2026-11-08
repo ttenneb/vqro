@@ -1,5 +1,6 @@
 use ratatui::layout::Rect;
 
+mod collapsed;
 mod onboarding;
 mod panes;
 mod release_notes;

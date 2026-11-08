@@ -351,7 +351,20 @@ fn agent_start_command_works() {
     ));
 
     let after = run_cli_json(&socket_path, &["pane", "list"]);
-    assert_eq!(pane_topology_snapshot(&after), before_topology);
+    let after_topology = pane_topology_snapshot(&after);
+    assert_eq!(
+        after_topology.len(),
+        before_topology.len() + 2,
+        "default start adds two terminal-free views"
+    );
+    let terminal_topology = after_topology
+        .into_iter()
+        .filter(|pane| !pane["terminal_id"].is_null())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        terminal_topology, before_topology,
+        "agent start preserves terminal identities and focus"
+    );
 
     let prompts_before_blocked = fs::read(&captured_prompts).unwrap();
     let blocked_report = run_cli(

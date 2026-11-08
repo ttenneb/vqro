@@ -288,7 +288,7 @@ pub(super) fn snapshot(
                 number: tab.number,
                 label: tab.label,
                 custom_label: !state.is_auto_named(),
-                zoomed: state.zoomed,
+                zoomed: state.body_zoomed(),
                 agent_status: tab.agent_status,
             }
         })
@@ -369,7 +369,7 @@ pub(super) fn snapshot(
                 .tabs
                 .get(tab_index)
         })
-        .is_some_and(|tab| tab.zoomed);
+        .is_some_and(|tab| tab.body_zoomed());
     let tab_bar_right = app
         .state
         .tab_bar_right
@@ -450,6 +450,7 @@ pub(super) struct RenderedPaneSurface {
     pub(super) graphics: protocol::SurfaceGraphicsScene,
     pub(super) graphics_delivery: crate::kitty_graphics::surface::DeliveryCache,
     pub(super) graphics_sources: crate::kitty_graphics::surface::SourceFiles,
+    pub(super) collapse: Option<crate::protocol::collapse::CollapseBodyV1>,
 }
 
 /// The view panes the frame will actually draw, in tree order.
@@ -478,26 +479,24 @@ pub(super) fn render_pane_surface(
     cell_size: crate::kitty_graphics::HostCellSize,
     graphics_delivery: &crate::kitty_graphics::surface::DeliveryCache,
     client_id: u64,
+    collapse_enabled: bool,
 ) -> RenderedPaneSurface {
     let content_revisions_before = target
         .and_then(|target| {
             let workspace = app.state.workspaces.get(target.workspace_index)?;
             let tab = workspace.tabs.get(target.tab_index)?;
-            Some(
-                tab.layout
-                    .pane_ids()
-                    .into_iter()
-                    .filter_map(|pane_id| {
-                        app.state
-                            .runtime_for_pane_in_workspace(
-                                &app.terminal_runtimes,
-                                target.workspace_index,
-                                pane_id,
-                            )
-                            .map(|runtime| (pane_id, runtime.content_seq()))
-                    })
-                    .collect::<std::collections::HashMap<_, _>>(),
-            )
+            let mut revisions = std::collections::HashMap::new();
+            tab.layout.any_visible_pane(|pane_id| {
+                if let Some(runtime) = app.state.runtime_for_pane_in_workspace(
+                    &app.terminal_runtimes,
+                    target.workspace_index,
+                    pane_id,
+                ) {
+                    revisions.insert(pane_id, runtime.content_seq());
+                }
+                false
+            });
+            Some(revisions)
         })
         .unwrap_or_default();
     let (buffer, cursor, hyperlinks, layout) =
@@ -695,6 +694,7 @@ pub(super) fn render_pane_surface(
             graphics_delivery,
             client_id,
         );
+    let collapse = collapse_enabled.then(|| super::collapse::projection_body(app, &layout, area));
     RenderedPaneSurface {
         frame: FrameData::from_ratatui_buffer_with_hyperlinks(&buffer, cursor, &hyperlinks),
         panes,
@@ -705,6 +705,7 @@ pub(super) fn render_pane_surface(
         graphics,
         graphics_delivery: next_graphics_delivery,
         graphics_sources,
+        collapse,
     }
 }
 
@@ -1212,6 +1213,7 @@ mod tests {
             crate::kitty_graphics::HostCellSize::default(),
             &crate::kitty_graphics::surface::DeliveryCache::default(),
             1,
+            false,
         );
 
         assert_eq!(rendered.collections.len(), 1);
@@ -1274,7 +1276,7 @@ mod tests {
         let cell_size = crate::kitty_graphics::HostCellSize::default();
 
         let rendered = render_pane_surface(
-            &mut app, target, area, false, false, cell_size, &delivery, 1,
+            &mut app, target, area, false, false, cell_size, &delivery, 1, false,
         );
         let view_public = app
             .public_pane_id(0, view_pane)
@@ -1405,6 +1407,7 @@ mod tests {
                 crate::kitty_graphics::HostCellSize::default(),
                 &crate::kitty_graphics::surface::DeliveryCache::default(),
                 1,
+                true,
             );
             assert_eq!(crate::layout::TileLayout::take_geometry_gathers_for_test(),1,"{count} populated named/view groups share a single fact pass including collection projection");
             assert_eq!(rendered.collections.len(), count);
@@ -1485,6 +1488,7 @@ mod tests {
                 },
                 &crate::kitty_graphics::surface::DeliveryCache::default(),
                 1,
+                false,
             );
             let terminal = rendered
                 .panes

@@ -90,6 +90,7 @@ impl App {
             .collect::<Vec<_>>();
         self.host_document_caches
             .retain(|(namespace, _), _| package_namespaces.contains(&namespace.as_str()));
+        self.sync_view_headers();
         for (namespace, scope_id, generation, revision) in retired_documents {
             self.event_hub.push(crate::api::schema::EventEnvelope {
                 event: crate::api::schema::EventKind::HostDocumentUpdated,
@@ -952,6 +953,103 @@ mod tests {
         Method, PluginSourceInfo, PluginSourceKind, Request, SuccessResponse,
     };
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[tokio::test]
+    async fn pane_links_use_effective_collapse_visibility_for_resolve_and_activate() {
+        for containing_box in [false, true] {
+            for restored_flag in [false, true] {
+                let mut app = test_app();
+                app.state.workspaces =
+                    vec![crate::workspace::Workspace::test_new("link-visibility")];
+                app.state.active = Some(0);
+                let root = app.state.workspaces[0].tabs[0].root_pane;
+                let sibling =
+                    app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+                if containing_box {
+                    app.state.workspaces[0]
+                        .split_pane_with_view(
+                            root,
+                            "example.views",
+                            "summary",
+                            ratatui::layout::Direction::Vertical,
+                            0.5,
+                            false,
+                        )
+                        .unwrap();
+                }
+                app.state.ensure_test_terminals();
+                let mut readers = Vec::new();
+                for pane in [root, sibling] {
+                    let (runtime, reader) =
+                        crate::terminal::TerminalRuntime::test_with_channel(80, 4);
+                    runtime.test_process_pty_bytes(b"https://visibility.invalid/link");
+                    app.state.workspaces[0].insert_test_runtime(pane, runtime);
+                    readers.push(reader);
+                }
+                app.state.focus_pane_in_workspace(0, root);
+                assert!(app.set_node_collapsed(0, 0, &[0], true));
+                if restored_flag {
+                    app.state.workspaces[0].tabs[0].zoomed = true;
+                } else {
+                    app.state
+                        .apply_pane_zoom(0, sibling, crate::app::actions::PaneZoomCommand::On)
+                        .unwrap();
+                    app.state.focus_pane_in_workspace(0, root);
+                }
+                for (pane, visible) in [(sibling, true), (root, false)] {
+                    let params = PaneLinkActivateParams {
+                        pane_id: app.public_pane_id(0, pane).unwrap(),
+                        viewport_row: 0,
+                        col: 1,
+                        content_revision: None,
+                        offset_from_bottom: None,
+                    };
+                    for method in [
+                        Method::PaneLinkResolve(params.clone()),
+                        Method::PaneLinkActivate(params),
+                    ] {
+                        let response = app.handle_api_request(Request {
+                            id: "link-visibility".into(),
+                            method,
+                        });
+                        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+                        if visible {
+                            assert!(
+                                value.get("error").is_none(),
+                                "visible sibling link rejected: {value}"
+                            );
+                            match response_result(&response) {
+                                ResponseResult::PaneLinkResolved { regions } => {
+                                    assert_eq!(regions.len(), 1)
+                                }
+                                ResponseResult::PaneLinkActivated { url, handled } => {
+                                    assert_eq!(
+                                        url.as_deref(),
+                                        Some("https://visibility.invalid/link")
+                                    );
+                                    assert!(
+                                        !handled,
+                                        "no plugin effects are installed in this fixture"
+                                    );
+                                }
+                                other => panic!("unexpected link result: {other:?}"),
+                            }
+                        } else {
+                            assert_eq!(
+                                value["error"]["code"], "stale_target",
+                                "collapsed link target must reject"
+                            );
+                        }
+                    }
+                }
+                assert!(
+                    readers.iter_mut().all(|reader| reader.try_recv().is_err()),
+                    "link probes cannot write to PTYs"
+                );
+                app.state.assert_invariants_for_test();
+            }
+        }
+    }
 
     #[tokio::test]
     async fn pane_link_resolve_checks_staleness_without_side_effects() {

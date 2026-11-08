@@ -141,13 +141,7 @@ impl HeadlessServer {
     /// Whether a pane the client shows asked for SGR pixel mouse reports. Host
     /// reports go to whichever pane is under the pointer, so an unfocused pane
     /// needs pixels from the host too (#4750); others get them as cells.
-    fn shell_visible_pane_wants_sgr_pixels(&self, client_id: u64) -> bool {
-        if self
-            .shell_focused_runtime(client_id)
-            .is_some_and(|(runtime, _)| runtime.sgr_pixel_mouse_enabled())
-        {
-            return true;
-        }
+    pub(super) fn shell_visible_pane_wants_sgr_pixels(&self, client_id: u64) -> bool {
         let Some(target) = self.shell_target_for_client(client_id) else {
             return false;
         };
@@ -160,7 +154,22 @@ impl HeadlessServer {
         else {
             return false;
         };
-        if tab.zoomed {
+        if self
+            .shell_focused_runtime(client_id)
+            .is_some_and(|(runtime, pane)| {
+                (self
+                    .app
+                    .state
+                    .popup_pane
+                    .as_ref()
+                    .is_some_and(|popup| popup.pane_id == pane)
+                    || tab.layout.pane_is_expanded(pane))
+                    && runtime.sgr_pixel_mouse_enabled()
+            })
+        {
+            return true;
+        }
+        if tab.body_zoomed() {
             return false;
         }
         tab.layout.any_visible_pane(|pane_id| {
@@ -384,15 +393,13 @@ impl HeadlessServer {
                 else {
                     continue;
                 };
-                if tab.zoomed {
+                if tab.body_zoomed() {
                     pane_ids.insert(tab.layout.focused());
                 } else {
-                    pane_ids.extend(
-                        tab.layout
-                            .panes(Rect::new(0, 0, 1, 1))
-                            .into_iter()
-                            .map(|pane| pane.id),
-                    );
+                    tab.layout.any_visible_pane(|pane| {
+                        pane_ids.insert(pane);
+                        false
+                    });
                 }
                 if let Some(interest) = client.shell_terminal_views_interest.as_ref() {
                     pane_ids.extend(interest.views.iter().filter_map(|view| {
@@ -500,7 +507,7 @@ impl HeadlessServer {
             .map(|(_, pane)| &pane.attached_terminal_id)
     }
 
-    fn any_shell_surface_contains_pane(&self, pane_id: crate::layout::PaneId) -> bool {
+    pub(super) fn any_shell_surface_contains_pane(&self, pane_id: crate::layout::PaneId) -> bool {
         self.clients.iter().any(|(&client_id, client)| {
             if !client.is_active_shell_client() || client.writer.is_none() {
                 return false;
@@ -541,7 +548,7 @@ impl HeadlessServer {
                     });
             terminal_view_visible
                 || (tab.layout.is_pane_visible(pane_id)
-                    && (!tab.zoomed || tab.layout.focused() == pane_id))
+                    && (!tab.body_zoomed() || tab.layout.focused() == pane_id))
         })
     }
 
@@ -1119,6 +1126,11 @@ impl HeadlessServer {
                 .map(|client| client.shell_graphics_delivery.clone())
                 .unwrap_or_default();
             let mut surface_parts = None;
+            let mut collapse_metadata = None;
+            let collapse_enabled = self
+                .clients
+                .get(&client_id)
+                .is_some_and(|client| client.shell_collapse_enabled);
             let frame = match mode {
                 ClientConnectionMode::ClientShell => {
                     let render_started = crate::render_prof::timer();
@@ -1137,6 +1149,7 @@ impl HeadlessServer {
                         graphics,
                         graphics_delivery: next_graphics_delivery,
                         graphics_sources,
+                        collapse,
                     } = render_client_shell_pane_surface(
                         &mut self.app,
                         shell_target,
@@ -1146,7 +1159,9 @@ impl HeadlessServer {
                         render_cell_size,
                         &shell_graphics_delivery,
                         client_id,
+                        collapse_enabled,
                     );
+                    collapse_metadata = collapse;
                     crate::render_prof::duration_since(
                         "full_render.render_tab_surface_virtual",
                         render_started,
@@ -1266,6 +1281,8 @@ impl HeadlessServer {
                             || !graphics.retained_assets.is_empty()
                     });
             let mut next_shell_graphics_delivery = None;
+            let collapse_metadata_changed = collapse_enabled
+                && client.shell_collapse_metadata.as_ref() != collapse_metadata.as_ref();
             let prepared =
                 if let Some((panes, views, collections, splits, popup, graphics, delivery, _)) =
                     surface_parts
@@ -1284,7 +1301,7 @@ impl HeadlessServer {
                             graphics,
                         },
                         views,
-                        native_upload.is_some(),
+                        native_upload.is_some() || collapse_metadata_changed,
                     )
                 } else {
                     client.render_state.prepare_frame(frame)
@@ -1392,6 +1409,29 @@ impl HeadlessServer {
                 && next_shell_graphics_delivery
                     .as_ref()
                     .is_some_and(crate::kitty_graphics::surface::DeliveryCache::has_pending);
+            if let Some(body) = collapse_metadata.as_ref() {
+                let ServerMessage::PaneSurfaceV2(surface) = prepared.message() else {
+                    continue;
+                };
+                let companion = match crate::server::collapse::projection_message(
+                    &surface.frame.boot_id,
+                    surface.frame.projection_revision,
+                    surface.frame.surface_revision,
+                    body,
+                )
+                .ok()
+                .and_then(|message| Self::frame_server_message(&message).ok())
+                {
+                    Some(companion) => companion,
+                    None => {
+                        client.defer_full_render();
+                        continue;
+                    }
+                };
+                // One render-queue packet commits the full base and its companion.
+                // Clients still accept either queue order relative to snapshots.
+                serialized.extend_from_slice(&companion);
+            }
             if let Some((_, message)) = &native_upload {
                 let Ok(file_frame) =
                     Self::frame_server_message_with_max(message, MAX_GRAPHICS_FRAME_SIZE)
@@ -1419,6 +1459,9 @@ impl HeadlessServer {
                         client.shell_graphics_delivery = delivery;
                     }
                     client.render_state.commit_sent_frame(prepared);
+                    if collapse_enabled {
+                        client.shell_collapse_metadata = collapse_metadata;
+                    }
                     let terminal_views_deferred = terminal_views_render
                         .is_some_and(|framed| writer.render.send_ordered(framed).is_err());
                     if shell_graphics_pending || shell_assets_deferred || terminal_views_deferred {

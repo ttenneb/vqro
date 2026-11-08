@@ -1,5 +1,8 @@
 //! One transient membership/geometry pass; no session/tree or provider authority.
-use super::{LayoutLeaf, PaneFramePolicy, PaneId, PaneInfo, SplitBorder, TypedNode};
+use super::{
+    LayoutLeaf, LayoutPathStep, LayoutSplitChild, PaneFramePolicy, PaneId, PaneInfo, SplitBorder,
+    TypedNode,
+};
 use ratatui::{
     layout::{Direction, Rect},
     widgets::Borders,
@@ -26,11 +29,30 @@ pub(crate) struct BoxFrame {
     pub rect: Rect,
     pub title_pane: Option<PaneId>,
 }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CollapsedFrame {
+    pub rect: Rect,
+    pub path: Vec<LayoutPathStep>,
+    pub direction: Direction,
+    pub title_pane: Option<PaneId>,
+    pub leaf_pane: Option<PaneId>,
+    pub focused: bool,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ContainerGeometry {
+    pub path: Vec<LayoutPathStep>,
+    pub rect: Rect,
+    pub framed: bool,
+    pub stack: bool,
+}
 #[derive(Default)]
 pub(crate) struct LayoutGeometry {
     pub panes: Vec<PaneInfo>,
     pub splits: Vec<SplitBorder>,
     pub boxes: Vec<BoxFrame>,
+    pub collapsed: Vec<CollapsedFrame>,
+    pub containers: Vec<ContainerGeometry>,
+    pub pane_paths: HashMap<PaneId, Vec<LayoutPathStep>>,
     pub leaf_rects: HashMap<LayoutLeaf, Rect>,
 }
 #[derive(Clone, Copy, Default)]
@@ -41,6 +63,8 @@ struct Facts {
     visible_views: bool,
     views: bool,
     valid_scopes: bool,
+    compact: Option<(u16, u16)>,
+    visible_collapse: bool,
 }
 impl Facts {
     fn group_terminal(self) -> Option<PaneId> {
@@ -57,10 +81,16 @@ fn key(node: &TypedNode) -> usize {
 }
 
 // All membership (including hidden terminals) participates in scope validation.
-// Only the selected stack branch contributes visibility. A direct view's scope
-// is resolved against its immediate parent's complete terminal membership.
+// Only the selected stack branch contributes visibility. View-only containers
+// inherit the nearest enclosing nonempty complete terminal membership.
 fn gather(node: &TypedNode, facts: &mut HashMap<usize, Facts>) -> Facts {
     let result = match node {
+        TypedNode::Collapsed { node } => {
+            let mut result = gather(node, facts);
+            result.compact = Some((1, 1));
+            result.visible_collapse = true;
+            result
+        }
         TypedNode::Leaf(pane) => Facts {
             terminals: 1,
             terminal: Some(*pane),
@@ -93,8 +123,22 @@ fn gather(node: &TypedNode, facts: &mut HashMap<usize, Facts>) -> Facts {
                 views: a.views || b.views,
                 valid_scopes: a.valid_scopes
                     && b.valid_scopes
-                    && (!matches!(**first, TypedNode::View { .. }) || terminals == 1)
-                    && (!matches!(**second, TypedNode::View { .. }) || terminals == 1),
+                    && (!matches!(first.content(), TypedNode::View { .. }) || terminals <= 1)
+                    && (!matches!(second.content(), TypedNode::View { .. }) || terminals <= 1),
+                visible_collapse: a.visible_collapse || b.visible_collapse,
+                compact: a.compact.zip(b.compact).map(|(a, b)| {
+                    if matches!(
+                        node,
+                        TypedNode::Split {
+                            direction: Direction::Horizontal,
+                            ..
+                        }
+                    ) {
+                        (a.0.saturating_add(b.0), a.1.max(b.1))
+                    } else {
+                        (a.0.max(b.0), a.1.saturating_add(b.1))
+                    }
+                }),
             }
         }
         TypedNode::Stack {
@@ -118,12 +162,16 @@ fn gather(node: &TypedNode, facts: &mut HashMap<usize, Facts>) -> Facts {
                 if index == *selected {
                     result.visible_terminals = child_facts.visible_terminals;
                     result.visible_views = child_facts.visible_views;
+                    result.compact = child_facts
+                        .compact
+                        .map(|(width, height)| (width, height.saturating_add(1)));
+                    result.visible_collapse = child_facts.visible_collapse;
                 }
             }
             if result.terminals != 1 {
                 result.terminal = None;
             }
-            result.valid_scopes &= !direct_view || result.terminals == 1;
+            result.valid_scopes &= !direct_view || result.terminals <= 1;
             result
         }
     };
@@ -138,6 +186,15 @@ fn inset(area: Rect) -> Rect {
         area.height.saturating_sub(2),
     )
 }
+fn below_stack_header(area: Rect) -> Rect {
+    let row = area.height.min(1);
+    Rect::new(
+        area.x,
+        area.y.saturating_add(row),
+        area.width,
+        area.height.saturating_sub(row),
+    )
+}
 #[derive(Clone, Copy)]
 struct Group {
     terminal: PaneId,
@@ -145,18 +202,25 @@ struct Group {
 }
 
 pub(super) fn single_terminal_view_scopes(root: &TypedNode) -> HashMap<PaneId, PaneId> {
-    fn visit(node: &TypedNode, facts: &HashMap<usize, Facts>, out: &mut HashMap<PaneId, PaneId>) {
-        let terminal = facts
-            .get(&key(node))
-            .filter(|fact| fact.terminals == 1)
-            .and_then(|fact| fact.terminal);
+    fn visit(
+        node: &TypedNode,
+        inherited: Option<PaneId>,
+        facts: &HashMap<usize, Facts>,
+        out: &mut HashMap<PaneId, PaneId>,
+    ) {
+        let terminal = match facts.get(&key(node)) {
+            Some(fact) if fact.terminals == 0 => inherited,
+            Some(fact) if fact.terminals == 1 => fact.terminal,
+            _ => None,
+        };
         let mut child = |child: &TypedNode| {
-            if let (TypedNode::View { pane, .. }, Some(terminal)) = (child, terminal) {
+            if let (TypedNode::View { pane, .. }, Some(terminal)) = (child.content(), terminal) {
                 out.insert(*pane, terminal);
             }
-            visit(child, facts, out);
+            visit(child, terminal, facts, out);
         };
         match node {
+            TypedNode::Collapsed { node } => visit(node, inherited, facts, out),
             TypedNode::Split { first, second, .. } => {
                 child(first);
                 child(second);
@@ -172,7 +236,7 @@ pub(super) fn single_terminal_view_scopes(root: &TypedNode) -> HashMap<PaneId, P
     let mut facts = HashMap::new();
     gather(root, &mut facts);
     let mut scopes = HashMap::new();
-    visit(root, &facts, &mut scopes);
+    visit(root, None, &facts, &mut scopes);
     scopes
 }
 
@@ -209,16 +273,27 @@ pub(super) fn auto_size(
                 .is_some();
         let inside = inside || grouped;
         let mut size = match node {
+            TypedNode::Collapsed { .. } => (1, 1),
             // Reserve twenty body columns plus the existing optional scrollbar
             // gutter. The conservative extra cell also works with scrollbars off.
             TypedNode::Leaf(pane) => (21, 4 + u16::from(headers.contains(pane))),
             TypedNode::View { pane, .. } => (8, 3 + u16::from(headers.contains(pane))),
             TypedNode::Stack {
                 selected, children, ..
-            } => children
-                .get(*selected)
-                .map(|child| minimum(child, facts, measures, inside, headers, out))
-                .unwrap_or((0, 0)),
+            } => {
+                let (width, height) = children
+                    .get(*selected)
+                    .map(|child| minimum(child, facts, measures, inside, headers, out))
+                    .unwrap_or((0, 0));
+                (
+                    width,
+                    height.saturating_add(u16::from(
+                        facts
+                            .get(&key(node))
+                            .is_some_and(|facts| facts.visible_collapse),
+                    )),
+                )
+            }
             TypedNode::Split {
                 direction,
                 ratio,
@@ -270,12 +345,26 @@ pub(super) fn auto_size(
         if grouped {
             area = inset(area);
         }
+        let reserve_stack_header = facts
+            .get(&key(node))
+            .is_some_and(|facts| facts.visible_collapse);
         match node {
             TypedNode::Stack {
                 selected, children, ..
-            } => children
-                .get_mut(*selected)
-                .is_some_and(|child| apply(child, area, inside, facts, minima, measures)),
+            } => children.get_mut(*selected).is_some_and(|child| {
+                apply(
+                    child,
+                    if reserve_stack_header {
+                        below_stack_header(area)
+                    } else {
+                        area
+                    },
+                    inside,
+                    facts,
+                    minima,
+                    measures,
+                )
+            }),
             TypedNode::Split {
                 direction,
                 ratio,
@@ -292,7 +381,15 @@ pub(super) fn auto_size(
                     }
                     _ => None,
                 };
-                if inside {
+                let compact = facts
+                    .get(&key(first))
+                    .and_then(|fact| fact.compact)
+                    .is_some()
+                    || facts
+                        .get(&key(second))
+                        .and_then(|fact| fact.compact)
+                        .is_some();
+                if inside && !compact {
                     if let Some((before, measure, other)) = selected {
                         let other_min = minima.get(&key(other)).copied().unwrap_or((20, 4));
                         let (extent, reserve, wanted, low, high) =
@@ -335,7 +432,7 @@ pub(super) fn auto_size(
                         }
                     }
                 }
-                let (a, b) = super::split_rect(area, *direction, *ratio);
+                let (a, b) = effective_split(area, *direction, *ratio, first, second, facts);
                 changed |= apply(first, a, inside, facts, minima, measures);
                 changed |= apply(second, b, inside, facts, minima, measures);
                 changed
@@ -355,6 +452,53 @@ pub(super) fn auto_size(
     apply(root, area, false, &facts, &minima, &measures)
 }
 
+fn effective_split(
+    area: Rect,
+    direction: Direction,
+    ratio: f32,
+    first: &TypedNode,
+    second: &TypedNode,
+    facts: &HashMap<usize, Facts>,
+) -> (Rect, Rect) {
+    let axis = |size: (u16, u16)| {
+        if direction == Direction::Horizontal {
+            size.0
+        } else {
+            size.1
+        }
+    };
+    let a = facts
+        .get(&key(first))
+        .and_then(|fact| fact.compact)
+        .map(axis);
+    let b = facts
+        .get(&key(second))
+        .and_then(|fact| fact.compact)
+        .map(axis);
+    let extent = if direction == Direction::Horizontal {
+        area.width
+    } else {
+        area.height
+    };
+    let (a, b) = match (a, b) {
+        (None, None) => return super::split_rect(area, direction, ratio),
+        (Some(a), None) => (a.min(extent), extent.saturating_sub(a)),
+        (None, Some(b)) => (extent.saturating_sub(b), b.min(extent)),
+        (Some(a), Some(b)) => (a.min(extent), b.min(extent.saturating_sub(a))),
+    };
+    if direction == Direction::Horizontal {
+        (
+            Rect::new(area.x, area.y, a, area.height),
+            Rect::new(area.x.saturating_add(a), area.y, b, area.height),
+        )
+    } else {
+        (
+            Rect::new(area.x, area.y, area.width, a),
+            Rect::new(area.x, area.y.saturating_add(a), area.width, b),
+        )
+    }
+}
+
 pub(super) fn geometry(root: &TypedNode, focus: LayoutLeaf, area: Rect) -> LayoutGeometry {
     #[cfg(test)]
     GATHERS.with(|count| count.set(count.get() + 1));
@@ -362,7 +506,17 @@ pub(super) fn geometry(root: &TypedNode, focus: LayoutLeaf, area: Rect) -> Layou
     gather(root, &mut facts);
     let mut result = LayoutGeometry::default();
     let mut path = Vec::new();
-    walk(root, focus, area, None, &facts, &mut path, &mut result);
+    walk(
+        root,
+        focus,
+        area,
+        None,
+        &facts,
+        &mut path,
+        &mut Vec::new(),
+        Direction::Vertical,
+        &mut result,
+    );
     result
 }
 
@@ -374,8 +528,43 @@ fn walk(
     mut group: Option<Group>,
     facts: &HashMap<usize, Facts>,
     path: &mut Vec<bool>,
+    address: &mut Vec<LayoutPathStep>,
+    parent_direction: Direction,
     out: &mut LayoutGeometry,
 ) {
+    if let TypedNode::Collapsed { node } = node {
+        if parent_direction == Direction::Horizontal {
+            area.width = area.width.min(1);
+        } else {
+            area.height = area.height.min(1);
+        }
+        let focused = match focus {
+            LayoutLeaf::Pane(pane) => node.contains_pane(pane),
+            LayoutLeaf::Stack(id) => node.stack(id).is_some(),
+        };
+        out.collapsed.push(CollapsedFrame {
+            rect: area,
+            path: address.clone(),
+            direction: parent_direction,
+            title_pane: node.selected_pane(),
+            leaf_pane: node.pane_leaf(),
+            focused,
+        });
+        if matches!(
+            node.content(),
+            TypedNode::Split { .. } | TypedNode::Stack { .. }
+        ) {
+            out.containers.push(ContainerGeometry {
+                path: address.clone(),
+                rect: area,
+                framed: false,
+                stack: matches!(node.content(), TypedNode::Stack { .. }),
+            });
+        }
+        return;
+    }
+    let frame_rect = area;
+    let mut own_frame = false;
     if group.is_none() && matches!(node, TypedNode::Split { .. }) {
         if let Some(terminal) = facts
             .get(&key(node))
@@ -390,15 +579,18 @@ fn walk(
                 terminal,
                 outer: area,
             });
+            own_frame = true;
             area = inset(area);
         }
     }
     match node {
+        TypedNode::Collapsed { .. } => {} // handled before grouping
         TypedNode::Leaf(pane) | TypedNode::View { pane, .. } => {
             let view = matches!(node, TypedNode::View { .. });
             let terminal_group = group.filter(|group| group.terminal == *pane && !view);
             let rect = terminal_group.map_or(area, |group| group.outer);
             out.leaf_rects.insert(LayoutLeaf::Pane(*pane), rect);
+            out.pane_paths.insert(*pane, address.clone());
             out.panes.push(PaneInfo {
                 id: *pane,
                 rect,
@@ -421,6 +613,12 @@ fn walk(
             children,
         } => {
             out.leaf_rects.insert(LayoutLeaf::Stack(*id), area);
+            out.containers.push(ContainerGeometry {
+                path: address.clone(),
+                rect: area,
+                framed: true,
+                stack: true,
+            });
             if let Some(child) = children.get(*selected) {
                 let focus = if focus == LayoutLeaf::Stack(*id) {
                     child.selected_pane().map(LayoutLeaf::Pane).unwrap_or(focus)
@@ -430,7 +628,27 @@ fn walk(
                 // Existing split paths cannot address stack children. Keep that
                 // inherited interaction limit; geometry still projects correctly.
                 let start = out.splits.len();
-                walk(child, focus, area, group, facts, path, out);
+                address.push(LayoutPathStep::StackChild(*selected));
+                let content = if facts
+                    .get(&key(node))
+                    .is_some_and(|facts| facts.visible_collapse)
+                {
+                    below_stack_header(area)
+                } else {
+                    area
+                };
+                walk(
+                    child,
+                    focus,
+                    content,
+                    group,
+                    facts,
+                    path,
+                    address,
+                    parent_direction,
+                    out,
+                );
+                address.pop();
                 out.splits.truncate(start);
             }
         }
@@ -440,28 +658,52 @@ fn walk(
             first,
             second,
         } => {
-            let (a, b) = super::split_rect(area, *direction, *ratio);
-            out.splits.push(SplitBorder {
-                pos: if *direction == Direction::Horizontal {
-                    b.x
-                } else {
-                    b.y
-                },
-                direction: *direction,
-                ratio: *ratio,
-                area,
-                path: path.clone(),
-                independent_borders: group.is_some(),
-                view_before: group.is_some()
-                    && facts
-                        .get(&key(first))
-                        .is_some_and(|facts| facts.terminals == 0),
+            out.containers.push(ContainerGeometry {
+                path: address.clone(),
+                rect: if own_frame { frame_rect } else { area },
+                framed: own_frame,
+                stack: false,
             });
+            let (a, b) = effective_split(area, *direction, *ratio, first, second, facts);
+            let compact = facts
+                .get(&key(first))
+                .and_then(|fact| fact.compact)
+                .is_some()
+                || facts
+                    .get(&key(second))
+                    .and_then(|fact| fact.compact)
+                    .is_some();
+            if !compact {
+                out.splits.push(SplitBorder {
+                    pos: if *direction == Direction::Horizontal {
+                        b.x
+                    } else {
+                        b.y
+                    },
+                    direction: *direction,
+                    ratio: *ratio,
+                    area,
+                    path: path.clone(),
+                    independent_borders: group.is_some(),
+                    view_before: group.is_some()
+                        && facts
+                            .get(&key(first))
+                            .is_some_and(|facts| facts.terminals == 0),
+                });
+            }
             path.push(false);
-            walk(first, focus, a, group, facts, path, out);
+            address.push(LayoutPathStep::Split(LayoutSplitChild::First));
+            walk(
+                first, focus, a, group, facts, path, address, *direction, out,
+            );
+            address.pop();
             path.pop();
             path.push(true);
-            walk(second, focus, b, group, facts, path, out);
+            address.push(LayoutPathStep::Split(LayoutSplitChild::Second));
+            walk(
+                second, focus, b, group, facts, path, address, *direction, out,
+            );
+            address.pop();
             path.pop();
         }
     }

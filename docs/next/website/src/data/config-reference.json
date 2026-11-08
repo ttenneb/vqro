@@ -794,6 +794,18 @@
           "description": "Close the focused pane."
         },
         {
+          "key": "keys.collapse_pane",
+          "type": "keybinding",
+          "default": "\"prefix+m\"",
+          "description": "Collapse the focused pane, or expand its active collapsed header."
+        },
+        {
+          "key": "keys.collapse_box",
+          "type": "keybinding",
+          "default": "\"prefix+shift+m\"",
+          "description": "Choose a containing box to collapse using the existing header ancestor picker."
+        },
+        {
           "key": "keys.zoom",
           "type": "keybinding",
           "default": "\"prefix+z\"",
@@ -906,10 +918,16 @@
           "description": "Capture mouse input for Herdr's mouse UI."
         },
         {
+          "key": "ui.agent_start_views",
+          "type": "array of strings",
+          "default": "[\"vqro.tasks:tasks\", \"vqro.tasks:messages\"]",
+          "description": "Ordered <extension>:<view> identities in an ordinary terminal-free box below the terminal when its agent is reported, once per terminal. Empty disables the rule; invalid identities reject the whole group."
+        },
+        {
           "key": "ui.agent_start_view",
           "type": "string",
           "default": "",
-          "description": "Server-side agent-start rule: the view added beside a pane when an agent starts there, as <extension>:<view> (for example vqro.tasks:tasks), once per terminal. Setting it is the only switch; unset adds nothing."
+          "description": "Earlier optional single-view input override for ui.agent_start_views. Unset uses the ordered list; an explicitly empty string disables the rule."
         },
         {
           "key": "ui.copy_on_select",

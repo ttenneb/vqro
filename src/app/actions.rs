@@ -851,7 +851,7 @@ impl AppState {
         let Some(tab) = self.workspaces.get(ws_idx).and_then(|ws| ws.active_tab()) else {
             return;
         };
-        let panes = if tab.zoomed {
+        let panes = if tab.body_zoomed() {
             tab.layout.panes(self.view.terminal_area)
         } else {
             self.view.pane_infos.clone()
@@ -872,7 +872,7 @@ impl AppState {
         let Some(tab) = self.workspaces.get(ws_idx).and_then(|ws| ws.active_tab()) else {
             return false;
         };
-        let panes = if tab.zoomed {
+        let panes = if tab.body_zoomed() {
             tab.layout.panes(self.view.terminal_area)
         } else {
             self.view.pane_infos.clone()
@@ -929,6 +929,17 @@ impl AppState {
             .workspaces
             .get(ws_idx)?
             .find_tab_index_for_pane(pane_id)?;
+        let target = self.workspaces.get(ws_idx)?.tabs.get(tab_idx)?;
+        let desired = match command {
+            PaneZoomCommand::Toggle => !target.zoomed,
+            PaneZoomCommand::On => true,
+            PaneZoomCommand::Off => false,
+        };
+        // Zoom is not expansion. Reject before focus/geometry mutations so the
+        // collapsed wrapper and retained hidden PTY dimensions remain intact.
+        if desired && !target.layout.pane_is_expanded(pane_id) {
+            return None;
+        }
         let focus_changed = self.focus_pane_in_workspace(ws_idx, pane_id);
         let tab = self
             .workspaces
@@ -939,15 +950,10 @@ impl AppState {
                 changed: false,
                 focus_changed,
                 reason: Some(PaneZoomNoopReason::SinglePane),
-                zoomed: tab.zoomed,
+                zoomed: tab.body_zoomed(),
             });
         }
 
-        let desired = match command {
-            PaneZoomCommand::Toggle => !tab.zoomed,
-            PaneZoomCommand::On => true,
-            PaneZoomCommand::Off => false,
-        };
         let reason = match (command, tab.zoomed) {
             (PaneZoomCommand::On, true) => Some(PaneZoomNoopReason::AlreadyZoomed),
             (PaneZoomCommand::Off, false) => Some(PaneZoomNoopReason::AlreadyUnzoomed),
@@ -958,12 +964,12 @@ impl AppState {
                 changed: false,
                 focus_changed,
                 reason,
-                zoomed: tab.zoomed,
+                zoomed: tab.body_zoomed(),
             });
         }
 
         tab.zoomed = desired;
-        let zoomed = tab.zoomed;
+        let zoomed = tab.body_zoomed();
         self.mark_session_dirty();
         Some(PaneZoomOutcome {
             changed: true,
