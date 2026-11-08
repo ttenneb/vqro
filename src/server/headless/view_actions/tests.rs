@@ -98,8 +98,49 @@ fn fixture() -> (HeadlessServer, PrepareParams) {
         focused_workspace_id: Some(workspace_id.clone()),
         active_tab_ids: HashMap::from([(workspace_id, tab_id)]),
     });
+    client.shell_projection_revision = 1;
+    let area = ratatui::layout::Rect::new(0, 0, 80, 24);
+    let frame = crate::protocol::FrameData::from_ratatui_buffer_with_hyperlinks(
+        &ratatui::buffer::Buffer::empty(area),
+        None,
+        &[],
+    );
+    let surface = crate::protocol::PaneSurfaceFrame {
+        boot_id: server.client_shell_boot_id.clone(),
+        projection_revision: 1,
+        surface_revision: 1,
+        frame,
+        panes: vec![crate::protocol::PaneSurfacePane {
+            pane_id: consumer_pane_id.clone(),
+            content_revision: 1,
+            rect: crate::protocol::SurfaceRect {
+                x: 0,
+                y: 0,
+                width: 40,
+                height: 20,
+            },
+            inner_rect: crate::protocol::SurfaceRect {
+                x: 1,
+                y: 1,
+                width: 38,
+                height: 18,
+            },
+            scrollbar_rect: None,
+            scroll: None,
+            focused: false,
+            mouse_reporting: false,
+            sgr_pixel_mouse: false,
+            alternate_screen_active: false,
+            pixel_width: 0,
+            pixel_height: 0,
+        }],
+        collections: Vec::new(),
+        splits: Vec::new(),
+        popup: None,
+        graphics: Default::default(),
+    };
     client.render_state = crate::server::render_stream::ClientRenderState::Semantic {
-        last_surface: None,
+        last_surface: Some(Box::new(surface)),
         last_views: vec![crate::protocol::PaneSurfaceViewEntryV2 {
             pane_id: consumer_pane_id,
             extension: "example.docs".into(),
@@ -360,6 +401,222 @@ async fn admission_scope_keeps_hidden_members_and_rejects_a_selected_only_scope(
     assert!(server.view_action_binding(1, &selection).is_ok());
     selection.terminal_scope = vec![selection.pane_id.clone()];
     assert!(server.view_action_binding(1, &selection).is_err());
+}
+
+fn stack_consumer(server: &mut HeadlessServer, selection: &mut PrepareParams) {
+    let (wi, consumer) = server
+        .app
+        .parse_pane_id(&selection.consumer_pane_id)
+        .unwrap();
+    let ti = server.app.state.workspaces[wi]
+        .find_tab_index_for_pane(consumer)
+        .unwrap();
+    let terminals = server.app.state.workspaces[wi].tabs[ti]
+        .layout
+        .pane_ids()
+        .into_iter()
+        .filter(|pane| {
+            server.app.state.workspaces[wi].tabs[ti]
+                .layout
+                .view_at(*pane)
+                .is_none()
+        })
+        .collect::<Vec<_>>();
+    let mut children = terminals
+        .iter()
+        .copied()
+        .map(crate::layout::TypedNode::Leaf)
+        .collect::<Vec<_>>();
+    children.push(crate::layout::TypedNode::View {
+        pane: consumer,
+        extension: "example.docs".into(),
+        view: "work".into(),
+    });
+    let selected = children.len() - 1;
+    server.app.state.workspaces[wi].tabs[ti]
+        .layout
+        .replace_typed_root_for_test(crate::layout::TypedNode::Stack {
+            id: crate::terminal_container::TerminalContainerId::alloc().unwrap(),
+            selected,
+            children,
+        });
+    selection.terminal_scope = terminals
+        .iter()
+        .map(|pane| server.app.public_pane_id(wi, *pane).unwrap())
+        .collect();
+    if let crate::server::render_stream::ClientRenderState::Semantic { last_views, .. } =
+        &mut server.clients.get_mut(&1).unwrap().render_state
+    {
+        last_views[0].scope = selection.terminal_scope.clone();
+    }
+    server.app.state.assert_invariants_for_test();
+}
+fn hide_consumer(server: &mut HeadlessServer, selection: &PrepareParams) {
+    let (wi, consumer) = server
+        .app
+        .parse_pane_id(&selection.consumer_pane_id)
+        .unwrap();
+    let ti = server.app.state.workspaces[wi]
+        .find_tab_index_for_pane(consumer)
+        .unwrap();
+    let mut root = server.app.state.workspaces[wi].tabs[ti]
+        .layout
+        .typed_root()
+        .clone();
+    let crate::layout::TypedNode::Stack { selected, .. } = &mut root else {
+        panic!("stack fixture")
+    };
+    *selected = 0;
+    server.app.state.workspaces[wi].tabs[ti]
+        .layout
+        .replace_typed_root_for_test(root);
+    assert!(!server.app.state.workspaces[wi].tabs[ti]
+        .layout
+        .is_pane_visible(consumer));
+    server.app.state.assert_invariants_for_test();
+}
+fn prepared_for_test(server: &HeadlessServer, selection: &PrepareParams) -> Prepared {
+    Prepared::new(
+        server.view_action_binding(1, selection).unwrap(),
+        crate::client_invocation::ClientIdentity {
+            boot_id: "fixture".into(),
+            pid: 10,
+            birth: 20,
+            tty: crate::client_invocation::ClientTtyDescriptor {
+                kind: "unix".into(),
+                device: "1:2:3".into(),
+            },
+        },
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn visibility_rejects_hidden_consumer_with_stale_committed_surface() {
+    let (mut server, mut selection) = fixture();
+    stack_consumer(&mut server, &mut selection);
+    assert!(server.view_action_binding(1, &selection).is_ok());
+    let scope = selection.terminal_scope.clone();
+    hide_consumer(&mut server, &selection);
+    assert_eq!(selection.terminal_scope, scope);
+    assert!(server.clients[&1]
+        .render_state
+        .committed_view(&selection.consumer_pane_id)
+        .is_some());
+    assert!(
+        server.view_action_binding(1, &selection).is_err(),
+        "a stale visible descriptor cannot admit a hidden consumer"
+    );
+}
+#[tokio::test]
+async fn visibility_rejects_hide_after_prepare_before_native_evidence() {
+    let (mut server, mut selection) = fixture();
+    stack_consumer(&mut server, &mut selection);
+    let prepared = prepared_for_test(&server, &selection);
+    let request = crate::view_action::SubmitParams {
+        token: prepared.token.clone(),
+        confirmation_token: prepared.confirmation.clone(),
+        cancel: false,
+    };
+    server.clients.get_mut(&1).unwrap().view_actions.prepared = Some(prepared);
+    hide_consumer(&mut server, &selection);
+    let (tx, _) = std::sync::mpsc::channel();
+    let message = server
+        .start_view_action_inner(api::ApiRequestMessage {
+            origin: origin(&server, 1),
+            request: api::schema::Request {
+                id: "hidden-submit".into(),
+                method: api::schema::Method::HostViewActionSubmit(request),
+            },
+            respond_to: tx,
+            response_write_complete: None,
+        })
+        .unwrap_err();
+    assert!(
+        message.contains("visible") || message.contains("body"),
+        "must reject visibility before missing native evidence: {message}"
+    );
+}
+#[tokio::test]
+async fn visibility_rejects_hidden_consumer_at_final_ready_without_fake_native_proof() {
+    let (mut server, mut selection) = fixture();
+    stack_consumer(&mut server, &mut selection);
+    let ready = ready_sentinel(
+        &mut server,
+        &selection,
+        Instant::now() + Duration::from_secs(3),
+    );
+    hide_consumer(&mut server, &selection);
+    let message = server.finish_view_action_inner(ready).unwrap_err();
+    assert!(
+        message.contains("visible") || message.contains("body"),
+        "visibility fence must precede proof sentinel: {message}"
+    );
+}
+#[tokio::test]
+async fn visibility_rejects_zoomed_away_consumer_and_empty_current_body() {
+    let (mut server, selection) = fixture();
+    let (wi, consumer) = server
+        .app
+        .parse_pane_id(&selection.consumer_pane_id)
+        .unwrap();
+    let ti = server.app.state.workspaces[wi]
+        .find_tab_index_for_pane(consumer)
+        .unwrap();
+    let source = server.app.parse_pane_id(&selection.pane_id).unwrap().1;
+    server.app.state.workspaces[wi].tabs[ti]
+        .layout
+        .focus_pane(source);
+    server.app.state.workspaces[wi].tabs[ti].zoomed = true;
+    assert!(
+        server.view_action_binding(1, &selection).is_err(),
+        "zoom hides this body despite old surface"
+    );
+    let (mut server, selection) = fixture();
+    server.clients.get_mut(&1).unwrap().terminal_size = (1, 1);
+    assert!(
+        server.view_action_binding(1, &selection).is_err(),
+        "no current body geometry"
+    );
+}
+#[tokio::test]
+async fn visibility_rejects_inactive_surface_or_zero_accepted_body() {
+    let (mut server, selection) = fixture();
+    server.clients.get_mut(&1).unwrap().shell_surface_active = false;
+    assert!(server.view_action_binding(1, &selection).is_err());
+    let (mut server, selection) = fixture();
+    if let crate::server::render_stream::ClientRenderState::Semantic {
+        last_surface: Some(surface),
+        ..
+    } = &mut server.clients.get_mut(&1).unwrap().render_state
+    {
+        surface.panes[0].inner_rect.height = 0;
+    }
+    assert!(server.view_action_binding(1, &selection).is_err());
+}
+
+#[tokio::test]
+async fn visible_consumer_keeps_full_hidden_terminal_scope_in_stack_and_zoom() {
+    let (mut server, mut selection) = fixture();
+    stack_consumer(&mut server, &mut selection);
+    assert!(selection.terminal_scope.len() > 1);
+    let binding = server.view_action_binding(1, &selection).unwrap();
+    let (wi, consumer) = server
+        .app
+        .parse_pane_id(&selection.consumer_pane_id)
+        .unwrap();
+    let ti = server.app.state.workspaces[wi]
+        .find_tab_index_for_pane(consumer)
+        .unwrap();
+    server.app.state.workspaces[wi].tabs[ti]
+        .layout
+        .focus_pane(consumer);
+    server.app.state.workspaces[wi].tabs[ti].zoomed = true;
+    assert_eq!(server.view_action_binding(1, &selection).unwrap(), binding);
+    let mut selected_only = selection.clone();
+    selected_only.terminal_scope = vec![selected_only.pane_id.clone()];
+    assert!(server.view_action_binding(1, &selected_only).is_err());
+    server.app.state.assert_invariants_for_test();
 }
 
 fn ready_sentinel(

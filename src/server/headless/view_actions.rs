@@ -227,6 +227,46 @@ impl HeadlessServer {
                     .into(),
             );
         }
+        if !client.is_active_shell_client() || !tab.layout.is_pane_visible(pane) {
+            return Err("stale: consumer is no longer visible on this client surface".into());
+        }
+        // A descriptor is not body visibility. Use this connection's committed
+        // surface and the same current geometry path as rendering, without any
+        // drawing or runtime resizing. This runs only on explicit action jobs.
+        let accepted_body = client
+            .render_state
+            .last_pane_surface()
+            .is_some_and(|surface| {
+                surface.boot_id == self.client_shell_boot_id
+                    && surface.projection_revision == client.shell_projection_revision
+                    && surface.panes.iter().any(|entry| {
+                        entry.pane_id == selection.consumer_pane_id
+                            && entry.inner_rect.width > 0
+                            && entry.inner_rect.height > 0
+                    })
+            });
+        if !accepted_body {
+            return Err("stale: consumer has no accepted visible body".into());
+        }
+        let (cols, rows) = client.terminal_size;
+        let geometry = crate::ui::compute_tab_surface_for(
+            &self.app.state,
+            &self.app.terminal_runtimes,
+            Some(crate::ui::TabSurfaceTarget {
+                workspace_index,
+                tab_index,
+            }),
+            ratatui::layout::Rect::new(0, 0, cols, rows),
+            false,
+            crate::kitty_graphics::HostCellSize::default(),
+        );
+        if !geometry
+            .pane_infos
+            .iter()
+            .any(|info| info.id == pane && info.inner_rect.width > 0 && info.inner_rect.height > 0)
+        {
+            return Err("stale: consumer has no currently visible body".into());
+        }
         Ok(accepted.clone())
     }
 
@@ -540,6 +580,12 @@ impl HeadlessServer {
         }
         client.view_actions.busy = None;
         self.check_view_action_admission(ready.deadline)?;
+        // The accepted surface/layout can change while proof runs. Recheck
+        // their ordinary binding before considering the native proof result.
+        let current = self.view_action_binding(ready.client_id, &ready.binding.selection)?;
+        if current != ready.binding {
+            return Err("stale: action/provider/document changed after proof".into());
+        }
         let proved = ready.result?;
         if ready
             .previous
@@ -550,10 +596,6 @@ impl HeadlessServer {
         }
         if self.app.client_peer_in_owned_pane(&proved.peer) {
             return Err("client moved into an owned pane".into());
-        }
-        let current = self.view_action_binding(ready.client_id, &ready.binding.selection)?;
-        if current != ready.binding {
-            return Err("stale: action/provider/document changed after proof".into());
         }
         let local = crate::pty_ownership::publisher::current_status()
             .ok_or("local ownership unavailable")?;

@@ -27,7 +27,12 @@ descriptor. Its live `layout.view_scope` must match that committed descriptor an
 the complete `terminal_scope` expectation, including hidden/collapsed members.
 The expectation is only a fence, never scope authority. Another global SESSION
 root, an unplaced/background/moved consumer or a selected-only scope is rejected.
-Prepare/submit/final admission bind and recheck these facts.
+Prepare/submit/final admission bind and recheck these facts. Consumer visibility
+is a separate fence: this exact connection needs an active accepted surface with
+a nonempty consumer body, and the consumer must remain selected/visible with
+nonempty current effective geometry. A stale committed descriptor does not keep
+an unselected or zoomed-away consumer eligible. This consumer-body check never
+trims the authoritative terminal scope.
 
 Both document publisher and action service must remain current; the action service is the exact service recorded by the document catalog, with its independent generation and ActionInvoke grant. No task-specific state or ID interpretation occurs in the host.
 
