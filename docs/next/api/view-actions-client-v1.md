@@ -36,6 +36,22 @@ trims the authoritative terminal scope.
 
 Both document publisher and action service must remain current; the action service is the exact service recorded by the document catalog, with its independent generation and ActionInvoke grant. No task-specific state or ID interpretation occurs in the host.
 
+### TUI consumer
+
+Expanded view bodies expose neutral action/choice labels, never task commands or
+subject interpretation. A choice dialog lists only published options, marks the
+default without applying it, and displays reversibility and the full bounded
+question/options through scrolling. Irreversible answers need a matching prepared
+confirmation and an additional explicit confirm; cancel discards preparation.
+The exact composed document/projection and original operation/choice are retained;
+a newer publication cannot silently upgrade an old click. Terminal-only content
+patches do not invalidate unchanged view meaning. Stale preparation redraws cached
+current publications and requires a fresh choice, never a blind retry. Provider
+errors, uncertain replies and audit warnings retain original-operation inspection
+guidance rather than claiming no effect. Windows and unadvertised methods stay
+read-only with extension-CLI guidance; the legacy document-action lane is not a
+fallback. The legacy Tasks curses pane is unchanged.
+
 Caller identity is not a parameter. Native requests have their exact connection. Raw socket requests require kernel PID/birth/account matching exactly one registered connection; neither a payload client ID nor the foreground client supplies authority. Fresh complete ancestry, corroborated real controlling TTY, owned-pane exclusion and live fixed-namespace ownership epochs are mandatory. See [client TTY attribution](../architecture/client-tty-action-attribution.md).
 
 Prepare returns `host_view_action_prepared` with a random token, `requires_confirmation`, optional `confirmation_token`, `expires_in_ms` (60000), and original operation ID. At most one pending intent per connection, 64 globally; proof/result jobs use the existing bounded extension work slots. Tokens bind connection incarnation, caller/TTY, publisher/service generations, document revision, item, opaque subject, listed choice and operation ID. Expiry/replacement is pruned on explicit requests/document events; there is no heartbeat. Teardown drops pending state and cancels queued/pre-dispatch work.

@@ -1946,6 +1946,9 @@ impl ClientShellState {
             }
             return;
         }
+        if self.handle_view_action_dialog_mouse(mouse, outcome) {
+            return;
+        }
         if self.overlay.is_some() {
             if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
                 return;
@@ -2382,6 +2385,9 @@ impl ClientShellState {
             return;
         }
         if self.handle_collapse_header_mouse(mouse, outcome) {
+            return;
+        }
+        if self.handle_view_action_mouse(mouse, outcome) {
             return;
         }
 

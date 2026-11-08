@@ -73,6 +73,9 @@ pub(crate) fn render_client_overlay(
         }
         ClientShellOverlay::Rename(v) => render_rename_overlay(b, v, p),
         ClientShellOverlay::ConfirmClose(v) => render_confirm_close_overlay(b, v, p),
+        ClientShellOverlay::ViewAction(v) => {
+            super::super::pane_panel::actions::render_dialog(b, v, p)
+        }
         ClientShellOverlay::PaneInterruptConfirm(v) => render_confirm_close_overlay(
             b,
             &ClientConfirmCloseOverlay {
@@ -250,7 +253,7 @@ pub(crate) fn render_context_menu(
     })
 }
 
-fn panel(
+pub(in crate::client::shell) fn panel(
     b: &mut Buffer,
     a: Rect,
     c: ratatui::style::Color,
@@ -335,7 +338,7 @@ pub(in crate::client::shell) fn render_pane_contribution_divider(
     }
 }
 
-fn popup(a: Rect, w: u16, h: u16) -> Option<Rect> {
+pub(in crate::client::shell) fn popup(a: Rect, w: u16, h: u16) -> Option<Rect> {
     let w = w.min(a.width.saturating_sub(4));
     let h = h.min(a.height.saturating_sub(2));
     if w < 4 || h < 4 {
@@ -348,7 +351,7 @@ fn popup(a: Rect, w: u16, h: u16) -> Option<Rect> {
         h,
     ))
 }
-fn button(b: &mut Buffer, r: Rect, t: &str, s: Style) {
+pub(in crate::client::shell) fn button(b: &mut Buffer, r: Rect, t: &str, s: Style) {
     b.set_style(r, s);
     let w = display_width(t).min(r.width);
     put_text(b, r.x + (r.width - w) / 2, r.y, w, t, s)

@@ -658,6 +658,23 @@ impl ClientShellState {
             })
             .flatten();
         if let (Some(index), Some(documents)) = (index.as_ref(), host_documents) {
+            if let Some(surface) = self.pane_surface.as_ref() {
+                if self
+                    .view_action_composed
+                    .as_ref()
+                    .is_none_or(|(boot, revision, frame)| {
+                        boot != &documents.boot_id
+                            || *revision != documents.revision
+                            || *frame != surface.projection_revision
+                    })
+                {
+                    self.view_action_composed = Some((
+                        documents.boot_id.clone(),
+                        documents.revision,
+                        surface.projection_revision,
+                    ));
+                }
+            }
             for (pane_id, extension, view, scope) in view_panes {
                 let Some(pane) = self.hits.panes.iter().find(|hit| hit.pane_id == pane_id) else {
                     continue;
@@ -1155,6 +1172,9 @@ impl ClientShellState {
                     &self.config.keybinds,
                     &self.config.palette,
                 )?;
+                if matches!(overlay, ClientShellOverlay::ViewAction(_)) {
+                    self.hits.view_action_popup = rendered.area;
+                }
                 occlusion.cover(rendered.area);
                 self.hits.overlay_primary = rendered.primary;
                 self.hits.overlay_clear = rendered.clear;

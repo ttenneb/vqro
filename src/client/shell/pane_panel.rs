@@ -14,6 +14,8 @@ use super::*;
 use crate::extension_contract::{HostDocumentItem, HostViewState, HostViewTone};
 use crate::protocol::endpoint::HostDocumentsProjectionV1;
 
+pub(super) mod actions;
+
 #[cfg(test)]
 mod background_tests;
 #[cfg(test)]
@@ -21,6 +23,8 @@ mod frame_tests;
 
 /// A published view that fills one pane's slot.
 struct PanelView<'a> {
+    document_index: usize,
+    root_pane: &'a str,
     title: &'a str,
     /// The extension's own summary of the slice, drawn after the title.
     summary: &'a str,
@@ -269,6 +273,8 @@ fn view_sections<'a>(
             continue;
         }
         views.push(PanelView {
+            document_index: *document,
+            root_pane: item_pane,
             title: item.label.as_str(),
             summary: item.detail.as_deref().unwrap_or_default(),
             rows: flatten(index, *document, item.id.as_str(), &BTreeSet::new()),
@@ -426,7 +432,27 @@ pub(super) fn render_view_pane(
                 break;
             }
             let rect = Rect::new(body.x, y, columns, 1);
-            draw_row(buffer, rect, row, &collapsed, &agents, columns, palette);
+            let label = actions::action_label(row.item);
+            let button = label
+                .map(|label| actions::action_rect(rect, label))
+                .unwrap_or_default();
+            let row_columns = if button.is_empty() {
+                columns
+            } else {
+                columns.saturating_sub(button.width.saturating_add(1))
+            };
+            draw_row(
+                buffer,
+                Rect::new(rect.x, rect.y, row_columns, 1),
+                row,
+                &collapsed,
+                &agents,
+                row_columns,
+                palette,
+            );
+            if let Some(label) = label {
+                actions::draw_action(buffer, rect, label, palette);
+            }
             drew_row = true;
             y = y.saturating_add(1);
         }

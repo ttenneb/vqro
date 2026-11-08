@@ -182,6 +182,7 @@ pub(super) struct ShellHitMap {
     pub(super) overlay_primary: Rect,
     pub(super) overlay_clear: Rect,
     pub(super) overlay_cancel: Rect,
+    pub(super) view_action_popup: Rect,
     pub(super) inspector_body: Rect,
     pub(super) inspector_close: Rect,
     pub(super) inspector_refresh: Rect,
@@ -842,6 +843,7 @@ pub(super) enum ClientShellOverlay {
     Rename(ClientRenameOverlay),
     ConfirmClose(ClientConfirmCloseOverlay),
     PaneInterruptConfirm(ClientPaneInterruptConfirmOverlay),
+    ViewAction(super::pane_panel::actions::Dialog),
     Help(ClientHelpOverlay),
     Navigator(ClientNavigatorOverlay),
     Recovery(super::recovery_browser::ClientRecoveryOverlay),
@@ -861,7 +863,7 @@ impl ClientShellOverlay {
             Self::ProductAnnouncement(_) => ClientShellOverlayKind::ProductAnnouncement,
             Self::ReleaseNotes(_) => ClientShellOverlayKind::ReleaseNotes,
             Self::Rename(_) => ClientShellOverlayKind::Rename,
-            Self::ConfirmClose(_) | Self::PaneInterruptConfirm(_) => {
+            Self::ConfirmClose(_) | Self::PaneInterruptConfirm(_) | Self::ViewAction(_) => {
                 ClientShellOverlayKind::ConfirmClose
             }
             Self::Help(_) => ClientShellOverlayKind::Help,
@@ -881,6 +883,10 @@ impl ClientShellOverlay {
 #[derive(Debug)]
 pub(super) enum PendingEndpointKind {
     Generic,
+    ViewAction {
+        intent: Box<super::pane_panel::actions::Intent>,
+        submitting: bool,
+    },
     ProductAnnouncementDismiss {
         version: String,
         id: String,
@@ -1125,6 +1131,9 @@ pub(crate) struct ClientShellState {
     /// `shell.surface.v2` wrapper. Empty for a v1 surface, which carries no view
     /// panes. Kept beside the frame so the frame type stays byte-exact v1.
     pub(super) pane_surface_views: Vec<crate::protocol::PaneSurfaceViewEntryV2>,
+    /// TUI-only document/surface identity used for the last composed view body.
+    /// A publication before repaint cannot silently upgrade an old mouse intent.
+    pub(super) view_action_composed: Option<(String, u64, u64)>,
     /// A future projection surface waits here until its matching snapshot arrives. The visible
     /// pane surface always remains an exact snapshot pair.
     pub(super) pending_pane_surface: Option<PaneSurfaceFrame>,
@@ -1332,6 +1341,7 @@ impl ClientShellState {
             structure: None,
             pane_surface: None,
             pane_surface_views: Vec::new(),
+            view_action_composed: None,
             pending_pane_surface: None,
             pending_pane_surface_views: Vec::new(),
             graphics: crate::kitty_graphics::surface::ClientState::new(),

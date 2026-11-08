@@ -492,6 +492,9 @@ impl ClientShellState {
     ) {
         use crossterm::event::KeyModifiers;
 
+        if self.handle_view_action_dialog_key(key.as_key_event(), outcome) {
+            return;
+        }
         if matches!(self.overlay, Some(ClientShellOverlay::Onboarding)) {
             if matches!(
                 key.code,
