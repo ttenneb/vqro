@@ -345,8 +345,7 @@ async fn admission_scope_rejects_a_rescoped_consumer_with_unchanged_document_and
     assert!(server.view_action_binding(1, &selection).is_err());
 }
 
-#[tokio::test]
-async fn admission_scope_keeps_hidden_members_and_rejects_a_selected_only_scope() {
+fn split_consumer_fixture() -> (HeadlessServer, PrepareParams) {
     let (mut server, mut selection) = fixture();
     let (wi, consumer) = server
         .app
@@ -398,9 +397,147 @@ async fn admission_scope_keeps_hidden_members_and_rejects_a_selected_only_scope(
     }
     server.app.state.assert_invariants_for_test();
     selection.terminal_scope = scope;
+    (server, selection)
+}
+
+#[tokio::test]
+async fn admission_scope_keeps_hidden_members_and_rejects_a_selected_only_scope() {
+    let (server, mut selection) = split_consumer_fixture();
     assert!(server.view_action_binding(1, &selection).is_ok());
     selection.terminal_scope = vec![selection.pane_id.clone()];
     assert!(server.view_action_binding(1, &selection).is_err());
+}
+
+fn collapse_at(server: &mut HeadlessServer, selection: &PrepareParams, path: &[usize]) {
+    let (wi, consumer) = server
+        .app
+        .parse_pane_id(&selection.consumer_pane_id)
+        .unwrap();
+    let ti = server.app.state.workspaces[wi]
+        .find_tab_index_for_pane(consumer)
+        .unwrap();
+    assert!(server.app.set_node_collapsed(wi, ti, path, true));
+    server.app.state.assert_invariants_for_test();
+}
+fn assert_visibility_rejection(result: Result<(), String>) {
+    let message = result.unwrap_err();
+    assert!(
+        message.contains("visible") || message.contains("body"),
+        "must reject body eligibility before native evidence: {message}"
+    );
+}
+fn collapse_consumer(server: &mut HeadlessServer, selection: &PrepareParams, latent: bool) {
+    let (wi, consumer) = server
+        .app
+        .parse_pane_id(&selection.consumer_pane_id)
+        .unwrap();
+    let ti = server.app.state.workspaces[wi]
+        .find_tab_index_for_pane(consumer)
+        .unwrap();
+    server.app.state.workspaces[wi].tabs[ti]
+        .layout
+        .focus_pane(consumer);
+    collapse_at(server, selection, &[1]);
+    // Retain a latent persisted/raw flag in the second case, not effective zoom.
+    let tab = &mut server.app.state.workspaces[wi].tabs[ti];
+    tab.zoomed = latent;
+    assert!(!tab.body_zoomed());
+    assert!(!tab.layout.is_pane_visible(consumer));
+    server.app.state.assert_invariants_for_test();
+}
+#[tokio::test]
+async fn integrated_collapse_rejects_consumer_at_prepare_with_old_surface() {
+    for latent in [false, true] {
+        let (mut server, selection) = split_consumer_fixture();
+        assert!(server.view_action_binding(1, &selection).is_ok());
+        collapse_consumer(&mut server, &selection, latent);
+        assert!(server.clients[&1]
+            .render_state
+            .committed_view(&selection.consumer_pane_id)
+            .is_some());
+        let (tx, _) = std::sync::mpsc::channel();
+        let message = api::ApiRequestMessage {
+            origin: origin(&server, 1),
+            request: api::schema::Request {
+                id: "collapsed-prepare".into(),
+                method: api::schema::Method::HostViewActionPrepare(selection),
+            },
+            respond_to: tx,
+            response_write_complete: None,
+        };
+        assert_visibility_rejection(server.start_view_action_inner(message));
+        assert!(server.clients[&1].view_actions.busy.is_none());
+    }
+}
+#[tokio::test]
+async fn integrated_collapse_rejects_consumer_at_submit() {
+    for latent in [false, true] {
+        let (mut server, selection) = split_consumer_fixture();
+        let prepared = prepared_for_test(&server, &selection);
+        let params = crate::view_action::SubmitParams {
+            token: prepared.token.clone(),
+            confirmation_token: prepared.confirmation.clone(),
+            cancel: false,
+        };
+        server.clients.get_mut(&1).unwrap().view_actions.prepared = Some(prepared);
+        collapse_consumer(&mut server, &selection, latent);
+        let (tx, _) = std::sync::mpsc::channel();
+        let message = api::ApiRequestMessage {
+            origin: origin(&server, 1),
+            request: api::schema::Request {
+                id: "collapsed-submit".into(),
+                method: api::schema::Method::HostViewActionSubmit(params),
+            },
+            respond_to: tx,
+            response_write_complete: None,
+        };
+        assert_visibility_rejection(server.start_view_action_inner(message));
+        assert!(server.clients[&1].view_actions.busy.is_none());
+    }
+}
+#[tokio::test]
+async fn integrated_collapse_rejects_consumer_at_final_admission() {
+    for latent in [false, true] {
+        let (mut server, selection) = split_consumer_fixture();
+        let ready = ready_sentinel(
+            &mut server,
+            &selection,
+            Instant::now() + Duration::from_secs(3),
+        );
+        collapse_consumer(&mut server, &selection, latent);
+        assert_visibility_rejection(server.finish_view_action_inner(ready));
+        assert!(server.clients[&1].view_actions.busy.is_none());
+    }
+}
+#[tokio::test]
+async fn integrated_collapse_keeps_visible_sibling_and_full_collapsed_terminal_scope() {
+    let (mut server, selection) = split_consumer_fixture();
+    let before = server.view_action_binding(1, &selection).unwrap();
+    assert!(selection.terminal_scope.len() > 1);
+    collapse_at(&mut server, &selection, &[0]);
+    assert_eq!(server.view_action_binding(1, &selection).unwrap(), before);
+    let mut incomplete = selection.clone();
+    incomplete.terminal_scope = vec![incomplete.pane_id.clone()];
+    assert!(server.view_action_binding(1, &incomplete).is_err());
+}
+#[tokio::test]
+async fn integrated_collapse_keeps_visible_consumer_under_latent_raw_zoom() {
+    let (mut server, selection) = split_consumer_fixture();
+    let before = server.view_action_binding(1, &selection).unwrap();
+    let (wi, source) = server.app.parse_pane_id(&selection.pane_id).unwrap();
+    let ti = server.app.state.workspaces[wi]
+        .find_tab_index_for_pane(source)
+        .unwrap();
+    let tab = &mut server.app.state.workspaces[wi].tabs[ti];
+    tab.layout.focus_pane(source);
+    tab.zoomed = true;
+    // Characterize a latent persisted/raw flag. The ordinary App collapse path
+    // clears zoom, so use the real layout primitive to retain this state.
+    assert!(tab.layout.set_collapsed(&[0], true));
+    assert!(tab.zoomed);
+    assert!(!tab.body_zoomed());
+    assert_eq!(server.view_action_binding(1, &selection).unwrap(), before);
+    server.app.state.assert_invariants_for_test();
 }
 
 fn stack_consumer(server: &mut HeadlessServer, selection: &mut PrepareParams) {
