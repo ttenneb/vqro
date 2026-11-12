@@ -5,6 +5,10 @@ import json
 import os
 from pathlib import Path
 import shlex
+import socket
+import subprocess
+import sys
+import threading
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -136,6 +140,140 @@ class CliTests(unittest.TestCase):
         self.assertIn(cli.encoded(CALLER), message)
         self.assertIn("lookup first", message)
 
+    @unittest.skipIf(os.name == "nt", "private Unix socket transport fixture")
+    def test_socket_ack_loss_after_claim_commit_preserves_original_recovery_scope(self):
+        import provider
+        sender = {**CALLER, "terminal_id": "sender", "execution": "boot:9:9"}
+        with tempfile.TemporaryDirectory() as root:
+            store = provider.Store(root)
+            sent = store.invoke({"caller": sender, "payload": {"action": "message_send", "operation_id": "send",
+                                 "recipient": CALLER, "body": "durable before ACK loss"}})["message"]
+            store.db.close()
+            failures = []
+            with socket.socket(socket.AF_UNIX) as listener:
+                path = str(Path(root) / "api.sock")
+                listener.bind(path); listener.listen(); listener.settimeout(5)
+                def serve():
+                    observed = None
+                    try:
+                        observed = provider.Store(root)
+                        for index in range(2):
+                            peer, _ = listener.accept()
+                            with peer:
+                                peer.settimeout(5)
+                                with peer.makefile("rb") as stream:
+                                    request = json.loads(stream.readline(1024 * 1024))
+                                value = observed.invoke({"caller": CALLER, "payload": request["params"]["payload"]})
+                                if index == 0:
+                                    peer.sendall((json.dumps(success(value)) + "\n").encode())
+                                # Second call committed. Close without its admission ACK.
+                    except Exception as error:
+                        failures.append(error)
+                    finally:
+                        if observed is not None: observed.db.close()
+                worker = threading.Thread(target=serve, daemon=True)
+                worker.start()
+                with patch.dict(os.environ, {"VQRO_SOCKET_PATH": path}):
+                    status, text = cli.execute({"action": "message_claim", "operation_id": "original-claim",
+                                                "expected_caller": CALLER}, True, call=cli.invoke)
+                worker.join(timeout=6)
+                self.assertFalse(worker.is_alive())
+                self.assertEqual([], failures)
+            self.assertEqual("unknown", status)
+            self.assertIn("op original-claim", text)
+            self.assertIn(cli.encoded(CALLER), text)
+            reopened = provider.Store(root)
+            try:
+                receipt = reopened.invoke({"caller": CALLER, "payload": {"action": "op",
+                                          "operation_id": "original-claim", "lookup_caller": CALLER}})
+                self.assertTrue(receipt["authoritative"])
+                self.assertEqual([sent["id"]], [row["id"] for row in receipt["outcome"]["claimed"]])
+                self.assertEqual([], reopened.invoke({"caller": CALLER, "payload": {"action": "message_list"}})["waiting"])
+            finally:
+                reopened.db.close()
+
+    @unittest.skipIf(os.name == "nt", "private Unix socket transport fixture")
+    def test_outer_mutation_budget_leaves_inner_timeout_recovery_and_one_claim(self):
+        import provider
+        sender = {**CALLER, "terminal_id": "sender", "execution": "boot:9:9"}
+        with tempfile.TemporaryDirectory() as root:
+            store = provider.Store(root)
+            sent = store.invoke({"caller": sender, "payload": {"action": "message_send", "operation_id": "send",
+                                 "recipient": CALLER, "body": "committed once before inner timeout"}})["message"]
+            store.db.close()
+            release, failures = threading.Event(), []
+            with socket.socket(socket.AF_UNIX) as listener:
+                path = str(Path(root) / "api.sock")
+                listener.bind(path); listener.listen(); listener.settimeout(10)
+                def serve():
+                    observed = None
+                    try:
+                        observed = provider.Store(root)
+                        for index in range(2):
+                            peer, _ = listener.accept()
+                            with peer:
+                                with peer.makefile("rb") as stream:
+                                    request = json.loads(stream.readline(1024 * 1024))
+                                result = observed.invoke({"caller": CALLER, "payload": request["params"]["payload"]})
+                                if index == 0:
+                                    peer.sendall((json.dumps(success(result)) + "\n").encode())
+                                else:
+                                    release.wait(16)  # Commit, but withhold ACK beyond the inner6s deadline.
+                    except Exception as error:
+                        failures.append(error)
+                    finally:
+                        if observed is not None: observed.db.close()
+                worker = threading.Thread(target=serve, daemon=True)
+                worker.start()
+                try:
+                    # The Tasks consumer uses this bounded outer15s budget. The
+                    # real CLI must finish its inner timeout and print scope first.
+                    result = subprocess.run([sys.executable, "-B", str(Path(cli.__file__)), "message", "claim", "--json"],
+                                            env={**os.environ, "VQRO_SOCKET_PATH": path}, capture_output=True, text=True, timeout=15)
+                finally:
+                    release.set(); worker.join(timeout=3)
+                self.assertFalse(worker.is_alive())
+                self.assertEqual([], failures)
+            self.assertEqual(1, result.returncode)
+            self.assertEqual("", result.stdout)
+            self.assertIn("outcome unknown; op msg-op-", result.stderr)
+            self.assertIn("lookup first", result.stderr)
+            self.assertIn(cli.encoded(CALLER), result.stderr)
+            reopened = provider.Store(root)
+            try:
+                receipts = reopened.db.execute("SELECT operation_id,outcome FROM operations WHERE operation_id LIKE 'msg-op-%'").fetchall()
+                self.assertEqual(1, len(receipts))
+                self.assertIn(receipts[0]["operation_id"], result.stderr)
+                self.assertEqual([sent["id"]], [row["id"] for row in json.loads(receipts[0]["outcome"])["claimed"]])
+                self.assertEqual(1, reopened.db.execute("SELECT COUNT(*) FROM messages WHERE state='claimed'").fetchone()[0])
+            finally:
+                reopened.db.close()
+
+    @unittest.skipIf(os.name == "nt", "Unix API deadline; Windows has its own absolute deadline")
+    def test_api_uses_one_deadline_across_connect_send_and_trickled_reads(self):
+        def exercise(step):
+            clock, timeouts = [0.0], []
+            class Stream:
+                def __enter__(self): return self
+                def __exit__(self, *_): pass
+                def settimeout(self, value): timeouts.append(value)
+                def connect(self, path): clock[0] += step
+                def sendall(self, frame): clock[0] += step
+                def recv(self, size):
+                    clock[0] += step
+                    return next(blocks)
+            blocks = iter((b"{", b"}", b"\n"))
+            with patch.dict(os.environ, {"VQRO_SOCKET_PATH": "/private/fake.sock"}), \
+                 patch.object(cli.socket, "socket", return_value=Stream()), \
+                 patch.object(cli.time, "monotonic", side_effect=lambda: clock[0]):
+                result = cli.api("fixture.read", timeout=0.1)
+            return result, timeouts
+        result, timeouts = exercise(0.01)
+        self.assertEqual({}, result)
+        self.assertTrue(all(0 < right < left for left, right in zip(timeouts, timeouts[1:])))
+        with self.assertRaisesRegex(TimeoutError, "API deadline elapsed"):
+            exercise(0.03)
+
     def test_entropy_and_unknown_caller_fail_before_write(self):
         payload = {"action": "create", "title": "proof"}
         calls = []
@@ -147,10 +285,62 @@ class CliTests(unittest.TestCase):
         self.assertEqual(calls, [{"action": "whoami"}])
 
     def test_message_binding_revision_and_claim_payloads(self):
-        self.assertEqual(cli.parse_message(["send", "task-b", "body", "--op", "id"])[0]["target"], "task-b")
+        self.assertEqual(cli.parse_message(["send", "task-b", "body", "--op", "id", "--caller", cli.encoded(CALLER)])[0]["target"], "task-b")
         self.assertTrue(cli.parse_message(["claim", "--idle"])[0]["idle"])
         with self.assertRaises(ValueError): cli.parse_message(["edit", "id", "body"])
         self.assertFalse(cli.parse_message(["activation", "off"])[0]["activation"])
+
+    def test_explicit_message_operations_require_original_binding_for_every_write(self):
+        commands = [["send", "recipient", "body"], ["claim"],
+                    ["edit", "message", "body", "--rev", "1"], ["activation", "off"]]
+        for command in commands:
+            with self.subTest(command=command):
+                with self.assertRaisesRegex(ValueError, "explicit --op requires --caller"):
+                    cli.parse_message([*command, "--op", "original"])
+                payload, mutation = cli.parse_message([*command, "--op", "original", "--caller", cli.encoded(CALLER)])
+                self.assertTrue(mutation)
+                self.assertEqual(CALLER, payload["expected_caller"])
+                implicit, mutation = cli.parse_message(command)
+                self.assertTrue(mutation)
+                self.assertNotIn("operation_id", implicit)
+
+    def test_replacement_cannot_rescope_an_explicit_message_operation(self):
+        import provider
+        recipient = {**CALLER, "terminal_id": "recipient", "execution": "boot:3:3"}
+        current = CALLER
+        calls = []
+        with tempfile.TemporaryDirectory() as root:
+            store = provider.Store(root)
+            try:
+                def call(payload):
+                    calls.append(copy.deepcopy(payload))
+                    return success(store.invoke({"caller": current, "payload": payload}))
+                args = ["send", json.dumps(recipient), "one durable message", "--op", "original",
+                        "--caller", cli.encoded(CALLER)]
+                payload, mutation = cli.parse_message(args)
+                status, original = cli.execute(payload, mutation, call=call)
+                self.assertEqual("success", status)
+                receipt = store.db.execute("SELECT outcome FROM operations WHERE operation_id='original'").fetchone()[0]
+                payload, mutation = cli.parse_message(args)
+                self.assertEqual(("success", original), cli.execute(payload, mutation, call=call))
+                current = {**CALLER, "execution": "boot:1:replacement"}
+                before = list(store.db.iterdump()), len(calls)
+                with self.assertRaisesRegex(ValueError, "explicit --op requires --caller"):
+                    cli.parse_message(args[:-2])
+                self.assertEqual(before, (list(store.db.iterdump()), len(calls)))
+                payload, mutation = cli.parse_message(args)
+                status, text = cli.execute(payload, mutation, call=call)
+                self.assertEqual("rejected", status)
+                self.assertIn("original caller changed", text)
+                self.assertEqual("whoami", calls[-1]["action"])
+                lookup = store.invoke({"caller": current, "payload": {"action": "op", "operation_id": "original",
+                                      "lookup_caller": CALLER}})
+                self.assertTrue(lookup["authoritative"])
+                self.assertEqual(original, lookup["outcome"])
+                self.assertEqual(receipt, store.db.execute("SELECT outcome FROM operations WHERE operation_id='original'").fetchone()[0])
+                self.assertEqual(1, store.db.execute("SELECT COUNT(*) FROM messages").fetchone()[0])
+            finally:
+                store.db.close()
 
     def test_message_send_target_can_be_an_exact_agent_binding(self):
         binding = {"class": "agent", "terminal_id": "term_a", "agent": "pi", "execution": "boot:1:2"}

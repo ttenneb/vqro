@@ -101,6 +101,25 @@ class MessagesTest(unittest.TestCase):
         claimed = self.invoke({"action": "message_claim", "operation_id": "wide-claim"}, B)["claimed"]
         self.assertEqual([item["body"] for item in claimed], [body])
 
+    def test_serialized_claim_budget_and_oversized_request_do_not_lose_waiting_records(self):
+        body = "\u0800" * 10_800
+        for index in range(6):
+            self.send(body=body, op=f"encoded-{index}")
+        claimed_ids = set()
+        for batch in range(6):
+            outcome = self.invoke({"action": "message_claim", "operation_id": f"encoded-claim-{batch}"}, B)
+            self.assertLessEqual(len(provider.canonical(outcome).encode()), provider.MAX_REPLY_BYTES)
+            ids = {row["id"] for row in outcome["claimed"]}
+            self.assertFalse(ids & claimed_ids)
+            claimed_ids.update(ids)
+        self.assertEqual(6, len(claimed_ids))
+        before = list(self.store.db.iterdump())
+        # Raw body is allowed, but escaped wire JSON is not: fail before a receipt
+        # or durable send, rather than committing an unreturnable outcome.
+        with self.assertRaisesRegex(ValueError, "64 KiB"):
+            self.send(body="\u0001" * MAX_BODY_BYTES, op="escaped-too-large")
+        self.assertEqual(before, list(self.store.db.iterdump()))
+
     def test_a_fresh_store_defaults_activation_on_and_keeps_the_stored_value(self):
         self.assertTrue(self.invoke({"action": "message_list"}, A)["activation"])
         self.invoke({"action": "message_activation", "operation_id": "human-off", "activation": False}, HUMAN)
@@ -130,6 +149,52 @@ class MessagesTest(unittest.TestCase):
         self.assertFalse(self.invoke({"action": "message_list"}, A)["activation"])
         row = self.store.db.execute("SELECT activation, updated_by FROM message_policy WHERE id=1").fetchone()
         self.assertEqual((row["activation"], json.loads(row["updated_by"])), (0, HUMAN))
+
+    def test_lost_claim_ack_recovers_original_batch_after_restart_without_reclaim(self):
+        first = self.send(body="original delivery")["message"]
+        payload = {"action": "message_claim", "operation_id": "lost-claim", "expected_caller": B}
+        original = self.invoke(payload, B)  # Commit happened; pretend its ACK was lost.
+        self.send(body="later delivery", op="later")
+        self.store.db.close()
+        self.store = provider.Store(self.root)
+        before = list(self.store.db.iterdump())
+        lookup = self.invoke({"action": "op", "operation_id": "lost-claim", "lookup_caller": B}, B)
+        self.assertTrue(lookup["authoritative"])
+        self.assertEqual(original, lookup["outcome"])
+        self.assertEqual(original, self.invoke(payload, B))
+        self.assertEqual(before, list(self.store.db.iterdump()))
+        self.assertEqual([first["id"]], [row["id"] for row in original["claimed"]])
+        waiting = self.invoke({"action": "message_list"}, B)["waiting"]
+        self.assertEqual(["later delivery"], [row["body"] for row in waiting])
+        replacement = {**B, "execution": "boot:20:replacement"}
+        self.assertEqual([], self.invoke({"action": "message_list"}, replacement)["waiting"])
+        with self.assertRaisesRegex(ValueError, "original operation scope"):
+            self.invoke(payload, replacement)
+
+    def test_document_version_moves_for_each_message_not_only_the_largest_revision(self):
+        versions = [self.store.document_revision()]
+        first = self.send(body="first", recipient=C)["message"]
+        versions.append(self.store.document_revision())
+        for revision in range(1, 5):
+            self.invoke({"action": "message_edit", "operation_id": f"edit-{revision}",
+                         "id": first["id"], "revision": revision, "body": f"draft {revision}"})
+            versions.append(self.store.document_revision())
+        second = self.send(body="second", op="second")["message"]
+        versions.append(self.store.document_revision())
+        self.invoke({"action": "message_claim", "operation_id": "claim-lower-revision"}, B)
+        versions.append(self.store.document_revision())
+        self.send(caller=B, recipient=A, body="reply", reply_to=second["id"], op="reply")
+        versions.append(self.store.document_revision())
+        self.assertTrue(all(after > before for before, after in zip(versions, versions[1:])), versions)
+        before = self.store.document_revision()
+        self.invoke({"action": "message_list"}, B)
+        self.invoke({"action": "message_claim", "operation_id": "claim-lower-revision"}, B)
+        self.invoke({"action": "message_claim", "operation_id": "empty-claim"}, B)
+        self.send(body="second", op="second")
+        self.assertEqual(before, self.store.document_revision())
+        self.store.db.close()
+        self.store = provider.Store(self.root)
+        self.assertEqual(before, self.store.document_revision())
 
     def test_operation_dedupe_and_provider_restart_durability(self):
         sent = self.send(body="durable")

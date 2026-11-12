@@ -45,14 +45,35 @@ export default function (pi: ExtensionAPI) {
   const snapshot = () => structuredClone(state);
   const current = (token: Run) => state.state !== "closed" && token.session === state.session && token.generation === state.generation && token.run === state.run && token.self?.execution === state.self?.execution;
   const exec = async (args: string[], timeout: number) => state.state === "closed" ? null : pi.exec(bin!, args, { timeout }).catch(() => null);
-  async function identity() {
-    const result = await exec(["agent", "get", pane!], 2000);
-    if (result?.code !== 0) return undefined;
+  let identityFlight: Promise<Run["self"]> | undefined;
+  let lastIdentityAttempt = Number.NEGATIVE_INFINITY;
+  async function identity(): Promise<Run["self"]> {
+    const session = state.session, generation = state.generation, run = state.run;
+    const sameEpoch = () => state.state !== "closed" && state.session === session && state.generation === generation && state.run === run;
+    // Lifecycle/delivery needs its OWN fresh read, not an idle read begun before
+    // its observation boundary. Invalidated reads retain their slot until done.
+    while (identityFlight) {
+      await identityFlight;
+      if (!sameEpoch()) return undefined;
+    }
+    if (!sameEpoch()) return undefined;
+    lastIdentityAttempt = Date.now();
+    const read = (async () => {
+      const result = await exec(["agent", "get", pane!], 2000);
+      if (result?.code !== 0) return undefined;
+      try {
+        const agent = JSON.parse(result.stdout)?.result?.agent;
+        if (!agent) return undefined;
+        return { name: agent.name, execution: agent.execution, terminal_id: agent.terminal_id, pane_id: agent.pane_id };
+      } catch { return undefined; }
+    })();
+    identityFlight = read;
     try {
-      const agent = JSON.parse(result.stdout)?.result?.agent;
-      if (!agent) return undefined;
-      return { name: agent.name, execution: agent.execution, terminal_id: agent.terminal_id, pane_id: agent.pane_id };
-    } catch { return undefined; }
+      const observed = await read;
+      return sameEpoch() ? observed : undefined;
+    } finally {
+      if (identityFlight === read) identityFlight = undefined;
+    }
   }
   async function publish(kind: string, extra: Partial<Fact> = {}) {
     state.sequence += 1;
@@ -188,6 +209,14 @@ export default function (pi: ExtensionAPI) {
     settleTimer.unref?.();
   }
 
+  function refreshUnknownIdentity(): void {
+    if (state.state !== "idle" || state.self?.execution || identityFlight || Date.now() - lastIdentityAttempt < INPUT_BOX_REFRESH_MS) return;
+    const token = snapshot();
+    void identity().then(observed => {
+      if (current(token) && state.state === "idle" && !state.self?.execution && observed?.execution) state.self = observed;
+    });
+  }
+
   function watchInputBox(ctx: any): void {
     stopInputBox();
     inputBoxStopped = false;
@@ -200,6 +229,9 @@ export default function (pi: ExtensionAPI) {
       return undefined;
     });
     editorPoll = setInterval(() => {
+      // Neutral observation only, independent of editor/UI/report availability.
+      // Unknown idle sessions reuse this clock; no Tasks policy or turn starts.
+      refreshUnknownIdentity();
       const text = readInputBoxText();
       if (text !== undefined && text !== lastSentInputBox?.text) markInputBoxDirty(false);
       reportInputBox();

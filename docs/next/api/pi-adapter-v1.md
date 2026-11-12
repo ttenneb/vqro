@@ -30,6 +30,15 @@ version1 interface provides:
   queuing. A transport result is not agent acceptance; do not replay uncertain
   effects or infer understanding from a receipt.
 
+Unknown idle identity is re-observed using the existing editor observation clock,
+paced at most once per 30 seconds independently of editor text or report success.
+It reuses the same bounded host identity probe, adds no timer/API/event shape, and
+only updates neutral cached identity after session/generation/run and idle/unknown
+checks. Idle reads are single-flight with lifecycle/delivery reads; lifecycle and
+fresh delivery serialize then make their own fresh observation, never borrow an
+earlier read. Healthy known sessions add no recurring identity probes. Observation
+itself sends no input and cannot adopt a prior execution's addressed queue.
+
 Shutdown invalidates retained interfaces/in-flight work and unregisters discovery
 and consumers. Facts never request input themselves. The adapter does not poll
 mailboxes, invoke Tasks commands, interpret reply expectation or publish no-reply
@@ -37,12 +46,20 @@ labels. It keeps no message/approval/work record of truth.
 
 ## Tasks composition
 
-`extensions/tasks/pi.ts` consumes this interface. Tasks owns durable message
+`extensions/tasks/pi.ts` consumes this interface. Its existing mailbox interval
+may be armed while identity is unknown, but performs no list, claim or delivery
+until a freshly observed execution is present. Existing activation, token/current
+and fresh-delivery checks still gate every effect. Tasks owns durable message
 claim/activation polling, message rendering, explicit-send evidence, reply caps,
 recipient policy and no-reply observations. Disabled/unavailable Tasks cannot
 activate a durable message or record a reply. A late successful
 claim is recorded undelivered rather than injected into a different run; an
 uncertain claim retains CLI recovery information and is not blindly replayed.
+Tasks gives message mutations a bounded 15-second outer execution budget, longer
+than the CLI's two six-second identity/write API deadlines plus process overhead,
+so an inner timeout can return the original caller/operation recovery text.
+Unknown automatic replies retain that same recovery text; neither path retries
+an uncertain mutation or treats its receipt as delivery/acceptance.
 
 Reply recording — exact sender bindings, `reply_to` on every automatic answer,
 no automatic answer to an answer, and no automatic reply unless the run's own

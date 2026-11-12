@@ -109,6 +109,55 @@ class DocumentTests(unittest.TestCase):
         # Placement is required: no placement, no panel row.
         self.assertFalse(any("panel:" in row["id"] for row in document.project(self.store,self.snapshot([]))["items"]))
 
+    def test_empty_messages_view_needs_only_current_placement_not_a_store_or_binding(self):
+        for store in (None, self.store):
+            with self.subTest(store=store is not None):
+                before = None if store is None else list(store.db.iterdump())
+                doc = document.project(store, self.snapshot([{"terminal_id": "a", "placement": P}]))
+                root = next(row for row in doc["items"] if row["id"] == "panel:w1:p1:messages")
+                self.assertEqual({"pane_id": "w1:p1", "view_id": "messages", "state": "open"}, root["view"])
+                rows = [row for row in doc["items"] if row.get("parent_id") == root["id"]]
+                self.assertEqual(["No messages"], [row["label"] for row in rows])
+                self.assertNotIn("terminal", rows[0])
+                self.assertFalse(rows[0].get("action_ids"))
+                self.assertEqual([], doc["actions"])
+                if store is not None:
+                    self.assertEqual(before, list(store.db.iterdump()))
+                self.assertFalse(any(row.get("view", {}).get("view_id") == "messages"
+                                     for row in document.project(store, self.snapshot([]))["items"]))
+                moved = {**P, "pane_id": "w2:p7", "workspace_id": "w2", "tab_id": "w2:t3"}
+                roots = [row["view"]["pane_id"] for row in document.project(
+                    store, self.snapshot([{"terminal_id": "a", "placement": moved}]))["items"]
+                         if row.get("view", {}).get("view_id") == "messages"]
+                self.assertEqual(["w2:p7"], roots)
+
+    def test_empty_message_panels_keep_the_existing_item_budget(self):
+        placements = {f"t{index}": {**P, "pane_id": f"w1:p{index}"} for index in range(300)}
+        for room in (0, 1, 2, 3, 4, 7, 252):
+            items = document.message_panel_items(placements, [], ({}, {}, set()), room)
+            self.assertLessEqual(len(items), room)
+            roots = {row["id"] for row in items if "parent_id" not in row}
+            self.assertTrue(all(row["parent_id"] in roots for row in items if "parent_id" in row))
+        refs = [{"terminal_id": key, "placement": value} for key, value in placements.items()]
+        doc = document.project(self.store, self.snapshot(refs))
+        self.assertLessEqual(len(doc["items"]), 256)
+        self.assertLessEqual(len(provider.canonical(doc).encode()), document.DOCUMENT_BYTES)
+
+    def test_empty_slices_do_not_displace_real_messages_at_the_item_bound(self):
+        self.store.messages.mutate({"action": "message_send", "body": "real message wins", "recipient": A},
+                                   H, "2026-10-04T00:00:00.000+00:00")
+        refs = [{"terminal_id": f"empty-{index}", "placement": {**P, "pane_id": f"w1:p{index:03}"}}
+                for index in range(300)]
+        refs.append({"terminal_id": "a", "placement": {**P, "pane_id": "w1:pzz-last"}})
+        doc = document.project(self.store, self.snapshot(refs))
+        self.assertLessEqual(len(doc["items"]), 256)
+        self.assertTrue(any("real message wins" in row["label"] for row in doc["items"]))
+
+    def test_unreadable_messages_table_is_a_provider_error_not_an_empty_inbox(self):
+        self.store.db.execute("DROP TABLE messages")
+        with self.assertRaises(sqlite3.OperationalError):
+            document.project(self.store, self.snapshot([{"terminal_id": "a", "placement": P}]))
+
     def test_messages_view_shows_waiting_claimed_and_missing_replies(self):
         panel_a={"pane_id":"w1:p1","workspace_id":"w1","tab_id":"w1:t1"}
         panel_b={"pane_id":"w1:p2","workspace_id":"w1","tab_id":"w1:t1"}
@@ -122,12 +171,127 @@ class DocumentTests(unittest.TestCase):
         items=document.project(self.store,self.snapshot(refs))["items"]
         a_root=next(row for row in items if row["id"]=="panel:w1:p1:messages")
         self.assertEqual("Messages",a_root["label"])
-        self.assertEqual("1 no reply",a_root["detail"])
-        self.assertTrue(any(row["detail"].startswith("no reply to") for row in items if row["id"].startswith("panel:w1:p1:message:")))
-        b_rows=[row for row in items if row["id"].startswith("panel:w1:p2:message:")]
+        self.assertFalse(any(row["label"] == "No messages" for row in items))
+        self.assertEqual("UNRESOLVED · 0 recorded waiting",a_root["detail"])
+        self.assertTrue(any(row.get("detail", "").startswith("no recorded reply") for row in items if row["id"].startswith("panel:w1:p1:message:")))
+        b_rows=[row for row in items if row["id"].removeprefix("panel:w1:p2:message:").isdigit()]
         self.assertEqual(1,len(b_rows))
-        self.assertEqual("claimed",b_rows[0]["detail"])
+        self.assertEqual("claimed", b_rows[0]["detail"])
+        context = next(row for row in items if row["id"] == b_rows[0]["parent_id"])
+        self.assertEqual("Recorded recipient: pi · boot:1:2", context["label"])
         self.assertTrue(b_rows[0]["label"].startswith("pi @") or "please review" in b_rows[0]["label"], b_rows[0])
+
+    def message_slice(self, doc, pane="w1:p1"):
+        return [row for row in doc["items"] if row["id"].startswith(f"panel:{pane}:message")]
+
+    def seed_messages(self, count, recipient=A, sender=None):
+        sender = sender or {"class": "agent", "terminal_id": "b", "agent": "pi", "execution": "boot:1:2"}
+        at = "2026-10-04T00:00:00.000+00:00"
+        self.store.db.execute("BEGIN")
+        self.store.db.executemany(
+            "INSERT INTO messages(id,sender,recipient,recipient_execution,body,reply_to,state,revision,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,NULL,'waiting',1,?,?)",
+            ((f"msg_{index:032x}", provider.canonical(sender), provider.canonical(recipient), recipient["execution"],
+              f"Stored message {index}", at, at) for index in range(count)))
+        self.store.db.commit()
+
+    def test_replacement_and_single_historical_context_are_unresolved_not_actionable(self):
+        self.invoke({"action": "create", "title": "old execution anchor", "operation_id": "old-anchor"}, caller=A)
+        replacement = {**A, "execution": "boot:1:replacement"}
+        self.store.messages.mutate({"action": "message_send", "recipient": replacement, "body": "replacement waiting"}, H,
+                                   "2026-10-04T00:00:00.000+00:00")
+        before = list(self.store.db.iterdump()), self.store.db.total_changes
+        doc = document.project(self.store, self.agent_snapshot())
+        rows = self.message_slice(doc)
+        text = json.dumps(rows, ensure_ascii=False)
+        self.assertIn("UNRESOLVED", text)
+        self.assertIn("1 recorded waiting", text)
+        self.assertIn("Recorded recipient: pi · boot:1:replacement", text)
+        self.assertIn("replacement waiting", text)
+        self.assertNotIn("No messages", text)
+        self.assertTrue(all(not any(key in row.get("view", {}) for key in ("action", "waiting", "affordance")) for row in rows))
+        self.assertTrue(all(not row.get("action_ids") for row in rows))
+        self.assertEqual([], doc["actions"])
+        self.assertEqual(before, (list(self.store.db.iterdump()), self.store.db.total_changes))
+        # Even one recorded execution does not attest that it is current.
+        self.assertIn("Current execution not established", text)
+
+    def test_complete_quota_headers_keep_old_messages_visible_beyond_preview(self):
+        other = {**A, "terminal_id": "other", "execution": "boot:2:2"}
+        self.seed_messages(provider.MAX_RECORDS, recipient=other)
+        self.store.db.execute("UPDATE messages SET recipient=?,recipient_execution=? WHERE id=?",
+                              (provider.canonical(A), A["execution"], "msg_" + "0" * 32))
+        before = list(self.store.db.iterdump())
+        trace = []
+        self.store.db.set_trace_callback(trace.append)
+        try:
+            doc = document.project(self.store, self.snapshot([
+                {"terminal_id": "a", "placement": P},
+                {"terminal_id": "other", "placement": {**P, "pane_id": "w1:p2"}}]))
+        finally:
+            self.store.db.set_trace_callback(None)
+        self.assertIn("UNRESOLVED · 9999 recorded waiting", json.dumps(self.message_slice(doc, "w1:p2"), ensure_ascii=False))
+        text = json.dumps(self.message_slice(doc), ensure_ascii=False)
+        self.assertIn("UNRESOLVED", text)
+        self.assertIn("1 recorded waiting", text)
+        self.assertIn("Recorded recipient: pi · boot:1:1", text)
+        self.assertIn("1 message previews omitted", text)
+        self.assertNotIn("No messages", text)
+        self.assertEqual(1, sum("SELECT id,sender,recipient,recipient_execution,state,reply_to" in query for query in trace))
+        self.assertEqual(1, sum("SELECT * FROM messages" in query for query in trace))
+        self.assertEqual("BEGIN", trace[0])
+        self.assertEqual("ROLLBACK", trace[-1])
+        self.assertEqual(before, list(self.store.db.iterdump()))
+        self.assertLessEqual(len(doc["items"]), 256)
+        self.assertLessEqual(len(provider.canonical(doc).encode()), document.DOCUMENT_BYTES)
+        self.store.db.execute("INSERT INTO messages SELECT 'over-quota',sender,recipient,recipient_execution,body,reply_to,state,revision,created_at,updated_at,claimed_at FROM messages LIMIT 1")
+        with self.assertRaisesRegex(ValueError, "exceeds store quota"):
+            document.project(self.store, self.agent_snapshot())
+
+    def test_reply_outside_preview_is_not_reported_missing_and_unrelated_scope_is_empty(self):
+        self.seed_messages(201, recipient=A)
+        # The newest preview includes message200 sent by b. Its recorded reply is
+        # outside the body window; complete header evidence still discharges it.
+        self.store.db.execute("UPDATE messages SET reply_to=? WHERE id=?", (f"msg_{200:032x}", f"msg_{0:032x}"))
+        panel_b = {**P, "pane_id": "w1:p2"}
+        refs = [{"terminal_id": "b", "placement": panel_b}, {"terminal_id": "unrelated", "placement": P}]
+        doc = document.project(self.store, self.snapshot(refs))
+        rows = self.message_slice(doc, "w1:p2")
+        latest = next(row for row in rows if row["label"] == "Stored message 200")
+        self.assertEqual("recorded reply", latest["detail"])
+        context = next(row for row in rows if row["id"] == latest["parent_id"])
+        self.assertEqual("Recorded sender: pi · boot:1:2", context["label"])
+        self.assertNotIn("no recorded reply", latest["detail"])
+        self.assertIn("UNRESOLVED · 0 recorded waiting", json.dumps(rows, ensure_ascii=False))
+        self.assertEqual(["No messages"], [row["label"] for row in self.message_slice(doc) if "parent_id" in row])
+
+    def test_malformed_header_outside_preview_fails_closed(self):
+        self.seed_messages(201)
+        self.store.db.execute("UPDATE messages SET recipient='{}' WHERE id=?", ("msg_" + "0" * 32,))
+        before = list(self.store.db.iterdump())
+        with self.assertRaises(ValueError):
+            document.project(self.store, self.agent_snapshot())
+        self.assertEqual(before, list(self.store.db.iterdump()))
+
+    def test_message_headers_and_preview_share_one_snapshot_during_a_write(self):
+        writer = provider.Store(self.root.name)
+        changed = []
+        def trace(query):
+            if query.startswith("SELECT id,sender,recipient,recipient_execution,state,reply_to") and not changed:
+                changed.append(True)
+                writer.invoke({"caller": H, "payload": {"action": "message_send", "operation_id": "concurrent",
+                               "recipient": A, "body": "concurrent message"}})
+        self.store.db.set_trace_callback(trace)
+        try:
+            before = document.project(self.store, self.agent_snapshot())
+        finally:
+            self.store.db.set_trace_callback(None)
+            writer.db.close()
+        self.assertEqual([True], changed)
+        self.assertIn("No messages", provider.canonical(self.message_slice(before)))
+        after = json.dumps(self.message_slice(document.project(self.store, self.agent_snapshot())), ensure_ascii=False)
+        self.assertIn("UNRESOLVED · 1 recorded waiting", after)
+        self.assertIn("concurrent message", after)
 
     def test_shared_durable_policy_and_placement_move_and_unknown(self):
         task=self.invoke({"action":"create","title":"native","operation_id":"create"})["task"]
@@ -253,6 +417,38 @@ class DocumentTests(unittest.TestCase):
         self.assertEqual([1,2,2],[result["document_revision"] for result in results])
         self.assertEqual(results[0]["value"],results[2]["value"])
         self.assertTrue(all("document_revision" not in json.loads(row[0]) for row in self.store.db.execute("SELECT outcome FROM operations")))
+
+    def test_every_changed_message_projection_moves_its_publication_version(self):
+        agent_b = {"class": "agent", "terminal_id": "b", "agent": "pi", "execution": "boot:1:2"}
+        refs = [{"terminal_id": "a", "placement": P},
+                {"terminal_id": "b", "placement": {**P, "pane_id": "w1:p2"}}]
+        snapshot = self.snapshot(refs)
+        def observed():
+            return self.store.document_revision(), provider.canonical(document.project(self.store, snapshot))
+        previous = observed()
+        self.assertIn("No messages", previous[1])
+        second = None
+        for payload, caller in [
+            ({"action": "message_send", "operation_id": "first", "recipient": agent_b, "body": "First message"}, A),
+            ({"action": "message_send", "operation_id": "second", "recipient": agent_b, "body": "Second message"}, A),
+            ({"action": "message_claim", "operation_id": "pickup"}, agent_b),
+        ]:
+            result = self.store.invoke({"caller": caller, "payload": payload})
+            if payload["operation_id"] == "second":
+                second = result["message"]["id"]
+            current = observed()
+            self.assertNotEqual(previous[1], current[1])
+            self.assertGreater(current[0], previous[0])
+            previous = current
+        self.store.invoke({"caller": agent_b, "payload": {"action": "message_send", "operation_id": "reply",
+                           "recipient": A, "body": "Review recorded", "reply_to": second}})
+        current = observed()
+        self.assertNotEqual(previous[1], current[1])
+        self.assertGreater(current[0], previous[0])
+        self.store.invoke({"caller": A, "payload": {"action": "message_send", "operation_id": "second",
+                           "recipient": agent_b, "body": "Second message"}})
+        self.store.invoke({"caller": A, "payload": {"action": "message_list"}})
+        self.assertEqual(current, observed())
 
     def panel_rows(self, doc):
         return [row for row in doc["items"] if row["id"].startswith("panel:") and ":task:" in row["id"]]

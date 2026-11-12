@@ -171,7 +171,7 @@ export default function(pi:any) {
         raise RuntimeError(f"private demo result did not arrive: {path}")
 
     def agent(self, name, token, args=None, expected=0, drop=None, tool="task"):
-        if tool == "task" and args and "--op" in args and "--caller" not in args:
+        if tool in ("task", "message") and args and "--op" in args and "--caller" not in args:
             args = [*args, "--caller", json.dumps(self.agent_bindings[name])]
         self.save(f"commands/{token}.json", {"tool": tool, "args": args, **({"drop": drop} if drop else {})})
         self.cli("agent", "prompt", name, f"/taskcore {token}")
@@ -188,7 +188,7 @@ export default function(pi:any) {
         return result
 
     def human(self, pane, token, args, tool="task"):
-        if tool == "task" and "--op" in args and "--caller" not in args:
+        if tool in ("task", "message") and "--op" in args and "--caller" not in args:
             args = [*args, "--caller", json.dumps(self.human_binding)]
         output, error, status = [self.root / f"receipts/{token}.{suffix}" for suffix in ("out", "err", "status")]
         command = shlex.join(["vqro", tool, *args]) + f" > {shlex.quote(str(output))} 2> {shlex.quote(str(error))}; printf '%s' \"$?\" > {shlex.quote(str(status))}"

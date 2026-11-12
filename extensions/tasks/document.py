@@ -7,10 +7,9 @@ durable meaning only: which task, who owes what, and since when.
 import datetime
 import json
 import re
-import sqlite3
 from collections import Counter
 from decision_queue import text as decision_text
-from provider import canonical
+from provider import MAX_RECORDS, canonical, checked_binding
 from view import clean, debtors, durable_attention as attention, label, recipient
 
 PREFIX = "context:attention."
@@ -198,37 +197,53 @@ def message_record(row):
     return {key: row[key] for key in row.keys()}
 
 
-def known_bindings(tasks, messages=()):
-    """canonical key -> binding, from the records the extension already owns.
+def message_evidence(store):
+    """Complete bounded headers, never a preview or task binding as currentness.
 
-    A message stores its sender and recipient as canonical binding keys, so a
-    name and a terminal link need this join: the task records carry their own
-    bindings, and each message's keys are bindings too.
+    project() holds one read transaction across these headers and body previews.
+    A cap+1 read proves completeness without hydrating all stored bodies.
     """
-    known = {}
-    for task in tasks:
-        for key in ("owner", "creator", "delegator"):
-            binding = task.get(key)
-            if isinstance(binding, dict):
-                known[canonical(binding)] = binding
-    for record in messages:
-        for key in ("sender", "recipient"):
-            try:
-                binding = json.loads(record.get(key) or "null")
-            except (TypeError, ValueError):
+    scopes, known, replied = {}, {}, set()
+    if store is None:
+        return scopes, known, replied
+    headers = store.db.execute(
+        "SELECT id,sender,recipient,recipient_execution,state,reply_to FROM messages ORDER BY id LIMIT ?",
+        (MAX_RECORDS + 1,)).fetchall()
+    if len(headers) > MAX_RECORDS:
+        raise ValueError("message evidence exceeds store quota")
+    ids = {row["id"] for row in headers}
+    for row in headers:
+        for field in ("sender", "recipient"):
+            key = row[field]
+            if key not in known:
+                binding = checked_binding(json.loads(key))
+                if any(isinstance(value, str) and clean(value) != value for value in binding.values()):
+                    raise ValueError("invalid recorded message identity")
+                known[key] = binding
+        recipient = known[row["recipient"]]
+        if recipient.get("class") != "agent" or row["recipient_execution"] != recipient.get("execution"):
+            raise ValueError("invalid recorded recipient execution")
+        if row["state"] not in ("waiting", "claimed", "answered"):
+            raise ValueError("invalid recorded message state")
+        if row["reply_to"] is not None:
+            if row["reply_to"] not in ids:
+                raise ValueError("invalid recorded reply reference")
+            replied.add(row["reply_to"])
+        terminals = set()
+        for role in ("sender", "recipient"):
+            key = row[role]
+            terminal = known[key].get("terminal_id")
+            if not terminal:
                 continue
-            if isinstance(binding, dict):
-                known.setdefault(record[key], binding)
-    return known
-
-
-def executions_by_terminal(known):
-    by_terminal = {}
-    for binding in known.values():
-        terminal, execution = binding.get("terminal_id"), binding.get("execution")
-        if binding.get("class") == "agent" and terminal and execution:
-            by_terminal.setdefault(terminal, execution)
-    return by_terminal
+            bucket = scopes.setdefault(terminal, {"total": 0, "waiting": 0, "contexts": {}})
+            context = bucket["contexts"].setdefault((role, key), {"waiting": 0})
+            if role == "recipient" and row["state"] == "waiting":
+                bucket["waiting"] += 1
+                context["waiting"] += 1
+            terminals.add(terminal)
+        for terminal in terminals:
+            scopes[terminal]["total"] += 1
+    return scopes, known, replied
 
 
 def message_subject(record):
@@ -241,95 +256,97 @@ def message_subject(record):
     return body[:MESSAGE_PREVIEW].strip()
 
 
-def message_rows(records, execution, known):
-    """One pane's messages: waiting pickups, claimed messages, missing replies.
+def recorded_identity(binding):
+    if binding.get("class") == "agent":
+        return f"{binding['agent']} · {binding['execution']}"
+    return label(binding, None)
 
-    Show and jump only: sending and claiming stay in the CLI.
-    """
-    def counterpart(key):
-        binding = known.get(key)
-        if binding is None:
-            return None, None
-        return binding, label(binding, None)
 
+def message_rows(records, terminal_id, known, replied):
+    """Bounded stored previews, not a current execution's actionable inbox."""
     rows = []
     for record in records:
-        sender_binding, sender_label = counterpart(record.get("sender"))
-        recipient_binding, recipient_label = counterpart(record.get("recipient"))
-        if record["state"] == "waiting" and record["recipient_execution"] == execution:
-            rows.append({"label": f"{sender_label}: {message_subject(record)}",
-                         "state": "open", "waiting": "you", "action": "claim",
-                         "since": epoch(record.get("created_at")),
-                         "counterparty": sender_binding, "kind": "waiting"})
-        elif record["state"] in ("claimed", "answered") and record["recipient_execution"] == execution:
-            rows.append({"label": f"{sender_label}: {message_subject(record)}",
-                         "state": "done", "detail": record["state"],
-                         "since": epoch(record.get("updated_at") or record.get("created_at")),
-                         "counterparty": sender_binding, "kind": "claimed"})
-    replied = {record.get("reply_to") for record in records if record.get("reply_to")}
-    mine = {
-        canonical(binding)
-        for binding in known.values()
-        if binding.get("execution") == execution
-    }
-    for record in records:
-        if record.get("sender") not in mine or record["id"] in replied:
+        sender, recipient = known[record["sender"]], known[record["recipient"]]
+        incoming = recipient.get("terminal_id") == terminal_id
+        if not incoming and sender.get("terminal_id") != terminal_id:
             continue
-        _, recipient_label = counterpart(record.get("recipient"))
-        rows.append({"label": message_subject(record),
-                     "state": "reported", "detail": f"no reply to {recipient_label}",
-                     "since": epoch(record.get("created_at")),
-                     "counterparty": None, "kind": "no-reply"})
+        if incoming:
+            state = "open" if record["state"] == "waiting" else "done"
+            detail = record["state"]
+            text = f"{label(sender, None)}: {message_subject(record)}"
+        else:
+            missing = record["id"] not in replied
+            state = "reported" if missing else "done"
+            detail = "no recorded reply" if missing else "recorded reply"
+            text = message_subject(record)
+        rows.append({"label": text, "state": state, "detail": detail,
+                     "since": epoch(record.get("updated_at") or record.get("created_at")),
+                     "counterparty": sender if incoming else None,
+                     "context": ("recipient", record["recipient"]) if incoming else ("sender", record["sender"]),
+                     "waiting": incoming and record["state"] == "waiting"})
+    rows.sort(key=lambda row: not row["waiting"])
     return rows[: MESSAGE_LIMIT * 2]
 
 
-def message_panel_items(tasks, placements, messages, known, room):
-    """One messages view per pane whose agent has messages or owes a reply."""
-    items = []
-    by_terminal = executions_by_terminal(known)
-    # Every placed terminal is a candidate pane; only an agent's has messages.
-    panes = {}
+def message_panel_items(placements, messages, evidence, room):
+    """Complete recorded context is distinct from currentness and previews."""
+    scopes, known, replied = evidence
+    items, panes = [], {}
     for terminal_id, placement in sorted((placements or {}).items()):
-        if terminal_id in by_terminal:
-            panes.setdefault(placement["pane_id"], terminal_id)
-    for pane_id, terminal_id in sorted(panes.items()):
-        execution = by_terminal.get(terminal_id)
-        if not execution:
+        panes.setdefault(placement["pane_id"], terminal_id)
+    candidates = [(pane, terminal, scopes.get(terminal, {"total": 0, "waiting": 0, "contexts": {}}))
+                  for pane, terminal in panes.items()]
+    # Recorded waiting first, then other stored context, then proven empty sets.
+    for pane_id, terminal_id, scope in sorted(candidates, key=lambda entry: (
+            not entry[2]["waiting"], not entry[2]["total"], entry[0])):
+        if len(items) + (4 if scope["total"] else 3) > room:
             continue
-        rows = message_rows(messages, execution, known)
-        if not rows or len(items) + 3 > room:
-            continue
-        waiting = sum(1 for row in rows if row["kind"] == "waiting")
-        missing = sum(1 for row in rows if row["kind"] == "no-reply")
-        summary = " · ".join(
-            part for part in (
-                f"{waiting} waiting" if waiting else "",
-                f"{missing} no reply" if missing else "",
-            ) if part
-        ) or "settled"
         root_id = f"panel:{pane_id}:{MESSAGE_VIEW}"
-        items.append({"id": root_id, "role": "section", "label": "Messages",
-                      "detail": summary,
+        summary = f"UNRESOLVED · {scope['waiting']} recorded waiting" if scope["total"] else "settled"
+        items.append({"id": root_id, "role": "section", "label": "Messages", "detail": summary,
                       "view": {"pane_id": pane_id, "view_id": MESSAGE_VIEW,
-                               "state": "in_progress" if waiting else "open"}})
-        for index, row in enumerate(rows):
-            if len(items) + 1 >= room:
+                               "state": "in_progress" if scope["waiting"] else "open"}})
+        if not scope["total"]:
+            items.append({"id": f"panel:{pane_id}:message:empty", "role": "section",
+                          "parent_id": root_id, "label": "No messages", "view": {"state": "open"}})
+            continue
+        items.append({"id": f"panel:{pane_id}:message:context", "role": "section", "parent_id": root_id,
+                      "label": "Current execution not established", "detail": f"{scope['total']} relevant stored messages",
+                      "view": {"state": "open"}})
+        contexts = sorted(scope["contexts"].items(), key=lambda entry: (-entry[1]["waiting"], entry[0]))
+        context_ids = {}
+        for index, ((role, key), count) in enumerate(contexts[:MESSAGE_LIMIT]):
+            if len(items) + 2 >= room:
                 break
-            item = {"id": f"panel:{pane_id}:message:{index}", "role": "section",
-                    "parent_id": root_id, "label": row["label"],
-                    "view": {"state": row["state"]}}
-            if row.get("action"):
-                item["view"]["waiting"] = row["waiting"]
-                item["view"]["action"] = row["action"]
-            elif row.get("detail"):
-                item["detail"] = row["detail"]
-            if row.get("since") is not None:
+            items.append({"id": f"panel:{pane_id}:message:identity:{index}", "role": "section", "parent_id": root_id,
+                          "label": f"Recorded {role}: {recorded_identity(known[key])}",
+                          "detail": f"{count['waiting']} recorded waiting" if role == "recipient" else "Stored sender context",
+                          "view": {"state": "open"}})
+            context_ids[(role, key)] = items[-1]["id"]
+        shown = 0
+        for index, row in enumerate(message_rows(messages, terminal_id, known, replied)):
+            # A preview belongs under its exact recorded identity; do not strip
+            # identity merely to fit another body after context truncation.
+            if row["context"] not in context_ids:
+                continue
+            # Reserve a truthful omission row and the caller's overflow slot.
+            if len(items) + 2 >= room:
+                break
+            item = {"id": f"panel:{pane_id}:message:{index}", "role": "section", "parent_id": context_ids[row["context"]],
+                    "label": row["label"], "detail": row["detail"], "view": {"state": row["state"]}}
+            if row["since"] is not None:
                 item["view"]["since"] = row["since"]
-            terminal = panel_terminal(row.get("counterparty"), (placements or {}).get(
-                (row.get("counterparty") or {}).get("terminal_id")))
+            terminal = panel_terminal(row["counterparty"], (placements or {}).get(
+                (row["counterparty"] or {}).get("terminal_id")))
             if terminal is not None:
                 item["terminal"] = terminal
             items.append(item)
+            shown += 1
+        omitted, omitted_contexts = scope["total"] - shown, len(contexts) - len(context_ids)
+        if omitted or omitted_contexts:
+            items.append({"id": f"panel:{pane_id}:message:omitted", "role": "section", "parent_id": root_id,
+                          "label": f"{omitted} message previews omitted · {omitted_contexts} recorded contexts omitted",
+                          "view": {"state": "open"}})
     return items
 
 
@@ -395,6 +412,19 @@ def attention_row_target(task, placements):
 
 
 def project(store, snapshot):
+    # The provider already owns a read transaction. Direct/test consumers get the
+    # same complete header/body snapshot, never separate autocommit observations.
+    own_read = store is not None and not store.db.in_transaction
+    if own_read:
+        store.db.execute("BEGIN")
+    try:
+        return project_snapshot(store, snapshot)
+    finally:
+        if own_read:
+            store.db.rollback()
+
+
+def project_snapshot(store, snapshot):
     refs = snapshot.get("terminals")
     placements = None if refs is None else {row["terminal_id"]: row["placement"] for row in refs}
     # No database yet is a fresh empty installation. A present unreadable or
@@ -429,15 +459,15 @@ def project(store, snapshot):
     attention_rows = rows[: room // 2]
     items.extend(attention_rows)
     items.extend(panel_items(tasks, placements, max(0, 256 - len(items))))
+    evidence = message_evidence(store)
+    messages = []
     if store is not None:
-        try:
-            messages = [message_record(row) for row in store.db.execute(
-                "SELECT * FROM messages ORDER BY created_at DESC, id DESC LIMIT 200")]
-        except sqlite3.OperationalError:
-            messages = []
-        known = known_bindings(tasks, messages)
-        items.extend(message_panel_items(
-            tasks, placements, messages, known, max(0, 256 - len(items))))
+        # A current but unreadable message store is a provider error, not an
+        # empty inbox. Missing installations were handled above without writes.
+        messages = [message_record(row) for row in store.db.execute(
+            "SELECT * FROM messages ORDER BY created_at DESC, id DESC LIMIT 200")]
+    items.extend(message_panel_items(
+        placements, messages, evidence, max(0, 256 - len(items))))
     if len(rows) > len(attention_rows):
         items.append({"id": PREFIX + "overflow:tasks", "role": "section", "label": f"{len(rows)} more · open full Tasks view"})
     if len(items) > 256:
@@ -449,4 +479,6 @@ def project(store, snapshot):
         # Hints must not make an otherwise readable document unavailable.
         for item in items:
             item.get("view", {}).pop("affordance", None)
+    if len(canonical(document).encode()) > DOCUMENT_BYTES:
+        raise ValueError("document exceeds bounded publication size")
     return document

@@ -1,7 +1,7 @@
-import { expect, test } from "bun:test";
+import { expect, jest, test } from "bun:test";
 import extension, { READY, MAX_FACT_BYTES, boundedText, type AdapterV1 } from "./index";
 
-function harness() {
+function harness(exec?: (args: string[]) => any) {
   process.env.VQRO_ENV = "1"; process.env.VQRO_SOCKET_PATH = "/private/api";
   process.env.VQRO_BIN_PATH = "/private/vqro"; process.env.VQRO_PANE_ID = "w1:p1";
   delete process.env.HERDR_ENV; delete process.env.HERDR_SOCKET_PATH; delete process.env.HERDR_CLIENT_SOCKET_PATH;
@@ -14,7 +14,7 @@ function harness() {
       emit(name: string, value: any) { for (const listener of [...(bus.get(name) ?? [])]) listener(value); },
     },
     on(name: string, fn: any) { handlers.set(name, fn); },
-    async exec(_bin: string, args: string[]) { calls.push(args); return { code: 0, stdout: JSON.stringify({ result: { agent: { name: "self", execution } } }) }; },
+    async exec(_bin: string, args: string[]) { calls.push(args); if (exec) return exec(args); return { code: 0, stdout: JSON.stringify({ result: { agent: { name: "self", execution } } }) }; },
     sendUserMessage(text: string, options: any) { sent.push({ text, options, kind: "user" }); },
     sendMessage(message: any, options: any) { sent.push({ ...message, options }); },
   };
@@ -79,6 +79,107 @@ test("new session/runtime cannot accept a retained token", async () => {
   expect(replacement.api().current(token)).toBe(false);
   expect(await replacement.api().deliver("stale input", token)).toBe(false);
   expect(replacement.sent).toHaveLength(0);
+});
+
+test("idle identity re-observation shares lifecycle single flight and rejects the prior epoch", async () => {
+  jest.useFakeTimers();
+  let reads = 0, release: any;
+  const h = harness(() => {
+    reads += 1;
+    if (reads === 1) return { code: 1, stdout: "" };
+    if (reads === 2) return new Promise(resolve => { release = () => resolve({ code: 0, stdout: JSON.stringify({ result: { agent: { execution: "old-epoch" } } }) }); });
+    return { code: 0, stdout: JSON.stringify({ result: { agent: { execution: "new-epoch" } } }) };
+  });
+  const flush = async () => { for (let i = 0; i < 30; i += 1) await Promise.resolve(); };
+  try {
+    await h.emit("session_start");
+    jest.advanceTimersByTime(30_000); await flush();
+    expect(reads).toBe(2);
+    jest.advanceTimersByTime(90_000); await flush();
+    expect(reads).toBe(2);
+    const next = h.emit("session_start");
+    await flush();
+    expect(reads).toBe(2);
+    release(); await next;
+    expect(reads).toBe(3);
+    expect(h.api().snapshot().self?.execution).toBe("new-epoch");
+    expect(h.sent).toHaveLength(0);
+    expect(h.facts.map(fact => fact.kind)).toEqual(["session_started", "session_started"]);
+  } finally {
+    release?.();
+    await h.emit("session_shutdown");
+    jest.useRealTimers();
+  }
+});
+
+test("fast unknown failures stay paced and healthy identity adds no idle probes", async () => {
+  jest.useFakeTimers();
+  let attempts = 0;
+  const unknown = harness(() => ++attempts === 2 ? { code: 0, stdout: "{" } : { code: 1, stdout: "" });
+  const healthy = harness();
+  const flush = async () => { for (let i = 0; i < 30; i += 1) await Promise.resolve(); };
+  try {
+    await unknown.emit("session_start"); await healthy.emit("session_start");
+    jest.advanceTimersByTime(29_000); await flush(); expect(unknown.calls).toHaveLength(1);
+    jest.advanceTimersByTime(1000); await flush(); expect(unknown.calls).toHaveLength(2);
+    jest.advanceTimersByTime(29_000); await flush(); expect(unknown.calls).toHaveLength(2);
+    jest.advanceTimersByTime(1000); await flush(); expect(unknown.calls).toHaveLength(3);
+    expect(healthy.calls).toHaveLength(1);
+    expect(unknown.sent).toHaveLength(0);
+    expect(unknown.facts.map(fact => fact.kind)).toEqual(["session_started"]);
+  } finally {
+    await unknown.emit("session_shutdown"); await healthy.emit("session_shutdown");
+    jest.useRealTimers();
+  }
+});
+
+for (const transition of ["run", "shutdown"]) test(`late idle identity cannot cross ${transition}`, async () => {
+  jest.useFakeTimers();
+  let reads = 0, release: any;
+  const h = harness(() => {
+    reads += 1;
+    if (reads === 1) return { code: 1, stdout: "" };
+    if (reads === 2) return new Promise(resolve => { release = () => resolve({ code: 0, stdout: JSON.stringify({ result: { agent: { execution: "old-idle" } } }) }); });
+    return { code: 0, stdout: JSON.stringify({ result: { agent: { execution: "new-run" } } }) };
+  });
+  const flush = async () => { for (let i = 0; i < 30; i += 1) await Promise.resolve(); };
+  try {
+    await h.emit("session_start");
+    jest.advanceTimersByTime(30_000); await flush(); expect(reads).toBe(2);
+    const pending = transition === "run" ? h.emit("before_agent_start", { prompt: "human input" }) : h.emit("session_shutdown");
+    await flush(); expect(reads).toBe(2);
+    release(); await pending; await flush();
+    expect(h.api().snapshot().self?.execution).toBe(transition === "run" ? "new-run" : undefined);
+    expect(reads).toBe(transition === "run" ? 3 : 2);
+    jest.advanceTimersByTime(90_000); await flush();
+    expect(reads).toBe(transition === "run" ? 3 : 2);
+    expect(h.sent).toHaveLength(0);
+  } finally {
+    release?.(); await h.emit("session_shutdown"); jest.useRealTimers();
+  }
+});
+
+test("fresh delivery waits for lifecycle probe then makes its own fresh read", async () => {
+  let reads = 0, release: any;
+  const h = harness(() => {
+    reads += 1;
+    if (reads === 2) return new Promise(resolve => { release = () => resolve({ code: 0, stdout: JSON.stringify({ result: { agent: { execution: "original" } } }) }); });
+    return { code: 0, stdout: JSON.stringify({ result: { agent: { execution: reads === 1 ? "original" : "replacement" } } }) };
+  });
+  const flush = async () => { for (let i = 0; i < 30; i += 1) await Promise.resolve(); };
+  try {
+    await h.emit("session_start");
+    const run = h.emit("before_agent_start", { prompt: "input" });
+    await flush(); expect(reads).toBe(2);
+    const delivery = h.api().deliver("must not use an earlier read", h.api().snapshot());
+    await flush(); expect(reads).toBe(2);
+    release(); await run;
+    expect(await delivery).toBe(false);
+    expect(reads).toBe(3);
+    expect(h.sent).toHaveLength(0);
+  } finally {
+    release?.(); await h.emit("session_shutdown");
+  }
 });
 
 test("final text is replaced even when final turn is empty; fields bounded", async () => {
