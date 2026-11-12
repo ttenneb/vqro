@@ -1497,6 +1497,18 @@
           "description": "Disable default-enabled bundled extension providers by namespace, including vqro.delegation or vqro.agent-status."
         },
         {
+          "key": "extensions.pi_executable",
+          "type": "string",
+          "default": "unset",
+          "description": "Optional Pi executable: one name or absolute path. Absent selects pi, independently of pi_source_dir. Either override makes managed launch explicit; failures never fall back."
+        },
+        {
+          "key": "extensions.pi_source_dir",
+          "type": "string",
+          "default": "unset",
+          "description": "Optional read-only absolute or ~/ Pi source directory. Absent selects ~/.pi/agent. Unix startup prepares a shadow; explicit invalid, unreadable or unprepared choices fail managed launch."
+        },
+        {
           "key": "extensions.tasks_python",
           "type": "string",
           "default": "unset",
