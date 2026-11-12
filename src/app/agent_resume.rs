@@ -97,6 +97,11 @@ impl App {
     }
 
     fn pending_agent_resume_candidates(&self) -> Vec<PendingAgentResumeCandidate> {
+        // Geometry/theme events also enter here after startup. Keep their idle
+        // path free of per-tab geometry and collapsed-membership work.
+        if !self.has_pending_agent_resumes() {
+            return Vec::new();
+        }
         let terminal_area = self.state.view.terminal_area;
         if terminal_area.width == 0 || terminal_area.height == 0 {
             return Vec::new();
@@ -325,7 +330,7 @@ fn derived_pending_agent_resume_pane_infos(
     pane_gaps: bool,
     pane_outer_borders: bool,
 ) -> Vec<crate::layout::PaneInfo> {
-    crate::ui::apply_pane_chrome(
+    let mut pane_infos: Vec<_> = crate::ui::apply_pane_chrome(
         tab.pane_layout(terminal_area),
         pane_borders,
         pane_gaps,
@@ -337,7 +342,33 @@ fn derived_pending_agent_resume_pane_infos(
         info.inner_rect = stable_terminal_inner_rect(pane_inner);
         info
     })
-    .collect()
+    .collect();
+    let mut represented: std::collections::HashSet<_> =
+        pane_infos.iter().map(|info| info.id).collect();
+    // Collapse removes presentation geometry, not terminal ownership or the
+    // saved resume plan. Supplement after chrome so startup estimates cannot
+    // change visible geometry, layout or focus. Match the runtime's minimum
+    // resize size even when the nonzero terminal area is smaller than chrome.
+    let startup_rect = Rect::new(
+        terminal_area.x,
+        terminal_area.y,
+        terminal_area.width.max(4),
+        terminal_area.height.max(2),
+    );
+    for id in tab.layout.pane_ids() {
+        if tab.panes.contains_key(&id) && represented.insert(id) {
+            pane_infos.push(crate::layout::PaneInfo {
+                id,
+                rect: startup_rect,
+                inner_rect: stable_terminal_inner_rect(startup_rect),
+                scrollbar_rect: None,
+                borders: ratatui::widgets::Borders::NONE,
+                frame_policy: crate::layout::PaneFramePolicy::Unframed,
+                is_focused: false,
+            });
+        }
+    }
+    pane_infos
 }
 
 fn stable_terminal_inner_rect(pane_inner: Rect) -> Rect {
@@ -627,6 +658,118 @@ mod tests {
         assert!(app.start_pending_agent_resumes(Instant::now(), true));
         assert!(app.terminal_runtimes.get(&terminal_id).is_some());
 
+        for (_, runtime) in app.terminal_runtimes.drain() {
+            runtime.shutdown();
+        }
+    }
+
+    #[test]
+    fn pending_agent_resume_geometry_includes_collapsed_adversarial_terminals() {
+        let mut workspace = crate::workspace::Workspace::test_adversarial_identity_state();
+        workspace.assert_invariants_for_test();
+        for tab in &mut workspace.tabs {
+            assert!(tab.layout.set_collapsed(&[], true));
+            let fingerprint = tab.layout.tree_fingerprint();
+            let focus = tab.layout.focused_leaf();
+            let infos = derived_pending_agent_resume_pane_infos(
+                tab,
+                Rect::new(0, 0, 100, 30),
+                crate::config::Config::default().ui.pane_borders,
+                false,
+                false,
+            );
+            let mut actual: Vec<_> = infos.iter().map(|info| info.id).collect();
+            let mut expected: Vec<_> = tab.panes.keys().copied().collect();
+            actual.sort_by_key(|id| id.raw());
+            expected.sort_by_key(|id| id.raw());
+            assert_eq!(
+                actual, expected,
+                "collapsed terminals still need resume geometry"
+            );
+            assert!(infos
+                .iter()
+                .all(|info| info.inner_rect.width > 0 && info.inner_rect.height > 0));
+            assert_eq!(tab.layout.tree_fingerprint(), fingerprint);
+            assert_eq!(tab.layout.focused_leaf(), focus);
+        }
+        workspace.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn collapsed_resume_fallback_excludes_views_and_keeps_visible_chrome() {
+        let mut workspace = crate::workspace::Workspace::test_new("mixed");
+        let root = workspace.tabs[0].root_pane;
+        let visible = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        let (_, view) = workspace
+            .split_pane_with_view(
+                root,
+                "vqro.tasks",
+                "tasks",
+                ratatui::layout::Direction::Vertical,
+                0.5,
+                false,
+            )
+            .unwrap();
+        assert!(workspace.tabs[0].layout.set_collapsed(&[0], true));
+        workspace.assert_invariants_for_test();
+        let tab = &workspace.tabs[0];
+        let area = Rect::new(0, 0, 100, 30);
+        let borders = crate::config::Config::default().ui.pane_borders;
+        let presentation =
+            crate::ui::apply_pane_chrome(tab.pane_layout(area), borders, false, false);
+        let before = presentation.iter().find(|info| info.id == visible).unwrap();
+        let infos = derived_pending_agent_resume_pane_infos(tab, area, borders, false, false);
+        assert_eq!(infos.len(), 2);
+        assert!(infos.iter().any(|info| info.id == root));
+        assert!(!infos.iter().any(|info| info.id == view));
+        let after = infos.iter().find(|info| info.id == visible).unwrap();
+        assert_eq!(after.rect, before.rect);
+        assert_eq!(after.borders, before.borders);
+        assert_eq!(
+            after.inner_rect,
+            stable_terminal_inner_rect(crate::ui::pane_content_rect(before))
+        );
+        workspace.assert_invariants_for_test();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pending_agent_resume_launches_collapsed_root_once_without_expanding() {
+        let mut app = test_app();
+        let mut workspace = crate::workspace::Workspace::test_new("collapsed");
+        let pane = workspace.tabs[0].root_pane;
+        let terminal_id = workspace.terminal_id(pane).cloned().unwrap();
+        assert!(workspace.tabs[0].layout.set_collapsed(&[], true));
+        let fingerprint = workspace.tabs[0].layout.tree_fingerprint().to_owned();
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .pending_agent_resume_plan = Some(crate::agent_resume::AgentResumePlan {
+            agent: "codex".into(),
+            argv: long_running_test_argv(),
+            dedupe_key: "collapsed-root".into(),
+        });
+        app.state.view.terminal_area = Rect::default();
+        assert!(!app.start_pending_agent_resumes(Instant::now(), true));
+        assert_eq!(app.terminal_runtimes.len(), 0);
+        app.state.view.terminal_area = Rect::new(0, 0, 1, 1);
+        let candidates = app.pending_agent_resume_candidates();
+        assert_eq!(candidates.len(), 1);
+        assert!(candidates[0].rows >= 2 && candidates[0].cols >= 4);
+        assert!(app.start_pending_agent_resumes(Instant::now(), true));
+        assert!(app.terminal_runtimes.get(&terminal_id).is_some());
+        assert!(!app.has_pending_agent_resumes());
+        assert!(!app.start_pending_agent_resumes(Instant::now(), true));
+        assert_eq!(app.terminal_runtimes.len(), 1);
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].layout.tree_fingerprint(),
+            fingerprint
+        );
+        app.state.workspaces[0].assert_invariants_for_test();
         for (_, runtime) in app.terminal_runtimes.drain() {
             runtime.shutdown();
         }
