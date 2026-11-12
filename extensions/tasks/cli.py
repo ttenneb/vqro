@@ -11,7 +11,7 @@ import sys
 
 SERVICE = "vqro.tasks.core"
 TASK_USAGE = "usage: vqro task <create/decision TITLE --done-when TEXT [--parent ID]|plan FILE [--parent ID --rev N]|depends ID --on JSON --rev N|update ID --rev N [metadata options]|delegate ID --to NAME (or --owner JSON) --rev N|start/accept/done ID --rev N [done --evidence TEXT]|block/report/answer ID TEXT --rev N|revert ID --rev N|decision-timer ID --rev N --auto-at UTC|decisions|decisions-seen --through SEQ|decision-log [--after SEQ]|list/ready [--after ID]|tree|whoami|get ID|op ID [--caller JSON]>; decision requires --options JSON --default KEY --reversible BOOL --waiting-cost TEXT [--auto-at UTC]; explicit task --op requires --caller JSON from the original attempt; --json forces JSON"
-MESSAGE_USAGE = "usage: vqro message <send TARGET TEXT [--reply-to ID]|list|claim [--idle]|edit ID TEXT --rev N|activation on|off> [--op ID] [--caller JSON] [--json]; TARGET is a detected agent name, pane id, or an exact agent binding JSON {\"class\":\"agent\",\"terminal_id\":...,\"agent\":...,\"execution\":...}"
+MESSAGE_USAGE = "usage: vqro message <send TARGET TEXT [--reply-to ID]|list|claim [--idle]|edit ID TEXT --rev N|activation on|off> [--op ID] [--caller JSON] [--json]; explicit --op requires --caller from the original attempt; TARGET is a detected agent name, pane id, or an exact agent binding JSON {\"class\":\"agent\",\"terminal_id\":...,\"agent\":...,\"execution\":...}"
 MUTATIONS = {"create", "decision", "delegate", "start", "block", "report", "accept", "done", "answer", "decision_seen", "decision_timer", "decision_revert", "plan", "depends", "update"}
 
 
@@ -246,6 +246,8 @@ def parse_message(args):
         else:
             raise ValueError(f"unknown option: {flag}")
         index += 2
+    if "operation_id" in payload and "expected_caller" not in payload:
+        raise ValueError("an explicit --op requires --caller with the original attempt's binding (use task whoami for a fresh explicit ID)")
     if command == "edit" and "revision" not in payload:
         raise ValueError("edit requires the inspected --rev revision")
     return payload, command != "list"

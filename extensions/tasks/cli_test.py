@@ -201,10 +201,62 @@ class CliTests(unittest.TestCase):
         self.assertEqual(calls, [{"action": "whoami"}])
 
     def test_message_binding_revision_and_claim_payloads(self):
-        self.assertEqual(cli.parse_message(["send", "task-b", "body", "--op", "id"])[0]["target"], "task-b")
+        self.assertEqual(cli.parse_message(["send", "task-b", "body", "--op", "id", "--caller", cli.encoded(CALLER)])[0]["target"], "task-b")
         self.assertTrue(cli.parse_message(["claim", "--idle"])[0]["idle"])
         with self.assertRaises(ValueError): cli.parse_message(["edit", "id", "body"])
         self.assertFalse(cli.parse_message(["activation", "off"])[0]["activation"])
+
+    def test_explicit_message_operations_require_original_binding_for_every_write(self):
+        commands = [["send", "recipient", "body"], ["claim"],
+                    ["edit", "message", "body", "--rev", "1"], ["activation", "off"]]
+        for command in commands:
+            with self.subTest(command=command):
+                with self.assertRaisesRegex(ValueError, "explicit --op requires --caller"):
+                    cli.parse_message([*command, "--op", "original"])
+                payload, mutation = cli.parse_message([*command, "--op", "original", "--caller", cli.encoded(CALLER)])
+                self.assertTrue(mutation)
+                self.assertEqual(CALLER, payload["expected_caller"])
+                implicit, mutation = cli.parse_message(command)
+                self.assertTrue(mutation)
+                self.assertNotIn("operation_id", implicit)
+
+    def test_replacement_cannot_rescope_an_explicit_message_operation(self):
+        import provider
+        recipient = {**CALLER, "terminal_id": "recipient", "execution": "boot:3:3"}
+        current = CALLER
+        calls = []
+        with tempfile.TemporaryDirectory() as root:
+            store = provider.Store(root)
+            try:
+                def call(payload):
+                    calls.append(copy.deepcopy(payload))
+                    return success(store.invoke({"caller": current, "payload": payload}))
+                args = ["send", json.dumps(recipient), "one durable message", "--op", "original",
+                        "--caller", cli.encoded(CALLER)]
+                payload, mutation = cli.parse_message(args)
+                status, original = cli.execute(payload, mutation, call=call)
+                self.assertEqual("success", status)
+                receipt = store.db.execute("SELECT outcome FROM operations WHERE operation_id='original'").fetchone()[0]
+                payload, mutation = cli.parse_message(args)
+                self.assertEqual(("success", original), cli.execute(payload, mutation, call=call))
+                current = {**CALLER, "execution": "boot:1:replacement"}
+                before = list(store.db.iterdump()), len(calls)
+                with self.assertRaisesRegex(ValueError, "explicit --op requires --caller"):
+                    cli.parse_message(args[:-2])
+                self.assertEqual(before, (list(store.db.iterdump()), len(calls)))
+                payload, mutation = cli.parse_message(args)
+                status, text = cli.execute(payload, mutation, call=call)
+                self.assertEqual("rejected", status)
+                self.assertIn("original caller changed", text)
+                self.assertEqual("whoami", calls[-1]["action"])
+                lookup = store.invoke({"caller": current, "payload": {"action": "op", "operation_id": "original",
+                                      "lookup_caller": CALLER}})
+                self.assertTrue(lookup["authoritative"])
+                self.assertEqual(original, lookup["outcome"])
+                self.assertEqual(receipt, store.db.execute("SELECT outcome FROM operations WHERE operation_id='original'").fetchone()[0])
+                self.assertEqual(1, store.db.execute("SELECT COUNT(*) FROM messages").fetchone()[0])
+            finally:
+                store.db.close()
 
     def test_message_send_target_can_be_an_exact_agent_binding(self):
         binding = {"class": "agent", "terminal_id": "term_a", "agent": "pi", "execution": "boot:1:2"}
