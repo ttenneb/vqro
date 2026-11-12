@@ -109,6 +109,80 @@ class DocumentTests(unittest.TestCase):
         # Placement is required: no placement, no panel row.
         self.assertFalse(any("panel:" in row["id"] for row in document.project(self.store,self.snapshot([]))["items"]))
 
+    def test_empty_tasks_view_needs_only_current_placement_not_a_store_or_binding(self):
+        for store in (None, self.store):
+            with self.subTest(store=store is not None):
+                before = None if store is None else list(store.db.iterdump())
+                doc = document.project(store, self.snapshot([{"terminal_id": "plain-shell", "placement": P}]))
+                self.assertEqual("host.view.v1", doc["contract"])
+                root = next(row for row in doc["items"] if row["id"] == "panel:w1:p1:tasks")
+                self.assertEqual({"pane_id": "w1:p1", "view_id": "tasks", "state": "open"}, root["view"])
+                self.assertEqual("0/0 done", root["detail"])
+                rows = [row for row in doc["items"] if row.get("parent_id") == root["id"]]
+                self.assertEqual(["No tasks"], [row["label"] for row in rows])
+                self.assertNotIn("terminal", rows[0])
+                self.assertEqual({"state": "open"}, rows[0]["view"])
+                self.assertFalse(rows[0].get("action_ids"))
+                self.assertEqual([], doc["actions"])
+                if store is not None:
+                    self.assertEqual(before, list(store.db.iterdump()))
+                for refs in ([], None):
+                    snapshot = self.snapshot([]) if refs == [] else {"generation": 7, "revision": 1}
+                    self.assertFalse(any(row.get("view", {}).get("view_id") == "tasks"
+                                         for row in document.project(store, snapshot)["items"]))
+                moved = {**P, "pane_id": "w2:p7", "workspace_id": "w2", "tab_id": "w2:t3"}
+                roots = [row["view"]["pane_id"] for row in document.project(
+                    store, self.snapshot([{"terminal_id": "plain-shell", "placement": moved}]))["items"]
+                         if row.get("view", {}).get("view_id") == "tasks"]
+                self.assertEqual(["w2:p7"], roots)
+
+    def test_tasks_in_another_scope_do_not_prevent_a_healthy_empty_tasks_view(self):
+        self.invoke({"action": "create", "title": "Elsewhere", "operation_id": "elsewhere"}, caller=A)
+        doc = document.project(self.store, self.snapshot())
+        root = next(row for row in doc["items"] if row["id"] == "panel:w1:p1:tasks")
+        self.assertEqual(["No tasks"], [row["label"] for row in doc["items"] if row.get("parent_id") == root["id"]])
+
+    def test_empty_task_panels_keep_the_existing_item_budget(self):
+        placements = {f"t{index}": {**P, "pane_id": f"w1:p{index}"} for index in range(300)}
+        for room in (0, 1, 2, 3, 4, 7, 252):
+            items = document.panel_items([], placements, room, empty_only=True)
+            self.assertLessEqual(len(items), room)
+            roots = {row["id"] for row in items if "parent_id" not in row}
+            self.assertTrue(all(row["parent_id"] in roots for row in items if "parent_id" in row))
+
+    def test_empty_task_panels_do_not_displace_populated_tasks_or_messages(self):
+        task = self.invoke({"action": "create", "title": "Real task wins", "operation_id": "real-task"}, caller=A)["task"]
+        self.store.messages.mutate({"action": "message_send", "body": "Real message wins", "recipient": A},
+                                   H, "2026-10-04T00:00:00.000+00:00")
+        refs = [{"terminal_id": f"empty-{index}", "placement": {**P, "pane_id": f"w1:p{index:03}"}}
+                for index in range(300)]
+        refs.append({"terminal_id": "a", "placement": {**P, "pane_id": "w1:pzz-last"}})
+        doc = document.project(self.store, self.snapshot(refs))
+        self.assertLessEqual(len(doc["items"]), 256)
+        self.assertLessEqual(len(provider.canonical(doc).encode()), document.DOCUMENT_BYTES)
+        self.assertTrue(any(row["label"] == task["title"] for row in doc["items"]))
+        self.assertTrue(any("Real message wins" in row["label"] for row in doc["items"]))
+        task = self.change(task, "report", text=f"> {task['done_when']}\nEvidence recorded")
+        self.change(task, "accept")
+        doc = document.project(self.store, self.snapshot([refs[-1]]))
+        root = next(row for row in doc["items"] if row["id"] == "panel:w1:pzz-last:tasks")
+        self.assertEqual("1/1 done", root["detail"])
+        self.assertFalse(any(row["label"] == "No tasks" for row in doc["items"]))
+
+    def test_empty_task_panels_preserve_attention_overflow_room(self):
+        for index in range(260):
+            self.invoke({"action": "create", "title": f"Unplaced {index}", "operation_id": f"unplaced-{index}"}, caller=A)
+        refs = [{"terminal_id": f"empty-{index}", "placement": {**P, "pane_id": f"w1:p{index:03}"}}
+                for index in range(300)]
+        doc = document.project(self.store, self.snapshot(refs))
+        self.assertLessEqual(len(doc["items"]), 256)
+        self.assertTrue(any(row["id"] == document.PREFIX + "overflow:tasks" for row in doc["items"]))
+
+    def test_unreadable_tasks_table_is_a_provider_error_not_an_empty_task_view(self):
+        self.store.db.execute("DROP TABLE tasks")
+        with self.assertRaises(sqlite3.OperationalError):
+            document.project(self.store, self.snapshot())
+
     def test_empty_messages_view_needs_only_current_placement_not_a_store_or_binding(self):
         for store in (None, self.store):
             with self.subTest(store=store is not None):
@@ -387,6 +461,42 @@ class DocumentTests(unittest.TestCase):
                 except subprocess.TimeoutExpired:
                     proc.kill();proc.wait(timeout=5)
                 proc.stdout.close();proc.stderr.close()
+
+    def test_protocol_empty_tasks_view_and_store_failures_remain_distinct(self):
+        welcome = {"type": "welcome", "protocol": 2, "granted_capabilities": ["action_invoke", "host_document"],
+                   "methods": ["action.invoke.v1", "host.document.render"]}
+        request = {"type": "request", "id": "read", "method": "host.document.render", "params": self.snapshot()}
+        for state in ("missing", "empty", "corrupt", "unsupported", "unreadable-tasks", "unreadable-messages"):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as root:
+                path = Path(root) / "tasks.sqlite"
+                if state == "corrupt":
+                    path.write_bytes(b"not a database")
+                elif state != "missing":
+                    store = provider.Store(root)
+                    if state == "unsupported":
+                        store.db.execute("PRAGMA user_version=5")
+                    elif state.startswith("unreadable-"):
+                        store.db.execute(f"DROP TABLE {state.removeprefix('unreadable-')}")
+                    store.db.close()
+                before = path.read_bytes() if path.exists() else None
+                proc = subprocess.run([sys.executable, "-B", str(Path(provider.__file__).resolve()),
+                                       "--native-attention", "--data-dir", root],
+                                      input=json.dumps(welcome) + "\n" + json.dumps(request) + "\n",
+                                      capture_output=True, text=True, timeout=5)
+                self.assertEqual(0, proc.returncode, proc.stderr)
+                reply = json.loads(proc.stdout.splitlines()[1])
+                if state in ("missing", "empty"):
+                    self.assertNotIn("error", reply)
+                    self.assertEqual("host.view.v1", reply["result"]["contract"])
+                    root_item = next(row for row in reply["result"]["items"] if row["id"] == "panel:w1:p1:tasks")
+                    self.assertEqual(["No tasks"], [row["label"] for row in reply["result"]["items"]
+                                                   if row.get("parent_id") == root_item["id"]])
+                else:
+                    self.assertIn("error", reply)
+                    self.assertNotIn("result", reply)
+                self.assertEqual(before, path.read_bytes() if path.exists() else None)
+                if state == "missing":
+                    self.assertEqual([], list(Path(root).iterdir()))
 
     def test_present_corrupt_or_dangling_store_is_not_empty(self):
         with tempfile.TemporaryDirectory() as root:

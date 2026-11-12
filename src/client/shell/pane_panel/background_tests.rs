@@ -6,6 +6,7 @@ fn tasks_empty_and_populated_messages_validate_and_render_from_package_documents
     // a private store/unit caller fixture, not native principal attribution.
     let output = std::process::Command::new("python3")
         .env_clear()
+        .env("TMPDIR", std::env::temp_dir())
         .arg("-B")
         .arg("-c")
         .arg(r#"
@@ -111,6 +112,63 @@ with tempfile.TemporaryDirectory() as root:
             ..projection
         };
         assert!(view_sections(&panel_index, &documents, &other).is_empty());
+
+        let tasks = ViewPaneProjection {
+            extension: "vqro.tasks",
+            view: "tasks",
+            scope: &scope,
+        };
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 80, 10));
+        render_view_pane(
+            &mut buffer,
+            &panel_index,
+            &documents,
+            &snapshot,
+            &pane,
+            &tasks,
+            &Palette::catppuccin(),
+        );
+        let text = buffer
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("Tasks"), "{text}");
+        assert!(
+            !text.contains("unavailable") && !text.contains("read-only"),
+            "{text}"
+        );
+        if index < 3 {
+            assert!(text.contains("No tasks"), "{text}");
+        } else {
+            assert!(
+                text.contains("Old execution anchor") && !text.contains("No tasks"),
+                "{text}"
+            );
+        }
+        let uncovered = ViewPaneProjection {
+            scope: &other_scope,
+            ..tasks
+        };
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 80, 10));
+        render_view_pane(
+            &mut buffer,
+            &panel_index,
+            &documents,
+            &snapshot,
+            &pane,
+            &uncovered,
+            &Palette::catppuccin(),
+        );
+        let text = buffer
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(
+            text.contains("vqro.tasks unavailable") && !text.contains("No tasks"),
+            "{text}"
+        );
     }
 }
 

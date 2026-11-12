@@ -350,12 +350,21 @@ def message_panel_items(placements, messages, evidence, room):
     return items
 
 
-def panel_items(tasks, placements, room):
-    """One panel view per pane with rows, bounded by the remaining item room."""
+def panel_items(tasks, placements, room, *, empty_only=False):
+    """Task slices, or healthy empty placed panes after populated publication.
+
+    Placement scopes presentation only; an empty view asserts no current agent
+    identity and grants no action authority. Never replace an omitted task slice
+    with an empty root, even when its open rows or publication room run out.
+    """
+    slices = pane_slices(tasks, placements)
+    if empty_only:
+        slices = {placement["pane_id"]: {"counts": Counter(), "rows": []}
+                  for placement in (placements or {}).values() if placement["pane_id"] not in slices}
     items = []
     unfinished_parents = {task.get("parent") for task in tasks if not final(task)}
     remaining = AFFORDANCES_BYTES
-    for pane_id, bucket in sorted(pane_slices(tasks, placements).items()):
+    for pane_id, bucket in sorted(slices.items()):
         if len(items) + 2 > room:
             break
         root_id = f"panel:{pane_id}:{PANEL_VIEW}"
@@ -365,6 +374,9 @@ def panel_items(tasks, placements, room):
                       "detail": summary(bucket["counts"]), "view": {
                           "pane_id": pane_id, "view_id": PANEL_VIEW,
                           "state": "in_progress" if bucket["counts"]["active"] else "open"}})
+        if empty_only:
+            items.append({"id": f"panel:{pane_id}:task:empty", "role": "section",
+                          "parent_id": root_id, "label": "No tasks", "view": {"state": "open"}})
         for row in rows:
             if len(items) + 1 >= room:
                 break
@@ -468,6 +480,10 @@ def project_snapshot(store, snapshot):
             "SELECT * FROM messages ORDER BY created_at DESC, id DESC LIMIT 200")]
     items.extend(message_panel_items(
         placements, messages, evidence, max(0, 256 - len(items))))
+    # Preserve every existing populated task/message slice's priority. Empty
+    # Tasks roots use only remaining room, never conceal read/binding failures.
+    items.extend(panel_items(tasks, placements,
+                             max(0, 256 - len(items) - (len(rows) > len(attention_rows))), empty_only=True))
     if len(rows) > len(attention_rows):
         items.append({"id": PREFIX + "overflow:tasks", "role": "section", "label": f"{len(rows)} more · open full Tasks view"})
     if len(items) > 256:
