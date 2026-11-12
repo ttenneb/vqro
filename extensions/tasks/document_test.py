@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 import document
 import provider
 import view
@@ -177,6 +178,87 @@ class DocumentTests(unittest.TestCase):
         doc = document.project(self.store, self.snapshot(refs))
         self.assertLessEqual(len(doc["items"]), 256)
         self.assertTrue(any(row["id"] == document.PREFIX + "overflow:tasks" for row in doc["items"]))
+
+    def test_empty_task_views_preserve_real_message_contexts_at_production_byte_cap(self):
+        recipient = {**A, "terminal_id": "sink"}
+        refs, records = [], []
+        for pane in range(19):
+            terminal = f"terminal{pane}"
+            refs.append({"terminal_id": terminal, "placement": {**P, "pane_id": f"w1:p{pane}"}})
+            for context in range(8):
+                sender = {**A, "terminal_id": terminal, "agent": "é" * 120, "execution": "é" * 120 + str(context)}
+                provider.checked_binding(sender)
+                records.append((f"msg_{pane:02}_{context}", provider.canonical(sender), provider.canonical(recipient),
+                                recipient["execution"], "old context", "2026-10-04", "2026-10-04"))
+        # Move all bodies outside the existing 200-preview window. Complete
+        # recorded contexts still legitimately fill the published message views.
+        for index in range(201):
+            records.append((f"padding_{index:03}", provider.canonical({**A, "terminal_id": "unplaced"}),
+                            provider.canonical(recipient), recipient["execution"], "padding", "2026-10-05", "2026-10-05"))
+        self.store.db.execute("BEGIN")
+        self.store.db.executemany(
+            "INSERT INTO messages(id,sender,recipient,recipient_execution,body,reply_to,state,revision,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,NULL,'waiting',1,?,?)", records)
+        self.store.db.commit()
+        snapshot = self.snapshot(refs)
+        original = document.panel_items
+        with mock.patch.object(document, "panel_items", side_effect=lambda *args, **kwargs:
+                               [] if kwargs.get("empty_only") else original(*args, **kwargs)):
+            baseline = document.project(self.store, snapshot)
+        base_bytes = len(provider.canonical(baseline).encode())
+        empty_items = original([], {row["terminal_id"]: row["placement"] for row in refs},
+                               256 - len(baseline["items"]), empty_only=True)
+        self.assertLessEqual(base_bytes, document.DOCUMENT_BYTES)
+        self.assertGreater(base_bytes + sum(len(provider.canonical(row).encode()) + 1 for row in empty_items),
+                           document.DOCUMENT_BYTES)
+        before = list(self.store.db.iterdump())
+        observed = document.project(self.store, snapshot)
+        self.assertEqual(baseline["items"], observed["items"][:len(baseline["items"])])
+        self.assertLessEqual(len(provider.canonical(observed).encode()), document.DOCUMENT_BYTES)
+        self.assertLessEqual(len(observed["items"]), 256)
+        empty_count = sum(row["label"] == "No tasks" for row in observed["items"])
+        self.assertGreater(empty_count, 0)
+        self.assertLess(empty_count, len(refs))
+        self.assertEqual(before, list(self.store.db.iterdump()))
+
+    def test_empty_task_views_preserve_populated_bytes_and_affordances_at_the_byte_limit(self):
+        # A reduced cap isolates the exact byte boundary with real producer/store
+        # data; this is not a claim of a production-limit runtime reproduction.
+        snapshot = self.snapshot([{"terminal_id": "a", "placement": P},
+                                  {"terminal_id": "empty", "placement": {**P, "pane_id": "w1:p2"}}])
+        for with_affordance in (False, True):
+            with self.subTest(with_affordance=with_affordance):
+                if with_affordance:
+                    self.invoke({"action": "decision", "title": "Choose 雪", "operation_id": "byte-decision",
+                                 "options": [{"key": "yes", "label": "雪" * 80},
+                                             {"key": "no", "label": "é" * 120}]}, caller=A)
+                full = document.project(self.store, snapshot)
+                empty_roots = {row["id"] for row in full["items"]
+                               if row.get("view", {}).get("view_id") == "tasks"
+                               and row["detail"] == "0/0 done"}
+                baseline = {**full, "items": [row for row in full["items"]
+                                             if row["id"] not in empty_roots and row.get("parent_id") not in empty_roots]}
+                before = list(self.store.db.iterdump())
+                with mock.patch.object(document, "DOCUMENT_BYTES", len(provider.canonical(baseline).encode())):
+                    observed = document.project(self.store, snapshot)
+                self.assertEqual(baseline, observed)
+                self.assertEqual(before, list(self.store.db.iterdump()))
+                if with_affordance:
+                    self.assertTrue(any("affordance" in row.get("view", {}) for row in observed["items"]))
+
+    def test_empty_task_views_admit_only_whole_pairs_within_exact_encoded_room(self):
+        full = document.project(None, self.snapshot())
+        pair = [row for row in full["items"]
+                if row["id"] == "panel:w1:p1:tasks" or row.get("parent_id") == "panel:w1:p1:tasks"]
+        baseline = {**full, "items": [row for row in full["items"] if row not in pair]}
+        base_bytes = len(provider.canonical(baseline).encode())
+        pair_bytes = sum(len(provider.canonical(row).encode()) + 1 for row in pair)
+        self.assertEqual(len(provider.canonical(full).encode()), base_bytes + pair_bytes)
+        for room in (0, pair_bytes - 1, pair_bytes):
+            with self.subTest(room=room), mock.patch.object(document, "DOCUMENT_BYTES", base_bytes + room):
+                observed = document.project(None, self.snapshot())
+                self.assertEqual(full if room == pair_bytes else baseline, observed)
+                self.assertLessEqual(len(provider.canonical(observed).encode()), base_bytes + room)
 
     def test_unreadable_tasks_table_is_a_provider_error_not_an_empty_task_view(self):
         self.store.db.execute("DROP TABLE tasks")

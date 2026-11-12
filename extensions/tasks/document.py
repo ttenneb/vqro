@@ -480,10 +480,6 @@ def project_snapshot(store, snapshot):
             "SELECT * FROM messages ORDER BY created_at DESC, id DESC LIMIT 200")]
     items.extend(message_panel_items(
         placements, messages, evidence, max(0, 256 - len(items))))
-    # Preserve every existing populated task/message slice's priority. Empty
-    # Tasks roots use only remaining room, never conceal read/binding failures.
-    items.extend(panel_items(tasks, placements,
-                             max(0, 256 - len(items) - (len(rows) > len(attention_rows))), empty_only=True))
     if len(rows) > len(attention_rows):
         items.append({"id": PREFIX + "overflow:tasks", "role": "section", "label": f"{len(rows)} more · open full Tasks view"})
     if len(items) > 256:
@@ -491,7 +487,18 @@ def project_snapshot(store, snapshot):
     document = {"contract": VIEW_CONTRACT, "namespace": "vqro.tasks", "generation": snapshot["generation"],
                 "revision": snapshot["revision"], "surface": "navigation", "target": {"kind": "session"},
                 "items": items, "actions": [], "required_capabilities": []}
-    if len(canonical(document).encode()) > DOCUMENT_BYTES:
+    used = len(canonical(document).encode())
+    # Empty Tasks are optional: preserve populated content and hints at both
+    # caps, including overflow. Count each root/child pair's encoded bytes once;
+    # the nonempty document items array adds one comma per appended item.
+    empty_items = panel_items(tasks, placements, max(0, 256 - len(items)), empty_only=True)
+    for index in range(0, len(empty_items), 2):
+        pair = empty_items[index:index + 2]
+        size = sum(len(canonical(item).encode()) + 1 for item in pair)
+        if used + size <= DOCUMENT_BYTES:
+            items.extend(pair)
+            used += size
+    if used > DOCUMENT_BYTES:
         # Hints must not make an otherwise readable document unavailable.
         for item in items:
             item.get("view", {}).pop("affordance", None)
