@@ -26,15 +26,25 @@ import threading
 import time
 from pathlib import Path
 
-from demo import Demo, birth
+from demo import Demo, birth, image_hash
 
 CRITERION = "The observable result is recorded."
 TASKS_NAMESPACE = "vqro.tasks"
 
 
 class ReadinessDemo(Demo):
-    def __init__(self, root, vqro, pi):
+    def __init__(self, root, vqro, pi, pi1_profile=False):
         super().__init__(root, vqro, pi)
+        self.pi1_profile = pi1_profile
+        if pi1_profile:
+            self.env["PI_OFFLINE"] = "1"
+            # The installed executable entrypoint, not a HOME-relative wrapper.
+            package = pi.parents[2]
+            metadata = json.loads((package / "package.json").read_text())
+            assert metadata["version"] == "1.5.0", metadata["version"]
+            self.save("PI1-IMAGE.json", {"entrypoint": str(pi), "version": metadata["version"],
+                "sha256": {str(file.relative_to(package)): image_hash(file)
+                           for file in sorted((package / "dist/bundle").rglob("*.js"))}})
         # Pi sets process.title, which truncates /proc/cmdline, so wrap the real Pi
         # to record the exact argv Vqro launches it with. Pi still runs for real.
         self.launch_log = root / "pi-launch-args.txt"
@@ -47,6 +57,12 @@ class ReadinessDemo(Demo):
         wrapper.chmod(0o755)
         (root / "bin" / "pi").unlink()
         (root / "bin" / "pi").symlink_to(wrapper)
+        if pi1_profile:
+            (root / "bin" / "pi1").symlink_to(wrapper)
+            source = root / "home/.pi/agent1"
+            source.mkdir(parents=True)
+            config = root / "config/config.toml"
+            config.write_text(config.read_text() + '\n[extensions]\npi_executable = "pi1"\npi_source_dir = ' + json.dumps(str(source)) + '\n')
         # The private fixture executes the guide's shell blocks under each real
         # Pi execution. No model, credentials or normal-user config is involved.
         fixture = root / "demo-agent.ts"
@@ -85,7 +101,7 @@ class ReadinessDemo(Demo):
         return [[line for line in record.splitlines() if line] for record in records]
 
     def _drain_pty(self, master):
-        with open(self.root / "client.log", "wb") as log:
+        with open(self.root / "client.log", "wb", buffering=0) as log:
             try:
                 while True:
                     data = os.read(master, 65536)
@@ -391,6 +407,8 @@ class ReadinessDemo(Demo):
                   "agent_root_create_and_import": True,
                   "child_accepted_by_agent_delegator": True, "root_agent_accept_and_done_denied": True,
                   "root_human_accepted": True, "creator_execution_in_get_and_tree": True}
+        result["explicit_pi1_profile"] = self.pi1_profile
+        result["pi_executable"] = str(self.pi)
         self.save("RESULT.json", result)
         return result
 
@@ -400,6 +418,7 @@ def main():
     parser.add_argument("--vqro", required=True, type=Path)
     parser.add_argument("--pi", default=shutil.which("pi"), type=Path)
     parser.add_argument("--root", type=Path)
+    parser.add_argument("--pi1-profile", action="store_true", help="select pi1 + private agent1 through shared config")
     args = parser.parse_args()
     if not args.pi:
         parser.error("an already-installed Pi executable is required")
@@ -412,7 +431,7 @@ def main():
         root = Path(tempfile.mkdtemp(prefix="readiness-demo-", dir=base))
     if len(str(root / "api.sock").encode()) >= 108:
         parser.error("private root is too long for a Linux Unix socket")
-    demo = ReadinessDemo(root, args.vqro.resolve(), args.pi.resolve())
+    demo = ReadinessDemo(root, args.vqro.resolve(), args.pi.resolve(), pi1_profile=args.pi1_profile)
     print(f"Private readiness demo: {root}", flush=True)
     try:
         print(json.dumps(demo.run()), flush=True)
