@@ -152,10 +152,11 @@ provider returns, the view is drawn again.
   [--ratio FLOAT] [--focus]` adds a view pane beside a pane. The ratio is the
   **view's share**, in either direction (0.1 through 0.9), before
   child border insets and subject to integer cell quantization. Omitting it
-  opts a new qualifying view into transient automatic sizing from accepted,
-  cached neutral document facts (initial tree fallback 0.5). Explicit ratios
-  and divider drags opt the affected view out; directional pane resize opts
-  its terminal group out. New defaults do not rearm earlier manual choices.
+  opts the newly designated views box into transient automatic sizing from
+  accepted, cached neutral document facts (initial tree fallback 0.5). Ordinary
+  user splits are never auto-fit merely because they contain views. Explicit
+  ratios and divider drags opt the affected views box out; directional pane resize
+  opts its terminal group out. New defaults do not rearm earlier manual choices.
   AUTO bounds may produce a finite interior share below ten percent; only
   explicit manual/API ratios have the 0.1–0.9 limit. Restart/handoff preserves
   that last actual ratio unchanged, never the auto policy.

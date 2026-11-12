@@ -54,6 +54,11 @@ completion cannot release the fence. Only a genuinely later relevant changed
 fact originating after the watermark, a changed controlling viewport, or an
 explicit sizing action can resume. Fences follow canonical edge membership or
 are explicitly invalidated on topology edits, not merely on fingerprint churn.
+For an already-armed, explicitly created views box, collapsing or expanding an
+individual child *inside* that box immediately re-fits its contents within the
+existing caps. That child expansion adds no new sizing fence. Collapsing or
+expanding the whole box, its terminal sibling, or an enclosing group still uses
+the ordinary fences above; child expansion cannot remove such an existing fence.
 Manual opt-out and restored unarmed views must never be rearmed by expansion.
 
 ## Optional client projection and conditional targets

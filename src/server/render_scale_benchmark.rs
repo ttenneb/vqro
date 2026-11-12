@@ -449,6 +449,133 @@ fn print_stage(
     }
 }
 
+const SIZING_AREA: Rect = Rect::new(0, 0, 300, 200);
+
+fn armed_box_sizing_fixture(terminals: usize, boxes: usize) -> App {
+    let workspace = if boxes == 4 {
+        // Balanced depth-two terminal leaves admit two more view edges each.
+        // The ordinary strip/grid fixture has deeper leaves: never bypass the
+        // production per-identity depth budget just to raise box cardinality.
+        assert_eq!(terminals, 4);
+        let mut workspace = Workspace::test_new("four admitted boxes");
+        let left = workspace.tabs[0].root_pane;
+        let right = workspace.test_split(Direction::Horizontal);
+        for pane in [left, right] {
+            workspace.tabs[0].layout.focus_pane(pane);
+            workspace.test_split(Direction::Vertical);
+        }
+        let history = history();
+        for pane in workspace.tabs[0].layout.panes(SIZING_AREA) {
+            workspace.insert_test_runtime(pane.id, populated_runtime(pane.rect, &history));
+        }
+        workspace
+    } else {
+        assert_eq!(boxes, 1);
+        populated_panes(terminals)
+    };
+    let mut app = RenderPipeline::new(vec![workspace]).app;
+    let terminals = app.state.workspaces[0].tabs[0].layout.pane_ids();
+    let mut views = Vec::new();
+    let mut items = Vec::new();
+    for (index, terminal) in terminals.into_iter().take(boxes).enumerate() {
+        let public = app.public_pane_id(0, terminal).unwrap();
+        let (_, added) = app.state.workspaces[0]
+            .split_pane_with_view_box(
+                terminal,
+                &[
+                    ("bench.views".into(), "one".into()),
+                    ("bench.views".into(), "two".into()),
+                ],
+                Direction::Vertical,
+                0.5,
+            )
+            .expect("fixture box must pass ordinary depth/pane admission");
+        views.extend(added);
+        for view in ["one", "two"] {
+            let root = format!("{index}-{view}");
+            items.push(serde_json::json!({"id":root,"role":"section","label":"Populated view","view":{"pane_id":public,"view_id":view}}));
+            for row in 0..4 {
+                items.push(serde_json::json!({"id":format!("{root}-{row}"),"parent_id":root,"role":"section","label":"A populated neutral document row"}));
+            }
+        }
+    }
+    let document = serde_json::from_value(serde_json::json!({"contract":"host.view.v1","namespace":"bench.views","generation":1,"revision":1,"surface":"navigation","target":{"kind":"session"},"items":items})).unwrap();
+    app.host_document_caches
+        .entry(("bench.views".into(), "session".into()))
+        .or_default()
+        .publish_for_namespace("bench.views", 1, 0, &Default::default(), document)
+        .unwrap();
+    for view in views {
+        app.activate_auto_view(0, 0, view);
+    }
+    assert_eq!(app.state.view_sizing.active.len(), boxes * 2);
+    assert!(app
+        .state
+        .view_sizing
+        .active
+        .values()
+        .all(|view| view.measure.rows == 4));
+    app
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn armed_box_sizing_fixture_is_admitted_populated_and_gathers_once_per_event() {
+    for (terminals, boxes) in [(1, 1), (15, 1), (4, 4)] {
+        let mut app = armed_box_sizing_fixture(terminals, boxes);
+        crate::layout::TileLayout::take_auto_gathers_for_test();
+        app.resize_auto_views(
+            crate::ui::TabSurfaceTarget {
+                workspace_index: 0,
+                tab_index: 0,
+            },
+            SIZING_AREA,
+            HostCellSize::default(),
+        );
+        assert_eq!(crate::layout::TileLayout::take_auto_gathers_for_test(), 1);
+        let layout = &app.state.workspaces[0].tabs[0].layout;
+        let geometry = layout.geometry(SIZING_AREA);
+        assert_eq!(geometry.panes.len(), terminals + boxes * 2);
+        for view in layout.view_panes() {
+            assert!(geometry
+                .panes
+                .iter()
+                .any(|pane| pane.id == view && pane.rect.height >= 6 && pane.rect.width >= 8));
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "release-only event sizing profile; run with just bench-render-scale"]
+async fn render_scale_profile_armed_boxes_with_populated_documents() {
+    println!("cached sizing EVENT pass; fixed 300x200; populated terminal history; two accepted four-row view roots per box");
+    for cases in [[(1, 1), (15, 1)], [(1, 1), (4, 4)]] {
+        println!("terminals boxes median_us p95_us max_us (fixed box count in first table; admitted box-cardinality in second)");
+        for (terminals, boxes) in cases {
+            let mut app = armed_box_sizing_fixture(terminals, boxes);
+            let mut samples = Vec::new();
+            for sample in 0..WARMUP_COUNT + SAMPLE_COUNT {
+                let started = Instant::now();
+                black_box(app.resize_auto_views(
+                    crate::ui::TabSurfaceTarget {
+                        workspace_index: 0,
+                        tab_index: 0,
+                    },
+                    SIZING_AREA,
+                    HostCellSize::default(),
+                ));
+                if sample >= WARMUP_COUNT {
+                    samples.push(started.elapsed());
+                }
+            }
+            let stats = summarize(samples);
+            println!(
+                "{terminals} {boxes} {} {} {}",
+                stats.median_us, stats.p95_us, stats.max_us
+            );
+        }
+    }
+}
+
 fn print_profiles(label: &str, build: fn(usize) -> Vec<Workspace>) {
     let rows = CARDINALITIES.map(|count| (count, profile(build, count)));
     println!("{label}");

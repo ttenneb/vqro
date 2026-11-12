@@ -233,9 +233,15 @@ neutral invalidation; existing host geometry control applies it with current
 viewport/accessory exclusions. Document callbacks never resize PTYs themselves.
 Unchanged integer allocations do not change ratios or request PTY geometry work.
 
-Side views target their text width within 25–60% of the available split;
-stacked views target row count plus two border rows, capped at twelve rows and
-35%. Aggregate minima reserve twenty terminal body columns plus a possible
+Only the views box explicitly created by the agent-start rule or `pane view add`
+is eligible for automatic sizing while armed. Ordinary user splits retain their
+ratios even when they contain views. Side boxes target their aggregate text width
+within 25–60% of the available split; stacked boxes target aggregate row count,
+capped at twelve rows and 35%. Vertically arranged children sum their body rows
+and individual frame/header chrome; their width is the maximum child width.
+Collapsed children contribute only their compact geometry. Internal child shares
+fit within that one capped box, rather than applying the cap to each child.
+Aggregate minima reserve twenty terminal body columns plus a possible
 scrollbar gutter, four terminal rows, and view minima. Existing stack headers
 are charged to the actual selected terminal/view branch. Manual splits retain
 their ratios. When the viewport cannot
@@ -247,8 +253,9 @@ round-trip unchanged. Manual/API ratio limits remain 0.1–0.9. Content may
 truncate or become zero-sized, never escape its rectangle.
 
 `pane view add --ratio R` is explicit manual view share (0.1–0.9), quantized to
-cells. A successful explicit ratio/drag disarms its directly attached view;
-directional pane resize disarms the affected terminal group. Rejected mutations
+cells. A successful explicit ratio/drag disarms the affected views box, including
+its non-leaf child subtree; directional pane resize disarms the affected terminal
+group. Rejected mutations
 do not disarm. Adding another default never rearms an older manual choice.
 Only actual ratios persist: restart/handoff restores them with auto **off**.
 Persistent auto/manual policy is deliberately deferred.

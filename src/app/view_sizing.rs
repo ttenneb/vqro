@@ -179,21 +179,9 @@ impl App {
                 .iter()
                 .map(|second| usize::from(*second))
                 .collect::<Vec<_>>();
-            if let Some(crate::layout::TypedNode::Split { first, second, .. }) =
-                tab.layout.typed_root().at(&path)
-            {
-                let views = [first.as_ref(), second.as_ref()]
-                    .into_iter()
-                    .filter_map(|node| {
-                        if let crate::layout::TypedNode::View { pane, .. } = node {
-                            Some(*pane)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                self.state.view_sizing.manual(views);
-            }
+            self.state
+                .view_sizing
+                .manual(tab.layout.auto_views_for_split(&path));
         }
     }
 
