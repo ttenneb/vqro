@@ -7,6 +7,7 @@ import extension, {
   replyTarget,
   MAILBOX_POLL_MS,
   MAX_REPLY_BYTES,
+  MESSAGE_MUTATION_TIMEOUT_MS,
 } from "./pi";
 import adapter from "../vqro-pi/index";
 
@@ -31,7 +32,7 @@ function clearVqroEnv() {
 
 interface Harness {
   entries: any[];
-  calls: { args: string[] }[];
+  calls: { args: string[]; timeout: number }[];
   sent: string[];
   emit: (name: string, event: any, ctx?: any) => Promise<any[]>;
 }
@@ -39,7 +40,7 @@ interface Harness {
 function harness(exec?: (args: string[]) => any, consumerFirst = false): Harness {
   const handlers = new Map<string, ((event: any, ctx: any) => Promise<any>)[]>();
   const entries: any[] = [];
-  const calls: { args: string[] }[] = [];
+  const calls: { args: string[]; timeout: number }[] = [];
   const sent: string[] = [];
   const bus = new Map<string, Set<(value: any) => void>>();
   const pi: any = {
@@ -64,8 +65,8 @@ function harness(exec?: (args: string[]) => any, consumerFirst = false): Harness
     sendMessage(message: any) {
       sent.push(String(message?.content ?? ""));
     },
-    async exec(_bin: string, args: string[]) {
-      calls.push({ args });
+    async exec(_bin: string, args: string[], options: { timeout: number }) {
+      calls.push({ args, timeout: options.timeout });
       if (exec) {
         const response = await exec(args);
         if (!(response?.code === 0 && !response.stdout && ((args[0] === "agent" && args[1] === "get") || (args[0] === "task" && args[1] === "whoami")))) return response;
@@ -137,6 +138,9 @@ test("a delivered batch is answered by the sender's exact binding with reply_to"
     await h.emit("agent_settled", {});
     const recorded = sends(h);
     expect(recorded).toHaveLength(1);
+    expect(recorded[0].timeout).toBe(MESSAGE_MUTATION_TIMEOUT_MS);
+    expect(MESSAGE_MUTATION_TIMEOUT_MS).toBe(2 * 6000 + 3000);
+    expect(h.calls.find(call => call.args[1] === "claim")?.timeout).toBe(MESSAGE_MUTATION_TIMEOUT_MS);
     expect(recorded[0].args).toEqual(["message", "send", bindingOf("exec-alpha"), "here is the review", "--reply-to", "m1"]);
     expect(h.entries).toContainEqual(expect.objectContaining({ data: expect.objectContaining({ kind: "replied", recipient: "exec-alpha" }) }));
   } finally {
@@ -587,6 +591,35 @@ test("a starting-turn claim after shutdown is recorded, not injected", async () 
   const results = await pending;
   expect(results.some((result) => result?.message)).toBe(false);
   expect(h.entries.some((entry) => entry.data.kind === "messages-undelivered")).toBe(true);
+});
+
+test("an unknown automatic reply retains original recovery and is never replayed", async () => {
+  jest.useFakeTimers();
+  const recovery = `outcome unknown; op original-reply\noriginal caller: ${bindingOf("exec-beta")}\nlookup first: vqro task op original-reply`;
+  const messages = [messageFixture("request", "review once")];
+  let offered = false;
+  const h = harness(args => {
+    if (args[0] === "message" && args[1] === "list") return { code: 0, stdout: JSON.stringify({ activation: true, waiting: offered ? [] : messages }), stderr: "" };
+    if (args[0] === "message" && args[1] === "claim") { offered = true; return { code: 0, stdout: JSON.stringify({ claimed: messages }), stderr: "" }; }
+    if (args[0] === "message" && args[1] === "send") return { code: 1, stdout: "", stderr: recovery };
+    return { code: 0, stdout: "", stderr: "" };
+  });
+  try {
+    await h.emit("session_start", {});
+    jest.advanceTimersByTime(MAILBOX_POLL_MS + 5); await flush();
+    await h.emit("before_agent_start", { prompt: deliveredContent(messages) });
+    await h.emit("turn_end", turnText("one reply"));
+    await h.emit("agent_settled", {});
+    expect(sends(h)).toHaveLength(1);
+    expect(sends(h)[0].timeout).toBe(MESSAGE_MUTATION_TIMEOUT_MS);
+    expect(h.entries).toContainEqual(expect.objectContaining({ data: expect.objectContaining({ kind: "reply-unknown", recovery }) }));
+    await h.emit("agent_settled", {});
+    jest.advanceTimersByTime(MAILBOX_POLL_MS * 3); await flush();
+    expect(sends(h)).toHaveLength(1);
+  } finally {
+    await h.emit("session_shutdown", {});
+    jest.useRealTimers();
+  }
 });
 
 test("slow mailbox reads stay single flight across many poll ticks", async () => {

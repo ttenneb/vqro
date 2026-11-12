@@ -8,6 +8,7 @@ import json
 import os
 import socket
 import sys
+import time
 
 SERVICE = "vqro.tasks.core"
 TASK_USAGE = "usage: vqro task <create/decision TITLE --done-when TEXT [--parent ID]|plan FILE [--parent ID --rev N]|depends ID --on JSON --rev N|update ID --rev N [metadata options]|delegate ID --to NAME (or --owner JSON) --rev N|start/accept/done ID --rev N [done --evidence TEXT]|block/report/answer ID TEXT --rev N|revert ID --rev N|decision-timer ID --rev N --auto-at UTC|decisions|decisions-seen --through SEQ|decision-log [--after SEQ]|list/ready [--after ID]|tree|whoami|get ID|op ID [--caller JSON]>; decision requires --options JSON --default KEY --reversible BOOL --waiting-cost TEXT [--auto-at UTC]; explicit task --op requires --caller JSON from the original attempt; --json forces JSON"
@@ -35,12 +36,20 @@ def api(method, params=None, request_id="cli:tasks", timeout=6):
     if os.name == "nt":
         from windows_api import request
         return json.loads(request(path, frame, timeout))
+    deadline = time.monotonic() + timeout
+    def remaining():
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise TimeoutError("API deadline elapsed; submitted writes may have committed")
+        return left
     with socket.socket(socket.AF_UNIX) as stream:
-        stream.settimeout(timeout)
+        stream.settimeout(remaining())
         stream.connect(path)
+        stream.settimeout(remaining())
         stream.sendall(frame)
         data = bytearray()
         while b"\n" not in data:
+            stream.settimeout(remaining())
             part = stream.recv(65536)
             if not part:
                 raise OSError("API closed without reply")

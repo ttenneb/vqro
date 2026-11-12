@@ -43,6 +43,11 @@ recipient policy and no-reply observations. Disabled/unavailable Tasks cannot
 activate a durable message or record a reply. A late successful
 claim is recorded undelivered rather than injected into a different run; an
 uncertain claim retains CLI recovery information and is not blindly replayed.
+Tasks gives message mutations a bounded 15-second outer execution budget, longer
+than the CLI's two six-second identity/write API deadlines plus process overhead,
+so an inner timeout can return the original caller/operation recovery text.
+Unknown automatic replies retain that same recovery text; neither path retries
+an uncertain mutation or treats its receipt as delivery/acceptance.
 
 Reply recording — exact sender bindings, `reply_to` on every automatic answer,
 no automatic answer to an answer, and no automatic reply unless the run's own

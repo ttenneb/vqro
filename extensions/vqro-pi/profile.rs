@@ -831,7 +831,9 @@ mod tests {
         // asset edits change these addresses. The Tasks address was independently
         // recomputed over all 11 declared assets in order, including ids.py and
         // the negotiated caller/view-action adapter, with generation_id separators.
-        assert_eq!(generation_dir().file_name().unwrap(), "pi-14d420aa1fdb11d9");
+        // The Pi address changes only for the Tasks consumer's bounded mutation
+        // timeout/recovery edits; neutral adapter and skill assets are unchanged.
+        assert_eq!(generation_dir().file_name().unwrap(), "pi-5c211d0ef29dd672");
         let installed = crate::persist::plugin_registry::load();
         let tasks = installed
             .iter()
@@ -839,7 +841,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             Path::new(&tasks.plugin_root).file_name().unwrap(),
-            "tasks-ddb850c967691bae"
+            "tasks-6b7fad61bd7f02b3"
         );
         crate::persist::plugin_registry::update(|entries| {
             entries

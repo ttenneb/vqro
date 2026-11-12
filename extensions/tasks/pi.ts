@@ -5,6 +5,10 @@ import type { AdapterV1 } from "../vqro-pi/index";
 export const MAX_REPLY_BYTES = 8192;
 export const METADATA_TTL_MS = 600_000;
 export const MAILBOX_POLL_MS = 10_000;
+// A mutation CLI performs whoami then the write, each with a six-second API
+// deadline. Leave three seconds for process overhead and unknown-outcome text;
+// an outer kill at either inner deadline can hide the original receipt scope.
+export const MESSAGE_MUTATION_TIMEOUT_MS = 15_000;
 
 /** The exact agent this reply answers, and the delivered message when there is one. */
 export interface ReplyTarget {
@@ -113,7 +117,7 @@ export default function (pi: ExtensionAPI) {
       try { return JSON.parse(result.stdout)?.caller?.class === "agent"; } catch { return false; }
     };
     async function claim(idle: boolean) {
-      const result = await run(["message", "claim", ...(idle ? ["--idle"] : []), "--json"], 6000);
+      const result = await run(["message", "claim", ...(idle ? ["--idle"] : []), "--json"], MESSAGE_MUTATION_TIMEOUT_MS);
       if (result?.code !== 0) {
         if (result?.stderr?.includes("outcome unknown")) record({ kind: "claim-unknown", recovery: result.stderr });
         return [];
@@ -196,11 +200,14 @@ export default function (pi: ExtensionAPI) {
       if (explicit) { record({ kind: "explicit", recipient: current.execution }); return; }
       if (!fact.final) { record({ kind: "no-reply", recipient: current.execution }); await noReply(current); return; }
       const body = boundedReplyBytes(fact.final);
-      const result = await run(["message", "send", current.binding, body, ...(current.id ? ["--reply-to", current.id] : [])], 10_000);
+      const result = await run(["message", "send", current.binding, body, ...(current.id ? ["--reply-to", current.id] : [])], MESSAGE_MUTATION_TIMEOUT_MS);
       if (result?.code === 0) {
         record({ kind: "replied", recipient: current.execution, bytes: Buffer.byteLength(body, "utf8") });
         await run(["pane", "report-metadata", process.env.VQRO_PANE_ID!, "--source", "vqro.reply-routing", "--clear-state-labels"], 2000);
       } else {
+        if (result?.stderr?.includes("outcome unknown")) {
+          record({ kind: "reply-unknown", recipient: current.execution, recovery: result.stderr });
+        }
         record({ kind: "no-reply", recipient: current.execution, reason: result ? `message send exited ${result.code}` : "message send unavailable" });
         await noReply(current);
       }
