@@ -26,8 +26,10 @@ pi_source_dir = "~/.pi/agent1"
 
 Neither setting auto-selects the other. Absent values retain `pi` and
 `~/.pi/agent`; no source profile is installed or modified. The executable is one
-name or absolute path, never a shell fragment. The source is an absolute or
-`~/`-relative directory. Plain Vqro startup prepares a source-keyed shadow;
+name or absolute path, never a shell fragment. Selectors containing `=` are
+refused before launch because the Unix environment prefix would treat them as
+assignments rather than a literal executable; no alternate command is tried.
+The source is an absolute or `~/`-relative directory. Plain Vqro startup prepares a source-keyed shadow;
 switching sources cannot reuse the prior source's resource/auth links, even if
 settings match. Old shadows are left alone. Source settings remain byte-exact;
 the shadow settings stamp is canonical JSON ignoring only the top-level

@@ -71,6 +71,9 @@ impl Selection {
         let explicit =
             config.extensions.pi_executable.is_some() || config.extensions.pi_source_dir.is_some();
         let executable = config.extensions.pi_executable.as_deref().unwrap_or("pi");
+        if executable.contains('=') {
+            return Err(io::Error::other("Pi executable cannot contain '=': environment assignments are not executable selectors"));
+        }
         if executable.is_empty()
             || executable.chars().any(char::is_control)
             || (!Path::new(executable).is_absolute()
@@ -845,6 +848,7 @@ mod tests {
                 "XDG_CONFIG_HOME",
                 crate::bundled::OPT_OUT_ENV,
                 "PI_CODING_AGENT_DIR",
+                "PATH",
             ]
             .into_iter()
             .map(|key| (key, std::env::var_os(key)))
@@ -1259,6 +1263,28 @@ mod tests {
             launch(&config, "pi").is_err(),
             "opt-out cannot silently change an explicit source"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_assignment_like_executable_path_and_name_are_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = ProfileFixture::new("assignment-executable");
+        fixture.prepare();
+        let executable = fixture.root.join("pi1=literal");
+        std::fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::env::set_var("PATH", &fixture.root);
+        assert!(crate::platform::unix_executable_available(
+            executable.to_str().unwrap()
+        ));
+        assert!(crate::platform::unix_executable_available("pi1=literal"));
+        let mut config = crate::config::Config::default();
+        for selector in [executable.to_str().unwrap(), "pi1=literal"] {
+            config.extensions.pi_executable = Some(selector.into());
+            let error = launch(&config, "pi").unwrap_err();
+            assert!(error.to_string().contains("cannot contain '='"));
+        }
     }
 
     #[cfg(unix)]
