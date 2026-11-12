@@ -311,6 +311,10 @@ pub fn validated_sidebar_bounds(min: u16, max: u16) -> Option<(u16, u16)> {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct ExtensionsConfig {
+    /// Explicit Pi executable (one argv0); absent keeps `pi`, never auto-selects.
+    pub pi_executable: Option<String>,
+    /// Read-only Pi source directory: absolute or `~/`-relative; absent keeps agent.
+    pub pi_source_dir: Option<String>,
     /// Explicit Windows Tasks Python candidate; still requires exact-path approval.
     pub tasks_python: Option<String>,
     /// Host-recorded exact approved Windows interpreter path.

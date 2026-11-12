@@ -852,7 +852,7 @@ fn main() -> io::Result<()> {
     if let Err(err) = bundled::ensure_defaults() {
         tracing::warn!(err = %err, "failed to prepare bundled default extensions");
     }
-    if let Err(err) = agent_profiles::prepare() {
+    if let Err(err) = agent_profiles::prepare(&loaded_config.config) {
         tracing::warn!(err = %err, "failed to prepare an agent launch profile");
     }
 

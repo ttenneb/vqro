@@ -189,15 +189,19 @@ impl App {
         let shell_name = available_shell_name(runtime)
             .ok_or_else(|| AgentStartError::TargetBusy(params.pane_id.clone()))?;
 
-        let mut argv = vec![crate::detect::interactive_agent_executable(kind).to_string()];
+        let config = crate::config::Config::load().config;
+        let launch = crate::agent_profiles::launch(
+            &config,
+            crate::detect::interactive_agent_executable(kind),
+        )
+        .map_err(|error| AgentStartError::ProfileUnavailable(error.to_string()))?;
+        let mut argv = launch.argv;
         argv.extend(params.args);
         let command = crate::platform::interactive_shell_command(&argv, &shell_name)
             .ok_or(AgentStartError::InvalidArgument)?;
-        // Only the shipped trusted adapter supplies fixed notice text. It owns
-        // executable matching and fresh readiness; installed manifests cannot.
-        let command = if let Some(notice) =
-            crate::agent_profiles::notice(crate::detect::interactive_agent_executable(kind))
-        {
+        // Only the shipped trusted adapter supplies fixed notice text. Its
+        // operation-local choice also binds the environment in an existing pane.
+        let command = if let Some(notice) = launch.notice {
             format!("printf '%s\\n' \"{notice}\"; {command}")
         } else {
             command
@@ -251,6 +255,10 @@ impl App {
             AgentStartError::UnsupportedKind(kind) => crate::api::schema::ErrorBody {
                 code: "unsupported_agent_kind".into(),
                 message: format!("unsupported interactive agent kind {kind}"),
+            },
+            AgentStartError::ProfileUnavailable(message) => crate::api::schema::ErrorBody {
+                code: "agent_profile_unavailable".into(),
+                message,
             },
             AgentStartError::InvalidArgument => crate::api::schema::ErrorBody {
                 code: "invalid_agent_argument".into(),
@@ -459,6 +467,7 @@ pub(super) enum AgentStartError {
     InvalidName,
     UnsupportedKind(String),
     InvalidArgument,
+    ProfileUnavailable(String),
     InvalidTimeout,
     TargetNotFound(String),
     TargetBusy(String),

@@ -12,7 +12,7 @@ vqro owns persistent terminal sessions. Terminals are canonical for execution/re
 - Read IDs from command output; never guess workspace, tab, pane, terminal, collection, or delegation IDs.
 - Do not restart or stop the active session unless explicitly requested.
 - Use one bounded subagent per task. Do not recursively spawn agents.
-- Prefer waits and state reads over arbitrary sleeps.
+- Prefer bounded state reads for your own running processes over arbitrary sleeps. When waiting only for another agent, send the message and end your turn; its reply wakes you. Do not hold your turn with `agent wait`, sleep commands or repeated polling.
 - Keep Herdr and vqro routing separate. vqro uses `VQRO_*` environment variables and `vqro.sock`.
 
 ## Discover the installed interface
@@ -44,11 +44,10 @@ For agents, start a bounded helper only when authorized. Use the CLI's current-n
 vqro agent start <name>
 # Optional: --kind <agent> (default pi), --pane <pane-id> (default own new pane)
 vqro message send <name> "Run vqro task whoami and reply with its caller binding."
-vqro agent wait <name> --until idle --until done --timeout 300000
 vqro agent read <name> --source detection --format text
 ```
 
-Wait/read observes the agent, not task completion. Inspect the task and accept its evidence before closing a completed helper pane. Never close the active session.
+Reading an agent observes it, not task completion. After assigning work, continue independent work or end your turn for its reply. Inspect the task and accept its evidence before closing a completed helper pane. Never close the active session.
 
 ## Shared work: Tasks, not Pi todo or chat
 
@@ -194,6 +193,25 @@ The target must be a detected agent process (a name or pane that currently hosts
 ## Spaces and collections
 
 Repository identity and checkout grouping are shared server facts projected as Spaces. Non-Git workspaces remain valid. Use `vqro collection --help` and `vqro delegation --help` for orchestration. A collection is an ordered set of real panes with one selected preview. Its in-pane header exposes previous/next member controls, delegation provenance, and inspection. Splitting a selected member splits the collection leaf.
+
+## View panes, views boxes and clicks
+
+A view pane contains an extension view, not a terminal or process. By default, `agent start` adds a terminal-free views box **below** the agent, with Tasks above Messages; configured/disabled views and an existing terminal's recorded close intent are preserved. Add a view explicitly with:
+
+```bash
+vqro pane view add <pane-id> vqro.tasks:tasks --direction right
+vqro pane view add <pane-id> vqro.tasks:messages --direction down
+vqro pane collapse <pane-id>
+vqro pane expand <pane-id>
+```
+
+A view's scope comes from placement: it covers the full terminal membership of its nearest enclosing terminal-bearing box, including hidden/collapsed members. A terminal-free views box inherits that scope; moving it rederives scope. No enclosing terminals means empty scope, not an inferred agent. Omit `--ratio` for bounded automatic sizing; an explicit ratio reserves that share for the **new view**. Restored/manual sizes do not automatically rearm sizing.
+
+Collapse preserves terminals, processes, identities and box membership; it is not stop/close. Use the header collapse control or **Collapse box** on a child-header context menu; click a collapsed header/strip to expand. A collapsed body's absence is not agent completion. Explicit terminal-write commands retain their normal execution effects even while collapsed.
+
+Tasks owner links navigate to a live recorded placement; the Tasks badge selects its tab, not an accept/answer action. Where offered, human accept/decision controls use the ordinary authorization, exact revision and receipt path; agents cannot self-accept or answer human decisions. **Windows mutating view clicks remain read-only**; use the supported CLI after approved interpreter setup, and do not claim native validation from a cross-build. A receipt confirms its historical operation, not accepted execution or current state: inspect the task anew.
+
+Messages marked **UNRESOLVED / Current execution not established** show stored execution contexts, counts and bounded previews. They do not prove a current actionable inbox, a running recipient, delivered understanding or acceptance. Do not infer currentness from a pane label, stored sender/recipient binding or preview.
 
 ## Terminal inspector
 

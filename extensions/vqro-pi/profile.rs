@@ -1,32 +1,33 @@
 //! A Vqro-only Pi profile.
 //!
 //! Pi reads its entire configuration from one directory, selected by
-//! `PI_CODING_AGENT_DIR`. A plain Vqro launch builds a shadow of the human's
-//! `~/.pi/agent` there: a `settings.json` derived from the human's with the
+//! `PI_CODING_AGENT_DIR`. A plain Vqro launch builds a source-keyed shadow of
+//! `extensions.pi_source_dir` (default `~/.pi/agent`): settings derived from it with the
 //! Herdr-coupled packages removed, and a symlink to every other entry (auth,
 //! models, packages, resources). A Pi Vqro starts therefore keeps the human's
 //! normal auth, models and settings without loading `pi-input-gate`,
-//! `pi-tasking-herdr-adapter` or `rpiv-todo`.
+//! `pi-tasking-herdr-adapter`, `rpiv-todo` or `pi-system-prompt`.
 //!
 //! Only the human's `settings.json` is read; Vqro never writes the human's
 //! settings or packages, and never writes through a symlink. The profile
 //! references `auth.json` and `models-store.json` by symlink, so Pi's own runtime
 //! token/catalog refresh may still update those human files. This is a profile,
-//! not a sandbox: a deliberate fallback or opt-out loads the human's normal Pi
-//! configuration. Set [`crate::bundled::OPT_OUT_ENV`] to disable it.
+//! not a sandbox. Both overrides absent retain the default warned fallback;
+//! either explicit override makes an invalid/unreadable/unprepared selection fail
+//! managed launch. Opt-out disables defaults, and cannot bypass an explicit choice.
 //!
 //! Known limits (documented, not handled): a package source written with `./`,
 //! `../` or another non-prefix parent-path form that normalizes outside the agent
 //! dir, a package path under an entry the profile does not mirror, and a read-only
-//! profile directory whose content still matches its marker. An unreadable human
-//! `settings.json` (any read error, not only a missing file) is treated as the
-//! empty settings, so that case builds a profile without the human's settings.
+//! profile directory whose content still matches its marker. Only the legacy
+//! default treats any settings read error as empty. Explicit sources must exist
+//! and reject settings read errors other than a missing settings file.
 //!
 //! Readiness means the profile settings match the human's current settings AND the
 //! bundled adapter and vqro skill are linked and present; a preparation that
-//! cannot publish them fails and leaves the profile unselected. In that warned
-//! fallback Pi loads the human's own config and gets neither the vqro skill nor the
-//! neutral adapter or Tasks consumer.
+//! cannot publish them fails and leaves the profile unselected. Default warned
+//! fallback clears inherited profile env and loads default Pi config without the
+//! Vqro skill/adapter/Tasks consumer. Explicit managed choices never fall back.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -58,20 +59,193 @@ fn generation_dir() -> PathBuf {
     )
 }
 
-pub(crate) fn apply_pane_env(command: &mut portable_pty::CommandBuilder) {
-    if profile_ready() {
-        command.env("PI_CODING_AGENT_DIR", profile_dir());
-    } else if !opted_out() {
-        command.env_remove("PI_CODING_AGENT_DIR");
+/// One operation-local selection, shared by preparation/readiness/launch binding.
+struct Selection {
+    executable: String,
+    source: Option<PathBuf>,
+    explicit: bool,
+}
+
+impl Selection {
+    fn resolve(config: &crate::config::Config) -> io::Result<Self> {
+        let explicit =
+            config.extensions.pi_executable.is_some() || config.extensions.pi_source_dir.is_some();
+        let executable = config.extensions.pi_executable.as_deref().unwrap_or("pi");
+        if executable.is_empty()
+            || executable.chars().any(char::is_control)
+            || (!Path::new(executable).is_absolute()
+                && (executable.chars().any(char::is_whitespace)
+                    || executable.contains(['/', '\\'])))
+        {
+            return Err(io::Error::other(
+                "Pi executable must be one name or absolute path",
+            ));
+        }
+        let source = match config.extensions.pi_source_dir.as_deref() {
+            None => human_agent_dir(),
+            Some(value) => {
+                let path = if let Some(relative) = value.strip_prefix("~/") {
+                    home_dir().map(|home| home.join(relative))
+                } else if Path::new(value).is_absolute() {
+                    Some(PathBuf::from(value))
+                } else {
+                    None
+                };
+                Some(path.ok_or_else(|| {
+                    io::Error::other("Pi source directory must be absolute or ~/ relative")
+                })?)
+            }
+        };
+        if explicit && source.is_none() {
+            return Err(io::Error::other(
+                "explicit Pi source requires HOME or an absolute source directory",
+            ));
+        }
+        // Resolve existing aliases once: namespace and resource reads use exactly
+        // the same identity. Missing defaults retain their accepted empty behavior.
+        let source = source.map(|path| path.canonicalize().unwrap_or(path));
+        Ok(Self {
+            executable: executable.into(),
+            source,
+            explicit,
+        })
+    }
+
+    fn profile_dir(&self) -> PathBuf {
+        let identity = self
+            .source
+            .as_ref()
+            .map(|path| path.as_os_str().as_encoded_bytes())
+            .unwrap_or_default();
+        crate::config::config_dir().join(format!("pi-agent-{}", &digest_hex(identity)[..16]))
+    }
+
+    fn source_text(&self) -> io::Result<String> {
+        let Some(source) = &self.source else {
+            return Ok(String::new());
+        };
+        if !self.explicit {
+            return Ok(std::fs::read_to_string(source.join("settings.json")).unwrap_or_default());
+        }
+        if !source.is_dir() {
+            return Err(io::Error::other(format!(
+                "selected Pi source directory unavailable: {}",
+                source.display()
+            )));
+        }
+        match std::fs::read_to_string(source.join("settings.json")) {
+            Ok(text) => Ok(text),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(String::new()),
+            Err(error) => Err(io::Error::other(format!(
+                "selected Pi settings unreadable at {}: {error}",
+                source.display()
+            ))),
+        }
     }
 }
 
-pub(crate) fn notice(executable: &str) -> Option<&'static str> {
+pub(crate) fn apply_pane_env(
+    config: &crate::config::Config,
+    command: &mut portable_pty::CommandBuilder,
+) {
+    if opted_out() {
+        return;
+    }
+    if let Ok(selected) = Selection::resolve(config) {
+        if profile_ready_for(&selected) {
+            command.env("PI_CODING_AGENT_DIR", selected.profile_dir());
+            return;
+        }
+    }
+    command.env_remove("PI_CODING_AGENT_DIR");
+}
+
+/// Bind per launch, not through the parent shell's possibly stale birth env.
+/// `env` arguments are ordinary argv, escaped by the existing platform builder.
+pub(crate) fn launch(
+    config: &crate::config::Config,
+    kind_executable: &str,
+) -> io::Result<Option<crate::agent_profiles::ProfileLaunch>> {
+    if kind_executable != "pi" {
+        return Ok(None);
+    }
+    let selected = Selection::resolve(config)?;
+    if selected.explicit && opted_out() {
+        return Err(io::Error::other(
+            "explicit Pi selection requires bundled profiles; VQRO_NO_BUNDLED_DEFAULTS is set",
+        ));
+    }
+    #[cfg(not(unix))]
+    {
+        if selected.explicit {
+            return Err(io::Error::other(
+                "explicit Pi source profiles are unsupported on this platform",
+            ));
+        }
+        Ok(Some(crate::agent_profiles::ProfileLaunch {
+            argv: vec![selected.executable],
+            notice: None,
+        }))
+    }
+    #[cfg(unix)]
+    {
+        if selected.explicit {
+            selected.source_text()?;
+            use std::os::unix::fs::PermissionsExt;
+            let executable = Path::new(&selected.executable);
+            let executable_file = |path: &Path| {
+                std::fs::metadata(path)
+                    .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+            };
+            let available = if executable.is_absolute() {
+                executable_file(executable)
+            } else {
+                std::env::var_os("PATH").is_some_and(|paths| {
+                    std::env::split_paths(&paths).any(|dir| executable_file(&dir.join(executable)))
+                })
+            };
+            if !available {
+                return Err(io::Error::other(format!(
+                    "selected Pi executable unavailable: {}",
+                    selected.executable
+                )));
+            }
+        }
+        let ready = profile_ready_for(&selected);
+        if selected.explicit && !ready {
+            return Err(io::Error::other("selected Vqro Pi profile is unprepared or stale; start Vqro again with this configuration"));
+        }
+        let mut argv = vec!["env".into()];
+        if ready {
+            argv.push(format!(
+                "PI_CODING_AGENT_DIR={}",
+                selected.profile_dir().display()
+            ));
+        } else {
+            // Default fallback must actively clear an old pane's source binding.
+            argv.extend(["-u".into(), "PI_CODING_AGENT_DIR".into()]);
+        }
+        argv.push(selected.executable);
+        Ok(Some(crate::agent_profiles::ProfileLaunch {
+            argv,
+            notice: (!ready && !opted_out() && selected.source.is_some())
+                .then_some(UNAVAILABLE_WARNING),
+        }))
+    }
+}
+
+#[cfg(test)]
+fn notice(executable: &str) -> Option<&'static str> {
     (executable == "pi" && warning_needed()).then_some(UNAVAILABLE_WARNING)
 }
 
 /// Packages a Vqro-launched Pi must not load: Herdr-coupled or Vqro-competing.
-const EXCLUDED_PACKAGES: &[&str] = &["pi-input-gate", "pi-tasking-herdr-adapter", "rpiv-todo"];
+const EXCLUDED_PACKAGES: &[&str] = &[
+    "pi-input-gate",
+    "pi-tasking-herdr-adapter",
+    "rpiv-todo",
+    "pi-system-prompt",
+];
 /// Human agent-dir directories mirrored entry by entry, with the names to drop,
 /// so an excluded entry is absent and a new human entry still appears.
 const EXCLUDED_SKILLS: &[&str] = &[
@@ -115,8 +289,11 @@ pub(crate) fn opted_out() -> bool {
 }
 
 /// The Vqro-managed Pi config directory.
-pub(crate) fn profile_dir() -> PathBuf {
-    crate::config::config_dir().join("pi-agent")
+#[cfg(test)]
+fn profile_dir() -> PathBuf {
+    Selection::resolve(&crate::config::Config::default())
+        .unwrap()
+        .profile_dir()
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -130,8 +307,17 @@ fn human_agent_dir() -> Option<PathBuf> {
 /// The content address of the human's settings, or `None` when it is unreadable.
 /// The content address of the human's settings; a missing file is the empty
 /// settings, so a resource-only human agent dir still gets a profile.
-fn source_stamp(human: &Path) -> String {
-    digest_hex(&std::fs::read(human.join("settings.json")).unwrap_or_default())
+fn source_stamp(selected: &Selection) -> Option<String> {
+    if selected.explicit {
+        return selected
+            .source_text()
+            .ok()
+            .map(|text| digest_hex(text.as_bytes()));
+    }
+    selected
+        .source
+        .as_ref()
+        .map(|human| digest_hex(&std::fs::read(human.join("settings.json")).unwrap_or_default()))
 }
 
 fn digest_hex(bytes: &[u8]) -> String {
@@ -141,37 +327,58 @@ fn digest_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
-/// The content address of the profile's own settings, or `None` when that path is
-/// not a regular file (for example a symlink to a human file).
+/// Pi writes these two top-level display bookkeeping fields on startup. Ignore
+/// only those in the SHADOW stamp; source bytes and every other value/array order
+/// remain guarded. Shared by marker publication and readiness verification.
+fn shadow_settings_stamp(bytes: &[u8]) -> Option<String> {
+    let mut settings: Value = serde_json::from_slice(bytes).ok()?;
+    let object = settings.as_object_mut()?;
+    object.remove("lastChangelogVersion");
+    object.remove("extensionChangelogVersions");
+    Some(digest_hex(&serde_json::to_vec(&settings).ok()?))
+}
+
+/// `None` for unreadable, non-object or non-regular shadow settings.
 fn profile_settings_hash(profile: &Path) -> Option<String> {
     let path = profile.join("settings.json");
     if !std::fs::symlink_metadata(&path).ok()?.file_type().is_file() {
         return None;
     }
-    Some(digest_hex(&std::fs::read(&path).ok()?))
+    shadow_settings_stamp(&std::fs::read(&path).ok()?)
 }
 
 /// True when Pi Vqro starts should use the profile: a real (not symlinked)
-/// profile directory whose settings are the exact bytes this profile prepared
-/// from the human's current settings.
-pub(crate) fn profile_ready() -> bool {
+/// profile directory whose guarded settings match this preparation and whose
+/// source settings still match byte-for-byte.
+#[cfg(test)]
+fn profile_ready() -> bool {
+    Selection::resolve(&crate::config::Config::default())
+        .is_ok_and(|selected| profile_ready_for(&selected))
+}
+
+fn profile_ready_for(selected: &Selection) -> bool {
     if opted_out() || !cfg!(unix) {
         return false;
     }
-    let profile = profile_dir();
+    let profile = selected.profile_dir();
     if std::fs::symlink_metadata(&profile).is_ok_and(|meta| meta.file_type().is_symlink()) {
         return false;
     }
     let Ok(marker) = std::fs::read_to_string(profile.join(READY_MARKER)) else {
         return false;
     };
-    let Some((recorded_source, recorded_profile)) = marker.trim().split_once(':') else {
+    // Private cache v1 markers used raw shadow bytes. Deliberately require a
+    // startup reprepare rather than interpreting them as semantic v2 stamps.
+    let Some((recorded_source, recorded_profile)) = marker
+        .trim()
+        .strip_prefix("settings-v2:")
+        .and_then(|marker| marker.split_once(':'))
+    else {
         return false;
     };
-    let Some(human) = human_agent_dir() else {
+    let Some(source) = source_stamp(selected) else {
         return false;
     };
-    let source = source_stamp(&human);
     let Some(profile_hash) = profile_settings_hash(&profile) else {
         return false;
     };
@@ -189,7 +396,8 @@ pub(crate) fn profile_ready() -> bool {
 /// True when a profile is wanted but not ready, so a Vqro-launched Pi must be
 /// warned. Any human HOME counts, because the profile also carries the bundled
 /// adapter and vqro skill.
-pub(crate) fn warning_needed() -> bool {
+#[cfg(test)]
+fn warning_needed() -> bool {
     if !cfg!(unix) || opted_out() || profile_ready() {
         return false;
     }
@@ -202,11 +410,17 @@ pub(crate) fn warning_needed() -> bool {
 /// or when the defaults are opted out. The ready marker records the content
 /// address of the settings used, so a rejected, partial or stale preparation is
 /// never selected even when the marker cannot be rewritten.
-pub(crate) fn ensure_profile() -> io::Result<()> {
+#[cfg(test)]
+fn ensure_profile() -> io::Result<()> {
+    ensure_configured_profile(&crate::config::Config::default())
+}
+
+pub(crate) fn ensure_configured_profile(config: &crate::config::Config) -> io::Result<()> {
+    let selected = Selection::resolve(config)?;
     if opted_out() || !cfg!(unix) {
         return Ok(());
     }
-    let profile = profile_dir();
+    let profile = selected.profile_dir();
     // Never follow a symlinked profile directory into a human file.
     crate::bundled::safe_under(&profile, &profile)?;
     // Drop the previous readiness first: a preparation that fails must not keep an
@@ -215,21 +429,27 @@ pub(crate) fn ensure_profile() -> io::Result<()> {
     if std::fs::symlink_metadata(&profile).is_ok_and(|meta| meta.file_type().is_dir()) {
         let _ = std::fs::remove_file(profile.join(READY_MARKER));
     }
-    let Some(human) = human_agent_dir() else {
+    let Some(human) = selected.source.as_ref() else {
         return Ok(());
     };
     // A missing settings.json is the empty settings, and a missing agent dir means
     // there is nothing to mirror; either way the profile still carries the bundled
     // adapter, vqro skill and SYSTEM.md, so a Vqro pane gets them.
-    let text = std::fs::read_to_string(human.join("settings.json")).unwrap_or_default();
+    let text = selected.source_text()?;
     let mut settings: Value = if text.trim().is_empty() {
         Value::Object(serde_json::Map::new())
     } else {
         serde_json::from_str(&text)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
     };
-    derive_packages(&mut settings, &human);
-    derive_paths(&mut settings, &human);
+    if !settings.is_object() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Pi settings must be a JSON object",
+        ));
+    }
+    derive_packages(&mut settings, human);
+    derive_paths(&mut settings, human);
     drop_excluded_resources(&mut settings);
     std::fs::create_dir_all(&profile)?;
     let settings_path = profile.join("settings.json");
@@ -237,7 +457,7 @@ pub(crate) fn ensure_profile() -> io::Result<()> {
     let body = serde_json::to_string_pretty(&settings)?;
     write_if_changed(&settings_path, &body)?;
     if human.is_dir() {
-        mirror_entries(&human, &profile)?;
+        mirror_entries(human, &profile)?;
     }
     link_profile_assets(&profile)?;
     let system = profile.join("SYSTEM.md");
@@ -256,9 +476,10 @@ pub(crate) fn ensure_profile() -> io::Result<()> {
     write_if_changed(
         &marker,
         &format!(
-            "{}:{}\n",
+            "settings-v2:{}:{}\n",
             digest_hex(text.as_bytes()),
-            digest_hex(body.as_bytes())
+            shadow_settings_stamp(body.as_bytes())
+                .ok_or_else(|| io::Error::other("invalid prepared Pi shadow settings"))?
         ),
     )?;
     Ok(())
@@ -833,7 +1054,7 @@ mod tests {
         // the negotiated caller/view-action adapter, with generation_id separators.
         // The Pi address includes the neutral adapter's paced idle identity
         // recovery and Tasks consumer resource; the skill asset is unchanged.
-        assert_eq!(generation_dir().file_name().unwrap(), "pi-682972051cd6ba11");
+        assert_eq!(generation_dir().file_name().unwrap(), "pi-8491e8d971703a5c");
         let installed = crate::persist::plugin_registry::load();
         let tasks = installed
             .iter()
@@ -880,6 +1101,230 @@ mod tests {
         assert!(generation_dir().exists());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn only_shadow_changelog_bookkeeping_is_ignored_by_readiness() {
+        let fixture = ProfileFixture::new("changelog-stamp");
+        fixture.prepare();
+        let profile = profile_dir();
+        let settings_path = profile.join("settings.json");
+        let mut value: Value =
+            serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
+        value["lastChangelogVersion"] = serde_json::json!("1.5.0");
+        std::fs::write(&settings_path, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(
+            profile_ready(),
+            "Pi's own changelog display update must not invalidate a later launch"
+        );
+        value["extensionChangelogVersions"] =
+            serde_json::json!({"{\"source\":\"npm:fixture\",\"scope\":\"user\"}": "1.0.0"});
+        std::fs::write(&settings_path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+        assert!(profile_ready());
+        value["lastChangelogVersion"] = serde_json::json!("next");
+        std::fs::write(&settings_path, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(
+            profile_ready(),
+            "serialization and display-key updates are not policy changes"
+        );
+        for (key, changed) in [
+            ("theme", serde_json::json!("changed")),
+            ("defaultModel", serde_json::json!("changed")),
+            ("defaultProvider", serde_json::json!("changed")),
+            ("packages", serde_json::json!(["npm:changed"])),
+            ("extensions", serde_json::json!(["changed.ts"])),
+            ("skills", serde_json::json!(["changed.md"])),
+            ("prompts", serde_json::json!(["changed.md"])),
+            ("themes", serde_json::json!(["changed.json"])),
+            ("shellPath", serde_json::json!("changed")),
+            (
+                "nested",
+                serde_json::json!({"lastChangelogVersion": "not-top-level", "extensionChangelogVersions": {"x": "1"}}),
+            ),
+        ] {
+            let mut changed_value = value.clone();
+            changed_value[key] = changed;
+            std::fs::write(&settings_path, serde_json::to_vec(&changed_value).unwrap()).unwrap();
+            assert!(!profile_ready(), "guarded key {key} changed");
+        }
+        for invalid in ["[", "[]", "null", "\"string\""] {
+            std::fs::write(&settings_path, invalid).unwrap();
+            assert!(
+                !profile_ready(),
+                "invalid/non-object settings must not be empty-ready"
+            );
+        }
+        std::fs::write(&settings_path, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(profile_ready());
+        let marker = std::fs::read_to_string(profile.join(READY_MARKER)).unwrap();
+        let legacy = marker.strip_prefix("settings-v2:").unwrap();
+        std::fs::write(profile.join(READY_MARKER), legacy).unwrap();
+        assert!(
+            !profile_ready(),
+            "old cache markers deliberately require reprepare"
+        );
+        std::fs::write(profile.join(READY_MARKER), marker).unwrap();
+        let human = human_agent_dir().unwrap();
+        std::fs::write(human.join("settings.json"), "{}\n").unwrap();
+        assert!(
+            !profile_ready(),
+            "source byte changes are never projected away"
+        );
+        std::fs::write(
+            human.join("settings.json"),
+            "{\"extensions\":[\"a.ts\",\"b.ts\"]}",
+        )
+        .unwrap();
+        fixture.prepare();
+        let mut ordered: Value =
+            serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
+        ordered["extensions"] = serde_json::json!(["b.ts", "a.ts"]);
+        std::fs::write(&settings_path, serde_json::to_vec(&ordered).unwrap()).unwrap();
+        assert!(!profile_ready(), "array order stays guarded");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_sources_are_isolated_and_unprepared_switches_fail_closed() {
+        let fixture = ProfileFixture::new("selected-sources");
+        fixture.prepare();
+        let mut config = crate::config::Config::default();
+        config.extensions.pi_executable = Some("/bin/true".into());
+        let source_a = fixture.root.join("source a;$literal");
+        let source_b = fixture.root.join("source b");
+        for (source, marker) in [(&source_a, "a"), (&source_b, "b")] {
+            std::fs::create_dir(source).unwrap();
+            std::fs::write(source.join("settings.json"), "{}").unwrap();
+            std::fs::write(source.join("resource.txt"), marker).unwrap();
+        }
+        config.extensions.pi_source_dir = Some(source_a.to_string_lossy().into());
+        assert!(
+            launch(&config, "pi").is_err(),
+            "explicit unprepared source must not launch"
+        );
+        ensure_configured_profile(&config).unwrap();
+        let a = Selection::resolve(&config).unwrap();
+        let launch_a = launch(&config, "pi").unwrap().unwrap();
+        assert_eq!(
+            launch_a.argv[1],
+            format!("PI_CODING_AGENT_DIR={}", a.profile_dir().display())
+        );
+        assert!(launch_a.notice.is_none());
+        config.extensions.pi_source_dir = Some(source_b.to_string_lossy().into());
+        let b = Selection::resolve(&config).unwrap();
+        assert_ne!(a.profile_dir(), b.profile_dir());
+        assert!(
+            launch(&config, "pi").is_err(),
+            "same settings do not prepare another source"
+        );
+        ensure_configured_profile(&config).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(a.profile_dir().join("resource.txt")).unwrap(),
+            "a"
+        );
+        assert_eq!(
+            std::fs::read_to_string(b.profile_dir().join("resource.txt")).unwrap(),
+            "b"
+        );
+        let launch_b = launch(&config, "pi").unwrap().unwrap();
+        let mut argv = launch_b.argv;
+        // Reuse the actual bound command with a deterministic executable, in a
+        // pane whose inherited value is the old profile. No parent env mutation.
+        argv.pop();
+        argv.extend([
+            "/bin/sh".into(),
+            "-c".into(),
+            "printf '%s' \"$PI_CODING_AGENT_DIR\"".into(),
+        ]);
+        let output = std::process::Command::new(&argv[0])
+            .args(&argv[1..])
+            .env("PI_CODING_AGENT_DIR", a.profile_dir())
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            b.profile_dir().to_string_lossy()
+        );
+        std::fs::create_dir(source_b.join("broken")).unwrap();
+        std::fs::remove_file(source_b.join("settings.json")).unwrap();
+        std::fs::create_dir(source_b.join("settings.json")).unwrap();
+        assert!(ensure_configured_profile(&config).is_err());
+        assert!(
+            launch(&config, "pi").is_err(),
+            "unreadable explicit settings are not empty-ready"
+        );
+        config.extensions.pi_source_dir = Some("relative/source".into());
+        assert!(launch(&config, "pi").is_err());
+        config.extensions.pi_source_dir =
+            Some(fixture.root.join("missing").to_string_lossy().into());
+        assert!(ensure_configured_profile(&config).is_err());
+        assert!(launch(&config, "pi").is_err());
+        // A source-only explicit selection keeps the executable default.
+        config.extensions.pi_executable = None;
+        config.extensions.pi_source_dir = Some(source_a.to_string_lossy().into());
+        assert_eq!(Selection::resolve(&config).unwrap().executable, "pi");
+        std::env::set_var(crate::bundled::OPT_OUT_ENV, "1");
+        assert!(
+            launch(&config, "pi").is_err(),
+            "opt-out cannot silently change an explicit source"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn default_fallback_unsets_stale_pane_env_and_executable_override_is_literal() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = ProfileFixture::new("bound-fallback");
+        let config = crate::config::Config::default();
+        let fallback = launch(&config, "pi").unwrap().unwrap();
+        assert_eq!(fallback.argv, ["env", "-u", "PI_CODING_AGENT_DIR", "pi"]);
+        assert_eq!(fallback.notice, Some(UNAVAILABLE_WARNING));
+        let output = std::process::Command::new(&fallback.argv[0])
+            .args(&fallback.argv[1..3])
+            .args([
+                "/bin/sh",
+                "-c",
+                "printf '%s' \"${PI_CODING_AGENT_DIR-unset}\"",
+            ])
+            .env("PI_CODING_AGENT_DIR", "/old/source-a")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"unset");
+        fixture.prepare();
+        let executable = fixture.root.join("pi1 binary;$literal");
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\nprintf '%s' \"$PI_CODING_AGENT_DIR\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut config = config;
+        config.extensions.pi_executable = Some(executable.to_string_lossy().into());
+        let selected = launch(&config, "pi").unwrap().unwrap();
+        assert_eq!(selected.argv.last().unwrap(), &executable.to_string_lossy());
+        let command = crate::platform::interactive_shell_command(&selected.argv, "bash").unwrap();
+        let output = std::process::Command::new("/bin/bash")
+            .args(["-c", &command])
+            .env("PI_CODING_AGENT_DIR", "/old/source-a")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, profile_dir().to_string_lossy().as_bytes());
+        // Absolute executable matching is still Pi-kind scoped; invalid Pi
+        // configuration cannot warn or change a non-Pi launch.
+        config.extensions.pi_executable = Some("/missing/pi1".into());
+        assert!(launch(&config, "pi")
+            .unwrap_err()
+            .to_string()
+            .contains("executable unavailable"));
+        assert!(launch(&config, "claude").unwrap().is_none());
+        for invalid in ["", "pi1 --model x", "relative/pi1", "pi1\n"] {
+            config.extensions.pi_executable = Some(invalid.into());
+            assert!(launch(&config, "pi").is_err());
+        }
+    }
+
     #[test]
     fn derive_drops_excluded_packages_and_keeps_the_rest() {
         let mut value = settings(&[
@@ -888,6 +1333,12 @@ mod tests {
             "git:https://example.com/o/pi-tasking-herdr-adapter.git",
             "../../Projects/pi-budget",
             "/opt/packages/rpiv-todo",
+            "../../Projects/pi-system-prompt",
+            "npm:pi-system-prompt@1.0.0",
+            "git:https://example.com/o/pi-system-prompt.git@v1",
+            "/opt//pi-system-prompt//",
+            "npm:pi-system-prompt-extra",
+            "../../Projects/keep-pi-system-prompt",
         ]);
         derive_packages(&mut value, Path::new("/home/h/.pi/agent"));
         let kept: Vec<&str> = value["packages"]
@@ -900,7 +1351,9 @@ mod tests {
             kept,
             [
                 "npm:@blazer2k/searxng-suite",
-                "/home/h/.pi/agent/../../Projects/pi-budget"
+                "/home/h/.pi/agent/../../Projects/pi-budget",
+                "npm:pi-system-prompt-extra",
+                "/home/h/.pi/agent/../../Projects/keep-pi-system-prompt"
             ]
         );
         assert_eq!(value["theme"], "dracula");
@@ -993,6 +1446,7 @@ mod tests {
             "packages": [
                 { "source": "/opt/rpiv-todo", "extensions": [] },
                 { "source": "../../Projects/pi-system-prompt" },
+                { "source": "../../Projects/pi-budget", "skills": ["skills/*.md"] },
             ]
         });
         derive_packages(&mut value, Path::new("/home/h/.pi/agent"));
@@ -1000,7 +1454,7 @@ mod tests {
         assert_eq!(kept.len(), 1);
         assert_eq!(
             kept[0]["source"],
-            "/home/h/.pi/agent/../../Projects/pi-system-prompt"
+            "/home/h/.pi/agent/../../Projects/pi-budget"
         );
     }
 
@@ -1045,9 +1499,14 @@ mod tests {
         let root = std::env::temp_dir().join(format!("vqro-pi-stamp-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
-        assert_eq!(source_stamp(&root), digest_hex(b""));
+        let selected = Selection {
+            executable: "pi".into(),
+            source: Some(root.clone()),
+            explicit: false,
+        };
+        assert_eq!(source_stamp(&selected), Some(digest_hex(b"")));
         std::fs::write(root.join("settings.json"), "{}").unwrap();
-        assert_ne!(source_stamp(&root), digest_hex(b""));
+        assert_ne!(source_stamp(&selected), Some(digest_hex(b"")));
         let _ = std::fs::remove_dir_all(&root);
     }
 
