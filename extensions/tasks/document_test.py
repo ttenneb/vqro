@@ -304,6 +304,38 @@ class DocumentTests(unittest.TestCase):
         self.assertEqual(results[0]["value"],results[2]["value"])
         self.assertTrue(all("document_revision" not in json.loads(row[0]) for row in self.store.db.execute("SELECT outcome FROM operations")))
 
+    def test_every_changed_message_projection_moves_its_publication_version(self):
+        agent_b = {"class": "agent", "terminal_id": "b", "agent": "pi", "execution": "boot:1:2"}
+        refs = [{"terminal_id": "a", "placement": P},
+                {"terminal_id": "b", "placement": {**P, "pane_id": "w1:p2"}}]
+        snapshot = self.snapshot(refs)
+        def observed():
+            return self.store.document_revision(), provider.canonical(document.project(self.store, snapshot))
+        previous = observed()
+        self.assertIn("No messages", previous[1])
+        second = None
+        for payload, caller in [
+            ({"action": "message_send", "operation_id": "first", "recipient": agent_b, "body": "First message"}, A),
+            ({"action": "message_send", "operation_id": "second", "recipient": agent_b, "body": "Second message"}, A),
+            ({"action": "message_claim", "operation_id": "pickup"}, agent_b),
+        ]:
+            result = self.store.invoke({"caller": caller, "payload": payload})
+            if payload["operation_id"] == "second":
+                second = result["message"]["id"]
+            current = observed()
+            self.assertNotEqual(previous[1], current[1])
+            self.assertGreater(current[0], previous[0])
+            previous = current
+        self.store.invoke({"caller": agent_b, "payload": {"action": "message_send", "operation_id": "reply",
+                           "recipient": A, "body": "Review recorded", "reply_to": second}})
+        current = observed()
+        self.assertNotEqual(previous[1], current[1])
+        self.assertGreater(current[0], previous[0])
+        self.store.invoke({"caller": A, "payload": {"action": "message_send", "operation_id": "second",
+                           "recipient": agent_b, "body": "Second message"}})
+        self.store.invoke({"caller": A, "payload": {"action": "message_list"}})
+        self.assertEqual(current, observed())
+
     def panel_rows(self, doc):
         return [row for row in doc["items"] if row["id"].startswith("panel:") and ":task:" in row["id"]]
 

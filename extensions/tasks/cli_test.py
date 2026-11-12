@@ -5,6 +5,8 @@ import json
 import os
 from pathlib import Path
 import shlex
+import socket
+import threading
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -135,6 +137,58 @@ class CliTests(unittest.TestCase):
         self.assertIn("op original", message)
         self.assertIn(cli.encoded(CALLER), message)
         self.assertIn("lookup first", message)
+
+    @unittest.skipIf(os.name == "nt", "private Unix socket transport fixture")
+    def test_socket_ack_loss_after_claim_commit_preserves_original_recovery_scope(self):
+        import provider
+        sender = {**CALLER, "terminal_id": "sender", "execution": "boot:9:9"}
+        with tempfile.TemporaryDirectory() as root:
+            store = provider.Store(root)
+            sent = store.invoke({"caller": sender, "payload": {"action": "message_send", "operation_id": "send",
+                                 "recipient": CALLER, "body": "durable before ACK loss"}})["message"]
+            store.db.close()
+            failures = []
+            with socket.socket(socket.AF_UNIX) as listener:
+                path = str(Path(root) / "api.sock")
+                listener.bind(path); listener.listen(); listener.settimeout(5)
+                def serve():
+                    observed = None
+                    try:
+                        observed = provider.Store(root)
+                        for index in range(2):
+                            peer, _ = listener.accept()
+                            with peer:
+                                peer.settimeout(5)
+                                with peer.makefile("rb") as stream:
+                                    request = json.loads(stream.readline(1024 * 1024))
+                                value = observed.invoke({"caller": CALLER, "payload": request["params"]["payload"]})
+                                if index == 0:
+                                    peer.sendall((json.dumps(success(value)) + "\n").encode())
+                                # Second call committed. Close without its admission ACK.
+                    except Exception as error:
+                        failures.append(error)
+                    finally:
+                        if observed is not None: observed.db.close()
+                worker = threading.Thread(target=serve, daemon=True)
+                worker.start()
+                with patch.dict(os.environ, {"VQRO_SOCKET_PATH": path}):
+                    status, text = cli.execute({"action": "message_claim", "operation_id": "original-claim",
+                                                "expected_caller": CALLER}, True, call=cli.invoke)
+                worker.join(timeout=6)
+                self.assertFalse(worker.is_alive())
+                self.assertEqual([], failures)
+            self.assertEqual("unknown", status)
+            self.assertIn("op original-claim", text)
+            self.assertIn(cli.encoded(CALLER), text)
+            reopened = provider.Store(root)
+            try:
+                receipt = reopened.invoke({"caller": CALLER, "payload": {"action": "op",
+                                          "operation_id": "original-claim", "lookup_caller": CALLER}})
+                self.assertTrue(receipt["authoritative"])
+                self.assertEqual([sent["id"]], [row["id"] for row in receipt["outcome"]["claimed"]])
+                self.assertEqual([], reopened.invoke({"caller": CALLER, "payload": {"action": "message_list"}})["waiting"])
+            finally:
+                reopened.db.close()
 
     def test_entropy_and_unknown_caller_fail_before_write(self):
         payload = {"action": "create", "title": "proof"}

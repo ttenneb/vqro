@@ -560,7 +560,10 @@ class Store:
         its version changes, and an idempotent retry must not move it.
         """
         transitions = self.db.execute("SELECT COALESCE(MAX(seq),0) FROM transitions").fetchone()[0]
-        messages = self.db.execute("SELECT COALESCE(MAX(revision),0) FROM messages").fetchone()[0]
+        # Message rows are append-only: send starts at one, edit/claim increment
+        # their row revision, and no normal mutation deletes or resets a row.
+        # MAX misses a second send and changes below an older message's revision.
+        messages = self.db.execute("SELECT COALESCE(SUM(revision),0) FROM messages").fetchone()[0]
         return transitions + messages
 
     def view_action(self, caller, payload):

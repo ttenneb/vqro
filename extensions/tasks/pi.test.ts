@@ -589,6 +589,80 @@ test("a starting-turn claim after shutdown is recorded, not injected", async () 
   expect(h.entries.some((entry) => entry.data.kind === "messages-undelivered")).toBe(true);
 });
 
+test("slow mailbox reads stay single flight across many poll ticks", async () => {
+  jest.useFakeTimers();
+  let release: any;
+  const h = harness(args => args[0] === "message" && args[1] === "list"
+    ? new Promise(resolve => { release = () => resolve({ code: 0, stdout: JSON.stringify({ activation: true, waiting: [] }), stderr: "" }); })
+    : { code: 0, stdout: "", stderr: "" });
+  try {
+    await h.emit("session_start", {});
+    jest.advanceTimersByTime(MAILBOX_POLL_MS * 20);
+    await flush();
+    expect(h.calls.filter(call => call.args[1] === "list")).toHaveLength(1);
+    expect(h.calls.filter(call => call.args[1] === "claim")).toHaveLength(0);
+    release(); await flush();
+    jest.advanceTimersByTime(MAILBOX_POLL_MS); await flush();
+    expect(h.calls.filter(call => call.args[1] === "list")).toHaveLength(2);
+  } finally {
+    await h.emit("session_shutdown", {});
+    release?.();
+    jest.useRealTimers();
+  }
+});
+
+test("an unknown claim records original recovery without immediate retry or delivery", async () => {
+  jest.useFakeTimers();
+  const recovery = "outcome unknown; op original-claim; lookup original caller first";
+  const h = harness(args => {
+    if (args[0] === "message" && args[1] === "list") return { code: 0, stdout: JSON.stringify({ activation: true, waiting: [{ id: "m1" }] }), stderr: "" };
+    if (args[0] === "message" && args[1] === "claim") return { code: 1, stdout: "", stderr: recovery };
+    return { code: 0, stdout: "", stderr: "" };
+  });
+  try {
+    await h.emit("session_start", {});
+    jest.advanceTimersByTime(MAILBOX_POLL_MS + 5); await flush();
+    expect(h.calls.filter(call => call.args[1] === "claim")).toHaveLength(1);
+    expect(h.sent).toHaveLength(0);
+    expect(h.entries).toContainEqual(expect.objectContaining({ data: expect.objectContaining({ kind: "claim-unknown", recovery }) }));
+    await flush();
+    expect(h.calls.filter(call => call.args[1] === "claim")).toHaveLength(1);
+  } finally {
+    await h.emit("session_shutdown", {});
+    jest.useRealTimers();
+  }
+});
+
+test("a session restart fences an in-flight claim and polling resumes for new delivery", async () => {
+  jest.useFakeTimers();
+  let release: any, claims = 0;
+  const h = harness(args => {
+    if (args[0] === "message" && args[1] === "list") return { code: 0, stdout: JSON.stringify({ activation: true, waiting: [{ id: "waiting" }] }), stderr: "" };
+    if (args[0] === "message" && args[1] === "claim") {
+      claims += 1;
+      if (claims === 1) return new Promise(resolve => { release = () => resolve({ code: 0, stdout: JSON.stringify({ claimed: [messageFixture("old", "old session delivery")] }), stderr: "" }); });
+      return { code: 0, stdout: JSON.stringify({ claimed: [messageFixture("new", "new session delivery")] }), stderr: "" };
+    }
+    return { code: 0, stdout: "", stderr: "" };
+  });
+  try {
+    await h.emit("session_start", {});
+    jest.advanceTimersByTime(MAILBOX_POLL_MS + 5); await flush();
+    expect(claims).toBe(1);
+    await h.emit("session_start", {});
+    release(); await flush();
+    expect(h.sent).toHaveLength(0);
+    expect(h.entries.some(entry => entry.data.kind === "messages-undelivered" && entry.data.ids.includes("old"))).toBe(true);
+    jest.advanceTimersByTime(MAILBOX_POLL_MS + 5); await flush();
+    expect(claims).toBe(2);
+    expect(h.sent.join("\n")).toContain("new session delivery");
+    expect(h.sent.join("\n")).not.toContain("old session delivery");
+  } finally {
+    await h.emit("session_shutdown", {});
+    jest.useRealTimers();
+  }
+});
+
 test("consumer loaded before adapter discovers the same interface", async () => {
   jest.useFakeTimers();
   try {
