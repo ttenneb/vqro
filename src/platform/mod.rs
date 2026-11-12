@@ -777,7 +777,9 @@ pub(crate) use unix_common::{
     RemoteBridgeWake,
 };
 #[cfg(unix)]
-pub(crate) use unix_common::{poll_fd_readable, read_fd, resource_symlink};
+pub(crate) use unix_common::{
+    poll_fd_readable, read_fd, resource_symlink, unix_executable_available,
+};
 
 mod client_state;
 mod package_fs;

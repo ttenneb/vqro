@@ -192,20 +192,7 @@ pub(crate) fn launch(
     {
         if selected.explicit {
             selected.source_text()?;
-            use std::os::unix::fs::PermissionsExt;
-            let executable = Path::new(&selected.executable);
-            let executable_file = |path: &Path| {
-                std::fs::metadata(path)
-                    .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
-            };
-            let available = if executable.is_absolute() {
-                executable_file(executable)
-            } else {
-                std::env::var_os("PATH").is_some_and(|paths| {
-                    std::env::split_paths(&paths).any(|dir| executable_file(&dir.join(executable)))
-                })
-            };
-            if !available {
+            if !crate::platform::unix_executable_available(&selected.executable) {
                 return Err(io::Error::other(format!(
                     "selected Pi executable unavailable: {}",
                     selected.executable
