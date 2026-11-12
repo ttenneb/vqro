@@ -21,7 +21,11 @@ with tempfile.TemporaryDirectory() as root:
     empty = document.project(store, snapshot)
     store.invoke({"caller":a, "payload":{"action":"message_send", "operation_id":"send", "recipient":b, "body":"Review the bounded message"}})
     populated = document.project(store, snapshot)
-    print(json.dumps([missing, empty, populated]))
+    old = {**b, "execution":"boot:2:old"}
+    store.invoke({"caller":old, "payload":{"action":"create", "operation_id":"old-anchor", "title":"Old execution anchor", "done_when":"Evidence recorded."}})
+    store.invoke({"caller":a, "payload":{"action":"message_send", "operation_id":"replacement", "recipient":b, "body":"Replacement message visible"}})
+    replacement = document.project(store, snapshot)
+    print(json.dumps([missing, empty, populated, replacement]))
     store.db.close()
 "#)
         .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("extensions/tasks"))
@@ -34,7 +38,7 @@ with tempfile.TemporaryDirectory() as root:
     );
     let produced: Vec<crate::extension_contract::HostDocumentV1> =
         serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(produced.len(), 3);
+    assert_eq!(produced.len(), 4);
     for (index, document) in produced.into_iter().enumerate() {
         document.validate().unwrap();
         let snapshot = super::super::tests::snapshot();
@@ -90,9 +94,16 @@ with tempfile.TemporaryDirectory() as root:
         } else {
             assert!(text.contains("Review the bounded message"), "{text}");
             assert!(
-                text.contains("claim") && !text.contains("No messages"),
+                text.contains("UNRESOLVED")
+                    && text.contains("Recorded recipient")
+                    && !text.contains("waiting on you")
+                    && !text.contains("No messages"),
                 "{text}"
             );
+        }
+        if index == 3 {
+            assert!(text.contains("Replacement message visible"), "{text}");
+            assert!(text.contains("2 recorded waiting"), "{text}");
         }
         let other_scope = vec!["not-covered".into()];
         let other = ViewPaneProjection {

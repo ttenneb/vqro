@@ -39,6 +39,31 @@ a later sample opens the store once the core action runtime has initialized it.
 Present unreadable, corrupt or unsupported-version stores still fail unavailable,
 not healthy zero. This is package-owned absence policy, not host task knowledge.
 
+## Messages: recorded context is not current execution
+
+The package publishes a Messages root for each placed terminal. `No messages`
+means its complete relevant stored set is empty (stored sender **or** recipient
+terminal matches), including a genuinely absent/fresh store. A historical task
+binding and an empty body-preview window cannot establish this emptiness.
+
+Placement does not attest a current execution. Nonempty stored context therefore
+says `UNRESOLVED · N recorded waiting`, even for a sole recorded execution, with
+`Current execution not established` and exact recorded sender/recipient labels.
+Waiting/claimed/reply rows are stored facts, not an actionable current inbox:
+there is no claim/you instruction, action, queue adoption/rebinding or activation.
+Terminal links navigate placement only. Delivery and exact-execution claim policy
+are unchanged; this view does not infer which process is current.
+
+One read transaction covers a single lightweight header pass over the existing
+10,000-message quota, complete counts/reply references, and at most 200 recent
+body previews. A cap-plus-one read proves header completeness; malformed,
+unreadable or overquota evidence fails unavailable, never partial-as-empty.
+Per-terminal previews/context labels remain bounded and explicitly report omitted
+previews/contexts. A recorded reply outside the preview still prevents a false
+`no recorded reply` label. The existing 256-item/256-KiB producer limits remain;
+publication failure is unavailable, not healthy zero. There is no new schema,
+index, host current-execution API or render/PTY-time store work.
+
 Known follow-up limitation: a background decision deadline auto-apply has no action
 response carrying the revision hint. Native badges refresh on the next action,
 read or host-source change; the full Tasks pane's own polling observes it sooner.
