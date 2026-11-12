@@ -109,6 +109,55 @@ class DocumentTests(unittest.TestCase):
         # Placement is required: no placement, no panel row.
         self.assertFalse(any("panel:" in row["id"] for row in document.project(self.store,self.snapshot([]))["items"]))
 
+    def test_empty_messages_view_needs_only_current_placement_not_a_store_or_binding(self):
+        for store in (None, self.store):
+            with self.subTest(store=store is not None):
+                before = None if store is None else list(store.db.iterdump())
+                doc = document.project(store, self.snapshot([{"terminal_id": "a", "placement": P}]))
+                root = next(row for row in doc["items"] if row["id"] == "panel:w1:p1:messages")
+                self.assertEqual({"pane_id": "w1:p1", "view_id": "messages", "state": "open"}, root["view"])
+                rows = [row for row in doc["items"] if row.get("parent_id") == root["id"]]
+                self.assertEqual(["No messages"], [row["label"] for row in rows])
+                self.assertNotIn("terminal", rows[0])
+                self.assertFalse(rows[0].get("action_ids"))
+                self.assertEqual([], doc["actions"])
+                if store is not None:
+                    self.assertEqual(before, list(store.db.iterdump()))
+                self.assertFalse(any(row.get("view", {}).get("view_id") == "messages"
+                                     for row in document.project(store, self.snapshot([]))["items"]))
+                moved = {**P, "pane_id": "w2:p7", "workspace_id": "w2", "tab_id": "w2:t3"}
+                roots = [row["view"]["pane_id"] for row in document.project(
+                    store, self.snapshot([{"terminal_id": "a", "placement": moved}]))["items"]
+                         if row.get("view", {}).get("view_id") == "messages"]
+                self.assertEqual(["w2:p7"], roots)
+
+    def test_empty_message_panels_keep_the_existing_item_budget(self):
+        placements = {f"t{index}": {**P, "pane_id": f"w1:p{index}"} for index in range(300)}
+        for room in (0, 1, 2, 3, 4, 7, 252):
+            items = document.message_panel_items([], placements, [], {}, room)
+            self.assertLessEqual(len(items), room)
+            roots = {row["id"] for row in items if "parent_id" not in row}
+            self.assertTrue(all(row["parent_id"] in roots for row in items if "parent_id" in row))
+        refs = [{"terminal_id": key, "placement": value} for key, value in placements.items()]
+        doc = document.project(self.store, self.snapshot(refs))
+        self.assertLessEqual(len(doc["items"]), 256)
+        self.assertLessEqual(len(provider.canonical(doc).encode()), document.DOCUMENT_BYTES)
+
+    def test_empty_slices_do_not_displace_real_messages_at_the_item_bound(self):
+        self.store.messages.mutate({"action": "message_send", "body": "real message wins", "recipient": A},
+                                   H, "2026-10-04T00:00:00.000+00:00")
+        refs = [{"terminal_id": f"empty-{index}", "placement": {**P, "pane_id": f"w1:p{index:03}"}}
+                for index in range(300)]
+        refs.append({"terminal_id": "a", "placement": {**P, "pane_id": "w1:pzz-last"}})
+        doc = document.project(self.store, self.snapshot(refs))
+        self.assertLessEqual(len(doc["items"]), 256)
+        self.assertTrue(any("real message wins" in row["label"] for row in doc["items"]))
+
+    def test_unreadable_messages_table_is_a_provider_error_not_an_empty_inbox(self):
+        self.store.db.execute("DROP TABLE messages")
+        with self.assertRaises(sqlite3.OperationalError):
+            document.project(self.store, self.snapshot([{"terminal_id": "a", "placement": P}]))
+
     def test_messages_view_shows_waiting_claimed_and_missing_replies(self):
         panel_a={"pane_id":"w1:p1","workspace_id":"w1","tab_id":"w1:t1"}
         panel_b={"pane_id":"w1:p2","workspace_id":"w1","tab_id":"w1:t1"}
@@ -122,6 +171,7 @@ class DocumentTests(unittest.TestCase):
         items=document.project(self.store,self.snapshot(refs))["items"]
         a_root=next(row for row in items if row["id"]=="panel:w1:p1:messages")
         self.assertEqual("Messages",a_root["label"])
+        self.assertFalse(any(row["label"] == "No messages" for row in items))
         self.assertEqual("1 no reply",a_root["detail"])
         self.assertTrue(any(row["detail"].startswith("no reply to") for row in items if row["id"].startswith("panel:w1:p1:message:")))
         b_rows=[row for row in items if row["id"].startswith("panel:w1:p2:message:")]

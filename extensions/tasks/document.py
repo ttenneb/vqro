@@ -7,7 +7,6 @@ durable meaning only: which task, who owes what, and since when.
 import datetime
 import json
 import re
-import sqlite3
 from collections import Counter
 from decision_queue import text as decision_text
 from provider import canonical
@@ -284,20 +283,25 @@ def message_rows(records, execution, known):
 
 
 def message_panel_items(tasks, placements, messages, known, room):
-    """One messages view per pane whose agent has messages or owes a reply."""
+    """One messages view per placed pane, including a healthy empty inbox.
+
+    Placement scopes presentation only. No record-derived execution is needed to
+    show an empty view, and an empty row grants no message or activation rights.
+    """
     items = []
     by_terminal = executions_by_terminal(known)
-    # Every placed terminal is a candidate pane; only an agent's has messages.
     panes = {}
     for terminal_id, placement in sorted((placements or {}).items()):
-        if terminal_id in by_terminal:
-            panes.setdefault(placement["pane_id"], terminal_id)
-    for pane_id, terminal_id in sorted(panes.items()):
+        panes.setdefault(placement["pane_id"], terminal_id)
+    candidates = []
+    for pane_id, terminal_id in panes.items():
         execution = by_terminal.get(terminal_id)
-        if not execution:
-            continue
-        rows = message_rows(messages, execution, known)
-        if not rows or len(items) + 3 > room:
+        rows = message_rows(messages, execution, known) if execution else []
+        candidates.append((pane_id, rows))
+    # Empty presentation must not evict existing message-bearing slices when
+    # publication is tight. Keep the previous pane order among populated views.
+    for pane_id, rows in sorted(candidates, key=lambda entry: (not entry[1], entry[0])):
+        if len(items) + 3 > room:
             continue
         waiting = sum(1 for row in rows if row["kind"] == "waiting")
         missing = sum(1 for row in rows if row["kind"] == "no-reply")
@@ -312,6 +316,10 @@ def message_panel_items(tasks, placements, messages, known, room):
                       "detail": summary,
                       "view": {"pane_id": pane_id, "view_id": MESSAGE_VIEW,
                                "state": "in_progress" if waiting else "open"}})
+        if not rows:
+            items.append({"id": f"panel:{pane_id}:message:empty", "role": "section",
+                          "parent_id": root_id, "label": "No messages",
+                          "view": {"state": "open"}})
         for index, row in enumerate(rows):
             if len(items) + 1 >= room:
                 break
@@ -429,15 +437,15 @@ def project(store, snapshot):
     attention_rows = rows[: room // 2]
     items.extend(attention_rows)
     items.extend(panel_items(tasks, placements, max(0, 256 - len(items))))
+    messages = []
     if store is not None:
-        try:
-            messages = [message_record(row) for row in store.db.execute(
-                "SELECT * FROM messages ORDER BY created_at DESC, id DESC LIMIT 200")]
-        except sqlite3.OperationalError:
-            messages = []
-        known = known_bindings(tasks, messages)
-        items.extend(message_panel_items(
-            tasks, placements, messages, known, max(0, 256 - len(items))))
+        # A current but unreadable message store is a provider error, not an
+        # empty inbox. Missing installations were handled above without writes.
+        messages = [message_record(row) for row in store.db.execute(
+            "SELECT * FROM messages ORDER BY created_at DESC, id DESC LIMIT 200")]
+    known = known_bindings(tasks, messages)
+    items.extend(message_panel_items(
+        tasks, placements, messages, known, max(0, 256 - len(items))))
     if len(rows) > len(attention_rows):
         items.append({"id": PREFIX + "overflow:tasks", "role": "section", "label": f"{len(rows)} more · open full Tasks view"})
     if len(items) > 256:
