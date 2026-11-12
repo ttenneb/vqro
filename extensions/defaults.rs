@@ -10,7 +10,7 @@ pub(crate) static BUNDLES: &[crate::bundled::DefaultBundle] =
     &[tasks::BUNDLE, launch_profile::BUNDLE];
 pub(crate) static LAUNCH_PROFILES: &[crate::agent_profiles::AgentLaunchProfile] =
     &[crate::agent_profiles::AgentLaunchProfile {
-        prepare: launch_profile::ensure_profile,
+        prepare: launch_profile::ensure_configured_profile,
         apply_pane_env: launch_profile::apply_pane_env,
-        notice: launch_profile::notice,
+        launch: launch_profile::launch,
     }];

@@ -38,6 +38,24 @@ pub(crate) fn resource_symlink(source: &Path, target: &Path) -> std::io::Result<
     std::os::unix::fs::symlink(source, target)
 }
 
+/// One executable name on PATH or an absolute executable file. This is an OS
+/// availability observation, not an identity/SDK compatibility attestation.
+pub(crate) fn unix_executable_available(executable: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let executable_file = |path: &Path| {
+        std::fs::metadata(path)
+            .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+    };
+    let executable = Path::new(executable);
+    if executable.is_absolute() {
+        executable_file(executable)
+    } else {
+        std::env::var_os("PATH").is_some_and(|paths| {
+            std::env::split_paths(&paths).any(|dir| executable_file(&dir.join(executable)))
+        })
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct PlatformPersistenceLock {
     _file: std::fs::File,
@@ -771,6 +789,30 @@ pub(crate) fn write_package_staging_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn executable_availability_requires_a_regular_executable_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("vqro-executable-{}-{stamp}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        let executable = root.join("pi1 space;$literal");
+        assert!(!unix_executable_available(executable.to_str().unwrap()));
+        std::fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(!unix_executable_available(executable.to_str().unwrap()));
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(unix_executable_available(executable.to_str().unwrap()));
+        assert!(!unix_executable_available(root.to_str().unwrap()));
+        let alias = root.join("pi1-alias");
+        std::os::unix::fs::symlink(&executable, &alias).unwrap();
+        assert!(unix_executable_available(alias.to_str().unwrap()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn listener_resource_exhaustion_classifies_descriptor_limits_only() {

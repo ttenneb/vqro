@@ -20,6 +20,32 @@ fn start(config: &Config) -> (App, PaneId) {
 }
 
 #[test]
+fn pi_profile_configuration_is_shared_and_does_not_change_other_agent_kinds() {
+    let config: Config =
+        toml::from_str("[extensions]\npi_executable = ''\npi_source_dir = '~/selected-agent'\n")
+            .unwrap();
+    assert_eq!(
+        config.extensions.pi_source_dir.as_deref(),
+        Some("~/selected-agent")
+    );
+    let error = crate::agent_profiles::launch(&config, "pi").unwrap_err();
+    let (app, _) = start(&config);
+    let body = app.agent_start_error_body(crate::app::agents::AgentStartError::ProfileUnavailable(
+        error.to_string(),
+    ));
+    assert_eq!(body.code, "agent_profile_unavailable");
+    assert!(body.message.contains("Pi executable"));
+    for executable in ["claude", "codex"] {
+        let launch = crate::agent_profiles::launch(&config, executable).unwrap();
+        assert_eq!(launch.argv, [executable]);
+        assert!(launch.notice.is_none());
+    }
+    let default = Config::default();
+    assert!(default.extensions.pi_executable.is_none());
+    assert!(default.extensions.pi_source_dir.is_none());
+}
+
+#[test]
 fn default_box_respects_depth_per_identity_and_never_partially_commits() {
     for (depth, admitted) in [(2, true), (3, false)] {
         let (mut app, mut target) = start(&Config::default());

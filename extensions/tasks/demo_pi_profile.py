@@ -18,8 +18,9 @@ import time
 from pathlib import Path
 
 from demo_readiness import ReadinessDemo
+import demo_capture
 
-EXCLUDED = ("pi-input-gate", "pi-tasking-herdr-adapter", "rpiv-todo")
+EXCLUDED = ("pi-input-gate", "pi-tasking-herdr-adapter", "rpiv-todo", "pi-system-prompt")
 # Unambiguous excluded resource names; the bare `herdr` skill is covered by the
 # profile-layout check and the sanitized header check below.
 HERDR_SKILLS = (
@@ -38,7 +39,6 @@ WANTED = (
     "searxng-suite",
     "pi-tree-sitter",
     "avtc-pi-ask-user-question",
-    "pi-system-prompt",
     "pi-budget",
     "pi-anthropic-auth",
 )
@@ -114,15 +114,22 @@ def herdr_descendants(pane_pid):
 
 
 class PiProfileDemo(ReadinessDemo):
-    def __init__(self, root, vqro, pi, no_settings=False):
-        super().__init__(root, vqro, pi)
+    def __init__(self, root, vqro, pi, no_settings=False, pi1_profile=False):
+        super().__init__(root, vqro, pi, pi1_profile=pi1_profile)
         self.no_settings = no_settings
+        config = root / "config/config.toml"
+        config.write_text("onboarding = false\n" + config.read_text())
+        self.wanted = ("searxng-suite", "pi-tree-sitter", "pi-anthropic-auth") if pi1_profile else WANTED
         # The readiness harness wraps `pi` to record argv; this demo needs the real
         # Pi so its own arguments and resource loading are exercised.
         link = root / "bin" / "pi"
         if link.is_symlink():
             link.unlink()
         link.symlink_to(pi)
+        if pi1_profile:
+            selected = root / "bin/pi1"
+            selected.unlink()
+            selected.symlink_to(pi)
 
     def seed_human_agent_dir(self):
         """A private stand-in for the human's ~/.pi/agent (read-only source).
@@ -132,7 +139,7 @@ class PiProfileDemo(ReadinessDemo):
         credentials. The extensions, skills and SYSTEM.md are stubs that make the
         excluded and kept sets visible.
         """
-        agent = self.root / "home" / ".pi" / "agent"
+        agent = self.root / "home" / ".pi" / ("agent1" if self.pi1_profile else "agent")
         agent.mkdir(parents=True, exist_ok=True)
         extensions = agent / "extensions"
         extensions.mkdir(exist_ok=True)
@@ -148,9 +155,11 @@ export default function (pi) {
   pi.events.emit("vqro:pi-adapter:v1:discover", {});
   pi.registerCommand("neutral-probe", {
     description: "Private model-free neutral adapter probe",
-    handler: async () => {
-      fs.writeFileSync(path.join(process.env.HOME, "neutral-probe.json"), JSON.stringify({
-        version: adapter?.version, facts, snapshot: adapter?.snapshot(),
+    handler: async (args) => {
+      if (!/^[a-z0-9-]*$/.test(args)) throw new Error("invalid private probe token");
+      const actor = await adapter?.exec(["task", "whoami", "--json"], 6000);
+      fs.writeFileSync(path.join(process.env.HOME, args ? `neutral-probe-${args}.json` : "neutral-probe.json"), JSON.stringify({
+        version: adapter?.version, facts, snapshot: adapter?.snapshot(), actor, agentDir: process.env.PI_CODING_AGENT_DIR,
         methods: ["snapshot", "current", "onFact", "beforeRun", "exec", "deliver"].every(key => typeof adapter?.[key] === "function")
       }));
     }
@@ -168,12 +177,23 @@ export default function (pi) {
             # Resources and a SYSTEM.md but no settings.json: the profile must
             # still be built from empty settings.
             return
-        human = Path.home() / ".pi" / "agent"
+        human = Path.home() / ".pi" / ("agent1" if self.pi1_profile else "agent")
         settings = json.loads((human / "settings.json").read_text())
+        if self.pi1_profile:
+            # Inventory only, not human defaults/auth. All mutable package roots
+            # are private copies of already-installed CODE, never cache symlinks.
+            settings = {"packages": settings["packages"]}
         settings["defaultProvider"] = "deepseek"
         settings["defaultModel"] = "deepseek-chat"
         # A trailing/duplicated-separator directory source must still be excluded.
         settings["packages"].append("/tmp//pi-input-gate//")
+        if self.pi1_profile:
+            for name in EXCLUDED:
+                package = agent / "fixture-packages" / name
+                package.mkdir(parents=True)
+                (package / "package.json").write_text(json.dumps({"name": name, "version": "0.0.0", "pi": {"extensions": ["index.ts"]}}))
+                (package / "index.ts").write_text('export default function () { throw new Error("excluded fixture loaded"); }\n')
+                settings["packages"].append(str(package))
         # An explicit absolute extension path in settings must not bypass the
         # extension exclusion, nor an explicit absolute skill file the skill one.
         settings["extensions"] = [
@@ -189,7 +209,15 @@ export default function (pi) {
         for name in ("npm", "git"):
             source = human / name
             if source.exists() and not (agent / name).exists():
-                (agent / name).symlink_to(source)
+                if self.pi1_profile:
+                    # Only installed resource/dependency code. No Git credential
+                    # configuration, auth files, npm config or environment files.
+                    shutil.copytree(source, agent / name, ignore=shutil.ignore_patterns(
+                        ".git", ".npmrc", ".env*", "auth.json", "credentials*", "models*.json"))
+                else:
+                    (agent / name).symlink_to(source)
+        if self.pi1_profile:
+            return
         # The human's relative local package sources resolve to ~/Projects from the
         # agent dir; mirror that base so they load in the private root.
         home_projects = self.root / "home" / "Projects"
@@ -197,7 +225,9 @@ export default function (pi) {
             home_projects.symlink_to(Path.home() / "Projects")
 
     def profile_dir(self):
-        return self.bundled_dir().parent / "pi-agent"
+        profiles = list(self.bundled_dir().parent.glob("pi-agent-*"))
+        assert len(profiles) == 1, profiles
+        return profiles[0]
 
     def wait_file(self, path, seconds=20):
         deadline = time.monotonic() + seconds
@@ -220,7 +250,7 @@ export default function (pi) {
         settings = json.loads((profile / "settings.json").read_text())
         names = [package_name(entry) for entry in settings["packages"]]
         assert not [name for name in names if name in EXCLUDED], names
-        assert sorted(names) == sorted(WANTED), names
+        assert sorted(names) == sorted(self.wanted), names
         explicit = [resource_name(entry) for entry in settings.get("extensions", [])]
         assert EXCLUDED_EXTENSION not in explicit, explicit
         explicit_skills = [skill_name(entry) for entry in settings.get("skills", [])]
@@ -246,15 +276,30 @@ export default function (pi) {
         assert listing.returncode == 0, listing
         for excluded in EXCLUDED:
             assert excluded not in listing.stdout, (excluded, listing.stdout)
-        for wanted in WANTED:
+        for wanted in self.wanted:
             assert wanted in listing.stdout, (wanted, listing.stdout)
 
         # A hand-typed `pi` in a Vqro pane sees the profile through the pane env.
-        human = self.cli("workspace", "create", "--cwd", str(self.root / "work"), "--no-focus")["result"]["root_pane"]["pane_id"]
+        human = self.cli("workspace", "create", "--cwd", str(self.root / "work"), "--focus")["result"]["root_pane"]["pane_id"]
         result = self.root / "pane-agent-dir"
         self.cli("pane", "run", human, f"printf '%s' \"$PI_CODING_AGENT_DIR\" > {result}")
         self.wait_file(result)
         assert result.read_text() == str(profile), result.read_text()
+        if self.pi1_profile:
+            # A live config switch in an existing pane must reject an explicit
+            # unprepared source, not inherit the old pane env or load empty/default.
+            config_path = self.root / "config/config.toml"
+            configured = config_path.read_text()
+            source = self.root / "home/.pi/agent1"
+            wrong = self.root / "home/.pi/unprepared-agent1"
+            wrong.mkdir()
+            config_path.write_text(configured.replace(json.dumps(str(source)), json.dumps(str(wrong))))
+            try:
+                failure = self.api("agent.start", {"name": "profile-wrong-source", "kind": "pi", "pane_id": human, "args": []})
+                assert failure["error"]["code"] == "agent_profile_unavailable", failure
+                self.save("unprepared-source-rejected.json", failure)
+            finally:
+                config_path.write_text(configured)
 
         # A `pi` the human types in a Vqro pane (not agent start): its startup
         # resource list shows none of the excluded items, the vqro skill and
@@ -270,7 +315,7 @@ export default function (pi) {
         context = sections.get("context", "")
         skills = sections.get("skills", "")
         extensions_section = sections.get("extensions", "")
-        assert "/pi-agent/SYSTEM.md" in context, (context, sanitized)
+        assert f"/{profile.name}/SYSTEM.md" in context, (context, sanitized)
         assert "vqro" in skills, (skills, sanitized)
         assert "vqro-pi.ts" in extensions_section, (extensions_section, sanitized)
         assert "tasks-pi.ts" in extensions_section, (extensions_section, sanitized)
@@ -296,8 +341,59 @@ export default function (pi) {
         probe = json.loads(probe_file.read_text())
         assert probe.get("version") == 1 and probe.get("methods") is True, probe
         assert "session_started" in probe.get("facts", []), probe
+        assert probe["agentDir"] == str(profile), probe
+        assert probe["actor"]["code"] == 0, probe
+        assert json.loads(probe["actor"]["stdout"])["caller"]["class"] == "agent", probe
 
-        result_value = {"result": "passed", "excluded_absent": list(EXCLUDED), "wanted_present": list(WANTED),
+        # Also exercise the configured managed-start executable, not just a
+        # hand-typed alias. The API keeps logical executable argv; each real
+        # process probe separately proves its bound environment.
+        managed = self.cli("pane", "split", "--pane", human, "--direction", "down", "--no-focus")["result"]["pane"]["pane_id"]
+        self.wait_output(managed, r"\$", 5)
+        started = self.cli("agent", "start", "profile-managed", "--kind", "pi", "--pane", managed, "--", "--no-session")
+        argv = started["result"]["argv"]
+        assert argv == [("pi1" if self.pi1_profile else "pi"), "--no-session"], argv
+        self.remember_pane(managed)
+        self.cli("agent", "prompt", "profile-managed", "/neutral-probe managed-first")
+        first_probe = self.root / "home/neutral-probe-managed-first.json"
+        self.wait_file(first_probe)
+        first_value = json.loads(first_probe.read_text())
+        assert first_value["agentDir"] == str(profile), first_value
+        assert json.loads(first_value["actor"]["stdout"])["caller"]["class"] == "agent"
+        # Pi1 has now written its actual changelog metadata. A second managed
+        # launch must remain ready without reprepare/version seeding.
+        second = self.cli("pane", "split", "--pane", human, "--direction", "down", "--no-focus")["result"]["pane"]["pane_id"]
+        self.wait_output(second, r"\$", 5)
+        second_start = self.cli("agent", "start", "profile-second", "--kind", "pi", "--pane", second, "--", "--no-session")
+        assert second_start["result"]["argv"] == argv, second_start
+        self.remember_pane(second)
+        self.cli("agent", "prompt", "profile-second", "/neutral-probe managed-second")
+        second_probe = self.root / "home/neutral-probe-managed-second.json"
+        self.wait_file(second_probe)
+        second_value = json.loads(second_probe.read_text())
+        assert second_value["agentDir"] == str(profile), second_value
+        assert json.loads(second_value["actor"]["stdout"])["caller"]["class"] == "agent"
+        self.api("pane.focus", {"pane_id": managed})
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            frame = (self.root / "client.log").read_bytes()
+            text = demo_capture.replay(frame).text()
+            if "vqro-pi.ts" in text and (not self.pi1_profile or "v1.5.0" in text):
+                break
+            time.sleep(0.05)
+        else:
+            raise RuntimeError("private client did not render the Pi profile resources")
+        capture_dir = self.root / "capture"
+        capture_dir.mkdir(exist_ok=True)
+        raw_capture = capture_dir / "pi-profile.ansi"
+        raw_capture.write_bytes(frame)
+        capture = demo_capture.capture(raw_capture, capture_dir, "pi-profile")
+        self.save("managed-launch.json", started)
+        self.save("managed-second-launch.json", second_start)
+        result_value = {"result": "passed", "excluded_absent": list(EXCLUDED), "wanted_present": list(self.wanted),
+                        "explicit_pi1_profile": self.pi1_profile, "managed_argv": argv, "capture": str(capture),
+                        "second_managed_launch_after_real_startup": True, "native_agent_principals": 3,
+                        "explicit_unprepared_source_rejected": self.pi1_profile,
                         "excluded_extension_absent": EXCLUDED_EXTENSION,
                         "excluded_skills_absent": list(HERDR_SKILLS), "kept_resources_present": True,
                         "vqro_system_md": True, "pi_list_ok": True, "header_ok": True,
@@ -334,6 +430,7 @@ def main():
     parser.add_argument("--vqro", required=True, type=Path)
     parser.add_argument("--pi", default=shutil.which("pi"), type=Path)
     parser.add_argument("--root", type=Path)
+    parser.add_argument("--pi1-profile", action="store_true", help="select pi1 + private agent1 through shared config")
     args = parser.parse_args()
     if not args.pi:
         parser.error("an already-installed Pi executable is required")
@@ -342,7 +439,7 @@ def main():
         root = args.root.resolve()
         if len(str(root / "api.sock").encode()) >= 108:
             parser.error("private root is too long for a Linux Unix socket")
-        demo = PiProfileDemo(root, args.vqro.resolve(), args.pi.resolve())
+        demo = PiProfileDemo(root, args.vqro.resolve(), args.pi.resolve(), pi1_profile=args.pi1_profile)
         print(f"Private Pi profile demo: {root}", flush=True)
         try:
             print(json.dumps(demo.run()), flush=True)
@@ -356,7 +453,7 @@ def main():
         if len(str(root / "api.sock").encode()) >= 108:
             parser.error("private root is too long for a Linux Unix socket")
         label = "no-settings" if no_settings else "default"
-        demo = PiProfileDemo(root, args.vqro.resolve(), args.pi.resolve(), no_settings=no_settings)
+        demo = PiProfileDemo(root, args.vqro.resolve(), args.pi.resolve(), no_settings=no_settings, pi1_profile=args.pi1_profile)
         print(f"Private Pi profile demo ({label}): {root}", flush=True)
         try:
             print(json.dumps(demo.run()), flush=True)
