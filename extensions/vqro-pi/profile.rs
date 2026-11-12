@@ -184,6 +184,7 @@ pub(crate) fn launch(
         }
         Ok(Some(crate::agent_profiles::ProfileLaunch {
             argv: vec![selected.executable],
+            prefix: Vec::new(),
             notice: None,
         }))
     }
@@ -215,19 +216,22 @@ pub(crate) fn launch(
         if selected.explicit && !ready {
             return Err(io::Error::other("selected Vqro Pi profile is unprepared or stale; start Vqro again with this configuration"));
         }
-        let mut argv = vec!["env".into()];
+        // The pane PATH may intentionally contain only agent executables. Pi's
+        // standard Unix launcher already relies on /usr/bin/env; do not add a
+        // separate PATH lookup dependency for the environment binding itself.
+        let mut prefix = vec!["/usr/bin/env".into()];
         if ready {
-            argv.push(format!(
+            prefix.push(format!(
                 "PI_CODING_AGENT_DIR={}",
                 selected.profile_dir().display()
             ));
         } else {
             // Default fallback must actively clear an old pane's source binding.
-            argv.extend(["-u".into(), "PI_CODING_AGENT_DIR".into()]);
+            prefix.extend(["-u".into(), "PI_CODING_AGENT_DIR".into()]);
         }
-        argv.push(selected.executable);
         Ok(Some(crate::agent_profiles::ProfileLaunch {
-            argv,
+            argv: vec![selected.executable],
+            prefix,
             notice: (!ready && !opted_out() && selected.source.is_some())
                 .then_some(UNAVAILABLE_WARNING),
         }))
@@ -1205,7 +1209,7 @@ mod tests {
         let a = Selection::resolve(&config).unwrap();
         let launch_a = launch(&config, "pi").unwrap().unwrap();
         assert_eq!(
-            launch_a.argv[1],
+            launch_a.prefix[1],
             format!("PI_CODING_AGENT_DIR={}", a.profile_dir().display())
         );
         assert!(launch_a.notice.is_none());
@@ -1226,7 +1230,7 @@ mod tests {
             "b"
         );
         let launch_b = launch(&config, "pi").unwrap().unwrap();
-        let mut argv = launch_b.argv;
+        let mut argv: Vec<String> = launch_b.prefix.into_iter().chain(launch_b.argv).collect();
         // Reuse the actual bound command with a deterministic executable, in a
         // pane whose inherited value is the old profile. No parent env mutation.
         argv.pop();
@@ -1277,10 +1281,14 @@ mod tests {
         let fixture = ProfileFixture::new("bound-fallback");
         let config = crate::config::Config::default();
         let fallback = launch(&config, "pi").unwrap().unwrap();
-        assert_eq!(fallback.argv, ["env", "-u", "PI_CODING_AGENT_DIR", "pi"]);
+        assert_eq!(fallback.argv, ["pi"]);
+        assert_eq!(
+            fallback.prefix,
+            ["/usr/bin/env", "-u", "PI_CODING_AGENT_DIR"]
+        );
         assert_eq!(fallback.notice, Some(UNAVAILABLE_WARNING));
-        let output = std::process::Command::new(&fallback.argv[0])
-            .args(&fallback.argv[1..3])
+        let output = std::process::Command::new(&fallback.prefix[0])
+            .args(&fallback.prefix[1..3])
             .args([
                 "/bin/sh",
                 "-c",
@@ -1303,9 +1311,11 @@ mod tests {
         config.extensions.pi_executable = Some(executable.to_string_lossy().into());
         let selected = launch(&config, "pi").unwrap().unwrap();
         assert_eq!(selected.argv.last().unwrap(), &executable.to_string_lossy());
-        let command = crate::platform::interactive_shell_command(&selected.argv, "bash").unwrap();
+        let command_argv: Vec<String> = selected.prefix.into_iter().chain(selected.argv).collect();
+        let command = crate::platform::interactive_shell_command(&command_argv, "bash").unwrap();
         let output = std::process::Command::new("/bin/bash")
             .args(["-c", &command])
+            .env("PATH", &fixture.root)
             .env("PI_CODING_AGENT_DIR", "/old/source-a")
             .output()
             .unwrap();

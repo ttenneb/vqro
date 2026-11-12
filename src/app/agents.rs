@@ -197,7 +197,12 @@ impl App {
         .map_err(|error| AgentStartError::ProfileUnavailable(error.to_string()))?;
         let mut argv = launch.argv;
         argv.extend(params.args);
-        let command = crate::platform::interactive_shell_command(&argv, &shell_name)
+        let command_argv: Vec<String> = launch
+            .prefix
+            .into_iter()
+            .chain(argv.iter().cloned())
+            .collect();
+        let command = crate::platform::interactive_shell_command(&command_argv, &shell_name)
             .ok_or(AgentStartError::InvalidArgument)?;
         // Only the shipped trusted adapter supplies fixed notice text. Its
         // operation-local choice also binds the environment in an existing pane.

@@ -6,7 +6,10 @@ use std::io;
 
 #[derive(Debug)]
 pub(crate) struct ProfileLaunch {
+    /// Logical executable/arguments reported by the existing agent-start API.
     pub(crate) argv: Vec<String>,
+    /// Internal ordinary argv preceding the executable only during execution.
+    pub(crate) prefix: Vec<String>,
     pub(crate) notice: Option<&'static str>,
 }
 
@@ -43,6 +46,7 @@ pub(crate) fn launch(
     }
     Ok(ProfileLaunch {
         argv: vec![executable.into()],
+        prefix: Vec::new(),
         notice: None,
     })
 }

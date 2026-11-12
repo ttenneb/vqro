@@ -159,7 +159,7 @@ export default function (pi) {
       if (!/^[a-z0-9-]*$/.test(args)) throw new Error("invalid private probe token");
       const actor = await adapter?.exec(["task", "whoami", "--json"], 6000);
       fs.writeFileSync(path.join(process.env.HOME, args ? `neutral-probe-${args}.json` : "neutral-probe.json"), JSON.stringify({
-        version: adapter?.version, facts, snapshot: adapter?.snapshot(), actor,
+        version: adapter?.version, facts, snapshot: adapter?.snapshot(), actor, agentDir: process.env.PI_CODING_AGENT_DIR,
         methods: ["snapshot", "current", "onFact", "beforeRun", "exec", "deliver"].every(key => typeof adapter?.[key] === "function")
       }));
     }
@@ -341,22 +341,25 @@ export default function (pi) {
         probe = json.loads(probe_file.read_text())
         assert probe.get("version") == 1 and probe.get("methods") is True, probe
         assert "session_started" in probe.get("facts", []), probe
+        assert probe["agentDir"] == str(profile), probe
         assert probe["actor"]["code"] == 0, probe
         assert json.loads(probe["actor"]["stdout"])["caller"]["class"] == "agent", probe
 
         # Also exercise the configured managed-start executable, not just a
-        # hand-typed alias. The API reports the actual bound env argv.
+        # hand-typed alias. The API keeps logical executable argv; each real
+        # process probe separately proves its bound environment.
         managed = self.cli("pane", "split", "--pane", human, "--direction", "down", "--no-focus")["result"]["pane"]["pane_id"]
         self.wait_output(managed, r"\$", 5)
         started = self.cli("agent", "start", "profile-managed", "--kind", "pi", "--pane", managed, "--", "--no-session")
         argv = started["result"]["argv"]
-        assert argv[:2] == ["env", f"PI_CODING_AGENT_DIR={profile}"], argv
-        assert argv[2] == ("pi1" if self.pi1_profile else "pi"), argv
+        assert argv == [("pi1" if self.pi1_profile else "pi"), "--no-session"], argv
         self.remember_pane(managed)
         self.cli("agent", "prompt", "profile-managed", "/neutral-probe managed-first")
         first_probe = self.root / "home/neutral-probe-managed-first.json"
         self.wait_file(first_probe)
-        assert json.loads(json.loads(first_probe.read_text())["actor"]["stdout"])["caller"]["class"] == "agent"
+        first_value = json.loads(first_probe.read_text())
+        assert first_value["agentDir"] == str(profile), first_value
+        assert json.loads(first_value["actor"]["stdout"])["caller"]["class"] == "agent"
         # Pi1 has now written its actual changelog metadata. A second managed
         # launch must remain ready without reprepare/version seeding.
         second = self.cli("pane", "split", "--pane", human, "--direction", "down", "--no-focus")["result"]["pane"]["pane_id"]
@@ -367,7 +370,9 @@ export default function (pi) {
         self.cli("agent", "prompt", "profile-second", "/neutral-probe managed-second")
         second_probe = self.root / "home/neutral-probe-managed-second.json"
         self.wait_file(second_probe)
-        assert json.loads(json.loads(second_probe.read_text())["actor"]["stdout"])["caller"]["class"] == "agent"
+        second_value = json.loads(second_probe.read_text())
+        assert second_value["agentDir"] == str(profile), second_value
+        assert json.loads(second_value["actor"]["stdout"])["caller"]["class"] == "agent"
         self.api("pane.focus", {"pane_id": managed})
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
