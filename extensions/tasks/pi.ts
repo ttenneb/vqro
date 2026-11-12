@@ -152,7 +152,9 @@ export default function (pi: ExtensionAPI) {
       } finally { checking = false; }
     }
     const startPoll = () => {
-      if (!poll && !shutDown && adapter.snapshot().self?.execution) poll = setInterval(checkMailbox, MAILBOX_POLL_MS);
+      // Keep the existing clock armed for a live unknown session. checkMailbox
+      // still performs no list/claim/delivery until a proved identity is seen.
+      if (!poll && !shutDown) poll = setInterval(checkMailbox, MAILBOX_POLL_MS);
     };
     async function noReply(target: ReplyTarget) {
       await run(["pane", "report-metadata", process.env.VQRO_PANE_ID!, "--source", "vqro.reply-routing", "--state-label", `idle=no reply to ${target.display}`, "--seq", String(++metadataSeq), "--ttl-ms", String(METADATA_TTL_MS)], 2000);

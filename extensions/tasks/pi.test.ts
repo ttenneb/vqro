@@ -622,6 +622,38 @@ test("an unknown automatic reply retains original recovery and is never replayed
   }
 });
 
+for (const activation of [true, false]) test(`unknown startup recovers from the existing clock without a run; activation=${activation}`, async () => {
+  jest.useFakeTimers();
+  let reads = 0;
+  const messages = [messageFixture("recovered", "idle recovery message")];
+  const h = harness(args => {
+    if (args[0] === "agent" && args[1] === "get") {
+      reads += 1;
+      return reads === 1 ? { code: 1, stdout: "", stderr: "transient unknown" }
+        : { code: 0, stdout: JSON.stringify({ result: { agent: { execution: "exec-beta", terminal_id: "term-beta", pane_id: "w1:p1" } } }), stderr: "" };
+    }
+    if (args[0] === "message" && args[1] === "list") return { code: 0, stdout: JSON.stringify({ activation, waiting: messages }), stderr: "" };
+    if (args[0] === "message" && args[1] === "claim") return { code: 0, stdout: JSON.stringify({ claimed: messages }), stderr: "" };
+    return { code: 0, stdout: "", stderr: "" };
+  });
+  try {
+    await h.emit("session_start", {});
+    jest.advanceTimersByTime(29_000); await flush();
+    expect(reads).toBe(1);
+    expect(h.calls.filter(call => call.args[0] === "message")).toHaveLength(0);
+    jest.advanceTimersByTime(1000); await flush();
+    expect(reads).toBe(2);
+    expect(h.sent).toHaveLength(0);
+    jest.advanceTimersByTime(MAILBOX_POLL_MS); await flush();
+    expect(h.calls.some(call => call.args[1] === "list")).toBe(true);
+    expect(h.calls.filter(call => call.args[1] === "claim")).toHaveLength(activation ? 1 : 0);
+    expect(h.sent.join("\n").includes("idle recovery message")).toBe(activation);
+  } finally {
+    await h.emit("session_shutdown", {});
+    jest.useRealTimers();
+  }
+});
+
 test("slow mailbox reads stay single flight across many poll ticks", async () => {
   jest.useFakeTimers();
   let release: any;
