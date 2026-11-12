@@ -295,7 +295,7 @@ export default function (pi) {
             wrong.mkdir()
             config_path.write_text(configured.replace(json.dumps(str(source)), json.dumps(str(wrong))))
             try:
-                failure = self.cli("agent", "start", "profile-wrong-source", "--kind", "pi", "--pane", human, expected=1)
+                failure = self.api("agent.start", {"name": "profile-wrong-source", "kind": "pi", "pane_id": human, "args": []})
                 assert failure["error"]["code"] == "agent_profile_unavailable", failure
                 self.save("unprepared-source-rejected.json", failure)
             finally:
