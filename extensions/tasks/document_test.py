@@ -287,13 +287,52 @@ class DocumentTests(unittest.TestCase):
                          if row.get("view", {}).get("view_id") == "messages"]
                 self.assertEqual(["w2:p7"], roots)
 
+    def test_old_activation_off_store_stays_off_and_shows_exact_human_enable_command(self):
+        # October-shaped recorded policy, not a new-install default or a live store.
+        self.store.db.execute("UPDATE message_policy SET activation=0,updated_at=? WHERE id=1",
+                              ("2026-10-04T00:00:00.000+00:00",))
+        self.store.db.close()
+        self.store = provider.Store(self.root.name)
+        before = list(self.store.db.iterdump()), self.store.db.total_changes
+        for populated in (False, True):
+            if populated:
+                self.seed_messages(1)
+                before = list(self.store.db.iterdump()), self.store.db.total_changes
+            observed = provider.read_only_store(self.root.name)
+            try:
+                doc = document.project(observed, self.snapshot([{"terminal_id": "a", "placement": P}]))
+            finally:
+                observed.db.close()
+            root = next(row for row in doc["items"] if row["id"] == "panel:w1:p1:messages")
+            self.assertIn("Activation off", root["detail"])
+            notice = next(row for row in doc["items"] if row["id"] == "panel:w1:p1:message:activation")
+            self.assertEqual(root["id"], notice["parent_id"])
+            self.assertIn("off", notice["label"])
+            self.assertIn("will not start agent turns", notice["detail"])
+            self.assertIn("vqro message activation on", notice["detail"])
+            self.assertNotIn("action_ids", notice)
+            self.assertEqual([], doc["actions"])
+            self.assertFalse(self.invoke({"action": "message_list"})["activation"])
+            self.assertEqual(before, (list(self.store.db.iterdump()), self.store.db.total_changes))
+
+    def test_unreadable_policy_is_a_provider_error_not_an_off_notice(self):
+        self.store.db.execute("DROP TABLE message_policy")
+        with self.assertRaises(sqlite3.OperationalError):
+            document.project(self.store, self.snapshot([{"terminal_id": "a", "placement": P}]))
+
+    def test_activation_on_message_panels_have_no_disabled_notice(self):
+        doc = document.project(self.store, self.snapshot([{"terminal_id": "a", "placement": P}]))
+        self.assertNotIn("Activation off", json.dumps(doc))
+        self.assertFalse(any(row["id"].endswith(":message:activation") for row in doc["items"]))
+
     def test_empty_message_panels_keep_the_existing_item_budget(self):
         placements = {f"t{index}": {**P, "pane_id": f"w1:p{index}"} for index in range(300)}
-        for room in (0, 1, 2, 3, 4, 7, 252):
-            items = document.message_panel_items(placements, [], ({}, {}, set()), room)
-            self.assertLessEqual(len(items), room)
-            roots = {row["id"] for row in items if "parent_id" not in row}
-            self.assertTrue(all(row["parent_id"] in roots for row in items if "parent_id" in row))
+        for activation in (True, False):
+            for room in (0, 1, 2, 3, 4, 7, 252):
+                items = document.message_panel_items(placements, [], ({}, {}, set()), room, activation=activation)
+                self.assertLessEqual(len(items), room)
+                roots = {row["id"] for row in items if "parent_id" not in row}
+                self.assertTrue(all(row["parent_id"] in roots for row in items if "parent_id" in row))
         refs = [{"terminal_id": key, "placement": value} for key, value in placements.items()]
         doc = document.project(self.store, self.snapshot(refs))
         self.assertLessEqual(len(doc["items"]), 256)

@@ -7,6 +7,9 @@ execution matches can claim. Sender provenance is the host caller binding.
 """
 import uuid
 
+ACTIVATION_OFF_LABEL = "Automatic message delivery is off"
+ACTIVATION_OFF_DETAIL = "Waiting messages will not start agent turns. Enable in a human shell: vqro message activation on"
+
 MAX_BODY_BYTES = 32 * 1024
 MAX_PAGE = 32
 # Bounds count encoded record JSON (the real result bytes), not just bodies. A

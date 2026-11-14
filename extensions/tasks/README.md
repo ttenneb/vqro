@@ -15,7 +15,11 @@ Durable addressed messages are a second record family in the same store
 (`messages.py`, schema v4): `vqro message send/list/claim/edit` with the sender
 taken from the host-supplied caller, exact-execution recipients, edit before
 claim, and one human-controlled activation setting that a fresh store defaults
-on. Delivery to Pi is the reply-routing adapter claiming at a turn boundary,
+on. Existing recorded off settings stay off. The Messages view and
+`vqro message list` show a disabled-delivery notice with the human-shell command
+`vqro message activation on`; the CLI notice goes to stderr so JSON stdout stays
+unchanged. Viewing/listing never changes policy or drains the queue.
+Delivery to Pi is the reply-routing adapter claiming at a turn boundary,
 never pane typing. When a delivered message owns an agent turn, that turn's
 final text is recorded as a durable reply message to the exact sender binding,
 always with `reply_to` (a same-sender batch links its newest message). Ownership

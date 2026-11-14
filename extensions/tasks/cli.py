@@ -9,6 +9,7 @@ import os
 import socket
 import sys
 import time
+from messages import ACTIVATION_OFF_DETAIL, ACTIVATION_OFF_LABEL
 
 SERVICE = "vqro.tasks.core"
 TASK_USAGE = "usage: vqro task <create/decision TITLE --done-when TEXT [--parent ID]|plan FILE [--parent ID --rev N]|depends ID --on JSON --rev N|update ID --rev N [metadata options]|delegate ID --to NAME (or --owner JSON) --rev N|start/accept/done ID --rev N [done --evidence TEXT]|block/report/answer ID TEXT --rev N|revert ID --rev N|decision-timer ID --rev N --auto-at UTC|decisions|decisions-seen --through SEQ|decision-log [--after SEQ]|list/ready [--after ID]|tree|whoami|get ID|op ID [--caller JSON]>; decision requires --options JSON --default KEY --reversible BOOL --waiting-cost TEXT [--auto-at UTC]; explicit task --op requires --caller JSON from the original attempt; --json forces JSON"
@@ -411,6 +412,10 @@ def main(args=None):
         payload, mutation = parse_payload(args) if kind == "task" else parse_message(args)
         status, value = execute(payload, mutation)
         if status in ("success", "unscoped"):
+            if payload["action"] == "message_list" and value.get("activation") is False:
+                # Keep JSON stdout intact for adapters and scripts; the same
+                # human-visible notice is available in redirected/TTY output.
+                print(f"{ACTIVATION_OFF_LABEL}. {ACTIVATION_OFF_DETAIL}", file=sys.stderr)
             short_ids = None
             if not json_output and payload["action"] in ("list", "ready"):
                 from ids import short_forms

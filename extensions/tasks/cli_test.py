@@ -372,6 +372,26 @@ class CliTests(unittest.TestCase):
             if expected_json: self.assertEqual(json.loads(text)["task"]["id"], "proof")
             else: self.assertIn("proof [task / reported", text)
 
+    def test_message_list_off_notice_preserves_json_and_shows_exact_enable_command(self):
+        class Tty(io.StringIO):
+            def isatty(self): return True
+        for activation in (False, True, None):
+            value = {"activation": activation, "waiting": [], "messages": []}
+            for output, flags, json_output in ((Tty(), [], False), (io.StringIO(), [], True), (Tty(), ["--json"], True)):
+                errors = io.StringIO()
+                with patch("sys.stdout", output), patch("sys.stderr", errors), patch("cli.execute", return_value=("success", value)):
+                    self.assertEqual(cli.main(["message", "list", *flags]), 0)
+                if json_output:
+                    self.assertEqual(value, json.loads(output.getvalue()))
+                else:
+                    self.assertEqual("(no messages)\n", output.getvalue())
+                if activation is not False:
+                    self.assertEqual("", errors.getvalue())
+                else:
+                    self.assertIn("Automatic message delivery is off", errors.getvalue())
+                    self.assertIn("Waiting messages will not start agent turns", errors.getvalue())
+                    self.assertIn("human shell: vqro message activation on", errors.getvalue())
+
     def test_shipped_skill_task_examples_parse_with_current_cli(self):
         skill = (Path(__file__).resolve().parents[2] / "skills/vqro/SKILL.md").read_text()
         with tempfile.TemporaryDirectory() as root:

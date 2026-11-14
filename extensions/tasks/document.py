@@ -9,6 +9,7 @@ import json
 import re
 from collections import Counter
 from decision_queue import text as decision_text
+from messages import ACTIVATION_OFF_DETAIL, ACTIVATION_OFF_LABEL, Messages
 from provider import MAX_RECORDS, canonical, checked_binding
 from view import clean, debtors, durable_attention as attention, label, recipient
 
@@ -288,7 +289,7 @@ def message_rows(records, terminal_id, known, replied):
     return rows[: MESSAGE_LIMIT * 2]
 
 
-def message_panel_items(placements, messages, evidence, room):
+def message_panel_items(placements, messages, evidence, room, *, activation=True):
     """Complete recorded context is distinct from currentness and previews."""
     scopes, known, replied = evidence
     items, panes = [], {}
@@ -299,13 +300,18 @@ def message_panel_items(placements, messages, evidence, room):
     # Recorded waiting first, then other stored context, then proven empty sets.
     for pane_id, terminal_id, scope in sorted(candidates, key=lambda entry: (
             not entry[2]["waiting"], not entry[2]["total"], entry[0])):
-        if len(items) + (4 if scope["total"] else 3) > room:
+        if len(items) + (4 if scope["total"] else 3) + (activation is False) > room:
             continue
         root_id = f"panel:{pane_id}:{MESSAGE_VIEW}"
         summary = f"UNRESOLVED · {scope['waiting']} recorded waiting" if scope["total"] else "settled"
+        if activation is False:
+            summary = "Activation off · " + summary
         items.append({"id": root_id, "role": "section", "label": "Messages", "detail": summary,
                       "view": {"pane_id": pane_id, "view_id": MESSAGE_VIEW,
                                "state": "in_progress" if scope["waiting"] else "open"}})
+        if activation is False:
+            items.append({"id": f"panel:{pane_id}:message:activation", "role": "section", "parent_id": root_id,
+                          "label": ACTIVATION_OFF_LABEL, "detail": ACTIVATION_OFF_DETAIL, "view": {"state": "open"}})
         if not scope["total"]:
             items.append({"id": f"panel:{pane_id}:message:empty", "role": "section",
                           "parent_id": root_id, "label": "No messages", "view": {"state": "open"}})
@@ -479,7 +485,8 @@ def project_snapshot(store, snapshot):
         messages = [message_record(row) for row in store.db.execute(
             "SELECT * FROM messages ORDER BY created_at DESC, id DESC LIMIT 200")]
     items.extend(message_panel_items(
-        placements, messages, evidence, max(0, 256 - len(items))))
+        placements, messages, evidence, max(0, 256 - len(items)),
+        activation=True if store is None else Messages(store).activation()))
     if len(rows) > len(attention_rows):
         items.append({"id": PREFIX + "overflow:tasks", "role": "section", "label": f"{len(rows)} more · open full Tasks view"})
     if len(items) > 256:
