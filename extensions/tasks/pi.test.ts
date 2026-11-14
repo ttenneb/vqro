@@ -134,6 +134,7 @@ test("a delivered batch is answered by the sender's exact binding with reply_to"
     await flush();
     expect(h.sent.join("\n")).toContain("please review");
     await h.emit("before_agent_start", { prompt: deliveredContent(messages) });
+    await h.emit("message_start", { message: { role: "user", content: deliveredContent(messages) } });
     await h.emit("turn_end", turnText("here is the review"));
     await h.emit("agent_settled", {});
     const recorded = sends(h);
@@ -217,6 +218,224 @@ test("the run whose prompt is the delivered content answers it", async () => {
     await h.emit("turn_end", turnText("answer to the colleague"));
     await h.emit("agent_settled", {});
     expect(sends(h)[0]?.args).toEqual(["message", "send", bindingOf("exec-alpha"), "answer to the colleague", "--reply-to", "m1"]);
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+test("follow-up input inside a delivered run disables its automatic reply", async () => {
+  jest.useFakeTimers();
+  try {
+    for (const source of ["interactive", "rpc", "extension"]) {
+      const messages = [messageFixture("m1", "colleague request")];
+      const h = mailboxHarness(messages);
+      await h.emit("session_start", {});
+      jest.advanceTimersByTime(MAILBOX_POLL_MS + 5);
+      await flush();
+      await h.emit("before_agent_start", { prompt: deliveredContent(messages) });
+      await h.emit("message_start", { message: { role: "user", content: deliveredContent(messages) } });
+      await h.emit("turn_end", turnText("working on the request"));
+      await h.emit("input", { source, text: "human follow-up question" });
+      await h.emit("message_start", { message: { role: "user", content: "human follow-up question" } });
+      await h.emit("turn_end", turnText("private answer to the follow-up"));
+      await h.emit("agent_settled", {});
+      expect(sends(h)).toHaveLength(0);
+      expect(h.entries).toContainEqual(expect.objectContaining({ data: expect.objectContaining({ kind: "no-reply", reason: "follow-up-input" }) }));
+      await h.emit("session_shutdown", {});
+    }
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+test("revocation is monotonic even if the initial marker appears later", async () => {
+  jest.useFakeTimers();
+  try {
+    for (const variant of ["human-before-initial", "duplicate-initial", "truncated-initial"]) {
+      const messages = [messageFixture("m1", "request")];
+      const h = mailboxHarness(messages);
+      await h.emit("session_start", {});
+      jest.advanceTimersByTime(MAILBOX_POLL_MS + 5);
+      await flush();
+      await h.emit("before_agent_start", { prompt: deliveredContent(messages) });
+      if (variant === "human-before-initial") await h.emit("input", { source: "interactive", text: "human question" });
+      const content = variant === "truncated-initial" ? deliveredContent(messages) + "x".repeat(65536) : deliveredContent(messages);
+      await h.emit("message_start", { message: { role: "user", content } });
+      // A repeated marker cannot recover ownership after a human, an unknown
+      // second input, or an incomplete observation of the initial input.
+      await h.emit("message_start", { message: { role: "user", content: deliveredContent(messages) } });
+      await h.emit("turn_end", turnText("do not route this"));
+      await h.emit("agent_settled", {});
+      expect(sends(h)).toHaveLength(0);
+      await h.emit("session_shutdown", {});
+    }
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+test("message-start follow-up without a submission hook cannot inherit a sender", async () => {
+  jest.useFakeTimers();
+  try {
+    for (const role of ["user", "custom"]) {
+      const messages = [messageFixture("m1", "request")];
+      const h = mailboxHarness(messages);
+      await h.emit("session_start", {});
+      jest.advanceTimersByTime(MAILBOX_POLL_MS + 5);
+      await flush();
+      await h.emit("before_agent_start", { prompt: deliveredContent(messages) });
+      await h.emit("message_start", { message: { role: "user", content: deliveredContent(messages) } });
+      await h.emit("turn_end", turnText("partial work"));
+      await h.emit("message_start", { message: { role, content: "human follow-up" } });
+      await h.emit("turn_end", turnText("private human answer"));
+      await h.emit("agent_settled", {});
+      expect(sends(h)).toHaveLength(0);
+      await h.emit("session_shutdown", {});
+    }
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+test("later queued B cannot rearm a run whose starting delivery was not proved", async () => {
+  jest.useFakeTimers();
+  try {
+    for (const human of [false, true]) {
+      const messages = [messageFixture("m1", "request A")];
+      const first = deliveredContent(messages);
+      const h = mailboxHarness(messages);
+      await h.emit("session_start", {});
+      jest.advanceTimersByTime(MAILBOX_POLL_MS + 5);
+      await flush();
+      // SDK input hooks can leave both deliveries queued before it starts.
+      messages.splice(0, 1, messageFixture("m2", "request B", "exec-gamma"));
+      jest.advanceTimersByTime(MAILBOX_POLL_MS + 5);
+      await flush();
+      await h.emit("before_agent_start", { prompt: first });
+      await h.emit("message_start", { message: { role: "user", content: first } });
+      await h.emit("turn_end", turnText("work on A"));
+      if (human) {
+        await h.emit("input", { source: "interactive", text: "human question" });
+        await h.emit("message_start", { message: { role: "user", content: "human question" } });
+        await h.emit("turn_end", turnText("human answer"));
+      }
+      await h.emit("message_start", { message: { role: "custom", customType: "vqro-input", content: deliveredContent(messages) } });
+      await h.emit("turn_end", turnText("answer to B"));
+      await h.emit("agent_settled", {});
+      await h.emit("agent_settled", {});
+      expect(sends(h)).toHaveLength(0);
+      await h.emit("session_shutdown", {});
+    }
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+test("a later delivered message can own a new run after human follow-up", async () => {
+  jest.useFakeTimers();
+  try {
+    const messages = [messageFixture("m1", "first request")];
+    const h = mailboxHarness(messages);
+    await h.emit("session_start", {});
+    jest.advanceTimersByTime(MAILBOX_POLL_MS + 5);
+    await flush();
+    await h.emit("before_agent_start", { prompt: deliveredContent(messages) });
+    await h.emit("input", { source: "interactive", text: "human question" });
+    await h.emit("turn_end", turnText("human answer"));
+    await h.emit("agent_settled", {});
+    expect(sends(h)).toHaveLength(0);
+    messages.splice(0, 1, messageFixture("m2", "later request", "exec-gamma"));
+    jest.advanceTimersByTime(MAILBOX_POLL_MS + 5);
+    await flush();
+    await h.emit("before_agent_start", { prompt: deliveredContent(messages) });
+    await h.emit("turn_end", turnText("later answer"));
+    await h.emit("agent_settled", {});
+    expect(sends(h).map(call => call.args)).toEqual([["message", "send", bindingOf("exec-gamma"), "later answer", "--reply-to", "m2"]]);
+    await h.emit("session_shutdown", {});
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+test("input during the reply availability read also disables automatic routing", async () => {
+  jest.useFakeTimers();
+  try {
+    for (const kind of ["input", "message_start"]) {
+      const messages = [messageFixture("m1", "request")];
+      let release: any;
+      const h = harness(args => {
+        if (args[0] === "message" && args[1] === "list") return { code: 0, stdout: JSON.stringify({ activation: true, waiting: messages }) };
+        if (args[0] === "message" && args[1] === "claim") return { code: 0, stdout: JSON.stringify({ claimed: messages }) };
+        if (args[0] === "task") return new Promise(resolve => { release = () => resolve({ code: 0, stdout: JSON.stringify({ caller: { class: "agent" } }) }); });
+        return { code: 0, stdout: "" };
+      });
+      await h.emit("session_start", {});
+      jest.advanceTimersByTime(MAILBOX_POLL_MS + 5);
+      await flush();
+      await h.emit("before_agent_start", { prompt: deliveredContent(messages) });
+      await h.emit("turn_end", turnText("old answer"));
+      const settling = h.emit("agent_settled", {});
+      await flush();
+      expect(release).toBeDefined();
+      await h.emit(kind, kind === "input" ? { source: "interactive", text: "new human question" } : { message: { role: "user", content: "new human question" } });
+      release();
+      await settling;
+      expect(sends(h)).toHaveLength(0);
+      await h.emit("session_shutdown", {});
+    }
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+test("follow-up during the starting identity read cannot rearm the initial sender", async () => {
+  jest.useFakeTimers();
+  try {
+    const messages = [messageFixture("m1", "request")];
+    let delayIdentity = false, release: any;
+    let claims = 0;
+    const live = harness(args => {
+      if (args[0] === "agent" && delayIdentity) return new Promise(resolve => { release = () => resolve({ code: 0, stdout: JSON.stringify({ result: { agent: { execution: "exec-beta" } } }) }); });
+      if (args[0] === "message" && args[1] === "list") return { code: 0, stdout: JSON.stringify({ activation: true, waiting: messages }) };
+      if (args[0] === "message" && args[1] === "claim") return { code: 0, stdout: JSON.stringify({ claimed: claims++ === 0 ? messages : [] }) };
+      return { code: 0, stdout: "" };
+    });
+    await live.emit("session_start", {});
+    jest.advanceTimersByTime(MAILBOX_POLL_MS + 5);
+    await flush();
+    delayIdentity = true;
+    const starting = live.emit("before_agent_start", { prompt: deliveredContent(messages) });
+    await flush();
+    expect(release).toBeDefined();
+    await live.emit("input", { source: "interactive", text: "human steering" });
+    delayIdentity = false;
+    release();
+    await starting;
+    await live.emit("turn_end", turnText("human answer"));
+    await live.emit("agent_settled", {});
+    expect(sends(live)).toHaveLength(0);
+    await live.emit("session_shutdown", {});
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+test("cancelled or failed delivered runs never reply with partial output", async () => {
+  jest.useFakeTimers();
+  try {
+    for (const stopReason of ["aborted", "error"]) {
+      const messages = [messageFixture("m1", "request")];
+      const h = mailboxHarness(messages);
+      await h.emit("session_start", {});
+      jest.advanceTimersByTime(MAILBOX_POLL_MS + 5);
+      await flush();
+      await h.emit("before_agent_start", { prompt: deliveredContent(messages) });
+      await h.emit("turn_end", turnText("earlier tool turn"));
+      await h.emit("turn_end", { message: { ...turnText("partial answer").message, stopReason } });
+      await h.emit("agent_settled", {});
+      expect(sends(h)).toHaveLength(0);
+      await h.emit("session_shutdown", {});
+    }
   } finally {
     jest.useRealTimers();
   }

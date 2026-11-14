@@ -43,6 +43,37 @@ test("adapter alone reports neutral facts and only explicit input delivers", asy
   expect(await h.api().deliver("after shutdown", h.api().snapshot())).toBe(false);
 });
 
+test("input message starts are bounded neutral observations, not tool or status noise", async () => {
+  const h = harness();
+  await h.emit("session_start");
+  for (const role of ["user", "custom", "assistant", "toolResult"]) {
+    await h.emit("message_start", { message: { role, content: "input text" } });
+  }
+  await h.emit("message_start", { message: { role: "user", content: "x".repeat(MAX_FACT_BYTES + 1) } });
+  const inputs = h.facts.filter(f => f.kind === "input_message_started");
+  expect(inputs.map(f => f.messageRole)).toEqual(["user", "custom", "user"]);
+  expect(inputs[0].text).toBe("input text");
+  expect(inputs[1].text_truncated).toBe(false);
+  expect(inputs[2].text_truncated).toBe(true);
+  expect(Buffer.byteLength(inputs[2].text)).toBe(MAX_FACT_BYTES);
+  expect(h.sent).toHaveLength(0);
+  await h.emit("session_shutdown");
+  await h.emit("message_start", { message: { role: "user", content: "closed" } });
+  expect(h.facts.filter(f => f.kind === "input_message_started")).toHaveLength(3);
+});
+
+test("aborted and error turns replace earlier final text with no final answer", async () => {
+  for (const stopReason of ["aborted", "error"]) {
+    const h = harness();
+    await h.emit("before_agent_start", { prompt: "request" });
+    await h.emit("turn_end", { message: { content: "earlier tool turn" } });
+    await h.emit("turn_end", { message: { content: "partial answer", stopReason } });
+    await h.emit("agent_settled");
+    expect(h.facts.at(-1).final).toBe("");
+    await h.emit("session_shutdown");
+  }
+});
+
 test("consumer mutation cannot alter the producer's identity or facts", async () => {
   const h = harness();
   h.api().onFact(fact => { if (fact.self) fact.self.execution = "forged"; });

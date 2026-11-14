@@ -82,6 +82,11 @@ pi-launch-profile-test:
 pi-reply-routing-test:
     bun test extensions/vqro-pi/index.test.ts extensions/vqro-pi/input-box.test.ts extensions/tasks/pi.test.ts
 
+# Exercise real installed Pi 1.5 SDK ordering offline in an explicit private root.
+# Identity/message CLI effects are doubles, not native principal admission.
+pi-sdk-reply-routing-test sdk root:
+    node extensions/vqro-pi/pi1-sdk.mjs "{{sdk}}" "{{root}}"
+
 # Download the Windows SDK once (requires xwin; prompts for Microsoft's SDK license)
 [unix]
 setup-windows-cross *args:

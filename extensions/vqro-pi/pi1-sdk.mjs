@@ -44,7 +44,7 @@ saveState();
 const settingsManager = sdk.SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false }, cacheWarm: { enabled: false } });
 const modelRuntime = await sdk.ModelRuntime.create({ authPath: path.join(root, 'agent/auth.json'), modelsPath: null, modelsStorePath: path.join(root, 'agent/models-store.json'), refreshOnCreate: false, allowModelNetwork: false });
 const facts = [], contexts = [], errors = [], boundaries = [];
-let adapter;
+let adapter, holdNext = false, releaseHeld, announceHeld;
 const runtime = modelRuntime;
 runtime.registerProvider('vqro-offline', {
   api: 'openai-completions', baseUrl: 'http://offline.invalid', apiKey: 'offline-sentinel-not-a-credential',
@@ -54,7 +54,12 @@ runtime.registerProvider('vqro-offline', {
     const stream = ai.createAssistantMessageEventStream();
     const response = { role: 'assistant', content: [{ type: 'text', text: `offline answer ${contexts.length}` }], api: model.api, provider: model.provider, model: model.id,
       usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: 'stop', timestamp: Date.now() };
-    queueMicrotask(() => { stream.push({ type: 'done', reason: 'stop', message: response }); stream.end(response); });
+    const finish = () => { stream.push({ type: 'done', reason: 'stop', message: response }); stream.end(response); };
+    if (holdNext) {
+      holdNext = false;
+      releaseHeld = finish;
+      announceHeld?.();
+    } else queueMicrotask(finish);
     return stream;
   },
 });
@@ -106,6 +111,29 @@ try {
   assert(entries.some(entry => entry.type === 'custom' && entry.customType === 'vqro-reply-routing' && entry.data?.kind === 'replied'), 'reply routing recorded in real persisted session');
   assert.equal(errors.length, 0, JSON.stringify(errors));
   assert(boundaries.every(boundary => typeof boundary.messageEntryId === 'string'), 'Pi1 actionable boundary metadata');
+  // Real SDK ordering: a durable message starts the run, a human steering
+  // question is submitted while its model response is held, then the SDK starts
+  // that queued user message before its final answer. No network/model spend.
+  const held = new Promise(resolve => { announceHeld = resolve; });
+  holdNext = true;
+  state.messages = [message('human-follow-up')]; saveState();
+  await Promise.race([held, new Promise((_, reject) => setTimeout(() => reject(new Error('follow-up fixture did not start')), 15000).unref())]);
+  const run = adapter.snapshot().run;
+  const settled = new Promise(resolve => {
+    const off = adapter.onFact(fact => {
+      if (fact.kind === 'run_settled' && fact.run === run) { off(); resolve(); }
+    });
+  });
+  await session.prompt('PRIVATE human follow-up question', { streamingBehavior: 'steer' });
+  releaseHeld();
+  await settled;
+  await session.waitForIdle();
+  await new Promise(resolve => setImmediate(resolve));
+  assert(facts.some(fact => fact.kind === 'input_message_started' && fact.text === 'PRIVATE human follow-up question'), 'real SDK starts queued human input');
+  assert(contexts.at(-1).messages.some(message => message.role === 'user' && JSON.stringify(message.content).includes('PRIVATE human follow-up question')), 'model actually sees the human question');
+  assert.equal(fs.readFileSync(path.join(root, 'replies.jsonl'), 'utf8').trim().split('\n').length, 1, 'no automatic reply record for human answer');
+  assert(manager.getEntries().some(entry => entry.type === 'message' && entry.message.role === 'assistant' && JSON.stringify(entry.message.content).includes(`offline answer ${contexts.length}`)), 'human answer remains in private session');
+  assert(manager.getEntries().some(entry => entry.type === 'custom' && entry.customType === 'vqro-reply-routing' && entry.data?.reason === 'follow-up-input'));
   // A changed execution while beforeRun is awaiting must discard claimed context.
   state.messages = [message('stale-message')]; state.activation = false; saveState();
   let discarded = false;
@@ -116,8 +144,8 @@ try {
   await session.prompt('replacement race');
   offBefore();
   assert(discarded);
-  assert(!JSON.stringify(contexts[2]).includes('NEVER INJECT STALE'));
-  assert(!JSON.stringify(contexts[2]).includes('offline body stale-message'));
+  assert(!JSON.stringify(contexts.at(-1)).includes('NEVER INJECT STALE'));
+  assert(!JSON.stringify(contexts.at(-1)).includes('offline body stale-message'));
   assert(manager.getEntries().some(entry => entry.type === 'custom' && entry.customType === 'vqro-reply-routing' && entry.data?.kind === 'messages-undelivered' && entry.data.ids.includes('stale-message')));
   const oldAdapter = adapter, oldToken = adapter.snapshot();
   // Public reload performs real shutdown and rebind; old adapter cannot accept tokens.

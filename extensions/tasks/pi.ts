@@ -103,6 +103,8 @@ export default function (pi: ExtensionAPI) {
     detach(); active = candidate;
     const adapter = candidate as AdapterV1;
     let replyTo: ReplyTarget | undefined = undefined, explicit = false, shutDown = false, checking = false;
+    let inputRevision = 0, followUpRun: number | undefined;
+    let initialMarker: string | undefined;
     // A delivered batch awaiting the run that runs it, identified by the unique
     // delivery id the SDK copies into that run's own input.
     let pending: { marker: string; target: ReplyTarget } | undefined = undefined;
@@ -169,9 +171,27 @@ export default function (pi: ExtensionAPI) {
       return { message: { customType: "vqro-message", content: messages.map(renderMessage).join("\n\n"), display: true }, discard: () => undelivered(messages) };
     });
     const unFacts = adapter.onFact(async fact => {
-      if (fact.kind === "session_closed") { shutDown = true; replyTo = undefined; pending = undefined; stopPoll(); return; }
+      if (fact.kind === "session_closed") { shutDown = true; replyTo = undefined; pending = undefined; initialMarker = undefined; stopPoll(); return; }
       if (shutDown) return;
-      if (fact.kind === "session_started") { stopPoll(); replyTo = undefined; pending = undefined; explicit = false; startPoll(); return; }
+      if (fact.kind === "session_started") { stopPoll(); replyTo = undefined; pending = undefined; initialMarker = undefined; followUpRun = undefined; explicit = false; startPoll(); return; }
+      if (fact.kind === "input_message_started") {
+        inputRevision += 1;
+        // The SDK emits the starting prompt after run_started. Accept it once;
+        // every other user/custom observation revokes ownership for this run.
+        const initial = initialMarker; initialMarker = undefined;
+        if (initial && fact.text_truncated !== true && (fact.text ?? "").includes(initial)) return;
+      }
+      if (fact.kind === "input_observed" || fact.kind === "input_message_started") {
+        if (fact.kind === "input_observed") inputRevision += 1;
+        initialMarker = undefined;
+        // run_started may still be awaiting its identity read when input arrives.
+        if (fact.state === "working") followUpRun = fact.run;
+        // Ownership of the starting prompt does not cover steering/follow-up
+        // input inside the same SDK run. Never send its answer to the old sender.
+        const current = replyTo; replyTo = undefined;
+        if (current) record({ kind: "no-reply", recipient: current.execution, reason: "follow-up-input" });
+        return;
+      }
       if (fact.kind === "run_started") {
         stopPoll(); explicit = false;
         const current = pending; pending = undefined;
@@ -181,8 +201,9 @@ export default function (pi: ExtensionAPI) {
         // proof, and anything else — a human turn that won the race, a busy-queued
         // follow-up, transformed input — is not proven either: none of those is
         // sent an automatic reply, and the pane is told so.
-        const owns = current !== undefined && fact.prompt_truncated !== true && prompt.includes(current.marker);
+        const owns = current !== undefined && fact.run !== followUpRun && fact.prompt_truncated !== true && prompt.includes(current.marker);
         replyTo = owns && current ? current.target : undefined;
+        initialMarker = owns ? current?.marker : undefined;
         if (current && !owns) {
           record({ kind: "no-reply", recipient: current.target.execution, reason: "delivery-not-run" });
           await noReply(current.target);
@@ -194,11 +215,12 @@ export default function (pi: ExtensionAPI) {
       }
       if (fact.kind !== "run_settled") return;
       startPoll();
-      const current = replyTo; replyTo = undefined;
+      const current = replyTo; replyTo = undefined; initialMarker = undefined;
+      const revision = inputRevision;
       if (!current) return;
       if (fact.self?.execution === current.execution) { record({ kind: "self", recipient: current.execution }); return; }
-      // Disabled/unavailable Tasks cannot record the reply.
-      if (!await available() || shutDown || !adapter.current(fact)) return;
+      // Recheck input after the asynchronous availability read as well.
+      if (!await available() || shutDown || !adapter.current(fact) || revision !== inputRevision) return;
       if (explicit) { record({ kind: "explicit", recipient: current.execution }); return; }
       if (!fact.final) { record({ kind: "no-reply", recipient: current.execution }); await noReply(current); return; }
       const body = boundedReplyBytes(fact.final);

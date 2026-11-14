@@ -13,7 +13,7 @@ export interface Run {
   prompt: string; prompt_truncated?: boolean; source: string; origin?: { label: string; trust: "self_declared" };
   final: string; truncated: boolean;
 }
-export interface Fact extends Run { kind: string; toolName?: string; text?: string; text_truncated?: boolean }
+export interface Fact extends Run { kind: string; toolName?: string; messageRole?: string; text?: string; text_truncated?: boolean }
 export interface ContextInput { message: { customType: string; content: string; display: boolean }; discard?: () => void }
 export interface AdapterV1 {
   version: 1;
@@ -281,6 +281,13 @@ export default function (pi: ExtensionAPI) {
     const value = boundedText(event.text);
     await publish("input_observed", { text: value.text, text_truncated: value.truncated, source });
   });
+  pi.on("message_start", async event => {
+    if (state.state === "closed" || !["user", "custom"].includes(event.message.role)) return;
+    const value = boundedText(assistantText(event.message));
+    // Custom appends also emit message_start: this is an observation, not proof
+    // of model consumption, delivery acceptance, or permission to start a turn.
+    await publish("input_message_started", { messageRole: event.message.role, text: value.text, text_truncated: value.truncated });
+  });
   pi.on("session_start", async (_event, ctx) => {
     if (state.state === "closed") return;
     watchInputBox(ctx);
@@ -333,7 +340,9 @@ export default function (pi: ExtensionAPI) {
   });
   pi.on("turn_end", async event => {
     if (state.state === "closed") return;
-    const value = boundedText(assistantText(event.message).trim());
+    // Interrupted/failed assistant text is partial output, not a final answer.
+    const failed = event.message?.stopReason === "aborted" || event.message?.stopReason === "error";
+    const value = boundedText(failed ? "" : assistantText(event.message).trim());
     state.final = value.text; state.truncated = value.truncated;
     await publish("turn_ended");
   });

@@ -16,7 +16,12 @@ version1 interface provides:
   by changing a supplied observation. Each textual field is bounded at64KiB;
   prompt/final/tool/input truncation is explicit. Origin labels are tagged
   **self_declared**, never authenticated identities. Unknown evidence stays
-  unknown. Final text replaces intermediate text even when the last turn is empty.
+  unknown. Final text replaces intermediate text even when the last turn is empty;
+  aborted/error turns expose no final answer. `input_observed` reports submission.
+  `input_message_started` reports SDK `message_start` for user/custom messages,
+  with `messageRole`, bounded `text` and `text_truncated`. Custom appends can emit
+  this observation without triggering model input; it is not consumption,
+  delivery/acceptance evidence, or permission to activate a turn.
 - `beforeRun(callback)`: an asynchronous context contribution **awaited inside
   the SDK `before_agent_start` hook**. Returning `{message, discard?}` contributes
   context only after current-run/execution/shutdown checks; `discard` reports a
@@ -67,6 +72,13 @@ untruncated input is observed to carry the delivered message id — is Tasks con
 [Tasks conventions](task-conventions.md) and
 [`extensions/tasks/README.md`](../../extensions/tasks/README.md).
 The consumer has no broader automatic-reply policy for every claimed message.
+After ownership is armed, Tasks permits one complete initial message-start
+observation carrying that delivery marker. Subsequent submitted input or other
+user/custom message starts revoke automatic reply ownership for that run,
+including if a delivery marker appears again later. Revocation is monotonic;
+only a separate delivery-owned run can arm a new reply. Tool/status observations
+cannot revoke or establish ownership. Input revisions are rechecked after the
+asynchronous Tasks availability read before recording an automatic reply.
 
 The profile carries the neutral adapter and separately loaded Tasks consumer;
 bundling describes distribution only, not host capability authority. Existing
