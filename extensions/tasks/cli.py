@@ -13,7 +13,7 @@ from messages import ACTIVATION_OFF_DETAIL, ACTIVATION_OFF_LABEL
 
 SERVICE = "vqro.tasks.core"
 TASK_USAGE = "usage: vqro task <create/decision TITLE --done-when TEXT [--parent ID]|plan FILE [--parent ID --rev N]|depends ID --on JSON --rev N|update ID --rev N [metadata options]|delegate ID --to NAME (or --owner JSON) --rev N|start/accept/done ID --rev N [done --evidence TEXT]|block/report/answer ID TEXT --rev N|revert ID --rev N|decision-timer ID --rev N --auto-at UTC|decisions|decisions-seen --through SEQ|decision-log [--after SEQ]|list/ready [--after ID]|tree|whoami|get ID|op ID [--caller JSON]>; decision requires --options JSON --default KEY --reversible BOOL --waiting-cost TEXT [--auto-at UTC]; explicit task --op requires --caller JSON from the original attempt; --json forces JSON"
-MESSAGE_USAGE = "usage: vqro message <send TARGET TEXT [--reply-to ID]|list|claim [--idle]|edit ID TEXT --rev N|activation on|off> [--op ID] [--caller JSON] [--json]; explicit --op requires --caller from the original attempt; TARGET is a detected agent name, pane id, or an exact agent binding JSON {\"class\":\"agent\",\"terminal_id\":...,\"agent\":...,\"execution\":...}"
+MESSAGE_USAGE = "usage: vqro message <send TARGET TEXT [--reply-to ID]|list|get ID|claim [--idle]|edit ID TEXT --rev N|outcome ID ATTEMPT OUTCOME|outcomes PAIRS_JSON OUTCOME|recover ID retry|resolve --rev N [--may-duplicate]|activation on|off> [--op ID] [--caller JSON] [--json]; explicit --op requires --caller from the original attempt; TARGET is a detected agent name, pane id, or an exact agent binding JSON {\"class\":\"agent\",\"terminal_id\":...,\"agent\":...,\"execution\":...}"
 MUTATIONS = {"create", "decision", "delegate", "start", "block", "report", "accept", "done", "answer", "decision_seen", "decision_timer", "decision_revert", "plan", "depends", "update"}
 
 
@@ -230,6 +230,14 @@ def parse_message(args):
     command = args[0]
     if command in ("list", "claim"):
         payload = {"action": "message_" + command}; remaining = args[1:]
+    elif command == "get" and len(args) >= 2:
+        payload = {"action": "message_get", "id": args[1]}; remaining = args[2:]
+    elif command == "outcome" and len(args) >= 4:
+        payload = {"action": "message_outcome", "id": args[1], "attempt": args[2], "outcome": args[3]}; remaining = args[4:]
+    elif command == "outcomes" and len(args) >= 3:
+        payload = {"action": "message_outcomes", "attempts": json.loads(args[1]), "outcome": args[2]}; remaining = args[3:]
+    elif command == "recover" and len(args) >= 3:
+        payload = {"action": "message_recover", "id": args[1], "mode": args[2]}; remaining = args[3:]
     elif command in ("send", "edit") and len(args) >= 3:
         payload = {"action": "message_" + command, "body": args[2], "target" if command == "send" else "id": args[1]}; remaining = args[3:]
     elif command == "activation" and len(args) >= 2 and args[1] in ("on", "off"):
@@ -241,26 +249,28 @@ def parse_message(args):
         flag = remaining[index]
         if flag == "--idle" and command == "claim":
             payload["idle"] = True; index += 1; continue
+        if flag == "--may-duplicate" and command == "recover":
+            payload["may_duplicate"] = True; index += 1; continue
         if index + 1 >= len(remaining):
             raise ValueError(f"{flag} requires a value")
         value = remaining[index + 1]
-        if flag == "--op" and command != "list":
+        if flag == "--op" and command not in ("list", "get"):
             if not value: raise ValueError("--op id must not be empty")
             payload["operation_id"] = value
-        elif flag == "--caller" and command != "list":
+        elif flag == "--caller" and command not in ("list", "get"):
             payload["expected_caller"] = json.loads(value)
         elif flag == "--reply-to" and command == "send":
             payload["reply_to"] = value
-        elif flag == "--rev" and command == "edit":
+        elif flag == "--rev" and command in ("edit", "recover"):
             payload["revision"] = unsigned(value, "--rev requires a message revision number")
         else:
             raise ValueError(f"unknown option: {flag}")
         index += 2
     if "operation_id" in payload and "expected_caller" not in payload:
         raise ValueError("an explicit --op requires --caller with the original attempt's binding (use task whoami for a fresh explicit ID)")
-    if command == "edit" and "revision" not in payload:
-        raise ValueError("edit requires the inspected --rev revision")
-    return payload, command != "list"
+    if command in ("edit", "recover") and "revision" not in payload:
+        raise ValueError(f"{command} requires the inspected --rev revision")
+    return payload, command not in ("list", "get")
 
 
 def output_options(kind, args):
@@ -268,7 +278,7 @@ def output_options(kind, args):
     forced = bool(args and args[0] == "--json")
     if forced: args.pop(0)
     if not args: return args, forced
-    minimum = ({"send": 3, "edit": 3, "activation": 2} if kind == "message" else {"block": 3, "report": 3, "answer": 3, **dict.fromkeys(("create", "decision", "plan", "get", "op", "delegate", "start", "accept", "done", "depends", "update", "revert", "decision-timer"), 2)}).get(args[0], 1)
+    minimum = ({"send": 3, "edit": 3, "get": 2, "outcome": 4, "outcomes": 3, "recover": 3, "activation": 2} if kind == "message" else {"block": 3, "report": 3, "answer": 3, **dict.fromkeys(("create", "decision", "plan", "get", "op", "delegate", "start", "accept", "done", "depends", "update", "revert", "decision-timer"), 2)}).get(args[0], 1)
     kept, index = args[:minimum], minimum
     while index < len(args):
         if args[index] == "--json":
@@ -354,7 +364,16 @@ def human_output(value, short_ids=None):
     elif "claimed" in value: messages = value["claimed"]
     elif "waiting" in value: messages = value["waiting"] + value.get("messages", [])
     else: return "\n".join(f"{visible(key)}: {encoded(item)}" for key, item in value.items())
-    return "\n".join(f"{visible(message['id'])} [{visible(message.get('state'))} r{message.get('revision')}] {visible(message['body'])}" for message in messages) or "(no messages)"
+    lines = [f"{visible(message['id'])} [{visible(message.get('state'))} r{message.get('revision')}, delivery={visible((message.get('attempt') or {}).get('outcome', 'unrecorded'))}{', ATTENTION: inspect original with vqro message get ' + visible(message['id']) if message.get('attention') else ''}] {visible(message['body'])}" for message in messages]
+    if "attempts" in value:
+        message = value["message"]
+        lines.extend((f"  Original sender: {visible(message['sender'])}", f"  Original recipient (never retargeted): {visible(message['recipient'])}"))
+        if message.get("resolved_at") is not None:
+            lines.append(f"  Attention resolved at {visible(message['resolved_at'])}; delivery not asserted")
+        lines.extend(f"  {visible(attempt['id'])}: {visible(attempt['outcome'])} ({visible(attempt['updated_at'])})" for attempt in value["attempts"])
+        lines.extend(f"  Recovery r{item['revision']}: {visible(item['mode'])} by original {visible(item['caller_role'])} ({visible(item['at'])})" for item in value.get("recoveries", []))
+        lines.append("  Explicit recovery: vqro message recover " + visible(message["id"]) + f" retry|resolve --rev {message['revision']} (retry may require --may-duplicate; original recipient only)")
+    return "\n".join(lines) or "(no messages)"
 
 
 def execute(payload, mutation, call=invoke, resolve=resolve_recipient):

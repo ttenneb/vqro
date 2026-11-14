@@ -131,7 +131,22 @@ export default function (pi: ExtensionAPI) {
       }
       try { return JSON.parse(result.stdout)?.claimed ?? []; } catch { return []; }
     }
-    const undelivered = (messages: any[]) => record({ kind: "messages-undelivered", ids: messages.map(message => message.id) });
+    async function outcomes(messages: any[], outcome: string): Promise<boolean> {
+      const attempts = messages.map(message => ({ id: message.id, attempt: message?.attempt?.id }));
+      if (attempts.some(item => !item.attempt)) return false;
+      // One bounded transaction/CLI call for the whole claim batch, rather than
+      // up to eight sequential mutation deadlines inside a starting SDK hook.
+      const result = await run(["message", "outcomes", JSON.stringify(attempts), outcome, "--json"], MESSAGE_MUTATION_TIMEOUT_MS);
+      if (result?.code === 0) return true;
+      // The claim's pending attempt is already durable attention, even if this
+      // write or acknowledgement is lost. Do not retry either effect.
+      record({ kind: "outcome-unconfirmed", attempts, outcome, recovery: result?.stderr });
+      return false;
+    }
+    async function undelivered(messages: any[]) {
+      record({ kind: "messages-undelivered", ids: messages.map(message => message.id) });
+      await outcomes(messages, "no_effect");
+    }
     async function checkMailbox() {
       if (checking || shutDown) return;
       const token = adapter.snapshot();
@@ -148,14 +163,20 @@ export default function (pi: ExtensionAPI) {
         record({ kind: "messages-claimed", ids: messages.map(message => message.id) });
         const content = messages.map(renderMessage).join("\n\n");
         const target = replyTarget(messages);
-        const delivered = await adapter.deliver(content, token);
-        if (shutDown || !adapter.current(token) || !delivered) {
-          undelivered(messages);
-          return;
+        if (shutDown || !adapter.current(token)) { await undelivered(messages); return; }
+        let outcome: string;
+        try {
+          outcome = adapter.deliverOutcome ? await adapter.deliverOutcome(content, token) :
+            await adapter.deliver(content, token) ? "submitted" : "uncertain";
+        } catch { outcome = "uncertain"; }
+        // Arm before awaiting the outcome write: the SDK may start its queued
+        // run while the CLI receipt is in flight. This is reply correlation only,
+        // never durable execution proof, and never retries a submitted effect.
+        if (outcome === "submitted" && !shutDown && adapter.current(token)) {
+          const marker = deliveryMarker(messages[0]);
+          pending = target && marker ? { marker, target } : undefined;
         }
-        // Armed here, owned only by a run whose own input carries this delivery id.
-        const marker = deliveryMarker(messages[0]);
-        pending = delivered && target && marker ? { marker, target } : undefined;
+        await outcomes(messages, outcome);
       } finally { checking = false; }
     }
     const startPoll = () => {
@@ -170,10 +191,16 @@ export default function (pi: ExtensionAPI) {
       const messages = await claim(false);
       if (!messages.length) return;
       record({ kind: "messages-claimed", ids: messages.map(message => message.id) });
-      if (shutDown || !adapter.current(token)) { undelivered(messages); return; }
-      // Claimed into a turn something else started: recorded as delivered context,
-      // but this turn does not owe the sender an automatic reply.
-      return { message: { customType: "vqro-message", content: messages.map(renderMessage).join("\n\n"), display: true }, discard: () => undelivered(messages) };
+      if (shutDown || !adapter.current(token)) { await undelivered(messages); return; }
+      // Hook preparation cannot prove SDK consumption: a crash after its durable
+      // callback but before return is still attention, not confirmed delivery.
+      return {
+        message: { customType: "vqro-message", content: messages.map(renderMessage).join("\n\n"), display: true },
+        discard: () => undelivered(messages),
+        prepared: async () => {
+          if (!await outcomes(messages, "context_prepared")) throw new Error("context outcome unconfirmed");
+        },
+      };
     });
     const unFacts = adapter.onFact(async fact => {
       if (fact.kind === "session_closed") { shutDown = true; replyTo = undefined; pending = undefined; initialMarker = undefined; stopPoll(); return; }

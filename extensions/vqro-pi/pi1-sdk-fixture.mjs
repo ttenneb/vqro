@@ -14,9 +14,12 @@ if (args[0] === 'agent' && args[1] === 'get') {
 } else if (args[0] === 'message' && args[1] === 'list') {
   result = { activation: state.activation, waiting: state.messages };
 } else if (args[0] === 'message' && args[1] === 'claim') {
-  result = { claimed: state.messages };
+  result = { claimed: state.messages.map(message => ({ ...message, attempt: { id: `attempt-${message.id}`, outcome: 'pending' } })) };
   state.messages = [];
   fs.writeFileSync(statePath, JSON.stringify(state));
+} else if (args[0] === 'message' && args[1] === 'outcomes') {
+  fs.appendFileSync(path.join(root, 'outcomes.jsonl'), JSON.stringify(args) + '\n');
+  result = { outcomes: JSON.parse(args[2]).map(item => ({ id: item.id, attempt: { id: item.attempt, outcome: args[3] } })) };
 } else if (args[0] === 'task' && args[1] === 'whoami') {
   result = { caller: { class: 'agent' } };
 } else if (args[0] === 'message' && args[1] === 'send') {

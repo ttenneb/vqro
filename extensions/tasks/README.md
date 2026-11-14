@@ -81,6 +81,7 @@ unavailable/not-running indication when their execution has no placement.
 
 - [Windows interpreter setup, identity and native trial](../../docs/next/api/tasks-windows.md)
 - [Tasks policy, CLI, receipts and limits](../../docs/next/api/tasks-core-v0.md)
+- [Message delivery attention and original-record recovery](../../docs/next/api/message-delivery-outcomes.md)
 - [The retired full-tab view, kept as the shape reference](../../docs/next/api/tasks-view-v0.md)
 - [Public generic invocation and authority boundary](../../docs/next/api/extension-action-invoke-v1.md)
 

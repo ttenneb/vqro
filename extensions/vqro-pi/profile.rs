@@ -1050,7 +1050,7 @@ mod tests {
         // Pi includes the neutral adapter's input observations and Tasks consumer's
         // reply routing/header; Tasks includes activation notices and exact-recipient
         // checks. The skill asset and production generation construction are unchanged.
-        assert_eq!(generation_dir().file_name().unwrap(), "pi-f4504044142b23d2");
+        assert_eq!(generation_dir().file_name().unwrap(), "pi-e3950af4e9c5eb08");
         let installed = crate::persist::plugin_registry::load();
         let tasks = installed
             .iter()
@@ -1058,7 +1058,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             Path::new(&tasks.plugin_root).file_name().unwrap(),
-            "tasks-210712577e340d90"
+            "tasks-686e7c73b71fff34"
         );
         for (directory, assets) in [
             (generation_dir(), BUNDLE.assets),

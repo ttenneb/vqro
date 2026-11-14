@@ -9,7 +9,7 @@ import json
 import re
 from collections import Counter
 from decision_queue import text as decision_text
-from messages import ACTIVATION_OFF_DETAIL, ACTIVATION_OFF_LABEL, Messages
+from messages import ACTIVATION_OFF_DETAIL, ACTIVATION_OFF_LABEL, DELIVERY_ATTENTION_SQL, Messages
 from provider import MAX_RECORDS, canonical, checked_binding
 from view import clean, debtors, durable_attention as attention, label, recipient
 
@@ -208,7 +208,7 @@ def message_evidence(store):
     if store is None:
         return scopes, known, replied
     headers = store.db.execute(
-        "SELECT id,sender,recipient,recipient_execution,state,reply_to FROM messages ORDER BY id LIMIT ?",
+        f"SELECT id,sender,recipient,recipient_execution,state,reply_to,{DELIVERY_ATTENTION_SQL} AS delivery_attention FROM messages ORDER BY id LIMIT ?",
         (MAX_RECORDS + 1,)).fetchall()
     if len(headers) > MAX_RECORDS:
         raise ValueError("message evidence exceeds store quota")
@@ -236,14 +236,16 @@ def message_evidence(store):
             terminal = known[key].get("terminal_id")
             if not terminal:
                 continue
-            bucket = scopes.setdefault(terminal, {"total": 0, "waiting": 0, "contexts": {}})
-            context = bucket["contexts"].setdefault((role, key), {"waiting": 0})
+            bucket = scopes.setdefault(terminal, {"total": 0, "waiting": 0, "attention": 0, "contexts": {}})
+            context = bucket["contexts"].setdefault((role, key), {"waiting": 0, "attention": 0})
+            context["attention"] += bool(row["delivery_attention"])
             if role == "recipient" and row["state"] == "waiting":
                 bucket["waiting"] += 1
                 context["waiting"] += 1
             terminals.add(terminal)
         for terminal in terminals:
             scopes[terminal]["total"] += 1
+            scopes[terminal]["attention"] += bool(row["delivery_attention"])
     return scopes, known, replied
 
 
@@ -272,20 +274,26 @@ def message_rows(records, terminal_id, known, replied):
         if not incoming and sender.get("terminal_id") != terminal_id:
             continue
         if incoming:
-            state = "open" if record["state"] == "waiting" else "done"
-            detail = record["state"]
+            state = "open" if record["state"] == "waiting" else "reported"
+            detail = "waiting" if record["state"] == "waiting" else "SDK submission only; not execution"
             text = f"{label(sender, None)}: {message_subject(record)}"
         else:
             missing = record["id"] not in replied
             state = "reported" if missing else "done"
             detail = "no recorded reply" if missing else "recorded reply"
             text = message_subject(record)
-        rows.append({"label": text, "state": state, "detail": detail,
+        needs_attention = bool(record.get("delivery_attention"))
+        if record.get("resolved_at") is not None:
+            detail = "Attention resolved; delivery not asserted"
+        if needs_attention:
+            state = "blocked"
+            detail = f"Delivery unconfirmed · inspect original: vqro message get {record['id']}"
+        rows.append({"label": text, "state": state, "detail": detail, "attention": needs_attention,
                      "since": epoch(record.get("updated_at") or record.get("created_at")),
                      "counterparty": sender if incoming else None,
                      "context": ("recipient", record["recipient"]) if incoming else ("sender", record["sender"]),
                      "waiting": incoming and record["state"] == "waiting"})
-    rows.sort(key=lambda row: not row["waiting"])
+    rows.sort(key=lambda row: (not row["attention"], not row["waiting"]))
     return rows[: MESSAGE_LIMIT * 2]
 
 
@@ -295,20 +303,22 @@ def message_panel_items(placements, messages, evidence, room, *, activation=True
     items, panes = [], {}
     for terminal_id, placement in sorted((placements or {}).items()):
         panes.setdefault(placement["pane_id"], terminal_id)
-    candidates = [(pane, terminal, scopes.get(terminal, {"total": 0, "waiting": 0, "contexts": {}}))
+    candidates = [(pane, terminal, scopes.get(terminal, {"total": 0, "waiting": 0, "attention": 0, "contexts": {}}))
                   for pane, terminal in panes.items()]
     # Recorded waiting first, then other stored context, then proven empty sets.
     for pane_id, terminal_id, scope in sorted(candidates, key=lambda entry: (
-            not entry[2]["waiting"], not entry[2]["total"], entry[0])):
+            not entry[2]["attention"], not entry[2]["waiting"], not entry[2]["total"], entry[0])):
         if len(items) + (4 if scope["total"] else 3) + (activation is False) > room:
             continue
         root_id = f"panel:{pane_id}:{MESSAGE_VIEW}"
         summary = f"UNRESOLVED · {scope['waiting']} recorded waiting" if scope["total"] else "settled"
+        if scope["attention"]:
+            summary += f" · {scope['attention']} delivery unconfirmed"
         if activation is False:
             summary = "Activation off · " + summary
         items.append({"id": root_id, "role": "section", "label": "Messages", "detail": summary,
                       "view": {"pane_id": pane_id, "view_id": MESSAGE_VIEW,
-                               "state": "in_progress" if scope["waiting"] else "open"}})
+                               "state": "blocked" if scope["attention"] else "in_progress" if scope["waiting"] else "open"}})
         if activation is False:
             items.append({"id": f"panel:{pane_id}:message:activation", "role": "section", "parent_id": root_id,
                           "label": ACTIVATION_OFF_LABEL, "detail": ACTIVATION_OFF_DETAIL, "view": {"state": "open"}})
@@ -319,14 +329,15 @@ def message_panel_items(placements, messages, evidence, room, *, activation=True
         items.append({"id": f"panel:{pane_id}:message:context", "role": "section", "parent_id": root_id,
                       "label": "Current execution not established", "detail": f"{scope['total']} relevant stored messages",
                       "view": {"state": "open"}})
-        contexts = sorted(scope["contexts"].items(), key=lambda entry: (-entry[1]["waiting"], entry[0]))
+        contexts = sorted(scope["contexts"].items(), key=lambda entry: (-entry[1]["attention"], -entry[1]["waiting"], entry[0]))
         context_ids = {}
         for index, ((role, key), count) in enumerate(contexts[:MESSAGE_LIMIT]):
             if len(items) + 2 >= room:
                 break
             items.append({"id": f"panel:{pane_id}:message:identity:{index}", "role": "section", "parent_id": root_id,
                           "label": f"Recorded {role}: {recorded_identity(known[key])}",
-                          "detail": f"{count['waiting']} recorded waiting" if role == "recipient" else "Stored sender context",
+                          "detail": (f"{count['waiting']} recorded waiting" if role == "recipient" else "Stored sender context") +
+                              (f" · {count['attention']} delivery unconfirmed" if count["attention"] else ""),
                           "view": {"state": "open"}})
             context_ids[(role, key)] = items[-1]["id"]
         shown = 0
@@ -483,7 +494,7 @@ def project_snapshot(store, snapshot):
         # A current but unreadable message store is a provider error, not an
         # empty inbox. Missing installations were handled above without writes.
         messages = [message_record(row) for row in store.db.execute(
-            "SELECT * FROM messages ORDER BY created_at DESC, id DESC LIMIT 200")]
+            f"SELECT *,{DELIVERY_ATTENTION_SQL} AS delivery_attention FROM messages ORDER BY delivery_attention DESC, created_at DESC, id DESC LIMIT 200")]
     items.extend(message_panel_items(
         placements, messages, evidence, max(0, 256 - len(items)),
         activation=True if store is None else Messages(store).activation()))

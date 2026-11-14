@@ -367,14 +367,50 @@ class DocumentTests(unittest.TestCase):
         a_root=next(row for row in items if row["id"]=="panel:w1:p1:messages")
         self.assertEqual("Messages",a_root["label"])
         self.assertFalse(any(row["label"] == "No messages" for row in items))
-        self.assertEqual("UNRESOLVED · 0 recorded waiting",a_root["detail"])
-        self.assertTrue(any(row.get("detail", "").startswith("no recorded reply") for row in items if row["id"].startswith("panel:w1:p1:message:")))
+        self.assertEqual("UNRESOLVED · 0 recorded waiting · 1 delivery unconfirmed",a_root["detail"])
+        self.assertTrue(any("Delivery unconfirmed" in row.get("detail", "") for row in items if row["id"].startswith("panel:w1:p1:message:")))
         b_rows=[row for row in items if row["id"].removeprefix("panel:w1:p2:message:").isdigit()]
         self.assertEqual(1,len(b_rows))
-        self.assertEqual("claimed", b_rows[0]["detail"])
+        self.assertIn("Delivery unconfirmed", b_rows[0]["detail"])
+        self.assertIn(message_id, b_rows[0]["detail"])
+        self.assertEqual("blocked", b_rows[0]["view"]["state"])
         context = next(row for row in items if row["id"] == b_rows[0]["parent_id"])
         self.assertEqual("Recorded recipient: pi · boot:1:2", context["label"])
         self.assertTrue(b_rows[0]["label"].startswith("pi @") or "please review" in b_rows[0]["label"], b_rows[0])
+
+    def test_unconfirmed_delivery_survives_preview_pressure_without_execution_authority(self):
+        message = self.store.messages.mutate({"action": "message_send", "body": "original crash-cut body", "recipient": A}, H,
+                                             "2026-01-01T00:00:00+00:00")["message"]
+        claimed = self.store.messages.mutate({"action": "message_claim"}, A, "2026-01-01T00:01:00+00:00")["claimed"][0]
+        self.seed_messages(250, recipient=A)
+        before = list(self.store.db.iterdump())
+        doc = document.project(self.store, self.snapshot([{"terminal_id": "a", "placement": P}]))
+        rows = self.message_slice(doc)
+        self.assertTrue(any("1 delivery unconfirmed" in row.get("detail", "") for row in rows))
+        original = next(row for row in rows if "original crash-cut body" in row["label"])
+        self.assertIn(message["id"], original["detail"])
+        self.assertEqual("blocked", original["view"]["state"])
+        self.assertTrue(all(not row.get("action_ids") for row in rows))
+        self.assertIn("Current execution not established", json.dumps(rows))
+        self.assertEqual([], doc["actions"])
+        self.assertEqual(before, list(self.store.db.iterdump()))
+        self.assertEqual("pending", claimed["attempt"]["outcome"])
+
+    def test_sdk_submission_and_resolution_never_claim_model_execution(self):
+        message = self.store.messages.mutate({"action": "message_send", "body": "submission only", "recipient": A}, H,
+                                             "2026-01-01T00:00:00+00:00")["message"]
+        claimed = self.store.messages.mutate({"action": "message_claim"}, A, "2026-01-01T00:01:00+00:00")["claimed"][0]
+        updated = self.store.messages.mutate({"action": "message_outcome", "id": message["id"], "attempt": claimed["attempt"]["id"],
+                                              "outcome": "submitted"}, A, "2026-01-01T00:02:00+00:00")["message"]
+        rows = self.message_slice(document.project(self.store, self.snapshot([{"terminal_id": "a", "placement": P}])))
+        original = next(row for row in rows if "submission only" in row["label"])
+        self.assertEqual("SDK submission only; not execution", original["detail"])
+        self.assertEqual("reported", original["view"]["state"])
+        self.store.messages.mutate({"action": "message_recover", "id": message["id"], "revision": updated["revision"], "mode": "resolve"},
+                                   H, "2026-01-01T00:03:00+00:00")
+        rows = self.message_slice(document.project(self.store, self.snapshot([{"terminal_id": "a", "placement": P}])))
+        self.assertTrue(any(row.get("detail") == "Attention resolved; delivery not asserted" for row in rows))
+        self.assertFalse(any("delivery unconfirmed" in row.get("detail", "") for row in rows))
 
     def message_slice(self, doc, pane="w1:p1"):
         return [row for row in doc["items"] if row["id"].startswith(f"panel:{pane}:message")]
@@ -433,13 +469,13 @@ class DocumentTests(unittest.TestCase):
         self.assertIn("1 message previews omitted", text)
         self.assertNotIn("No messages", text)
         self.assertEqual(1, sum("SELECT id,sender,recipient,recipient_execution,state,reply_to" in query for query in trace))
-        self.assertEqual(1, sum("SELECT * FROM messages" in query for query in trace))
+        self.assertEqual(1, sum("SELECT *," in query and "FROM messages ORDER BY delivery_attention" in query for query in trace))
         self.assertEqual("BEGIN", trace[0])
         self.assertEqual("ROLLBACK", trace[-1])
         self.assertEqual(before, list(self.store.db.iterdump()))
         self.assertLessEqual(len(doc["items"]), 256)
         self.assertLessEqual(len(provider.canonical(doc).encode()), document.DOCUMENT_BYTES)
-        self.store.db.execute("INSERT INTO messages SELECT 'over-quota',sender,recipient,recipient_execution,body,reply_to,state,revision,created_at,updated_at,claimed_at FROM messages LIMIT 1")
+        self.store.db.execute("INSERT INTO messages SELECT 'over-quota',sender,recipient,recipient_execution,body,reply_to,state,revision,created_at,updated_at,claimed_at,resolved_at FROM messages LIMIT 1")
         with self.assertRaisesRegex(ValueError, "exceeds store quota"):
             document.project(self.store, self.agent_snapshot())
 
@@ -551,9 +587,9 @@ class DocumentTests(unittest.TestCase):
             self.assertFalse(document.project(observed,self.snapshot())["actions"])
             task=self.invoke({"action":"decision","title":"quiet decision","operation_id":"decision"})["task"]
             self.assertTrue(any(row["label"]==task["title"] for row in document.project(observed,self.snapshot())["items"]))
-            self.store.db.execute("PRAGMA user_version=5")
+            self.store.db.execute("PRAGMA user_version=6")
             with self.assertRaisesRegex(ValueError,"current store version"):provider.read_only_store(self.root.name)
-            self.assertEqual(5,self.store.db.execute("PRAGMA user_version").fetchone()[0])
+            self.assertEqual(6,self.store.db.execute("PRAGMA user_version").fetchone()[0])
         finally:observed.db.close()
     def test_missing_store_then_first_commit_is_seen_by_same_document_process(self):
         with tempfile.TemporaryDirectory() as root:
@@ -595,7 +631,7 @@ class DocumentTests(unittest.TestCase):
                 elif state != "missing":
                     store = provider.Store(root)
                     if state == "unsupported":
-                        store.db.execute("PRAGMA user_version=5")
+                        store.db.execute("PRAGMA user_version=6")
                     elif state.startswith("unreadable-"):
                         store.db.execute(f"DROP TABLE {state.removeprefix('unreadable-')}")
                     store.db.close()

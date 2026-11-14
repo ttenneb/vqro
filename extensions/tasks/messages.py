@@ -22,6 +22,13 @@ MAX_LIST_BYTES = 96 * 1024
 MAX_CLAIM = 8
 MAX_CLAIM_BYTES = 96 * 1024
 STATES = ("waiting", "claimed")
+MAX_ATTEMPTS = 32
+ATTEMPT_OUTCOMES = ("no_effect", "submitted", "uncertain", "context_prepared")
+# Shared by bounded CLI history and complete, body-free document evidence.
+DELIVERY_ATTENTION_SQL = """(state='claimed' AND resolved_at IS NULL AND NOT EXISTS
+    (SELECT 1 FROM message_attempts a WHERE a.rowid=
+     (SELECT MAX(b.rowid) FROM message_attempts b WHERE b.message_id=messages.id)
+     AND a.outcome='submitted'))"""
 
 
 def _bounded(canonical, records, budget):
@@ -70,6 +77,17 @@ class Messages:
                 state TEXT NOT NULL, revision INTEGER NOT NULL,
                 created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
                 claimed_at TEXT)""")
+        columns = {row["name"] for row in self.db.execute("PRAGMA table_info(messages)")}
+        if "resolved_at" not in columns:
+            self.db.execute("ALTER TABLE messages ADD COLUMN resolved_at TEXT")
+        self.db.execute("""CREATE TABLE IF NOT EXISTS message_attempts (
+                id TEXT PRIMARY KEY, message_id TEXT NOT NULL REFERENCES messages(id),
+                outcome TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
+        self.db.execute("CREATE INDEX IF NOT EXISTS message_attempt_history ON message_attempts(message_id, created_at, id)")
+        self.db.execute("""CREATE TABLE IF NOT EXISTS message_recoveries (
+                message_id TEXT NOT NULL REFERENCES messages(id), revision INTEGER NOT NULL,
+                mode TEXT NOT NULL, caller TEXT NOT NULL, at TEXT NOT NULL,
+                PRIMARY KEY(message_id, revision))""")
         self.db.execute("CREATE INDEX IF NOT EXISTS message_recipient_execution ON messages(recipient_execution, state)")
         self.db.execute("CREATE INDEX IF NOT EXISTS message_sender ON messages(sender, created_at)")
         self.db.execute("""CREATE TABLE IF NOT EXISTS message_policy (
@@ -87,18 +105,38 @@ class Messages:
     def activation(self):
         return bool(self.db.execute("SELECT activation FROM message_policy WHERE id=1").fetchone()[0])
 
+    def _attempt(self, message_id):
+        row = self.db.execute("SELECT * FROM message_attempts WHERE message_id=? ORDER BY rowid DESC LIMIT 1", (message_id,)).fetchone()
+        return dict(row) if row is not None else None
+
     def _record(self, row):
+        attempt = self._attempt(row["id"])
         return {
             "id": row["id"], "sender": row["sender"], "recipient": row["recipient"],
             "recipient_execution": row["recipient_execution"],
             "body": row["body"], "reply_to": row["reply_to"], "state": row["state"],
             "revision": row["revision"], "created_at": row["created_at"], "updated_at": row["updated_at"],
-            "claimed_at": row["claimed_at"],
+            "claimed_at": row["claimed_at"], "attempt": attempt,
+            "resolved_at": row["resolved_at"],
+            # No attempt is the legacy claimed crash cut. Pending is deliberately
+            # uncertain after reopen: neither age nor a new process proves no effect.
+            "attention": row["state"] == "claimed" and row["resolved_at"] is None
+                and (attempt is None or attempt["outcome"] != "submitted"),
         }
 
     def read(self, payload, caller):
         binding = self.store.binding(caller)
         key = self.store.canonical(binding)
+        if payload["action"] == "message_get":
+            row = self._owned(payload["id"], key)
+            return {"message": self._record(row), "attempts": [dict(item) for item in self.db.execute(
+                "SELECT * FROM message_attempts WHERE message_id=? ORDER BY rowid", (row["id"],))],
+                # Actor roles reference the immutable full bindings in this same
+                # record; avoid repeating large escaped bindings 32 times.
+                "recoveries": [{"revision": item["revision"], "mode": item["mode"], "at": item["at"],
+                                "caller_role": "sender" if item["caller"] == row["sender"] else "recipient"}
+                               for item in self.db.execute(
+                    "SELECT * FROM message_recoveries WHERE message_id=? ORDER BY revision", (row["id"],))]}
         waiting_rows = []
         clause, params = "sender=?", [key]
         if binding.get("class") == "agent":
@@ -108,7 +146,7 @@ class Messages:
                 (binding["execution"], key, MAX_PAGE),
             ).fetchall()
         history_rows = self.db.execute(
-            f"SELECT * FROM messages WHERE {clause} ORDER BY created_at DESC, id DESC LIMIT ?",
+            f"SELECT * FROM messages WHERE {clause} ORDER BY {DELIVERY_ATTENTION_SQL} DESC, created_at DESC, id DESC LIMIT ?",
             (*params, MAX_PAGE),
         ).fetchall()
         waiting_ids = {row["id"] for row in waiting_rows}
@@ -120,6 +158,12 @@ class Messages:
         waiting = [record for record in kept if record["id"] in waiting_ids]
         messages = [record for record in kept if record["id"] not in waiting_ids]
         return {"activation": self.activation(), "waiting": waiting, "messages": messages}
+
+    def _owned(self, message_id, key):
+        row = self.db.execute("SELECT * FROM messages WHERE id=?", (message_id,)).fetchone()
+        if row is None or key not in (row["sender"], row["recipient"]):
+            raise ValueError("message unavailable to this exact sender/recipient binding")
+        return row
 
     def mutate(self, payload, caller, at):
         action = payload["action"]
@@ -145,8 +189,8 @@ class Messages:
                 raise ValueError("unknown message")
             if row["sender"] != key:
                 raise ValueError("only the original sender may edit a message")
-            if row["state"] != "waiting":
-                raise ValueError("a claimed message can no longer be edited")
+            if row["state"] != "waiting" or row["claimed_at"] is not None:
+                raise ValueError("a previously claimed message can no longer be edited")
             if type(payload["revision"]) is not int or payload["revision"] != row["revision"]:
                 raise ValueError("stale message revision")
             body = _text(payload["body"], "body")
@@ -171,11 +215,66 @@ class Messages:
             claimed = []
             for record in records:
                 self.db.execute(
-                    "UPDATE messages SET state='claimed',claimed_at=?,revision=revision+1,updated_at=? WHERE id=? AND state='waiting'",
+                    "UPDATE messages SET state='claimed',claimed_at=COALESCE(claimed_at,?),revision=revision+1,updated_at=? WHERE id=? AND state='waiting'",
                     (at, at, record["id"]),
                 )
+                # Same transaction as claim and operation receipt: no second
+                # claim-to-attempt commit gap, including lost claim acknowledgements.
+                self.db.execute("INSERT INTO message_attempts VALUES (?,?,?,?,?)",
+                                ("attempt_" + uuid.uuid4().hex, record["id"], "pending", at, at))
                 claimed.append(self._record(self.db.execute("SELECT * FROM messages WHERE id=?", (record["id"],)).fetchone()))
             return {"claimed": claimed, "activation": self.activation()}
+        if action == "message_outcomes":
+            attempts = payload.get("attempts")
+            if not isinstance(attempts, list) or not 1 <= len(attempts) <= MAX_CLAIM:
+                raise ValueError("outcomes requires 1..8 exact message/attempt pairs")
+            if any(not isinstance(item, dict) or set(item) != {"id", "attempt"}
+                   or any(not isinstance(value, str) or not 1 <= len(value) <= 128 for value in item.values())
+                   for item in attempts):
+                raise ValueError("invalid outcome message/attempt pair")
+            if len({item["id"] for item in attempts}) != len(attempts):
+                raise ValueError("duplicate outcome message")
+            outcomes = []
+            for item in attempts:
+                result = self.mutate({"action": "message_outcome", **item, "outcome": payload["outcome"]}, caller, at)["message"]
+                outcomes.append({"id": result["id"], "attempt": result["attempt"]})
+            return {"outcomes": outcomes}
+        if action == "message_outcome":
+            row = self._owned(payload["id"], key)
+            if row["recipient"] != key:
+                raise ValueError("only the exact recipient can report an adapter outcome")
+            attempt = self._attempt(row["id"])
+            if row["state"] != "claimed" or row["resolved_at"] is not None or attempt is None or attempt["id"] != payload["attempt"]:
+                raise ValueError("stale delivery attempt")
+            outcome = payload["outcome"]
+            if (outcome not in ATTEMPT_OUTCOMES or attempt["outcome"] not in ("pending", "context_prepared")
+                    or (attempt["outcome"] == "context_prepared" and outcome != "no_effect")):
+                raise ValueError("invalid delivery outcome transition")
+            self.db.execute("UPDATE message_attempts SET outcome=?,updated_at=? WHERE id=?", (outcome, at, attempt["id"]))
+            self.db.execute("UPDATE messages SET revision=revision+1,updated_at=? WHERE id=?", (at, row["id"]))
+            return {"message": self._record(self.db.execute("SELECT * FROM messages WHERE id=?", (row["id"],)).fetchone())}
+        if action == "message_recover":
+            row = self._owned(payload["id"], key)
+            if type(payload["revision"]) is not int or payload["revision"] != row["revision"]:
+                raise ValueError("stale message revision; inspect the original record")
+            if row["state"] != "claimed" or row["resolved_at"] is not None:
+                raise ValueError("only an unresolved original claim can be recovered")
+            mode = payload["mode"]
+            if mode == "retry":
+                attempt = self._attempt(row["id"])
+                if (attempt is None or attempt["outcome"] != "no_effect") and payload.get("may_duplicate") is not True:
+                    raise ValueError("delivery may already have happened; explicit --may-duplicate required")
+                if self.db.execute("SELECT COUNT(*) FROM message_attempts WHERE message_id=?", (row["id"],)).fetchone()[0] >= MAX_ATTEMPTS:
+                    raise ValueError("message attempt limit reached; resolve the original record")
+                # Original body, sender, recipient, execution, id and history stay
+                # unchanged. There is intentionally no target parameter.
+                self.db.execute("UPDATE messages SET state='waiting',revision=revision+1,updated_at=? WHERE id=?", (at, row["id"]))
+            elif mode == "resolve":
+                self.db.execute("UPDATE messages SET resolved_at=?,revision=revision+1,updated_at=? WHERE id=?", (at, at, row["id"]))
+            else:
+                raise ValueError("recovery mode must be retry or resolve")
+            self.db.execute("INSERT INTO message_recoveries VALUES (?,?,?,?,?)", (row["id"], row["revision"], mode, key, at))
+            return {"message": self._record(self.db.execute("SELECT * FROM messages WHERE id=?", (row["id"],)).fetchone())}
         if action == "message_activation":
             if binding.get("class") != "human_unverified":
                 raise ValueError("only a human may change the activation setting")
