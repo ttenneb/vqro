@@ -64,6 +64,17 @@ automatic retry, caller rebinding, creator acceptance fallback or hidden routing
 
 ## Assurance boundary
 
+The current adapter's message-marker ownership and execution-shaped stdout
+suppression are **correlation heuristics**, not an opaque SDK delivery identity
+or proof of a committed explicit reply. `reply_to` checks reference existence,
+not a reversed sender/recipient relationship. A durable claim precedes SDK
+delivery; the current Tasks record has no durable delivery-attempt outcome or
+automatic claimed-message recovery. See the
+[current behavior matrix](current-behavior-matrix.md#message-claim-and-reply-correlation)
+for the exact limitations and unavailable follow-ups. These qualifications do
+not weaken the full-recipient-binding checks on list/claim, authorize uncertain
+replay, or permit retargeting an old execution's message.
+
 Example guards parse the shipped task command examples using the current CLI
 parser; a no-server CLI test verifies `vqro --skill` prints the exact embedded file.
 The existing private Vqro/two model-free Pi demo supplies fresh retained command,

@@ -42,6 +42,10 @@ a qualifying split gets its own frame only outside an enclosing group, and a
 collapsed wrapper gets no inner frame. Thus a framed compact side group normally
 needs five outer columns to leave three usable header columns. Both-collapsed,
 root and tiny rectangles saturate without negative sizes or overlapping headers.
+If both children are compact, the first child receives its compact extent bounded
+by available space before the second receives its own bounded extent from the
+remainder. This is a tree-order tie-break, not focused-child priority; tiny areas
+can clip a header or give it zero extent.
 Only an ancestor header is visible when it is collapsed. A root header can leave
 unused space.
 

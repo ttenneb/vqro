@@ -59,8 +59,11 @@ it enables the existing stable-pane menu, never ordinary typing. These are ephem
 A client installs a full surface and companion only as an exact boot, projection,
 base-revision, tab and geometry pair, in either arrival order. Verified patches
 advance the admitted base; metadata-only changes force a full pair. Newer pending
-metadata disables body/header input until coherent. Existing held releases still
-reach their original target; suppressed presses acquire no forwarded lease.
+metadata disables body/header input until coherent. Existing held releases retain
+their recorded pane/popup target and bypass the press guard; that is not an exact
+runtime-incarnation guarantee after lifecycle changes. See the
+[current release limitation](current-behavior-matrix.md#release-identity-across-lifecycle-changes).
+Suppressed presses acquire no forwarded lease.
 Collapsed bodies have no pane/view descriptors, body interests or graphics.
 Independent explicit viewers retain their own interests. Legacy peers never wait
 for metadata and receive safe raster without new controls.
@@ -90,8 +93,14 @@ race returns the server rejection instead of retrying a potentially different
 subtree. Other ancestors are addressable through the public conditional API.
 
 Collapse releases vertical space as one header row or horizontal space as a
-one-column title strip, preserving remembered shares. Root collapse can leave
-unused space. Expansion first restores those shares, with transient auto-sizing
+three-usable-column title strip (normally five outer columns when framed),
+preserving remembered shares. Existing enclosing frames and stack-header chrome
+are included contextually, not added again inside an already framed group.
+When both children are compact and space is insufficient, the first child takes
+its bounded compact extent before the second receives the remainder; either can
+be clipped or zero-sized. Root collapse can leave unused space. See
+[accepted geometry](../architecture/generic-pane-collapse.md#geometry-and-size-memory)
+and the [current behavior matrix](current-behavior-matrix.md). Expansion first restores those shares, with transient auto-sizing
 resume fences as specified by the accepted design. An individual child inside an
 already-armed designated views box instead immediately re-fits that box within
 its sizing caps; this neither rearms a manual/restored box nor removes a fence

@@ -29,9 +29,11 @@ expanded nodes omit the field. Collapse preserves the node's kind and children.
 The export is observational, not a conditional mutation token; see the
 [generic collapse contract](../architecture/generic-pane-collapse.md).
 
-### Identify a collapsed box and its hidden members
+### Diagnostic and inventory workflow
 
-Use `vqro pane layout --tree` (active tab), or
+**Default to the complete tree for structural diagnosis and inventory.** To
+identify a collapsed box and its hidden members, use
+`vqro pane layout --tree` (active tab), or
 `vqro pane layout --pane w1:p1 --tree` for a pane's tab. This explicitly requests
 `layout.tree.export`, not the legacy geometry report. Walk **all** `children`,
 `first` and `second` branches, including unselected stack children. A collapsed
@@ -46,6 +48,10 @@ Native JSON clients can request
 For fresh conditional collapse/expand addresses, use `layout.collapse.describe`.
 Neither `vqro pane layout` without `--tree` nor `vqro api snapshot` is a complete
 box/member inventory; their existing selected-only semantics are unchanged.
+If the optional tree method is absent, report complete inventory unavailable,
+not an apparently complete selected-only fallback. See the
+[current behavior matrix](current-behavior-matrix.md) for implementation limits
+and proposed work; none of these examples changes the bare CLI's JSON default.
 
 Existing `layout.export`, `layout.apply` and `layout.set_split_ratio` retain
 pane-only, selected-branch response semantics. Their parameter shapes are
@@ -53,8 +59,10 @@ unchanged. The portable terminal-only `layout.export` omits view leaves and
 collapses branches whose selected path has no terminal, without searching hidden
 stack members. Its `focused_pane_id` remains the **actual host focus**, which can
 name an omitted view; clients must not infer a first-terminal focus from the
-exported tree. A view-only tree has no portable terminal layout. The new method
-does not imply nested tree application support.
+exported tree. A view-only tree has no portable terminal layout. This legacy
+projection is **not round-trippable as a complete layout**: export/apply cannot
+restore omitted views, hidden stack members, collapse state or full container
+structure. The new method does not imply nested tree application support.
 
 ## Pane content kind
 
