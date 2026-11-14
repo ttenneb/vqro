@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, expect, jest, test } from "bun:test";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import extension, {
   assistantText,
   boundedReplyBytes,
@@ -736,7 +738,65 @@ test("messageConfirmsOrigin trusts only a newly committed send to that execution
 test("renderMessage names the host-attributed sender and carries the body", () => {
   const agentMessage = { id: "m1", body: "please review", sender: JSON.stringify({ class: "agent", execution: "boot:1:2" }) };
   expect(renderMessage(agentMessage)).toContain("vqro message m1 from agent boot:1:2");
+  expect(renderMessage(agentMessage)).toContain("reply recipient unavailable");
   expect(renderMessage({ id: "m2", body: "x" })).toContain("from an agent");
+});
+
+test("received header exposes the existing exact JSON reply recipient", () => {
+  const message = messageFixture("m1", "request", "boot:123:456");
+  const header = renderMessage(message);
+  const line = header.split("\n").find(line => line.startsWith("[reply recipient (exact binding JSON): "))!;
+  const copied = line.slice("[reply recipient (exact binding JSON): ".length, -1);
+  expect(JSON.parse(copied)).toEqual(JSON.parse(message.sender));
+  expect(copied).toBe(replyTarget([message])?.binding);
+  expect(header).toContain("[vqro message m1 from agent boot:123:456]");
+  expect(header.endsWith("\nrequest")).toBe(true);
+  expect(header).toContain("vqro message send TARGET TEXT --reply-to m1; quote JSON as one TARGET");
+});
+
+test("copying the actual header recipient through CLI writes only that exact provider recipient", () => {
+  const header = renderMessage(messageFixture("m1", "request", "boot:123:456"));
+  const prefix = "[reply recipient (exact binding JSON): ";
+  const copied = header.split("\n").find(line => line.startsWith(prefix))!.slice(prefix.length, -1);
+  const script = `
+import contextlib, io, json, sys, tempfile
+from unittest.mock import patch
+sys.path.insert(0, sys.argv[1])
+import cli, provider
+sender = json.loads(sys.argv[2])
+receiver = {"class":"agent","terminal_id":"term_beta","agent":"pi","execution":"exec-beta"}
+with tempfile.TemporaryDirectory() as root:
+    store = provider.Store(root)
+    try:
+        original = store.invoke({"caller": sender, "payload": {"action":"message_send","operation_id":"original","recipient":receiver,"body":"request"}})["message"]
+        def api(method, params=None, *args):
+            assert method == "extension.action.invoke", "no name/pane lookup allowed"
+            return {"result":{"type":"extension_action_invoked","value":{"ok":True,"value":store.invoke({"caller":receiver,"payload":params["payload"]})}}}
+        output = io.StringIO()
+        with patch("cli.api", api), contextlib.redirect_stdout(output):
+            assert cli.main(["message","send",sys.argv[2],"manual reply","--reply-to",original["id"],"--json"]) == 0
+        recorded = json.loads(output.getvalue())["message"]
+        assert json.loads(recorded["recipient"]) == sender
+        assert recorded["reply_to"] == original["id"]
+        assert store.db.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 2
+    finally:
+        store.db.close()
+`;
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("HERDR_") && !key.startsWith("VQRO_")));
+  const result = spawnSync(process.platform === "win32" ? "python" : "python3", ["-B", "-c", script, fileURLToPath(new URL(".", import.meta.url)), copied], { env, encoding: "utf8", timeout: 15000 });
+  expect(result.stderr).toBe("");
+  expect(result.status).toBe(0);
+});
+
+test("missing, malformed and non-agent senders expose no guessed reply recipient", () => {
+  for (const binding of [undefined, "not json", { class: "human_unverified", uid: 1 },
+    { class: "agent", execution: "boot:1:2" },
+    { ...JSON.parse(bindingOf("exec-alpha")), extra: "ambiguous" },
+    { ...JSON.parse(bindingOf("exec-alpha")), terminal_id: "x".repeat(257) }]) {
+    const message = { id: "m1", body: "request", sender: typeof binding === "string" ? binding : JSON.stringify(binding) };
+    expect(renderMessage(message)).not.toContain("[reply recipient (exact binding JSON): ");
+    expect(replyTarget([message])).toBeUndefined();
+  }
 });
 
 test("a waiting message is claimed into a starting turn without an automatic reply", async () => {
