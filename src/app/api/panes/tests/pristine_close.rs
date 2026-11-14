@@ -1,4 +1,7 @@
 use super::*;
+
+#[path = "pristine_relocation.rs"]
+mod relocation;
 use crate::{
     app::{AppPolicy, AppState},
     terminal::{TerminalId, TerminalRuntime},

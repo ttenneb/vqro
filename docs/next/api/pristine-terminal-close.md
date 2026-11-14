@@ -19,7 +19,10 @@ Eligibility is transient host-owned lifecycle state. All generic runtime
 constructors, restore/import, handoff and respawn paths are ineligible. Only a
 positively fresh API-split shell runtime can be armed, once, before publication.
 Every user-input admission attempt invalidates eligibility before queueing,
-including delayed, failed and uncertain attempts. Moves invalidate it too. PTY
+including delayed, failed and uncertain attempts. Host relocation also
+invalidates it: pane moves/swaps, Collection add/promote/reorder, and in-place
+layout replacement that reuses terminal identities. Presentation-only Collection
+selection is not a relocation. PTY
 protocol replies, resize and rendering do not constitute user-input admission.
 Known foreground shell and no active/pending launch or resume are additional
 required guards, not substitutes for pristine-input admission ownership.
