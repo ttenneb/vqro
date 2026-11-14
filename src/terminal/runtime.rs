@@ -485,6 +485,18 @@ impl TerminalRuntime {
         self.0.encode_terminal_key(key)
     }
 
+    pub(crate) fn arm_fresh_split_cleanup(&self) -> bool {
+        self.0.arm_fresh_split_cleanup()
+    }
+
+    pub(crate) fn invalidate_cleanup(&self) {
+        self.0.invalidate_cleanup();
+    }
+
+    pub(crate) fn claim_pristine_close(&self) -> Option<crate::pty::actor::PristineCloseClaim> {
+        self.0.claim_pristine_close()
+    }
+
     pub fn try_send_bytes(&self, bytes: Bytes) -> Result<(), mpsc::error::TrySendError<Bytes>> {
         self.0.try_send_bytes(bytes)
     }

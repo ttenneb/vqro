@@ -10,7 +10,7 @@ use bytes::Bytes;
 use tokio::sync::mpsc::{self, error::TryRecvError as DataTryRecvError};
 use tracing::{debug, warn};
 
-use crate::pty::fd;
+use crate::pty::{fd, input_ownership::InputOwnership};
 
 // Actor handle methods must call wake_actor() after queuing work. The idle
 // timeout is only a fallback for missed wakes; PTY and wake readiness drive
@@ -107,9 +107,55 @@ pub(crate) struct PtyIoActorHandle {
 #[derive(Debug)]
 struct UserWriteGate {
     accepting: bool,
+    ownership: InputOwnership,
+}
+
+pub(crate) struct PristineCloseClaim {
+    gate: Arc<Mutex<UserWriteGate>>,
+    epoch: u64,
+}
+
+impl Drop for PristineCloseClaim {
+    fn drop(&mut self) {
+        let mut gate = self
+            .gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if gate.ownership.rollback_cleanup(self.epoch) {
+            gate.accepting = true;
+        }
+    }
 }
 
 impl PtyIoActorHandle {
+    pub(crate) fn arm_fresh_split_cleanup(&self) -> bool {
+        let Ok(mut gate) = self.user_writes.lock() else {
+            return false;
+        };
+        gate.accepting && gate.ownership.arm_fresh_split()
+    }
+
+    pub(crate) fn invalidate_cleanup(&self) {
+        let mut gate = self
+            .user_writes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        gate.ownership.invalidate();
+    }
+
+    pub(crate) fn claim_pristine_close(&self) -> Option<PristineCloseClaim> {
+        let mut gate = self.user_writes.lock().ok()?;
+        if !gate.accepting {
+            return None;
+        }
+        let epoch = gate.ownership.claim_cleanup()?;
+        gate.accepting = false;
+        Some(PristineCloseClaim {
+            gate: self.user_writes.clone(),
+            epoch,
+        })
+    }
+
     pub(crate) fn validate_input_submission(&self, bytes: &[u8]) -> std::io::Result<()> {
         self.input_guard.validate(bytes)
     }
@@ -118,17 +164,19 @@ impl PtyIoActorHandle {
         &self,
         bytes: Bytes,
     ) -> Result<(), mpsc::error::TrySendError<Bytes>> {
-        let user_writes = self
+        let mut user_writes = self
             .user_writes
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        user_writes.ownership.record_input_attempt();
         if !user_writes.accepting {
             return Err(mpsc::error::TrySendError::Closed(bytes));
         }
-        match self
+        let queued = self
             .data_tx
-            .try_send(PtyIoDataCommand::WriteUserInput(bytes))
-        {
+            .try_send(PtyIoDataCommand::WriteUserInput(bytes));
+        drop(user_writes);
+        match queued {
             Ok(()) => {
                 self.wake_actor();
                 Ok(())
@@ -154,10 +202,11 @@ impl PtyIoActorHandle {
         enter: Bytes,
         delay: Duration,
     ) -> std::io::Result<std_mpsc::Receiver<std::io::Result<()>>> {
-        let user_writes = self
+        let mut user_writes = self
             .user_writes
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        user_writes.ownership.record_input_attempt();
         if !user_writes.accepting {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::BrokenPipe,
@@ -180,6 +229,7 @@ impl PtyIoActorHandle {
                     std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pty actor closed")
                 }
             })?;
+        drop(user_writes);
         self.wake_actor();
         Ok(reply_rx)
     }
@@ -252,7 +302,7 @@ impl PtyIoActorHandle {
 
     pub(crate) fn begin_handoff(&self, timeout: Duration) -> std::io::Result<()> {
         let (reply_tx, reply_rx) = std_mpsc::channel();
-        {
+        let epoch = {
             let mut user_writes = self
                 .user_writes
                 .lock()
@@ -263,28 +313,35 @@ impl PtyIoActorHandle {
                     "PTY handoff is already in progress",
                 ));
             }
+            let epoch = user_writes.ownership.claim_handoff().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "PTY admission owned elsewhere",
+                )
+            })?;
             user_writes.accepting = false;
             if self
                 .control_tx
                 .send(PtyIoControlCommand::BeginHandoff(reply_tx))
                 .is_err()
             {
-                user_writes.accepting = true;
+                user_writes.accepting = user_writes.ownership.rollback_handoff(epoch);
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::BrokenPipe,
                     "pty actor closed",
                 ));
             }
-            self.wake_actor();
-        }
+            epoch
+        };
+        self.wake_actor();
         match reply_rx.recv_timeout(timeout) {
             Ok(Ok(())) => Ok(()),
             Ok(Err(err)) => {
-                let _ = self.rollback_handoff();
+                let _ = self.rollback_handoff_claim(epoch);
                 Err(err)
             }
             Err(_) => {
-                let _ = self.rollback_handoff();
+                let _ = self.rollback_handoff_claim(epoch);
                 Err(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
                     "timed out waiting for PTY actor to quiesce",
@@ -317,10 +374,43 @@ impl PtyIoActorHandle {
     }
 
     pub(crate) fn rollback_handoff(&self) -> std::io::Result<()> {
+        let epoch = self
+            .user_writes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .ownership
+            .handoff_epoch()
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "PTY handoff no longer owns admission",
+                )
+            })?;
+        self.rollback_handoff_claim(epoch)
+    }
+
+    fn rollback_handoff_claim(&self, epoch: u64) -> std::io::Result<()> {
         let (reply_tx, reply_rx) = std_mpsc::channel();
-        self.control_tx
-            .send(PtyIoControlCommand::RollbackHandoff(reply_tx))
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pty actor closed"))?;
+        {
+            let gate = self
+                .user_writes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if gate.ownership.handoff_epoch() != Some(epoch) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "stale PTY handoff",
+                ));
+            }
+            // Order rollback enqueue with admission-owner transitions. Otherwise
+            // an old rollback could resume a newer actor handoff before its
+            // eventual epoch check (even though it cannot reopen user input).
+            self.control_tx
+                .send(PtyIoControlCommand::RollbackHandoff(reply_tx))
+                .map_err(|_| {
+                    std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pty actor closed")
+                })?;
+        }
         self.wake_actor();
         let result = reply_rx.recv_timeout(Duration::from_secs(1)).map_err(|_| {
             std::io::Error::new(
@@ -333,6 +423,12 @@ impl PtyIoActorHandle {
                 .user_writes
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !user_writes.ownership.rollback_handoff(epoch) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "stale PTY handoff",
+                ));
+            }
             user_writes.accepting = true;
         }
         result
@@ -344,6 +440,7 @@ impl PtyIoActorHandle {
                 .user_writes
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            user_writes.ownership.shutdown();
             user_writes.accepting = false;
         }
         let (reply_tx, reply_rx) = std_mpsc::channel();
@@ -365,6 +462,7 @@ impl PtyIoActorHandle {
                 .user_writes
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            user_writes.ownership.shutdown();
             user_writes.accepting = false;
         }
         if self.control_tx.send(PtyIoControlCommand::Shutdown).is_ok() {
@@ -398,6 +496,7 @@ impl PtyIoActor {
         let wake_pipe = fd::create_wake_pipe()?;
         let user_writes = Arc::new(Mutex::new(UserWriteGate {
             accepting: !config.initially_quiesced,
+            ownership: InputOwnership::new(config.initially_quiesced),
         }));
         let controls = Arc::new(Mutex::new(SharedPtyControls::default()));
         let response_order = Arc::new(Mutex::new(()));
@@ -1141,6 +1240,76 @@ mod tests {
     }
 
     #[test]
+    fn pristine_close_claim_serializes_input_and_retained_rollback() {
+        let (handle, _peer, _read) = actor_with_socket_pair(false);
+        assert!(handle.claim_pristine_close().is_none());
+        assert!(handle.arm_fresh_split_cleanup());
+        let claim = handle.claim_pristine_close().unwrap();
+        assert!(handle
+            .try_write_user_input(Bytes::from_static(b"competing"))
+            .is_err());
+        assert!(handle.rollback_handoff().is_err());
+        drop(claim);
+        assert!(handle
+            .try_write_user_input(Bytes::from_static(b"retained"))
+            .is_ok());
+        assert!(handle.claim_pristine_close().is_none());
+        handle.shutdown();
+    }
+
+    #[test]
+    fn pristine_close_claim_never_reopens_shutdown_and_replies_do_not_dirty() {
+        let (handle, _peer, _read) = actor_with_socket_pair(false);
+        assert!(handle.arm_fresh_split_cleanup());
+        handle.write_terminal_response(|| Some(Bytes::from_static(b"reply")));
+        let claim = handle.claim_pristine_close().unwrap();
+        handle.shutdown();
+        drop(claim);
+        assert!(handle
+            .try_write_user_input(Bytes::from_static(b"closed"))
+            .is_err());
+    }
+
+    #[test]
+    fn pristine_cleanup_rejects_queued_delayed_input_before_execution() {
+        let (handle, _peer, _read) = actor_with_socket_pair(false);
+        assert!(handle.arm_fresh_split_cleanup());
+        let _completion = handle
+            .queue_user_input_submission(
+                Bytes::from_static(b"run"),
+                Bytes::from_static(b"\r"),
+                Duration::from_millis(100),
+            )
+            .unwrap();
+        assert!(handle.claim_pristine_close().is_none());
+        assert!(!handle.arm_fresh_split_cleanup());
+        handle.shutdown();
+    }
+
+    #[test]
+    fn pristine_cleanup_races_admission_under_one_gate() {
+        for _ in 0..32 {
+            let (handle, _peer, _read) = actor_with_socket_pair(false);
+            assert!(handle.arm_fresh_split_cleanup());
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let input = handle.clone();
+            let input_barrier = barrier.clone();
+            let writer = std::thread::spawn(move || {
+                input_barrier.wait();
+                input
+                    .try_write_user_input(Bytes::from_static(b"race"))
+                    .is_ok()
+            });
+            barrier.wait();
+            let claim = handle.claim_pristine_close();
+            let wrote = writer.join().unwrap();
+            assert_ne!(claim.is_some(), wrote);
+            drop(claim);
+            handle.shutdown();
+        }
+    }
+
+    #[test]
     fn actor_ignores_empty_user_input_write() {
         let (mut runner, _peer) = actor_runner_for_unit_test();
 
@@ -1665,7 +1834,10 @@ mod tests {
             data_tx,
             control_tx,
             wake,
-            user_writes: Arc::new(Mutex::new(UserWriteGate { accepting: true })),
+            user_writes: Arc::new(Mutex::new(UserWriteGate {
+                accepting: true,
+                ownership: InputOwnership::new(false),
+            })),
             controls: Arc::clone(&controls),
             response_order: Arc::new(Mutex::new(())),
             input_guard: Default::default(),
@@ -1747,7 +1919,10 @@ mod tests {
             data_tx,
             control_tx,
             wake: wake_pipe.writer,
-            user_writes: Arc::new(Mutex::new(UserWriteGate { accepting: true })),
+            user_writes: Arc::new(Mutex::new(UserWriteGate {
+                accepting: true,
+                ownership: InputOwnership::new(false),
+            })),
             controls,
             response_order,
             input_guard: crate::platform::PtyInputGuard::new(&runner.file),
@@ -1818,7 +1993,10 @@ mod tests {
             data_tx,
             control_tx,
             wake,
-            user_writes: Arc::new(Mutex::new(UserWriteGate { accepting: true })),
+            user_writes: Arc::new(Mutex::new(UserWriteGate {
+                accepting: true,
+                ownership: InputOwnership::new(false),
+            })),
             controls: Arc::new(Mutex::new(SharedPtyControls::default())),
             response_order: Arc::new(Mutex::new(())),
             input_guard: Default::default(),

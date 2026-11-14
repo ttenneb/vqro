@@ -100,6 +100,7 @@ pub(crate) const CLIENT_SHELL_OPTIONAL_METHODS: &[&str] = &[
     "layout.collapse.describe",
     "layout.expand",
     "layout.tree.export",
+    "pane.close_if_pristine_terminal",
     "pane.collapse",
     "pane.expand",
     "pane.telemetry",

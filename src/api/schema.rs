@@ -292,6 +292,8 @@ pub enum Method {
     PaneReleaseAgent(PaneReleaseAgentParams),
     #[serde(rename = "pane.close")]
     PaneClose(PaneTarget),
+    #[serde(rename = "pane.close_if_pristine_terminal")]
+    PaneCloseIfPristineTerminal(PaneCloseIfPristineTerminalParams),
     #[serde(rename = "popup.close")]
     PopupClose(EmptyParams),
     #[serde(rename = "events.subscribe")]

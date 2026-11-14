@@ -72,6 +72,13 @@ pub struct PaneSwapParams {
     pub target_pane_id: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PaneCloseIfPristineTerminalParams {
+    pub pane_id: String,
+    pub expected_terminal_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PaneMoveParams {
     pub pane_id: String,

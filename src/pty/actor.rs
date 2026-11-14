@@ -10,6 +10,7 @@ mod windows {
     use std::sync::{mpsc as std_mpsc, Arc, Mutex};
     use std::time::{Duration, Instant};
 
+    use crate::pty::input_ownership::InputOwnership;
     use bytes::Bytes;
     use portable_pty::{MasterPty, PtySize};
     use tokio::sync::{mpsc, oneshot};
@@ -66,7 +67,25 @@ mod windows {
 
     struct InputAcceptance {
         accepting: bool,
+        ownership: InputOwnership,
         enter_completion: Option<std_mpsc::Receiver<()>>,
+    }
+
+    pub(crate) struct PristineCloseClaim {
+        gate: Arc<Mutex<InputAcceptance>>,
+        epoch: u64,
+    }
+
+    impl Drop for PristineCloseClaim {
+        fn drop(&mut self) {
+            let mut gate = self
+                .gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if gate.ownership.rollback_cleanup(self.epoch) {
+                gate.accepting = true;
+            }
+        }
     }
 
     enum PtyIoControlCommand {
@@ -84,18 +103,47 @@ mod windows {
     }
 
     impl PtyIoActorHandle {
+        pub(crate) fn arm_fresh_split_cleanup(&self) -> bool {
+            let Ok(mut gate) = self.accepting.lock() else {
+                return false;
+            };
+            gate.accepting && gate.ownership.arm_fresh_split()
+        }
+
+        pub(crate) fn invalidate_cleanup(&self) {
+            let mut gate = self
+                .accepting
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            gate.ownership.invalidate();
+        }
+
+        pub(crate) fn claim_pristine_close(&self) -> Option<PristineCloseClaim> {
+            let mut gate = self.accepting.lock().ok()?;
+            if !gate.accepting {
+                return None;
+            }
+            let epoch = gate.ownership.claim_cleanup()?;
+            gate.accepting = false;
+            Some(PristineCloseClaim {
+                gate: self.accepting.clone(),
+                epoch,
+            })
+        }
+
         pub(crate) fn try_write_user_input(
             &self,
             bytes: Bytes,
         ) -> Result<(), mpsc::error::TrySendError<Bytes>> {
-            if !self
+            let mut gate = self
                 .accepting
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .accepting
-            {
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            gate.ownership.record_input_attempt();
+            if !gate.accepting {
                 return Err(mpsc::error::TrySendError::Closed(bytes));
             }
+            drop(gate);
             self.data_tx
                 .try_send(PtyIoDataCommand::WriteUserInput(bytes))
                 .map_err(|err| match err {
@@ -121,10 +169,11 @@ mod windows {
             delay: Duration,
             deadline: Option<Instant>,
         ) -> std::io::Result<std_mpsc::Receiver<std::io::Result<()>>> {
-            let accepting = self
+            let mut accepting = self
                 .accepting
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            accepting.ownership.record_input_attempt();
             if !accepting.accepting {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::BrokenPipe,
@@ -188,6 +237,7 @@ mod windows {
                 .accepting
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            accepting.ownership.shutdown();
             // Give a queued Enter the same grace as process termination. A blocked
             // pipe writer must not prevent teardown from terminating the child.
             if let Some(completion) = accepting.enter_completion.take() {
@@ -223,6 +273,7 @@ mod windows {
             let response_order = Arc::new(Mutex::new(()));
             let accepting = Arc::new(Mutex::new(InputAcceptance {
                 accepting: !initially_quiesced,
+                ownership: InputOwnership::new(initially_quiesced),
                 enter_completion: None,
             }));
 
@@ -452,6 +503,7 @@ mod windows {
         fn input_acceptance(accepting: bool) -> Arc<Mutex<InputAcceptance>> {
             Arc::new(Mutex::new(InputAcceptance {
                 accepting,
+                ownership: InputOwnership::new(!accepting),
                 enter_completion: None,
             }))
         }

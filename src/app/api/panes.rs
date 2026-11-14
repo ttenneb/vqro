@@ -115,6 +115,9 @@ impl App {
             Some(Err(err)) => return encode_error(id, "pane_split_failed", err.to_string()),
             None => return encode_error(id, "pane_not_found", "pane not found"),
         };
+        // Only this positively fresh shell creation may arm cleanup, before any
+        // publication or focus/input effects. Restore/respawn constructors do not.
+        let _ = new_pane.runtime.arm_fresh_split_cleanup();
         if let Some(pane) = self.state.workspaces[ws_idx].pane_state_mut(new_pane.pane_id) {
             pane.right_click_passthrough = matches!(
                 params.right_click,
@@ -1230,6 +1233,9 @@ impl App {
             };
 
         let previous_focus = self.state.current_pane_focus_target();
+        if let Some(runtime) = self.lookup_runtime_sender(source_ws_idx, source_pane_id) {
+            runtime.invalidate_cleanup();
+        }
         let taken = match self
             .state
             .workspaces
