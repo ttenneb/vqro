@@ -146,6 +146,11 @@ try {
   assert(discarded);
   assert(!JSON.stringify(contexts.at(-1)).includes('NEVER INJECT STALE'));
   assert(!JSON.stringify(contexts.at(-1)).includes('offline body stale-message'));
+  const outcomes = fs.readFileSync(path.join(root, 'outcomes.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const outcomeFor = (id, outcome) => outcomes.some(args => args[3] === outcome && JSON.parse(args[2]).some(item => item.id === id && item.attempt === `attempt-${id}`));
+  assert(outcomeFor('boundary-message', 'context_prepared'), 'hook preparation is explicitly not SDK consumption');
+  assert(outcomeFor('idle-message', 'submitted'), 'actual SDK synchronous submission records an outcome');
+  assert(outcomeFor('stale-message', 'no_effect'), 'stale hook context is discarded without SDK effect');
   assert(manager.getEntries().some(entry => entry.type === 'custom' && entry.customType === 'vqro-reply-routing' && entry.data?.kind === 'messages-undelivered' && entry.data.ids.includes('stale-message')));
   const oldAdapter = adapter, oldToken = adapter.snapshot();
   // Public reload performs real shutdown and rebind; old adapter cannot accept tokens.

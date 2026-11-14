@@ -106,7 +106,7 @@ class Store:
         self.initialized_at = timestamp()
         self.decisions = decision_queue.Queue(self, decision_delay_seconds, OutcomeUnknown)
         self.messages = messages.Messages(self)
-        if self.db.execute("PRAGMA user_version").fetchone()[0] > 4:
+        if self.db.execute("PRAGMA user_version").fetchone()[0] > 5:
             self.db.close()
             raise ValueError("unsupported future Tasks database version; no migration attempted")
         self.db.execute("PRAGMA journal_mode=WAL")
@@ -139,14 +139,15 @@ class Store:
     def migrate(self):
         # Successful migration is atomic; don't repeat historical backfill on restarts.
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version >= 4:
+        if version >= 5:
             return
-        if version == 3:
-            # Additive message schema only; existing records and policy are untouched.
+        if version in (3, 4):
+            # Additive message schema only; legacy claims remain attention without
+            # inventing a delivery attempt or changing any original recipient.
             self.db.execute("BEGIN IMMEDIATE")
             try:
                 self.messages.create_schema()
-                self.db.execute("PRAGMA user_version=4")
+                self.db.execute("PRAGMA user_version=5")
                 self.commit()
             except OutcomeUnknown:
                 raise
@@ -176,7 +177,7 @@ class Store:
             self.db.execute("UPDATE tasks SET started_at=(SELECT at FROM transitions WHERE task_id=tasks.id AND state='in_progress' ORDER BY seq LIMIT 1) WHERE started_at IS NULL")
             self.decisions.migrate(columns)
             self.messages.create_schema()
-            self.db.execute("PRAGMA user_version=4")
+            self.db.execute("PRAGMA user_version=5")
             self.commit()
         except OutcomeUnknown:
             raise
@@ -607,6 +608,10 @@ class Store:
             "decision_seen": {"action", "operation_id", "through", "expected_caller"},
             "op": {"action", "operation_id", "lookup_caller"},
             "message_list": {"action"},
+            "message_get": {"action", "id"},
+            "message_outcome": {"action", "operation_id", "id", "attempt", "outcome", "expected_caller"},
+            "message_outcomes": {"action", "operation_id", "attempts", "outcome", "expected_caller"},
+            "message_recover": {"action", "operation_id", "id", "revision", "mode", "may_duplicate", "expected_caller"},
             "message_send": {"action", "operation_id", "recipient", "body", "reply_to", "expected_caller"},
             "message_edit": {"action", "operation_id", "id", "revision", "body", "expected_caller"},
             "message_claim": {"action", "operation_id", "idle", "expected_caller"},
@@ -638,7 +643,9 @@ class Store:
             return {"task": self.task(ids.resolve(self.db, "tasks", payload["id"]))}
         if action == "op":
             return self.lookup(payload, caller)
-        if action == "message_list":
+        if action in ("message_list", "message_get"):
+            if action == "message_get":
+                payload = self.resolve_ids(payload)
             return self.messages.read(payload, caller)
         if len(canonical(payload).encode()) > 64 * 1024:
             raise ValueError("plan/action exceeds 64 KiB request size")
@@ -718,7 +725,7 @@ def read_only_store(directory):
     except sqlite3.Error:
         store.db.close()
         raise
-    if version != 4:
+    if version != 5:
         store.db.close()
         raise ValueError("Tasks document requires current store version")
     store.decisions = decision_queue.Queue(store, 900, OutcomeUnknown)
@@ -792,7 +799,7 @@ def main():
                     document = project(None, request["params"])
                 else:
                     document_store.db.execute("BEGIN")
-                    if document_store.db.execute("PRAGMA user_version").fetchone()[0] != 4:
+                    if document_store.db.execute("PRAGMA user_version").fetchone()[0] != 5:
                         raise ValueError("Tasks document requires current store version")
                     document = project(document_store, request["params"])
                     document_store.db.rollback()

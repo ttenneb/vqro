@@ -20,7 +20,7 @@ function harness(exec?: (args: string[]) => any) {
   };
   pi.events.on(READY, (value: AdapterV1) => { adapter = value; adapter.onFact(fact => { facts.push(fact); }); });
   extension(pi);
-  return { calls, sent, facts, api: () => adapter!, execution: (value: string) => { execution = value; },
+  return { calls, sent, facts, sdk: pi, api: () => adapter!, execution: (value: string) => { execution = value; },
     emit: (name: string, value = {}, ctx = {}) => handlers.get(name)?.(value, ctx) };
 }
 
@@ -41,6 +41,37 @@ test("adapter alone reports neutral facts and only explicit input delivers", asy
   expect(h.sent[0].options).toEqual({ deliverAs: "followUp" });
   await h.emit("session_shutdown");
   expect(await h.api().deliver("after shutdown", h.api().snapshot())).toBe(false);
+});
+
+test("delivery outcomes distinguish pre-SDK no-effect, submission, and SDK throw uncertainty", async () => {
+  const h = harness();
+  await h.emit("session_start", {}, { isIdle: () => { throw new Error("before SDK boundary"); } });
+  expect(await h.api().deliverOutcome!("no effect", h.api().snapshot())).toBe("no_effect");
+  expect(h.sent).toHaveLength(0);
+  await h.emit("session_start", {}, { isIdle: () => true });
+  h.sdk.sendUserMessage = (text: string) => { h.sent.push({ text }); throw new Error("queued then threw"); };
+  expect(await h.api().deliverOutcome!("uncertain effect", h.api().snapshot())).toBe("uncertain");
+  expect(h.sent).toHaveLength(1);
+  h.sdk.sendUserMessage = (text: string) => { h.sent.push({ text }); };
+  expect(await h.api().deliverOutcome!("submission only", h.api().snapshot())).toBe("submitted");
+  const old = h.api().snapshot();
+  h.execution("replacement");
+  expect(await h.api().deliverOutcome!("stale", old)).toBe("no_effect");
+  expect(h.sent).toHaveLength(2);
+  await h.emit("session_shutdown");
+});
+
+test("awaited context preparation revalidates execution and awaits no-effect discard", async () => {
+  const h = harness();
+  const outcomes: string[] = [];
+  h.api().beforeRun(async () => ({
+    message: { customType: "fixture", content: "old context", display: true },
+    prepared: async () => { await Promise.resolve(); outcomes.push("prepared"); h.execution("replacement"); },
+    discard: async () => { await Promise.resolve(); outcomes.push("no_effect"); },
+  }));
+  expect(await h.emit("before_agent_start", { prompt: "request" })).toBeUndefined();
+  expect(outcomes).toEqual(["prepared", "no_effect"]);
+  await h.emit("session_shutdown");
 });
 
 test("input message starts are bounded neutral observations, not tool or status noise", async () => {

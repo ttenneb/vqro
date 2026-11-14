@@ -36,6 +36,7 @@ interface Harness {
   entries: any[];
   calls: { args: string[]; timeout: number }[];
   sent: string[];
+  sdk: any;
   emit: (name: string, event: any, ctx?: any) => Promise<any[]>;
 }
 
@@ -87,6 +88,7 @@ function harness(exec?: (args: string[]) => any, consumerFirst = false): Harness
     entries,
     calls,
     sent,
+    sdk: pi,
     async emit(name, event, ctx = {}) {
       const results: any[] = [];
       for (const handler of handlers.get(name) ?? []) results.push(await handler(event, ctx));
@@ -104,6 +106,7 @@ const messageFixture = (id: string, body: string, execution = "exec-alpha", repl
   body,
   reply_to: replyTo,
   sender: bindingOf(execution),
+  attempt: { id: `attempt-${id}`, outcome: "pending" },
 });
 const flush = async () => { for (let i = 0; i < 20; i += 1) await Promise.resolve(); };
 /** Exactly what the adapter hands the SDK, and so the run's prompt when it owns the run. */
@@ -124,6 +127,62 @@ beforeEach(() => {
 });
 afterEach(() => {
   process.env = { ...savedEnv };
+});
+
+test("Tasks reports SDK submission, definite no-effect and uncertainty on the original attempts", async () => {
+  jest.useFakeTimers();
+  try {
+    for (const expected of ["submitted", "no_effect", "uncertain"]) {
+      const message = messageFixture(`m-${expected}`, "deliver exactly once");
+      let waiting = true;
+      const h = harness(args => {
+        if (args[0] === "message" && args[1] === "list") return { code: 0, stdout: JSON.stringify({ activation: true, waiting: waiting ? [message] : [] }) };
+        if (args[0] === "message" && args[1] === "claim") { waiting = false; return { code: 0, stdout: JSON.stringify({ claimed: [message] }) }; }
+        return { code: 0, stdout: "" };
+      });
+      if (expected === "uncertain") h.sdk.sendUserMessage = (text: string) => { h.sent.push(text); throw new Error("effect may have happened"); };
+      await h.emit("session_start", {}, { isIdle: () => { if (expected === "no_effect") throw new Error("before SDK call"); return true; } });
+      jest.advanceTimersByTime(MAILBOX_POLL_MS + 5); await flush();
+      const writes = h.calls.filter(call => call.args[1] === "outcomes");
+      expect(writes.map(call => call.args)).toEqual([["message", "outcomes", JSON.stringify([{ id: message.id, attempt: message.attempt.id }]), expected, "--json"]]);
+      expect(h.sent).toHaveLength(expected === "no_effect" ? 0 : 1);
+      // A later observation does not replay any attempt or invent another claim.
+      jest.advanceTimersByTime(MAILBOX_POLL_MS + 5); await flush();
+      expect(h.calls.filter(call => call.args[1] === "claim")).toHaveLength(1);
+      await h.emit("session_shutdown", {});
+    }
+  } finally { jest.useRealTimers(); }
+});
+
+test("lost outcome acknowledgement retains recovery and never resubmits SDK input", async () => {
+  jest.useFakeTimers();
+  try {
+    const message = messageFixture("lost-outcome", "once");
+    let waiting = true;
+    const h = harness(args => {
+      if (args[0] === "message" && args[1] === "list") return { code: 0, stdout: JSON.stringify({ activation: true, waiting: waiting ? [message] : [] }) };
+      if (args[0] === "message" && args[1] === "claim") { waiting = false; return { code: 0, stdout: JSON.stringify({ claimed: [message] }) }; }
+      if (args[0] === "message" && args[1] === "outcomes") return { code: 1, stderr: "outcome unknown; original outcome operation" };
+      return { code: 0, stdout: "" };
+    });
+    await h.emit("session_start", {});
+    jest.advanceTimersByTime(MAILBOX_POLL_MS + 5); await flush();
+    jest.advanceTimersByTime(MAILBOX_POLL_MS + 5); await flush();
+    expect(h.sent).toHaveLength(1);
+    expect(h.calls.filter(call => call.args[1] === "outcomes")).toHaveLength(1);
+    expect(h.entries.some(entry => entry.data.kind === "outcome-unconfirmed" && entry.data.recovery.includes("original outcome"))).toBe(true);
+    await h.emit("session_shutdown", {});
+  } finally { jest.useRealTimers(); }
+});
+
+test("starting context records preparation, never SDK delivery or execution", async () => {
+  const message = messageFixture("context", "context only");
+  const h = harness(args => args[1] === "claim" ? { code: 0, stdout: JSON.stringify({ claimed: [message] }) } : { code: 0, stdout: "" });
+  const results = await h.emit("before_agent_start", { prompt: "human-started" });
+  expect(results.some(result => result?.message?.content.includes("context only"))).toBe(true);
+  expect(h.calls.filter(call => call.args[1] === "outcomes").map(call => call.args[3])).toEqual(["context_prepared"]);
+  expect(h.sent).toHaveLength(0);
+  await h.emit("session_shutdown", {});
 });
 
 test("a delivered batch is answered by the sender's exact binding with reply_to", async () => {

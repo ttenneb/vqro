@@ -14,7 +14,14 @@ export interface Run {
   final: string; truncated: boolean;
 }
 export interface Fact extends Run { kind: string; toolName?: string; messageRole?: string; text?: string; text_truncated?: boolean }
-export interface ContextInput { message: { customType: string; content: string; display: boolean }; discard?: () => void }
+export type DeliveryOutcome = "no_effect" | "submitted" | "uncertain";
+export interface ContextInput {
+  message: { customType: string; content: string; display: boolean };
+  discard?: () => void | Promise<void>;
+  // Preparation is not an SDK receipt: a crash after this callback can still
+  // precede hook return. Consumers must not call it model execution/delivery.
+  prepared?: () => void | Promise<void>;
+}
 export interface AdapterV1 {
   version: 1;
   snapshot(): Run;
@@ -23,6 +30,7 @@ export interface AdapterV1 {
   beforeRun(listener: (run: Run) => Promise<ContextInput | void>): () => void;
   exec(args: string[], timeout: number): Promise<any>;
   deliver(content: string, token: Run): Promise<boolean>;
+  deliverOutcome?(content: string, token: Run): Promise<DeliveryOutcome>;
 }
 export function assistantText(message: any): string {
   if (typeof message?.content === "string") return message.content;
@@ -83,9 +91,9 @@ export default function (pi: ExtensionAPI) {
       catch { /* An optional consumer cannot fail the SDK lifecycle. */ }
     }
   }
-  function discard(contexts: ContextInput[]) {
+  async function discard(contexts: ContextInput[]) {
     for (const context of contexts) {
-      try { context.discard?.(); } catch { /* Failed consumer cannot break another context. */ }
+      try { await context.discard?.(); } catch { /* Failed consumer cannot break another context. */ }
     }
   }
   function subscribe<T>(set: Set<T>, listener: T) {
@@ -259,17 +267,22 @@ export default function (pi: ExtensionAPI) {
     onFact: listener => subscribe(facts, listener),
     beforeRun: listener => subscribe(before, listener),
     async deliver(content, token) {
-      if (Buffer.byteLength(content, "utf8") > 128 * 1024 || !current(token) || !token.self?.execution) return false;
-      const fresh = await identity();
-      if (!current(token) || fresh?.execution !== token.self.execution) return false;
-      // Always queue: an observed idle state can race a turn beginning inside
-      // SDK input hooks. Facts themselves never invoke either delivery method.
+      return await adapter.deliverOutcome!(content, token) === "submitted";
+    },
+    async deliverOutcome(content, token) {
+      let sdkCalled = false;
       try {
+        if (Buffer.byteLength(content, "utf8") > 128 * 1024 || !current(token) || !token.self?.execution) return "no_effect";
+        const fresh = await identity();
+        if (!current(token) || fresh?.execution !== token.self.execution) return "no_effect";
+        // Always queue. Once the SDK boundary is crossed, a throw is uncertain:
+        // it may have queued input before failing. Never turn that into a retry.
         const idle = typeof latestCtx?.isIdle === "function" ? latestCtx.isIdle() : state.state === "idle";
+        sdkCalled = true;
         if (idle) pi.sendUserMessage(content, { deliverAs: "followUp" });
         else pi.sendMessage({ customType: "vqro-input", content, display: true }, { deliverAs: "followUp" });
-        return true;
-      } catch { return false; }
+        return "submitted";
+      } catch { return sdkCalled ? "uncertain" : "no_effect"; }
     },
   };
   // Synchronous SDK-scoped discovery, independent of extension load order.
@@ -328,13 +341,28 @@ export default function (pi: ExtensionAPI) {
     if (accepted.length === 0) return;
     const fresh = await identity();
     if (!current(token) || !token.self?.execution || fresh?.execution !== token.self.execution) {
-      discard(accepted);
+      await discard(accepted);
       return;
     }
     const content = accepted.map(context => context.message.content).join("\n\n");
     if (Buffer.byteLength(content, "utf8") > 128 * 1024) {
-      discard(accepted);
+      await discard(accepted);
       return;
+    }
+    if (accepted.some(context => context.prepared)) {
+      try {
+        for (const context of accepted) await context.prepared?.();
+      } catch {
+        await discard(accepted);
+        return;
+      }
+      // Preparation callbacks may await durable consumer writes. Revalidate after
+      // them; their commit is not proof that the SDK used the context.
+      const finalIdentity = await identity();
+      if (!current(token) || finalIdentity?.execution !== token.self.execution) {
+        await discard(accepted);
+        return;
+      }
     }
     if (content) return { message: accepted.length === 1 ? structuredClone(accepted[0].message) : { customType: "vqro-input", content, display: true } };
   });

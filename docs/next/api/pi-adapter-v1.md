@@ -24,8 +24,10 @@ version1 interface provides:
   delivery/acceptance evidence, or permission to activate a turn.
 - `beforeRun(callback)`: an asynchronous context contribution **awaited inside
   the SDK `before_agent_start` hook**. Returning `{message, discard?}` contributes
-  context only after current-run/execution/shutdown checks; `discard` reports a
-  rejected late contribution back to its owner. The SDK bus itself does not
+  context only after current-run/execution/shutdown checks; awaited `discard`
+  reports a rejected late contribution back to its owner. Optional awaited
+  `prepared` runs before final identity revalidation and hook return; it confirms
+  preparation only, not SDK consumption. A crash can still precede hook return. The SDK bus itself does not
   await listeners. Combined context is bounded at128KiB; failed consumers
   contribute nothing. Registrations are bounded to16 and can unsubscribe.
 - `exec(argv, timeout)`: bounded CLI transport through the supplied Vqro binary;
@@ -34,6 +36,11 @@ version1 interface provides:
   shutdown/run checks, at most 128KiB. Both SDK idle and busy paths use followUp
   queuing. A transport result is not agent acceptance; do not replay uncertain
   effects or infer understanding from a receipt.
+- Optional `deliverOutcome(content, token)` preserves that delivery path while
+  returning `no_effect` for pre-SDK rejection, `submitted` for synchronous SDK
+  return, or `uncertain` after crossing an SDK boundary that throws. Boolean
+  `deliver` remains available; false does not prove no effect. Neither result
+  proves model execution or acceptance.
 
 Unknown idle identity is re-observed using the existing editor observation clock,
 paced at most once per 30 seconds independently of editor text or report success.
@@ -60,6 +67,12 @@ recipient policy and no-reply observations. Disabled/unavailable Tasks cannot
 activate a durable message or record a reply. A late successful
 claim is recorded undelivered rather than injected into a different run; an
 uncertain claim retains CLI recovery information and is not blindly replayed.
+Claim and pending attempt now commit atomically in Tasks. Adapter outcomes and
+explicit original-record recovery are documented in
+[message delivery outcomes](message-delivery-outcomes.md). Missing outcome writes
+and legacy claims remain durable attention; context preparation deliberately
+remains unconfirmed, including the crash cut before hook return. No outcome
+starts a turn or causes an uncertain automatic replay.
 Tasks gives message mutations a bounded 15-second outer execution budget, longer
 than the CLI's two six-second identity/write API deadlines plus process overhead,
 so an inner timeout can return the original caller/operation recovery text.
