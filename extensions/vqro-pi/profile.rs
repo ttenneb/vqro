@@ -1044,12 +1044,13 @@ mod tests {
         let fixture = ProfileFixture::new("distribution");
         fixture.prepare();
         // Content-address characterization, not a frozen wire pin: deliberate
-        // asset edits change these addresses. The Tasks address was independently
-        // recomputed over all 11 declared assets in order, including ids.py and
-        // the negotiated caller/view-action adapter, with generation_id separators.
-        // The Pi address includes the neutral adapter's paced idle identity
-        // recovery and Tasks consumer resource; the skill asset is unchanged.
-        assert_eq!(generation_dir().file_name().unwrap(), "pi-8491e8d971703a5c");
+        // asset edits change these addresses. Independently recomputed using
+        // declared names/body bytes in order with generation_id's 00/ff separators,
+        // then checked against all 3 installed Pi and 11 installed Tasks assets.
+        // Pi includes the neutral adapter's input observations and Tasks consumer's
+        // reply routing/header; Tasks includes activation notices and exact-recipient
+        // checks. The skill asset and production generation construction are unchanged.
+        assert_eq!(generation_dir().file_name().unwrap(), "pi-f4504044142b23d2");
         let installed = crate::persist::plugin_registry::load();
         let tasks = installed
             .iter()
@@ -1057,8 +1058,33 @@ mod tests {
             .unwrap();
         assert_eq!(
             Path::new(&tasks.plugin_root).file_name().unwrap(),
-            "tasks-5914ac24b95a902e"
+            "tasks-210712577e340d90"
         );
+        for (directory, assets) in [
+            (generation_dir(), BUNDLE.assets),
+            (
+                PathBuf::from(&tasks.plugin_root),
+                super::super::tasks::BUNDLE.assets,
+            ),
+        ] {
+            for (name, body) in assets {
+                assert_eq!(
+                    std::fs::read(directory.join(name)).unwrap(),
+                    body.as_bytes(),
+                    "prepared asset differs: {name}"
+                );
+            }
+        }
+        for (profile_asset, bundled_asset) in [
+            ("extensions/vqro-pi.ts", "vqro-pi.ts"),
+            ("extensions/tasks-pi.ts", "tasks-pi.ts"),
+            ("skills/vqro", "skills/vqro"),
+        ] {
+            assert_eq!(
+                std::fs::read_link(profile_dir().join(profile_asset)).unwrap(),
+                generation_dir().join(bundled_asset)
+            );
+        }
         crate::persist::plugin_registry::update(|entries| {
             entries
                 .iter_mut()
