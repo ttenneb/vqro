@@ -1448,29 +1448,40 @@ pub(crate) fn find_in_direction_from_rect(
     direction: NavDirection,
     panes: &[PaneInfo],
 ) -> Option<PaneId> {
-    panes
-        .iter()
+    find_in_direction_among_rects(
+        source,
+        fr,
+        direction,
+        panes.iter().map(|pane| (pane.id, navigation_rect(pane))),
+    )
+}
+
+/// Share navigation ranking with header-only targets, without manufacturing
+/// pane bodies or changing the canonical collapsed subtree.
+pub(crate) fn find_in_direction_among_rects(
+    source: PaneId,
+    fr: Rect,
+    direction: NavDirection,
+    candidates: impl Iterator<Item = (PaneId, Rect)>,
+) -> Option<PaneId> {
+    candidates
         .enumerate()
-        .filter(|(_, p)| p.id != source)
-        .filter(|(_, p)| {
-            let r = navigation_rect(p);
-            match direction {
-                NavDirection::Left => {
-                    r.x + r.width <= fr.x && ranges_overlap(r.y, r.height, fr.y, fr.height)
-                }
-                NavDirection::Right => {
-                    r.x >= fr.x + fr.width && ranges_overlap(r.y, r.height, fr.y, fr.height)
-                }
-                NavDirection::Up => {
-                    r.y + r.height <= fr.y && ranges_overlap(r.x, r.width, fr.x, fr.width)
-                }
-                NavDirection::Down => {
-                    r.y >= fr.y + fr.height && ranges_overlap(r.x, r.width, fr.x, fr.width)
-                }
+        .filter(|(_, (id, rect))| *id != source && !rect.is_empty())
+        .filter(|(_, (_, r))| match direction {
+            NavDirection::Left => {
+                r.x + r.width <= fr.x && ranges_overlap(r.y, r.height, fr.y, fr.height)
+            }
+            NavDirection::Right => {
+                r.x >= fr.x + fr.width && ranges_overlap(r.y, r.height, fr.y, fr.height)
+            }
+            NavDirection::Up => {
+                r.y + r.height <= fr.y && ranges_overlap(r.x, r.width, fr.x, fr.width)
+            }
+            NavDirection::Down => {
+                r.y >= fr.y + fr.height && ranges_overlap(r.x, r.width, fr.x, fr.width)
             }
         })
-        .min_by_key(|(index, p)| {
-            let r = navigation_rect(p);
+        .min_by_key(|(index, (_, r))| {
             let edge_distance = match direction {
                 NavDirection::Left => fr.x.saturating_sub(r.x + r.width),
                 NavDirection::Right => r.x.saturating_sub(fr.x + fr.width),
@@ -1495,10 +1506,10 @@ pub(crate) fn find_in_direction_from_rect(
             };
             (edge_distance, Reverse(overlap), center_distance, *index)
         })
-        .map(|(_, p)| p.id)
+        .map(|(_, (id, _))| id)
 }
 
-fn navigation_rect(pane: &PaneInfo) -> Rect {
+pub(crate) fn navigation_rect(pane: &PaneInfo) -> Rect {
     if pane.frame_policy == PaneFramePolicy::Unframed {
         pane.inner_rect
     } else {

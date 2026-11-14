@@ -159,6 +159,30 @@ fn collapsed_stack_paths_keep_selection_and_hidden_members() {
 }
 
 #[test]
+fn collapsed_stack_restores_its_selected_content_after_unrelated_focus_changes() {
+    let id = crate::terminal_container::TerminalContainerId::parse(912_002).unwrap();
+    let mut tree = layout(split(
+        Direction::Horizontal,
+        pane(1),
+        TypedNode::Stack {
+            id,
+            selected: 1,
+            children: vec![pane(2), split(Direction::Vertical, pane(3), pane(4))],
+        },
+    ));
+    let content = tree.typed_root().at(&[1]).unwrap().clone();
+    assert!(tree.set_collapsed(&[1], true));
+    tree.focus_pane(PaneId::from_raw(1));
+    let header = &tree.geometry(Rect::new(0, 0, 100, 40)).collapsed[0];
+    assert_eq!(header.title_pane, Some(PaneId::from_raw(3)));
+    assert_eq!(header.pane_count, 3);
+    assert!(tree.set_collapsed(&[1], false));
+    assert_eq!(tree.typed_root().at(&[1]), Some(&content));
+    assert!(tree.is_pane_visible(PaneId::from_raw(3)));
+    assert!(!tree.is_pane_visible(PaneId::from_raw(2)));
+}
+
+#[test]
 fn collapsed_root_and_tiny_both_collapsed_children_never_escape_the_viewport() {
     for direction in [Direction::Horizontal, Direction::Vertical] {
         let mut tree = layout(split(direction, pane(1), pane(2)));
@@ -297,8 +321,29 @@ fn adversarial_collapse_keeps_public_and_terminal_identity_authority() {
     state.assert_invariants_for_test();
     for workspace in &mut state.workspaces {
         for tab in &mut workspace.tabs {
+            let content = tab.layout.typed_root().content().clone();
             assert!(tab.layout.set_collapsed(&[], false));
+            assert_eq!(tab.layout.typed_root(), &content);
         }
+        // Collapse one side of an adversarial tab, change selection outside it,
+        // then compare the exact subtree, not just its membership or geometry.
+        let tab = workspace
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.panes.len() > 1)
+            .unwrap();
+        let content = tab.layout.typed_root().at(&[1]).unwrap().clone();
+        let outside = tab
+            .layout
+            .typed_root()
+            .at(&[0])
+            .unwrap()
+            .selected_pane()
+            .unwrap();
+        assert!(tab.layout.set_collapsed(&[1], true));
+        tab.layout.focus_pane(outside);
+        assert!(tab.layout.set_collapsed(&[1], false));
+        assert_eq!(tab.layout.typed_root().at(&[1]), Some(&content));
     }
     state.assert_invariants_for_test();
 }

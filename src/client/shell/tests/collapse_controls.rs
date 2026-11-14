@@ -122,6 +122,59 @@ fn header_mouse_and_default_key_use_the_same_fenced_desired_state() {
 }
 
 #[test]
+fn collapsed_header_expand_uses_clicked_structure_not_current_pane_selection() {
+    let mut state = feature_shell();
+    let frame = surface();
+    let mut metadata = projection(&frame);
+    let path = vec![LayoutPathStep::Split(LayoutSplitChild::Second)];
+    metadata.body.anchors[0].path = vec![LayoutPathStep::Split(LayoutSplitChild::First)];
+    metadata.body.containers.push(CollapseContainerV1 {
+        path: Vec::new(),
+        stack: false,
+    });
+    metadata.body.headers.push(CollapseHeaderV1 {
+        rect: SurfaceRect {
+            x: 3,
+            y: 0,
+            width: 1,
+            height: 2,
+        },
+        action_rect: SurfaceRect {
+            x: 3,
+            y: 0,
+            width: 1,
+            height: 2,
+        },
+        path: path.clone(),
+        collapsed: true,
+        focused: false,
+    });
+    state.set_pane_surface_with_views_for_generation(
+        &ClientEndpointId::Local,
+        1,
+        frame,
+        Vec::new(),
+    );
+    state.set_endpoint_collapse_projection_for_generation(
+        &ClientEndpointId::Local,
+        1,
+        Ok(metadata),
+    );
+    for focused in ["pane_1", "unrelated-pane"] {
+        state.snapshot.as_mut().unwrap().focused_pane_id = Some(focused.into());
+        state.compose(80, 24).unwrap();
+        let hit = state.hits.collapse_headers[0].rect;
+        let clicked = state.handle_raw_events(vec![RawInputEvent::Mouse(mouse(
+            hit,
+            MouseEventKind::Down(MouseButton::Left),
+        ))]);
+        assert!(
+            matches!(method(&clicked), Some(Method::LayoutExpand(target)) if target.path == path)
+        );
+    }
+}
+
+#[test]
 fn cold_header_consumes_typing_text_and_paste_but_the_key_expands_it() {
     let mut state = header_state(true);
     let typing = state.handle_input_bytes(b"do-not-send");

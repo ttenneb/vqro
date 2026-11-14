@@ -720,7 +720,7 @@ impl App {
             return encode_error(id, "pane_not_found", "pane not found");
         };
         let target =
-            self.directional_pane_target(ws_idx, tab_idx, source_pane_id, params.direction);
+            self.directional_pane_focus_target(ws_idx, tab_idx, source_pane_id, params.direction);
         let reason = target
             .is_none()
             .then_some(PaneFocusDirectionReason::NoNeighbor);
@@ -2421,6 +2421,7 @@ impl App {
         self.resolve_optional_pane(pane_id)
     }
 
+    // Neighbor discovery and mutation must never acquire hidden destinations.
     fn directional_pane_target(
         &self,
         ws_idx: usize,
@@ -2445,6 +2446,51 @@ impl App {
             header.rect,
             direction.into(),
             &geometry.panes,
+        )
+    }
+
+    fn directional_pane_focus_target(
+        &self,
+        ws_idx: usize,
+        tab_idx: usize,
+        source_pane_id: PaneId,
+        direction: PaneDirection,
+    ) -> Option<PaneId> {
+        let tab = self.state.workspaces.get(ws_idx)?.tabs.get(tab_idx)?;
+        let geometry = tab.layout.geometry(self.state.view.terminal_area);
+        if geometry.collapsed.is_empty() {
+            let source = geometry
+                .panes
+                .iter()
+                .find(|pane| pane.id == source_pane_id)?;
+            return find_in_direction(source, direction.into(), &geometry.panes);
+        }
+        let origin =
+            if let Some(source) = geometry.panes.iter().find(|pane| pane.id == source_pane_id) {
+                crate::layout::navigation_rect(source)
+            } else {
+                let path = tab
+                    .layout
+                    .tagged_path(&tab.layout.pane_path(source_pane_id)?)?;
+                geometry
+                    .collapsed
+                    .iter()
+                    .find(|header| path.starts_with(&header.path) && !header.rect.is_empty())?
+                    .rect
+            };
+        crate::layout::find_in_direction_among_rects(
+            source_pane_id,
+            origin,
+            direction.into(),
+            geometry
+                .panes
+                .iter()
+                .map(|pane| (pane.id, crate::layout::navigation_rect(pane)))
+                .chain(geometry.collapsed.iter().filter_map(|header| {
+                    // Focus only the already-selected representative. The header
+                    // remains collapsed and expansion keeps its structural path.
+                    Some((header.title_pane?, header.rect))
+                })),
         )
     }
 

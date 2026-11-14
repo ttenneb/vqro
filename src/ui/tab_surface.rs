@@ -176,7 +176,6 @@ pub(crate) fn render_tab_surface(
         surface.pane_infos,
         frame,
     );
-    super::collapsed::render_collapsed_frames(app, surface.target, surface.collapsed_frames, frame);
     render_panes(
         app,
         terminal_runtimes,
@@ -185,6 +184,8 @@ pub(crate) fn render_tab_surface(
         surface.pane_infos,
         surface.split_borders,
     );
+    // Focus labels share the existing title chrome but must overlay pane bodies.
+    super::collapsed::render_collapsed_frames(app, surface.target, surface.collapsed_frames, frame);
 }
 
 pub(crate) fn tab_surface_hyperlinks(
