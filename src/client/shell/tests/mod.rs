@@ -261,6 +261,7 @@ mod graphics;
 mod input_conformance;
 #[path = "input.rs"]
 mod input_domain;
+mod input_refusal;
 mod keybindings_settings;
 mod link_hover;
 mod mobile;

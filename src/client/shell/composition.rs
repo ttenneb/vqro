@@ -207,7 +207,32 @@ impl ClientShellState {
             &self.config.keybinds,
             &self.config.palette,
         );
+        if let Some(notice) = self.visible_endpoint_notice.as_ref() {
+            self.hits.notification_toast = endpoint_notices::render_notice(
+                &mut buffer,
+                layout.pane_surface,
+                notice,
+                0,
+                &self.config.palette,
+            );
+        }
         FrameData::from_ratatui_buffer_with_hyperlinks(&buffer, None, &[])
+    }
+
+    fn compose_input_refusal_chrome(
+        &mut self,
+        cols: u16,
+        rows: u16,
+    ) -> crate::client::frame_output::ComposedFrame {
+        let frame = self.compose_unavailable(cols, rows);
+        let graphics = self.graphics.encode_output(
+            crate::kitty_graphics::surface::Visibility::Hidden,
+            (0, 0),
+            None,
+            self.graphics_cell_size,
+            &crate::kitty_graphics::surface::Occlusion::default(),
+        );
+        crate::client::frame_output::ComposedFrame { frame, graphics }
     }
 
     pub(crate) fn compose(
@@ -228,18 +253,36 @@ impl ClientShellState {
                 .as_ref()
                 .is_some_and(|target| self.navigation_target_valid(target));
         if self.snapshot.is_none() || self.pane_surface.is_none() {
+            self.input_refusal_chrome_presented = false;
+            if self.visible_endpoint_notice.as_ref().is_some_and(|notice| {
+                notice.key.code == super::input::TERMINAL_INPUT_REFUSED_NOTICE
+            }) {
+                return Some(self.compose_input_refusal_chrome(cols, rows));
+            }
             return Some(self.compose_unavailable(cols, rows).into());
         }
-        let snapshot = self.snapshot.as_deref()?;
         // A one-step successor is retained separately until its exact snapshot arrives; do not
         // keep composing the now-superseded current pair while it is pending.
-        if self.pending_pane_surface.is_some() {
+        let refusal_visible = self
+            .visible_endpoint_notice
+            .as_ref()
+            .is_some_and(|notice| notice.key.code == super::input::TERMINAL_INPUT_REFUSED_NOTICE);
+        let pair_unavailable = self.pending_pane_surface.is_some()
+            || self.snapshot.as_ref()?.revision != self.pane_surface.as_ref()?.projection_revision;
+        let refusal_needs_chrome = (refusal_visible || self.input_refusal_chrome_presented)
+            && !self.collapse_interactions_current();
+        if pair_unavailable || refusal_needs_chrome {
+            if refusal_visible || self.input_refusal_chrome_presented {
+                // Client-only notice chrome, not a replacement tuple: no body, cursor,
+                // graphics or stale pane hits are exposed while admission stays fail-closed.
+                self.input_refusal_chrome_presented = refusal_visible;
+                return Some(self.compose_input_refusal_chrome(cols, rows));
+            }
             return None;
         }
+        self.input_refusal_chrome_presented = false;
+        let snapshot = self.snapshot.as_deref()?;
         let surface = self.pane_surface.as_ref()?;
-        if snapshot.revision != surface.projection_revision {
-            return None;
-        }
         let layout = self.layout(cols, rows);
         if self.last_tab_bar_width != Some(layout.tab_bar.width) {
             self.last_tab_bar_width = Some(layout.tab_bar.width);

@@ -64,6 +64,62 @@ fn add_main_image(
 }
 
 #[test]
+fn input_refusal_chrome_hides_placements_and_restores_cached_scene() {
+    use super::collapse::{feature_shell, projection};
+    let mut state = feature_shell();
+    state.set_graphics_cell_size(8, 16);
+    let layout = state.layout(106, 24);
+    let mut frame = surface();
+    add_main_image(
+        &mut frame,
+        layout,
+        (layout.pane_surface.x, layout.pane_surface.y),
+        17,
+    );
+    state.set_pane_surface_with_views_for_generation(
+        &ClientEndpointId::Local,
+        1,
+        frame.clone(),
+        Vec::new(),
+    );
+    state.set_endpoint_collapse_projection_for_generation(
+        &ClientEndpointId::Local,
+        1,
+        Ok(projection(&frame)),
+    );
+    let shown = state.compose(106, 24).unwrap().graphics.into_inline_bytes();
+    assert!(String::from_utf8_lossy(&shown).contains("a=p"));
+    let mut newer = snapshot();
+    newer.revision = 2;
+    state.set_snapshot(Box::new(newer));
+    let refused = state.handle_input_bytes(b"private");
+    assert!(refused.requests.is_empty());
+    let hidden = state.compose(106, 24).unwrap().graphics.into_inline_bytes();
+    assert!(String::from_utf8_lossy(&hidden).contains("a=d,d=i"));
+    assert!(!String::from_utf8_lossy(&hidden).contains("a=p"));
+    assert!(!state.collapse_interactions_current());
+    frame.projection_revision = 2;
+    frame.surface_revision = 2;
+    state.set_pane_surface_with_views_for_generation(
+        &ClientEndpointId::Local,
+        1,
+        frame.clone(),
+        Vec::new(),
+    );
+    state.set_endpoint_collapse_projection_for_generation(
+        &ClientEndpointId::Local,
+        1,
+        Ok(projection(&frame)),
+    );
+    let restored = state.compose(106, 24).unwrap().graphics.into_inline_bytes();
+    assert!(String::from_utf8_lossy(&restored).contains("a=p"));
+    assert!(
+        !String::from_utf8_lossy(&restored).contains("a=t"),
+        "reuse owned image bytes"
+    );
+}
+
+#[test]
 fn collection_list_and_inspector_suppress_native_placements_without_reupload() {
     let mut state = super::chrome_context::listed_collection_state();
     state.set_graphics_cell_size(8, 16);
