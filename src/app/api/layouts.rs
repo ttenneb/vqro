@@ -381,6 +381,14 @@ impl App {
         let Some(layout) = TileLayout::from_tree(root, LayoutLeaf::Pane(first_pane)) else {
             return encode_error(id, "invalid_layout", "replacement layout is invalid");
         };
+        // In-place replacement preserves durable terminal ids but represents
+        // competing placement work. Disqualify every reused runtime before the
+        // replacement is published, without putting runtime locks in pure Tab.
+        for pane in &existing_panes {
+            if let Some(runtime) = self.lookup_runtime_sender(ws_idx, *pane) {
+                runtime.invalidate_cleanup();
+            }
+        }
         {
             let tab = &mut self.state.workspaces[ws_idx].tabs[tab_idx];
             tab.replace_layout_without_collections(layout, first_pane);

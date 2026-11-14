@@ -926,6 +926,11 @@ impl App {
                     changed = tab.swap_panes(source_pane_id, target_pane_id);
                     tab.focus_pane(source_pane_id);
                     if changed {
+                        for pane in [source_pane_id, target_pane_id] {
+                            if let Some(runtime) = self.lookup_runtime_sender(ws_idx, pane) {
+                                runtime.invalidate_cleanup();
+                            }
+                        }
                         self.state.switch_workspace_tab(ws_idx, tab_idx);
                         self.apply_bundled_extension_state();
                         self.state

@@ -2029,6 +2029,9 @@ impl App {
                 "pane could not be added to the collection",
             );
         }
+        if let Some(runtime) = self.lookup_runtime_sender(ws_idx, pane_id) {
+            runtime.invalidate_cleanup();
+        }
         self.state.mark_session_dirty();
         let collection = self
             .collection_info(ws_idx, tab_idx, collection_id)
@@ -2046,6 +2049,7 @@ impl App {
             request_id,
             &params.collection_id,
             &params.pane_id,
+            false,
             |tab, collection, pane| {
                 tab.select_collection_member(collection, pane)?;
                 if params.focus {
@@ -2065,6 +2069,7 @@ impl App {
             request_id,
             &params.collection_id,
             &params.pane_id,
+            true,
             |tab, collection, pane| tab.reorder_collection_member(collection, pane, params.index),
         )
     }
@@ -2087,6 +2092,7 @@ impl App {
         request_id: String,
         collection_raw: &str,
         pane_raw: &str,
+        relocates_pane: bool,
         mutate: F,
     ) -> String
     where
@@ -2118,6 +2124,11 @@ impl App {
                 "invalid_placement",
                 "pane is not a member of the collection",
             );
+        }
+        if relocates_pane {
+            if let Some(runtime) = self.lookup_runtime_sender(ws_idx, pane_id) {
+                runtime.invalidate_cleanup();
+            }
         }
         self.state.mark_session_dirty();
         let collection = self
@@ -2181,6 +2192,9 @@ impl App {
                 "invalid_placement",
                 "pane could not be promoted",
             );
+        }
+        if let Some(runtime) = self.lookup_runtime_sender(ws_idx, pane_id) {
+            runtime.invalidate_cleanup();
         }
         if !params.focus {
             self.state.workspaces[ws_idx].tabs[tab_idx].focus_pane(target);
