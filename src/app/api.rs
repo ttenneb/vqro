@@ -23,6 +23,7 @@ mod integrations;
 mod layouts;
 mod panes;
 pub(crate) mod plugins;
+mod pristine_close;
 pub(super) mod responses;
 mod session;
 pub(crate) mod spaces_candidate;
@@ -1606,6 +1607,9 @@ impl App {
                 return self.handle_pane_send_input(request.id, params);
             }
             Method::PaneClose(target) => return self.handle_pane_close(request.id, target),
+            Method::PaneCloseIfPristineTerminal(params) => {
+                return self.handle_pristine_terminal_close(request.id, params)
+            }
             Method::PopupClose(_) => {
                 return if self.close_popup_pane() {
                     responses::encode_success(request.id, ResponseResult::Ok {})

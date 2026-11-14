@@ -3645,6 +3645,22 @@
           ],
           "type": "object"
         },
+        "PaneCloseIfPristineTerminalParams": {
+          "additionalProperties": false,
+          "properties": {
+            "expected_terminal_id": {
+              "type": "string"
+            },
+            "pane_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id",
+            "expected_terminal_id"
+          ],
+          "type": "object"
+        },
         "PaneCopyMotion": {
           "enum": [
             "line_end",
@@ -7824,6 +7840,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/PaneTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "pane.close_if_pristine_terminal",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneCloseIfPristineTerminalParams"
             }
           },
           "required": [

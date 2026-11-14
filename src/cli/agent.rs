@@ -3,8 +3,8 @@ use std::time::{Duration, Instant};
 use crate::api::schema::{
     AgentPromptParams, AgentPromptWaitOptions, AgentReadParams, AgentRenameParams,
     AgentSendKeysParams, AgentStartParams, AgentTarget, AgentWaitParams, EmptyParams, ErrorBody,
-    ErrorResponse, Method, PaneProcessInfoParams, PaneSplitParams, PaneTarget, ReadFormat,
-    ReadSource, Request, SplitDirection,
+    ErrorResponse, Method, PaneCloseIfPristineTerminalParams, PaneProcessInfoParams,
+    PaneSplitParams, PaneTarget, ReadFormat, ReadSource, Request, SplitDirection,
 };
 
 const AGENT_START_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -388,8 +388,11 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
         ));
     }
     let created_pane = pane_id.is_none();
-    let pane_id = match pane_id {
-        Some(pane) => pane,
+    let (pane_id, pinned_terminal_id) = match pane_id {
+        Some(pane) => {
+            let terminal = pane_terminal_id(&pane)?;
+            (pane, terminal)
+        }
         None => {
             // Refuse existing/ambiguous names before creating a pane. Do not retry
             // creation or close the new terminal after an uncertain startup.
@@ -427,10 +430,13 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
                     "pane creation response missing pane_id",
                 ));
             };
-            pane.to_string()
+            // Ownership comes from this creation response, never a later lookup.
+            let terminal = response["result"]["pane"]["terminal_id"]
+                .as_str()
+                .map(str::to_owned);
+            (pane.to_string(), terminal)
         }
     };
-    let pinned_terminal_id = pane_terminal_id(&pane_id)?;
     let mut retry_deadline = None;
     let mut previous_busy_response = None;
     let mut response = loop {
@@ -440,13 +446,12 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
                 || pane_terminal_id(&pane_id)? != pinned_terminal_id
                 || !pane_shell_is_initializing(&pane_id)?
             {
-                cleanup_rejected_agent_pane(
+                return print_rejected_agent_start(
                     created_pane,
                     &pane_id,
                     &pinned_terminal_id,
                     previous_busy_response,
                 );
-                return super::print_response(previous_busy_response);
             }
         }
 
@@ -469,8 +474,12 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
             || pane_terminal_id(&pane_id)? != pinned_terminal_id
             || !pane_shell_is_initializing(&pane_id)?
         {
-            cleanup_rejected_agent_pane(created_pane, &pane_id, &pinned_terminal_id, &response);
-            return super::print_response(&response);
+            return print_rejected_agent_start(
+                created_pane,
+                &pane_id,
+                &pinned_terminal_id,
+                &response,
+            );
         }
 
         let deadline = *retry_deadline
@@ -479,13 +488,12 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             if let Some(previous_busy_response) = previous_busy_response.as_ref() {
-                cleanup_rejected_agent_pane(
+                return print_rejected_agent_start(
                     created_pane,
                     &pane_id,
                     &pinned_terminal_id,
                     previous_busy_response,
                 );
-                return super::print_response(previous_busy_response);
             }
         }
         std::thread::sleep(AGENT_START_POLL_INTERVAL.min(remaining));
@@ -525,14 +533,13 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
 
 // Only explicit rejections before command submission are safe to clean up.
 // Transport errors, input failures and readiness failures retain recovery work.
-fn cleanup_rejected_agent_pane(
+fn print_rejected_agent_start(
     created: bool,
     pane: &str,
     terminal: &Option<String>,
     response: &serde_json::Value,
-) {
+) -> std::io::Result<i32> {
     if !created
-        || terminal.is_none()
         || !matches!(
             response["error"]["code"].as_str(),
             Some(
@@ -547,21 +554,45 @@ fn cleanup_rejected_agent_pane(
             )
         )
     {
-        return;
+        return super::print_response(response);
     }
-    // Never close a replacement terminal that acquired the same pane identity.
-    if !matches!(pane_terminal_id(pane), Ok(current) if current == *terminal) {
-        return;
-    }
-    match super::send_request(&Request {
+    let Some(terminal) = terminal.as_deref() else {
+        let mut response = response.clone();
+        let original = response["error"]["message"]
+            .as_str()
+            .unwrap_or("agent start rejected");
+        response["error"]["message"] = format!(
+            "{original}; created pane {pane} retained: creation terminal identity unavailable"
+        )
+        .into();
+        return super::print_response(&response);
+    };
+    // A distinct optional operation performs the comparison AND admission claim
+    // in the host. Unsupported/unknown outcomes never fall back to pane.close.
+    let cleanup = super::send_request(&Request {
         id: "cli:agent:start:cleanup".into(),
-        method: Method::PaneClose(PaneTarget {
+        method: Method::PaneCloseIfPristineTerminal(PaneCloseIfPristineTerminalParams {
             pane_id: pane.into(),
+            expected_terminal_id: terminal.into(),
         }),
-    }) {
-        Ok(result) if result.get("error").is_none() => {}
-        _ => eprintln!("could not close rejected agent pane {pane}; inspect it before retrying"),
+    });
+    let detail = match cleanup {
+        Ok(result) if result.get("error").is_none() => None,
+        Ok(_) => Some(format!(
+            "created pane {pane} retained: safe conditional cleanup was rejected or unsupported"
+        )),
+        Err(_) => Some(format!(
+            "conditional cleanup outcome for {pane} is unknown; inspect before retrying"
+        )),
+    };
+    let mut response = response.clone();
+    if let Some(detail) = detail {
+        let original = response["error"]["message"]
+            .as_str()
+            .unwrap_or("agent start rejected");
+        response["error"]["message"] = format!("{original}; {detail}").into();
     }
+    super::print_response(&response)
 }
 
 fn agent_list(args: &[String]) -> std::io::Result<i32> {

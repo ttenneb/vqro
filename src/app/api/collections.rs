@@ -2293,6 +2293,9 @@ impl App {
                     };
                     let mut created = Vec::with_capacity(members.len());
                     for (pane_id, tab_id) in members.into_iter().zip(tab_ids) {
+                        if let Some(runtime) = self.lookup_runtime_sender(ws_idx, pane_id) {
+                            runtime.invalidate_cleanup();
+                        }
                         let Some(taken) = self.state.workspaces[ws_idx].take_pane_for_move(pane_id)
                         else {
                             return responses::encode_error(

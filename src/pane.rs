@@ -1298,6 +1298,30 @@ enum PaneRuntimeIo {
 }
 
 impl PaneRuntimeIo {
+    fn arm_fresh_split_cleanup(&self) -> bool {
+        match self {
+            Self::Actor(actor) => actor.arm_fresh_split_cleanup(),
+            #[cfg(test)]
+            Self::TestChannel { .. } => false,
+        }
+    }
+
+    fn invalidate_cleanup(&self) {
+        match self {
+            Self::Actor(actor) => actor.invalidate_cleanup(),
+            #[cfg(test)]
+            Self::TestChannel { .. } => {}
+        }
+    }
+
+    fn claim_pristine_close(&self) -> Option<crate::pty::actor::PristineCloseClaim> {
+        match self {
+            Self::Actor(actor) => actor.claim_pristine_close(),
+            #[cfg(test)]
+            Self::TestChannel { .. } => None,
+        }
+    }
+
     fn shutdown(&self) {
         match self {
             PaneRuntimeIo::Actor(actor) => actor.shutdown(),
@@ -3256,6 +3280,18 @@ impl PaneRuntime {
 
     pub fn encode_terminal_key(&self, key: crate::input::TerminalKey) -> Vec<u8> {
         self.terminal.encode_terminal_key(key)
+    }
+
+    pub(crate) fn arm_fresh_split_cleanup(&self) -> bool {
+        self.io.arm_fresh_split_cleanup()
+    }
+
+    pub(crate) fn invalidate_cleanup(&self) {
+        self.io.invalidate_cleanup();
+    }
+
+    pub(crate) fn claim_pristine_close(&self) -> Option<crate::pty::actor::PristineCloseClaim> {
+        self.io.claim_pristine_close()
     }
 
     pub fn try_send_bytes(&self, bytes: Bytes) -> Result<(), mpsc::error::TrySendError<Bytes>> {
