@@ -4,6 +4,7 @@ use crate::raw_input::RawInputEvent;
 use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 
 const LOCAL_INPUT_SOURCE: u8 = 0;
+pub(super) const TERMINAL_INPUT_REFUSED_NOTICE: &str = "terminal-input-refused";
 
 fn is_retained_selection_copy_key(key: &crate::input::TerminalKey) -> bool {
     matches!(key.code, KeyCode::Char('c' | 'C'))
@@ -386,9 +387,14 @@ impl ClientShellState {
                 let initial_context = self.input_context();
                 // A hidden/unpaired body must not acquire a forwarded lease:
                 // its later release would otherwise be legitimate cleanup input.
-                let target = self
-                    .route_key_press(&key, outcome)
-                    .filter(|target| self.collapse_allows_pane_input(target));
+                let target = self.route_key_press(&key, outcome).filter(|target| {
+                    if self.collapse_allows_pane_input(target) {
+                        true
+                    } else {
+                        self.notify_terminal_input_refused(outcome);
+                        false
+                    }
+                });
                 if let Some(target) = target.as_ref() {
                     self.push_pane_key(target.clone(), key.clone(), outcome);
                 }
@@ -1499,13 +1505,23 @@ impl ClientShellState {
             .map(|terminal_id| ClientInputTarget::Popup(terminal_id.clone()))
     }
 
+    fn notify_terminal_input_refused(&mut self, outcome: &mut ClientShellInput) {
+        outcome.repaint |= self.push_endpoint_notice(
+            ClientEndpointNoticeKind::Rejected,
+            TERMINAL_INPUT_REFUSED_NOTICE,
+            "Input not delivered",
+            "Check the active pane before retyping.",
+        );
+    }
+
     fn push_pane_key(
-        &self,
+        &mut self,
         target: ClientInputTarget,
         key: crate::input::TerminalKey,
         outcome: &mut ClientShellInput,
     ) {
         if key.kind != KeyEventKind::Release && !self.collapse_allows_pane_input(&target) {
+            self.notify_terminal_input_refused(outcome);
             return;
         }
         if let Some(event) = ClientPaneInputEvent::from_terminal_key(key) {
@@ -1517,11 +1533,44 @@ impl ClientShellState {
     /// Returns true when a collection list or inspector consumed the event, including when the
     /// owner deliberately swallows it instead of forwarding it to a PTY.
     fn route_committed_pane_event(
-        &self,
+        &mut self,
         event: ClientPaneInputEvent,
         outcome: &mut ClientShellInput,
     ) -> bool {
         if !self.collapse_interactions_current() {
+            // An inspector or unentered collection list owns text as UI input,
+            // rather than attempting terminal dispatch. Keep those silent.
+            let list_owns_text = self.snapshot.as_deref().is_some_and(|snapshot| {
+                self.structure.as_deref().is_some_and(|structure| {
+                    structure.collections.iter().any(|collection| {
+                        self.collection_list_views
+                            .contains(&collection.collection_id)
+                            && collection.selected_pane_id == snapshot.focused_pane_id
+                            && !self
+                                .collection_entered_pane
+                                .as_deref()
+                                .is_some_and(|pane_id| {
+                                    collection
+                                        .members
+                                        .iter()
+                                        .any(|member| member.pane_id == pane_id)
+                                        && self
+                                            .collection_expanded_members
+                                            .get(&collection.collection_id)
+                                            .is_some_and(|expanded| expanded.contains(pane_id))
+                                })
+                    })
+                })
+            });
+            if !list_owns_text
+                && !self
+                    .inspector
+                    .as_ref()
+                    .is_some_and(|inspector| inspector.focused)
+                && self.focused_pane_id().is_some()
+            {
+                self.notify_terminal_input_refused(outcome);
+            }
             return true;
         }
         let list_collection = self.snapshot.as_deref().and_then(|snapshot| {
@@ -1550,6 +1599,8 @@ impl ClientShellState {
                 let target = ClientInputTarget::Pane(entered_pane.to_owned());
                 if self.collapse_allows_pane_input(&target) {
                     super::push_target_event(target, event, outcome);
+                } else {
+                    self.notify_terminal_input_refused(outcome);
                 }
             }
             return true;
@@ -1567,6 +1618,8 @@ impl ClientShellState {
                 let target = ClientInputTarget::Pane(inspector.pane_id.clone());
                 if self.collapse_allows_pane_input(&target) {
                     super::push_target_event(target, event, outcome);
+                } else {
+                    self.notify_terminal_input_refused(outcome);
                 }
                 return true;
             }
@@ -1574,11 +1627,17 @@ impl ClientShellState {
         false
     }
 
-    fn push_focused_pane_event(&self, event: ClientPaneInputEvent, outcome: &mut ClientShellInput) {
+    fn push_focused_pane_event(
+        &mut self,
+        event: ClientPaneInputEvent,
+        outcome: &mut ClientShellInput,
+    ) {
         if let Some(pane_id) = self.focused_pane_id() {
             let target = ClientInputTarget::Pane(pane_id);
             if self.collapse_allows_pane_input(&target) {
                 super::push_target_event(target, event, outcome);
+            } else {
+                self.notify_terminal_input_refused(outcome);
             }
         }
     }

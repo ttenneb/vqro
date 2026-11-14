@@ -1237,6 +1237,8 @@ pub(crate) struct ClientShellState {
     pub(super) queued_notifications: VecDeque<ClientVisibleNotification>,
     pub(super) endpoint_notice_seen: HashSet<ClientEndpointNoticeKey>,
     pub(super) visible_endpoint_notice: Option<ClientVisibleEndpointNotice>,
+    /// Clear refusal-only chrome once after expiry; never grants pane input authority.
+    pub(super) input_refusal_chrome_presented: bool,
     pub(super) outer_focused: Option<bool>,
     pub(super) ascii_input_source_active: bool,
     pub(super) pending_input_source_changes: Vec<bool>,
@@ -1432,6 +1434,7 @@ impl ClientShellState {
             queued_notifications: VecDeque::new(),
             endpoint_notice_seen: HashSet::new(),
             visible_endpoint_notice: None,
+            input_refusal_chrome_presented: false,
             outer_focused: None,
             ascii_input_source_active: false,
             pending_input_source_changes: Vec::new(),
@@ -1667,6 +1670,7 @@ impl ClientShellState {
         self.popup_pending_deadline = None;
         self.endpoint_notice_seen.clear();
         self.visible_endpoint_notice = None;
+        self.input_refusal_chrome_presented = false;
         self.endpoint_error = None;
         self.endpoint_error_deadline = None;
         self.navigate_workspace_id = None;
