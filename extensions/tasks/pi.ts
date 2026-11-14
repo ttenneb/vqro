@@ -33,7 +33,7 @@ function agentBinding(message: any): Omit<ReplyTarget, "id"> | undefined {
   try {
     const value = JSON.parse(message?.sender ?? "{}");
     if (value?.class !== "agent") return undefined;
-    if (![value.terminal_id, value.agent, value.execution].every((field: any) => typeof field === "string" && field)) return undefined;
+    if (Object.keys(value).length !== 4 || ![value.terminal_id, value.agent, value.execution].every((field: any) => typeof field === "string" && field && Buffer.byteLength(field, "utf8") <= 256)) return undefined;
     return { binding: JSON.stringify(value), execution: value.execution, display: `${value.agent} ${value.execution}` };
   } catch {
     return undefined;
@@ -81,7 +81,12 @@ export function renderMessage(message: any): string {
   } catch {
     /* Retain unknown provenance. */
   }
-  return `[vqro message ${message.id} from ${sender}]\n${message.body}`;
+  const exact = agentBinding(message);
+  // This is the existing CLI's exact-binding recipient, not a display name or
+  // bare execution id that could be resolved to another process after reuse.
+  const recipient = exact ? `\n[reply recipient (exact binding JSON): ${exact.binding}]\n[reply usage: vqro message send TARGET TEXT --reply-to ${message.id}; quote JSON as one TARGET]` :
+    sender.startsWith("agent ") ? "\n[reply recipient unavailable: no exact sender binding]" : "";
+  return `[vqro message ${message.id} from ${sender}]${recipient}\n${message.body}`;
 }
 
 /**

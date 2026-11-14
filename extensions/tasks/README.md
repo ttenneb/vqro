@@ -32,6 +32,14 @@ in-flight work, or a human turn that wins the race, is therefore not auto-replie
 and a delivered reply is never re-answered automatically. `vqro agent prompt` is human-only, so agents address
 each other with messages rather than pane input.
 
+Received agent-message headers include a `reply recipient (exact binding JSON)`
+line. For a manual reply, copy that entire JSON object as one quoted `TARGET`
+argument to `vqro message send`; the bare execution label is not a recipient
+lookup. This reuses exact terminal/agent/execution addressing without name/pane
+fallback. A historical binding is not proof the sender is still live; a
+replacement cannot claim its messages. Missing/malformed identities expose no
+reply recipient rather than guessing a name.
+
 Task/message ID references accept a unique prefix with at least six hex digits,
 with or without `task_`/`msg_`. Exact IDs win; ambiguity lists the full candidates.
 Existing-task/message writes still require `--rev`. TTY `task list`/`ready` uses
