@@ -576,9 +576,9 @@ async fn render_scale_profile_armed_boxes_with_populated_documents() {
     }
 }
 
-#[test]
+#[tokio::test(flavor = "current_thread")]
 #[ignore = "manual fixed-geometry populated-pane profile"]
-fn render_scale_profile_collapsed_side_strip() {
+async fn render_scale_profile_collapsed_side_strip() {
     let rows = [1, 15].map(|count| {
         let mut workspace = populated_panes(count);
         let root = workspace.tabs[0].root_pane;
