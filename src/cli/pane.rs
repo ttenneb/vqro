@@ -1786,8 +1786,9 @@ fn print_pane_help() {
     eprintln!("  vqro pane list [--workspace <workspace_id>]");
     eprintln!("  vqro pane current [--pane ID|--current]");
     eprintln!("  vqro pane get <pane_id>");
-    eprintln!("  vqro pane layout [--pane ID|--current] [--tree]");
-    eprintln!("    --tree: full boxes, collapsed state and all hidden shell/view members");
+    eprintln!("  vqro pane layout --tree [--pane ID|--current]");
+    eprintln!("    preferred for diagnostics/inventory: full tree, collapsed and hidden shell/view members");
+    eprintln!("    omit --tree for the legacy selected-only geometry report (unchanged JSON)");
     eprintln!("  vqro pane process-info [--pane ID|--current]");
     eprintln!("  vqro pane neighbor --direction left|right|up|down [--pane ID|--current]");
     eprintln!("  vqro pane edges [--pane ID|--current]");
@@ -2126,6 +2127,17 @@ mod tests {
             parse_pane_layout_method(&args(&[]), Some("w1:p1")).unwrap(),
             Method::PaneLayout(PaneLayoutParams { pane_id: None })
         ));
+        assert!(matches!(
+            parse_pane_layout_method(&args(&["--tree"]), Some("w1:p1")).unwrap(),
+            Method::LayoutTreeExport(LayoutExportParams {
+                tab_id: None,
+                pane_id: None
+            })
+        ));
+        assert!(
+            matches!(parse_pane_layout_method(&args(&["--pane", "w1:p2"]), None).unwrap(),
+            Method::PaneLayout(PaneLayoutParams { pane_id: Some(pane) }) if pane == "w1:p2")
+        );
         assert!(
             matches!(parse_pane_layout_method(&args(&["--tree", "--current"]), Some("w1:p1")).unwrap(),
             Method::LayoutTreeExport(LayoutExportParams { tab_id: None, pane_id: Some(pane) }) if pane == "w1:p1")

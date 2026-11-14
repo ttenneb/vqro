@@ -17,7 +17,7 @@ the authority for their surfaces; a design's acceptance alone is not availabilit
 | Agent-start views | Default Tasks-above-Messages group always below the terminal; atomic layout admission, once marker and transient sizing. Explicit layout edits can move it beside. | [Agent-start contract](agent-start-views.md) supersedes the aspect-dependent single-Tasks promise in [Nested panes](../architecture/nested-panes.md#agent-start-rule). |
 | Stage 3 versus stage 4 | View panes and placement-derived scope ship; evaluation still composes per-pane extension roots. Core absorption of Collections, generic box naming/selection/close and new anonymous box IDs do **not** ship. | [Stage 3 notes](../architecture/nested-panes.md#stage-3-implementation-notes-2026-10-07); [Collections authority](../architecture/collections-authority-transition.md) remains in force. |
 | Terminal input today | Paired collapse guards and visible client-refusal notice ship. Normal input names a pane (popup input a terminal), not a rendered runtime incarnation/route epoch. No end-to-end batch disposition guarantee. | [Current input rules](#input-authority-and-admission); [surface codec decision](../architecture/endpoint-surface-codec-v2.md). |
-| Atomic scene / all-input exact lane | **Proposed implementation, unavailable at this baseline.** Atomic scene direction is accepted; one-event installation and separate route authority are in progress. Exact-runtime envelopes, transactional prefix/held admission and dispositions are a later lane, not supplied by pairing or atomic publication alone. | [Tracked scene decision](https://github.com/ttenneb/vqro/blob/00c91140f1a1a344169eb422bffaf11eec984846/docs/next/architecture/atomic-client-scene-v1.md) and [availability](https://github.com/ttenneb/vqro/blob/00c91140f1a1a344169eb422bffaf11eec984846/docs/next/api/client-scene-v1.md), committed separately, not implemented/installed here. Existing [endpoint obligations](../../../AGENTS.md#stable-client-endpoint-contract) still apply. |
+| Atomic scene / all-input exact lane | **Proposed implementation, unavailable at this baseline.** Atomic scene direction is accepted; one-event installation and separate route authority are in progress. Exact-runtime envelopes, transactional prefix/held admission and dispositions are a later lane, not supplied by pairing or atomic publication alone. | Scene decision and availability references are recorded [below](#route-revocation-versus-presentation-churn), pending integration, not new source availability. Existing [endpoint obligations](../../../AGENTS.md#stable-client-endpoint-contract) still apply. |
 | Deferred-only lifecycle (B) | **Parked, superseded direction; unavailable.** BEGIN/RESUME/tail/END, lifetime CompletedExact and recovery scaffolding are not a shipped input fix or fallback. | No such optional method/codec is advertised by this baseline. Do not treat a parked branch or proposal review as availability. |
 | Durable messages | Exact full recipient binding controls list/claim. Waiting → claimed is durable, but claim is not SDK delivery, execution, reply or acceptance. Durable delivery-attempt/attention/recovery outcomes are **not yet available** here. | [Task conventions](task-conventions.md); [message limitations](#message-claim-and-reply-correlation). |
 | Automatic sizing | Explicit creation provenance plus transient armed state, cached measures and resume fences; only actual ratios persist. Restore/handoff is AUTO **off**. | [Sizing contract](../architecture/nested-panes.md#transient-automatic-sizing) and [collapse fences](../architecture/generic-pane-collapse.md#geometry-and-size-memory). No persistent mode/pin or consolidated sizing state machine is introduced. |
@@ -89,9 +89,13 @@ and popup ownership. Current pane resolution can accept historical aliases; it
 is not proof of the incarnation that produced the displayed pixels.
 
 **Accepted direction, implementation pending, not a current guarantee:** the
-separately committed
-[closed scene route dependencies](https://github.com/ttenneb/vqro/blob/00c91140f1a1a344169eb422bffaf11eec984846/docs/next/architecture/atomic-client-scene-v1.md#closed-route-dependencies-first-shipment)
-separate route authority from scene/raster revision. They cover:
+separately committed scene decision records closed route dependencies apart from
+scene/raster revision. Reference: `docs/next/architecture/atomic-client-scene-v1.md`,
+section “Closed route dependencies (first shipment)”, and availability document
+`docs/next/api/client-scene-v1.md`, commit `00c91140` on
+`fix/atomic-scene-20261114`. Those files are not integrated into this baseline;
+relative contract links are pending integration, not an assertion of published
+source availability. The proposed dependencies cover:
 
 1. Boot/connection generation, activation/handoff and selected location/focus.
 2. Exact terminal attachment/runtime, popup ownership and lifecycle changes.
@@ -105,8 +109,8 @@ separate route authority from scene/raster revision. They cover:
 
 Task/status/agent observations, labels, document bodies, terminal cell content
 and provider refresh are not dependencies unless actual structural eligibility
-changes. See the linked decision for the closed list and exclusions, not the
-current broad projection guard. The permalink records the accepted design
+changes. The separately committed decision owns that closed list and exclusions,
+not the current broad projection guard. This reference records accepted direction
 without implying that its new codec, atomic installation or source availability
 has landed on this baseline. No exact-runtime input admission is supplied by
 scene publication alone.
