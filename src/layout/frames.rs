@@ -36,6 +36,7 @@ pub(crate) struct CollapsedFrame {
     pub direction: Direction,
     pub title_pane: Option<PaneId>,
     pub leaf_pane: Option<PaneId>,
+    pub pane_count: usize,
     pub focused: bool,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,6 +58,7 @@ pub(crate) struct LayoutGeometry {
 }
 #[derive(Clone, Copy, Default)]
 struct Facts {
+    panes: usize,
     terminals: u8,
     terminal: Option<PaneId>,
     visible_terminals: u8,
@@ -92,6 +94,7 @@ fn gather(node: &TypedNode, facts: &mut HashMap<usize, Facts>) -> Facts {
             result
         }
         TypedNode::Leaf(pane) => Facts {
+            panes: 1,
             terminals: 1,
             terminal: Some(*pane),
             visible_terminals: 1,
@@ -99,6 +102,7 @@ fn gather(node: &TypedNode, facts: &mut HashMap<usize, Facts>) -> Facts {
             ..Facts::default()
         },
         TypedNode::View { .. } => Facts {
+            panes: 1,
             views: true,
             visible_views: true,
             valid_scopes: true,
@@ -109,6 +113,7 @@ fn gather(node: &TypedNode, facts: &mut HashMap<usize, Facts>) -> Facts {
             let b = gather(second, facts);
             let terminals = a.terminals.saturating_add(b.terminals).min(2);
             Facts {
+                panes: a.panes.saturating_add(b.panes),
                 terminals,
                 terminal: if terminals == 1 {
                     a.terminal.or(b.terminal)
@@ -151,6 +156,7 @@ fn gather(node: &TypedNode, facts: &mut HashMap<usize, Facts>) -> Facts {
             let mut direct_view = false;
             for (index, child) in children.iter().enumerate() {
                 let child_facts = gather(child, facts);
+                result.panes = result.panes.saturating_add(child_facts.panes);
                 result.terminals = result
                     .terminals
                     .saturating_add(child_facts.terminals)
@@ -339,6 +345,7 @@ fn walk(
             direction: parent_direction,
             title_pane: node.selected_pane(),
             leaf_pane: node.pane_leaf(),
+            pane_count: facts.get(&key(node)).map_or(0, |facts| facts.panes),
             focused,
         });
         if matches!(
