@@ -207,6 +207,7 @@ pub(crate) struct ClientConnection {
     /// may reuse them but cannot mint fresh attachment/runtime authority.
     pub(crate) shell_scene_targets: Vec<crate::protocol::scene::SceneTargetV1>,
     pub(crate) shell_committed_scene_epoch: u64,
+    pub(crate) shell_committed_scene_projection: Option<u64>,
     pub(crate) shell_collapse_metadata: Option<crate::protocol::collapse::CollapseBodyV1>,
     /// Whether this client may reserve terminal geometry for pane contributions.
     pub(crate) shell_pane_viewport_enabled: bool,
@@ -343,6 +344,7 @@ impl ClientConnection {
             shell_preview_routes: Vec::new(),
             shell_scene_targets: Vec::new(),
             shell_committed_scene_epoch: 0,
+            shell_committed_scene_projection: None,
             shell_collapse_metadata: None,
             shell_pane_viewport_enabled: false,
             shell_pane_view_enabled: false,

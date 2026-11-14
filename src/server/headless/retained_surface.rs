@@ -414,8 +414,9 @@ impl HeadlessServer {
                 // Alternate-screen transitions change whether the pane reserves
                 // a scrollbar gutter. Recompute layout and resize the runtime
                 // through the complete renderer before retaining further rows.
-                if pane.mouse_reporting != collected_pane.mouse_reporting
-                    || pane.sgr_pixel_mouse != collected_pane.sgr_pixel_mouse
+                if self.clients[&client_id].shell_scene_enabled
+                    && (pane.mouse_reporting != collected_pane.mouse_reporting
+                        || pane.sgr_pixel_mouse != collected_pane.sgr_pixel_mouse)
                 {
                     fallback!("input_mode_authority");
                 }

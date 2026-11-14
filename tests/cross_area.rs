@@ -17,8 +17,8 @@ use serde_json::{json, Value};
 use support::{
     cleanup_test_base, client_shell_handshake, register_runtime_dir, register_spawned_herdr_pid,
     unregister_spawned_herdr_pid, CURRENT_ENDPOINT_PROTOCOL_GENERATION as CURRENT_PROTOCOL,
-    SERVER_MESSAGE_ENDPOINT_CONTROL, SERVER_MESSAGE_PANE_SURFACE,
-    SERVER_MESSAGE_PANE_SURFACE_PATCH, SERVER_MESSAGE_PANE_SURFACE_V2,
+    SERVER_MESSAGE_CLIENT_SCENE_V1, SERVER_MESSAGE_ENDPOINT_CONTROL, SERVER_MESSAGE_PANE_SURFACE,
+    SERVER_MESSAGE_PANE_SURFACE_PATCH,
 };
 
 fn unique_test_dir() -> PathBuf {
@@ -451,7 +451,7 @@ fn wait_for_frame(stream: &mut UnixStream, timeout: Duration) -> bool {
             Ok(
                 SERVER_MESSAGE_PANE_SURFACE
                 | SERVER_MESSAGE_PANE_SURFACE_PATCH
-                | SERVER_MESSAGE_PANE_SURFACE_V2,
+                | SERVER_MESSAGE_CLIENT_SCENE_V1,
             ) => return true,
             Ok(SERVER_MESSAGE_ENDPOINT_CONTROL) => {}
             Ok(_) => {}

@@ -2118,6 +2118,7 @@ impl HeadlessServer {
                     width_px: cell_width_px,
                     height_px: cell_height_px,
                 };
+                let scene_enabled = writer.scene_enabled;
                 let mut connection = ClientConnection::new_with_mode(
                     ClientConnectionMode::ClientShell,
                     (surface_cols, surface_rows),
@@ -2134,7 +2135,7 @@ impl HeadlessServer {
                 connection.shell_host_documents_enabled = host_documents_enabled;
                 connection.shell_host_views_enabled = host_views_enabled;
                 connection.shell_collapse_enabled = collapse_enabled;
-                connection.shell_scene_enabled = true;
+                connection.shell_scene_enabled = scene_enabled;
                 connection.shell_pane_viewport_enabled = pane_viewport_enabled;
                 connection.shell_pane_view_enabled = pane_view_enabled;
                 connection.shell_terminal_views_enabled = terminal_views_enabled;

@@ -358,6 +358,33 @@ fn atomic_scene_same_route_preserves_local_inspector_ownership_without_rebinding
         !delivered(&text(&mut state)),
         "focused inspector still consumes text as local UI"
     );
+    let mut geometry = scene(2, 2);
+    geometry.surface.frame.surface_revision = 3;
+    geometry.projections[1].data =
+        serde_json::to_string(&projection(&geometry.surface.frame)).unwrap();
+    state.revoke_scene_route(
+        &ClientEndpointId::Local,
+        1,
+        SceneRouteRevokedV1 {
+            boot_id: "boot-1".into(),
+            route_epoch: 2,
+        },
+    );
+    assert!(install(&mut state, geometry));
+    assert!(
+        state.inspector.is_some(),
+        "same-projection own geometry preserves the client owner"
+    );
+    let mut replaced = scene(2, 3);
+    replaced.surface.frame.surface_revision = 4;
+    replaced.targets[0].runtime_instance = Some(2);
+    replaced.projections[1].data =
+        serde_json::to_string(&projection(&replaced.surface.frame)).unwrap();
+    assert!(install(&mut state, replaced));
+    assert!(
+        state.inspector.is_none(),
+        "runtime identity loss closes owner even at same projection"
+    );
 }
 
 #[test]

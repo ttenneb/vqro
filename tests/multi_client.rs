@@ -18,8 +18,8 @@ use support::{
     cleanup_test_base, client_shell_handshake, drain_messages, register_runtime_dir,
     register_spawned_herdr_pid, send_client_shell_focus, send_detach, unregister_spawned_herdr_pid,
     wait_for_client_shell_bootstrap, wait_for_message_variant, wait_for_message_variants,
-    CURRENT_ENDPOINT_PROTOCOL_GENERATION as CURRENT_PROTOCOL, SERVER_MESSAGE_PANE_SURFACE_PATCH,
-    SERVER_MESSAGE_PANE_SURFACE_V2,
+    CURRENT_ENDPOINT_PROTOCOL_GENERATION as CURRENT_PROTOCOL, SERVER_MESSAGE_CLIENT_SCENE_V1,
+    SERVER_MESSAGE_PANE_SURFACE_PATCH,
 };
 
 fn unique_test_dir() -> PathBuf {
@@ -334,7 +334,7 @@ fn api_pane_output_is_fanned_out_as_pane_surface_updates() {
     pane_input(&api, &pane, &format!("printf '{marker}\\n'"));
     assert!(pane_contains(&api, &pane, &marker, Duration::from_secs(5)));
     let surface_updates = [
-        SERVER_MESSAGE_PANE_SURFACE_V2,
+        SERVER_MESSAGE_CLIENT_SCENE_V1,
         SERVER_MESSAGE_PANE_SURFACE_PATCH,
     ];
     assert!(wait_for_message_variants(&mut a, Duration::from_secs(5), &surface_updates).unwrap());
@@ -369,7 +369,7 @@ fn crashed_client_shell_does_not_affect_survivor() {
     assert!(wait_for_message_variant(
         &mut survivor,
         Duration::from_secs(5),
-        SERVER_MESSAGE_PANE_SURFACE_V2
+        SERVER_MESSAGE_CLIENT_SCENE_V1
     )
     .unwrap());
     cleanup(server, base);

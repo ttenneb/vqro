@@ -131,6 +131,9 @@ const MAX_QUEUED_CONTROL_BYTES: usize = 8 * 1024 * 1024;
 /// Channels owned by the server side of a client writer thread.
 #[derive(Clone, Debug)]
 pub(crate) struct ClientWriter {
+    /// Selected only by a validated scene-codec greeting. Internal legacy test
+    /// writers do not acquire scene serving merely by registering as a shell.
+    pub(crate) scene_enabled: bool,
     /// Reliable control messages such as shutdown, notifications, and clipboard writes.
     pub(crate) control: ClientControlWriter,
     /// Droppable render messages. Capacity is one so slow clients cannot build lag.
@@ -147,6 +150,7 @@ impl ClientWriter {
     pub(crate) fn test_paused() -> Self {
         let queue = ClientWriterQueue::new();
         Self {
+            scene_enabled: false,
             control: ClientControlWriter::queue(queue.clone()),
             render: ClientRenderWriter::queue(queue),
         }
@@ -182,6 +186,7 @@ impl ClientWriter {
         let mut render_writer = ClientRenderWriter::queue(queue);
         render_writer.test_render = Some(render.clone());
         let writer = Self {
+            scene_enabled: false,
             control: control_writer,
             render: render_writer,
         };
@@ -1105,6 +1110,7 @@ pub(crate) fn handle_client_handshake(
     // Create separate channels for reliable control messages and droppable renders.
     let writer_queue = ClientWriterQueue::new();
     let writer = ClientWriter {
+        scene_enabled: shell_options.is_some(),
         control: ClientControlWriter::queue(writer_queue.clone()),
         render: ClientRenderWriter::queue(writer_queue.clone()),
     };
@@ -1976,11 +1982,18 @@ mod tests {
         let queue = ClientWriterQueue::new();
         (
             ClientWriter {
+                scene_enabled: false,
                 control: ClientControlWriter::queue(queue.clone()),
                 render: ClientRenderWriter::queue(queue.clone()),
             },
             queue,
         )
+    }
+
+    #[test]
+    fn legacy_writer_does_not_implicitly_negotiate_atomic_scenes() {
+        let (writer, _) = test_queue_writer();
+        assert!(!writer.scene_enabled);
     }
 
     fn frame_server_message(message: &ServerMessage) -> Vec<u8> {
@@ -2688,6 +2701,10 @@ mod tests {
                 assert!(!terminal_views_enabled);
                 assert!(!pane_viewport_enabled);
                 assert!(!pane_view_enabled);
+                assert!(
+                    writer.scene_enabled,
+                    "scene publication follows the validated codec selection"
+                );
                 drop(writer);
             }
             other => panic!("expected ClientShellConnected, got {other:?}"),

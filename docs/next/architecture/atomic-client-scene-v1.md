@@ -122,6 +122,14 @@ Preview payloads are validated against the existing client-local interest before
 any live mutation; a harmless scene can rebase that same claim to its projection,
 not invent a claim or discard a member after partially installing. Same-route
 scenes preserve local inspector/preview input ownership and viewport geometry.
+Host reservations and client inspectors use the same `inspector_identity` and
+`preserves_inspector_owner` predicates: identity loss always closes ownership;
+otherwise an unchanged projection or unchanged route preserves it. Thus an
+owner's own geometry request keeps its reservation/inspector while still
+revoking keyboard geometry authority; external focus restores the old pane's
+PTY geometry. Requested viewport pane/size are routing facts, not its rebased
+presentation revision. Scene serving follows the validated transport codec
+selection; merely registering an internal shell writer does not negotiate it.
 Extension action/request leases are not rebound: cached inspector content may
 remain read-only, without a provider refresh, while old semantic leases close.
 Popup key, committed text and paste share the same route revocation guard;

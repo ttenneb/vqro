@@ -345,10 +345,36 @@ impl shell::ClientShellState {
                 return false;
             }
         }
+        let next_tree = scene
+            .projections
+            .iter()
+            .find_map(|projection| match projection {
+                C::CollapseProjection(Ok(value)) => value.body.tree_fingerprint.as_deref(),
+                _ => None,
+            });
+        let next_identity =
+            crate::protocol::scene::inspector_identity(&scene.snapshot, &scene.targets, next_tree);
+        let previous_identity = endpoint.snapshot.as_ref().and_then(|snapshot| {
+            crate::protocol::scene::inspector_identity(
+                snapshot,
+                &endpoint.scene_targets,
+                endpoint
+                    .collapse
+                    .current
+                    .as_ref()
+                    .and_then(|projection| projection.body.tree_fingerprint.as_deref()),
+            )
+        });
         let preserve_context = active
             && endpoint.snapshot_generation == Some(generation)
-            && endpoint.scene_authority.current()
-            && endpoint.scene_authority.installed == Some(scene.route_epoch);
+            && crate::protocol::scene::preserves_inspector_owner(
+                next_identity.is_some() && next_identity == previous_identity,
+                endpoint
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.revision == scene.snapshot.revision),
+                endpoint.scene_authority.installed == Some(scene.route_epoch),
+            );
         if !endpoint
             .scene_authority
             .can_install(generation, scene.route_epoch)
@@ -359,6 +385,9 @@ impl shell::ClientShellState {
         endpoint.collapse = Default::default();
         endpoint.scene_targets = scene.targets;
         if active {
+            if !preserve_context {
+                self.inspector = None;
+            }
             self.preserve_scene_context = preserve_context;
             self.set_endpoint_snapshot_for_generation(endpoint_id, generation, scene.snapshot);
             self.preserve_scene_context = false;

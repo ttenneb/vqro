@@ -60,10 +60,11 @@ impl SceneProfileHarness {
         let mut event = std::thread::spawn(move || rx.blocking_recv().unwrap())
             .join()
             .unwrap();
-        let (writer, control, render) = test_client_writer();
+        let (mut writer, control, render) = test_client_writer();
         let ServerEvent::ClientShellConnected { writer: output, .. } = &mut event else {
             panic!("negotiated shell connection")
         };
+        writer.scene_enabled = output.scene_enabled;
         *output = writer;
         let mut server = test_headless_server();
         server.app.state.workspaces = workspaces;
@@ -301,6 +302,7 @@ async fn atomic_scene_route_inventory_excludes_status_cells_and_scroll() {
             targets: &first.targets,
             previews: None,
             tree_fingerprint: None,
+            viewport: None,
         })
         .unwrap()
     };
@@ -397,6 +399,76 @@ async fn atomic_scene_status_churn_rebases_existing_viewport_without_provider_re
     );
     assert_eq!(updated.route_epoch, before);
     assert!(revocations(&control).is_empty());
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+async fn atomic_scene_owned_viewport_survives_open_then_external_focus_releases_old_owner() {
+    let mut server = test_headless_server();
+    let _input = install_focused_test_runtime(&mut server, b"pane one");
+    let first = server.app.state.workspaces[0].tabs[0].root_pane;
+    let second = server.app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+    server.app.state.workspaces[0].insert_test_runtime(
+        second,
+        crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"pane two"),
+    );
+    server.app.state.focus_pane_in_workspace(0, first);
+    server.app.state.ensure_test_terminals();
+    let (_control, render) = scene_client(&mut server);
+    server
+        .clients
+        .get_mut(&1)
+        .unwrap()
+        .shell_pane_viewport_enabled = true;
+    server.foreground_client_id = Some(1);
+    server.sync_foreground_client_state();
+    assert!(server.claim_unowned_shell_tab_geometry(1, true));
+    server.render_and_stream();
+    let initial = decode(render.try_recv().unwrap());
+    let full_size = server.app.state.workspaces[0].test_runtimes[&first].current_size();
+    let pane_id = server.app.public_pane_id(0, first).unwrap();
+    assert!(
+        server.handle_server_event(ServerEvent::ClientShellPaneViewport {
+            client_id: 1,
+            viewport: crate::protocol::endpoint::ClientPaneViewportRequest {
+                boot_id: initial.surface.frame.boot_id.clone(),
+                projection_revision: initial.surface.frame.projection_revision,
+                pane_id,
+                size: Some(crate::protocol::ClientSurfaceSize { cols: 20, rows: 10 }),
+            },
+        })
+    );
+    assert_eq!(
+        server.app.state.workspaces[0].test_runtimes[&first].current_size(),
+        (10, 20)
+    );
+    server.render_and_stream();
+    let reserved = decode(render.try_recv().unwrap());
+    assert!(
+        server.clients[&1].shell_pane_viewport.is_some(),
+        "a live owner's new geometry must not be immediately erased"
+    );
+    assert_eq!(
+        server.app.state.workspaces[0].test_runtimes[&first].current_size(),
+        (10, 20)
+    );
+    assert!(
+        reserved.route_epoch > initial.route_epoch,
+        "keyboard geometry authority still revokes conservatively"
+    );
+    server.app.state.focus_pane_in_workspace(0, second);
+    server.render_and_stream();
+    let focused = decode(render.try_recv().unwrap());
+    assert!(focused.route_epoch > reserved.route_epoch);
+    assert!(
+        server.clients[&1].shell_pane_viewport.is_none(),
+        "external focus closes the prior inspector's reservation owner"
+    );
+    assert_eq!(
+        server.app.state.workspaces[0].test_runtimes[&first].current_size(),
+        full_size
+    );
+    server.app.state.assert_invariants_for_test();
     shutdown_test_runtimes(&mut server);
 }
 

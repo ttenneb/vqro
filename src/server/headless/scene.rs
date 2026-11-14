@@ -79,45 +79,6 @@ pub(super) fn wrap_full_scene(
     Some(prepared.with_scene(client.shell_route_epoch, projections, targets))
 }
 
-/// Invalidate known identity/topology/viewport changes before preparing pixels.
-/// Geometry and mode facts discovered by compute_view are checked again below.
-pub(super) fn identity_witness(
-    snapshot: &crate::protocol::ClientShellSnapshot,
-    targets: &[SceneTargetV1],
-    tree: Option<&str>,
-    size: (u16, u16),
-    cell_size: crate::kitty_graphics::HostCellSize,
-) -> Option<[u8; 32]> {
-    let panes = snapshot
-        .panes
-        .iter()
-        .filter(|pane| Some(&pane.tab_id) == snapshot.focused_tab_id.as_ref())
-        .map(|pane| {
-            (
-                &pane.pane_id,
-                &pane.workspace_id,
-                &pane.tab_id,
-                pane.focused,
-                pane.right_click_passthrough,
-            )
-        })
-        .collect::<Vec<_>>();
-    let bytes = serde_json::to_vec(&(
-        &snapshot.boot_id,
-        &snapshot.focused_workspace_id,
-        &snapshot.focused_tab_id,
-        &snapshot.focused_pane_id,
-        panes,
-        targets,
-        tree,
-        size,
-        cell_size.width_px,
-        cell_size.height_px,
-    ))
-    .ok()?;
-    Some(Sha256::digest(bytes).into())
-}
-
 pub(super) fn revoke_route(
     client: &mut crate::server::clients::ClientConnection,
     boot_id: &str,
@@ -208,6 +169,7 @@ pub(super) struct SceneRoutingFacts<'a> {
     pub targets: &'a [SceneTargetV1],
     pub previews: Option<&'a crate::protocol::endpoint::ServerTerminalViewsSurface>,
     pub tree_fingerprint: Option<&'a str>,
+    pub viewport: Option<&'a crate::protocol::endpoint::ClientPaneViewportRequest>,
 }
 
 pub(super) fn route_witness(facts: SceneRoutingFacts<'_>) -> Result<[u8; 32], serde_json::Error> {
@@ -220,6 +182,7 @@ pub(super) fn route_witness(facts: SceneRoutingFacts<'_>) -> Result<[u8; 32], se
         targets,
         previews,
         tree_fingerprint,
+        viewport,
     } = facts;
     let panes = surface
         .panes
@@ -309,6 +272,7 @@ pub(super) fn route_witness(facts: SceneRoutingFacts<'_>) -> Result<[u8; 32], se
         collapse,
         previews,
         tree_fingerprint,
+        viewport.map(|viewport| (&viewport.pane_id, viewport.size)),
     ))?;
     Ok(Sha256::digest(bytes).into())
 }

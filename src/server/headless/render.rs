@@ -1126,9 +1126,6 @@ impl HeadlessServer {
                     continue;
                 }
             }
-            if restore_pane_viewport {
-                let _ = self.resize_shell_tab_if_controller(client_id, true);
-            }
             let scene_targets = self
                 .clients
                 .get(&client_id)
@@ -1151,17 +1148,25 @@ impl HeadlessServer {
             {
                 if let Some(snapshot) = client.shell_snapshot.as_ref() {
                     let boot_id = snapshot.boot_id.clone();
-                    let Some(identity) = super::scene::identity_witness(
+                    let Some(identity) = crate::protocol::scene::inspector_identity(
                         snapshot,
                         &scene_targets,
-                        tree_fingerprint.as_deref(),
-                        (cols, rows),
-                        cell_size,
+                        tree_fingerprint
+                            .as_deref()
+                            .filter(|_| client.shell_collapse_enabled),
                     ) else {
                         broken_clients.push(client_id);
                         continue;
                     };
-                    if client.shell_identity_witness != Some(identity) {
+                    let same_identity = client.shell_identity_witness == Some(identity);
+                    if !crate::protocol::scene::preserves_inspector_owner(
+                        same_identity,
+                        client.shell_committed_scene_projection == Some(snapshot.revision),
+                        client.shell_route_epoch == client.shell_committed_scene_epoch,
+                    ) {
+                        restore_pane_viewport |= client.shell_pane_viewport.take().is_some();
+                    }
+                    if !same_identity {
                         if !super::scene::revoke_route(client, &boot_id) {
                             broken_clients.push(client_id);
                             continue;
@@ -1170,6 +1175,9 @@ impl HeadlessServer {
                         identity_revoked = true;
                     }
                 }
+            }
+            if restore_pane_viewport {
+                let _ = self.resize_shell_tab_if_controller(client_id, true);
             }
             let shell_graphics_delivery = self
                 .clients
@@ -1363,6 +1371,7 @@ impl HeadlessServer {
                                 targets: &scene_targets,
                                 previews: terminal_views_surface.as_ref(),
                                 tree_fingerprint: tree_fingerprint.as_deref(),
+                                viewport: client.shell_pane_viewport.as_ref(),
                             })
                             .ok()
                         });
@@ -1404,9 +1413,24 @@ impl HeadlessServer {
                 };
                 if client.shell_route_witness != Some(witness) {
                     if !identity_revoked
+                        && client.shell_route_epoch == client.shell_committed_scene_epoch
                         && !super::scene::revoke_route(client, &surface.frame.boot_id)
                     {
                         broken_clients.push(client_id);
+                        continue;
+                    }
+                    let keeps_owner = crate::protocol::scene::preserves_inspector_owner(
+                        !identity_revoked,
+                        client.shell_committed_scene_projection
+                            == Some(surface.frame.projection_revision),
+                        client.shell_route_epoch == client.shell_committed_scene_epoch,
+                    );
+                    if !keeps_owner && client.shell_pane_viewport.take().is_some() {
+                        // The local inspector is closed by this changed route. Restore
+                        // its PTY reservation before preparing the replacement raster.
+                        client.request_repaint();
+                        client.defer_full_render();
+                        let _ = self.resize_shell_tab_if_controller(client_id, true);
                         continue;
                     }
                     client.shell_route_witness = Some(witness);
@@ -1570,6 +1594,8 @@ impl HeadlessServer {
                     if let ServerMessage::ClientSceneV1(scene) = prepared.message() {
                         client.shell_scene_targets = scene.targets.clone();
                         client.shell_committed_scene_epoch = scene.route_epoch;
+                        client.shell_committed_scene_projection =
+                            Some(scene.surface.frame.projection_revision);
                     }
                     client.render_state.commit_sent_frame(prepared);
                     if client.shell_scene_enabled {
