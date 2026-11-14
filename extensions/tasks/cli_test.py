@@ -349,6 +349,33 @@ class CliTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             cli.resolve_recipient("{not json")
 
+    def test_copied_exact_sender_binding_replies_without_name_lookup_or_replacement_delivery(self):
+        import provider
+        sender = {"class": "agent", "terminal_id": "term_reply", "agent": "pi", "execution": "boot:4:5"}
+        with tempfile.TemporaryDirectory() as root:
+            store = provider.Store(root)
+            try:
+                original = store.invoke({"caller": sender, "payload": {"action": "message_send", "operation_id": "original",
+                                         "recipient": CALLER, "body": "request"}})["message"]
+                # This is the exact sender JSON now rendered in the received header.
+                target = original["sender"]
+                payload, mutation = cli.parse_message(["send", target, "manual reply", "--reply-to", original["id"]])
+                with patch("cli.api", side_effect=AssertionError("exact bindings must not fall back to names/panes")):
+                    status, result = cli.execute(payload, mutation, lambda p: success(store.invoke({"caller": CALLER, "payload": p})))
+                self.assertEqual("success", status)
+                self.assertEqual(sender, json.loads(result["message"]["recipient"]))
+                self.assertEqual(original["id"], result["message"]["reply_to"])
+                for index, replacement in enumerate(({**sender, "execution": "boot:4:replacement"},
+                                                      {**sender, "terminal_id": "term_other"},
+                                                      {**sender, "agent": "other"})):
+                    claimed = store.invoke({"caller": replacement, "payload": {"action": "message_claim", "operation_id": f"replacement-{index}"}})
+                    self.assertEqual([], claimed["claimed"])
+                claimed = store.invoke({"caller": sender, "payload": {"action": "message_claim", "operation_id": "exact-claim"}})["claimed"]
+                self.assertEqual([result["message"]["id"]], [row["id"] for row in claimed])
+                self.assertEqual(2, store.db.execute("SELECT COUNT(*) FROM messages").fetchone()[0])
+            finally:
+                store.db.close()
+
     def test_message_grammar_and_help_are_local_without_api(self):
         for args in ([], ["activation", "maybe"], ["send", "only-target"], ["edit", "id", "text"]):
             with self.assertRaises(ValueError): cli.parse_message(args)

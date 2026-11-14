@@ -54,6 +54,31 @@ class MessagesTest(unittest.TestCase):
         self.assertIn("final draft", [item["body"] for item in inbox["messages"]])
         self.assertEqual(json.loads(reply["message"]["sender"]), B)
 
+    def test_list_history_and_claim_require_the_full_exact_recipient_binding(self):
+        incoming = self.send()["message"]
+        human_message = self.send(caller=HUMAN, op="human-send")["message"]
+        lookalikes = [{**B, "terminal_id": "term_reused"}, {**B, "agent": "other"}, {**B, "execution": "boot:20:new"}]
+        for index, lookalike in enumerate(lookalikes):
+            own = self.send(caller=lookalike, recipient=C, op=f"own-{index}")["message"]
+            listed = self.invoke({"action": "message_list"}, lookalike)
+            self.assertEqual([], listed["waiting"])
+            self.assertEqual([own["id"]], [message["id"] for message in listed["messages"]])
+            claimed = self.invoke({"action": "message_claim", "operation_id": f"wrong-{index}"}, lookalike)
+            self.assertEqual([], claimed["claimed"])
+        # Extra host facts normalize to the same exact four-field agent binding.
+        exact_with_host_metadata = {**B, "name": "reusable-display-name", "pane_id": "w9:p9"}
+        listed = self.invoke({"action": "message_list"}, exact_with_host_metadata)
+        self.assertEqual({incoming["id"], human_message["id"]}, {message["id"] for message in listed["waiting"]})
+        claimed = self.invoke({"action": "message_claim", "operation_id": "right"}, exact_with_host_metadata)["claimed"]
+        self.assertEqual({incoming["id"], human_message["id"]}, {message["id"] for message in claimed})
+        self.assertEqual({incoming["id"], human_message["id"]}, {message["id"] for message in self.invoke({"action": "message_list"}, B)["messages"]})
+        for lookalike in lookalikes:
+            listed = self.invoke({"action": "message_list"}, lookalike)
+            self.assertNotIn(incoming["id"], [message["id"] for message in listed["messages"]])
+        # Sender-owned history (including human history) is unchanged.
+        self.assertIn(incoming["id"], [message["id"] for message in self.invoke({"action": "message_list"}, A)["messages"]])
+        self.assertIn(human_message["id"], [message["id"] for message in self.invoke({"action": "message_list"}, HUMAN)["messages"]])
+
     def test_edit_rejections_and_message_guards(self):
         message = self.send(body="x")["message"]
         with self.assertRaises(ValueError):
