@@ -3,7 +3,9 @@
 Messages are a second record family in the same store. The provider never sees
 agent names: a recipient is an exact agent-process binding supplied by the caller
 (the CLI resolves it with `agent get`), and only the host-attributed caller whose
-execution matches can claim. Sender provenance is the host caller binding.
+full normalized terminal/agent/execution binding matches can list or claim.
+Sender-owned history remains visible independently of the recipient. Sender
+provenance is the host caller binding.
 """
 import uuid
 
@@ -100,10 +102,10 @@ class Messages:
         waiting_rows = []
         clause, params = "sender=?", [key]
         if binding.get("class") == "agent":
-            clause, params = "(sender=? OR recipient_execution=?)", [key, binding["execution"]]
+            clause, params = "(sender=? OR (recipient_execution=? AND recipient=?))", [key, binding["execution"], key]
             waiting_rows = self.db.execute(
-                "SELECT * FROM messages WHERE recipient_execution=? AND state='waiting' ORDER BY created_at ASC, id ASC LIMIT ?",
-                (binding["execution"], MAX_PAGE),
+                "SELECT * FROM messages WHERE recipient_execution=? AND recipient=? AND state='waiting' ORDER BY created_at ASC, id ASC LIMIT ?",
+                (binding["execution"], key, MAX_PAGE),
             ).fetchall()
         history_rows = self.db.execute(
             f"SELECT * FROM messages WHERE {clause} ORDER BY created_at DESC, id DESC LIMIT ?",
@@ -162,8 +164,8 @@ class Messages:
             if payload.get("idle") and not self.activation():
                 return {"claimed": [], "activation": False}
             rows = self.db.execute(
-                "SELECT * FROM messages WHERE recipient_execution=? AND state='waiting' ORDER BY created_at ASC, id ASC LIMIT ?",
-                (binding["execution"], MAX_CLAIM),
+                "SELECT * FROM messages WHERE recipient_execution=? AND recipient=? AND state='waiting' ORDER BY created_at ASC, id ASC LIMIT ?",
+                (binding["execution"], key, MAX_CLAIM),
             ).fetchall()
             records = _bounded(self.store.canonical, [self._record(row) for row in rows], MAX_CLAIM_BYTES)
             claimed = []
