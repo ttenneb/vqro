@@ -154,6 +154,84 @@ mod tests {
     use std::time::Instant;
 
     #[test]
+    fn atomic_scene_publication_is_one_client_event_not_three_messages() {
+        use crate::protocol::scene::SceneProjectionV1;
+        let mut render = crate::server::render_stream::ClientRenderState::new(
+            crate::protocol::RenderEncoding::SemanticFrame,
+        );
+        let surface = crate::protocol::PaneSurfaceFrame {
+            boot_id: "prototype-boot".into(),
+            projection_revision: 2,
+            surface_revision: 0,
+            frame: crate::protocol::FrameData {
+                width: 0,
+                height: 0,
+                cells: Vec::new(),
+                cursor: None,
+                hyperlinks: Vec::new(),
+                graphics: Vec::new(),
+            },
+            panes: Vec::new(),
+            collections: Vec::new(),
+            splits: Vec::new(),
+            popup: None,
+            graphics: Default::default(),
+        };
+        let prepared = render.prepare_pane_surface(surface, Vec::new()).unwrap();
+        let prepared = prepared.with_scene(
+            7,
+            vec![
+                SceneProjectionV1 {
+                    kind: "snapshot-prototype".into(),
+                    data: "S2".into(),
+                },
+                SceneProjectionV1 {
+                    kind: "collapse-prototype".into(),
+                    data: "C2".into(),
+                },
+            ],
+            Vec::new(),
+        );
+        let path = std::env::temp_dir().join(format!("scene-{}.sock", std::process::id()));
+        let listener = crate::ipc::bind_private_local_listener(&path).unwrap();
+        let client = crate::ipc::connect_local_stream(&path).unwrap();
+        let mut server = listener.accept().unwrap();
+        std::fs::remove_file(path).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let stopped = Arc::new(AtomicBool::new(false));
+        let reader_stopped = stopped.clone();
+        let reader = std::thread::spawn(move || {
+            server_reader_thread(
+                client,
+                tx,
+                &reader_stopped,
+                protocol::MAX_FRAME_SIZE,
+                endpoint::ClientEndpointId::Local,
+                1,
+            )
+        });
+        protocol::write_message(&mut server, prepared.message()).unwrap();
+        render.commit_sent_frame(prepared);
+        let ClientLoopEvent::ServerMessage { message, .. } = rx.blocking_recv().unwrap() else {
+            panic!("one scene event");
+        };
+        let ServerMessage::ClientSceneV1(scene) = *message else {
+            panic!("scene codec");
+        };
+        assert_eq!(scene.route_epoch, 7);
+        assert_eq!(scene.surface.frame.projection_revision, 2);
+        assert_eq!(scene.surface.frame.surface_revision, 1);
+        assert_eq!(scene.projections.len(), 2);
+        assert!(
+            rx.try_recv().is_err(),
+            "no separately schedulable S2/F2/C2 events"
+        );
+        stopped.store(true, Ordering::Release);
+        drop(server);
+        reader.join().unwrap();
+    }
+
+    #[test]
     fn upload_cancellation_preserves_pending_endpoint_download() {
         let path = std::env::temp_dir().join(format!(
             "herdr-cancel-{}-{}.sock",

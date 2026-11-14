@@ -14,14 +14,30 @@ use crate::layout::PaneId;
 /// The PTY implementation still delegates to the legacy pane runtime while the
 /// migration proceeds, but production code now depends on this terminal-layer
 /// type instead of the pane module's implementation detail.
-pub struct TerminalRuntime(crate::pane::PaneRuntime, Option<u64>);
+pub struct TerminalRuntime(crate::pane::PaneRuntime, Option<u64>, Option<u64>);
+
+// Never reused within one endpoint boot, including after map relocation or respawn.
+// Exhaustion leaves identity unknown, rather than wrapping into an old scene identity.
+fn next_scene_runtime_instance() -> Option<u64> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_update(
+        std::sync::atomic::Ordering::Relaxed,
+        std::sync::atomic::Ordering::Relaxed,
+        |value| value.checked_add(1),
+    )
+    .ok()
+}
 
 impl TerminalRuntime {
     fn wrap(runtime: crate::pane::PaneRuntime) -> Self {
         let birth = runtime
             .child_pid()
             .and_then(crate::platform::invocation_process_birth);
-        Self(runtime, birth)
+        Self(runtime, birth, next_scene_runtime_instance())
+    }
+
+    pub(crate) fn scene_runtime_instance(&self) -> Option<u64> {
+        self.2
     }
 
     pub(crate) fn invocation_root_birth(&self) -> Option<u64> {
@@ -101,7 +117,7 @@ impl TerminalRuntime {
         )
         // Imported roots do not carry an original process-birth proof. Terminal recovery
         // remains usable, but action authority is unknown until a fresh owned runtime.
-        .map(|runtime| Self(runtime, None))
+        .map(|runtime| Self(runtime, None, next_scene_runtime_instance()))
     }
 
     // Wrapper mirrors pane runtime construction arguments.

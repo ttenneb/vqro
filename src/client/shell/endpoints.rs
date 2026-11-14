@@ -21,6 +21,8 @@ pub(crate) struct ClientShellEndpoint {
     pub(crate) host_documents: Option<Box<crate::protocol::endpoint::HostDocumentsProjectionV1>>,
     pub(crate) host_documents_generation: Option<u64>,
     pub(super) collapse: super::collapse::CollapsePairState,
+    pub(super) scene_authority: super::scene::SceneAuthority,
+    pub(super) scene_targets: Vec<crate::protocol::scene::SceneTargetV1>,
     pub(super) attention: Option<super::attention::AttentionNavigation>,
     pub(crate) agent_recency: HashMap<String, u64>,
     pub(super) agent_presentation: super::endpoint_agent_state::EndpointAgentPresentation,
@@ -108,6 +110,12 @@ impl ClientShellState {
                 collapse: previous
                     .map(|endpoint| endpoint.collapse.clone())
                     .unwrap_or_default(),
+                scene_authority: previous
+                    .map(|endpoint| endpoint.scene_authority.clone())
+                    .unwrap_or_default(),
+                scene_targets: previous
+                    .map(|endpoint| endpoint.scene_targets.clone())
+                    .unwrap_or_default(),
                 attention: previous.and_then(|endpoint| endpoint.attention.clone()),
                 agent_recency: previous
                     .map(|endpoint| endpoint.agent_recency.clone())
@@ -174,6 +182,8 @@ impl ClientShellState {
             endpoint.pending_agent_view_projection = None;
             endpoint.agent_view_projection_supported = false;
             endpoint.collapse = Default::default();
+            endpoint.scene_authority = Default::default();
+            endpoint.scene_targets.clear();
         }
         self.refresh_recovery_overlay(endpoint_id);
     }
@@ -1152,6 +1162,8 @@ pub(super) fn local_endpoint() -> ClientShellEndpoint {
         host_documents: None,
         host_documents_generation: None,
         collapse: Default::default(),
+        scene_authority: Default::default(),
+        scene_targets: Vec::new(),
         attention: None,
         agent_recency: HashMap::new(),
         agent_presentation: Default::default(),

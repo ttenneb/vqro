@@ -279,6 +279,12 @@ impl HeadlessServer {
                 },
                 Some(pty_sources),
             );
+            if client.shell_scene_enabled
+                && crate::server::clients::ShellPreviewRoute::from_surface(&surface)
+                    != client.shell_preview_routes
+            {
+                fallback!("preview_input_authority");
+            }
             if surface.views.is_empty() {
                 continue;
             }
@@ -402,6 +408,11 @@ impl HeadlessServer {
                 // Alternate-screen transitions change whether the pane reserves
                 // a scrollbar gutter. Recompute layout and resize the runtime
                 // through the complete renderer before retaining further rows.
+                if pane.mouse_reporting != collected_pane.mouse_reporting
+                    || pane.sgr_pixel_mouse != collected_pane.sgr_pixel_mouse
+                {
+                    fallback!("input_mode_authority");
+                }
                 if pane.alternate_screen_active != collected_pane.alternate_screen_active {
                     fallback!("alternate_screen_geometry");
                 }

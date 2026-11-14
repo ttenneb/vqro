@@ -180,7 +180,9 @@ pane semantics. Session v8 originally used private protocol 23 / generation 1;
 the later terminal admission decision raises these to 24 / 2 without changing
 bincode-reachable payload shapes. View panes then raise private protocol to 25
 for the appended surface-v2 message, retaining endpoint generation 2 with explicit
-surface-v2 codec negotiation. The inherited stable v0.9.0 and preview
+surface-v2 codec negotiation. Atomic client scenes then raise private protocol
+26 with explicit `shell.scene.v1` negotiation; generation 2 remains unchanged.
+The inherited stable v0.9.0 and preview
 2026-09-08-62431dbd033b published protocol 22 / endpoint generation 1.
 Session versions are independent.
 See [tree export and conversion](docs/next/api/layout-tree-v1.md).
@@ -200,13 +202,25 @@ which is normative for this change and must be read before touching that lane.
 `ServerMessage` has one appended variant, `PaneSurfaceV2` (tag 21); serving is
 `shell.surface.v2` only, and patches stay `PaneSurfacePatch`.
 
+**Recorded generation-scoped extension (atomic scene codec, 2026-11-14).**
+The owner-directed atomic scene redirect is recorded in
+[`docs/next/architecture/atomic-client-scene-v1.md`](docs/next/architecture/atomic-client-scene-v1.md).
+One new `ServerMessage::ClientSceneV1` variant is appended at tag 22, after
+`PaneSurfaceV2` tag 21; private protocol becomes 26. Serving requires the new
+`shell.scene.v1` codec in endpoint generation 2. Snapshot/surface v1/v2 and patch
+shapes, old tags and frozen fixtures remain historical decode inputs, not new
+serving promises. New scene tests/fixtures are separate; API JSON and persistence
+are unchanged. This is a second explicit append exception, not permission to
+change any existing named codec. Availability is recorded in
+[`docs/next/api/client-scene-v1.md`](docs/next/api/client-scene-v1.md).
+
 - Named core codecs are immutable. Do not add, remove, reorder, or reinterpret fields or enum variants reachable from a published codec. Introduce a new codec name and keep the old codec as a fallback instead.
 - Keep baseline JSON handshake and snapshot fields required. New JSON fields must be optional or have field-specific defaults; new enum values need an `Unknown` fallback where older clients can safely ignore them.
 - Add server features through advertised API methods and optional snapshot data when possible. A missing optional feature must disable only that action, not reject the connection.
 - Do not change the meaning or load-bearing parameter shape of an advertised endpoint method. If an old server could ignore a new field and incorrectly report success, add a new method name or a separately advertised capability and omit that field without it.
 - Missing methods, rejections, timeouts, and unavailable servers are client-local outcomes. They must not disconnect other compatible servers, and typing in a pane must not dismiss their notices.
 - Frozen endpoint fixtures, bincode digests, wire-tag tests, and `tests/fixtures/endpoint-method-shapes-v1.json` are compatibility contracts. Never update a generation-1 expectation merely to bless a wire change; create and negotiate a new codec or method. The one recorded exception is the appended surface variant above, which is a new codec, not a re-blessed value.
-- Existing-value digests cannot detect an appended enum variant. Review every enum reachable from a frozen codec as append-closed even when tests remain green, except for the single recorded generation-scoped surface variant above.
+- Existing-value digests cannot detect an appended enum variant. Review every enum reachable from a frozen codec as append-closed even when tests remain green, except for the two explicitly recorded generation-scoped surface and atomic-scene variants above.
 
 ## Workflow
 

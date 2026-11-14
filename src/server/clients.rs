@@ -198,6 +198,11 @@ pub(crate) struct ClientConnection {
     /// The client advertises that it can parse view documents.
     pub(crate) shell_host_views_enabled: bool,
     pub(crate) shell_collapse_enabled: bool,
+    pub(crate) shell_scene_enabled: bool,
+    pub(crate) shell_route_epoch: u64,
+    pub(crate) shell_route_witness: Option<[u8; 32]>,
+    pub(crate) shell_identity_witness: Option<[u8; 32]>,
+    pub(crate) shell_preview_routes: Vec<ShellPreviewRoute>,
     pub(crate) shell_collapse_metadata: Option<crate::protocol::collapse::CollapseBodyV1>,
     /// Whether this client may reserve terminal geometry for pane contributions.
     pub(crate) shell_pane_viewport_enabled: bool,
@@ -244,6 +249,37 @@ pub(crate) struct ClientConnection {
     pub(crate) shell_uses_endpoint_keybindings: bool,
     /// Channels for sending framed ServerMessage data to the client writer thread.
     pub(crate) writer: Option<ClientWriter>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ShellPreviewRoute {
+    pane_id: String,
+    width: u16,
+    height: u16,
+    mouse_reporting: bool,
+    sgr_pixel_mouse: bool,
+    pixel_width: u32,
+    pixel_height: u32,
+}
+
+impl ShellPreviewRoute {
+    pub(crate) fn from_surface(
+        surface: &crate::protocol::endpoint::ServerTerminalViewsSurface,
+    ) -> Vec<Self> {
+        surface
+            .views
+            .iter()
+            .map(|view| Self {
+                pane_id: view.pane_id.clone(),
+                width: view.frame.width,
+                height: view.frame.height,
+                mouse_reporting: view.mouse_reporting,
+                sgr_pixel_mouse: view.sgr_pixel_mouse,
+                pixel_width: view.pixel_width,
+                pixel_height: view.pixel_height,
+            })
+            .collect()
+    }
 }
 
 impl ClientConnection {
@@ -296,6 +332,11 @@ impl ClientConnection {
             shell_host_documents_enabled: false,
             shell_host_views_enabled: false,
             shell_collapse_enabled: false,
+            shell_scene_enabled: false,
+            shell_route_epoch: 0,
+            shell_route_witness: None,
+            shell_identity_witness: None,
+            shell_preview_routes: Vec::new(),
             shell_collapse_metadata: None,
             shell_pane_viewport_enabled: false,
             shell_pane_view_enabled: false,

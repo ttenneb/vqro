@@ -14,7 +14,7 @@ use crate::protocol::endpoint::{
     ENDPOINT_PROTOCOL_GENERATION, ENDPOINT_WELCOME_KIND, HOST_DOCUMENTS_KIND, HOST_VIEWS_KIND,
     INPUT_CODEC_V1, PANE_VIEWPORT_KIND, PANE_VIEW_ACTION_KIND, PANE_VIEW_ACTION_RESULT_KIND,
     PANE_VIEW_CANCEL_KIND, PANE_VIEW_CONFIRM_KIND, PANE_VIEW_REQUEST_KIND, PANE_VIEW_RESULT_KIND,
-    SESSION_STRUCTURE_KIND, SNAPSHOT_CODEC_V1, SURFACE_CODEC_V2, TERMINAL_VIEWS_INTEREST_KIND,
+    SESSION_STRUCTURE_KIND, SNAPSHOT_CODEC_V1, TERMINAL_VIEWS_INTEREST_KIND,
     TERMINAL_VIEWS_SURFACE_KIND,
 };
 use crate::protocol::{
@@ -214,7 +214,7 @@ pub(super) fn do_handshake(
             // v1 and emit its connected/geometry event before this client rejects
             // the welcome. This client still decodes the frozen v1 shape for the
             // historical contract, but never asks to be served it.
-            surface_codecs: vec![SURFACE_CODEC_V2.into()],
+            surface_codecs: vec![crate::protocol::scene::SCENE_CODEC_V1.into()],
             input_codecs: vec![INPUT_CODEC_V1.into()],
             blob_codecs: vec![BLOB_CODEC_V1.into()],
             control_kinds: vec![
@@ -302,7 +302,7 @@ pub(super) fn do_handshake(
         // fallback v1 surface.
         if welcome.generation != ENDPOINT_PROTOCOL_GENERATION
             || welcome.snapshot_codec != SNAPSHOT_CODEC_V1
-            || welcome.surface_codec != SURFACE_CODEC_V2
+            || welcome.surface_codec != crate::protocol::scene::SCENE_CODEC_V1
             || welcome.input_codec != INPUT_CODEC_V1
             || welcome.blob_codec != BLOB_CODEC_V1
         {
@@ -413,7 +413,7 @@ mod admission_tests {
             } else {
                 assert!(matches!(
                     hello,
-                    ClientMessage::TerminalHello { version: 25, .. }
+                    ClientMessage::TerminalHello { version: 26, .. }
                 ));
             }
             protocol::write_message(&mut server, &reply).unwrap();
@@ -442,7 +442,7 @@ mod admission_tests {
 
     #[test]
     fn direct_admission_rejects_mismatched_success_welcome() {
-        for version in [22, 23, 24, 25, 26] {
+        for version in [22, 23, 24, 25, 26, 27] {
             let result = handshake_with_reply(
                 ServerMessage::Welcome {
                     version,
@@ -451,7 +451,7 @@ mod admission_tests {
                 },
                 false,
             );
-            if version == 25 {
+            if version == 26 {
                 assert!(matches!(
                     result.unwrap().encoding,
                     RenderEncoding::TerminalAnsi

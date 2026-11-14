@@ -477,6 +477,7 @@ impl PendingEndpointActivation {
         self.progress()
     }
 
+    #[cfg(test)]
     pub(crate) fn receive_surface(
         &mut self,
         endpoint_id: &ClientEndpointId,

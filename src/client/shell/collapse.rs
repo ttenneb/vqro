@@ -262,6 +262,9 @@ impl ClientShellState {
     }
 
     pub(super) fn collapse_allows_pane_input(&self, target: &ClientInputTarget) -> bool {
+        if !self.scene_target_current(target) {
+            return false;
+        }
         let ClientInputTarget::Pane(pane) = target else {
             return true;
         };
@@ -576,6 +579,9 @@ impl ClientShellState {
     }
 
     pub(super) fn collapse_interactions_current(&self) -> bool {
+        if !self.scene_route_current() {
+            return false;
+        }
         if !self.supports_endpoint_capability(LAYOUT_COLLAPSE_CAPABILITY) {
             return true;
         }

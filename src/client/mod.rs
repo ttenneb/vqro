@@ -1469,8 +1469,107 @@ async fn run_client_loop(
                     continue;
                 }
                 match *message {
-                    ServerMessage::ClientShellSnapshot(_) => {
-                        let message = "server sent an unnegotiated binary endpoint snapshot";
+                    ServerMessage::ClientSceneV1(scene) => {
+                        let scene = match shell::scene::DecodedScene::decode(*scene) {
+                            Ok(scene) => scene,
+                            Err(message) => {
+                                if handle_endpoint_attention(
+                                    &mut state,
+                                    &mut write_stream,
+                                    &mut endpoint_commands,
+                                    &mut supervisors,
+                                    &mut pending_activation,
+                                    &endpoint_id,
+                                    generation,
+                                    now,
+                                    message,
+                                ) {
+                                    clear_endpoint_host_effects(
+                                        &mut state,
+                                        &host_mouse_capture_active,
+                                        &host_sgr_pixels_active,
+                                    );
+                                }
+                                continue;
+                            }
+                        };
+                        let activation_surface = activation_message.then(|| scene.surface.clone());
+                        if let Some(pending) =
+                            pending_activation.as_mut().filter(|_| activation_message)
+                        {
+                            pending.receive_snapshot(&endpoint_id, generation, &scene.snapshot);
+                        }
+                        let previous_size = state.shell.as_ref().map(|shell| {
+                            shell.surface_size(state.reported_size.0, state.reported_size.1)
+                        });
+                        let installed = state.shell.as_mut().is_some_and(|shell| {
+                            shell.install_scene(
+                                &endpoint_id,
+                                generation,
+                                scene,
+                                endpoint_active && !activation_message,
+                            )
+                        });
+                        if !installed {
+                            continue;
+                        }
+                        if let Some(surface) = activation_surface {
+                            if let Some(pending) = pending_activation.as_mut() {
+                                pending.receive_surface_with_views(
+                                    &endpoint_id,
+                                    generation,
+                                    surface.frame,
+                                    surface.views,
+                                );
+                            }
+                            if let Some(event) = complete_endpoint_activation(
+                                &mut state,
+                                &mut write_stream,
+                                &mut pending_activation,
+                                &mut endpoint_commands,
+                            )? {
+                                scheduled_activation = Some(event);
+                            }
+                        } else if endpoint_active {
+                            let pixel_mouse_available = state.pixel_mouse_available();
+                            let resize = state.shell.as_ref().and_then(|shell| {
+                                (Some(
+                                    shell
+                                        .surface_size(state.reported_size.0, state.reported_size.1),
+                                ) != previous_size)
+                                    .then(|| {
+                                        client_shell_resize_message(
+                                            shell,
+                                            state.reported_size.0,
+                                            state.reported_size.1,
+                                            state.reported_cell_size.0,
+                                            state.reported_cell_size.1,
+                                            pixel_mouse_available,
+                                        )
+                                    })
+                            });
+                            let cleanup = state
+                                .shell
+                                .as_mut()
+                                .map(|shell| shell.take_pending_graphics_cleanup())
+                                .unwrap_or_default();
+                            state.present_graphics(&cleanup);
+                            if let Some(resize) = resize {
+                                write_stream.send_to(&endpoint_id, &resize);
+                            }
+                            finish_endpoint_pane_surface(
+                                &mut state,
+                                &mut write_stream,
+                                &mut prefix_input_source,
+                            );
+                        }
+                        write_stream.mark_ready(&endpoint_id, generation);
+                    }
+                    ServerMessage::ClientShellSnapshot(_)
+                    | ServerMessage::PaneSurface(_)
+                    | ServerMessage::PaneSurfaceV2(_) => {
+                        let message =
+                            "server sent an unnegotiated standalone endpoint snapshot or surface";
                         if federated || !endpoint_id.is_local() {
                             if handle_endpoint_attention(
                                 &mut state,
@@ -1494,73 +1593,6 @@ async fn run_client_loop(
                         return Err(ClientError::Protocol(protocol::FramingError::Io(
                             io::Error::new(io::ErrorKind::InvalidData, message),
                         )));
-                    }
-                    ServerMessage::PaneSurface(surface) => {
-                        if activation_message {
-                            let progress = pending_activation.as_mut().map(|pending| {
-                                pending.receive_surface(&endpoint_id, generation, surface)
-                            });
-                            if matches!(progress, Some(endpoint::SurfaceActivationProgress::Ready))
-                            {
-                                if let Some(event) = complete_endpoint_activation(
-                                    &mut state,
-                                    &mut write_stream,
-                                    &mut pending_activation,
-                                    &mut endpoint_commands,
-                                )? {
-                                    scheduled_activation = Some(event);
-                                }
-                            }
-                            continue;
-                        }
-                        if !endpoint_active {
-                            continue;
-                        }
-                        apply_endpoint_pane_surface_v1(
-                            &mut state,
-                            &mut write_stream,
-                            &mut prefix_input_source,
-                            &endpoint_id,
-                            generation,
-                            surface,
-                        );
-                    }
-                    ServerMessage::PaneSurfaceV2(frame) => {
-                        let crate::protocol::PaneSurfaceFrameV2 { frame, views } = frame;
-                        if activation_message {
-                            let progress = pending_activation.as_mut().map(|pending| {
-                                pending.receive_surface_with_views(
-                                    &endpoint_id,
-                                    generation,
-                                    frame,
-                                    views.clone(),
-                                )
-                            });
-                            if matches!(progress, Some(endpoint::SurfaceActivationProgress::Ready))
-                            {
-                                if let Some(event) = complete_endpoint_activation(
-                                    &mut state,
-                                    &mut write_stream,
-                                    &mut pending_activation,
-                                    &mut endpoint_commands,
-                                )? {
-                                    scheduled_activation = Some(event);
-                                }
-                            }
-                            continue;
-                        }
-                        if !endpoint_active {
-                            continue;
-                        }
-                        apply_endpoint_pane_surface_v2(
-                            &mut state,
-                            &mut write_stream,
-                            &mut prefix_input_source,
-                            &endpoint_id,
-                            generation,
-                            frame,
-                            views,
-                        );
                     }
                     ServerMessage::PaneSurfacePatch(patch) => {
                         let patch_started = crate::render_prof::timer();
@@ -2071,6 +2103,17 @@ async fn run_client_loop(
                         }
                     }
                     ServerMessage::EndpointControl { kind, data } => {
+                        if kind == crate::protocol::scene::ROUTE_REVOKED_KIND {
+                            if let (Some(shell), Ok(revoked)) = (
+                                state.shell.as_mut(),
+                                serde_json::from_str::<crate::protocol::scene::SceneRouteRevokedV1>(
+                                    &data,
+                                ),
+                            ) {
+                                shell.revoke_scene_route(&endpoint_id, generation, revoked);
+                            }
+                            continue;
+                        }
                         if kind == crate::protocol::endpoint::PRESENTATION_EFFECTS_READY_KIND {
                             let progress = pending_activation.as_mut().map(|activation| {
                                 activation.receive_presentation_effects_ready(

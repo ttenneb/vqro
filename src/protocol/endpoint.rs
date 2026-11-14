@@ -419,10 +419,11 @@ impl EndpointClientHello {
         self.snapshot_codecs
             .iter()
             .any(|codec| codec == SNAPSHOT_CODEC_V1)
-            && self
-                .surface_codecs
-                .iter()
-                .any(|codec| codec == SURFACE_CODEC_V2 || codec == SURFACE_CODEC_V1)
+            && self.surface_codecs.iter().any(|codec| {
+                codec == super::scene::SCENE_CODEC_V1
+                    || codec == SURFACE_CODEC_V2
+                    || codec == SURFACE_CODEC_V1
+            })
             && self
                 .input_codecs
                 .iter()
@@ -437,6 +438,13 @@ impl EndpointClientHello {
     /// frozen generation-1 hello still decodes and still satisfies
     /// [`Self::supports_required_codecs`] for its historical contract; this is a
     /// separate serving decision, not a decode one.
+    pub fn serves_scene_v1(&self) -> bool {
+        self.surface_codecs
+            .iter()
+            .any(|codec| codec == super::scene::SCENE_CODEC_V1)
+    }
+
+    #[cfg(test)]
     pub fn serves_surface_v2(&self) -> bool {
         self.surface_codecs
             .iter()
@@ -450,7 +458,7 @@ impl EndpointServerWelcome {
             generation: ENDPOINT_PROTOCOL_GENERATION,
             server_version: crate::build_info::version(),
             snapshot_codec: SNAPSHOT_CODEC_V1.into(),
-            surface_codec: SURFACE_CODEC_V2.into(),
+            surface_codec: super::scene::SCENE_CODEC_V1.into(),
             input_codec: INPUT_CODEC_V1.into(),
             blob_codec: BLOB_CODEC_V1.into(),
             methods,
@@ -469,7 +477,7 @@ impl EndpointServerWelcome {
             generation: ENDPOINT_PROTOCOL_GENERATION,
             server_version: crate::build_info::version(),
             snapshot_codec: SNAPSHOT_CODEC_V1.into(),
-            surface_codec: SURFACE_CODEC_V2.into(),
+            surface_codec: super::scene::SCENE_CODEC_V1.into(),
             input_codec: INPUT_CODEC_V1.into(),
             blob_codec: BLOB_CODEC_V1.into(),
             methods: Vec::new(),

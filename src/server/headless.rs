@@ -80,6 +80,7 @@ mod native_graphics;
 mod notifications;
 mod render;
 mod retained_surface;
+mod scene;
 mod surface_interest;
 pub(super) mod view_actions;
 
@@ -2133,6 +2134,7 @@ impl HeadlessServer {
                 connection.shell_host_documents_enabled = host_documents_enabled;
                 connection.shell_host_views_enabled = host_views_enabled;
                 connection.shell_collapse_enabled = collapse_enabled;
+                connection.shell_scene_enabled = true;
                 connection.shell_pane_viewport_enabled = pane_viewport_enabled;
                 connection.shell_pane_view_enabled = pane_view_enabled;
                 connection.shell_terminal_views_enabled = terminal_views_enabled;

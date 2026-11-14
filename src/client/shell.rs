@@ -20,6 +20,7 @@ mod endpoint_notices;
 mod endpoint_sidebar;
 mod endpoints;
 mod extension_context;
+pub(super) mod scene;
 pub(super) use endpoints::*;
 mod attention;
 mod extensions;

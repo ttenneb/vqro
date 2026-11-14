@@ -346,6 +346,37 @@ pub(crate) enum PreparedRender {
 }
 
 impl PreparedRender {
+    /// Promote a full surface into one immutable publication before framing it.
+    /// The retained baseline remains the existing surface/patch mechanism.
+    pub(crate) fn with_scene(
+        self,
+        route_epoch: u64,
+        projections: Vec<crate::protocol::scene::SceneProjectionV1>,
+        targets: Vec<crate::protocol::scene::SceneTargetV1>,
+    ) -> Self {
+        match self {
+            Self::Semantic {
+                message: ServerMessage::PaneSurfaceV2(surface),
+                committed_surface,
+                queued_graphics_assets,
+                committed_views,
+            } => Self::Semantic {
+                message: ServerMessage::ClientSceneV1(Box::new(
+                    crate::protocol::scene::ClientSceneV1 {
+                        route_epoch,
+                        projections,
+                        targets,
+                        surface,
+                    },
+                )),
+                committed_surface,
+                queued_graphics_assets,
+                committed_views,
+            },
+            other => other,
+        }
+    }
+
     pub(crate) fn message(&self) -> &ServerMessage {
         match self {
             Self::Semantic { message, .. }
@@ -391,6 +422,7 @@ impl PreparedRender {
         let surface = match message {
             ServerMessage::PaneSurface(surface) => surface,
             ServerMessage::PaneSurfaceV2(frame) => &mut frame.frame,
+            ServerMessage::ClientSceneV1(scene) => &mut scene.surface.frame,
             _ => return None,
         };
         let index = surface

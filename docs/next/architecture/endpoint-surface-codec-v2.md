@@ -88,6 +88,12 @@ retained-surface, patch and graphics-asset paths. It is not the smaller change.
 
 ## Serving policy
 
+Superseded for new connections by the owner-approved 2026-11-14
+[atomic scene codec](atomic-client-scene-v1.md): serving now requires
+`shell.scene.v1`, which carries the unchanged surface-v2 value inside one scene.
+The v2-only policy below records the predecessor decision; it is not a current
+fallback promise. Old v1/v2 decode fixtures remain frozen.
+
 `shell.surface.v1` is retired from serving, not from decode: serving is
 `shell.surface.v2` only. The client advertises only `shell.surface.v2`; a
 predecessor server therefore refuses the greeting with `no_common_core` before
@@ -114,6 +120,9 @@ expectation in place.
 
 ## Removal condition
 
-Remove `ServerMessage::PaneSurfaceV2` and the `shell.surface.v2` name when the
-surface lane is re-cut (a later endpoint generation). Until then this is the
-only recorded append to the historically frozen `ServerMessage` enum.
+The 2026-11-14 atomic-scene decision explicitly supersedes this removal rule:
+retain `PaneSurfaceV2` (tag 21) and its frozen decode inputs, append only the
+negotiated `ClientSceneV1` (tag 22), and use private protocol 26 with endpoint
+generation 2. The unchanged v2 surface value is embedded in the new scene codec;
+it is no longer served alone. These are the only two recorded append exceptions.
+Any future re-cut must again record serving policy and fixture disposition.

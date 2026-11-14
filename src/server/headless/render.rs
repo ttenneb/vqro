@@ -1099,9 +1099,10 @@ impl HeadlessServer {
                         broken_clients.push(client_id);
                         continue;
                     };
-                    if framed_controls
-                        .into_iter()
-                        .any(|framed| writer.control.send(framed).is_err())
+                    if (!client.shell_scene_enabled || !client.shell_surface_active)
+                        && framed_controls
+                            .into_iter()
+                            .any(|framed| writer.control.send(framed).is_err())
                     {
                         broken_clients.push(client_id);
                         continue;
@@ -1119,6 +1120,48 @@ impl HeadlessServer {
             }
             if restore_pane_viewport {
                 let _ = self.resize_shell_tab_if_controller(client_id, true);
+            }
+            let scene_targets = self
+                .clients
+                .get(&client_id)
+                .and_then(|client| client.shell_snapshot.as_ref())
+                .map(|snapshot| self.scene_targets(snapshot))
+                .unwrap_or_default();
+            let tree_fingerprint = shell_target.and_then(|target| {
+                self.app
+                    .state
+                    .workspaces
+                    .get(target.workspace_index)
+                    .and_then(|workspace| workspace.tabs.get(target.tab_index))
+                    .map(|tab| tab.layout.tree_fingerprint().to_owned())
+            });
+            let mut identity_revoked = false;
+            if let Some(client) = self
+                .clients
+                .get_mut(&client_id)
+                .filter(|client| client.shell_scene_enabled)
+            {
+                if let Some(snapshot) = client.shell_snapshot.as_ref() {
+                    let boot_id = snapshot.boot_id.clone();
+                    let Some(identity) = super::scene::identity_witness(
+                        snapshot,
+                        &scene_targets,
+                        tree_fingerprint.as_deref(),
+                        (cols, rows),
+                        cell_size,
+                    ) else {
+                        broken_clients.push(client_id);
+                        continue;
+                    };
+                    if client.shell_identity_witness != Some(identity) {
+                        if !super::scene::revoke_route(client, &boot_id) {
+                            broken_clients.push(client_id);
+                            continue;
+                        }
+                        client.shell_identity_witness = Some(identity);
+                        identity_revoked = true;
+                    }
+                }
             }
             let shell_graphics_delivery = self
                 .clients
@@ -1217,20 +1260,21 @@ impl HeadlessServer {
                 }
             };
 
-            if surface_parts
-                .as_ref()
-                .is_some_and(|(_, _, _, _, _, graphics, _, _)| {
-                    self.defer_changed_native_geometry(client_id, graphics)
-                })
-            {
-                continue;
-            }
-            let mut native_upload =
+            let native_geometry_deferred =
+                surface_parts
+                    .as_ref()
+                    .is_some_and(|(_, _, _, _, _, graphics, _, _)| {
+                        self.defer_changed_native_geometry(client_id, graphics)
+                    });
+            let mut native_upload = if native_geometry_deferred {
+                None
+            } else {
                 surface_parts
                     .as_mut()
                     .and_then(|(_, _, _, _, _, graphics, delivery, sources)| {
                         self.prepare_native_scene(client_id, graphics, delivery, sources)
-                    });
+                    })
+            };
             let terminal_views_surface = if shell_mode {
                 self.clients
                     .get(&client_id)
@@ -1283,25 +1327,44 @@ impl HeadlessServer {
             let mut next_shell_graphics_delivery = None;
             let collapse_metadata_changed = collapse_enabled
                 && client.shell_collapse_metadata.as_ref() != collapse_metadata.as_ref();
+            let mut scene_witness = None;
             let prepared =
                 if let Some((panes, views, collections, splits, popup, graphics, delivery, _)) =
                     surface_parts
                 {
                     next_shell_graphics_delivery = Some(delivery);
+                    let surface = protocol::PaneSurfaceFrame {
+                        boot_id: self.client_shell_boot_id.clone(),
+                        projection_revision: shell_projection_revision,
+                        surface_revision: 0,
+                        frame,
+                        panes,
+                        collections,
+                        splits,
+                        popup,
+                        graphics,
+                    };
+                    if client.shell_scene_enabled {
+                        scene_witness = client.shell_snapshot.as_ref().and_then(|snapshot| {
+                            super::scene::route_witness(super::scene::SceneRoutingFacts {
+                                snapshot,
+                                structure: client.shell_structure.as_ref(),
+                                surface: &surface,
+                                views: &views,
+                                collapse: collapse_metadata.as_ref(),
+                                targets: &scene_targets,
+                                previews: terminal_views_surface.as_ref(),
+                                tree_fingerprint: tree_fingerprint.as_deref(),
+                            })
+                            .ok()
+                        });
+                    }
+                    let route_changed =
+                        client.shell_scene_enabled && scene_witness != client.shell_route_witness;
                     client.render_state.prepare_pane_surface_with_file(
-                        protocol::PaneSurfaceFrame {
-                            boot_id: self.client_shell_boot_id.clone(),
-                            projection_revision: shell_projection_revision,
-                            surface_revision: 0,
-                            frame,
-                            panes,
-                            collections,
-                            splits,
-                            popup,
-                            graphics,
-                        },
+                        surface,
                         views,
-                        native_upload.is_some() || collapse_metadata_changed,
+                        native_upload.is_some() || collapse_metadata_changed || route_changed,
                     )
                 } else {
                     client.render_state.prepare_frame(frame)
@@ -1323,6 +1386,59 @@ impl HeadlessServer {
                 crate::render_prof::event("full_render.skip_identical");
                 continue;
             };
+            if client.shell_scene_enabled {
+                let ServerMessage::PaneSurfaceV2(surface) = prepared.message() else {
+                    continue;
+                };
+                let Some(witness) = scene_witness else {
+                    broken_clients.push(client_id);
+                    continue;
+                };
+                if client.shell_route_witness != Some(witness) {
+                    if !identity_revoked
+                        && !super::scene::revoke_route(client, &surface.frame.boot_id)
+                    {
+                        broken_clients.push(client_id);
+                        continue;
+                    }
+                    client.shell_route_witness = Some(witness);
+                }
+                if native_geometry_deferred {
+                    client.defer_full_render();
+                    continue;
+                }
+                let Some(mut projections) = super::scene::projections(client) else {
+                    broken_clients.push(client_id);
+                    continue;
+                };
+                if let Some(body) = collapse_metadata.as_ref() {
+                    let Ok(message) = crate::server::collapse::projection_message(
+                        &surface.frame.boot_id,
+                        surface.frame.projection_revision,
+                        surface.frame.surface_revision,
+                        body,
+                    ) else {
+                        continue;
+                    };
+                    let Some(value) = super::scene::projection(message) else {
+                        continue;
+                    };
+                    projections.push(value);
+                }
+                if let Some(previews) = terminal_views_surface.as_ref() {
+                    let Ok(data) = serde_json::to_string(previews) else {
+                        continue;
+                    };
+                    projections.push(crate::protocol::scene::SceneProjectionV1 {
+                        kind: crate::protocol::endpoint::TERMINAL_VIEWS_SURFACE_KIND.into(),
+                        data,
+                    });
+                }
+                prepared =
+                    prepared.with_scene(client.shell_route_epoch, projections, scene_targets);
+            } else if native_geometry_deferred {
+                continue;
+            }
             let max = if has_graphics {
                 graphics_frame_limit
             } else {
@@ -1409,7 +1525,10 @@ impl HeadlessServer {
                 && next_shell_graphics_delivery
                     .as_ref()
                     .is_some_and(crate::kitty_graphics::surface::DeliveryCache::has_pending);
-            if let Some(body) = collapse_metadata.as_ref() {
+            if let Some(body) = collapse_metadata
+                .as_ref()
+                .filter(|_| !client.shell_scene_enabled)
+            {
                 let ServerMessage::PaneSurfaceV2(surface) = prepared.message() else {
                     continue;
                 };
@@ -1459,11 +1578,18 @@ impl HeadlessServer {
                         client.shell_graphics_delivery = delivery;
                     }
                     client.render_state.commit_sent_frame(prepared);
+                    if client.shell_scene_enabled {
+                        client.shell_preview_routes = terminal_views_surface
+                            .as_ref()
+                            .map(crate::server::clients::ShellPreviewRoute::from_surface)
+                            .unwrap_or_default();
+                    }
                     if collapse_enabled {
                         client.shell_collapse_metadata = collapse_metadata;
                     }
-                    let terminal_views_deferred = terminal_views_render
-                        .is_some_and(|framed| writer.render.send_ordered(framed).is_err());
+                    let terminal_views_deferred = !client.shell_scene_enabled
+                        && terminal_views_render
+                            .is_some_and(|framed| writer.render.send_ordered(framed).is_err());
                     if shell_graphics_pending || shell_assets_deferred || terminal_views_deferred {
                         client.defer_full_render();
                     } else {

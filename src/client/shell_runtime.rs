@@ -154,46 +154,6 @@ pub(super) fn clear_endpoint_host_effects(
     let _ = crate::terminal_effects::write_window_title(&mut std::io::stdout(), None);
 }
 
-/// Install a terminal-only endpoint pane surface and present it.
-///
-/// Serving is `shell.surface.v2`; this path is retained for the historical
-/// `PaneSurface` decode and for robustness, and carries no view panes.
-pub(super) fn apply_endpoint_pane_surface_v1(
-    state: &mut ClientState,
-    endpoints: &mut endpoint::EndpointRegistry,
-    prefix_input_source: &mut impl crate::platform::PrefixInputSource,
-    endpoint_id: &endpoint::ClientEndpointId,
-    generation: u64,
-    surface: crate::protocol::PaneSurfaceFrame,
-) {
-    if let Some(shell) = &mut state.shell {
-        shell.set_pane_surface_with_views_for_generation(
-            endpoint_id,
-            generation,
-            surface,
-            Vec::new(),
-        );
-    }
-    finish_endpoint_pane_surface(state, endpoints, prefix_input_source);
-}
-
-/// Install a `shell.surface.v2` endpoint pane surface (the v1 frame plus view
-/// descriptors) and present it.
-pub(super) fn apply_endpoint_pane_surface_v2(
-    state: &mut ClientState,
-    endpoints: &mut endpoint::EndpointRegistry,
-    prefix_input_source: &mut impl crate::platform::PrefixInputSource,
-    endpoint_id: &endpoint::ClientEndpointId,
-    generation: u64,
-    surface: crate::protocol::PaneSurfaceFrame,
-    views: Vec<crate::protocol::PaneSurfaceViewEntryV2>,
-) {
-    if let Some(shell) = &mut state.shell {
-        shell.set_pane_surface_with_views_for_generation(endpoint_id, generation, surface, views);
-    }
-    finish_endpoint_pane_surface(state, endpoints, prefix_input_source);
-}
-
 /// Reconcile host input-source side effects for the just-installed surface and
 /// present the composed frame.
 pub(super) fn finish_endpoint_pane_surface(

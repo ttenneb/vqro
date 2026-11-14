@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// Current protocol version. Bumped when wire format changes incompatibly.
-pub const PROTOCOL_VERSION: u32 = 25;
+pub const PROTOCOL_VERSION: u32 = 26;
 
 /// Maximum allowed frame payload size (2 MB). Frames larger than this are
 /// rejected to prevent denial-of-service via oversized length prefixes.
@@ -1383,17 +1383,13 @@ pub struct SemanticNotification {
 
 /// Messages sent from the server to the client over the client protocol socket.
 ///
-/// Variant order is historically frozen for endpoint generation 1, with one
-/// recorded extension served under endpoint generation 2: [`ServerMessage::PaneSurfaceV2`]
-/// is appended after `EndpointControl` under the human 2026-10-04 option-B no-floor decision
-/// (`docs/next/architecture/nested-panes.md`). bincode cannot add an optional
-/// field to the `shell.surface.v1` frame, and the endpoint hello checks codec
-/// names only, so a same-generation peer would desync on an in-place field. Serving
-/// is `shell.surface.v2` only: a peer that did not advertise it is refused
-/// client-locally and never receives the appended variant, and a patch is the
-/// unchanged [`ServerMessage::PaneSurfacePatch`]. Remove the variant when the
-/// surface lane is re-cut. Otherwise add compatible endpoint behavior through
-/// `EndpointControl`, and ignore unrecognized named controls.
+/// Historical tags are frozen, with two explicitly recorded generation-2
+/// extensions: surface-v2 tag 21 and atomic-scene-v1 tag 22. See
+/// `docs/next/architecture/endpoint-surface-codec-v2.md` and
+/// `docs/next/architecture/atomic-client-scene-v1.md`. Serving requires the new
+/// scene codec; old surface/snapshot values remain immutable decode inputs.
+/// Patches retain their existing exact-base shape. No other append or in-place
+/// reinterpretation is authorized; optional controls use `EndpointControl`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ServerMessage {
     /// Handshake response: server acknowledges (or rejects) the client.
@@ -1524,6 +1520,10 @@ pub enum ServerMessage {
     /// that negotiated `shell.surface.v2` ever receives it; patches stay
     /// [`ServerMessage::PaneSurfacePatch`].
     PaneSurfaceV2(PaneSurfaceFrameV2),
+
+    /// Negotiated `shell.scene.v1`: one full presentation transaction, tag 22.
+    /// Existing named codecs and tags remain unchanged.
+    ClientSceneV1(Box<super::scene::ClientSceneV1>),
 }
 
 // ---------------------------------------------------------------------------

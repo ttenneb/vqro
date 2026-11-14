@@ -34,9 +34,8 @@ pub(crate) fn accepts_endpoint_message(
         || (activation_message
             && matches!(
                 message,
-                // Serving is `shell.surface.v2` only; a v1 surface is not a live
-                // activation lane, though the client still decodes its shape.
-                ServerMessage::PaneSurfaceV2(_)
+                // Historical standalone surfaces decode but cannot activate a live scene lane.
+                ServerMessage::ClientSceneV1(_)
                     | ServerMessage::ClientShellEndpointResponseChunk { .. }
             ))
         || (command_response
@@ -152,9 +151,18 @@ mod tests {
             frame: empty_frame(),
             views: Vec::new(),
         });
-        // Serving is v2 only: the v1 shape still decodes, but it is not a live
-        // activation lane, and an inactive endpoint gets neither.
-        assert!(accepts_endpoint_message(false, true, false, &v2));
+        let scene = ServerMessage::ClientSceneV1(Box::new(crate::protocol::scene::ClientSceneV1 {
+            route_epoch: 1,
+            projections: Vec::new(),
+            targets: Vec::new(),
+            surface: crate::protocol::PaneSurfaceFrameV2 {
+                frame: empty_frame(),
+                views: Vec::new(),
+            },
+        }));
+        assert!(accepts_endpoint_message(false, true, false, &scene));
+        assert!(!accepts_endpoint_message(false, false, false, &scene));
+        assert!(!accepts_endpoint_message(false, true, false, &v2));
         assert!(!accepts_endpoint_message(false, true, false, &v1));
         assert!(!accepts_endpoint_message(false, false, false, &v1));
         assert!(!accepts_endpoint_message(false, false, false, &v2));

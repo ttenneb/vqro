@@ -1,0 +1,21 @@
+{
+  "route_epoch": 7,
+  "projections": [
+    {
+      "kind": "shell.snapshot.v1",
+      "data": "{\"boot_id\":\"scene-fixture\",\"revision\":3,\"config_diagnostic\":null,\"product_announcement\":null,\"update_available\":null,\"update_install_command\":\"vqro update\",\"server_keybindings_toml\":null,\"latest_release_notes_available\":false,\"integration_updates_available\":false,\"worktree_directory\":\"/private/worktrees\",\"release_notes\":null,\"focused_workspace_id\":null,\"focused_tab_id\":null,\"focused_pane_id\":null,\"tab_bar_right\":[],\"tab_bar_right_separator\":\" \",\"agent_view_label\":null,\"agent_order\":[],\"workspaces\":[],\"tabs\":[],\"panes\":[],\"agents\":[],\"commands\":[]}"
+    }
+  ],
+  "targets": [],
+  "surface": {
+    "frame": {
+      "boot_id": "scene-fixture",
+      "projection_revision": 3,
+      "surface_revision": 9,
+      "frame": { "width": 0, "height": 0, "cells": [], "cursor": null, "hyperlinks": [], "graphics": [] },
+      "panes": [], "collections": [], "splits": [], "popup": null,
+      "graphics": { "assets": [], "placements": [], "retained_assets": [] }
+    },
+    "views": []
+  }
+}

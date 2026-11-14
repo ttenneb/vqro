@@ -19,7 +19,7 @@ use tracing::{debug, warn};
 use crate::ipc::LocalStream;
 use crate::protocol::endpoint::{
     EndpointClientHello, EndpointServerWelcome, ENDPOINT_HELLO_KIND, ENDPOINT_PROTOCOL_GENERATION,
-    ENDPOINT_WELCOME_KIND, SURFACE_CODEC_V2,
+    ENDPOINT_WELCOME_KIND,
 };
 use crate::protocol::{
     self, AttachScrollDirection, AttachScrollSource, ClientMessage, ClientPaneInputEvent,
@@ -951,14 +951,14 @@ pub(crate) fn handle_client_handshake(
                     "no_common_core",
                     "client and server have no compatible endpoint core codecs".to_owned(),
                 ))
-            } else if !hello.serves_surface_v2() {
+            } else if !hello.serves_scene_v1() {
                 // Serving is `shell.surface.v2` only. A peer that never
                 // advertised it is refused cleanly here, client-locally, rather
                 // than sent the retired `shell.surface.v1` frame.
                 Some((
                     "unsupported_surface_codec",
                     format!(
-                        "client cannot decode the current pane surface codec ({SURFACE_CODEC_V2}); update this client"
+                        "client cannot decode the current pane surface codec ({}); update this client", crate::protocol::scene::SCENE_CODEC_V1
                     ),
                 ))
             } else {
@@ -1918,12 +1918,7 @@ mod tests {
             mouse_capture: true,
             surface_active: true,
             snapshot_codecs: vec![crate::protocol::endpoint::SNAPSHOT_CODEC_V1.into()],
-            // The current client advertises the additive v2 surface first and
-            // keeps v1 as the frozen terminal-only fallback.
-            surface_codecs: vec![
-                crate::protocol::endpoint::SURFACE_CODEC_V2.into(),
-                crate::protocol::endpoint::SURFACE_CODEC_V1.into(),
-            ],
+            surface_codecs: vec![crate::protocol::scene::SCENE_CODEC_V1.into()],
             input_codecs: vec![crate::protocol::endpoint::INPUT_CODEC_V1.into()],
             blob_codecs: vec![crate::protocol::endpoint::BLOB_CODEC_V1.into()],
             control_kinds: Vec::new(),
@@ -2366,7 +2361,7 @@ mod tests {
     fn legacy_private_hello_is_refused_before_decoding_its_body() {
         use std::io::Write as _;
         for tag in [0u8, 11] {
-            for version in [22u8, 23, 24] {
+            for version in [22u8, 23, 24, 25] {
                 let (mut client, server, _path) = local_stream_pair("legacy-private-refusal");
                 let (tx, mut rx) = mpsc::channel(4);
                 let quit = Arc::new(AtomicBool::new(false));
@@ -2385,7 +2380,7 @@ mod tests {
                 else {
                     panic!("expected readable refusal");
                 };
-                assert_eq!(supported, 25);
+                assert_eq!(supported, 26);
                 assert!(error.contains("Vqro"), "{error}");
                 assert!(error.contains(&version.to_string()), "{error}");
                 worker.join().unwrap().unwrap();
@@ -2650,7 +2645,7 @@ mod tests {
         // The peer advertised both surface codecs, so the server picks v2.
         assert_eq!(
             welcome.surface_codec,
-            crate::protocol::endpoint::SURFACE_CODEC_V2
+            crate::protocol::scene::SCENE_CODEC_V1
         );
         assert!(welcome
             .capabilities
@@ -2728,7 +2723,9 @@ mod tests {
         let welcome = endpoint_welcome(welcome);
         let error = welcome.error.expect("a v1-only peer is refused");
         assert_eq!(error.code, "unsupported_surface_codec");
-        assert!(error.message.contains(SURFACE_CODEC_V2));
+        assert!(error
+            .message
+            .contains(crate::protocol::scene::SCENE_CODEC_V1));
         assert!(server_event_rx.try_recv().is_err());
 
         drop(client_stream);
@@ -2737,6 +2734,34 @@ mod tests {
             .join()
             .expect("handshake thread join")
             .expect("handshake thread result");
+    }
+
+    #[test]
+    fn atomic_scene_v2_only_peer_is_refused_before_connection_or_geometry_effects() {
+        let (mut client_stream, server_stream, _path) = local_stream_pair("scene-v2-refusal");
+        let (tx, mut rx) = mpsc::channel(4);
+        let quit = Arc::new(AtomicBool::new(false));
+        let worker =
+            std::thread::spawn(move || handle_client_handshake(server_stream, 46, &tx, &quit));
+        let ClientMessage::EndpointControl { kind, data } = endpoint_hello(80, 29) else {
+            panic!("hello");
+        };
+        let mut hello: EndpointClientHello = serde_json::from_str(&data).unwrap();
+        hello.surface_codecs = vec![crate::protocol::endpoint::SURFACE_CODEC_V2.into()];
+        protocol::write_message(
+            &mut client_stream,
+            &ClientMessage::EndpointControl {
+                kind,
+                data: serde_json::to_string(&hello).unwrap(),
+            },
+        )
+        .unwrap();
+        let welcome =
+            endpoint_welcome(protocol::read_message(&mut client_stream, MAX_FRAME_SIZE).unwrap());
+        assert_eq!(welcome.error.unwrap().code, "unsupported_surface_codec");
+        assert!(rx.try_recv().is_err());
+        drop(client_stream);
+        worker.join().unwrap().unwrap();
     }
 
     #[test]

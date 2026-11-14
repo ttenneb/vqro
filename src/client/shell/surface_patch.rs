@@ -121,6 +121,9 @@ impl ClientShellState {
         &mut self,
         patch: crate::protocol::PaneSurfacePatch,
     ) -> ClientPaneSurfacePatchOutcome {
+        if !self.collapse_interactions_current() {
+            return ClientPaneSurfacePatchOutcome::Rejected;
+        }
         let Some(current) = self.pane_surface.as_ref() else {
             return ClientPaneSurfacePatchOutcome::Rejected;
         };
@@ -143,7 +146,15 @@ impl ClientShellState {
             else {
                 return ClientPaneSurfacePatchOutcome::Rejected;
             };
-            if !pane_geometry_matches(existing, updated) {
+            if !pane_geometry_matches(existing, updated)
+                || (self
+                    .endpoints
+                    .iter()
+                    .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
+                    .is_some_and(|endpoint| !endpoint.scene_targets.is_empty())
+                    && (existing.mouse_reporting != updated.mouse_reporting
+                        || existing.sgr_pixel_mouse != updated.sgr_pixel_mouse))
+            {
                 return ClientPaneSurfacePatchOutcome::Rejected;
             }
         }
