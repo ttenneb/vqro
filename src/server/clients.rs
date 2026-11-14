@@ -203,6 +203,10 @@ pub(crate) struct ClientConnection {
     pub(crate) shell_route_witness: Option<[u8; 32]>,
     pub(crate) shell_identity_witness: Option<[u8; 32]>,
     pub(crate) shell_preview_routes: Vec<ShellPreviewRoute>,
+    /// Descriptors from the last successfully queued full scene; retained updates
+    /// may reuse them but cannot mint fresh attachment/runtime authority.
+    pub(crate) shell_scene_targets: Vec<crate::protocol::scene::SceneTargetV1>,
+    pub(crate) shell_committed_scene_epoch: u64,
     pub(crate) shell_collapse_metadata: Option<crate::protocol::collapse::CollapseBodyV1>,
     /// Whether this client may reserve terminal geometry for pane contributions.
     pub(crate) shell_pane_viewport_enabled: bool,
@@ -337,6 +341,8 @@ impl ClientConnection {
             shell_route_witness: None,
             shell_identity_witness: None,
             shell_preview_routes: Vec::new(),
+            shell_scene_targets: Vec::new(),
+            shell_committed_scene_epoch: 0,
             shell_collapse_metadata: None,
             shell_pane_viewport_enabled: false,
             shell_pane_view_enabled: false,

@@ -23,6 +23,7 @@ pub const SERVER_MESSAGE_SEMANTIC_NOTIFICATION: u32 = 14;
 pub const SERVER_MESSAGE_PANE_SURFACE_PATCH: u32 = 19;
 /// The recorded generation-scoped extension, appended after EndpointControl.
 pub const SERVER_MESSAGE_PANE_SURFACE_V2: u32 = 21;
+pub const SERVER_MESSAGE_CLIENT_SCENE_V1: u32 = 22;
 const CLIENT_MESSAGE_CLIENT_SHELL_PANE_INPUT: u32 = 13;
 const CLIENT_MESSAGE_CLIENT_SHELL_FOCUS: u32 = 18;
 const CLIENT_MESSAGE_ENDPOINT_CONTROL: u32 = 20;
@@ -339,7 +340,7 @@ pub fn client_shell_handshake(
         "endpoint_keybindings": false,
         "mouse_capture": false,
         "snapshot_codecs": ["shell.snapshot.v1"],
-        "surface_codecs": ["shell.surface.v2", "shell.surface.v1"],
+        "surface_codecs": ["shell.scene.v1"],
         "input_codecs": ["shell.input.semantic.v1"],
         "blob_codecs": ["shell.blob.v1"]
     })
@@ -512,9 +513,9 @@ pub fn wait_for_client_shell_bootstrap(
                     saw_snapshot = true;
                 }
             }
-            Ok((SERVER_MESSAGE_PANE_SURFACE_V2, _)) if saw_snapshot => return Ok(()),
+            Ok((SERVER_MESSAGE_CLIENT_SCENE_V1, _)) => return Ok(()),
             Ok((SERVER_MESSAGE_PANE_SURFACE_V2, _)) => {
-                return Err("client shell pane surface arrived before its snapshot".into());
+                return Err("unnegotiated standalone surface on scene lane".into());
             }
             Ok(_) | Err(_) => {}
         }

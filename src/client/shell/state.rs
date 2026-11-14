@@ -1172,6 +1172,8 @@ pub(crate) struct ClientShellState {
         HashMap<String, crate::protocol::endpoint::ServerTerminalViewSurface>,
     pub(super) last_terminal_views_interest:
         Option<crate::protocol::endpoint::ClientTerminalViewsInterest>,
+    /// Set only inside one validated same-route scene commit; not authority or persistence.
+    pub(super) preserve_scene_context: bool,
     pub(super) workspace_scroll: usize,
     pub(super) agent_scroll: usize,
     pub(super) show_agents: bool,
@@ -1375,6 +1377,7 @@ impl ClientShellState {
             next_recovery_projection_token: 0,
             terminal_view_surfaces: HashMap::new(),
             last_terminal_views_interest: None,
+            preserve_scene_context: false,
             workspace_scroll: 0,
             agent_scroll: 0,
             show_agents: false,
@@ -1728,7 +1731,16 @@ impl ClientShellState {
         if projection_changed || endpoint_boot_changed {
             // Contributions and terminal views are leased to one exact projection identity. Close it explicitly;
             // preserving it would leave stale content or a permanently loading request.
-            self.inspector = None;
+            if !self.preserve_scene_context || endpoint_boot_changed {
+                self.inspector = None;
+            } else if let Some(inspector) = self.inspector.as_mut() {
+                // Keep local terminal/UI ownership and read-only presentation, never
+                // rebind an extension action/contribution lease to the new projection.
+                inspector.view_request_id = None;
+                inspector.service_generation = None;
+                inspector.pending_action = None;
+                inspector.loading = false;
+            }
             self.last_pane_viewport_request = None;
             self.last_pane_panel_viewport = None;
             self.terminal_view_surfaces.clear();

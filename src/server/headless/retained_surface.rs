@@ -309,6 +309,12 @@ impl HeadlessServer {
                 crate::render_prof::event("retained_surface.recipient_deferred");
                 continue;
             }
+            if client.shell_scene_enabled
+                && (client.shell_committed_scene_epoch == 0
+                    || client.shell_committed_scene_epoch != client.shell_route_epoch)
+            {
+                fallback!("scene_authority_pending");
+            }
             let Some(surface) = client.render_state.last_pane_surface() else {
                 fallback!("no_baseline");
             };
@@ -575,11 +581,25 @@ impl HeadlessServer {
             } else {
                 (client.render_state.prepare_pane_surface_patch(patch), None)
             };
-            let Some(prepared) = prepared else {
+            let Some(mut prepared) = prepared else {
                 client.defer_full_render();
                 deferred += 1;
                 continue;
             };
+            if graphics_delivery.is_some() && client.shell_scene_enabled {
+                let Some(scene) = super::scene::wrap_full_scene(
+                    client,
+                    prepared,
+                    client.shell_collapse_metadata.as_ref(),
+                    None,
+                    client.shell_scene_targets.clone(),
+                ) else {
+                    client.defer_full_render();
+                    deferred += 1;
+                    continue;
+                };
+                prepared = scene;
+            }
             let max_frame_size = if graphics_delivery.is_some() {
                 MAX_GRAPHICS_FRAME_SIZE
             } else {

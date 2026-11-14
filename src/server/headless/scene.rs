@@ -41,6 +41,44 @@ pub(super) fn projections(
     messages.into_iter().map(projection).collect()
 }
 
+/// The single construction seam for full and retained-graphics publication.
+pub(super) fn wrap_full_scene(
+    client: &crate::server::clients::ClientConnection,
+    prepared: crate::server::render_stream::PreparedRender,
+    collapse: Option<&crate::protocol::collapse::CollapseBodyV1>,
+    previews: Option<&crate::protocol::endpoint::ServerTerminalViewsSurface>,
+    targets: Vec<SceneTargetV1>,
+) -> Option<crate::server::render_stream::PreparedRender> {
+    let ServerMessage::PaneSurfaceV2(surface) = prepared.message() else {
+        return None;
+    };
+    let snapshot = client.shell_snapshot.as_ref()?;
+    if snapshot.boot_id != surface.frame.boot_id
+        || snapshot.revision != surface.frame.projection_revision
+    {
+        return None;
+    }
+    let mut projections = projections(client)?;
+    if let Some(body) = collapse {
+        projections.push(projection(
+            crate::server::collapse::projection_message(
+                &surface.frame.boot_id,
+                surface.frame.projection_revision,
+                surface.frame.surface_revision,
+                body,
+            )
+            .ok()?,
+        )?);
+    }
+    if let Some(previews) = previews {
+        projections.push(SceneProjectionV1 {
+            kind: crate::protocol::endpoint::TERMINAL_VIEWS_SURFACE_KIND.into(),
+            data: serde_json::to_string(previews).ok()?,
+        });
+    }
+    Some(prepared.with_scene(client.shell_route_epoch, projections, targets))
+}
+
 /// Invalidate known identity/topology/viewport changes before preparing pixels.
 /// Geometry and mode facts discovered by compute_view are checked again below.
 pub(super) fn identity_witness(

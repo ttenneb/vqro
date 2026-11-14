@@ -2,6 +2,17 @@
 use crate::client::{endpoint, shell};
 use crate::protocol::{scene::ClientSceneV1, ClientShellSnapshot};
 
+pub(crate) fn decode_route_revocation(
+    data: &str,
+) -> Result<crate::protocol::scene::SceneRouteRevokedV1, String> {
+    let revoked: crate::protocol::scene::SceneRouteRevokedV1 = serde_json::from_str(data)
+        .map_err(|error| format!("invalid scene route revocation: {error}"))?;
+    if revoked.route_epoch == 0 || revoked.boot_id.is_empty() || revoked.boot_id.len() > 128 {
+        return Err("invalid scene route revocation identity".into());
+    }
+    Ok(revoked)
+}
+
 pub(crate) struct DecodedScene {
     pub snapshot: Box<ClientShellSnapshot>,
     pub projections: Vec<endpoint::EndpointControlMessage>,
@@ -34,7 +45,24 @@ impl DecodedScene {
                 }
                 C::HostDocuments(value) => value.boot_id == *boot && value.revision == revision,
                 C::TerminalViewsSurface(value) => {
-                    value.boot_id == *boot && value.projection_revision == revision
+                    let mut ids = std::collections::HashSet::new();
+                    let mut cells = 0usize;
+                    value.replace
+                        && value.views.len() <= crate::protocol::endpoint::MAX_TERMINAL_VIEWS
+                        && value.views.iter().all(|view| {
+                            let count =
+                                usize::from(view.frame.width) * usize::from(view.frame.height);
+                            cells = cells.saturating_add(count);
+                            ids.insert(&view.pane_id)
+                                && view.frame.cells.len() == count
+                                && cells <= crate::protocol::endpoint::MAX_TERMINAL_VIEW_CELLS
+                                && scene
+                                    .targets
+                                    .iter()
+                                    .any(|target| target.pane_id.as_ref() == Some(&view.pane_id))
+                        })
+                        && value.boot_id == *boot
+                        && value.projection_revision == revision
                 }
                 C::CollapseProjection(Ok(value)) => {
                     value.validate().map_err(str::to_owned)?;
@@ -236,6 +264,36 @@ impl shell::ClientShellState {
         {
             return false;
         }
+        // Stage/rebase the existing local preview claim before any live setter can
+        // clear it. A full scene cannot invent a new preview interest.
+        let mut preview_interest = None;
+        for projection in &scene.projections {
+            if let C::TerminalViewsSurface(value) = projection {
+                let Some(interest) =
+                    self.last_terminal_views_interest
+                        .as_ref()
+                        .filter(|interest| {
+                            active
+                                && interest.boot_id == value.boot_id
+                                && interest.projection_revision <= value.projection_revision
+                        })
+                else {
+                    return false;
+                };
+                if value.views.iter().any(|view| {
+                    !interest.views.iter().any(|claim| {
+                        claim.pane_id == view.pane_id
+                            && claim.size.cols == view.frame.width
+                            && claim.size.rows == view.frame.height
+                    })
+                }) {
+                    return false;
+                }
+                let mut next = interest.clone();
+                next.projection_revision = value.projection_revision;
+                preview_interest = Some(next);
+            }
+        }
         let Some(endpoint) = self
             .endpoints
             .iter_mut()
@@ -287,6 +345,10 @@ impl shell::ClientShellState {
                 return false;
             }
         }
+        let preserve_context = active
+            && endpoint.snapshot_generation == Some(generation)
+            && endpoint.scene_authority.current()
+            && endpoint.scene_authority.installed == Some(scene.route_epoch);
         if !endpoint
             .scene_authority
             .can_install(generation, scene.route_epoch)
@@ -297,7 +359,9 @@ impl shell::ClientShellState {
         endpoint.collapse = Default::default();
         endpoint.scene_targets = scene.targets;
         if active {
+            self.preserve_scene_context = preserve_context;
             self.set_endpoint_snapshot_for_generation(endpoint_id, generation, scene.snapshot);
+            self.preserve_scene_context = false;
         } else {
             self.cache_endpoint_snapshot_inactive_for_generation(
                 endpoint_id,
@@ -326,7 +390,12 @@ impl shell::ClientShellState {
                         value,
                     ),
                 C::TerminalViewsSurface(value) => {
-                    self.set_terminal_views_surface_for_generation(endpoint_id, generation, *value);
+                    self.last_terminal_views_interest = preview_interest.take();
+                    self.terminal_view_surfaces = value
+                        .views
+                        .into_iter()
+                        .map(|view| (view.pane_id.clone(), view))
+                        .collect();
                 }
                 _ => unreachable!("validated scene projections"),
             }
@@ -353,6 +422,18 @@ impl shell::ClientShellState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn malformed_route_revocations_are_not_silently_ignored() {
+        for data in [
+            "bad JSON",
+            r#"{"boot_id":"boot","route_epoch":0}"#,
+            r#"{"boot_id":"","route_epoch":2}"#,
+        ] {
+            assert!(decode_route_revocation(data).is_err());
+        }
+        assert!(decode_route_revocation(r#"{"boot_id":"boot","route_epoch":2}"#).is_ok());
+    }
+
     #[test]
     fn stale_scene_cannot_clear_newer_route_revocation_or_connection() {
         let mut authority = SceneAuthority::default();

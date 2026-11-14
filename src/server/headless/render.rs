@@ -1004,7 +1004,15 @@ impl HeadlessServer {
                 {
                     client.shell_projection_revision =
                         client.shell_projection_revision.saturating_add(1);
-                    restore_pane_viewport |= client.shell_pane_viewport.take().is_some();
+                    if client.shell_scene_enabled {
+                        if let Some(viewport) = client.shell_pane_viewport.as_mut() {
+                            // A presentation revision is not a geometry change. Preserve
+                            // the existing reservation without refreshing its provider.
+                            viewport.projection_revision = client.shell_projection_revision;
+                        }
+                    } else {
+                        restore_pane_viewport |= client.shell_pane_viewport.take().is_some();
+                    }
                     if let Some(mut interest) = client.shell_terminal_views_interest.take() {
                         // Terminal previews are presentation geometry, not extension leases. Keep
                         // valid preview claims across projection-only updates so focusing collection
@@ -1407,35 +1415,17 @@ impl HeadlessServer {
                     client.defer_full_render();
                     continue;
                 }
-                let Some(mut projections) = super::scene::projections(client) else {
+                let Some(scene) = super::scene::wrap_full_scene(
+                    client,
+                    prepared,
+                    collapse_metadata.as_ref(),
+                    terminal_views_surface.as_ref(),
+                    scene_targets,
+                ) else {
                     broken_clients.push(client_id);
                     continue;
                 };
-                if let Some(body) = collapse_metadata.as_ref() {
-                    let Ok(message) = crate::server::collapse::projection_message(
-                        &surface.frame.boot_id,
-                        surface.frame.projection_revision,
-                        surface.frame.surface_revision,
-                        body,
-                    ) else {
-                        continue;
-                    };
-                    let Some(value) = super::scene::projection(message) else {
-                        continue;
-                    };
-                    projections.push(value);
-                }
-                if let Some(previews) = terminal_views_surface.as_ref() {
-                    let Ok(data) = serde_json::to_string(previews) else {
-                        continue;
-                    };
-                    projections.push(crate::protocol::scene::SceneProjectionV1 {
-                        kind: crate::protocol::endpoint::TERMINAL_VIEWS_SURFACE_KIND.into(),
-                        data,
-                    });
-                }
-                prepared =
-                    prepared.with_scene(client.shell_route_epoch, projections, scene_targets);
+                prepared = scene;
             } else if native_geometry_deferred {
                 continue;
             }
@@ -1576,6 +1566,10 @@ impl HeadlessServer {
                     }
                     if let Some(delivery) = next_shell_graphics_delivery {
                         client.shell_graphics_delivery = delivery;
+                    }
+                    if let ServerMessage::ClientSceneV1(scene) = prepared.message() {
+                        client.shell_scene_targets = scene.targets.clone();
+                        client.shell_committed_scene_epoch = scene.route_epoch;
                     }
                     client.render_state.commit_sent_frame(prepared);
                     if client.shell_scene_enabled {

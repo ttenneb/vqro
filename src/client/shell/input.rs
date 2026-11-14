@@ -253,11 +253,15 @@ impl ClientShellState {
                         continue;
                     }
                     if let Some(target) = self.popup_input_target() {
-                        super::push_target_event(
-                            target,
-                            ClientPaneInputEvent::TextCommit(text),
-                            &mut outcome,
-                        );
+                        if self.collapse_allows_pane_input(&target) {
+                            super::push_target_event(
+                                target,
+                                ClientPaneInputEvent::TextCommit(text),
+                                &mut outcome,
+                            );
+                        } else {
+                            self.notify_terminal_input_refused(&mut outcome);
+                        }
                     } else if !self.popup_pending {
                         if self.insert_overlay_text(&text) {
                             outcome.repaint = true;
@@ -286,11 +290,15 @@ impl ClientShellState {
                         continue;
                     }
                     if let Some(target) = self.popup_input_target() {
-                        super::push_target_event(
-                            target,
-                            ClientPaneInputEvent::Paste(text),
-                            &mut outcome,
-                        );
+                        if self.collapse_allows_pane_input(&target) {
+                            super::push_target_event(
+                                target,
+                                ClientPaneInputEvent::Paste(text),
+                                &mut outcome,
+                            );
+                        } else {
+                            self.notify_terminal_input_refused(&mut outcome);
+                        }
                     } else if !self.popup_pending {
                         if self.insert_overlay_text(&text) {
                             outcome.repaint = true;
@@ -1442,7 +1450,17 @@ impl ClientShellState {
         {
             return None;
         }
-        if let Some(terminal_id) = self.popup_input_target().and_then(|target| match target {
+        if !self.scene_route_current() {
+            return None;
+        }
+        let popup_target = self.popup_input_target();
+        if popup_target
+            .as_ref()
+            .is_some_and(|target| !self.collapse_allows_pane_input(target))
+        {
+            return None;
+        }
+        if let Some(terminal_id) = popup_target.and_then(|target| match target {
             ClientInputTarget::Popup(terminal_id) => Some(terminal_id),
             ClientInputTarget::Pane(_) => None,
         }) {
@@ -1454,6 +1472,7 @@ impl ClientShellState {
             return None;
         }
         self.focused_pane_id()
+            .filter(|pane| self.collapse_allows_pane_input(&ClientInputTarget::Pane(pane.clone())))
             .map(crate::protocol::ClientClipboardImageTarget::Pane)
     }
 

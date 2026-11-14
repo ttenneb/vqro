@@ -7,7 +7,7 @@ mod native_graphics;
 #[path = "pane_graphics.rs"]
 mod pane_graphics_tests;
 mod pane_view_mutations;
-mod scene;
+pub(super) mod scene;
 #[path = "shutdown.rs"]
 mod shutdown_tests;
 #[path = "surface_interest.rs"]

@@ -99,6 +99,12 @@ fn atomic_scene_status_update_keeps_old_route_until_one_complete_install() {
 fn atomic_scene_revocation_overtakes_queued_scene_and_patch_without_reopening() {
     let mut state = feature_shell();
     assert!(install(&mut state, scene(1, 1)));
+    assert_eq!(
+        state.clipboard_image_target(),
+        Some(crate::protocol::ClientClipboardImageTarget::Pane(
+            "pane_1".into()
+        ))
+    );
     state.revoke_scene_route(
         &ClientEndpointId::Local,
         1,
@@ -108,6 +114,7 @@ fn atomic_scene_revocation_overtakes_queued_scene_and_patch_without_reopening() 
         },
     );
     assert!(!delivered(&text(&mut state)));
+    assert_eq!(state.clipboard_image_target(), None);
     assert!(!install(&mut state, scene(2, 1)));
     assert_eq!(state.snapshot.as_ref().unwrap().revision, 1);
     assert!(!delivered(&text(&mut state)));
@@ -151,6 +158,206 @@ fn atomic_scene_malformed_members_or_old_base_leave_all_installed_facts_unchange
     assert!(!install(&mut state, scene(1, 1)));
     assert_eq!(state.snapshot, before);
     assert_eq!(state.pane_surface, raster);
+}
+
+#[test]
+fn atomic_scene_popup_key_text_and_paste_refuse_revoked_route_but_release_cleans_up() {
+    use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
+    let key = |kind| {
+        RawInputEvent::Key(
+            crate::input::TerminalKey::new(KeyCode::Char('x'), KeyModifiers::NONE).with_kind(kind),
+        )
+    };
+    for kind in 0..3 {
+        let event = || match kind {
+            0 => key(KeyEventKind::Press),
+            1 => RawInputEvent::Text(crate::input::TextCommit::new("x")),
+            _ => RawInputEvent::Paste("x".into()),
+        };
+        let mut state = feature_shell();
+        let mut value = scene(1, 1);
+        value.surface.frame.popup = surface_with_popup().popup;
+        value.targets.push(SceneTargetV1 {
+            pane_id: None,
+            terminal_id: "terminal-popup".into(),
+            runtime_instance: Some(2),
+        });
+        assert!(install(&mut state, value));
+        state.overlay = None;
+        state.set_host_reports_key_releases(true);
+        assert_eq!(
+            state.clipboard_image_target(),
+            Some(crate::protocol::ClientClipboardImageTarget::Popup(
+                "terminal-popup".into()
+            ))
+        );
+        let admitted = state.handle_raw_events(vec![event()]);
+        assert!(admitted
+            .requests
+            .iter()
+            .any(|request| matches!(request, ClientMessage::ClientShellPopupInput { .. })));
+        state.revoke_scene_route(
+            &ClientEndpointId::Local,
+            1,
+            SceneRouteRevokedV1 {
+                boot_id: "boot-1".into(),
+                route_epoch: 2,
+            },
+        );
+        assert_eq!(state.clipboard_image_target(), None);
+        let refused = state.handle_raw_events(vec![if kind == 0 {
+            key(KeyEventKind::Repeat)
+        } else {
+            event()
+        }]);
+        assert!(!refused
+            .requests
+            .iter()
+            .any(|request| matches!(request, ClientMessage::ClientShellPopupInput { .. })));
+        assert!(state.visible_endpoint_notice.is_some());
+        if kind == 0 {
+            let release = state.handle_raw_events(vec![key(KeyEventKind::Release)]);
+            assert!(release
+                .requests
+                .iter()
+                .any(|request| matches!(request, ClientMessage::ClientShellPopupInput { .. })));
+        }
+    }
+}
+
+#[test]
+fn atomic_scene_preview_member_rebases_existing_interest_and_rejects_bad_geometry_before_mutation()
+{
+    use crate::protocol::endpoint::*;
+    let mut state = feature_shell();
+    assert!(install(&mut state, scene(1, 1)));
+    state.collection_list_views.insert("collection_1".into());
+    state.collection_entered_pane = Some("pane_1".into());
+    state.collection_expanded_members.insert(
+        "collection_1".into(),
+        std::collections::HashSet::from(["pane_1".into()]),
+    );
+    state.last_terminal_views_interest = Some(ClientTerminalViewsInterest {
+        boot_id: "boot-1".into(),
+        projection_revision: 1,
+        views: vec![ClientTerminalViewInterest {
+            pane_id: "pane_1".into(),
+            size: crate::protocol::ClientSurfaceSize { cols: 8, rows: 2 },
+        }],
+    });
+    let value = |revision: u64, cols: u16| {
+        let mut value = scene(revision, 1);
+        let structure = ClientShellStructureProjection {
+            session_id: "session".into(),
+            boot_id: "boot-1".into(),
+            revision,
+            collections: vec![ClientShellCollection {
+                collection_id: "collection_1".into(),
+                workspace_id: "ws_1".into(),
+                tab_id: "tab_1".into(),
+                label: None,
+                selected_pane_id: Some("pane_1".into()),
+                members: vec![ClientShellCollectionMember {
+                    pane_id: "pane_1".into(),
+                    index: 0,
+                    archived: false,
+                }],
+            }],
+            delegations: Vec::new(),
+            repositories: Vec::new(),
+            space_order: Vec::new(),
+        };
+        let preview = ServerTerminalViewsSurface {
+            boot_id: "boot-1".into(),
+            projection_revision: revision,
+            replace: true,
+            views: vec![ServerTerminalViewSurface {
+                pane_id: "pane_1".into(),
+                frame: FrameData::from_ratatui_buffer_with_hyperlinks(
+                    &Buffer::empty(Rect::new(0, 0, cols, 2)),
+                    None,
+                    &[],
+                ),
+                scroll: None,
+                mouse_reporting: false,
+                sgr_pixel_mouse: false,
+                pixel_width: 0,
+                pixel_height: 0,
+            }],
+        };
+        value.projections.push(SceneProjectionV1 {
+            kind: SESSION_STRUCTURE_KIND.into(),
+            data: serde_json::to_string(&structure).unwrap(),
+        });
+        value.projections.push(SceneProjectionV1 {
+            kind: TERMINAL_VIEWS_SURFACE_KIND.into(),
+            data: serde_json::to_string(&preview).unwrap(),
+        });
+        value
+    };
+    assert!(install(&mut state, value(2, 8)));
+    assert_eq!(state.terminal_view_surfaces["pane_1"].frame.width, 8);
+    assert_eq!(
+        state
+            .last_terminal_views_interest
+            .as_ref()
+            .unwrap()
+            .projection_revision,
+        2
+    );
+    assert_eq!(state.collection_entered_pane.as_deref(), Some("pane_1"));
+    assert!(delivered(&text(&mut state)));
+    let snapshot = state.snapshot.clone();
+    let surface = state.pane_surface.clone();
+    let previews = state.terminal_view_surfaces.clone();
+    assert!(
+        !install(&mut state, value(3, 9)),
+        "well-formed but unclaimed geometry cannot partially install"
+    );
+    assert_eq!(state.snapshot, snapshot);
+    assert_eq!(state.pane_surface, surface);
+    assert_eq!(state.terminal_view_surfaces, previews);
+    assert_eq!(
+        state
+            .last_terminal_views_interest
+            .as_ref()
+            .unwrap()
+            .projection_revision,
+        2
+    );
+    assert!(state.collapse_interactions_current());
+}
+
+#[test]
+fn atomic_scene_same_route_preserves_local_inspector_ownership_without_rebinding_actions() {
+    let mut state = feature_shell();
+    assert!(install(&mut state, scene(1, 1)));
+    state.inspector = Some(Box::new(ClientTerminalInspectorPane {
+        pane_id: "pane_1".into(),
+        pane_label: "pane".into(),
+        loading: false,
+        focused: true,
+        request_revision: 1,
+        view_request_id: Some("old-view".into()),
+        service_generation: Some(1),
+        pending_action: None,
+        placement: crate::pane_contribution::PaneContributionPlacement::Accessory,
+        contribution: None,
+        telemetry: None,
+        error: None,
+    }));
+    assert!(install(&mut state, scene(2, 1)));
+    let inspector = state
+        .inspector
+        .as_ref()
+        .expect("status projection must not remove local input owner");
+    assert!(inspector.focused);
+    assert!(inspector.view_request_id.is_none());
+    assert!(inspector.service_generation.is_none());
+    assert!(
+        !delivered(&text(&mut state)),
+        "focused inspector still consumes text as local UI"
+    );
 }
 
 #[test]

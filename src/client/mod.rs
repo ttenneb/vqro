@@ -56,6 +56,8 @@ use state::RetiredDirectGraphicsMatch;
 use transport::*;
 
 #[cfg(test)]
+pub(crate) use shell::scene::DecodedScene;
+#[cfg(test)]
 pub(crate) use shell::{ClientShellConfig, ClientShellState};
 pub use startup::{run_client, run_terminal_attach};
 pub use terminal_sessions::{run_terminal_session_control, run_terminal_session_observe};
@@ -2104,13 +2106,31 @@ async fn run_client_loop(
                     }
                     ServerMessage::EndpointControl { kind, data } => {
                         if kind == crate::protocol::scene::ROUTE_REVOKED_KIND {
-                            if let (Some(shell), Ok(revoked)) = (
-                                state.shell.as_mut(),
-                                serde_json::from_str::<crate::protocol::scene::SceneRouteRevokedV1>(
-                                    &data,
-                                ),
-                            ) {
-                                shell.revoke_scene_route(&endpoint_id, generation, revoked);
+                            match shell::scene::decode_route_revocation(&data) {
+                                Ok(revoked) => {
+                                    if let Some(shell) = state.shell.as_mut() {
+                                        shell.revoke_scene_route(&endpoint_id, generation, revoked);
+                                    }
+                                }
+                                Err(message) => {
+                                    if handle_endpoint_attention(
+                                        &mut state,
+                                        &mut write_stream,
+                                        &mut endpoint_commands,
+                                        &mut supervisors,
+                                        &mut pending_activation,
+                                        &endpoint_id,
+                                        generation,
+                                        now,
+                                        message,
+                                    ) {
+                                        clear_endpoint_host_effects(
+                                            &mut state,
+                                            &host_mouse_capture_active,
+                                            &host_sgr_pixels_active,
+                                        );
+                                    }
+                                }
                             }
                             continue;
                         }

@@ -112,6 +112,21 @@ scene fixtures and tests cover the new shape and negotiation. This supersedes
 the surface-v2 note's append-only removal condition for this named extension,
 under the owner's 2026-11-14 authorization and development no-floor decision.
 
+Retained graphics full refreshes use the same scene constructor. They may reuse
+only the successfully queued base's targets/collapse and route epoch; staged
+successor metadata or a newer revoked epoch cannot be stamped onto old geometry.
+A missing/mismatched association falls back to full scene preparation. Asset
+reuse and exact surface-base checks remain in the existing render mechanism.
+
+Preview payloads are validated against the existing client-local interest before
+any live mutation; a harmless scene can rebase that same claim to its projection,
+not invent a claim or discard a member after partially installing. Same-route
+scenes preserve local inspector/preview input ownership and viewport geometry.
+Extension action/request leases are not rebound: cached inspector content may
+remain read-only, without a provider refresh, while old semantic leases close.
+Popup key, committed text and paste share the same route revocation guard;
+already-held release cleanup keeps its existing separate behavior.
+
 The initial/inactive endpoint metadata snapshot remains an observation, never
 active terminal routing authority. Auxiliary structure/agent/document facts used
 for active classification must be inside the scene transaction, not ahead of it
