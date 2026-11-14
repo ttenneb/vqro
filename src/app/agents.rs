@@ -10,14 +10,7 @@ pub(crate) const MAX_AGENT_START_TIMEOUT: Duration = Duration::from_secs(300);
 pub(crate) const AGENT_START_SETTLE_DELAY: Duration = Duration::from_secs(3);
 const INVALID_AGENT_TIMEOUT_MESSAGE: &str =
     "agent start timeout must be greater than 3000ms and at most 300000ms";
-const INVALID_AGENT_NAME_MESSAGE: &str = "agent name must start with a lowercase letter and contain only lowercase letters, digits, '-' or '_' (1-32 characters)";
-
-fn valid_agent_name(name: &str) -> bool {
-    let mut chars = name.chars();
-    matches!(chars.next(), Some('a'..='z'))
-        && name.len() <= 32
-        && chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '-' | '_'))
-}
+use crate::api::schema::agents::{valid_agent_name, INVALID_AGENT_NAME_MESSAGE};
 
 impl App {
     pub(super) fn collect_agent_infos(&self) -> Vec<crate::api::schema::AgentInfo> {

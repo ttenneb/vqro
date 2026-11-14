@@ -290,6 +290,13 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
         eprintln!("usage: vqro agent start <name> [--kind KIND] [--pane ID] [--timeout MS] [-- <agent-args...>]");
         return Ok(2);
     };
+    if !crate::api::schema::agents::valid_agent_name(name) {
+        return super::print_response(&cli_agent_error(
+            "cli:agent:start",
+            "invalid_agent_name",
+            crate::api::schema::agents::INVALID_AGENT_NAME_MESSAGE,
+        ));
+    }
     let separator = args
         .iter()
         .position(|arg| arg == "--")
@@ -298,7 +305,12 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
     let mut pane_id = None;
     let mut timeout_ms = None;
     let mut index = 1;
+    let mut seen = std::collections::HashSet::new();
     while index < separator {
+        if !seen.insert(args[index].as_str()) {
+            eprintln!("duplicate option: {}", args[index]);
+            return Ok(2);
+        }
         match args[index].as_str() {
             "--kind" => {
                 let Some(value) = args.get(index + 1).filter(|_| index + 1 < separator) else {
@@ -338,6 +350,7 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
         eprintln!("unsupported interactive agent kind: {kind}");
         return Ok(2);
     };
+    let executable = crate::detect::interactive_agent_executable(expected_kind);
     let expected_kind = crate::detect::agent_label(expected_kind).to_string();
     let agent_args = if separator < args.len() {
         args[separator + 1..].to_vec()
@@ -347,6 +360,34 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
     let timeout = Duration::from_millis(timeout_ms.unwrap_or(30_000));
     let retryable_timeout = timeout > crate::app::AGENT_START_SETTLE_DELAY
         && timeout <= crate::app::MAX_AGENT_START_TIMEOUT;
+    if !retryable_timeout {
+        return super::print_response(&cli_agent_error(
+            "cli:agent:start",
+            "invalid_agent_timeout",
+            "agent start timeout must be greater than 3000ms and at most 300000ms",
+        ));
+    }
+    if agent_args
+        .iter()
+        .any(|arg| arg.chars().any(char::is_control))
+    {
+        return super::print_response(&cli_agent_error(
+            "cli:agent:start",
+            "invalid_agent_argument",
+            "agent arguments cannot contain control characters",
+        ));
+    }
+    // Resolve local launch-profile errors before creating a terminal. The server
+    // remains authoritative and validates again against its own configuration.
+    let config = crate::config::Config::load().config;
+    if let Err(error) = crate::agent_profiles::launch(&config, executable) {
+        return super::print_response(&cli_agent_error(
+            "cli:agent:start",
+            "agent_profile_unavailable",
+            error.to_string(),
+        ));
+    }
+    let created_pane = pane_id.is_none();
     let pane_id = match pane_id {
         Some(pane) => pane,
         None => {
@@ -386,7 +427,6 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
                     "pane creation response missing pane_id",
                 ));
             };
-            eprintln!("created agent pane {pane}; retained for recovery if startup fails");
             pane.to_string()
         }
     };
@@ -400,6 +440,12 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
                 || pane_terminal_id(&pane_id)? != pinned_terminal_id
                 || !pane_shell_is_initializing(&pane_id)?
             {
+                cleanup_rejected_agent_pane(
+                    created_pane,
+                    &pane_id,
+                    &pinned_terminal_id,
+                    previous_busy_response,
+                );
                 return super::print_response(previous_busy_response);
             }
         }
@@ -423,6 +469,7 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
             || pane_terminal_id(&pane_id)? != pinned_terminal_id
             || !pane_shell_is_initializing(&pane_id)?
         {
+            cleanup_rejected_agent_pane(created_pane, &pane_id, &pinned_terminal_id, &response);
             return super::print_response(&response);
         }
 
@@ -432,6 +479,12 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             if let Some(previous_busy_response) = previous_busy_response.as_ref() {
+                cleanup_rejected_agent_pane(
+                    created_pane,
+                    &pane_id,
+                    &pinned_terminal_id,
+                    previous_busy_response,
+                );
                 return super::print_response(previous_busy_response);
             }
         }
@@ -467,6 +520,47 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
         Err(err) => {
             print_agent_transport_error(err, "cli:agent:start", "agent_start_transport_failed")
         }
+    }
+}
+
+// Only explicit rejections before command submission are safe to clean up.
+// Transport errors, input failures and readiness failures retain recovery work.
+fn cleanup_rejected_agent_pane(
+    created: bool,
+    pane: &str,
+    terminal: &Option<String>,
+    response: &serde_json::Value,
+) {
+    if !created
+        || terminal.is_none()
+        || !matches!(
+            response["error"]["code"].as_str(),
+            Some(
+                "invalid_agent_name"
+                    | "unsupported_agent_kind"
+                    | "invalid_agent_argument"
+                    | "invalid_agent_timeout"
+                    | "agent_profile_unavailable"
+                    | "agent_name_taken"
+                    | "agent_pane_busy"
+                    | "agent_pane_unavailable"
+            )
+        )
+    {
+        return;
+    }
+    // Never close a replacement terminal that acquired the same pane identity.
+    if !matches!(pane_terminal_id(pane), Ok(current) if current == *terminal) {
+        return;
+    }
+    match super::send_request(&Request {
+        id: "cli:agent:start:cleanup".into(),
+        method: Method::PaneClose(PaneTarget {
+            pane_id: pane.into(),
+        }),
+    }) {
+        Ok(result) if result.get("error").is_none() => {}
+        _ => eprintln!("could not close rejected agent pane {pane}; inspect it before retrying"),
     }
 }
 
