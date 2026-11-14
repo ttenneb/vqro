@@ -1065,6 +1065,85 @@ mod tests {
     }
 
     #[test]
+    fn sliver_tree_export_reports_collapsed_box_and_every_shell_and_view_member() {
+        let mut app = app_with_workspace();
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+        let hidden_a = app.state.workspaces[0].test_split(Direction::Horizontal);
+        let selected = app.state.workspaces[0].test_split(Direction::Vertical);
+        let hidden_b = app.state.workspaces[0].test_split(Direction::Vertical);
+        let (_, view) = app.state.workspaces[0]
+            .split_pane_with_view(
+                root,
+                "sample.views",
+                "tasks",
+                Direction::Vertical,
+                0.5,
+                false,
+            )
+            .unwrap();
+        let id = crate::terminal_container::TerminalContainerId::parse(914_144).unwrap();
+        app.state.workspaces[0].tabs[0]
+            .layout
+            .replace_typed_root_for_test(TypedNode::Split {
+                direction: Direction::Horizontal,
+                ratio: 0.6,
+                first: Box::new(TypedNode::Leaf(root)),
+                second: Box::new(TypedNode::Stack {
+                    id,
+                    selected: 1,
+                    children: vec![
+                        TypedNode::Leaf(hidden_a),
+                        TypedNode::Split {
+                            direction: Direction::Vertical,
+                            ratio: 0.7,
+                            first: Box::new(TypedNode::Leaf(selected)),
+                            second: Box::new(TypedNode::view(view, "sample.views", "tasks")),
+                        },
+                        TypedNode::Leaf(hidden_b),
+                    ],
+                }),
+            });
+        app.state.workspaces[0].tabs[0].layout.focus_pane(root);
+        app.state.ensure_test_terminals();
+        app.state.assert_invariants_for_test();
+        let legacy = app.layout_description(0, 0).unwrap();
+        let before = app.layout_tree_description(0, 0).unwrap();
+        let terminal_ids = |app: &App| {
+            app.state.workspaces[0].tabs[0]
+                .panes
+                .iter()
+                .map(|(pane, state)| (*pane, state.attached_terminal_id.clone()))
+                .collect::<std::collections::HashMap<_, _>>()
+        };
+        let terminals = terminal_ids(&app);
+        assert!(app.set_node_collapsed(0, 0, &[1], true));
+        let response = app.handle_layout_tree_export(
+            "sliver".into(),
+            LayoutExportParams {
+                tab_id: app.public_tab_id(0, 0),
+                pane_id: None,
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::LayoutTreeExport { layout } = success.result else {
+            panic!("full tree")
+        };
+        let mut expected = serde_json::to_value(&before).unwrap();
+        expected["root"]["second"]["collapsed"] = serde_json::json!(true);
+        assert_eq!(serde_json::to_value(&layout).unwrap(), expected);
+        let encoded = serde_json::to_string(&layout).unwrap();
+        for pane in [root, hidden_a, selected, hidden_b, view] {
+            assert!(encoded.contains(&app.public_pane_id(0, pane).unwrap()));
+        }
+        assert_eq!(layout.kind, "layout.tree.v1");
+        assert_eq!(app.layout_description(0, 0).unwrap(), legacy);
+        assert!(app.set_node_collapsed(0, 0, &[1], false));
+        assert_eq!(app.layout_tree_description(0, 0).unwrap(), before);
+        assert_eq!(terminal_ids(&app), terminals);
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
     fn legacy_export_ignores_hidden_terminals_behind_a_selected_view() {
         let mut app = app_with_workspace();
         let root = app.state.workspaces[0].tabs[0].root_pane;

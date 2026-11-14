@@ -29,6 +29,24 @@ expanded nodes omit the field. Collapse preserves the node's kind and children.
 The export is observational, not a conditional mutation token; see the
 [generic collapse contract](../architecture/generic-pane-collapse.md).
 
+### Identify a collapsed box and its hidden members
+
+Use `vqro pane layout --tree` (active tab), or
+`vqro pane layout --pane w1:p1 --tree` for a pane's tab. This explicitly requests
+`layout.tree.export`, not the legacy geometry report. Walk **all** `children`,
+`first` and `second` branches, including unselected stack children. A collapsed
+node retains its kind, stable box ID when it is a stack, selected child index,
+saved split ratios, and all shell/view member IDs; `collapsed: true` hides their
+bodies, not their membership. Nested collapsed flags distinguish an expanded
+outer box from a still-collapsed selected child. The result is structural, not a
+report of current pixel/cell rectangles.
+
+Native JSON clients can request
+`{"id":"inspect-layout","method":"layout.tree.export","params":{"tab_id":"w1:t1"}}`.
+For fresh conditional collapse/expand addresses, use `layout.collapse.describe`.
+Neither `vqro pane layout` without `--tree` nor `vqro api snapshot` is a complete
+box/member inventory; their existing selected-only semantics are unchanged.
+
 Existing `layout.export`, `layout.apply` and `layout.set_split_ratio` retain
 pane-only, selected-branch response semantics. Their parameter shapes are
 unchanged. The portable terminal-only `layout.export` omits view leaves and

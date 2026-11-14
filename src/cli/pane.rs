@@ -1,7 +1,7 @@
 mod collapse;
 
 use crate::api::schema::{
-    Method, OutputMatch, PaneCurrentParams, PaneDirection, PaneEdgesParams,
+    LayoutExportParams, Method, OutputMatch, PaneCurrentParams, PaneDirection, PaneEdgesParams,
     PaneFocusDirectionParams, PaneInputSetParams, PaneLayoutParams, PaneListParams,
     PaneMoveDestination, PaneMoveParams, PaneNeighborParams, PaneProcessInfoParams, PaneReadParams,
     PaneReleaseAgentParams, PaneRenameParams, PaneReportAgentParams, PaneReportAgentSessionParams,
@@ -143,9 +143,28 @@ fn parse_pane_current_args(
     Ok(caller_pane_id)
 }
 
+fn parse_pane_layout_method(args: &[String], env_pane_id: Option<&str>) -> Result<Method, String> {
+    let tree = args.iter().any(|arg| arg == "--tree");
+    let target_args = args
+        .iter()
+        .filter(|arg| *arg != "--tree")
+        .cloned()
+        .collect::<Vec<_>>();
+    let pane_id = parse_optional_current_pane_args(&target_args, env_pane_id)?;
+    Ok(if tree {
+        Method::LayoutTreeExport(LayoutExportParams {
+            tab_id: None,
+            pane_id,
+        })
+    } else {
+        Method::PaneLayout(PaneLayoutParams { pane_id })
+    })
+}
+
 fn pane_layout(args: &[String]) -> std::io::Result<i32> {
-    let pane_id = match parse_optional_current_pane_args_from_env(args) {
-        Ok(pane_id) => pane_id,
+    let env_pane_id = super::target::caller_pane_id();
+    let method = match parse_pane_layout_method(args, env_pane_id.as_deref()) {
+        Ok(method) => method,
         Err(message) => {
             eprintln!("{message}");
             return Ok(2);
@@ -154,7 +173,7 @@ fn pane_layout(args: &[String]) -> std::io::Result<i32> {
 
     super::print_response(&super::send_request(&Request {
         id: "cli:pane:layout".into(),
-        method: Method::PaneLayout(PaneLayoutParams { pane_id }),
+        method,
     })?)
 }
 
@@ -1767,7 +1786,8 @@ fn print_pane_help() {
     eprintln!("  vqro pane list [--workspace <workspace_id>]");
     eprintln!("  vqro pane current [--pane ID|--current]");
     eprintln!("  vqro pane get <pane_id>");
-    eprintln!("  vqro pane layout [--pane ID|--current]");
+    eprintln!("  vqro pane layout [--pane ID|--current] [--tree]");
+    eprintln!("    --tree: full boxes, collapsed state and all hidden shell/view members");
     eprintln!("  vqro pane process-info [--pane ID|--current]");
     eprintln!("  vqro pane neighbor --direction left|right|up|down [--pane ID|--current]");
     eprintln!("  vqro pane edges [--pane ID|--current]");
@@ -2098,6 +2118,23 @@ mod tests {
 
         assert_eq!(params.pane_id, None);
         assert_eq!(params.direction, PaneDirection::Down);
+    }
+
+    #[test]
+    fn sliver_layout_tree_flag_uses_full_method_without_changing_legacy_default() {
+        assert!(matches!(
+            parse_pane_layout_method(&args(&[]), Some("w1:p1")).unwrap(),
+            Method::PaneLayout(PaneLayoutParams { pane_id: None })
+        ));
+        assert!(
+            matches!(parse_pane_layout_method(&args(&["--tree", "--current"]), Some("w1:p1")).unwrap(),
+            Method::LayoutTreeExport(LayoutExportParams { tab_id: None, pane_id: Some(pane) }) if pane == "w1:p1")
+        );
+        assert!(
+            matches!(parse_pane_layout_method(&args(&["--pane", "w1:p2", "--tree"]), None).unwrap(),
+            Method::LayoutTreeExport(LayoutExportParams { tab_id: None, pane_id: Some(pane) }) if pane == "w1:p2")
+        );
+        assert!(parse_pane_layout_method(&args(&["--tree", "--bogus"]), None).is_err());
     }
 
     #[test]

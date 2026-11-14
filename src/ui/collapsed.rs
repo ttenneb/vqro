@@ -54,7 +54,7 @@ pub(super) fn render_collapsed_frames(
             header.pane_count,
             style,
         );
-        if header.focused && header.direction == Direction::Horizontal {
+        if header.focused && (header.direction == Direction::Horizontal || header.rect.width <= 3) {
             draw_full_label(
                 frame.buffer_mut(),
                 header.rect,
@@ -84,26 +84,34 @@ fn draw_header(
         .filter(|ch| !ch.is_control())
         .take(MAX_HEADER_SCALARS)
         .collect::<String>();
-    buffer.set_stringn(rect.x, rect.y, "▸", 1, style);
+    buffer.set_stringn(rect.x, rect.y, "▸ ", usize::from(rect.width.min(2)), style);
     if direction == Direction::Horizontal {
-        // One initial/icon and a count, never an unreadable vertical title.
+        // Reuse the compact initial/count language, with a readable arrow row.
+        // Tiny viewports retain the one-cell fallback rather than painting out.
         let span = ratatui::text::Span::raw(&bounded);
-        if rect.height > 1 {
-            let initial = span
-                .styled_graphemes(style)
-                .find(|glyph| !glyph.symbol.trim().is_empty() && glyph.symbol.width() > 0)
-                .map(|glyph| glyph.symbol)
-                .filter(|glyph| glyph.width() == 1)
-                .unwrap_or("□");
-            buffer.set_stringn(rect.x, rect.y + 1, initial, 1, style);
-        }
-        if rect.height > 2 {
-            let count = if count > 9 {
-                "+".to_owned()
-            } else {
-                count.to_string()
-            };
-            buffer.set_stringn(rect.x, rect.y + 2, count, 1, style);
+        let initial = span
+            .styled_graphemes(style)
+            .find(|glyph| !glyph.symbol.trim().is_empty() && glyph.symbol.width() > 0)
+            .map(|glyph| glyph.symbol)
+            .filter(|glyph| glyph.width() == 1)
+            .unwrap_or("□");
+        if rect.width >= 3 {
+            buffer.set_stringn(rect.x + 2, rect.y, initial, 1, style);
+            if rect.height > 1 {
+                buffer.set_stringn(rect.x + 1, rect.y + 1, count.to_string(), 2, style);
+            }
+        } else {
+            if rect.height > 1 {
+                buffer.set_stringn(rect.x, rect.y + 1, initial, 1, style);
+            }
+            if rect.height > 2 {
+                let count = if count > 9 {
+                    "+".to_owned()
+                } else {
+                    count.to_string()
+                };
+                buffer.set_stringn(rect.x, rect.y + 2, count, 1, style);
+            }
         }
     } else if rect.width > 2 {
         buffer.set_stringn(
@@ -188,17 +196,31 @@ mod tests {
             workspace_index: 0,
             tab_index: 0,
         });
-        for focused in [false, true] {
+        for (focused, direction) in [
+            (false, Direction::Horizontal),
+            (true, Direction::Horizontal),
+            (false, Direction::Vertical),
+            (true, Direction::Vertical),
+        ] {
             let header = CollapsedFrame {
-                rect: Rect::new(11, 0, 1, 5),
+                rect: Rect::new(
+                    11,
+                    0,
+                    3,
+                    if direction == Direction::Vertical {
+                        1
+                    } else {
+                        5
+                    },
+                ),
                 path: Vec::new(),
-                direction: Direction::Horizontal,
+                direction,
                 title_pane: Some(pane),
                 leaf_pane: Some(pane),
                 pane_count: 1,
                 focused,
             };
-            let mut terminal = Terminal::new(TestBackend::new(12, 5)).unwrap();
+            let mut terminal = Terminal::new(TestBackend::new(14, 5)).unwrap();
             terminal
                 .draw(|frame| {
                     render_collapsed_frames(&app, target, std::slice::from_ref(&header), frame)
@@ -206,10 +228,43 @@ mod tests {
                 .unwrap();
             let buffer = terminal.backend().buffer();
             assert_eq!(buffer[(11, 0)].symbol(), "▸");
-            assert_eq!(buffer[(11, 1)].symbol(), "S");
-            assert_eq!(buffer[(11, 2)].symbol(), "1");
+            assert_eq!(buffer[(12, 0)].symbol(), " ");
+            assert_eq!(buffer[(13, 0)].symbol(), "S");
+            if direction == Direction::Horizontal {
+                assert_eq!(buffer[(12, 1)].symbol(), "1");
+            }
             let top = (0..11).map(|x| buffer[(x, 0)].symbol()).collect::<String>();
             assert_eq!(top.contains("Shell"), focused, "{top:?}");
+        }
+    }
+
+    #[test]
+    fn sliver_three_column_strip_has_readable_arrow_initial_and_full_member_count() {
+        for (text, initial) in [
+            ("Shell", "S"),
+            ("e\u{301}", "e\u{301}"),
+            ("界", "□"),
+            ("👩‍💻", "□"),
+        ] {
+            let mut buffer = Buffer::empty(Rect::new(0, 0, 5, 4));
+            draw_header(
+                &mut buffer,
+                Rect::new(1, 1, 3, 2),
+                Direction::Horizontal,
+                text,
+                32,
+                Style::default(),
+            );
+            assert_eq!(buffer[(1, 1)].symbol(), "▸");
+            assert_eq!(buffer[(2, 1)].symbol(), " ");
+            assert_eq!(buffer[(3, 1)].symbol(), initial);
+            assert_eq!(buffer[(2, 2)].symbol(), "3");
+            assert_eq!(buffer[(3, 2)].symbol(), "2");
+            for y in 0..4 {
+                for x in [0, 4] {
+                    assert_eq!(buffer[(x, y)].symbol(), " ");
+                }
+            }
         }
     }
 

@@ -122,6 +122,27 @@ fn header_mouse_and_default_key_use_the_same_fenced_desired_state() {
 }
 
 #[test]
+fn sliver_all_three_affordance_cells_expand_without_body_input() {
+    for column in 0..3 {
+        let mut state = header_state(true);
+        let mut hit = state.hits.collapse_headers[0].rect;
+        assert_eq!(hit.width, 3);
+        hit.x += column;
+        let clicked = state.handle_raw_events(vec![RawInputEvent::Mouse(mouse(
+            hit,
+            MouseEventKind::Down(MouseButton::Left),
+        ))]);
+        assert!(
+            matches!(method(&clicked), Some(Method::LayoutExpand(target)) if target.path.is_empty())
+        );
+        assert!(
+            clicked.requests.is_empty(),
+            "strip clicks never become body input"
+        );
+    }
+}
+
+#[test]
 fn collapsed_header_expand_uses_clicked_structure_not_current_pane_selection() {
     let mut state = feature_shell();
     let frame = surface();

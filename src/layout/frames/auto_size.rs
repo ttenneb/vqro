@@ -45,8 +45,8 @@ impl Sizer<'_> {
             TypedNode::Collapsed { node } => {
                 let child = self.minimum(node, inside);
                 Size {
-                    minimum: (1, 1),
-                    wanted: child.wanted.map(|_| (1, 1)),
+                    minimum: (COLLAPSED_SIDE_WIDTH, 1),
+                    wanted: child.wanted.map(|_| (COLLAPSED_SIDE_WIDTH, 1)),
                     ..child
                 }
             }
@@ -231,7 +231,8 @@ impl Sizer<'_> {
                         changed |= set_cells(ratio, extent, first_cells);
                     }
                 }
-                let (a, b) = effective_split(area, *direction, *ratio, first, second, &self.facts);
+                let (a, b) =
+                    effective_split(area, *direction, *ratio, first, second, inside, &self.facts);
                 let selected = selected.filter(|_| inside && !compact);
                 let first_group = selected
                     .filter(|(before, _, _)| *before)

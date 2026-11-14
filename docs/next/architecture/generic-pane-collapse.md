@@ -32,12 +32,18 @@ Frame qualification, sizing and view summaries use this same rule. See
 ## Geometry and size memory
 
 In a vertical split a collapsed child takes one header row. In a horizontal split
-it takes one narrow column with an upright vertical or truncated title. Display
-clipping must not let wide/combining/emoji clusters paint into the sibling.
+it takes three usable columns for the existing expand arrow, title initial and
+member count; focused narrow headers reveal the cached full horizontal label.
+Display clipping must not let wide/combining/emoji clusters paint into the sibling.
 Expanded siblings receive the released space. Fully collapsed nested subtrees
-have compact extents too; both-collapsed, root and tiny rectangles saturate
-without negative sizes. Only an ancestor header is visible when it is collapsed.
-A root header can leave unused space.
+have compact extents too, including their existing box-frame and stack-header
+chrome. Compact measurement follows the same inherited-group boundary as geometry:
+a qualifying split gets its own frame only outside an enclosing group, and a
+collapsed wrapper gets no inner frame. Thus a framed compact side group normally
+needs five outer columns to leave three usable header columns. Both-collapsed,
+root and tiny rectangles saturate without negative sizes or overlapping headers.
+Only an ancestor header is visible when it is collapsed. A root header can leave
+unused space.
 
 Effective allocation never writes near-zero shares over expanded size memory.
 Expand restores those shares, proportionally scaled after viewport changes.

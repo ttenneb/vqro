@@ -17,6 +17,260 @@ fn layout(root: TypedNode) -> TileLayout {
     TileLayout::from_tree(root, LayoutLeaf::Pane(PaneId::from_raw(1))).unwrap()
 }
 
+// Private reproduction of the reported 144-column shape, never a live session.
+fn sliver_layout(ratio: f32) -> TileLayout {
+    let mut root = split(
+        Direction::Horizontal,
+        split(
+            Direction::Vertical,
+            split(Direction::Horizontal, pane(1), pane(2)),
+            TypedNode::view(PaneId::from_raw(3), "sample.views", "bottom"),
+        ),
+        TypedNode::Stack {
+            id: crate::layout::CollectionId::from_raw(914_144)
+                .unwrap()
+                .into(),
+            selected: 1,
+            children: vec![
+                pane(4),
+                split(
+                    Direction::Vertical,
+                    split(Direction::Horizontal, pane(5), pane(6)),
+                    TypedNode::view(PaneId::from_raw(7), "sample.views", "hidden"),
+                ),
+            ],
+        },
+    );
+    let TypedNode::Split { ratio: saved, .. } = &mut root else {
+        unreachable!()
+    };
+    *saved = ratio;
+    layout(root)
+}
+
+#[test]
+fn sliver_collapsed_side_has_readable_minimum_and_preserves_saved_share() {
+    let mut tree = sliver_layout(0.6);
+    let before = tree.typed_root().clone();
+    let area = Rect::new(0, 0, 144, 40);
+    assert!(tree.set_collapsed(&[1], true));
+    let geometry = tree.geometry(area);
+    assert_eq!(geometry.collapsed[0].pane_count, 4);
+    assert!(geometry.collapsed[0].rect.width >= 3);
+    assert!(tree.set_collapsed(&[1], false));
+    assert_eq!(tree.typed_root(), &before);
+}
+
+#[test]
+fn sliver_pure_collapse_preserves_even_an_unusable_saved_share() {
+    let mut tree = sliver_layout(143.0 / 144.0);
+    let area = Rect::new(0, 0, 144, 40);
+    let members = tree.pane_ids();
+    let selected = tree.typed_root().at(&[1]).unwrap().clone();
+    assert!(tree.set_collapsed(&[1], true));
+    assert!(tree.set_collapsed(&[1], false));
+    let geometry = tree.geometry(area);
+    let right = geometry
+        .containers
+        .iter()
+        .find(|container| container.path == vec![LayoutPathStep::Split(LayoutSplitChild::Second)])
+        .unwrap();
+    // Characterize the symptom and the pure edit boundary. Any approved usable
+    // fallback is explicit actor policy, not a silent rewrite in this primitive.
+    assert_eq!(right.rect, Rect::new(143, 0, 1, 40));
+    assert_eq!(tree.pane_ids(), members);
+    assert_eq!(tree.typed_root().at(&[1]), Some(&selected));
+}
+
+fn actual_sliver_layout() -> TileLayout {
+    let edge = |direction, ratio, first, second| TypedNode::Split {
+        direction,
+        ratio,
+        first: Box::new(first),
+        second: Box::new(second),
+    };
+    layout(edge(
+        Direction::Horizontal,
+        0.6041667,
+        edge(
+            Direction::Vertical,
+            0.9,
+            edge(Direction::Horizontal, 0.3846154, pane(1), pane(2)),
+            TypedNode::view(PaneId::from_raw(3), "sample.views", "tasks"),
+        ),
+        edge(
+            Direction::Vertical,
+            0.93333334,
+            pane(4).collapsed(),
+            TypedNode::view(PaneId::from_raw(5), "sample.views", "tasks").collapsed(),
+        ),
+    ))
+}
+
+#[test]
+fn sliver_actual_shape_keeps_readable_child_headers_and_expands_with_saved_share() {
+    for child in [0, 1] {
+        let mut tree = actual_sliver_layout();
+        let original = tree.typed_root().clone();
+        let area = Rect::new(0, 0, 144, 40);
+        let geometry = tree.geometry(area);
+        assert_eq!(geometry.collapsed.len(), 2);
+        assert!(
+            geometry
+                .collapsed
+                .iter()
+                .all(|header| header.rect.width >= 3),
+            "compact box frame consumed child headers: {:?}",
+            geometry.collapsed
+        );
+        assert!(tree.set_collapsed(&[1, child], false));
+        let expanded = tree.geometry(area);
+        let side = expanded
+            .containers
+            .iter()
+            .find(|container| {
+                container.path == vec![LayoutPathStep::Split(LayoutSplitChild::Second)]
+            })
+            .unwrap();
+        assert_eq!(side.rect.width, 57);
+        assert!(expanded
+            .panes
+            .iter()
+            .any(|pane| pane.id == PaneId::from_raw(4 + child as u32)));
+        assert_eq!(
+            expanded.collapsed.len(),
+            1,
+            "other child's intent remains collapsed"
+        );
+        assert!(tree.set_collapsed(&[1, child], true));
+        assert_eq!(tree.typed_root(), &original);
+    }
+}
+
+#[test]
+fn sliver_compact_nested_group_charges_one_frame_and_wrapper_charges_none() {
+    let group = split(
+        Direction::Vertical,
+        split(
+            Direction::Vertical,
+            pane(2).collapsed(),
+            TypedNode::view(PaneId::from_raw(3), "sample.views", "a").collapsed(),
+        ),
+        TypedNode::view(PaneId::from_raw(4), "sample.views", "b").collapsed(),
+    );
+    for wrapped in [false, true] {
+        let child = if wrapped {
+            group.clone().collapsed()
+        } else {
+            group.clone()
+        };
+        let tree = layout(split(Direction::Horizontal, pane(1), child));
+        let geometry = tree.geometry(Rect::new(0, 0, 144, 40));
+        if wrapped {
+            assert!(geometry.boxes.is_empty());
+            assert_eq!(geometry.collapsed.len(), 1);
+            assert_eq!(geometry.collapsed[0].rect.width, 3);
+        } else {
+            assert_eq!(geometry.boxes.len(), 1);
+            assert_eq!(geometry.boxes[0].rect.width, 5);
+            assert_eq!(geometry.collapsed.len(), 3);
+            assert!(geometry
+                .collapsed
+                .iter()
+                .all(|header| header.rect.width == 3));
+        }
+    }
+}
+
+#[test]
+fn sliver_stack_header_and_hidden_members_do_not_duplicate_group_chrome() {
+    let tree = layout(split(
+        Direction::Horizontal,
+        pane(1),
+        TypedNode::Stack {
+            id: crate::layout::CollectionId::from_raw(914_145)
+                .unwrap()
+                .into(),
+            selected: 0,
+            children: vec![
+                split(
+                    Direction::Vertical,
+                    pane(2).collapsed(),
+                    TypedNode::view(PaneId::from_raw(3), "sample.views", "a").collapsed(),
+                ),
+                pane(4),
+            ],
+        },
+    ));
+    let geometry = tree.geometry(Rect::new(0, 0, 144, 40));
+    assert_eq!(geometry.boxes.len(), 1);
+    assert_eq!(geometry.boxes[0].rect.width, 5);
+    assert!(geometry
+        .collapsed
+        .iter()
+        .all(|header| header.rect.width == 3 && header.rect.y >= 2));
+    assert_eq!(tree.pane_count(), 4);
+}
+
+#[test]
+fn sliver_actual_compact_group_clips_tiny_geometry_without_overlap() {
+    let tree = actual_sliver_layout();
+    for width in 0..10 {
+        for height in 0..8 {
+            let area = Rect::new(3, 4, width, height);
+            let geometry = tree.geometry(area);
+            let rects = geometry
+                .panes
+                .iter()
+                .map(|pane| pane.rect)
+                .chain(geometry.collapsed.iter().map(|header| header.rect))
+                .collect::<Vec<_>>();
+            for (index, rect) in rects.iter().enumerate() {
+                assert!(
+                    rect.x >= area.x
+                        && rect.y >= area.y
+                        && rect.right() <= area.right()
+                        && rect.bottom() <= area.bottom(),
+                    "{rect:?} outside {area:?}"
+                );
+                for other in &rects[index + 1..] {
+                    assert!(rect.intersection(*other).is_empty());
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn sliver_new_split_without_explicit_share_keeps_existing_usable_half_default() {
+    let (mut tree, _) = TileLayout::new();
+    tree.split_focused(Direction::Horizontal);
+    let original = tree.typed_root().clone();
+    assert!(tree.set_collapsed(&[1], true));
+    assert!(tree.set_collapsed(&[1], false));
+    assert_eq!(tree.typed_root(), &original);
+    let panes = tree.geometry(Rect::new(0, 0, 144, 40)).panes;
+    assert_eq!(panes[0].rect.width, 72);
+    assert_eq!(panes[1].rect.width, 72);
+}
+
+#[test]
+fn sliver_normal_and_asymmetric_shares_survive_cycles_and_viewport_resize_exactly() {
+    for ratio in [0.1, 0.6, 0.95] {
+        let mut tree = sliver_layout(ratio);
+        let before = tree.typed_root().clone();
+        for width in [144, 80, 220, 144] {
+            assert!(tree.set_collapsed(&[1], true));
+            let geometry = tree.geometry(Rect::new(0, 0, width, 40));
+            assert_eq!(geometry.collapsed[0].rect.width, 3);
+            assert!(tree.set_collapsed(&[1], false));
+            assert_eq!(tree.typed_root(), &before);
+            let _ = tree.geometry(Rect::new(0, 0, width, 40));
+            assert_eq!(tree.typed_root(), &before);
+        }
+    }
+}
+
 #[test]
 fn visible_header_title_consumers_stop_at_outer_collapse_and_hidden_stack_branches() {
     let mut tree = layout(TypedNode::Stack {
@@ -102,8 +356,8 @@ fn collapsed_node_releases_axis_space_and_expand_restores_exact_geometry() {
         assert_eq!(header.direction, direction);
         match direction {
             Direction::Horizontal => {
-                assert_eq!(header.rect.width, 1);
-                assert_eq!(geometry.panes[0].inner_rect.width, area.width - 1);
+                assert_eq!(header.rect.width, 3);
+                assert_eq!(geometry.panes[0].inner_rect.width, area.width - 3);
             }
             Direction::Vertical => {
                 assert_eq!(header.rect.height, 1);

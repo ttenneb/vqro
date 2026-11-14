@@ -576,6 +576,72 @@ async fn render_scale_profile_armed_boxes_with_populated_documents() {
     }
 }
 
+#[test]
+#[ignore = "manual fixed-geometry populated-pane profile"]
+fn render_scale_profile_collapsed_side_strip() {
+    let rows = [1, 15].map(|count| {
+        let mut workspace = populated_panes(count);
+        let root = workspace.tabs[0].root_pane;
+        let original = workspace.tabs[0].layout.typed_root().clone();
+        // Fixed hidden membership, with no populated runtime: only the 1/15
+        // visible terminal bodies carry the scrollback/output workload.
+        let hidden = workspace.test_split(Direction::Horizontal);
+        let (_, view) = workspace
+            .split_pane_with_view(
+                hidden,
+                "sample.views",
+                "collapsed",
+                Direction::Horizontal,
+                0.5,
+                false,
+            )
+            .unwrap();
+        workspace.tabs[0]
+            .layout
+            .replace_typed_root_for_test(crate::layout::TypedNode::Split {
+                direction: Direction::Horizontal,
+                ratio: 0.6041667,
+                first: Box::new(original),
+                second: Box::new(crate::layout::TypedNode::Split {
+                    direction: Direction::Vertical,
+                    ratio: 0.93333334,
+                    first: Box::new(crate::layout::TypedNode::Collapsed {
+                        node: Box::new(crate::layout::TypedNode::Leaf(hidden)),
+                    }),
+                    second: Box::new(crate::layout::TypedNode::Collapsed {
+                        node: Box::new(crate::layout::TypedNode::view(
+                            view,
+                            "sample.views",
+                            "collapsed",
+                        )),
+                    }),
+                }),
+            });
+        workspace.tabs[0].layout.focus_pane(root);
+        let geometry = workspace.tabs[0].layout.geometry(pane_surface_rect());
+        assert_eq!(geometry.collapsed.len(), 2);
+        assert!(geometry
+            .collapsed
+            .iter()
+            .all(|header| header.rect.width == 3));
+        assert_eq!(geometry.panes.len(), count);
+        assert!(geometry
+            .panes
+            .iter()
+            .all(|pane| pane.rect.width >= MIN_PANE_COLS && pane.rect.height >= MIN_PANE_ROWS));
+        (
+            count,
+            profile_pipeline(RenderPipeline::new(vec![workspace])),
+        )
+    });
+    println!(
+        "collapsed grouped side, fixed {COLS}x{ROWS}, 1/15 populated terminal bodies + fixed hidden terminal/view"
+    );
+    print_stage("server pane surface", &rows, |stats| stats.server);
+    print_stage("client shell composition", &rows, |stats| stats.client);
+    print_stage("combined pipeline", &rows, |stats| stats.total);
+}
+
 fn print_profiles(label: &str, build: fn(usize) -> Vec<Workspace>) {
     let rows = CARDINALITIES.map(|count| (count, profile(build, count)));
     println!("{label}");

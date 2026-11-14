@@ -24,6 +24,9 @@ pub(crate) fn take_gathers() -> usize {
     GATHERS.with(|count| count.replace(0))
 }
 
+/// Arrow, spacing and one readable title initial; height remains one header row.
+pub(crate) const COLLAPSED_SIDE_WIDTH: u16 = 3;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct BoxFrame {
     pub rect: Rect,
@@ -65,10 +68,21 @@ struct Facts {
     visible_views: bool,
     views: bool,
     valid_scopes: bool,
+    // Outside and inside an inherited box frame. A qualifying split adds its
+    // own chrome only outside; walk suppresses nested frames inside a group.
     compact: Option<(u16, u16)>,
+    compact_in_group: Option<(u16, u16)>,
     visible_collapse: bool,
 }
 impl Facts {
+    fn compact(self, inside_group: bool) -> Option<(u16, u16)> {
+        if inside_group {
+            self.compact_in_group
+        } else {
+            self.compact
+        }
+    }
+
     fn group_terminal(self) -> Option<PaneId> {
         (self.terminals == 1
             && self.visible_terminals == 1
@@ -86,10 +100,11 @@ fn key(node: &TypedNode) -> usize {
 // Only the selected stack branch contributes visibility. View-only containers
 // inherit the nearest enclosing nonempty complete terminal membership.
 fn gather(node: &TypedNode, facts: &mut HashMap<usize, Facts>) -> Facts {
-    let result = match node {
+    let mut result = match node {
         TypedNode::Collapsed { node } => {
             let mut result = gather(node, facts);
-            result.compact = Some((1, 1));
+            result.compact = Some((COLLAPSED_SIDE_WIDTH, 1));
+            result.compact_in_group = result.compact;
             result.visible_collapse = true;
             result
         }
@@ -108,7 +123,12 @@ fn gather(node: &TypedNode, facts: &mut HashMap<usize, Facts>) -> Facts {
             valid_scopes: true,
             ..Facts::default()
         },
-        TypedNode::Split { first, second, .. } => {
+        TypedNode::Split {
+            direction,
+            first,
+            second,
+            ..
+        } => {
             let a = gather(first, facts);
             let b = gather(second, facts);
             let terminals = a.terminals.saturating_add(b.terminals).min(2);
@@ -131,19 +151,8 @@ fn gather(node: &TypedNode, facts: &mut HashMap<usize, Facts>) -> Facts {
                     && (!matches!(first.content(), TypedNode::View { .. }) || terminals <= 1)
                     && (!matches!(second.content(), TypedNode::View { .. }) || terminals <= 1),
                 visible_collapse: a.visible_collapse || b.visible_collapse,
-                compact: a.compact.zip(b.compact).map(|(a, b)| {
-                    if matches!(
-                        node,
-                        TypedNode::Split {
-                            direction: Direction::Horizontal,
-                            ..
-                        }
-                    ) {
-                        (a.0.saturating_add(b.0), a.1.max(b.1))
-                    } else {
-                        (a.0.max(b.0), a.1.saturating_add(b.1))
-                    }
-                }),
+                compact: compact_split(*direction, a.compact, b.compact),
+                compact_in_group: compact_split(*direction, a.compact_in_group, b.compact_in_group),
             }
         }
         TypedNode::Stack {
@@ -168,9 +177,9 @@ fn gather(node: &TypedNode, facts: &mut HashMap<usize, Facts>) -> Facts {
                 if index == *selected {
                     result.visible_terminals = child_facts.visible_terminals;
                     result.visible_views = child_facts.visible_views;
-                    result.compact = child_facts
-                        .compact
-                        .map(|(width, height)| (width, height.saturating_add(1)));
+                    let header = |(width, height): (u16, u16)| (width, height.saturating_add(1));
+                    result.compact = child_facts.compact.map(header);
+                    result.compact_in_group = child_facts.compact_in_group.map(header);
                     result.visible_collapse = child_facts.visible_collapse;
                 }
             }
@@ -181,8 +190,28 @@ fn gather(node: &TypedNode, facts: &mut HashMap<usize, Facts>) -> Facts {
             result
         }
     };
+    // Same qualification and inherited-frame boundary as walk. Collapsed
+    // wrappers return before grouping, so they never acquire phantom chrome.
+    if matches!(node, TypedNode::Split { .. }) && result.group_terminal().is_some() {
+        result.compact = result
+            .compact_in_group
+            .map(|(width, height)| (width.saturating_add(2), height.saturating_add(2)));
+    }
     facts.insert(key(node), result);
     result
+}
+fn compact_split(
+    direction: Direction,
+    a: Option<(u16, u16)>,
+    b: Option<(u16, u16)>,
+) -> Option<(u16, u16)> {
+    a.zip(b).map(|(a, b)| {
+        if direction == Direction::Horizontal {
+            (a.0.saturating_add(b.0), a.1.max(b.1))
+        } else {
+            (a.0.max(b.0), a.1.saturating_add(b.1))
+        }
+    })
 }
 fn inset(area: Rect) -> Rect {
     Rect::new(
@@ -255,6 +284,7 @@ fn effective_split(
     ratio: f32,
     first: &TypedNode,
     second: &TypedNode,
+    inside_group: bool,
     facts: &HashMap<usize, Facts>,
 ) -> (Rect, Rect) {
     let axis = |size: (u16, u16)| {
@@ -266,11 +296,11 @@ fn effective_split(
     };
     let a = facts
         .get(&key(first))
-        .and_then(|fact| fact.compact)
+        .and_then(|fact| fact.compact(inside_group))
         .map(axis);
     let b = facts
         .get(&key(second))
-        .and_then(|fact| fact.compact)
+        .and_then(|fact| fact.compact(inside_group))
         .map(axis);
     let extent = if direction == Direction::Horizontal {
         area.width
@@ -331,7 +361,7 @@ fn walk(
 ) {
     if let TypedNode::Collapsed { node } = node {
         if parent_direction == Direction::Horizontal {
-            area.width = area.width.min(1);
+            area.width = area.width.min(COLLAPSED_SIDE_WIDTH);
         } else {
             area.height = area.height.min(1);
         }
@@ -462,7 +492,15 @@ fn walk(
                 framed: own_frame,
                 stack: false,
             });
-            let (a, b) = effective_split(area, *direction, *ratio, first, second, facts);
+            let (a, b) = effective_split(
+                area,
+                *direction,
+                *ratio,
+                first,
+                second,
+                group.is_some(),
+                facts,
+            );
             let compact = facts
                 .get(&key(first))
                 .and_then(|fact| fact.compact)
