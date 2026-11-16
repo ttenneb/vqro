@@ -7,7 +7,8 @@
 //!     "description"?, "checked"?, "style"?, "disabled"?, "badges"?: [{"text", "style"?, "color"?}],
 //!     "children"?: [row], "expanded"?: bool, "command"?, "args"?, "input"?, "menu"?: [menu item],
 //!     "icon"?: one or two characters before the text, or {"name"?, "nerd"?, "text"?} resolved through
-//!     the active icon set (`icons.rs`), "icon_style"?: a semantic style for it}`
+//!     the active icon set (`icons.rs`; named icons and chip icons are feature `icon_names`),
+//!     "icon_style"?: a semantic style for it}`
 //! More row types: `chips` (`{"type": "chips", "chips": [chip]}`, a wrapping row of small buttons or
 //! toggles; a chip is `{"text", "icon"?, "checked"?, "style"?, "command"?, "args"?, "input"?, "options"?}`) and
 //! `select` (`{"type": "select", "text", "value", "options": [{"label", "value"}], "command", "args"?}`).
@@ -66,7 +67,7 @@ pub struct Hits {
 }
 
 /// Panel features this client renders. A panel may list what it needs in `requires`.
-pub const SUPPORTED: &[&str] = &["items", "pages", "tree", "badges", "menu", "input", "description", "filter", "toolbar", "chips", "select", "options", "badge_color", "icon"];
+pub const SUPPORTED: &[&str] = &["items", "pages", "tree", "badges", "menu", "input", "description", "filter", "toolbar", "chips", "select", "options", "badge_color", "icon", "icon_names"];
 
 /// Features a panel needs that this client lacks.
 pub fn missing(v: &Value) -> Vec<String> {
@@ -518,5 +519,57 @@ pub fn right(rows: &[Flat], st: &mut State) {
         st.open.insert(r.id.clone(), true);
     } else if r.has_children && st.sel + 1 < rows.len() {
         st.sel += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Draw a panel and return its lines, skipping the cell a wide glyph covers.
+    fn draw(v: &Value, icons: &Icons, width: u16) -> Vec<String> {
+        let area = Rect::new(0, 0, width, 6);
+        let mut buf = Buffer::empty(area);
+        render(&mut buf, area, v, &mut State::default(), false, &Palette::default(), icons);
+        let line = |y| {
+            let mut s = String::new();
+            let mut x = 0;
+            while x < width {
+                let sym = buf[(x, y)].symbol();
+                s.push_str(sym);
+                x += icons::width(sym).max(1);
+            }
+            s.trim_end().to_string()
+        };
+        (0..area.height).map(line).collect()
+    }
+
+    fn rows() -> Value {
+        json!({"items": [
+            {"text": "agent", "icon": {"name": ["working", "agent"], "nerd": "\u{f06a9}", "text": "◆"}},
+            {"text": "repo", "icon": {"name": "repo", "text": "⎇"}},
+            {"text": "plain", "icon": "x"},
+            {"type": "chips", "chips": [{"text": "", "icon": {"name": "filter", "text": "/"}}, {"text": "all"}]},
+        ]})
+    }
+
+    #[test]
+    fn no_set_draws_as_before() {
+        let lines = draw(&rows(), &Icons::new(None, false), 30);
+        assert_eq!(lines[..4], [" ◆ agent", " ⎇ repo", " x plain", " /   all"]);
+    }
+
+    #[test]
+    fn a_wide_set_keeps_text_aligned() {
+        // The set has the state glyph and not `repo`: the repo row falls back but keeps the column.
+        let icons = Icons::new(Some(&json!({"name": "emoji", "width": 2, "glyphs": {"working": "⏳", "filter": "🔍"}})), false);
+        let lines = draw(&rows(), &icons, 30);
+        let col = |l: &str, t: &str| l.find(t).map(|b| icons::width(&l[..b]));
+        assert_eq!(col(&lines[0], "agent"), Some(4));
+        assert_eq!(col(&lines[1], "repo"), Some(4));
+        assert_eq!(col(&lines[2], "plain"), Some(4));
+        assert!(lines[0].starts_with(" ⏳"));
+        assert!(lines[3].starts_with(" 🔍"));
     }
 }
