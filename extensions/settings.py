@@ -48,26 +48,101 @@ def ext_rows(states):
     return rows
 
 
+# Keys page. Mirrors the client's key rules (src/tui/keys.rs, src/tui/mod.rs `rank`) to show
+# which binding wins each key; the client stays the authority.
+PREFIXES = ["C-g", "C-a", "C-b", "C-Space"]
+NAMED = {n.lower(): n for n in ("Up", "Down", "Left", "Right", "Home", "End", "PageUp", "PageDown", "Insert",
+                                "Delete", "Tab", "BackTab", "Enter", "Esc", "Backspace", "Space")}
+NAMED.update({f"f{n}": f"F{n}" for n in range(1, 13)})
+# The client's default keys (recovery ones stay reachable from the prim badge whatever wins).
+BUILTIN = [(":", "all commands"), ("o", "next pane"), ("O", "previous pane"), ("u", "undo last change"),
+           ("R", "reset layout"), ("!", "safe mode"), ("q", "quit")] + [(str(n), f"tab {n}") for n in range(1, 10)]
+
+
+def norm_key(s):
+    """Canonical key name (`C-space` -> `C-Space`), or None if it isn't one."""
+    mods, rest = set(), s
+    while len(rest) > 2 and rest[1] == "-" and rest[0].upper() in "CMS":
+        mods.add(rest[0].upper())
+        rest = rest[2:]
+    if rest == " ":
+        rest = "Space"
+    elif len(rest) == 1:
+        if "S" in mods:
+            return None
+        rest = rest.lower() if "C" in mods else rest
+    elif rest.lower() in NAMED:
+        rest = NAMED[rest.lower()]
+    else:
+        return None
+    return "".join(m + "-" for m in "CMS" if m in mods) + rest
+
+
+def prefix_key():
+    k = norm_key(str(tui().get("prefix") or ""))
+    return k if k and (k[:2] in ("C-", "M-") or (k[0] == "F" and len(k) > 1)) else "C-g"
+
+
+def binding_on(b, titles):
+    """Whether a client would use this binding: its owner is on and its command available.
+    (No need to check safe mode: this extension isn't running then.)"""
+    owner = b.get("owner")
+    if owner and not (ext.value(f"extension/{owner}") or {"enabled": False}).get("enabled", True):
+        return False
+    cmd = b.get("command", "")
+    return cmd.startswith("client.") or cmd in titles
+
+
 def key_rows():
-    """Every binding: prefix keys and gestures, with what they run and who added them."""
+    """Profile and prefix, then every binding grouped by key, the winner first."""
     titles = {}
     try:
-        titles = {c["name"]: c["title"] for c in ext.prim.call("command.list")["commands"]}
+        titles = {c["name"]: c["title"] for c in ext.prim.call("command.list")["commands"] if c.get("available")}
     except Exception:
         pass
+    prefix = prefix_key()
     rows = []
+    live = ext.live.get("keys") or {}
+    if live.get("profiles"):
+        rows.append({"type": "select", "text": "Profile", "value": live.get("profile"), "options": live["profiles"],
+                     "command": "keys.profile", "description": "a keymap; its keys override extensions' own"})
+    current = tui().get("prefix") or "C-g"
+    options = [{"label": p, "value": p} for p in PREFIXES]
+    if current not in PREFIXES:
+        options.append({"label": current, "value": current})
+    options.append({"label": "custom…", "input": "Prefix key (e.g. C-a, M-Space, F12)"})
+    rows.append({"type": "select", "text": "Prefix", "value": current, "options": options, "command": "settings.prefix",
+                 "description": "falls back to C-g if unusable; press it twice to send it to the program"})
+    rows += [{"type": "separator"}, {"type": "header", "text": f"Keys after {prefix} (first wins)"}]
+
+    groups = {}
+    for k, d in BUILTIN:
+        groups.setdefault(k, []).append(((0, 0, ""), {"key": k, "label": d, "owner": "client"}, True))
     for k in sorted(k for k in ext.entries if k.startswith("binding/")):
-        b = ext.value(k)
-        key = b.get("key", "?")
-        where = f" on {b['where']}" if b.get("where") else ""
-        shown = ("Ctrl-g " + key) if not key.startswith("mouse.") else key.replace("mouse.", "") + "-click" + where
-        rows.append({"text": shown, "detail": b.get("owner") or "workspace",
-                     "description": b.get("label") or titles.get(b.get("command"), b.get("command"))})
-    builtin = [(":", "all commands"), ("o", "next pane"), ("1-9", "tab"), ("u", "undo last change"),
-               ("R", "reset layout"), ("!", "safe mode"), ("q", "quit")]
-    rows.append({"type": "separator"})
-    rows.append({"type": "header", "text": "Built in (recovery, always there)"})
-    rows += [{"text": "Ctrl-g " + k, "detail": "core", "description": d} for k, d in builtin]
+        bv = ext.value(k)
+        raw = bv.get("key", "?")
+        group = f"{raw} on {bv.get('where', 'pane')}" if raw.startswith("mouse.") else norm_key(raw) or raw
+        on = binding_on(bv, titles)
+        groups.setdefault(group, []).append(((-int(bv.get("priority") or 0), 1, k), bv, on))
+    for group in sorted(groups, key=lambda g: (g.startswith("mouse."), g)):
+        cands = sorted(groups[group], key=lambda c: (not c[2], c[0]))
+        for n, (_, bv, on) in enumerate(cands):
+            cmd = bv.get("command")
+            what = bv.get("label") or titles.get(cmd, cmd)
+            if cmd == "client.none":
+                what = "unbound"
+            if group.startswith("mouse."):
+                shown = group.replace("mouse.", "").replace(" on ", "-click on ")
+            else:
+                shown = f"{prefix} {group}"
+            row = {"text": shown if n == 0 else "  ↳ " + shown, "detail": bv.get("owner") or "workspace", "description": what}
+            if not on:
+                row.update(style="dim", detail=f"{row['detail']} · off")
+            elif n > 0:
+                row.update(style="dim", detail=f"{row['detail']} · overridden")
+            elif len(cands) > 1:
+                row["badges"] = [{"text": "wins", "style": "ok"}]
+            rows.append(row)
     return rows
 
 
@@ -94,7 +169,7 @@ def refresh(*_):
 
 @ext.on_event
 def on_event(t, d):
-    if t in ("extension", "missed", "safe_mode", "command") or (t == "entries" and any(c["key"].startswith(("extension/", TUI, "binding/")) for c in d["changes"])):
+    if t in ("extension", "missed", "safe_mode", "command") or (t == "view.content" and d.get("view") == "keys") or (t == "entries" and any(c["key"].startswith(("extension/", TUI, "binding/")) for c in d["changes"])):
         refresh()
 
 
@@ -116,6 +191,16 @@ def toggle(args):
         t = tui()
         t[args["tui"]] = not t[args["tui"]]
         ext.apply([{"op": "set", "key": TUI, "value": t, "expect": ext.version(TUI)}], "settings: interface")
+
+
+@ext.command("settings.prefix", "Set the client prefix key (args: value or text, e.g. C-a)")
+def set_prefix(args):
+    want = (args.get("value") or args.get("text") or "").strip()
+    key = norm_key(want)
+    if not key or not (key[:2] in ("C-", "M-") or (key[0] == "F" and len(key) > 1)):
+        raise PrimError(f"{want!r} can't be a prefix: use Ctrl or Alt with a key (C-a, M-Space) or F1-F12", "invalid")
+    t = dict(ext.value(TUI) or {}, prefix=key)
+    ext.apply([{"op": "set", "key": TUI, "value": t, "expect": ext.version(TUI)}], "settings: prefix")
 
 
 ext.contribute({
