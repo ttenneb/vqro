@@ -43,6 +43,13 @@
       ]
     },
     {
+      "name": "keys",
+      "argv": [
+        "python3",
+        "keys.py"
+      ]
+    },
+    {
       "name": "settings",
       "argv": [
         "python3",

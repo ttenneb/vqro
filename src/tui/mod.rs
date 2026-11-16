@@ -3,14 +3,17 @@
 //! mechanism (rendering, focus, mouse mechanics, menus drawn from `menu/*` entries, text prompts,
 //! pickers) and recovery that must work when every extension is broken:
 //!
-//! Prefix: Ctrl-g, or click the `prim` badge. A menu lists every action; press its key or click it.
-//!   built in: : commands · o/O next/previous pane · 1-9 tab · u undo · R reset layout · ! safe mode
-//!   · q quit · Ctrl-g sends Ctrl-g. Everything else comes from `binding/*` entries.
+//! Prefix: Ctrl-g (setting `doc/settings/tui.prefix`), or click the `prim` badge. A menu lists every
+//!   action; press its key or click it. Default keys: : commands · o/O next/previous pane · 1-9 tab
+//!   · u undo · R reset layout · ! safe mode · q quit; the prefix twice sends it to the program.
+//!   `binding/*` entries add keys and, with a higher `priority`, override these. Whatever the keymap,
+//!   the menu keeps the recovery actions (commands, undo, reset, safe mode, quit).
 //!
 //! Mouse mechanics: click to focus, click tabs, drag borders (one layout change on release), wheel
 //! scrollback, forwarding to programs that asked for the mouse. What other gestures mean comes from
 //! bindings such as `{"key": "mouse.right", "where": "pane", "command": "client.menu"}`.
-//! Client commands: `client.menu {where}`, `client.prefix`, `client.palette`.
+//! Client commands: `client.menu {where}`, `client.prefix`, `client.palette`, `client.focus {dir}`,
+//! `client.tab {to}`, `client.quit`, `client.none` (unbinds a key).
 
 mod keys;
 mod mouse;
@@ -83,6 +86,16 @@ struct Item {
     pick: Option<String>,
     /// For status items: take the label (and style) from this view's live content.
     view: Option<String>,
+    /// What an `input` prompt starts with, instead of the current pane or tab name.
+    prefill: Option<String>,
+}
+
+/// A row of the prefix menu: the key that runs it (None for a recovery action whose key now does
+/// something else), its label, and the binding it runs.
+struct PrefixRow {
+    key: Option<String>,
+    label: String,
+    binding: Value,
 }
 
 impl Item {
@@ -94,6 +107,7 @@ impl Item {
             input: v["input"].as_str().map(String::from),
             pick: v["pick"].as_str().map(String::from),
             view: v["view"].as_str().map(String::from),
+            prefill: None,
         }
     }
 }
@@ -101,6 +115,8 @@ impl Item {
 enum Msg {
     Attached { view: String, resource: String, result: Result<u64, String> },
     Info(String),
+    /// A command finished: say so unless something newer took the status line.
+    Done(String),
     Snapshot(Value),
     ClearOverrides,
     /// A command's reply asked this client to show a view as a popup.
@@ -171,6 +187,10 @@ struct App {
     zoomed: Option<String>,
     /// Focus this view on the next draw (after leaving zoom the leaves are recomputed).
     pending_focus: Option<String>,
+    /// The terminal speaks the kitty keyboard protocol; used only while the prefix menu is open.
+    kbd_enhance: bool,
+    /// Modifiers held after the prefix (reported only with keyboard enhancement), shown live.
+    held: KeyModifiers,
     message: String,
     quit: bool,
 }
@@ -215,12 +235,23 @@ pub async fn run(socket: &Path) -> Result<()> {
         mouse_on: true,
         zoomed: None,
         pending_focus: None,
+        kbd_enhance: false,
+        held: KeyModifiers::NONE,
         message: "click prim or press Ctrl-g for the menu".into(),
         quit: false,
     };
     app.load(&snap);
+    app.message = format!("click prim or press {} for the menu", app.prefix());
     peer.call("events.subscribe", json!({"from": seq})).await?;
 
+    let mut terminal = ratatui::init();
+    // Asked before the input thread starts reading: the query reads the terminal's reply.
+    app.kbd_enhance = crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
+    let restore_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        keys::enhance(false);
+        restore_hook(info)
+    }));
     let (key_tx, mut keys) = mpsc::unbounded_channel();
     std::thread::spawn(move || {
         while let Ok(ev) = crossterm::event::read() {
@@ -230,7 +261,6 @@ pub async fn run(socket: &Path) -> Result<()> {
         }
     });
 
-    let mut terminal = ratatui::init();
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste, crossterm::event::EnableMouseCapture);
     let result: Result<()> = async {
         let mut dirty = true;
@@ -268,6 +298,14 @@ pub async fn run(socket: &Path) -> Result<()> {
                 app.on_incoming(m);
                 dirty = true;
             }
+            // Richer key reports only while the prefix menu is open: typing into programs is untouched.
+            let prefix_open = matches!(app.overlay, Some(Overlay::Prefix { .. }));
+            if app.kbd_enhance {
+                keys::enhance(prefix_open);
+            }
+            if !prefix_open {
+                app.held = KeyModifiers::NONE;
+            }
             // Client options from the settings document.
             let want = app.setting("mouse");
             if want != app.mouse_on {
@@ -281,6 +319,8 @@ pub async fn run(socket: &Path) -> Result<()> {
         }
     }
     .await;
+    // Every way out (quit, error, re-exec) passes here; pop before leaving the alternate screen.
+    keys::enhance(false);
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture, crossterm::event::DisableBracketedPaste);
     ratatui::restore();
     if reexec {
@@ -454,6 +494,11 @@ impl App {
     fn on_msg(&mut self, m: Msg) {
         match m {
             Msg::Info(s) => self.message = s,
+            Msg::Done(name) => {
+                if self.message == format!("running {name}…") {
+                    self.message = format!("{name}: done");
+                }
+            }
             Msg::Snapshot(s) => self.load(&s),
             Msg::ClearOverrides => self.overrides.clear(),
             Msg::Popup { view, width, ctx } => {
@@ -504,6 +549,11 @@ impl App {
     /// Returns whether a redraw is needed.
     fn on_event(&mut self, ev: Event) -> bool {
         match ev {
+            // Bare modifiers (keyboard enhancement, prefix menu open): live feedback only.
+            Event::Key(KeyEvent { code: KeyCode::Modifier(m), kind, modifiers, .. }) => {
+                self.held = if kind == KeyEventKind::Release { modifiers - keys::modifier_of(m) } else { modifiers };
+                matches!(self.overlay, Some(Overlay::Prefix { .. }))
+            }
             Event::Key(k) if k.kind != KeyEventKind::Release => {
                 self.on_key(k);
                 true
@@ -529,7 +579,7 @@ impl App {
     }
 
     fn on_key(&mut self, k: KeyEvent) {
-        let is_prefix = k.code == KeyCode::Char('g') && k.modifiers.contains(KeyModifiers::CONTROL);
+        let is_prefix = keys::name(&k) == Some(self.prefix());
         if self.filtering.is_some() {
             return self.on_filter_key(k);
         }
@@ -662,9 +712,11 @@ impl App {
                     label: format!("{mark}{}", o["label"].as_str().or_else(|| o["value"].as_str()).unwrap_or("?")),
                     command: item["command"].as_str().unwrap_or("").to_string(),
                     args: with_arg(&item["args"], "value", o["value"].clone()),
-                    input: None,
+                    // An option with `input` asks for its value instead (e.g. "custom…"), as `text`.
+                    input: o["input"].as_str().map(String::from),
                     pick: None,
                     view: None,
+                    prefill: current.as_str().map(String::from),
                 }
             })
             .collect();
@@ -723,85 +775,100 @@ impl App {
         }
     }
 
-    /// The prefix menu: built-in recovery keys, then every visible keyboard binding.
-    fn prefix_items(&self) -> Vec<(String, String)> {
-        let mut items: Vec<(String, String)> = [
-            (":", "all commands"),
-            ("o", "next pane"),
-            ("u", "undo last change"),
-            ("R", "reset layout"),
-            ("!", if self.safe_mode { "leave safe mode" } else { "safe mode (stop extensions)" }),
-            ("q", "quit this UI"),
-        ]
-        .iter()
-        .map(|(k, l)| (k.to_string(), l.to_string()))
-        .collect();
-        for b in self.bindings().into_iter().filter(|b| !b["key"].as_str().unwrap_or("").starts_with("mouse.")) {
-            let key = b["key"].as_str().unwrap_or("").to_string();
-            if items.iter().any(|(k, _)| *k == key) {
-                continue; // built-ins win
+    /// The prefix key in canonical form; Ctrl-g if the setting is missing or unusable.
+    fn prefix(&self) -> String {
+        keys::prefix(self.entries.get("doc/settings/tui").and_then(|s| s["prefix"].as_str()))
+    }
+
+    /// Every keyboard binding with its id: the client's defaults, then visible `binding/*` entries.
+    fn key_candidates(&self) -> Vec<(String, Value)> {
+        let mut found: Vec<(String, Value)> = builtin_bindings().into_iter().map(|b| (format!("{BUILTIN}{}", b["key"].as_str().unwrap_or("")), b)).collect();
+        found.extend(
+            self.entries
+                .iter()
+                .filter(|(k, v)| k.starts_with("binding/") && !v["key"].as_str().unwrap_or("").starts_with("mouse.") && self.visible(v))
+                .map(|(k, v)| (k.clone(), v.clone())),
+        );
+        found
+    }
+
+    /// The binding a key (canonical name) runs, if any; `client.none` leaves the key unbound.
+    fn binding_for(&self, key: &str) -> Option<Value> {
+        let cands = self.key_candidates();
+        let (_, b) = &cands[*resolve(&cands).get(key)?];
+        (b["command"] != "client.none").then(|| b.clone())
+    }
+
+    /// The prefix menu: the winning binding of every key (defaults first), then any recovery
+    /// action no key reaches any more, so recovery survives every keymap.
+    fn prefix_items(&self) -> Vec<PrefixRow> {
+        let cands = self.key_candidates();
+        let winners = resolve(&cands);
+        let mut rows: Vec<PrefixRow> = cands
+            .iter()
+            .enumerate()
+            .filter_map(|(i, (_, b))| {
+                let key = keys::normalize(b["key"].as_str()?)?;
+                (winners.get(&key) == Some(&i) && b["command"] != "client.none" && b["hidden"] != true).then(|| PrefixRow { key: Some(key), label: self.binding_label(b), binding: b.clone() })
+            })
+            .collect();
+        for b in builtin_bindings().into_iter().filter(|b| b["recovery"] == true) {
+            if !rows.iter().any(|r| r.binding["command"] == b["command"]) {
+                rows.push(PrefixRow { key: None, label: self.binding_label(&b), binding: b });
             }
-            let cmd = b["command"].as_str().unwrap_or("");
-            let label = b["label"].as_str().or_else(|| self.commands.get(cmd).and_then(|c| c["title"].as_str())).unwrap_or(cmd);
-            items.push((key, label.to_string()));
         }
-        items
+        rows
+    }
+
+    fn binding_label(&self, b: &Value) -> String {
+        let cmd = b["command"].as_str().unwrap_or("");
+        if cmd == "prim.safe_mode" && self.safe_mode {
+            return "leave safe mode".into();
+        }
+        b["label"].as_str().or_else(|| self.commands.get(cmd).and_then(|c| c["title"].as_str())).unwrap_or(cmd).to_string()
     }
 
     fn on_prefix_key(&mut self, k: KeyEvent, is_prefix: bool) {
-        let items = self.prefix_items();
+        if is_prefix {
+            // The prefix twice sends it to the program.
+            self.overlay = None;
+            let app_cursor = self.leaves.get(self.focus).and_then(|v| self.terms.get(v)).map(|t| t.parser.screen().application_cursor()).unwrap_or(false);
+            if let Some(bytes) = keys::encode(&k, app_cursor) {
+                self.send_to_focused(bytes);
+            }
+            return;
+        }
+        let name = keys::name(&k);
+        // A bound key runs; otherwise arrows and Enter work the menu.
+        if let Some((n, b)) = name.as_deref().and_then(|n| Some((n, self.binding_for(n)?))) {
+            self.overlay = None;
+            self.run_binding(&b);
+            // Echo what ran, unless the binding opened a prompt that owns the status line.
+            if self.overlay.is_none() {
+                self.message = format!("{} {n} → {}", self.prefix(), self.binding_label(&b));
+            }
+            return;
+        }
+        let n = self.prefix_items().len();
         if let Some(Overlay::Prefix { sel }) = self.overlay.as_mut() {
             match k.code {
                 KeyCode::Up => return *sel = sel.saturating_sub(1),
-                KeyCode::Down => return *sel = (*sel + 1).min(items.len().saturating_sub(1)),
-                KeyCode::Enter => {
-                    let key = items.get(*sel).map(|i| i.0.clone()).unwrap_or_default();
-                    self.overlay = None;
-                    return self.prefix_action(&key);
-                }
+                KeyCode::Down => return *sel = (*sel + 1).min(n.saturating_sub(1)),
+                KeyCode::Enter => return self.activate_overlay(),
                 _ => {}
             }
         }
         self.overlay = None;
-        if is_prefix {
-            return self.send_to_focused(vec![7]);
-        }
-        if let KeyCode::Char(c) = k.code {
-            self.prefix_action(&c.to_string());
+        if let Some(name) = name.filter(|n| n != "Esc") {
+            self.message = format!("no binding for {} {name}", self.prefix());
         }
     }
 
-    fn prefix_action(&mut self, key: &str) {
-        let n = self.leaves.len().max(1);
-        match key {
-            "q" => self.quit = true,
-            ":" => self.overlay = Some(Overlay::Palette { query: String::new(), sel: 0 }),
-            "o" => {
-                self.unzoom();
-                self.focus = (self.focus + 1) % n;
-            }
-            "O" => {
-                self.unzoom();
-                self.focus = (self.focus + n - 1) % n;
-            }
-            "u" => self.invoke("prim.revert", Value::Null),
-            "R" => self.invoke("prim.layout.reset", Value::Null),
-            "!" => self.invoke("prim.safe_mode", Value::Null),
-            d if d.len() == 1 && d.chars().all(|c| ('1'..='9').contains(&c)) => {
-                let i = d.parse::<usize>().unwrap() - 1;
-                if let Some((path, _, _)) = self.hit.tabs.first().cloned() {
-                    self.select_tab(&path, i);
-                }
-            }
-            _ => match self.bindings().into_iter().find(|b| b["key"] == key) {
-                Some(b) => {
-                    let ctx = self.ctx_leaf(self.focus);
-                    let at = self.hit.leaves.get(self.focus).map(|(_, o, _)| Position { x: o.x + 1, y: o.y + 1 });
-                    self.run_command(b["command"].as_str().unwrap_or(""), b["args"].clone(), ctx, at);
-                }
-                None => self.message = format!("no binding for {key}"),
-            },
-        }
+    /// Run a key binding on the focused pane (prompting or picking first if it asks to).
+    fn run_binding(&mut self, b: &Value) {
+        let ctx = self.ctx_leaf(self.focus);
+        let at = self.hit.leaves.get(self.focus).map(|(_, o, _)| Position { x: o.x + 1, y: o.y + 1 });
+        self.activate_item(Item::from_entry(b), ctx, at);
     }
 
     fn overlay_len(&self) -> usize {
@@ -827,8 +894,8 @@ impl App {
         let prefix = self.prefix_items();
         match self.overlay.take() {
             Some(Overlay::Prefix { sel }) => {
-                if let Some((key, _)) = prefix.get(sel) {
-                    self.prefix_action(&key.clone());
+                if let Some(row) = prefix.get(sel) {
+                    self.run_binding(&row.binding);
                 }
             }
             Some(Overlay::Palette { sel, query }) => {
@@ -939,12 +1006,14 @@ impl App {
         cmd.starts_with("client.") || self.commands.get(cmd).map(|c| c["available"] == true).unwrap_or(false)
     }
 
-    fn bindings(&self) -> Vec<Value> {
-        self.entries.iter().filter(|(k, _)| k.starts_with("binding/")).map(|(_, v)| v.clone()).filter(|v| self.visible(v)).collect()
-    }
-
+    /// The binding a gesture runs in a place: the same precedence as keys (see `rank`).
     fn gesture(&self, key: &str, place: &str) -> Option<Value> {
-        self.bindings().into_iter().find(|b| b["key"] == key && b["where"].as_str().unwrap_or("pane") == place)
+        self.entries
+            .iter()
+            .filter(|(k, b)| k.starts_with("binding/") && b["key"] == key && b["where"].as_str().unwrap_or("pane") == place && self.visible(b))
+            .min_by_key(|(k, b)| rank(k, b))
+            .map(|(_, b)| b.clone())
+            .filter(|b| b["command"] != "client.none")
     }
 
     /// Menu items for a place, filtered by `when` against the context, in `order`.
@@ -1009,7 +1078,7 @@ impl App {
     fn activate_item(&mut self, item: Item, ctx: Value, at: Option<Position>) {
         if let Some(prompt) = item.input.clone() {
             // Prefill with the current name when renaming something that has one.
-            let text = ctx["title"].as_str().map(String::from).or_else(|| self.tab_title(&ctx)).unwrap_or_default();
+            let text = item.prefill.clone().or_else(|| ctx["title"].as_str().map(String::from)).or_else(|| self.tab_title(&ctx)).unwrap_or_default();
             self.overlay = Some(Overlay::Input { prompt, text, item, ctx });
         } else if item.pick.as_deref() == Some("resource") {
             self.overlay = Some(Overlay::Pick { sel: 0, item, ctx });
@@ -1066,6 +1135,12 @@ impl App {
                 }
             }
             "client.palette" => self.overlay = Some(Overlay::Palette { query: String::new(), sel: 0 }),
+            "client.focus" => self.focus_to(args["dir"].as_str().unwrap_or("next")),
+            "client.tab" => self.tab_to(&args["to"], &ctx),
+            "client.quit" => self.quit = true,
+            "client.none" => {}
+            // Never sent to the core: a client that doesn't know one says so.
+            other if other.starts_with("client.") => self.message = format!("{other}: not supported by this client"),
             _ => {
                 let args = with_arg(&args, "context", ctx);
                 self.invoke(name, args);
@@ -1078,6 +1153,50 @@ impl App {
         if let Some(z) = self.zoomed.take() {
             self.pending_focus = Some(z);
         }
+    }
+
+    /// `client.focus {dir}`: next/prev cycle panes; left/right/up/down go to the adjacent pane.
+    fn focus_to(&mut self, dir: &str) {
+        self.unzoom();
+        let n = self.leaves.len().max(1);
+        self.focus = match dir {
+            "next" => (self.focus + 1) % n,
+            "prev" => (self.focus + n - 1) % n,
+            "left" | "right" | "up" | "down" => {
+                let rects: Vec<Rect> = self.hit.leaves.iter().map(|(_, r, _)| *r).collect();
+                match neighbour(&rects, self.focus, dir) {
+                    Some(i) => i,
+                    None => return,
+                }
+            }
+            other => return self.message = format!("client.focus: unknown dir {other}"),
+        };
+    }
+
+    /// `client.tab {to: next|prev|n}` (n counts from 1) in the tab group holding the focused pane,
+    /// or the first tab bar.
+    fn tab_to(&mut self, to: &Value, ctx: &Value) {
+        let path = match ctx["tab_path"].as_array() {
+            Some(p) => p.iter().filter_map(|x| x.as_u64().map(|n| n as usize)).collect(),
+            None => match self.hit.tabs.first() {
+                Some((p, _, _)) => p.clone(),
+                None => return,
+            },
+        };
+        let Some((_, mut root)) = self.active_layout() else { return };
+        let Some(group) = node_at_mut(&mut root, &path) else { return };
+        let n = group["tabs"].as_array().map(|t| t.len()).unwrap_or(0);
+        if n == 0 {
+            return;
+        }
+        let active = group["active"].as_u64().unwrap_or(0) as usize;
+        let i = match (to.as_str(), to.as_u64()) {
+            (Some("next"), _) => (active + 1) % n,
+            (Some("prev"), _) => (active + n - 1) % n,
+            (_, Some(k)) if k >= 1 => k as usize - 1,
+            _ => return self.message = format!("client.tab: unknown target {to}"),
+        };
+        self.select_tab(&path, i);
     }
 
     fn setting(&self, key: &str) -> bool {
@@ -1383,7 +1502,7 @@ impl App {
         self.message = format!("running {name}…");
         tokio::spawn(async move {
             let ctx = args["context"].clone();
-            let msg = match peer.call("command.invoke", json!({"name": name, "args": args})).await {
+            match peer.call("command.invoke", json!({"name": name, "args": args})).await {
                 Ok(r) => {
                     // A reply may ask this client for UI: `{"client": {"popup": {"view", "width"?}}}` or `{"client": {"close": true}}`.
                     if let Some(view) = r["client"]["popup"]["view"].as_str() {
@@ -1393,11 +1512,12 @@ impl App {
                     if r["client"]["close"] == true {
                         let _ = tx.send(Msg::ClosePopup);
                     }
-                    format!("{name}: done")
+                    let _ = tx.send(Msg::Done(name));
                 }
-                Err(e) => format!("{name}: {e}"),
-            };
-            let _ = tx.send(Msg::Info(msg));
+                Err(e) => {
+                    let _ = tx.send(Msg::Info(format!("{name}: {e}")));
+                }
+            }
         });
     }
 
@@ -1467,7 +1587,7 @@ impl App {
                 }
             }
             None => {
-                let text = "No layout yet.\n\nClick prim (bottom left) or press Ctrl-g for the menu:\n  n  open a shell\n  R  one tab per terminal\n  :  all commands";
+                let text = format!("No layout yet.\n\nClick prim (bottom left) or press {} for the menu:\n  n  open a shell\n  R  one tab per terminal\n  :  all commands", self.prefix());
                 f.render_widget(Paragraph::new(text).style(pal.style(None)).block(Block::bordered().title(" prim ").border_style(pal.border(true))), main);
             }
         }
@@ -1610,7 +1730,7 @@ impl App {
         let filtering = self.filtering.as_ref().map(|k| self.pstate.get(k).map(|s| s.filter.clone()).unwrap_or_default());
         let prompt = match &self.overlay {
             _ if filtering.is_some() => Some(("/".to_string(), filtering.clone().unwrap_or_default())),
-            Some(Overlay::Prefix { .. }) => Some(("C-g".to_string(), String::new())),
+            Some(Overlay::Prefix { .. }) => Some((self.prefix(), keys::held(self.held))),
             Some(Overlay::Palette { query, .. }) => Some((":".to_string(), query.clone())),
             Some(Overlay::Input { prompt, text, .. }) => Some((format!("{prompt}:"), text.clone())),
             _ => None,
@@ -1721,7 +1841,10 @@ impl App {
                 return;
             }
             Some(Overlay::Prefix { sel }) => {
-                let items = self.prefix_items().into_iter().map(|(k, l)| format!(" {k:>2}  {l}")).collect();
+                // Recovery actions that lost their key show `·`: click or Enter runs them.
+                let rows = self.prefix_items();
+                let w = rows.iter().filter_map(|r| r.key.as_ref()).map(|k| k.chars().count()).max().unwrap_or(1).max(2);
+                let items = rows.into_iter().map(|r| format!(" {:>w$}  {}", r.key.unwrap_or_else(|| "·".into()), r.label)).collect();
                 (" prim (press a key or click) ", items, *sel, None::<String>)
             }
             Some(Overlay::Palette { query, sel }) => {
@@ -1777,6 +1900,69 @@ impl App {
         f.render_stateful_widget(list, list_area, &mut state);
         self.hit.overlay = Some((rect, list_area, state.offset()));
     }
+}
+
+/// Ids of the client's default bindings, which win ties (see `rank`).
+const BUILTIN: &str = "builtin:";
+
+/// The client's default prefix keys, as bindings. `recovery` ones stay in the prefix menu even
+/// when a binding takes their key; `hidden` ones work but stay out of the menu.
+fn builtin_bindings() -> Vec<Value> {
+    let mut b = vec![
+        json!({"key": ":", "command": "client.palette", "label": "all commands", "recovery": true}),
+        json!({"key": "o", "command": "client.focus", "args": {"dir": "next"}, "label": "next pane"}),
+        json!({"key": "O", "command": "client.focus", "args": {"dir": "prev"}, "label": "previous pane", "hidden": true}),
+        json!({"key": "u", "command": "prim.revert", "label": "undo last change", "recovery": true}),
+        json!({"key": "R", "command": "prim.layout.reset", "label": "reset layout", "recovery": true}),
+        json!({"key": "!", "command": "prim.safe_mode", "label": "safe mode (stop extensions)", "recovery": true}),
+        json!({"key": "q", "command": "client.quit", "label": "quit this UI", "recovery": true}),
+    ];
+    b.extend((1..=9).map(|n| json!({"key": n.to_string(), "command": "client.tab", "args": {"to": n}, "label": format!("tab {n}"), "hidden": true})));
+    b
+}
+
+/// Which of several bindings for one key wins (smallest rank): the highest `priority` (default 0),
+/// then the client's defaults, then the lowest id, so the outcome never depends on load order.
+fn rank(id: &str, b: &Value) -> (std::cmp::Reverse<i64>, bool, String) {
+    (std::cmp::Reverse(b["priority"].as_i64().unwrap_or(0)), !id.starts_with(BUILTIN), id.to_string())
+}
+
+/// For each key (canonical name), the index of the binding that wins it. Keys that don't parse
+/// are ignored, so a binding from a newer protocol can't break the keymap.
+fn resolve(cands: &[(String, Value)]) -> HashMap<String, usize> {
+    let mut won: HashMap<String, usize> = HashMap::new();
+    for (i, (id, b)) in cands.iter().enumerate() {
+        let Some(key) = b["key"].as_str().and_then(keys::normalize) else { continue };
+        let better = won.get(&key).map(|&j| rank(id, b) < rank(&cands[j].0, &cands[j].1)).unwrap_or(true);
+        if better {
+            won.insert(key, i);
+        }
+    }
+    won
+}
+
+/// The pane next to `from` in a direction: among panes on that side that overlap it across the
+/// direction, the nearest, then the best aligned.
+fn neighbour(rects: &[Rect], from: usize, dir: &str) -> Option<usize> {
+    let a = *rects.get(from)?;
+    let span = |lo: u16, hi: u16, blo: u16, bhi: u16| blo < hi && bhi > lo;
+    let mid = |lo: u16, len: u16| 2 * lo as i32 + len as i32;
+    rects
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != from)
+        .filter_map(|(i, b)| {
+            let (gap, offset) = match dir {
+                "left" if b.right() <= a.x && span(a.y, a.bottom(), b.y, b.bottom()) => (a.x - b.right(), mid(a.y, a.height) - mid(b.y, b.height)),
+                "right" if b.x >= a.right() && span(a.y, a.bottom(), b.y, b.bottom()) => (b.x - a.right(), mid(a.y, a.height) - mid(b.y, b.height)),
+                "up" if b.bottom() <= a.y && span(a.x, a.right(), b.x, b.right()) => (a.y - b.bottom(), mid(a.x, a.width) - mid(b.x, b.width)),
+                "down" if b.y >= a.bottom() && span(a.x, a.right(), b.x, b.right()) => (b.y - a.bottom(), mid(a.x, a.width) - mid(b.x, b.width)),
+                _ => return None,
+            };
+            Some(((gap, offset.abs()), i))
+        })
+        .min()
+        .map(|(_, i)| i)
 }
 
 fn with_arg(args: &Value, key: &str, v: Value) -> Value {
@@ -1915,5 +2101,52 @@ fn render_screen(buf: &mut Buffer, area: Rect, screen: &vt100::Screen) {
                 out.set_style(style);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn winner(cands: &[(String, Value)], key: &str) -> String {
+        cands[resolve(cands)[key]].0.clone()
+    }
+
+    #[test]
+    fn priority_then_defaults_then_id() {
+        let b = |id: &str, v: Value| (id.to_string(), v);
+        let mut cands: Vec<(String, Value)> = builtin_bindings().into_iter().map(|v| (format!("{BUILTIN}{}", v["key"].as_str().unwrap()), v)).collect();
+        cands.push(b("binding/tabs.new", json!({"key": "n", "command": "tabs.open"})));
+        cands.push(b("binding/a.q", json!({"key": "q", "command": "x.y"})));
+        cands.push(b("binding/z.n", json!({"key": "n", "command": "x.y"})));
+        cands.push(b("binding/keys.n", json!({"key": "n", "command": "client.tab", "priority": 10})));
+        cands.push(b("binding/keys.u", json!({"key": "u", "command": "client.none", "priority": 10})));
+        cands.push(b("binding/keys.left", json!({"key": "left", "command": "client.focus"})));
+        cands.push(b("binding/future", json!({"key": "Hyper-x", "command": "x.y"})));
+        assert_eq!(winner(&cands, "q"), "builtin:q", "defaults win ties");
+        assert_eq!(winner(&cands, "n"), "binding/keys.n", "priority wins");
+        assert_eq!(winner(&cands, "u"), "binding/keys.u", "unbinding is a binding that wins");
+        assert_eq!(winner(&cands, "Left"), "binding/keys.left", "named keys are normalized");
+        assert!(!resolve(&cands).contains_key("Hyper-x"), "unknown keys are ignored");
+        cands.retain(|(id, _)| id != "binding/keys.n");
+        assert_eq!(winner(&cands, "n"), "binding/tabs.new", "then the lowest id");
+    }
+
+    #[test]
+    fn directional_focus() {
+        // +---+-----+
+        // | 0 |  1  |
+        // |   +--+--+
+        // |   |2 |3 |
+        // +---+--+--+
+        let r = |x, y, w, h| Rect { x, y, width: w, height: h };
+        let rects = [r(0, 0, 10, 20), r(10, 0, 20, 10), r(10, 10, 10, 10), r(20, 10, 10, 10)];
+        assert_eq!(neighbour(&rects, 0, "right"), Some(1), "touching panes: the better aligned, then the first");
+        assert_eq!(neighbour(&rects, 1, "down"), Some(2));
+        assert_eq!(neighbour(&rects, 3, "left"), Some(2));
+        assert_eq!(neighbour(&rects, 3, "up"), Some(1));
+        assert_eq!(neighbour(&rects, 2, "left"), Some(0));
+        assert_eq!(neighbour(&rects, 0, "left"), None);
+        assert_eq!(neighbour(&rects, 0, "sideways"), None);
     }
 }
