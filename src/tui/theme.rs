@@ -47,6 +47,8 @@ pub struct Palette {
     /// The active tab in a tab bar.
     pub tab_active: Color,
     pub tab_active_text: Color,
+    /// Background of the whole tab bar row: a darker band that sets the tabs apart from panes.
+    pub tab_bar: Color,
 }
 
 impl Default for Palette {
@@ -70,6 +72,7 @@ impl Default for Palette {
             surface: Color::Rgb(40, 40, 48),
             tab_active: Color::Blue,
             tab_active_text: Color::White,
+            tab_bar: Color::Indexed(235),
         }
     }
 }
@@ -111,6 +114,7 @@ impl Palette {
             "surface" => &mut self.surface,
             "tab_active" => &mut self.tab_active,
             "tab_active_text" => &mut self.tab_active_text,
+            "tab_bar" => &mut self.tab_bar,
             _ => return None,
         })
     }
@@ -213,7 +217,7 @@ mod tests {
 
     #[test]
     fn every_token_is_themable() {
-        let tokens = ["text", "muted", "dim", "accent", "ok", "warn", "error", "prompt", "border", "border_focus", "badge", "badge_text", "surface", "tab_active", "tab_active_text"];
+        let tokens = ["text", "muted", "dim", "accent", "ok", "warn", "error", "prompt", "border", "border_focus", "badge", "badge_text", "surface", "tab_active", "tab_active_text", "tab_bar"];
         let palette: serde_json::Map<String, Value> = tokens.iter().map(|t| (t.to_string(), json!(1))).collect();
         let mut p = Palette::from_theme(Some(&json!({"palette": palette})));
         for t in tokens {

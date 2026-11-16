@@ -161,6 +161,7 @@ Colours: a name (the 16 ANSI names such as `cyan`, `darkgray`, `lightblue`), `#R
 | `badge`, `badge_text` | neutral badge and unchecked chip fill; text on any filled background | `darkgray`, `black` |
 | `surface` | fill of plain chips | `#282830` |
 | `tab_active`, `tab_active_text` | the active tab | `blue`, `white` |
+| `tab_bar` | background of the whole tab bar row | `235` |
 
 The bundled `themes` extension publishes its themes as live data `themes` and applies one with
 `themes.apply {name}`; settings shows them on its Theme page.

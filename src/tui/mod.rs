@@ -2087,7 +2087,8 @@ fn walk(node: &Value, area: Rect, path: &mut Vec<usize>, overrides: &HashMap<Vec
                 spans.push(Span::styled(label, pal.style(Some("accent"))));
             }
         }
-        ratatui::widgets::Widget::render(Paragraph::new(Line::from(spans)), bar, buf);
+        // The whole row gets the tab-bar band, not just the labels.
+        ratatui::widgets::Widget::render(Paragraph::new(Line::from(spans)).style(Style::new().bg(pal.tab_bar)), bar, buf);
         if let Some(t) = tabs.get(active) {
             path.push(active);
             walk(&t["node"], body, path, overrides, tabbar, hit, buf, pal);
