@@ -51,8 +51,21 @@ def status_of(r):
     return st if isinstance(st, dict) else {}
 
 
-def term_row(rid, r):
+def folder_of(r):
+    """Short name of a terminal's current folder ("~" for home), or None."""
+    cwd = r.get("cwd")
+    if not cwd:
+        return None
+    return "~" if os.path.realpath(cwd) == os.path.realpath(os.path.expanduser("~")) else os.path.basename(cwd.rstrip("/")) or cwd
+
+
+def term_row(rid, r, where=False):
+    """A terminal row. With `where` (not placed under a folder in the tree), an unnamed terminal also
+    shows its folder, so a column of "zsh" rows can be told apart; named ones keep their room for badges."""
     label = r.get("name") or (r.get("argv") or ["?"])[0].split("/")[-1]
+    folder = folder_of(r) if where and not r.get("name") else None
+    if folder and folder != label:
+        label = f"{label} · {folder}"
     st = status_of(r)
     badges = []
     if st.get("state"):
@@ -125,7 +138,7 @@ def build():
         if tree and home:
             placed.setdefault(home, []).append(term_row(rid, r))
         elif tree or data is None or sh["terminals" if home else "stray"]:
-            stray.append(term_row(rid, r))
+            stray.append(term_row(rid, r, where=True))
 
     items = []
     if tree:
