@@ -97,7 +97,8 @@ def rename_tab(args):
 
 
 ext.contribute({
-    "menu/tabs.new": {"where": "tabbar", "label": "+", "command": "tabs.open", "order": 0},
+    # An icon alone: the label stays empty so a set's `add` glyph replaces the `+`.
+    "menu/tabs.new": {"where": "tabbar", "label": "", "icon": {"name": "add", "text": "+"}, "command": "tabs.open", "order": 0},
     "menu/tabs.rename": {"where": "tab", "label": "Rename tab", "command": "tabs.rename", "input": "Tab name", "order": 10},
     "menu/tabs.close": {"where": "tab", "label": "Close tab", "command": "tabs.close", "order": 20},
     "binding/tabs.new": {"key": "n", "command": "tabs.open", "label": "new shell in a tab"},

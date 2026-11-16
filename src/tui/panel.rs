@@ -6,10 +6,11 @@
 //!   `{"type"?: "item"|"toggle"|"header"|"separator"|"text", "text", "id"?, "detail"?, "detail_style"?,
 //!     "description"?, "checked"?, "style"?, "disabled"?, "badges"?: [{"text", "style"?, "color"?}],
 //!     "children"?: [row], "expanded"?: bool, "command"?, "args"?, "input"?, "menu"?: [menu item],
-//!     "icon"?: one or two characters before the text, or {"nerd", "text"} so clients with a Nerd Font
-//!     use its glyph, "icon_style"?: a semantic style for it}`
+//!     "icon"?: one or two characters before the text, or {"name"?, "nerd"?, "text"?} resolved through
+//!     the active icon set (`icons.rs`; named icons and chip icons are feature `icon_names`),
+//!     "icon_style"?: a semantic style for it}`
 //! More row types: `chips` (`{"type": "chips", "chips": [chip]}`, a wrapping row of small buttons or
-//! toggles; a chip is `{"text", "checked"?, "style"?, "command"?, "args"?, "input"?, "options"?}`) and
+//! toggles; a chip is `{"text", "icon"?, "checked"?, "style"?, "command"?, "args"?, "input"?, "options"?}`) and
 //! `select` (`{"type": "select", "text", "value", "options": [{"label", "value"}], "command", "args"?}`).
 //! Anything with `options` opens a pick-one menu; the chosen `value` is added to its args.
 //! A panel may pin rows above its list with `"toolbar": [row]`; they never scroll away.
@@ -27,6 +28,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use serde_json::Value;
 
+use super::icons::{self, Icons, truncate};
 use super::theme::{self, Palette};
 
 /// Per-view interaction state, owned by the client.
@@ -65,7 +67,7 @@ pub struct Hits {
 }
 
 /// Panel features this client renders. A panel may list what it needs in `requires`.
-pub const SUPPORTED: &[&str] = &["items", "pages", "tree", "badges", "menu", "input", "description", "filter", "toolbar", "chips", "select", "options", "badge_color", "icon"];
+pub const SUPPORTED: &[&str] = &["items", "pages", "tree", "badges", "menu", "input", "description", "filter", "toolbar", "chips", "select", "options", "badge_color", "icon", "icon_names"];
 
 /// Features a panel needs that this client lacks.
 pub fn missing(v: &Value) -> Vec<String> {
@@ -149,8 +151,8 @@ pub fn parent_ids(v: &Value, st: &State) -> Vec<String> {
     out
 }
 
-fn chip_label(c: &Value) -> String {
-    let t = c["text"].as_str().unwrap_or("");
+fn chip_label(c: &Value, icons: &Icons) -> String {
+    let t = icons.label(&c["icon"], c["text"].as_str().unwrap_or(""));
     if c["options"].is_array() {
         format!(" {t} ▾ ")
     } else {
@@ -159,11 +161,11 @@ fn chip_label(c: &Value) -> String {
 }
 
 /// Where each chip goes in a row of `width`, wrapping: (dx, dy, width).
-fn chip_layout(item: &Value, width: u16) -> Vec<(u16, u16, u16)> {
+fn chip_layout(item: &Value, width: u16, icons: &Icons) -> Vec<(u16, u16, u16)> {
     let mut out = Vec::new();
     let (mut x, mut y) = (0u16, 0u16);
     for c in item["chips"].as_array().into_iter().flatten() {
-        let w = (chip_label(c).chars().count() as u16).min(width.max(1));
+        let w = icons::width(&chip_label(c, icons)).min(width.max(1));
         if x > 0 && x + w > width {
             x = 0;
             y += 1;
@@ -204,19 +206,19 @@ pub fn last(rows: &[Flat]) -> usize {
     rows.iter().rposition(|r| selectable(&r.item)).unwrap_or(0)
 }
 
-fn lines(item: &Value, width: u16) -> u16 {
+fn lines(item: &Value, width: u16, icons: &Icons) -> u16 {
     if kind(item) == "chips" {
-        return chip_layout(item, width).last().map(|c| c.1 + 1).unwrap_or(1);
+        return chip_layout(item, width, icons).last().map(|c| c.1 + 1).unwrap_or(1);
     }
     1 + item["description"].as_str().map(|_| 1).unwrap_or(0)
 }
 
 /// Height the content wants at `width` (for sizing popups), including the page bar and toolbar rule.
-pub fn height(v: &Value, st: &State, width: u16) -> u16 {
+pub fn height(v: &Value, st: &State, width: u16, icons: &Icons) -> u16 {
     let bar = if page_titles(v).is_empty() { 0 } else { 2 };
     let rows = rows(v, st);
     let rule = rows.iter().any(|r| r.pinned) as u16;
-    bar + rule + rows.iter().map(|r| lines(&r.item, width)).sum::<u16>()
+    bar + rule + rows.iter().map(|r| lines(&r.item, width, icons)).sum::<u16>()
 }
 
 fn text_style(item: &Value, pal: &Palette) -> Style {
@@ -235,7 +237,7 @@ fn badge_style(b: &Value, pal: &Palette) -> Style {
 }
 
 /// Draw the panel into `area`. Keeps the selection visible and returns hit areas.
-pub fn render(buf: &mut Buffer, area: Rect, v: &Value, st: &mut State, focused: bool, pal: &Palette) -> Hits {
+pub fn render(buf: &mut Buffer, area: Rect, v: &Value, st: &mut State, focused: bool, pal: &Palette, icons: &Icons) -> Hits {
     let mut hits = Hits::default();
     if area.width < 6 || area.height == 0 {
         return hits;
@@ -257,7 +259,7 @@ pub fn render(buf: &mut Buffer, area: Rect, v: &Value, st: &mut State, focused: 
         let mut x = area.x;
         for (i, t) in titles.iter().enumerate() {
             let label = format!(" {t} ");
-            let w = label.chars().count() as u16;
+            let w = icons::width(&label);
             if x + w > area.right() {
                 break;
             }
@@ -291,11 +293,11 @@ pub fn render(buf: &mut Buffer, area: Rect, v: &Value, st: &mut State, focused: 
     let pinned = rows.iter().take_while(|r| r.pinned).count();
     let mut y = area.y;
     for (i, r) in rows.iter().enumerate().take(pinned) {
-        let h = lines(&r.item, area.width).min(area.bottom().saturating_sub(y));
+        let h = lines(&r.item, area.width, icons).min(area.bottom().saturating_sub(y));
         if h == 0 {
             break;
         }
-        draw_row(buf, Rect { x: area.x, y, width: area.width, height: h }, r, focused && i == st.sel, st.chip, i, &mut hits, pal);
+        draw_row(buf, Rect { x: area.x, y, width: area.width, height: h }, r, focused && i == st.sel, st.chip, i, &mut hits, pal, icons);
         y += h;
     }
     if pinned > 0 && y < area.bottom() {
@@ -309,7 +311,7 @@ pub fn render(buf: &mut Buffer, area: Rect, v: &Value, st: &mut State, focused: 
     let list = &rows[pinned..];
 
     // Scroll so the selection is visible, in lines.
-    let heights: Vec<u16> = list.iter().map(|r| lines(&r.item, area.width)).collect();
+    let heights: Vec<u16> = list.iter().map(|r| lines(&r.item, area.width, icons)).collect();
     let total: u16 = heights.iter().sum();
     let mut top = st.top as u16;
     if st.sel >= pinned {
@@ -341,7 +343,7 @@ pub fn render(buf: &mut Buffer, area: Rect, v: &Value, st: &mut State, focused: 
         if y >= body.bottom() {
             break;
         }
-        draw_row(buf, Rect { x: body.x, y, width: body.width, height: h.min(body.bottom() - y) }, r, focused && i == st.sel, st.chip, i, &mut hits, pal);
+        draw_row(buf, Rect { x: body.x, y, width: body.width, height: h.min(body.bottom() - y) }, r, focused && i == st.sel, st.chip, i, &mut hits, pal, icons);
     }
 
     if scrollbar {
@@ -357,7 +359,7 @@ pub fn render(buf: &mut Buffer, area: Rect, v: &Value, st: &mut State, focused: 
 }
 
 #[allow(clippy::too_many_arguments)]
-fn draw_row(buf: &mut Buffer, row: Rect, r: &Flat, selected: bool, chip: usize, i: usize, hits: &mut Hits, pal: &Palette) {
+fn draw_row(buf: &mut Buffer, row: Rect, r: &Flat, selected: bool, chip: usize, i: usize, hits: &mut Hits, pal: &Palette, icons: &Icons) {
     let item = &r.item;
     let w = row.width as usize;
     let y = row.y;
@@ -366,7 +368,7 @@ fn draw_row(buf: &mut Buffer, row: Rect, r: &Flat, selected: bool, chip: usize, 
     match kind(item) {
         "chips" => {
             let chips = item["chips"].as_array().cloned().unwrap_or_default();
-            for (ci, ((dx, dy, cw), c)) in chip_layout(item, row.width).into_iter().zip(chips.iter()).enumerate() {
+            for (ci, ((dx, dy, cw), c)) in chip_layout(item, row.width, icons).into_iter().zip(chips.iter()).enumerate() {
                 if dy >= row.height {
                     break;
                 }
@@ -378,7 +380,7 @@ fn draw_row(buf: &mut Buffer, row: Rect, r: &Flat, selected: bool, chip: usize, 
                 let style = if let Some(n) = c["style"].as_str() { style.patch(pal.style(Some(n))) } else { style };
                 let style = if selected && ci == chip { style.add_modifier(Modifier::REVERSED | Modifier::BOLD) } else { style };
                 let rect = Rect { x: row.x + dx, y: y + dy, width: cw, height: 1 };
-                buf.set_string(rect.x, rect.y, truncate(&chip_label(c), cw as usize), style);
+                buf.set_string(rect.x, rect.y, truncate(&chip_label(c, icons), cw as usize), style);
                 hits.chips.push((rect, i, ci));
             }
             hits.rows.push((row, i));
@@ -398,7 +400,7 @@ fn draw_row(buf: &mut Buffer, row: Rect, r: &Flat, selected: bool, chip: usize, 
                 .unwrap_or_default();
             let label = format!(" {text}: ");
             buf.set_string(row.x + indent, y, &label, ink(pal.style(Some("muted"))));
-            let vx = row.x + indent + label.chars().count() as u16;
+            let vx = row.x + indent + icons::width(&label);
             buf.set_string(vx, y, truncate(&format!("{shown} ▾"), w.saturating_sub((vx - row.x) as usize)), ink(pal.style(Some("accent"))));
             hits.rows.push((row, i));
         }
@@ -425,17 +427,19 @@ fn draw_row(buf: &mut Buffer, row: Rect, r: &Flat, selected: bool, chip: usize, 
             } else if r.depth == 0 && !r.has_children {
                 x += 1;
             }
-            // An icon says what the row is; its style can carry state (e.g. an agent working).
-            if let Some(icon) = icon_text(&item["icon"]).filter(|i| !i.is_empty()) {
+            // An icon says what the row is; its style can carry state (e.g. an agent working). It
+            // fills the set's icon column, so text lines up across 1- and 2-cell glyphs.
+            if let Some(icon) = icons.resolve(&item["icon"]) {
                 let icon: String = icon.chars().take(2).collect();
-                buf.set_string(x, y, &icon, ink(pal.style(item["icon_style"].as_str().or(Some("muted")))));
-                x += icon.chars().count() as u16 + 1;
+                let (cell, cells) = icons.cell(&icon);
+                buf.set_string(x, y, &cell, ink(pal.style(item["icon_style"].as_str().or(Some("muted")))));
+                x += cells + 1;
             }
             // Right side: detail, then badges before it.
             let detail = item["detail"].as_str().unwrap_or("");
             let mut right = row.right().saturating_sub(1);
             if !detail.is_empty() {
-                let dw = detail.chars().count() as u16;
+                let dw = icons::width(detail);
                 if right > x + dw + 2 {
                     right -= dw;
                     let ds = item["detail_style"].as_str().unwrap_or("dim");
@@ -454,9 +458,9 @@ fn draw_row(buf: &mut Buffer, row: Rect, r: &Flat, selected: bool, chip: usize, 
             let mut bx = right;
             let mut placed = Vec::new();
             // The name keeps some room before badges get any.
-            let keep = (text.chars().count() as u16).min(12) + 1;
+            let keep = icons::width(text).min(12) + 1;
             for (t, s) in badges.iter().rev() {
-                let bw = t.chars().count() as u16;
+                let bw = icons::width(t);
                 if bx < x + bw + keep {
                     break;
                 }
@@ -476,34 +480,6 @@ fn draw_row(buf: &mut Buffer, row: Rect, r: &Flat, selected: bool, chip: usize, 
             }
             hits.rows.push((row, i));
         }
-    }
-}
-
-/// Whether this client draws Nerd Font icons; set once per frame from the client's settings.
-static NERD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-pub fn set_nerd_icons(on: bool) {
-    NERD.store(on, std::sync::atomic::Ordering::Relaxed);
-}
-
-/// An icon is a string, or `{"nerd", "text"}`: the Nerd Font glyph when this client uses one, else text.
-fn icon_text(v: &Value) -> Option<&str> {
-    if let Some(s) = v.as_str() {
-        return Some(s);
-    }
-    let nerd = NERD.load(std::sync::atomic::Ordering::Relaxed);
-    if nerd { v["nerd"].as_str().or_else(|| v["text"].as_str()) } else { v["text"].as_str() }
-}
-
-fn truncate(s: &str, w: usize) -> String {
-    if s.chars().count() <= w {
-        s.to_string()
-    } else if w == 0 {
-        String::new()
-    } else {
-        let mut t: String = s.chars().take(w - 1).collect();
-        t.push('…');
-        t
     }
 }
 
@@ -543,5 +519,57 @@ pub fn right(rows: &[Flat], st: &mut State) {
         st.open.insert(r.id.clone(), true);
     } else if r.has_children && st.sel + 1 < rows.len() {
         st.sel += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Draw a panel and return its lines, skipping the cell a wide glyph covers.
+    fn draw(v: &Value, icons: &Icons, width: u16) -> Vec<String> {
+        let area = Rect::new(0, 0, width, 6);
+        let mut buf = Buffer::empty(area);
+        render(&mut buf, area, v, &mut State::default(), false, &Palette::default(), icons);
+        let line = |y| {
+            let mut s = String::new();
+            let mut x = 0;
+            while x < width {
+                let sym = buf[(x, y)].symbol();
+                s.push_str(sym);
+                x += icons::width(sym).max(1);
+            }
+            s.trim_end().to_string()
+        };
+        (0..area.height).map(line).collect()
+    }
+
+    fn rows() -> Value {
+        json!({"items": [
+            {"text": "agent", "icon": {"name": ["working", "agent"], "nerd": "\u{f06a9}", "text": "◆"}},
+            {"text": "repo", "icon": {"name": "repo", "text": "⎇"}},
+            {"text": "plain", "icon": "x"},
+            {"type": "chips", "chips": [{"text": "", "icon": {"name": "filter", "text": "/"}}, {"text": "all"}]},
+        ]})
+    }
+
+    #[test]
+    fn no_set_draws_as_before() {
+        let lines = draw(&rows(), &Icons::new(None, false), 30);
+        assert_eq!(lines[..4], [" ◆ agent", " ⎇ repo", " x plain", " /   all"]);
+    }
+
+    #[test]
+    fn a_wide_set_keeps_text_aligned() {
+        // The set has the state glyph and not `repo`: the repo row falls back but keeps the column.
+        let icons = Icons::new(Some(&json!({"name": "emoji", "width": 2, "glyphs": {"working": "⏳", "filter": "🔍"}})), false);
+        let lines = draw(&rows(), &icons, 30);
+        let col = |l: &str, t: &str| l.find(t).map(|b| icons::width(&l[..b]));
+        assert_eq!(col(&lines[0], "agent"), Some(4));
+        assert_eq!(col(&lines[1], "repo"), Some(4));
+        assert_eq!(col(&lines[2], "plain"), Some(4));
+        assert!(lines[0].starts_with(" ⏳"));
+        assert!(lines[3].starts_with(" 🔍"));
     }
 }

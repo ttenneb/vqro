@@ -11,7 +11,7 @@
 //!                     `{"tabs": [{"title": ..., "node": ...}], "active": n}`
 //! - `binding/<id>`    `{"key": "x", "command": "name", "args": {...}, "where"?, "owner"?}`: a prefix key,
 //!                     or a gesture such as `mouse.right` with `where` = "pane" | "tab"
-//! - `menu/<id>`       `{"where": "pane"|"tab"|"tabbar"|"status", "label", "command", "args"?, "input"?,
+//! - `menu/<id>`       `{"where": "pane"|"tab"|"tabbar"|"status", "label", "icon"?, "command", "args"?, "input"?,
 //!                      "pick"?, "when"?, "order"?, "owner"?}`: an item a client shows in that menu
 //!   Entries with `owner` belong to that extension; clients hide them while it is off (D17).
 //! - `extension/<name>` `{"argv": [...], "enabled": true}`

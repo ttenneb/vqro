@@ -35,15 +35,19 @@ SHORT = {"everything": "all", "workspaces only": "workspaces", "workspaces and w
 SHOW_LABELS = [("workspaces", "Workspaces", "folders you added"), ("worktrees", "Worktrees", "git worktrees"),
                ("terminals", "Terminals", "in workspaces"), ("stray", "Other terminals", "elsewhere")]
 STATUS = {"working": "accent", "blocked": "warn", "error": "error", "done": "ok"}
-# What a row is, at a glance. Nerd Font glyphs where the client has one (Nerd Fonts v3: nf-dev-git,
-# nf-dev-git_branch, nf-fa-folder, nf-oct-terminal, nf-md-robot), plain Unicode otherwise.
-# The icon's style carries its state.
+# What a row is, at a glance, by icon name (the active icon set draws it, D20). Without a set, Nerd Font
+# glyphs where the client has one, plain Unicode otherwise. The icon's style carries its state.
 ICON = {
-    "repo": {"nerd": "\ue702", "text": "⎇"},
-    "worktree": {"nerd": "\ue725", "text": "⑂"},
-    "folder": {"nerd": "\uf07b", "text": "▫"},
-    "terminal": {"nerd": "\uf489", "text": "›"},
-    "agent": {"nerd": "\U000f06a9", "text": "◆"},
+    "repo": {"name": "repo", "nerd": "\ue702", "text": "⎇"},              # nf-dev-git
+    "worktree": {"name": "worktree", "nerd": "\ue725", "text": "⑂"},      # nf-dev-git_branch
+    "folder": {"name": "folder", "nerd": "\uf07b", "text": "▫"},          # nf-fa-folder
+    "terminal": {"name": "terminal", "nerd": "\uf489", "text": "›"},      # nf-oct-terminal
+    "agent": {"name": "agent", "nerd": "\U000f06a9", "text": "◆"},        # nf-md-robot
+    "add": {"name": "add", "text": "+"},
+    "filter": {"name": "filter", "text": "/"},
+    "refresh": {"name": "refresh", "text": "↻"},
+    "blocked": {"name": "blocked", "text": "⚠"},
+    "sidebar": {"name": "sidebar", "text": "☰"},
 }
 last = [None, None, None]  # what was last published: sidebar, status segment, view popup
 
@@ -83,12 +87,16 @@ def term_row(rid, r, where=False):
     if isinstance(st.get("progress"), (int, float)):
         badges.append({"text": f"{int(st['progress'])}%", "style": "accent"})
     live = r.get("state") == "live"
-    # A terminal whose program reports status (OSC 7501) is an agent; its icon takes the status colour.
+    # A terminal whose program reports status (OSC 7501) is an agent; its icon takes the status colour,
+    # and a set with a glyph for the state shows that instead of the agent's (shape, not only colour).
     agent = bool(st.get("state") or st.get("app"))
     icon_style = STATUS.get(st.get("state")) if live and st.get("state") else ("muted" if live else "dim")
+    icon = ICON["agent" if agent else "terminal"]
+    if agent and st.get("state") in STATUS:
+        icon = dict(icon, name=[st["state"], "agent"])
     return {
         "id": f"term:{rid}", "text": label, "style": None if live else "dim",
-        "icon": ICON["agent" if agent else "terminal"], "icon_style": icon_style,
+        "icon": icon, "icon_style": icon_style,
         "badges": badges,
         "command": "sidebar.show", "args": {"resource": rid},
         "menu": [
@@ -182,7 +190,8 @@ def build():
                 "badges": ([{"text": "missing", "style": "error"}] if w.get("missing") else git_badges(w)) + rollup(kids),
                 "children": kids, "command": "workspaces.open", "args": {"path": w["path"]}, "menu": menu,
             })
-        items.append({"id": "add", "text": "+ add workspace…", "style": "dim", "command": "workspaces.add", "input": "Folder path"})
+        items.append({"id": "add", "text": "add workspace…", "style": "dim", "icon": ICON["add"], "icon_style": "dim",
+                      "command": "workspaces.add", "input": "Folder path"})
         if sh["stray"] and stray:
             items.append({"type": "header", "text": "Other terminals"})
             items += stray
@@ -199,7 +208,7 @@ def toolbar():
     short = SHORT.get(current_preset(), "custom")
     return [{"type": "chips", "chips": [
         {"text": f"Show: {short} ▾", "command": "sidebar.view"},
-        {"text": "/", "command": "client.panel", "args": {"action": "filter"}},
+        {"text": "", "icon": ICON["filter"], "command": "client.panel", "args": {"action": "filter"}},
     ]}]
 
 
@@ -223,14 +232,15 @@ def view_panel():
               "command": "sidebar.preset", "args": {"preset": name}} for name in PRESETS]
     if have_ws:
         rows += [{"type": "separator"},
-                 {"text": "↻ Refresh git state", "command": "workspaces.refresh"},
-                 {"text": "+ Add workspace…", "command": "workspaces.add", "input": "Folder path"}]
+                 {"text": "Refresh git state", "icon": ICON["refresh"], "icon_style": "plain", "command": "workspaces.refresh"},
+                 {"text": "Add workspace…", "icon": ICON["add"], "icon_style": "plain", "command": "workspaces.add",
+                  "input": "Folder path"}]
     return {"title": "Sidebar view", "items": rows}
 
 
 def refresh(*_):
     items = build()
-    content = {"requires": ["tree", "badges", "menu", "toolbar", "chips", "icon"], "toolbar": toolbar(), "items": items}
+    content = {"requires": ["tree", "badges", "menu", "toolbar", "chips", "icon", "icon_names"], "toolbar": toolbar(), "items": items}
     if content != last[0]:
         last[0] = content
         ext.publish("sidebar", content)
@@ -239,7 +249,7 @@ def refresh(*_):
         last[2] = view
         ext.publish("sidebar.view", view)
     c = counts_of(items)
-    seg = {"label": f"⚠ {c['blocked']} blocked", "style": "warn"} if c.get("blocked") else {"label": ""}
+    seg = {"label": f"{c['blocked']} blocked", "icon": ICON["blocked"], "style": "warn"} if c.get("blocked") else {"label": ""}
     if seg != last[1]:
         last[1] = seg
         ext.publish("sidebar.status", seg)
@@ -297,7 +307,7 @@ ext.contribute({
     "view/sidebar": {"kind": "panel", "title": "sidebar", "items": [{"type": "text", "text": "no content: the sidebar extension is starting or stopped"}]},
     "view/sidebar.view": {"kind": "panel", "title": "Sidebar view", "items": [{"type": "text", "text": "no content: the sidebar extension is stopped"}]},
     "binding/sidebar.toggle": {"key": "s", "command": "sidebar.toggle", "label": "toggle sidebar"},
-    "menu/sidebar.toggle": {"where": "status", "label": "☰ sidebar", "command": "sidebar.toggle", "order": 10},
+    "menu/sidebar.toggle": {"where": "status", "label": "sidebar", "icon": ICON["sidebar"], "command": "sidebar.toggle", "order": 10},
     "menu/sidebar.blocked": {"where": "status", "label": "", "view": "sidebar.status", "command": "sidebar.toggle", "order": 5},
 })
 refresh()

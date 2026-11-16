@@ -15,6 +15,7 @@
 //! Client commands: `client.menu {where}`, `client.prefix`, `client.palette`, `client.focus {dir}`,
 //! `client.tab {to}`, `client.quit`, `client.none` (unbinds a key).
 
+mod icons;
 mod keys;
 mod mouse;
 mod panel;
@@ -37,6 +38,7 @@ use tokio::sync::mpsc;
 
 use crate::client;
 use crate::rpc::{Incoming, Peer};
+use icons::Icons;
 use theme::Palette;
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
@@ -80,6 +82,8 @@ impl ClonePopup for Option<Overlay> {
 #[derive(Clone)]
 struct Item {
     label: String,
+    /// Drawn before the label where items are shown (status bar, tab bar, menus); see `icons.rs`.
+    icon: Value,
     command: String,
     args: Value,
     input: Option<String>,
@@ -102,6 +106,7 @@ impl Item {
     fn from_entry(v: &Value) -> Item {
         Item {
             label: v["label"].as_str().unwrap_or("").to_string(),
+            icon: v["icon"].clone(),
             command: v["command"].as_str().unwrap_or("").to_string(),
             args: v["args"].clone(),
             input: v["input"].as_str().map(String::from),
@@ -715,6 +720,7 @@ impl App {
                 let mark = if o["value"] == current { "● " } else { "  " };
                 Item {
                     label: format!("{mark}{}", o["label"].as_str().or_else(|| o["value"].as_str()).unwrap_or("?")),
+                    icon: Value::Null,
                     command: item["command"].as_str().unwrap_or("").to_string(),
                     args: with_arg(&item["args"], "value", o["value"].clone()),
                     // An option with `input` asks for its value instead (e.g. "custom…"), as `text`.
@@ -1590,21 +1596,21 @@ impl App {
     // ---- drawing -----------------------------------------------------------------------------
 
     fn draw(&mut self, f: &mut Frame) {
-        // Resolved every frame, so a theme change shows on the next redraw. Safe mode uses the built-in
-        // palette, so an unreadable theme can't lock anyone out.
-        panel::set_nerd_icons(self.nerd_icons());
+        // Resolved every frame, so a theme or icon set change shows on the next redraw. Safe mode uses
+        // the built-in palette and no icon set, so neither can lock anyone out.
         let pal = if self.safe_mode { Palette::default() } else { Palette::from_theme(self.entries.get(theme::ENTRY)) };
+        let icons = Icons::new(if self.safe_mode { None } else { self.entries.get(icons::ENTRY) }, self.nerd_icons());
         let [main, status] = Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(f.area());
         let mut hit = Hit::default();
         match self.active_layout() {
             Some((_, root)) => {
                 let tabbar = self.menu_items("tabbar", &json!({}));
                 match self.zoomed.clone() {
-                    None => walk(&root, main, &mut Vec::new(), &self.overrides, &tabbar, &mut hit, f.buffer_mut(), &pal),
+                    None => walk(&root, main, &mut Vec::new(), &self.overrides, &tabbar, &mut hit, f.buffer_mut(), &pal, &icons),
                     Some(z) => {
                         // Lay out normally off-screen to find the pane, then give it the whole area.
                         let mut scratch = Buffer::empty(main);
-                        walk(&root, main, &mut Vec::new(), &self.overrides, &tabbar, &mut hit, &mut scratch, &pal);
+                        walk(&root, main, &mut Vec::new(), &self.overrides, &tabbar, &mut hit, &mut scratch, &pal, &icons);
                         match hit.leaves.iter().position(|(v, _, _)| *v == z) {
                             Some(i) => {
                                 let path = hit.leaf_paths[i].clone();
@@ -1617,7 +1623,7 @@ impl App {
                                 // The zoomed pane is gone (closed, other tab): stop zooming.
                                 self.zoomed = None;
                                 hit = Hit::default();
-                                walk(&root, main, &mut Vec::new(), &self.overrides, &tabbar, &mut hit, f.buffer_mut(), &pal);
+                                walk(&root, main, &mut Vec::new(), &self.overrides, &tabbar, &mut hit, f.buffer_mut(), &pal, &icons);
                             }
                         }
                     }
@@ -1651,19 +1657,19 @@ impl App {
         let leaves = hit.leaves.clone();
         self.hit = hit;
         for (i, (view, rect, _)) in leaves.iter().enumerate() {
-            if let Some(c) = self.draw_view(f, view, *rect, i == self.focus, &pal) {
+            if let Some(c) = self.draw_view(f, view, *rect, i == self.focus, &pal, &icons) {
                 cursor = Some(c);
             }
         }
-        self.draw_status(f, status, &pal);
-        self.draw_overlay(f, main, &pal);
+        self.draw_status(f, status, &pal, &icons);
+        self.draw_overlay(f, main, &pal, &icons);
         self.draw_toast(f, main, &pal);
         if let (Some(c), None) = (cursor, &self.overlay) {
             f.set_cursor_position(c);
         }
     }
 
-    fn draw_view(&mut self, f: &mut Frame, view: &str, rect: Rect, focused: bool, pal: &Palette) -> Option<(u16, u16)> {
+    fn draw_view(&mut self, f: &mut Frame, view: &str, rect: Rect, focused: bool, pal: &Palette, icons: &Icons) -> Option<(u16, u16)> {
         let border = pal.border(focused);
         let Some(v) = self.entries.get(&format!("view/{view}")).cloned() else {
             f.render_widget(Paragraph::new(format!("view {view} is missing")).block(Block::bordered().border_style(border)), rect);
@@ -1749,7 +1755,7 @@ impl App {
                 let inner = block.inner(rect);
                 f.render_widget(block, rect);
                 let mut st = self.pstate.remove(view).unwrap_or_default();
-                let hits = panel::render(f.buffer_mut(), inner, &v, &mut st, focused, pal);
+                let hits = panel::render(f.buffer_mut(), inner, &v, &mut st, focused, pal, icons);
                 self.pstate.insert(view.to_string(), st);
                 self.hit.panels.insert(view.to_string(), hits);
                 None
@@ -1762,7 +1768,7 @@ impl App {
         }
     }
 
-    fn draw_status(&mut self, f: &mut Frame, area: Rect, pal: &Palette) {
+    fn draw_status(&mut self, f: &mut Frame, area: Rect, pal: &Palette, icons: &Icons) {
         // Keyboard modes turn the bar into an input line, like a multiplexer's prompt.
         let filtering = self.filtering.as_ref().map(|k| self.pstate.get(k).map(|s| s.filter.clone()).unwrap_or_default());
         let prompt = match &self.overlay {
@@ -1800,17 +1806,21 @@ impl App {
         // Contributed status-bar buttons.
         let mut x = area.x + spans.iter().map(|s| s.content.chars().count() as u16).sum::<u16>();
         for item in self.menu_items("status", &json!({})) {
-            // Live segments take their label and style from a view's live content.
+            // Live segments take their label, icon and style from a view's live content. An empty
+            // label hides a live segment (nothing to report), whatever its icon.
             let (text, style) = match item.view.as_deref().and_then(|v| self.live.get(v)) {
-                Some(l) => (l["label"].as_str().unwrap_or(&item.label).to_string(), pal.style(Some(l["style"].as_str().unwrap_or("accent")))),
+                Some(l) => match l["label"].as_str().unwrap_or(&item.label) {
+                    "" => continue,
+                    t => (icons.label(if l["icon"].is_null() { &item.icon } else { &l["icon"] }, t), pal.style(Some(l["style"].as_str().unwrap_or("accent")))),
+                },
                 None if item.view.is_some() => continue,
-                None => (item.label.clone(), pal.style(Some("accent"))),
+                None => (icons.label(&item.icon, &item.label), pal.style(Some("accent"))),
             };
             if text.is_empty() {
                 continue;
             }
             let label = format!(" {text} ");
-            let w = label.chars().count() as u16;
+            let w = icons::width(&label);
             if x + w > area.right() {
                 break;
             }
@@ -1841,7 +1851,7 @@ impl App {
         f.render_widget(Paragraph::new(text.as_str()).style(pal.style(None)), inner);
     }
 
-    fn draw_overlay(&mut self, f: &mut Frame, area: Rect, pal: &Palette) {
+    fn draw_overlay(&mut self, f: &mut Frame, area: Rect, pal: &Palette, icons: &Icons) {
         if let Some(Overlay::Popup { view, width, .. }) = &self.overlay {
             let (view, width) = (view.clone(), *width);
             let v = self.panel_value(&view);
@@ -1849,7 +1859,7 @@ impl App {
             let w = width.clamp(20, area.width);
             // Size to the largest page so switching pages doesn't jump.
             let tallest = (0..panel::page_titles(&v).len().max(1))
-                .map(|p| panel::height(&v, &panel::State { page: p, filter: st.filter.clone(), open: st.open.clone(), ..Default::default() }, w.saturating_sub(4)))
+                .map(|p| panel::height(&v, &panel::State { page: p, filter: st.filter.clone(), open: st.open.clone(), ..Default::default() }, w.saturating_sub(4), icons))
                 .max()
                 .unwrap_or(1);
             let h = (tallest + 4 + (!st.filter.is_empty()) as u16).min(area.height);
@@ -1867,7 +1877,7 @@ impl App {
             let inner = block.inner(rect);
             f.render_widget(block, rect);
             let body = Rect { x: inner.x + 1, y: inner.y + 1, width: inner.width.saturating_sub(2), height: inner.height.saturating_sub(1) };
-            let hits = panel::render(f.buffer_mut(), body, &v, &mut st, true, pal);
+            let hits = panel::render(f.buffer_mut(), body, &v, &mut st, true, pal, icons);
             self.pstate.insert("@popup".into(), st);
             self.hit.panels.insert("@popup".into(), hits);
             self.hit.overlay = Some((rect, Rect::default(), 0));
@@ -1899,7 +1909,7 @@ impl App {
                     .collect::<Vec<_>>();
                 (" pick a terminal ", items, *sel, None)
             }
-            Some(Overlay::Menu { items, sel, .. }) => (" ", items.iter().map(|i| format!(" {}", i.label)).collect(), *sel, None),
+            Some(Overlay::Menu { items, sel, .. }) => (" ", menu_lines(items, icons), *sel, None),
             Some(Overlay::Input { .. }) => {
                 // Typed in the status bar; clicking anywhere else cancels.
                 self.hit.overlay = Some((self.hit.status, Rect::default(), 0));
@@ -1915,7 +1925,7 @@ impl App {
             Rect { x: area.x, y: area.bottom().saturating_sub(h), width: w, height: h }
         } else if let Some(Overlay::Menu { at, .. }) = &self.overlay {
             // At the pointer, kept on screen.
-            let w = (items.iter().map(|i| i.chars().count()).max().unwrap_or(10) as u16 + 4).min(area.width);
+            let w = (items.iter().map(|i| icons::width(i)).max().unwrap_or(10) + 4).min(area.width);
             let x = at.x.min(area.right().saturating_sub(w));
             let y = at.y.min(area.bottom().saturating_sub(h));
             Rect { x, y, width: w, height: h }
@@ -2036,7 +2046,7 @@ fn node_at_mut<'a>(root: &'a mut Value, path: &[usize]) -> Option<&'a mut Value>
 
 /// Lay out a layout node: tabs, splits and view leaves, recording hit areas.
 #[allow(clippy::too_many_arguments)]
-fn walk(node: &Value, area: Rect, path: &mut Vec<usize>, overrides: &HashMap<Vec<usize>, Vec<u16>>, tabbar: &[Item], hit: &mut Hit, buf: &mut Buffer, pal: &Palette) {
+fn walk(node: &Value, area: Rect, path: &mut Vec<usize>, overrides: &HashMap<Vec<usize>, Vec<u16>>, tabbar: &[Item], hit: &mut Hit, buf: &mut Buffer, pal: &Palette, icons: &Icons) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -2058,7 +2068,7 @@ fn walk(node: &Value, area: Rect, path: &mut Vec<usize>, overrides: &HashMap<Vec
         }
         for (i, (c, r)) in children.iter().zip(rects.iter()).enumerate() {
             path.push(i);
-            walk(c, *r, path, overrides, tabbar, hit, buf, pal);
+            walk(c, *r, path, overrides, tabbar, hit, buf, pal, icons);
             path.pop();
         }
     } else if let Some(tabs) = node["tabs"].as_array() {
@@ -2068,7 +2078,7 @@ fn walk(node: &Value, area: Rect, path: &mut Vec<usize>, overrides: &HashMap<Vec
         let mut x = bar.x;
         for (i, t) in tabs.iter().enumerate() {
             let label = format!(" {}:{} ", i + 1, t["title"].as_str().unwrap_or("tab"));
-            let w = label.chars().count() as u16;
+            let w = icons::width(&label);
             hit.tabs.push((path.clone(), i, Rect { x, y: bar.y, width: w.min(bar.right().saturating_sub(x)), height: 1 }));
             x = x.saturating_add(w);
             let style = if i == active { Style::new().bg(pal.tab_active).fg(pal.tab_active_text) } else { pal.style(Some("muted")) };
@@ -2077,8 +2087,8 @@ fn walk(node: &Value, area: Rect, path: &mut Vec<usize>, overrides: &HashMap<Vec
         // Contributed tab-bar buttons (e.g. `+` from the tabs extension), on the first tab bar.
         if !hit.buttons.iter().any(|(_, _, c)| c.get("tab_path").is_some()) {
             for item in tabbar {
-                let label = format!(" {} ", item.label);
-                let w = label.chars().count() as u16;
+                let label = format!(" {} ", icons.label(&item.icon, &item.label));
+                let w = icons::width(&label);
                 if x + w > bar.right() {
                     break;
                 }
@@ -2091,10 +2101,27 @@ fn walk(node: &Value, area: Rect, path: &mut Vec<usize>, overrides: &HashMap<Vec
         ratatui::widgets::Widget::render(Paragraph::new(Line::from(spans)).style(Style::new().bg(pal.tab_bar)), bar, buf);
         if let Some(t) = tabs.get(active) {
             path.push(active);
-            walk(&t["node"], body, path, overrides, tabbar, hit, buf, pal);
+            walk(&t["node"], body, path, overrides, tabbar, hit, buf, pal, icons);
             path.pop();
         }
     }
+}
+
+/// A menu's lines. When any item has an icon, every label starts after one shared icon column.
+fn menu_lines(items: &[Item], icons: &Icons) -> Vec<String> {
+    let glyphs: Vec<Option<&str>> = items.iter().map(|i| icons.resolve(&i.icon)).collect();
+    let column = glyphs.iter().flatten().map(|g| icons.cell(g).1).max();
+    items
+        .iter()
+        .zip(glyphs)
+        .map(|(i, g)| match (column, g) {
+            (None, _) => format!(" {}", i.label),
+            (Some(c), g) => {
+                let (cell, cells) = g.map(|g| icons.cell(g)).unwrap_or_default();
+                format!(" {cell}{} {}", " ".repeat((c - cells) as usize), i.label)
+            }
+        })
+        .collect()
 }
 
 fn nz(n: u16) -> std::num::NonZeroU16 {

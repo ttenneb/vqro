@@ -68,8 +68,8 @@ Everything opinionated is an extension (D17).
 Extensions contribute `menu/*` and `binding/*` entries carrying `owner`; clients hide them while that extension is
 disabled, removed or in safe mode, or when their command is unavailable.
 
-- `menu/<id>`: `{where: "pane"|"tab"|"tabbar"|"status", label, command, args?, input?, pick?: "resource", when?, order?}`.
-  `input` makes the client prompt for text (passed as `args.text`); `pick` makes it offer a choice (`args.picked`);
+- `menu/<id>`: `{where: "pane"|"tab"|"tabbar"|"status", label, icon?, command, args?, input?, pick?: "resource", when?,
+  order?}`. `icon` (see Icons) is drawn before the label; an empty label shows the icon alone. `input` makes the client prompt for text (passed as `args.text`); `pick` makes it offer a choice (`args.picked`);
   `when` is matched field by field against the invocation context.
 - `binding/<id>`: `{key, command, args?, where?, label?, priority?, input?, pick?, hidden?}`. `key` is a prefix key
   (`"n"`, `"Left"`, see Keys) or a gesture (`"mouse.right"`, `"mouse.middle"`) with `where` = `"pane"` or `"tab"`.
@@ -120,10 +120,9 @@ and sets the prefix; the active profile is `doc/keys/profile`, and the list is l
 - Panels: `{title?, items: [row]}` or `{title?, pages: [{title, items}]}`. Rows:
   `{type?: "item"|"toggle"|"header"|"separator"|"text", text, id?, detail?, detail_style?, description?, checked?,
   style?, disabled?, badges?: [{text, style?}], children?: [row], expanded?, command?, args?, input?, pick?,
-  menu?: [menu item], icon?: one or two characters before the text, or `{nerd, text}` (clients pick by their `icons` setting:
-  `auto`, `nerd`, `text`; fonts can't be detected, so `auto` trusts terminals that bundle Nerd Font symbols),
-  icon_style?}`, plus `chips` rows (`{type: "chips", chips: [{text, checked?, style?, command, args?, input?,
-  options?}]}`, wrapping) and `select` rows (`{type: "select", text, value, options: [{label, value}], command}`);
+  menu?: [menu item], icon?: an icon (see Icons) before the text, in the icon column, icon_style?}`, plus `chips`
+  rows (`{type: "chips", chips: [{text, icon?, checked?, style?, command, args?, input?, options?}]}`, wrapping; a
+  chip with an icon and empty text is the icon alone) and `select` rows (`{type: "select", text, value, options: [{label, value}], command}`);
   anything with `options` opens a pick-one menu and adds `value` to its args; an option with `input` (e.g.
   "custom…") prompts for text instead, passed as `text`. `toolbar: [row]` pins rows above the
   list. Clients handle `client.panel {action: expand_all|collapse_all|filter|clear_filter}` for the panel it came
@@ -133,8 +132,8 @@ and sets the prefix; the active profile is `doc/keys/profile`, and the list is l
   colour as data, e.g. a swatch (feature `badge_color`; clients without it show a neutral badge). Use styles for
   everything else, so extensions follow the theme.
 - `ui.notify {text, style?}`: a transient message every client shows briefly (event `notify`). Not state.
-- Status-bar menu items may name a live `view`; clients take the label and style from its content
-  (`{label, style}`), hiding it while the label is empty.
+- Status-bar menu items may name a live `view`; clients take the label, icon and style from its content
+  (`{label, icon?, style}`), hiding it while the label is empty.
 
 ## Themes
 
@@ -166,12 +165,51 @@ Colours: a name (the 16 ANSI names such as `cyan`, `darkgray`, `lightblue`), `#R
 The bundled `themes` extension publishes its themes as live data `themes` and applies one with
 `themes.apply {name}`; settings shows them on its Theme page.
 
+## Icons
+
+Extensions ask for icons by name; the active icon set says how each name looks (D20). An icon (row `icon`, chip
+`icon`, menu item `icon`, a status segment's live `icon`) is one of:
+
+- a string: one or two characters, drawn as is;
+- `{name?, nerd?, text?}`: `name` is an icon name, or a list of names tried most specific first (an agent that
+  is working: `["working", "agent"]`); `nerd` and `text` are the extension's own glyphs.
+
+The active set is the entry `doc/settings/icons` = `{name, width?, glyphs: {name: glyph}}`. Clients resolve an
+icon to: the set's glyph for the first name it has; else the icon's own glyph, `nerd` or `text` by the client's
+`icons` setting (`doc/settings/tui.icons`: `auto`, `nerd`, `text`; fonts can't be detected, so `auto` trusts
+terminals that bundle Nerd Font symbols, Ghostty and WezTerm, or `PRIM_NERD_FONT=1`; `nerd` falls back to `text`);
+else nothing. With no set, or an empty `glyphs`, every icon looks as the extension drew it. Unknown names, and
+glyphs a client can't use (empty, control characters, wider than two cells), fall back the same way, so sets and
+extensions can evolve independently. In safe mode clients ignore the set (recovery, D15).
+
+Width is in terminal cells by Unicode width (UAX #11, as `unicode-width` measures it): most Unicode and Nerd Font
+glyphs take 1, emoji 2. A set's glyphs share one icon column of `width` cells (1 or 2; default 1), widened to its
+widest glyph; clients pad narrower glyphs to it and put one space after, so text after icons lines up across a list.
+An own glyph wider than the column widens only its own row. Inline places (status bar, tab bar, chips) need no
+column: the glyph, a space, the label. Panels whose rows rely on named icons, or icons on chips, list
+`icon_names` in `requires`.
+
+| Name | Marks |
+|---|---|
+| `repo`, `folder` | a workspace that is a git repository, or a plain folder |
+| `worktree` | a git worktree of a workspace |
+| `terminal`, `agent` | a terminal; one whose program reports agent status (OSC 7501) |
+| `working`, `blocked`, `done`, `error` | an agent's reported state (tried before `agent`); `blocked` also counts waiting agents |
+| `add`, `filter`, `refresh` | actions: add (a tab, a workspace), filter a list, refresh derived state |
+| `settings`, `sidebar` | the buttons that open them |
+
+The names are an open set: an extension may use others, and a set may leave any out. The bundled `icons`
+extension publishes its sets as live data `icons` (`{data: [{name, title, description, credit, width, glyphs}],
+preview, names}`) and applies one with `icons.apply {name}`; settings shows them, with the `icons` setting, on its
+Icons page.
+
 ## Default extensions
 
 On first run the core declares the extensions listed in `<extensions dir>/defaults.json` (`PRIM_EXTENSIONS_DIR`,
 default `~/.local/share/prim/extensions`) and records `doc/prim/defaults`, so removing one sticks. Bundled:
-`tabs`, `panes`, `gestures`, `workspaces`, `sidebar`, `themes`, `keys`, `settings` (`extensions/`, helper `prim_ext.py`). Client
-options live in `doc/settings/tui`, the theme in `doc/settings/theme`.
+`tabs`, `panes`, `gestures`, `workspaces`, `sidebar`, `themes`, `icons`, `keys`, `settings` (`extensions/`, helper
+`prim_ext.py`). Client options live in `doc/settings/tui`, the theme in `doc/settings/theme`, the icon set in
+`doc/settings/icons`.
 
 ## Extensions
 
