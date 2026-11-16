@@ -75,7 +75,8 @@ disabled, removed or in safe mode, or when their command is unavailable.
   (`"mouse.right"`, `"mouse.middle"`) with `where` = `"pane"` or `"tab"`.
 - Clients add `args.context` when invoking from a place: `{layout, layout_version, path, view, kind, resource, live,
   title}` for a pane, `{layout, layout_version, tab_path, tab_index}` for a tab. Use `layout_version` as `expect`.
-- Client-side commands (mechanism, never sent to the core): `client.menu {where}`, `client.prefix`, `client.palette`.
+- Client-side commands (mechanism, never sent to the core): `client.menu {where}`, `client.prefix`, `client.palette`,
+  `client.zoom` (toggle: the focused pane fills this window; per window, not workspace state; moving focus leaves it).
 
 ## Live view content and popups
 

@@ -165,6 +165,10 @@ struct App {
     overrides: HashMap<Vec<usize>, Vec<u16>>,
     mouse_owner: Option<String>,
     mouse_on: bool,
+    /// The pane shown alone (`client.zoom`): this window's presentation only, never workspace state.
+    zoomed: Option<String>,
+    /// Focus this view on the next draw (after leaving zoom the leaves are recomputed).
+    pending_focus: Option<String>,
     message: String,
     quit: bool,
 }
@@ -207,6 +211,8 @@ pub async fn run(socket: &Path) -> Result<()> {
         overrides: HashMap::new(),
         mouse_owner: None,
         mouse_on: true,
+        zoomed: None,
+        pending_focus: None,
         message: "click prim or press Ctrl-g for the menu".into(),
         quit: false,
     };
@@ -768,8 +774,14 @@ impl App {
         match key {
             "q" => self.quit = true,
             ":" => self.overlay = Some(Overlay::Palette { query: String::new(), sel: 0 }),
-            "o" => self.focus = (self.focus + 1) % n,
-            "O" => self.focus = (self.focus + n - 1) % n,
+            "o" => {
+                self.unzoom();
+                self.focus = (self.focus + 1) % n;
+            }
+            "O" => {
+                self.unzoom();
+                self.focus = (self.focus + n - 1) % n;
+            }
             "u" => self.invoke("prim.revert", Value::Null),
             "R" => self.invoke("prim.layout.reset", Value::Null),
             "!" => self.invoke("prim.safe_mode", Value::Null),
@@ -1025,6 +1037,14 @@ impl App {
                 self.overlay = Some(Overlay::Menu { items, ctx, sel: 0, at });
             }
             "client.prefix" => self.overlay = Some(Overlay::Prefix { sel: 0 }),
+            "client.zoom" => {
+                // Toggle: the focused pane alone, or back to the layout.
+                if self.zoomed.is_some() {
+                    self.unzoom();
+                } else if let Some(v) = self.leaves.get(self.focus).cloned() {
+                    self.zoomed = Some(v);
+                }
+            }
             "client.panel" => {
                 // Act on a panel's client-side state: the panel the command came from.
                 let Some(key) = ctx["panel"].as_str().map(String::from) else { return };
@@ -1048,6 +1068,13 @@ impl App {
                 let args = with_arg(&args, "context", ctx);
                 self.invoke(name, args);
             }
+        }
+    }
+
+    /// Leave zoom, keeping focus on the pane that was zoomed.
+    fn unzoom(&mut self) {
+        if let Some(z) = self.zoomed.take() {
+            self.pending_focus = Some(z);
         }
     }
 
@@ -1410,7 +1437,29 @@ impl App {
         match self.active_layout() {
             Some((_, root)) => {
                 let tabbar = self.menu_items("tabbar", &json!({}));
-                walk(&root, main, &mut Vec::new(), &self.overrides, &tabbar, &mut hit, f.buffer_mut())
+                match self.zoomed.clone() {
+                    None => walk(&root, main, &mut Vec::new(), &self.overrides, &tabbar, &mut hit, f.buffer_mut()),
+                    Some(z) => {
+                        // Lay out normally off-screen to find the pane, then give it the whole area.
+                        let mut scratch = Buffer::empty(main);
+                        walk(&root, main, &mut Vec::new(), &self.overrides, &tabbar, &mut hit, &mut scratch);
+                        match hit.leaves.iter().position(|(v, _, _)| *v == z) {
+                            Some(i) => {
+                                let path = hit.leaf_paths[i].clone();
+                                hit = Hit::default();
+                                hit.leaves.push((z, main, Block::bordered().inner(main)));
+                                hit.leaf_paths.push(path);
+                                self.focus = 0;
+                            }
+                            None => {
+                                // The zoomed pane is gone (closed, other tab): stop zooming.
+                                self.zoomed = None;
+                                hit = Hit::default();
+                                walk(&root, main, &mut Vec::new(), &self.overrides, &tabbar, &mut hit, f.buffer_mut());
+                            }
+                        }
+                    }
+                }
             }
             None => {
                 let text = "No layout yet.\n\nClick prim (bottom left) or press Ctrl-g for the menu:\n  n  open a shell\n  R  one tab per terminal\n  :  all commands";
@@ -1418,6 +1467,11 @@ impl App {
             }
         }
         self.leaves = hit.leaves.iter().map(|(v, _, _)| v.clone()).collect();
+        if let Some(v) = self.pending_focus.take() {
+            if let Some(i) = self.leaves.iter().position(|l| *l == v) {
+                self.focus = i;
+            }
+        }
         if self.focus >= self.leaves.len() {
             self.focus = 0;
         }
@@ -1571,6 +1625,9 @@ impl App {
         }
         if self.safe_mode {
             spans.push(Span::styled(" SAFE MODE ", Style::new().bg(Color::Yellow).fg(Color::Black)));
+        }
+        if self.zoomed.is_some() {
+            spans.push(Span::styled(" ZOOM ", Style::new().bg(Color::Cyan).fg(Color::Black)));
         }
         let failed = self.extensions.values().filter(|e| e["status"] == "failed").count();
         if failed > 0 {

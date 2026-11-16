@@ -121,5 +121,6 @@ ext.contribute({
     "binding/panes.split-h": {"key": "h", "command": "panes.split", "args": {"dir": "right"}, "label": "split side by side"},
     "binding/panes.split-v": {"key": "v", "command": "panes.split", "args": {"dir": "down"}, "label": "split stacked"},
     "binding/panes.close": {"key": "x", "command": "panes.close", "label": "close pane (program keeps running)"},
+    "binding/panes.zoom": {"key": "z", "command": "client.zoom", "label": "zoom pane (toggle)"},
 })
 ext.run()
