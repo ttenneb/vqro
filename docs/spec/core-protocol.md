@@ -102,7 +102,8 @@ disabled, removed or in safe mode, or when their command is unavailable.
   that no key reaches any more, without a key. Safe mode hides every extension's bindings.
 - **Live feedback.** While the prefix menu is open, and only then, a client may ask the terminal for richer key
   reports (the TUI uses the kitty keyboard protocol when supported) to show held modifiers in the prompt; after
-  a key runs it echoes it (`C-g z → zoom pane`).
+  a key runs it echoes it (`C-g z → zoom pane`). Held modifiers display as dimmed words (`Shift-`, `Ctrl-`,
+  `Alt-`); key names also accept these long forms (`Ctrl-a`, `Shift-Tab`).
 
 The bundled `keys` extension owns keymap profiles (`prim`, `tmux`, `screen`; tables and gaps in
 `extensions/keys.py`). Applying one with `keys.profile {value}` replaces its `binding/keys.*` entries (priority 10)
@@ -119,7 +120,9 @@ and sets the prefix; the active profile is `doc/keys/profile`, and the list is l
 - Panels: `{title?, items: [row]}` or `{title?, pages: [{title, items}]}`. Rows:
   `{type?: "item"|"toggle"|"header"|"separator"|"text", text, id?, detail?, detail_style?, description?, checked?,
   style?, disabled?, badges?: [{text, style?}], children?: [row], expanded?, command?, args?, input?, pick?,
-  menu?: [menu item], icon?: one or two characters before the text, icon_style?}`, plus `chips` rows (`{type: "chips", chips: [{text, checked?, style?, command, args?, input?,
+  menu?: [menu item], icon?: one or two characters before the text, or `{nerd, text}` (clients pick by their `icons` setting:
+  `auto`, `nerd`, `text`; fonts can't be detected, so `auto` trusts terminals that bundle Nerd Font symbols),
+  icon_style?}`, plus `chips` rows (`{type: "chips", chips: [{text, checked?, style?, command, args?, input?,
   options?}]}`, wrapping) and `select` rows (`{type: "select", text, value, options: [{label, value}], command}`);
   anything with `options` opens a pick-one menu and adds `value` to its args; an option with `input` (e.g.
   "custom…") prompts for text instead, passed as `text`. `toolbar: [row]` pins rows above the

@@ -35,8 +35,16 @@ SHORT = {"everything": "all", "workspaces only": "workspaces", "workspaces and w
 SHOW_LABELS = [("workspaces", "Workspaces", "folders you added"), ("worktrees", "Worktrees", "git worktrees"),
                ("terminals", "Terminals", "in workspaces"), ("stray", "Other terminals", "elsewhere")]
 STATUS = {"working": "accent", "blocked": "warn", "error": "error", "done": "ok"}
-# What a row is, at a glance (plain Unicode, no special font). The icon's style carries its state.
-ICON = {"repo": "⎇", "worktree": "⑂", "folder": "▫", "terminal": "›", "agent": "◆"}
+# What a row is, at a glance. Nerd Font glyphs where the client has one (Nerd Fonts v3: nf-dev-git,
+# nf-dev-git_branch, nf-fa-folder, nf-oct-terminal, nf-md-robot), plain Unicode otherwise.
+# The icon's style carries its state.
+ICON = {
+    "repo": {"nerd": "\ue702", "text": "⎇"},
+    "worktree": {"nerd": "\ue725", "text": "⑂"},
+    "folder": {"nerd": "\uf07b", "text": "▫"},
+    "terminal": {"nerd": "\uf489", "text": "›"},
+    "agent": {"nerd": "\U000f06a9", "text": "◆"},
+}
 last = [None, None, None]  # what was last published: sidebar, status segment, view popup
 
 

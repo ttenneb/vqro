@@ -183,6 +183,8 @@ struct App {
     overrides: HashMap<Vec<usize>, Vec<u16>>,
     mouse_owner: Option<String>,
     mouse_on: bool,
+    /// A popup waiting under a menu, prompt or picker opened from it; it comes back when that closes.
+    under: Option<Overlay>,
     /// The pane shown alone (`client.zoom`): this window's presentation only, never workspace state.
     zoomed: Option<String>,
     /// Focus this view on the next draw (after leaving zoom the leaves are recomputed).
@@ -233,6 +235,7 @@ pub async fn run(socket: &Path) -> Result<()> {
         overrides: HashMap::new(),
         mouse_owner: None,
         mouse_on: true,
+        under: None,
         zoomed: None,
         pending_focus: None,
         kbd_enhance: false,
@@ -293,6 +296,7 @@ pub async fn run(socket: &Path) -> Result<()> {
                 _ = tokio::time::sleep(std::time::Duration::from_millis(500)), if app.toast.is_some() => true,
                 else => return Ok(()),
             };
+            dirty |= app.restore_under();
             // Drain whatever else is ready before redrawing.
             while let Ok(m) = incoming.try_recv() {
                 app.on_incoming(m);
@@ -506,6 +510,7 @@ impl App {
                     "" => self.message = format!("popup: no view {view}"),
                     "terminal" => self.message = "popup refused: terminals never pop up".into(),
                     _ => {
+                        self.under = None;
                         self.pstate.insert("@popup".into(), panel::State::default());
                         self.overlay = Some(Overlay::Popup { view, width, ctx });
                     }
@@ -724,7 +729,7 @@ impl App {
             return;
         }
         let at = at.unwrap_or_default();
-        self.overlay = Some(Overlay::Menu { items, ctx, sel: 0, at });
+        self.open_over(Overlay::Menu { items, ctx, sel: 0, at });
     }
 
     /// A row's own actions (`menu`), shown like any other menu.
@@ -734,7 +739,7 @@ impl App {
             return;
         }
         let at = at.or_else(|| self.hit.leaves.get(self.focus).map(|(_, o, _)| Position { x: o.x + 2, y: o.y + 2 })).unwrap_or_default();
-        self.overlay = Some(Overlay::Menu { items, ctx, sel: 0, at });
+        self.open_over(Overlay::Menu { items, ctx, sel: 0, at });
     }
 
     fn on_filter_key(&mut self, k: KeyEvent) {
@@ -1079,9 +1084,9 @@ impl App {
         if let Some(prompt) = item.input.clone() {
             // Prefill with the current name when renaming something that has one.
             let text = item.prefill.clone().or_else(|| ctx["title"].as_str().map(String::from)).or_else(|| self.tab_title(&ctx)).unwrap_or_default();
-            self.overlay = Some(Overlay::Input { prompt, text, item, ctx });
+            self.open_over(Overlay::Input { prompt, text, item, ctx });
         } else if item.pick.as_deref() == Some("resource") {
-            self.overlay = Some(Overlay::Pick { sel: 0, item, ctx });
+            self.open_over(Overlay::Pick { sel: 0, item, ctx });
         } else {
             self.run_command(&item.command, item.args.clone(), ctx, at);
         }
@@ -1105,7 +1110,7 @@ impl App {
                     return;
                 }
                 let at = at.or_else(|| self.hit.leaves.get(self.focus).map(|(_, o, _)| Position { x: o.x + 1, y: o.y + 1 })).unwrap_or_default();
-                self.overlay = Some(Overlay::Menu { items, ctx, sel: 0, at });
+                self.open_over(Overlay::Menu { items, ctx, sel: 0, at });
             }
             "client.prefix" => self.overlay = Some(Overlay::Prefix { sel: 0 }),
             "client.zoom" => {
@@ -1197,6 +1202,37 @@ impl App {
             _ => return self.message = format!("client.tab: unknown target {to}"),
         };
         self.select_tab(&path, i);
+    }
+
+    /// Open a menu, prompt or picker. From inside a popup, the popup waits underneath and returns.
+    fn open_over(&mut self, ov: Overlay) {
+        if matches!(self.overlay, Some(Overlay::Popup { .. })) {
+            self.under = self.overlay.take();
+        }
+        self.overlay = Some(ov);
+    }
+
+    /// Bring back a popup once whatever was opened over it has closed.
+    fn restore_under(&mut self) -> bool {
+        if self.overlay.is_none() && self.under.is_some() {
+            self.overlay = self.under.take();
+            return true;
+        }
+        false
+    }
+
+    /// Nerd Font icons: the `icons` setting (`nerd`, `text`, or `auto`). Fonts can't be detected from
+    /// a terminal, so `auto` trusts terminals that bundle the Nerd Font symbols (Ghostty, WezTerm), or
+    /// `PRIM_NERD_FONT=1`.
+    fn nerd_icons(&self) -> bool {
+        match self.entries.get("doc/settings/tui").and_then(|s| s["icons"].as_str()) {
+            Some("nerd") => true,
+            Some("text") => false,
+            _ => {
+                std::env::var("PRIM_NERD_FONT").map(|v| v == "1").unwrap_or(false)
+                    || matches!(std::env::var("TERM_PROGRAM").as_deref(), Ok("ghostty") | Ok("WezTerm"))
+            }
+        }
     }
 
     fn setting(&self, key: &str) -> bool {
@@ -1556,6 +1592,7 @@ impl App {
     fn draw(&mut self, f: &mut Frame) {
         // Resolved every frame, so a theme change shows on the next redraw. Safe mode uses the built-in
         // palette, so an unreadable theme can't lock anyone out.
+        panel::set_nerd_icons(self.nerd_icons());
         let pal = if self.safe_mode { Palette::default() } else { Palette::from_theme(self.entries.get(theme::ENTRY)) };
         let [main, status] = Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(f.area());
         let mut hit = Hit::default();
@@ -1730,7 +1767,7 @@ impl App {
         let filtering = self.filtering.as_ref().map(|k| self.pstate.get(k).map(|s| s.filter.clone()).unwrap_or_default());
         let prompt = match &self.overlay {
             _ if filtering.is_some() => Some(("/".to_string(), filtering.clone().unwrap_or_default())),
-            Some(Overlay::Prefix { .. }) => Some((self.prefix(), keys::held(self.held))),
+            Some(Overlay::Prefix { .. }) => Some((self.prefix(), keys::held_words(self.held))),
             Some(Overlay::Palette { query, .. }) => Some((":".to_string(), query.clone())),
             Some(Overlay::Input { prompt, text, .. }) => Some((format!("{prompt}:"), text.clone())),
             _ => None,
@@ -1742,7 +1779,9 @@ impl App {
         let mut spans = vec![Span::styled(badge, Style::new().bg(if open { pal.prompt } else { pal.accent }).fg(pal.badge_text))];
         if let Some((label, text)) = prompt {
             spans.push(Span::styled(format!(" {label} "), Style::new().fg(pal.prompt).add_modifier(Modifier::BOLD)));
-            spans.push(Span::styled(text, pal.style(None)));
+            // Held modifiers after the prefix are a hint, not input: greyed out.
+            let text_style = if matches!(self.overlay, Some(Overlay::Prefix { .. })) && self.filtering.is_none() { pal.style(Some("dim")) } else { pal.style(None) };
+            spans.push(Span::styled(text, text_style));
             let x = area.x + spans.iter().map(|s| s.content.chars().count() as u16).sum::<u16>();
             f.render_widget(Paragraph::new(Line::from(spans)), area);
             f.set_cursor_position((x.min(area.right().saturating_sub(1)), area.y));

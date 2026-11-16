@@ -158,6 +158,25 @@ THEMES = [
         },
     },
 ]
+# Catppuccin's 14 accents per flavour (https://catppuccin.com/palette). Its ports let you pick one;
+# here it drives `accent`, `border_focus` and `tab_active`. Lavender by default.
+ACCENT_NAMES = ["rosewater", "flamingo", "pink", "mauve", "red", "maroon", "peach", "yellow", "green", "teal",
+                "sky", "sapphire", "blue", "lavender"]
+ACCENTS = {
+    "catppuccin-mocha": "f5e0dc f2cdcd f5c2e7 cba6f7 f38ba8 eba0ac fab387 f9e2af a6e3a1 94e2d5 89dceb 74c7ec 89b4fa b4befe",
+    "catppuccin-macchiato": "f4dbd6 f0c6c6 f5bde6 c6a0f6 ed8796 ee99a0 f5a97f eed49f a6da95 8bd5ca 91d7e3 7dc4e4 8aadf4 b7bdf8",
+    "catppuccin-frappe": "f2d5cf eebebe f4b8e4 ca9ee6 e78284 ea999c ef9f76 e5c890 a6d189 81c8be 99d1db 85c1dc 8caaee babbf1",
+    "catppuccin-latte": "dc8a78 dd7878 ea76cb 8839ef d20f39 e64553 fe640b df8e1d 40a02b 179299 04a5e5 209fb5 1e66f5 7287fd",
+}
+ACCENT_TOKENS = ("accent", "border_focus", "tab_active")
+for t in THEMES:
+    if t["name"] in ACCENTS:
+        t["accents"] = {n: "#" + h for n, h in zip(ACCENT_NAMES, ACCENTS[t["name"]].split())}
+        t["accent"] = "lavender"
+        # Calmer than pink for the prompt line: mauve.
+        t["palette"]["prompt"] = t["accents"]["mauve"]
+        for k in ACCENT_TOKENS:
+            t["palette"][k] = t["accents"]["lavender"]
 BY_NAME = {t["name"]: t for t in THEMES}
 
 
@@ -167,16 +186,36 @@ def publish():
     ext.publish("themes", {"data": data, "preview": PREVIEW})
 
 
-@ext.command("themes.apply", "Apply a theme (args: name, or value from a pick-one menu)")
-def apply(args):
-    name = args.get("name") or args.get("value")
+def write(name, accent=None):
     theme = BY_NAME.get(name)
     if theme is None:
         raise PrimError(f"no theme {name!r}; try one of: {', '.join(BY_NAME)}", "invalid")
-    value = {"name": theme["name"], "palette": theme["palette"]}
+    value = {"name": name, "palette": dict(theme["palette"])}
+    if "accents" in theme:
+        current = ext.value(ENTRY) or {}
+        # Keep the accent you chose when switching between flavours that have one.
+        accent = accent or (current.get("accent") if current.get("accent") in theme["accents"] else None) or theme["accent"]
+        if accent not in theme["accents"]:
+            raise PrimError(f"no accent {accent!r}; try one of: {', '.join(theme['accents'])}", "invalid")
+        value["accent"] = accent
+        for k in ACCENT_TOKENS:
+            value["palette"][k] = theme["accents"][accent]
     ext.retrying(lambda: ext.apply([{"op": "set", "key": ENTRY, "value": value, "expect": ext.version(ENTRY)}],
-                                   f"themes: {name}"))
-    return {"theme": name}
+                                   f"themes: {name}" + (f" ({value['accent']})" if "accent" in value else "")))
+    return {"theme": name, "accent": value.get("accent")}
+
+
+@ext.command("themes.apply", "Apply a theme (args: name, or value from a pick-one menu; accent?)")
+def apply(args):
+    return write(args.get("name") or args.get("value"), args.get("accent"))
+
+
+@ext.command("themes.accent", "Choose the current theme's accent, for themes that have accents (args: value)")
+def accent(args):
+    name = (ext.value(ENTRY) or {}).get("name")
+    if name not in BY_NAME or "accents" not in BY_NAME[name]:
+        raise PrimError("the current theme has no accent choice", "invalid")
+    return write(name, args.get("value") or args.get("accent") or args.get("text"))
 
 
 publish()

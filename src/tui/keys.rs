@@ -109,6 +109,20 @@ pub fn name(key: &KeyEvent) -> Option<String> {
 
 /// The canonical form of a key name, or None if it isn't one (so unknown keys never match).
 pub fn normalize(s: &str) -> Option<String> {
+    // Long modifier words are accepted too: `Ctrl-a`, `Alt-x`, `Shift-Tab`.
+    let mut long = s.to_string();
+    for (word, short) in [("ctrl-", "C-"), ("control-", "C-"), ("alt-", "M-"), ("meta-", "M-"), ("option-", "M-"), ("shift-", "S-")] {
+        loop {
+            let lower = long.to_ascii_lowercase();
+            // Only at the front or after another modifier, and only if something follows.
+            let at = lower.find(word).filter(|&i| (i == 0 || lower[..i].ends_with('-')) && lower.len() > i + word.len());
+            match at {
+                Some(i) => long.replace_range(i..i + word.len(), short),
+                None => break,
+            }
+        }
+    }
+    let s = long.as_str();
     let (mut ctrl, mut alt, mut shift, mut rest) = (false, false, false, s);
     // A modifier needs something after it, so `C--` is Ctrl and `-`, and `C` alone is the letter.
     while rest.len() > 2 && rest.is_char_boundary(2) && rest.as_bytes()[1] == b'-' {
@@ -148,11 +162,14 @@ pub fn prefix(setting: Option<&str>) -> String {
         .unwrap_or_else(|| DEFAULT_PREFIX.to_string())
 }
 
-/// Held modifiers in key-name notation (`C-`, `M-`, `S-`), for live feedback after the prefix.
-pub fn held(m: KeyModifiers) -> String {
-    let mut s = compose(m.contains(KeyModifiers::CONTROL), m.contains(KeyModifiers::ALT), m.contains(KeyModifiers::SHIFT), "");
-    if m.contains(KeyModifiers::SUPER) {
-        s.push_str("Super-");
+/// Held modifiers as words (`Ctrl-`, `Alt-`, `Shift-`, `Super-`), for live feedback after the prefix:
+/// easier to read at a glance than the compact binding notation.
+pub fn held_words(m: KeyModifiers) -> String {
+    let mut s = String::new();
+    for (flag, word) in [(KeyModifiers::CONTROL, "Ctrl-"), (KeyModifiers::ALT, "Alt-"), (KeyModifiers::SHIFT, "Shift-"), (KeyModifiers::SUPER, "Super-")] {
+        if m.contains(flag) {
+            s.push_str(word);
+        }
     }
     s
 }
@@ -230,7 +247,6 @@ mod tests {
         assert_eq!(k(KeyCode::F(5), KeyModifiers::ALT), "M-F5");
         assert_eq!(k(KeyCode::Char('o'), KeyModifiers::SHIFT), "O");
         assert_eq!(name(&KeyEvent::new(KeyCode::Char('c'), KeyModifiers::SUPER)), None);
-        assert_eq!(held(KeyModifiers::SHIFT | KeyModifiers::CONTROL), "C-S-");
     }
 
     #[test]
@@ -259,5 +275,13 @@ mod tests {
         for bad in [None, Some(""), Some("a"), Some("Left"), Some("nonsense"), Some("C-")] {
             assert_eq!(prefix(bad), DEFAULT_PREFIX, "{bad:?}");
         }
+    }
+
+    #[test]
+    fn long_modifier_words() {
+        assert_eq!(normalize("Ctrl-a").as_deref(), Some("C-a"));
+        assert_eq!(normalize("ctrl-alt-Left").as_deref(), Some("C-M-Left"));
+        assert_eq!(normalize("Shift-Tab").as_deref(), Some("S-Tab"));
+        assert_eq!(held_words(KeyModifiers::SHIFT | KeyModifiers::CONTROL), "Ctrl-Shift-");
     }
 }

@@ -38,8 +38,15 @@ def theme_rows():
     if not themes.get("data"):
         return [{"type": "text", "text": "No themes listed: the themes extension is not running."},
                 {"type": "text", "text": "The current colours stay as they are."}]
-    current = (ext.value(THEME) or {}).get("name") or "default"
+    entry = ext.value(THEME) or {}
+    current = entry.get("name") or "default"
     rows = []
+    cur = next((t for t in themes["data"] if t["name"] == current), None)
+    if cur and cur.get("accents"):
+        accent = entry.get("accent") or cur.get("accent")
+        rows += [{"type": "select", "text": "Accent", "value": accent, "command": "themes.accent",
+                  "options": [{"label": n, "value": n} for n in cur["accents"]]},
+                 {"type": "separator"}]
     for t in themes["data"]:
         on = t["name"] == current
         swatches = [{"text": "  ", "color": t["preview"][k]} for k in themes.get("preview", []) if k in t.get("preview", {})]
@@ -170,6 +177,10 @@ def refresh(*_):
     t = tui()
     interface = [{"type": "toggle", "text": label, "description": desc, "checked": bool(t[k]),
                   "command": "settings.toggle", "args": {"tui": k}} for k, label, desc, _ in OPTIONS]
+    interface.append({"type": "select", "text": "Icons", "value": (ext.value(TUI) or {}).get("icons", "auto"),
+                      "command": "settings.set", "args": {"tui": "icons"},
+                      "options": [{"label": "auto (Nerd Font in Ghostty, WezTerm)", "value": "auto"},
+                                  {"label": "Nerd Font", "value": "nerd"}, {"label": "plain text", "value": "text"}]})
     info = ext.info
     about = [
         {"text": "prim", "detail": f"{info.get('server')} {info.get('version')} · protocol {info.get('protocol')}", "disabled": True, "style": "plain"},
@@ -198,6 +209,15 @@ def on_event(t, d):
 def open_settings(args):
     refresh()
     return {"client": {"popup": {"view": "settings", "width": 72}}}
+
+
+@ext.command("settings.set", "Set a client option (args: tui, value)")
+def set_option(args):
+    key, value = args.get("tui"), args.get("value")
+    if not key:
+        raise PrimError("needs `tui`", "invalid")
+    t = dict(ext.value(TUI) or {}, **{key: value})
+    ext.apply([{"op": "set", "key": TUI, "value": t, "expect": ext.version(TUI)}], f"settings: {key}")
 
 
 @ext.command("settings.toggle", "Toggle an extension (args: extension) or a client option (args: tui)")

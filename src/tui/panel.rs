@@ -6,7 +6,8 @@
 //!   `{"type"?: "item"|"toggle"|"header"|"separator"|"text", "text", "id"?, "detail"?, "detail_style"?,
 //!     "description"?, "checked"?, "style"?, "disabled"?, "badges"?: [{"text", "style"?, "color"?}],
 //!     "children"?: [row], "expanded"?: bool, "command"?, "args"?, "input"?, "menu"?: [menu item],
-//!     "icon"?: one or two characters before the text, "icon_style"?: a semantic style for it}`
+//!     "icon"?: one or two characters before the text, or {"nerd", "text"} so clients with a Nerd Font
+//!     use its glyph, "icon_style"?: a semantic style for it}`
 //! More row types: `chips` (`{"type": "chips", "chips": [chip]}`, a wrapping row of small buttons or
 //! toggles; a chip is `{"text", "checked"?, "style"?, "command"?, "args"?, "input"?, "options"?}`) and
 //! `select` (`{"type": "select", "text", "value", "options": [{"label", "value"}], "command", "args"?}`).
@@ -425,7 +426,7 @@ fn draw_row(buf: &mut Buffer, row: Rect, r: &Flat, selected: bool, chip: usize, 
                 x += 1;
             }
             // An icon says what the row is; its style can carry state (e.g. an agent working).
-            if let Some(icon) = item["icon"].as_str().filter(|i| !i.is_empty()) {
+            if let Some(icon) = icon_text(&item["icon"]).filter(|i| !i.is_empty()) {
                 let icon: String = icon.chars().take(2).collect();
                 buf.set_string(x, y, &icon, ink(pal.style(item["icon_style"].as_str().or(Some("muted")))));
                 x += icon.chars().count() as u16 + 1;
@@ -476,6 +477,22 @@ fn draw_row(buf: &mut Buffer, row: Rect, r: &Flat, selected: bool, chip: usize, 
             hits.rows.push((row, i));
         }
     }
+}
+
+/// Whether this client draws Nerd Font icons; set once per frame from the client's settings.
+static NERD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_nerd_icons(on: bool) {
+    NERD.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// An icon is a string, or `{"nerd", "text"}`: the Nerd Font glyph when this client uses one, else text.
+fn icon_text(v: &Value) -> Option<&str> {
+    if let Some(s) = v.as_str() {
+        return Some(s);
+    }
+    let nerd = NERD.load(std::sync::atomic::Ordering::Relaxed);
+    if nerd { v["nerd"].as_str().or_else(|| v["text"].as_str()) } else { v["text"].as_str() }
 }
 
 fn truncate(s: &str, w: usize) -> String {
