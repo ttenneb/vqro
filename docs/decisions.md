@@ -1,0 +1,199 @@
+# Decisions
+
+Each entry is binding until superseded. Format: decision, why, consequences. Add new ones at the end; don't edit
+old ones except to mark them superseded.
+
+## D0. No coordination policy in core (2026-11-16)
+
+**Decision.** The core exposes neutral mechanisms. Anything that decides *when* or *how* a participant learns
+about or acts on a change (wait, notify, polling vs push, queueing, routing, wake) is an extension.
+**Why.** Agent tooling is early; the owner wants to change the agent system quickly. herdr-core's `send`/`wait`/
+notes show how fused policy locks users in (`research/review-1-backends.md`, finding 3).
+**Consequences.** Core gets a cursored change log where poll and push are the same primitive; parameters such as
+retention are explicit (D6).
+
+## D1. Split process model: frozen supervisor + restartable core (2026-11-16)
+
+> **Superseded by D14.** prim does not run its own supervisor or own process lifetime; backends do.
+
+
+> **Partly superseded by D9:** the split (long-lived execution layer, restartable core) stands. Committing to build
+> prim's own supervisor does not; the core depends on a lifetime contract that prim-sup or herdr-core may satisfy.
+> The claim below that a supervisor crash kills its children was wrong (see D9).
+
+**Decision.** A tiny, long-lived supervisor per machine owns child processes and buffers raw bytes. The core, adapters,
+extensions and UI restart freely and reattach by byte offset. The supervisor protocol is meant to be frozen; prim is
+partly defining a standard for itself. Spec: now `spec/execution-v0.md` (renamed, D9).
+**Why.** A single daemon makes every core change kill agents, is a single point of failure, and accumulates policy.
+The alternatives considered were a per-agent `prim-host` (repeats the external-supervisor pattern vqro retired,
+`research/review-2-plan.md` finding 3), herdr-core as supervisor (pipes problem and coupling), and no persistence.
+**Consequences.** The supervisor must stay minimal because a supervisor crash kills its children.
+
+## D2. prim is not "a wrapper over any multiplexer" (2026-11-16)
+
+> **Superseded by D14.** prim *is* a standardized layer over any multiplexer.
+
+
+**Decision.** prim is a primitives layer over execution hosts (D9). Multiplexers are optional backends for terminal nodes.
+**Why.** Headless agents need clean pipes and emit no OSC 7501, so backends provide agents neither I/O nor status
+(`research/agents.md`, Findings 2; `research/review-2-plan.md` finding 2).
+
+## D3. Backend order: herdr-core first; tmux, RMUX and Rex deferred (2026-11-16)
+
+> **Superseded by D14.** Order revised: herdr-core first, a second backend early to expose leaks; Rex stays in scope as a backend.
+
+
+**Why.** herdr-core has events with seq and `missed`, a status store, versioned docs and remote machines. tmux and RMUX
+lose status under load, need separate dialects and reset pane IDs; Rex's protocol is undocumented, its API revision
+moves weekly, and its terms are unchecked (`research/review-1-backends.md`, findings 1, 2, 8 and 9).
+**Consequences.** Never write into the `herdr-app` document; prim uses its own `prim` document (finding 7).
+
+## D4. Agent model is capability-based, not mode-based (2026-11-16)
+
+**Decision.** Agent adapters publish native capabilities (`inject_at_boundary`, `enqueue_after_settle`, `interrupt`,
+`answer_request`, `fork`, `resume`, ...). Core does not define a universal `deliver(mode)`. Extensions name and compose
+delivery strategies, and hold any queues.
+**Why.** "Steer" means at least three different things across runtimes, and emulating missing modes needs a queue,
+which is policy (`research/agents.md`, Findings 1; `research/review-2-plan.md` finding 4).
+**Supersedes** the `deliver(mode: boundary|settle|preempt)` draft in `research/agents.md`.
+
+## D5. ACP is an adapter, not the core model; first adapters are pi RPC and Claude Code (2026-11-16)
+
+**Why.** ACP has the widest reach, but its steering is unstandardised, v2 is a draft, and the Rust crate went from 3.6
+to 5.3 in a month (`research/agents.md`, Protocols). pi and Claude Code are both installed, cover two different
+input semantics, and Claude Code is the owner's main agent. Codex app-server is third (best documented steer).
+**Risk.** Claude Code's mid-turn behaviour is undocumented; E1 measures it.
+
+## D6. Change log mechanism parameters (2026-11-16)
+
+**Decision.** The log is bounded; readers that fall behind get `missed` and re-read current facts; ordering is
+guaranteed per node only. Facts are observed, not authoritative.
+**Why.** Retention, backpressure and ordering are unavoidable choices; naming them as mechanism parameters keeps them
+out of policy (`research/review-2-plan.md` findings 6, 7; vqro "Volatile events are not state").
+
+## D7. Rust; TUI client first (2026-11-16)
+
+**Decision.** Supervisor and core in Rust. The first UI client is a TUI (ratatui). A GPU client may come later as another
+client of the same core protocol.
+**Why.** The owner prefers Rust. A TUI is the cheapest way to reach daily use and works over SSH.
+
+## D8. Trust is cooperative, with safe defaults (2026-11-16)
+
+**Decision.** prim's permissions are a coordination protocol, not a security boundary. Sockets are 0600, every effect
+records its caller, and answering permission requests is reserved to humans unless explicitly granted.
+**Why.** An agent with prim access could otherwise answer another agent's prompts (`research/review-1-backends.md`
+finding 9; vqro "Coordination authority is cooperative").
+
+## D9. Process-lifetime contract before supervisor implementation (2026-11-16)
+
+> **Superseded by D14.** No execution host contract; backends declare capabilities through the adapter contract and prim never compensates.
+
+
+**Decision.** The core depends on the execution host contract (`spec/execution-v0.md`), which states lifetime
+guarantees explicitly (`survives_client_restart`, `child_dies_with_host`, `orphan_reclaim`, ...). M1 compares a
+prim-owned supervisor with a herdr-core adapter against it before either is chosen.
+**Why.** Building a supervisor is an irreversible commitment, and PTY recovery, process ownership and cross-platform
+behaviour are hard. Children do not necessarily die with their parent: on Unix they are re-parented and may receive
+SIGHUP or SIGPIPE or keep running. herdr-core already survives client and core updates (`research/backends.md`).
+(Raised by the distillation response.)
+**Supersedes** the supervisor commitment in D1.
+
+## D10. Delivery has explicit failure states; no exactly-once (2026-11-16)
+
+**Decision.** Every effect carries one of `recorded`, `dispatched`, `accepted`, `observed`, `indeterminate`.
+`indeterminate` is never resolved by replay. Bounded buffers mean a long disconnect can lose history; prim reports the
+gap instead of claiming reconstruction.
+**Why.** Lost acknowledgements make general exactly-once impossible (distillation response; vqro "Delivery is not
+acceptance" and "A crash ... does not justify automatic replay").
+
+## D11. Agents may be headless or PTY-backed (2026-11-16)
+
+**Decision.** An agent node is either headless (structured adapter) or PTY-backed (native TUI). Switching means ending
+one process and resuming the session in the other. Resume restores saved history, not a turn in progress.
+**Why.** A runtime's native TUI stays useful and not every runtime supports the same modes. This is also the
+raw-terminal escape hatch (vision principle 8). (Distillation response.)
+
+## D12. Contracts are platform-neutral; Unix ships first (2026-11-16)
+
+**Decision.** No contract names a Unix-only concept: "local transport" (Unix socket or named pipe), `terminate` /
+`kill` / `interrupt` (not signal numbers), PTY or ConPTY, process groups or Job Objects. Native Windows implementations
+come later without contract changes.
+**Why.** Unix assumptions that harden into a frozen contract cannot be removed later. (Distillation response.)
+
+## D13. Programmable workspace is a co-equal goal (2026-11-16)
+
+> **Superseded by D14.** There are no separate goals; coordination is workspace behaviour built from the same primitives.
+
+
+**Decision.** prim's success criterion includes: *can an agent safely build and change meaningful workspace behaviour
+(layout, views, input, commands, state, extensions) using only public primitives?* Execution and coordination are not
+subordinate to it, but the workspace surface gets the same rigour (`spec/workspace-v0.md`, E0).
+**Why.** The plan specified execution well and the workspace barely; a strong supervisor with a rigid TUI would miss
+the point. The owner confirmed this is just as much the goal.
+**Consequences.** Clients are renderers of workspace primitives (D7 stands, TUI first). Extensions carry workspace
+behaviour as well as coordination policy.
+
+## D14. The center: one lean, standardized primitives layer over any multiplexer (2026-11-16)
+
+**Decision.** prim is one thing: a lean, standardized set of workspace primitives (nodes and views, layout, commands,
+input and messaging, state, events) that humans and agents use to build and change their agent workspace, on top of
+whatever multiplexer and agent runtimes are in use, through thin adapters. Coordination (messages, interrupts, routing)
+is workspace behaviour built from the same primitives, not a separate goal.
+
+**Backends own execution.** Processes, PTYs, persistence, recovery, remote machines and every lifetime guarantee belong
+to the backend (herdr-core, Rex, tmux, RMUX, Zellij, ...). Each backend adapter declares what its backend can do as
+capabilities (`spec/backend-adapter-v0.md`). prim exposes those capabilities and never compensates for missing ones,
+and never runs its own process host.
+
+**Why.** That execution work is hard and is what multiplexers such as Rex and herdr-core exist to solve. Taking it on
+makes prim neither lean nor terminal-agnostic. Per-tool mods (Claude Code mods, cmux config) reshape one tool; a layer
+across tools and multiplexers is still needed, and that layer is prim. The owner restated this center after the plan
+drifted into supervisor design (2026-11-16).
+
+**Judge every proposal by:** is it lean, is it standardized, and does it keep adding a new backend or runtime quick?
+
+**Consequences.** `spec/execution-v0.md` is withdrawn. Headless agents run inside a backend terminal through an agent
+bridge, so prim still hosts nothing. D10 (delivery states) stays as honest *reporting* of what a backend or runtime
+says, not a guarantee prim builds.
+
+## D15. Boundaries: resources and views, extension lifecycle, transactions, safe mode (2026-11-16)
+
+**Decision.**
+- **Backends** own execution, PTYs, process lifetimes and their actual guarantees. prim never fabricates durability
+  or delivery semantics.
+- **Adapters** normalize protocols, output, event ordering, identity and resize ownership, and handle buffering and
+  recovery honestly without inventing guarantees.
+- **prim** owns authoritative workspace state, composition, commands, bindings, interactions and the extension
+  lifecycle. prim supervises **its own extensions** (launch, restart with a crash budget, disable); it does not host
+  terminals or agents.
+- **Resources and views have independent identities.** A resource (terminal, agent, ...) has an adapter-declared kind;
+  any number of views can present it. The kind set is open.
+- **Workspace mutations are transactions:** validated, all-or-nothing, versioned, recorded with author, revertible.
+  External side effects (spawn, input, kill) report explicit outcomes (D10).
+- **Safe extension replacement is foundational.** A broken extension, including one an agent wrote, must not destroy
+  running work or lock the user out. The core has a small built-in, non-replaceable recovery surface (safe mode,
+  disable extension, revert transaction, reset layout) reachable from every client.
+- **Portability is a constraint from day one.** Develop on macOS; validate native Windows before locking any
+  backend or extension contract.
+**Refines** D14's "prim hosts no processes": prim hosts no *workspace* processes, but runs its own extensions.
+
+## D16. Build prim now as a production-shaped vertical slice (2026-11-16)
+
+**Decision.** No disposable prototypes. Every step builds a real prim component, a reusable contract, or a test that
+stays valuable. Fake backends exist only as deterministic test fixtures. Start with the smallest complete, usable prim
+(`build-plan.md`), dogfood it immediately, and grow it through real extensions and needs. Use a second, genuinely
+different backend to challenge the abstractions, not to build a universal framework in advance. Remove or simplify
+anything that proves unnecessary; keep tests and lessons, not bad code.
+**Supersedes** the spike-first ordering in `test-plan.md`; its questions are answered inside the build.
+
+## D17. Opinionated functionality ships as extensions (2026-11-16)
+
+**Decision.** Anything that is a choice about how to work (opening shells as tabs, split/rename/close actions,
+sidebars, settings menus, default layouts) is implemented as an extension using public primitives, even when it
+is "base" functionality. The core and clients keep only mechanism (rendering, focus, mouse mechanics, forwarding
+input, menus drawn from data, text prompts) and recovery (prefix, palette, undo/revert, safe mode, disable
+extension, a neutral layout reset), which must work when every extension is broken.
+**Why.** It forces prim to dogfood its own primitives, keeps every opinion easy to remove or replace, and is the
+sidebar's model generalised. The owner asked for this explicitly.
+**Consequences.** Needs a menu-contribution primitive (`menu/*` entries) and a set of default extensions
+installed on first run.

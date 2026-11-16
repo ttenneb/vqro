@@ -1,0 +1,46 @@
+{
+  "extensions": [
+    {
+      "name": "tabs",
+      "argv": [
+        "python3",
+        "tabs.py"
+      ]
+    },
+    {
+      "name": "panes",
+      "argv": [
+        "python3",
+        "panes.py"
+      ]
+    },
+    {
+      "name": "gestures",
+      "argv": [
+        "python3",
+        "gestures.py"
+      ]
+    },
+    {
+      "name": "workspaces",
+      "argv": [
+        "python3",
+        "workspaces.py"
+      ]
+    },
+    {
+      "name": "sidebar",
+      "argv": [
+        "python3",
+        "sidebar.py"
+      ]
+    },
+    {
+      "name": "settings",
+      "argv": [
+        "python3",
+        "settings.py"
+      ]
+    }
+  ]
+}

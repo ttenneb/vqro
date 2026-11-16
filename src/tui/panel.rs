@@ -1,0 +1,528 @@
+//! Panels: the declarative UI catalogue extensions draw with (D17). Generic, so every extension (and
+//! every future client) gets the same elements.
+//!
+//! A panel value is `{"title"?, "items": [row]}` or `{"title"?, "pages": [{"title", "items"}]}`.
+//! A row is:
+//!   `{"type"?: "item"|"toggle"|"header"|"separator"|"text", "text", "id"?, "detail"?, "detail_style"?,
+//!     "description"?, "checked"?, "style"?, "disabled"?, "badges"?: [{"text", "style"?}],
+//!     "children"?: [row], "expanded"?: bool, "command"?, "args"?, "input"?, "menu"?: [menu item]}`
+//! More row types: `chips` (`{"type": "chips", "chips": [chip]}`, a wrapping row of small buttons or
+//! toggles; a chip is `{"text", "checked"?, "style"?, "command"?, "args"?, "input"?, "options"?}`) and
+//! `select` (`{"type": "select", "text", "value", "options": [{"label", "value"}], "command", "args"?}`).
+//! Anything with `options` opens a pick-one menu; the chosen `value` is added to its args.
+//! A panel may pin rows above its list with `"toolbar": [row]`; they never scroll away.
+//! Unknown types render as plain items (forward compatible). Selection, expansion, page, filter and
+//! scroll are client state (per view), never written back.
+
+use std::collections::HashMap;
+
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::style::{Color, Modifier, Style};
+use serde_json::Value;
+
+/// Per-view interaction state, owned by the client.
+#[derive(Default, Clone)]
+pub struct State {
+    pub sel: usize,
+    /// Expansion the user chose, by row id (overrides the row's `expanded`).
+    pub open: HashMap<String, bool>,
+    pub page: usize,
+    pub filter: String,
+    pub top: usize,
+    /// Focused chip within a selected chips row.
+    pub chip: usize,
+}
+
+/// A visible row after pages, tree expansion and filtering.
+#[derive(Clone)]
+pub struct Flat {
+    pub item: Value,
+    pub depth: usize,
+    pub id: String,
+    pub parent: Option<usize>,
+    pub has_children: bool,
+    pub expanded: bool,
+    /// A toolbar row: drawn above the list, never scrolled.
+    pub pinned: bool,
+}
+
+#[derive(Default)]
+pub struct Hits {
+    pub rows: Vec<(Rect, usize)>,
+    pub expanders: Vec<(Rect, usize)>,
+    pub pages: Vec<(Rect, usize)>,
+    /// Chips: rect, row index, chip index.
+    pub chips: Vec<(Rect, usize, usize)>,
+}
+
+/// Panel features this client renders. A panel may list what it needs in `requires`.
+pub const SUPPORTED: &[&str] = &["items", "pages", "tree", "badges", "menu", "input", "description", "filter", "toolbar", "chips", "select", "options"];
+
+/// Features a panel needs that this client lacks.
+pub fn missing(v: &Value) -> Vec<String> {
+    v["requires"].as_array().into_iter().flatten().filter_map(|x| x.as_str()).filter(|f| !SUPPORTED.contains(f)).map(String::from).collect()
+}
+
+pub fn kind(item: &Value) -> &str {
+    item["type"].as_str().unwrap_or("item")
+}
+
+pub fn selectable(item: &Value) -> bool {
+    !matches!(kind(item), "header" | "separator" | "text") && item["disabled"] != true
+}
+
+pub fn page_titles(v: &Value) -> Vec<String> {
+    v["pages"].as_array().map(|p| p.iter().map(|x| x["title"].as_str().unwrap_or("page").to_string()).collect()).unwrap_or_default()
+}
+
+fn page_items<'a>(v: &'a Value, st: &State) -> &'a [Value] {
+    if let Some(pages) = v["pages"].as_array() {
+        let p = st.page.min(pages.len().saturating_sub(1));
+        return pages.get(p).and_then(|x| x["items"].as_array()).map(|a| a.as_slice()).unwrap_or(&[]);
+    }
+    v["items"].as_array().map(|a| a.as_slice()).unwrap_or(&[])
+}
+
+fn matches(item: &Value, f: &str) -> bool {
+    let hay = format!("{} {} {}", item["text"].as_str().unwrap_or(""), item["detail"].as_str().unwrap_or(""), item["description"].as_str().unwrap_or(""));
+    hay.to_lowercase().contains(f)
+}
+
+fn subtree_matches(item: &Value, f: &str) -> bool {
+    matches(item, f) || item["children"].as_array().map(|c| c.iter().any(|x| subtree_matches(x, f))).unwrap_or(false)
+}
+
+/// The rows to show, in order.
+pub fn rows(v: &Value, st: &State) -> Vec<Flat> {
+    let f = st.filter.to_lowercase();
+    let mut out = Vec::new();
+    fn walk(items: &[Value], depth: usize, parent: Option<usize>, prefix: &str, st: &State, f: &str, out: &mut Vec<Flat>) {
+        for (i, item) in items.iter().enumerate() {
+            if !f.is_empty() && !subtree_matches(item, f) {
+                continue;
+            }
+            let id = item["id"].as_str().map(String::from).unwrap_or_else(|| format!("{prefix}{i}"));
+            let children = item["children"].as_array().map(|c| c.as_slice()).unwrap_or(&[]);
+            let has_children = !children.is_empty();
+            // Filtering opens everything that matched below.
+            let expanded = has_children && (!f.is_empty() || st.open.get(&id).copied().unwrap_or(item["expanded"] == true));
+            let mut shown = item.clone();
+            if let Some(o) = shown.as_object_mut() {
+                o.remove("children");
+            }
+            let me = out.len();
+            out.push(Flat { item: shown, depth, id: id.clone(), parent, has_children, expanded, pinned: false });
+            if expanded {
+                walk(children, depth + 1, Some(me), &format!("{id}/"), st, f, out);
+            }
+        }
+    }
+    for (i, item) in v["toolbar"].as_array().into_iter().flatten().enumerate() {
+        out.push(Flat { item: item.clone(), depth: 0, id: format!("toolbar/{i}"), parent: None, has_children: false, expanded: false, pinned: true });
+    }
+    walk(page_items(v, st), 0, None, "", st, &f, &mut out);
+    out
+}
+
+/// Ids of every row with children on the current page (for expand/collapse all).
+pub fn parent_ids(v: &Value, st: &State) -> Vec<String> {
+    let mut out = Vec::new();
+    fn walk(items: &[Value], prefix: &str, out: &mut Vec<String>) {
+        for (i, item) in items.iter().enumerate() {
+            let id = item["id"].as_str().map(String::from).unwrap_or_else(|| format!("{prefix}{i}"));
+            if let Some(c) = item["children"].as_array().filter(|c| !c.is_empty()) {
+                out.push(id.clone());
+                walk(c, &format!("{id}/"), out);
+            }
+        }
+    }
+    walk(page_items(v, st), "", &mut out);
+    out
+}
+
+fn chip_label(c: &Value) -> String {
+    let t = c["text"].as_str().unwrap_or("");
+    if c["options"].is_array() {
+        format!(" {t} ▾ ")
+    } else {
+        format!(" {t} ")
+    }
+}
+
+/// Where each chip goes in a row of `width`, wrapping: (dx, dy, width).
+fn chip_layout(item: &Value, width: u16) -> Vec<(u16, u16, u16)> {
+    let mut out = Vec::new();
+    let (mut x, mut y) = (0u16, 0u16);
+    for c in item["chips"].as_array().into_iter().flatten() {
+        let w = (chip_label(c).chars().count() as u16).min(width.max(1));
+        if x > 0 && x + w > width {
+            x = 0;
+            y += 1;
+        }
+        out.push((x, y, w));
+        x += w + 1;
+    }
+    out
+}
+
+/// The next selectable row from `from` in direction `delta` (any distance), clamped at the ends.
+pub fn step(rows: &[Flat], from: usize, delta: i64) -> usize {
+    if rows.is_empty() {
+        return 0;
+    }
+    let dir = delta.signum();
+    let mut i = from.min(rows.len() - 1) as i64;
+    let mut left = delta.abs();
+    let mut last_ok = if selectable(&rows[i as usize].item) { Some(i) } else { None };
+    while left > 0 {
+        i += dir;
+        if i < 0 || i >= rows.len() as i64 {
+            break;
+        }
+        if selectable(&rows[i as usize].item) {
+            last_ok = Some(i);
+            left -= 1;
+        }
+    }
+    last_ok.map(|x| x as usize).unwrap_or_else(|| first(rows))
+}
+
+pub fn first(rows: &[Flat]) -> usize {
+    rows.iter().position(|r| selectable(&r.item)).unwrap_or(0)
+}
+
+pub fn last(rows: &[Flat]) -> usize {
+    rows.iter().rposition(|r| selectable(&r.item)).unwrap_or(0)
+}
+
+fn lines(item: &Value, width: u16) -> u16 {
+    if kind(item) == "chips" {
+        return chip_layout(item, width).last().map(|c| c.1 + 1).unwrap_or(1);
+    }
+    1 + item["description"].as_str().map(|_| 1).unwrap_or(0)
+}
+
+/// Height the content wants at `width` (for sizing popups), including the page bar and toolbar rule.
+pub fn height(v: &Value, st: &State, width: u16) -> u16 {
+    let bar = if page_titles(v).is_empty() { 0 } else { 2 };
+    let rows = rows(v, st);
+    let rule = rows.iter().any(|r| r.pinned) as u16;
+    bar + rule + rows.iter().map(|r| lines(&r.item, width)).sum::<u16>()
+}
+
+pub fn style_named(name: Option<&str>) -> Style {
+    match name {
+        Some("bold") => Style::new().add_modifier(Modifier::BOLD),
+        Some("dim") => Style::new().fg(Color::DarkGray),
+        Some("warn") => Style::new().fg(Color::Yellow),
+        Some("error") => Style::new().fg(Color::Red),
+        Some("ok") => Style::new().fg(Color::Green),
+        Some("accent") => Style::new().fg(Color::Cyan),
+        _ => Style::new(),
+    }
+}
+
+fn text_style(item: &Value) -> Style {
+    match item["style"].as_str() {
+        Some("plain") => Style::new(),
+        None if item["disabled"] == true => Style::new().fg(Color::DarkGray),
+        s => style_named(s),
+    }
+}
+
+fn badge_style(name: Option<&str>) -> Style {
+    let bg = match name {
+        Some("warn") => Color::Yellow,
+        Some("error") => Color::Red,
+        Some("ok") => Color::Green,
+        Some("accent") => Color::Cyan,
+        Some("bold") => Color::White,
+        _ => Color::DarkGray,
+    };
+    Style::new().bg(bg).fg(Color::Black)
+}
+
+/// Draw the panel into `area`. Keeps the selection visible and returns hit areas.
+pub fn render(buf: &mut Buffer, area: Rect, v: &Value, st: &mut State, focused: bool) -> Hits {
+    let mut hits = Hits::default();
+    if area.width < 6 || area.height == 0 {
+        return hits;
+    }
+    let missing = missing(v);
+    if !missing.is_empty() {
+        buf.set_string(area.x, area.y, "This view needs a newer prim UI", Style::new().fg(Color::Yellow));
+        if area.height > 1 {
+            buf.set_string(area.x, area.y + 1, format!("(missing: {})", missing.join(", ")), Style::new().fg(Color::DarkGray));
+        }
+        return hits;
+    }
+    let mut area = area;
+
+    // Page bar.
+    let titles = page_titles(v);
+    if !titles.is_empty() {
+        st.page = st.page.min(titles.len() - 1);
+        let mut x = area.x;
+        for (i, t) in titles.iter().enumerate() {
+            let label = format!(" {t} ");
+            let w = label.chars().count() as u16;
+            if x + w > area.right() {
+                break;
+            }
+            let style = if i == st.page { Style::new().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD) } else { Style::new().fg(Color::Gray) };
+            buf.set_string(x, area.y, &label, style);
+            hits.pages.push((Rect { x, y: area.y, width: w, height: 1 }, i));
+            x += w + 1;
+        }
+        if area.height > 1 {
+            buf.set_string(area.x, area.y + 1, "─".repeat(area.width as usize), Style::new().fg(Color::DarkGray));
+        }
+        area = Rect { y: area.y + 2, height: area.height.saturating_sub(2), ..area };
+    }
+    if !st.filter.is_empty() && area.height > 1 {
+        buf.set_string(area.x, area.y, format!("/{}", st.filter), Style::new().fg(Color::Magenta));
+        area = Rect { y: area.y + 1, height: area.height - 1, ..area };
+    }
+
+    let rows = rows(v, st);
+    if rows.is_empty() {
+        let msg = if st.filter.is_empty() { "(empty)" } else { "(no matches)" };
+        buf.set_string(area.x, area.y, msg, Style::new().fg(Color::DarkGray));
+        return hits;
+    }
+    st.sel = st.sel.min(rows.len() - 1);
+    if !selectable(&rows[st.sel].item) {
+        st.sel = step(&rows, st.sel, 1);
+    }
+
+    // Pinned toolbar rows first, then a rule, then the scrolling list.
+    let pinned = rows.iter().take_while(|r| r.pinned).count();
+    let mut y = area.y;
+    for (i, r) in rows.iter().enumerate().take(pinned) {
+        let h = lines(&r.item, area.width).min(area.bottom().saturating_sub(y));
+        if h == 0 {
+            break;
+        }
+        draw_row(buf, Rect { x: area.x, y, width: area.width, height: h }, r, focused && i == st.sel, st.chip, i, &mut hits);
+        y += h;
+    }
+    if pinned > 0 && y < area.bottom() {
+        buf.set_string(area.x, y, "─".repeat(area.width as usize), Style::new().fg(Color::DarkGray));
+        y += 1;
+    }
+    let area = Rect { y, height: area.bottom().saturating_sub(y), ..area };
+    if area.height == 0 {
+        return hits;
+    }
+    let list = &rows[pinned..];
+
+    // Scroll so the selection is visible, in lines.
+    let heights: Vec<u16> = list.iter().map(|r| lines(&r.item, area.width)).collect();
+    let total: u16 = heights.iter().sum();
+    let mut top = st.top as u16;
+    if st.sel >= pinned {
+        let s = st.sel - pinned;
+        let sel_start: u16 = heights[..s].iter().sum();
+        let sel_end = sel_start + heights[s];
+        if sel_start < top {
+            top = sel_start;
+        }
+        if sel_end > top + area.height {
+            top = sel_end.saturating_sub(area.height);
+        }
+    }
+    top = top.min(total.saturating_sub(area.height));
+    st.top = top as usize;
+    let scrollbar = total > area.height;
+    let body = Rect { width: area.width - scrollbar as u16, ..area };
+
+    let mut line: u16 = 0;
+    for (j, r) in list.iter().enumerate() {
+        let i = j + pinned;
+        let h = heights[j];
+        if line + h <= top {
+            line += h;
+            continue;
+        }
+        let y = body.y + (line - top);
+        line += h;
+        if y >= body.bottom() {
+            break;
+        }
+        draw_row(buf, Rect { x: body.x, y, width: body.width, height: h.min(body.bottom() - y) }, r, focused && i == st.sel, st.chip, i, &mut hits);
+    }
+
+    if scrollbar {
+        let x = area.right() - 1;
+        let thumb = ((area.height as u32 * area.height as u32) / total as u32).max(1) as u16;
+        let pos = ((top as u32 * area.height as u32) / total as u32) as u16;
+        for dy in 0..area.height {
+            let (sym, style) = if dy >= pos && dy < pos + thumb { ("┃", Style::new().fg(Color::Cyan)) } else { ("│", Style::new().fg(Color::DarkGray)) };
+            buf.set_string(x, area.y + dy, sym, style);
+        }
+    }
+    hits
+}
+
+fn draw_row(buf: &mut Buffer, row: Rect, r: &Flat, selected: bool, chip: usize, i: usize, hits: &mut Hits) {
+    let item = &r.item;
+    let w = row.width as usize;
+    let y = row.y;
+    let text = item["text"].as_str().unwrap_or("");
+    let indent = (r.depth * 2) as u16;
+    match kind(item) {
+        "chips" => {
+            let chips = item["chips"].as_array().cloned().unwrap_or_default();
+            for (ci, ((dx, dy, cw), c)) in chip_layout(item, row.width).into_iter().zip(chips.iter()).enumerate() {
+                if dy >= row.height {
+                    break;
+                }
+                let style = match c["checked"].as_bool() {
+                    Some(true) => Style::new().bg(Color::Cyan).fg(Color::Black),
+                    Some(false) => Style::new().bg(Color::DarkGray).fg(Color::Gray),
+                    None => Style::new().fg(Color::Cyan).bg(Color::Rgb(40, 40, 48)),
+                };
+                let style = if let Some(n) = c["style"].as_str() { style.patch(style_named(Some(n))) } else { style };
+                let style = if selected && ci == chip { style.add_modifier(Modifier::REVERSED | Modifier::BOLD) } else { style };
+                let rect = Rect { x: row.x + dx, y: y + dy, width: cw, height: 1 };
+                buf.set_string(rect.x, rect.y, truncate(&chip_label(c), cw as usize), style);
+                hits.chips.push((rect, i, ci));
+            }
+            hits.rows.push((row, i));
+        }
+        "select" => {
+            let base = if selected { Style::new().add_modifier(Modifier::REVERSED) } else { Style::new() };
+            buf.set_string(row.x, y, " ".repeat(w), base);
+            let value = item["value"].clone();
+            let shown = item["options"]
+                .as_array()
+                .and_then(|o| o.iter().find(|x| x["value"] == value))
+                .and_then(|x| x["label"].as_str())
+                .map(String::from)
+                .or_else(|| value.as_str().map(String::from))
+                .unwrap_or_default();
+            let label = format!(" {text}: ");
+            buf.set_string(row.x + indent, y, &label, base.patch(Style::new().fg(Color::Gray)));
+            let vx = row.x + indent + label.chars().count() as u16;
+            buf.set_string(vx, y, truncate(&format!("{shown} ▾"), w.saturating_sub((vx - row.x) as usize)), base.patch(Style::new().fg(Color::Cyan)));
+            hits.rows.push((row, i));
+        }
+        "separator" => buf.set_string(row.x, y, "─".repeat(w), Style::new().fg(Color::DarkGray)),
+        "header" => buf.set_string(row.x + indent, y, truncate(text, w.saturating_sub(indent as usize)), Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        "text" => buf.set_string(row.x + indent, y, truncate(text, w.saturating_sub(indent as usize)), text_style(item).fg(Color::Gray)),
+        k => {
+            let base = if selected { Style::new().add_modifier(Modifier::REVERSED) } else { Style::new() };
+            buf.set_string(row.x, y, " ".repeat(w), base);
+            let mut x = row.x + indent;
+            if r.has_children {
+                buf.set_string(x, y, if r.expanded { "▾ " } else { "▸ " }, base.patch(Style::new().fg(Color::Cyan)));
+                hits.expanders.push((Rect { x, y, width: 2, height: 1 }, i));
+            } else if r.depth > 0 {
+                buf.set_string(x, y, "  ", base);
+            }
+            x += 2 * (r.has_children || r.depth > 0) as u16;
+            if k == "toggle" {
+                let on = item["checked"] == true;
+                buf.set_string(x, y, if on { "[x] " } else { "[ ] " }, base.patch(Style::new().fg(if on { Color::Green } else { Color::DarkGray })));
+                x += 4;
+            } else if r.depth == 0 && !r.has_children {
+                x += 1;
+            }
+            // Right side: detail, then badges before it.
+            let detail = item["detail"].as_str().unwrap_or("");
+            let mut right = row.right().saturating_sub(1);
+            if !detail.is_empty() {
+                let dw = detail.chars().count() as u16;
+                if right > x + dw + 2 {
+                    right -= dw;
+                    let ds = item["detail_style"].as_str().map(|s| style_named(Some(s))).unwrap_or(Style::new().fg(Color::DarkGray));
+                    buf.set_string(right, y, detail, base.patch(ds));
+                    right = right.saturating_sub(1);
+                }
+            }
+            let badges: Vec<(String, Style)> = item["badges"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|b| Some((format!(" {} ", b["text"].as_str()?), badge_style(b["style"].as_str()))))
+                .collect();
+            let room_for_text = |right: u16| right.saturating_sub(x) as usize;
+            let mut bx = right;
+            let mut placed = Vec::new();
+            // The name keeps some room before badges get any.
+            let keep = (text.chars().count() as u16).min(12) + 1;
+            for (t, s) in badges.iter().rev() {
+                let bw = t.chars().count() as u16;
+                if bx < x + bw + keep {
+                    break;
+                }
+                bx -= bw;
+                placed.push((bx, t.clone(), *s));
+                bx = bx.saturating_sub(1);
+            }
+            buf.set_string(x, y, truncate(text, room_for_text(bx)), base.patch(text_style(item)));
+            for (bx, t, s) in placed {
+                buf.set_string(bx, y, t, s);
+            }
+            if let Some(d) = item["description"].as_str() {
+                if y + 1 < row.bottom() {
+                    let dx = row.x + indent + 4;
+                    buf.set_string(dx, y + 1, truncate(d, w.saturating_sub(dx as usize - row.x as usize)), Style::new().fg(Color::DarkGray));
+                }
+            }
+            hits.rows.push((row, i));
+        }
+    }
+}
+
+fn truncate(s: &str, w: usize) -> String {
+    if s.chars().count() <= w {
+        s.to_string()
+    } else if w == 0 {
+        String::new()
+    } else {
+        let mut t: String = s.chars().take(w - 1).collect();
+        t.push('…');
+        t
+    }
+}
+
+/// Activate a row: run its command (the caller does that), or open/close it if it only has children.
+/// Returns the row to run, if any.
+pub fn activate(rows: &[Flat], st: &mut State, i: usize) -> Option<Value> {
+    let r = rows.get(i)?;
+    if !selectable(&r.item) {
+        return None;
+    }
+    if kind(&r.item) == "chips" {
+        let c = r.item["chips"].get(st.chip)?;
+        return (c["command"].is_string() && c["disabled"] != true).then(|| c.clone());
+    }
+    if r.item["command"].is_string() {
+        return Some(r.item.clone());
+    }
+    if r.has_children {
+        st.open.insert(r.id.clone(), !r.expanded);
+    }
+    None
+}
+
+/// ←: close an open row, else go to its parent. →: open a closed row, else go to its first child.
+pub fn left(rows: &[Flat], st: &mut State) {
+    let Some(r) = rows.get(st.sel) else { return };
+    if r.has_children && r.expanded {
+        st.open.insert(r.id.clone(), false);
+    } else if let Some(p) = r.parent {
+        st.sel = p;
+    }
+}
+
+pub fn right(rows: &[Flat], st: &mut State) {
+    let Some(r) = rows.get(st.sel) else { return };
+    if r.has_children && !r.expanded {
+        st.open.insert(r.id.clone(), true);
+    } else if r.has_children && st.sel + 1 < rows.len() {
+        st.sel += 1;
+    }
+}
