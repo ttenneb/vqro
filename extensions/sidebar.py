@@ -116,11 +116,16 @@ def build():
         for t in w.get("worktrees", []):
             homes.append((os.path.realpath(t["path"]), ("wt", t["path"])))
     homes.sort(key=lambda h: -len(h[0]))
+    # `placed`: terminals under a tree folder. `stray`: the rest in the tree, or the flat list without one,
+    # where Terminals still means "in workspaces" and Other "elsewhere" (all count when there's no data).
     placed, stray = {}, []
     for rid, r in sorted(ext.resources.items(), key=lambda kv: int(kv[0][1:]) if kv[0][1:].isdigit() else 0):
         cwd = os.path.realpath(r["cwd"]) if r.get("cwd") else None
-        home = next((k for p, k in homes if cwd and (cwd == p or cwd.startswith(p + os.sep))), None) if tree else None
-        (placed.setdefault(home, []) if home else stray).append(term_row(rid, r))
+        home = next((k for p, k in homes if cwd and (cwd == p or cwd.startswith(p + os.sep))), None)
+        if tree and home:
+            placed.setdefault(home, []).append(term_row(rid, r))
+        elif tree or data is None or sh["terminals" if home else "stray"]:
+            stray.append(term_row(rid, r))
 
     items = []
     if tree:
