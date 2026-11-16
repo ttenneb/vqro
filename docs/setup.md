@@ -1,5 +1,22 @@
 # Setup on a new machine
 
+> prim is a working prototype, and fluid: expect these steps to change.
+
+## Run prim on a new machine
+
+1. **Prerequisites:** Rust (stable), Python 3 (extensions are stdlib-only), git.
+2. **herdr-core:** install with its official installer (it verifies sha256 and codesign), e.g.
+   `curl -fsSL https://releases.herdr.dev/core/install.sh` and review it before running. prim finds `hc` on PATH
+   or at herdr-core's standard install (`~/.local/share/herdr-core/current/...`), or set `PRIM_HERDR`.
+3. **Install prim:** `./scripts/dev-install.sh` (release build to `~/.local/bin/prim`, extensions to
+   `~/.local/share/prim/extensions`). Make sure `~/.local/bin` is on PATH.
+4. **Run:** `prim tui`. The first core start installs the default extensions from `extensions/defaults.json`.
+   `prim status` shows the core, extensions and connected UIs.
+5. **Terminal:** Ghostty or WezTerm give Nerd Font icons and the kitty keyboard protocol out of the box; other
+   terminals work with plain-text icons (Settings → Interface → Icons) and without live modifier display.
+6. **Moving state (optional):** your workspace, theme and keymap live in `~/.local/state/prim/`; copy
+   `workspace.json` across if you want the same setup (resource ids are re-mapped to the new machine's terminals).
+
 Nothing outside this repo moves with you. Reference clones, installed tools and the assistant's local memory all stay
 on the old machine, so everything needed is listed here.
 

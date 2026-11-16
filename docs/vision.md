@@ -1,6 +1,7 @@
 # prim: vision
 
-Status: direction (revised 2026-11-16 around D14). Binding choices live in `decisions.md`.
+Status: direction (revised 2026-11-16 around D14). Binding choices live in `decisions.md`. The implementation is a
+working prototype, and fluid.
 
 ## The problem
 
@@ -67,4 +68,4 @@ can't (D14).
   too fine-grained, extensions become full of special cases. Mitigation: two backends early.
 - **Owning the agent UI** means rebuilding diffs, slash commands and auth flows per runtime. Mitigation: native-TUI mode.
 - **Runtime protocols are young**: ACP steering is unstandardised, Claude Code's mid-turn input is undocumented.
-- **The workspace surface is the easiest part to over-build** into an extension platform, as vqro did. Keep E0 throwaway.
+- **The workspace surface is the easiest part to over-build** into an extension platform, as vqro did. Every element we add stays generic and documented (`spec/core-protocol.md`).

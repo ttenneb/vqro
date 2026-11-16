@@ -1,5 +1,7 @@
 # E1: agent input semantics (pi RPC, Claude Code stream-json)
 
+> **Status (2026-11-16):** **Still open**: it is roadmap step 1 (the headless agent bridge). Agents run in terminals today; status arrives via OSC 7501. prim is a working prototype, and fluid.
+
 Goal: measure when input actually takes effect in each runtime, so the agent capability model (D4) rests on
 observed behaviour, not docs. Also check that a restarted reader loses nothing and replays nothing.
 

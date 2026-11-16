@@ -1,5 +1,7 @@
 # Test plan: assumptions to clear up now
 
+> **Status (2026-11-16):** **Superseded by D16** (build prim directly; answer questions inside the build). Kept as the record of what we meant to test. Still open: S1, agent input routes, now `experiments/e1-agent-input.md` and roadmap step 1. prim is a working prototype, and fluid.
+
 Revised 2026-11-16 around D14. Evidence: `research/` (agents, backends, prior-art-tools, protocols-and-ui,
 workspace-extension-models). Every test is throwaway code or no code, ends with a written result in `research/`, and
 answers a question that changes the primitives.

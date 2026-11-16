@@ -1,6 +1,8 @@
 # prim: architecture
 
-Status: draft (revised 2026-11-16 around D14). Nothing here is built. **Open** items are in `open-questions.md`.
+Status: revised 2026-11-16. The shape below is the intended design; **much of it is now built as a working
+prototype, and fluid** (see "What exists now"). The exact, current protocol is `spec/core-protocol.md`; open items
+are in `open-questions.md`.
 
 prim is one lean, standardized layer of workspace primitives over any multiplexer and any agent runtime. Humans and
 agents use the same primitives to build and change the workspace; coordination (messages, interrupts, routing) is
@@ -27,6 +29,19 @@ workspace behaviour like layout or commands. Backends own execution (D14).
 
 Everything above the backends talks the prim core protocol. The core is a small, restartable process; it owns no
 child processes.
+
+## What exists now (prototype, 2026-11-16)
+
+| Area | Built | Where |
+|---|---|---|
+| Core | JSON-RPC over a local socket; workspace store (validated transactions, history, revert, persisted); events with seq and `missed`; commands routed to owning connections; live view content (`view.publish`, not persisted); client tracking | `src/core.rs`, `src/server.rs`, `src/store.rs` |
+| Adapters | herdr-core via `hc connect` (framed attach streams, OSC 7501 status, cwd); a fake backend fixture. **In-process**, behind channels | `src/adapter/` |
+| Extensions | supervisor with crash budget, live replacement, safe mode; first-run defaults; contributions (`menu/*`, `binding/*`) with `owner` | `src/ext.rs`, `extensions/` |
+| TUI client | layouts (tabs, splits, drag resize, zoom), terminal views (vt100), panels (pages, trees, toolbar, chips, select, badges, icons, filter), menus, popups, prompt line, mouse, themes (palette tokens), keys (rebindable prefix, priority, profiles), self-restart on reinstall | `src/tui/` |
+| Bundled extensions | tabs, panes, gestures, workspaces, sidebar, themes, keys, settings | `extensions/*.py` |
+
+Not built: headless agent bridge and agent views (agents run as terminals; status via OSC 7501), out-of-process
+adapters, a second backend, remote machines, Windows. Order: `roadmap.md`.
 
 ## The primitives
 

@@ -4,7 +4,8 @@ One lean, standardized layer of workspace primitives over any multiplexer and an
 the same primitives to build and change their agent workspace; coordination is workspace behaviour too. Backends
 (herdr-core, Rex, tmux, Zellij, ...) own execution; prim adapts to them through thin adapters that declare capabilities.
 
-Status: usable daily-driver prototype over herdr-core (`docs/build-plan.md` has the slice-by-slice log).
+Status: **a working prototype, and fluid.** It is usable daily over herdr-core, but protocols, extension APIs and
+UI will keep changing as we learn (`docs/roadmap.md` for direction, `docs/build-plan.md` for the build log).
 
 ## Install and run
 

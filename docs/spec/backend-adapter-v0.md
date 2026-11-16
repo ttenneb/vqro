@@ -1,5 +1,7 @@
 # prim backend adapter contract, v0 (draft)
 
+> **Status (2026-11-16):** Forward-looking. Today the only adapter (herdr-core) and the test fixture run **in-process** behind a channel interface (`src/adapter/`); the out-of-process protocol is roadmap step 2. prim is a working prototype, and fluid.
+
 Status: draft (D14). A backend adapter maps one multiplexer onto prim's primitives and **declares** what that backend
 can do. prim exposes the declared capabilities and never compensates for missing ones. Adding a backend should take
 days, not weeks: if a backend needs prim to build something, the capability is simply absent.

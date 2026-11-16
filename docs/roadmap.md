@@ -1,17 +1,29 @@
 # Roadmap
 
-Revised 2026-11-16 around D14. Each step has an exit test and a kill question. If a kill question's answer is bad,
-stop and redesign. No irreversible commitment before the tests in `test-plan.md` report.
+**prim is a working prototype, and fluid.** This page says where we are and what we think comes next; it is
+revised as we learn, not a commitment. Detail of what was built and when: `build-plan.md`.
 
-| | Step | Builds | Exit test | Kill question |
+## Where we are (2026-11-16)
+
+Working and used daily over herdr-core:
+- Core: workspace store (transactions, history, revert), resources from a herdr-core adapter (in-process), event
+  log, commands routed to owners, extension supervisor (crash budget, safe mode), live view content.
+- TUI client: layouts (tabs, splits, zoom), terminal views, the panel catalogue (pages, trees, toolbars, chips,
+  badges, icons, filters), menus, popups, prompts, mouse, themes, configurable prefix and keymaps, self-restart.
+- Extensions: tabs, panes, gestures, workspaces, sidebar, themes, keys, settings (and soon icons).
+
+Not built yet: headless agent bridge (agents run in terminals today, status via OSC 7501), out-of-process backend
+adapters, any second backend, Windows.
+
+## Next (in this order, revisable)
+
+| | Step | Why now | Done when | Kill / rethink question |
 |---|---|---|---|---|
-| **Tests** | `test-plan.md` | throwaway spikes: agent input routes, view models, extension lifecycle | written results; capability tables filled in | Do the primitives hold up against real runtimes and two very different workspaces? |
-| **M1** | Core + first adapters | core (primitives, facts, log, effects), herdr-core adapter, one agent bridge (pi or Claude Code) | an extension builds a workspace with a terminal and an agent; the core restarts without disturbing either | Is any adapter more than thin? |
-| **M2** | Second backend + second runtime | tmux or Zellij adapter; the other agent runtime | the same extensions run unchanged on both backends | Did anything leak backend-specific assumptions into the primitives? |
-| **M3** | TUI, daily use | ratatui client; default workspace as replaceable extensions; native-TUI agent mode | the owner uses prim for real multi-agent work for a week | Better than the owner's current setup? |
-| **M4** | Agents as authors | an agent changes the workspace through commands; delivery strategies, mailbox, notifier as extensions | an agent builds a meaningful workspace change; swap delivery strategy without restarting anything | Was anything missing from the primitives? |
-| **M5** | Standard v1 | spec and protocol docs good enough for third parties; Codex and ACP adapters; Rex adapter if its API settles | someone could write an adapter from the spec alone | |
-| **Later** | | GPU client, more backends, Windows, publish | | |
+| 1 | **Headless agent bridge** (pi RPC first, then Claude Code) with agent views and input delivery by native capability (D4) | Biggest gap against the vision: prim owning the agent UI and routing input | An agent runs headless, its turns render in prim, and steer / queue / interrupt work through capabilities | Do runtimes fit one fact/effect shape without a core-side queue? (`experiments/e1-agent-input.md`) |
+| 2 | **Out-of-process adapter protocol + tmux adapter** | Proves backends are swappable extensions; exposes leaks in the primitives | The same extensions run unchanged on herdr-core and tmux; adapters restart without losing resources | Does any primitive assume herdr-core? |
+| 3 | **Undo for extension-made changes the user asked for** (e.g. theme, keymap picks) | Today the default revert skips extension writes | A user-initiated extension change can be undone from the prefix | |
+| 4 | **Windows validation** of contracts (D12) | Before anything freezes | Core and TUI run natively, or the gaps are written down | |
+| 5 | **Freeze candidates** | Only after 1–2 | Protocol pieces that survived two backends and two runtimes are marked stable | |
 
-Rules: one trunk, short branches; a small verification plan per change; record surprises in `research/` and binding
-choices in `decisions.md`.
+Rules: one trunk, short branches or worktree streams; small verification per change; record surprises in
+`research/` and binding choices in `decisions.md`.
