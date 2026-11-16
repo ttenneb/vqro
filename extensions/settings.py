@@ -6,8 +6,9 @@
 update in place while the popup is open.
 
 Extensions are switched with the core's `prim.extension.enable|disable`; client options live in
-`doc/settings/tui` and each client reads the ones it understands. This extension can't switch itself
-off from its own popup: turning settings off from settings would leave you without a way back.
+`doc/settings/tui` and each client reads the ones it understands. The Theme page draws the `themes`
+extension's live data and applies one with its `themes.apply` command. This extension can't switch
+itself off from its own popup: turning settings off from settings would leave you without a way back.
 """
 import os
 import sys
@@ -17,6 +18,7 @@ from prim_ext import Extension, PrimError  # noqa: E402
 
 ext = Extension("settings")
 TUI = "doc/settings/tui"
+THEME = "doc/settings/theme"
 OPTIONS = [
     ("mouse", "Capture the mouse", "off: your terminal handles the mouse and selects text", True),
     ("wheel_arrows", "Wheel scrolls full-screen programs", "sends arrow keys when a program has no mouse support", True),
@@ -28,6 +30,23 @@ def tui():
     return dict({k: d for k, _, _, d in OPTIONS}, **(ext.value(TUI) or {}))
 
 
+
+
+def theme_rows():
+    """The themes extension's themes, the current one marked, each with colour swatches."""
+    themes = ext.live.get("themes") or {}
+    if not themes.get("data"):
+        return [{"type": "text", "text": "No themes listed: the themes extension is not running."},
+                {"type": "text", "text": "The current colours stay as they are."}]
+    current = (ext.value(THEME) or {}).get("name") or "default"
+    rows = []
+    for t in themes["data"]:
+        on = t["name"] == current
+        swatches = [{"text": "  ", "color": t["preview"][k]} for k in themes.get("preview", []) if k in t.get("preview", {})]
+        rows.append({"text": ("● " if on else "○ ") + t["title"], "style": "accent" if on else None,
+                     "description": t.get("credit"), "badges": swatches,
+                     "command": "themes.apply", "args": {"name": t["name"]}})
+    return rows
 
 
 def ext_rows(states):
@@ -87,6 +106,7 @@ def refresh(*_):
     ext.publish("settings", {"title": "Settings", "requires": ["pages", "menu", "input"], "pages": [
         {"title": "Extensions", "items": ext_rows(states)},
         {"title": "Interface", "items": interface},
+        {"title": "Theme", "items": theme_rows()},
         {"title": "Keys", "items": key_rows()},
         {"title": "About", "items": about},
     ]})
@@ -94,7 +114,8 @@ def refresh(*_):
 
 @ext.on_event
 def on_event(t, d):
-    if t in ("extension", "missed", "safe_mode", "command") or (t == "entries" and any(c["key"].startswith(("extension/", TUI, "binding/")) for c in d["changes"])):
+    if t in ("extension", "missed", "safe_mode", "command") or (t == "view.content" and d["view"] == "themes") \
+            or (t == "entries" and any(c["key"].startswith(("extension/", TUI, THEME, "binding/")) for c in d["changes"])):
         refresh()
 
 

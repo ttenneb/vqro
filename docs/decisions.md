@@ -197,3 +197,18 @@ extension, a neutral layout reset), which must work when every extension is brok
 sidebar's model generalised. The owner asked for this explicitly.
 **Consequences.** Needs a menu-contribution primitive (`menu/*` entries) and a set of default extensions
 installed on first run.
+
+## D18. Themes are data; clients own the palette mechanism (2026-11-16)
+
+**Decision.** The active theme is one workspace entry, `doc/settings/theme` = `{name, palette: {token: colour}}`.
+Clients resolve a small set of semantic tokens (`spec/core-protocol.md`, Themes) over a built-in default and draw
+all their chrome from it; terminal content keeps its program's colours. Which themes exist and how one is chosen is
+an extension (`themes`, shown in settings). Extensions never name colours: they use semantic styles, and a raw
+colour appears only as data to show (a badge's `color`, e.g. a swatch).
+**Why.** A theme is a choice about how to work (D17), but drawing is client mechanism, and prim must look right
+with every extension broken. Tokens rather than a colour per element keep themes portable across clients (a GPU
+client resolves the same tokens) and keep the set small enough to design for.
+**Consequences.** A missing or unreadable token keeps the client's default and unknown tokens are ignored, so
+themes and clients can evolve independently. A theme only recolours chrome. Recovery: clients ignore the theme in
+safe mode, and a bad theme is undone by reverting its transaction (`prim.revert {txn}`; the default revert skips
+extension changes, and `themes` writes as an extension) or deleting the entry.

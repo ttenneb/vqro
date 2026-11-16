@@ -93,17 +93,49 @@ disabled, removed or in safe mode, or when their command is unavailable.
   anything with `options` opens a pick-one menu and adds `value` to its args. `toolbar: [row]` pins rows above the
   list. Clients handle `client.panel {action: expand_all|collapse_all|filter|clear_filter}` for the panel it came
   from. Panels list needed features in `requires`. Unknown types render as plain items. Selection, expansion, page, filter and scroll are client
-  state. Styles: `bold`, `dim`, `warn`, `error`, `ok`, `accent`, `plain`.
+  state. Styles are semantic names resolved through the theme (below): `bold`, `dim`, `muted`, `warn`, `error`, `ok`,
+  `accent`, `plain`; unknown names render plain. A badge may also carry `color` (a theme colour value) to show a
+  colour as data, e.g. a swatch (feature `badge_color`; clients without it show a neutral badge). Use styles for
+  everything else, so extensions follow the theme.
 - `ui.notify {text, style?}`: a transient message every client shows briefly (event `notify`). Not state.
 - Status-bar menu items may name a live `view`; clients take the label and style from its content
   (`{label, style}`), hiding it while the label is empty.
+
+## Themes
+
+The active theme is the entry `doc/settings/theme` = `{name, palette: {token: colour}}`. Clients read it live and
+draw their own chrome with it; terminal content keeps the colours its program set. Every client has a built-in
+default palette, so it looks right with no theme and no extensions. A token the theme leaves out, or whose colour
+the client can't read, keeps its default; unknown tokens are ignored (a theme may carry tokens for other clients).
+An empty palette means the client's own default. In safe mode clients ignore the theme (recovery, D15).
+
+Colours: a name (the 16 ANSI names such as `cyan`, `darkgray`, `lightblue`), `#RRGGBB`, a 256-colour index
+(number or numeric string), or `default` for the terminal's own colour.
+
+| Token | Used for | TUI default |
+|---|---|---|
+| `text` | ordinary text; `plain` and `bold` | `default` |
+| `muted` | secondary text: inactive tabs and pages, labels, `text` rows, status message; `muted` style | `gray` |
+| `dim` | details, descriptions, disabled rows, hints; `dim` style | `darkgray` |
+| `accent` | headers, values, buttons, scrollbar thumb, open page; `accent` style | `cyan` |
+| `ok`, `warn`, `error` | the matching styles, badges and toasts | `green`, `yellow`, `red` |
+| `prompt` | keyboard modes: prompt line, open prim badge, filter | `magenta` |
+| `border` | unfocused borders, rules, separators, scrollbar track | `darkgray` |
+| `border_focus` | the focused pane, popups and menus | `cyan` |
+| `selection`, `selection_text` | the selected row; unset `selection` means reverse video | unset |
+| `badge`, `badge_text` | neutral badge and unchecked chip fill; text on any filled background | `darkgray`, `black` |
+| `surface` | fill of plain chips | `#282830` |
+| `tab_active`, `tab_active_text` | the active tab | `blue`, `white` |
+
+The bundled `themes` extension publishes its themes as live data `themes` and applies one with
+`themes.apply {name}`; settings shows them on its Theme page.
 
 ## Default extensions
 
 On first run the core declares the extensions listed in `<extensions dir>/defaults.json` (`PRIM_EXTENSIONS_DIR`,
 default `~/.local/share/prim/extensions`) and records `doc/prim/defaults`, so removing one sticks. Bundled:
-`tabs`, `panes`, `gestures`, `workspaces`, `sidebar`, `settings` (`extensions/`, helper `prim_ext.py`). Client options live in
-`doc/settings/tui`.
+`tabs`, `panes`, `gestures`, `workspaces`, `sidebar`, `themes`, `settings` (`extensions/`, helper `prim_ext.py`). Client
+options live in `doc/settings/tui`, the theme in `doc/settings/theme`.
 
 ## Extensions
 
