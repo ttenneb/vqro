@@ -117,5 +117,8 @@ ext.contribute({
     "menu/panes.close": {"where": "pane", "label": "Close pane (program keeps running)", "command": "panes.close", "order": 40},
     "menu/panes.kill": {"where": "pane", "label": "Kill program", "command": "panes.kill", "when": {"live": True}, "order": 50},
     "binding/panes.menu": {"key": "m", "command": "client.menu", "args": {"where": "pane"}, "label": "pane menu"},
+    # h/v follow the layout's split names: "h" puts panes side by side, "v" stacks them.
+    "binding/panes.split-h": {"key": "h", "command": "panes.split", "args": {"dir": "right"}, "label": "split side by side"},
+    "binding/panes.split-v": {"key": "v", "command": "panes.split", "args": {"dir": "down"}, "label": "split stacked"},
 })
 ext.run()
