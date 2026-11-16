@@ -71,11 +71,42 @@ disabled, removed or in safe mode, or when their command is unavailable.
 - `menu/<id>`: `{where: "pane"|"tab"|"tabbar"|"status", label, command, args?, input?, pick?: "resource", when?, order?}`.
   `input` makes the client prompt for text (passed as `args.text`); `pick` makes it offer a choice (`args.picked`);
   `when` is matched field by field against the invocation context.
-- `binding/<id>`: `{key, command, args?, where?, label?}`. `key` is a prefix key (`"n"`) or a gesture
-  (`"mouse.right"`, `"mouse.middle"`) with `where` = `"pane"` or `"tab"`.
+- `binding/<id>`: `{key, command, args?, where?, label?, priority?, input?, pick?, hidden?}`. `key` is a prefix key
+  (`"n"`, `"Left"`, see Keys) or a gesture (`"mouse.right"`, `"mouse.middle"`) with `where` = `"pane"` or `"tab"`.
+  `input` and `pick` work as for menu items; `hidden` keeps a key out of the prefix menu (it still works).
 - Clients add `args.context` when invoking from a place: `{layout, layout_version, path, view, kind, resource, live,
   title}` for a pane, `{layout, layout_version, tab_path, tab_index}` for a tab. Use `layout_version` as `expect`.
 - Client-side commands (mechanism, never sent to the core): `client.menu {where}`, `client.prefix`, `client.palette`.
+- More client-side commands, so bindings can reach what the prefix keys do: `client.focus {dir: next|prev|left|right|
+  up|down}` (directions pick the adjacent pane), `client.tab {to: next|prev|<n>}` (n counts from 1, in the tab group
+  holding the focused pane), `client.quit` (this UI only), `client.none` (does nothing: binds a key to nothing). A
+  client answers an unknown `client.*` command with a message and never sends it to the core.
+
+## Keys
+
+- **Prefix.** `doc/settings/tui.prefix` names the prefix key (default `C-g`). It must have Ctrl or Alt, or be a
+  function key; anything missing, unparsable or unsuitable means `C-g`, never "no prefix". Clients apply it live,
+  show it in their prompt, and send it to the program when it is pressed twice.
+- **Key names** (tmux-like): modifiers `C-` (Ctrl), `M-` (Alt), `S-` (Shift; named keys only, since a character
+  already carries Shift: `O`, `%`), in any order, then a character or one of `Up Down Left Right Home End PageUp
+  PageDown Insert Delete Tab BackTab Enter Esc Backspace Space F1`..`F12`. Matching is case-insensitive for names
+  and modifiers (`C-space` = `C-Space`), exact for characters. A key that doesn't parse never matches.
+- **Precedence.** When several visible bindings share a key (or a gesture and `where`), the highest `priority`
+  wins (an integer, default 0), then the client's own defaults, then the lowest entry id. A winning binding to
+  `client.none` unbinds the key, so a profile can remove a key without deleting another extension's entry.
+- **Client defaults** are bindings at priority 0: `:` `client.palette`, `o`/`O` `client.focus` next/prev, `1`-`9`
+  `client.tab`, `u` `prim.revert`, `R` `prim.layout.reset`, `!` `prim.safe_mode`, `q` `client.quit`.
+- **Recovery survives any keymap.** The prefix menu (prefix key, the clickable `prim` badge, or `client.prefix`)
+  lists the winning binding of each key, then any recovery action (commands, undo, reset layout, safe mode, quit)
+  that no key reaches any more, without a key. Safe mode hides every extension's bindings.
+- **Live feedback.** While the prefix menu is open, and only then, a client may ask the terminal for richer key
+  reports (the TUI uses the kitty keyboard protocol when supported) to show held modifiers in the prompt; after
+  a key runs it echoes it (`C-g z → zoom pane`).
+
+The bundled `keys` extension owns keymap profiles (`prim`, `tmux`, `screen`; tables and gaps in
+`extensions/keys.py`). Applying one with `keys.profile {value}` replaces its `binding/keys.*` entries (priority 10)
+and sets the prefix; the active profile is `doc/keys/profile`, and the list is live data `keys`
+(`{profile, profiles: [{label, value}]}`) for the settings page.
 
 ## Live view content and popups
 
@@ -89,7 +120,8 @@ disabled, removed or in safe mode, or when their command is unavailable.
   style?, disabled?, badges?: [{text, style?}], children?: [row], expanded?, command?, args?, input?, pick?,
   menu?: [menu item]}`, plus `chips` rows (`{type: "chips", chips: [{text, checked?, style?, command, args?, input?,
   options?}]}`, wrapping) and `select` rows (`{type: "select", text, value, options: [{label, value}], command}`);
-  anything with `options` opens a pick-one menu and adds `value` to its args. `toolbar: [row]` pins rows above the
+  anything with `options` opens a pick-one menu and adds `value` to its args; an option with `input` (e.g.
+  "custom…") prompts for text instead, passed as `text`. `toolbar: [row]` pins rows above the
   list. Clients handle `client.panel {action: expand_all|collapse_all|filter|clear_filter}` for the panel it came
   from. Panels list needed features in `requires`. Unknown types render as plain items. Selection, expansion, page, filter and scroll are client
   state. Styles: `bold`, `dim`, `warn`, `error`, `ok`, `accent`, `plain`.
@@ -101,7 +133,7 @@ disabled, removed or in safe mode, or when their command is unavailable.
 
 On first run the core declares the extensions listed in `<extensions dir>/defaults.json` (`PRIM_EXTENSIONS_DIR`,
 default `~/.local/share/prim/extensions`) and records `doc/prim/defaults`, so removing one sticks. Bundled:
-`tabs`, `panes`, `gestures`, `workspaces`, `sidebar`, `settings` (`extensions/`, helper `prim_ext.py`). Client options live in
+`tabs`, `panes`, `gestures`, `workspaces`, `sidebar`, `keys`, `settings` (`extensions/`, helper `prim_ext.py`). Client options live in
 `doc/settings/tui`.
 
 ## Extensions

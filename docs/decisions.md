@@ -197,3 +197,17 @@ extension, a neutral layout reset), which must work when every extension is brok
 sidebar's model generalised. The owner asked for this explicitly.
 **Consequences.** Needs a menu-contribution primitive (`menu/*` entries) and a set of default extensions
 installed on first run.
+
+## D19. Keys: a configurable prefix, binding priority, profiles as an extension (2026-11-16)
+
+**Decision.** The prefix key is a client setting (`doc/settings/tui.prefix`) with a fallback to Ctrl-g. The
+client's built-in prefix keys are default bindings to `client.*` commands. Bindings sharing a key are resolved by
+`priority`, then the client's defaults, then entry id; a winning `client.none` unbinds a key. Keymap profiles
+(tmux, screen) live in the `keys` extension.
+**Why.** A keymap is an opinion (D17), but the prefix and how bindings combine are mechanism every client needs.
+Priority lets a profile override an extension's key without deleting or editing that extension's entries, so
+switching back, or turning the profile off, restores them. Deterministic tie-breaks keep the result independent of
+load order.
+**Consequences.** Recovery can't depend on any key: the prefix menu (and the `prim` badge that opens it) always
+lists the recovery actions, keyed or not, and an unusable prefix falls back to Ctrl-g (D15). Live key feedback
+uses terminal key-reporting extensions only while the prefix menu is open, so typing into programs never changes.
