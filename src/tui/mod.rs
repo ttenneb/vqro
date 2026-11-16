@@ -1407,8 +1407,9 @@ impl App {
     // ---- drawing -----------------------------------------------------------------------------
 
     fn draw(&mut self, f: &mut Frame) {
-        // Resolved every frame, so a theme change shows on the next redraw.
-        let pal = Palette::from_theme(self.entries.get(theme::ENTRY));
+        // Resolved every frame, so a theme change shows on the next redraw. Safe mode uses the built-in
+        // palette, so an unreadable theme can't lock anyone out.
+        let pal = if self.safe_mode { Palette::default() } else { Palette::from_theme(self.entries.get(theme::ENTRY)) };
         let [main, status] = Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(f.area());
         let mut hit = Hit::default();
         match self.active_layout() {
