@@ -36,6 +36,13 @@
       ]
     },
     {
+      "name": "themes",
+      "argv": [
+        "python3",
+        "themes.py"
+      ]
+    },
+    {
       "name": "settings",
       "argv": [
         "python3",
