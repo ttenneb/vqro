@@ -1,0 +1,158 @@
+#!/usr/bin/env python3
+"""prim extension: keys. Named keymap profiles; applying one writes its bindings and the prefix.
+
+A profile is an opinion about keys (D17), so it lives here and not in the client. Its bindings are
+`binding/keys.*` entries owned by `keys` with priority 10, so they override extensions' own keys
+(priority 0) without deleting them; switching profiles removes the previous profile's bindings.
+Switching also sets the client prefix (`doc/settings/tui.prefix`); changing the prefix afterwards
+(Settings > Keys) keeps the profile. The active profile is `doc/keys/profile`. The profile list is
+published live as view `keys` (`{profile, profiles: [{label, value}]}`) for the settings page.
+
+Turn this extension off (or enter safe mode) and its bindings disappear; the prefix setting stays,
+and whatever it is, the client's `prim` badge still opens the prefix menu with every recovery action.
+"""
+import os
+import sys
+import threading
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from prim_ext import Extension, PrimError  # noqa: E402
+
+ext = Extension("keys")
+STATE = "doc/keys/profile"
+TUI = "doc/settings/tui"
+PREFIX = "binding/keys."
+PRIORITY = 10
+
+
+def b(key, command, label, **extra):
+    return dict(key=key, command=command, label=label, **extra)
+
+
+def tab_digits():
+    """0-9 select tabs counting from 0, as tmux and screen number windows (`client.tab` counts from 1)."""
+    return {f"tab-{d}": b(str(d), "client.tab", f"tab {d}", args={"to": d + 1}, hidden=True) for d in range(10)}
+
+
+SPLIT_SIDE = {"dir": "right"}
+SPLIT_STACK = {"dir": "down"}
+PICK_TAB = dict(pick="resource")  # choose a terminal; tabs.show activates its tab or opens one
+
+PROFILES = {
+    # prim: the client's defaults and the extensions' own keys, nothing added.
+    "prim": {"label": "prim (C-g)", "prefix": "C-g", "keys": {}},
+    # tmux's default prefix key table (`tmux list-keys -T prefix`), mapped onto prim commands.
+    # Gaps (no prim command): ! break-pane, ; last pane, l last window, { } swap panes, [ ] copy and
+    # paste, q display-panes (prim's q quit stays), space/M-1..5 layouts, C-arrows resize, C-o
+    # rotate, s/$ sessions, . move window, f find, t clock, i info, ~ messages, D/L clients.
+    # Differences: x and & close without asking and keep the programs running; d quits this UI,
+    # which is close to detaching because terminals live in the backend.
+    "tmux": {"label": "tmux (C-b)", "prefix": "C-b", "keys": {
+        "split-h": b("%", "panes.split", "split side by side", args=SPLIT_SIDE),
+        "split-v": b('"', "panes.split", "split stacked", args=SPLIT_STACK),
+        "close-pane": b("x", "panes.close", "close pane (program keeps running)"),
+        "new-tab": b("c", "tabs.open", "new shell in a tab"),
+        "next-tab": b("n", "client.tab", "next tab", args={"to": "next"}),
+        "prev-tab": b("p", "client.tab", "previous tab", args={"to": "prev"}),
+        **tab_digits(),
+        "next-pane": b("o", "client.focus", "next pane", args={"dir": "next"}),
+        **{f"focus-{d}": b(d.capitalize(), "client.focus", f"pane {d}", args={"dir": d}, hidden=True)
+           for d in ("left", "right", "up", "down")},
+        "rename-tab": b(",", "tabs.rename", "rename tab", input="Tab name"),
+        "close-tab": b("&", "tabs.close", "close tab (programs keep running)"),
+        "choose": b("w", "tabs.show", "choose a terminal", **PICK_TAB),
+        "detach": b("d", "client.quit", "detach (quit this UI)"),
+        "commands": b(":", "client.palette", "all commands"),
+        "keys": b("?", "client.prefix", "list keys"),
+        "zoom": b("z", "client.zoom", "zoom pane (toggle)"),
+    }},
+    # GNU screen's default key bindings (`man screen`, "Default Key Bindings"), mapped onto prim.
+    # Gaps: C-a (other window) and a (send C-a; here press C-a twice), w (window list in the message
+    # line), Q (only this region), [ ] copy and paste, x lock, H log, M/_ monitor, F fit, i info,
+    # ' select by name, z suspend, \ quit all.
+    # Differences: k kills the program but its pane stays (showing it ended) until closed; " picks
+    # from every terminal rather than this session's windows.
+    "screen": {"label": "screen (C-a)", "prefix": "C-a", "keys": {
+        "new-tab": b("c", "tabs.open", "new shell in a tab"),
+        "new-tab-c": b("C-c", "tabs.open", "new shell in a tab", hidden=True),
+        "next-tab": b("n", "client.tab", "next tab", args={"to": "next"}),
+        "next-tab-c": b("C-n", "client.tab", "next tab", args={"to": "next"}, hidden=True),
+        "next-tab-space": b("Space", "client.tab", "next tab", args={"to": "next"}, hidden=True),
+        "prev-tab": b("p", "client.tab", "previous tab", args={"to": "prev"}),
+        "prev-tab-c": b("C-p", "client.tab", "previous tab", args={"to": "prev"}, hidden=True),
+        "prev-tab-bs": b("Backspace", "client.tab", "previous tab", args={"to": "prev"}, hidden=True),
+        **tab_digits(),
+        "split-v": b("S", "panes.split", "split stacked", args=SPLIT_STACK),
+        "split-h": b("|", "panes.split", "split side by side", args=SPLIT_SIDE),
+        "close-pane": b("X", "panes.close", "close pane (program keeps running)"),
+        "next-pane": b("Tab", "client.focus", "next pane", args={"dir": "next"}),
+        "list": b('"', "tabs.show", "choose a terminal", **PICK_TAB),
+        "kill": b("k", "panes.kill", "kill the program"),
+        "kill-c": b("C-k", "panes.kill", "kill the program", hidden=True),
+        "title": b("A", "tabs.rename", "rename tab", input="Tab name"),
+        "detach": b("d", "client.quit", "detach (quit this UI)"),
+        "detach-c": b("C-d", "client.quit", "detach (quit this UI)", hidden=True),
+        "commands": b(":", "client.palette", "all commands"),
+        "keys": b("?", "client.prefix", "list keys"),
+    }},
+}
+DEFAULT = "prim"
+lock = threading.Lock()
+
+
+def current():
+    name = (ext.value(STATE) or {}).get("profile")
+    return name if name in PROFILES else DEFAULT
+
+
+def binding_ops(name):
+    """Ops that make the `keys` bindings exactly this profile's (only what changed)."""
+    want = {PREFIX + k: dict(v, owner=ext.name, priority=PRIORITY) for k, v in PROFILES[name]["keys"].items()}
+    ops = [{"op": "delete", "key": k} for k in ext.entries if k.startswith(PREFIX) and k not in want]
+    ops += [{"op": "set", "key": k, "value": v} for k, v in want.items() if ext.value(k) != v]
+    return ops
+
+
+def publish():
+    ext.publish("keys", {"profile": current(),
+                         "profiles": [{"label": p["label"], "value": n} for n, p in PROFILES.items()]})
+
+
+def sync():
+    """Bring the bindings in line with the active profile (on start, or if the state changed)."""
+    def attempt():
+        ops = binding_ops(current())
+        if ops:
+            ext.apply(ops, "keys: sync")
+    with lock:
+        ext.retrying(attempt)
+    publish()
+
+
+@ext.on_event
+def on_event(t, d):
+    if t == "missed" or (t == "entries" and any(c["key"] == STATE for c in d["changes"])):
+        sync()
+
+
+@ext.command("keys.profile", "Apply a keymap profile (args: value = prim | tmux | screen)")
+def apply_profile(args):
+    name = args.get("value") or args.get("text")
+    if name not in PROFILES:
+        raise PrimError(f"unknown profile {name!r} (have: {', '.join(PROFILES)})", "invalid")
+
+    def attempt():
+        tui = dict(ext.value(TUI) or {}, prefix=PROFILES[name]["prefix"])
+        ops = binding_ops(name) + [
+            {"op": "set", "key": STATE, "value": {"profile": name}, "expect": ext.version(STATE)},
+            {"op": "set", "key": TUI, "value": tui, "expect": ext.version(TUI)},
+        ]
+        return ext.apply(ops, f"keys: profile {name}")
+    with lock:
+        ext.retrying(attempt)
+    publish()
+    ext.notify(f"keys: {PROFILES[name]['label']}", "ok")
+
+
+sync()
+ext.run()
