@@ -4,27 +4,32 @@ One lean, standardized layer of workspace primitives over any multiplexer and an
 the same primitives to build and change their agent workspace; coordination is workspace behaviour too. Backends
 (herdr-core, Rex, tmux, Zellij, ...) own execution; prim adapts to them through thin adapters that declare capabilities.
 
-Status: slice 1 working (`docs/build-plan.md`).
+Status: usable daily-driver prototype over herdr-core (`docs/build-plan.md` has the slice-by-slice log).
 
-## Try it
+## Install and run
 
 ```sh
-cargo build
-./target/debug/prim serve &                 # needs herdr-core's `hc` on PATH (or --fake)
-./target/debug/prim tui                     # Ctrl-g n: new shell, Ctrl-g : commands, Ctrl-g q: quit
-# install the example extension, as an agent would:
-./target/debug/prim call workspace.apply '{"ops":[{"op":"set","key":"extension/sidebar",
-  "value":{"argv":["python3","'$PWD'/extensions/sidebar.py"]}}]}'
-./target/debug/prim run sidebar.toggle      # or Ctrl-g s in the TUI
-./target/debug/prim run prim.revert         # undo the last change not made by an extension
+./scripts/dev-install.sh        # release build to ~/.local/bin/prim, extensions to ~/.local/share/prim/extensions
+prim tui                        # starts the core in the background if needed (herdr-core must be installed)
+prim status                     # core, extensions and connected UIs (flags out-of-date UIs)
+prim stop                       # stop the core; terminals keep running in herdr-core
 ```
+
+In the UI, everything starts from the prefix (Ctrl-g by default, rebindable) or by clicking the `prim` badge:
+`n` new tab, `h`/`v` split, `x` close pane, `z` zoom, `s` sidebar, `,` settings, `:` all commands, `u` undo,
+`!` safe mode, `q` quit. Settings has pages for extensions, interface, themes, keys (profiles: prim, tmux,
+screen) and more. Agents and scripts drive the same primitives with `prim call <method> '<json>'` and
+`prim run <command> '<json args>'`. Reinstalling restarts the core and any open UI restarts into the new build.
+
+Development: `cargo test`; `.run/harness.py` (ignored) drives `prim tui` in a pty for UI checks against a scratch
+core (`PRIM_STATE_DIR`, `PRIM_SOCKET`, `PRIM_EXTENSIONS_DIR`, `prim serve --fake`).
 
 Protocol: `docs/spec/core-protocol.md`.
 
 ## Read in this order
 
 1. `docs/vision.md`: why, principles, non-goals, risks
-2. `docs/decisions.md`: what is decided (start with D14, then D15 and D16)
+2. `docs/decisions.md`: what is decided (D14 is the center; D15–D19 shape everything since)
 3. `docs/architecture.md`: how it fits together
 4. `docs/spec/`: `workspace-v0.md` (the primitives) and `backend-adapter-v0.md` (how backends plug in)
 5. `docs/roadmap.md`: milestones, exit tests, kill questions

@@ -73,3 +73,18 @@ written the same way was contained by the crash budget and removed with one reve
   published as live data that the sidebar consumes. Sidebar is one tree (workspaces → worktrees → terminals,
   other terminals) with presets in `doc/settings/sidebar`; OSC 7501 status as badges rolled up to parents.
 - Settings popup has pages: Extensions, Interface, Sidebar, Keys (all bindings, filterable), About.
+
+## Slice 4: polish streams (2026-11-16)
+
+Built as parallel streams on git worktrees, reviewed and merged by a coordinator:
+- **Sidebar:** one-line toolbar (`Show: … ▾`, `/`), view popup with toggles and presets, type icons coloured by state.
+- **Themes (D18):** palette tokens with a built-in default; `themes` extension with 14 themes (Catppuccin with
+  accent choice, Dracula, Tokyo Night, Nord, Gruvbox, Solarized, One Dark, Rosé Pine, Kanagawa, Light);
+  tab bar band; safe mode ignores the theme.
+- **Keys (D19):** rebindable prefix, binding priority and `client.none`, `client.focus|tab|quit|zoom`, keymap
+  profiles (prim, tmux, screen) in the `keys` extension, live key feedback (kitty protocol, prefix only).
+- **UI:** zoom, popups that survive their dropdowns, Nerd Font icons with fallback, self-restart on reinstall,
+  client build tracking in `prim status`.
+
+Known gaps: undo skips extension-made changes (e.g. theme picks); agents still run PTY-backed (headless agent
+bridge not built); second backend (tmux) not started; Windows untested.
