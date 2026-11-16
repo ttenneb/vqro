@@ -120,5 +120,6 @@ ext.contribute({
     # h/v follow the layout's split names: "h" puts panes side by side, "v" stacks them.
     "binding/panes.split-h": {"key": "h", "command": "panes.split", "args": {"dir": "right"}, "label": "split side by side"},
     "binding/panes.split-v": {"key": "v", "command": "panes.split", "args": {"dir": "down"}, "label": "split stacked"},
+    "binding/panes.close": {"key": "x", "command": "panes.close", "label": "close pane (program keeps running)"},
 })
 ext.run()
