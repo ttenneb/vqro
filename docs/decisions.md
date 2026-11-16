@@ -1,5 +1,7 @@
 # Decisions
 
+> Decisions guide a **working prototype, and fluid**: each one holds until a later entry supersedes it.
+
 Each entry is binding until superseded. Format: decision, why, consequences. Add new ones at the end; don't edit
 old ones except to mark them superseded.
 

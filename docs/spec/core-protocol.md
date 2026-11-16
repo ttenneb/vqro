@@ -1,5 +1,8 @@
 # prim core protocol, v0
 
+> **Status:** this is the living protocol of a **working prototype, and fluid**: it documents what the code does
+> today and will change as we learn. Nothing here is frozen yet (`../roadmap.md`, step 5).
+
 Status: implemented in slice 1 (`src/server.rs`), not frozen (D16). JSON-RPC 2.0, one message per line, over a
 local socket (`PRIM_SOCKET`, default `~/.local/state/prim/prim.sock`, mode 0600). Both sides may send requests:
 the core forwards `command.invoke` to the connection that registered the command. Errors carry a stable
