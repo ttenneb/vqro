@@ -7,8 +7,10 @@ working in; terminals outside all of them are "other terminals". Status badges c
 terminal's OSC 7501 report and roll up to its parents.
 
 What to show is a preference in `doc/settings/sidebar` (`show`: workspaces, worktrees, terminals,
-stray), changed from the sidebar's own pinned toolbar: toggle chips, a preset dropdown, and actions
-(expand/collapse all, filter, add workspace, refresh git state).
+stray). The sidebar's pinned toolbar is one line so it fits a narrow sidebar: a `Show: <preset> ▾` chip
+naming what is shown, and `/` to filter. The chip opens the `sidebar.view` popup: show toggles,
+presets, and rarely used actions (refresh git state, add workspace). The popup is live content too,
+so its checks update in place while it is open.
 Rows are live content (`view.publish`): not saved, not in history.
 """
 import os
@@ -27,12 +29,21 @@ PRESETS = {
     "worktrees and stray terminals": {"workspaces": True, "worktrees": True, "terminals": False, "stray": True},
     "terminals only": {"workspaces": False, "worktrees": False, "terminals": True, "stray": True},
 }
+# Short names for the toolbar chip, so the current choice fits a ~24-column sidebar on one line.
+SHORT = {"everything": "all", "workspaces only": "workspaces", "workspaces and worktrees": "trees",
+         "worktrees and stray terminals": "trees+other", "terminals only": "terminals"}
+SHOW_LABELS = [("workspaces", "Workspaces", "folders you added"), ("worktrees", "Worktrees", "git worktrees"),
+               ("terminals", "Terminals", "in workspaces"), ("stray", "Other terminals", "elsewhere")]
 STATUS = {"working": "accent", "blocked": "warn", "error": "error", "done": "ok"}
-last = [None, None]
+last = [None, None, None]  # what was last published: sidebar, status segment, view popup
 
 
 def show():
     return dict(SHOW_DEFAULT, **((ext.value(PREFS) or {}).get("show") or {}))
+
+
+def current_preset():
+    return next((name for name, p in PRESETS.items() if p == show()), None)
 
 
 def status_of(r):
@@ -149,31 +160,49 @@ def build():
 
 
 def toolbar():
+    """One line: what is shown (opens the view popup) and the filter."""
+    short = SHORT.get(current_preset(), "custom")
+    return [{"type": "chips", "chips": [
+        {"text": f"Show: {short} ▾", "command": "sidebar.view"},
+        {"text": "/", "command": "client.panel", "args": {"action": "filter"}},
+    ]}]
+
+
+def view_panel():
+    """The `sidebar.view` popup: show toggles, presets, then actions too rare for the toolbar."""
     sh = show()
     have_ws = ext.live.get("workspaces") is not None
-    labels = [("workspaces", "Workspaces"), ("worktrees", "Worktrees"), ("terminals", "Terminals"), ("stray", "Other")]
-    toggles = [{"text": label, "checked": bool(sh[k]), "command": "sidebar.preset", "args": {"show": {k: not sh[k]}}}
-               for k, label in labels if have_ws or k in ("terminals", "stray")]
-    current = next((name for name, p in PRESETS.items() if p == sh), "custom")
-    actions = [
-        {"text": "Preset", "command": "sidebar.preset", "value": current,
-         "options": [{"label": name, "value": name} for name in PRESETS]},
-        {"text": "⊞", "command": "client.panel", "args": {"action": "expand_all"}},
-        {"text": "⊟", "command": "client.panel", "args": {"action": "collapse_all"}},
-        {"text": "/", "command": "client.panel", "args": {"action": "filter"}},
-    ]
+    rows = [{"type": "header", "text": "Show"}]
+    for k, label, what in SHOW_LABELS:
+        row = {"type": "toggle", "text": label, "checked": bool(sh[k]), "detail": what,
+               "command": "sidebar.preset", "args": {"show": {k: not sh[k]}}}
+        # Say why a toggle can't matter right now instead of hiding it.
+        if not have_ws and k in ("workspaces", "worktrees"):
+            row.update(disabled=True, detail="workspaces extension off")
+        elif k == "worktrees" and not sh["workspaces"]:
+            row.update(disabled=True, detail="needs Workspaces")
+        rows.append(row)
+    rows += [{"type": "separator"}, {"type": "header", "text": "Presets"}]
+    current = current_preset()
+    rows += [{"text": ("● " if name == current else "○ ") + name, "style": "accent" if name == current else None,
+              "command": "sidebar.preset", "args": {"preset": name}} for name in PRESETS]
     if have_ws:
-        actions += [{"text": "+", "command": "workspaces.add", "input": "Folder path"},
-                    {"text": "↻", "command": "workspaces.refresh"}]
-    return [{"type": "chips", "chips": toggles}, {"type": "chips", "chips": actions}]
+        rows += [{"type": "separator"},
+                 {"text": "↻ Refresh git state", "command": "workspaces.refresh"},
+                 {"text": "+ Add workspace…", "command": "workspaces.add", "input": "Folder path"}]
+    return {"title": "Sidebar view", "items": rows}
 
 
 def refresh(*_):
     items = build()
-    content = {"requires": ["tree", "badges", "menu", "toolbar", "chips", "options"], "toolbar": toolbar(), "items": items}
+    content = {"requires": ["tree", "badges", "menu", "toolbar", "chips"], "toolbar": toolbar(), "items": items}
     if content != last[0]:
         last[0] = content
         ext.publish("sidebar", content)
+    view = view_panel()
+    if view != last[2]:
+        last[2] = view
+        ext.publish("sidebar.view", view)
     c = counts_of(items)
     seg = {"label": f"⚠ {c['blocked']} blocked", "style": "warn"} if c.get("blocked") else {"label": ""}
     if seg != last[1]:
@@ -201,6 +230,11 @@ def toggle(args):
     ext.apply([{"op": "set", "key": key, "value": new, "expect": ver}], "sidebar: toggle")
 
 
+@ext.command("sidebar.view", "Choose what the sidebar shows (opens a popup)")
+def view_cmd(args):
+    return {"client": {"popup": {"view": "sidebar.view", "width": 52}}}
+
+
 @ext.command("sidebar.show", "Show a terminal in a tab (args: resource)")
 def show_cmd(args):
     return ext.invoke("tabs.show", {"resource": args["resource"]})
@@ -226,6 +260,7 @@ if "binding/sidebar-toggle" in ext.entries:
     ext.apply([{"op": "delete", "key": "binding/sidebar-toggle"}], "sidebar: migrate binding")
 ext.contribute({
     "view/sidebar": {"kind": "panel", "title": "sidebar", "items": [{"type": "text", "text": "no content: the sidebar extension is starting or stopped"}]},
+    "view/sidebar.view": {"kind": "panel", "title": "Sidebar view", "items": [{"type": "text", "text": "no content: the sidebar extension is stopped"}]},
     "binding/sidebar.toggle": {"key": "s", "command": "sidebar.toggle", "label": "toggle sidebar"},
     "menu/sidebar.toggle": {"where": "status", "label": "☰ sidebar", "command": "sidebar.toggle", "order": 10},
     "menu/sidebar.blocked": {"where": "status", "label": "", "view": "sidebar.status", "command": "sidebar.toggle", "order": 5},
