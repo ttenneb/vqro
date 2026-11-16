@@ -7,11 +7,13 @@ update in place while the popup is open.
 
 Extensions are switched with the core's `prim.extension.enable|disable`; client options live in
 `doc/settings/tui` and each client reads the ones it understands. The Theme page draws the `themes`
-extension's live data and applies one with its `themes.apply` command. This extension can't switch
+extension's live data and applies one with its `themes.apply` command; the Icons page does the same with
+the `icons` extension (`icons.apply`), under the client's own Nerd Font choice. This extension can't switch
 itself off from its own popup: turning settings off from settings would leave you without a way back.
 """
 import os
 import sys
+import unicodedata
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from prim_ext import Extension, PrimError  # noqa: E402
@@ -19,6 +21,7 @@ from prim_ext import Extension, PrimError  # noqa: E402
 ext = Extension("settings")
 TUI = "doc/settings/tui"
 THEME = "doc/settings/theme"
+ICONS = "doc/settings/icons"
 OPTIONS = [
     ("mouse", "Capture the mouse", "off: your terminal handles the mouse and selects text", True),
     ("wheel_arrows", "Wheel scrolls full-screen programs", "sends arrow keys when a program has no mouse support", True),
@@ -30,6 +33,35 @@ def tui():
     return dict({k: d for k, _, _, d in OPTIONS}, **(ext.value(TUI) or {}))
 
 
+def cells(glyph):
+    """Terminal cells a glyph takes: 2 for East Asian Wide (emoji), else 1. Enough for previews; the
+    client measures for real."""
+    return 2 if glyph and unicodedata.east_asian_width(glyph[0]) in ("W", "F") else 1
+
+
+def icon_rows():
+    """The client's own-glyph choice, then the icons extension's sets, each with a preview of its glyphs."""
+    rows = [{"type": "select", "text": "Own glyphs", "value": (ext.value(TUI) or {}).get("icons", "auto"),
+             "command": "settings.set", "args": {"tui": "icons"},
+             "description": "what an icon shows when the set has none for it, and with Default",
+             "options": [{"label": "auto (Nerd Font in Ghostty, WezTerm)", "value": "auto"},
+                         {"label": "Nerd Font", "value": "nerd"}, {"label": "plain text", "value": "text"}]},
+            {"type": "separator"}]
+    sets = ext.live.get("icons") or {}
+    if not sets.get("data"):
+        return rows + [{"type": "text", "text": "No icon sets listed: the icons extension is not running."},
+                       {"type": "text", "text": "Icons keep their extensions' own glyphs."}]
+    current = (ext.value(ICONS) or {}).get("name") or "default"
+    for s in sets["data"]:
+        on = s["name"] == current
+        # Each glyph padded to the set's column, as the client lays them out.
+        glyphs = [s["glyphs"][n] for n in sets.get("preview", []) if n in s.get("glyphs", {})]
+        preview = " ".join(g + " " * max(0, s.get("width", 1) - cells(g)) for g in glyphs).rstrip()
+        rows.append({"text": ("● " if on else "○ ") + s["title"], "style": "accent" if on else None,
+                     "detail": preview, "detail_style": "plain",
+                     "description": f"{s.get('description', '')} · {s.get('credit', '')}",
+                     "command": "icons.apply", "args": {"name": s["name"]}})
+    return rows
 
 
 def theme_rows():
@@ -177,10 +209,6 @@ def refresh(*_):
     t = tui()
     interface = [{"type": "toggle", "text": label, "description": desc, "checked": bool(t[k]),
                   "command": "settings.toggle", "args": {"tui": k}} for k, label, desc, _ in OPTIONS]
-    interface.append({"type": "select", "text": "Icons", "value": (ext.value(TUI) or {}).get("icons", "auto"),
-                      "command": "settings.set", "args": {"tui": "icons"},
-                      "options": [{"label": "auto (Nerd Font in Ghostty, WezTerm)", "value": "auto"},
-                                  {"label": "Nerd Font", "value": "nerd"}, {"label": "plain text", "value": "text"}]})
     info = ext.info
     about = [
         {"text": "prim", "detail": f"{info.get('server')} {info.get('version')} · protocol {info.get('protocol')}", "disabled": True, "style": "plain"},
@@ -193,6 +221,7 @@ def refresh(*_):
         {"title": "Extensions", "items": ext_rows(states)},
         {"title": "Interface", "items": interface},
         {"title": "Theme", "items": theme_rows()},
+        {"title": "Icons", "items": icon_rows()},
         {"title": "Keys", "items": key_rows()},
         {"title": "About", "items": about},
     ]})
@@ -200,8 +229,8 @@ def refresh(*_):
 
 @ext.on_event
 def on_event(t, d):
-    if t in ("extension", "missed", "safe_mode", "command") or (t == "view.content" and d.get("view") in ("themes", "keys")) \
-            or (t == "entries" and any(c["key"].startswith(("extension/", TUI, THEME, "binding/")) for c in d["changes"])):
+    if t in ("extension", "missed", "safe_mode", "command") or (t == "view.content" and d.get("view") in ("themes", "icons", "keys")) \
+            or (t == "entries" and any(c["key"].startswith(("extension/", TUI, THEME, ICONS, "binding/")) for c in d["changes"])):
         refresh()
 
 
@@ -246,7 +275,8 @@ def set_prefix(args):
 
 ext.contribute({
     "view/settings": {"kind": "panel", "title": "Settings", "items": [{"type": "text", "text": "no content: the settings extension is starting or stopped"}]},
-    "menu/settings.open": {"where": "status", "label": "⚙ settings", "command": "settings.open", "order": 90},
+    "menu/settings.open": {"where": "status", "label": "settings", "icon": {"name": "settings", "text": "⚙"},
+                           "command": "settings.open", "order": 90},
     "binding/settings.open": {"key": ",", "command": "settings.open", "label": "settings"},
 })
 refresh()

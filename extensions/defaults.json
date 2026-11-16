@@ -43,6 +43,13 @@
       ]
     },
     {
+      "name": "icons",
+      "argv": [
+        "python3",
+        "icons.py"
+      ]
+    },
+    {
       "name": "keys",
       "argv": [
         "python3",
