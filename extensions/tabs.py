@@ -53,10 +53,10 @@ def open_tab(args):
     return show(f"term-{r['id']}", title_of(r), {"kind": "terminal", "resource": r["id"]})
 
 
-@ext.command("tabs.show", "Show a resource (args: resource) or view (args: view, title) in a tab")
+@ext.command("tabs.show", "Show a resource (args: resource, or picked) or view (args: view, title) in a tab")
 def show_cmd(args):
-    if "resource" in args:
-        rid = args["resource"]
+    rid = args.get("resource") or args.get("picked")  # `picked`: from a client's resource picker
+    if rid:
         return show(f"term-{rid}", title_of(ext.resources.get(rid, {})), {"kind": "terminal", "resource": rid})
     if "view" in args:
         return show(args["view"], args.get("title") or args["view"])
