@@ -113,6 +113,8 @@ impl Item {
 enum Msg {
     Attached { view: String, resource: String, result: Result<u64, String> },
     Info(String),
+    /// A command finished: say so unless something newer took the status line.
+    Done(String),
     Snapshot(Value),
     ClearOverrides,
     /// A command's reply asked this client to show a view as a popup.
@@ -179,6 +181,10 @@ struct App {
     overrides: HashMap<Vec<usize>, Vec<u16>>,
     mouse_owner: Option<String>,
     mouse_on: bool,
+    /// The terminal speaks the kitty keyboard protocol; used only while the prefix menu is open.
+    kbd_enhance: bool,
+    /// Modifiers held after the prefix (reported only with keyboard enhancement), shown live.
+    held: KeyModifiers,
     message: String,
     quit: bool,
 }
@@ -221,6 +227,8 @@ pub async fn run(socket: &Path) -> Result<()> {
         overrides: HashMap::new(),
         mouse_owner: None,
         mouse_on: true,
+        kbd_enhance: false,
+        held: KeyModifiers::NONE,
         message: "click prim or press Ctrl-g for the menu".into(),
         quit: false,
     };
@@ -228,6 +236,14 @@ pub async fn run(socket: &Path) -> Result<()> {
     app.message = format!("click prim or press {} for the menu", app.prefix());
     peer.call("events.subscribe", json!({"from": seq})).await?;
 
+    let mut terminal = ratatui::init();
+    // Asked before the input thread starts reading: the query reads the terminal's reply.
+    app.kbd_enhance = crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
+    let restore_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        keys::enhance(false);
+        restore_hook(info)
+    }));
     let (key_tx, mut keys) = mpsc::unbounded_channel();
     std::thread::spawn(move || {
         while let Ok(ev) = crossterm::event::read() {
@@ -237,7 +253,6 @@ pub async fn run(socket: &Path) -> Result<()> {
         }
     });
 
-    let mut terminal = ratatui::init();
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste, crossterm::event::EnableMouseCapture);
     let result: Result<()> = async {
         let mut dirty = true;
@@ -275,6 +290,14 @@ pub async fn run(socket: &Path) -> Result<()> {
                 app.on_incoming(m);
                 dirty = true;
             }
+            // Richer key reports only while the prefix menu is open: typing into programs is untouched.
+            let prefix_open = matches!(app.overlay, Some(Overlay::Prefix { .. }));
+            if app.kbd_enhance {
+                keys::enhance(prefix_open);
+            }
+            if !prefix_open {
+                app.held = KeyModifiers::NONE;
+            }
             // Client options from the settings document.
             let want = app.setting("mouse");
             if want != app.mouse_on {
@@ -288,6 +311,8 @@ pub async fn run(socket: &Path) -> Result<()> {
         }
     }
     .await;
+    // Every way out (quit, error, re-exec) passes here; pop before leaving the alternate screen.
+    keys::enhance(false);
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture, crossterm::event::DisableBracketedPaste);
     ratatui::restore();
     if reexec {
@@ -461,6 +486,11 @@ impl App {
     fn on_msg(&mut self, m: Msg) {
         match m {
             Msg::Info(s) => self.message = s,
+            Msg::Done(name) => {
+                if self.message == format!("running {name}…") {
+                    self.message = format!("{name}: done");
+                }
+            }
             Msg::Snapshot(s) => self.load(&s),
             Msg::ClearOverrides => self.overrides.clear(),
             Msg::Popup { view, width, ctx } => {
@@ -511,6 +541,11 @@ impl App {
     /// Returns whether a redraw is needed.
     fn on_event(&mut self, ev: Event) -> bool {
         match ev {
+            // Bare modifiers (keyboard enhancement, prefix menu open): live feedback only.
+            Event::Key(KeyEvent { code: KeyCode::Modifier(m), kind, modifiers, .. }) => {
+                self.held = if kind == KeyEventKind::Release { modifiers - keys::modifier_of(m) } else { modifiers };
+                matches!(self.overlay, Some(Overlay::Prefix { .. }))
+            }
             Event::Key(k) if k.kind != KeyEventKind::Release => {
                 self.on_key(k);
                 true
@@ -797,9 +832,14 @@ impl App {
         }
         let name = keys::name(&k);
         // A bound key runs; otherwise arrows and Enter work the menu.
-        if let Some(b) = name.as_deref().and_then(|n| self.binding_for(n)) {
+        if let Some((n, b)) = name.as_deref().and_then(|n| Some((n, self.binding_for(n)?))) {
             self.overlay = None;
-            return self.run_binding(&b);
+            self.run_binding(&b);
+            // Echo what ran, unless the binding opened a prompt that owns the status line.
+            if self.overlay.is_none() {
+                self.message = format!("{} {n} → {}", self.prefix(), self.binding_label(&b));
+            }
+            return;
         }
         let n = self.prefix_items().len();
         if let Some(Overlay::Prefix { sel }) = self.overlay.as_mut() {
@@ -812,7 +852,7 @@ impl App {
         }
         self.overlay = None;
         if let Some(name) = name.filter(|n| n != "Esc") {
-            self.message = format!("no binding for {name}");
+            self.message = format!("no binding for {} {name}", self.prefix());
         }
     }
 
@@ -1438,7 +1478,7 @@ impl App {
         self.message = format!("running {name}…");
         tokio::spawn(async move {
             let ctx = args["context"].clone();
-            let msg = match peer.call("command.invoke", json!({"name": name, "args": args})).await {
+            match peer.call("command.invoke", json!({"name": name, "args": args})).await {
                 Ok(r) => {
                     // A reply may ask this client for UI: `{"client": {"popup": {"view", "width"?}}}` or `{"client": {"close": true}}`.
                     if let Some(view) = r["client"]["popup"]["view"].as_str() {
@@ -1448,11 +1488,12 @@ impl App {
                     if r["client"]["close"] == true {
                         let _ = tx.send(Msg::ClosePopup);
                     }
-                    format!("{name}: done")
+                    let _ = tx.send(Msg::Done(name));
                 }
-                Err(e) => format!("{name}: {e}"),
-            };
-            let _ = tx.send(Msg::Info(msg));
+                Err(e) => {
+                    let _ = tx.send(Msg::Info(format!("{name}: {e}")));
+                }
+            }
         });
     }
 
@@ -1635,7 +1676,7 @@ impl App {
         let filtering = self.filtering.as_ref().map(|k| self.pstate.get(k).map(|s| s.filter.clone()).unwrap_or_default());
         let prompt = match &self.overlay {
             _ if filtering.is_some() => Some(("/".to_string(), filtering.clone().unwrap_or_default())),
-            Some(Overlay::Prefix { .. }) => Some((self.prefix(), String::new())),
+            Some(Overlay::Prefix { .. }) => Some((self.prefix(), keys::held(self.held))),
             Some(Overlay::Palette { query, .. }) => Some((":".to_string(), query.clone())),
             Some(Overlay::Input { prompt, text, .. }) => Some((format!("{prompt}:"), text.clone())),
             _ => None,

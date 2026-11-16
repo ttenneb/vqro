@@ -6,7 +6,9 @@
 //! Space F1`..`F12`. Names parse case-insensitively and compare in canonical form, so `C-space`
 //! and `C-Space` are the same key.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, KeyboardEnhancementFlags, ModifierKeyCode};
 
 /// The prefix when the setting is missing or unusable: never "no prefix" (recovery).
 pub const DEFAULT_PREFIX: &str = "C-g";
@@ -72,9 +74,15 @@ pub fn encode(key: &KeyEvent, app_cursor: bool) -> Option<Vec<u8>> {
 
 /// The canonical name of a key event, or None for keys bindings can't name.
 pub fn name(key: &KeyEvent) -> Option<String> {
+    // Super/Hyper/Meta (only reported with keyboard enhancement) have no name; never misread them.
+    if key.modifiers.intersects(KeyModifiers::SUPER | KeyModifiers::HYPER | KeyModifiers::META) {
+        return None;
+    }
     let base = match key.code {
         KeyCode::Char(' ') => "Space".to_string(),
         KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) => c.to_ascii_lowercase().to_string(),
+        // A terminal that reports Shift without the shifted key: letters are still unambiguous.
+        KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::SHIFT) => c.to_ascii_uppercase().to_string(),
         KeyCode::Char(c) => c.to_string(),
         KeyCode::Up => "Up".into(),
         KeyCode::Down => "Down".into(),
@@ -140,6 +148,50 @@ pub fn prefix(setting: Option<&str>) -> String {
         .unwrap_or_else(|| DEFAULT_PREFIX.to_string())
 }
 
+/// Held modifiers in key-name notation (`C-`, `M-`, `S-`), for live feedback after the prefix.
+pub fn held(m: KeyModifiers) -> String {
+    let mut s = compose(m.contains(KeyModifiers::CONTROL), m.contains(KeyModifiers::ALT), m.contains(KeyModifiers::SHIFT), "");
+    if m.contains(KeyModifiers::SUPER) {
+        s.push_str("Super-");
+    }
+    s
+}
+
+/// The modifier a modifier key press or release is about.
+pub fn modifier_of(k: ModifierKeyCode) -> KeyModifiers {
+    match k {
+        ModifierKeyCode::LeftShift | ModifierKeyCode::RightShift => KeyModifiers::SHIFT,
+        ModifierKeyCode::LeftControl | ModifierKeyCode::RightControl => KeyModifiers::CONTROL,
+        ModifierKeyCode::LeftAlt | ModifierKeyCode::RightAlt => KeyModifiers::ALT,
+        ModifierKeyCode::LeftSuper | ModifierKeyCode::RightSuper => KeyModifiers::SUPER,
+        _ => KeyModifiers::NONE,
+    }
+}
+
+/// Kitty keyboard protocol flags while the prefix is active: every key (bare modifiers too) as an
+/// escape code with press/repeat/release, and the shifted key (`%`, not Shift+5) so bindings match.
+const ENHANCED: KeyboardEnhancementFlags = KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+    .union(KeyboardEnhancementFlags::REPORT_EVENT_TYPES)
+    .union(KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS);
+
+/// Whether we pushed `ENHANCED`; global so every exit path, panics included, can pop it.
+static PUSHED: AtomicBool = AtomicBool::new(false);
+
+/// Push or pop the enhancement flags (idempotent). Only ever pops what we pushed, so a shell's or
+/// outer program's own flags are left alone. Pop before leaving the alternate screen: the
+/// protocol keeps a separate stack per screen.
+pub fn enhance(on: bool) {
+    if PUSHED.swap(on, Ordering::SeqCst) == on {
+        return;
+    }
+    let mut out = std::io::stdout();
+    let _ = if on {
+        crossterm::execute!(out, crossterm::event::PushKeyboardEnhancementFlags(ENHANCED))
+    } else {
+        crossterm::execute!(out, crossterm::event::PopKeyboardEnhancementFlags)
+    };
+}
+
 fn compose(ctrl: bool, alt: bool, shift: bool, base: &str) -> String {
     format!("{}{}{}{base}", if ctrl { "C-" } else { "" }, if alt { "M-" } else { "" }, if shift { "S-" } else { "" })
 }
@@ -176,6 +228,9 @@ mod tests {
         assert_eq!(k(KeyCode::Left, KeyModifiers::SHIFT), "S-Left");
         assert_eq!(k(KeyCode::BackTab, KeyModifiers::SHIFT), "BackTab");
         assert_eq!(k(KeyCode::F(5), KeyModifiers::ALT), "M-F5");
+        assert_eq!(k(KeyCode::Char('o'), KeyModifiers::SHIFT), "O");
+        assert_eq!(name(&KeyEvent::new(KeyCode::Char('c'), KeyModifiers::SUPER)), None);
+        assert_eq!(held(KeyModifiers::SHIFT | KeyModifiers::CONTROL), "C-S-");
     }
 
     #[test]
