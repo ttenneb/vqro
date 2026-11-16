@@ -226,3 +226,27 @@ load order.
 **Consequences.** Recovery can't depend on any key: the prefix menu (and the `prim` badge that opens it) always
 lists the recovery actions, keyed or not, and an unusable prefix falls back to Ctrl-g (D15). Live key feedback
 uses terminal key-reporting extensions only while the prefix menu is open, so typing into programs never changes.
+
+## D20. Icons are names; sets are data; clients own resolution and width (2026-11-16)
+
+**Decision.** Extensions ask for an icon by name (`{"name": "repo", "text": "⎇"}`, or a list of names, most
+specific first), keeping their own glyphs as the fallback. The active icon set is one workspace entry,
+`doc/settings/icons` = `{name, width?, glyphs: {name: glyph}}`. Clients resolve a name through the set, then the
+icon's own `nerd`/`text` by the client's `icons` setting, then nothing, and lay icons out in one column of the
+set's width, measured in Unicode cells (`spec/core-protocol.md`, Icons). Which sets exist and how one is chosen
+is an extension (`icons`, shown in settings). Rows, chips, menu items and status segments carry icons the same way.
+**Why.** A set of icons is a choice about how to work (D17), like a theme (D18), but turning a name into a glyph
+and keeping text aligned when glyphs differ in width is mechanism every client needs, and prim must look right
+with every extension off. Names keep the choice in one place, so a set can restyle every extension at once
+without any of them changing; fallbacks keep each extension readable when no set (or an older one) has the name.
+A name list lets a set show an agent's state by shape, not only colour, while sets without state glyphs still
+show the agent.
+**Consequences.** With no set, an empty set, or in safe mode, every icon looks exactly as its extension drew it,
+so adding the mechanism changed nothing for anyone who never picks a set. Unknown names and unusable glyphs
+(empty, control characters, wider than two cells) fall back, so sets, extensions and clients evolve
+independently. The `icons` setting (auto, Nerd Font, text) now only chooses among an extension's own glyphs; a set
+needing a font says so in its description, since fonts can't be detected. Width follows the client's Unicode
+tables; terminals that draw a glyph wider than its Unicode width (text-presentation symbols drawn as emoji,
+ambiguous-width glyphs in CJK locales, non-Mono Nerd Fonts) will misalign, which is why the bundled emoji set uses
+only emoji-presentation characters and a 2-cell column, and a roomy Nerd Font variant exists. Recovery: revert the
+`icons` transaction, delete the entry, or pick Default.
