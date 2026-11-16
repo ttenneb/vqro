@@ -5,7 +5,8 @@
 //! A row is:
 //!   `{"type"?: "item"|"toggle"|"header"|"separator"|"text", "text", "id"?, "detail"?, "detail_style"?,
 //!     "description"?, "checked"?, "style"?, "disabled"?, "badges"?: [{"text", "style"?, "color"?}],
-//!     "children"?: [row], "expanded"?: bool, "command"?, "args"?, "input"?, "menu"?: [menu item]}`
+//!     "children"?: [row], "expanded"?: bool, "command"?, "args"?, "input"?, "menu"?: [menu item],
+//!     "icon"?: one or two characters before the text, "icon_style"?: a semantic style for it}`
 //! More row types: `chips` (`{"type": "chips", "chips": [chip]}`, a wrapping row of small buttons or
 //! toggles; a chip is `{"text", "checked"?, "style"?, "command"?, "args"?, "input"?, "options"?}`) and
 //! `select` (`{"type": "select", "text", "value", "options": [{"label", "value"}], "command", "args"?}`).
@@ -63,7 +64,7 @@ pub struct Hits {
 }
 
 /// Panel features this client renders. A panel may list what it needs in `requires`.
-pub const SUPPORTED: &[&str] = &["items", "pages", "tree", "badges", "menu", "input", "description", "filter", "toolbar", "chips", "select", "options", "badge_color"];
+pub const SUPPORTED: &[&str] = &["items", "pages", "tree", "badges", "menu", "input", "description", "filter", "toolbar", "chips", "select", "options", "badge_color", "icon"];
 
 /// Features a panel needs that this client lacks.
 pub fn missing(v: &Value) -> Vec<String> {
@@ -422,6 +423,12 @@ fn draw_row(buf: &mut Buffer, row: Rect, r: &Flat, selected: bool, chip: usize, 
                 x += 4;
             } else if r.depth == 0 && !r.has_children {
                 x += 1;
+            }
+            // An icon says what the row is; its style can carry state (e.g. an agent working).
+            if let Some(icon) = item["icon"].as_str().filter(|i| !i.is_empty()) {
+                let icon: String = icon.chars().take(2).collect();
+                buf.set_string(x, y, &icon, ink(pal.style(item["icon_style"].as_str().or(Some("muted")))));
+                x += icon.chars().count() as u16 + 1;
             }
             // Right side: detail, then badges before it.
             let detail = item["detail"].as_str().unwrap_or("");

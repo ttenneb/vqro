@@ -88,7 +88,7 @@ disabled, removed or in safe mode, or when their command is unavailable.
 - Panels: `{title?, items: [row]}` or `{title?, pages: [{title, items}]}`. Rows:
   `{type?: "item"|"toggle"|"header"|"separator"|"text", text, id?, detail?, detail_style?, description?, checked?,
   style?, disabled?, badges?: [{text, style?}], children?: [row], expanded?, command?, args?, input?, pick?,
-  menu?: [menu item]}`, plus `chips` rows (`{type: "chips", chips: [{text, checked?, style?, command, args?, input?,
+  menu?: [menu item], icon?: one or two characters before the text, icon_style?}`, plus `chips` rows (`{type: "chips", chips: [{text, checked?, style?, command, args?, input?,
   options?}]}`, wrapping) and `select` rows (`{type: "select", text, value, options: [{label, value}], command}`);
   anything with `options` opens a pick-one menu and adds `value` to its args. `toolbar: [row]` pins rows above the
   list. Clients handle `client.panel {action: expand_all|collapse_all|filter|clear_filter}` for the panel it came

@@ -35,6 +35,8 @@ SHORT = {"everything": "all", "workspaces only": "workspaces", "workspaces and w
 SHOW_LABELS = [("workspaces", "Workspaces", "folders you added"), ("worktrees", "Worktrees", "git worktrees"),
                ("terminals", "Terminals", "in workspaces"), ("stray", "Other terminals", "elsewhere")]
 STATUS = {"working": "accent", "blocked": "warn", "error": "error", "done": "ok"}
+# What a row is, at a glance (plain Unicode, no special font). The icon's style carries its state.
+ICON = {"repo": "⎇", "worktree": "⑂", "folder": "▫", "terminal": "›", "agent": "◆"}
 last = [None, None, None]  # what was last published: sidebar, status segment, view popup
 
 
@@ -73,8 +75,12 @@ def term_row(rid, r, where=False):
     if isinstance(st.get("progress"), (int, float)):
         badges.append({"text": f"{int(st['progress'])}%", "style": "accent"})
     live = r.get("state") == "live"
+    # A terminal whose program reports status (OSC 7501) is an agent; its icon takes the status colour.
+    agent = bool(st.get("state") or st.get("app"))
+    icon_style = STATUS.get(st.get("state")) if live and st.get("state") else ("muted" if live else "dim")
     return {
-        "id": f"term:{rid}", "text": ("● " if live else "○ ") + label, "style": None if live else "dim",
+        "id": f"term:{rid}", "text": label, "style": None if live else "dim",
+        "icon": ICON["agent" if agent else "terminal"], "icon_style": icon_style,
         "badges": badges,
         "command": "sidebar.show", "args": {"resource": rid},
         "menu": [
@@ -150,6 +156,7 @@ def build():
                     tt = placed.get(("wt", t["path"]), []) if sh["terminals"] else []
                     kids.append({
                         "id": f"wt:{t['path']}", "text": os.path.basename(t["path"].rstrip("/")), "expanded": True,
+                        "icon": ICON["worktree"], "icon_style": "warn" if t.get("dirty") else "accent",
                         "badges": git_badges(t) + rollup(tt), "children": tt,
                         "command": "workspaces.open", "args": {"path": t["path"]},
                         "menu": [{"label": "Open shell here", "command": "workspaces.open", "args": {"path": t["path"]}}],
@@ -161,6 +168,8 @@ def build():
                      {"label": "Remove from workspaces", "command": "workspaces.remove", "args": {"path": w["path"]}}]
             items.append({
                 "id": f"ws:{w['path']}", "text": w["name"], "expanded": True,
+                "icon": ICON["repo" if w.get("git") else "folder"],
+                "icon_style": "error" if w.get("missing") else ("warn" if w.get("dirty") else "accent") if w.get("git") else "muted",
                 "style": "error" if w.get("missing") else "bold",
                 "badges": ([{"text": "missing", "style": "error"}] if w.get("missing") else git_badges(w)) + rollup(kids),
                 "children": kids, "command": "workspaces.open", "args": {"path": w["path"]}, "menu": menu,
@@ -213,7 +222,7 @@ def view_panel():
 
 def refresh(*_):
     items = build()
-    content = {"requires": ["tree", "badges", "menu", "toolbar", "chips"], "toolbar": toolbar(), "items": items}
+    content = {"requires": ["tree", "badges", "menu", "toolbar", "chips", "icon"], "toolbar": toolbar(), "items": items}
     if content != last[0]:
         last[0] = content
         ext.publish("sidebar", content)
