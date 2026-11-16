@@ -15,6 +15,7 @@
 mod keys;
 mod mouse;
 mod panel;
+mod theme;
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
@@ -33,6 +34,7 @@ use tokio::sync::mpsc;
 
 use crate::client;
 use crate::rpc::{Incoming, Peer};
+use theme::Palette;
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
@@ -1405,16 +1407,18 @@ impl App {
     // ---- drawing -----------------------------------------------------------------------------
 
     fn draw(&mut self, f: &mut Frame) {
+        // Resolved every frame, so a theme change shows on the next redraw.
+        let pal = Palette::from_theme(self.entries.get(theme::ENTRY));
         let [main, status] = Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(f.area());
         let mut hit = Hit::default();
         match self.active_layout() {
             Some((_, root)) => {
                 let tabbar = self.menu_items("tabbar", &json!({}));
-                walk(&root, main, &mut Vec::new(), &self.overrides, &tabbar, &mut hit, f.buffer_mut())
+                walk(&root, main, &mut Vec::new(), &self.overrides, &tabbar, &mut hit, f.buffer_mut(), &pal)
             }
             None => {
                 let text = "No layout yet.\n\nClick prim (bottom left) or press Ctrl-g for the menu:\n  n  open a shell\n  R  one tab per terminal\n  :  all commands";
-                f.render_widget(Paragraph::new(text).block(Block::bordered().title(" prim ")), main);
+                f.render_widget(Paragraph::new(text).style(pal.style(None)).block(Block::bordered().title(" prim ").border_style(pal.border(true))), main);
             }
         }
         self.leaves = hit.leaves.iter().map(|(v, _, _)| v.clone()).collect();
@@ -1435,20 +1439,20 @@ impl App {
         let leaves = hit.leaves.clone();
         self.hit = hit;
         for (i, (view, rect, _)) in leaves.iter().enumerate() {
-            if let Some(c) = self.draw_view(f, view, *rect, i == self.focus) {
+            if let Some(c) = self.draw_view(f, view, *rect, i == self.focus, &pal) {
                 cursor = Some(c);
             }
         }
-        self.draw_status(f, status);
-        self.draw_overlay(f, main);
-        self.draw_toast(f, main);
+        self.draw_status(f, status, &pal);
+        self.draw_overlay(f, main, &pal);
+        self.draw_toast(f, main, &pal);
         if let (Some(c), None) = (cursor, &self.overlay) {
             f.set_cursor_position(c);
         }
     }
 
-    fn draw_view(&mut self, f: &mut Frame, view: &str, rect: Rect, focused: bool) -> Option<(u16, u16)> {
-        let border = if focused { Style::new().fg(Color::Cyan) } else { Style::new().fg(Color::DarkGray) };
+    fn draw_view(&mut self, f: &mut Frame, view: &str, rect: Rect, focused: bool, pal: &Palette) -> Option<(u16, u16)> {
+        let border = pal.border(focused);
         let Some(v) = self.entries.get(&format!("view/{view}")).cloned() else {
             f.render_widget(Paragraph::new(format!("view {view} is missing")).block(Block::bordered().border_style(border)), rect);
             return None;
@@ -1514,7 +1518,7 @@ impl App {
                 }
                 render_screen(f.buffer_mut(), inner, t.parser.screen());
                 if let Some(reason) = &t.closed {
-                    let line = Line::from(Span::styled(format!(" stream closed: {reason} "), Style::new().fg(Color::Yellow)));
+                    let line = Line::from(Span::styled(format!(" stream closed: {reason} "), pal.style(Some("warn"))));
                     f.render_widget(Paragraph::new(line), Rect { height: 1, ..inner });
                 }
                 let screen = t.parser.screen();
@@ -1533,7 +1537,7 @@ impl App {
                 let inner = block.inner(rect);
                 f.render_widget(block, rect);
                 let mut st = self.pstate.remove(view).unwrap_or_default();
-                let hits = panel::render(f.buffer_mut(), inner, &v, &mut st, focused);
+                let hits = panel::render(f.buffer_mut(), inner, &v, &mut st, focused, pal);
                 self.pstate.insert(view.to_string(), st);
                 self.hit.panels.insert(view.to_string(), hits);
                 None
@@ -1546,7 +1550,7 @@ impl App {
         }
     }
 
-    fn draw_status(&mut self, f: &mut Frame, area: Rect) {
+    fn draw_status(&mut self, f: &mut Frame, area: Rect, pal: &Palette) {
         // Keyboard modes turn the bar into an input line, like a multiplexer's prompt.
         let filtering = self.filtering.as_ref().map(|k| self.pstate.get(k).map(|s| s.filter.clone()).unwrap_or_default());
         let prompt = match &self.overlay {
@@ -1560,30 +1564,30 @@ impl App {
         let badge = if open { " prim ▴ " } else { " prim ▾ " };
         self.hit.badge = Rect { x: area.x, y: area.y, width: badge.chars().count() as u16, height: 1 };
         self.hit.status = area;
-        let mut spans = vec![Span::styled(badge, Style::new().bg(if open { Color::Magenta } else { Color::Cyan }).fg(Color::Black))];
+        let mut spans = vec![Span::styled(badge, Style::new().bg(if open { pal.prompt } else { pal.accent }).fg(pal.badge_text))];
         if let Some((label, text)) = prompt {
-            spans.push(Span::styled(format!(" {label} "), Style::new().fg(Color::Magenta).add_modifier(Modifier::BOLD)));
-            spans.push(Span::raw(text));
+            spans.push(Span::styled(format!(" {label} "), Style::new().fg(pal.prompt).add_modifier(Modifier::BOLD)));
+            spans.push(Span::styled(text, pal.style(None)));
             let x = area.x + spans.iter().map(|s| s.content.chars().count() as u16).sum::<u16>();
             f.render_widget(Paragraph::new(Line::from(spans)), area);
             f.set_cursor_position((x.min(area.right().saturating_sub(1)), area.y));
             return;
         }
         if self.safe_mode {
-            spans.push(Span::styled(" SAFE MODE ", Style::new().bg(Color::Yellow).fg(Color::Black)));
+            spans.push(Span::styled(" SAFE MODE ", pal.badge(Some("warn"))));
         }
         let failed = self.extensions.values().filter(|e| e["status"] == "failed").count();
         if failed > 0 {
-            spans.push(Span::styled(format!(" {failed} extension(s) failed "), Style::new().bg(Color::Red).fg(Color::White)));
+            spans.push(Span::styled(format!(" {failed} extension(s) failed "), pal.badge(Some("error"))));
         }
         // Contributed status-bar buttons.
         let mut x = area.x + spans.iter().map(|s| s.content.chars().count() as u16).sum::<u16>();
         for item in self.menu_items("status", &json!({})) {
             // Live segments take their label and style from a view's live content.
             let (text, style) = match item.view.as_deref().and_then(|v| self.live.get(v)) {
-                Some(l) => (l["label"].as_str().unwrap_or(&item.label).to_string(), l["style"].as_str().map(|s| panel::style_named(Some(s))).unwrap_or(Style::new().fg(Color::Cyan))),
+                Some(l) => (l["label"].as_str().unwrap_or(&item.label).to_string(), pal.style(Some(l["style"].as_str().unwrap_or("accent")))),
                 None if item.view.is_some() => continue,
-                None => (item.label.clone(), Style::new().fg(Color::Cyan)),
+                None => (item.label.clone(), pal.style(Some("accent"))),
             };
             if text.is_empty() {
                 continue;
@@ -1597,11 +1601,11 @@ impl App {
             x += w;
             spans.push(Span::styled(label, style));
         }
-        spans.push(Span::styled(format!(" {}", self.message), Style::new().fg(Color::Gray)));
+        spans.push(Span::styled(format!(" {}", self.message), pal.style(Some("muted"))));
         f.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 
-    fn draw_toast(&mut self, f: &mut Frame, area: Rect) {
+    fn draw_toast(&mut self, f: &mut Frame, area: Rect, pal: &Palette) {
         let Some((text, style, until)) = &self.toast else { return };
         if std::time::Instant::now() > *until {
             self.toast = None;
@@ -1609,20 +1613,18 @@ impl App {
         }
         let w = (text.chars().count() as u16 + 4).min(area.width);
         let rect = Rect { x: area.right().saturating_sub(w + 1), y: area.y + 1, width: w, height: 3 };
-        let color = match style.as_deref() {
-            Some("error") => Color::Red,
-            Some("warn") => Color::Yellow,
-            Some("ok") => Color::Green,
-            _ => Color::Cyan,
+        let edge = match style.as_deref() {
+            Some(s @ ("error" | "warn" | "ok")) => pal.style(Some(s)),
+            _ => pal.style(Some("accent")),
         };
         f.render_widget(Clear, rect);
-        let block = Block::bordered().border_type(ratatui::widgets::BorderType::Rounded).border_style(Style::new().fg(color));
+        let block = Block::bordered().border_type(ratatui::widgets::BorderType::Rounded).border_style(edge);
         let inner = block.inner(rect);
         f.render_widget(block, rect);
-        f.render_widget(Paragraph::new(text.as_str()), inner);
+        f.render_widget(Paragraph::new(text.as_str()).style(pal.style(None)), inner);
     }
 
-    fn draw_overlay(&mut self, f: &mut Frame, area: Rect) {
+    fn draw_overlay(&mut self, f: &mut Frame, area: Rect, pal: &Palette) {
         if let Some(Overlay::Popup { view, width, .. }) = &self.overlay {
             let (view, width) = (view.clone(), *width);
             let v = self.panel_value(&view);
@@ -1639,16 +1641,16 @@ impl App {
             let title = v["title"].as_str().unwrap_or(&view).to_string();
             let block = Block::bordered()
                 .border_type(ratatui::widgets::BorderType::Rounded)
-                .title(Span::styled(format!(" {title} "), Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD)))
+                .title(Span::styled(format!(" {title} "), pal.style(Some("accent")).add_modifier(Modifier::BOLD)))
                 .title_bottom(Line::from(Span::styled(
                     if panel::page_titles(&v).is_empty() { " ↑↓ move · enter select · / filter · esc close " } else { " ↑↓ move · tab page · enter select · / filter · esc close " },
-                    Style::new().fg(Color::DarkGray),
+                    pal.style(Some("dim")),
                 )).right_aligned())
-                .border_style(Style::new().fg(Color::Cyan));
+                .border_style(pal.border(true));
             let inner = block.inner(rect);
             f.render_widget(block, rect);
             let body = Rect { x: inner.x + 1, y: inner.y + 1, width: inner.width.saturating_sub(2), height: inner.height.saturating_sub(1) };
-            let hits = panel::render(f.buffer_mut(), body, &v, &mut st, true);
+            let hits = panel::render(f.buffer_mut(), body, &v, &mut st, true, pal);
             self.pstate.insert("@popup".into(), st);
             self.hit.panels.insert("@popup".into(), hits);
             self.hit.overlay = Some((rect, Rect::default(), 0));
@@ -1701,19 +1703,19 @@ impl App {
             Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 3, width: w, height: h }
         };
         f.render_widget(Clear, rect);
-        let block = Block::bordered().title(title).border_style(Style::new().fg(Color::Cyan));
+        let block = Block::bordered().title(title).border_style(pal.border(true));
         let inner = block.inner(rect);
         f.render_widget(block, rect);
         let list_area = match query {
             Some(q) => {
-                f.render_widget(Paragraph::new(format!("> {q}")), Rect { height: 1, ..inner });
+                f.render_widget(Paragraph::new(format!("> {q}")).style(pal.style(None)), Rect { height: 1, ..inner });
                 Rect { y: inner.y + 1, height: inner.height.saturating_sub(1), ..inner }
             }
             None => inner,
         };
         let mut state = ListState::default();
         state.select(Some(sel));
-        let list = List::new(items.into_iter().map(ListItem::new).collect::<Vec<_>>()).highlight_style(Style::new().add_modifier(Modifier::REVERSED));
+        let list = List::new(items.into_iter().map(ListItem::new).collect::<Vec<_>>()).style(pal.style(None)).highlight_style(pal.selected());
         f.render_stateful_widget(list, list_area, &mut state);
         self.hit.overlay = Some((rect, list_area, state.offset()));
     }
@@ -1750,7 +1752,8 @@ fn node_at_mut<'a>(root: &'a mut Value, path: &[usize]) -> Option<&'a mut Value>
 }
 
 /// Lay out a layout node: tabs, splits and view leaves, recording hit areas.
-fn walk(node: &Value, area: Rect, path: &mut Vec<usize>, overrides: &HashMap<Vec<usize>, Vec<u16>>, tabbar: &[Item], hit: &mut Hit, buf: &mut Buffer) {
+#[allow(clippy::too_many_arguments)]
+fn walk(node: &Value, area: Rect, path: &mut Vec<usize>, overrides: &HashMap<Vec<usize>, Vec<u16>>, tabbar: &[Item], hit: &mut Hit, buf: &mut Buffer, pal: &Palette) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -1772,7 +1775,7 @@ fn walk(node: &Value, area: Rect, path: &mut Vec<usize>, overrides: &HashMap<Vec
         }
         for (i, (c, r)) in children.iter().zip(rects.iter()).enumerate() {
             path.push(i);
-            walk(c, *r, path, overrides, tabbar, hit, buf);
+            walk(c, *r, path, overrides, tabbar, hit, buf, pal);
             path.pop();
         }
     } else if let Some(tabs) = node["tabs"].as_array() {
@@ -1785,7 +1788,7 @@ fn walk(node: &Value, area: Rect, path: &mut Vec<usize>, overrides: &HashMap<Vec
             let w = label.chars().count() as u16;
             hit.tabs.push((path.clone(), i, Rect { x, y: bar.y, width: w.min(bar.right().saturating_sub(x)), height: 1 }));
             x = x.saturating_add(w);
-            let style = if i == active { Style::new().bg(Color::Blue).fg(Color::White) } else { Style::new().fg(Color::Gray) };
+            let style = if i == active { Style::new().bg(pal.tab_active).fg(pal.tab_active_text) } else { pal.style(Some("muted")) };
             spans.push(Span::styled(label, style));
         }
         // Contributed tab-bar buttons (e.g. `+` from the tabs extension), on the first tab bar.
@@ -1798,13 +1801,13 @@ fn walk(node: &Value, area: Rect, path: &mut Vec<usize>, overrides: &HashMap<Vec
                 }
                 hit.buttons.push((Rect { x, y: bar.y, width: w, height: 1 }, item.clone(), json!({"tab_path": path.clone()})));
                 x += w;
-                spans.push(Span::styled(label, Style::new().fg(Color::Cyan)));
+                spans.push(Span::styled(label, pal.style(Some("accent"))));
             }
         }
         ratatui::widgets::Widget::render(Paragraph::new(Line::from(spans)), bar, buf);
         if let Some(t) = tabs.get(active) {
             path.push(active);
-            walk(&t["node"], body, path, overrides, tabbar, hit, buf);
+            walk(&t["node"], body, path, overrides, tabbar, hit, buf, pal);
             path.pop();
         }
     }

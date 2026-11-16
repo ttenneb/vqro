@@ -4,7 +4,7 @@
 //! A panel value is `{"title"?, "items": [row]}` or `{"title"?, "pages": [{"title", "items"}]}`.
 //! A row is:
 //!   `{"type"?: "item"|"toggle"|"header"|"separator"|"text", "text", "id"?, "detail"?, "detail_style"?,
-//!     "description"?, "checked"?, "style"?, "disabled"?, "badges"?: [{"text", "style"?}],
+//!     "description"?, "checked"?, "style"?, "disabled"?, "badges"?: [{"text", "style"?, "color"?}],
 //!     "children"?: [row], "expanded"?: bool, "command"?, "args"?, "input"?, "menu"?: [menu item]}`
 //! More row types: `chips` (`{"type": "chips", "chips": [chip]}`, a wrapping row of small buttons or
 //! toggles; a chip is `{"text", "checked"?, "style"?, "command"?, "args"?, "input"?, "options"?}`) and
@@ -13,13 +13,19 @@
 //! A panel may pin rows above its list with `"toolbar": [row]`; they never scroll away.
 //! Unknown types render as plain items (forward compatible). Selection, expansion, page, filter and
 //! scroll are client state (per view), never written back.
+//!
+//! Colours come from the client's palette (`theme.rs`) through semantic style names, so panels follow
+//! the theme. A badge's `color` (any palette colour value) is the one exception: it shows a colour as
+//! data, e.g. a theme preview swatch, and needs the `badge_color` feature.
 
 use std::collections::HashMap;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use serde_json::Value;
+
+use super::theme::{self, Palette};
 
 /// Per-view interaction state, owned by the client.
 #[derive(Default, Clone)]
@@ -57,7 +63,7 @@ pub struct Hits {
 }
 
 /// Panel features this client renders. A panel may list what it needs in `requires`.
-pub const SUPPORTED: &[&str] = &["items", "pages", "tree", "badges", "menu", "input", "description", "filter", "toolbar", "chips", "select", "options"];
+pub const SUPPORTED: &[&str] = &["items", "pages", "tree", "badges", "menu", "input", "description", "filter", "toolbar", "chips", "select", "options", "badge_color"];
 
 /// Features a panel needs that this client lacks.
 pub fn missing(v: &Value) -> Vec<String> {
@@ -211,49 +217,32 @@ pub fn height(v: &Value, st: &State, width: u16) -> u16 {
     bar + rule + rows.iter().map(|r| lines(&r.item, width)).sum::<u16>()
 }
 
-pub fn style_named(name: Option<&str>) -> Style {
-    match name {
-        Some("bold") => Style::new().add_modifier(Modifier::BOLD),
-        Some("dim") => Style::new().fg(Color::DarkGray),
-        Some("warn") => Style::new().fg(Color::Yellow),
-        Some("error") => Style::new().fg(Color::Red),
-        Some("ok") => Style::new().fg(Color::Green),
-        Some("accent") => Style::new().fg(Color::Cyan),
-        _ => Style::new(),
-    }
-}
-
-fn text_style(item: &Value) -> Style {
+fn text_style(item: &Value, pal: &Palette) -> Style {
     match item["style"].as_str() {
-        Some("plain") => Style::new(),
-        None if item["disabled"] == true => Style::new().fg(Color::DarkGray),
-        s => style_named(s),
+        None if item["disabled"] == true => pal.style(Some("dim")),
+        s => pal.style(s),
     }
 }
 
-fn badge_style(name: Option<&str>) -> Style {
-    let bg = match name {
-        Some("warn") => Color::Yellow,
-        Some("error") => Color::Red,
-        Some("ok") => Color::Green,
-        Some("accent") => Color::Cyan,
-        Some("bold") => Color::White,
-        _ => Color::DarkGray,
-    };
-    Style::new().bg(bg).fg(Color::Black)
+/// A badge: its `color` if it names one this client can show, else its semantic style.
+fn badge_style(b: &Value, pal: &Palette) -> Style {
+    match theme::parse_color(&b["color"]) {
+        Some(c) => Style::new().bg(c).fg(pal.badge_text),
+        None => pal.badge(b["style"].as_str()),
+    }
 }
 
 /// Draw the panel into `area`. Keeps the selection visible and returns hit areas.
-pub fn render(buf: &mut Buffer, area: Rect, v: &Value, st: &mut State, focused: bool) -> Hits {
+pub fn render(buf: &mut Buffer, area: Rect, v: &Value, st: &mut State, focused: bool, pal: &Palette) -> Hits {
     let mut hits = Hits::default();
     if area.width < 6 || area.height == 0 {
         return hits;
     }
     let missing = missing(v);
     if !missing.is_empty() {
-        buf.set_string(area.x, area.y, "This view needs a newer prim UI", Style::new().fg(Color::Yellow));
+        buf.set_string(area.x, area.y, "This view needs a newer prim UI", pal.style(Some("warn")));
         if area.height > 1 {
-            buf.set_string(area.x, area.y + 1, format!("(missing: {})", missing.join(", ")), Style::new().fg(Color::DarkGray));
+            buf.set_string(area.x, area.y + 1, format!("(missing: {})", missing.join(", ")), pal.style(Some("dim")));
         }
         return hits;
     }
@@ -270,25 +259,25 @@ pub fn render(buf: &mut Buffer, area: Rect, v: &Value, st: &mut State, focused: 
             if x + w > area.right() {
                 break;
             }
-            let style = if i == st.page { Style::new().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD) } else { Style::new().fg(Color::Gray) };
+            let style = if i == st.page { pal.badge(Some("accent")).add_modifier(Modifier::BOLD) } else { pal.style(Some("muted")) };
             buf.set_string(x, area.y, &label, style);
             hits.pages.push((Rect { x, y: area.y, width: w, height: 1 }, i));
             x += w + 1;
         }
         if area.height > 1 {
-            buf.set_string(area.x, area.y + 1, "─".repeat(area.width as usize), Style::new().fg(Color::DarkGray));
+            buf.set_string(area.x, area.y + 1, "─".repeat(area.width as usize), pal.border(false));
         }
         area = Rect { y: area.y + 2, height: area.height.saturating_sub(2), ..area };
     }
     if !st.filter.is_empty() && area.height > 1 {
-        buf.set_string(area.x, area.y, format!("/{}", st.filter), Style::new().fg(Color::Magenta));
+        buf.set_string(area.x, area.y, format!("/{}", st.filter), Style::new().fg(pal.prompt));
         area = Rect { y: area.y + 1, height: area.height - 1, ..area };
     }
 
     let rows = rows(v, st);
     if rows.is_empty() {
         let msg = if st.filter.is_empty() { "(empty)" } else { "(no matches)" };
-        buf.set_string(area.x, area.y, msg, Style::new().fg(Color::DarkGray));
+        buf.set_string(area.x, area.y, msg, pal.style(Some("dim")));
         return hits;
     }
     st.sel = st.sel.min(rows.len() - 1);
@@ -304,11 +293,11 @@ pub fn render(buf: &mut Buffer, area: Rect, v: &Value, st: &mut State, focused: 
         if h == 0 {
             break;
         }
-        draw_row(buf, Rect { x: area.x, y, width: area.width, height: h }, r, focused && i == st.sel, st.chip, i, &mut hits);
+        draw_row(buf, Rect { x: area.x, y, width: area.width, height: h }, r, focused && i == st.sel, st.chip, i, &mut hits, pal);
         y += h;
     }
     if pinned > 0 && y < area.bottom() {
-        buf.set_string(area.x, y, "─".repeat(area.width as usize), Style::new().fg(Color::DarkGray));
+        buf.set_string(area.x, y, "─".repeat(area.width as usize), pal.border(false));
         y += 1;
     }
     let area = Rect { y, height: area.bottom().saturating_sub(y), ..area };
@@ -350,7 +339,7 @@ pub fn render(buf: &mut Buffer, area: Rect, v: &Value, st: &mut State, focused: 
         if y >= body.bottom() {
             break;
         }
-        draw_row(buf, Rect { x: body.x, y, width: body.width, height: h.min(body.bottom() - y) }, r, focused && i == st.sel, st.chip, i, &mut hits);
+        draw_row(buf, Rect { x: body.x, y, width: body.width, height: h.min(body.bottom() - y) }, r, focused && i == st.sel, st.chip, i, &mut hits, pal);
     }
 
     if scrollbar {
@@ -358,14 +347,15 @@ pub fn render(buf: &mut Buffer, area: Rect, v: &Value, st: &mut State, focused: 
         let thumb = ((area.height as u32 * area.height as u32) / total as u32).max(1) as u16;
         let pos = ((top as u32 * area.height as u32) / total as u32) as u16;
         for dy in 0..area.height {
-            let (sym, style) = if dy >= pos && dy < pos + thumb { ("┃", Style::new().fg(Color::Cyan)) } else { ("│", Style::new().fg(Color::DarkGray)) };
+            let (sym, style) = if dy >= pos && dy < pos + thumb { ("┃", Style::new().fg(pal.accent)) } else { ("│", pal.border(false)) };
             buf.set_string(x, area.y + dy, sym, style);
         }
     }
     hits
 }
 
-fn draw_row(buf: &mut Buffer, row: Rect, r: &Flat, selected: bool, chip: usize, i: usize, hits: &mut Hits) {
+#[allow(clippy::too_many_arguments)]
+fn draw_row(buf: &mut Buffer, row: Rect, r: &Flat, selected: bool, chip: usize, i: usize, hits: &mut Hits, pal: &Palette) {
     let item = &r.item;
     let w = row.width as usize;
     let y = row.y;
@@ -379,11 +369,11 @@ fn draw_row(buf: &mut Buffer, row: Rect, r: &Flat, selected: bool, chip: usize, 
                     break;
                 }
                 let style = match c["checked"].as_bool() {
-                    Some(true) => Style::new().bg(Color::Cyan).fg(Color::Black),
-                    Some(false) => Style::new().bg(Color::DarkGray).fg(Color::Gray),
-                    None => Style::new().fg(Color::Cyan).bg(Color::Rgb(40, 40, 48)),
+                    Some(true) => pal.badge(Some("accent")),
+                    Some(false) => Style::new().bg(pal.badge).fg(pal.muted),
+                    None => Style::new().fg(pal.accent).bg(pal.surface),
                 };
-                let style = if let Some(n) = c["style"].as_str() { style.patch(style_named(Some(n))) } else { style };
+                let style = if let Some(n) = c["style"].as_str() { style.patch(pal.style(Some(n))) } else { style };
                 let style = if selected && ci == chip { style.add_modifier(Modifier::REVERSED | Modifier::BOLD) } else { style };
                 let rect = Rect { x: row.x + dx, y: y + dy, width: cw, height: 1 };
                 buf.set_string(rect.x, rect.y, truncate(&chip_label(c), cw as usize), style);
@@ -392,7 +382,9 @@ fn draw_row(buf: &mut Buffer, row: Rect, r: &Flat, selected: bool, chip: usize, 
             hits.rows.push((row, i));
         }
         "select" => {
-            let base = if selected { Style::new().add_modifier(Modifier::REVERSED) } else { Style::new() };
+            let base = if selected { pal.selected() } else { Style::new() };
+            // The row's own colours, with the selection's on top when the theme sets them.
+            let ink = |s: Style| base.patch(s).patch(base);
             buf.set_string(row.x, y, " ".repeat(w), base);
             let value = item["value"].clone();
             let shown = item["options"]
@@ -403,20 +395,22 @@ fn draw_row(buf: &mut Buffer, row: Rect, r: &Flat, selected: bool, chip: usize, 
                 .or_else(|| value.as_str().map(String::from))
                 .unwrap_or_default();
             let label = format!(" {text}: ");
-            buf.set_string(row.x + indent, y, &label, base.patch(Style::new().fg(Color::Gray)));
+            buf.set_string(row.x + indent, y, &label, ink(pal.style(Some("muted"))));
             let vx = row.x + indent + label.chars().count() as u16;
-            buf.set_string(vx, y, truncate(&format!("{shown} ▾"), w.saturating_sub((vx - row.x) as usize)), base.patch(Style::new().fg(Color::Cyan)));
+            buf.set_string(vx, y, truncate(&format!("{shown} ▾"), w.saturating_sub((vx - row.x) as usize)), ink(pal.style(Some("accent"))));
             hits.rows.push((row, i));
         }
-        "separator" => buf.set_string(row.x, y, "─".repeat(w), Style::new().fg(Color::DarkGray)),
-        "header" => buf.set_string(row.x + indent, y, truncate(text, w.saturating_sub(indent as usize)), Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        "text" => buf.set_string(row.x + indent, y, truncate(text, w.saturating_sub(indent as usize)), text_style(item).fg(Color::Gray)),
+        "separator" => buf.set_string(row.x, y, "─".repeat(w), pal.border(false)),
+        "header" => buf.set_string(row.x + indent, y, truncate(text, w.saturating_sub(indent as usize)), pal.style(Some("accent")).add_modifier(Modifier::BOLD)),
+        "text" => buf.set_string(row.x + indent, y, truncate(text, w.saturating_sub(indent as usize)), text_style(item, pal).fg(pal.muted)),
         k => {
-            let base = if selected { Style::new().add_modifier(Modifier::REVERSED) } else { Style::new() };
+            let base = if selected { pal.selected() } else { Style::new() };
+            // The row's own colours, with the selection's on top when the theme sets them.
+            let ink = |s: Style| base.patch(s).patch(base);
             buf.set_string(row.x, y, " ".repeat(w), base);
             let mut x = row.x + indent;
             if r.has_children {
-                buf.set_string(x, y, if r.expanded { "▾ " } else { "▸ " }, base.patch(Style::new().fg(Color::Cyan)));
+                buf.set_string(x, y, if r.expanded { "▾ " } else { "▸ " }, ink(pal.style(Some("accent"))));
                 hits.expanders.push((Rect { x, y, width: 2, height: 1 }, i));
             } else if r.depth > 0 {
                 buf.set_string(x, y, "  ", base);
@@ -424,7 +418,7 @@ fn draw_row(buf: &mut Buffer, row: Rect, r: &Flat, selected: bool, chip: usize, 
             x += 2 * (r.has_children || r.depth > 0) as u16;
             if k == "toggle" {
                 let on = item["checked"] == true;
-                buf.set_string(x, y, if on { "[x] " } else { "[ ] " }, base.patch(Style::new().fg(if on { Color::Green } else { Color::DarkGray })));
+                buf.set_string(x, y, if on { "[x] " } else { "[ ] " }, ink(pal.style(Some(if on { "ok" } else { "dim" }))));
                 x += 4;
             } else if r.depth == 0 && !r.has_children {
                 x += 1;
@@ -436,8 +430,9 @@ fn draw_row(buf: &mut Buffer, row: Rect, r: &Flat, selected: bool, chip: usize, 
                 let dw = detail.chars().count() as u16;
                 if right > x + dw + 2 {
                     right -= dw;
-                    let ds = item["detail_style"].as_str().map(|s| style_named(Some(s))).unwrap_or(Style::new().fg(Color::DarkGray));
-                    buf.set_string(right, y, detail, base.patch(ds));
+                    let ds = item["detail_style"].as_str().unwrap_or("dim");
+                    let ds = pal.style(Some(ds));
+                    buf.set_string(right, y, detail, ink(ds));
                     right = right.saturating_sub(1);
                 }
             }
@@ -445,7 +440,7 @@ fn draw_row(buf: &mut Buffer, row: Rect, r: &Flat, selected: bool, chip: usize, 
                 .as_array()
                 .into_iter()
                 .flatten()
-                .filter_map(|b| Some((format!(" {} ", b["text"].as_str()?), badge_style(b["style"].as_str()))))
+                .filter_map(|b| Some((format!(" {} ", b["text"].as_str()?), badge_style(b, pal))))
                 .collect();
             let room_for_text = |right: u16| right.saturating_sub(x) as usize;
             let mut bx = right;
@@ -461,14 +456,14 @@ fn draw_row(buf: &mut Buffer, row: Rect, r: &Flat, selected: bool, chip: usize, 
                 placed.push((bx, t.clone(), *s));
                 bx = bx.saturating_sub(1);
             }
-            buf.set_string(x, y, truncate(text, room_for_text(bx)), base.patch(text_style(item)));
+            buf.set_string(x, y, truncate(text, room_for_text(bx)), ink(text_style(item, pal)));
             for (bx, t, s) in placed {
                 buf.set_string(bx, y, t, s);
             }
             if let Some(d) = item["description"].as_str() {
                 if y + 1 < row.bottom() {
                     let dx = row.x + indent + 4;
-                    buf.set_string(dx, y + 1, truncate(d, w.saturating_sub(dx as usize - row.x as usize)), Style::new().fg(Color::DarkGray));
+                    buf.set_string(dx, y + 1, truncate(d, w.saturating_sub(dx as usize - row.x as usize)), pal.style(Some("dim")));
                 }
             }
             hits.rows.push((row, i));
