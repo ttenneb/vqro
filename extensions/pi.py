@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import sys
 import time
+import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from prim_ext import Extension, PrimError
@@ -98,7 +99,7 @@ class Pi:
         # The local default uses this installed package. A configured host
         # launcher/environment never inherits a core-host module path.
         env = runtime.get("bridge_env", {} if "bridge_argv" in runtime else {"PYTHONPATH": EXTENSIONS})
-        params = {"bridge": True, "name": "Pi bridge", "argv": [*launcher, "--", *runtime["argv"]], "env": env}
+        params = {"bridge": True, "name": "pi-bridge-"+uuid.uuid4().hex[:12], "argv": [*launcher, "--", *runtime["argv"]], "env": env}
         if cwd:
             params["cwd"] = cwd
         result = self.ext.prim.call("resource.spawn", params)  # exactly once, never retried
@@ -112,17 +113,17 @@ class Pi:
                 # Agents is optional: its disable must never kill or hide the
                 # backend terminal. Fall back to that public terminal view.
                 try:
-                    self.ext.invoke("agents.show", {"resource": resource["id"]})
+                    shown = self.ext.invoke("agents.show", {"resource": resource["id"]})
                 except PrimError as error:
                     if error.kind not in ("unavailable", "not_found"):
                         raise
-                    self.terminal(host)
+                    shown = self.terminal(host)
                 self.ext.notify("Pi agent "+resource["id"]+" created (observed); no prompt sent.", "ok")
-                return {"outcome": result["outcome"], "host": host, "agent": resource["id"], "client": {"close": True}}
+                return {"outcome": result["outcome"], "host": host, "agent": resource["id"], "client": dict((shown or {}).get("client") or {}, close=True)}
             if time.monotonic() >= end:
                 self.ext.notify("Terminal "+host+" spawned; Pi agent not ready. Do not blindly retry.", "warn")
-                self.terminal(host)
-                return {"outcome": result["outcome"], "host": host, "ready": False}
+                shown = self.terminal(host)
+                return {"outcome": result["outcome"], "host": host, "ready": False, "client": (shown or {}).get("client", {})}
             time.sleep(.1)
 
     def terminal(self, host):

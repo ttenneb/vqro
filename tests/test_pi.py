@@ -76,7 +76,8 @@ class PiTests(unittest.TestCase):
         self.command("new")
         spawns = [params for method, params in self.native() if method == "resource.spawn"]
         self.assertEqual(len(spawns), 2)
-        self.assertTrue(all(params["name"] == "Pi bridge" for params in spawns))
+        self.assertTrue(all(params["name"].startswith("pi-bridge-") for params in spawns))
+        self.assertNotEqual(spawns[0]["name"], spawns[1]["name"])
 
     def test_agents_disabled_falls_back_to_real_terminal_without_respawning(self):
         self.core.fail_agents = True

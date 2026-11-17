@@ -50,7 +50,8 @@ def show(view, title, view_value=None):
                 t["active"] = len(t["tabs"]) - 1
             ops.append({"op": "set", "key": key, "value": root, "expect": ver})
         return ext.apply(ops, f"tabs: show {view}")
-    return ext.retrying(attempt)
+    result = ext.retrying(attempt)
+    return dict(result or {}, client={"focus": {"view": view}})
 
 
 def title_of(r):

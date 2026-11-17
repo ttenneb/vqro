@@ -426,8 +426,12 @@ and sets the prefix; the active profile is `doc/keys/profile`, and the list is l
 - `view.publish {view, content}`: live content merged over a view's entry (e.g. `{"items": [...]}`). Not saved,
   not in history; broadcast as event `view.content`; cleared when the publishing connection disconnects, so a
   panel falls back to its entry (typically "not running"). Snapshots include `live`.
-- A command's reply may ask the invoking client for UI: `{"client": {"popup": {"view", "width"?}}}` or
-  `{"client": {"close": true}}`. Per client and temporary; clients refuse terminal views as popups.
+- A command's reply may ask the invoking client for UI: `{"client": {"popup": {"view", "width"?}}}`,
+  `{"client": {"close": true}}`, or `{"client": {"focus": {"view": "view-id"}}}`. These fields may be combined.
+  Per client and temporary; clients refuse terminal views as popups. `focus` leaves zoom and focuses an already
+  visible view after the command's layout changes; it never opens a view or changes another client's focus.
+  Missing/hidden targets are ignored. Older clients ignore unknown reply fields. Extensions choose what to show;
+  the focus mechanism is independent of resource/view kind.
 - Panels: `{title?, items: [row]}` or `{title?, pages: [{title, items}]}`. Rows:
   `{type?: "item"|"toggle"|"header"|"separator"|"text", text, id?, detail?, detail_style?, description?, checked?,
   style?, disabled?, badges?: [{text, style?}], children?: [row], expanded?, command?, args?, input?, pick?,

@@ -93,7 +93,7 @@ class Agents:
         self.ext.contribute(self.declarations([r]))
         self.ext.publish(view(r["id"]), self.panel(r))
         result = self.ext.invoke("tabs.show", {"view": view(r["id"]), "title": label(r.get("name") or "Agent")+" "+r["id"]})
-        return {"resource": r["id"], "view": view(r["id"]), "tab": result, "client": {"close": True}}
+        return {"resource": r["id"], "view": view(r["id"]), "tab": result, "client": {"close": True, "focus": {"view": view(r["id"])}}}
 
     def effect(self, op, args):
         self.ext.fresh()

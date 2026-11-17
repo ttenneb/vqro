@@ -152,6 +152,8 @@ enum Msg {
     /// A command's reply asked this client to show a view as a popup.
     Popup { view: String, width: u16, ctx: Value },
     ClosePopup,
+    /// A command's reply asks to focus a visible view, independently of its kind.
+    FocusView(String),
 }
 
 /// Where things were drawn last frame, for mouse hit-testing.
@@ -760,6 +762,10 @@ impl App {
                         self.overlay = Some(Overlay::Popup { view, width, ctx });
                     }
                 }
+            }
+            Msg::FocusView(view) => {
+                self.zoomed = None;
+                self.pending_focus = Some(view);
             }
             Msg::ClosePopup => {
                 if matches!(self.overlay, Some(Overlay::Popup { .. })) {
@@ -1889,6 +1895,9 @@ impl App {
                     if r["client"]["close"] == true {
                         let _ = tx.send(Msg::ClosePopup);
                     }
+                    if let Some(view) = r["client"]["focus"]["view"].as_str() {
+                        let _ = tx.send(Msg::FocusView(view.to_string()));
+                    }
                     let _ = tx.send(Msg::Done(name));
                 }
                 Err(e) => {
@@ -2531,6 +2540,23 @@ mod tests {
         let (peer, _) = Peer::spawn(tokio::io::empty(), tokio::io::sink());
         let (tx, rx) = mpsc::unbounded_channel();
         (App::new(peer, tx), rx)
+    }
+
+    #[tokio::test]
+    async fn command_focus_targets_a_visible_view_without_kind_policy() {
+        let (mut app, _) = app();
+        app.entries.insert("workspace/active".into(), json!({"layout": "test"}));
+        app.entries.insert("layout/test".into(), json!({"split": "h", "children": [{"view": "list"}, {"view": "detail"}]}));
+        for view in ["list", "detail"] {
+            app.entries.insert(format!("view/{view}"), json!({"kind": "panel", "items": []}));
+        }
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        app.on_msg(Msg::FocusView("detail".into()));
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert_eq!(app.leaves[app.focus], "detail");
+        app.on_msg(Msg::FocusView("missing".into()));
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert_eq!(app.leaves[app.focus], "detail", "a hidden/missing view is ignored, never opened");
     }
 
     fn snapshot(seq: u64, value: &str) -> Value {

@@ -47,6 +47,7 @@ class ResourceViews(unittest.TestCase):
         self.assertEqual(core.value("view/term-r1")["resource"], "r1")
         self.assertIsNone(core.value("view/term-r2"))
         self.assertEqual(first_tabs(core.value("layout/main"))["tabs"][0]["title"], "Other agent r2 bridge")
+        self.assertEqual(module["show_cmd"]({"resource": "r1"})["client"], {"focus": {"view": "term-r1"}})
 
     def test_failed_agent_show_does_not_replay_as_terminal_navigation(self):
         _, core = load("tabs")
@@ -78,6 +79,22 @@ class ResourceViews(unittest.TestCase):
         result = core.value("layout/main")
         self.assertEqual(len(result["tabs"]), 2)
         self.assertEqual(result["active"], 0)
+
+    def test_ended_markers_follow_lifecycle_without_status_transaction_churn(self):
+        module, core = load("tabs")
+        core.apply([{"op": "set", "key": "layout/main", "value": {"tabs": [
+            {"title": "User title", "node": {"view": "agents-r2"}}], "active": 0}}], "fixture")
+        module["resource_state"]("resource", {"id": "r2"})
+        count = len(core.transactions)
+        for _ in range(20):
+            module["resource_state"]("resource", {"id": "r2"})
+        self.assertEqual(len(core.transactions), count)
+        core.resources.pop("r2")
+        module["resource_state"]("resource.removed", {"id": "r2"})
+        self.assertEqual(core.value("layout/main")["tabs"][0]["title"], "User title [gone]")
+        core.add_agent()
+        module["resource_state"]("resource", {"id": "r2"})
+        self.assertEqual(core.value("layout/main")["tabs"][0]["title"], "User title")
 
     def test_close_ended_preserves_live_mixed_and_last_tabs(self):
         module, core = load("tabs")
