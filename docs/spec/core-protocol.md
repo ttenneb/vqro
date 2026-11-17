@@ -7,7 +7,7 @@ Status: implemented in slice 1 (`src/server.rs`), not frozen (D16). JSON-RPC 2.0
 core's local endpoint (below). Both sides may send requests:
 the core forwards `command.invoke` to the connection that registered the command. Errors carry a stable
 `data.kind`: `invalid`, `conflict`, `not_found`, `unavailable`, `forbidden`, `backend`, `disconnected`, `io`,
-`durability_unconfirmed`, `timeout`, `overloaded`, `unsupported`, `too_large`.
+`durability_unconfirmed`, `timeout`, `overloaded`, `unsupported`, `stale_generation`, `too_large`.
 
 ## Endpoint and transport (D12, D22 proposed)
 
@@ -81,9 +81,10 @@ The ordinary control backlog remains **4 MiB**. One separately reserved, priorit
 slot stays charged through actual writing: 16 MiB entries + 8 MiB live + 32 MiB resource allowance + 8 MiB
 metadata/headroom. A busy large slot returns `overloaded`; a reply over the envelope returns `too_large` **without
 disconnecting**. This is not a raised general backlog cap. No effect/input is replayed. The resource envelope
-assumes provider-wire admission: 4096 resources/provider, 128 KiB whole facts, 32 MiB global retained current/pending
-resource JSON, 32 providers and 128 KiB registration metadata/provider. Provider-wire owns that admission; older
-in-process/external facts may exceed it during migration, so oversized recovery remains necessary.
+is enforced for native and wire providers: 4096 resources/provider, 128 KiB whole facts, 32 MiB globally retained
+published/pending-IO resource JSON, 32 providers, 128 KiB registration metadata/provider, 128-byte names and
+256-byte instances. Global-budget errors name the offending provider. Legacy workspace/live state can still
+exceed other limits, so oversized recovery remains necessary.
 
 If legacy/external state exceeds the reply envelope, the TUI starts in clearly labelled **recovery-only** mode,
 not a partial authoritative workspace. Built-in undo, safe mode, reset, commands and quit remain reachable; CLI
@@ -136,14 +137,14 @@ connection. A bounded recovery buffer may discard its batch and request a newer 
 Then notifications `event {epoch, seq, type, data}` with types `entries`, `resource`, `resource.removed`, `command`,
 `extension`, `provider`, `adapter` (compatibility alias), `safe_mode`, `effect`, `persistence.error`, `persistence.recovered`; or `missed` when the bounded log can't serve the cursor
 (re-snapshot). `effect {effect, provider, generation, method, author, outcome, error?}` audits the result observed by
-the caller, including an indeterminate timeout; it is not a late-reply notification. Publishing a late
-`effect.outcome` remains OPEN in `provider-v0.md` section 9.4.
+the caller, including an indeterminate timeout; it is not a late-reply notification. Late original replies are
+ignored, with no invented `effect.outcome` event; independent resource facts reconcile the backend.
 
 `persistence.error {scope: "resources", provider, message, error}` reports a resource-identity map failure and is
 logged once per affected provider until recovery. Repeated resource/status events are coalesced, not logged as a
 new failure each time. `persistence.recovered {scope: "resources", provider}` makes recovery visible.
 
-## In-process providers
+## Providers (native and wire)
 
 The registry exports `providers: {name: {name, role, instance, generation, software, capabilities, state,
 connected, synced, since, error, identity_persistence}}`. `state` is `connected` or `disconnected`; `synced` means
@@ -154,8 +155,20 @@ events temporarily remain aliases so existing extensions continue to work.
 
 A provider registration/start is connection-bound and gets a new generation. Old event sources, queued commands,
 effect replies and streams cannot act through a replacement connection. The native adapter's connection token is
-internal, distinct from the core-assigned public generation. No `provider.*` wire methods, bridge-token validation
-or relay are exposed yet; `provider-v0.md` section 9 pins the later wire step.
+internal, distinct from the core-assigned public generation. `provider.register`, chunked `provider.sync`,
+`resource.upsert`/`gone`, provider effects and credited streams are implemented as pinned in `provider-v0.md`
+section 9. Requests/notifications carry generation in params; reply envelopes never do. Wrong-generation requests
+return `stale_generation`; wrong-generation notifications close the connection. Wire provider records, including
+records queued before registration, are capped at 1 MiB. Relay remains unimplemented.
+
+`resource.spawn {bridge:true}` opts into `PRIM_BRIDGE_TOKEN` + opaque `PRIM_SOCKET` spawn environment. Runtime
+registration may wait five seconds for durable host identity and returns `resume_token`; bootstrap and resume use
+same `params.token`. Private durable current+previous credentials bind exact host/provider/instance and expire
+on host removal. Lost-first-reply recovery, rotation and core-restart identity restoration are tested. Ordinary
+spawns receive no token. Native herdr remains the default; no proposed essential/safe-mode policy is implemented.
+
+`terminal.exit {exit_code:true|false}` declares whether numeric exit codes are natively reportable; absent/unknown
+parameters imply no numeric-code guarantee. Never manufacture a code from an unknown reason.
 
 A resource's identity is `(provider, instance, backend_ref, incarnation)`. IDs never reuse a retired identity's id.
 Herdr's instance is the stable `hello.core.id` (not pid/uptime); `created_ms` identifies a terminal incarnation.
@@ -178,9 +191,10 @@ and old layouts may show gone resources until explicitly repaired/reset. No iden
 | Method | Params | Result |
 |---|---|---|
 | `resource.list` | | `resources` |
-| `resource.spawn` | `argv?` (default: the provider's default shell for its host), `cwd?`, `name?`, `provider?` (`adapter` alias), `deadline_ms?` | `outcome: observed`, `effect`, `resource` |
+| `resource.spawn` | `argv?` (default: the provider's default shell for its host), `cwd?`, `name?`, `env?`, `cols?`, `rows?`, `placement?`, `bridge?` (default false), `provider?` (`adapter` alias), `deadline_ms?` | `outcome: observed`, `effect`, `resource` |
 | `resource.kill` | `resource`, `deadline_ms?` | `outcome: accepted`, `effect`, `backend` |
-| `resource.attach` | `resource`, `cols`, `rows`, `history?` (backend scrollback), `deadline_ms?` | `outcome: accepted`, `effect`, `stream`, `initial` (`history` or `none`) |
+| `resource.attach` | `resource`, `cols`, `rows`, `history?` (backend scrollback), `deadline_ms?` | `outcome: accepted`, `effect`, `stream`, `initial` (`history`, `repaint` or `none`) |
+| `resource.invoke` | `resource`, `op`, `args?` (object), `deadline_ms?` | `outcome`, `effect`, `data?`; capability-checked generic provider operation |
 | `stream.input` | `stream`, `data` (base64) or `text` | `outcome: dispatched` (also accepted as a notification) |
 | `stream.resize` | `stream`, `cols`, `rows` | |
 | `stream.close` | `stream` | |
@@ -220,9 +234,11 @@ drains are batched to keep key handling reachable under sustained traffic.
 After a gap, discard the old VT parser state and attach again with backend history for a fresh repaint; do not
 concatenate partial escape sequences across streams. The TUI retries closed live views after a paced one-second
 retry, without requiring a new resource event. It also handles `stream.gap {stream, reason}` from future producers
-by closing the old stream and reattaching. No new viewer/provider credit wire method is introduced in this slice:
-internal herdr CREDIT follows acceptance into the core's bounded connection writer queue, not an unbounded enqueue
-and not a claim that the viewer parsed the bytes.
+by closing the old stream and reattaching. Provider-side `stream.credit` counts decoded bytes accepted into the
+bounded core writer queue, not an unbounded enqueue or a claim that the viewer parsed bytes. Data precedes ordered
+gap/closed markers; wrong offsets or exceeded credit close that stream. `stream.error` reports asynchronous input
+rejection and does not close output. Native herdr CREDIT follows the same consumption boundary. Viewer credit is
+still not negotiated; slow viewers use explicit closure/repaint rather than simulated end-to-end acknowledgement.
 
 Resource ids (`r1`, ...) are prim's and stay stable across core restarts while the backend keeps the resource.
 

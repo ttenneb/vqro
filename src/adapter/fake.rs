@@ -56,7 +56,7 @@ pub fn start(name: String, events: mpsc::UnboundedSender<(String, AdapterEvent)>
 /// Deterministic identity injection for conformance fixtures; ordinary starts always get a new instance.
 pub fn start_with_instance(name: String, instance: String, events: mpsc::UnboundedSender<(String, AdapterEvent)>) -> AdapterHandle {
     let (cmd_tx, mut cmds) = mpsc::unbounded_channel::<AdapterCmd>();
-    let handle = AdapterHandle { name: name.clone(), session: None, capabilities: json!({"terminal.spawn": {}, "terminal.input": {}, "terminal.output": {"raw": true}, "terminal.kill": {}, "terminal.list": {}, "terminal.resize": {}}), cmds: cmd_tx };
+    let handle = AdapterHandle { name: name.clone(), session: None, context: None, capabilities: json!({"terminal.spawn": {}, "terminal.input": {}, "terminal.output": {"raw": true}, "terminal.kill": {}, "terminal.list": {}, "terminal.resize": {}}), cmds: cmd_tx };
     // Status ticks from agent-like terminals come back through the adapter loop, so `terms` stays
     // the one source of truth for facts.
     let (tick_tx, mut ticks) = mpsc::unbounded_channel::<String>();
@@ -115,6 +115,7 @@ pub fn start_with_instance(name: String, instance: String, events: mpsc::Unbound
                     let _ = events.send((name.clone(), AdapterEvent::Upsert(f.clone())));
                     let _ = reply.send(Ok(f));
                 }
+                cmd @ AdapterCmd::Invoke { .. } => reject_command(cmd, "operation is not supported by the in-process fake adapter"),
                 AdapterCmd::Kill(r, reply) => match terms.get_mut(&r) {
                     None => drop(reply.send(Err(format!("no terminal {r}").into()))),
                     Some(t) => {
@@ -122,7 +123,7 @@ pub fn start_with_instance(name: String, instance: String, events: mpsc::Unbound
                         t.facts.state = "finished".into();
                         t.facts.exit = json!({"reason": "killed"});
                         let _ = events.send((name.clone(), AdapterEvent::Upsert(t.facts.clone())));
-                        let _ = reply.send(Ok(json!({"reason": "killed"})));
+                        let _ = reply.send(Ok(EffectResult::accepted(json!({"reason": "killed"}))));
                     }
                 },
                 AdapterCmd::Attach { backend_ref, reply, .. } => {
@@ -155,7 +156,7 @@ pub fn start_with_instance(name: String, instance: String, events: mpsc::Unbound
                             }
                         }
                     });
-                    let _ = reply.send(Ok(Stream { initial: "none", input: in_tx, output: out_rx }));
+                    let _ = reply.send(Ok(Stream { initial: "none", input: in_tx, output: out_rx, terminal: None }));
                 }
             }
         }

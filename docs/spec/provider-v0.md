@@ -1,8 +1,9 @@
 # prim provider contract, v0 (proposed)
 
-> **Status (2026-11-17): proposed, not implemented.** prim is a working prototype, and fluid. This is the intended
-> public contract for backend adapters and agent-runtime bridges as out-of-process providers (D21, proposed). Today
-> the only adapters run in-process (`src/adapter/`). Nothing here is frozen (`../roadmap.md`, step 5); it changes as
+> **Status (2026-11-17): section 9 implemented; broader D21 migration remains proposed.** prim is a working
+> prototype, and fluid. Core wire, Python/Rust provider SDKs and private fake/tmux integration are implemented;
+> native in-process herdr remains the default. Essential extensions, relay and the proposed safe-mode policy are
+> not implemented. Nothing here is frozen (`../roadmap.md`, step 5); it changes as
 > the first two implementations on each side (herdr-core and tmux; Pi and Claude Code) teach us.
 
 Evidence keys: **src** prim source at `main`; **rec** recorded result (file named); **unverified** not yet checked.
@@ -265,6 +266,10 @@ cursors with snapshot fencing; the scale harness. Providers reuse these rules.
 
 ## 9. Wire messages (v0, pinned 2026-11-17)
 
+The core side is implemented in `src/provider_wire.rs`; Python SDK/fake and Rust `prim-tmux` interoperate through
+private extension-backed socket tests (`tests/provider_wire.rs`). Native herdr remains the default: no essential
+extension or safe-mode policy from the earlier proposal is implemented by this step.
+
 This section is the implementable contract; where sections 1–6 differ, this wins. It answers the SDK gap list
 (G1–G20 below refer to it). Items marked **OPEN** carry a recommendation and are not built in v0.
 
@@ -279,6 +284,8 @@ This section is the implementable contract; where sections 1–6 differ, this wi
 - Every provider-originated message after registration and every core-originated provider message carries
   `generation` (integer). Requests with a wrong generation fail with `stale_generation`; a notification with a wrong
   generation is a protocol error and the core closes the connection (on one connection a mismatch is a bug).
+  Generation is present only in request/notification **params**, never a reply envelope. JSON-RPC replies carry
+  `id` plus `result`/`error`; a field explicitly defined inside a result (register's `generation`) is ordinary data.
 - **Errors** are JSON-RPC errors with `data.kind` (G12). Kinds used here: `invalid` (bad params, bad base64, bad
   dimensions), `unknown_method` (code -32601), `unsupported` (op or stream feature not in the provider's
   capabilities), `not_found` (unknown ref, incarnation or stream), `stale_generation`, `conflict` (duplicate
@@ -302,9 +309,16 @@ This section is the implementable contract; where sections 1–6 differ, this wi
 - **Capabilities** (G19): an object mapping name → parameter object (`{}` when none). Absent means unsupported;
   `false`, `null` or a non-object value is `invalid` at register. Unknown names are accepted and exported verbatim.
   An op is allowed only if a capability of the same name is declared (`terminal.spawn`, `agent.steer`, ...).
+- **Admission bounds (native and wire):** 4096 retained resource references per provider; 128 KiB per whole facts
+  record (including status/argv/name/cwd, in addition to the 64 KiB data bound); 32 MiB globally for published plus
+  pending-IO resource JSON. Candidates reserve space before publication. Registration metadata is at most 128 KiB,
+  provider names 128 UTF-8 bytes, instances 256 bytes, and the registry holds at most 32 providers. Violations return
+  `overloaded` or close a notifying provider; global-budget diagnostics identify the provider that hit the bound.
+  These are payload/accounting bounds, not an RSS or latency promise.
 - **Limits** (G10): `max_streams` is the provider's hard cap on concurrently open streams; the core does not open more
   and returns `overloaded` to the viewer. The effective window is `min(stream_window_bytes, 262144)` and is returned
-  in the register result.
+  in the register result. The current core additionally admits at most 512 wire streams and 128 concurrent
+  effect/open calls per provider; overflow is rejected, never queued without a bound.
 - **Sync** (G9, G20): a sync is one or more `provider.sync` chunks; the chunk with `final: true` ends it. Each chunk
   merges (upserts) its resources as it is applied. At the final chunk, every resource of this provider not listed in
   any chunk of this sync is removed (`reason: replaced` if its ref reappeared with another incarnation, else
@@ -342,15 +356,21 @@ existing status consumers and partial resource events (`src/events.rs`) work unc
 
 - `deadline_ms` is the **remaining** time at dispatch, 1–300000, always present; default 30000 (as forwarded
   commands). The provider converts it to a local monotonic deadline. The core owns the caller's deadline.
-- Result `outcome` is one of `accepted`, `observed`, `rejected`. `rejected` carries `error: {kind, message}` and
-  means no effect. Protocol problems (bad args, unknown op or ref) are JSON-RPC errors instead, also no effect.
-  `indeterminate` is never sent by a provider; the core produces it (`timeout`, `unavailable`).
+- Result `outcome` is one of `dispatched`, `accepted`, `observed`, `rejected`. `dispatched` means handed to the layer
+  below without an acknowledgement; the core passes it through unchanged and never resends. `rejected` carries
+  `error: {kind, message}` and guarantees no effect. Protocol problems are JSON-RPC errors instead. If the provider
+  cannot know whether an effect happened (lost reply, backend dropped mid-call), it returns a JSON-RPC error with
+  `data.kind: backend` or `unavailable`, never a fabricated `rejected` result. The core conservatively maps every
+  provider error and deadline expiry to caller `outcome: indeterminate`, without resend. Core-side pre-dispatch
+  validation/admission remains a definite rejection. Providers never send an `indeterminate` result.
 - **One response per request.** The provider replies once, when it knows, even after the deadline; the core ignores
-  a reply that arrives after it timed out (as forwarded commands on `main`). **OPEN:** publishing a late reply as an
-  `effect.outcome` event; recommend only when an extension needs it.
+  a reply that arrives after it timed out (as forwarded commands on `main`). No invented late `effect.outcome`
+  event: independent native facts reconcile what happened; late original replies are ignored.
 - `effect` ids are generated by the core, unique for the core's boot epoch, never reused. A provider must not run a
   duplicate id twice on one connection; it rejects it with `conflict`. Providers may use native idempotency keys
-  internally. Nobody resends automatically.
+  internally. Nobody resends automatically. A bounded duplicate-id ledger retains ids until disconnect; when
+  full, reject new calls as `overloaded`, never evict ids and risk replay. Core wire retains up to 65536 ids per
+  connection; reconnection creates a new generation, not a resend.
 - **`terminal.spawn`**: no `ref`; `args {argv, cwd?, name?, env? (object string→string), cols?, rows?, placement?}`.
   An empty `argv` means the provider's default shell for its host (`$SHELL` on Unix, `%ComSpec%` or PowerShell on
   Windows); the core never picks a shell. `cwd` is a host path string in the host's own syntax.
@@ -405,16 +425,29 @@ existing status consumers and partial resource events (`src/events.rs`) work unc
 
 ### 9.6 Runtime bridges (G17)
 
-- `role: "runtime"` requires `token` (string). The core mints it at spawn, single-use, valid until used or the
-  hosting terminal's resource is gone. Unknown, used or expired tokens fail with `forbidden`. A successful register
-  links the bridge: every agent resource it publishes gets `host` = the terminal resource id.
+- `resource.spawn {bridge: true, ...}` opts in. Ordinary shells receive no bridge credentials. The core injects
+  `PRIM_BRIDGE_TOKEN` and opaque `PRIM_SOCKET` in spawn `env` (native herdr: `terminal.run.env`; wire:
+  `terminal.spawn.args.env`). A provider explicitly declaring spawn `env: false` is rejected before dispatch.
+- `role: "runtime"` requires `token` (string). Registration can wait up to five seconds for a pending spawn's
+  durable host id. Failed/expired pending spawns invalidate bootstrap credentials. Success links published agent
+  resources to `host` = that terminal id and returns `resume_token`. Unknown/expired credentials are `forbidden`.
+- Bootstrap and resume credentials use the **same `params.token`** field. Resume is durably bound to the exact
+  host/provider name/instance and survives core restart; same agent identities can return in a fresh generation
+  and inventory without restarting Pi or replaying effects. Host removal expires credentials.
+- Rotation retains **current + previous** per host. Presenting current retires the older previous credential;
+  presenting previous reissues a current credential. The initial bootstrap becomes previous after first success,
+  permitting recovery when the first registration reply was lost. Each successful registration rotates current;
+  the presented credential remains previous, so a lost reply is retryable. Only the same bound identity may resume.
+- Credentials live in private `runtime-tokens.json`, never snapshots/ordinary logs. File sync/rename/directory sync
+  precede acknowledgement. Post-rename uncertainty is adopted and reported as `io`, with recovery `resume_token`;
+  the spawn is never resent.
 - **OPEN:** `provider.relay` for bridges on other hosts (D21 proposed; no wire schema in v0). v0 bridges are local.
   Whatever its schema, a relay carries the bridge connection as a **byte stream** (the same LF-delimited JSON-RPC)
   and never an endpoint path, file descriptor or handle, so it works the same over `hc connect`, ssh and named pipes.
 
 ### 9.7 Gap list disposition
 
-G1 9.3. G2 9.4. G3 9.1. G4 9.4. G5 9.4 (late effect event OPEN). G6 9.5 (viewer credit OPEN). G7 9.5. G8 9.5.
+G1 9.3. G2 9.4. G3 9.1. G4 9.4. G5 9.4 (late replies ignored). G6 9.5 (viewer credit OPEN). G7 9.5. G8 9.5.
 G9 9.2. G10 9.2. G11 9.1. G12 9.1. G13 9.4, 9.5. G14 9.5. G15 9.4. G16 9.1. G17 9.6 (relay OPEN). G18 9.1 (other
 queue caps: `core-protocol.md`, Resources). G19 9.2. G20 9.2.
 
@@ -422,4 +455,4 @@ queue caps: `core-protocol.md`, Resources). G19 9.2. G20 9.2.
 
 Exact tmux formats for a server identity; tmux size arbitration between several clients; herdr-core incarnation
 semantics on `keep` restarts; Pi active-run abort, steer and settle behaviour and dialog round-trips; the cost of JSON
-with base64 at the target load; how `provider.relay` maps onto `hc connect` channels and ssh.
+with base64 beyond the measured external-fake floor (`docs/research/provider-wire.md`); how `provider.relay` maps onto `hc connect` channels and ssh.

@@ -35,13 +35,15 @@ pub struct Provider {
     pub since: u64,
     pub error: Option<String>,
     pub synced: bool,
+    /// Additional validated wire registration metadata (version, effective limits, runtime host).
+    pub metadata: Value,
     pub health: watch::Sender<Health>,
 }
 
 impl Provider {
     pub fn new(handle: AdapterHandle, source: u64, generation: u64) -> Self {
         let (health, _) = watch::channel(Health { connected: false, generation, instance: String::new() });
-        Self { handle, info: None, source, generation, since: crate::store::now_ms(), error: None, synced: false, health }
+        Self { handle, info: None, source, generation, since: crate::store::now_ms(), error: None, synced: false, metadata: json!({}), health }
     }
 
     pub fn register(&mut self, info: ProviderInfo) {
@@ -65,11 +67,15 @@ impl Provider {
 
     pub fn to_json(&self) -> Value {
         let health = self.health.borrow();
-        json!({"name": self.handle.name, "role": self.info.as_ref().map(|i| &i.role),
+        let mut value = json!({"name": self.handle.name, "role": self.info.as_ref().map(|i| &i.role),
             "instance": health.instance, "generation": self.generation,
             "software": self.info.as_ref().map(|i| &i.software), "capabilities": self.handle.capabilities,
             "state": if health.connected { "connected" } else { "disconnected" },
-            "connected": health.connected, "synced": self.synced, "since": self.since, "error": self.error})
+            "connected": health.connected, "synced": self.synced, "since": self.since, "error": self.error});
+        for key in ["provider_version", "limits", "host"] {
+            if let Some(extra) = self.metadata.get(key) { value[key] = extra.clone(); }
+        }
+        value
     }
 
     pub fn route(&self, capability: &str) -> Result<Route, RpcError> {
@@ -79,7 +85,7 @@ impl Provider {
         if !self.handle.capabilities.get(capability).is_some_and(Value::is_object) {
             return Err(rejected("unsupported", format!("provider {} does not declare {capability}", self.handle.name)));
         }
-        Ok(Route { handle: self.handle.clone(), health: self.health.subscribe(), generation: self.generation, instance: self.health.borrow().instance.clone(), resource: None })
+        Ok(Route { handle: self.handle.clone(), health: self.health.subscribe(), generation: self.generation, instance: self.health.borrow().instance.clone(), resource: None, target: None })
     }
 }
 
@@ -90,6 +96,7 @@ pub struct Route {
     pub instance: String,
     pub health: watch::Receiver<Health>,
     pub resource: Option<watch::Receiver<bool>>,
+    pub target: Option<(String, String)>,
 }
 
 impl Route {
@@ -231,6 +238,8 @@ impl IdentityMap {
         self.needs_sync = uncertain.is_some();
         Ok(uncertain)
     }
+
+    pub fn active(&self, id: &str) -> bool { self.state.ids.get(id).is_some_and(|record| !record.retired) }
 
     pub fn identify(&mut self, identity: Identity) -> Result<IdentityUpdate, RpcError> {
         if let Some(id) = self.state.ids.iter().find(|(_, r)| !r.retired && r.identity == identity).map(|(id, _)| id.clone()) {

@@ -70,10 +70,25 @@ type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<PendingReply>>>>;
 
 /// Byte-bounded application ingress. Dequeue releases its charge; at most one additional record
 /// may be in the consumer's hands. Overflow closes the connection rather than dropping messages.
-pub struct IncomingReceiver { rx: queue::Receiver<Incoming> }
+pub struct IncomingReceiver { rx: queue::Receiver<Incoming>, limit: Arc<AtomicUsize>, shutdown: watch::Sender<bool>, closed: bool }
 impl IncomingReceiver {
-    pub async fn recv(&mut self) -> Option<Incoming> { self.rx.recv().await.map(|item| item.value) }
-    pub fn try_recv(&mut self) -> Result<Incoming, mpsc::error::TryRecvError> { self.rx.try_recv().map(|item| item.value) }
+    fn accept(&mut self, item: &queue::Item<Incoming>) -> bool {
+        // Registration can tighten a limit after the reader already queued a complete record.
+        // Recheck its original byte charge, not reserialized params (which lose whitespace).
+        if item.payload_bytes() > self.limit.load(Ordering::Acquire) {
+            self.closed = true; self.shutdown.send_replace(true); false
+        } else { true }
+    }
+    pub async fn recv(&mut self) -> Option<Incoming> {
+        if self.closed { return None; }
+        let item = self.rx.recv().await?;
+        self.accept(&item).then_some(item.value)
+    }
+    pub fn try_recv(&mut self) -> Result<Incoming, mpsc::error::TryRecvError> {
+        if self.closed { return Err(mpsc::error::TryRecvError::Disconnected); }
+        let item = self.rx.try_recv()?;
+        if self.accept(&item) { Ok(item.value) } else { Err(mpsc::error::TryRecvError::Disconnected) }
+    }
     pub fn len(&self) -> usize { self.rx.len() }
     pub fn is_empty(&self) -> bool { self.rx.is_empty() }
     pub fn queued_bytes(&self) -> usize { self.rx.used_bytes() }
@@ -246,7 +261,8 @@ impl Peer {
             }
         });
 
-        (Peer { control, data, large, large_bytes, record_limit, shutdown, pending, next_id: Arc::new(AtomicU64::new(1)) }, IncomingReceiver { rx: in_rx })
+        let incoming = IncomingReceiver { rx: in_rx, limit: record_limit.clone(), shutdown: shutdown.clone(), closed: false };
+        (Peer { control, data, large, large_bytes, record_limit, shutdown, pending, next_id: Arc::new(AtomicU64::new(1)) }, incoming)
     }
 
     pub async fn call(&self, method: &str, params: Value) -> RpcResult {
@@ -455,6 +471,20 @@ mod tests {
         assert_eq!(peer.call("not_sent", Value::Null).await.unwrap_err().kind(), "overloaded");
         for task in tasks { task.abort(); let _ = task.await; }
         assert!(peer.pending.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn tightening_a_record_limit_also_checks_already_queued_records() {
+        let (a, b) = tokio::io::duplex(4096);
+        let (r, w) = tokio::io::split(a);
+        let (peer, mut incoming) = Peer::spawn(r, w);
+        let (r, w) = tokio::io::split(b);
+        let (sender, _rx) = Peer::spawn(r, w);
+        sender.notify("queued", json!({"payload":"x".repeat(512)}));
+        tokio::time::timeout(Duration::from_secs(1), async { while incoming.is_empty() { tokio::task::yield_now().await; } }).await.unwrap();
+        peer.set_max_record_bytes(128).unwrap();
+        assert!(incoming.recv().await.is_none());
+        assert!(peer.is_closed());
     }
 
     #[tokio::test]

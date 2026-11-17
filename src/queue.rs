@@ -17,6 +17,10 @@ impl std::error::Error for QueueError {}
 pub struct Item<T> {
     pub value: T,
     _permit: OwnedSemaphorePermit,
+    bytes: usize,
+}
+impl<T> Item<T> {
+    pub(crate) fn payload_bytes(&self) -> usize { self.bytes }
 }
 
 pub struct Sender<T> {
@@ -54,7 +58,7 @@ impl<T> Sender<T> {
             tokio::sync::TryAcquireError::Closed => QueueError::Closed,
             tokio::sync::TryAcquireError::NoPermits => QueueError::Full,
         })?;
-        self.tx.try_send(Item { value, _permit: permit }).map_err(|e| match e {
+        self.tx.try_send(Item { value, _permit: permit, bytes }).map_err(|e| match e {
             mpsc::error::TrySendError::Full(_) => QueueError::Full,
             mpsc::error::TrySendError::Closed(_) => QueueError::Closed,
         })
@@ -63,7 +67,7 @@ impl<T> Sender<T> {
     pub async fn send(&self, value: T, bytes: usize) -> Result<(), QueueError> {
         let charge = self.charge(bytes)?;
         let permit = self.budget.clone().acquire_many_owned(charge).await.map_err(|_| QueueError::Closed)?;
-        self.tx.send(Item { value, _permit: permit }).await.map_err(|_| QueueError::Closed)
+        self.tx.send(Item { value, _permit: permit, bytes }).await.map_err(|_| QueueError::Closed)
     }
 
     pub fn is_closed(&self) -> bool { self.tx.is_closed() }

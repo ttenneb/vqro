@@ -4,8 +4,8 @@ pub const ENTRY_BYTES: usize = MIB;
 pub const WORKSPACE_BYTES: usize = 16 * MIB;
 pub const LIVE_VALUE_BYTES: usize = MIB;
 pub const LIVE_BYTES: usize = 8 * MIB;
-/// Resource allowance is an operating assumption until provider admission bounds all facts.
-pub const RESOURCE_ALLOWANCE: usize = 32 * MIB;
+/// Enforced for canonical and unpublished IO-recovery resource JSON by provider admission.
+pub const RESOURCE_ALLOWANCE: usize = crate::resource_admission::MAX_RESOURCE_BYTES;
 pub const SNAPSHOT_BYTES: usize = WORKSPACE_BYTES + LIVE_BYTES + RESOURCE_ALLOWANCE + 8 * MIB;
 
 /// Count encoded JSON without allocating another copy of a large value.

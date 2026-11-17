@@ -21,8 +21,8 @@ const RESIZE: u8 = 3;
 
 pub fn capabilities() -> Value {
     json!({
-        "terminal.spawn": {}, "terminal.input": {}, "terminal.output": {"raw": true}, "terminal.resize": {},
-        "terminal.kill": {}, "terminal.list": {}, "terminal.exit": {}, "status.osc7501": {},
+        "terminal.spawn": {"env": true, "cwd": true}, "terminal.input": {}, "terminal.output": {"raw": true}, "terminal.resize": {},
+        "terminal.kill": {}, "terminal.list": {}, "terminal.exit": {"exit_code": true}, "status.osc7501": {},
         "persist.detach": {}, "events.resync": {}, "remote.machines": {}
     })
 }
@@ -31,7 +31,7 @@ pub fn capabilities() -> Value {
 /// connection drops. Events go to `events` tagged with the adapter name.
 pub fn start(name: String, argv: Vec<String>, events: mpsc::UnboundedSender<(String, AdapterEvent)>) -> AdapterHandle {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-    let handle = AdapterHandle { name: name.clone(), session: None, capabilities: capabilities(), cmds: cmd_tx };
+    let handle = AdapterHandle { name: name.clone(), session: None, context: None, capabilities: capabilities(), cmds: cmd_tx };
     tokio::spawn(run(name, argv, events, cmd_rx));
     handle
 }
@@ -45,7 +45,7 @@ struct Frame {
 enum Pending {
     Subscribe,
     Spawn(Reply<ResourceFacts>),
-    Kill(Reply<Value>),
+    Kill(Reply<EffectResult>),
     Attach { reply: Reply<Stream>, history: u32 },
 }
 
@@ -177,13 +177,19 @@ async fn session(
                 match cmd {
                     AdapterCmd::Bound { .. } => unreachable!("command_for removes bindings"),
                     AdapterCmd::Spawn(req, reply) => {
-                        let mut p = json!({"argv": req.argv, "no_parent": true});
+                        if req.placement.is_some() { reject_command(AdapterCmd::Spawn(req, reply), "placement is not supported by the in-process herdr adapter"); continue; }
+                        let mut p = json!({"no_parent": true});
+                        if !req.argv.is_empty() { p["argv"] = json!(req.argv); }
+                        if !req.env.is_empty() { p["env"] = json!(req.env); }
+                        if let Some(cols) = req.cols { p["cols"] = json!(cols); }
+                        if let Some(rows) = req.rows { p["rows"] = json!(rows); }
                         if let Some(cwd) = req.cwd { p["cwd"] = json!(cwd); }
                         if let Some(n) = req.name { p["name"] = json!(n); }
                         let (id, bytes) = call(&mut next_id, "terminal.run", p);
                         pending.insert(id, Pending::Spawn(reply));
                         send_frame(&frame_tx, bytes)?;
                     }
+                    cmd @ AdapterCmd::Invoke { .. } => reject_command(cmd, "operation is not supported by the in-process herdr adapter"),
                     AdapterCmd::Kill(r, reply) => {
                         let (id, bytes) = call(&mut next_id, "terminal.kill", json!({"terminal": r}));
                         pending.insert(id, Pending::Kill(reply));
@@ -226,7 +232,7 @@ async fn session(
                             let _ = events.send((name.to_string(), AdapterEvent::Snapshot(records.values().map(facts).collect())));
                         }
                         Pending::Spawn(reply) => { let _ = reply.send(result.map(|r| facts(&r))); }
-                        Pending::Kill(reply) => { let _ = reply.send(result); }
+                        Pending::Kill(reply) => { let _ = reply.send(result.map(EffectResult::accepted)); }
                         Pending::Attach { reply, history } => match result {
                             Err(e) => { let _ = reply.send(Err(e)); }
                             Ok(r) => {
@@ -257,7 +263,7 @@ async fn session(
                                     let close = frame(ch, CLOSE, &[]);
                                     let _ = ftx.send(close, 9).await;
                                 });
-                                let _ = reply.send(Ok(Stream { initial: if history > 0 { "history" } else { "none" }, input: inp_tx, output: out_rx }));
+                                let _ = reply.send(Ok(Stream { initial: if history > 0 { "history" } else { "none" }, input: inp_tx, output: out_rx, terminal: None }));
                             }
                         },
                     }

@@ -43,6 +43,7 @@ const BUDGET_FINAL_SNAPSHOT_MS: f64 = 1000.0; // core still answers promptly aft
 #[derive(Debug, Clone)]
 struct Profile {
     terminals: usize,
+    external_providers: bool,
     agents: usize,
     floods: usize,
     flood_bytes_per_sec: u64,
@@ -78,6 +79,7 @@ impl Profile {
     fn from_env() -> Profile {
         let p = Profile {
             terminals: env_num("TERMINALS", 600),
+            external_providers: env_num("EXTERNAL_PROVIDERS", 0u8) != 0,
             agents: env_num("AGENTS", 200),
             floods: env_num("FLOODS", 8),
             flood_bytes_per_sec: env_num("FLOOD_BYTES_PER_SEC", 1_000_000),
@@ -101,7 +103,7 @@ impl Profile {
     }
     fn to_json(&self) -> Value {
         json!({
-            "terminals": self.terminals, "agents": self.agents, "floods": self.floods,
+            "terminals": self.terminals, "external_providers": self.external_providers, "agents": self.agents, "floods": self.floods,
             "flood_bytes_per_sec": self.flood_bytes_per_sec, "status_every_ms": self.status_every_ms,
             "txn_per_sec": self.txn_per_sec, "clients": 2 + self.stalled_clients + self.slow_clients, "stalled_clients": self.stalled_clients,
             "slow_clients": self.slow_clients, "slow_read_bytes_per_sec": self.slow_read_bytes_per_sec, "slow_echo_timeout_s": self.slow_echo_timeout_s,
@@ -131,7 +133,8 @@ fn status_phase_ms(prof: &Profile, i: usize) -> Option<u64> {
 }
 
 fn adapter_name(i: usize) -> String {
-    if i == 0 { "fake".into() } else { format!("fake{}", i + 1) }
+    let prefix = if env_num("EXTERNAL_PROVIDERS", 0u8) != 0 { "external-fake" } else { "fake" };
+    if i == 0 { prefix.into() } else { format!("{prefix}{}", i + 1) }
 }
 
 /// The core process. Does nothing unless started by `scale_load`.
@@ -145,7 +148,7 @@ fn scale_core_child() {
         let core = prim::server::start(socket.into(), state, false, prim::server::Backend::Fake, None).unwrap();
         // More fake instances, as more hosts. `server::start` only starts one backend; the core
         // already supports several adapters, so add the rest here.
-        for i in 1..adapters {
+        for i in 1..if env_num("EXTERNAL_PROVIDERS", 0u8) != 0 { 1 } else { adapters } {
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
             prim::core::add_adapter(&core, prim::adapter::fake::start(adapter_name(i), tx), rx, false);
         }
@@ -321,6 +324,20 @@ async fn scale_load() {
 
     // A trivial extension to restart under load (process supervision churn, no protocol traffic).
     writer.call("workspace.apply", json!({"ops": [{"op": "set", "key": "extension/scale-noop", "value": {"argv": ["sleep", "3600"]}}]})).await.unwrap();
+
+    if prof.external_providers {
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake_provider.py");
+        let ops: Vec<_> = (0..prof.adapters).map(|i| json!({"op":"set", "key":format!("extension/scale-provider-{i}"),
+            "value":{"argv":["python3",fixture,"--name",adapter_name(i),"--socket",socket]}})).collect();
+        writer.call("workspace.apply", json!({"ops":ops})).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let snap = writer.call("workspace.snapshot", Value::Null).await.unwrap();
+                if (0..prof.adapters).all(|i| snap["providers"][adapter_name(i)]["synced"] == true) { break; }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await.expect("external fake providers did not register/sync");
+    }
 
     // Resources: agents first, then floods, then idle terminals; round-robin over adapters.
     let setup_t0 = Instant::now();
