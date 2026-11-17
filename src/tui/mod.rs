@@ -118,11 +118,11 @@ impl Item {
 }
 
 enum Msg {
-    Attached { view: String, resource: String, result: Result<u64, String> },
+    Attached { connection: u64, view: String, resource: String, result: Result<u64, String> },
     Info(String),
     /// A command finished: say so unless something newer took the status line.
     Done(String),
-    Snapshot(Value),
+    Snapshot { generation: u64, result: Result<Value, String> },
     ClearOverrides,
     /// A command's reply asked this client to show a view as a popup.
     Popup { view: String, width: u16, ctx: Value },
@@ -200,6 +200,14 @@ struct App {
     held: KeyModifiers,
     message: String,
     quit: bool,
+    connected: bool,
+    connection: u64,
+    epoch: String,
+    seq: u64,
+    /// Incremented on snapshot requests and disconnects to fence late replies.
+    generation: u64,
+    resyncing: bool,
+    buffered: Vec<Value>,
 }
 
 /// The installed binary's identity, to notice a reinstall.
@@ -209,6 +217,35 @@ fn exe_stamp() -> Option<(std::path::PathBuf, std::time::SystemTime)> {
     Some((exe, modified))
 }
 
+type Connection = (Peer, mpsc::UnboundedReceiver<Incoming>, Value);
+
+enum UiInput {
+    Incoming(Option<Incoming>),
+    Message(Msg),
+    Key(Event),
+    Reconnected(Connection),
+    Tick,
+    Closed,
+}
+
+/// In particular, a pending reconnect must never take the key receiver out of this select.
+async fn next_input(
+    app: &App,
+    incoming: &mut mpsc::UnboundedReceiver<Incoming>,
+    messages: &mut mpsc::UnboundedReceiver<Msg>,
+    keys: &mut mpsc::UnboundedReceiver<Event>,
+    reconnecting: &mut Option<tokio::task::JoinHandle<Connection>>,
+) -> Result<UiInput> {
+    Ok(tokio::select! {
+        m = incoming.recv(), if app.connected => UiInput::Incoming(m),
+        result = async { reconnecting.as_mut().unwrap().await }, if reconnecting.is_some() => UiInput::Reconnected(result?),
+        Some(m) = messages.recv() => UiInput::Message(m),
+        Some(ev) = keys.recv() => UiInput::Key(ev),
+        _ = tokio::time::sleep(std::time::Duration::from_millis(500)), if app.toast.is_some() => UiInput::Tick,
+        else => UiInput::Closed,
+    })
+}
+
 pub async fn run(socket: &Path) -> Result<()> {
     let started_as = exe_stamp();
     let mut reexec = false;
@@ -216,41 +253,10 @@ pub async fn run(socket: &Path) -> Result<()> {
     let snap = peer.call("workspace.snapshot", Value::Null).await?;
     let seq = snap["seq"].as_u64().unwrap_or(0);
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let mut app = App {
-        peer: peer.clone(),
-        tx,
-        entries: BTreeMap::new(),
-        versions: BTreeMap::new(),
-        resources: BTreeMap::new(),
-        commands: BTreeMap::new(),
-        extensions: BTreeMap::new(),
-        safe_mode: false,
-        terms: HashMap::new(),
-        stream_view: HashMap::new(),
-        early: HashMap::new(),
-        leaves: Vec::new(),
-        focus: 0,
-        overlay: None,
-        pstate: HashMap::new(),
-        filtering: None,
-        toast: None,
-        live: HashMap::new(),
-        hit: Hit::default(),
-        drag: None,
-        overrides: HashMap::new(),
-        mouse_owner: None,
-        mouse_on: true,
-        under: None,
-        zoomed: None,
-        pending_focus: None,
-        kbd_enhance: false,
-        held: KeyModifiers::NONE,
-        message: "click prim or press Ctrl-g for the menu".into(),
-        quit: false,
-    };
+    let mut app = App::new(peer.clone(), tx);
     app.load(&snap);
     app.message = format!("click prim or press {} for the menu", app.prefix());
-    peer.call("events.subscribe", json!({"from": seq})).await?;
+    peer.call("events.subscribe", json!({"from": seq, "epoch": snap["epoch"]})).await?;
 
     let mut terminal = ratatui::init();
     // Asked before the input thread starts reading: the query reads the terminal's reply.
@@ -270,6 +276,7 @@ pub async fn run(socket: &Path) -> Result<()> {
     });
 
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste, crossterm::event::EnableMouseCapture);
+    let mut reconnecting = None;
     let result: Result<()> = async {
         let mut dirty = true;
         loop {
@@ -279,27 +286,31 @@ pub async fn run(socket: &Path) -> Result<()> {
             if app.quit {
                 return Ok(());
             }
-            dirty = tokio::select! {
-                m = incoming.recv() => match m {
+            dirty = match next_input(&app, &mut incoming, &mut rx, &mut keys, &mut reconnecting).await? {
+                UiInput::Incoming(m) => match m {
                     Some(m) => { app.on_incoming(m); true }
                     None => {
                         // The core went away (restart, reinstall): bring it back and reconnect.
-                        app.message = "core disconnected, reconnecting…".into();
-                        terminal.draw(|f| app.draw(f))?;
-                        incoming = app.reconnect(socket).await;
-                        // A reinstall restarts the core; if our own binary changed too, restart into it.
-                        // Terminals live in the backend, so nothing is lost.
-                        if exe_stamp() != started_as {
-                            reexec = true;
-                            return Ok(());
-                        }
+                        app.disconnected();
+                        reconnecting = Some(tokio::spawn(reconnect(socket.to_path_buf(), app.tx.clone())));
                         true
                     }
                 },
-                Some(m) = rx.recv() => { app.on_msg(m); true }
-                Some(ev) = keys.recv() => app.on_event(ev),
-                _ = tokio::time::sleep(std::time::Duration::from_millis(500)), if app.toast.is_some() => true,
-                else => return Ok(()),
+                UiInput::Reconnected((peer, new_incoming, snap)) => {
+                    reconnecting = None;
+                    incoming = new_incoming;
+                    app.reconnected(peer, &snap);
+                    // The next draw recreates terminal views and attaches with backend history.
+                    if exe_stamp() != started_as {
+                        reexec = true;
+                        return Ok(());
+                    }
+                    true
+                },
+                UiInput::Message(m) => { app.on_msg(m); true }
+                UiInput::Key(ev) => app.on_event(ev),
+                UiInput::Tick => true,
+                UiInput::Closed => return Ok(()),
             };
             dirty |= app.restore_under();
             // Drain whatever else is ready before redrawing.
@@ -328,6 +339,9 @@ pub async fn run(socket: &Path) -> Result<()> {
         }
     }
     .await;
+    if let Some(task) = reconnecting {
+        task.abort();
+    }
     // Every way out (quit, error, re-exec) passes here; pop before leaving the alternate screen.
     keys::enhance(false);
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture, crossterm::event::DisableBracketedPaste);
@@ -346,37 +360,65 @@ pub async fn run(socket: &Path) -> Result<()> {
     result
 }
 
-impl App {
-    /// Reconnect to the core, starting it if needed. Retries until it works; keys still quit.
-    async fn reconnect(&mut self, socket: &Path) -> mpsc::UnboundedReceiver<Incoming> {
-        loop {
-            let attempt: Result<_> = async {
-                client::ensure_core().await?;
-                let (peer, incoming, _) = client::connect(socket, "tui").await?;
-                let snap = peer.call("workspace.snapshot", Value::Null).await?;
-                peer.call("events.subscribe", json!({"from": snap["seq"].as_u64().unwrap_or(0)})).await?;
-                Ok((peer, incoming, snap))
-            }
-            .await;
-            match attempt {
-                Ok((peer, incoming, snap)) => {
-                    self.peer = peer;
-                    self.terms.clear();
-                    self.stream_view.clear();
-                    self.early.clear();
-                    self.load(&snap);
-                    self.message = "reconnected".into();
-                    return incoming;
-                }
-                Err(e) => {
-                    self.message = format!("reconnecting: {e}");
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                }
+/// Runs outside the UI state: neither connection attempts nor retry sleeps block keys or drawing.
+async fn reconnect(socket: std::path::PathBuf, tx: mpsc::UnboundedSender<Msg>) -> Connection {
+    loop {
+        let attempt: Result<_> = async {
+            client::ensure_core().await?;
+            let (peer, incoming, _) = client::connect(&socket, "tui").await?;
+            let snap = peer.call("workspace.snapshot", Value::Null).await?;
+            peer.call("events.subscribe", json!({"from": snap["seq"], "epoch": snap["epoch"]})).await?;
+            Ok((peer, incoming, snap))
+        }.await;
+        match attempt {
+            Ok(connection) => return connection,
+            Err(e) => {
+                let _ = tx.send(Msg::Info(format!("reconnecting: {e}")));
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             }
         }
     }
+}
+
+impl App {
+    fn new(peer: Peer, tx: mpsc::UnboundedSender<Msg>) -> Self {
+        Self {
+            peer, tx,
+            entries: BTreeMap::new(), versions: BTreeMap::new(), resources: BTreeMap::new(),
+            commands: BTreeMap::new(), extensions: BTreeMap::new(), safe_mode: false,
+            terms: HashMap::new(), stream_view: HashMap::new(), early: HashMap::new(),
+            leaves: Vec::new(), focus: 0, overlay: None, pstate: HashMap::new(),
+            filtering: None, toast: None, live: HashMap::new(), hit: Hit::default(),
+            drag: None, overrides: HashMap::new(), mouse_owner: None, mouse_on: true,
+            under: None, zoomed: None, pending_focus: None, kbd_enhance: false,
+            held: KeyModifiers::NONE, message: "click prim or press Ctrl-g for the menu".into(),
+            quit: false, connected: true, connection: 0, epoch: String::new(), seq: 0,
+            generation: 0, resyncing: false, buffered: Vec::new(),
+        }
+    }
+
+    fn disconnected(&mut self) {
+        self.message = "core disconnected, reconnecting…".into();
+        self.connected = false;
+        self.connection += 1;
+        self.generation += 1;
+        self.resyncing = false;
+        self.buffered.clear();
+    }
+
+    fn reconnected(&mut self, peer: Peer, snap: &Value) {
+        self.peer = peer;
+        self.connected = true;
+        self.terms.clear();
+        self.stream_view.clear();
+        self.early.clear();
+        self.load(snap);
+        self.message = "reconnected".into();
+    }
 
     fn load(&mut self, snap: &Value) {
+        self.epoch = snap["epoch"].as_str().unwrap_or("").to_string();
+        self.seq = snap["seq"].as_u64().unwrap_or(0);
         self.entries.clear();
         self.versions.clear();
         if let Some(es) = snap["entries"].as_object() {
@@ -412,20 +454,44 @@ impl App {
                     }
                 }
             }
-            "missed" => {
-                let (peer, tx) = (self.peer.clone(), self.tx.clone());
-                tokio::spawn(async move {
-                    if let Ok(s) = peer.call("workspace.snapshot", Value::Null).await {
-                        let _ = tx.send(Msg::Snapshot(s));
+            "missed" => self.resync(),
+            "event" => {
+                if self.resyncing {
+                    // Bound recovery memory. A fresh snapshot subsumes a discarded batch.
+                    if self.buffered.len() == 10_000 {
+                        self.resync();
                     }
-                });
+                    self.buffered.push(params);
+                } else {
+                    self.on_event_record(&params);
+                }
             }
-            "event" => self.on_event_record(&params),
             _ => {}
         }
     }
 
+    fn resync(&mut self) {
+        self.generation += 1;
+        self.resyncing = true;
+        self.buffered.clear();
+        let generation = self.generation;
+        let (peer, tx) = (self.peer.clone(), self.tx.clone());
+        tokio::spawn(async move {
+            let result = peer.call("workspace.snapshot", Value::Null).await.map_err(|e| e.to_string());
+            let _ = tx.send(Msg::Snapshot { generation, result });
+        });
+    }
+
     fn on_event_record(&mut self, ev: &Value) {
+        if ev["epoch"].as_str() != Some(self.epoch.as_str()) {
+            self.resync();
+            return;
+        }
+        let seq = ev["seq"].as_u64().unwrap_or(0);
+        if seq <= self.seq {
+            return;
+        }
+        self.seq = seq;
         let d = &ev["data"];
         match ev["type"].as_str().unwrap_or("") {
             "entries" => {
@@ -508,7 +574,26 @@ impl App {
                     self.message = format!("{name}: done");
                 }
             }
-            Msg::Snapshot(s) => self.load(&s),
+            Msg::Snapshot { generation, result } => {
+                if generation != self.generation || !self.connected {
+                    return;
+                }
+                match result {
+                    Ok(s) => {
+                        self.load(&s);
+                        self.resyncing = false;
+                        for ev in std::mem::take(&mut self.buffered) {
+                            if ev["epoch"].as_str() == Some(self.epoch.as_str()) {
+                                self.on_event_record(&ev);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        // Stay fenced; the connection's closure drives reconnection.
+                        self.message = format!("resync failed: {e}");
+                    }
+                }
+            }
             Msg::ClearOverrides => self.overrides.clear(),
             Msg::Popup { view, width, ctx } => {
                 match self.view_kind(&view).as_str() {
@@ -526,7 +611,11 @@ impl App {
                     self.overlay = None;
                 }
             }
-            Msg::Attached { view, resource, result } => {
+            Msg::Attached { connection, view, resource, result } => {
+                // Stream ids are scoped to a connection. Never close or adopt a stale id on the new peer.
+                if connection != self.connection || !self.connected {
+                    return;
+                }
                 let Some(t) = self.terms.get_mut(&view) else {
                     if let Ok(sid) = result {
                         self.peer.notify("stream.close", json!({"stream": sid}));
@@ -1721,17 +1810,18 @@ impl App {
                         self.peer.notify("stream.resize", json!({"stream": sid, "cols": inner.width, "rows": inner.height}));
                     }
                 }
-                if t.stream.is_none() && !t.attaching && t.closed.is_none() && live {
+                if self.connected && t.stream.is_none() && !t.attaching && t.closed.is_none() && live {
                     t.attaching = true;
                     let (peer, tx, view, rid) = (self.peer.clone(), self.tx.clone(), view.to_string(), rid.clone());
                     let (cols, rows) = (inner.width, inner.height);
+                    let connection = self.connection;
                     tokio::spawn(async move {
                         let result = peer
                             .call("resource.attach", json!({"resource": rid, "cols": cols, "rows": rows, "history": 2000}))
                             .await
                             .map(|r| r["stream"].as_u64().unwrap_or(0))
                             .map_err(|e| e.to_string());
-                        let _ = tx.send(Msg::Attached { view, resource: rid, result });
+                        let _ = tx.send(Msg::Attached { connection, view, resource: rid, result });
                     });
                 }
                 render_screen(f.buffer_mut(), inner, t.parser.screen());
@@ -1783,6 +1873,9 @@ impl App {
         self.hit.badge = Rect { x: area.x, y: area.y, width: badge.chars().count() as u16, height: 1 };
         self.hit.status = area;
         let mut spans = vec![Span::styled(badge, Style::new().bg(if open { pal.prompt } else { pal.accent }).fg(pal.badge_text))];
+        if !self.connected {
+            spans.push(Span::styled(" reconnecting ", pal.badge(Some("warn"))));
+        }
         if let Some((label, text)) = prompt {
             spans.push(Span::styled(format!(" {label} "), Style::new().fg(pal.prompt).add_modifier(Modifier::BOLD)));
             // Held modifiers after the prefix are a hint, not input: greyed out.
@@ -2174,6 +2267,157 @@ fn render_screen(buf: &mut Buffer, area: Rect, screen: &vt100::Screen) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn app() -> (App, mpsc::UnboundedReceiver<Msg>) {
+        let (peer, _) = Peer::spawn(tokio::io::empty(), tokio::io::sink());
+        let (tx, rx) = mpsc::unbounded_channel();
+        (App::new(peer, tx), rx)
+    }
+
+    fn snapshot(seq: u64, value: &str) -> Value {
+        json!({"epoch": "boot", "seq": seq, "entries": {"doc/test/value": {"version": seq, "value": value}}})
+    }
+
+    fn delta(seq: u64, value: &str) -> Incoming {
+        Incoming::Notification { method: "event".into(), params: json!({
+            "epoch": "boot", "seq": seq, "type": "entries", "data": {"changes": [
+                {"key": "doc/test/value", "version": seq, "value": value}
+            ]}
+        }) }
+    }
+
+    #[tokio::test]
+    async fn resync_snapshot_cannot_overwrite_newer_entries() {
+        let (mut app, _) = app();
+        app.load(&snapshot(1, "old"));
+        app.on_incoming(Incoming::Notification { method: "missed".into(), params: Value::Null });
+        app.on_incoming(delta(2, "new"));
+        assert_eq!(app.entries["doc/test/value"], "old", "deltas are fenced while snapshot is in flight");
+        app.on_msg(Msg::Snapshot { generation: app.generation, result: Ok(snapshot(1, "old")) });
+        assert_eq!(app.entries["doc/test/value"], "new");
+        assert_eq!(app.seq, 2);
+        app.on_incoming(delta(1, "stale"));
+        assert_eq!(app.entries["doc/test/value"], "new", "pre-snapshot events cannot regress state");
+    }
+
+    #[tokio::test]
+    async fn resync_discards_subsumed_events_and_late_snapshot_replies() {
+        let (mut app, _) = app();
+        app.load(&snapshot(1, "old"));
+        app.resync();
+        let first = app.generation;
+        app.resync();
+        app.on_incoming(delta(2, "older-than-snapshot"));
+        app.on_msg(Msg::Snapshot { generation: first, result: Ok(snapshot(1, "stale")) });
+        assert!(app.resyncing);
+        app.on_msg(Msg::Snapshot { generation: app.generation, result: Ok(snapshot(3, "current")) });
+        assert_eq!(app.entries["doc/test/value"], "current");
+        app.disconnected();
+        app.on_msg(Msg::Snapshot { generation: first, result: Ok(snapshot(1, "stale")) });
+        assert_eq!(app.entries["doc/test/value"], "current");
+    }
+
+    #[tokio::test]
+    async fn recovery_buffer_is_bounded_and_overflow_requests_a_new_snapshot() {
+        let (mut app, _) = app();
+        app.load(&snapshot(0, "old"));
+        app.resync();
+        let first = app.generation;
+        for seq in 1..=10_001 {
+            app.on_incoming(delta(seq, "new"));
+        }
+        assert!(app.generation > first);
+        assert_eq!(app.buffered.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn reconnect_pending_still_selects_prefix_and_quit_without_a_pty() {
+        let (mut app, mut messages) = app();
+        app.disconnected();
+        assert!(app.message.contains("reconnecting"));
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        let screen: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
+        assert!(screen.contains("reconnecting"));
+        let (in_tx, mut incoming) = mpsc::unbounded_channel();
+        drop(in_tx); // A closed old connection must not starve keys, either.
+        let (keys_tx, mut keys) = mpsc::unbounded_channel();
+        let task = tokio::spawn(std::future::pending::<Connection>());
+        let mut reconnecting = Some(task);
+        for key in [KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL), KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)] {
+            keys_tx.send(Event::Key(key)).unwrap();
+            let input = tokio::time::timeout(std::time::Duration::from_secs(1), next_input(&app, &mut incoming, &mut messages, &mut keys, &mut reconnecting)).await.unwrap().unwrap();
+            let UiInput::Key(ev) = input else { panic!("key must stay reachable") };
+            app.on_event(ev);
+        }
+        assert!(app.quit);
+        reconnecting.unwrap().abort();
+    }
+
+    #[tokio::test]
+    async fn stale_attach_reply_cannot_adopt_or_close_a_new_connections_stream() {
+        use tokio::io::AsyncBufReadExt;
+        let (mut app, _) = app();
+        let old_connection = app.connection;
+        app.disconnected();
+        let (local, remote) = tokio::io::duplex(4096);
+        let (reader, writer) = tokio::io::split(local);
+        let (peer, _) = Peer::spawn(reader, writer);
+        app.reconnected(peer, &snapshot(1, "current"));
+        app.terms.insert("view".into(), Term {
+            resource: "r1".into(), stream: None, parser: new_parser(80, 24),
+            size: (80, 24), attaching: true, closed: None,
+        });
+        app.on_msg(Msg::Attached { connection: old_connection, view: "view".into(), resource: "r1".into(), result: Ok(1) });
+        assert!(app.terms["view"].attaching);
+        assert_eq!(app.terms["view"].stream, None);
+        // Even a removed view's stale successful reply must not close the same id on the new peer.
+        app.on_msg(Msg::Attached { connection: old_connection, view: "removed".into(), resource: "r1".into(), result: Ok(1) });
+        let mut lines = tokio::io::BufReader::new(remote).lines();
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(20), lines.next_line()).await.is_err());
+        app.on_msg(Msg::Attached { connection: app.connection, view: "view".into(), resource: "r1".into(), result: Ok(1) });
+        assert_eq!(app.terms["view"].stream, Some(1));
+    }
+
+    #[tokio::test]
+    async fn reconnect_draw_reattaches_terminal_and_repaints_backend_output() {
+        use crate::server::{start, Backend};
+        let dir = tempfile::Builder::new().prefix("pr").tempdir_in("/tmp").unwrap();
+        let socket = dir.path().join("s");
+        let _core = start(socket.clone(), dir.path().join("state"), false, Backend::Fake, None).unwrap();
+        let (peer, mut incoming, _) = client::connect(&socket, "test").await.unwrap();
+        peer.call("resource.spawn", json!({"argv": ["sh"]})).await.unwrap();
+        peer.call("command.invoke", json!({"name": "prim.layout.reset"})).await.unwrap();
+        let snap = peer.call("workspace.snapshot", Value::Null).await.unwrap();
+        let (mut app, mut messages) = app();
+        app.terms.insert("term-r1".into(), Term {
+            resource: "r1".into(), stream: Some(99), parser: new_parser(80, 24),
+            size: (80, 24), attaching: false, closed: None,
+        });
+        app.stream_view.insert(99, "term-r1".into());
+        app.early.insert(99, vec![b"stale".to_vec()]);
+        app.disconnected();
+        app.reconnected(peer, &snap);
+        assert!(app.terms.is_empty());
+        assert!(app.stream_view.is_empty());
+        assert!(app.early.is_empty());
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                tokio::select! {
+                    Some(m) = incoming.recv() => app.on_incoming(m),
+                    Some(m) = messages.recv() => app.on_msg(m),
+                }
+                if app.terms.values().any(|t| t.stream.is_some() && t.parser.screen().contents().contains("fake f1")) {
+                    break;
+                }
+            }
+        }).await.unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        let screen: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
+        assert!(screen.contains("fake f1"), "reattached output must be repainted");
+    }
 
     fn winner(cands: &[(String, Value)], key: &str) -> String {
         cands[resolve(cands)[key]].0.clone()
