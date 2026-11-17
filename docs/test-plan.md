@@ -49,6 +49,33 @@ This sets priorities for which primitives and adapters matter first.
 On the winner of S3: kill -9 loop (placeholder < 100 ms, other views and terminals unaffected, manifest bindings still
 listed); state-schema rollback; late crash 30 s after load (crash budget); 5 s stall (last good frame kept).
 
+## Scale harness (run after every foundation slice)
+
+`tests/scale.rs`, ignored by default. It starts a real core in its own process (fake backend, two adapter
+instances standing in for two hosts), loads it over the socket and writes a JSON receipt:
+
+```sh
+env -i HOME=$HOME PATH=$PATH cargo test --release --test scale -- --ignored --exact scale_load --nocapture
+```
+
+- Default load (the target floor): 600 terminals, 200 agent-like (status change every 2 s), 8 streams at 1 MB/s,
+  20 transactions/s, an extension restart every 5 s, 30 s, three clients: one observer draining events and
+  streams, one writer, one stalled (subscribes and attaches, never reads).
+- Change it with `PRIM_SCALE_*` variables: `TERMINALS`, `AGENTS`, `FLOODS`, `FLOOD_BYTES_PER_SEC`, `STATUS_EVERY_MS`,
+  `TXN_PER_SEC`, `STALLED_CLIENTS`, `EXT_RESTART_EVERY_S`, `ADAPTERS`, `DURATION_S`, `ECHO_EVERY_MS`;
+  `RSS_ABORT_MB` (default 4096) stops the load early to protect the machine.
+- Measures core RSS over time, spawn and transaction latency (p50/p99), input→echo p99 on an idle stream sharing
+  the observer's connection with the floods, status event lag (backend emit → client), `missed` counts and
+  delivered share, extension restart failures, and a final snapshot.
+- Budgets are the `BUDGET_*` constants at the top of the file (placeholders until set); the test fails on any
+  exceeded one. Receipt: `$PRIM_SCALE_RECEIPT`, default `<target>/tmp/scale-receipt.json`.
+- The load shapes come from the fake backend's load profile (`src/adapter/fake.rs`: `--status-every-ms`,
+  `--output-bytes-per-sec` in a spawned terminal's argv), so a real backend can replace it later.
+
+Baseline on `main` 13c5561 (2026-11-16): fails on core RSS only. The stalled client's unbounded queues grow
+the core from 9 MB to about 520 MB in 30 s; the same run without the stalled client peaks at 31 MB and passes.
+Echo p99 3 ms, transaction p99 6 ms, event lag p99 2 ms, no `missed`.
+
 ## Deferred
 
 Concurrent layout edits (versioned docs vs Loro); protocol compatibility gate; multi-client convergence after `missed`.
