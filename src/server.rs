@@ -45,7 +45,7 @@ pub enum Backend {
 /// Open the store, bind the socket, start the adapter and extensions, and serve in the background.
 /// `defaults`: a directory with `defaults.json` listing extensions to install on first run.
 pub fn start(socket: std::path::PathBuf, state: std::path::PathBuf, safe: bool, backend: Backend, defaults: Option<std::path::PathBuf>) -> anyhow::Result<Shared> {
-    std::fs::create_dir_all(&state)?;
+    crate::store::create_dir_all_durable(&state)?;
     if socket.exists() {
         if std::os::unix::net::UnixStream::connect(&socket).is_ok() {
             anyhow::bail!("prim is already running at {}", socket.display());
@@ -158,8 +158,7 @@ async fn connection(core: Shared, conn: Arc<Conn>, mut incoming: mpsc::Unbounded
         c.live.remove(&view);
         c.emit("view.content", json!({"view": view, "content": null}));
     }
-    let owner = conn.author();
-    let names: Vec<String> = c.commands.values().filter(|cmd| cmd.owner == owner && cmd.available).map(|cmd| cmd.name.clone()).collect();
+    let names: Vec<String> = c.commands.values().filter(|cmd| cmd.connection == Some(conn.id) && cmd.available).map(|cmd| cmd.name.clone()).collect();
     for name in names {
         if let Some(cmd) = c.commands.get_mut(&name) {
             cmd.available = false;
@@ -248,14 +247,13 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> Rp
             let touched_ext = a.ops.iter().any(|o| op_key(o).starts_with("extension/"));
             let summary = {
                 let mut c = core.lock().unwrap();
-                let txn = c.store.apply(&conn.author(), a.note, a.ops)?;
-                c.emit_txn(&txn);
-                Core::txn_summary(&txn)
+                let result = c.store.apply(&conn.author(), a.note, a.ops);
+                c.finish_txn(result).map(|txn| Core::txn_summary(&txn))
             };
-            if touched_ext {
+            if touched_ext && adopted(&summary) {
                 ext::reconcile(core);
             }
-            Ok(summary)
+            summary
         }
         "workspace.history" => {
             let limit = p.get("limit").and_then(|l| l.as_u64()).unwrap_or(20) as usize;
@@ -295,7 +293,7 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> Rp
                     return Err(RpcError::new("conflict", format!("{} is owned by {}", r.name, existing.owner)));
                 }
             }
-            let info = CommandInfo { name: r.name.clone(), title: r.title.unwrap_or_else(|| r.name.clone()), owner: conn.author(), available: true, peer: Some(conn.peer.clone()) };
+            let info = CommandInfo { name: r.name.clone(), title: r.title.unwrap_or_else(|| r.name.clone()), owner: conn.author(), connection: Some(conn.id), available: true, peer: Some(conn.peer.clone()) };
             let j = info.to_json();
             c.commands.insert(r.name, info);
             c.emit("command", j.clone());
@@ -457,28 +455,32 @@ fn revert(core: &Shared, author: &str, txn: Option<u64>) -> RpcResult {
                 .map(|t| t.id)
                 .ok_or_else(|| RpcError::new("not_found", "no transactions to revert"))?,
         };
-        let t = c.store.revert(author, id)?;
-        c.emit_txn(&t);
-        (Core::txn_summary(&t), t.changes.iter().any(|ch| ch.key.starts_with("extension/")))
+        let result = c.store.revert(author, id);
+        let result = c.finish_txn(result);
+        let touched_ext = adopted(&result) && c.store.history(1).first().is_some_and(|t| t.changes.iter().any(|ch| ch.key.starts_with("extension/")));
+        (result.map(|t| Core::txn_summary(&t)), touched_ext)
     };
     if touched_ext {
         ext::reconcile(core);
     }
-    Ok(summary)
+    summary
+}
+
+fn adopted<T>(result: &Result<T, RpcError>) -> bool {
+    result.is_ok() || result.as_ref().is_err_and(|e| e.kind() == "durability_unconfirmed")
 }
 
 fn apply(core: &Shared, author: &str, note: &str, ops: Vec<Op>) -> RpcResult {
     let touched_ext = ops.iter().any(|o| op_key(o).starts_with("extension/"));
     let summary = {
         let mut c = core.lock().unwrap();
-        let txn = c.store.apply(author, Some(note.to_string()), ops)?;
-        c.emit_txn(&txn);
-        Core::txn_summary(&txn)
+        let result = c.store.apply(author, Some(note.to_string()), ops);
+        c.finish_txn(result).map(|txn| Core::txn_summary(&txn))
     };
-    if touched_ext {
+    if touched_ext && adopted(&summary) {
         ext::reconcile(core);
     }
-    Ok(summary)
+    summary
 }
 
 /// Run a command: built-ins here, everything else forwarded to the connection that owns it.

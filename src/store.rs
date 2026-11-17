@@ -4,6 +4,12 @@
 //! a list of operations that is validated against the resulting state and applied all-or-nothing,
 //! recorded with its author, persisted atomically, and revertible.
 //!
+//! Success means the candidate file and its containing directory have been synced. Before rename,
+//! persistence failure leaves memory and history untouched. After rename, a directory-sync failure
+//! adopts the candidate (the file already names it) but returns `durability_unconfirmed`, with the
+//! transaction id in error data. Callers must publish that adopted change, report the uncertainty,
+//! and never replay it automatically. A restart after a crash may recover either state.
+//!
 //! Key namespaces:
 //! - `view/<id>`       something a client can render: `{"kind": "terminal", "resource": "r1"}`,
 //!                     `{"kind": "panel", "title": ..., "items": [...]}`, or any other kind (open set)
@@ -19,7 +25,8 @@
 //! - `doc/<ns>/<name>` any JSON
 
 use std::collections::{BTreeMap, VecDeque};
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -106,13 +113,20 @@ impl Store {
         self.history.iter().rev().take(limit).cloned().collect()
     }
 
-    /// Validate and apply a transaction. Nothing changes unless every op succeeds and the
-    /// resulting workspace is consistent.
+    /// Validate and durably apply a transaction. See the module header for the post-rename
+    /// `durability_unconfirmed` exception: the transaction is adopted, not safe to retry.
     pub fn apply(&mut self, author: &str, note: Option<String>, ops: Vec<Op>) -> Result<Txn, RpcError> {
         self.apply_inner(author, note, None, ops)
     }
 
     fn apply_inner(&mut self, author: &str, note: Option<String>, reverts: Option<u64>, ops: Vec<Op>) -> Result<Txn, RpcError> {
+        self.apply_with_writer(author, note, reverts, ops, write_atomic)
+    }
+
+    fn apply_with_writer(
+        &mut self, author: &str, note: Option<String>, reverts: Option<u64>, ops: Vec<Op>,
+        write: impl FnOnce(&Path, &[u8]) -> Result<(), AtomicWriteError>,
+    ) -> Result<Txn, RpcError> {
         if ops.is_empty() {
             return Err(RpcError::invalid("empty transaction"));
         }
@@ -149,15 +163,31 @@ impl Store {
             .filter(|c| c.before != c.after)
             .collect();
         let txn = Txn { id: self.next_txn, author: author.to_string(), at_ms: now_ms(), note, reverts, changes };
-        self.next_txn += 1;
-        self.rev = rev;
-        self.entries = next;
-        self.history.push_back(txn.clone());
-        while self.history.len() > HISTORY {
-            self.history.pop_front();
+        let mut candidate = Persisted { rev, next_txn: self.next_txn + 1, entries: next, history: self.history.clone() };
+        candidate.history.push_back(txn.clone());
+        while candidate.history.len() > HISTORY {
+            candidate.history.pop_front();
         }
-        self.save().map_err(|e| RpcError::new("io", format!("could not persist workspace: {e}")))?;
-        Ok(txn)
+        let mut uncertain = None;
+        if let Some(path) = &self.path {
+            let bytes = serde_json::to_vec_pretty(&candidate).map_err(|e| RpcError::new("io", format!("could not serialize workspace: {e}")))?;
+            if let Err(e) = write(path, &bytes) {
+                if !e.renamed {
+                    return Err(RpcError::new("io", format!("could not persist workspace: {e}")));
+                }
+                let mut err = RpcError::new("durability_unconfirmed", format!("workspace transaction {} adopted after rename, but durability is unconfirmed: {e}; do not replay", txn.id));
+                err.data.as_mut().unwrap()["txn"] = txn.id.into();
+                uncertain = Some(err);
+            }
+        }
+        self.rev = candidate.rev;
+        self.next_txn = candidate.next_txn;
+        self.entries = candidate.entries;
+        self.history = candidate.history;
+        match uncertain {
+            Some(err) => Err(err),
+            None => Ok(txn),
+        }
     }
 
     /// Undo a transaction with a new one. Fails with `conflict` if any entry it touched has changed since.
@@ -181,22 +211,66 @@ impl Store {
         }
         self.apply_inner(author, Some(format!("revert {txn_id}")), Some(txn_id), ops)
     }
+}
 
-    fn save(&self) -> anyhow::Result<()> {
-        let Some(path) = &self.path else { return Ok(()) };
-        let p = Persisted { rev: self.rev, next_txn: self.next_txn, entries: self.entries.clone(), history: self.history.clone() };
-        write_atomic(path, &serde_json::to_vec_pretty(&p)?)
+/// `renamed` distinguishes a clean failure from an already-visible replacement whose durability
+/// could not be confirmed. Never roll back memory or replay a write in the latter case.
+#[derive(Debug)]
+pub struct AtomicWriteError {
+    pub renamed: bool,
+    source: std::io::Error,
+}
+
+impl From<std::io::Error> for AtomicWriteError {
+    fn from(source: std::io::Error) -> Self {
+        Self { renamed: false, source }
     }
 }
 
-pub fn write_atomic(path: &PathBuf, bytes: &[u8]) -> anyhow::Result<()> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
+impl std::fmt::Display for AtomicWriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.source.fmt(f)
     }
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
+}
+
+impl std::error::Error for AtomicWriteError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+/// Provision state directories durably too: syncing a file's containing directory alone cannot
+/// make a newly created ancestor's name survive a crash.
+pub fn create_dir_all_durable(path: &Path) -> std::io::Result<()> {
+    if path.is_dir() {
+        return Ok(());
+    }
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+    create_dir_all_durable(parent)?;
+    match std::fs::create_dir(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && path.is_dir() => {}
+        Err(e) => return Err(e),
+    }
+    std::fs::File::open(path)?.sync_all()?;
+    std::fs::File::open(parent)?.sync_all()
+}
+
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), AtomicWriteError> {
+    write_atomic_with_sync(path, bytes, |dir| dir.sync_all())
+}
+
+fn write_atomic_with_sync(path: &Path, bytes: &[u8], sync_dir: impl FnOnce(&std::fs::File) -> std::io::Result<()>) -> Result<(), AtomicWriteError> {
+    let dir = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+    create_dir_all_durable(dir)?;
+    let directory = std::fs::File::open(dir)?;
+    // Exclusive, randomly named files in the destination directory. The guard removes only our
+    // own temp on any pre-rename failure, never another writer's file or a fixed `.tmp` path.
+    let mut tmp = tempfile::Builder::new().prefix(".prim-").tempfile_in(dir)?;
+    tmp.write_all(bytes)?;
+    tmp.as_file().sync_all()?;
+    tmp.persist(path).map_err(|e| e.error)?;
+    sync_dir(&directory).map_err(|source| AtomicWriteError { renamed: true, source })
 }
 
 pub fn now_ms() -> u64 {
@@ -401,6 +475,77 @@ mod tests {
         assert!(s.get("view/b").is_none());
         // Reverting again conflicts: the entries moved on.
         assert_eq!(s.revert("human", t2.id).unwrap_err().kind(), "conflict");
+    }
+
+    #[test]
+    fn failed_write_leaves_everything_unchanged_and_can_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("state");
+        std::fs::create_dir(&parent).unwrap();
+        let path = parent.join("ws.json");
+        let mut s = Store::open(path.clone()).unwrap();
+        s.apply("t", None, vec![set("doc/a/b", json!(1))]).unwrap();
+        let before_entries = s.entries.clone();
+        let before_history = serde_json::to_value(&s.history).unwrap();
+        let (rev, next_txn) = (s.rev, s.next_txn);
+        let saved = dir.path().join("saved");
+        std::fs::rename(&parent, &saved).unwrap();
+        std::fs::write(&parent, b"not a directory").unwrap();
+
+        let err = s.apply("t", None, vec![set("doc/a/b", json!(2))]).unwrap_err();
+        assert_eq!(err.kind(), "io");
+        assert_eq!(s.entries, before_entries);
+        assert_eq!(serde_json::to_value(&s.history).unwrap(), before_history);
+        assert_eq!((s.rev, s.next_txn), (rev, next_txn));
+
+        std::fs::remove_file(&parent).unwrap();
+        std::fs::rename(saved, &parent).unwrap();
+        let txn = s.apply("t", None, vec![set("doc/a/b", json!(2))]).unwrap();
+        assert_eq!(txn.id, next_txn);
+        assert_eq!(s.get("doc/a/b").unwrap().version, rev + 1);
+        assert_eq!(Store::open(path).unwrap().entries, s.entries);
+    }
+
+    #[test]
+    fn directory_sync_failure_adopts_candidate_and_reports_uncertainty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ws.json");
+        let mut s = Store::open(path.clone()).unwrap();
+        let err = s.apply_with_writer("t", None, None, vec![set("doc/a/b", json!(1))], |path, bytes| {
+            write_atomic_with_sync(path, bytes, |_| Err(std::io::Error::other("injected directory sync failure")))
+        }).unwrap_err();
+        assert_eq!(err.kind(), "durability_unconfirmed");
+        assert_eq!(err.data.as_ref().unwrap()["txn"], 1);
+        assert_eq!((s.rev, s.next_txn), (1, 2));
+        assert_eq!(s.history(10).len(), 1);
+        assert_eq!(Store::open(path).unwrap().entries, s.entries);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "no stale temp after rename");
+        let mut core = crate::core::Core::new(s, None, dir.path().join("unused.sock"), false).unwrap();
+        assert_eq!(core.finish_txn(Err(err)).unwrap_err().kind(), "durability_unconfirmed");
+        let events = core.events_since(0).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["type"], "entries");
+        assert_eq!(events[0]["data"]["txn"], 1);
+        let txn = core.store.apply("t", None, vec![set("doc/a/b", json!(2))]).unwrap();
+        assert_eq!(txn.id, 2);
+    }
+
+    #[test]
+    fn atomic_writer_cleans_failed_temps_without_touching_other_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ws.json");
+        std::fs::create_dir(&path).unwrap(); // rename cannot replace a directory with a file
+        let legacy = path.with_extension("tmp");
+        std::fs::write(&legacy, b"not ours").unwrap();
+        let err = write_atomic(&path, b"candidate").unwrap_err();
+        assert!(!err.renamed);
+        assert!(path.is_dir());
+        assert_eq!(std::fs::read(&legacy).unwrap(), b"not ours");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2, "our failed temp was removed");
+        std::fs::remove_dir(&path).unwrap();
+        write_atomic(&path, b"committed").unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), b"committed");
+        assert_eq!(std::fs::read(legacy).unwrap(), b"not ours");
     }
 
     #[test]

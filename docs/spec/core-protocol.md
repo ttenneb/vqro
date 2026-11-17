@@ -6,7 +6,8 @@
 Status: implemented in slice 1 (`src/server.rs`), not frozen (D16). JSON-RPC 2.0, one message per line, over a
 local socket (`PRIM_SOCKET`, default `~/.local/state/prim/prim.sock`, mode 0600). Both sides may send requests:
 the core forwards `command.invoke` to the connection that registered the command. Errors carry a stable
-`data.kind`: `invalid`, `conflict`, `not_found`, `unavailable`, `forbidden`, `backend`, `disconnected`.
+`data.kind`: `invalid`, `conflict`, `not_found`, `unavailable`, `forbidden`, `backend`, `disconnected`, `io`,
+`durability_unconfirmed`.
 
 ## Session
 
@@ -29,6 +30,18 @@ Transactions are validated against the resulting state and applied all-or-nothin
 (0 = must not exist). Key namespaces and value shapes: `src/store.rs` header. Layouts may only reference
 existing views; `workspace/active` must name an existing layout.
 
+A successful apply or revert has persisted the candidate through a unique temporary file in the same directory,
+file sync, replacement, then directory sync. Before replacement, persistence failure returns `io` with no change
+to entries, versions, history, transaction numbering or events. Failed writes clean up their own temporary files;
+other writers' files and legacy `.tmp` paths are not swept or overwritten. Process crashes can leave harmless
+orphaned temporary files, which are never loaded as workspace state.
+
+If replacement succeeds but the final directory sync fails, the core **adopts and publishes** the new transaction
+and returns `durability_unconfirmed` with `data.txn`. The entries event and history reflect this adopted state;
+extension changes are reconciled too. The file now names the candidate, but a crash may recover the old or new
+state. **Do not automatically replay**: inspect snapshot/history using the transaction id instead. This exception
+reports uncertainty about crash durability, not partial application of operations.
+
 ## Events
 
 | Method | Params | Result |
@@ -36,7 +49,10 @@ existing views; `workspace/active` must name an existing layout.
 | `events.subscribe` | `from?` (seq) | `seq` |
 
 Then notifications `event {seq, type, data}` with types `entries`, `resource`, `resource.removed`, `command`,
-`extension`, `adapter`, `safe_mode`; or `missed` when the bounded log can't serve the cursor (re-snapshot).
+`extension`, `adapter`, `safe_mode`, `persistence.error`; or `missed` when the bounded log can't serve the cursor
+(re-snapshot). `persistence.error {scope: "resources", message}` reports a failed resource-id map write; the same
+error is logged by the server. The backend effect is not undone: resource facts and ids remain available in memory,
+but id stability across a core restart is not confirmed until a later successful map write.
 
 ## Resources (backend-owned, D14)
 
@@ -65,6 +81,10 @@ resource.
 Built-in, non-replaceable commands (recovery surface, D15): `prim.layout.reset`, `prim.revert`
 (default: last change not made by an extension), `prim.safe_mode`, `prim.extension.disable|enable|restart`.
 Everything opinionated is an extension (D17).
+
+Command registrations belong to the registering connection, not just its author string. A replacement connection
+with the same extension identity may re-register a command; closing the old connection does not disable or reroute
+the replacement's command. Commands left registered only by the closing connection become unavailable.
 
 ## Contributions (D17)
 

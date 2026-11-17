@@ -47,6 +47,8 @@ pub struct CommandInfo {
     pub name: String,
     pub title: String,
     pub owner: String,
+    /// Connection that registered this command; author names may be shared across replacements.
+    pub connection: Option<u64>,
     pub available: bool,
     pub peer: Option<Peer>,
 }
@@ -100,7 +102,7 @@ impl Core {
         let (events, _) = broadcast::channel(4096);
         let mut commands = BTreeMap::new();
         for (name, title) in BUILTINS {
-            commands.insert(name.to_string(), CommandInfo { name: name.to_string(), title: title.to_string(), owner: "core".into(), available: true, peer: None });
+            commands.insert(name.to_string(), CommandInfo { name: name.to_string(), title: title.to_string(), owner: "core".into(), connection: None, available: true, peer: None });
         }
         Ok(Core {
             store,
@@ -166,6 +168,21 @@ impl Core {
         self.emit("entries", json!({"txn": txn.id, "author": txn.author, "note": txn.note, "reverts": txn.reverts, "changes": changes}));
     }
 
+    /// Publish every adopted transaction, including a replacement whose final directory sync
+    /// failed. Clean persistence errors do not change state and never produce an entries event.
+    pub fn finish_txn(&mut self, result: Result<Txn, RpcError>) -> Result<Txn, RpcError> {
+        match &result {
+            Ok(txn) => self.emit_txn(txn),
+            Err(err) if err.kind() == "durability_unconfirmed" => {
+                if let Some(txn) = self.store.history(1).first() {
+                    self.emit_txn(txn);
+                }
+            }
+            Err(_) => {}
+        }
+        result
+    }
+
     pub fn txn_summary(txn: &Txn) -> Value {
         json!({"txn": txn.id, "changes": txn.changes.iter().map(|c| json!({"key": c.key, "version": c.after.as_ref().map(|e| e.version)})).collect::<Vec<_>>()})
     }
@@ -190,11 +207,17 @@ impl Core {
         id
     }
 
-    fn save_map(&self) {
-        if let Some(p) = &self.map_path {
-            if let Ok(bytes) = serde_json::to_vec_pretty(&self.map) {
-                let _ = crate::store::write_atomic(p, &bytes);
-            }
+    fn save_map(&mut self) {
+        let Some(path) = &self.map_path else { return };
+        let result = serde_json::to_vec_pretty(&self.map)
+            .map_err(anyhow::Error::from)
+            .and_then(|bytes| crate::store::write_atomic(path, &bytes).map_err(anyhow::Error::from));
+        if let Err(error) = result {
+            // Backend effects already happened. Keep the observed resource and its in-memory id,
+            // but explicitly report that its identity may not survive a core restart.
+            let message = format!("could not persist resource ids at {}: {error}", path.display());
+            eprintln!("prim: {message}");
+            self.emit("persistence.error", json!({"scope": "resources", "message": message}));
         }
     }
 

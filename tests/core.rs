@@ -111,6 +111,42 @@ async fn commands_route_to_their_owner_and_go_unavailable() {
 }
 
 #[tokio::test]
+async fn old_extension_disconnect_does_not_disable_replacement() {
+    let e = env();
+    let core = start(e.socket.clone(), e.state.clone(), false, Backend::Fake, None).unwrap();
+    let (old, old_rx) = connect(&e).await;
+    old.call("hello", json!({"extension": "greeter"})).await.unwrap();
+    old.call("command.register", json!({"name": "greet"})).await.unwrap();
+    old.call("command.register", json!({"name": "old-only"})).await.unwrap();
+    old.call("view.publish", json!({"view": "greeting", "content": {"label": "old"}})).await.unwrap();
+
+    let (new, mut new_rx) = connect(&e).await;
+    new.call("hello", json!({"extension": "greeter"})).await.unwrap();
+    new.call("command.register", json!({"name": "greet"})).await.unwrap();
+    new.call("view.publish", json!({"view": "greeting", "content": {"label": "new"}})).await.unwrap();
+    drop(old_rx);
+    drop(old);
+    // The old-only command is our barrier: cleanup has run while holding the core lock.
+    until(|| !core.lock().unwrap().commands["old-only"].available).await;
+    assert!(core.lock().unwrap().commands["greet"].available);
+    assert_eq!(core.lock().unwrap().live["greeting"].0["label"], "new");
+
+    let responder = new.clone();
+    let handler = tokio::spawn(async move {
+        if let Some(Incoming::Request { id, method, .. }) = new_rx.recv().await {
+            assert_eq!(method, "command.invoke");
+            responder.respond(id, Ok(json!({"from": "replacement"})));
+        } else {
+            panic!("expected invocation on replacement connection");
+        }
+    });
+    let (caller, _rx) = connect(&e).await;
+    let result = tokio::time::timeout(Duration::from_secs(2), caller.call("command.invoke", json!({"name": "greet"}))).await.unwrap().unwrap();
+    assert_eq!(result["from"], "replacement");
+    handler.await.unwrap();
+}
+
+#[tokio::test]
 async fn crash_budget_then_replace_then_safe_mode() {
     let e = env();
     let _core = start(e.socket.clone(), e.state.clone(), false, Backend::Fake, None).unwrap();
@@ -178,6 +214,48 @@ async fn transactions_revert_and_events() {
     // Survives a restart of the store.
     let hist = p.call("workspace.history", json!({"limit": 5})).await.unwrap();
     assert_eq!(hist["txns"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn failed_workspace_write_has_no_state_history_or_event_effect() {
+    let e = env();
+    let core = start(e.socket.clone(), e.state.clone(), false, Backend::Fake, None).unwrap();
+    until(|| core.lock().unwrap().adapter_state.contains_key("fake")).await;
+    let (p, _rx) = connect(&e).await;
+    let ops = json!({"ops": [{"op": "set", "key": "doc/test/value", "value": 1}]});
+    let first = p.call("workspace.apply", ops.clone()).await.unwrap();
+    let before = p.call("workspace.snapshot", Value::Null).await.unwrap();
+    let history = p.call("workspace.history", Value::Null).await.unwrap();
+    let saved = e._dir.path().join("saved");
+    std::fs::rename(&e.state, &saved).unwrap();
+    std::fs::write(&e.state, b"not a directory").unwrap();
+    let err = p.call("workspace.apply", json!({"ops": [{"op": "set", "key": "doc/test/value", "value": 2}]})).await.unwrap_err();
+    assert_eq!(err.kind(), "io");
+    assert_eq!(p.call("workspace.snapshot", Value::Null).await.unwrap(), before, "including event seq");
+    assert_eq!(p.call("workspace.history", Value::Null).await.unwrap(), history);
+    std::fs::remove_file(&e.state).unwrap();
+    std::fs::rename(saved, &e.state).unwrap();
+    let next = p.call("workspace.apply", ops).await.unwrap();
+    assert_eq!(next["txn"].as_u64().unwrap(), first["txn"].as_u64().unwrap() + 1);
+}
+
+#[tokio::test]
+async fn resource_map_write_failure_is_reported_without_hiding_backend_effect() {
+    let e = env();
+    let core = start(e.socket.clone(), e.state.clone(), false, Backend::Fake, None).unwrap();
+    // Force a rename failure without relying on permissions (also works as root).
+    std::fs::create_dir(e.state.join("resources.json")).unwrap();
+    let (p, _rx) = connect(&e).await;
+    let spawned = p.call("resource.spawn", json!({"argv": ["sh"]})).await.unwrap();
+    assert!(spawned["resource"]["id"].is_string(), "the backend spawn happened");
+    let events = core.lock().unwrap().events_since(0).unwrap();
+    assert!(events.iter().any(|ev| ev["type"] == "persistence.error" && ev["data"]["scope"] == "resources"));
+    assert!(events.iter().any(|ev| ev["type"] == "resource"));
+    // Retry persistence through another observed spawn after the filesystem is repaired.
+    std::fs::remove_dir(e.state.join("resources.json")).unwrap();
+    p.call("resource.spawn", json!({"argv": ["sh"]})).await.unwrap();
+    let ids: Value = serde_json::from_slice(&std::fs::read(e.state.join("resources.json")).unwrap()).unwrap();
+    assert!(ids["ids"].get(spawned["resource"]["id"].as_str().unwrap()).is_some());
 }
 
 #[tokio::test]

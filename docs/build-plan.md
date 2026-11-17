@@ -41,6 +41,16 @@ Working and tested (`cargo test`: store unit tests, key encoding, end-to-end cor
 Verified by hand against herdr-core: an agent-style `prim call` installed the sidebar; a broken extension
 written the same way was contained by the crash budget and removed with one revert.
 
+## Foundation hardening (2026-11-16)
+
+- Store commits persist a candidate before publishing entries/history/counters, using unique temporary files,
+  file sync, replacement and directory sync. Pre-replacement failures are effect-free; a post-replacement sync
+  failure adopts and publishes the transaction but reports `durability_unconfirmed` (never replay automatically).
+- Resource-id persistence failures are logged and reported as `persistence.error`, without hiding backend effects.
+- Command registrations are connection-bound, so an old extension connection closing cannot disable its replacement.
+- Regression coverage: failed write rollback and retry, uncertain directory sync and event publication, temporary-file
+  cleanup, resource-map error reporting, and same-identity extension replacement routing/live-content cleanup.
+
 ## Known gaps found while building
 
 - **History churn:** extensions that refresh views on every event (the sidebar on status changes) fill the
