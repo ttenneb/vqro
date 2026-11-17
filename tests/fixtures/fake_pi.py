@@ -54,6 +54,15 @@ for line in sys.stdin.buffer:
         message = command.get("message")
         if message == "crash":
             os._exit(23)
+        if message == "linger":
+            # A descendant inherits stdout/stderr and outlives us; its pid goes to
+            # $HOME/linger.pid so the test can clean up exactly that process.
+            import subprocess
+            child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                                     stdin=subprocess.DEVNULL, close_fds=False)
+            with open(os.path.join(os.environ["HOME"], "linger.pid"), "w") as f:
+                f.write(str(child.pid))
+            os._exit(0)
         if message == "hang":
             accepted.append(message)
             held.append(command)

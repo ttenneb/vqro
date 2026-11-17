@@ -123,6 +123,42 @@ class PiBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(facts["exit_code"], 23)
         self.assertEqual((await self.client.invoke("abort"))["outcome"], "rejected")
 
+    def kill_lingering(self):
+        pidfile = Path(self.root.name) / "linger.pid"
+        if pidfile.exists():
+            try:
+                os.kill(int(pidfile.read_text()), 9)
+            except ProcessLookupError:
+                pass
+
+    async def lingering_exit(self, **kwargs):
+        """Start a client whose fake Pi exits while a descendant keeps its stdout/stderr open."""
+        client = await self.start(limits=Limits(drain=.2), **kwargs)
+        self.addCleanup(self.kill_lingering)
+        held = asyncio.create_task(client.invoke("prompt", {"message": "hang"}))
+        await asyncio.sleep(0)
+        exit_result = await client.invoke("prompt", {"message": "linger"}, timeout=2)
+        return client, held, exit_result
+
+    async def test_owned_exit_is_authoritative_despite_inherited_pipes(self):
+        client, held, exit_result = await self.lingering_exit()
+        self.assertEqual(exit_result["outcome"], "indeterminate")
+        self.assertEqual((await asyncio.wait_for(held, 2))["outcome"], "indeterminate")
+        await asyncio.wait_for(client.wait_closed(), 2)
+        facts = client.snapshot()
+        self.assertFalse(facts["available"])
+        self.assertEqual(facts["exit_code"], 0)
+        self.assertTrue(any(e["type"] == "pipes_abandoned" for e in client.events()["events"]))
+
+    async def test_close_is_bounded_when_a_descendant_keeps_pipes_open(self):
+        client, held, _ = await self.lingering_exit()
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        await asyncio.wait_for(client.close(grace=.05), 2)
+        self.assertLess(loop.time() - started, 1)
+        self.assertFalse(client.snapshot()["available"])
+        self.assertEqual((await held)["outcome"], "indeterminate")
+
     async def test_dialog_facts_answer_has_dispatched_not_fake_ack(self):
         await self.client.request("test_dialog", {"dialog_id": "dialog-1", "method": "confirm"})
         facts = self.client.snapshot()

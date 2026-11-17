@@ -15,13 +15,18 @@ class Limits:
     stderr_bytes: int = 65536
     requests: int = 32
     deadline: float = 5.0
+    # After the owned child exits, how long stdout/stderr may keep draining. A descendant that
+    # inherited them can hold them open forever; past this, the pipes are abandoned.
+    drain: float = 1.0
 
     def __post_init__(self):
         for name in ("record_bytes", "pending", "event_bytes", "stderr_bytes", "requests"):
             if not isinstance(getattr(self, name), int) or getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be positive")
-        if not math.isfinite(self.deadline) or self.deadline <= 0:
-            raise ValueError("deadline must be finite and positive")
+        for name in ("deadline", "drain"):
+            value = getattr(self, name)
+            if not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be finite and positive")
 
 
 DIALOGS = frozenset({"select", "confirm", "input", "editor"})
@@ -73,6 +78,7 @@ class PiRpcClient:
         self._dialog_timeouts = {}
         self._closing = False
         self._failure = None
+        self._abandon = asyncio.Event()  # close() gave up waiting for inherited pipes
 
     def snapshot(self):
         """Detached current facts. Unknown/stale is not silently called idle."""
@@ -367,11 +373,45 @@ class PiRpcClient:
             self._stderr_tail.extend(data)
             del self._stderr_tail[:-self.limits.stderr_bytes]
 
+    async def _owned_exit(self):
+        # asyncio's Process.wait() also waits for stdout/stderr EOF, which a descendant
+        # holding the inherited pipes can delay forever. The owned child's own exit status
+        # is authoritative, so watch it directly.
+        while self.process.returncode is None:
+            await asyncio.sleep(0.02)
+        return self.process.returncode
+
     async def _watch(self):
-        code = await self.process.wait()
-        await asyncio.gather(self._stdout, self._stderr)
-        self._facts["exit_code"] = code
+        code = await self._owned_exit()
+        # Exited: not available for new effects, whatever its pipes do.
+        self._facts.update(available=False, stale=True, exit_code=code)
+        self._status()
+        # Records already written before the exit still count: drain, but only for a bounded
+        # time (or until close() gives up), then abandon pipes a descendant keeps open.
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.limits.drain
+        readers = {self._stdout, self._stderr}
+        while not all(t.done() for t in readers) and not self._abandon.is_set():
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            abandon = asyncio.ensure_future(self._abandon.wait())
+            try:
+                await asyncio.wait(readers | {abandon}, timeout=remaining, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                abandon.cancel()
+        abandoned = not all(t.done() for t in readers)
+        if abandoned:
+            for task in readers:
+                task.cancel()
+            await asyncio.gather(*readers, return_exceptions=True)
+            # Stop reading the inherited pipes; never signal processes we don't own.
+            transport = getattr(self.process, "_transport", None)
+            if transport is not None:
+                transport.close()
         self._disconnect(f"child exited: {code}")
+        if abandoned:
+            self._publish({"type": "pipes_abandoned", "reason": "a descendant kept stdout/stderr open after exit"})
         self._publish({"type": "child_exit", "code": code})
 
     async def wait_closed(self):
@@ -381,15 +421,23 @@ class PiRpcClient:
         """Request EOF shutdown, then bound cleanup of only this owned child."""
         self._closing = True
         self.process.stdin.close()
-        try:
-            await asyncio.wait_for(asyncio.shield(self._watcher), grace)
-        except TimeoutError:
-            self._signal_child()
+        for step in ("wait", "terminate", "kill"):
+            if step == "terminate":
+                self._signal_child()
+            elif step == "kill":
+                self._signal_child(kill=True)
+            if self.process.returncode is not None and step != "wait":
+                # Exited, but pipes still held by a descendant: stop waiting for them.
+                self._abandon.set()
             try:
                 await asyncio.wait_for(asyncio.shield(self._watcher), grace)
+                break
             except TimeoutError:
-                self._signal_child(kill=True)
-                await self._watcher
+                continue
+        else:
+            # Killed: the owned exit follows promptly; pipes are abandoned right after it.
+            self._abandon.set()
+            await self._watcher
         if self._ui_tasks:
             await asyncio.gather(*list(self._ui_tasks), return_exceptions=True)
 
