@@ -174,6 +174,15 @@ written the same way was contained by the crash budget and removed with one reve
   Red/green, durable migration/tombstone tests, scoped quick gate and real-private herdr/tmux opt-ins pass.
   No live install/remote/model calls. Migration limits and upstream ask: `research/platform-small-fixes.md`.
 
+## EOF retirement race (2026-11-17)
+
+- Fixed accepted provider resource.gone tails being rejected when EOF marked routes disconnected before ingress
+  drained. Retirement now checks source/generation atomically even across EOF; upserts/effects remain unavailable
+  and an old provider cannot retire a replacement. No timeout increase or replay.
+- Deterministic lifecycle regressions red/green; exact agents UI flake reproduced 3/6 under owned single-CPU
+  contention, then 6/6 pass. Full gate 18/18 passes, zero warnings/no leftovers; live prim not touched.
+- Evidence and bounds: `research/agent-exit-flake.md`.
+
 ## Known gaps found while building
 
 - **History churn:** extensions that refresh views on every event (the sidebar on status changes) fill the
