@@ -509,7 +509,7 @@ mod qa2_tests {
         let (r,w)=tokio::io::split(b); let (remote,incoming)=Peer::spawn(r,w);
         let connection=Connection::new(1,local);
         connection.hello().unwrap();
-        connection.register(&core,json!({"name":"qa2","role":"backend","instance":"i","software":{"name":"fixture","version":"1"},"provider_version":"0","capabilities":{"terminal.output":{"raw":true}}})).await.unwrap();
+        connection.register(&core,json!({"name":"qa2","role":"backend","instance":"i","software":{"name":"fixture","version":"1"},"provider_version":"0","capabilities":{"terminal.output":{"raw":true}}}),None).await.unwrap();
         let provider=connection.provider.lock().unwrap().clone().unwrap();
         (core,provider,remote,incoming)
     }
@@ -519,7 +519,7 @@ mod qa2_tests {
         let (a,_b)=tokio::io::duplex(4096);let (r,w)=tokio::io::split(a);let (peer,_rx)=Peer::spawn(r,w);
         let connection=Connection::new(2,peer);connection.hello().unwrap();
         core.lock().unwrap().shutdown.request();
-        let error=connection.register(&core,json!({"name":"late","role":"backend","instance":"i","software":{"name":"fixture","version":"1"},"provider_version":"0","capabilities":{}})).await.unwrap_err();
+        let error=connection.register(&core,json!({"name":"late","role":"backend","instance":"i","software":{"name":"fixture","version":"1"},"provider_version":"0","capabilities":{}}),None).await.unwrap_err();
         assert_eq!(error.kind(),"unavailable");assert_eq!(error.data.unwrap()["outcome"],"rejected");
         assert!(!core.lock().unwrap().providers.contains_key("late"));remote.close();
     }

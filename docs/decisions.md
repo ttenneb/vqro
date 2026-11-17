@@ -336,7 +336,7 @@ later multi-machine work to stay cheap. A relay built on one backend's documents
 backend, against D14 (any multiplexer) and D21 (providers are swappable). WSL is the first case of an agent on
 another host (a WSL2 process can't open a Windows named pipe), so the neutral reachability rule is needed early.
 
-**Consequences.** **Supersedes D21's third bullet** (remote bridges through the host's provider): `provider.relay` stays
+**Consequences.** **Supersedes D21's earlier remote-bridges recommendation** (through the host's provider): `provider.relay` stays
 OPEN and only as "carries a byte stream". Candidate neutral mechanisms, to be chosen later: a stdio connector
 (`prim connect`, reached over ssh or WSL interop and given to bridges as `PRIM_CONNECT` argv), endpoint forwarding
 started from the prim side (ssh `-R` of the local endpoint), or a backend byte channel as an optional transport.

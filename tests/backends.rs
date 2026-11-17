@@ -20,10 +20,10 @@ fn defaults(dir: &Path) {
     ]}).to_string()).unwrap();
 }
 
-/// A core in safe mode (no extension process runs) with the given defaults dir.
+/// Defaults migration uses safe mode; manual-provider cases use normal mode with no declarations.
 fn core(root: &Path, name: &str, defaults_dir: Option<&Path>) -> (prim::core::Shared, std::path::PathBuf) {
     let socket = root.join(format!("{name}.sock"));
-    let core = start(socket.clone(), root.join("state"), true, Backend::Extensions, defaults_dir.map(Path::to_path_buf)).unwrap();
+    let core = start(socket.clone(), root.join("state"), defaults_dir.is_some(), Backend::Extensions, defaults_dir.map(Path::to_path_buf)).unwrap();
     (core, socket)
 }
 

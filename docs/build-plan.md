@@ -145,6 +145,16 @@ written the same way was contained by the crash budget and removed with one reve
 - Full check gate passes17/17 with99 Python tests, all opt-in suites/UI/scale and no leftovers. No Rust changes,
   real prompts/model calls or live install. Details/receipts: `research/agents-split.md`.
 
+## Empty-start safe-mode chooser and reinstall recovery (2026-11-17)
+
+- Human-confirmed D21 revision: no extensions/providers start in safe mode; a built-in grouped checkbox popup
+  enables an explicit session-only subset. No essential exemption or persisted enabled edits. D22 is confirmed.
+- Rebased onto declared backend providers; herdr/tmux appear in recovery choices. Old source generations are fenced
+  on stop/revoke; provider registration rechecks safe admission after asynchronous token waits.
+- Replaced Linux executable paths no longer prevent core restart/re-exec; CLI closed stdout is quiet. Private
+  replacement smoke and full gate pass18/18,187 Rust/104 Python tests, zero warnings/leftovers.
+- Evidence and limitations: `research/safe-mode-recovery.md`.
+
 ## Known gaps found while building
 
 - **History churn:** extensions that refresh views on every event (the sidebar on status changes) fill the

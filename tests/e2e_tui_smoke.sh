@@ -14,6 +14,10 @@ mkdir -p "$R"/{home,st,cfg,xst,run,bin,ext}
 chmod 700 "$R/run"
 P="$R/bin/prim"
 cp "$SOURCE_P" "$P"
+# Provider programs stay next to the private install path after the backend migration.
+for program in prim-herdr prim-tmux; do
+  [ ! -x "$(dirname "$SOURCE_P")/$program" ] || ln -s "$(dirname "$SOURCE_P")/$program" "$R/bin/$program"
+done
 cp "$REPO"/extensions/*.py "$REPO"/extensions/defaults.json "$R/ext/"
 cp -R "$REPO"/extensions/pi_bridge "$R/ext/"
 for t in python3 sh cat ls env head yes; do ln -sf "$(command -v $t)" "$R/bin/$t"; done
