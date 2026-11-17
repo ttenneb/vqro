@@ -43,6 +43,21 @@ def load():
 
 
 class SidebarTests(unittest.TestCase):
+    def test_agents_group_their_bridge_and_ended_items_are_marked(self):
+        module = load(); ext = module["ext"]
+        ext.resources = {
+            "r1": {"id": "r1", "kind": "terminal", "argv": ["python3"], "state": "live"},
+            "r2": {"id": "r2", "kind": "agent", "name": "Other", "host": "r1", "state": "live"},
+            "r3": {"id": "r3", "kind": "terminal", "argv": ["sh"], "state": "finished"}}
+        rows = module["build"]()
+        agent = next(row for row in rows if row.get("args", {}).get("resource") == "r2")
+        self.assertEqual(agent["children"][0]["text"], "Other r2 bridge")
+        self.assertFalse(any(row.get("args", {}).get("resource") == "r1" for row in rows))
+        dead = next(row for row in rows if row.get("args", {}).get("resource") == "r3")
+        self.assertIn({"text": "ended", "style": "dim"}, dead["badges"])
+        with mock.patch.object(ext, "value", return_value={"hide_ended": True}):
+            self.assertFalse(any(row.get("args", {}).get("resource") == "r3" for row in module["build"]()))
+
     def test_status_burst_only_schedules_one_latest_publish(self):
         module = load(); ext = module["ext"]; ext.published.clear()
         for _ in range(500):

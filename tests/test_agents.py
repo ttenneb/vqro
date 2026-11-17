@@ -156,9 +156,21 @@ class AgentsTests(unittest.TestCase):
         core.entries["layout/main"] = {"version": 1, "value": {"view": "agents-r2"}}
         controller = Agents(core)
         self.assertIsNotNone(core.value("view/agents-r2"))
-        self.assertIn("not currently available", json.dumps(core.live["agents-r2"]))
+        self.assertIn("Agent gone", json.dumps(core.live["agents-r2"]))
         controller.event("resource.removed", {"id": "r2"})
         self.assertIsNotNone(core.value("view/agents-r2"))
+
+    def test_bridge_terminal_is_an_explicit_action_and_unavailable_agents_can_be_inspected(self):
+        self.core.add_agent()
+        self.core.resources["r1"] = {"id": "r1", "kind": "terminal", "name": "Other bridge", "state": "live"}
+        self.core.resources["r2"]["available"] = False
+        self.command("show", resource="r2")
+        panel = self.core.live["agents-r2"]
+        bridge = next(row for row in panel["items"] if row.get("text") == "Bridge terminal")
+        self.assertEqual((bridge["command"], bridge["args"]), ("tabs.show", {"resource": "r1"}))
+        self.assertIn("unavailable", json.dumps(panel))
+        with self.assertRaises(PrimError):
+            self.command("prompt", resource="r2", text="not sent")
 
     def test_palette_template_targets_focused_agent(self):
         self.core.add_agent()

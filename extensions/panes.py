@@ -10,7 +10,9 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from prim_ext import Extension, PrimError, node_at, replace_at, views_in  # noqa: E402
 
-ext = Extension("panes", event_types=["entries", "view.content"])  # no resource events: not used here
+from prim_views import terminal_target
+
+ext = Extension("panes", event_types=["entries", "resource", "resource.removed", "view.content"])
 
 
 def target(args):
@@ -105,7 +107,11 @@ def show(args):
     v = dict(ext.value(vkey) or {})
     if v.get("kind") != "terminal" or not args.get("picked"):
         raise PrimError("pick a terminal for a terminal pane", "invalid")
-    v["resource"] = args["picked"]
+    ext.fresh()
+    resource, result = terminal_target(ext, args["picked"])
+    if resource is None:
+        return result
+    v["resource"] = resource["id"]
     ext.apply([{"op": "set", "key": vkey, "value": v, "expect": ext.version(vkey)}], "panes: show")
 
 
@@ -113,7 +119,7 @@ ext.contribute({
     "menu/panes.rename": {"where": "pane", "label": "Rename", "command": "panes.rename", "input": "Pane name", "order": 10},
     "menu/panes.split-right": {"where": "pane", "label": "Split right (new shell)", "command": "panes.split", "args": {"dir": "right"}, "order": 20},
     "menu/panes.split-down": {"where": "pane", "label": "Split down (new shell)", "command": "panes.split", "args": {"dir": "down"}, "order": 21},
-    "menu/panes.show": {"where": "pane", "label": "Show another terminal here", "command": "panes.show", "pick": "resource", "when": {"kind": "terminal"}, "order": 30},
+    "menu/panes.show": {"where": "pane", "label": "Show another resource", "command": "panes.show", "pick": "resource", "when": {"kind": "terminal"}, "order": 30},
     "menu/panes.close": {"where": "pane", "label": "Close pane (program keeps running)", "command": "panes.close", "order": 40},
     "menu/panes.kill": {"where": "pane", "label": "Kill program", "command": "panes.kill", "when": {"live": True}, "order": 50},
     "binding/panes.menu": {"key": "m", "command": "client.menu", "args": {"where": "pane"}, "label": "pane menu"},

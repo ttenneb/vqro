@@ -1,0 +1,48 @@
+"""Resource-kind navigation policy shared by workspace extensions (not core)."""
+from prim_ext import PrimError
+from prim_display import label
+
+
+def ended(resource):
+    return resource is None or resource.get("state") in ("finished", "gone", "ended", "closed")
+
+
+def title(resource, resources):
+    rid = resource.get("id")
+    agent = next((r for r in resources.values() if r.get("kind") == "agent" and r.get("host") == rid), None)
+    if agent:
+        return label(agent.get("name") or "Agent") + " " + agent["id"] + " bridge"
+    return label(resource.get("name") or (resource.get("argv") or ["Resource"])[0].split("/")[-1])
+
+
+def terminal_target(ext, rid):
+    """Return only an actual terminal; agents route to their UI when it is on.
+
+    Do not turn a failed/uncertain agents.show into a different layout effect.
+    The escape hatch is only for an unavailable command, never for arbitrary errors.
+    """
+    resource = ext.resources.get(rid)
+    if resource is None:
+        raise PrimError("resource is gone", "not_found")
+    if resource.get("kind") == "agent":
+        try:
+            return None, ext.invoke("agents.show", {"resource": rid})
+        except PrimError as error:
+            if error.kind not in ("unavailable", "not_found"):
+                raise
+        resource = ext.resources.get(resource.get("host"))
+        if not resource or resource.get("kind") != "terminal":
+            raise PrimError("agent UI is off and no bridge terminal is available", "unavailable")
+    if resource.get("kind") != "terminal":
+        raise PrimError("no view for resource kind " + str(resource.get("kind")), "unsupported")
+    return resource, None
+
+
+def view_resource(ext, view):
+    value = ext.value("view/" + view) or {}
+    if value.get("kind") == "terminal":
+        return value.get("resource")
+    for prefix in ("agents-", "agent-"):
+        if view.startswith(prefix) and view[len(prefix):].startswith("r") and view[len(prefix)+1:].isdigit():
+            return view[len(prefix):]
+    return None

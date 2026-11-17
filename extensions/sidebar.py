@@ -20,6 +20,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from prim_ext import Extension, PrimError  # noqa: E402
+from prim_views import ended, title
 
 ext = Extension("sidebar")
 PREFS = "doc/settings/sidebar"
@@ -80,20 +81,24 @@ def folder_of(r):
 def term_row(rid, r, where=False):
     """A terminal row. With `where` (not placed under a folder in the tree), an unnamed terminal also
     shows its folder, so a column of "zsh" rows can be told apart; named ones keep their room for badges."""
-    label = r.get("name") or (r.get("argv") or ["?"])[0].split("/")[-1]
+    label = title(r, ext.resources)
     folder = folder_of(r) if where and not r.get("name") else None
     if folder and folder != label:
         label = f"{label} · {folder}"
     st = status_of(r)
     badges = []
-    if st.get("state"):
+    if ended(r):
+        badges.append({"text": "ended", "style": "dim"})
+    elif not r.get("available", True):
+        badges.append({"text": "unavailable", "style": "warn"})
+    elif st.get("state"):
         badges.append({"text": st["state"], "style": STATUS.get(st["state"])})
     if isinstance(st.get("progress"), (int, float)):
         badges.append({"text": f"{int(st['progress'])}%", "style": "accent"})
     live = r.get("state") == "live"
     # A terminal whose program reports status (OSC 7501) is an agent; its icon takes the status colour,
     # and a set with a glyph for the state shows that instead of the agent's (shape, not only colour).
-    agent = bool(st.get("state") or st.get("app"))
+    agent = r.get("kind") == "agent" or bool(st.get("state") or st.get("app"))
     icon_style = STATUS.get(st.get("state")) if live and st.get("state") else ("muted" if live else "dim")
     icon = ICON["agent" if agent else "terminal"]
     if agent and st.get("state") in STATUS:
@@ -105,7 +110,8 @@ def term_row(rid, r, where=False):
         "command": "sidebar.show", "args": {"resource": rid},
         "menu": [
             {"label": "Show", "command": "sidebar.show", "args": {"resource": rid}},
-            {"label": "Kill program", "command": "sidebar.kill", "args": {"resource": rid}},
+            *([{"label": "Kill program", "command": "sidebar.kill", "args": {"resource": rid}}]
+              if r.get("kind", "terminal") == "terminal" and live else []),
         ],
     }
 
@@ -158,13 +164,22 @@ def build():
     # `placed`: terminals under a tree folder. `stray`: the rest in the tree, or the flat list without one,
     # where Terminals still means "in workspaces" and Other "elsewhere" (all count when there's no data).
     placed, stray = {}, []
+    agents = {r.get("host"): r for r in ext.resources.values() if r.get("kind") == "agent"}
+    hide_ended = (ext.value(PREFS) or {}).get("hide_ended", False)
     for rid, r in sorted(ext.resources.items(), key=lambda kv: int(kv[0][1:]) if kv[0][1:].isdigit() else 0):
-        cwd = os.path.realpath(r["cwd"]) if r.get("cwd") else None
+        if rid in agents or (hide_ended and ended(r)):
+            continue
+        row = term_row(rid, r, where=True)
+        host = ext.resources.get(r.get("host")) if r.get("kind") == "agent" else None
+        if host and host.get("kind") == "terminal":
+            row["children"] = [term_row(host["id"], host)]
+            row["expanded"] = False
+        cwd = os.path.realpath(r.get("cwd") or (host or {}).get("cwd")) if r.get("cwd") or (host or {}).get("cwd") else None
         home = next((k for p, k in homes if cwd and (cwd == p or cwd.startswith(p + os.sep))), None)
         if tree and home:
-            placed.setdefault(home, []).append(term_row(rid, r))
+            placed.setdefault(home, []).append(row)
         elif tree or data is None or sh["terminals" if home else "stray"]:
-            stray.append(term_row(rid, r, where=True))
+            stray.append(row)
 
     items = []
     if tree:
@@ -234,6 +249,9 @@ def view_panel():
     current = current_preset()
     rows += [{"text": ("● " if name == current else "○ ") + name, "style": "accent" if name == current else None,
               "command": "sidebar.preset", "args": {"preset": name}} for name in PRESETS]
+    rows += [{"type": "separator"},
+             {"text": "Close/hide ended items", "command": "sidebar.close_ended"},
+             {"text": "Show ended items", "command": "sidebar.show_ended"}]
     if have_ws:
         rows += [{"type": "separator"},
                  {"text": "Refresh git state", "icon": ICON["refresh"], "icon_style": "plain", "command": "workspaces.refresh"},
@@ -302,6 +320,24 @@ def show_cmd(args):
     return ext.invoke("tabs.show", {"resource": args["resource"]})
 
 
+@ext.command("sidebar.close_ended", "Close ended tabs and hide ended sidebar items (nothing is killed)")
+def close_ended(args):
+    ext.invoke("tabs.close_ended", {})
+    set_ended_visibility(True)
+
+
+@ext.command("sidebar.show_ended", "Show ended sidebar items")
+def show_ended(args):
+    set_ended_visibility(False)
+
+
+def set_ended_visibility(hidden):
+    def attempt():
+        value = dict(ext.value(PREFS) or {}, hide_ended=hidden)
+        ext.apply([{"op": "set", "key": PREFS, "value": value, "expect": ext.version(PREFS)}], "sidebar: ended visibility")
+    ext.retrying(attempt)
+
+
 @ext.command("sidebar.kill", "Kill a terminal's program (args: resource)")
 def kill(args):
     return ext.prim.call("resource.kill", {"resource": args["resource"]})
@@ -315,7 +351,7 @@ def preset(args):
         new = PRESETS[next(args[k] for k in ("preset", "value", "text") if args.get(k) in PRESETS)]
     else:
         raise PrimError(f"presets: {', '.join(PRESETS)}", "invalid")
-    ext.apply([{"op": "set", "key": PREFS, "value": {"show": new}, "expect": ext.version(PREFS)}], "sidebar: show")
+    ext.apply([{"op": "set", "key": PREFS, "value": dict(ext.value(PREFS) or {}, show=new), "expect": ext.version(PREFS)}], "sidebar: show")
 
 
 if "binding/sidebar-toggle" in ext.entries:

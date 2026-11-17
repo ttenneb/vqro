@@ -8,6 +8,7 @@ import threading
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from prim_ext import Extension, PrimError
 from prim_display import label
+from prim_views import ended
 
 EFFECTS = {"prompt": "Prompt", "steer": "Steer", "follow_up": "Follow-up", "abort": "Abort",
            "clear_queue": "Clear queue", "answer": "Answer pending request"}
@@ -71,7 +72,7 @@ class Agents:
                 raise
         return command
 
-    def agent(self, args, op=None):
+    def agent(self, args, op=None, inspect=False):
         context = args.get("context") or {}
         rid = args.get("resource") or context.get("resource")
         for prefix in ("agents-", "agent-"):
@@ -80,7 +81,7 @@ class Agents:
         resource = self.ext.resources.get(rid)
         if not resource or resource.get("kind") != "agent":
             raise PrimError("choose an agent pane or an agent from Agents", "invalid")
-        if not resource.get("available", False) or resource.get("state") != "live":
+        if not inspect and (not resource.get("available", False) or resource.get("state") != "live"):
             raise PrimError("agent is unavailable; nothing sent", "unavailable")
         if op and not self.supported(resource, op):
             raise PrimError("agent provider does not declare agent."+op+"; nothing sent", "unsupported")
@@ -88,7 +89,7 @@ class Agents:
 
     def show(self, args):
         self.ext.fresh()
-        r = self.agent(args)
+        r = self.agent(args, inspect=True)
         self.ext.contribute(self.declarations([r]))
         self.ext.publish(view(r["id"]), self.panel(r))
         result = self.ext.invoke("tabs.show", {"view": view(r["id"]), "title": label(r.get("name") or "Agent")+" "+r["id"]})
@@ -205,7 +206,13 @@ class Agents:
             items.append({"type": "text", "text": "Pending requests: "+(str(len(requests)) if isinstance(requests, list) else "unknown")})
             items.append({"type": "text", "text": label(json.dumps(details, ensure_ascii=False), 8192)})
             content = {"title": title, "requires": ["badges", "description"], "items": items}
-        if not r.get("available"):
+        host = self.ext.resources.get(r.get("host"))
+        if host and host.get("kind") == "terminal":
+            content["items"].insert(0, {"text": "Bridge terminal", "description": label(host.get("name") or host["id"]),
+                                         "command": "tabs.show", "args": {"resource": host["id"]}})
+        if ended(r):
+            content["items"].insert(0, {"type": "text", "style": "warn", "text": "Agent ended; no operation will be sent. Close this tab or use Close ended tabs."})
+        elif not r.get("available"):
             content["items"].insert(0, {"type": "text", "style": "warn", "text": "Agent unavailable; displayed facts may be stale."})
         if len(json.dumps(content, ensure_ascii=False).encode()) > 32768:
             content["items"].insert(0, {"type": "text", "style": "warn", "text": "Bounded agent panel: some provider output omitted."})
@@ -221,7 +228,7 @@ class Agents:
 
     def publish_list(self):
         rows = [{"text": label(r.get("name") or "Agent")+" "+r["id"], "description": status(r),
-                 "command": "agents.show", "args": {"resource": r["id"]}, "disabled": not r.get("available")}
+                 "command": "agents.show", "args": {"resource": r["id"]}, "badges": [{"text": "ended", "style": "dim"}] if ended(r) else []}
                 for r in self.ext.resources.values() if r.get("kind") == "agent"]
         count = len(rows)
         rows = rows[:128]
@@ -266,7 +273,7 @@ class Agents:
                 self.ext.publish(view(r["id"]), self.panel(r))
         for key, entry in list(self.ext.entries.items()):
             if panel_key(key) and entry["value"].get("owner") == "agents" and key[12:] not in self.ext.resources:
-                self.ext.publish(key[5:], {"items": [{"type": "text", "style": "warn", "text": "Agent facts are not currently available; no operation sent."}]})
+                self.ext.publish(key[5:], {"items": [{"type": "text", "style": "warn", "text": "Agent gone (facts not currently available); no operation sent. Close this tab or use Close ended tabs."}]})
 
     def event(self, kind, event):
         if kind in ("resource", "resource.removed", "provider", "missed"):
