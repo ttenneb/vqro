@@ -143,7 +143,7 @@ class AgentsTests(unittest.TestCase):
         for op in ("prompt", "steer", "follow_up"):
             result = self.command(op, context={"view": "agent-r2"}, text="explicit text")
             self.assertEqual(result["outcome"], "accepted")
-            self.assertIn("not settled", self.core.notices[-1][0])
+            self.assertIn("acceptance is not settlement", self.core.notices[-1][0])
         for op in ("abort", "clear_queue"):
             self.command(op, resource="r2")
         self.assertEqual([p["op"] for _, p in self.native()], ["agent."+op for op in ("prompt", "steer", "follow_up", "abort", "clear_queue")])
@@ -176,7 +176,7 @@ class AgentsTests(unittest.TestCase):
             popup = self.command("answer", resource="r2")
             self.assertEqual(popup["client"]["popup"]["view"], "agents-requests-r2")
             content = self.core.live["agents-requests-r2"]
-            self.assertNotIn("\x1b", json.dumps(content, ensure_ascii=False))
+            self.assertNotIn("\x1b", content["items"][0]["text"])
             result = self.command("answer", resource="r2", request="q", **answer)
             self.assertEqual(result["outcome"], "dispatched")
             self.assertIn("no runtime acknowledgement", self.core.notices[-1][0])
@@ -206,6 +206,32 @@ class AgentsTests(unittest.TestCase):
         self.core.resources.clear()
         self.agents.event("resource.removed", {"id": "r2"})
         self.assertIsNone(self.core.value("menu/agents.r2.prompt"))
+
+    def test_restored_agents_are_in_the_complete_activation_declaration(self):
+        core = FakeCore()
+        core.add_agent()
+        Agents(core)
+        declarations = core.transactions[-1]
+        self.assertTrue(any(op["key"] == "menu/agents.r2.prompt" for op in declarations))
+        self.assertTrue(any(op["key"] == "binding/agents.new" for op in declarations))
+
+    def test_oversized_request_popup_preserves_cancellation(self):
+        self.core.add_agent()
+        self.core.resources["r2"]["data"]["requests"] = [{"id": "big", "kind": "select", "prompt": "Big",
+            "data": {"options": ["x"*100 for _ in range(3000)]}}]
+        self.command("answer", resource="r2")
+        panel = self.core.live["agents-requests-r2"]
+        self.assertLess(len(json.dumps(panel).encode()), 262144)
+        self.assertTrue(panel["items"][-1]["args"]["cancelled"])
+        self.assertEqual(self.native(), [])
+
+    def test_palette_menu_template_targets_focused_agent_not_first_agent(self):
+        self.core.add_agent()
+        self.core.resources["r4"] = dict(self.core.resources["r2"], id="r4")
+        self.agents.event("resource", {"id": "r4"})
+        template = self.core.value("menu/agents.r2.prompt")
+        self.command("prompt", **dict(template.get("args", {}), context={"view": "agent-r4"}, text="focused"))
+        self.assertEqual(self.native()[-1][1]["resource"], "r4")
 
     def test_configuration_validates_before_write_and_launch(self):
         for value in ({}, {"runtimes": []}, {"runtimes": [{"name": "x", "argv": "shell string"}]},

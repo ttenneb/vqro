@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import socket
 import subprocess
 import sys
@@ -40,6 +41,7 @@ class E2E:
         self.args, self.root = args, args.isolated_root
         self.log, self.core, self.hc_process = [], None, None
         self.tracked = []
+        self.ui_running = False
         for name in ('home', 'config', 'state', 'run', 'work', 'ext', 'empty', 'prim', 'agent', 'sessions'):
             (self.root / name).mkdir(exist_ok=True)
         r = self.root
@@ -121,10 +123,9 @@ class E2E:
                 self.core.kill()
                 self.core.wait(timeout=3)
 
-    def audit_error(self, cursor, outcome):
-        # prim call deliberately prints only an error message; the public effect
-        # audit retains its exact rejected/indeterminate outcome. Observe only,
-        # never repeat an effect to learn its result.
+    def audit_error(self, cursor, outcome, event_method='resource.invoke'):
+        # Observe exact public audits, including CLI errors and physical UI
+        # effects. Never repeat an effect merely to discover its outcome.
         with socket.socket(socket.AF_UNIX) as sock:
             sock.settimeout(4)
             sock.connect(self.env['PRIM_SOCKET'])
@@ -136,21 +137,14 @@ class E2E:
                         row = json.loads(wire.readline())
                         if row.get('method') == 'event' and row['params']['type'] == 'effect':
                             event = row['params']['data']
-                            if event['method'] == 'resource.invoke':
+                            if event['method'] == event_method:
                                 assert event['outcome'] == outcome, event
-                                self.log.append({'audited_error': event})
-                                return
+                                self.log.append({'audited_effect': event})
+                                return event
                         if row.get('id') == ident:
                             assert 'error' not in row, row
-                            break
-                while True:
-                    row = json.loads(wire.readline())
-                    if row.get('method') == 'event' and row['params']['type'] == 'effect':
-                        event = row['params']['data']
-                        if event['method'] == 'resource.invoke':
-                            assert event['outcome'] == outcome, event
-                            self.log.append({'audited_error': event})
-                            return
+                            if ident == 1:
+                                break
 
     def invoke(self, rid, op, args=None, outcome='accepted'):
         params = {'resource': rid, 'op': 'agent.'+op, 'args': args or {}}
@@ -170,6 +164,27 @@ class E2E:
             r = self.resource(rid)
             return r if r and predicate(r) else None
         return self.wait(found, 'agent facts '+rid)
+
+    def probe_terminal_input(self, host):
+        resource = self.resource(host)
+        caps = self.snapshot()['providers'][resource['provider']]['capabilities']['terminal.input']
+        assert caps.get('stream') is True and caps.get('effect') is False, caps
+        with socket.socket(socket.AF_UNIX) as sock:
+            sock.settimeout(5)
+            sock.connect(self.env['PRIM_SOCKET'])
+            with sock.makefile('rwb', buffering=0) as wire:
+                for ident, method, params in [(1, 'hello', {'client': 'input-transport-probe'}),
+                        (2, 'resource.invoke', {'resource': host, 'op': 'terminal.input', 'args': {'text': ''}})]:
+                    wire.write((json.dumps({'jsonrpc': '2.0', 'id': ident, 'method': method, 'params': params})+'\n').encode())
+                    while True:
+                        row = json.loads(wire.readline())
+                        if row.get('id') == ident:
+                            break
+                    if ident == 1:
+                        assert 'error' not in row, row
+                assert row['error']['data']['kind'] == 'unsupported', row
+                assert row['error']['data']['outcome'] == 'rejected', row
+                self.log.append({'declared_stream_only_input_rejected': row})
 
     def terminal_eof(self, host):
         # Stream handles are connection-scoped: attach and input share one public
@@ -191,6 +206,69 @@ class E2E:
                 assert result['outcome'] == 'dispatched', result
                 self.log.append({'public_terminal_eof': result})
 
+    def ui(self, *args):
+        p = subprocess.run(['/usr/bin/tmux', '-S', str(self.root/'t.sock'), '-f', '/dev/null', *args],
+            cwd=self.root/'work', env={'HOME': self.env['HOME'], 'PATH': self.env['PATH'], 'LANG': 'C.UTF-8', 'SHELL': '/bin/sh'},
+            capture_output=True, text=True, timeout=5)
+        assert not p.returncode, (args, p.stderr)
+        return p.stdout
+
+    def ui_frame(self, name, *texts):
+        def rendered():
+            screen = self.ui('capture-pane', '-p', '-t', 'ui:0.0')
+            return screen if all(text in screen for text in texts) else None
+        screen = self.wait(rendered, 'UI frame '+name, timeout=8)
+        (self.root/('ui-'+name+'.txt')).write_text(screen)
+        self.log.append({'ui_frame': name, 'contains': texts})
+        return screen
+
+    def ui_menu(self, rid, title):
+        self.ui('send-keys', '-t', 'ui:0.0', 'C-g')
+        self.ui_frame('prefix-menu', 'pane menu')
+        self.ui('send-keys', '-t', 'ui:0.0', 'm')
+        self.ui_frame('pane-menu', title)
+        context = {'view': 'agent-'+rid, 'kind': 'panel', 'resource': None, 'live': False}
+        rows = [(v['value'].get('order', 0), k, v['value']) for k, v in self.snapshot()['entries'].items()
+                if k.startswith('menu/') and v['value'].get('where') == 'pane'
+                and all(context.get(field) == value for field, value in v['value'].get('when', {}).items())]
+        rows.sort(key=lambda r: (r[0], r[1]))
+        index = next(i for i, (_, _, item) in enumerate(rows) if item.get('label') == title)
+        self.ui('send-keys', '-t', 'ui:0.0', *(['Down']*index), 'Enter')
+
+    def ui_launch(self):
+        before = self.snapshot()
+        cursor = {key: before[key] for key in ('epoch', 'seq')}
+        self.ui('new-session', '-d', '-s', 'ui', '-x', '150', '-y', '36', '/usr/bin/env', '-i',
+                *[key+'='+value for key, value in self.env.items()], str(self.args.prim), 'tui')
+        self.ui_running = True
+        for format_ in ('#{pid}', '#{pane_pid}'):
+            self.tracked.append(identity(int(self.ui('display-message', '-p', '-t', 'ui:0.0', format_).strip())))
+        self.ui_frame('initial', 'prim')
+        self.ui('send-keys', '-t', 'ui:0.0', 'C-g')
+        self.ui_frame('new-binding', 'new Pi agent')
+        self.ui('send-keys', '-t', 'ui:0.0', 'a')
+        agent = self.wait(lambda: next((r for r in self.snapshot()['resources'] if r.get('kind') == 'agent' and r.get('available')), None), 'UI new agent')
+        self.ui_frame('agent-ready', 'Pi run', 'Queued steering: 0', 'created (observed)')
+        event = self.audit_error(cursor, 'observed', 'resource.spawn')
+        rid = agent['id']
+        self.ui_menu(rid, 'Prompt')
+        self.ui('send-keys', '-t', 'ui:0.0', '-l', 'ui-typed-prompt')
+        self.ui_frame('prompt-input', 'ui-typed-prompt')
+        self.ui('send-keys', '-t', 'ui:0.0', 'Enter')
+        self.agent(rid, lambda r: r['data']['run']['active'])
+        self.ui_frame('working', 'working', 'active=True')
+        self.ui_menu(rid, 'Abort')
+        self.agent(rid, lambda r: r['data']['run']['settled'] and r['data']['run']['aborted'])
+        return {'outcome': event['outcome'], 'host': agent['host'], 'agent': rid}
+
+    def stop_ui(self):
+        if self.ui_running:
+            try:
+                self.ui('kill-server')
+            except (AssertionError, subprocess.SubprocessError) as error:
+                self.log.append({'ui_stop_error': str(error)})
+            self.ui_running = False
+
     def trace(self):
         return [json.loads(line) for line in (self.root/'native.jsonl').read_text().splitlines()]
 
@@ -202,6 +280,11 @@ class E2E:
         self.log.append({'started_hc': self.hc_process, 'image_sha256': hashlib.sha256(
             Path(f'/proc/{started["pid"]}/exe').read_bytes()).hexdigest()})
         assert self.hc_process and not self.hc('ls', '--all')['terminals']
+        if self.args.agents_extension:
+            # Stage the installed-directory layout, not just source imports.
+            for helper in (REPO/'extensions').glob('*.py'):
+                shutil.copy2(helper, self.root/'ext'/helper.name)
+            shutil.copytree(REPO/'extensions/pi_bridge', self.root/'ext/pi_bridge', ignore=shutil.ignore_patterns('__pycache__'))
         self.start()
         if self.args.real_pi_metadata:
             assert json.loads((PACKAGE/'package.json').read_text())['version'] == '1.5.0'
@@ -215,11 +298,11 @@ class E2E:
             assert not self.args.real_pi_metadata, 'extension E2E uses fake Pi only'
             ops = [{'op': 'set', 'key': 'doc/settings/agents', 'value': {'runtimes': [{'name': 'fake', 'argv': native}]}}]
             ops += [{'op': 'set', 'key': 'extension/'+name, 'value': {'enabled': True,
-                    'argv': ['/usr/bin/python3', str(REPO/'extensions'/(name+'.py'))]}}
+                    'argv': ['/usr/bin/python3', str(self.root/'ext'/(name+'.py'))]}}
                     for name in ('tabs', 'panes', 'agents')]
             self.call('workspace.apply', {'ops': ops, 'note': 'Private agents extension conformance'})
             self.wait(self.extension_ready, 'agents/tabs/panes command registration')
-            created = self.call('command.invoke', {'name': 'agents.new', 'args': {'runtime': 'fake', 'cwd': str(self.root/'work')}})
+            created = self.ui_launch() if self.args.agents_ui else self.call('command.invoke', {'name': 'agents.new', 'args': {'runtime': 'fake', 'cwd': str(self.root/'work')}})
             assert created.get('agent'), created
             spawned = {'outcome': created['outcome'], 'resource': self.resource(created['host'])}
             layout = [entry['value'] for key, entry in self.snapshot()['entries'].items() if key.startswith('layout/')]
@@ -252,8 +335,7 @@ class E2E:
         native_process = identity(int(children[0]))
         self.tracked.extend([bridge_process, native_process])
         if self.args.probe_terminal_invoke:
-            result = self.call('resource.invoke', {'resource': host, 'op': 'terminal.input', 'args': {'text': ''}})
-            assert result['outcome'] in ('accepted', 'observed', 'dispatched'), result
+            self.probe_terminal_input(host)
         if not self.args.real_pi_metadata:
             first = self.trace()[0]
             assert not first['bootstrap_in_child'] and not first['herdr_in_child'], first
@@ -266,6 +348,8 @@ class E2E:
             queued = self.agent(rid, lambda r: r['data']['queues']['steering'] == ['explicit-steering']
                                 and r['data']['queues']['follow_up'] == ['explicit-follow-up'])
             assert not queued['data']['run']['settled']
+            if self.args.agents_ui:
+                self.ui_frame('queues', 'Queued steering: 1', 'follow-up: 1', 'explicit-steering')
             cleared = self.invoke(rid, 'clear_queue')
             assert cleared['data']['steering'] == ['explicit-steering'], cleared
             self.invoke(rid, 'abort')
@@ -273,13 +357,25 @@ class E2E:
             self.invoke(rid, 'prompt', {'message': 'fixture-dialog'})
             dialog = self.agent(rid, lambda r: bool(r['data']['requests']))['data']['requests'][0]
             assert dialog['id'] == 'fixture-confirm', dialog
-            self.invoke(rid, 'answer', {'id': dialog['id'], 'confirmed': True}, outcome='dispatched')
+            if self.args.agents_ui:
+                before_answer = self.snapshot()
+                cursor = {key: before_answer[key] for key in ('epoch', 'seq')}
+                self.ui_menu(rid, 'Answer pending request')
+                self.ui_frame('requests', 'Requests: '+rid, 'Fixture confirmation')
+                self.ui('send-keys', '-t', 'ui:0.0', 'Enter')
+                self.ui_frame('confirm-options', 'Yes', 'No')
+                self.ui('send-keys', '-t', 'ui:0.0', 'Enter')
+                self.audit_error(cursor, 'dispatched')
+                self.ui_frame('transcript', 'FIXTURE FINAL transcript tail')
+            else:
+                self.invoke(rid, 'answer', {'id': dialog['id'], 'confirmed': True}, outcome='dispatched')
             self.agent(rid, lambda r: r['data']['run']['settled'] and not r['data']['requests'])
             self.invoke(rid, 'prompt', {'message': 'resume-active-run'})
             before = self.agent(rid, lambda r: r['data']['run']['active'])
             trace = self.trace()
         else:
             before = self.agent(rid, lambda r: not r['data']['run']['active'])
+        self.stop_ui()  # owned manual core restart; do not race a TUI auto-start
         old_host = self.resource(host)
         self.stop(crash=True)
         time.sleep(.3)
@@ -320,6 +416,7 @@ class E2E:
                          'agents_extension': self.args.agents_extension})
 
     def cleanup(self):
+        self.stop_ui()
         self.stop()
         if live(self.hc_process):
             for terminal in self.hc('ls', '--all')['terminals']:
@@ -341,11 +438,14 @@ def main():
     parser.add_argument('--hc', type=Path, required=True)
     parser.add_argument('--real-pi-metadata', action='store_true')
     parser.add_argument('--agents-extension', action='store_true', help='drive agents extension commands with fake Pi')
-    parser.add_argument('--probe-terminal-invoke', action='store_true', help='regression probe for advertised terminal.input dispatch')
+    parser.add_argument('--agents-ui', action='store_true', help='also drive a real TUI in private tmux with fake Pi')
+    parser.add_argument('--probe-terminal-invoke', action='store_true', help='assert declared stream-only input rejects an unsupported effect')
     parser.add_argument('--scratch-parent', type=Path, default=Path.home()/'.local/share/herdr/scratch')
     parser.add_argument('--isolated-root', type=Path, help=argparse.SUPPRESS)
     parser.add_argument('--parent-net', help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.agents_ui:
+        args.agents_extension = True
     if not args.isolated_root:
         if not args.run:
             parser.error('requires --run; never part of ordinary unit discovery')
@@ -363,6 +463,8 @@ def main():
             command.append('--probe-terminal-invoke')
         if args.agents_extension:
             command.append('--agents-extension')
+        if args.agents_ui:
+            command.append('--agents-ui')
         result = subprocess.run(command, cwd=root, env={'HOME': str(root/'home'), 'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8'})
         print(json.dumps({'code': result.returncode, 'receipt': str(root/'receipt.json')}), flush=True)
         raise SystemExit(result.returncode)

@@ -108,6 +108,8 @@ if [ "$MODE" = full ]; then
   step e2e-tui-providers "${CLEAN[@]}" python3 tests/e2e_tui_providers.py "$TARGET"
   step e2e-scale-herdr scale_probe
   step e2e-tui-smoke "${CLEAN[@]}" bash tests/e2e_tui_smoke.sh "$TARGET/debug/prim"
+  step e2e-pi-provider "${CLEAN[@]}" python3 tests/pi_provider_e2e.py --run --probe-terminal-invoke --prim "$TARGET/debug/prim" --hc "$HOME/.local/bin/herdr-core"
+  step e2e-agents-ui "${CLEAN[@]}" python3 tests/pi_provider_e2e.py --run --agents-ui --probe-terminal-invoke --prim "$TARGET/debug/prim" --hc "$HOME/.local/bin/herdr-core"
   step scale-harness scale_harness
 fi
 sleep 2

@@ -61,16 +61,18 @@ class Agents:
                 if not ext.version(SETTINGS):
                     ext.apply([{"op": "set", "key": SETTINGS, "expect": 0, "value": DEFAULTS}], "agents: default runtimes")
             ext.retrying(initialize)
-        ext.contribute({
+        declarations = {
             "menu/agents.new": {"where": "tabbar", "label": "New Pi agent", "command": "agents.new", "order": 5},
             "menu/agents.list": {"where": "tabbar", "label": "Agents", "command": "agents.list", "order": 6},
             "binding/agents.new": {"key": "a", "command": "agents.new", "label": "new Pi agent"},
             "view/agents-list": {"kind": "panel", "title": "Agents", "items": []},
             "view/agents-runtimes": {"kind": "panel", "title": "Pi runtimes", "items": []},
             "view/agents-settings": {"kind": "panel", "title": "Agent runtimes", "items": []},
-        })
+        }
+        self.ids = tuple(sorted(r["id"] for r in ext.resources.values() if r.get("kind") == "agent"))
+        declarations.update(self.pane_entries(self.ids))
+        ext.contribute(declarations)  # whole activation set, including restored agents
         ext.on_event(self.event)
-        self.refresh_menus()
 
     def guarded(self, fn):
         def command(args):
@@ -105,18 +107,20 @@ class Agents:
         self.ext.fresh()
         options = self.config()
         selected = args.get("runtime") or args.get("value")
+        context = args.get("context") or {}
+        source_id = context.get("resource")
+        if not source_id and str(context.get("view", "")).startswith("agent-"):
+            source_id = context["view"][6:]
+        cwd = args.get("cwd") or self.ext.resources.get(source_id, {}).get("cwd")
         if selected is None and len(options) > 1:
             self.ext.publish("agents-runtimes", {"title": "New Pi agent: runtime", "requires": ["menu"], "items": [
                 {"text": label(r["name"]), "description": label(" ".join(r["argv"])),
-                 "command": "agents.new", "args": {"runtime": r["name"], **({"cwd": args["cwd"]} if "cwd" in args else {})}}
+                 "command": "agents.new", "args": {"runtime": r["name"], **({"cwd": cwd} if cwd else {})}}
                 for r in options]})
             return {"client": {"popup": {"view": "agents-runtimes", "width": 72}}}
         runtime = next((r for r in options if r["name"] == selected), None) if selected is not None else options[0]
         if runtime is None:
             raise PrimError("configured runtime not found", "invalid")
-        context = args.get("context") or {}
-        source = self.ext.resources.get(context.get("resource"), {})
-        cwd = args.get("cwd") or source.get("cwd")
         params = {"bridge": True, "name": runtime["name"],
                   "argv": [sys.executable, "-m", "pi_bridge", "--", *runtime["argv"]],
                   "env": {"PYTHONPATH": EXTENSIONS}}
@@ -141,6 +145,10 @@ class Agents:
                 return {"outcome": result["outcome"], "host": host, "agent": r["id"], "client": {"close": True}}
             if time.monotonic() >= end:
                 self.ext.notify("Terminal "+host+" spawned; agent not ready. Check Agents later; do not blindly retry.", "warn")
+                try:
+                    self.ext.invoke("tabs.show", {"resource": host})
+                except PrimError:
+                    pass  # already observed: never repeat or roll back the spawn
                 return {"outcome": result["outcome"], "host": host, "ready": False}
             time.sleep(.1)
 
@@ -159,7 +167,7 @@ class Agents:
 
     def outcome(self, op, result):
         outcome = result.get("outcome", "unknown")
-        extra = "; not settled: watch agent status" if outcome == "accepted" else "; no runtime acknowledgement" if outcome == "dispatched" else ""
+        extra = "; acceptance is not settlement: watch agent status" if outcome == "accepted" else "; no runtime acknowledgement" if outcome == "dispatched" else ""
         self.ext.notify(label(EFFECTS[op]+": "+outcome+extra), "ok" if outcome in ("accepted", "observed") else "warn")
 
     def requests_panel(self, r):
@@ -169,7 +177,7 @@ class Agents:
             items.append({"type": "text", "style": "warn", "text": "Request facts incomplete/unavailable; nothing assumed answered."})
         for request in requests or []:
             args = {"resource": r["id"], "request": request["id"]}
-            row = {"text": label(request.get("prompt") or request["id"]), "description": label(request.get("data", {}).get("message", request["kind"])),
+            row = {"text": label(request.get("prompt") or request["id"]), "description": label(request.get("data", {}).get("message") or request.get("data", {}).get("prefill") or request.get("data", {}).get("placeholder") or request["kind"]),
                    "command": "agents.answer", "args": args}
             if request["kind"] == "confirm":
                 row["options"] = [{"label": "Yes", "value": True}, {"label": "No", "value": False}]
@@ -184,7 +192,10 @@ class Agents:
             items = [{"type": "text", "text": "No pending requests."}]
         content = {"title": "Requests: "+r["id"], "requires": ["menu", "input"], "items": items}
         if len(json.dumps(content).encode()) > 262144:
-            content["items"] = [{"type": "text", "style": "warn", "text": "Requests exceed UI display budget. Nothing answered; inspect the agent facts."}]
+            content["items"] = [{"type": "text", "style": "warn", "text": "Request details exceed the UI budget. Nothing answered; cancellation remains available."}]
+            content["items"] += [{"text": "Cancel "+label(q["id"]), "command": "agents.answer",
+                                  "args": {"resource": r["id"], "request": q["id"], "cancelled": True}}
+                                 for q in requests or []]
         return content
 
     def answer(self, args):
@@ -225,7 +236,10 @@ class Agents:
         rows = [{"text": label(r.get("name") or r["id"])+" "+r["id"], "description": label((r.get("status") or {}).get("state", "unknown")),
                  "command": "agents.show", "args": {"resource": r["id"]}, "disabled": not r.get("available")}
                 for r in self.ext.resources.values() if r.get("kind") == "agent"]
+        count = len(rows)
         rows = rows[:128]
+        if count > 128:
+            rows.append({"type": "text", "style": "warn", "text": f"Showing 128 of {count} agents; existing agent panes remain usable."})
         rows.append({"text": "Runtime settings", "command": "agents.settings"})
         self.ext.publish("agents-list", {"title": "Agents", "items": rows})
 
@@ -233,13 +247,15 @@ class Agents:
         value = self.ext.value(SETTINGS, DEFAULTS)
         self.ext.publish("agents-settings", {"title": "Pi runtime argv", "requires": ["input"], "items": [
             {"type": "text", "text": "Each runtime is an explicit Pi RPC command. No shell interpolation."},
-            {"type": "text", "text": label(json.dumps(value, ensure_ascii=False), 8192)},
+            {"type": "text", "text": label(json.dumps(value.get("runtimes", value) if isinstance(value, dict) else value, ensure_ascii=False), 8192)},
             {"text": "Edit runtimes JSON list", "input": "JSON list of {name, argv}", "command": "agents.configure"}]})
         return {"client": {"popup": {"view": "agents-settings", "width": 90}}}
 
     def configure(self, args):
         try:
-            value = {"runtimes": json.loads(args.get("text", ""))}
+            value = self.ext.value(SETTINGS, {})
+            value = dict(value) if isinstance(value, dict) else {}
+            value["runtimes"] = json.loads(args.get("text", ""))
         except (ValueError, TypeError):
             raise PrimError("enter a JSON list of {name, argv}", "invalid") from None
         runtimes(value)
@@ -249,23 +265,29 @@ class Agents:
         self.ext.notify("Agent runtimes saved; existing agents unchanged.", "ok")
         return {"client": {"close": True}}
 
+    def pane_entries(self, ids):
+        entries = {}
+        for rid in ids:
+            for i, (op, title) in enumerate(EFFECTS.items()):
+                menu = {"where": "pane", "label": title, "command": "agents."+op,
+                        "when": {"view": "agent-"+rid}, "order": 100+i}
+                if op in ("prompt", "steer", "follow_up"):
+                    menu["input"] = title
+                entries["menu/agents."+rid+"."+op] = menu
+        return entries
+
     def refresh_menus(self):
         with self.lock:
             ids = tuple(sorted(r["id"] for r in self.ext.resources.values() if r.get("kind") == "agent"))
             if ids == self.ids:
                 return
-            entries = {}
-            for rid in ids:
-                for i, (op, title) in enumerate(EFFECTS.items()):
-                    menu = {"where": "pane", "label": title, "command": "agents."+op, "args": {"resource": rid},
-                            "when": {"view": "agent-"+rid}, "order": 100+i}
-                    if op in ("prompt", "steer", "follow_up"):
-                        menu["input"] = title
-                    entries["menu/agents."+rid+"."+op] = menu
-            stale = [key for key, entry in self.ext.entries.items() if key.startswith("menu/agents.r")
-                     and entry["value"].get("owner") == "agents" and key not in entries]
-            if stale:
-                self.ext.apply([{"op": "delete", "key": key} for key in stale], "agents: remove stale pane actions")
+            entries = self.pane_entries(ids)
+            def prune():
+                stale = [key for key, entry in self.ext.entries.items() if key.startswith("menu/agents.r")
+                         and entry["value"].get("owner") == "agents" and key not in entries]
+                if stale:
+                    self.ext.apply([{"op": "delete", "key": key, "expect": self.ext.version(key)} for key in stale], "agents: remove stale pane actions")
+            self.ext.retrying(prune)
             self.ext.contribute(entries)
             self.ids = ids
 

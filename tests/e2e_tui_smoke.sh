@@ -12,12 +12,13 @@ R=$(mktemp -d /tmp/ptsXXXXXX)
 mkdir -p "$R"/{home,st,cfg,xst,run,bin,ext}
 chmod 700 "$R/run"
 cp "$REPO"/extensions/*.py "$REPO"/extensions/defaults.json "$R/ext/"
+cp -R "$REPO"/extensions/pi_bridge "$R/ext/"
 for t in python3 sh cat ls env head yes; do ln -sf "$(command -v $t)" "$R/bin/$t"; done
 cat > "$R/env.sh" <<EOF
 export HOME=$R/home PATH=$R/bin TERM=xterm-256color SHELL=/bin/sh PRIM_STATE_DIR=$R/st PRIM_SOCKET=$R/p.sock PRIM_EXTENSIONS_DIR=$R/ext XDG_CONFIG_HOME=$R/cfg XDG_STATE_HOME=$R/xst XDG_RUNTIME_DIR=$R/run HC_SESSION=smoke HC_SOCKET=$R/h.sock PRIM_HERDR="$HC connect"
 EOF
 printf '. %s/env.sh; exec %s tui\n' "$R" "$P" > "$R/tui.sh"
-T="/usr/bin/tmux -S $R/t.sock"
+T="/usr/bin/tmux -S $R/t.sock -f /dev/null"
 pass=0; fail=0
 check() { if [ "$2" = 1 ]; then echo "PASS $1"; pass=$((pass+1)); else echo "FAIL $1"; fail=$((fail+1)); fi; }
 seen() { $T capture-pane -p | grep -c -- "$1"; }
@@ -47,7 +48,7 @@ for pid in filter(str.isdigit, os.listdir("/proc")):
 PY
 }
 
-env -i /usr/bin/tmux -S "$R/t.sock" new-session -d -x 120 -y 30 "/bin/bash $R/tui.sh"; sleep 4
+env -i /usr/bin/tmux -S "$R/t.sock" -f /dev/null new-session -d -x 120 -y 30 "/bin/bash $R/tui.sh"; sleep 4
 $T send-keys C-g; sleep 0.4; $T send-keys n; sleep 2
 $T send-keys -l 'echo smoke-A'; $T send-keys Enter; sleep 1
 check "new tab + input echo" $([ "$(seen smoke-A)" -ge 1 ] && echo 1 || echo 0)

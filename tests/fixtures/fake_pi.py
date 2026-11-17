@@ -125,6 +125,8 @@ for line in sys.stdin.buffer:
     elif kind == "extension_ui_response":
         emit({"type": "test_answer_observed", "answer": command})
         if "--bridge-e2e" in sys.argv and command.get("id") == "fixture-confirm":
+            emit({"type": "message_end", "message": {"role": "assistant", "content": [
+                {"type": "text", "text": "FIXTURE FINAL transcript tail"}]}})
             settle()
     elif kind == "test_end":
         emit({"type": "tool_execution_end", "toolCallId": "tool-1", "toolName": "fixture", "result": {}, "isError": False})
