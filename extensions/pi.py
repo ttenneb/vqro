@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Pi launch/runtime settings policy. Execution stays in the backend-owned bridge."""
 import json
+import os
 from pathlib import Path
 import sys
 import time
@@ -15,6 +16,15 @@ DEFAULTS = {"runtimes": [{"name": "pi", "argv": ["pi1", "--mode", "rpc"]}]}
 EXTENSIONS = str(Path(__file__).resolve().parent)
 
 
+def default_bridge(platform=None):
+    return (["py", "-3"] if (platform or os.name) == "nt" else ["python3"]) + ["-m", "pi_bridge"]
+
+
+def valid_argv(argv):
+    return isinstance(argv, list) and 1 <= len(argv) <= 64 and all(
+        isinstance(arg, str) and arg and "\0" not in arg and len(arg.encode()) <= 32768 for arg in argv)
+
+
 def runtimes(value):
     rows = value.get("runtimes") if isinstance(value, dict) else None
     if not isinstance(rows, list) or not 1 <= len(rows) <= 32:
@@ -25,9 +35,14 @@ def runtimes(value):
                 or len(row["name"]) > 64 or row["name"] in seen:
             raise PrimError("runtime names must be unique, nonempty strings (at most 64 characters)", "invalid")
         argv = row.get("argv")
-        if not isinstance(argv, list) or not 1 <= len(argv) <= 64 \
-                or any(not isinstance(a, str) or not a or "\0" in a or len(a.encode()) > 32768 for a in argv):
+        if not valid_argv(argv):
             raise PrimError("runtime argv must be a nonempty list of literal argument strings", "invalid")
+        if "bridge_argv" in row and not valid_argv(row["bridge_argv"]):
+            raise PrimError("bridge_argv must be literal argv for the terminal host", "invalid")
+        env = row.get("bridge_env", {})
+        if not isinstance(env, dict) or any(not isinstance(k, str) or not k or "=" in k or "\0" in k
+                or not isinstance(v, str) or "\0" in v for k, v in env.items()):
+            raise PrimError("bridge_env must map host environment names to strings", "invalid")
         seen.add(row["name"])
     return rows
 
@@ -78,8 +93,11 @@ class Pi:
         runtime = next((r for r in options if r["name"] == selected), None) if selected is not None else options[0]
         if runtime is None:
             raise PrimError("configured runtime not found", "invalid")
-        params = {"bridge": True, "argv": [sys.executable, "-m", "pi_bridge", "--", *runtime["argv"]],
-                  "env": {"PYTHONPATH": EXTENSIONS}}
+        launcher = runtime.get("bridge_argv", default_bridge())
+        # The local default uses this installed package. A configured host
+        # launcher/environment never inherits a core-host module path.
+        env = runtime.get("bridge_env", {} if "bridge_argv" in runtime else {"PYTHONPATH": EXTENSIONS})
+        params = {"bridge": True, "argv": [*launcher, "--", *runtime["argv"]], "env": env}
         if cwd:
             params["cwd"] = cwd
         result = self.ext.prim.call("resource.spawn", params)  # exactly once, never retried
@@ -114,7 +132,7 @@ class Pi:
         self.ext.fresh()
         value = self.ext.value(SETTINGS, DEFAULTS)
         self.ext.publish("pi-settings", {"title": "Pi runtime argv", "requires": ["input"], "items": [
-            {"type": "text", "text": "Explicit Pi RPC commands. No shell interpolation."},
+            {"type": "text", "text": "Literal Pi argv; optional bridge_argv and bridge_env resolve on the terminal host."},
             {"type": "text", "text": label(json.dumps(value.get("runtimes", value) if isinstance(value, dict) else value, ensure_ascii=False), 8192)},
             {"text": "Edit Pi runtimes JSON list", "input": "JSON list of {name, argv}", "command": "pi.configure"}]})
         return {"client": {"popup": {"view": "pi-settings", "width": 90}}}

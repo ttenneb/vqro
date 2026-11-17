@@ -45,6 +45,8 @@ class E2E:
         for name in ('home', 'config', 'state', 'run', 'work', 'ext', 'empty', 'prim', 'agent', 'sessions'):
             (self.root / name).mkdir(exist_ok=True)
         r = self.root
+        if args.agents_extension:
+            (r/'empty/python3').symlink_to('/usr/bin/python3')  # host-resolved, private allowlist only
         self.env = {'HOME': str(r/'home'), 'PATH': str(r/'empty'), 'LANG': 'C.UTF-8',
                     'XDG_CONFIG_HOME': str(r/'config'), 'XDG_STATE_HOME': str(r/'state'),
                     'XDG_RUNTIME_DIR': str(r/'run'), 'SHELL': '/bin/sh', 'TERM': 'xterm-256color',

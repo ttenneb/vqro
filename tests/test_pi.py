@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "extensions"))
-from pi import Pi, DEFAULTS, EXTENSIONS, LEGACY, SETTINGS, runtimes
+from pi import Pi, DEFAULTS, EXTENSIONS, LEGACY, SETTINGS, default_bridge, runtimes
 from prim_ext import PrimError
 from agent_fixture import FakeCore
 
@@ -40,6 +40,34 @@ class PiTests(unittest.TestCase):
         self.assertEqual(spawn["cwd"], "/private/project")
         self.assertEqual(self.core.calls[-1], ("agents.show", {"resource": "r2"}))
         self.assertEqual(len(self.native()), 1)
+
+    def test_windows_default_is_host_resolved_argv(self):
+        self.assertEqual(default_bridge("nt"), ["py", "-3", "-m", "pi_bridge"])
+        self.assertEqual(default_bridge("posix"), ["python3", "-m", "pi_bridge"])
+
+    def test_invalid_host_launcher_is_rejected_before_spawn(self):
+        for extra in ({"bridge_argv": "python -m pi_bridge"}, {"bridge_env": {"PYTHONPATH": None}}):
+            with self.assertRaises(PrimError):
+                runtimes({"runtimes": [{"name": "bad", "argv": ["pi1"], **extra}]})
+        self.assertEqual(self.native(), [])
+
+    def test_bridge_interpreter_is_resolved_on_terminal_host(self):
+        self.command("new")
+        self.assertEqual(self.native()[0][1]["argv"][0], "python3")
+
+    def test_configured_host_launcher_and_environment_are_literal(self):
+        self.core.apply([{"op": "set", "key": SETTINGS, "value": {"runtimes": [{"name": "remote", "argv": ["pi-host", "--mode", "rpc"],
+            "bridge_argv": ["/Host Tools/python", "-m", "pi_bridge"], "bridge_env": {"PYTHONPATH": "/Host Modules"}}]}}], "host")
+        self.command("new")
+        spawn = self.native()[0][1]
+        self.assertEqual(spawn["argv"], ["/Host Tools/python", "-m", "pi_bridge", "--", "pi-host", "--mode", "rpc"])
+        self.assertEqual(spawn["env"], {"PYTHONPATH": "/Host Modules"})
+
+    def test_custom_host_launcher_does_not_inject_core_module_path(self):
+        self.core.apply([{"op": "set", "key": SETTINGS, "value": {"runtimes": [{"name": "host", "argv": ["pi-host"],
+            "bridge_argv": ["prim-bridge-pi"]}]}}], "host")
+        self.command("new")
+        self.assertEqual(self.native()[0][1]["env"], {})
 
     def test_multiple_launches_leave_backend_naming_to_backend(self):
         self.command("new")
