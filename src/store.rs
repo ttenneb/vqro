@@ -497,7 +497,14 @@ mod tests {
         let writer=store.committed_copy();drop(store);
         assert!(Store::open_locked(path.clone()).is_err(),"a late old writer must fence replacement startup");
         drop(writer);
-        assert!(Store::open_locked(path).is_ok());
+        // Other tests in this process spawn children; a child forked while the lock file is open
+        // shares its open file description (and so the flock) until its exec closes the fd. Allow
+        // that brief window instead of failing on it.
+        let deadline=std::time::Instant::now()+std::time::Duration::from_secs(5);
+        while Store::open_locked(path.clone()).is_err() {
+            assert!(std::time::Instant::now()<deadline,"the lock must be free once the last writer handle drops");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 
     #[test]
