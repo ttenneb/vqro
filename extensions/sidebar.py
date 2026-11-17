@@ -15,6 +15,8 @@ Rows are live content (`view.publish`): not saved, not in history.
 """
 import os
 import sys
+import threading
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from prim_ext import Extension, PrimError  # noqa: E402
@@ -50,6 +52,8 @@ ICON = {
     "sidebar": {"name": "sidebar", "text": "☰"},
 }
 last = [None, None, None]  # what was last published: sidebar, status segment, view popup
+refresh_pending = threading.Event()
+PUBLISH_INTERVAL = 0.1  # Opinion: collapse status bursts into at most ten sidebar updates/second.
 
 
 def show():
@@ -239,27 +243,40 @@ def view_panel():
 
 
 def refresh(*_):
-    items = build()
-    content = {"requires": ["tree", "badges", "menu", "toolbar", "chips", "icon", "icon_names"], "toolbar": toolbar(), "items": items}
-    if content != last[0]:
-        last[0] = content
-        ext.publish("sidebar", content)
-    view = view_panel()
-    if view != last[2]:
-        last[2] = view
-        ext.publish("sidebar.view", view)
-    c = counts_of(items)
-    seg = {"label": f"{c['blocked']} blocked", "icon": ICON["blocked"], "style": "warn"} if c.get("blocked") else {"label": ""}
-    if seg != last[1]:
-        last[1] = seg
-        ext.publish("sidebar.status", seg)
+    # The worker reads a coherent cache, but never holds its lock across RPC/publication.
+    with ext.cache_lock:
+        items = build()
+        content = {"requires": ["tree", "badges", "menu", "toolbar", "chips", "icon", "icon_names"], "toolbar": toolbar(), "items": items}
+        view = view_panel()
+        c = counts_of(items)
+        seg = {"label": f"{c['blocked']} blocked", "icon": ICON["blocked"], "style": "warn"} if c.get("blocked") else {"label": ""}
+    for index, name, value in ((0, "sidebar", content), (2, "sidebar.view", view), (1, "sidebar.status", seg)):
+        if value != last[index]:
+            ext.publish(name, value)
+            last[index] = value
+
+
+def refresh_worker():
+    failed = None
+    while True:
+        refresh_pending.wait()
+        time.sleep(PUBLISH_INTERVAL)
+        # Clear before building: an event during publication schedules another fresh snapshot.
+        refresh_pending.clear()
+        try:
+            refresh()
+            failed = None
+        except Exception as error:
+            if str(error) != failed:
+                ext.log("sidebar publication failed:", error)
+                failed = str(error)
 
 
 @ext.on_event
 def on_event(t, d):
     if t in ("resource", "resource.removed", "missed") or (t == "view.content" and d.get("view") == "workspaces") \
             or (t == "entries" and any(c["key"] == PREFS for c in d["changes"])):
-        refresh()
+        refresh_pending.set()
 
 
 @ext.command("sidebar.toggle", "Show or hide the sidebar")
@@ -311,4 +328,5 @@ ext.contribute({
     "menu/sidebar.blocked": {"where": "status", "label": "", "view": "sidebar.status", "command": "sidebar.toggle", "order": 5},
 })
 refresh()
+threading.Thread(target=refresh_worker, daemon=True, name="sidebar-publish").start()
 ext.run()

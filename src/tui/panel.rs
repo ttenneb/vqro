@@ -22,6 +22,7 @@
 //! data, e.g. a theme preview swatch, and needs the `badge_color` feature.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -42,6 +43,21 @@ pub struct State {
     pub top: usize,
     /// Focused chip within a selected chips row.
     pub chip: usize,
+    pub(super) prepared: Option<Arc<Prepared>>,
+}
+
+/// Only fields that affect flattening belong to this cache key. Selection/scroll/chips do not.
+pub(super) struct Prepared {
+    value: Arc<Value>, page: usize, filter: String, open: HashMap<String,bool>, rows: Vec<Flat>,
+}
+impl State {
+    fn prepare(&mut self, value: &Arc<Value>) -> Arc<Prepared> {
+        if let Some(cache) = &self.prepared {
+            if Arc::ptr_eq(&cache.value,value) && cache.page==self.page && cache.filter==self.filter && cache.open==self.open { return cache.clone(); }
+        }
+        let prepared=Arc::new(Prepared { value:value.clone(),page:self.page,filter:self.filter.clone(),open:self.open.clone(),rows:rows(value,self) });
+        self.prepared=Some(prepared.clone()); prepared
+    }
 }
 
 /// A visible row after pages, tree expansion and filtering.
@@ -237,7 +253,7 @@ fn badge_style(b: &Value, pal: &Palette) -> Style {
 }
 
 /// Draw the panel into `area`. Keeps the selection visible and returns hit areas.
-pub fn render(buf: &mut Buffer, area: Rect, v: &Value, st: &mut State, focused: bool, pal: &Palette, icons: &Icons) -> Hits {
+pub fn render(buf: &mut Buffer, area: Rect, v: &Arc<Value>, st: &mut State, focused: bool, pal: &Palette, icons: &Icons) -> Hits {
     let mut hits = Hits::default();
     if area.width < 6 || area.height == 0 {
         return hits;
@@ -278,7 +294,8 @@ pub fn render(buf: &mut Buffer, area: Rect, v: &Value, st: &mut State, focused: 
         area = Rect { y: area.y + 1, height: area.height - 1, ..area };
     }
 
-    let rows = rows(v, st);
+    let prepared = st.prepare(v);
+    let rows = &prepared.rows;
     if rows.is_empty() {
         let msg = if st.filter.is_empty() { "(empty)" } else { "(no matches)" };
         buf.set_string(area.x, area.y, msg, pal.style(Some("dim")));
@@ -531,7 +548,7 @@ mod tests {
     fn draw(v: &Value, icons: &Icons, width: u16) -> Vec<String> {
         let area = Rect::new(0, 0, width, 6);
         let mut buf = Buffer::empty(area);
-        render(&mut buf, area, v, &mut State::default(), false, &Palette::default(), icons);
+        render(&mut buf, area, &Arc::new(v.clone()), &mut State::default(), false, &Palette::default(), icons);
         let line = |y| {
             let mut s = String::new();
             let mut x = 0;
@@ -543,6 +560,22 @@ mod tests {
             s.trim_end().to_string()
         };
         (0..area.height).map(line).collect()
+    }
+
+    #[test]
+    fn prepared_rows_reuse_only_when_value_and_shape_are_unchanged() {
+        let value=Arc::new(serde_json::json!({"items":[{"id":"p","text":"parent","expanded":true,"children":[{"text":"child"}]}]}));
+        let mut state=State::default(); let first=state.prepare(&value);
+        assert_eq!(first.rows.len(),2);
+        state.sel=1; state.top=3; state.chip=2;
+        assert!(Arc::ptr_eq(&first,&state.prepare(&value)),"selection/scroll are not flattening inputs");
+        state.open.insert("p".into(),false);
+        let folded=state.prepare(&value); assert!(!Arc::ptr_eq(&first,&folded)); assert_eq!(folded.rows.len(),1);
+        state.filter="child".into(); let filtered=state.prepare(&value); assert_eq!(filtered.rows.len(),2);
+        assert!(!Arc::ptr_eq(&folded,&filtered));
+        state.page=1; assert!(!Arc::ptr_eq(&filtered,&state.prepare(&value)));
+        let current=state.prepare(&value);
+        assert!(!Arc::ptr_eq(&current,&state.prepare(&Arc::new((*value).clone()))),"new content identity invalidates even identical JSON");
     }
 
     fn rows() -> Value {

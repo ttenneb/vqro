@@ -19,10 +19,13 @@ mod icons;
 mod keys;
 mod mouse;
 mod panel;
+mod probe;
+mod frame_budget;
 mod theme;
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use base64::Engine;
@@ -206,6 +209,8 @@ struct App {
     toast: Option<(String, Option<String>, std::time::Instant)>,
     /// Live view content from `view.publish`, merged over the view entry.
     live: HashMap<String, Value>,
+    /// Merged immutable panel values; invalidate only on this view's entry/live update or snapshot.
+    panel_values: Mutex<HashMap<String, Arc<Value>>>,
     hit: Hit,
     drag: Option<Drag>,
     overrides: HashMap<Vec<usize>, Vec<u16>>,
@@ -251,6 +256,7 @@ enum UiInput {
     Key(Event),
     Reconnected(Connection),
     Tick,
+    Frame,
     Closed,
 }
 
@@ -261,12 +267,15 @@ async fn next_input(
     messages: &mut mpsc::UnboundedReceiver<Msg>,
     keys: &mut mpsc::UnboundedReceiver<Event>,
     reconnecting: &mut Option<tokio::task::JoinHandle<Connection>>,
+    redraw: Option<std::time::Instant>,
 ) -> Result<UiInput> {
     Ok(tokio::select! {
-        m = incoming.recv(), if app.connected => UiInput::Incoming(m),
+        biased;
+        Some(ev) = keys.recv() => UiInput::Key(ev),
+        _ = tokio::time::sleep_until(tokio::time::Instant::from_std(redraw.unwrap_or_else(std::time::Instant::now))), if redraw.is_some() => UiInput::Frame,
         result = async { reconnecting.as_mut().unwrap().await }, if reconnecting.is_some() => UiInput::Reconnected(result?),
         Some(m) = messages.recv() => UiInput::Message(m),
-        Some(ev) = keys.recv() => UiInput::Key(ev),
+        m = incoming.recv(), if app.connected => UiInput::Incoming(m),
         _ = tokio::time::sleep(std::time::Duration::from_millis(500)), if app.toast.is_some() || app.retry_snapshot.is_some() || app.terms.values().any(|t| t.retry_at.is_some()) => UiInput::Tick,
         else => UiInput::Closed,
     })
@@ -318,18 +327,26 @@ pub async fn run(socket: &Path) -> Result<()> {
 
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste, crossterm::event::EnableMouseCapture);
     let mut reconnecting = None;
+    let mut probe = probe::Probe::from_env();
     let result: Result<()> = async {
         let mut dirty = true;
+        let mut interactive = false;
+        let mut frames = frame_budget::FrameBudget::new();
         loop {
-            if dirty {
-                terminal.draw(|f| app.draw(f))?;
+            let now = std::time::Instant::now();
+            if frames.ready(dirty, interactive, now) {
+                probe.draw(interactive, || terminal.draw(|f| app.draw(f)))?;
+                frames.drawn(now);
+                dirty = false;
             }
             if app.quit {
                 return Ok(());
             }
-            dirty = match next_input(&app, &mut incoming, &mut rx, &mut keys, &mut reconnecting).await? {
+            let input = next_input(&app, &mut incoming, &mut rx, &mut keys, &mut reconnecting, frames.deadline(dirty)).await?;
+            let key_input = matches!(input, UiInput::Key(_));
+            dirty |= match input {
                 UiInput::Incoming(m) => match m {
-                    Some(m) => { app.on_incoming(m); true }
+                    Some(m) => { probe.incoming(&m); app.on_incoming(m); true }
                     None => {
                         // The core went away (restart, reinstall): bring it back and reconnect.
                         app.disconnected();
@@ -351,15 +368,19 @@ pub async fn run(socket: &Path) -> Result<()> {
                 UiInput::Message(m) => { app.on_msg(m); true }
                 UiInput::Key(ev) => app.on_event(ev),
                 UiInput::Tick => { app.retry_snapshot_if_due(); true },
+                UiInput::Frame => false,
                 UiInput::Closed => return Ok(()),
             };
             dirty |= app.restore_under();
             // Drain whatever else is ready before redrawing.
-            for _ in 0..64 {
+            for _ in 0..if key_input { 0 } else { 64 } {
+                if !keys.is_empty() { break; }
                 let Ok(m) = incoming.try_recv() else { break };
+                probe.incoming(&m);
                 app.on_incoming(m);
                 dirty = true;
             }
+            interactive = key_input && dirty;
             // Richer key reports only while the prefix menu is open: typing into programs is untouched.
             let prefix_open = matches!(app.overlay, Some(Overlay::Prefix { .. }));
             if app.kbd_enhance {
@@ -430,7 +451,7 @@ impl App {
             commands: BTreeMap::new(), extensions: BTreeMap::new(), safe_mode: false,
             terms: HashMap::new(), stream_view: HashMap::new(), early: HashMap::new(), early_closed: HashMap::new(),
             leaves: Vec::new(), focus: 0, overlay: None, pstate: HashMap::new(),
-            filtering: None, toast: None, live: HashMap::new(), hit: Hit::default(),
+            filtering: None, toast: None, live: HashMap::new(), panel_values: Mutex::new(HashMap::new()), hit: Hit::default(),
             drag: None, overrides: HashMap::new(), mouse_owner: None, mouse_on: true,
             under: None, zoomed: None, pending_focus: None, kbd_enhance: false,
             held: KeyModifiers::NONE, message: "click prim or press Ctrl-g for the menu".into(),
@@ -466,6 +487,8 @@ impl App {
         self.retry_snapshot = None;
         self.epoch = snap["epoch"].as_str().unwrap_or("").to_string();
         self.seq = snap["seq"].as_u64().unwrap_or(0);
+        self.panel_values.lock().unwrap().clear();
+        for state in self.pstate.values_mut() { state.prepared = None; }
         self.entries.clear();
         self.versions.clear();
         if let Some(es) = snap["entries"].as_object() {
@@ -575,6 +598,10 @@ impl App {
             "entries" => {
                 for c in d["changes"].as_array().into_iter().flatten() {
                     let Some(k) = c["key"].as_str() else { continue };
+                    if let Some(view) = k.strip_prefix("view/") {
+                        self.panel_values.lock().unwrap().remove(view);
+                        for state in self.pstate.values_mut() { state.prepared = None; }
+                    }
                     if k.starts_with("layout/") {
                         // The committed layout replaces any local drag preview.
                         self.overrides.clear();
@@ -647,6 +674,8 @@ impl App {
             }
             "view.content" => {
                 if let Some(v) = d["view"].as_str() {
+                    self.panel_values.lock().unwrap().remove(v);
+                    for state in self.pstate.values_mut() { state.prepared = None; }
                     if d["content"].is_null() {
                         self.live.remove(v);
                     } else {
@@ -831,13 +860,16 @@ impl App {
     }
 
     /// A panel's value: the view entry with its live content merged over it.
-    fn panel_value(&self, view: &str) -> Value {
+    fn panel_value(&self, view: &str) -> Arc<Value> {
+        if let Some(value) = self.panel_values.lock().unwrap().get(view).cloned() { return value; }
         let mut v = self.entries.get(&format!("view/{view}")).cloned().unwrap_or(json!({}));
         if let (Some(live), Some(obj)) = (self.live.get(view).and_then(|l| l.as_object()), v.as_object_mut()) {
             for (k, x) in live {
                 obj.insert(k.clone(), x.clone());
             }
         }
+        let v = Arc::new(v);
+        self.panel_values.lock().unwrap().insert(view.to_string(), v.clone());
         v
     }
 
@@ -2423,6 +2455,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unchanged_panel_values_share_storage_and_all_content_paths_invalidate() {
+        let (mut app, _) = app();
+        let snap=json!({"epoch":"boot","seq":1,"entries":{"view/p":{"version":1,"value":{"kind":"panel","title":"base","items":[{"text":"base"}]}}},"live":{"p":{"items":[{"text":"live"}]}}});
+        app.load(&snap);
+        let first=app.panel_value("p"); assert!(Arc::ptr_eq(&first,&app.panel_value("p")));
+        app.on_incoming(resource_event(2,json!({"id":"r1","state":"live"}),false));
+        assert!(Arc::ptr_eq(&first,&app.panel_value("p")),"unrelated resource/flood updates do not rebuild panels");
+        app.on_event_record(&json!({"epoch":"boot","seq":3,"type":"view.content","data":{"view":"p","content":{"items":[{"text":"new live"}]}}}));
+        let live=app.panel_value("p"); assert!(!Arc::ptr_eq(&first,&live)); assert_eq!(live["items"][0]["text"],"new live");
+        app.on_event_record(&json!({"epoch":"boot","seq":4,"type":"entries","data":{"changes":[{"key":"view/p","version":2,"value":{"kind":"panel","title":"new base","items":[{"text":"new base"}]}}]}}));
+        let entry=app.panel_value("p"); assert!(!Arc::ptr_eq(&live,&entry)); assert_eq!(entry["title"],"new base");
+        app.on_event_record(&json!({"epoch":"boot","seq":5,"type":"view.content","data":{"view":"p","content":null}}));
+        assert_eq!(app.panel_value("p")["items"][0]["text"],"new base");
+        let before_reload=app.panel_value("p"); app.load(&snap);
+        assert!(!Arc::ptr_eq(&before_reload,&app.panel_value("p")));
+        app.on_event_record(&json!({"epoch":"boot","seq":2,"type":"entries","data":{"changes":[{"key":"view/p","value":null}]}}));
+        assert!(!app.panel_values.lock().unwrap().contains_key("p"));
+    }
+
+    #[tokio::test]
+    async fn queued_key_beats_both_ready_background_input_and_frame_deadline() {
+        let (app, _) = app();
+        let (_,mut incoming)=Peer::spawn(tokio::io::empty(),tokio::io::sink());
+        let (_,mut messages)=mpsc::unbounded_channel(); let (key_tx,mut keys)=mpsc::unbounded_channel();
+        key_tx.send(Event::Key(KeyEvent::new(KeyCode::Char('x'),KeyModifiers::NONE))).unwrap();
+        let mut reconnecting=None;
+        assert!(matches!(next_input(&app,&mut incoming,&mut messages,&mut keys,&mut reconnecting,Some(std::time::Instant::now())).await.unwrap(),UiInput::Key(_)));
+    }
+
+    #[tokio::test]
     async fn partial_resource_events_merge_onto_the_known_record() {
         let (mut app, _) = app();
         app.load(&snapshot(1, "x"));
@@ -2559,7 +2621,7 @@ mod tests {
         let mut reconnecting = Some(task);
         for key in [KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL), KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)] {
             keys_tx.send(Event::Key(key)).unwrap();
-            let input = tokio::time::timeout(std::time::Duration::from_secs(1), next_input(&app, &mut incoming, &mut messages, &mut keys, &mut reconnecting)).await.unwrap().unwrap();
+            let input = tokio::time::timeout(std::time::Duration::from_secs(1), next_input(&app, &mut incoming, &mut messages, &mut keys, &mut reconnecting, None)).await.unwrap().unwrap();
             let UiInput::Key(ev) = input else { panic!("key must stay reachable") };
             app.on_event(ev);
         }

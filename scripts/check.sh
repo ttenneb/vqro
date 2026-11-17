@@ -3,7 +3,7 @@
 #
 #   scripts/check.sh quick   cargo build (zero warnings) + cargo test + Python unittests
 #   scripts/check.sh full    quick + every opt-in private suite (tmux, providers, herdr-core), the e2e
-#                            scripts, the TUI smoke, the default scale profile, and a leftover check
+#                            scripts, TUI smoke/scale probe, the default scale profile, and a leftover check
 #
 # Every step runs under `env -i` with private paths: no live prim, hc/herdr-core or tmux server is
 # touched (suites start their own private ones and stop only those). Prints a PASS/FAIL table and writes
@@ -90,6 +90,11 @@ scale_harness() {
     cargo test --release --test scale -- --ignored --exact scale_load --nocapture
 }
 
+tui_scale_probe() {
+  "${CARGO[@]}" cargo build --release --bin prim || return 1
+  "${CLEAN[@]}" python3 tests/e2e_tui_scale.py "$TARGET" --receipt "$LOGS/tui-scale-receipt.json"
+}
+
 opt_in() {  # opt_in SUITE: every test of an integration suite, including the ignored (private) ones
   "${CARGO[@]}" cargo test --test "$1" -- --include-ignored --test-threads=1
 }
@@ -110,6 +115,7 @@ if [ "$MODE" = full ]; then
   step e2e-tui-smoke "${CLEAN[@]}" bash tests/e2e_tui_smoke.sh "$TARGET/debug/prim"
   step e2e-pi-provider "${CLEAN[@]}" python3 tests/pi_provider_e2e.py --run --probe-terminal-invoke --prim "$TARGET/debug/prim" --hc "$HOME/.local/bin/herdr-core"
   step e2e-agents-ui "${CLEAN[@]}" python3 tests/pi_provider_e2e.py --run --agents-ui --probe-terminal-invoke --prim "$TARGET/debug/prim" --hc "$HOME/.local/bin/herdr-core"
+  step e2e-tui-scale-placeholder-budgets tui_scale_probe
   step scale-harness scale_harness
 fi
 sleep 2
