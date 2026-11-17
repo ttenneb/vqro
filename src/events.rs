@@ -43,6 +43,10 @@ impl EventFilter {
     /// The event as this subscriber should get it, or None if filtered out.
     pub fn shape(&mut self, ev: Value) -> Option<Value> {
         let ty = ev["type"].as_str().unwrap_or("");
+        // Cache lifecycle is independent of whether this subscriber wants the notification.
+        if ty == "resource.removed" {
+            if let Some(id) = ev["data"]["id"].as_str() { self.sent.remove(id); }
+        }
         if self.types.as_ref().is_some_and(|t| !t.contains(ty)) {
             return None;
         }
@@ -68,12 +72,7 @@ impl EventFilter {
                 ev["partial"] = Value::Bool(true);
                 Some(ev)
             }
-            "resource.removed" => {
-                if let Some(id) = ev["data"]["id"].as_str() {
-                    self.sent.remove(id);
-                }
-                Some(ev)
-            }
+            "resource.removed" => Some(ev),
             _ => Some(ev),
         }
     }
@@ -99,6 +98,20 @@ mod tests {
         assert_eq!(f.shape(res("r1", "c")).unwrap(), res("r1", "c"), "full after missed");
         f.shape(json!({"type": "resource.removed", "data": {"id": "r1"}})).unwrap();
         assert_eq!(f.shape(res("r1", "d")).unwrap(), res("r1", "d"), "full after removal");
+    }
+
+    #[test]
+    fn filtered_removal_still_retires_the_delta_base() {
+        let mut f = EventFilter::new(&SubscribeOptions {
+            types: Some(vec!["resource".into()]), partial_resources: true, ..Default::default()
+        });
+        for i in 0..1000 {
+            let id = format!("r{i}");
+            f.shape(res(&id, "old"));
+            assert!(f.shape(json!({"type":"resource.removed", "data":{"id":id}})).is_none());
+        }
+        assert!(f.sent.is_empty(), "filtered lifecycle events must still evict internal cache state");
+        assert!(f.shape(res("r0", "new")).unwrap().get("partial").is_none());
     }
 
     #[test]
