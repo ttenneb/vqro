@@ -276,7 +276,7 @@ def refresh(*_):
         {"type": "separator"},
         {"type": "text", "text": "Everything here is an extension; see docs/decisions.md D17."},
     ]
-    ext.publish("settings", {"title": "Settings", "requires": ["pages", "menu", "input"], "pages": [
+    ext.publish("settings", {"title": "Settings", "requires": ["pages", "menu", "input", "tree"], "pages": [
         {"title": "Extensions", "list_detail": {"requires": ["list_detail"]}, "items": ext_rows(states, commands)},
         {"title": "Interface", "items": interface},
         {"title": "Theme", "items": theme_rows()},
