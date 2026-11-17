@@ -180,7 +180,7 @@ pub async fn serve(core: Shared, listener: UnixListener) -> anyhow::Result<()> {
     let socket = core.lock().unwrap().socket.clone();
     let _ = std::fs::remove_file(socket);
     drop(listener);
-    shutdown.finish();
+    { let mut c=core.lock().unwrap();c.store.release_state();shutdown.finish(); }
     Ok(())
 }
 

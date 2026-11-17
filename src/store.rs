@@ -121,6 +121,8 @@ impl Store {
         Ok(std::sync::Arc::new(lock))
     }
 
+    pub(crate) fn release_state(&mut self) { self.lifetime=None; }
+
     pub(crate) fn set_writer(&mut self, writer: DurableWriter) { self.writer = writer; }
 
     /// O(1) immutable committed-state copy. Only the serialized committer may persist it.

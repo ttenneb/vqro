@@ -435,6 +435,7 @@ impl Core {
     }
 
     pub fn on_adapter_event(&mut self, name: &str, event: AdapterEvent) {
+        if self.shutdown.is_stopped() { return; } // no late backend mutation after the state fence is released
         if !self.providers.contains_key(name) { return; }
         match event {
             AdapterEvent::Consumed(ack) => { let _ = ack.send(()); }

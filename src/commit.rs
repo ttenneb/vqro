@@ -127,7 +127,7 @@ async fn run(core:Weak<Mutex<Core>>, queue:Receiver,cancel:Arc<AtomicBool>) {
             };
             (store, result)
         }).await;
-        let (store, result) = match written {
+        let (mut store, result) = match written {
             Ok(written) => written,
             Err(err) => {
                 // A panicking writer may already have renamed. Never roll back/replay or
@@ -142,6 +142,9 @@ async fn run(core:Weak<Mutex<Core>>, queue:Receiver,cancel:Arc<AtomicBool>) {
         let adopted = result.is_ok() || result.as_ref().is_err_and(|e| e.kind() == "durability_unconfirmed");
         let (result, retired) = {
             let mut c = core.lock().unwrap();
+            // A stopped embedding may retain Core for inspection; only the dispatched writer
+            // must hold the lock past stop, not its late in-memory adoption afterward.
+            if c.shutdown.is_stopped() { store.release_state(); }
             let retired = if adopted { Some(std::mem::replace(&mut c.store, store)) } else { None };
             (c.finish_txn(result), retired)
         };
@@ -188,7 +191,7 @@ mod tests {
     #[tokio::test]
     async fn shutdown_deadline_rejects_queued_work_but_never_claims_active_write_failed() {
         let root=Arc::new(tempfile::Builder::new().prefix("pcq").tempdir_in("/tmp").unwrap());
-        let store=crate::store::Store::open(root.path().join("workspace.json")).unwrap();
+        let store=crate::store::Store::open_locked(root.path().join("workspace.json")).unwrap();
         let core=Arc::new(Mutex::new(Core::new(store,None,root.path().join("s"),false).unwrap()));
         let gate=Arc::new((Mutex::new(false),std::sync::Condvar::new()));
         struct Release(Arc<(Mutex<bool>,std::sync::Condvar)>);
@@ -207,9 +210,12 @@ mod tests {
         assert!(!drained.completed);assert_eq!(drained.rejected,1);assert_eq!(drained.active,1);
         let error=second.await.unwrap().unwrap_err();assert_eq!(error.data.unwrap()["outcome"],"rejected");
         assert_eq!(core.lock().unwrap().committer.enqueue(&core,256,plan()).unwrap_err().kind(),"unavailable");
+        { let mut c=core.lock().unwrap();c.store.release_state();c.shutdown.finish(); }
+        assert!(crate::store::Store::open_locked(root.path().join("workspace.json")).is_err(),"late writer still owns the fence after endpoint shutdown");
         *gate.0.lock().unwrap()=true;gate.1.notify_all();
         first.await.unwrap().unwrap();
         assert!(core.lock().unwrap().safe_mode,"late active completion must still run adoption hook");
+        assert!(crate::store::Store::open_locked(root.path().join("workspace.json")).is_ok(),"late adoption must not re-pin the stopped core's fence");
         assert_eq!(crate::store::Store::open(root.path().join("workspace.json")).unwrap().history(10).len(),1,"queued work must never be replayed");
     }
     #[test]

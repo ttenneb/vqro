@@ -84,6 +84,11 @@ async fn new_fake_instance_cannot_reuse_a_previous_prim_id() {
     let _old = start(e.socket.clone(), e.state.clone(), false, Backend::Fake, None).unwrap();
     let (old, _rx) = connect(&e).await;
     let first = old.call("resource.spawn", json!({"argv": ["sh"]})).await.unwrap()["resource"]["id"].clone();
+    // A restart stops the old writer first; two live cores must not share one state directory.
+    prim::server::shutdown(&_old).await;
+    let stale_facts=_old.lock().unwrap().resources.values().next().unwrap().facts.clone();
+    _old.lock().unwrap().on_adapter_event("fake",prim::adapter::AdapterEvent::Removed { reference:stale_facts.backend_ref,incarnation:stale_facts.incarnation });
+    assert_eq!(_old.lock().unwrap().resources.len(),1,"stopped cores ignore late backend state mutations");
     // The fake starts empty with refs f1, f2... again, but belongs to a new instance.
     let socket = e._dir.path().join("new.sock");
     let _new = start(socket.clone(), e.state.clone(), false, Backend::Fake, None).unwrap();
@@ -291,6 +296,7 @@ async fn restarted_core_rejects_old_epoch_even_when_sequence_matches() {
     until(|| old_core.lock().unwrap().adapter_state.contains_key("fake")).await;
     let (old, _) = connect(&e).await;
     let before = old.call("workspace.snapshot", Value::Null).await.unwrap();
+    prim::server::shutdown(&old_core).await;
     let socket = e._dir.path().join("new.sock");
     let new_core = start(socket.clone(), e.state.clone(), false, Backend::Fake, None).unwrap();
     until(|| new_core.lock().unwrap().adapter_state.contains_key("fake")).await;
