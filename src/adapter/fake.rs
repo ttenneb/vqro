@@ -4,6 +4,8 @@
 //! so a test can shape load through the public `resource.spawn` alone:
 //! - `--status-every-ms N`: an agent-like terminal. Every N ms its status changes, as an OSC 7501
 //!   report would: `{"state": "working"|"idle", "n": <count>, "at_ms": <unix ms when emitted>}`.
+//!   With `--status-phase-ms P` the first change comes P ms after spawn instead of N, so agents spawned
+//!   together need not tick in lock-step.
 //! - `--output-bytes-per-sec N`: a high-output terminal. While attached, each stream also gets N
 //!   bytes per second of printable output, in chunks every 10 ms, besides echoing input.
 //!
@@ -23,13 +25,14 @@ use super::*;
 #[derive(Clone, Copy, Default)]
 struct Load {
     status_every_ms: Option<u64>,
+    status_phase_ms: Option<u64>,
     output_bytes_per_sec: Option<u64>,
 }
 
 impl Load {
     fn from_argv(argv: &[String]) -> Load {
         let num = |flag: &str| argv.iter().position(|a| a == flag).and_then(|i| argv.get(i + 1)).and_then(|v| v.parse().ok()).filter(|n| *n > 0);
-        Load { status_every_ms: num("--status-every-ms"), output_bytes_per_sec: num("--output-bytes-per-sec") }
+        Load { status_every_ms: num("--status-every-ms"), status_phase_ms: num("--status-phase-ms"), output_bytes_per_sec: num("--output-bytes-per-sec") }
     }
 }
 
@@ -86,9 +89,9 @@ pub fn start(name: String, events: mpsc::UnboundedSender<(String, AdapterEvent)>
                     let alive = Arc::new(AtomicBool::new(true));
                     if let Some(ms) = load.status_every_ms {
                         let (tick, r, alive) = (tick_tx.clone(), f.backend_ref.clone(), alive.clone());
+                        let first = tokio::time::Instant::now() + Duration::from_millis(load.status_phase_ms.unwrap_or(ms));
                         tokio::spawn(async move {
-                            let mut every = tokio::time::interval(Duration::from_millis(ms));
-                            every.tick().await;
+                            let mut every = tokio::time::interval_at(first, Duration::from_millis(ms));
                             while alive.load(Ordering::Relaxed) {
                                 every.tick().await;
                                 if tick.send(r.clone()).is_err() {
