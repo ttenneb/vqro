@@ -9,12 +9,13 @@
 //! native pause ends the stream with a gap, the pane is resumed, and the viewer reopens.
 //!
 //! Server: `--tmux-socket PATH` attaches to an existing server (it is never killed); without it, a
-//! private server is started under /tmp and killed on exit. Never the default tmux server.
+//! prim-owned server at the core's stable state directory is created or reused. It outlives this
+//! provider; only explicit `prim-tmux server stop` stops it. Never the default tmux server.
 //! Exit codes are not reported (tmux removes exited panes); a vanished pane is `gone` with reason
 //! `exited`, or `killed` if this provider killed it.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -22,6 +23,9 @@ use prim::provider_client::{Config, EffectRequest, Initial, OpenRequest, Outcome
 use prim::tmux::{self, Client, GapReason, Notification, PaneEvent, PaneId};
 use serde_json::{json, Map, Value};
 use tokio::sync::Notify;
+
+#[path = "prim-tmux/server.rs"]
+mod owned_server;
 
 /// tmux replaces control characters (tabs too) and, without a UTF-8 locale, non-ASCII bytes in format
 /// output, so fields are split on a printable ASCII token that names and titles are unlikely to contain.
@@ -614,85 +618,10 @@ fn watch_lifetime() {
             let mut buf = [0u8; 4096];
             let mut stdin = std::io::stdin();
             while matches!(stdin.read(&mut buf), Ok(n) if n > 0) {}
-            LIFETIME_ENDED.store(true, std::sync::atomic::Ordering::SeqCst);
-            // The core ended (graceful shutdown closes this pipe before any kill): clean up exactly
-            // like a normal exit, i.e. stop our private server. A configured server is never ours.
-            stop_private_server();
+            // Only the provider belongs to this lifetime. Backend terminals do not.
             std::process::exit(0);
         });
     }
-}
-
-/// The private server, if this provider started one: (tmux binary, socket). Read by the lifetime
-/// thread, which exits the process without running destructors.
-static PRIVATE: std::sync::Mutex<Option<(PathBuf, PathBuf)>> = std::sync::Mutex::new(None);
-/// Set when the lifetime pipe closed: that thread owns the exit (cleanup, then status 0).
-static LIFETIME_ENDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-fn stop_private_server() {
-    let private = PRIVATE.lock().unwrap_or_else(|e| e.into_inner()).take();
-    if let Some((bin, socket)) = private {
-        let _ = tmux_cli(&bin, &socket, &["kill-server"]);
-        // kill-server returns before the server has exited; it removes its socket as it goes.
-        for _ in 0..40 {
-            if !socket.exists() && tmux_cli(&bin, &socket, &["list-sessions"]).is_err() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(25));
-        }
-        if let Some(dir) = socket.parent() {
-            let _ = std::fs::remove_dir_all(dir);
-        }
-    }
-}
-
-struct PrivateServer {
-    bin: PathBuf,
-    socket: PathBuf,
-    _dir: tempfile::TempDir,
-}
-
-impl Drop for PrivateServer {
-    fn drop(&mut self) {
-        PRIVATE.lock().unwrap_or_else(|e| e.into_inner()).take();
-        let _ = tmux_cli(&self.bin, &self.socket, &["kill-server"]);
-    }
-}
-
-/// `prim-tmux --watch-private PID TMUX SOCKET`: kill the private server once its provider is gone,
-/// even if the provider was SIGKILLed (the extension supervisor's stop) and its cleanup never ran.
-fn watch_private(args: &[String]) -> ! {
-    let (pid, tmux, socket) = (&args[0], PathBuf::from(&args[1]), PathBuf::from(&args[2]));
-    let alive = || {
-        if Path::new("/proc/self").exists() {
-            Path::new(&format!("/proc/{pid}")).exists()
-        } else {
-            std::process::Command::new("/bin/kill").args(["-0", pid]).status().is_ok_and(|s| s.success())
-        }
-    };
-    while alive() {
-        std::thread::sleep(Duration::from_millis(500));
-    }
-    let _ = tmux_cli(&tmux, &socket, &["kill-server"]);
-    // The private socket's own temporary directory (created by the provider under /tmp).
-    if let Some(dir) = socket.parent().filter(|d| d.file_name().is_some_and(|n| n.to_string_lossy().starts_with("prim-tmux"))) {
-        let _ = std::fs::remove_dir_all(dir);
-    }
-    std::process::exit(0);
-}
-
-fn spawn_private_watchdog(tmux: &PathBuf, socket: &PathBuf) {
-    let Ok(exe) = std::env::current_exe() else { return };
-    let _ = std::process::Command::new(exe)
-        .arg("--watch-private")
-        .arg(std::process::id().to_string())
-        .arg(tmux)
-        .arg(socket)
-        .env_remove("PRIM_EXTENSION_LIFETIME")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
 }
 
 fn default_name(instance: &str) -> String {
@@ -712,17 +641,12 @@ mod platform_tests {
 #[tokio::main]
 async fn main() {
     let argv: Vec<String> = std::env::args().collect();
-    if argv.get(1).map(String::as_str) == Some("--watch-private") && argv.len() == 5 {
-        watch_private(&argv[2..]);
-    }
-    watch_lifetime();
-    let result = run().await;
-    if LIFETIME_ENDED.load(std::sync::atomic::Ordering::SeqCst) {
-        // Its own cleanup stops the private server, which can end run() first: let it finish and exit.
-        loop {
-            std::thread::park();
-        }
-    }
+    let result = if argv.get(1).map(String::as_str) == Some("server") {
+        owned_server::command(&argv[2..]).await
+    } else {
+        watch_lifetime();
+        run().await
+    };
     let code = match result {
         Ok(()) => 0,
         Err(e) => {
@@ -736,17 +660,11 @@ async fn main() {
 async fn run() -> Result<(), String> {
     let a = args()?;
     let endpoint = std::env::var("PRIM_SOCKET").map_err(|_| "PRIM_SOCKET is not set")?;
-    let mut private = None;
     let socket = match a.socket.clone() {
         Some(s) => s,
         None => {
-            let dir = tempfile::Builder::new().prefix("prim-tmux").tempdir_in("/tmp").map_err(|e| e.to_string())?;
-            let socket = dir.path().join("s");
-            // Our own server: the one call that may start one.
-            tmux_run(&a.tmux, &socket, &[], &["new-session", "-d", "-s", "prim"])?;
-            private = Some(PrivateServer { bin: a.tmux.clone(), socket: socket.clone(), _dir: dir });
-            *PRIVATE.lock().unwrap_or_else(|e| e.into_inner()) = Some((a.tmux.clone(), socket.clone()));
-            spawn_private_watchdog(&a.tmux, &socket);
+            let socket = owned_server::socket(None, false).await?;
+            owned_server::ensure(&a.tmux, &socket)?;
             socket
         }
     };
@@ -756,18 +674,13 @@ async fn run() -> Result<(), String> {
     loop {
         match registration(&a, &endpoint, &socket).await {
             Ok(()) => {
-                if private.is_some() {
-                    return Err("the private tmux server went away".into());
-                }
-                // Wait for a server behind the configured socket.
+                // Wait without creating another server. An explicit stop must remain stopped
+                // while this provider is running; only a new provider start creates an absent server.
                 while tmux_cli(&a.tmux, &socket, &["list-sessions", "-F", "#{session_name}"]).map(|s| s.trim().is_empty()).unwrap_or(true) {
                     tokio::time::sleep(Duration::from_millis(500)).await;
                 }
             }
-            Err(e) => {
-                drop(private);
-                return Err(e);
-            }
+            Err(e) => return Err(e),
         }
     }
 }

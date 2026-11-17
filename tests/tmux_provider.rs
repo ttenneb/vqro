@@ -1,7 +1,11 @@
 //! prim-tmux against an in-test fake core (provider-v0 section 9) and a private tmux 3.7b server.
 //! Opt-in: cargo test --test tmux_provider -- --ignored
-//! Every tmux call uses this test's own -S socket and allowlisted environment; Drop kills only it.
+//! Every tmux call uses this test's own -S socket and allowlisted environment; cleanup stops only it.
+
 #![cfg(unix)]
+
+#[path = "cases/tmux_lifetime.rs"]
+mod lifetime;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -318,7 +322,7 @@ async fn native_pause_ends_the_stream_with_a_gap_and_a_reopen_repaints() {
 
 #[tokio::test]
 #[ignore]
-async fn private_server_is_started_synced_and_killed_when_the_core_goes() {
+async fn private_server_survives_when_the_core_goes() {
     let out = Command::new("/usr/bin/tmux").arg("-V").env_clear().output().unwrap();
     assert_eq!(out.stdout, b"tmux 3.7b\n");
     let root = tempfile::Builder::new().prefix("ptq").tempdir_in("/tmp").unwrap();
@@ -331,8 +335,10 @@ async fn private_server_is_started_synced_and_killed_when_the_core_goes() {
         .env("PATH", "/usr/bin:/bin")
         .env("TERM", "xterm-256color")
         .env("PRIM_SOCKET", &endpoint)
+        .env("PRIM_STATE_DIR", root.path())
         .spawn()
         .unwrap();
+    let _server = lifetime::ServerCleanup(root.path().to_path_buf());
     let mut provider = Provider(child);
     let (sock, _) = tokio::time::timeout(Duration::from_secs(10), listener.accept()).await.unwrap().unwrap();
     let (r, w) = sock.into_split();
@@ -345,10 +351,10 @@ async fn private_server_is_started_synced_and_killed_when_the_core_goes() {
     let pane = &sync["params"]["resources"][0];
     assert_eq!(pane["data"]["session"], "prim");
     core.reply(&sync, json!({})).await;
-    // Find our private server: a tmux server process whose socket is under /tmp/prim-tmux*.
+    // Find only the server at this test's owned state root.
     let servers = || -> Vec<String> {
         let out = Command::new("pgrep").args(["-f", "-a", "tmux"]).output().unwrap();
-        String::from_utf8_lossy(&out.stdout).lines().filter(|l| l.contains("/tmp/prim-tmux") && l.contains("new-session")).map(String::from).collect()
+        String::from_utf8_lossy(&out.stdout).lines().filter(|l| l.contains(root.path().to_str().unwrap()) && l.contains("new-session")).map(String::from).collect()
     };
     let mine: Vec<String> = servers().into_iter().filter(|l| {
         let pid = l.split_whitespace().next().unwrap();
@@ -356,7 +362,7 @@ async fn private_server_is_started_synced_and_killed_when_the_core_goes() {
     }).collect();
     assert_eq!(mine.len(), 1, "exactly our private server: {mine:?}");
     let pid = mine[0].split_whitespace().next().unwrap().to_string();
-    // The core goes away: the provider exits and kills only its private server.
+    // The core goes away: the provider exits, but backend terminals must survive.
     drop(core);
     let status = tokio::task::spawn_blocking(move || {
         let start = std::time::Instant::now();
@@ -373,31 +379,31 @@ async fn private_server_is_started_synced_and_killed_when_the_core_goes() {
     .await
     .unwrap();
     assert!(status.is_some(), "provider exits when the core disconnects");
-    for _ in 0..100 {
-        if !Path::new(&format!("/proc/{pid}")).exists() {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    let _ = Command::new("kill").args(["-KILL", &pid]).status();
-    panic!("private tmux server {pid} survived the provider");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(Path::new(&format!("/proc/{pid}")).exists(), "server died with its provider");
+    lifetime::stop(root.path());
 }
 
 #[tokio::test]
 #[ignore]
-async fn private_server_dies_with_a_sigkilled_provider() {
+async fn private_server_survives_a_sigkilled_provider() {
     // The extension supervisor stops providers with SIGKILL: no cleanup code runs in the provider.
     let root = tempfile::Builder::new().prefix("ptk").tempdir_in("/tmp").unwrap();
     let endpoint = root.path().join("core.sock");
     let listener = UnixListener::bind(&endpoint).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_prim-tmux"))
+    // Allows a pinned old provider to demonstrate the regression without editing production code.
+    let binary = std::env::var_os("TMUX_LIFETIME_PROVIDER_BIN").map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_prim-tmux")));
+    let child = Command::new(binary)
         .args(["--tmux", "/usr/bin/tmux"])
         .env_clear()
         .env("HOME", root.path())
         .env("PATH", "")
         .env("PRIM_SOCKET", &endpoint)
+        .env("PRIM_STATE_DIR", root.path())
         .spawn()
         .unwrap();
+    let _server = lifetime::ServerCleanup(root.path().to_path_buf());
     let mut provider = Provider(child);
     let (sock, _) = tokio::time::timeout(Duration::from_secs(10), listener.accept()).await.unwrap().unwrap();
     let (r, w) = sock.into_split();
@@ -420,23 +426,15 @@ async fn private_server_dies_with_a_sigkilled_provider() {
     assert_eq!(mine().len(), 1, "our private server runs");
     provider.0.kill().unwrap();
     provider.0.wait().unwrap();
-    for _ in 0..60 {
-        if mine().is_empty() {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    for pid in mine() {
-        let _ = Command::new("/bin/kill").args(["-KILL", &pid]).status();
-    }
-    panic!("the private tmux server outlived its SIGKILLed provider");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(mine().len(), 1, "the owned server died with its SIGKILLed provider");
+    lifetime::stop(root.path());
 }
 
 #[tokio::test]
 #[ignore]
-async fn lifetime_eof_stops_the_private_server_before_the_provider_exits() {
-    // core.shutdown closes the managed extension's stdin (lifetime pipe) before any kill. The provider
-    // must clean up as on a normal exit: its private server is gone by the time the process is.
+async fn lifetime_eof_keeps_the_server_after_the_provider_exits() {
+    // The inherited lifetime pipe owns only the provider, never backend terminal lifetime.
     let root = tempfile::Builder::new().prefix("ptl").tempdir_in("/tmp").unwrap();
     let endpoint = root.path().join("core.sock");
     let listener = UnixListener::bind(&endpoint).unwrap();
@@ -447,9 +445,11 @@ async fn lifetime_eof_stops_the_private_server_before_the_provider_exits() {
         .env("PATH", "")
         .env("PRIM_SOCKET", &endpoint)
         .env("PRIM_EXTENSION_LIFETIME", "stdin")
+        .env("PRIM_STATE_DIR", root.path())
         .stdin(std::process::Stdio::piped())
         .spawn()
         .unwrap();
+    let _server = lifetime::ServerCleanup(root.path().to_path_buf());
     let mut provider = Provider(child);
     let (sock, _) = tokio::time::timeout(Duration::from_secs(10), listener.accept()).await.unwrap().unwrap();
     let (r, w) = sock.into_split();
@@ -477,10 +477,7 @@ async fn lifetime_eof_stops_the_private_server_before_the_provider_exits() {
     })
     .await
     .unwrap();
-    let left = servers();
-    for pid in &left {
-        let _ = Command::new("/bin/kill").args(["-KILL", pid]).status();
-    }
     assert!(status.0.success(), "provider exits cleanly on EOF");
-    assert!(left.is_empty(), "private server still running after the provider exited: {left:?}");
+    assert_eq!(servers().len(), 1, "server died after provider EOF");
+    lifetime::stop(root.path());
 }
