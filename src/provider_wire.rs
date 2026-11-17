@@ -437,8 +437,22 @@ impl WireProvider {
     }
 }
 
+/// Provider JSON-RPC errors that mean the provider did nothing (provider-v0 9.1, 9.4): protocol
+/// problems, refused before any effect. They are definite rejections with the provider's kind.
+const NO_EFFECT_KINDS: &[&str] = &[
+    "invalid", "unknown_method", "unsupported", "not_found", "stale_generation", "conflict", "forbidden", "overloaded",
+    "too_large",
+];
+
+/// Map a provider's JSON-RPC error. Protocol errors are rejections with no effect; only an unknown
+/// outcome stays indeterminate: the provider's own `backend` error (it may have acted), a lost
+/// connection, a deadline, or a kind this core does not know.
 fn provider_error(error: RpcError) -> AdapterError {
-    if matches!(error.kind(), "disconnected" | "unavailable") { AdapterError::Indeterminate(error.to_string()) }
-    else { AdapterError::Backend(error.to_string()) }
+    match error.kind() {
+        "disconnected" | "unavailable" => AdapterError::Indeterminate(error.to_string()),
+        "timeout" => AdapterError::Timeout(error.to_string()),
+        kind if NO_EFFECT_KINDS.contains(&kind) => AdapterError::RejectedKind { kind: kind.to_string(), message: error.message },
+        _ => AdapterError::Backend(error.to_string()),
+    }
 }
 

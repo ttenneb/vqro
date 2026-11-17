@@ -79,7 +79,7 @@ async fn effects_credit_offsets_gaps_and_dispatched_are_forwarded() {
                             match params["op"].as_str().unwrap() {
                                 "fixture.dispatch" => actor.respond(id, Ok(json!({"outcome":"dispatched","data":{"ok":true}}))),
                                 "fixture.reject" => actor.respond(id, Ok(json!({"outcome":"rejected","error":{"kind":"forbidden","message":"no effect"}}))),
-                                "fixture.error" => actor.respond(id, Err(prim::rpc::RpcError::new("invalid", "native uncertainty"))),
+                                "fixture.error" => actor.respond(id, Err(prim::rpc::RpcError::new("backend", "native uncertainty"))),
                                 "fixture.hang" => { let late = actor.clone(); tokio::spawn(async move { tokio::time::sleep(Duration::from_millis(40)).await; late.respond(id, Ok(json!({"outcome":"observed","data":{"late":true}}))); }); }
                                 other => panic!("unexpected op {other}"),
                             }

@@ -1,35 +1,35 @@
-//! Wire provider protocol errors reach callers as "no effect" (provider-v0 9.4), not "indeterminate".
-//! A real in-process core, with prim::provider_client as an out-of-process-style provider.
+//! Wire provider errors reach callers with the right certainty (provider-v0 9.1, 9.4): protocol errors
+//! mean no effect (outcome rejected, the provider's kind); a provider's `backend` error stays
+//! indeterminate. A real in-process core, with prim::provider_client as the provider.
 
 use std::time::Duration;
 
 use prim::client;
 use prim::provider_client::{Config, Outcome, Provider, ProviderError, Request};
+use prim::rpc::Peer;
 use prim::server::{start, Backend};
 use serde_json::{json, Value};
 
-async fn provider(socket: &std::path::Path) -> (Provider, tokio::sync::mpsc::UnboundedReceiver<Request>) {
+/// Core + a wire provider "wire" with one live resource. Requests are answered by `answer`.
+async fn setup(answer: fn(&str, &Value) -> Result<Outcome, ProviderError>) -> (tempfile::TempDir, prim::core::Shared, Peer, String) {
+    let dir = tempfile::Builder::new().prefix("ppe").tempdir_in("/tmp").unwrap();
+    let socket = dir.path().join("s.sock");
+    let core = start(socket.clone(), dir.path().join("state"), false, Backend::Fake, None).unwrap();
     let caps = json!({"terminal.spawn": {}, "terminal.output": {"raw": true}, "terminal.input": {}, "terminal.kill": {}});
     let mut config = Config::new("wire", "inst-1", caps.as_object().unwrap().clone());
     config.extension = Some("wire".into());
-    let stream = tokio::net::UnixStream::connect(socket).await.unwrap();
-    let (p, rx) = Provider::connect(stream, config).await.unwrap();
+    let stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+    let (p, mut requests) = Provider::connect(stream, config).await.unwrap();
     p.full_sync(vec![json!({"ref": "t1", "incarnation": "", "kind": "terminal", "state": "live"})]).await.unwrap();
-    (p, rx)
-}
-
-#[tokio::test]
-#[ignore = "core issue: src/provider_wire.rs provider_error() maps every provider protocol error to backend/indeterminate"]
-async fn a_provider_not_found_on_attach_is_no_effect_not_indeterminate() {
-    let dir = tempfile::Builder::new().prefix("ppe").tempdir_in("/tmp").unwrap();
-    let socket = dir.path().join("s.sock");
-    let _core = start(socket.clone(), dir.path().join("state"), false, Backend::Fake, None).unwrap();
-    let (_p, mut requests) = provider(&socket).await;
     tokio::spawn(async move {
+        let _keep = p;
         while let Some(r) = requests.recv().await {
             match r {
                 Request::Open(o) => drop(o.respond(Err(ProviderError::new("not_found", "no terminal t1 here")))),
-                Request::Effect(e) => e.respond(Ok(Outcome::Rejected { kind: "backend".into(), message: "unused".into() })),
+                Request::Effect(e) => {
+                    let result = answer(&e.op, &e.args);
+                    e.respond(result);
+                }
             }
         }
     });
@@ -45,8 +45,34 @@ async fn a_provider_not_found_on_attach_is_no_effect_not_indeterminate() {
     })
     .await
     .unwrap();
+    (dir, core, c, rid)
+}
+
+fn by_name(_op: &str, args: &Value) -> Result<Outcome, ProviderError> {
+    // The spawn's `name` picks the provider's answer.
+    match args["name"].as_str().unwrap_or("") {
+        "backend" => Err(ProviderError::new("backend", "outcome unknown")),
+        kind => Err(ProviderError::new(kind, format!("refused: {kind}"))),
+    }
+}
+
+#[tokio::test]
+async fn a_provider_not_found_on_attach_is_no_effect_not_indeterminate() {
+    let (_dir, _core, c, rid) = setup(by_name).await;
     let err = c.call("resource.attach", json!({"resource": rid, "cols": 80, "rows": 24})).await.unwrap_err();
     let data = err.data.clone().unwrap_or_default();
-    assert_ne!(data["outcome"], "indeterminate", "a provider protocol error means no effect (9.4): {err:?}");
-    assert_eq!(err.kind(), "not_found", "{err:?}");
+    assert_eq!((err.kind(), data["outcome"].as_str()), ("not_found", Some("rejected")), "{err:?}");
+}
+
+#[tokio::test]
+async fn provider_protocol_errors_on_effects_are_rejections_and_backend_stays_indeterminate() {
+    let (_dir, _core, c, _) = setup(by_name).await;
+    for kind in ["conflict", "invalid", "unsupported", "not_found", "stale_generation", "overloaded"] {
+        let err = c.call("resource.spawn", json!({"provider": "wire", "argv": ["sh"], "name": kind})).await.unwrap_err();
+        let data = err.data.clone().unwrap_or_default();
+        assert_eq!((err.kind(), data["outcome"].as_str()), (kind, Some("rejected")), "{kind}: {err:?}");
+    }
+    let err = c.call("resource.spawn", json!({"provider": "wire", "argv": ["sh"], "name": "backend"})).await.unwrap_err();
+    let data = err.data.clone().unwrap_or_default();
+    assert_eq!((err.kind(), data["outcome"].as_str()), ("backend", Some("indeterminate")), "{err:?}");
 }
