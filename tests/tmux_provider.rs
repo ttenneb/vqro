@@ -315,3 +315,70 @@ async fn native_pause_ends_the_stream_with_a_gap_and_a_reopen_repaints() {
     read_until(&mut core, 2, b"after-2-pause").await;
     eprintln!("gap kind observed: {gap}");
 }
+
+#[tokio::test]
+#[ignore]
+async fn private_server_is_started_synced_and_killed_when_the_core_goes() {
+    let out = Command::new("/usr/bin/tmux").arg("-V").env_clear().output().unwrap();
+    assert_eq!(out.stdout, b"tmux 3.7b\n");
+    let root = tempfile::Builder::new().prefix("ptq").tempdir_in("/tmp").unwrap();
+    let endpoint = root.path().join("core.sock");
+    let listener = UnixListener::bind(&endpoint).unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_prim-tmux"))
+        .args(["--tmux", "/usr/bin/tmux"])
+        .env_clear()
+        .env("HOME", root.path())
+        .env("PATH", "/usr/bin:/bin")
+        .env("TERM", "xterm-256color")
+        .env("PRIM_SOCKET", &endpoint)
+        .spawn()
+        .unwrap();
+    let mut provider = Provider(child);
+    let (sock, _) = tokio::time::timeout(Duration::from_secs(10), listener.accept()).await.unwrap().unwrap();
+    let (r, w) = sock.into_split();
+    let mut core = Core { r: BufReader::new(r), w, backlog: Vec::new() };
+    let hello = core.read().await;
+    core.reply(&hello, json!({})).await;
+    let reg = core.read().await;
+    core.reply(&reg, json!({"provider": "tmux", "generation": 1, "limits": {"stream_window_bytes": 65536, "max_record_bytes": 1048576}})).await;
+    let sync = core.read().await;
+    let pane = &sync["params"]["resources"][0];
+    assert_eq!(pane["data"]["session"], "prim");
+    core.reply(&sync, json!({})).await;
+    // Find our private server: a tmux server process whose socket is under /tmp/prim-tmux*.
+    let servers = || -> Vec<String> {
+        let out = Command::new("pgrep").args(["-f", "-a", "tmux"]).output().unwrap();
+        String::from_utf8_lossy(&out.stdout).lines().filter(|l| l.contains("/tmp/prim-tmux") && l.contains("new-session")).map(String::from).collect()
+    };
+    let mine: Vec<String> = servers().into_iter().filter(|l| {
+        let pid = l.split_whitespace().next().unwrap();
+        std::fs::read_to_string(format!("/proc/{pid}/environ")).is_ok_and(|e| e.contains(root.path().to_str().unwrap()))
+    }).collect();
+    assert_eq!(mine.len(), 1, "exactly our private server: {mine:?}");
+    let pid = mine[0].split_whitespace().next().unwrap().to_string();
+    // The core goes away: the provider exits and kills only its private server.
+    drop(core);
+    let status = tokio::task::spawn_blocking(move || {
+        let start = std::time::Instant::now();
+        loop {
+            if let Some(s) = provider.0.try_wait().unwrap() {
+                return Some(s);
+            }
+            if start.elapsed() > Duration::from_secs(10) {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    })
+    .await
+    .unwrap();
+    assert!(status.is_some(), "provider exits when the core disconnects");
+    for _ in 0..100 {
+        if !Path::new(&format!("/proc/{pid}")).exists() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let _ = Command::new("kill").args(["-KILL", &pid]).status();
+    panic!("private tmux server {pid} survived the provider");
+}
