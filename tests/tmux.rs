@@ -4,7 +4,7 @@
 use prim::tmux::{Client, Config, Error, GapReason, Notification, PaneEvent, PaneId, PaneStream};
 use std::path::PathBuf;
 use std::process::{Command, Output};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
 struct Server {
@@ -288,16 +288,43 @@ async fn native_pause_after_is_gap_then_labelled_capture_repaint_not_raw_history
     // Independent CLI triggers output without first letting this client's command barrier drain it.
     assert!(server.cli(&["send-keys", "-t", pane.as_str(), "-l", "FLOOD 80000"]).status.success());
     assert!(server.cli(&["send-keys", "-t", pane.as_str(), "-H", "0a"]).status.success());
-    // Deliberate stimulus, not a readiness assumption: stop draining the pipe on this runtime,
-    // while the independent tmux server and producer continue running.
-    std::thread::sleep(Duration::from_millis(3200));
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while !server.root.path().join("flood.done").exists() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
+    // Deliberate stimulus, not a readiness assumption: stop draining the pipe on this runtime (blocking
+    // calls only, so the reader cannot run) while the independent tmux server and producer continue.
+    // tmux pauses a pane when it ages that pane's pending output, which it does as new output arrives.
+    // So, still stalled: wait for the whole flood, let its pending output grow older than pause-after,
+    // then make the pane produce more through the independent CLI. An async wait here let the reader
+    // drain under load (no pause: "continuation not observed", 5/12 runs under CPU load).
+    // tmux stops reading a pane while every attached client is a control client that cannot take more
+    // (server-client.c server_client_check_pane_buffer); then nothing ages the stalled client's output
+    // and whether it pauses is timing. A no-output control client always counts as able to take output
+    // (control.c control_pane_offset), so the pane keeps being read and each read ages our client.
+    let mut keep_reading = Command::new("/usr/bin/tmux")
+        .args(["-N", "-S"])
+        .arg(&server.socket)
+        .args(["-f", "/dev/null", "-C", "attach-session", "-t", "test", "-f", "no-output"])
+        .env_clear()
+        .env("HOME", server.root.path())
+        .env("PATH", "/usr/bin:/bin")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let done = server.root.path().join("flood.done");
+    let started = Instant::now();
+    while !done.exists() {
+        assert!(started.elapsed() < Duration::from_secs(20), "flood did not finish");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::thread::sleep(Duration::from_millis(1000 * u64::from(Config::new(PathBuf::new(), "").pause_after) + 500));
+    for _ in 0..3 {
+        assert!(server.cli(&["send-keys", "-t", pane.as_str(), "-l", "ECHO tick"]).status.success());
+        assert!(server.cli(&["send-keys", "-t", pane.as_str(), "-H", "0a"]).status.success());
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    drop(keep_reading.stdin.take());
+    let _ = keep_reading.kill();
+    let _ = keep_reading.wait();
     // Pause notes may be delayed until control activity. Capture/continue flushes those notes too.
     client.resume(&pane).await.unwrap();
     note(&mut native_notes, |n| matches!(n, Notification::Pause(p) if p == &pane)).await;
