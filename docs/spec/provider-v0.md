@@ -200,11 +200,14 @@ Public calls stay resource-centric: `resource.spawn {provider?, kind, ...}`, `re
   The bridge connects and sends `provider.register {role: "runtime", token}`. The token links its agent resource to
   the hosting terminal (`facts.host`). Not through the PTY: that mixes with output, has no credit, and corrupts on
   any stray byte.
-- **Remote hosts (proposed default, D21).** A bridge on another machine can't reach the core's local endpoint. It reaches the
-  core **through its host's provider**: the provider offers `provider.relay` and carries the bridge's connection over
-  its own transport (a channel in `hc connect`, the ssh session for tmux). The bridge sees the same protocol over a
-  different byte stream; the core sees a provider-relayed connection. Alternatives (a small per-host relay, or local
-  bridges only) are open question 2.
+- **Remote hosts (backlog; D23 proposed supersedes D21's relay default).** A bridge on another machine, or in WSL2 when
+  the core is native Windows, can't reach the core's local endpoint. The mechanism is backend-neutral and chosen
+  later (D23 lists candidates: a stdio connector given as `PRIM_CONNECT` argv, endpoint forwarding started from the
+  prim side, or a backend byte channel as one optional transport). Rules that hold now: the bridge never derives how
+  to reach the core; the provider that places it on a host supplies a usable value (`PRIM_SOCKET`, or later
+  `PRIM_CONNECT`) or refuses the spawn with `unsupported`; whatever carries it is a byte stream of the same
+  LF-delimited JSON-RPC. Today's code injects the core's own endpoint for every bridge spawn (`src/server.rs`,
+  bridge spawn), which is correct only for terminals on the core's host.
 - **Resource kind `agent`.** Facts: `{status: "idle"|"working"|"blocked"|"done", run: {active, settled, aborted?},
   queues: {steering: [], follow_up: []}, requests: [{id, kind, prompt}], host: "r7"}`.
 - **Native capabilities**, declared per runtime, never emulated (D4). For Pi 1.5, from its RPC docs (active-run
@@ -432,6 +435,10 @@ existing status consumers and partial resource events (`src/events.rs`) work unc
   stream's data and close. Resize and close are fire-and-forget; their effect is seen in output or `stream.closed`.
 
 ### 9.6 Runtime bridges (G17)
+
+- **Placement (reserved, D23 proposed).** Facts may carry `machine: {id, name}` (opaque permanent id, display name)
+  and `terminal.spawn` args may carry `placement.machine` (that id). Extensions use these, never ref syntax, to
+  group or place resources by machine. Not implemented; additive.
 
 - `resource.spawn {bridge: true, ...}` opts in. Ordinary shells receive no bridge credentials. The core injects
   `PRIM_BRIDGE_TOKEN` and opaque `PRIM_SOCKET` in spawn `env` (native herdr: `terminal.run.env`; wire:

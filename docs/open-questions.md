@@ -6,10 +6,11 @@ Close a question by linking the decision, commit or experiment that answered it.
 ## Open
 1. **Agent input semantics.** When does mid-turn input take effect in each runtime, and which Claude Code route
    should the adapter use? (`experiments/e1-agent-input.md`, roadmap step 1)
-2. **Remote bridges.** Proposed (D21, `spec/provider-v0.md` section 6): bridges reach the core over the local
-   endpoint (opaque `PRIM_SOCKET`, D22 proposed) with a one-time token, and from other hosts through their host's provider (`provider.relay`). Human to
-   confirm, or choose a small per-host relay, or local bridges only for now. Still open: what an agent view needs
-   beyond today's panels.
+2. **Remote bridges.** Local bridges reach the core over the local endpoint (opaque `PRIM_SOCKET`, D22 proposed)
+   with a one-time token. For other hosts and WSL2 the mechanism must be backend-neutral (D23 proposed; the
+   herdr-core doc relay is rejected): stdio connector (`PRIM_CONNECT`), forwarding from the prim side, or a backend
+   byte channel as an optional transport. Backlog, except that WSL needs it early. Still open: what an agent view
+   needs beyond today's panels.
 3. **Capability granularity.** How fine should backend capabilities be before extensions fill up with special
    cases? Answered only by a second backend (roadmap step 2). First cut: `spec/provider-v0.md` section 3.
 4. **Undo of extension-made changes.** The default revert skips extension writes, so a theme or keymap the user

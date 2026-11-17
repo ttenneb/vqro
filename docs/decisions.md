@@ -304,3 +304,33 @@ after.
 3, 6 and 9). Implementation pending: `core.shutdown` and `prim.shutdown`; a transport module with a Windows
 named-pipe arm; `prim_ext.py` on Windows. Known Windows runtime work is listed in `build-plan.md` ("Windows work").
 Unix behaviour is unchanged.
+
+## D23. Platforms first, multi-machine later, and no backend-specific remote transport (2026-11-17, PROPOSED)
+
+> **Proposed wording for the human**, recording priorities the human set on 2026-11-17. Not binding until confirmed.
+
+**Decision.**
+- **Priorities.** Native Windows and WSL (both modes: prim inside WSL, and native-Windows prim driving WSL terminals)
+  are high priority; macOS is a third stream; daily use on Linux continues in parallel. prim core and TUI run
+  natively on Windows and macOS. Multi-machine (prim on one machine driving another machine's terminals and agents)
+  is a backlog feature (`roadmap.md`).
+- **Nothing now may make multi-machine hard.** Contracts and code keep these properties: the core endpoint stays local
+  and owner-only (D22) and anything remote reaches it by forwarding that terminates locally; resource identity and
+  provider names use permanent backend ids, never hostnames or a host's local aliases; facts and spawn arguments name
+  machines neutrally (`machine`, `placement.machine`); a bridge is given a usable way to reach the core by the
+  provider that places it, or the spawn is refused.
+- **No backend-specific remote transport.** Remote agents reach the core by a backend-neutral mechanism, designed
+  later. A backend's own channel may be one optional transport behind that neutral contract, never the contract.
+  The herdr-core doc-mailbox relay is rejected; its design and spike stay as research only.
+
+**Why.** The human wants prim on every OS they use, including WSL, before spreading across machines, and wants the
+later multi-machine work to stay cheap. A relay built on one backend's documents would tie remote agents to that
+backend, against D14 (any multiplexer) and D21 (providers are swappable). WSL is the first case of an agent on
+another host (a WSL2 process can't open a Windows named pipe), so the neutral reachability rule is needed early.
+
+**Consequences.** **Supersedes D21's third bullet** (remote bridges through the host's provider): `provider.relay` stays
+OPEN and only as "carries a byte stream". Candidate neutral mechanisms, to be chosen later: a stdio connector
+(`prim connect`, reached over ssh or WSL interop and given to bridges as `PRIM_CONNECT` argv), endpoint forwarding
+started from the prim side (ssh `-R` of the local endpoint), or a backend byte channel as an optional transport.
+`roadmap.md` lists the streams and constraints. Findings behind this: `platform-review.md` (scratch, static review of
+main `b851d6c`).
