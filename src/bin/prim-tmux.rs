@@ -502,8 +502,49 @@ impl App {
             tokio::spawn(async move { client.repaint(&id).await })
         });
         let mut started = false;
+        // Input is written by its own task, in order, so a long paste (many send-keys commands) never
+        // stops this loop from draining the pane's output: if it did, the output subscription would
+        // lag and the stream would end with a gap in the middle of the paste. The channel is small and
+        // the loop stops taking input while it is full, so the core's bounded input queue still applies.
+        let (input_tx, mut input_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(4);
+        let (fail_tx, mut fail_rx) = tokio::sync::mpsc::unbounded_channel::<(bool, String)>();
+        let writer = {
+            let (client, id) = (client.clone(), id.clone());
+            tokio::spawn(async move {
+                while let Some(bytes) = input_rx.recv().await {
+                    for chunk in bytes.chunks(16 * 1024) {
+                        match client.input(&id, chunk).await {
+                            Ok(()) => {}
+                            Err(tmux::Error::Rejected(lines)) => {
+                                let msg = lines.iter().map(|l| String::from_utf8_lossy(l)).collect::<Vec<_>>().join("; ");
+                                let _ = fail_tx.send((false, msg));
+                                break;
+                            }
+                            Err(e) => {
+                                // Maybe delivered: never claim rejected, never resend.
+                                let _ = fail_tx.send((true, format!("input outcome unknown: {e}")));
+                                return;
+                            }
+                        }
+                    }
+                }
+            })
+        };
+        let mut held: Option<Vec<u8>> = None;
         loop {
             tokio::select! {
+                permit = input_tx.reserve(), if held.is_some() => match permit {
+                    Ok(permit) => permit.send(held.take().unwrap()),
+                    Err(_) => break,
+                },
+                failure = fail_rx.recv() => match failure {
+                    Some((false, msg)) => { let _ = stream.error(&ProviderError::new("backend", msg)).await; }
+                    Some((true, msg)) => {
+                        let _ = stream.close(json!({"reason": "closed", "message": msg})).await;
+                        break;
+                    }
+                    None => {}
+                },
                 ev = events.recv() => match ev {
                     PaneEvent::Repaint { screen } if !started => {
                         started = true;
@@ -535,22 +576,12 @@ impl App {
                     }
                     _ => {}
                 },
-                cmd = stream.next() => match cmd {
+                cmd = stream.next(), if held.is_none() => match cmd {
                     Some(StreamCommand::Input(bytes)) => {
-                        for chunk in bytes.chunks(16 * 1024) {
-                            match client.input(&id, chunk).await {
-                                Ok(()) => {}
-                                Err(tmux::Error::Rejected(lines)) => {
-                                    let msg = lines.iter().map(|l| String::from_utf8_lossy(l)).collect::<Vec<_>>().join("; ");
-                                    let _ = stream.error(&ProviderError::new("backend", msg)).await;
-                                    break;
-                                }
-                                Err(e) => {
-                                    // Maybe delivered: never claim rejected, never resend.
-                                    let _ = stream.close(json!({"reason": "closed", "message": format!("input outcome unknown: {e}")})).await;
-                                    break;
-                                }
-                            }
+                        match input_tx.try_send(bytes) {
+                            Ok(()) => {}
+                            Err(tokio::sync::mpsc::error::TrySendError::Full(bytes)) => held = Some(bytes),
+                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
                         }
                     }
                     Some(StreamCommand::Resize(cols, rows)) => {
@@ -587,6 +618,9 @@ impl App {
                 }
             }
         }
+        // Input already handed to the writer finishes in order; nothing is resent.
+        drop(input_tx);
+        let _ = writer.await;
         if let Some(list) = self.state.lock().unwrap().streams.get_mut(&pane) {
             list.retain(|n| !Arc::ptr_eq(n, &gone));
         }

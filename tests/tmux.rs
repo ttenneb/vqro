@@ -426,3 +426,24 @@ async fn read_only_timeouts_under_a_flood_keep_the_client_and_replies_paired() {
     client.close().await;
     spawner.close().await;
 }
+
+#[tokio::test]
+#[ignore = "requires /usr/bin/tmux 3.7b; private server"]
+async fn sixteen_kib_of_arbitrary_bytes_arrive_intact_in_one_input_call() {
+    // One `send-keys -H` per input once failed above ~8 000 bytes ("parse error: yacc stack overflow"),
+    // so pastes into tmux panes were rejected whole. The client now splits input into several commands.
+    let server = Server::new();
+    let client = server.client(128).await;
+    let out = server.root.path().join("input.bin");
+    let script = format!("stty raw -echo; head -c 16384 > {}; echo DONE", out.display());
+    let pane = client.spawn(&["/bin/sh", "-c", &script], Some(server.root.path())).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let bytes: Vec<u8> = (0..16384u32).map(|i| (i * 7 % 256) as u8).collect();
+    client.input(&pane, &bytes).await.unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0) < bytes.len() as u64 {
+        assert!(Instant::now() < deadline, "input did not arrive: {:?} bytes", std::fs::metadata(&out).map(|m| m.len()));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(std::fs::read(&out).unwrap(), bytes, "every byte value arrives once, in order");
+}

@@ -20,6 +20,8 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 
 const MAX_COMMAND: usize = 64 * 1024;
 const MAX_INPUT: usize = 16 * 1024;
+/// Bytes per `send-keys -H` command (one argument each); well under tmux's parser limit.
+const SEND_KEYS_BYTES: usize = 2048;
 const CHUNK: usize = 16 * 1024;
 const MAX_WATCHED: usize = 1024;
 const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
@@ -325,10 +327,27 @@ impl Client {
         if bytes.is_empty() {
             return Ok(());
         }
-        let hex: Vec<_> = bytes.iter().map(|b| format!("{b:02x}")).collect();
-        let mut args = vec!["send-keys", "-t", pane.as_str(), "-H"];
-        args.extend(hex.iter().map(String::as_str));
-        self.command(&args).await.map(|_| ())
+        // One `send-keys -H` argument per byte. tmux's command parser fails with "yacc stack overflow"
+        // somewhere above 8 000 arguments (tmux 3.7b), so larger input is sent as several commands,
+        // in order. If one fails, the error says how much was already delivered; nothing is resent.
+        let mut sent = 0;
+        for part in bytes.chunks(SEND_KEYS_BYTES) {
+            let hex: Vec<_> = part.iter().map(|b| format!("{b:02x}")).collect();
+            let mut args = vec!["send-keys", "-t", pane.as_str(), "-H"];
+            args.extend(hex.iter().map(String::as_str));
+            match self.command(&args).await {
+                Ok(_) => sent += part.len(),
+                Err(Error::Rejected(mut lines)) if sent > 0 => {
+                    lines.insert(0, format!("input partly delivered: {sent} of {} bytes before tmux refused the rest", bytes.len()).into_bytes());
+                    return Err(Error::Rejected(lines));
+                }
+                Err(Error::Indeterminate(why)) if sent > 0 => {
+                    return Err(Error::Indeterminate(format!("{why} (after {sent} of {} bytes were delivered)", bytes.len())));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
     }
     /// Native pane layout resize; tmux may constrain it to the containing window.
     pub async fn resize_pane(&self, pane: &PaneId, cols: u16, rows: u16) -> Result<(), Error> {
