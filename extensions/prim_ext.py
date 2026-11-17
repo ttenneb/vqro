@@ -36,6 +36,12 @@ if os.environ.get("PRIM_EXTENSION_LIFETIME") == "stdin":
     threading.Thread(target=_watch_lifetime, daemon=True, name="prim-lifetime").start()
 
 
+MAX_RECORD_BYTES = 64 * 1024 * 1024
+MAX_REQUEST_BYTES = 4 * 1024 * 1024
+NOTIFICATION_BYTES = 4 * 1024 * 1024
+MAX_PENDING = 128
+
+
 class Prim:
     """JSON-RPC over lines. The core may send us requests (command.invoke) and notifications."""
 
@@ -47,43 +53,95 @@ class Prim:
         self.next = 1
         self.waiting = {}
         self.handler = handler
-        self.notes = queue.Queue()  # notifications are handled in order, on one thread
+        self.notes = queue.Queue(maxsize=128)  # ordered; byte charge remains through callback execution
+        self.note_lock = threading.Lock()
+        self.note_bytes = 0
+        self.handlers = threading.BoundedSemaphore(32)
         threading.Thread(target=self._read, daemon=True).start()
         threading.Thread(target=self._notes, daemon=True).start()
 
     def _send(self, msg):
         with self.lock:
-            self.file.write((json.dumps(msg) + "\n").encode())
+            wire = (json.dumps(msg) + "\n").encode()
+            cap = MAX_REQUEST_BYTES if "method" in msg else MAX_RECORD_BYTES
+            if len(wire) > cap:
+                raise PrimError("request exceeds 4 MiB; not sent" if "method" in msg else "reply exceeds recovery envelope; handler may have already run", "too_large")
+            self.sock.sendall(wire)
 
     def call(self, method, params=None):
         ev = threading.Event()
         with self.lock:
+            if len(self.waiting) >= MAX_PENDING:
+                raise PrimError("pending request limit; not sent", "overloaded")
             i = self.next
             self.next += 1
-            self.waiting[i] = [ev, None]
-        self._send({"jsonrpc": "2.0", "id": i, "method": method, "params": params or {}})
-        ev.wait()
-        msg = self.waiting.pop(i)[1]
-        if "error" in msg:
-            raise PrimError(msg["error"].get("message"), (msg["error"].get("data") or {}).get("kind"))
-        return msg.get("result")
+            slot = self.waiting[i] = [ev, None]
+        try:
+            self._send({"jsonrpc": "2.0", "id": i, "method": method, "params": params or {}})
+            if not ev.wait(60):
+                raise PrimError("response deadline; outcome indeterminate, never resend automatically", "timeout")
+            msg = slot[1]
+            if "error" in msg:
+                raise PrimError(msg["error"].get("message"), (msg["error"].get("data") or {}).get("kind"))
+            return msg.get("result")
+        finally:
+            with self.lock:
+                self.waiting.pop(i, None)
+
+    def _queue_note(self, msg, wire_bytes):
+        charge = max(64, wire_bytes)
+        with self.note_lock:
+            if self.note_bytes + charge > NOTIFICATION_BYTES:
+                return False
+            try:
+                self.notes.put_nowait((msg, charge))
+            except queue.Full:
+                return False
+            self.note_bytes += charge
+            return True
 
     def _read(self):
-        for line in self.file:
-            msg = json.loads(line)
-            if "method" in msg and "id" not in msg:
-                self.notes.put(msg)
-            elif "method" in msg:
-                threading.Thread(target=self._dispatch, args=(msg,), daemon=True).start()
-            elif msg.get("id") in self.waiting:
-                slot = self.waiting[msg["id"]]
-                slot[1] = msg
-                slot[0].set()
-        os._exit(0)  # the core went away; the supervisor restarts us
+        try:
+            while True:
+                line = self.file.readline(MAX_RECORD_BYTES + 1)
+                if not line or len(line) > MAX_RECORD_BYTES:
+                    break
+                msg = json.loads(line)
+                if "method" in msg:
+                    if len(line) > MAX_REQUEST_BYTES:
+                        break
+                    if "id" not in msg:
+                        if not self._queue_note(msg, len(line)):
+                            break  # explicit disconnect/gap, never silent cache divergence
+                    elif self.handlers.acquire(blocking=False):
+                        threading.Thread(target=self._request, args=(msg,), daemon=True).start()
+                    else:
+                        self._send({"jsonrpc":"2.0", "id":msg["id"], "error":{"code":-32000,"message":"handler limit; not dispatched","data":{"kind":"overloaded"}}})
+                else:
+                    with self.lock:
+                        slot = self.waiting.get(msg.get("id"))
+                        if slot is not None:
+                            slot[1] = msg
+                            slot[0].set()
+        finally:
+            os._exit(0)  # core/transport failed; supervisor restarts, never replays calls
+
+    def _request(self, msg):
+        try:
+            self._dispatch(msg)
+        finally:
+            self.handlers.release()
+
+    def _note(self, msg, charge):
+        try:
+            self._dispatch(msg)
+        finally:
+            with self.note_lock:
+                self.note_bytes -= charge
 
     def _notes(self):
         while True:
-            self._dispatch(self.notes.get())
+            self._note(*self.notes.get())
 
     def _dispatch(self, msg):
         try:

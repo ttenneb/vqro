@@ -1,11 +1,12 @@
 """Snapshot fencing regressions for the stdlib extension helper (no running core)."""
 import pathlib
+import queue
 import sys
 import threading
 import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "extensions"))
-from prim_ext import Extension
+from prim_ext import Extension, Prim, NOTIFICATION_BYTES
 
 
 def snapshot(seq, value):
@@ -14,6 +15,37 @@ def snapshot(seq, value):
 
 def event(seq, value):
     return {"epoch": "boot", "seq": seq, "type": "entries", "data": {"changes": [{"key": "doc/test/value", "version": seq, "value": value}]}}
+
+
+class InboundBounds(unittest.TestCase):
+    def test_notification_bytes_stay_charged_until_callback_finishes(self):
+        prim = Prim.__new__(Prim)
+        prim.notes = queue.Queue(maxsize=128)
+        prim.note_lock = threading.Lock()
+        prim.note_bytes = 0
+        prim.handler = lambda method, params: None
+        msg = {"method":"event", "params":{}}
+        accepted = 0
+        while prim._queue_note(msg, 65536):
+            accepted += 1
+        self.assertEqual(accepted, NOTIFICATION_BYTES // 65536)
+        self.assertLessEqual(prim.note_bytes, NOTIFICATION_BYTES)
+        prim._note(*prim.notes.get_nowait())
+        self.assertTrue(prim._queue_note(msg, 65536))
+        while not prim.notes.empty():
+            prim._note(*prim.notes.get_nowait())
+        self.assertEqual(prim.note_bytes, 0)
+
+    def test_tiny_notifications_have_a_metadata_and_count_bound(self):
+        prim = Prim.__new__(Prim)
+        prim.notes = queue.Queue(maxsize=128)
+        prim.note_lock = threading.Lock()
+        prim.note_bytes = 0
+        count = 0
+        while prim._queue_note({}, 1):
+            count += 1
+        self.assertEqual(count, 128)
+        self.assertEqual(prim.note_bytes, 128*64)
 
 
 class SnapshotFence(unittest.TestCase):
