@@ -253,35 +253,43 @@ ambiguous-width glyphs in CJK locales, non-Mono Nerd Fonts) will misalign, which
 only emoji-presentation characters and a 2-cell column, and a roomy Nerd Font variant exists. Recovery: revert the
 `icons` transaction, delete the entry, or pick Default.
 
-## D21. Adapters and runtime bridges are out-of-process providers (2026-11-17, PROPOSED)
+## D21. Providers and explicit safe-mode recovery choices (2026-11-17, REVISED)
 
-> **Proposed, not binding** until the human confirms it. Until then D14–D20 stand and the in-process adapter stays.
+> **Human-confirmed safe-mode policy, 2026-11-17.** The provider migration continues; remote relay remains OPEN.
+> The earlier proposal that privileged `essential` providers survive safe mode is withdrawn.
 
 **Decision.**
 - Backend adapters and agent-runtime bridges are **providers**: out-of-process programs speaking the core protocol,
   registered per connection with a generation, publishing resources with identity (provider, instance, ref,
   incarnation), serving effects with deadlines and D10 outcomes, and serving streams with credit that follows the
   viewer's consumption (`spec/provider-v0.md`). Adding a backend or runtime edits no core, server or client code.
-- Providers marked `essential` keep running in **safe mode**, so recovery never makes every terminal unavailable. They
-  can still be disabled explicitly, and the recovery surface never depends on them.
+- **Safe mode starts nothing:** no extensions or provider links run automatically. There is no `essential` flag.
+  The built-in Rust recovery chooser lists declared extensions with descriptions and checkboxes, grouped into
+  providers/backends (`kind: "provider"`, or remembered provider-registration owners) and UI extensions. The human
+  chooses a minimal set, enables selected entries, or leaves safe mode. The prefix menu always reaches the chooser.
+- Choices are a **session-only allowlist**, exposed in snapshots, not edits to `extension/<name>.enabled`. Explicit
+  allowance may temporarily run a normally disabled declaration. Enter/re-enter clears choices; leaving restores
+  ordinary enabled declarations. Stopping provider links never kills backend-owned terminals or replays input.
 - **Remote bridges reach the core through their host's provider** (`provider.relay`, carried over the provider's own
   transport). Recommended default; the human confirms or picks an alternative (open question 2).
 
 **Why.** D14 asks that a backend or runtime be a thin, quick addition; a built-in `Backend` enum in `server.rs` and
 `main.rs` contradicts that, and two implementations per side must satisfy one contract before it is called stable.
 The tmux check (2026-11-16) showed ids reused after a server restart and output dropped while paused, so identity
-and gap reporting must be in the contract, not left to each adapter. Safe mode exists for recovery; dropping the
-providers would remove the terminals the user is trying to recover. Relaying through the host's provider keeps
-bridges independent of where they run, without a separate prim process per host.
+and gap reporting must be in the contract, not left to each adapter. An unknown broken extension/provider must not
+be privileged during recovery: start empty, then let the human choose explicitly. The chooser itself cannot depend
+on extensions. Relaying through the host's provider remains a recommendation, not a confirmed relay contract.
 
 **Consequences.** Migration order in `spec/provider-v0.md` section 8: reshape in process, bounded streams, wire
 protocol with an external fake provider and a conformance suite, herdr-core out of process, then tmux and the Pi
-bridge in parallel. `extension/<name>` gains `essential`. `workspace.snapshot` gains `providers` (replacing
-`adapters`). Open: the exact `provider.relay` mapping onto `hc connect` channels and ssh.
+bridge in parallel. Provider declarations use `kind: "provider"`, `description`, and `default: true` for the default
+spawn backend. `workspace.snapshot` exposes `safe_mode_allow` and remembered `provider_extensions` alongside
+`providers`. `prim.safe_mode.allow {name,on}` is a built-in recovery command. `prim serve` now uses declared providers; explicit native test/embedder adapters stay stopped in safe mode and
+have no chooser checkbox. Open: the exact `provider.relay` mapping.
 
-## D22. The core endpoint is opaque and owner-only; stopping the core is a protocol request (2026-11-17, PROPOSED)
+## D22. The core endpoint is opaque and owner-only; stopping the core is a protocol request (2026-11-17, CONFIRMED)
 
-> **Proposed, not binding** until the human confirms it. Applies D12 to two contract points found in the
+> **Confirmed by the human, 2026-11-17; binding.** Applies D12 to two contract points found in the
 > portability audit (`~/.local/share/herdr/scratch/prim-independent-review/portability-audit.md`, static, main 267a45a).
 
 **Decision.**
@@ -301,9 +309,9 @@ already neutral or needed wording only. Both are cheap to fix before the provide
 after.
 
 **Consequences.** Spec text updated (`core-protocol.md`, Endpoint and transport, Session; `provider-v0.md` sections 1,
-3, 6 and 9). Implementation pending: `core.shutdown` and `prim.shutdown`; a transport module with a Windows
-named-pipe arm; `prim_ext.py` on Windows. Known Windows runtime work is listed in `build-plan.md` ("Windows work").
-Unix behaviour is unchanged.
+3, 6 and 9). `core.shutdown` and `prim.shutdown` are implemented, including commit/reply draining. CLI stop is
+protocol-first with a legacy no-answer signal fallback. Windows named-pipe transport and `prim_ext.py` on Windows
+remain implementation work; confirmation of the contract is not a claim that Windows is implemented.
 
 ## D23. Multi-machine stays cheap, and no backend-specific remote transport (2026-11-17)
 
@@ -334,3 +342,4 @@ OPEN and only as "carries a byte stream". Candidate neutral mechanisms, to be ch
 started from the prim side (ssh `-R` of the local endpoint), or a backend byte channel as an optional transport.
 `roadmap.md` lists the streams and constraints. Findings behind this: `platform-review.md` (scratch, static review of
 main `b851d6c`).
+

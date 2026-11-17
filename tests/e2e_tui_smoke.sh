@@ -6,12 +6,14 @@
 # Checks: new tab + input echo; input after a 30 MB output flood; core restart -> reconnect, reattach and
 # input; quit while the core cannot start; no leftover processes (tmux servers matched by socket path).
 set -u
-P=${1:?prim binary}
+SOURCE_P=${1:?prim binary}
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 HC=$HOME/.local/bin/herdr-core
 R=$(mktemp -d /tmp/ptsXXXXXX)
 mkdir -p "$R"/{home,st,cfg,xst,run,bin,ext}
 chmod 700 "$R/run"
+P="$R/bin/prim"
+cp "$SOURCE_P" "$P"
 cp "$REPO"/extensions/*.py "$REPO"/extensions/defaults.json "$R/ext/"
 cp -R "$REPO"/extensions/pi_bridge "$R/ext/"
 for t in python3 sh cat ls env head yes; do ln -sf "$(command -v $t)" "$R/bin/$t"; done
@@ -59,6 +61,13 @@ check "input after 30 MB output flood" $([ "$(seen smoke-F)" -ge 1 ] && echo 1 |
 for pid in $(cores); do kill "$pid"; done; sleep 5
 $T send-keys -l 'echo smoke-B'; $T send-keys Enter; sleep 2
 check "core restart: reconnect + reattach + input" $([ "$(seen smoke-B)" -ge 1 ] && echo 1 || echo 0)
+# Reinstall only this run's private executable, leaving the open UI on an unlinked inode.
+ui_pid=$($T display-message -p '#{pane_pid}')
+cp "$SOURCE_P" "$R/bin/prim-new"; mv "$R/bin/prim-new" "$P"
+check "replacement leaves old TUI inode deleted" $([ "$(readlink /proc/$ui_pid/exe)" = "$P (deleted)" ] && echo 1 || echo 0)
+for pid in $(cores); do kill "$pid"; done; sleep 5
+$T send-keys -l 'echo smoke-reinstalled'; $T send-keys Enter; sleep 2
+check "reinstall: restart core, re-exec installed image and input" $([ "$(seen smoke-reinstalled)" -ge 1 ] && [ "$(readlink /proc/$ui_pid/exe)" = "$P" ] && echo 1 || echo 0)
 # Failed reconnect: the state dir cannot be written, so the auto-started core cannot start.
 chmod 500 "$R/st"; for pid in $(cores); do kill "$pid"; done; sleep 4
 $T send-keys C-g; sleep 0.4; $T send-keys q; sleep 2

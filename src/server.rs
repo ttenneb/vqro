@@ -69,9 +69,10 @@ pub fn start(socket: std::path::PathBuf, state: std::path::PathBuf, safe: bool, 
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
     }
-    let (tx, rx) = mpsc::unbounded_channel();
-    if let Some(handle) = backend.start(tx) {
-        crate::core::add_adapter(&core, handle, rx, true);
+    // Only explicit test/embedder adapters remain; even they stay stopped in safe mode.
+    if !safe {
+        let (tx, rx) = mpsc::unbounded_channel();
+        if let Some(handle) = backend.start(tx) { crate::core::add_adapter(&core, handle, rx, true); }
     }
     ext::reconcile(&core);
     let c = core.clone();
@@ -83,12 +84,16 @@ pub fn start(socket: std::path::PathBuf, state: std::path::PathBuf, safe: bool, 
     Ok(core)
 }
 
-/// Declare the default extensions listed in `<dir>/defaults.json`:
-/// `{"version": 2, "extensions": [{"name", "argv", "description"?, "kind"?, "enabled"?, "default"?, "since"?}]}`
-/// (`.py` paths relative to `dir`; a bare `prim-*` program resolves next to this binary when present).
-/// Each entry is offered once per state dir: all on first run, and later only entries whose `since` is
-/// newer than the version recorded in `doc/prim/defaults` (migrations of existing installs). An entry
-/// that already exists is left as it is, and removing a default extension sticks.
+async fn stop_recovery_providers(handles: Vec<crate::adapter::AdapterHandle>) {
+    let mut tasks=tokio::task::JoinSet::new();
+    for handle in handles { tasks.spawn(async move { let _=handle.shutdown().await; }); }
+    if tokio::time::timeout(std::time::Duration::from_secs(2),async { while tasks.join_next().await.is_some() {} }).await.is_err() {
+        eprintln!("prim: safe-mode provider stop deadline; transport cleanup unconfirmed"); tasks.abort_all();
+    }
+}
+
+/// Declare versioned defaults once; preserve existing entries and deliberate removals.
+/// Provider metadata (`kind`, `default`, `description`) remains part of each declaration.
 fn install_defaults(store: &mut crate::store::Store, dir: &std::path::Path) {
     let Ok(bytes) = std::fs::read(dir.join("defaults.json")) else { return };
     let Ok(list) = serde_json::from_slice::<Value>(&bytes) else { return };
@@ -378,7 +383,13 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> Rp
     if method != "provider.register" && conn.wire.is_provider() { conn.wire.validate(core, &p)?; }
     match method {
         "core.shutdown" => Ok(json!({"outcome":"accepted"})),
-        "provider.register" => conn.wire.register(core, p).await,
+        "provider.register" => {
+            let owner=conn.extension.lock().unwrap().clone();
+            { let c=core.lock().unwrap(); if c.safe_mode && owner.as_ref().is_none_or(|name| !c.safe_mode_allow.contains(name)) {
+                return Err(provider::rejected("forbidden", "safe mode requires an explicitly allowed extension owner"));
+            } }
+            conn.wire.register(core,p,owner).await
+        },
         "provider.sync" => conn.wire.sync(core, p),
         "hello" => {
             let h: Hello = params(p)?;
@@ -792,18 +803,38 @@ async fn invoke_deadline(core: &Shared, author: &str, name: &str, args: Value, d
         "prim.layout.reset" => layout_reset(core, author).await,
         "prim.revert" => revert(core, author, arg("txn").as_u64()).await,
         "prim.safe_mode" => {
-            let on = {
-                let mut c = core.lock().unwrap();
-                c.safe_mode = arg("on").as_bool().unwrap_or(!c.safe_mode);
-                let on = c.safe_mode;
-                c.emit("safe_mode", json!({"on": on}));
-                on
+            let gate=core.lock().unwrap().recovery_gate.clone(); let _guard=gate.lock().await;
+            let (on,handles)={
+                let mut c=core.lock().unwrap();
+                let on=arg("on").as_bool().unwrap_or(!c.safe_mode);
+                c.safe_mode=on; c.safe_mode_allow.clear();
+                let handles=if on { ext::stop_all_locked(&mut c); c.fence_providers(None) } else { Vec::new() };
+                let data=json!({"on":on,"allow":c.safe_mode_allow,"provider_extensions":c.provider_extensions}); c.emit("safe_mode",data);
+                (on,handles)
             };
-            if on {
-                ext::stop_all(core);
-            }
+            if on { ext::shutdown(core).await; stop_recovery_providers(handles).await; }
             ext::reconcile(core);
-            Ok(json!({"safe_mode": on}))
+            Ok(json!({"safe_mode":on,"safe_mode_allow":core.lock().unwrap().safe_mode_allow}))
+        }
+        "prim.safe_mode.allow" => {
+            let gate=core.lock().unwrap().recovery_gate.clone(); let _guard=gate.lock().await;
+            let ext_name=arg("name").as_str().map(String::from).ok_or_else(|| RpcError::invalid("needs name"))?;
+            let on=arg("on").as_bool().ok_or_else(|| RpcError::invalid("needs boolean on"))?;
+            let handles={
+                let mut c=core.lock().unwrap();
+                if !c.safe_mode { return Err(RpcError::new("conflict","safe mode is not on")); }
+                if c.store.get(&format!("extension/{ext_name}")).is_none() { return Err(RpcError::new("not_found","no declared extension")); }
+                if on {
+                    c.safe_mode_allow.insert(ext_name.clone());
+                    if let Some(runtime)=c.exts.get_mut(&ext_name) { if runtime.status=="failed" { runtime.crashes.clear(); runtime.status="stopped".into(); } }
+                } else { c.safe_mode_allow.remove(&ext_name); }
+                let handles=if on { Vec::new() } else { c.fence_providers(Some(&ext_name)) };
+                let data=json!({"on":true,"allow":c.safe_mode_allow,"provider_extensions":c.provider_extensions}); c.emit("safe_mode",data);
+                handles
+            };
+            ext::reconcile(core);
+            stop_recovery_providers(handles).await;
+            Ok(json!({"safe_mode":true,"safe_mode_allow":core.lock().unwrap().safe_mode_allow}))
         }
         "prim.extension.disable" | "prim.extension.enable" => {
             let ext_name = arg("name").as_str().map(String::from).or_else(|| arg("text").as_str().map(String::from)).ok_or_else(|| RpcError::invalid("needs `name`"))?;

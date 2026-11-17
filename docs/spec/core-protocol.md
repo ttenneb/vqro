@@ -9,7 +9,7 @@ the core forwards `command.invoke` to the connection that registered the command
 `data.kind`: `invalid`, `conflict`, `not_found`, `unavailable`, `forbidden`, `backend`, `disconnected`, `io`,
 `durability_unconfirmed`, `timeout`, `overloaded`, `unsupported`, `stale_generation`, `too_large`.
 
-## Endpoint and transport (D12, D22 proposed)
+## Endpoint and transport (D12, D22 confirmed)
 
 - The core listens on one **local endpoint**: a reliable, ordered byte stream per connection, reachable only by the
   user who started the core. `PRIM_SOCKET` names it. Clients, extensions, providers and bridges treat the value as
@@ -36,7 +36,7 @@ the core forwards `command.invoke` to the connection that registered the command
 
 Every change is recorded with the connection's author (`ext:<name>`, `<client>:<n>`).
 
-`core.shutdown` is implemented (broader D22 transport work remains proposed). The accepted reply is locally
+`core.shutdown` is implemented (D22 is confirmed; Windows transport remains implementation work). The accepted reply is locally
 written/flushed before stop begins, not a remote-read guarantee. The core stops accepting and rejects new workspace
 commits, then gives admitted commits3s to persist, publish and run adoption hooks. At expiry queued/unstarted
 commits are cleanly rejected without effects; an already dispatched durable write remains indeterminate, never
@@ -195,8 +195,8 @@ so `prim call` works from any pane. An explicit `env.PRIM_SOCKET` is kept, and a
 registration may wait five seconds for durable host identity and returns `resume_token`; bootstrap and resume use
 same `params.token`. Private durable current+previous credentials bind exact host/provider/instance and expire
 on host removal. Lost-first-reply recovery, rotation and core-restart identity restoration are tested. Ordinary
-spawns receive no token. Backends run as provider extensions (Default extensions); no proposed essential/safe-mode
-policy is implemented yet.
+spawns receive no token. Backends run as provider extensions. Safe mode uses the human-confirmed empty-start/
+session-allowlist policy below; no provider is privileged as essential.
 
 `terminal.exit {exit_code:true|false}` declares whether numeric exit codes are natively reportable; absent/unknown
 parameters imply no numeric-code guarantee. Never manufacture a code from an unknown reason.
@@ -309,10 +309,30 @@ commands are local and are not timed by this forwarding deadline. Expiry returns
 replies are ignored; timeout/cancellation removes the pending call entry. The Rust `Peer::call` helper independently
 has a 60-second default; callers needing longer waits use `call_with_timeout` with an appropriate local deadline.
 
+## Safe-mode recovery (D21 revised)
+
+`prim.safe_mode {on}` is a built-in command (`command.invoke`): entering/re-entering stops all extensions and
+provider transport links, clears the session allowlist and rejects unapproved provider registration. Backend-owned
+terminals are not killed. `prim serve` has no in-process backend: herdr/tmux are declared provider extensions. Explicit in-process
+adapters used by tests/embedders also remain stopped in safe mode and have no chooser entry. Leaving restores ordinary enabled declarations.
+
+`prim.safe_mode.allow {name,on}` temporarily starts/stops one declared extension while safe mode is on. It never
+writes `extension/<name>.enabled` or history; an explicit allowance may override a saved disabled value for this
+session. Healthy repeated allowance is idempotent, not a provider restart. Unknown names fail `not_found`; use
+outside safe mode fails `conflict`. Provider owner removal immediately fences old generations/streams, closes
+links and rejects late registration. Snapshot fields `safe_mode_allow: [name]` and `provider_extensions: [name]`
+are session-only; `safe_mode {on,allow,provider_extensions}` events keep clients current.
+
+The Rust client opens a built-in recovery popup when safe mode is on, also reachable through the prefix menu:
+provider/backend and UI groups, descriptions, checkboxes, Enable selected and Leave safe mode. Classification uses
+`extension/<name>.kind: "provider"` or remembered successful registration owners (from `hello.extension`). Provider
+entries may also declare `default:true`; that default-backend migration is independent of this chooser. Recovery
+works without any extension, retains the prefix inside the popup, and ignores extension themes while in safe mode.
+
 ## Contributions (D17)
 
 Extensions contribute `menu/*` and `binding/*` entries carrying `owner`; clients hide them while that extension is
-disabled, removed or in safe mode, or when their command is unavailable.
+disabled, removed, not explicitly allowed in safe mode, or when their command is unavailable.
 
 Contributions are reconciled on activation (helper behaviour, `extensions/prim_ext.py` `contribute`). An extension's
 first contribution of a run is its whole declared set, so entries it owns (`owner` = its name) under `menu/`,

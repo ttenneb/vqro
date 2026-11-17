@@ -1,6 +1,7 @@
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 use serde_json::Value;
+use std::io::Write;
 
 use prim::{client, paths, server, tui};
 
@@ -37,6 +38,14 @@ enum Cmd {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let _ = client::executable_path(); // Remember the invoked install path before cwd/PATH can change.
+    match run().await {
+        Err(error) if error.downcast_ref::<std::io::Error>().is_some_and(|e| e.kind() == std::io::ErrorKind::BrokenPipe) => Ok(()),
+        result => result,
+    }
+}
+
+async fn run() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Serve { safe, fake } => serve(safe, fake).await,
         Cmd::Tui => {
@@ -47,7 +56,7 @@ async fn main() -> Result<()> {
         Cmd::Status => {
             match client::connect(&paths::socket_path()?, "cli").await {
                 Ok((peer, _, hello)) => {
-                    println!("running: {hello}");
+                    writeln!(std::io::stdout(), "running: {hello}")?;
                     let mine = client::build_stamp();
                     if let Ok(list) = peer.call("client.list", serde_json::Value::Null).await {
                         for c in list["clients"].as_array().into_iter().flatten() {
@@ -59,11 +68,11 @@ async fn main() -> Result<()> {
                                 (None, _) if c["client"].is_string() => " (old build without self-restart: quit and reopen it)",
                                 _ => "",
                             };
-                            println!("client: {} {}{}", c["author"].as_str().unwrap_or("?"), c["version"].as_str().unwrap_or(""), stale);
+                            writeln!(std::io::stdout(), "client: {} {}{}", c["author"].as_str().unwrap_or("?"), c["version"].as_str().unwrap_or(""), stale)?;
                         }
                     }
                 }
-                Err(e) => println!("not running ({e})"),
+                Err(e) => writeln!(std::io::stdout(), "not running ({e})")?,
             }
             Ok(())
         }
@@ -82,7 +91,7 @@ async fn call(method: &str, params: Value) -> Result<()> {
     let (peer, _incoming, _) = client::connect(&paths::socket_path()?, "cli").await?;
     match peer.call(method, params).await {
         Ok(v) => {
-            println!("{}", serde_json::to_string_pretty(&v)?);
+            writeln!(std::io::stdout(), "{}", serde_json::to_string_pretty(&v)?)?;
             Ok(())
         }
         Err(e) => bail!("{e}"),
@@ -95,7 +104,7 @@ async fn stop() -> Result<()> {
         peer.call_with_timeout("core.shutdown", Value::Null, std::time::Duration::from_secs(1)).await.map_err(anyhow::Error::from)
     }).await;
     match request {
-        Ok(Ok(value)) if value["outcome"] == "accepted" => { println!("core shutdown accepted"); return Ok(()); }
+        Ok(Ok(value)) if value["outcome"] == "accepted" => { writeln!(std::io::stdout(), "core shutdown accepted")?; return Ok(()); }
         Ok(Ok(_)) => bail!("core answered without accepting shutdown; pid fallback not used"),
         Ok(Err(error)) if error.downcast_ref::<prim::rpc::RpcError>().is_some_and(|e| !matches!(e.kind(), "timeout" | "disconnected")) => return Err(error),
         _ => {} // No answer: legacy Unix fallback only; never bypass a protocol refusal.
@@ -113,7 +122,7 @@ fn stop_pidfile() -> Result<()> {
         bail!("could not stop pid {}", pid.trim());
     }
     let _ = std::fs::remove_file(pidfile);
-    println!("stopped core (pid {})", pid.trim());
+    writeln!(std::io::stdout(), "stopped core (pid {})", pid.trim())?;
     Ok(())
 }
 

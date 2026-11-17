@@ -23,7 +23,7 @@ mod probe;
 mod frame_budget;
 mod theme;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -194,6 +194,9 @@ struct App {
     commands: BTreeMap<String, Value>,
     extensions: BTreeMap<String, Value>,
     safe_mode: bool,
+    safe_mode_allow: BTreeSet<String>,
+    provider_extensions: BTreeSet<String>,
+    safe_selected: BTreeSet<String>,
     terms: HashMap<String, Term>,
     stream_view: HashMap<u64, String>,
     early: HashMap<u64, Vec<Vec<u8>>>,
@@ -242,8 +245,10 @@ struct App {
 }
 
 /// The installed binary's identity, to notice a reinstall.
+fn strings(value: &Value) -> BTreeSet<String> { value.as_array().into_iter().flatten().filter_map(Value::as_str).map(String::from).collect() }
+
 fn exe_stamp() -> Option<(std::path::PathBuf, std::time::SystemTime)> {
-    let exe = std::env::current_exe().ok()?;
+    let exe = client::executable_path().ok()?;
     let modified = std::fs::metadata(&exe).ok()?.modified().ok()?;
     Some((exe, modified))
 }
@@ -449,6 +454,7 @@ impl App {
             peer, tx,
             entries: BTreeMap::new(), versions: BTreeMap::new(), resources: BTreeMap::new(),
             commands: BTreeMap::new(), extensions: BTreeMap::new(), safe_mode: false,
+            safe_mode_allow: BTreeSet::new(), provider_extensions: BTreeSet::new(), safe_selected: BTreeSet::new(),
             terms: HashMap::new(), stream_view: HashMap::new(), early: HashMap::new(), early_closed: HashMap::new(),
             leaves: Vec::new(), focus: 0, overlay: None, pstate: HashMap::new(),
             filtering: None, toast: None, live: HashMap::new(), panel_values: Mutex::new(HashMap::new()), hit: Hit::default(),
@@ -501,7 +507,10 @@ impl App {
         self.commands = snap["commands"].as_array().into_iter().flatten().filter_map(|c| Some((c["name"].as_str()?.to_string(), c.clone()))).collect();
         self.extensions = snap["extensions"].as_object().map(|o| o.iter().map(|(k, v)| (k.clone(), v.clone())).collect()).unwrap_or_default();
         self.safe_mode = snap["safe_mode"].as_bool().unwrap_or(false);
+        self.safe_mode_allow = strings(&snap["safe_mode_allow"]);
+        self.provider_extensions = strings(&snap["provider_extensions"]);
         self.live = snap["live"].as_object().map(|o| o.iter().map(|(k, v)| (k.clone(), v.clone())).collect()).unwrap_or_default();
+        if self.safe_mode { self.open_safe_chooser(); }
     }
 
     fn on_incoming(&mut self, m: Incoming) {
@@ -667,7 +676,12 @@ impl App {
                     self.extensions.insert(n.to_string(), st);
                 }
             }
-            "safe_mode" => self.safe_mode = d["on"].as_bool().unwrap_or(false),
+            "safe_mode" => {
+                let was=self.safe_mode; self.safe_mode=d["on"].as_bool().unwrap_or(false);
+                self.safe_mode_allow=strings(&d["allow"]); self.provider_extensions=strings(&d["provider_extensions"]);
+                if self.safe_mode && !was { self.open_safe_chooser(); }
+                if !self.safe_mode && matches!(&self.overlay,Some(Overlay::Popup{view,..}) if view=="@prim-safe-mode") { self.overlay=None; }
+            }
             "notify" => {
                 let text = d["text"].as_str().unwrap_or("").to_string();
                 self.toast = Some((text, d["style"].as_str().map(String::from), std::time::Instant::now() + std::time::Duration::from_secs(4)));
@@ -859,8 +873,37 @@ impl App {
         self.entries.get(&format!("view/{view}")).and_then(|v| v["kind"].as_str()).unwrap_or("").to_string()
     }
 
+    fn open_safe_chooser(&mut self) {
+        self.safe_selected=self.safe_mode_allow.clone();
+        self.pstate.remove("@popup");
+        self.overlay=Some(Overlay::Popup { view:"@prim-safe-mode".into(),width:76,ctx:json!({}) });
+    }
+
+    /// Recovery UI is generated in Rust, never published or supplied by an extension.
+    fn safe_chooser_value(&self) -> Value {
+        let mut declared:Vec<_>=self.entries.iter().filter_map(|(key,value)|key.strip_prefix("extension/").map(|name|(name,value))).collect();
+        declared.sort_by_key(|(name,_)|*name);
+        let mut items=vec![json!({"type":"text","text":"Nothing starts automatically. Choose this session's recovery set; saved enabled settings are unchanged."})];
+        for (provider,title) in [(true,"Providers / backends"),(false,"UI extensions")] {
+            items.push(json!({"type":"header","text":title}));
+            let mut count=0;
+            for (name,value) in &declared {
+                if (value["kind"]=="provider" || self.provider_extensions.contains(*name)) != provider { continue; }
+                let check=if self.safe_selected.contains(*name) { "[x]" } else { "[ ]" };
+                let description=value["description"].as_str().or_else(||value["argv"][0].as_str()).unwrap_or("Declared extension").chars().take(160).collect::<String>();
+                items.push(json!({"id":format!("safe/{name}"),"text":format!("{check} {name}"),"description":description,"command":"client.safe_mode.toggle","args":{"name":name}}));count+=1;
+            }
+            if count==0 { items.push(json!({"type":"text","text":"(none declared)"})); }
+        }
+        items.push(json!({"type":"separator"}));
+        items.push(json!({"id":"safe/apply","text":"Enable selected","command":"client.safe_mode.apply"}));
+        items.push(json!({"id":"safe/leave","text":"Leave safe mode","command":"client.safe_mode.leave"}));
+        json!({"title":"Safe mode recovery","items":items})
+    }
+
     /// A panel's value: the view entry with its live content merged over it.
     fn panel_value(&self, view: &str) -> Arc<Value> {
+        if view=="@prim-safe-mode" { return Arc::new(self.safe_chooser_value()); }
         if let Some(value) = self.panel_values.lock().unwrap().get(view).cloned() { return value; }
         let mut v = self.entries.get(&format!("view/{view}")).cloned().unwrap_or(json!({}));
         if let (Some(live), Some(obj)) = (self.live.get(view).and_then(|l| l.as_object()), v.as_object_mut()) {
@@ -1010,6 +1053,7 @@ impl App {
 
     fn on_popup_key(&mut self, k: KeyEvent) {
         let Some(Overlay::Popup { view, ctx, .. }) = self.overlay.clone_popup() else { return };
+        if view=="@prim-safe-mode" && keys::name(&k)==Some(self.prefix()) { self.overlay=Some(Overlay::Prefix{sel:0}); return; }
         match k.code {
             KeyCode::Esc | KeyCode::Char('q') => {
                 let st = self.pstate.entry("@popup".into()).or_default();
@@ -1248,9 +1292,7 @@ impl App {
     fn visible(&self, e: &Value) -> bool {
         if let Some(owner) = e["owner"].as_str() {
             let on = self.entries.get(&format!("extension/{owner}")).map(|x| x["enabled"].as_bool().unwrap_or(true)).unwrap_or(false);
-            if !on || self.safe_mode {
-                return false;
-            }
+            if if self.safe_mode { !self.safe_mode_allow.contains(owner) } else { !on } { return false; }
         }
         let cmd = e["command"].as_str().unwrap_or("");
         cmd.starts_with("client.") || self.commands.get(cmd).map(|c| c["available"] == true).unwrap_or(false)
@@ -1387,6 +1429,23 @@ impl App {
             "client.palette" => self.overlay = Some(Overlay::Palette { query: String::new(), sel: 0 }),
             "client.focus" => self.focus_to(args["dir"].as_str().unwrap_or("next")),
             "client.tab" => self.tab_to(&args["to"], &ctx),
+            "client.safe_mode" => {
+                if self.safe_mode { self.open_safe_chooser(); } else { self.invoke("prim.safe_mode",json!({"on":true})); }
+            }
+            "client.safe_mode.toggle" => {
+                if let Some(name)=args["name"].as_str() { if !self.safe_selected.remove(name) { self.safe_selected.insert(name.to_string()); } }
+            }
+            "client.safe_mode.apply" => {
+                let selected=self.safe_selected.clone(); let names:Vec<_>=self.entries.keys().filter_map(|key|key.strip_prefix("extension/").map(String::from)).collect();
+                let(peer,tx)=(self.peer.clone(),self.tx.clone());
+                tokio::spawn(async move {
+                    for name in names {
+                        if let Err(error)=peer.call("command.invoke",json!({"name":"prim.safe_mode.allow","args":{"on":selected.contains(&name),"name":name}})).await { let _=tx.send(Msg::Info(error.to_string())); return; }
+                    }
+                    let _=tx.send(Msg::Info("Safe-mode choices applied; enabled declarations were not changed".into()));
+                });
+            }
+            "client.safe_mode.leave" => self.invoke("prim.safe_mode",json!({"on":false})),
             "client.quit" => self.quit = true,
             "client.none" => {}
             // Never sent to the core: a client that doesn't know one says so.
@@ -2216,7 +2275,7 @@ fn builtin_bindings() -> Vec<Value> {
         json!({"key": "O", "command": "client.focus", "args": {"dir": "prev"}, "label": "previous pane", "hidden": true}),
         json!({"key": "u", "command": "prim.revert", "label": "undo last change", "recovery": true}),
         json!({"key": "R", "command": "prim.layout.reset", "label": "reset layout", "recovery": true}),
-        json!({"key": "!", "command": "prim.safe_mode", "label": "safe mode (stop extensions)", "recovery": true}),
+        json!({"key": "!", "command": "client.safe_mode", "label": "safe mode / recovery choices", "recovery": true}),
         json!({"key": "q", "command": "client.quit", "label": "quit this UI", "recovery": true}),
     ];
     b.extend((1..=9).map(|n| json!({"key": n.to_string(), "command": "client.tab", "args": {"to": n}, "label": format!("tab {n}"), "hidden": true})));
@@ -2452,6 +2511,31 @@ mod tests {
             params["partial"] = json!(true);
         }
         Incoming::Notification { method: "event".into(), params }
+    }
+
+    #[tokio::test]
+    async fn safe_chooser_is_builtin_grouped_and_temporary_even_with_no_extensions_running() {
+        let (mut app,_) = app();
+        app.load(&json!({"epoch":"boot","seq":1,"safe_mode":true,"safe_mode_allow":["ui"],"provider_extensions":["remembered"],"entries":{
+            "extension/herdr":{"value":{"kind":"provider","default":true,"description":"Backend connection","enabled":false,"argv":["prim-herdr"]}},
+            "extension/tmux":{"value":{"kind":"provider","description":"Optional tmux backend","enabled":false,"argv":["prim-tmux"]}},
+            "extension/remembered":{"value":{"description":"Registered provider","argv":["false"]}},
+            "extension/ui":{"value":{"description":"User interface","enabled":false,"argv":["false"]}}
+        }}));
+        assert!(matches!(&app.overlay,Some(Overlay::Popup{view,..}) if view=="@prim-safe-mode"));
+        let panel=app.panel_value("@prim-safe-mode");let rows=panel["items"].as_array().unwrap();
+        let at=|text:&str| rows.iter().position(|r|r["text"].as_str()==Some(text)).unwrap();
+        assert!(at("Providers / backends")<at("[ ] herdr"));
+        assert!(at("[ ] tmux")<at("UI extensions"));
+        assert!(at("[ ] remembered")<at("UI extensions"));
+        assert!(at("UI extensions")<at("[x] ui"));
+        assert!(app.visible(&json!({"owner":"ui","command":"client.none"})),"explicit safe allowance overrides saved disabled without changing it");
+        app.run_command("client.safe_mode.toggle",json!({"name":"herdr"}),Value::Null,None);
+        assert!(app.safe_selected.contains("herdr"));assert!(!app.safe_mode_allow.contains("herdr"));
+        assert_eq!(app.entries["extension/herdr"]["enabled"],false);
+        app.on_popup_key(KeyEvent::new(KeyCode::Char('g'),KeyModifiers::CONTROL));
+        assert!(matches!(app.overlay,Some(Overlay::Prefix{..})),"prefix recovery remains reachable inside chooser");
+        assert!(app.prefix_items().iter().any(|r|r.binding["command"]=="client.safe_mode"));
     }
 
     #[tokio::test]

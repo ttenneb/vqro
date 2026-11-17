@@ -148,7 +148,7 @@ impl Connection {
         }
         Ok(provider)
     }
-    pub async fn register(&self, core: &Shared, p: Value) -> RpcResult {
+    pub async fn register(&self, core: &Shared, p: Value, owner: Option<String>) -> RpcResult {
         if !self.hello.load(Ordering::Acquire) { return Err(invalid("hello must precede provider.register")); }
         if self.is_provider() { return Err(RpcError::new("conflict", "one registration per connection")); }
         if encoded_bytes(&p) > MAX_REGISTRATION_BYTES { return Err(overloaded("registration exceeds 128 KiB")); }
@@ -163,9 +163,9 @@ impl Connection {
         self.peer.set_max_record_bytes(MAX_RECORD_BYTES)?;
         let (commands, inbox) = mpsc::unbounded_channel();
         let mut c = core.lock().unwrap();
-        // Runtime token claims may await a host: revalidate stop admission after that await,
-        // before rotating credentials or mutating a core whose state fence may be released.
+        // Revalidate both stop and recovery admission after a pending host-token wait.
         if c.shutdown.is_requested() { return Err(provider::rejected("unavailable","core stopping; provider registration not admitted")); }
+        if c.safe_mode && owner.as_ref().is_none_or(|name| !c.safe_mode_allow.contains(name)) { return Err(crate::provider::rejected("forbidden", "safe mode requires an explicitly allowed extension owner")); }
         if self.is_provider() { return Err(RpcError::new("conflict", "one registration per connection")); }
         if let Some(claim) = &claim {
             if !c.bridge_tokens.valid_claim(r.token.as_deref().unwrap(), claim, &r.name, &r.instance) { return Err(RpcError::new("forbidden", "runtime resume identity mismatch or token used")); }
@@ -189,7 +189,8 @@ impl Connection {
         let source = c.install_provider(handle, preferred, backend)?;
         c.on_adapter_event(&r.name, adapter::AdapterEvent::Registered(ProviderInfo { connection: self.id, instance: r.instance.clone(), role: r.role, software: json!(r.software) }));
         let generation = c.providers[&r.name].generation;
-        c.providers.get_mut(&r.name).unwrap().metadata = json!({"provider_version": r.provider_version, "limits": {"max_streams": r.limits.max_streams.min(512), "stream_window_bytes": window, "max_record_bytes": MAX_RECORD_BYTES}, "host": host});
+        c.providers.get_mut(&r.name).unwrap().metadata = json!({"provider_version": r.provider_version, "limits": {"max_streams": r.limits.max_streams.min(512), "stream_window_bytes": window, "max_record_bytes": MAX_RECORD_BYTES}, "host": host, "owner_extension": owner});
+        if let Some(owner) = owner { c.provider_extensions.insert(owner); }
         c.provider_event(&r.name);
         let health = c.providers[&r.name].health.subscribe();
         let (stopped, _) = watch::channel(false);

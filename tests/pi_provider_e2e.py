@@ -107,6 +107,7 @@ class E2E:
                 'argv': [str(Path(self.args.prim).parent/'prim-herdr'), '--name', 'herdr'], 'kind': 'provider', 'default': True}]}))
         env = dict(self.env, PRIM_HERDR=str(self.args.hc)+' connect')
         with (self.root/'prim.log').open('ab') as output:
+            # Safe mode deliberately starts no providers and is not an isolation shortcut.
             self.core = subprocess.Popen([str(self.args.prim), 'serve'],
                                          cwd=self.root/'work', env=env, stdout=output, stderr=subprocess.STDOUT)
         self.tracked.append(identity(self.core.pid))

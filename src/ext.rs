@@ -64,7 +64,7 @@ pub fn reconcile(core: &Shared) {
 
     for (name, version, spec) in specs {
         let enabled = spec.get("enabled").and_then(|e| e.as_bool()).unwrap_or(true);
-        let want = enabled && !c.safe_mode;
+        let want = if c.safe_mode { c.safe_mode_allow.contains(&name) } else { enabled };
         let safe_mode = c.safe_mode;
         let rt = c.exts.entry(name.clone()).or_insert_with(|| ExtRuntime {
             status: "stopped".into(),
@@ -242,7 +242,10 @@ pub async fn shutdown(core: &Shared) {
 }
 
 pub fn stop_all(core: &Shared) {
-    let mut c = core.lock().unwrap();
+    stop_all_locked(&mut core.lock().unwrap());
+}
+
+pub(crate) fn stop_all_locked(c: &mut crate::core::Core) {
     for rt in c.exts.values_mut() {
         if let Some(stop) = rt.stop.take() {
             let _ = stop.send(());

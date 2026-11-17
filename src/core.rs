@@ -2,7 +2,7 @@
 //!
 //! Shared as `Arc<Mutex<Core>>`. The lock is never held across an await.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeSet, BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -63,7 +63,8 @@ impl CommandInfo {
 pub const BUILTINS: &[(&str, &str)] = &[
     ("prim.layout.reset", "Reset the layout to one tab per live terminal"),
     ("prim.revert", "Revert a workspace transaction (args: txn; default: the last one not made by an extension)"),
-    ("prim.safe_mode", "Stop all extensions, or start them again (args: on)"),
+    ("prim.safe_mode", "Stop all extensions/providers, or leave safe mode (args: on)"),
+    ("prim.safe_mode.allow", "Temporarily allow a declared extension in safe mode (args: name, on)"),
     ("prim.shutdown", "Stop extensions and provider connections, then exit the core"),
     ("prim.extension.disable", "Disable an extension (args: name)"),
     ("prim.extension.enable", "Enable an extension (args: name)"),
@@ -98,6 +99,9 @@ pub struct Core {
     pub shutdown: crate::shutdown::Shutdown,
     pub(crate) extension_tasks: Vec<tokio::task::JoinHandle<()>>,
     pub safe_mode: bool,
+    pub safe_mode_allow: BTreeSet<String>,
+    pub provider_extensions: BTreeSet<String>,
+    pub recovery_gate: Arc<tokio::sync::Mutex<()>>,
     /// Live view content (`view.publish`): derived, not persisted, not in history.
     /// view -> (content, author, connection id). Cleared when its publisher disconnects.
     pub live: BTreeMap<String, (Value, String, u64)>,
@@ -143,6 +147,9 @@ impl Core {
             shutdown: crate::shutdown::Shutdown::default(),
             extension_tasks: Vec::new(),
             safe_mode,
+            safe_mode_allow: BTreeSet::new(),
+            provider_extensions: BTreeSet::new(),
+            recovery_gate: Arc::new(tokio::sync::Mutex::new(())),
             live: BTreeMap::new(),
             clients: BTreeMap::new(),
             socket,
@@ -159,6 +166,19 @@ impl Core {
 
     /// Admitted workspace mutations, including the active writer (in-process harness metric).
     pub fn workspace_pending_commits(&self) -> usize { self.committer.pending() }
+
+    /// Invalidate old sources immediately; stopping transport workers never kills backend terminals.
+    pub fn fence_providers(&mut self, owner: Option<&str>) -> Vec<AdapterHandle> {
+        let names: Vec<_> = self.providers.iter().filter(|(_, p)| owner.is_none_or(|owner| p.metadata["owner_extension"].as_str() == Some(owner))).map(|(name, _)| name.clone()).collect();
+        let mut handles=Vec::new();
+        for name in names {
+            handles.push(self.providers[&name].handle.clone());
+            self.on_adapter_event(&name, AdapterEvent::Connected(false, Some("stopped for safe mode".into())));
+            self.providers.get_mut(&name).unwrap().source=self.next_provider_source;
+            self.next_provider_source+=1;
+        }
+        handles
+    }
 
     /// Append to the event log and broadcast.
     pub fn emit(&mut self, ty: &str, data: Value) {
@@ -200,7 +220,7 @@ impl Core {
             "extensions": self.exts.iter().map(|(n, e)| (n.clone(), e.to_json())).collect::<BTreeMap<_, _>>(),
             "providers": self.providers.keys().map(|n| (n.clone(), self.provider_json(n))).collect::<BTreeMap<_, _>>(),
             "adapters": self.adapter_state,
-            "safe_mode": self.safe_mode,
+            "safe_mode": self.safe_mode, "safe_mode_allow": self.safe_mode_allow, "provider_extensions": self.provider_extensions,
             "live": self.live.iter().map(|(k, (v, _, _))| (k.clone(), v.clone())).collect::<BTreeMap<_, _>>(),
         })
     }

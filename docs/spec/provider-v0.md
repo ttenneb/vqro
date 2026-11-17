@@ -245,10 +245,11 @@ bounds and credit accounting, disconnect handling, and the recovery commands.
 backend and per-host choices, spawning agents, delivery policies and queues, agent views, and what to do after
 `indeterminate` or gone.
 
-**Safe mode (proposed, D21).** Safe mode stops extensions, and providers are extensions, so stopping them all would
-make every terminal unavailable exactly when the user is recovering. An extension entry may set `essential: true`
-(the defaults set it for providers): it keeps running in safe mode, can still be disabled explicitly, and the recovery
-surface never depends on it.
+**Safe mode (human-confirmed D21 revision).** Safe mode starts no extensions or providers. The built-in client
+recovery chooser offers declared providers/backends and UI extensions with descriptions and checkboxes. Only the
+human's session allowlist runs; nothing is privileged as `essential`. Choices never edit persisted `enabled` values.
+Provider links stop, not backend-owned execution. Registration during safe mode requires an explicitly allowed
+extension owner; choices and remembered owner grouping are exposed in snapshots (`core-protocol.md`).
 
 ## 8. Migration and order of work
 
@@ -262,7 +263,7 @@ cursors with snapshot fencing; the scale harness. Providers reuse these rules.
 3. **Wire protocol.** `provider.*`, `effect.invoke` and the provider side of `stream.*`. The fake backend moves out of
    process as a stdlib-Python fixture, the first external implementation; one conformance suite (identity,
    disconnect, deadlines, gap and repaint, credit, no resend, isolation between providers) runs against both.
-4. **herdr-core out of process**, one essential provider extension per host; `Backend`, `--herdr` and `--fake` leave
+4. **herdr-core out of process**, one declared provider extension per host; `Backend`, `--herdr` and `--fake` leave
    `main.rs` and `server.rs`.
 5. **In parallel after 3:** the tmux provider and the Pi bridge, each passing the conformance suite; tmux on two hosts
    with failure isolation.
@@ -271,9 +272,9 @@ cursors with snapshot fencing; the scale harness. Providers reuse these rules.
 ## 9. Wire messages (v0, pinned 2026-11-17)
 
 The core side is implemented in `src/provider_wire.rs`; Python SDK/fake and Rust `prim-tmux` interoperate through
-private extension-backed socket tests (`tests/provider_wire.rs`). Since 2026-11-17 `prim serve` runs no backend in
-process: herdr-core is the `herdr` provider extension (prim-herdr) and tmux the optional `tmux` one (step 4 done for
-herdr). No essential extension or safe-mode policy from the earlier proposal is implemented yet.
+private extension-backed socket tests (`tests/provider_wire.rs`). `prim serve` runs no in-process backend:
+herdr-core is the `herdr` provider extension (prim-herdr), tmux the optional `tmux` one. Safe mode uses the
+empty-start chooser and session allowlist from revised D21, not the superseded essential-provider proposal.
 
 This section is the implementable contract; where sections 1–6 differ, this wins. It answers the SDK gap list
 (G1–G20 below refer to it). Items marked **OPEN** carry a recommendation and are not built in v0.
