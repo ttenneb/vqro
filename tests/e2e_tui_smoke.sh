@@ -21,8 +21,9 @@ done
 cp "$REPO"/extensions/*.py "$REPO"/extensions/defaults.json "$R/ext/"
 cp -R "$REPO"/extensions/pi_bridge "$R/ext/"
 for t in python3 sh cat ls env head yes; do ln -sf "$(command -v $t)" "$R/bin/$t"; done
+HC_ARGV=$(python3 -c 'import json, shlex, sys; print(shlex.quote(json.dumps([sys.argv[1], "connect"])))' "$HC")
 cat > "$R/env.sh" <<EOF
-export HOME=$R/home PATH=$R/bin TERM=xterm-256color SHELL=/bin/sh PRIM_STATE_DIR=$R/st PRIM_SOCKET=$R/p.sock PRIM_EXTENSIONS_DIR=$R/ext XDG_CONFIG_HOME=$R/cfg XDG_STATE_HOME=$R/xst XDG_RUNTIME_DIR=$R/run HC_SESSION=smoke HC_SOCKET=$R/h.sock PRIM_HERDR="$HC connect"
+export HOME=$R/home PATH=$R/bin TERM=xterm-256color SHELL=/bin/sh PRIM_STATE_DIR=$R/st PRIM_SOCKET=$R/p.sock PRIM_EXTENSIONS_DIR=$R/ext XDG_CONFIG_HOME=$R/cfg XDG_STATE_HOME=$R/xst XDG_RUNTIME_DIR=$R/run HC_SESSION=smoke HC_SOCKET=$R/h.sock PRIM_HERDR=$HC_ARGV
 EOF
 printf '. %s/env.sh; exec %s tui\n' "$R" "$P" > "$R/tui.sh"
 T="/usr/bin/tmux -S $R/t.sock -f /dev/null"

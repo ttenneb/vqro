@@ -41,9 +41,11 @@ class PiTests(unittest.TestCase):
         self.assertEqual(self.core.calls[-1], ("agents.show", {"resource": "r2"}))
         self.assertEqual(len(self.native()), 1)
 
-    def test_windows_default_is_host_resolved_argv(self):
-        self.assertEqual(default_bridge("nt"), ["py", "-3", "-m", "pi_bridge"])
-        self.assertEqual(default_bridge("posix"), ["python3", "-m", "pi_bridge"])
+    def test_default_does_not_infer_bridge_host_from_core_platform(self):
+        with patch("pi.sys.platform", "win32"):
+            self.assertEqual(default_bridge(), ["python3", "-m", "pi_bridge"])
+        value = {"runtimes": [{"name": "windows host", "argv": ["pi1"], "bridge_argv": ["py", "-3", "-m", "pi_bridge"]}]}
+        self.assertEqual(runtimes(value)[0]["bridge_argv"], ["py", "-3", "-m", "pi_bridge"])
 
     def test_invalid_host_launcher_is_rejected_before_spawn(self):
         for extra in ({"bridge_argv": "python -m pi_bridge"}, {"bridge_env": {"PYTHONPATH": None}}):

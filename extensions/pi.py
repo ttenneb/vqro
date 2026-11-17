@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Pi launch/runtime settings policy. Execution stays in the backend-owned bridge."""
 import json
-import os
 from pathlib import Path
 import sys
 import time
@@ -16,8 +15,10 @@ DEFAULTS = {"runtimes": [{"name": "pi", "argv": ["pi1", "--mode", "rpc"]}]}
 EXTENSIONS = str(Path(__file__).resolve().parent)
 
 
-def default_bridge(platform=None):
-    return (["py", "-3"] if (platform or os.name) == "nt" else ["python3"]) + ["-m", "pi_bridge"]
+def default_bridge():
+    # Resolved by the terminal host, never selected from the core host's OS.
+    # Windows/other hosts configure their launcher explicitly (e.g. py -3).
+    return ["python3", "-m", "pi_bridge"]
 
 
 def valid_argv(argv):

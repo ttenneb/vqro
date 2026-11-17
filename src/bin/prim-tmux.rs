@@ -695,6 +695,20 @@ fn spawn_private_watchdog(tmux: &PathBuf, socket: &PathBuf) {
         .spawn();
 }
 
+fn default_name(instance: &str) -> String {
+    // Native server-lifetime nonce: portable and independent of display hostname.
+    format!("tmux@{}", instance.rsplit(':').next().unwrap_or(instance))
+}
+
+#[cfg(test)]
+mod platform_tests {
+    use super::*;
+    #[test]
+    fn distinct_server_nonces_have_distinct_default_names() {
+        assert_ne!(default_name("1:100:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), default_name("1:100:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let argv: Vec<String> = std::env::args().collect();
@@ -776,8 +790,7 @@ async fn registration(a: &Args, endpoint: &str, socket: &PathBuf) -> Result<(), 
     let instance = first.instance().to_string();
     // Re-attached uniformly by attach_sessions (which installs the notification task).
     first.close().await;
-    let host = std::fs::read_to_string("/proc/sys/kernel/hostname").map(|h| h.trim().to_string()).unwrap_or_else(|_| "local".into());
-    let name = a.name.clone().unwrap_or_else(|| format!("tmux@{host}"));
+    let name = a.name.clone().unwrap_or_else(|| default_name(&instance));
     let mut pconfig = Config::new(name, instance.clone(), capabilities());
     let version = tmux_cli(&a.tmux, socket, &["-V"]).or_else(|_| {
         std::process::Command::new(&a.tmux).arg("-V").output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).map_err(|e| e.to_string())

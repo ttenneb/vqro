@@ -107,7 +107,7 @@ class E2E:
         if not defaults.exists():
             defaults.write_text(json.dumps({'version': 2, 'extensions': [{'name': 'herdr', 'since': 2,
                 'argv': [str(Path(self.args.prim).parent/'prim-herdr'), '--name', 'herdr'], 'kind': 'provider', 'default': True}]}))
-        env = dict(self.env, PRIM_HERDR=str(self.args.hc)+' connect')
+        env = dict(self.env, PRIM_HERDR=json.dumps([str(self.args.hc), 'connect']))
         with (self.root/'prim.log').open('ab') as output:
             # Safe mode deliberately starts no providers and is not an isolation shortcut.
             self.core = subprocess.Popen([str(self.args.prim), 'serve'],

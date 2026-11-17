@@ -23,7 +23,7 @@ pub fn capabilities() -> Value {
     json!({
         "terminal.spawn": {"env": true, "cwd": true}, "terminal.input": {"stream": true, "effect": false}, "terminal.output": {"raw": true}, "terminal.resize": {},
         "terminal.kill": {}, "terminal.list": {}, "terminal.exit": {"exit_code": true}, "status.osc7501": {},
-        "persist.detach": {}, "events.resync": {}, "remote.machines": {}
+        "persist.detach": {}, "events.resync": {}, "remote.machines": {"listing": true, "terminal_effects": false}
     })
 }
 
@@ -44,6 +44,7 @@ struct Frame {
 
 enum Pending {
     Subscribe,
+    Refresh(tokio::time::Instant),
     Spawn(Reply<ResourceFacts>),
     Kill(Reply<EffectResult>),
     Attach { reply: Reply<Stream>, history: u32 },
@@ -54,7 +55,7 @@ const MAX_NATIVE_PENDING: usize = 1024;
 fn prune_pending(pending: &mut HashMap<u64, Pending>, late_attaches: &mut HashSet<u64>) {
     pending.retain(|id, call| {
         let cancelled = match call {
-            Pending::Subscribe => false,
+            Pending::Subscribe | Pending::Refresh(_) => false,
             Pending::Spawn(reply) => reply.is_closed(),
             Pending::Kill(reply) => reply.is_closed(),
             Pending::Attach { reply, .. } => {
@@ -140,7 +141,7 @@ async fn session(
 
     let instance = reply["result"]["core"]["id"].as_str().filter(|id| !id.is_empty())
         .ok_or_else(|| anyhow::anyhow!("herdr-core hello has no stable core.id"))?.to_string();
-    let info = ProviderInfo { connection, instance, role: "backend".into(), software: json!({"name": "herdr-core", "version": reply["result"]["version"]}) };
+    let info = ProviderInfo { connection, instance, role: "backend".into(), software: json!({"name": "herdr-core", "version": reply["result"]["version"], "display_name": reply["result"]["core"]["name"]}) };
 
     let (frame_tx, mut frame_out) = crate::queue::channel::<Vec<u8>>(1024 * 1024);
     let writer = tokio::spawn(async move {
@@ -161,6 +162,7 @@ async fn session(
     let mut streams: HashMap<u32, crate::queue::Sender<StreamOutput>> = HashMap::new();
     let mut records: HashMap<String, Value> = HashMap::new();
     let mut events_channel: Option<u32> = None;
+    let mut refresh_needed = false;
 
     let call = |id: &mut u64, method: &str, params: Value| -> (u64, Vec<u8>) {
         let this = *id;
@@ -178,6 +180,15 @@ async fn session(
         tokio::select! {
             _ = maintenance.tick() => {
                 prune_pending(&mut pending, &mut late_attaches);
+                if pending.values().any(|call| matches!(call, Pending::Refresh(deadline) if *deadline <= tokio::time::Instant::now())) {
+                    anyhow::bail!("herdr-core remote inventory refresh timed out");
+                }
+                if refresh_needed && pending.len() < MAX_NATIVE_PENDING && !pending.values().any(|call| matches!(call, Pending::Refresh(_))) {
+                    let (id, bytes) = call(&mut next_id, "terminal.list", json!({"all": true}));
+                    pending.insert(id, Pending::Refresh(tokio::time::Instant::now() + std::time::Duration::from_secs(5)));
+                    send_frame(&frame_tx, bytes)?;
+                    refresh_needed = false;
+                }
                 // Closing this native connection also releases any channels whose attach response
                 // never arrived. Bounded tombstones prevent either leaked channels or unbounded IDs.
                 if late_attaches.len() >= MAX_NATIVE_PENDING { anyhow::bail!("too many expired native attachments"); }
@@ -211,11 +222,13 @@ async fn session(
                     }
                     cmd @ AdapterCmd::Invoke { .. } => reject_command(cmd, "operation is not supported by the in-process herdr adapter"),
                     AdapterCmd::Kill(r, reply) => {
+                        if remote_effect(&r) { let _ = reply.send(Err(remote_unsupported())); continue; }
                         let (id, bytes) = call(&mut next_id, "terminal.kill", json!({"terminal": r}));
                         pending.insert(id, Pending::Kill(reply));
                         send_frame(&frame_tx, bytes)?;
                     }
                     AdapterCmd::Attach { backend_ref, cols, rows, history, reply } => {
+                        if remote_effect(&backend_ref) { let _ = reply.send(Err(remote_unsupported())); continue; }
                         let (id, bytes) = call(&mut next_id, "terminal.attach", json!({"terminal": backend_ref, "cols": cols, "rows": rows, "history": history}));
                         pending.insert(id, Pending::Attach { reply, history });
                         send_frame(&frame_tx, bytes)?;
@@ -229,7 +242,14 @@ async fn session(
                     if f.kind != DATA { continue; }
                     let Ok(msg) = serde_json::from_slice::<Value>(&f.payload) else { continue };
                     if let Some(method) = msg.get("method").and_then(|m| m.as_str()) {
-                        handle_notification(name, method, msg.get("params").cloned().unwrap_or(Value::Null), &mut records, events);
+                        let params = msg.get("params").cloned().unwrap_or(Value::Null);
+                        if remote_notification(method, &params) {
+                            // Alias-only updates cannot safely bind machine identity. Refresh the
+                            // native snapshot (including Machine.id) instead of guessing/replaying.
+                            refresh_needed = true;
+                        } else {
+                            handle_notification(name, method, params, &mut records, events);
+                        }
                         if Some(f.channel) == events_channel {
                             let (ack, consumed) = tokio::sync::oneshot::channel();
                             if events.send((name.to_string(), AdapterEvent::Consumed(ack))).is_ok() {
@@ -254,11 +274,17 @@ async fn session(
                         None => Ok(msg.get("result").cloned().unwrap_or(Value::Null)),
                     };
                     match p {
+                        Pending::Refresh(_) => {
+                            let snapshot = result.map_err(|e| anyhow::anyhow!("remote inventory refresh failed: {e}"))?;
+                            // Keep newer local event facts; this query refreshes only remote rows.
+                            records.retain(|address, _| !address.contains('/'));
+                            records.extend(inventory(&snapshot).into_iter().filter(|(address, _)| address.contains('/')));
+                            let _ = events.send((name.to_string(), AdapterEvent::Snapshot(records.values().map(facts).collect())));
+                        }
                         Pending::Subscribe => {
                             let r = result.map_err(|e| anyhow::anyhow!("events.subscribe failed: {e}"))?;
                             events_channel = r.get("channel").and_then(|c| c.as_u64()).map(|c| c as u32);
-                            let list = r.get("terminals").and_then(|t| t.as_array()).cloned().unwrap_or_default();
-                            records = list.into_iter().filter_map(|t| Some((t.get("address")?.as_str()?.to_string(), t))).collect();
+                            records = inventory(&r);
                             let _ = events.send((name.to_string(), AdapterEvent::Snapshot(records.values().map(facts).collect())));
                         }
                         Pending::Spawn(reply) => { let _ = reply.send(result.map(|r| facts(&r))); }
@@ -345,7 +371,7 @@ async fn session(
             Pending::Spawn(r) => drop(r.send(Err(AdapterError::Indeterminate("herdr-core disconnected".into())))),
             Pending::Kill(r) => drop(r.send(Err(AdapterError::Indeterminate("herdr-core disconnected".into())))),
             Pending::Attach { reply, .. } => drop(reply.send(Err(AdapterError::Indeterminate("herdr-core disconnected".into())))),
-            Pending::Subscribe => {}
+            Pending::Subscribe | Pending::Refresh(_) => {}
         }
     }
     anyhow::bail!("herdr-core connection ended")
@@ -359,10 +385,10 @@ fn handle_notification(
     events: &mpsc::UnboundedSender<(String, AdapterEvent)>,
 ) {
     let send = |e| drop(events.send((name.to_string(), e)));
+    if remote_notification(method, &params) { return; }
     match method {
         "missed" => {
-            let list = params.get("terminals").and_then(|t| t.as_array()).cloned().unwrap_or_default();
-            *records = list.into_iter().filter_map(|t| Some((t.get("address")?.as_str()?.to_string(), t))).collect();
+            *records = inventory(&params);
             send(AdapterEvent::Snapshot(records.values().map(facts).collect()));
         }
         "event" => {
@@ -410,11 +436,44 @@ fn merge(rec: &mut Value, data: &Value) {
     }
 }
 
+fn inventory(snapshot: &Value) -> HashMap<String, Value> {
+    let mut records = HashMap::new();
+    let mut seen = HashSet::new();
+    for original in snapshot["terminals"].as_array().into_iter().flatten() {
+        let Some(address) = original["address"].as_str() else { continue };
+        let mut record = original.clone();
+        if let Some((alias, terminal)) = address.split_once('/') {
+            // Only direct machine/terminal addresses are specified by hc's schema.
+            if terminal.contains('/') { continue; }
+            let machine = snapshot["machines"].as_array().into_iter().flatten().find(|machine|
+                machine["name"].as_str() == Some(alias) && machine["id"].as_str().is_some_and(|id| !id.is_empty()));
+            let Some(machine) = machine else { continue };
+            record["_prim_ref"] = json!(json!(["hc-machine-v1", machine["id"], machine.get("session").unwrap_or(&Value::Null), terminal]).to_string());
+            record["_prim_machine"] = json!({"id": machine["id"], "name": alias, "session": machine.get("session").unwrap_or(&Value::Null)});
+        }
+        let reference = record["_prim_ref"].as_str().unwrap_or(address);
+        if seen.insert(reference.to_string()) { records.insert(address.to_string(), record); }
+    }
+    records
+}
+
+fn remote_notification(method: &str, params: &Value) -> bool {
+    method == "event" && params["terminal"].as_str().is_some_and(|address| address.contains('/'))
+}
+
+fn remote_effect(reference: &str) -> bool {
+    reference.contains('/') || reference.starts_with('[')
+}
+
+fn remote_unsupported() -> AdapterError {
+    AdapterError::RejectedKind { kind: "unsupported".into(), message: "remote terminal effects require identity-safe herdr-core addressing; aliases may be renamed/reused".into() }
+}
+
 /// herdr-core `Terminal` record to prim facts.
 fn facts(t: &Value) -> ResourceFacts {
     let s = |k: &str| t.get(k).and_then(|v| v.as_str()).map(String::from);
     ResourceFacts {
-        backend_ref: s("address").unwrap_or_default(),
+        backend_ref: s("_prim_ref").or_else(|| s("address")).unwrap_or_default(),
         incarnation: t.get("created_ms").and_then(Value::as_u64).map(|ms| ms.to_string()).unwrap_or_default(),
         kind: "terminal".into(),
         name: s("name"),
@@ -423,7 +482,7 @@ fn facts(t: &Value) -> ResourceFacts {
         status: t.get("status").cloned().unwrap_or(Value::Null),
         exit: json!({"reason": t.get("reason"), "exit_code": t.get("exit_code"), "signal": t.get("signal")}),
         argv: t.get("argv").and_then(|a| a.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default(),
-        data: json!({}),
+        data: t.get("_prim_machine").map(|machine| json!({"machine": machine, "hc_address": t["address"]})).unwrap_or_else(|| json!({})),
         // The foreground process's folder (read about twice a second), else where it started.
         cwd: t.get("foreground").and_then(|f| f.get("cwd")).and_then(|c| c.as_str()).or_else(|| t.get("cwd").and_then(|c| c.as_str())).map(String::from),
     }
@@ -459,6 +518,46 @@ mod qa_tests {
         prune_pending(&mut pending, &mut late);
         assert!(pending.is_empty(), "effect timeout must retire native pending senders");
         assert_eq!(late, HashSet::from([100]), "late attachment channel still needs explicit native close");
+    }
+    fn remote_snapshot(alias: &str, id: &str, session: Option<&str>) -> Value {
+        json!({"machines":[{"name":alias,"id":id,"session":session}],
+               "terminals":[{"address":format!("{alias}/t7"),"created_ms":1,"state":"live"}]})
+    }
+    #[test]
+    fn remote_alias_rename_keeps_ref_and_reuse_changes_it() {
+        let first = inventory(&remote_snapshot("rohan", "machine-a", None));
+        let renamed = inventory(&remote_snapshot("horse", "machine-a", None));
+        let reused = inventory(&remote_snapshot("rohan", "machine-b", None));
+        let session = inventory(&remote_snapshot("rohan", "machine-a", Some("other")));
+        let get = |rows: &HashMap<String, Value>| facts(rows.values().next().unwrap());
+        assert_eq!(get(&first).backend_ref, get(&renamed).backend_ref);
+        assert_ne!(get(&first).backend_ref, get(&reused).backend_ref);
+        assert_ne!(get(&first).backend_ref, get(&session).backend_ref);
+        assert_eq!(get(&renamed).data["machine"]["name"], "horse");
+    }
+    #[test]
+    fn alias_only_events_never_rebind_old_machine_facts() {
+        let mut records = inventory(&remote_snapshot("rohan", "machine-a", None));
+        let old_ref = facts(records.get("rohan/t7").unwrap()).backend_ref;
+        let (events, mut receiver) = mpsc::unbounded_channel();
+        let params = json!({"terminal":"rohan/t7","type":"created","data":{"address":"rohan/t7","created_ms":99}});
+        assert!(remote_notification("event", &params));
+        handle_notification("fixture", "event", params, &mut records, &events);
+        assert_eq!(facts(records.get("rohan/t7").unwrap()).backend_ref, old_ref);
+        assert_eq!(facts(records.get("rohan/t7").unwrap()).incarnation, "1");
+        assert!(receiver.try_recv().is_err());
+    }
+    #[test]
+    fn unknown_remote_identity_is_not_published_as_an_alias() {
+        assert!(inventory(&json!({"terminals":[{"address":"unknown/t7"}]})).is_empty());
+        let local = inventory(&json!({"terminals":[{"address":"t7","created_ms":1}]}));
+        assert_eq!(facts(local.get("t7").unwrap()).backend_ref, "t7");
+    }
+    #[test]
+    fn remote_effects_and_legacy_aliases_are_rejected_before_dispatch() {
+        assert!(remote_effect("rohan/t7"));
+        assert!(remote_effect(r#"["hc-machine-v1","machine-a",null,"t7"]"#));
+        assert!(!remote_effect("t7"));
     }
     #[test]
     fn cancelled_queued_commands_are_not_dispatched() {

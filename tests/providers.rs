@@ -65,6 +65,26 @@ async fn same_instance_survives_core_restart_but_replacement_retires_every_old_i
 }
 
 #[tokio::test]
+async fn remote_ref_shape_migration_and_alias_reuse_tombstone_old_ids() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = core(dir.path());
+    let (events, _commands) = register(&state, "fixture", "relay-core", vec![facts("rohan/t7", "birth")]).await;
+    let legacy = id(&state, "fixture", "rohan/t7");
+    let stable_a = json!(["hc-machine-v1", "machine-a", null, "t7"]).to_string();
+    let stable_b = json!(["hc-machine-v1", "machine-b", null, "t7"]).to_string();
+    events.send(("fixture".into(), AdapterEvent::Snapshot(vec![facts(&stable_a, "birth")]))).unwrap();
+    until(|| state.lock().unwrap().resources.values().any(|r| r.facts.backend_ref == stable_a)).await;
+    let first = id(&state, "fixture", &stable_a);
+    assert_ne!(first, legacy);
+    events.send(("fixture".into(), AdapterEvent::Snapshot(vec![facts(&stable_b, "birth")]))).unwrap();
+    until(|| state.lock().unwrap().resources.values().any(|r| r.facts.backend_ref == stable_b)).await;
+    assert_ne!(id(&state, "fixture", &stable_b), first);
+    let saved: Value = serde_json::from_slice(&std::fs::read(dir.path().join("resources.json")).unwrap()).unwrap();
+    assert_eq!(saved["ids"][&legacy]["retired"], true);
+    assert_eq!(saved["ids"][&first]["retired"], true);
+}
+
+#[tokio::test]
 async fn stale_source_events_and_disconnect_cannot_disable_a_replacement() {
     let dir = tempfile::tempdir().unwrap();
     let core = core(dir.path());

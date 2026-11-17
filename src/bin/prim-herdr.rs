@@ -5,7 +5,8 @@
 //! Nothing herdr-specific is duplicated here: this file only translates.
 //!
 //! - Instance: herdr-core's `core.id` (stable across core restarts, new after its state is wiped).
-//!   Refs are terminal addresses (`t3`); incarnation is the terminal's creation time.
+//!   Local refs stay `t3`; remote refs encode Machine.id/session/terminal, never aliases.
+//!   Incarnation is the terminal creation time. Remote effects are unsupported until hc has id-safe addressing.
 //! - Provider availability follows the backend: when herdr-core is lost, the core connection is
 //!   closed (the core marks the provider disconnected); when the adapter reconnects, the provider
 //!   registers again (new generation) and sends a full sync. Nothing is resent.
@@ -31,19 +32,21 @@ struct Args {
     hc: Option<String>,
     session: Option<String>,
     name: Option<String>,
+    hc_args: Vec<String>,
 }
 
 fn args() -> Result<Args, String> {
-    let mut a = Args { hc: None, session: None, name: None };
+    let mut a = Args { hc: None, session: None, name: None, hc_args: Vec::new() };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
         let mut value = || it.next().ok_or_else(|| format!("{flag} needs a value"));
         match flag.as_str() {
             "--hc" => a.hc = Some(value()?),
+            "--hc-arg" => a.hc_args.push(value()?),
             "--session" => a.session = Some(value()?),
             "--name" => a.name = Some(value()?),
             "-h" | "--help" => {
-                println!("prim-herdr [--hc PATH] [--session NAME] [--name NAME]\nConnects to $PRIM_SOCKET; reaches herdr-core with `hc connect`.");
+                println!("prim-herdr [--hc PATH] [--hc-arg ARG]... [--session NAME] [--name NAME]\nPRIM_HERDR may supply JSON argv. Paths/arguments are literal; no shell parsing.");
                 std::process::exit(0);
             }
             other => return Err(format!("unknown argument {other}")),
@@ -64,7 +67,7 @@ fn capabilities() -> Map<String, Value> {
         "status.osc7501": {"stored": true, "lossy": false},
         "events.resync": {},
         "persist.detach": {},
-        "remote.machines": {},
+        "remote.machines": {"listing": true, "terminal_effects": false},
         "identity": {"refs_survive_backend_restart": true},
     })
     .as_object()
@@ -269,7 +272,7 @@ async fn main() {
 async fn run() -> Result<(), String> {
     let a = args()?;
     let endpoint = std::env::var("PRIM_SOCKET").map_err(|_| "PRIM_SOCKET is not set")?;
-    let mut argv = herdr_command(a.hc.as_deref());
+    let mut argv = herdr_command(a.hc.as_deref(), &a.hc_args)?;
     if let Some(s) = &a.session {
         argv.extend(["--session".into(), s.clone()]);
     }
@@ -287,7 +290,7 @@ async fn run() -> Result<(), String> {
                 _ => {}
             }
         };
-        let name = a.name.clone().unwrap_or_else(|| format!("herdr@{}", hostname()));
+        let name = a.name.clone().unwrap_or_else(|| default_name(&info.instance));
         let mut config = Config::new(name, info.instance.clone(), capabilities());
         config.software = info.software.clone();
         let sock = tokio::net::UnixStream::connect(&endpoint).await.map_err(|e| format!("cannot reach the core: {e}"))?;
@@ -355,23 +358,83 @@ async fn serve(
     }
 }
 
-/// How to reach herdr-core: `--hc PATH` (+ `connect`); else `$PRIM_HERDR`, a whole command such as
-/// `ssh box hc connect`; else `hc connect` from PATH; else herdr-core's standard install.
-fn herdr_command(hc: Option<&str>) -> Vec<String> {
+/// Paths and arguments are never shell-parsed. PRIM_HERDR is JSON argv (or a
+/// single literal executable); --hc PATH and repeated --hc-arg prefix connect.
+fn herdr_command(hc: Option<&str>, extra: &[String]) -> Result<Vec<String>, String> {
     if let Some(hc) = hc {
-        return vec![hc.to_string(), "connect".into()];
+        let mut argv = vec![hc.to_string()];
+        argv.extend_from_slice(extra);
+        argv.push("connect".into());
+        return Ok(argv);
     }
+    if !extra.is_empty() { return Err("--hc-arg requires --hc".into()); }
     if let Some(cmd) = std::env::var("PRIM_HERDR").ok().filter(|c| !c.trim().is_empty()) {
-        return cmd.split_whitespace().map(String::from).collect();
+        return parse_hc_command(&cmd);
     }
-    let on_path = std::env::var("PATH").unwrap_or_default().split(':').any(|d| !d.is_empty() && std::path::Path::new(d).join("hc").exists());
-    let installed = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/share/herdr-core/current/Contents/MacOS/herdr-core");
-    if !on_path && installed.exists() {
-        return vec![installed.to_string_lossy().into_owned(), "connect".into()];
+    Ok(default_hc(std::env::var_os("PATH").as_deref(), &crate_home()))
+}
+
+fn crate_home() -> std::path::PathBuf {
+    std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(Into::into).unwrap_or_default()
+}
+
+fn default_hc(path: Option<&std::ffi::OsStr>, home: &std::path::Path) -> Vec<String> {
+    let executable = format!("hc{}", std::env::consts::EXE_SUFFIX);
+    if path.is_some_and(|value| std::env::split_paths(value).any(|dir| dir.join(&executable).is_file())) {
+        return vec!["hc".into(), "connect".into()];
+    }
+    for installed in [home.join(format!(".local/bin/herdr-core{}", std::env::consts::EXE_SUFFIX)),
+                      home.join(".local/share/herdr-core/current/Contents/MacOS/herdr-core")] {
+        if installed.is_file() { return vec![installed.to_string_lossy().into_owned(), "connect".into()]; }
     }
     vec!["hc".into(), "connect".into()]
 }
 
-fn hostname() -> String {
-    std::fs::read_to_string("/proc/sys/kernel/hostname").map(|h| h.trim().to_string()).unwrap_or_else(|_| "local".into())
+fn parse_hc_command(cmd: &str) -> Result<Vec<String>, String> {
+    let argv: Vec<String> = if cmd.trim_start().starts_with('[') {
+        serde_json::from_str(cmd).map_err(|error| format!("PRIM_HERDR must be JSON argv: {error}"))?
+    } else { vec![cmd.to_string()] };
+    if argv.is_empty() || argv.iter().any(|arg| arg.is_empty() || arg.contains('\0')) {
+        return Err("PRIM_HERDR needs nonempty literal arguments without NUL".into());
+    }
+    Ok(argv)
+}
+
+fn default_name(instance: &str) -> String {
+    format!("herdr@{instance}")
+}
+
+#[cfg(test)]
+mod platform_tests {
+    use super::*;
+    #[test]
+    fn argv_keeps_spaced_executable_and_argument() {
+        assert_eq!(parse_hc_command(r#"["/Program Files/hc","connect","--session","two words"]"#).unwrap(),
+                   vec!["/Program Files/hc", "connect", "--session", "two words"]);
+    }
+    #[test]
+    fn literal_program_and_prefix_arguments_keep_spaces() {
+        assert_eq!(parse_hc_command("/Program Files/hc").unwrap(), vec!["/Program Files/hc"]);
+        assert_eq!(herdr_command(Some("/SSH Tools/ssh"), &["host name".into(), "/Remote Tools/hc".into()]).unwrap(),
+                   vec!["/SSH Tools/ssh", "host name", "/Remote Tools/hc", "connect"]);
+        assert!(parse_hc_command("[]").is_err());
+        assert!(parse_hc_command("[42]").is_err());
+    }
+    #[test]
+    fn default_install_and_path_keep_spaces() {
+        let home = tempfile::Builder::new().prefix("hc home with spaces ").tempdir().unwrap();
+        let executable = home.path().join(format!(".local/bin/herdr-core{}", std::env::consts::EXE_SUFFIX));
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::write(&executable, "fixture").unwrap();
+        assert_eq!(default_hc(None, home.path()), vec![executable.to_string_lossy().into_owned(), "connect".into()]);
+        let bin = home.path().join("bin with spaces"); std::fs::create_dir(&bin).unwrap();
+        std::fs::write(bin.join(format!("hc{}", std::env::consts::EXE_SUFFIX)), "fixture").unwrap();
+        let path = std::env::join_paths([&bin]).unwrap();
+        assert_eq!(default_hc(Some(&path), home.path()), vec!["hc", "connect"]);
+    }
+    #[test]
+    fn names_do_not_collide_for_distinct_backend_ids() {
+        assert_ne!(default_name("backend-a"), default_name("backend-b"));
+        assert_eq!(default_name("backend-a"), default_name("backend-a"));
+    }
 }
