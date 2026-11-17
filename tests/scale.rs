@@ -30,9 +30,11 @@ const BUDGET_SPAWN_P99_MS: f64 = 50.0;
 const BUDGET_TXN_P50_MS: f64 = 10.0;
 const BUDGET_TXN_P99_MS: f64 = 50.0;
 const BUDGET_ECHO_P99_MS: f64 = 50.0; // input -> echo on an idle stream during the output flood
-const BUDGET_SLOW_ECHO_P99_MS: f64 = 250.0; // the same, on a slow-reading client's own idle stream
+const SLOW_ECHO_STARTUP_MS: f64 = 3000.0; // measured from successful socket connection, not first probe
+const BUDGET_SLOW_ECHO_STARTUP_MAX_MS: f64 = 3000.0;
+const BUDGET_SLOW_ECHO_P99_MS: f64 = 250.0; // steady state on a slow-reading client's own idle stream
 const BUDGET_SLOW_ECHO_MIN_SAMPLES: usize = 1; // completed probes per configured slow client
-const BUDGET_SLOW_ECHO_MAX_MS: f64 = 1000.0; // its worst probe, usually the first, right after attaching to floods
+const BUDGET_SLOW_ECHO_MAX_MS: f64 = 1000.0; // steady-state worst probe, including unfinished lower bounds
 const BUDGET_EVENT_LAG_P99_MS: f64 = 250.0; // status change emitted by the backend -> seen by a client
 const BUDGET_MISSED: u64 = 0; // `missed` notifications to the draining observer
 const BUDGET_STATUS_DELIVERED_MIN: f64 = 0.95; // share of emitted status changes the observer saw
@@ -575,12 +577,6 @@ async fn scale_load() {
     for t in slow_tasks {
         slow.push(t.await.unwrap());
     }
-    let slow_echo: Vec<f64> = slow.iter().flat_map(|s| s.echo_ms.iter().copied()).collect();
-    // No slow clients configured: the slow budgets don't apply. Otherwise NaN (nothing measured) fails.
-    let slow_none = prof.slow_clients == 0;
-    let slow_min_samples = if slow_none { BUDGET_SLOW_ECHO_MIN_SAMPLES } else { slow.iter().map(|s| s.echo_ms.len()).min().unwrap_or(0) };
-    // The worst echo is at least as long as any probe still unfinished at the end.
-    let slow_max = slow.iter().filter_map(|s| s.unfinished_ms).fold(pct(&slow_echo, 1.0), |m, u| if m.is_nan() { m } else { m.max(u) });
     let cleanup = core.shutdown();
     pump.abort();
     let observed_s = t_observe.elapsed().as_secs_f64();
@@ -593,18 +589,13 @@ async fn scale_load() {
     // Every ~2 s, to keep the receipt readable.
     let rss_samples: Vec<Value> = rss_series.iter().step_by(8).map(|(t, r)| json!([(*t * 10.0).round() / 10.0, (*r * 10.0).round() / 10.0])).collect();
 
-    let measured: BTreeMap<&str, (f64, f64, bool)> = BTreeMap::from([
+    let mut measured: BTreeMap<&str, (f64, f64, bool)> = BTreeMap::from([
         ("core_rss_peak_mb", (rss_peak, BUDGET_CORE_RSS_PEAK_MB, rss_peak <= BUDGET_CORE_RSS_PEAK_MB)),
         ("core_rss_growth_mb", (rss_peak - rss_after_setup, BUDGET_CORE_RSS_GROWTH_MB, rss_peak - rss_after_setup <= BUDGET_CORE_RSS_GROWTH_MB)),
         ("spawn_p99_ms", (pct(&spawn_ms, 0.99), BUDGET_SPAWN_P99_MS, pct(&spawn_ms, 0.99) <= BUDGET_SPAWN_P99_MS)),
         ("txn_p50_ms", (pct(&txn_ms, 0.5), BUDGET_TXN_P50_MS, pct(&txn_ms, 0.5) <= BUDGET_TXN_P50_MS)),
         ("txn_p99_ms", (pct(&txn_ms, 0.99), BUDGET_TXN_P99_MS, pct(&txn_ms, 0.99) <= BUDGET_TXN_P99_MS)),
         ("echo_p99_ms", (pct(&echo_ms, 0.99), BUDGET_ECHO_P99_MS, pct(&echo_ms, 0.99) <= BUDGET_ECHO_P99_MS)),
-        // NaN (no slow clients) passes.
-        // A configured slow client must have measured something: no samples is a failure, not a pass.
-        ("slow_echo_samples", (slow_min_samples as f64, BUDGET_SLOW_ECHO_MIN_SAMPLES as f64, slow_min_samples >= BUDGET_SLOW_ECHO_MIN_SAMPLES)),
-        ("slow_echo_p99_ms", (pct(&slow_echo, 0.99), BUDGET_SLOW_ECHO_P99_MS, slow_none || pct(&slow_echo, 0.99) <= BUDGET_SLOW_ECHO_P99_MS)),
-        ("slow_echo_max_ms", (slow_max, BUDGET_SLOW_ECHO_MAX_MS, slow_none || slow_max <= BUDGET_SLOW_ECHO_MAX_MS)),
         ("event_lag_p99_ms", (pct(&o.event_lag_ms, 0.99), BUDGET_EVENT_LAG_P99_MS, pct(&o.event_lag_ms, 0.99) <= BUDGET_EVENT_LAG_P99_MS)),
         ("missed", (o.missed as f64, BUDGET_MISSED as f64, o.missed <= BUDGET_MISSED)),
         ("status_delivered_ratio", (delivered, BUDGET_STATUS_DELIVERED_MIN, delivered >= BUDGET_STATUS_DELIVERED_MIN)),
@@ -613,6 +604,7 @@ async fn scale_load() {
         // Not a placeholder: a run must leave nothing behind.
         ("leaked_processes", (cleanup.leaked.len() as f64, 0.0, cleanup.leaked.is_empty())),
     ]);
+    measured.extend(slow_measurements(&slow,prof.slow_clients));
     let failed: Vec<&str> = measured.iter().filter(|(_, (_, _, ok))| !ok).map(|(k, _)| *k).collect();
     let commit = std::process::Command::new("git").args(["describe", "--always", "--dirty"]).output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
 
@@ -630,10 +622,15 @@ async fn scale_load() {
         "core_rss_mb": {"start": rss_start, "after_setup": rss_after_setup, "peak": rss_peak, "end": rss_end, "samples_t_s_mb": rss_samples},
         "transactions": {"latency": stats(&txn_ms), "errors": txn_errors, "achieved_per_sec": txn_ms.len() as f64 / load_s},
         "echo": {"latency": stats(&echo_ms), "lost_after_5s": echo_lost},
+        "slow_echo_phases": {"anchor":"successful_connection", "startup_ms":SLOW_ECHO_STARTUP_MS, "classification":"probe_start", "empty_phase":"not_applicable; per-client missing sample guard still applies"},
         "slow_clients": slow.iter().map(|s| json!({
-            "echo": stats(&s.echo_ms), "echo_timed_out": s.timed_out, "bytes_read": s.bytes_read,
-            "echo_unfinished_ms": s.unfinished_ms,
-            "echo_series_ms": s.echo_ms.iter().map(|m| m.round()).collect::<Vec<_>>(),
+            "echo": stats(&s.echo_ms(None)), "echo_timed_out": s.timed_out, "bytes_read": s.bytes_read,
+            "echo_startup": stats(&s.echo_ms(Some(SlowPhase::Startup))),
+            "echo_steady": stats(&s.echo_ms(Some(SlowPhase::Steady))),
+            "echo_samples": s.samples,
+            "echo_unfinished": s.unfinished,
+            "echo_unfinished_ms": s.unfinished.as_ref().map(|p| p.latency_ms),
+            "echo_series_ms": s.samples.iter().map(|p| p.latency_ms.round()).collect::<Vec<_>>(),
             "idle_stream_attached": s.attached, "missed": s.missed,
         })).collect::<Vec<_>>(),
         "events": {"received": o.events, "status_received": o.status_events, "status_expected_approx": expected_status, "lag": stats(&o.event_lag_ms), "missed": o.missed,
@@ -651,16 +648,62 @@ async fn scale_load() {
     assert!(failed.is_empty(), "scale budgets exceeded: {failed:?} (receipt: {})", path.display());
 }
 
-/// What one slow client saw.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SlowPhase { Startup, Steady }
+impl SlowPhase {
+    fn at(started_after_connect_ms:f64) -> Self {
+        if started_after_connect_ms < SLOW_ECHO_STARTUP_MS { Self::Startup } else { Self::Steady }
+    }
+}
+#[derive(serde::Serialize)]
+struct SlowEcho {
+    started_after_connect_ms:f64,
+    latency_ms:f64,
+    phase:SlowPhase,
+    outcome:&'static str,
+}
+impl SlowEcho {
+    fn new(started_after_connect_ms:f64, latency_ms:f64, outcome:&'static str) -> Self {
+        Self { started_after_connect_ms, latency_ms, phase:SlowPhase::at(started_after_connect_ms), outcome }
+    }
+}
+/// All completed/timeout probes remain in samples; censoring does not invent a completed sample.
 #[derive(Default)]
 struct Slow {
-    echo_ms: Vec<f64>,
-    /// A probe still waiting when the load ended: its echo took at least this long (censored).
-    unfinished_ms: Option<f64>,
+    samples: Vec<SlowEcho>,
+    unfinished: Option<SlowEcho>,
     timed_out: u64,
     bytes_read: u64,
     missed: u64,
     attached: bool,
+}
+impl Slow {
+    fn echo_ms(&self, phase:Option<SlowPhase>) -> Vec<f64> {
+        self.samples.iter().filter(|s| phase.is_none_or(|p| s.phase == p)).map(|s| s.latency_ms).collect()
+    }
+}
+
+fn slow_measurements(slow:&[Slow], configured:usize) -> BTreeMap<&'static str,(f64,f64,bool)> {
+    let none = configured == 0;
+    let minimum = if none { BUDGET_SLOW_ECHO_MIN_SAMPLES } else { slow.iter().map(|s| s.samples.len()).min().unwrap_or(0) };
+    let mut measured = BTreeMap::from([
+        ("slow_echo_samples", (minimum as f64, BUDGET_SLOW_ECHO_MIN_SAMPLES as f64, none || (slow.len() == configured && minimum >= BUDGET_SLOW_ECHO_MIN_SAMPLES))),
+        // A short configured timeout must not become a passing startup latency sample.
+        ("slow_echo_timeouts", (slow.iter().map(|s| s.timed_out).sum::<u64>() as f64, 0.0, slow.iter().all(|s| s.timed_out == 0))),
+    ]);
+    for (phase, max_key, limit) in [(SlowPhase::Startup,"slow_echo_startup_max_ms",BUDGET_SLOW_ECHO_STARTUP_MAX_MS), (SlowPhase::Steady,"slow_echo_max_ms",BUDGET_SLOW_ECHO_MAX_MS)] {
+        let values:Vec<f64> = slow.iter().flat_map(|s| s.echo_ms(Some(phase))).collect();
+        // Unfinished probes retain their start phase and are lower bounds, never dropped or
+        // assigned to whichever phase happened to be current when the run stopped.
+        let max = slow.iter().flat_map(|s| s.samples.iter().chain(s.unfinished.iter())).filter(|s| s.phase == phase).map(|s| s.latency_ms).reduce(f64::max);
+        measured.insert(max_key, (max.unwrap_or(f64::NAN), limit, max.is_none_or(|m| m <= limit)));
+        if phase == SlowPhase::Steady {
+            let p99 = (!values.is_empty()).then(|| pct(&values,0.99));
+            measured.insert("slow_echo_p99_ms", (p99.unwrap_or(f64::NAN), BUDGET_SLOW_ECHO_P99_MS, p99.is_none_or(|p| p <= BUDGET_SLOW_ECHO_P99_MS)));
+        }
+    }
+    measured
 }
 
 /// A client that subscribes and attaches like the stalled ones, but reads at most
@@ -670,6 +713,7 @@ fn slow_client(socket: PathBuf, attach: Vec<String>, prof: Profile, stop: Arc<st
     use tokio::io::AsyncReadExt;
     tokio::spawn(async move {
         let s = tokio::net::UnixStream::connect(&socket).await.unwrap();
+        let connected_at = Instant::now();
         let (mut r, mut w) = s.into_split();
         let mut lines = vec![
             json!({"jsonrpc": "2.0", "id": 1, "method": "hello", "params": {"client": "scale-slow"}}),
@@ -739,6 +783,7 @@ fn slow_client(socket: PathBuf, attach: Vec<String>, prof: Profile, stop: Arc<st
             k += 1;
             let token = format!("<s{k}>");
             let note = json!({"jsonrpc": "2.0", "method": "stream.input", "params": {"stream": sid, "text": token}});
+            let started_after_connect_ms = ms(connected_at.elapsed());
             w.write_all(format!("{note}\n").as_bytes()).await.unwrap();
             let t0 = Instant::now();
             loop {
@@ -751,17 +796,17 @@ fn slow_client(socket: PathBuf, attach: Vec<String>, prof: Profile, stop: Arc<st
                     hit
                 };
                 if hit {
-                    out.echo_ms.push(ms(t0.elapsed()));
+                    out.samples.push(SlowEcho::new(started_after_connect_ms,ms(t0.elapsed()),"matched"));
                     break;
                 }
                 if t0.elapsed() >= timeout {
                     out.timed_out += 1;
-                    out.echo_ms.push(ms(timeout));
+                    out.samples.push(SlowEcho::new(started_after_connect_ms,ms(timeout),"timeout"));
                     break;
                 }
                 if stop.load(Ordering::Relaxed) {
                     // Load over before this probe finished: not a sample, but a lower bound.
-                    out.unfinished_ms = Some(ms(t0.elapsed()));
+                    out.unfinished = Some(SlowEcho::new(started_after_connect_ms,ms(t0.elapsed()),"unfinished"));
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(5)).await;
@@ -775,4 +820,82 @@ fn slow_client(socket: PathBuf, attach: Vec<String>, prof: Profile, stop: Arc<st
         out.missed = s.missed;
         out
     })
+}
+
+#[cfg(test)]
+mod slow_phase_tests {
+    use super::*;
+    fn client(samples:Vec<SlowEcho>) -> Slow {
+        let timed_out = samples.iter().filter(|s| s.outcome == "timeout").count() as u64;
+        Slow { samples, timed_out, attached:true, ..Default::default() }
+    }
+    fn matched(start:f64,latency:f64) -> SlowEcho { SlowEcho::new(start,latency,"matched") }
+
+    #[test]
+    fn phase_is_probe_start_relative_to_connection_with_exact_boundary() {
+        assert_eq!(SlowPhase::at(2999.999),SlowPhase::Startup);
+        assert_eq!(SlowPhase::at(3000.0),SlowPhase::Steady);
+        let cross_boundary = matched(2999.0,2000.0);
+        assert_eq!(cross_boundary.phase,SlowPhase::Startup);
+        assert_eq!(SlowPhase::at(cross_boundary.started_after_connect_ms+cross_boundary.latency_ms),SlowPhase::Steady);
+    }
+    #[test]
+    fn startup_tail_is_not_a_steady_failure_and_all_samples_remain_visible() {
+        let s = client(vec![matched(50.0,2250.0),matched(3500.0,30.0)]);
+        let m = slow_measurements(std::slice::from_ref(&s),1);
+        assert_eq!(m["slow_echo_startup_max_ms"],(2250.0,3000.0,true));
+        assert_eq!(m["slow_echo_p99_ms"],(30.0,250.0,true));
+        assert_eq!(m["slow_echo_max_ms"],(30.0,1000.0,true));
+        assert_eq!(stats(&s.echo_ms(None))["n"],2);
+        assert_eq!(stats(&s.echo_ms(None))["max_ms"],2250.0);
+        let samples = serde_json::to_value(&s.samples).unwrap();
+        assert_eq!(samples[0]["phase"],"startup");
+        assert_eq!(samples[1]["phase"],"steady");
+    }
+    #[test]
+    fn a_late_first_probe_is_steady_not_a_fresh_startup_window() {
+        let m = slow_measurements(&[client(vec![matched(3100.0,1200.0)])],1);
+        assert!(!m["slow_echo_p99_ms"].2);
+        assert!(!m["slow_echo_max_ms"].2);
+        assert!(m["slow_echo_startup_max_ms"].0.is_nan());
+    }
+    #[test]
+    fn both_phases_still_enforce_their_own_limits() {
+        let m = slow_measurements(&[client(vec![matched(50.0,3001.0),matched(4000.0,300.0)])],1);
+        assert!(!m["slow_echo_startup_max_ms"].2);
+        assert!(!m["slow_echo_p99_ms"].2);
+        assert!(m["slow_echo_max_ms"].2);
+    }
+    #[test]
+    fn unfinished_lower_bounds_keep_their_start_phase_without_becoming_samples() {
+        let mut startup = client(vec![matched(50.0,20.0)]);
+        startup.unfinished = Some(SlowEcho::new(2900.0,3100.0,"unfinished"));
+        assert!(!slow_measurements(&[startup],1)["slow_echo_startup_max_ms"].2);
+        let mut steady = client(vec![matched(50.0,20.0)]);
+        steady.unfinished = Some(SlowEcho::new(3000.0,1100.0,"unfinished"));
+        let m = slow_measurements(std::slice::from_ref(&steady),1);
+        assert!(!m["slow_echo_max_ms"].2);
+        assert_eq!(steady.samples.len(),1);
+        assert!(m["slow_echo_p99_ms"].0.is_nan(),"censoring is not a percentile sample");
+    }
+    #[test]
+    fn empty_phases_cannot_hide_a_configured_clients_missing_samples() {
+        assert!(!slow_measurements(&[Slow::default()],1)["slow_echo_samples"].2);
+        assert!(!slow_measurements(&[],1)["slow_echo_samples"].2);
+        assert!(!slow_measurements(&[client(vec![matched(0.0,20.0)]),Slow::default()],2)["slow_echo_samples"].2);
+        assert!(slow_measurements(&[],0).values().all(|(_,_,ok)| *ok));
+    }
+    #[test]
+    fn startup_only_short_runs_explicitly_have_no_applicable_steady_measurement() {
+        let m = slow_measurements(&[client(vec![matched(20.0,100.0)])],1);
+        assert!(m.values().all(|(_,_,ok)| *ok));
+        assert!(m["slow_echo_p99_ms"].0.is_nan());
+        assert!(m["slow_echo_max_ms"].0.is_nan());
+    }
+    #[test]
+    fn a_short_timeout_is_not_a_passing_startup_echo() {
+        let m = slow_measurements(&[client(vec![SlowEcho::new(50.0,500.0,"timeout")])],1);
+        assert!(!m["slow_echo_timeouts"].2);
+        assert!(m["slow_echo_startup_max_ms"].2,"timeout failure is independent of latency threshold");
+    }
 }
