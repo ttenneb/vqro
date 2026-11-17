@@ -14,12 +14,19 @@ MODE=${1:-quick}
 case "$MODE" in quick|full) ;; *) echo "usage: $0 quick|full" >&2; exit 2 ;; esac
 # Run inside our own transient user scope (a cgroup): every process this run starts stays in it, even
 # daemons that reparent or rename themselves, and nothing of a concurrent run is in it. The leftover check
-# then lists exactly our processes. Without systemd-run, fall back to a root-pattern heuristic.
+# then lists exactly our processes. systemd-run --user needs the user bus: XDG_RUNTIME_DIR (and
+# DBUS_SESSION_BUS_ADDRESS); under `env -i` they are recovered from /run/user/<uid> when that is ours.
+# Without a scope the leftover check is UNSCOPED: it only reports (it can match concurrent runs by other
+# agents), never kills and never fails the gate.
 if [ -z "${PRIM_CHECK_SCOPED:-}" ]; then
+  if [ -z "${XDG_RUNTIME_DIR:-}" ] && [ -O "/run/user/$(id -u)" ]; then export XDG_RUNTIME_DIR=/run/user/$(id -u); fi
+  if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && [ -S "${XDG_RUNTIME_DIR:-/nonexistent}/bus" ]; then
+    export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+  fi
   if command -v systemd-run >/dev/null 2>&1 && systemd-run --user --scope --quiet --collect -- true >/dev/null 2>&1; then
     PRIM_CHECK_SCOPED=1 exec systemd-run --user --scope --quiet --collect --unit="prim-check-$(date +%s)-$$" -- "$0" "$@"
   fi
-  echo "check: no systemd user scope; the leftover check falls back to a test-root heuristic" >&2
+  echo "check: no systemd user scope (set XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS); the leftover check is UNSCOPED: report only, no kill, no failure" >&2
 fi
 CGROUP=
 if [ -n "${PRIM_CHECK_SCOPED:-}" ]; then
@@ -167,16 +174,25 @@ if [ -n "$CGROUP" ]; then
   SCOPE="cgroup $CGROUP"
   LEFT=$(scoped_leftovers | cut -f1 | tr '\n' ' ')
 else
-  SCOPE="heuristic (test roots; concurrent runs can match)"
+  SCOPE="unscoped heuristic (test roots; can match concurrent runs; report only, never killed or failed)"
   LEFT=$(comm -13 <(echo "$BEFORE") <(snapshot | cut -f1 | sort) | tr '\n' ' ')
 fi
 LEFT=${LEFT% }
 if [ -n "$LEFT" ]; then
   for pid in $LEFT; do printf '%s %s\n' "$pid" "$(tr '\0' ' ' < /proc/$pid/cmdline 2>/dev/null | cut -c1-100)"; done > "$LOGS/leftovers.log"
-  printf '%-28s FAIL  pids %s (see %s)\n' "no-leftover-processes" "$LEFT" "$LOGS/leftovers.log"
-  printf 'no-leftover-processes\tFAIL\t0\t%s\n' "$LOGS/leftovers.log" >> "$STEPS"
-  # Recorded; now clean up what this run leaked (only possible to attribute safely with a scope).
-  [ -n "$CGROUP" ] && kill -9 $LEFT 2>/dev/null
+  if [ -n "$CGROUP" ]; then
+    printf '%-28s FAIL  pids %s (see %s)\n' "no-leftover-processes" "$LEFT" "$LOGS/leftovers.log"
+    printf 'no-leftover-processes\tFAIL\t0\t%s\n' "$LOGS/leftovers.log" >> "$STEPS"
+    # Recorded; now clean up what this run leaked (attributable only because they are in our scope).
+    kill -9 $LEFT 2>/dev/null
+  else
+    # Unscoped: these may belong to other agents' concurrent runs. Report, never kill, never fail.
+    printf '%-28s UNSCOPED  possible leftovers %s (may be other runs; see %s)\n' "no-leftover-processes" "$LEFT" "$LOGS/leftovers.log"
+    printf 'no-leftover-processes\tUNSCOPED\t0\t%s\n' "$LOGS/leftovers.log" >> "$STEPS"
+  fi
+elif [ -z "$CGROUP" ]; then
+  printf '%-28s UNSCOPED  none matched\n' "no-leftover-processes"
+  printf 'no-leftover-processes\tUNSCOPED\t0\t-\n' >> "$STEPS"
 else
   printf '%-28s PASS\n' "no-leftover-processes"
   printf 'no-leftover-processes\tPASS\t0\t-\n' >> "$STEPS"
@@ -189,7 +205,7 @@ steps_file, receipt, mode, commit, logs, left, scope = sys.argv[1:8]
 steps = [dict(zip(("name", "result", "seconds", "log"), l.split("\t"))) for l in open(steps_file).read().splitlines() if l]
 for s in steps:
     s["seconds"] = int(s["seconds"])
-failed = [s["name"] for s in steps if s["result"] != "PASS"]
+failed = [s["name"] for s in steps if s["result"] not in ("PASS", "UNSCOPED")]
 r = {"kind": "prim.check-receipt", "version": 1, "mode": mode, "commit": commit, "finished_unix": int(time.time()),
      "result": "fail" if failed else "pass", "failed": failed, "steps": steps, "leftover_pids": left.split(), "leftover_scope": scope, "logs": logs}
 scale = logs + "/scale-receipt.json"

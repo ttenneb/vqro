@@ -62,8 +62,11 @@ listed); state-schema rollback; late crash 30 s after load (crash budget); 5 s s
 - a leftover-process check scoped to this run: `check.sh` re-runs itself in a transient systemd user scope
   (`systemd-run --user --scope`), so every process it starts stays in that cgroup even after reparenting or
   renaming (tmux becomes `tmux: server`), and concurrent runs by other agents are never counted. Leftovers are
-  recorded in the receipt (`leftover_pids`, `leftover_scope`) and then killed. Without a systemd user manager it
-  falls back to a before/after diff of processes tied to test roots, labelled as such in the receipt.
+  recorded in the receipt (`leftover_pids`, `leftover_scope`) and then killed. The scope needs the user bus:
+  `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS`; under `env -i` check.sh recovers them from `/run/user/<uid>`
+  when that directory is the user's. Without a scope (no systemd user manager, or no bus), the step is
+  `UNSCOPED`: a before/after diff of processes tied to test roots that can match other agents' concurrent runs,
+  so it only reports them; it never kills them and never fails the gate.
   `PRIM_CHECK_INJECT_LEAK=1` leaks one detached process to prove the check fails.
 
 Every step runs under `env -i` with private paths and never touches a live prim, hc or tmux. It prints a PASS/FAIL
