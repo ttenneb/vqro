@@ -73,6 +73,18 @@ storage cost; the improvement is isolation of unrelated work, not pretending fsy
 Each run had zero transaction errors, zero lost echo probes and zero leaked child processes. Peak
 core RSS was 23.5–24.1 MiB in these profiles. These are individual local runs, not statistical bounds.
 
+After rebasing onto provider-wire implementation `f2c1f21`, all 134 Rust tests and 51 strict Python
+tests passed with zero warnings. Repeating the same release profiles gave:
+
+| Integrated implementation | Added delay | Txn p99 ms | Echo p99 ms | Event lag p99 ms |
+|---|---:|---:|---:|---:|
+| provider wire + off-lock | 0 ms | 3.823 | 0.488 | 1 |
+| provider wire + off-lock | 80 ms | 83.249 | 0.457 | 1 |
+
+The normal run again passed every budget; the delayed run exceeded only the unchanged transaction
+p50/p99 ceilings. No transaction errors, lost echoes or leaked processes; peak RSS 24.3–25.1 MiB.
+The integrated queue's original-record-byte metadata required no committer adaptation.
+
 Reproduce in an isolated environment using `cargo test --release --test scale scale_load -- --ignored
 --exact --nocapture` and these `PRIM_SCALE_` settings:
 
@@ -88,7 +100,8 @@ harness/test child, never `prim serve`.
 
 Raw receipts/logs are under `~/.local/share/herdr/scratch/prim-independent-review/`:
 `commit-scale-{normal,slow,baseline-normal,baseline-slow}.{json,log}`; deterministic red/green logs
-are `commit-off-lock-{red,green}.log` and `commit-metadata-red.log`.
+are `commit-off-lock-{red,green}.log` and `commit-metadata-red.log`. Integrated receipts/logs are
+`commit-scale-integrated-{0,80}.{json,log}` and `commit-off-lock-integrated-{cargo,python}.log`.
 
 ## Remaining limits
 
