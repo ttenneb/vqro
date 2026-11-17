@@ -78,3 +78,28 @@ teardown was rebased.
 Detailed receipts/logs live under `~/.local/share/herdr/scratch/prim-independent-review/`:
 `slice2a-scale-final.json`, `slice2a-scale-final.log`, `slice2a-tests.log`,
 `slice2a-before-timeout.log`, and `slice2a-before-flood.log`.
+
+## OS send buffer: bytes the core cannot revoke (2026-11-17)
+
+The bounded queues above cannot take back bytes already handed to the OS. A 64 KiB/s viewer that attaches to eight
+1 MB/s floods had about 170 KB of flood payload in its connection's kernel buffer (Linux default `wmem` 208 KiB;
+`ss -x` showed Send-Q about 205 KB on the core side, Recv-Q about 171 KB on the viewer side) when the core closed
+those streams as slow consumers. Its first echo then waited about 5.6 s. The backlog drains at the viewer's read rate
+minus the event traffic (about 37 KB/s), which the writer always sends ahead of stream data.
+
+Bounded outbound: the core now requests a 16 KiB OS send buffer per client connection (`CONNECTION_SEND_BUFFER`,
+best effort through `socket2`; Linux doubles it). The default scale profile, first echo of that viewer:
+
+| Requested send buffer | First echo | Note |
+|---|---:|---|
+| OS default (208 KiB) | 5.6 s | |
+| 64 KiB | 3.8 s | |
+| 32 KiB | 1.8 s (3 runs) | |
+| 16 KiB | 0.50-0.65 s (4 runs) | chosen |
+| 8 KiB | 0.71-0.75 s (3 runs) | |
+| 4 KiB | 1.8-1.9 s (3 runs) | the viewer reads only about 53 KB/s: small buffers cost it wake-ups |
+
+Draining viewers are unaffected: 99.9% of flood bytes delivered, observer echo p99 about 2 ms. What remains, about
+0.5 s, is one flood line already being written plus the events queued ahead of the echo. Getting below that would
+need stream data to share priority with events, which is a different trade-off. Receipts: `first-echo-before-3697c40.json`,
+`first-echo-after-35dd1b3.json` under `~/.local/share/herdr/scratch/prim-scale/`.
