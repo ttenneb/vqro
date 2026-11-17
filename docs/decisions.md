@@ -305,15 +305,15 @@ after.
 named-pipe arm; `prim_ext.py` on Windows. Known Windows runtime work is listed in `build-plan.md` ("Windows work").
 Unix behaviour is unchanged.
 
-## D23. Platforms first, multi-machine later, and no backend-specific remote transport (2026-11-17, PROPOSED)
+## D23. Multi-machine stays cheap, and no backend-specific remote transport (2026-11-17)
 
-> **Proposed wording for the human**, recording priorities the human set on 2026-11-17. Not binding until confirmed.
+> **Confirmed by the human on 2026-11-17 for the last two bullets.** Platform priorities are not part of this
+> decision: the human will set them when the roadmap is revisited after the current hardening and fixes.
 
 **Decision.**
-- **Priorities.** Native Windows and WSL (both modes: prim inside WSL, and native-Windows prim driving WSL terminals)
-  are high priority; macOS is a third stream; daily use on Linux continues in parallel. prim core and TUI run
-  natively on Windows and macOS. Multi-machine (prim on one machine driving another machine's terminals and agents)
-  is a backlog feature (`roadmap.md`).
+- **Platform priorities: to be revisited.** Other OS support (Windows native and WSL, macOS) and multi-machine are
+  wanted; their order is decided after hardening. Multi-machine (prim on one machine driving another machine's
+  terminals and agents) is a backlog feature.
 - **Nothing now may make multi-machine hard.** Contracts and code keep these properties: the core endpoint stays local
   and owner-only (D22) and anything remote reaches it by forwarding that terminates locally; resource identity and
   provider names use permanent backend ids, never hostnames or a host's local aliases; facts and spawn arguments name

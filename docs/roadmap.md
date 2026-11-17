@@ -1,8 +1,11 @@
 # Roadmap
 
 **prim is a working prototype, and fluid.** This page says where we are and what we think comes next; it is
-revised as we learn, not a commitment. Detail of what was built and when: `build-plan.md`. Priorities below follow
-the human's direction of 2026-11-17 (D23, proposed).
+revised as we learn, not a commitment. Detail of what was built and when: `build-plan.md`.
+
+> **2026-11-17: the human will revisit priorities after the current hardening and fixes.** Until then only daily
+> use and hardening are active; the platform and multi-machine streams below are candidates, not an order. The
+> multi-machine constraints (D23, confirmed) apply to all work now.
 
 ## Where we are (2026-11-17)
 
@@ -18,12 +21,12 @@ validation (compiles), WSL validation, any second machine.
 
 ## Streams (run in parallel)
 
-| Stream | Priority | Done when | Main risk |
+| Stream | Priority (to be revisited) | Done when | Main risk |
 |---|---|---|---|
-| **Daily use** on this machine | ongoing | Daily work runs on prim without regressions; scale budgets hold | Regressions while the other streams land |
-| **Windows native** | high | Core, TUI and default extensions run natively (named-pipe endpoint, durable store, paths, stop request, Python helpers); a Windows backend provider drives ConPTY terminals | ConPTY output re-rendering; no Windows machine for runtime tests yet |
-| **WSL** | high | Both modes work: prim inside WSL (Linux build), and native-Windows prim driving WSL terminals through a provider that owns the `wsl.exe` transport; agents in WSL reach the core through the neutral reachability contract (D23) | Bridges in WSL can't open a Windows named pipe: needs the reachability mechanism early |
-| **macOS** | third | Core, TUI, `prim-herdr` and `prim-tmux` run on macOS; keys and mouse verified in Terminal.app and iTerm2 | Terminal key/mouse differences; provider naming (`/proc` hostname) |
+| **Daily use** on this machine | active | Daily work runs on prim without regressions; scale budgets hold | Regressions while the other streams land |
+| **Windows native** | to be set | Core, TUI and default extensions run natively (named-pipe endpoint, durable store, paths, stop request, Python helpers); a Windows backend provider drives ConPTY terminals | ConPTY output re-rendering; no Windows machine for runtime tests yet |
+| **WSL** | to be set | Both modes work: prim inside WSL (Linux build), and native-Windows prim driving WSL terminals through a provider that owns the `wsl.exe` transport; agents in WSL reach the core through the neutral reachability contract (D23) | Bridges in WSL can't open a Windows named pipe: needs the reachability mechanism early |
+| **macOS** | to be set | Core, TUI, `prim-herdr` and `prim-tmux` run on macOS; keys and mouse verified in Terminal.app and iTerm2 | Terminal key/mouse differences; provider naming (`/proc` hostname) |
 | **Multi-machine** | backlog | prim on one machine drives another machine's terminals and agents through backend-neutral mechanisms | Remote agent reachability (options in D23); identity across hosts |
 
 ### Architectural constraints for multi-machine (apply now, in every stream)
