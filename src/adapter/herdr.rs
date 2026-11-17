@@ -5,7 +5,7 @@
 //! See ~/Projects/herdr-core/schema/README.md. Input goes through attach streams, which herdr-core
 //! delivers immediately (no send/keys quiet delays).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -47,6 +47,22 @@ enum Pending {
     Spawn(Reply<ResourceFacts>),
     Kill(Reply<Value>),
     Attach { reply: Reply<Stream>, history: u32 },
+}
+
+const MAX_NATIVE_PENDING: usize = 1024;
+
+fn prune_pending(pending: &mut HashMap<u64, Pending>, late_attaches: &mut HashSet<u64>) {
+    pending.retain(|id, call| {
+        let cancelled = match call {
+            Pending::Subscribe => false,
+            Pending::Spawn(reply) => reply.is_closed(),
+            Pending::Kill(reply) => reply.is_closed(),
+            Pending::Attach { reply, .. } => {
+                if reply.is_closed() { late_attaches.insert(*id); true } else { false }
+            }
+        };
+        !cancelled
+    });
 }
 
 async fn run(
@@ -99,11 +115,12 @@ async fn session(
     // Plain-mode handshake, then framed.
     let hello = json!({"jsonrpc": "2.0", "id": 0, "method": "hello", "params": {"framed": true}});
     stdin.write_all(format!("{hello}\n").as_bytes()).await?;
-    let mut line = String::new();
-    stdout.read_line(&mut line).await?;
-    let reply: Value = serde_json::from_str(&line)?;
+    let mut line = Vec::new();
+    tokio::time::timeout(std::time::Duration::from_secs(5), (&mut stdout).take(1024 * 1024 + 1).read_until(b'\n', &mut line)).await??;
+    if line.len() > 1024 * 1024 { anyhow::bail!("herdr-core hello exceeds 1 MiB"); }
+    let reply: Value = serde_json::from_slice(&line)?;
     if reply.get("result").and_then(|r| r.get("framed")) != Some(&Value::Bool(true)) {
-        anyhow::bail!("herdr-core did not accept framed mode: {line}");
+        anyhow::bail!("herdr-core did not accept framed mode");
     }
 
     let instance = reply["result"]["core"]["id"].as_str().filter(|id| !id.is_empty())
@@ -123,6 +140,9 @@ async fn session(
 
     let mut next_id: u64 = 1;
     let mut pending: HashMap<u64, Pending> = HashMap::new();
+    let mut late_attaches = HashSet::new();
+    let mut maintenance = tokio::time::interval(std::time::Duration::from_millis(100));
+    let subscribe_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
     let mut streams: HashMap<u32, crate::queue::Sender<StreamOutput>> = HashMap::new();
     let mut records: HashMap<String, Value> = HashMap::new();
     let mut events_channel: Option<u32> = None;
@@ -141,9 +161,19 @@ async fn session(
 
     loop {
         tokio::select! {
+            _ = maintenance.tick() => {
+                prune_pending(&mut pending, &mut late_attaches);
+                // Closing this native connection also releases any channels whose attach response
+                // never arrived. Bounded tombstones prevent either leaked channels or unbounded IDs.
+                if late_attaches.len() >= MAX_NATIVE_PENDING { anyhow::bail!("too many expired native attachments"); }
+            }
+            _ = tokio::time::sleep_until(subscribe_deadline), if events_channel.is_none() => { anyhow::bail!("herdr-core initial subscription timed out"); }
             cmd = cmds.recv() => {
                 let Some(cmd) = cmd else { return Ok(()) };
                 let Some(cmd) = command_for(cmd, connection) else { continue };
+                prune_pending(&mut pending, &mut late_attaches);
+                if late_attaches.len() >= MAX_NATIVE_PENDING { anyhow::bail!("too many expired native attachments"); }
+                if pending.len() >= MAX_NATIVE_PENDING { reject_command(cmd, "native pending limit; not sent"); continue; }
                 match cmd {
                     AdapterCmd::Bound { .. } => unreachable!("command_for removes bindings"),
                     AdapterCmd::Spawn(req, reply) => {
@@ -177,7 +207,12 @@ async fn session(
                         continue;
                     }
                     let Some(id) = msg.get("id").and_then(|i| i.as_u64()) else { continue };
-                    let Some(p) = pending.remove(&id) else { continue };
+                    let Some(p) = pending.remove(&id) else {
+                        if late_attaches.remove(&id) {
+                            if let Some(channel) = msg["result"]["channel"].as_u64() { send_frame(&frame_tx, frame(channel as u32, CLOSE, &[]))?; }
+                        }
+                        continue;
+                    };
                     let result: Result<Value, AdapterError> = match msg.get("error") {
                         Some(e) => Err(AdapterError::Backend(e.get("message").and_then(|m| m.as_str()).unwrap_or("error").to_string())),
                         None => Ok(msg.get("result").cloned().unwrap_or(Value::Null)),
@@ -199,6 +234,7 @@ async fn session(
                                     let _ = reply.send(Err(AdapterError::Indeterminate("attach returned no channel".into())));
                                     continue;
                                 };
+                                if reply.is_closed() { send_frame(&frame_tx, frame(ch, CLOSE, &[]))?; continue; }
                                 let (out_tx, out_rx) = crate::queue::channel(STREAM_BUFFER_BYTES);
                                 let (inp_tx, mut inp_rx) = crate::queue::channel::<StreamInput>(STREAM_BUFFER_BYTES);
                                 streams.insert(ch, out_tx);
@@ -354,6 +390,30 @@ fn frame(channel: u32, kind: u8, payload: &[u8]) -> Vec<u8> {
 fn send_frame(tx: &crate::queue::Sender<Vec<u8>>, bytes: Vec<u8>) -> Result<(), crate::queue::QueueError> {
     let n = bytes.len();
     tx.try_send(bytes, n)
+}
+
+#[cfg(test)]
+mod qa_tests {
+    use super::*;
+    #[test]
+    fn expired_native_calls_retire_and_attach_ids_remain_bounded_cleanup_tokens() {
+        let mut pending = HashMap::new();
+        let mut late = HashSet::new();
+        for id in 0..100 {
+            let (reply, receiver) = tokio::sync::oneshot::channel();
+            pending.insert(id, Pending::Kill(reply)); drop(receiver);
+        }
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        pending.insert(100, Pending::Attach { reply, history:0 }); drop(receiver);
+        prune_pending(&mut pending, &mut late);
+        assert!(pending.is_empty(), "effect timeout must retire native pending senders");
+        assert_eq!(late, HashSet::from([100]), "late attachment channel still needs explicit native close");
+    }
+    #[test]
+    fn cancelled_queued_commands_are_not_dispatched() {
+        let (reply, receiver) = tokio::sync::oneshot::channel(); drop(receiver);
+        assert!(command_for(AdapterCmd::Kill("native".into(), reply), 1).is_none());
+    }
 }
 
 async fn read_frames(mut r: BufReader<ChildStdout>, tx: crate::queue::Sender<Frame>) {

@@ -156,7 +156,15 @@ pub fn command_for(mut command: AdapterCmd, current: u64) -> Option<AdapterCmd> 
                 if connection != current { reject_command(*inner, "provider connection changed before dispatch"); return None; }
                 command = *inner;
             }
-            native => return Some(native),
+            native => {
+                let cancelled = match &native {
+                    AdapterCmd::Spawn(_, reply) => reply.is_closed(),
+                    AdapterCmd::Kill(_, reply) => reply.is_closed(),
+                    AdapterCmd::Attach { reply, .. } => reply.is_closed(),
+                    AdapterCmd::Bound { .. } => unreachable!(),
+                };
+                return if cancelled { None } else { Some(native) };
+            }
         }
     }
 }
