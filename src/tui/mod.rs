@@ -544,23 +544,28 @@ impl App {
             }
             "resource" => {
                 if let Some(id) = d["id"].as_str() {
-                    // Partial events (we subscribe with `partial_resources`) carry only changed fields.
+                    // Merge the complete record before evaluating availability: partial status
+                    // events must not accidentally make a stale resource available again.
                     let record = if ev["partial"] == true {
                         let Some(mut base) = self.resources.get(id).cloned() else {
-                            // No base to merge onto: our state is not what the core assumed.
                             self.resync();
                             return;
                         };
-                        for (k, v) in d.as_object().into_iter().flatten() {
-                            base[k] = v.clone();
-                        }
+                        for (key, value) in d.as_object().into_iter().flatten() { base[key] = value.clone(); }
                         base
-                    } else {
-                        d.clone()
-                    };
-                    if d["state"] == "live" {
-                        for t in self.terms.values_mut().filter(|t| t.resource == id) {
-                            t.closed = None;
+                    } else { d.clone() };
+                    let available = record["available"].as_bool().unwrap_or(true);
+                    let restored = available && self.resources.get(id).is_some_and(|old| old["available"] == false);
+                    for term in self.terms.values_mut().filter(|t| t.resource == id) {
+                        if !available {
+                            if let Some(stream) = term.stream.take() {
+                                self.stream_view.remove(&stream);
+                                self.peer.notify("stream.close", json!({"stream": stream}));
+                            }
+                            term.close("resource unavailable".into());
+                        } else if record["state"] == "live" {
+                            term.closed = None;
+                            if restored { term.retry_at = Some(std::time::Instant::now()); }
                         }
                     }
                     self.resources.insert(id.to_string(), record);
@@ -599,7 +604,7 @@ impl App {
                     }
                 }
             }
-            "adapter" => {
+            "adapter" | "provider" => {
                 if d["state"]["connected"] == false {
                     self.message = format!("backend {} disconnected: {}", d["name"], d["state"]["error"].as_str().unwrap_or(""));
                 }
@@ -1826,7 +1831,7 @@ impl App {
                     Some(r) => {
                         let name = v["title"].as_str().or_else(|| r["name"].as_str()).or_else(|| r["argv"][0].as_str()).unwrap_or(&rid).to_string();
                         let status = r["status"]["state"].as_str().map(|s| format!(" [{s}]")).unwrap_or_default();
-                        let fin = if r["state"] == "finished" { " (finished)" } else { "" };
+                        let fin = if r["available"] == false { " (unavailable)" } else if r["state"] == "finished" { " (finished)" } else { "" };
                         let sc = if scroll > 0 { format!(" ↑{scroll}") } else { String::new() };
                         format!(" {name}{status}{fin}{sc} ")
                     }
@@ -1838,7 +1843,8 @@ impl App {
                 if inner.width == 0 || inner.height == 0 {
                     return None;
                 }
-                let live = res.as_ref().map(|r| r["state"] == "live").unwrap_or(false);
+                let available = res.as_ref().is_some_and(|r| r["available"] != false);
+                let live = res.as_ref().map(|r| r["state"] == "live").unwrap_or(false) && available;
                 let dragging = self.drag.is_some();
                 let t = self.terms.entry(view.to_string()).or_insert_with(|| Term {
                     resource: rid.clone(),
@@ -1855,6 +1861,13 @@ impl App {
                         self.peer.notify("stream.close", json!({"stream": sid}));
                     }
                     *t = Term { resource: rid.clone(), stream: None, parser: new_parser(inner.width, inner.height), size: (inner.width, inner.height), attaching: false, closed: None, retry_at: None };
+                }
+                if !available && (t.stream.is_some() || t.attaching) {
+                    if let Some(stream) = t.stream.take() {
+                        self.stream_view.remove(&stream);
+                        self.peer.notify("stream.close", json!({"stream": stream}));
+                    }
+                    t.close("resource unavailable".into());
                 }
                 // While a border is being dragged, programs keep their size; they resize once on release.
                 if t.size != (inner.width, inner.height) && !dragging {
@@ -2360,6 +2373,24 @@ mod tests {
         app.on_incoming(resource_event(4, json!({"id": "r9", "status": null}), true));
         assert!(!app.resources.contains_key("r9"));
         assert!(app.resyncing && app.generation > before, "a partial event without a base forces a resync");
+    }
+
+    #[tokio::test]
+    async fn partial_status_cannot_restore_an_unavailable_terminal_but_availability_can() {
+        let (mut app, _) = app();
+        app.load(&snapshot(1, "x"));
+        app.on_incoming(resource_event(2, json!({"id": "r1", "state": "live", "available": true, "status": null}), false));
+        app.terms.insert("view".into(), Term { resource: "r1".into(), stream: Some(9), parser: new_parser(80, 24), size: (80, 24), attaching: false, closed: None, retry_at: None });
+        app.stream_view.insert(9, "view".into());
+        app.on_incoming(resource_event(3, json!({"id": "r1", "available": false, "stale": true}), true));
+        assert!(app.terms["view"].stream.is_none());
+        assert!(app.terms["view"].closed.is_some());
+        app.on_incoming(resource_event(4, json!({"id": "r1", "status": {"state": "working"}}), true));
+        assert_eq!(app.resources["r1"]["available"], false);
+        assert!(app.terms["view"].closed.is_some(), "partial live status must not clear unavailability");
+        app.on_incoming(resource_event(5, json!({"id": "r1", "available": true, "stale": false}), true));
+        assert!(app.terms["view"].closed.is_none());
+        assert!(app.terms["view"].can_attach(true, std::time::Instant::now()));
     }
 
     #[tokio::test]

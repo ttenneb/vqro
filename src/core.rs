@@ -6,9 +6,9 @@ use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
+use crate::provider::{self, IdentityMap, Provider, Route};
 
 use crate::adapter::{AdapterEvent, AdapterHandle, ResourceFacts};
 use crate::ext::ExtRuntime;
@@ -19,26 +19,24 @@ pub type Shared = Arc<Mutex<Core>>;
 
 const LOG: usize = 10_000;
 
-#[derive(Default, Serialize, Deserialize)]
-struct ResourceMap {
-    next: u64,
-    /// prim id -> (adapter, backend ref). Keeps ids stable across core restarts.
-    ids: BTreeMap<String, (String, String)>,
-}
-
 #[derive(Clone)]
 pub struct Resource {
     pub id: String,
     pub adapter: String,
+    pub instance: String,
+    pub available: bool,
+    life: watch::Sender<bool>,
     pub facts: ResourceFacts,
 }
 
 impl Resource {
     pub fn to_json(&self) -> Value {
         json!({
-            "id": self.id, "adapter": self.adapter, "kind": self.facts.kind, "backend_ref": self.facts.backend_ref,
+            "id": self.id, "provider": self.adapter, "adapter": self.adapter, "instance": self.instance,
+            "incarnation": self.facts.incarnation, "available": self.available, "stale": !self.available,
+            "kind": self.facts.kind, "backend_ref": self.facts.backend_ref,
             "name": self.facts.name, "title": self.facts.title, "state": self.facts.state,
-            "status": self.facts.status, "exit": self.facts.exit, "argv": self.facts.argv, "cwd": self.facts.cwd,
+            "status": self.facts.status, "exit": self.facts.exit, "argv": self.facts.argv, "cwd": self.facts.cwd, "data": self.facts.data,
         })
     }
 }
@@ -72,11 +70,16 @@ pub const BUILTINS: &[(&str, &str)] = &[
 pub struct Core {
     pub store: Store,
     pub resources: BTreeMap<String, Resource>,
-    map: ResourceMap,
-    map_path: Option<PathBuf>,
-    pub adapters: BTreeMap<String, AdapterHandle>,
+    identities: IdentityMap,
+    pub providers: BTreeMap<String, Provider>,
+    /// Compatibility connection-state alias; authoritative declarations are in `providers`.
     pub adapter_state: BTreeMap<String, Value>,
     pub default_adapter: Option<String>,
+    next_provider_source: u64,
+    next_effect: u64,
+    identity_failures: BTreeMap<String, String>,
+    pending_facts: BTreeMap<String, BTreeMap<String, (String, ResourceFacts)>>,
+    recovering_identities: bool,
     log: VecDeque<(u64, Value)>,
     pub seq: u64,
     /// Opaque identity of this event log; sequence numbers are meaningful only within it.
@@ -96,11 +99,7 @@ pub struct Core {
 
 impl Core {
     pub fn new(store: Store, state_dir: Option<PathBuf>, socket: PathBuf, safe_mode: bool) -> anyhow::Result<Core> {
-        let map_path = state_dir.as_ref().map(|d| d.join("resources.json"));
-        let map = match &map_path {
-            Some(p) if p.exists() => serde_json::from_slice(&std::fs::read(p)?)?,
-            _ => ResourceMap { next: 1, ..Default::default() },
-        };
+        let identities = IdentityMap::open(state_dir.as_ref().map(|d| d.join("resources.json")))?;
         let mut boot = [0u8; 16];
         getrandom::fill(&mut boot).map_err(|e| anyhow::anyhow!("event epoch: {e}"))?;
         let epoch = boot.iter().map(|b| format!("{b:02x}")).collect();
@@ -112,11 +111,15 @@ impl Core {
         Ok(Core {
             store,
             resources: BTreeMap::new(),
-            map,
-            map_path,
-            adapters: BTreeMap::new(),
+            identities,
+            providers: BTreeMap::new(),
             adapter_state: BTreeMap::new(),
             default_adapter: None,
+            next_provider_source: 1,
+            next_effect: 1,
+            identity_failures: BTreeMap::new(),
+            pending_facts: BTreeMap::new(),
+            recovering_identities: false,
             log: VecDeque::new(),
             seq: 0,
             epoch,
@@ -159,6 +162,7 @@ impl Core {
             "resources": self.resources.values().map(|r| r.to_json()).collect::<Vec<_>>(),
             "commands": self.commands.values().map(|c| c.to_json()).collect::<Vec<_>>(),
             "extensions": self.exts.iter().map(|(n, e)| (n.clone(), e.to_json())).collect::<BTreeMap<_, _>>(),
+            "providers": self.providers.keys().map(|n| (n.clone(), self.provider_json(n))).collect::<BTreeMap<_, _>>(),
             "adapters": self.adapter_state,
             "safe_mode": self.safe_mode,
             "live": self.live.iter().map(|(k, (v, _, _))| (k.clone(), v.clone())).collect::<BTreeMap<_, _>>(),
@@ -198,111 +202,227 @@ impl Core {
         self.resources.get(id).ok_or_else(|| RpcError::new("not_found", format!("no resource {id}")))
     }
 
-    pub fn adapter(&self, name: Option<&str>) -> Result<AdapterHandle, RpcError> {
-        let name = name.map(String::from).or_else(|| self.default_adapter.clone()).ok_or_else(|| RpcError::new("unavailable", "no adapter configured"))?;
-        self.adapters.get(&name).cloned().ok_or_else(|| RpcError::new("not_found", format!("no adapter {name}")))
+    pub fn provider_route(&self, name: Option<&str>, capability: &str) -> Result<Route, RpcError> {
+        let name = name.or(self.default_adapter.as_deref()).ok_or_else(|| provider::rejected("unavailable", "no provider configured"))?;
+        self.providers.get(name).ok_or_else(|| provider::rejected("not_found", format!("no provider {name}")))?.route(capability)
     }
 
-    fn id_for(&mut self, adapter: &str, backend_ref: &str) -> String {
-        if let Some((id, _)) = self.map.ids.iter().find(|(_, (a, r))| a == adapter && r == backend_ref) {
-            return id.clone();
-        }
-        let id = format!("r{}", self.map.next);
-        self.map.next += 1;
-        self.map.ids.insert(id.clone(), (adapter.to_string(), backend_ref.to_string()));
-        self.save_map();
+    pub fn resource_route(&self, id: &str, capability: &str) -> Result<Route, RpcError> {
+        let resource = self.resource(id)?;
+        if !resource.available { return Err(provider::rejected("unavailable", format!("resource {id} is unavailable"))); }
+        let mut route = self.provider_route(Some(&resource.adapter), capability)?;
+        if route.instance != resource.instance { return Err(provider::rejected("unavailable", "resource belongs to an old provider instance")); }
+        route.resource = Some(resource.life.subscribe());
+        Ok(route)
+    }
+
+    pub fn effect_id(&mut self) -> String {
+        let id = format!("{}:e{}", self.epoch, self.next_effect);
+        self.next_effect += 1;
         id
     }
 
-    fn save_map(&mut self) {
-        let Some(path) = &self.map_path else { return };
-        let result = serde_json::to_vec_pretty(&self.map)
-            .map_err(anyhow::Error::from)
-            .and_then(|bytes| crate::store::write_atomic(path, &bytes).map_err(anyhow::Error::from));
-        if let Err(error) = result {
-            // Backend effects already happened. Keep the observed resource and its in-memory id,
-            // but explicitly report that its identity may not survive a core restart.
-            let message = format!("could not persist resource ids at {}: {error}", path.display());
-            eprintln!("prim: {message}");
-            self.emit("persistence.error", json!({"scope": "resources", "message": message}));
+    fn identity_error(&mut self, provider: &str, mut error: RpcError) -> RpcError {
+        let data = error.data.as_mut().unwrap();
+        data["outcome"] = json!("indeterminate");
+        data["provider"] = json!(provider);
+        data["instance"] = json!(self.providers.get(provider).and_then(|p| p.info.as_ref()).map(|i| &i.instance));
+        if !self.identity_failures.contains_key(provider) {
+            eprintln!("prim: resource identities for {provider}: {error}");
+            self.identity_failures.insert(provider.into(), error.message.clone());
+            self.emit("persistence.error", json!({"scope": "resources", "provider": provider, "message": error.message, "error": error}));
+            self.provider_event(provider);
+        }
+        error
+    }
+
+    fn identity_recovered(&mut self, provider: &str) {
+        if self.identity_failures.remove(provider).is_some() {
+            eprintln!("prim: resource identity persistence recovered for {provider}");
+            self.emit("persistence.recovered", json!({"scope": "resources", "provider": provider}));
+            self.provider_event(provider);
         }
     }
 
-    /// Upsert from an adapter; returns the prim id.
-    pub fn upsert_resource(&mut self, adapter: &str, facts: ResourceFacts) -> String {
-        let id = self.id_for(adapter, &facts.backend_ref);
-        let changed = self.resources.get(&id).map(|r| r.facts != facts).unwrap_or(true);
-        if changed {
-            let r = Resource { id: id.clone(), adapter: adapter.to_string(), facts };
-            self.emit("resource", r.to_json());
-            self.resources.insert(id.clone(), r);
-        }
-        id
-    }
-
-    fn remove_resource(&mut self, adapter: &str, backend_ref: &str) {
-        let id = self.map.ids.iter().find(|(_, (a, r))| a == adapter && r == backend_ref).map(|(id, _)| id.clone());
-        if let Some(id) = id {
-            self.map.ids.remove(&id);
-            self.save_map();
-            if self.resources.remove(&id).is_some() {
-                self.emit("resource.removed", json!({"id": id}));
+    fn recover_pending_identities(&mut self) {
+        if self.recovering_identities { return; }
+        self.recovering_identities = true;
+        let pending = std::mem::take(&mut self.pending_facts);
+        for (name, records) in pending {
+            for (reference, (instance, facts)) in records {
+                let current = self.providers.get(&name).is_some_and(|p| p.info.as_ref().is_some_and(|i| i.instance == instance));
+                if !current { continue; }
+                let ready = self.providers[&name].synced && self.providers[&name].health.borrow().connected;
+                if ready { let _ = self.upsert_resource(&name, facts); }
+                else { self.pending_facts.entry(name.clone()).or_default().insert(reference, (instance, facts)); }
             }
         }
+        self.recovering_identities = false;
     }
 
-    pub fn on_adapter_event(&mut self, adapter: &str, ev: AdapterEvent) {
-        match ev {
+    fn retire_visible(&mut self, ids: Vec<String>, reason: &str) {
+        for id in ids {
+            if let Some(resource) = self.resources.remove(&id) { resource.life.send_replace(false); }
+            self.emit("resource.removed", json!({"id": id, "reason": {"reason": reason}}));
+        }
+    }
+
+    fn mark_unavailable(&mut self, provider: &str) {
+        let mut changes = Vec::new();
+        for resource in self.resources.values_mut().filter(|r| r.adapter == provider && r.available) {
+            resource.available = false;
+            resource.life.send_replace(false);
+            changes.push(resource.to_json());
+        }
+        for resource in changes { self.emit("resource", resource); }
+    }
+
+    fn provider_json(&self, name: &str) -> Value {
+        let mut value = self.providers[name].to_json();
+        value["identity_persistence"] = json!({"state": if self.identity_failures.contains_key(name) { "failed" } else { "ok" }, "error": self.identity_failures.get(name)});
+        value
+    }
+
+    fn provider_event(&mut self, name: &str) {
+        let state = self.provider_json(name);
+        self.adapter_state.insert(name.into(), state.clone());
+        self.emit("provider", json!({"name": name, "state": state}));
+        // Temporary compatibility event/field for existing extensions.
+        self.emit("adapter", json!({"name": name, "state": state}));
+    }
+
+    pub fn upsert_resource(&mut self, name: &str, facts: ResourceFacts) -> Result<String, RpcError> {
+        if !facts.valid() {
+            self.on_adapter_event(name, AdapterEvent::Connected(false, Some("provider supplied invalid facts".into())));
+            return Err(provider::indeterminate("provider supplied invalid facts; effect may already have happened"));
+        }
+        let provider = self.providers.get(name).ok_or_else(|| provider::rejected("not_found", "unknown provider"))?;
+        if !provider.health.borrow().connected { return Err(provider::rejected("unavailable", "provider disconnected")); }
+        let instance = provider.health.borrow().instance.clone();
+        let update = match self.identities.identify(provider::identity(name, &instance, &facts)) {
+            Ok(update) => update,
+            Err(mut error) => {
+                self.pending_facts.entry(name.into()).or_default().insert(facts.backend_ref.clone(), (instance.clone(), facts.clone()));
+                let data = error.data.as_mut().unwrap();
+                data["backend_outcome"] = json!("observed");
+                data["resource_facts"] = json!(facts);
+                return Err(self.identity_error(name, error));
+            }
+        };
+        self.retire_visible(update.retired, "replaced");
+        let changed = self.resources.get(&update.id).is_none_or(|r| r.facts != facts || !r.available);
+        if changed {
+            let life = self.resources.get(&update.id).map(|r| r.life.clone()).unwrap_or_else(|| watch::channel(true).0);
+            let was_available = *life.borrow();
+            if !was_available { life.send_replace(true); }
+            let resource = Resource { id: update.id.clone(), adapter: name.into(), instance, available: true, life, facts };
+            self.emit("resource", resource.to_json());
+            self.resources.insert(update.id.clone(), resource);
+        }
+        if let Some(mut error) = update.uncertain {
+            let data = error.data.as_mut().unwrap();
+            data["resource"] = json!(update.id);
+            data["backend_outcome"] = json!("observed");
+            data["resource_facts"] = json!(self.resources.get(&update.id).map(|r| &r.facts));
+            return Err(self.identity_error(name, error));
+        }
+        if let Some(pending) = self.pending_facts.get_mut(name) { pending.remove(&self.resources[&update.id].facts.backend_ref); }
+        self.identity_recovered(name);
+        self.recover_pending_identities();
+        Ok(update.id)
+    }
+
+    pub fn on_adapter_event(&mut self, name: &str, event: AdapterEvent) {
+        if !self.providers.contains_key(name) { return; }
+        match event {
+            AdapterEvent::Registered(info) => {
+                let capabilities = &self.providers[name].handle.capabilities;
+                if info.connection == 0 || info.instance.is_empty() || !matches!(info.role.as_str(), "backend" | "runtime")
+                    || !info.software["name"].is_string() || !info.software["version"].is_string()
+                    || !capabilities.as_object().is_some_and(|caps| caps.values().all(Value::is_object)) {
+                    self.on_adapter_event(name, AdapterEvent::Connected(false, Some("provider supplied invalid registration facts or capabilities".into())));
+                    return;
+                }
+                self.mark_unavailable(name);
+                self.providers.get_mut(name).unwrap().register(info.clone());
+                if let Some(pending) = self.pending_facts.get_mut(name) { pending.retain(|_, (instance, _)| instance == &info.instance); }
+                match self.identities.retire(|i| i.provider == name && i.instance != info.instance) {
+                    Ok((ids, error)) => { self.retire_visible(ids, "replaced"); if let Some(error) = error { self.identity_error(name, error); } }
+                    Err(error) => { self.identity_error(name, error); }
+                }
+                self.provider_event(name);
+            }
             AdapterEvent::Connected(up, error) => {
-                let st = json!({"connected": up, "error": error});
-                self.adapter_state.insert(adapter.to_string(), st.clone());
-                self.emit("adapter", json!({"name": adapter, "state": st}));
+                if up {
+                    if let Some(info) = self.providers[name].info.clone() { self.on_adapter_event(name, AdapterEvent::Registered(info)); }
+                    return;
+                }
+                self.providers.get_mut(name).unwrap().disconnect(error);
+                self.mark_unavailable(name);
+                self.provider_event(name);
             }
             AdapterEvent::Snapshot(list) => {
-                let seen: Vec<String> = list.iter().map(|f| f.backend_ref.clone()).collect();
-                for f in list {
-                    self.upsert_resource(adapter, f);
+                if list.iter().any(|facts| !facts.valid()) {
+                    self.on_adapter_event(name, AdapterEvent::Connected(false, Some("provider supplied an invalid inventory".into())));
+                    return;
                 }
-                let gone: Vec<String> = self
-                    .resources
-                    .values()
-                    .filter(|r| r.adapter == adapter && !seen.contains(&r.facts.backend_ref))
-                    .map(|r| r.facts.backend_ref.clone())
-                    .collect();
-                for r in gone {
-                    self.remove_resource(adapter, &r);
+                let Some(info) = self.providers[name].info.clone() else { return };
+                if !self.providers[name].health.borrow().connected { return; }
+                let seen: Vec<_> = list.iter().map(|f| provider::identity(name, &info.instance, f)).collect();
+                if let Some(pending) = self.pending_facts.get_mut(name) {
+                    pending.retain(|_, (instance, facts)| seen.contains(&provider::identity(name, instance, facts)));
                 }
-                // Forget mappings to backend refs that no longer exist.
-                let stale: Vec<String> = self.map.ids.iter().filter(|(_, (a, r))| a == adapter && !seen.contains(r)).map(|(id, _)| id.clone()).collect();
-                if !stale.is_empty() {
-                    for id in stale {
-                        self.map.ids.remove(&id);
+                let newly_synced = !self.providers[name].synced;
+                self.providers.get_mut(name).unwrap().synced = true;
+                for facts in list { let _ = self.upsert_resource(name, facts); }
+                match self.identities.retire(|i| i.provider == name && !seen.contains(i)) {
+                    Ok((ids, error)) => {
+                        self.retire_visible(ids, "closed");
+                        if let Some(error) = error { self.identity_error(name, error); }
+                        else { self.identity_recovered(name); self.recover_pending_identities(); }
                     }
-                    self.save_map();
+                    Err(error) => { self.identity_error(name, error); }
+                }
+                if newly_synced { self.provider_event(name); }
+            }
+            AdapterEvent::Upsert(facts) => { let _ = self.upsert_resource(name, facts); }
+            AdapterEvent::Removed { reference, incarnation } => {
+                let Some(info) = self.providers[name].info.clone() else { return };
+                if let Some(pending) = self.pending_facts.get_mut(name) {
+                    if pending.get(&reference).is_some_and(|(instance, facts)| instance == &info.instance && facts.incarnation == incarnation) { pending.remove(&reference); }
+                }
+                match self.identities.retire(|i| i.provider == name && i.instance == info.instance && i.reference == reference && i.incarnation == incarnation) {
+                    Ok((ids, error)) => { self.retire_visible(ids, "closed"); if let Some(error) = error { self.identity_error(name, error); } }
+                    Err(error) => { self.identity_error(name, error); }
                 }
             }
-            AdapterEvent::Upsert(f) => {
-                self.upsert_resource(adapter, f);
-            }
-            AdapterEvent::Removed(r) => self.remove_resource(adapter, &r),
         }
     }
 }
 
 /// Start an adapter and pump its events into the core.
 pub fn add_adapter(core: &Shared, handle: AdapterHandle, events: mpsc::UnboundedReceiver<(String, AdapterEvent)>, default: bool) {
-    {
-        let mut c = core.lock().unwrap();
-        if default || c.default_adapter.is_none() {
-            c.default_adapter = Some(handle.name.clone());
-        }
-        c.adapters.insert(handle.name.clone(), handle);
-    }
+    let name = handle.name.clone();
+    let source = {
+        let mut core = core.lock().unwrap();
+        if default || core.default_adapter.is_none() { core.default_adapter = Some(name.clone()); }
+        let generation = core.providers.get(&name).map(|p| p.generation).unwrap_or(0);
+        if core.providers.contains_key(&name) { core.on_adapter_event(&name, AdapterEvent::Connected(false, Some("provider replaced".into()))); }
+        let source = core.next_provider_source;
+        core.next_provider_source += 1;
+        core.providers.insert(name.clone(), Provider::new(handle, source, generation));
+        source
+    };
     let core = core.clone();
     let mut events = events;
     tokio::spawn(async move {
-        while let Some((name, ev)) = events.recv().await {
-            core.lock().unwrap().on_adapter_event(&name, ev);
+        while let Some((sender, event)) = events.recv().await {
+            let mut core = core.lock().unwrap();
+            if sender == name && core.providers.get(&name).is_some_and(|p| p.source == source) { core.on_adapter_event(&name, event); }
+        }
+        let mut core = core.lock().unwrap();
+        if core.providers.get(&name).is_some_and(|p| p.source == source) {
+            core.on_adapter_event(&name, AdapterEvent::Connected(false, Some("provider event connection closed".into())));
         }
     });
 }

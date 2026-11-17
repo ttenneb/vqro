@@ -119,7 +119,7 @@ fn stop() -> Result<()> {
 
 async fn serve(safe: bool, herdr: Option<String>, fake: bool) -> Result<()> {
     let socket = paths::socket_path()?;
-    let backend = if fake { server::Backend::Fake } else { server::Backend::Herdr(herdr_command(herdr)) };
+    let backend = if fake { prim::adapter::Backend::Fake } else { prim::adapter::Backend::Herdr(herdr_command(herdr)) };
     let core = server::start(socket.clone(), paths::state_dir(), safe, backend, Some(paths::extensions_dir()))?;
     let pidfile = paths::state_dir().join("serve.pid");
     std::fs::write(&pidfile, std::process::id().to_string())?;

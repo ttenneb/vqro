@@ -8,6 +8,7 @@ pub mod events;
 pub mod ext;
 pub mod paths;
 pub mod queue;
+pub mod provider;
 pub mod rpc;
 pub mod server;
 pub mod store;

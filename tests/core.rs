@@ -44,6 +44,56 @@ async fn ext_status(p: &Peer, name: &str) -> String {
 }
 
 #[tokio::test]
+async fn provider_capabilities_and_unavailable_resources_are_exported() {
+    let e = env();
+    let core = start(e.socket.clone(), e.state.clone(), false, Backend::Fake, None).unwrap();
+    let (p, _rx) = connect(&e).await;
+    let spawned = p.call("resource.spawn", json!({"argv": ["sh"]})).await.unwrap();
+    let id = spawned["resource"]["id"].clone();
+    let snap = p.call("workspace.snapshot", Value::Null).await.unwrap();
+    assert!(snap["providers"]["fake"]["capabilities"]["terminal.spawn"].is_object());
+    assert_eq!(spawned["resource"]["available"], true);
+    core.lock().unwrap().on_adapter_event("fake", prim::adapter::AdapterEvent::Connected(false, Some("test disconnect".into())));
+    let snap = p.call("workspace.snapshot", Value::Null).await.unwrap();
+    let resource = snap["resources"].as_array().unwrap().iter().find(|r| r["id"] == id).unwrap();
+    assert_eq!(resource["available"], false, "disconnect keeps stale facts without deleting identity");
+    assert_eq!(snap["providers"]["fake"]["state"], "disconnected");
+    assert_eq!(p.call("resource.attach", json!({"resource": id})).await.unwrap_err().kind(), "unavailable");
+}
+
+#[tokio::test]
+async fn changed_incarnation_retires_ids_instead_of_resurrecting_them() {
+    let e = env();
+    let core = start(e.socket.clone(), e.state.clone(), false, Backend::Fake, None).unwrap();
+    let (p, _rx) = connect(&e).await;
+    let first = p.call("resource.spawn", json!({"argv": ["sh"]})).await.unwrap()["resource"]["id"].as_str().unwrap().to_string();
+    let original = core.lock().unwrap().resources[&first].facts.clone();
+    let mut changed = serde_json::to_value(&original).unwrap();
+    changed["incarnation"] = json!("replacement");
+    core.lock().unwrap().on_adapter_event("fake", prim::adapter::AdapterEvent::Upsert(serde_json::from_value(changed).unwrap()));
+    let second = core.lock().unwrap().resources.keys().next().unwrap().clone();
+    assert_ne!(first, second, "same backend ref with a new incarnation must retire its old id");
+    core.lock().unwrap().on_adapter_event("fake", prim::adapter::AdapterEvent::Upsert(original));
+    let third = core.lock().unwrap().resources.keys().next().unwrap().clone();
+    assert_ne!(third, first, "a tombstoned id cannot come back");
+    assert_ne!(third, second);
+}
+
+#[tokio::test]
+async fn new_fake_instance_cannot_reuse_a_previous_prim_id() {
+    let e = env();
+    let _old = start(e.socket.clone(), e.state.clone(), false, Backend::Fake, None).unwrap();
+    let (old, _rx) = connect(&e).await;
+    let first = old.call("resource.spawn", json!({"argv": ["sh"]})).await.unwrap()["resource"]["id"].clone();
+    // The fake starts empty with refs f1, f2... again, but belongs to a new instance.
+    let socket = e._dir.path().join("new.sock");
+    let _new = start(socket.clone(), e.state.clone(), false, Backend::Fake, None).unwrap();
+    let (new, _rx, _) = client::connect(&socket, "test").await.unwrap();
+    let second = new.call("resource.spawn", json!({"argv": ["sh"]})).await.unwrap()["resource"]["id"].clone();
+    assert_ne!(first, second, "same ref on a new backend instance is not the same resource");
+}
+
+#[tokio::test]
 async fn open_attach_and_type() {
     let e = env();
     let _core = start(e.socket.clone(), e.state.clone(), false, Backend::Fake, None).unwrap();
@@ -358,16 +408,32 @@ async fn resource_map_write_failure_is_reported_without_hiding_backend_effect() 
     // Force a rename failure without relying on permissions (also works as root).
     std::fs::create_dir(e.state.join("resources.json")).unwrap();
     let (p, _rx) = connect(&e).await;
-    let spawned = p.call("resource.spawn", json!({"argv": ["sh"]})).await.unwrap();
-    assert!(spawned["resource"]["id"].is_string(), "the backend spawn happened");
+    let error = p.call("resource.spawn", json!({"argv": ["sh"]})).await.unwrap_err();
+    assert_eq!(error.kind(), "io");
+    let data = error.data.unwrap();
+    assert_eq!(data["outcome"], "indeterminate");
+    assert_eq!(data["backend_outcome"], "observed");
+    assert_eq!(data["provider"], "fake");
+    assert!(data["instance"].is_string());
+    assert_eq!(data["resource_facts"]["backend_ref"], "f1");
+    let facts: prim::adapter::ResourceFacts = serde_json::from_value(data["resource_facts"].clone()).unwrap();
+    // Repeated status changes while the disk remains broken must not spam the event log.
+    for _ in 0..100 { core.lock().unwrap().on_adapter_event("fake", prim::adapter::AdapterEvent::Upsert(facts.clone())); }
     let events = core.lock().unwrap().events_since(0).unwrap();
-    assert!(events.iter().any(|ev| ev["type"] == "persistence.error" && ev["data"]["scope"] == "resources"));
-    assert!(events.iter().any(|ev| ev["type"] == "resource"));
-    // Retry persistence through another observed spawn after the filesystem is repaired.
+    assert_eq!(events.iter().filter(|ev| ev["type"] == "persistence.error").count(), 1);
+    assert!(!events.iter().any(|ev| ev["type"] == "resource"), "never publish an unpersisted id");
+    // A different backend spawn triggers a successful map write; f1 is recovered without
+    // resending its original spawn or waiting for another status event for it.
     std::fs::remove_dir(e.state.join("resources.json")).unwrap();
-    p.call("resource.spawn", json!({"argv": ["sh"]})).await.unwrap();
+    let second = p.call("resource.spawn", json!({"argv": ["sh"]})).await.unwrap();
+    assert_eq!(second["resource"]["backend_ref"], "f2");
+    let snap = p.call("workspace.snapshot", Value::Null).await.unwrap();
+    assert_eq!(snap["resources"].as_array().unwrap().len(), 2);
+    let recovered = snap["resources"].as_array().unwrap().iter().find(|r| r["backend_ref"] == "f1").unwrap();
     let ids: Value = serde_json::from_slice(&std::fs::read(e.state.join("resources.json")).unwrap()).unwrap();
-    assert!(ids["ids"].get(spawned["resource"]["id"].as_str().unwrap()).is_some());
+    assert!(ids["ids"].get(recovered["id"].as_str().unwrap()).is_some());
+    assert_eq!(ids["ids"].as_object().unwrap().len(), 2);
+    assert!(core.lock().unwrap().events_since(0).unwrap().iter().any(|ev| ev["type"] == "persistence.recovered"));
 }
 
 #[tokio::test]

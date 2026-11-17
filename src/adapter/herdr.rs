@@ -31,7 +31,7 @@ pub fn capabilities() -> Value {
 /// connection drops. Events go to `events` tagged with the adapter name.
 pub fn start(name: String, argv: Vec<String>, events: mpsc::UnboundedSender<(String, AdapterEvent)>) -> AdapterHandle {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-    let handle = AdapterHandle { name: name.clone(), capabilities: capabilities(), cmds: cmd_tx };
+    let handle = AdapterHandle { name: name.clone(), session: None, capabilities: capabilities(), cmds: cmd_tx };
     tokio::spawn(run(name, argv, events, cmd_rx));
     handle
 }
@@ -46,7 +46,7 @@ enum Pending {
     Subscribe,
     Spawn(Reply<ResourceFacts>),
     Kill(Reply<Value>),
-    Attach(Reply<Stream>),
+    Attach { reply: Reply<Stream>, history: u32 },
 }
 
 async fn run(
@@ -55,8 +55,10 @@ async fn run(
     events: mpsc::UnboundedSender<(String, AdapterEvent)>,
     mut cmds: mpsc::UnboundedReceiver<AdapterCmd>,
 ) {
+    let mut connection = 0;
     loop {
-        match session(&name, &argv, &events, &mut cmds).await {
+        connection += 1;
+        match session(&name, &argv, &events, &mut cmds, connection).await {
             Ok(()) => return, // the core dropped us
             Err(e) => {
                 let _ = events.send((name.clone(), AdapterEvent::Connected(false, Some(e.to_string()))));
@@ -70,18 +72,10 @@ async fn run(
                 _ = &mut retry => break,
                 cmd = cmds.recv() => match cmd {
                     None => return,
-                    Some(c) => fail(c, "herdr-core is not connected"),
+                    Some(c) => reject_command(c, "herdr-core is not connected"),
                 }
             }
         }
-    }
-}
-
-fn fail(cmd: AdapterCmd, why: &str) {
-    match cmd {
-        AdapterCmd::Spawn(_, r) => drop(r.send(Err(why.into()))),
-        AdapterCmd::Kill(_, r) => drop(r.send(Err(why.into()))),
-        AdapterCmd::Attach { reply, .. } => drop(reply.send(Err(why.into()))),
     }
 }
 
@@ -90,6 +84,7 @@ async fn session(
     argv: &[String],
     events: &mpsc::UnboundedSender<(String, AdapterEvent)>,
     cmds: &mut mpsc::UnboundedReceiver<AdapterCmd>,
+    connection: u64,
 ) -> anyhow::Result<()> {
     let mut child = Command::new(&argv[0])
         .args(&argv[1..])
@@ -110,6 +105,10 @@ async fn session(
     if reply.get("result").and_then(|r| r.get("framed")) != Some(&Value::Bool(true)) {
         anyhow::bail!("herdr-core did not accept framed mode: {line}");
     }
+
+    let instance = reply["result"]["core"]["id"].as_str().filter(|id| !id.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("herdr-core hello has no stable core.id"))?.to_string();
+    let info = ProviderInfo { connection, instance, role: "backend".into(), software: json!({"name": "herdr-core", "version": reply["result"]["version"]}) };
 
     let (frame_tx, mut frame_out) = crate::queue::channel::<Vec<u8>>(1024 * 1024);
     tokio::spawn(async move {
@@ -138,13 +137,15 @@ async fn session(
     let (id, bytes) = call(&mut next_id, "events.subscribe", json!({}));
     pending.insert(id, Pending::Subscribe);
     send_frame(&frame_tx, bytes)?;
-    let _ = events.send((name.to_string(), AdapterEvent::Connected(true, None)));
+    let _ = events.send((name.to_string(), AdapterEvent::Registered(info)));
 
     loop {
         tokio::select! {
             cmd = cmds.recv() => {
                 let Some(cmd) = cmd else { return Ok(()) };
+                let Some(cmd) = command_for(cmd, connection) else { continue };
                 match cmd {
+                    AdapterCmd::Bound { .. } => unreachable!("command_for removes bindings"),
                     AdapterCmd::Spawn(req, reply) => {
                         let mut p = json!({"argv": req.argv, "no_parent": true});
                         if let Some(cwd) = req.cwd { p["cwd"] = json!(cwd); }
@@ -160,7 +161,7 @@ async fn session(
                     }
                     AdapterCmd::Attach { backend_ref, cols, rows, history, reply } => {
                         let (id, bytes) = call(&mut next_id, "terminal.attach", json!({"terminal": backend_ref, "cols": cols, "rows": rows, "history": history}));
-                        pending.insert(id, Pending::Attach(reply));
+                        pending.insert(id, Pending::Attach { reply, history });
                         send_frame(&frame_tx, bytes)?;
                     }
                 }
@@ -177,8 +178,8 @@ async fn session(
                     }
                     let Some(id) = msg.get("id").and_then(|i| i.as_u64()) else { continue };
                     let Some(p) = pending.remove(&id) else { continue };
-                    let result: Result<Value, String> = match msg.get("error") {
-                        Some(e) => Err(e.get("message").and_then(|m| m.as_str()).unwrap_or("error").to_string()),
+                    let result: Result<Value, AdapterError> = match msg.get("error") {
+                        Some(e) => Err(AdapterError::Backend(e.get("message").and_then(|m| m.as_str()).unwrap_or("error").to_string())),
                         None => Ok(msg.get("result").cloned().unwrap_or(Value::Null)),
                     };
                     match p {
@@ -191,11 +192,11 @@ async fn session(
                         }
                         Pending::Spawn(reply) => { let _ = reply.send(result.map(|r| facts(&r))); }
                         Pending::Kill(reply) => { let _ = reply.send(result); }
-                        Pending::Attach(reply) => match result {
+                        Pending::Attach { reply, history } => match result {
                             Err(e) => { let _ = reply.send(Err(e)); }
                             Ok(r) => {
                                 let Some(ch) = r.get("channel").and_then(|c| c.as_u64()).map(|c| c as u32) else {
-                                    let _ = reply.send(Err("attach returned no channel".into()));
+                                    let _ = reply.send(Err(AdapterError::Indeterminate("attach returned no channel".into())));
                                     continue;
                                 };
                                 let (out_tx, out_rx) = crate::queue::channel(STREAM_BUFFER_BYTES);
@@ -220,7 +221,7 @@ async fn session(
                                     let close = frame(ch, CLOSE, &[]);
                                     let _ = ftx.send(close, 9).await;
                                 });
-                                let _ = reply.send(Ok(Stream { input: inp_tx, output: out_rx }));
+                                let _ = reply.send(Ok(Stream { initial: if history > 0 { "history" } else { "none" }, input: inp_tx, output: out_rx }));
                             }
                         },
                     }
@@ -254,9 +255,9 @@ async fn session(
     }
     for (_, p) in pending.drain() {
         match p {
-            Pending::Spawn(r) => drop(r.send(Err("herdr-core disconnected".into()))),
-            Pending::Kill(r) => drop(r.send(Err("herdr-core disconnected".into()))),
-            Pending::Attach(r) => drop(r.send(Err("herdr-core disconnected".into()))),
+            Pending::Spawn(r) => drop(r.send(Err(AdapterError::Indeterminate("herdr-core disconnected".into())))),
+            Pending::Kill(r) => drop(r.send(Err(AdapterError::Indeterminate("herdr-core disconnected".into())))),
+            Pending::Attach { reply, .. } => drop(reply.send(Err(AdapterError::Indeterminate("herdr-core disconnected".into())))),
             Pending::Subscribe => {}
         }
     }
@@ -286,8 +287,8 @@ fn handle_notification(
                     records.insert(t.clone(), data);
                 }
                 "removed" => {
-                    records.remove(&t);
-                    send(AdapterEvent::Removed(t));
+                    let incarnation = records.remove(&t).map(|record| facts(&record).incarnation).unwrap_or_default();
+                    send(AdapterEvent::Removed { reference: t, incarnation });
                     return;
                 }
                 _ => {
@@ -327,6 +328,7 @@ fn facts(t: &Value) -> ResourceFacts {
     let s = |k: &str| t.get(k).and_then(|v| v.as_str()).map(String::from);
     ResourceFacts {
         backend_ref: s("address").unwrap_or_default(),
+        incarnation: t.get("created_ms").and_then(Value::as_u64).map(|ms| ms.to_string()).unwrap_or_default(),
         kind: "terminal".into(),
         name: s("name"),
         title: s("title"),
@@ -334,6 +336,7 @@ fn facts(t: &Value) -> ResourceFacts {
         status: t.get("status").cloned().unwrap_or(Value::Null),
         exit: json!({"reason": t.get("reason"), "exit_code": t.get("exit_code"), "signal": t.get("signal")}),
         argv: t.get("argv").and_then(|a| a.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default(),
+        data: json!({}),
         // The foreground process's folder (read about twice a second), else where it started.
         cwd: t.get("foreground").and_then(|f| f.get("cwd")).and_then(|c| c.as_str()).or_else(|| t.get("cwd").and_then(|c| c.as_str())).map(String::from),
     }

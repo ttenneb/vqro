@@ -48,15 +48,22 @@ fn unix_ms() -> u64 {
 }
 
 pub fn start(name: String, events: mpsc::UnboundedSender<(String, AdapterEvent)>) -> AdapterHandle {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).expect("fake provider instance randomness");
+    start_with_instance(name, bytes.iter().map(|b| format!("{b:02x}")).collect(), events)
+}
+
+/// Deterministic identity injection for conformance fixtures; ordinary starts always get a new instance.
+pub fn start_with_instance(name: String, instance: String, events: mpsc::UnboundedSender<(String, AdapterEvent)>) -> AdapterHandle {
     let (cmd_tx, mut cmds) = mpsc::unbounded_channel::<AdapterCmd>();
-    let handle = AdapterHandle { name: name.clone(), capabilities: json!({"terminal.spawn": {}, "terminal.input": {}, "terminal.output": {"raw": true}, "terminal.kill": {}}), cmds: cmd_tx };
+    let handle = AdapterHandle { name: name.clone(), session: None, capabilities: json!({"terminal.spawn": {}, "terminal.input": {}, "terminal.output": {"raw": true}, "terminal.kill": {}, "terminal.list": {}, "terminal.resize": {}}), cmds: cmd_tx };
     // Status ticks from agent-like terminals come back through the adapter loop, so `terms` stays
     // the one source of truth for facts.
     let (tick_tx, mut ticks) = mpsc::unbounded_channel::<String>();
     tokio::spawn(async move {
         let mut terms: HashMap<String, Term> = HashMap::new();
         let mut n = 0;
-        let _ = events.send((name.clone(), AdapterEvent::Connected(true, None)));
+        let _ = events.send((name.clone(), AdapterEvent::Registered(ProviderInfo { connection: 1, instance, role: "backend".into(), software: json!({"name": "fake", "version": env!("CARGO_PKG_VERSION")}) })));
         let _ = events.send((name.clone(), AdapterEvent::Snapshot(vec![])));
         loop {
             let cmd = tokio::select! {
@@ -71,12 +78,15 @@ pub fn start(name: String, events: mpsc::UnboundedSender<(String, AdapterEvent)>
                 }
                 cmd = cmds.recv() => match cmd { Some(c) => c, None => break },
             };
+            let Some(cmd) = command_for(cmd, 1) else { continue };
             match cmd {
+                AdapterCmd::Bound { .. } => unreachable!("command_for removes bindings"),
                 AdapterCmd::Spawn(req, reply) => {
                     n += 1;
                     let load = Load::from_argv(&req.argv);
                     let f = ResourceFacts {
                         backend_ref: format!("f{n}"),
+                        incarnation: String::new(),
                         kind: "terminal".into(),
                         name: req.name,
                         title: None,
@@ -84,6 +94,7 @@ pub fn start(name: String, events: mpsc::UnboundedSender<(String, AdapterEvent)>
                         status: Value::Null,
                         exit: Value::Null,
                         argv: req.argv,
+                        data: json!({}),
                         cwd: req.cwd.clone(),
                     };
                     let alive = Arc::new(AtomicBool::new(true));
@@ -105,7 +116,7 @@ pub fn start(name: String, events: mpsc::UnboundedSender<(String, AdapterEvent)>
                     let _ = reply.send(Ok(f));
                 }
                 AdapterCmd::Kill(r, reply) => match terms.get_mut(&r) {
-                    None => drop(reply.send(Err(format!("no terminal {r}")))),
+                    None => drop(reply.send(Err(format!("no terminal {r}").into()))),
                     Some(t) => {
                         t.alive.store(false, Ordering::Relaxed);
                         t.facts.state = "finished".into();
@@ -116,7 +127,7 @@ pub fn start(name: String, events: mpsc::UnboundedSender<(String, AdapterEvent)>
                 },
                 AdapterCmd::Attach { backend_ref, reply, .. } => {
                     let Some(t) = terms.get(&backend_ref) else {
-                        let _ = reply.send(Err(format!("no terminal {backend_ref}")));
+                        let _ = reply.send(Err(format!("no terminal {backend_ref}").into()));
                         continue;
                     };
                     let (in_tx, mut in_rx) = crate::queue::channel(STREAM_BUFFER_BYTES);
@@ -144,7 +155,7 @@ pub fn start(name: String, events: mpsc::UnboundedSender<(String, AdapterEvent)>
                             }
                         }
                     });
-                    let _ = reply.send(Ok(Stream { input: in_tx, output: out_rx }));
+                    let _ = reply.send(Ok(Stream { initial: "none", input: in_tx, output: out_rx }));
                 }
             }
         }

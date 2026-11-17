@@ -23,7 +23,7 @@ def exact(n):
 
 
 json.loads(inp.readline())
-out.write(b'{"jsonrpc":"2.0","id":0,"result":{"framed":true}}\n')
+out.write(b'{"jsonrpc":"2.0","id":0,"result":{"framed":true,"core":{"id":"credit-fixture","name":"private"},"version":"fixture"}}\n')
 out.flush()
 while True:
     header = exact(9)

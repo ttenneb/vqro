@@ -205,14 +205,9 @@ impl Peer {
         if !self.send_control(msg.to_string()) {
             return Err(RpcError::new("disconnected", "connection closed or outbound control queue full"));
         }
-        match tokio::time::timeout(deadline, rx).await {
-            Ok(result) => result.unwrap_or_else(|_| Err(RpcError::new("disconnected", "connection closed"))),
-            Err(_) => {
-                let mut error = RpcError::new("timeout", format!("{method} deadline expired; outcome indeterminate, do not resend automatically"));
-                error.data.as_mut().unwrap()["outcome"] = json!("indeterminate");
-                Err(error)
-            }
-        }
+        with_deadline(method, deadline, async {
+            rx.await.unwrap_or_else(|_| Err(RpcError::new("disconnected", "connection closed")))
+        }).await
     }
 
     fn send_control(&self, line: String) -> bool {
@@ -324,6 +319,18 @@ mod tests {
         task.abort();
         let _ = task.await;
         assert!(peer.pending.lock().unwrap().is_empty());
+    }
+}
+
+/// Shared effect deadline: expiry says nothing about whether the layer below already ran it.
+pub async fn with_deadline<T>(method: &str, deadline: Duration, work: impl std::future::Future<Output = Result<T, RpcError>>) -> Result<T, RpcError> {
+    match tokio::time::timeout(deadline, work).await {
+        Ok(result) => result,
+        Err(_) => {
+            let mut error = RpcError::new("timeout", format!("{method} deadline expired; outcome indeterminate, do not resend automatically"));
+            error.data.as_mut().unwrap()["outcome"] = json!("indeterminate");
+            Err(error)
+        }
     }
 }
 
