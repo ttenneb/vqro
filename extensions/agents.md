@@ -1,22 +1,18 @@
-# Agents extension
+# Agents: runtime-neutral UI
 
-Enable `agents` (now bundled in defaults) to start backend-owned Pi RPC agents without `prim call`.
+`agents` observes every resource with `kind: agent`. It does not launch programs, select a runtime, or contain a runtime-specific bridge import.
 
-- **New Pi agent** on the tab bar or prefix `a` (default `Ctrl-g`, then `a`) starts a bridge and opens its agent view in a tab. No automatic prompt.
-- On the agent pane, open the pane menu (default prefix `m`, or the configured gesture): **Prompt**, **Steer**, **Follow-up**, **Abort**, **Clear queue**, **Answer pending request**.
-- Prompt/steer/follow-up use the normal client input. Answers open a per-agent pending-request popup; confirm/select use choices, input/editor use text, and cancellation is explicit. Editor text uses the existing single-line UI input, not a new editor widget.
-- **Agents** on the tab bar reopens hidden agent views and links runtime settings. Settings → Extensions also offers **Configure agent runtimes** while agents is running.
+- **Agents** on the tab bar lists observed agents. Selecting one invokes `agents.show` and opens its neutral `agents-rN` panel through the public `tabs.show` command.
+- On that panel, the pane menu (normally prefix `m`) offers only native operations declared by that resource's provider: prompt, steer, follow-up, abort, clear queue and answer. Direct commands also reject undeclared operations before sending anything.
+- Prompt-like actions use input. Answer opens a pending-request picker: confirm/select choices, input/editor text, explicit cancellation. Editor uses existing single-line input, not a new multiline editor.
+- Notifications preserve native outcomes: acceptance is not settlement; dispatched answers do not invent acknowledgement. Effects are never automatically replayed.
 
-`doc/settings/agents` defaults to:
+The panel uses resource/provider facts and optionally displays the provider's `agent-rN` live content read-only. Without that optional native output, it renders generic status, availability and data; arbitrary runtimes need no transcript/run/queue fields. It stays bounded to32KiB, with explicit clipping and stale/unavailable warnings. Panel output is live content, not transaction history.
 
-```json
-{"runtimes": [{"name": "pi", "argv": ["pi1", "--mode", "rpc"]}]}
-```
+Native capabilities come from the public provider registry, cached by `prim_ext` from snapshots and provider events. No capability is inferred from a runtime name or mode. Menus/panels are reconciled by ownership and lifecycle/capability changes, never on every status update.
 
-Runtime settings accept the JSON **list** of `{name, argv}` entries. Names must be unique; argv is a nonempty list of literal arguments, never a shell string. With multiple runtimes, New opens a runtime chooser. These are Pi RPC commands, not arbitrary runtime protocols. The bridge is launched separately with the extension's Python interpreter as `python3 -m pi_bridge -- <runtime argv>` and `PYTHONPATH` pointing at the installed extension directory. Backend primitives own all execution; agents.py never starts a child process itself.
+Launchers are separate extensions. The `pi` extension supplies New Pi agent and Pi runtime settings (`pi.md`). Disabling a launcher does not stop its backend-owned agents or neutral controls. Disabling agents removes its UI/commands, not the underlying processes: real backend terminal resources remain available.
 
-The extension uses `resource.spawn` with `bridge:true`, waits for the hosted agent/view, and invokes the public `tabs.show` command. Existing agents keep running if their tabs close or settings change. If tabs is unavailable, a ready agent can appear as a popup. If registration is slow, the observed terminal is shown for diagnostics and Agents can find the agent later. A timed-out or failed UI action never automatically repeats a native effect.
+The former agents.new/settings/configure contributions move to pi.new/settings/configure and owner pi; activation reconciliation removes stale agents-owned launch entries. Pi performs the non-destructive settings migration.
 
-Notifications preserve native outcomes: acceptance is not settlement; UI answers are dispatched without inventing acknowledgement. The agent panel shows semantic status badges, observed run/settlement, bounded queue previews, pending requests and a bounded transcript tail. Only native facts establish settlement.
-
-`tests/test_agents.py` uses a fake core. `tests/pi_provider_e2e.py --run --agents-extension --prim ABS_PRIM --hc ABS_HC` drives all native operations through the actual extension. Add `--agents-ui` for physical prefix/menu/input/answer checks in a private tmux PTY. Both use fake Pi only, private state/services and network namespace; no real prompt/model/provider call. Evidence: `docs/research/agents-extension.md`.
+Verification: `tests/test_agents.py` includes a non-specific provider with only abort; private E2E also uses an independent non-Pi wire provider, checks independent disabling and terminal fallback, and drives actual TUI keys using fake runtimes only. No real model call is needed. `tests/pi_provider_e2e.py --run --agents-ui --probe-terminal-invoke --prim ABS_PRIM --hc ABS_HC`; the full release gate includes it.

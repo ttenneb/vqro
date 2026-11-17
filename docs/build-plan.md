@@ -135,6 +135,15 @@ written the same way was contained by the crash budget and removed with one reve
   of one core, background peak55fps,37.65MiB RSS, marker p9952.07ms; no lost input/missed events/leaks. Earlier
   wrong-flag receipts are not flood evidence. Methodology/caveats: `research/tui-scale.md`.
 
+## Granular agents/Pi split (2026-11-17)
+
+- `agents` now owns runtime-neutral, capability-driven controls/list/panels; `pi` owns launch/runtime settings,
+  prefix a and settings migration. Both are bundled; disabling either leaves backend execution independent.
+- Neutral panels use resource/provider facts and optional read-only native output, with no runtime-specific import.
+  Referenced panels remain valid while provider inventory restores. Backend naming is left to the backend.
+- Full check gate passes17/17 with99 Python tests, all opt-in suites/UI/scale and no leftovers. No Rust changes,
+  real prompts/model calls or live install. Details/receipts: `research/agents-split.md`.
+
 ## Known gaps found while building
 
 - **History churn:** extensions that refresh views on every event (the sidebar on status changes) fill the
