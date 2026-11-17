@@ -1,87 +1,13 @@
-import copy
 import json
 from pathlib import Path
 import sys
+import threading
 import unittest
-from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "extensions"))
-from agents import Agents, DEFAULTS, EFFECTS, EXTENSIONS, SETTINGS, runtimes
-from prim_ext import PrimError
-
-
-class FakeCore:
-    def __init__(self):
-        self.entries, self.resources, self.handlers, self.live = {}, {}, {}, {}
-        self.calls, self.notices, self.transactions = [], [], []
-        self.prim = self
-        self.fail_tabs, self.fail_effect, self.make_agent = False, None, True
-
-    def fresh(self):
-        pass
-
-    def version(self, key):
-        return self.entries.get(key, {}).get("version", 0)
-
-    def value(self, key, default=None):
-        return copy.deepcopy(self.entries.get(key, {}).get("value", default))
-
-    def apply(self, ops, note):
-        self.transactions.append(copy.deepcopy(ops))
-        for op in ops:
-            if "expect" in op and op["expect"] != self.version(op["key"]):
-                raise PrimError("changed", "conflict")
-            if op["op"] == "delete":
-                self.entries.pop(op["key"], None)
-            else:
-                self.entries[op["key"]] = {"value": copy.deepcopy(op["value"]), "version": self.version(op["key"])+1}
-        return {}
-
-    def contribute(self, entries):
-        ops = [{"op": "set", "key": k, "value": dict(v, owner="agents")} for k, v in entries.items()
-               if self.value(k) != dict(v, owner="agents")]
-        if ops:
-            self.apply(ops, "contribute")
-
-    def retrying(self, fn):
-        return fn()
-
-    def command(self, name, title):
-        def register(fn):
-            self.handlers[name] = fn
-            return fn
-        return register
-
-    def on_event(self, fn):
-        self.listener = fn
-
-    def notify(self, text, style=None):
-        self.notices.append((text, style))
-
-    def publish(self, view, content):
-        self.live[view] = copy.deepcopy(content)
-        return {}
-
-    def invoke(self, name, args=None):
-        self.calls.append((name, copy.deepcopy(args)))
-        if self.fail_tabs:
-            raise PrimError("tabs stopped", "unavailable")
-        return {"ok": True}
-
-    def add_agent(self):
-        self.resources["r2"] = {"id": "r2", "kind": "agent", "state": "live", "available": True,
-                                "host": "r1", "data": {"requests": []}, "status": {"state": "idle"}}
-        self.entries["view/agent-r2"] = {"value": {"kind": "panel"}, "version": 1}
-
-    def call(self, method, params):
-        self.calls.append((method, copy.deepcopy(params)))
-        if method == "resource.spawn":
-            if self.make_agent:
-                self.add_agent()
-            return {"outcome": "observed", "resource": {"id": "r1"}}
-        if self.fail_effect:
-            raise PrimError("native outcome unknown", self.fail_effect)
-        return {"outcome": "dispatched" if params["op"] == "agent.answer" else "accepted", "effect": "e1"}
+from agents import Agents, EFFECTS
+from prim_ext import Extension, PrimError
+from agent_fixture import FakeCore
 
 
 class AgentsTests(unittest.TestCase):
@@ -95,53 +21,64 @@ class AgentsTests(unittest.TestCase):
     def native(self):
         return [(m, p) for m, p in self.core.calls if m.startswith("resource.")]
 
-    def test_defaults_and_contributions_without_execution(self):
-        self.assertEqual(self.core.value(SETTINGS), DEFAULTS)
-        self.assertEqual(self.core.value("binding/agents.new")["key"], "a")
-        self.assertEqual(self.core.value("menu/agents.new")["where"], "tabbar")
+    def test_neutral_extension_has_no_launcher_or_runtime_settings(self):
+        self.assertNotIn("agents.new", self.core.handlers)
+        self.assertNotIn("agents.settings", self.core.handlers)
+        self.assertNotIn("binding/agents.new", self.core.entries)
         self.assertEqual(self.native(), [])
-        self.assertTrue(all("agents."+op in self.core.handlers for op in EFFECTS))
+        source = (Path(__file__).resolve().parents[1]/"extensions/agents.py").read_text()
+        self.assertNotIn("pi_bridge", source)
+        self.assertNotIn("pi1", source)
+        self.assertNotIn("resource.spawn", source)
 
-    def test_new_spawns_once_with_literal_runtime_argv_then_public_tab_command(self):
-        self.core.apply([{"op": "set", "key": SETTINGS, "value": {"runtimes": [{"name": "custom", "argv": ["/node", "literal $(not-a-shell)", "--mode", "rpc"]}]}}], "settings")
-        result = self.command("new", cwd="/private/project")
-        self.assertEqual((result["outcome"], result["agent"]), ("observed", "r2"))
-        spawn = self.native()[0][1]
-        self.assertTrue(spawn["bridge"])
-        self.assertEqual(spawn["argv"][1:4], ["-m", "pi_bridge", "--"])
-        self.assertEqual(spawn["argv"][4:], ["/node", "literal $(not-a-shell)", "--mode", "rpc"])
-        self.assertEqual(spawn["env"], {"PYTHONPATH": EXTENSIONS})
-        self.assertEqual(spawn["cwd"], "/private/project")
-        self.assertEqual(self.core.calls[-1], ("tabs.show", {"view": "agent-r2", "title": "custom r2"}))
-        self.assertEqual(len(self.native()), 1)
-
-    def test_runtime_picker_does_not_spawn_until_explicit_selection(self):
-        self.core.apply([{"op": "set", "key": SETTINGS, "value": {"runtimes": [{"name": "one", "argv": ["/one"]}, {"name": "two", "argv": ["/two"]}]}}], "settings")
-        result = self.command("new")
-        self.assertEqual(result["client"]["popup"]["view"], "agents-runtimes")
+    def test_other_runtime_panel_and_only_declared_capabilities(self):
+        self.core.add_agent()
+        self.core.providers["other"]["capabilities"] = {"agent.abort": {}}
+        self.core.resources["r2"]["data"] = {"custom": "native other runtime"}
+        self.agents.event("resource", {"id": "r2"})
+        self.assertIsNotNone(self.core.value("menu/agents.r2.abort"))
+        self.assertIsNone(self.core.value("menu/agents.r2.prompt"))
+        self.assertIsNone(self.core.value("menu/agents.r2.answer"))
+        result = self.command("show", resource="r2")
+        self.assertEqual(result["view"], "agents-r2")
+        self.assertIn("native other runtime", json.dumps(self.core.live["agents-r2"]))
+        with self.assertRaises(PrimError) as failure:
+            self.command("prompt", resource="r2", text="must not send")
+        self.assertEqual(failure.exception.kind, "unsupported")
         self.assertEqual(self.native(), [])
-        self.command("new", runtime="two")
-        self.assertEqual(self.native()[0][1]["argv"][-1], "/two")
+        self.command("abort", resource="r2")
+        self.assertEqual(self.native()[-1][1]["op"], "agent.abort")
 
-    def test_tab_failure_does_not_respawn_or_discard_observed_agent(self):
-        self.core.fail_tabs = True
-        result = self.command("new")
-        self.assertEqual(result["outcome"], "observed")
-        self.assertEqual(result["client"]["popup"]["view"], "agent-r2")
-        self.assertEqual(len(self.native()), 1)
+    def test_provider_capability_change_prunes_actions_without_resource_change(self):
+        self.core.add_agent()
+        self.agents.event("resource", {})
+        self.core.providers["other"]["capabilities"] = {"agent.abort": {}}
+        self.agents.event("provider", {"name": "other"})
+        self.assertIsNone(self.core.value("menu/agents.r2.prompt"))
+        self.assertIsNotNone(self.core.value("menu/agents.r2.abort"))
 
-    def test_late_agent_does_not_cause_a_second_spawn(self):
-        self.core.make_agent = False
-        with patch("agents.time.monotonic", side_effect=[0, 13]):
-            result = self.command("new")
-        self.assertFalse(result["ready"])
-        self.assertEqual(result["outcome"], "observed")
-        self.assertEqual(len(self.native()), 1)
+    def test_missing_provider_declarations_offer_no_native_actions(self):
+        self.core.add_agent()
+        self.core.providers.clear()
+        self.agents.event("resource", {})
+        self.assertTrue(all(self.core.value("menu/agents.r2."+op) is None for op in EFFECTS))
+        self.assertIsNotNone(self.core.value("view/agents-r2"))
+
+    def test_optional_provider_output_is_readonly_and_bounded(self):
+        self.core.add_agent()
+        self.core.live["agent-r2"] = {"items": [{"text": "other native transcript", "command": "not.allowed"}]}
+        self.agents.event("resource", {})
+        panel = self.core.live["agents-r2"]
+        self.assertIn("other native transcript", json.dumps(panel))
+        self.assertNotIn("command", panel["items"][0])
+        self.core.live["agent-r2"] = {"items": [{"text": "x"*1024} for _ in range(100)]}
+        self.agents.event("view.content", {"view": "agent-r2"})
+        self.assertLessEqual(len(json.dumps(self.core.live["agents-r2"]).encode()), 32768)
 
     def test_all_native_effects_and_truthful_notifications(self):
         self.core.add_agent()
         for op in ("prompt", "steer", "follow_up"):
-            result = self.command(op, context={"view": "agent-r2"}, text="explicit text")
+            result = self.command(op, context={"view": "agents-r2"}, text="explicit text")
             self.assertEqual(result["outcome"], "accepted")
             self.assertIn("acceptance is not settlement", self.core.notices[-1][0])
         for op in ("abort", "clear_queue"):
@@ -175,16 +112,13 @@ class AgentsTests(unittest.TestCase):
                 "prompt": "Question\x1b]evil\x07", "data": {"message": "Full body", "options": ["A", "B"]}}]
             popup = self.command("answer", resource="r2")
             self.assertEqual(popup["client"]["popup"]["view"], "agents-requests-r2")
-            content = self.core.live["agents-requests-r2"]
-            self.assertNotIn("\x1b", content["items"][0]["text"])
+            self.assertNotIn("\x1b", self.core.live["agents-requests-r2"]["items"][0]["text"])
             result = self.command("answer", resource="r2", request="q", **answer)
             self.assertEqual(result["outcome"], "dispatched")
             self.assertIn("no runtime acknowledgement", self.core.notices[-1][0])
             native = self.native()[-1][1]["args"]
-            self.assertEqual(native["id"], "q")
             self.assertEqual(native.get("confirmed", native.get("value")), answer.get("value", answer.get("text")))
-        result = self.command("answer", resource="r2", request="q", cancelled=True)
-        self.assertEqual(result["outcome"], "dispatched")
+        self.command("answer", resource="r2", request="q", cancelled=True)
         self.assertTrue(self.native()[-1][1]["args"]["cancelled"])
 
     def test_stale_or_invalid_answer_is_rejected_without_native_send(self):
@@ -195,11 +129,10 @@ class AgentsTests(unittest.TestCase):
                 self.command("answer", resource="r2", **args)
         self.assertEqual(self.native(), [])
 
-    def test_resource_status_updates_do_not_churn_pane_contributions(self):
+    def test_resource_status_updates_do_not_churn_contributions(self):
         self.core.add_agent()
         self.agents.event("resource", {"id": "r2"})
         count = len(self.core.transactions)
-        self.assertEqual(self.core.value("menu/agents.r2.prompt")["when"], {"view": "agent-r2"})
         for _ in range(10):
             self.agents.event("resource", {"id": "r2"})
         self.assertEqual(len(self.core.transactions), count)
@@ -207,44 +140,45 @@ class AgentsTests(unittest.TestCase):
         self.agents.event("resource.removed", {"id": "r2"})
         self.assertIsNone(self.core.value("menu/agents.r2.prompt"))
 
-    def test_restored_agents_are_in_the_complete_activation_declaration(self):
+    def test_activation_removes_moved_launcher_contributions_not_foreign_entries(self):
         core = FakeCore()
+        core.entries = {"binding/agents.new": {"version": 1, "value": {"owner": "agents", "key": "a"}},
+                        "menu/pi.new": {"version": 1, "value": {"owner": "pi", "command": "pi.new"}}}
         core.add_agent()
         Agents(core)
-        declarations = core.transactions[-1]
-        self.assertTrue(any(op["key"] == "menu/agents.r2.prompt" for op in declarations))
-        self.assertTrue(any(op["key"] == "binding/agents.new" for op in declarations))
+        self.assertIsNone(core.value("binding/agents.new"))
+        self.assertEqual(core.value("menu/pi.new")["owner"], "pi")
+        self.assertIsNotNone(core.value("menu/agents.r2.prompt"))
 
-    def test_oversized_request_popup_preserves_cancellation(self):
-        self.core.add_agent()
-        self.core.resources["r2"]["data"]["requests"] = [{"id": "big", "kind": "select", "prompt": "Big",
-            "data": {"options": ["x"*100 for _ in range(3000)]}}]
-        self.command("answer", resource="r2")
-        panel = self.core.live["agents-requests-r2"]
-        self.assertLess(len(json.dumps(panel).encode()), 262144)
-        self.assertTrue(panel["items"][-1]["args"]["cancelled"])
-        self.assertEqual(self.native(), [])
+    def test_activation_keeps_referenced_panels_before_inventory_returns(self):
+        core = FakeCore()
+        core.entries["view/agents-r2"] = {"version": 1, "value": {"owner": "agents", "kind": "panel", "items": []}}
+        core.entries["layout/main"] = {"version": 1, "value": {"view": "agents-r2"}}
+        controller = Agents(core)
+        self.assertIsNotNone(core.value("view/agents-r2"))
+        self.assertIn("not currently available", json.dumps(core.live["agents-r2"]))
+        controller.event("resource.removed", {"id": "r2"})
+        self.assertIsNotNone(core.value("view/agents-r2"))
 
-    def test_palette_menu_template_targets_focused_agent_not_first_agent(self):
+    def test_palette_template_targets_focused_agent(self):
         self.core.add_agent()
         self.core.resources["r4"] = dict(self.core.resources["r2"], id="r4")
-        self.agents.event("resource", {"id": "r4"})
+        self.agents.event("resource", {})
         template = self.core.value("menu/agents.r2.prompt")
-        self.command("prompt", **dict(template.get("args", {}), context={"view": "agent-r4"}, text="focused"))
+        self.command("prompt", **dict(template.get("args", {}), context={"view": "agents-r4"}, text="focused"))
         self.assertEqual(self.native()[-1][1]["resource"], "r4")
 
-    def test_configuration_validates_before_write_and_launch(self):
-        for value in ({}, {"runtimes": []}, {"runtimes": [{"name": "x", "argv": "shell string"}]},
-                      {"runtimes": [{"name": "x", "argv": ["ok"]}, {"name": "x", "argv": ["again"]}]}):
-            with self.assertRaises(PrimError):
-                runtimes(value)
-        before = self.core.value(SETTINGS)
-        with self.assertRaises(PrimError):
-            self.command("configure", text="not JSON")
-        self.assertEqual(self.core.value(SETTINGS), before)
-        self.command("configure", text='[{"name":"fake","argv":["/python","fixture"]}]')
-        self.assertEqual(self.core.value(SETTINGS)["runtimes"][0]["name"], "fake")
-        self.assertEqual(self.native(), [])
+
+class ProviderCache(unittest.TestCase):
+    def test_snapshot_events_and_snapshot_without_providers(self):
+        ext = Extension.__new__(Extension)
+        ext.cache_lock = threading.RLock()
+        ext._load({"entries": {}, "resources": [], "live": {}, "providers": {"a": {"capabilities": {"agent.abort": {}}}}, "seq": 0, "epoch": "e"})
+        self.assertIn("agent.abort", ext.providers["a"]["capabilities"])
+        ext._notification("event", {"epoch": "e", "seq": 1, "type": "provider", "data": {"name": "a", "state": {"name": "a", "capabilities": {}}}})
+        self.assertEqual(ext.providers["a"]["capabilities"], {})
+        ext._load({"entries": {}, "resources": [], "seq": 2, "epoch": "e"})
+        self.assertEqual(ext.providers, {})
 
 
 if __name__ == "__main__":

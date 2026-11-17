@@ -1,78 +1,66 @@
 #!/usr/bin/env python3
-"""Backend-owned Pi agents: launch, tabs, native effects and pending request UI.
-
-All execution is resource.spawn/invoke; this extension never starts Pi itself.
-"""
+"""Runtime-neutral agent panels and native capability-driven controls. No launcher."""
 import json
-import os
 from pathlib import Path
 import sys
 import threading
-import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from prim_ext import Extension, PrimError
-from pi_bridge.display import plain, tail
+from prim_display import label
 
-SETTINGS = "doc/settings/agents"
-DEFAULTS = {"runtimes": [{"name": "pi", "argv": ["pi1", "--mode", "rpc"]}]}
-EXTENSIONS = str(Path(__file__).resolve().parent)
-EFFECTS = {"prompt": "Prompt", "steer": "Steer", "follow_up": "Follow-up",
-           "abort": "Abort", "clear_queue": "Clear queue", "answer": "Answer pending request"}
+EFFECTS = {"prompt": "Prompt", "steer": "Steer", "follow_up": "Follow-up", "abort": "Abort",
+           "clear_queue": "Clear queue", "answer": "Answer pending request"}
 
 
-def label(value, size=512):
-    return tail(plain(str(value)), size)
+def data(resource):
+    value = resource.get("data")
+    return value if isinstance(value, dict) else {}
 
 
-def runtimes(value):
-    rows = value.get("runtimes") if isinstance(value, dict) else None
-    if not isinstance(rows, list) or not 1 <= len(rows) <= 32:
-        raise PrimError("agents runtimes must be a nonempty list (at most 32)", "invalid")
-    seen = set()
-    for row in rows:
-        if not isinstance(row, dict) or not isinstance(row.get("name"), str) or not row["name"].strip() \
-                or len(row["name"]) > 64 or row["name"] in seen:
-            raise PrimError("runtime names must be unique, nonempty strings (at most 64 characters)", "invalid")
-        argv = row.get("argv")
-        if not isinstance(argv, list) or not 1 <= len(argv) <= 64 \
-                or any(not isinstance(a, str) or not a or "\0" in a or len(a.encode()) > 32768 for a in argv):
-            raise PrimError("runtime argv must be a nonempty list of literal argument strings", "invalid")
-        seen.add(row["name"])
-    return rows
+def status(resource):
+    value = resource.get("status")
+    return label(value.get("state", "unknown")) if isinstance(value, dict) else "unknown"
+
+
+def view(rid):
+    return "agents-"+rid
+
+
+def panel_key(key):
+    return key.startswith("view/agents-r") and key[len("view/agents-r"):].isdigit()
 
 
 class Agents:
     def __init__(self, ext):
         self.ext, self.lock = ext, threading.RLock()
-        self.ids = None
         self.open_requests = set()
         self.list_open = False
-        for name, fn, title in [
-            ("new", self.new, "New Pi agent"), ("list", self.list_agents, "Show agents"),
-            ("show", self.show, "Show an agent in a tab"), ("settings", self.settings, "Agent runtime settings"),
-            ("configure", self.configure, "Configure Pi runtime argv")]:
+        for name, fn, title in [("list", self.list_agents, "Show agents"), ("show", self.show, "Show an agent in a tab")]:
             ext.command("agents."+name, title)(self.guarded(fn))
         for op, title in EFFECTS.items():
             fn = self.answer if op == "answer" else lambda args, op=op: self.effect(op, args)
             ext.command("agents."+op, title)(self.guarded(fn))
-        if not ext.version(SETTINGS):
-            def initialize():
-                if not ext.version(SETTINGS):
-                    ext.apply([{"op": "set", "key": SETTINGS, "expect": 0, "value": DEFAULTS}], "agents: default runtimes")
-            ext.retrying(initialize)
-        declarations = {
-            "menu/agents.new": {"where": "tabbar", "label": "New Pi agent", "command": "agents.new", "order": 5},
-            "menu/agents.list": {"where": "tabbar", "label": "Agents", "command": "agents.list", "order": 6},
-            "binding/agents.new": {"key": "a", "command": "agents.new", "label": "new Pi agent"},
-            "view/agents-list": {"kind": "panel", "title": "Agents", "items": []},
-            "view/agents-runtimes": {"kind": "panel", "title": "Pi runtimes", "items": []},
-            "view/agents-settings": {"kind": "panel", "title": "Agent runtimes", "items": []},
-        }
-        self.ids = tuple(sorted(r["id"] for r in ext.resources.values() if r.get("kind") == "agent"))
-        declarations.update(self.pane_entries(self.ids))
-        ext.contribute(declarations)  # whole activation set, including restored agents
+        self.signature = self.current_signature()
+        declarations = {"menu/agents.list": {"where": "tabbar", "label": "Agents", "command": "agents.list", "order": 6},
+                        "view/agents-list": {"kind": "panel", "title": "Agents", "items": []}}
+        declarations.update(self.declarations())
+        # Provider inventory may not be restored yet. Referenced panels must
+        # remain valid across extension disable/re-enable and core restart.
+        for key, entry in ext.entries.items():
+            if panel_key(key) and entry["value"].get("owner") == "agents":
+                declarations.setdefault(key, entry["value"])
+        ext.contribute(declarations)  # reconciles removed/moved launcher entries
         ext.on_event(self.event)
+        self.publish_panels()
+
+    def supported(self, resource, op):
+        provider = self.ext.providers.get(resource.get("provider"), {})
+        return isinstance(provider.get("capabilities", {}).get("agent."+op), dict)
+
+    def current_signature(self):
+        return tuple(sorted((r["id"], tuple(op for op in EFFECTS if self.supported(r, op)))
+                            for r in self.ext.resources.values() if r.get("kind") == "agent"))
 
     def guarded(self, fn):
         def command(args):
@@ -83,78 +71,32 @@ class Agents:
                 raise
         return command
 
-    def config(self):
-        return runtimes(self.ext.value(SETTINGS, DEFAULTS))
-
-    def agent(self, args):
+    def agent(self, args, op=None):
         context = args.get("context") or {}
         rid = args.get("resource") or context.get("resource")
-        if not rid and str(context.get("view", "")).startswith("agent-"):
-            rid = context["view"][6:]
+        for prefix in ("agents-", "agent-"):
+            if not rid and str(context.get("view", "")).startswith(prefix):
+                rid = context["view"][len(prefix):]
         resource = self.ext.resources.get(rid)
         if not resource or resource.get("kind") != "agent":
             raise PrimError("choose an agent pane or an agent from Agents", "invalid")
         if not resource.get("available", False) or resource.get("state") != "live":
             raise PrimError("agent is unavailable; nothing sent", "unavailable")
+        if op and not self.supported(resource, op):
+            raise PrimError("agent provider does not declare agent."+op+"; nothing sent", "unsupported")
         return resource
 
     def show(self, args):
         self.ext.fresh()
         r = self.agent(args)
-        return self.ext.invoke("tabs.show", {"view": "agent-"+r["id"], "title": "Pi "+r["id"]})
-
-    def new(self, args):
-        self.ext.fresh()
-        options = self.config()
-        selected = args.get("runtime") or args.get("value")
-        context = args.get("context") or {}
-        source_id = context.get("resource")
-        if not source_id and str(context.get("view", "")).startswith("agent-"):
-            source_id = context["view"][6:]
-        cwd = args.get("cwd") or self.ext.resources.get(source_id, {}).get("cwd")
-        if selected is None and len(options) > 1:
-            self.ext.publish("agents-runtimes", {"title": "New Pi agent: runtime", "requires": ["menu"], "items": [
-                {"text": label(r["name"]), "description": label(" ".join(r["argv"])),
-                 "command": "agents.new", "args": {"runtime": r["name"], **({"cwd": cwd} if cwd else {})}}
-                for r in options]})
-            return {"client": {"popup": {"view": "agents-runtimes", "width": 72}}}
-        runtime = next((r for r in options if r["name"] == selected), None) if selected is not None else options[0]
-        if runtime is None:
-            raise PrimError("configured runtime not found", "invalid")
-        params = {"bridge": True, "name": runtime["name"],
-                  "argv": [sys.executable, "-m", "pi_bridge", "--", *runtime["argv"]],
-                  "env": {"PYTHONPATH": EXTENSIONS}}
-        if cwd:
-            params["cwd"] = cwd
-        # One native effect. Only layout transactions may be retried afterwards.
-        result = self.ext.prim.call("resource.spawn", params)
-        host = result["resource"]["id"]
-        end = time.monotonic() + 12
-        while True:
-            self.ext.fresh()
-            found = [r for r in self.ext.resources.values() if r.get("kind") == "agent" and r.get("host") == host and r.get("available")]
-            if found and self.ext.value("view/agent-"+found[0]["id"]):
-                r = found[0]
-                try:
-                    self.ext.invoke("tabs.show", {"view": "agent-"+r["id"], "title": label(runtime["name"])+" "+r["id"]})
-                except PrimError:
-                    self.ext.notify("Agent "+r["id"]+" created; tabs unavailable. Open it from Agents.", "warn")
-                    return {"outcome": result["outcome"], "host": host, "agent": r["id"],
-                            "client": {"popup": {"view": "agent-"+r["id"], "width": 80}}}
-                self.ext.notify("Agent "+r["id"]+" created (observed); no prompt sent.", "ok")
-                return {"outcome": result["outcome"], "host": host, "agent": r["id"], "client": {"close": True}}
-            if time.monotonic() >= end:
-                self.ext.notify("Terminal "+host+" spawned; agent not ready. Check Agents later; do not blindly retry.", "warn")
-                try:
-                    self.ext.invoke("tabs.show", {"resource": host})
-                except PrimError:
-                    pass  # already observed: never repeat or roll back the spawn
-                return {"outcome": result["outcome"], "host": host, "ready": False}
-            time.sleep(.1)
+        self.ext.contribute(self.declarations([r]))
+        self.ext.publish(view(r["id"]), self.panel(r))
+        result = self.ext.invoke("tabs.show", {"view": view(r["id"]), "title": label(r.get("name") or "Agent")+" "+r["id"]})
+        return {"resource": r["id"], "view": view(r["id"]), "tab": result, "client": {"close": True}}
 
     def effect(self, op, args):
         self.ext.fresh()
-        r = self.agent(args)
+        r = self.agent(args, op)
         native = {}
         if op in ("prompt", "steer", "follow_up"):
             text = args.get("text")
@@ -172,21 +114,25 @@ class Agents:
 
     def requests_panel(self, r):
         items = []
-        requests = r.get("data", {}).get("requests")
+        requests = data(r).get("requests")
         if not isinstance(requests, list):
+            requests = []
             items.append({"type": "text", "style": "warn", "text": "Request facts incomplete/unavailable; nothing assumed answered."})
-        for request in requests or []:
+        requests = [q for q in requests if isinstance(q, dict) and isinstance(q.get("id"), str)]
+        for request in requests:
+            detail = request.get("data") if isinstance(request.get("data"), dict) else {}
+            kind = request.get("kind")
             args = {"resource": r["id"], "request": request["id"]}
-            row = {"text": label(request.get("prompt") or request["id"]), "description": label(request.get("data", {}).get("message") or request.get("data", {}).get("prefill") or request.get("data", {}).get("placeholder") or request["kind"]),
+            row = {"text": label(request.get("prompt") or request["id"]), "description": label(detail.get("message") or detail.get("prefill") or detail.get("placeholder") or kind),
                    "command": "agents.answer", "args": args}
-            if request["kind"] == "confirm":
+            if kind == "confirm":
                 row["options"] = [{"label": "Yes", "value": True}, {"label": "No", "value": False}]
-            elif request["kind"] == "select":
-                row["options"] = [{"label": label(v, 200), "value": v} for v in request.get("data", {}).get("options", [])]
-            elif request["kind"] in ("input", "editor"):
+            elif kind == "select" and isinstance(detail.get("options"), list):
+                row["options"] = [{"label": label(v, 200), "value": v} for v in detail["options"]]
+            elif kind in ("input", "editor"):
                 row["input"] = label(request.get("prompt") or "Answer")
             else:
-                row = {"type": "text", "text": label("Unsupported request kind: "+str(request["kind"])), "style": "warn"}
+                row = {"type": "text", "text": label("Unsupported request kind: "+str(kind)), "style": "warn"}
             items.extend([row, {"text": "Cancel "+label(request["id"]), "command": "agents.answer", "args": {**args, "cancelled": True}}])
         if not items:
             items = [{"type": "text", "text": "No pending requests."}]
@@ -194,37 +140,78 @@ class Agents:
         if len(json.dumps(content).encode()) > 262144:
             content["items"] = [{"type": "text", "style": "warn", "text": "Request details exceed the UI budget. Nothing answered; cancellation remains available."}]
             content["items"] += [{"text": "Cancel "+label(q["id"]), "command": "agents.answer",
-                                  "args": {"resource": r["id"], "request": q["id"], "cancelled": True}}
-                                 for q in requests or []]
+                                  "args": {"resource": r["id"], "request": q["id"], "cancelled": True}} for q in requests]
         return content
 
     def answer(self, args):
         self.ext.fresh()
-        r = self.agent(args)
+        r = self.agent(args, "answer")
         rid = r["id"]
         if "request" not in args:
-            view = "agents-requests-"+rid
-            self.ext.contribute({"view/"+view: {"kind": "panel", "title": "Pending requests", "items": []}})
+            target = "agents-requests-"+rid
+            self.ext.contribute({"view/"+target: {"kind": "panel", "title": "Pending requests", "items": []}})
             self.open_requests.add(rid)
-            self.ext.publish(view, self.requests_panel(r))
-            return {"client": {"popup": {"view": view, "width": 80}}}
-        request = next((q for q in r.get("data", {}).get("requests") or [] if q["id"] == args["request"]), None)
+            self.ext.publish(target, self.requests_panel(r))
+            return {"client": {"popup": {"view": target, "width": 80}}}
+        requests = data(r).get("requests")
+        request = next((q for q in requests if isinstance(q, dict) and q.get("id") == args["request"]), None) if isinstance(requests, list) else None
         if request is None:
             raise PrimError("that request is no longer pending; nothing sent", "not_found")
+        detail = request.get("data") if isinstance(request.get("data"), dict) else {}
         native = {"id": request["id"]}
         if args.get("cancelled") is True:
             native["cancelled"] = True
-        elif request["kind"] == "confirm" and type(args.get("value")) is bool:
+        elif request.get("kind") == "confirm" and type(args.get("value")) is bool:
             native["confirmed"] = args["value"]
-        elif request["kind"] == "select" and args.get("value") in request.get("data", {}).get("options", []):
+        elif request.get("kind") == "select" and isinstance(detail.get("options"), list) and args.get("value") in detail["options"]:
             native["value"] = args["value"]
-        elif request["kind"] in ("input", "editor") and isinstance(args.get("text"), str):
+        elif request.get("kind") in ("input", "editor") and isinstance(args.get("text"), str):
             native["value"] = args["text"]
         else:
             raise PrimError("choose a valid answer for this request", "invalid")
         result = self.ext.prim.call("resource.invoke", {"resource": rid, "op": "agent.answer", "args": native})
         self.outcome("answer", result)
         return {**result, "client": {"close": True}}
+
+    def panel(self, r):
+        title = label(r.get("name") or r.get("title") or "Agent")+" "+r["id"]
+        native = self.ext.live.get("agent-"+r["id"])
+        if isinstance(native, dict) and isinstance(native.get("items"), list):
+            # Provider-native output is optional, read-only data. Controls stay
+            # here and are offered only from declared native capabilities.
+            def readonly(row):
+                if not isinstance(row, dict):
+                    return {"type": "text", "text": label(row)}
+                kept = {k: v for k, v in row.items() if k in ("type", "text", "style", "description", "detail", "detail_style", "badges", "id", "expanded")}
+                for key in ("text", "description", "detail"):
+                    if key in kept:
+                        kept[key] = label(kept[key], 8192)
+                if isinstance(kept.get("badges"), list):
+                    kept["badges"] = [{"text": label(b.get("text", ""), 200), "style": b.get("style", "plain")}
+                                      for b in kept["badges"] if isinstance(b, dict)]
+                if isinstance(row.get("children"), list):
+                    kept["children"] = [readonly(child) for child in row["children"]]
+                return kept
+            content = {"title": title, "requires": native.get("requires", []), "items": [readonly(row) for row in native["items"]]}
+        else:
+            items = [{"text": title, "badges": [{"text": status(r), "style": "dim"}],
+                      "description": label("provider: "+str(r.get("provider"))+" | available="+str(r.get("available")))}]
+            details = data(r)
+            if isinstance(details.get("run"), dict):
+                items.append({"type": "text", "text": label("Run: "+json.dumps(details["run"]), 2048)})
+            if isinstance(details.get("queues"), dict):
+                items.append({"type": "text", "text": label("Queues: "+json.dumps(details["queues"]), 4096)})
+            requests = details.get("requests")
+            items.append({"type": "text", "text": "Pending requests: "+(str(len(requests)) if isinstance(requests, list) else "unknown")})
+            items.append({"type": "text", "text": label(json.dumps(details, ensure_ascii=False), 8192)})
+            content = {"title": title, "requires": ["badges", "description"], "items": items}
+        if not r.get("available"):
+            content["items"].insert(0, {"type": "text", "style": "warn", "text": "Agent unavailable; displayed facts may be stale."})
+        if len(json.dumps(content, ensure_ascii=False).encode()) > 32768:
+            content["items"].insert(0, {"type": "text", "style": "warn", "text": "Bounded agent panel: some provider output omitted."})
+            while len(json.dumps(content, ensure_ascii=False).encode()) > 32768 and len(content["items"]) > 1:
+                del content["items"][1]
+        return content
 
     def list_agents(self, args):
         self.ext.fresh()
@@ -233,67 +220,58 @@ class Agents:
         return {"client": {"popup": {"view": "agents-list", "width": 80}}}
 
     def publish_list(self):
-        rows = [{"text": label(r.get("name") or r["id"])+" "+r["id"], "description": label((r.get("status") or {}).get("state", "unknown")),
+        rows = [{"text": label(r.get("name") or "Agent")+" "+r["id"], "description": status(r),
                  "command": "agents.show", "args": {"resource": r["id"]}, "disabled": not r.get("available")}
                 for r in self.ext.resources.values() if r.get("kind") == "agent"]
         count = len(rows)
         rows = rows[:128]
         if count > 128:
             rows.append({"type": "text", "style": "warn", "text": f"Showing 128 of {count} agents; existing agent panes remain usable."})
-        rows.append({"text": "Runtime settings", "command": "agents.settings"})
-        self.ext.publish("agents-list", {"title": "Agents", "items": rows})
+        self.ext.publish("agents-list", {"title": "Agents", "items": rows or [{"type": "text", "text": "No agents observed."}]})
 
-    def settings(self, args):
-        value = self.ext.value(SETTINGS, DEFAULTS)
-        self.ext.publish("agents-settings", {"title": "Pi runtime argv", "requires": ["input"], "items": [
-            {"type": "text", "text": "Each runtime is an explicit Pi RPC command. No shell interpolation."},
-            {"type": "text", "text": label(json.dumps(value.get("runtimes", value) if isinstance(value, dict) else value, ensure_ascii=False), 8192)},
-            {"text": "Edit runtimes JSON list", "input": "JSON list of {name, argv}", "command": "agents.configure"}]})
-        return {"client": {"popup": {"view": "agents-settings", "width": 90}}}
-
-    def configure(self, args):
-        try:
-            value = self.ext.value(SETTINGS, {})
-            value = dict(value) if isinstance(value, dict) else {}
-            value["runtimes"] = json.loads(args.get("text", ""))
-        except (ValueError, TypeError):
-            raise PrimError("enter a JSON list of {name, argv}", "invalid") from None
-        runtimes(value)
-        def save():
-            self.ext.apply([{"op": "set", "key": SETTINGS, "value": value, "expect": self.ext.version(SETTINGS)}], "agents: runtimes")
-        self.ext.retrying(save)
-        self.ext.notify("Agent runtimes saved; existing agents unchanged.", "ok")
-        return {"client": {"close": True}}
-
-    def pane_entries(self, ids):
+    def declarations(self, resources=None):
         entries = {}
-        for rid in ids:
+        for r in list(self.ext.resources.values()) if resources is None else resources:
+            if r.get("kind") != "agent":
+                continue
+            rid = r["id"]
+            entries["view/"+view(rid)] = {"kind": "panel", "title": "Agent "+rid, "items": [{"type": "text", "text": "Agents extension is not running."}]}
             for i, (op, title) in enumerate(EFFECTS.items()):
-                menu = {"where": "pane", "label": title, "command": "agents."+op,
-                        "when": {"view": "agent-"+rid}, "order": 100+i}
+                if not self.supported(r, op):
+                    continue
+                menu = {"where": "pane", "label": title, "command": "agents."+op, "when": {"view": view(rid)}, "order": 100+i}
                 if op in ("prompt", "steer", "follow_up"):
                     menu["input"] = title
                 entries["menu/agents."+rid+"."+op] = menu
         return entries
 
-    def refresh_menus(self):
+    def refresh(self):
         with self.lock:
-            ids = tuple(sorted(r["id"] for r in self.ext.resources.values() if r.get("kind") == "agent"))
-            if ids == self.ids:
+            signature = self.current_signature()
+            if signature == self.signature:
                 return
-            entries = self.pane_entries(ids)
+            entries = self.declarations()
             def prune():
                 stale = [key for key, entry in self.ext.entries.items() if key.startswith("menu/agents.r")
                          and entry["value"].get("owner") == "agents" and key not in entries]
                 if stale:
-                    self.ext.apply([{"op": "delete", "key": key, "expect": self.ext.version(key)} for key in stale], "agents: remove stale pane actions")
+                    self.ext.apply([{"op": "delete", "key": key, "expect": self.ext.version(key)} for key in stale], "agents: stale actions/panels")
             self.ext.retrying(prune)
             self.ext.contribute(entries)
-            self.ids = ids
+            self.signature = signature
 
-    def event(self, kind, data):
-        if kind in ("resource", "resource.removed", "missed"):
-            self.refresh_menus()
+    def publish_panels(self):
+        for r in list(self.ext.resources.values()):
+            if r.get("kind") == "agent":
+                self.ext.publish(view(r["id"]), self.panel(r))
+        for key, entry in list(self.ext.entries.items()):
+            if panel_key(key) and entry["value"].get("owner") == "agents" and key[12:] not in self.ext.resources:
+                self.ext.publish(key[5:], {"items": [{"type": "text", "style": "warn", "text": "Agent facts are not currently available; no operation sent."}]})
+
+    def event(self, kind, event):
+        if kind in ("resource", "resource.removed", "provider", "missed"):
+            self.refresh()
+            self.publish_panels()
             if self.list_open:
                 self.publish_list()
             for rid in tuple(self.open_requests):
@@ -303,10 +281,14 @@ class Agents:
                 else:
                     self.ext.publish("agents-requests-"+rid, {"items": [{"type": "text", "text": "Agent is gone; nothing sent."}]})
                     self.open_requests.discard(rid)
+        elif kind == "view.content" and str(event.get("view", "")).startswith("agent-"):
+            r = self.ext.resources.get(event["view"][6:])
+            if r and r.get("kind") == "agent":
+                self.ext.publish(view(r["id"]), self.panel(r))
 
 
 def main():
-    ext = Extension("agents", event_types=["entries", "resource", "resource.removed"])
+    ext = Extension("agents", event_types=["entries", "resource", "resource.removed", "provider", "view.content"])
     Agents(ext)
     ext.run()
 

@@ -57,6 +57,13 @@
       ]
     },
     {
+      "name": "pi",
+      "argv": [
+        "python3",
+        "pi.py"
+      ]
+    },
+    {
       "name": "agents",
       "argv": [
         "python3",

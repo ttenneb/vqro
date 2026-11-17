@@ -175,6 +175,7 @@ class Extension:
         self.listeners = []
         self.entries = {}
         self.resources = {}
+        self.providers = {}
         self.cache_lock = threading.RLock()
         self.prim = Prim(os.environ["PRIM_SOCKET"], self._handle)
         self.info = self.prim.call("hello", {"extension": self.name})
@@ -304,6 +305,7 @@ class Extension:
         # Live view content from every extension: also a way to share derived data.
         self.live = dict(snap.get("live") or {})
         self.resources = {r["id"]: r for r in snap["resources"]}
+        self.providers = dict(snap.get("providers") or {})
         self.seq = snap["seq"]
         self.epoch = snap["epoch"]
 
@@ -343,6 +345,8 @@ class Extension:
                 self.resources[d["id"]] = d
             elif t == "resource.removed":
                 self.resources.pop(d["id"], None)
+            elif t == "provider":
+                self.providers[d["name"]] = d["state"]
             elif t == "view.content":
                 if d["content"] is None:
                     self.live.pop(d["view"], None)

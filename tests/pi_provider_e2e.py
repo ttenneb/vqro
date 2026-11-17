@@ -112,7 +112,7 @@ class E2E:
 
     def extension_ready(self):
         names = {c['name'] for c in self.call('command.list')['commands'] if c.get('available')}
-        return {'agents.new', 'agents.answer', 'tabs.show', 'panes.close'} <= names
+        return {'pi.new', 'agents.answer', 'tabs.show', 'panes.close'} <= names
 
     def stop(self, crash=False):
         if self.core and self.core.poll() is None:
@@ -227,7 +227,7 @@ class E2E:
         self.ui_frame('prefix-menu', 'pane menu')
         self.ui('send-keys', '-t', 'ui:0.0', 'm')
         self.ui_frame('pane-menu', title)
-        context = {'view': 'agent-'+rid, 'kind': 'panel', 'resource': None, 'live': False}
+        context = {'view': 'agents-'+rid, 'kind': 'panel', 'resource': None, 'live': False}
         rows = [(v['value'].get('order', 0), k, v['value']) for k, v in self.snapshot()['entries'].items()
                 if k.startswith('menu/') and v['value'].get('where') == 'pane'
                 and all(context.get(field) == value for field, value in v['value'].get('when', {}).items())]
@@ -260,6 +260,38 @@ class E2E:
         self.ui_menu(rid, 'Abort')
         self.agent(rid, lambda r: r['data']['run']['settled'] and r['data']['run']['aborted'])
         return {'outcome': event['outcome'], 'host': agent['host'], 'agent': rid}
+
+    def split_independence(self, rid, native_process):
+        self.call('command.invoke', {'name': 'prim.extension.disable', 'args': {'name': 'pi'}})
+        assert live(native_process) and self.resource(rid)['available']
+        self.call('workspace.apply', {'ops': [{'op': 'set', 'key': 'extension/other-agent', 'value': {'enabled': True,
+            'argv': ['/usr/bin/python3', str(REPO/'tests/fixtures/other_agent.py')]}}], 'note': 'Other native runtime fixture'})
+        other = self.wait(lambda: next((r for r in self.snapshot()['resources'] if r.get('provider') == 'other-agent' and r.get('available')), None), 'non-Pi agent')
+        self.wait(lambda: self.snapshot()['entries'].get('menu/agents.'+other['id']+'.abort'), 'declared other abort menu')
+        assert 'menu/agents.'+other['id']+'.prompt' not in self.snapshot()['entries']
+        self.invoke(other['id'], 'abort', outcome='observed')
+        self.call('command.invoke', {'name': 'agents.show', 'args': {'resource': other['id']}})
+        if self.args.agents_ui:
+            self.ui_frame('other-runtime', 'Other agent', 'abort_count', 'other native runtime')
+        children = Path(f'/proc/{self.core.pid}/task/{self.core.pid}/children').read_text().split()
+        self.tracked.extend(identity(int(pid)) for pid in children)
+        self.call('command.invoke', {'name': 'prim.extension.disable', 'args': {'name': 'other-agent'}})
+        self.call('command.invoke', {'name': 'prim.extension.enable', 'args': {'name': 'pi'}})
+        self.wait(self.extension_ready, 'Pi launcher re-enabled')
+        self.call('command.invoke', {'name': 'prim.extension.disable', 'args': {'name': 'agents'}})
+        assert live(native_process) and self.resource(rid)['available']
+        auxiliary = self.call('command.invoke', {'name': 'pi.new', 'args': {'runtime': 'fake'}})
+        host = self.resource(auxiliary['host'])
+        terminal = self.hc('get', host['backend_ref'])
+        child_ids = Path(f'/proc/{terminal["pid"]}/task/{terminal["pid"]}/children').read_text().split()
+        self.tracked.append(identity(terminal['pid']))
+        self.tracked.extend(identity(int(pid)) for pid in child_ids)
+        assert host['kind'] == 'terminal' and 'term-'+host['id'] in json.dumps(self.snapshot()['entries'])
+        assert self.resource(auxiliary['agent'])['available'], 'agents disable killed the runtime'
+        self.call('resource.kill', {'resource': host['id']})  # explicit fixture cleanup only
+        self.call('command.invoke', {'name': 'prim.extension.enable', 'args': {'name': 'agents'}})
+        self.wait(self.extension_ready, 'neutral agents re-enabled')
+        self.log.append({'independent_extensions': 'PASS', 'other_runtime': other['id'], 'terminal_fallback': host['id']})
 
     def stop_ui(self):
         if self.ui_running:
@@ -299,14 +331,15 @@ class E2E:
             ops = [{'op': 'set', 'key': 'doc/settings/agents', 'value': {'runtimes': [{'name': 'fake', 'argv': native}]}}]
             ops += [{'op': 'set', 'key': 'extension/'+name, 'value': {'enabled': True,
                     'argv': ['/usr/bin/python3', str(self.root/'ext'/(name+'.py'))]}}
-                    for name in ('tabs', 'panes', 'agents')]
+                    for name in ('tabs', 'panes', 'agents', 'pi')]
             self.call('workspace.apply', {'ops': ops, 'note': 'Private agents extension conformance'})
             self.wait(self.extension_ready, 'agents/tabs/panes command registration')
-            created = self.ui_launch() if self.args.agents_ui else self.call('command.invoke', {'name': 'agents.new', 'args': {'runtime': 'fake', 'cwd': str(self.root/'work')}})
+            created = self.ui_launch() if self.args.agents_ui else self.call('command.invoke', {'name': 'pi.new', 'args': {'runtime': 'fake', 'cwd': str(self.root/'work')}})
             assert created.get('agent'), created
             spawned = {'outcome': created['outcome'], 'resource': self.resource(created['host'])}
             layout = [entry['value'] for key, entry in self.snapshot()['entries'].items() if key.startswith('layout/')]
-            assert 'agent-'+created['agent'] in json.dumps(layout), 'agents.new did not open the agent tab'
+            assert 'agents-'+created['agent'] in json.dumps(layout), 'pi.new did not open the neutral agent tab'
+            assert self.snapshot()['entries']['doc/settings/pi']['value']['runtimes'][0]['argv'] == native
             children = Path(f'/proc/{self.core.pid}/task/{self.core.pid}/children').read_text().split()
             self.tracked.extend(identity(int(pid)) for pid in children)
         else:
@@ -370,6 +403,8 @@ class E2E:
             else:
                 self.invoke(rid, 'answer', {'id': dialog['id'], 'confirmed': True}, outcome='dispatched')
             self.agent(rid, lambda r: r['data']['run']['settled'] and not r['data']['requests'])
+            if self.args.agents_extension:
+                self.split_independence(rid, native_process)
             self.invoke(rid, 'prompt', {'message': 'resume-active-run'})
             before = self.agent(rid, lambda r: r['data']['run']['active'])
             trace = self.trace()
