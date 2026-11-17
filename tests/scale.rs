@@ -31,6 +31,7 @@ const BUDGET_TXN_P50_MS: f64 = 10.0;
 const BUDGET_TXN_P99_MS: f64 = 50.0;
 const BUDGET_ECHO_P99_MS: f64 = 50.0; // input -> echo on an idle stream during the output flood
 const BUDGET_SLOW_ECHO_P99_MS: f64 = 250.0; // the same, on a slow-reading client's own idle stream
+const BUDGET_SLOW_ECHO_MAX_MS: f64 = 1000.0; // its worst probe, usually the first, right after attaching to floods
 const BUDGET_EVENT_LAG_P99_MS: f64 = 250.0; // status change emitted by the backend -> seen by a client
 const BUDGET_MISSED: u64 = 0; // `missed` notifications to the draining observer
 const BUDGET_STATUS_DELIVERED_MIN: f64 = 0.95; // share of emitted status changes the observer saw
@@ -558,6 +559,7 @@ async fn scale_load() {
         ("echo_p99_ms", (pct(&echo_ms, 0.99), BUDGET_ECHO_P99_MS, pct(&echo_ms, 0.99) <= BUDGET_ECHO_P99_MS)),
         // NaN (no slow clients) passes.
         ("slow_echo_p99_ms", (pct(&slow_echo, 0.99), BUDGET_SLOW_ECHO_P99_MS, !(pct(&slow_echo, 0.99) > BUDGET_SLOW_ECHO_P99_MS))),
+        ("slow_echo_max_ms", (pct(&slow_echo, 1.0), BUDGET_SLOW_ECHO_MAX_MS, !(pct(&slow_echo, 1.0) > BUDGET_SLOW_ECHO_MAX_MS))),
         ("event_lag_p99_ms", (pct(&o.event_lag_ms, 0.99), BUDGET_EVENT_LAG_P99_MS, pct(&o.event_lag_ms, 0.99) <= BUDGET_EVENT_LAG_P99_MS)),
         ("missed", (o.missed as f64, BUDGET_MISSED as f64, o.missed <= BUDGET_MISSED)),
         ("status_delivered_ratio", (delivered, BUDGET_STATUS_DELIVERED_MIN, delivered >= BUDGET_STATUS_DELIVERED_MIN)),
