@@ -209,6 +209,10 @@ impl App {
             for (pane, (session, window, mut facts)) in seen {
                 match st.panes.get_mut(&pane) {
                     Some(info) => {
+                        // Its status watcher ended with a dropped control client: watch again.
+                        if info.watcher.as_ref().is_none_or(|w| w.is_finished()) {
+                            start.push(pane.clone());
+                        }
                         facts["status"] = info.status.clone();
                         info.session = session;
                         info.window = window;
@@ -397,10 +401,10 @@ impl App {
         self.state.lock().unwrap().streams.entry(pane.clone()).or_default().push(gone.clone());
         let Some(mut stream) = open.respond(Ok(Initial::Repaint)) else { return };
         // The capture lands in this subscription in output order; data before it is in the screen.
-        let repaint = {
+        let mut repaint = Some({
             let (client, id) = (client.clone(), id.clone());
             tokio::spawn(async move { client.repaint(&id).await })
-        };
+        });
         let mut started = false;
         loop {
             tokio::select! {
@@ -424,7 +428,13 @@ impl App {
                         break;
                     }
                     PaneEvent::Closed => {
-                        let _ = stream.close(json!({"reason": "exited"})).await;
+                        // The feed ended: our kill, or the session's control client went away
+                        // (e.g. a command timed out under load). A pane exit arrives via `gone`.
+                        if self.state.lock().unwrap().killed.contains(&pane) {
+                            let _ = stream.close(json!({"reason": "killed"})).await;
+                        } else {
+                            let _ = stream.gap("backend_dropped").await;
+                        }
                         break;
                     }
                     _ => {}
@@ -467,12 +477,18 @@ impl App {
             if stream.is_closed() {
                 break;
             }
-            if repaint.is_finished() && !started {
-                // The capture failed (pane gone or tmux error): the promised repaint can't come.
-                if let Ok(Err(e)) = repaint.await {
+            if repaint.as_ref().is_some_and(|r| r.is_finished()) {
+                // A successful capture's Repaint event is already queued for us; only a failed
+                // capture (pane gone, tmux error) means the promised repaint can't come.
+                let failed = match repaint.take().unwrap().await {
+                    Ok(Ok(())) => None,
+                    Ok(Err(e)) => Some(e.to_string()),
+                    Err(e) => Some(e.to_string()),
+                };
+                if let (Some(e), false) = (failed, started) {
                     let _ = stream.close(json!({"reason": "closed", "message": format!("repaint failed: {e}")})).await;
+                    break;
                 }
-                break;
             }
         }
         if let Some(list) = self.state.lock().unwrap().streams.get_mut(&pane) {

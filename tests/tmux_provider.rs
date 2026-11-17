@@ -18,6 +18,8 @@ const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STA
 struct Tmux {
     root: tempfile::TempDir,
     socket: PathBuf,
+    /// The server's pid, to kill exactly it if kill-server fails during teardown.
+    pid: Option<u32>,
 }
 
 impl Tmux {
@@ -25,7 +27,7 @@ impl Tmux {
         let out = Command::new("/usr/bin/tmux").arg("-V").env_clear().output().unwrap();
         assert_eq!(out.stdout, b"tmux 3.7b\n", "these tests pin tmux 3.7b");
         let root = tempfile::Builder::new().prefix("ptp").tempdir_in("/tmp").unwrap();
-        let t = Tmux { socket: root.path().join("s"), root };
+        let mut t = Tmux { socket: root.path().join("s"), root, pid: None };
         // -N (used by cli) refuses to start a server; this one call starts it.
         let ok = Command::new("/usr/bin/tmux")
             .arg("-S")
@@ -39,6 +41,7 @@ impl Tmux {
             .unwrap();
         assert!(ok.status.success(), "{}", String::from_utf8_lossy(&ok.stderr));
         t.cli(&["set-option", "-g", "status", "off"]);
+        t.pid = String::from_utf8_lossy(&t.cli(&["display-message", "-p", "#{pid}"]).stdout).trim().parse().ok();
         t
     }
     fn cli(&self, args: &[&str]) -> std::process::Output {
@@ -59,6 +62,12 @@ impl Tmux {
 impl Drop for Tmux {
     fn drop(&mut self) {
         let _ = self.cli(&["kill-server"]);
+        // Control clients hand their pipes to the server, so they end with it.
+        if let Some(pid) = self.pid {
+            if Path::new(&format!("/proc/{pid}")).exists() {
+                let _ = Command::new("kill").args(["-KILL", &pid.to_string()]).status();
+            }
+        }
     }
 }
 
@@ -238,5 +247,73 @@ async fn panes_created_and_closed_outside_prim_are_reconciled() {
     assert!(tmux.cli(&["kill-pane", "-t", &outside]).status.success());
     let gone = core.until(|m| m["method"] == "resource.gone" && m["params"]["ref"] == outside.as_str()).await;
     assert_eq!(gone["params"]["reason"]["reason"], "exited");
-    let _ = Path::new("/");
+}
+
+/// Read stream data for `stream` (returning credit) until `needle` shows up. Returns the bytes seen.
+async fn read_until(core: &mut Core, stream: u64, needle: &[u8]) -> Vec<u8> {
+    let mut tail: Vec<u8> = Vec::new();
+    loop {
+        let d = core.until(|m| (m["method"] == "stream.data" || m["method"] == "stream.gap" || m["method"] == "stream.closed") && m["params"]["stream"] == stream).await;
+        assert_eq!(d["method"], "stream.data", "stream {stream} ended early: {d}");
+        let bytes = data_of(&d);
+        core.send(json!({"jsonrpc": "2.0", "method": "stream.credit", "params": {"generation": 1, "stream": stream, "bytes": bytes.len()}})).await;
+        tail.extend_from_slice(&bytes);
+        if contains(&tail, needle) {
+            return tail;
+        }
+        let keep = tail.len().saturating_sub(needle.len());
+        tail.drain(..keep);
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn native_pause_ends_the_stream_with_a_gap_and_a_reopen_repaints() {
+    let tmux = Tmux::start();
+    let (mut core, provider) = start(&tmux).await;
+    let reg = core.read().await;
+    core.reply(&reg, json!({"provider": "tmux@test", "generation": 1, "limits": {"stream_window_bytes": 65536, "max_record_bytes": 1048576}})).await;
+    let sync = core.read().await;
+    let pane = sync["params"]["resources"][0]["ref"].as_str().unwrap().to_string();
+    core.reply(&sync, json!({})).await;
+    let open = |id: u64, stream: u64| json!({"jsonrpc": "2.0", "id": id, "method": "stream.open", "params": {"generation": 1,
+        "stream": stream, "ref": pane, "incarnation": "", "cols": 100, "rows": 30, "history_lines": 0, "window_bytes": 65536}});
+    core.send(open(1, 1)).await;
+    assert_eq!(core.until(|m| m["id"] == 1).await["result"]["initial"], "repaint");
+    // A flood that keeps going while the provider is stalled, then ends.
+    let flood = "end=$(($(date +%s)+5)); while [ $(date +%s) -lt $end ]; do yes prim-flood-line | head -n 20000; done; echo flood-done\r";
+    core.send(json!({"jsonrpc": "2.0", "method": "stream.input", "params": {"generation": 1, "stream": 1, "data": B64.encode(flood)}})).await;
+    read_until(&mut core, 1, b"prim-flood-line").await;
+    // Stall the provider (our own child) past tmux's pause-after (1 s) while output floods.
+    let pid = provider.0.id().to_string();
+    assert!(Command::new("kill").args(["-STOP", &pid]).status().unwrap().success());
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(Command::new("kill").args(["-CONT", &pid]).status().unwrap().success());
+    let end = loop {
+        let m = core.until(|m| m["params"]["stream"] == 1 && m["method"] != "stream.error").await;
+        match m["method"].as_str() {
+            Some("stream.data") => {
+                let n = data_of(&m).len();
+                core.send(json!({"jsonrpc": "2.0", "method": "stream.credit", "params": {"generation": 1, "stream": 1, "bytes": n}})).await;
+            }
+            _ => break m,
+        }
+    };
+    assert_eq!(end["method"], "stream.gap", "a pause or lag ends the stream with a gap: {end}");
+    let gap = end["params"]["reason"]["gap"].as_str().unwrap().to_string();
+    // paused: tmux paused the pane; viewer_slow: our subscriber lagged first; backend_dropped: a tmux
+    // command timed out behind the flood and the session's control client was dropped (reattached).
+    assert!(["paused", "viewer_slow", "backend_dropped"].contains(&gap.as_str()), "{gap}");
+    // Recovery is a fresh open: a labelled repaint, then live output again (the pane was resumed).
+    // Reopen once the flood is over, so this viewer is not simply slow again.
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    core.send(open(2, 2)).await;
+    assert_eq!(core.until(|m| m["id"] == 2).await["result"]["initial"], "repaint");
+    let first = core.until(|m| m["method"] == "stream.data" && m["params"]["stream"] == 2).await;
+    assert_eq!(first["params"]["offset"], 0);
+    assert!(data_of(&first).starts_with(b"\x1b[H\x1b[2J"));
+    core.send(json!({"jsonrpc": "2.0", "method": "stream.credit", "params": {"generation": 1, "stream": 2, "bytes": data_of(&first).len()}})).await;
+    core.send(json!({"jsonrpc": "2.0", "method": "stream.input", "params": {"generation": 1, "stream": 2, "data": B64.encode("echo after-$((1+1))-pause\r")}})).await;
+    read_until(&mut core, 2, b"after-2-pause").await;
+    eprintln!("gap kind observed: {gap}");
 }
