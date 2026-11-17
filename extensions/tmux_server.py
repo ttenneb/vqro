@@ -38,14 +38,20 @@ class TmuxServer:
         if not state:
             raise PrimError("tmux needs a persistent prim state directory", "unavailable")
         argv = [self.helper, "server", action, "--state-dir", state, *args]
+        use_groups = os.name == "posix" and callable(getattr(os, "killpg", None)) and hasattr(signal, "SIGKILL")
+        group_options = {"start_new_session": True} if use_groups else {}
         child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                 start_new_session=True)
+                                 **group_options)
         try:
             out, err = child.communicate(timeout=4)
         except subprocess.TimeoutExpired:
-            # Only our helper group, not the independently running tmux daemon.
+            # Only our helper/group, never the independently running tmux daemon. Popen.kill
+            # is portable; POSIX may additionally clean up the helper's own CLI descendants.
             try:
-                os.killpg(child.pid, signal.SIGKILL)
+                if use_groups:
+                    os.killpg(child.pid, signal.SIGKILL)
+                else:
+                    child.kill()
             except ProcessLookupError:
                 pass
             try:

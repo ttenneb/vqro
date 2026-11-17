@@ -170,6 +170,36 @@ class TmuxServerTests(unittest.TestCase):
             self.assertEqual(len(server.calls), before + 2)
             self.assertIn("menu/tmux-server", self.ext.contributions[-1])
 
+    def test_non_posix_timeout_kills_helper_without_posix_session_or_group(self):
+        for action, kind in [("stop", "indeterminate"), ("status", "timeout")]:
+            with self.subTest(action=action):
+                server = m.TmuxServer(self.ext)
+                child = Mock(pid=123)
+                child.communicate.side_effect = [subprocess.TimeoutExpired("helper", 4), (b"", b"")]
+                with patch.object(m.os, "name", "nt"), \
+                        patch.object(m.os, "killpg", create=True) as kill_group, \
+                        patch.object(m.subprocess, "Popen", return_value=child) as spawn:
+                    with self.assertRaises(m.PrimError) as error: server.call(action)
+                self.assertEqual(error.exception.kind, kind)
+                self.assertNotIn("start_new_session", spawn.call_args.kwargs)
+                child.kill.assert_called_once_with()
+                kill_group.assert_not_called()
+                self.assertEqual(spawn.call_count, 1, "never retry after timeout")
+                self.assertEqual(child.communicate.call_count, 2)
+
+    def test_timeout_falls_back_when_group_primitive_is_unavailable(self):
+        server = m.TmuxServer(self.ext)
+        child = Mock(pid=123)
+        child.communicate.side_effect = [subprocess.TimeoutExpired("helper", 4), (b"", b"")]
+        with patch.object(m.os, "killpg", None, create=True), \
+                patch.object(m.subprocess, "Popen", return_value=child) as spawn:
+            with self.assertRaises(m.PrimError) as error: server.call("stop")
+        self.assertEqual(error.exception.kind, "indeterminate")
+        self.assertNotIn("start_new_session", spawn.call_args.kwargs)
+        child.kill.assert_called_once_with()
+
+    @unittest.skipUnless(m.os.name == "posix" and callable(getattr(m.os, "killpg", None)) and hasattr(m.signal, "SIGKILL"),
+                         "requires POSIX process groups")
     def test_stop_timeout_kills_only_own_helper_group_and_is_indeterminate(self):
         server = m.TmuxServer(self.ext)
         child = Mock(pid=123)
