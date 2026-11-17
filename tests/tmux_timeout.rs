@@ -53,6 +53,23 @@ async fn read_only_timeout_keeps_the_client_and_its_late_reply_never_pairs_with_
 }
 
 #[tokio::test]
+async fn short_read_deadline_does_not_destroy_the_late_reply_drain_window() {
+    let Some(_) = fake() else { return };
+    let dir = tempfile::Builder::new().prefix("pft").tempdir_in("/tmp").unwrap();
+    let c = client(dir.path(), r#"{"slow": {"list-panes": 0.8}}"#, 50).await;
+    let mut notes = c.notifications();
+    assert!(matches!(c.command(&["list-panes"]).await, Err(Error::TimedOut(_))));
+    // Healthy FIFO reply is later than the old 10*50ms drain allowance. The caller still
+    // times out promptly, but a queued request must wait for the old barrier, not lose pairing.
+    let next = tokio::time::timeout(Duration::from_secs(2), c.command(&["display-message", "-p", "own-reply"])).await.unwrap();
+    assert_eq!(next.unwrap(), vec![b"own-reply".to_vec()]);
+    assert!(!disconnected(&mut notes));
+    let log = std::fs::read_to_string(dir.path().join("s.log")).unwrap();
+    assert_eq!(log.lines().filter(|line| line.starts_with("'list-panes'")).count(), 1, "never resend a timed-out read");
+    c.close().await;
+}
+
+#[tokio::test]
 async fn mutating_timeout_is_indeterminate_and_drops_the_client() {
     let Some(_) = fake() else { return };
     let dir = tempfile::Builder::new().prefix("pft").tempdir_in("/tmp").unwrap();
@@ -62,17 +79,19 @@ async fn mutating_timeout_is_indeterminate_and_drops_the_client() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(disconnected(&mut notes));
     assert!(matches!(c.command(&["display-message", "-p", "x"]).await, Err(Error::Disconnected)));
+    let log = std::fs::read_to_string(dir.path().join("s.log")).unwrap();
+    assert_eq!(log.lines().filter(|line| line.starts_with("'kill-pane'")).count(), 1, "never resend an indeterminate mutation");
 }
 
 #[tokio::test]
 async fn a_late_reply_that_never_comes_is_a_desync_and_drops_the_client() {
     let Some(_) = fake() else { return };
     let dir = tempfile::Builder::new().prefix("pft").tempdir_in("/tmp").unwrap();
-    // 50 ms timeout: the late reply may take 10 more timeouts (0.5 s); this one takes 3 s.
-    let c = client(dir.path(), r#"{"slow": {"list-panes": 3}}"#, 50).await;
+    // 50 ms caller timeout, bounded five-second drain floor. This peer never answers in time.
+    let c = client(dir.path(), r#"{"slow": {"list-panes": 60}}"#, 50).await;
     let mut notes = c.notifications();
     assert!(matches!(c.command(&["list-panes"]).await, Err(Error::TimedOut(_))));
-    let next = tokio::time::timeout(Duration::from_secs(2), c.command(&["display-message", "-p", "queued"])).await.unwrap();
+    let next = tokio::time::timeout(Duration::from_secs(6), c.command(&["display-message", "-p", "queued"])).await.unwrap();
     assert!(matches!(next, Err(Error::Disconnected | Error::Indeterminate(_))), "{next:?}");
     assert!(disconnected(&mut notes));
 }

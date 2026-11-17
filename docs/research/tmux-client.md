@@ -34,8 +34,10 @@ control client. There is no automatic reconnect or effect resend.
 - **Timeouts (2026-11-17).** A *read-only* command (`list-*`, `display-message`, `capture-pane`, `show-*`,
   `has-session`) that gets no reply within `command_timeout` fails with `TimedOut`: no effect, and the control
   client stays attached. The request stays at the head and absorbs its late reply blocks up to its end barrier, so
-  the next command is never paired with them. If the late reply takes more than 10 further timeouts, the attachment
-  is treated as desynchronised and dropped. A *mutating* command that times out is `Indeterminate` and drops the
+  the next command is never paired with them. Drain grace is `max(10 * command_timeout, 5 seconds)`: short caller
+  deadlines must not misclassify healthy CPU-delayed FIFO backlog as desync. The existing five-second default keeps
+  its fifty-second drain; a30ms caller still times out at30ms, with a bounded five-second absorption window.
+  A peer that exceeds that drain window is treated as desynchronised and dropped. A *mutating* command that times out is `Indeterminate` and drops the
   attachment as before. Nothing is resent. Tests: `tests/tmux_timeout.rs` (deterministic fake control client,
   `tests/fixtures/fake_tmux_cc.py`) and `tests/tmux.rs` (real 3.7b flood with a 30 ms timeout).
 

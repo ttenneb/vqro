@@ -22,8 +22,10 @@ const MAX_COMMAND: usize = 64 * 1024;
 const MAX_INPUT: usize = 16 * 1024;
 const CHUNK: usize = 16 * 1024;
 const MAX_WATCHED: usize = 1024;
-/// After a read-only command times out, how many more command timeouts its late reply may take
-/// before the attachment is treated as desynchronised and dropped.
+const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
+/// After a read-only caller times out, drain its FIFO barriers for at least the normal native
+/// command budget. A short caller deadline must not turn healthy flood backlog into desync.
+/// Longer configured deadlines retain their existing ten-times allowance; silent peers remain bounded.
 const LATE_REPLY_FACTOR: u32 = 10;
 /// Commands that only read tmux state: a timeout leaves nothing unknown, so it is not fatal.
 const READ_ONLY: &[&str] = &[
@@ -79,7 +81,7 @@ impl Config {
             session: session.into(),
             binary: "tmux".into(),
             pause_after: 1,
-            command_timeout: Duration::from_secs(5),
+            command_timeout: DEFAULT_COMMAND_TIMEOUT,
             pane_capacity: 32,
         }
     }
@@ -496,7 +498,8 @@ async fn read_records(mut stdout: tokio::process::ChildStdout, tx: mpsc::Sender<
 }
 
 // The actor serializes commands. Dropped caller futures do not drop the pending block or shift
-// another command's reply; timeout/disconnect terminates this attachment, never retries an effect.
+// another command's reply; mutating timeout, failed bounded drain or disconnect terminates this
+// attachment. Never retry an effect.
 #[allow(clippy::too_many_arguments)]
 async fn actor(
     mut child: tokio::process::Child,
@@ -601,7 +604,7 @@ async fn actor(
                         // keep this request at the head so its late blocks are absorbed, not paired
                         // with the next command. Bounded: no reply at all means desync.
                         let _ = request.reply.take().unwrap().send(Err(Error::TimedOut("read-only command timed out; no effect".into())));
-                        deadline = tokio::time::Instant::now() + timeout * LATE_REPLY_FACTOR;
+                        deadline = tokio::time::Instant::now() + (timeout * LATE_REPLY_FACTOR).max(DEFAULT_COMMAND_TIMEOUT);
                         continue;
                     }
                     reason = if request.reply.is_none() { "late reply never arrived".into() } else { "command acknowledgement timed out".into() };
