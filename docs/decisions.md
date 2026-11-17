@@ -252,3 +252,29 @@ tables; terminals that draw a glyph wider than its Unicode width (text-presentat
 ambiguous-width glyphs in CJK locales, non-Mono Nerd Fonts) will misalign, which is why the bundled emoji set uses
 only emoji-presentation characters and a 2-cell column, and a roomy Nerd Font variant exists. Recovery: revert the
 `icons` transaction, delete the entry, or pick Default.
+
+## D21. Adapters and runtime bridges are out-of-process providers (2026-11-17, PROPOSED)
+
+> **Proposed, not binding** until the human confirms it. Until then D14–D20 stand and the in-process adapter stays.
+
+**Decision.**
+- Backend adapters and agent-runtime bridges are **providers**: out-of-process programs speaking the core protocol,
+  registered per connection with a generation, publishing resources with identity (provider, instance, ref,
+  incarnation), serving effects with deadlines and D10 outcomes, and serving streams with credit that follows the
+  viewer's consumption (`spec/provider-v0.md`). Adding a backend or runtime edits no core, server or client code.
+- Providers marked `essential` keep running in **safe mode**, so recovery never makes every terminal unavailable. They
+  can still be disabled explicitly, and the recovery surface never depends on them.
+- **Remote bridges reach the core through their host's provider** (`provider.relay`, carried over the provider's own
+  transport). Recommended default; the human confirms or picks an alternative (open question 2).
+
+**Why.** D14 asks that a backend or runtime be a thin, quick addition; a built-in `Backend` enum in `server.rs` and
+`main.rs` contradicts that, and two implementations per side must satisfy one contract before it is called stable.
+The tmux check (2026-11-16) showed ids reused after a server restart and output dropped while paused, so identity
+and gap reporting must be in the contract, not left to each adapter. Safe mode exists for recovery; dropping the
+providers would remove the terminals the user is trying to recover. Relaying through the host's provider keeps
+bridges independent of where they run, without a separate prim process per host.
+
+**Consequences.** Migration order in `spec/provider-v0.md` section 8: reshape in process, bounded streams, wire
+protocol with an external fake provider and a conformance suite, herdr-core out of process, then tmux and the Pi
+bridge in parallel. `extension/<name>` gains `essential`. `workspace.snapshot` gains `providers` (replacing
+`adapters`). Open: the exact `provider.relay` mapping onto `hc connect` channels and ssh.
