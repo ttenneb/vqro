@@ -102,11 +102,14 @@ possibly stale when `lossy`. Panels can name capabilities in `requires` as today
 
 ## 4. Terminal streams through a provider
 
-Today the herdr adapter returns credit to herdr-core as soon as a chunk is queued (`src/adapter/herdr.rs:231`), and
-connection queues are unbounded (`src/rpc.rs`). The contract makes every hop bounded and credit-driven, with the
-viewer as the consumer.
+Every hop is bounded and credit-driven. On `main` the in-process herdr adapter already returns credit only when the
+core's bounded per-connection writer accepted the bytes, and slow viewers are closed with `slow_consumer`
+(`core-protocol.md`, Resources). **The exact v0 messages are in section 9 and supersede the sketch below**: in v0
+a gap ends the stream (no in-stream `stream.repaint`), repaint is the initial data of a fresh open, and credit
+follows acceptance by the core's bounded writer, not a viewer acknowledgement.
 
 ```jsonc
+// SKETCH, superseded by section 9
 // core → provider (request)
 {"method": "stream.open", "params": {"stream": 42, "ref": "t3", "incarnation": "", "cols": 120, "rows": 40,
   "history_lines": 2000, "window_bytes": 262144}}            // → {"opened": true}
@@ -170,8 +173,8 @@ Public calls stay resource-centric: `resource.spawn {provider?, kind, ...}`, `re
 | `indeterminate` | sent, but the answer was lost (deadline, disconnect); the effect may or may not have happened |
 
 - **Deadlines.** Every forwarded call has one: the caller's `deadline_ms`, else a core default. When it expires the
-  caller gets `indeterminate`. A late reply is published as an `effect.outcome {effect, outcome}` event so observers
-  can reconcile.
+  caller gets `timeout` with `outcome: "indeterminate"`. In v0 a late reply is ignored, as for forwarded commands
+  (section 9.5); observers reconcile from resource facts. A published `effect.outcome` event is OPEN.
 - **No automatic resend**, anywhere: not on reconnect, not on restart, not after `indeterminate`. Retrying is an
   extension's explicit choice, with the outcome visible.
 - The same deadlines apply to `command.invoke` forwarded to extensions.
@@ -250,6 +253,157 @@ cursors with snapshot fencing; the scale harness. Providers reuse these rules.
 5. **In parallel after 3:** the tmux provider and the Pi bridge, each passing the conformance suite; tmux on two hosts
    with failure isolation.
 6. A Windows compile and smoke check of the provider transport before any part is a freeze candidate.
+
+## 9. Wire messages (v0, pinned 2026-11-17)
+
+This section is the implementable contract; where sections 1–6 differ, this wins. It answers the SDK gap list
+(G1–G20 below refer to it). Items marked **OPEN** carry a recommendation and are not built in v0.
+
+### 9.1 Framing, connection and errors
+
+- JSON-RPC 2.0 over the core socket, one JSON object per line, **LF only** (a trailing CR is stripped; U+2028/U+2029
+  inside strings are not separators). Maximum record **1 MiB** on a provider connection; a longer line is a protocol
+  error and the core closes the connection (G18).
+- **One provider per connection, registered once** (G3, G16). `hello {extension?}` first, then exactly one
+  `provider.register`. A second register on the same connection is `conflict`. Re-registering means a new connection,
+  a new generation and a full sync; streams are never resumed and effects never resent.
+- Every provider-originated message after registration and every core-originated provider message carries
+  `generation` (integer). Requests with a wrong generation fail with `stale_generation`; a notification with a wrong
+  generation is a protocol error and the core closes the connection (on one connection a mismatch is a bug).
+- **Errors** are JSON-RPC errors with `data.kind` (G12). Kinds used here: `invalid` (bad params, bad base64, bad
+  dimensions), `unknown_method` (code -32601), `unsupported` (op or stream feature not in the provider's
+  capabilities), `not_found` (unknown ref, incarnation or stream), `stale_generation`, `conflict` (duplicate
+  register, duplicate effect id, duplicate live provider name), `forbidden` (bad or used bridge token), `overloaded`
+  (a bound is full; nothing was done), `timeout` (core-side deadline; `data.outcome: "indeterminate"`),
+  `unavailable` (provider disconnected), `backend` (the layer below failed in a way not covered by `rejected`).
+  `unsupported` and `stale_generation` are new kinds; `core-protocol.md` lists them once the core implements them.
+- **Reasons** are always objects `{"reason": <string>, "message"?: <string>, ...}` (G11), matching `stream.closed` on
+  `main`. Minimum reason strings: `provider_disconnected`, `slow_consumer`, `gap`, `exited`, `killed`, `replaced`,
+  `closed`.
+
+### 9.2 Registration and sync
+
+| Method | Dir | Kind | Params | Result |
+|---|---|---|---|---|
+| `provider.register` | P→C | request | `name`, `role` (`backend`\|`runtime`), `instance` (string), `software {name, version}`, `provider_version`, `capabilities` (object), `limits? {max_streams?, stream_window_bytes?}`, `token?` (required for `runtime`) | `{provider, generation, limits: {stream_window_bytes, max_record_bytes}}` |
+| `provider.sync` | P→C | request | `generation`, `resources: [Facts]`, `final` (bool) | `{}` once applied |
+| `resource.upsert` | P→C | notification | `generation`, `facts: Facts` | — |
+| `resource.gone` | P→C | notification | `generation`, `ref`, `incarnation`, `reason` | — |
+
+- **Capabilities** (G19): an object mapping name → parameter object (`{}` when none). Absent means unsupported;
+  `false`, `null` or a non-object value is `invalid` at register. Unknown names are accepted and exported verbatim.
+  An op is allowed only if a capability of the same name is declared (`terminal.spawn`, `agent.steer`, ...).
+- **Limits** (G10): `max_streams` is the provider's hard cap on concurrently open streams; the core does not open more
+  and returns `overloaded` to the viewer. The effective window is `min(stream_window_bytes, 262144)` and is returned
+  in the register result.
+- **Sync** (G9, G20): a sync is one or more `provider.sync` chunks; the chunk with `final: true` ends it. Each chunk
+  merges (upserts) its resources as it is applied. At the final chunk, every resource of this provider not listed in
+  any chunk of this sync is removed (`reason: replaced` if its ref reappeared with another incarnation, else
+  `closed`). An empty `resources` with `final: true` removes all. Duplicate (ref, incarnation) in one sync: last wins.
+  If the connection drops mid-sync, nothing is removed. Resources of a new registration stay `available: false`
+  until listed. The first sync must start before any `resource.upsert`; upserts during a sync count as listed.
+- `upsert`/`gone` are notifications: ordered with everything else on the connection, no acknowledgement. An SDK may
+  expose an awaitable "written to socket", never "applied by core".
+
+### 9.3 Facts (G1)
+
+```jsonc
+{"ref": "t3",                // required, provider's id, unique within instance
+ "incarnation": "",          // optional, default ""
+ "kind": "terminal",         // required, open set: "terminal", "agent", ...
+ "state": "live",            // required: "live" | "finished"
+ "name": null, "title": null, "cwd": null,   // optional strings
+ "argv": [],                 // optional, default []
+ "status": null,             // optional: OSC 7501-shaped status object as reported, or null
+ "exit": null,               // optional: {reason?, exit_code?, signal?} when finished
+ "data": {}}                 // optional, opaque object preserved verbatim (≤ 64 KiB); kind-specific facts
+```
+
+The core maps `ref` to today's internal `backend_ref` and publishes resources with prim fields added (`id`,
+`provider`, `available`, and for bridges `host`). Unknown top-level fields are ignored; put extras in `data`. Agent
+facts live in `data`: `{run: {active, settled, aborted?}, queues: {steering, follow_up}, requests: [...]}`; the
+agent's coarse state goes in `status` like a terminal's (`{state: "idle"|"working"|"blocked"|"done", ...}`), so
+existing status consumers and partial resource events (`src/events.rs`) work unchanged.
+
+### 9.4 Effects (G2, G4, G5, G15)
+
+| Method | Dir | Kind | Params | Result |
+|---|---|---|---|---|
+| `effect.invoke` | C→P | request | `generation`, `effect` (string), `op`, `ref?`, `incarnation?`, `args` (object), `deadline_ms` (integer) | `{outcome, data?, error?}` |
+
+- `deadline_ms` is the **remaining** time at dispatch, 1–300000, always present; default 30000 (as forwarded
+  commands). The provider converts it to a local monotonic deadline. The core owns the caller's deadline.
+- Result `outcome` is one of `accepted`, `observed`, `rejected`. `rejected` carries `error: {kind, message}` and
+  means no effect. Protocol problems (bad args, unknown op or ref) are JSON-RPC errors instead, also no effect.
+  `indeterminate` is never sent by a provider; the core produces it (`timeout`, `unavailable`).
+- **One response per request.** The provider replies once, when it knows, even after the deadline; the core ignores
+  a reply that arrives after it timed out (as forwarded commands on `main`). **OPEN:** publishing a late reply as an
+  `effect.outcome` event; recommend only when an extension needs it.
+- `effect` ids are generated by the core, unique for the core's boot epoch, never reused. A provider must not run a
+  duplicate id twice on one connection; it rejects it with `conflict`. Providers may use native idempotency keys
+  internally. Nobody resends automatically.
+- **`terminal.spawn`**: no `ref`; `args {argv, cwd?, name?, env? (object string→string), cols?, rows?, placement?}`.
+  Result `{outcome: "observed", data: {facts}}`; the core assigns the prim id from these facts. The provider may also
+  send `resource.upsert` for it, before or after the reply; identity dedups.
+- **`terminal.kill`**: `ref`, `incarnation`, `args {}`. Result `accepted` (requested) or `observed` (with
+  `data.facts` in the finished state). Final facts also arrive as `resource.upsert` (`state: finished`) or
+  `resource.gone`; open streams then get `stream.closed`.
+- Agent ops (`agent.prompt`, `agent.steer`, ...) use `ref`, `args` per runtime; result `accepted` with
+  `data.disposition` (Pi: `started` | `queued` | `handled`).
+
+### 9.5 Streams (G6, G7, G8, G13, G14)
+
+| Method | Dir | Kind | Params | Result |
+|---|---|---|---|---|
+| `stream.open` | C→P | request | `generation`, `stream` (u64), `ref`, `incarnation`, `cols`, `rows`, `history_lines` (0 = none), `window_bytes` | `{initial: "history"\|"repaint"\|"none"}` |
+| `stream.data` | P→C | notification | `generation`, `stream`, `offset` (u64), `data` (base64) | — |
+| `stream.gap` | P→C | notification | `generation`, `stream`, `offset`, `reason` (`{reason: "gap", gap: "backend_dropped"\|"paused"\|"viewer_slow"}`) | — |
+| `stream.closed` | P→C | notification | `generation`, `stream`, `reason` | — |
+| `stream.error` | P→C | notification | `generation`, `stream`, `error {kind, message}`, `outcome: "rejected"` | — |
+| `stream.credit` | C→P | notification | `generation`, `stream`, `bytes` (u32 > 0) | — |
+| `stream.input` | C→P | notification | `generation`, `stream`, `data` (base64, ≤ 64 KiB decoded) | — |
+| `stream.resize` | C→P | notification | `generation`, `stream`, `cols`, `rows` (1–9999) | — |
+| `stream.close` | C→P | notification | `generation`, `stream` | — |
+
+- **Stream ids** are chosen by the core, unique for the life of the provider connection, never reused. Messages for
+  a stream that is closed or unknown are ignored by the provider (`stream.credit`, `stream.input` after close) and
+  dropped by the core; neither is an error.
+- **Units.** All byte counts are **decoded** bytes. `stream.data` carries at most 64 KiB decoded.
+- **Credit.** The initial credit is `window_bytes` (the effective window from 9.2). The provider never has more than
+  that many unacknowledged decoded bytes of `stream.data` outstanding. The core sends `stream.credit` when its
+  bounded per-connection writer has accepted those bytes for the viewer (the rule `main` uses internally; it is not
+  a claim that the viewer parsed them). The core never returns more than is outstanding; a provider ignores the
+  excess. There is no input-side credit: input is bounded by the core's 256 KiB queue (`overloaded` to the client)
+  and a provider that can't take input sends `stream.error` with `outcome: "rejected"` (never drops silently).
+  **OPEN:** viewer-acknowledged credit, only if measurements show the writer rule is insufficient.
+- **Offsets.** Per stream, starting at 0, counting decoded bytes the provider has sent on that stream. Each
+  `stream.data.offset` equals the previous offset plus the previous length; the core closes the stream with
+  `reason: invalid` on a mismatch.
+- **Gaps end the stream.** `stream.gap` is the last message for that stream (the core treats it as closed, frees it,
+  and forwards `stream.gap {stream, reason}` to the viewer, which `main`'s TUI handles by reattaching). Its `offset`
+  is where valid data ended. Recovery is a fresh `stream.open`.
+- **Initial data and repaint.** After a successful `stream.open` reply, the provider sends initial data from offset
+  0, as the reply's `initial` says: `history` (backend raw history, e.g. herdr-core), `repaint` (a synthetic screen
+  such as tmux `capture-pane`; labelled, not replay, carries no OSC status), or `none`. Repaint bytes consume credit
+  like any data. The core passes `initial` to the viewer in the `resource.attach` result (an additive field).
+- **Ordering.** The provider must not send `stream.data` before its `stream.open` reply. Per stream, the core sends
+  `stream.input`, `stream.resize` and `stream.close` in the order the viewer sent them, and the provider applies them
+  in that order; streams interleave freely. `stream.closed`/`stream.gap` follow all data the provider sent for that
+  stream. The core's control-over-data priority applies between different streams and connections, never within one
+  stream's data and close. Resize and close are fire-and-forget; their effect is seen in output or `stream.closed`.
+
+### 9.6 Runtime bridges (G17)
+
+- `role: "runtime"` requires `token` (string). The core mints it at spawn, single-use, valid until used or the
+  hosting terminal's resource is gone. Unknown, used or expired tokens fail with `forbidden`. A successful register
+  links the bridge: every agent resource it publishes gets `host` = the terminal resource id.
+- **OPEN:** `provider.relay` for bridges on other hosts (D21 proposed; no wire schema in v0). v0 bridges are local.
+
+### 9.7 Gap list disposition
+
+G1 9.3. G2 9.4. G3 9.1. G4 9.4. G5 9.4 (late effect event OPEN). G6 9.5 (viewer credit OPEN). G7 9.5. G8 9.5.
+G9 9.2. G10 9.2. G11 9.1. G12 9.1. G13 9.4, 9.5. G14 9.5. G15 9.4. G16 9.1. G17 9.6 (relay OPEN). G18 9.1 (other
+queue caps: `core-protocol.md`, Resources). G19 9.2. G20 9.2.
 
 ## Unverified
 
