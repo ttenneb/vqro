@@ -238,7 +238,7 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> Rp
             c.clients.insert(conn.id, me);
             Ok(json!({
                 "server": "prim", "version": env!("CARGO_PKG_VERSION"), "protocol": PROTOCOL, "you": conn.author(),
-                "seq": c.seq, "safe_mode": c.safe_mode, "socket": c.socket, "state_dir": c.state_dir,
+                "epoch": c.epoch, "seq": c.seq, "safe_mode": c.safe_mode, "socket": c.socket, "state_dir": c.state_dir,
             }))
         }
         "workspace.snapshot" => Ok(core.lock().unwrap().snapshot()),
@@ -263,7 +263,7 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> Rp
             let txn = p.get("txn").and_then(|t| t.as_u64()).ok_or_else(|| RpcError::invalid("needs `txn`"))?;
             revert(core, &conn.author(), Some(txn))
         }
-        "events.subscribe" => subscribe(core, conn, p.get("from").and_then(|f| f.as_u64())),
+        "events.subscribe" => subscribe(core, conn, p.get("from").and_then(|f| f.as_u64()), p.get("epoch").and_then(Value::as_str)),
         "resource.list" => Ok(json!({"resources": core.lock().unwrap().resources.values().map(|r| r.to_json()).collect::<Vec<_>>()})),
         "resource.spawn" => {
             let s: Spawn = params(p)?;
@@ -365,22 +365,28 @@ fn op_key(op: &Op) -> &str {
     }
 }
 
-fn subscribe(core: &Shared, conn: &Arc<Conn>, from: Option<u64>) -> RpcResult {
+fn subscribe(core: &Shared, conn: &Arc<Conn>, from: Option<u64>, epoch: Option<&str>) -> RpcResult {
     let mut subscribed = conn.subscribed.lock().unwrap();
     if *subscribed {
         return Err(RpcError::new("conflict", "already subscribed"));
     }
     *subscribed = true;
-    let (backlog, mut rx, seq) = {
+    let (backlog, mut rx, seq, epoch) = {
         let c = core.lock().unwrap();
-        let from = from.unwrap_or(c.seq);
-        (c.events_since(from), c.events.subscribe(), c.seq)
+        // A sequence without its epoch cannot identify a log position after restart.
+        let backlog = match from {
+            Some(from) if epoch == Some(c.epoch.as_str()) => c.events_since(from),
+            Some(_) => None,
+            None => Some(Vec::new()),
+        };
+        (backlog, c.events.subscribe(), c.seq, c.epoch.clone())
     };
     let peer = conn.peer.clone();
     match backlog {
-        None => peer.notify("missed", json!({"seq": seq})),
+        None => peer.notify("missed", json!({"epoch": epoch, "seq": seq})),
         Some(evs) => evs.into_iter().for_each(|e| peer.notify("event", e)),
     }
+    let response = json!({"epoch": epoch, "seq": seq});
     tokio::spawn(async move {
         loop {
             match rx.recv().await {
@@ -388,7 +394,7 @@ fn subscribe(core: &Shared, conn: &Arc<Conn>, from: Option<u64>) -> RpcResult {
                 Ok((_, ev)) => peer.notify("event", ev),
                 Err(broadcast::error::RecvError::Lagged(_)) => {
                     // Too slow: the client must resnapshot.
-                    peer.notify("missed", json!({}));
+                    peer.notify("missed", json!({"epoch": epoch}));
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             }
@@ -397,7 +403,7 @@ fn subscribe(core: &Shared, conn: &Arc<Conn>, from: Option<u64>) -> RpcResult {
             }
         }
     });
-    Ok(json!({"seq": seq}))
+    Ok(response)
 }
 
 async fn spawn(core: &Shared, s: Spawn) -> Result<String, RpcError> {

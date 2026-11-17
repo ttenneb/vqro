@@ -79,6 +79,8 @@ pub struct Core {
     pub default_adapter: Option<String>,
     log: VecDeque<(u64, Value)>,
     pub seq: u64,
+    /// Opaque identity of this event log; sequence numbers are meaningful only within it.
+    pub epoch: String,
     pub events: broadcast::Sender<(u64, Value)>,
     pub commands: BTreeMap<String, CommandInfo>,
     pub exts: BTreeMap<String, ExtRuntime>,
@@ -99,6 +101,9 @@ impl Core {
             Some(p) if p.exists() => serde_json::from_slice(&std::fs::read(p)?)?,
             _ => ResourceMap { next: 1, ..Default::default() },
         };
+        let mut boot = [0u8; 16];
+        getrandom::fill(&mut boot).map_err(|e| anyhow::anyhow!("event epoch: {e}"))?;
+        let epoch = boot.iter().map(|b| format!("{b:02x}")).collect();
         let (events, _) = broadcast::channel(4096);
         let mut commands = BTreeMap::new();
         for (name, title) in BUILTINS {
@@ -114,6 +119,7 @@ impl Core {
             default_adapter: None,
             log: VecDeque::new(),
             seq: 0,
+            epoch,
             events,
             commands,
             exts: BTreeMap::new(),
@@ -128,7 +134,7 @@ impl Core {
     /// Append to the event log and broadcast.
     pub fn emit(&mut self, ty: &str, data: Value) {
         self.seq += 1;
-        let ev = json!({"seq": self.seq, "type": ty, "data": data});
+        let ev = json!({"epoch": self.epoch, "seq": self.seq, "type": ty, "data": data});
         self.log.push_back((self.seq, ev.clone()));
         while self.log.len() > LOG {
             self.log.pop_front();
@@ -139,7 +145,7 @@ impl Core {
     /// Events after `from`, or None if some were already dropped from the bounded log (`missed`).
     pub fn events_since(&self, from: u64) -> Option<Vec<Value>> {
         let oldest = self.log.front().map(|(s, _)| *s).unwrap_or(self.seq + 1);
-        if from + 1 < oldest && from < self.seq {
+        if from > self.seq || from.saturating_add(1) < oldest {
             return None;
         }
         Some(self.log.iter().filter(|(s, _)| *s > from).map(|(_, e)| e.clone()).collect())
@@ -147,6 +153,7 @@ impl Core {
 
     pub fn snapshot(&self) -> Value {
         json!({
+            "epoch": self.epoch,
             "seq": self.seq,
             "entries": self.store.entries(),
             "resources": self.resources.values().map(|r| r.to_json()).collect::<Vec<_>>(),

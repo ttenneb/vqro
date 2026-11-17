@@ -1077,6 +1077,7 @@ dependencies = [
  "base64 0.23.1",
  "clap",
  "crossterm",
+ "getrandom 0.4.3",
  "ratatui",
  "serde",
  "serde_json",

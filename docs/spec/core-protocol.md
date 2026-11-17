@@ -13,7 +13,7 @@ the core forwards `command.invoke` to the connection that registered the command
 
 | Method | Params | Result |
 |---|---|---|
-| `hello` | `client?` or `extension?` (name) | `server`, `version`, `protocol`, `you` (author id), `seq`, `safe_mode` |
+| `hello` | `client?` or `extension?` (name) | `server`, `version`, `protocol`, `you` (author id), `epoch`, `seq`, `safe_mode` |
 
 Every change is recorded with the connection's author (`ext:<name>`, `<client>:<n>`).
 
@@ -21,7 +21,7 @@ Every change is recorded with the connection's author (`ext:<name>`, `<client>:<
 
 | Method | Params | Result |
 |---|---|---|
-| `workspace.snapshot` | | `seq`, `entries` (key → `{version, value}`), `resources`, `commands`, `extensions`, `adapters`, `safe_mode` |
+| `workspace.snapshot` | | `epoch`, `seq`, `entries` (key → `{version, value}`), `resources`, `commands`, `extensions`, `adapters`, `safe_mode` |
 | `workspace.apply` | `ops: [{op: "set", key, value, expect?} \| {op: "delete", key, expect?}]`, `note?` | `txn`, `changes` |
 | `workspace.history` | `limit?` | `txns` (newest first) |
 | `workspace.revert` | `txn` | the reverting `txn` |
@@ -46,9 +46,21 @@ reports uncertainty about crash durability, not partial application of operation
 
 | Method | Params | Result |
 |---|---|---|
-| `events.subscribe` | `from?` (seq) | `seq` |
+| `events.subscribe` | `from?` (seq), `epoch?` (opaque string, required with `from`) | `epoch`, `seq` |
 
-Then notifications `event {seq, type, data}` with types `entries`, `resource`, `resource.removed`, `command`,
+The cursor is the pair `(epoch, seq)`. A new random epoch is generated each time the core starts;
+sequence numbers start at zero within that epoch. `hello`, snapshots and every event carry the epoch.
+With no `from`, subscription starts at the current position (no backlog). With `from`, a missing or
+nonmatching epoch, a cursor ahead of the current sequence, or an expired log position produces `missed`
+instead of silently accepting an ambiguous cursor. `missed` carries the current `epoch` and, when known,
+`seq`; the subscription remains active and streams subsequent events.
+
+On `missed`, fence incoming event deltas while fetching a snapshot. Apply the snapshot, discard buffered
+events from other epochs or with `seq <= snapshot.seq`, then apply the remaining events in order.
+Only one snapshot generation may complete recovery; ignore replies superseded by another resync or
+connection. A bounded recovery buffer may discard its batch and request a newer snapshot on overflow.
+
+Then notifications `event {epoch, seq, type, data}` with types `entries`, `resource`, `resource.removed`, `command`,
 `extension`, `adapter`, `safe_mode`, `persistence.error`; or `missed` when the bounded log can't serve the cursor
 (re-snapshot). `persistence.error {scope: "resources", message}` reports a failed resource-id map write; the same
 error is logged by the server. The backend effect is not undone: resource facts and ids remain available in memory,

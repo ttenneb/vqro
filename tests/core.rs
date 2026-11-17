@@ -179,6 +179,61 @@ async fn crash_budget_then_replace_then_safe_mode() {
 }
 
 #[tokio::test]
+async fn restarted_core_rejects_old_epoch_even_when_sequence_matches() {
+    let e = env();
+    let old_core = start(e.socket.clone(), e.state.clone(), false, Backend::Fake, None).unwrap();
+    until(|| old_core.lock().unwrap().adapter_state.contains_key("fake")).await;
+    let (old, _) = connect(&e).await;
+    let before = old.call("workspace.snapshot", Value::Null).await.unwrap();
+    let socket = e._dir.path().join("new.sock");
+    let new_core = start(socket.clone(), e.state.clone(), false, Backend::Fake, None).unwrap();
+    until(|| new_core.lock().unwrap().adapter_state.contains_key("fake")).await;
+    let (new, mut rx, hello) = client::connect(&socket, "test").await.unwrap();
+    let after = new.call("workspace.snapshot", Value::Null).await.unwrap();
+    assert_eq!(before["seq"], after["seq"], "sequence alone is ambiguous");
+    assert!(after["epoch"].is_string());
+    assert_ne!(before["epoch"], after["epoch"]);
+    assert_eq!(hello["epoch"], after["epoch"]);
+    let result = new.call("events.subscribe", json!({"from": before["seq"], "epoch": before["epoch"]})).await.unwrap();
+    assert_eq!(result["epoch"], after["epoch"]);
+    let Some(Incoming::Notification { method, params }) = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await.unwrap() else {
+        panic!("expected missed");
+    };
+    assert_eq!(method, "missed");
+    assert_eq!(params["epoch"], after["epoch"]);
+}
+
+#[tokio::test]
+async fn event_cursors_require_an_epoch_and_replay_only_newer_events() {
+    let e = env();
+    let _core = start(e.socket.clone(), e.state.clone(), false, Backend::Fake, None).unwrap();
+    let (p, _) = connect(&e).await;
+    let snapshot = p.call("workspace.snapshot", Value::Null).await.unwrap();
+    p.call("workspace.apply", json!({"ops": [{"op": "set", "key": "doc/test/cursor", "value": 1}]})).await.unwrap();
+    let (replay, mut rx) = connect(&e).await;
+    replay.call("events.subscribe", json!({"epoch": snapshot["epoch"], "from": snapshot["seq"]})).await.unwrap();
+    loop {
+        let Some(Incoming::Notification { method, params }) = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await.unwrap() else {
+            panic!("expected replay");
+        };
+        assert_eq!(method, "event");
+        assert_eq!(params["epoch"], snapshot["epoch"]);
+        assert!(params["seq"].as_u64().unwrap() > snapshot["seq"].as_u64().unwrap());
+        if params["type"] == "entries" {
+            break;
+        }
+    }
+    for cursor in [json!({"from": 0}), json!({"epoch": snapshot["epoch"], "from": u64::MAX})] {
+        let (peer, mut rx) = connect(&e).await;
+        peer.call("events.subscribe", cursor).await.unwrap();
+        let Some(Incoming::Notification { method, .. }) = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await.unwrap() else {
+            panic!("expected missed");
+        };
+        assert_eq!(method, "missed");
+    }
+}
+
+#[tokio::test]
 async fn transactions_revert_and_events() {
     let e = env();
     let _core = start(e.socket.clone(), e.state.clone(), false, Backend::Fake, None).unwrap();
