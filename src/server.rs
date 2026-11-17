@@ -32,6 +32,7 @@ struct Conn {
     streams: Mutex<HashMap<u64, StreamBinding>>,
     next_stream: AtomicU64,
     subscribed: Mutex<bool>,
+    requests: Arc<tokio::sync::Semaphore>,
 }
 
 impl Conn {
@@ -129,6 +130,7 @@ pub async fn serve(core: Shared, listener: UnixListener) -> anyhow::Result<()> {
             streams: Mutex::new(HashMap::new()),
             next_stream: AtomicU64::new(1),
             subscribed: Mutex::new(false),
+            requests: Arc::new(tokio::sync::Semaphore::new(crate::rpc::MAX_PENDING_CALLS)),
         }), incoming));
     }
 }
@@ -147,8 +149,13 @@ async fn connection(core: Shared, conn: Arc<Conn>, mut incoming: crate::rpc::Inc
                 }
             }
             Incoming::Request { id, method, params } => {
+                let Ok(permit) = conn.requests.clone().try_acquire_owned() else {
+                    conn.peer.respond(id, Err(provider::rejected("overloaded", "connection request limit; not dispatched")));
+                    continue;
+                };
                 let (core, conn) = (core.clone(), conn.clone());
                 tokio::spawn(async move {
+                    let _permit = permit;
                     let result = dispatch(&core, &conn, &method, params).await;
                     conn.peer.respond(id, result);
                 });
@@ -237,6 +244,7 @@ struct Invoke {
 }
 
 async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> RpcResult {
+    if conn.peer.is_closed() { return Err(provider::rejected("disconnected", "connection closed before dispatch")); }
     match method {
         "hello" => {
             let h: Hello = params(p)?;
@@ -329,6 +337,16 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> Rp
                 return Err(RpcError::invalid("`content` is an object, or null to clear"));
             }
             let mut c = core.lock().unwrap();
+            let old = c.live.get(&view).map(|(v, _, _)| crate::limits::encoded_bytes(&(&view, v))).unwrap_or(0);
+            let next = if content.is_null() { 0 } else { crate::limits::encoded_bytes(&(&view, &content)) };
+            if next > crate::limits::LIVE_VALUE_BYTES && next > old {
+                return Err(crate::limits::too_large("live view", next, crate::limits::LIVE_VALUE_BYTES));
+            }
+            let total: usize = c.live.iter().map(|(key, (value, _, _))| crate::limits::encoded_bytes(&(key, value))).sum();
+            let candidate = total.saturating_sub(old).saturating_add(next);
+            if candidate > crate::limits::LIVE_BYTES && candidate > total {
+                return Err(crate::limits::too_large("live content", candidate, crate::limits::LIVE_BYTES));
+            }
             let unchanged = c.live.get(&view).map(|(v, _, _)| *v == content).unwrap_or(content.is_null());
             if content.is_null() {
                 c.live.remove(&view);
@@ -412,7 +430,14 @@ fn subscribe(core: &Shared, conn: &Arc<Conn>, opts: crate::events::SubscribeOpti
     let peer = conn.peer.clone();
     match backlog {
         None => peer.notify("missed", json!({"epoch": epoch, "seq": seq})),
-        Some(evs) => evs.into_iter().filter_map(|e| filter.shape(e)).for_each(|e| peer.notify("event", e)),
+        Some(evs) => {
+            let shaped: Vec<_> = evs.into_iter().filter_map(|e| filter.shape(e)).collect();
+            let bytes: usize = shaped.iter().map(|e| crate::limits::encoded_bytes(e).saturating_add(64)).sum();
+            if bytes > crate::rpc::CONTROL_BYTES - 4096 {
+                filter.reset();
+                peer.notify("missed", json!({"epoch":epoch,"seq":seq,"reason":"backlog_budget"}));
+            } else { for event in shaped { peer.notify("event", event); } }
+        },
     }
     let response = json!({"epoch": epoch, "seq": seq});
     tokio::spawn(async move {
@@ -485,7 +510,16 @@ async fn attach(core: &Shared, conn: &Arc<Conn>, a: Attach) -> RpcResult {
     if !route.valid() { return Err(provider::indeterminate("provider changed before stream registration")); }
     let initial = stream.initial;
     let sid = conn.next_stream.fetch_add(1, Ordering::Relaxed);
-    conn.streams.lock().unwrap().insert(sid, StreamBinding { input: stream.input.clone(), route: route.clone() });
+    {
+        let mut streams = conn.streams.lock().unwrap();
+        // Publish under the same lock as disconnect cleanup. A late idle attachment must never
+        // become invisible to cleanup, nor wait for backend output before noticing the viewer died.
+        if conn.peer.is_closed() {
+            let _ = StreamInput::Close.send(&stream.input);
+            return Err(provider::indeterminate("viewer disconnected before stream registration"));
+        }
+        streams.insert(sid, StreamBinding { input: stream.input.clone(), route: route.clone() });
+    }
     let peer = conn.peer.clone();
     let writer = peer.stream_writer(sid);
     let conn2 = conn.clone();
@@ -495,6 +529,7 @@ async fn attach(core: &Shared, conn: &Arc<Conn>, a: Attach) -> RpcResult {
         'output: loop {
             let out = tokio::select! {
                 biased;
+                _ = peer.closed() => { reason = json!({"reason": "viewer_disconnected"}); break; }
                 _ = route.ended() => { reason = json!({"reason": "provider_disconnected"}); break; }
                 out = stream.output.recv() => out,
             };

@@ -18,6 +18,7 @@ use crate::store::{Store, Txn};
 pub type Shared = Arc<Mutex<Core>>;
 
 const LOG: usize = 10_000;
+pub const LOG_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct Resource {
@@ -80,7 +81,8 @@ pub struct Core {
     identity_failures: BTreeMap<String, String>,
     pending_facts: BTreeMap<String, BTreeMap<String, (String, ResourceFacts)>>,
     recovering_identities: bool,
-    log: VecDeque<(u64, Value)>,
+    log: VecDeque<(u64, Value, usize)>,
+    log_bytes: usize,
     pub seq: u64,
     /// Opaque identity of this event log; sequence numbers are meaningful only within it.
     pub epoch: String,
@@ -121,6 +123,7 @@ impl Core {
             pending_facts: BTreeMap::new(),
             recovering_identities: false,
             log: VecDeque::new(),
+            log_bytes: 0,
             seq: 0,
             epoch,
             events,
@@ -138,26 +141,36 @@ impl Core {
     pub fn emit(&mut self, ty: &str, data: Value) {
         self.seq += 1;
         let ev = json!({"epoch": self.epoch, "seq": self.seq, "type": ty, "data": data});
-        self.log.push_back((self.seq, ev.clone()));
-        while self.log.len() > LOG {
-            self.log.pop_front();
+        let bytes = crate::limits::encoded_bytes(&ev).max(64);
+        // An oversized record creates a cursor gap, not an oversized retained allocation. Keep
+        // live delivery unchanged; subscribers unable to accept it recover through a snapshot.
+        if bytes > LOG_BYTES {
+            self.log.clear();
+            self.log_bytes = 0;
+        } else {
+            while self.log.len() >= LOG || self.log_bytes + bytes > LOG_BYTES {
+                if let Some((_, _, old)) = self.log.pop_front() { self.log_bytes -= old; }
+            }
+            self.log_bytes += bytes;
+            self.log.push_back((self.seq, ev.clone(), bytes));
         }
         let _ = self.events.send((self.seq, ev));
     }
 
     /// Events after `from`, or None if some were already dropped from the bounded log (`missed`).
     pub fn events_since(&self, from: u64) -> Option<Vec<Value>> {
-        let oldest = self.log.front().map(|(s, _)| *s).unwrap_or(self.seq + 1);
+        let oldest = self.log.front().map(|(s, _, _)| *s).unwrap_or(self.seq + 1);
         if from > self.seq || from.saturating_add(1) < oldest {
             return None;
         }
-        Some(self.log.iter().filter(|(s, _)| *s > from).map(|(_, e)| e.clone()).collect())
+        Some(self.log.iter().filter(|(s, _, _)| *s > from).map(|(_, e, _)| e.clone()).collect())
     }
 
     pub fn snapshot(&self) -> Value {
         json!({
             "epoch": self.epoch,
             "seq": self.seq,
+            "recovery_notice": self.store.admission_notice(),
             "entries": self.store.entries(),
             "resources": self.resources.values().map(|r| r.to_json()).collect::<Vec<_>>(),
             "commands": self.commands.values().map(|c| c.to_json()).collect::<Vec<_>>(),

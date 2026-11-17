@@ -144,7 +144,7 @@ enum Msg {
     Info(String),
     /// A command finished: say so unless something newer took the status line.
     Done(String),
-    Snapshot { generation: u64, result: Result<Value, String> },
+    Snapshot { generation: u64, result: crate::rpc::RpcResult },
     ClearOverrides,
     /// A command's reply asked this client to show a view as a popup.
     Popup { view: String, width: u16, ctx: Value },
@@ -231,6 +231,9 @@ struct App {
     generation: u64,
     resyncing: bool,
     buffered: Vec<Value>,
+    buffered_bytes: usize,
+    recovery_only: bool,
+    retry_snapshot: Option<std::time::Instant>,
 }
 
 /// The installed binary's identity, to notice a reinstall.
@@ -264,21 +267,36 @@ async fn next_input(
         result = async { reconnecting.as_mut().unwrap().await }, if reconnecting.is_some() => UiInput::Reconnected(result?),
         Some(m) = messages.recv() => UiInput::Message(m),
         Some(ev) = keys.recv() => UiInput::Key(ev),
-        _ = tokio::time::sleep(std::time::Duration::from_millis(500)), if app.toast.is_some() || app.terms.values().any(|t| t.retry_at.is_some()) => UiInput::Tick,
+        _ = tokio::time::sleep(std::time::Duration::from_millis(500)), if app.toast.is_some() || app.retry_snapshot.is_some() || app.terms.values().any(|t| t.retry_at.is_some()) => UiInput::Tick,
         else => UiInput::Closed,
     })
+}
+
+fn recovery_snapshot(hello: &Value, notice: &str) -> Value {
+    json!({"epoch":hello["epoch"], "seq":hello["seq"], "recovery_only":true,
+        "recovery_notice":format!("RECOVERY ONLY: {notice}; use undo/safe mode or CLI apply/delete, then retry"),
+        "entries":{}, "resources":[], "live":{},
+        "commands":crate::core::BUILTINS.iter().map(|(name,title)| json!({"name":name,"title":title,"available":true,"owner":"core"})).collect::<Vec<_>>()})
+}
+
+async fn snapshot_for_client(peer: &Peer, hello: &Value) -> Result<Value> {
+    match peer.call("workspace.snapshot", Value::Null).await {
+        Ok(snapshot) => Ok(snapshot),
+        Err(error) if error.kind() == "too_large" => Ok(recovery_snapshot(hello, &error.message)),
+        Err(error) => Err(error.into()),
+    }
 }
 
 pub async fn run(socket: &Path) -> Result<()> {
     let started_as = exe_stamp();
     let mut reexec = false;
-    let (peer, mut incoming, _) = client::connect(socket, "tui").await?;
-    let snap = peer.call("workspace.snapshot", Value::Null).await?;
+    let (peer, mut incoming, hello) = client::connect(socket, "tui").await?;
+    let snap = snapshot_for_client(&peer, &hello).await?;
     let seq = snap["seq"].as_u64().unwrap_or(0);
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut app = App::new(peer.clone(), tx);
     app.load(&snap);
-    app.message = format!("click prim or press {} for the menu", app.prefix());
+    app.message = snap["recovery_notice"].as_str().map(String::from).unwrap_or_else(|| format!("click prim or press {} for the menu", app.prefix()));
     peer.call("events.subscribe", json!({"from": seq, "epoch": snap["epoch"], "partial_resources": true})).await?;
 
     let mut terminal = ratatui::init();
@@ -332,12 +350,13 @@ pub async fn run(socket: &Path) -> Result<()> {
                 },
                 UiInput::Message(m) => { app.on_msg(m); true }
                 UiInput::Key(ev) => app.on_event(ev),
-                UiInput::Tick => true,
+                UiInput::Tick => { app.retry_snapshot_if_due(); true },
                 UiInput::Closed => return Ok(()),
             };
             dirty |= app.restore_under();
             // Drain whatever else is ready before redrawing.
-            while let Ok(m) = incoming.try_recv() {
+            for _ in 0..64 {
+                let Ok(m) = incoming.try_recv() else { break };
                 app.on_incoming(m);
                 dirty = true;
             }
@@ -388,8 +407,8 @@ async fn reconnect(socket: std::path::PathBuf, tx: mpsc::UnboundedSender<Msg>) -
     loop {
         let attempt: Result<_> = async {
             client::ensure_core().await?;
-            let (peer, incoming, _) = client::connect(&socket, "tui").await?;
-            let snap = peer.call("workspace.snapshot", Value::Null).await?;
+            let (peer, incoming, hello) = client::connect(&socket, "tui").await?;
+            let snap = snapshot_for_client(&peer, &hello).await?;
             peer.call("events.subscribe", json!({"from": snap["seq"], "epoch": snap["epoch"], "partial_resources": true})).await?;
             Ok((peer, incoming, snap))
         }.await;
@@ -416,7 +435,7 @@ impl App {
             under: None, zoomed: None, pending_focus: None, kbd_enhance: false,
             held: KeyModifiers::NONE, message: "click prim or press Ctrl-g for the menu".into(),
             quit: false, connected: true, connection: 0, epoch: String::new(), seq: 0,
-            generation: 0, resyncing: false, buffered: Vec::new(),
+            generation: 0, resyncing: false, buffered: Vec::new(), buffered_bytes: 0, recovery_only: false, retry_snapshot: None,
         }
     }
 
@@ -427,6 +446,8 @@ impl App {
         self.generation += 1;
         self.resyncing = false;
         self.buffered.clear();
+        self.buffered_bytes = 0;
+        self.retry_snapshot = None;
     }
 
     fn reconnected(&mut self, peer: Peer, snap: &Value) {
@@ -437,10 +458,12 @@ impl App {
         self.early.clear();
         self.early_closed.clear();
         self.load(snap);
-        self.message = "reconnected".into();
+        self.message = snap["recovery_notice"].as_str().unwrap_or("reconnected").into();
     }
 
     fn load(&mut self, snap: &Value) {
+        self.recovery_only = snap["recovery_only"].as_bool().unwrap_or(false);
+        self.retry_snapshot = None;
         self.epoch = snap["epoch"].as_str().unwrap_or("").to_string();
         self.seq = snap["seq"].as_u64().unwrap_or(0);
         self.entries.clear();
@@ -466,7 +489,18 @@ impl App {
                 let Ok(bytes) = B64.decode(data) else { return };
                 match self.stream_view.get(&sid).and_then(|v| self.terms.get_mut(v)) {
                     Some(t) => t.parser.process(&bytes),
-                    None => self.early.entry(sid).or_default().push(bytes),
+                    None => {
+                        if self.early_closed.contains_key(&sid) { return; }
+                        if !self.terms.values().any(|t| t.attaching) { self.peer.notify("stream.close", json!({"stream":sid})); return; }
+                        let charged = |chunks: &Vec<Vec<u8>>| chunks.iter().map(|b| b.len().max(64)).sum::<usize>();
+                        let total: usize = self.early.values().map(charged).sum();
+                        let pane = self.early.get(&sid).map(charged).unwrap_or(0);
+                        if pane + bytes.len().max(64) > crate::adapter::STREAM_BUFFER_BYTES || total + bytes.len().max(64) > crate::rpc::STREAM_OUTBOUND_BYTES {
+                            self.early.remove(&sid);
+                            self.remember_early_close(sid, "slow_consumer".into());
+                            self.peer.notify("stream.close", json!({"stream":sid}));
+                        } else { self.early.entry(sid).or_default().push(bytes); }
+                    },
                 }
             }
             "stream.closed" | "stream.gap" => {
@@ -478,17 +512,22 @@ impl App {
                     if let Some(t) = self.terms.get_mut(&view) { t.close(reason); }
                 } else if self.terms.values().any(|t| t.attaching) {
                     // Output/closure can race the attach reply's delivery to the UI task.
-                    self.early_closed.insert(sid, reason);
+                    self.remember_early_close(sid, reason);
                 }
             }
             "stream.error" => self.message = format!("stream input rejected (not replayed): {}", params["error"]["message"].as_str().unwrap_or("error")),
             "missed" => self.resync(),
             "event" => {
+                if self.recovery_only && !self.resyncing {
+                    self.retry_snapshot.get_or_insert_with(|| std::time::Instant::now() + std::time::Duration::from_secs(1));
+                    return;
+                }
                 if self.resyncing {
+                    let bytes = crate::limits::encoded_bytes(&params).max(64);
                     // Bound recovery memory. A fresh snapshot subsumes a discarded batch.
-                    if self.buffered.len() == 10_000 {
-                        self.resync();
-                    }
+                    if bytes > crate::core::LOG_BYTES { self.resync(); return; }
+                    if self.buffered.len() == 10_000 || self.buffered_bytes + bytes > crate::core::LOG_BYTES { self.resync(); }
+                    self.buffered_bytes += bytes;
                     self.buffered.push(params);
                 } else {
                     self.on_event_record(&params);
@@ -498,14 +537,25 @@ impl App {
         }
     }
 
+    fn remember_early_close(&mut self, sid: u64, reason: String) {
+        if self.early_closed.len() >= crate::rpc::MAX_PENDING_CALLS && !self.early_closed.contains_key(&sid) { self.peer.close(); return; }
+        self.early_closed.insert(sid, reason);
+    }
+
+    fn retry_snapshot_if_due(&mut self) {
+        if self.retry_snapshot.is_some_and(|at| std::time::Instant::now() >= at) && !self.resyncing { self.resync(); }
+    }
+
     fn resync(&mut self) {
+        self.retry_snapshot = None;
         self.generation += 1;
         self.resyncing = true;
         self.buffered.clear();
+        self.buffered_bytes = 0;
         let generation = self.generation;
         let (peer, tx) = (self.peer.clone(), self.tx.clone());
         tokio::spawn(async move {
-            let result = peer.call("workspace.snapshot", Value::Null).await.map_err(|e| e.to_string());
+            let result = peer.call("workspace.snapshot", Value::Null).await;
             let _ = tx.send(Msg::Snapshot { generation, result });
         });
     }
@@ -617,6 +667,7 @@ impl App {
         match m {
             Msg::Info(s) => self.message = s,
             Msg::Done(name) => {
+                if self.recovery_only && !self.resyncing { self.resync(); }
                 if self.message == format!("running {name}…") {
                     self.message = format!("{name}: done");
                 }
@@ -629,11 +680,18 @@ impl App {
                     Ok(s) => {
                         self.load(&s);
                         self.resyncing = false;
+                        self.buffered_bytes = 0;
                         for ev in std::mem::take(&mut self.buffered) {
                             if ev["epoch"].as_str() == Some(self.epoch.as_str()) {
                                 self.on_event_record(&ev);
                             }
                         }
+                    }
+                    Err(e) if e.kind() == "too_large" => {
+                        self.recovery_only = true;
+                        self.resyncing = false;
+                        self.buffered.clear(); self.buffered_bytes = 0;
+                        self.message = format!("RECOVERY ONLY: {e}; use undo/safe mode or CLI delete");
                     }
                     Err(e) => {
                         // A local RPC deadline does not close the transport. Close it explicitly
@@ -1942,6 +2000,7 @@ impl App {
         self.hit.badge = Rect { x: area.x, y: area.y, width: badge.chars().count() as u16, height: 1 };
         self.hit.status = area;
         let mut spans = vec![Span::styled(badge, Style::new().bg(if open { pal.prompt } else { pal.accent }).fg(pal.badge_text))];
+        if self.recovery_only { spans.push(Span::styled(" recovery only ", pal.badge(Some("warn")))); }
         if !self.connected {
             spans.push(Span::styled(" reconnecting ", pal.badge(Some("warn"))));
         }
@@ -2396,11 +2455,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn oversized_legacy_snapshot_starts_a_usable_recovery_ui() {
+        let (a, b) = tokio::io::duplex(4096);
+        let (ar, aw) = tokio::io::split(a); let (br, bw) = tokio::io::split(b);
+        let (client, _) = Peer::spawn(ar, aw); let (server, mut incoming) = Peer::spawn(br, bw);
+        server.set_max_record_bytes(1024).unwrap();
+        tokio::spawn(async move {
+            while let Some(Incoming::Request { id, method, .. }) = incoming.recv().await {
+                server.respond(id, Ok(if method == "workspace.snapshot" { json!("x".repeat(2048)) } else { json!({"reverted":true}) }));
+            }
+        });
+        let snap = snapshot_for_client(&client, &json!({"epoch":"boot","seq":1})).await.unwrap();
+        assert_eq!(snap["recovery_only"], true);
+        let (tx, _) = mpsc::unbounded_channel();
+        let mut app = App::new(client.clone(), tx); app.load(&snap);
+        assert!(app.prefix_items().iter().any(|r| r.binding["command"] == "prim.revert"));
+        assert!(app.prefix_items().iter().any(|r| r.binding["command"] == "client.quit"));
+        assert!(client.call("command.invoke", json!({"name":"prim.revert"})).await.is_ok());
+        assert!(!client.is_closed());
+        app.run_command("client.quit", Value::Null, Value::Null, None);
+        assert!(app.quit);
+    }
+
+    #[tokio::test]
+    async fn early_attach_buffer_overflow_is_a_gap_not_retained_bytes() {
+        let (mut app, _) = app();
+        app.terms.insert("view".into(), Term { resource:"r1".into(), stream:None, parser:new_parser(80,24), size:(80,24), attaching:true, closed:None, retry_at:None });
+        let bytes = B64.encode(vec![b'x'; 65536]);
+        for _ in 0..256 { app.on_incoming(Incoming::Notification { method:"stream.data".into(), params:json!({"stream":1,"data":bytes}) }); }
+        assert!(!app.early.contains_key(&1));
+        assert_eq!(app.early_closed[&1], "slow_consumer");
+        app.on_msg(Msg::Attached { connection:app.connection, view:"view".into(), resource:"r1".into(), result:Ok(1) });
+        assert_eq!(app.terms["view"].stream, None);
+        assert!(app.terms["view"].retry_at.is_some());
+    }
+
+    #[tokio::test]
     async fn snapshot_timeout_forces_reconnect_instead_of_permanent_fencing() {
         let (mut app, _) = app();
         app.load(&snapshot(1, "old"));
         app.resyncing = true;
-        app.on_msg(Msg::Snapshot { generation: app.generation, result: Err("snapshot deadline expired".into()) });
+        app.on_msg(Msg::Snapshot { generation: app.generation, result: Err(crate::rpc::RpcError::new("timeout", "snapshot deadline expired")) });
         assert!(app.peer.is_closed(), "a snapshot failure on a live connection must initiate recovery");
         assert_eq!(app.entries["doc/test/value"], "old", "retain last good state while reconnecting");
     }

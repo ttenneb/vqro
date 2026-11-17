@@ -105,6 +105,12 @@ impl Store {
         &self.entries
     }
 
+    pub fn admission_notice(&self) -> Option<&'static str> {
+        (crate::limits::encoded_bytes(&self.entries) > crate::limits::WORKSPACE_BYTES ||
+            self.entries.iter().any(|item| crate::limits::encoded_bytes(&item) > crate::limits::ENTRY_BYTES))
+            .then_some("Legacy workspace exceeds current size limits; it remains loaded. Revert/delete/shrink state to recover.")
+    }
+
     pub fn get(&self, key: &str) -> Option<&Entry> {
         self.entries.get(key)
     }
@@ -156,6 +162,19 @@ impl Store {
             }
         }
         validate_references(&next)?;
+        // Old oversized state remains loadable and shrinkable. Limits reject growth, never
+        // block deletion/revert that reduces a legacy violation.
+        for (key, entry) in &next {
+            let bytes = crate::limits::encoded_bytes(&(key, entry));
+            if bytes > crate::limits::ENTRY_BYTES {
+                let previous = self.entries.get(key).map(|old| crate::limits::encoded_bytes(&(key, old))).unwrap_or(0);
+                if bytes > previous { return Err(crate::limits::too_large("workspace entry", bytes, crate::limits::ENTRY_BYTES)); }
+            }
+        }
+        let bytes = crate::limits::encoded_bytes(&next);
+        if bytes > crate::limits::WORKSPACE_BYTES && bytes > crate::limits::encoded_bytes(&self.entries) {
+            return Err(crate::limits::too_large("workspace entries", bytes, crate::limits::WORKSPACE_BYTES));
+        }
 
         let changes: Vec<Change> = touched
             .into_iter()

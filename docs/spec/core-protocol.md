@@ -7,7 +7,7 @@ Status: implemented in slice 1 (`src/server.rs`), not frozen (D16). JSON-RPC 2.0
 core's local endpoint (below). Both sides may send requests:
 the core forwards `command.invoke` to the connection that registered the command. Errors carry a stable
 `data.kind`: `invalid`, `conflict`, `not_found`, `unavailable`, `forbidden`, `backend`, `disconnected`, `io`,
-`durability_unconfirmed`, `timeout`, `overloaded`, `unsupported`.
+`durability_unconfirmed`, `timeout`, `overloaded`, `unsupported`, `too_large`.
 
 ## Endpoint and transport (D12, D22 proposed)
 
@@ -70,11 +70,45 @@ extension changes are reconciled too. The file now names the candidate, but a cr
 state. **Do not automatically replay**: inspect snapshot/history using the transaction id instead. This exception
 reports uncertainty about crash durability, not partial application of operations.
 
+## Size admission and recovery
+
+Writes reject growth above **1 MiB per encoded workspace entry** (key/version/value), **16 MiB total entries**,
+**1 MiB per encoded live item**, or **8 MiB total live content**. Error `too_large` includes `outcome: rejected`,
+byte count and limit; state/history/sequence remain unchanged. Old oversized state still loads, and deletion,
+revert or shrinking a legacy violation remains possible. Snapshots carry `recovery_notice` for legacy entry limits.
+
+The ordinary control backlog remains **4 MiB**. One separately reserved, prioritized **64 MiB maximum reply**
+slot stays charged through actual writing: 16 MiB entries + 8 MiB live + 32 MiB resource allowance + 8 MiB
+metadata/headroom. A busy large slot returns `overloaded`; a reply over the envelope returns `too_large` **without
+disconnecting**. This is not a raised general backlog cap. No effect/input is replayed. The resource envelope
+assumes provider-wire admission: 4096 resources/provider, 128 KiB whole facts, 32 MiB global retained current/pending
+resource JSON, 32 providers and 128 KiB registration metadata/provider. Provider-wire owns that admission; older
+in-process/external facts may exceed it during migration, so oversized recovery remains necessary.
+
+If legacy/external state exceeds the reply envelope, the TUI starts in clearly labelled **recovery-only** mode,
+not a partial authoritative workspace. Built-in undo, safe mode, reset, commands and quit remain reachable; CLI
+apply/delete also works. Recovery commands/state changes trigger another fenced snapshot attempt. A snapshot
+timeout explicitly closes the old peer and reconnects responsively rather than remaining fenced forever.
+
+Incoming methods and queued application ingress are each capped at **4 MiB**, with a 64-byte metadata floor.
+Framing, including unterminated records and replies, is capped at 64 MiB by default; registered providers lower
+that to 1 MiB, replies included. `Peer::set_max_record_bytes` also checks an in-progress record. Queued response
+values have 4 MiB plus one large-response permit, held until the call consumes them. Pending calls and admitted
+server requests are capped at 128/connection. Overflow closes ingress explicitly: recover facts, never resend
+effects. The Python helper caps notifications at 4 MiB/128 records through callbacks, request handlers at 32,
+and pending calls at 128. These encoded/queue bounds exclude allocator overhead, framing/serialization copies
+and a consumer-held record.
+
 ## Events
 
 | Method | Params | Result |
 |---|---|---|
 | `events.subscribe` | `from?` (seq), `epoch?` (opaque string, required with `from`), `types?` (list of event types), `partial_resources?` (bool) | `epoch`, `seq` |
+
+The event log retains at most **10,000 records and 8 MiB encoded JSON** (64-byte floor). Byte eviction, an
+unretainable record, or a replay batch too large for the control backlog produces `missed`; subscription stays
+active. `reason: backlog_budget` requests a snapshot instead of repeatedly disconnecting on that replay batch.
+Client resync buffers have the same 8 MiB byte cap and restart recovery on overflow.
 
 Subscription options shape what one subscriber receives; they never change the log or other subscribers.
 - `types`: only events of these types arrive (unknown names are allowed; `missed` always arrives). Caches built
@@ -178,6 +212,11 @@ continue. A normal backend closure follows accepted output in order; if its clos
 `slow_consumer` rather than silently dropping final output. Control queue overflow disconnects the connection:
 reconnect and recover events using the epoch cursor/snapshot mechanism, never resend input.
 
+Late attachment completion after viewer disconnect is closed before registration. Idle output tasks select
+viewer shutdown without waiting for backend bytes. TUI early-attach buffers have a 256 KiB per-stream / 1 MiB
+total bound with a 64-byte chunk floor; overflow closes that stream and schedules a fresh repaint. Incoming
+drains are batched to keep key handling reachable under sustained traffic.
+
 After a gap, discard the old VT parser state and attach again with backend history for a fresh repaint; do not
 concatenate partial escape sequences across streams. The TUI retries closed live views after a paced one-second
 retry, without requiring a new resource event. It also handles `stream.gap {stream, reason}` from future producers
@@ -186,6 +225,12 @@ internal herdr CREDIT follows acceptance into the core's bounded connection writ
 and not a claim that the viewer parsed the bytes.
 
 Resource ids (`r1`, ...) are prim's and stay stable across core restarts while the backend keeps the resource.
+
+The in-process herdr adapter also caps native pending calls at 1024. Effect deadlines retire cancelled reply
+senders within 100 ms; cancelled commands still queued before native dispatch are skipped. Late attachment
+responses retain only bounded cleanup tokens so their returned channel is explicitly closed. At 1024 such tokens
+the native connection is closed/recovered, never replayed. Hello and initial subscription each have a five-second
+startup deadline; hello framing is capped at 1 MiB. These are distinct from the frontend pending-call limit.
 
 ## Commands
 
