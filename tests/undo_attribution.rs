@@ -10,6 +10,7 @@ impl Fixture {
     async fn new() -> Self {
         let root = tempfile::Builder::new().prefix("pundo").tempdir_in("/tmp").unwrap();
         std::fs::create_dir(root.path().join("extensions")).unwrap();
+        std::fs::create_dir(root.path().join("run")).unwrap();
         let mut fixture = Self { child:None, root };
         fixture.start();
         fixture.peer("ready").await;
@@ -22,6 +23,9 @@ impl Fixture {
             .env("PRIM_STATE_DIR",self.root.path().join("st"))
             .env("PRIM_SOCKET",self.root.path().join("s"))
             .env("PRIM_EXTENSIONS_DIR",self.root.path().join("extensions"))
+            .env("XDG_RUNTIME_DIR",self.root.path().join("run"))
+            .env("HC_SOCKET",self.root.path().join("hc.sock")).env("HC_SESSION","undo-fixture")
+            .env("PRIM_HERDR",r#"["/bin/false"]"#)
             .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
     }
     async fn peer(&self, name:&str) -> (Peer,IncomingReceiver,Value) {
@@ -126,6 +130,9 @@ impl TuiHarness {
             .arg(format!("PRIM_SOCKET={}",fixture.root.path().join("s").display()))
             .arg(format!("PRIM_STATE_DIR={}",fixture.root.path().join("st").display()))
             .arg(format!("PRIM_EXTENSIONS_DIR={}",fixture.root.path().join("extensions").display()))
+            .arg(format!("XDG_RUNTIME_DIR={}",fixture.root.path().join("run").display()))
+            .arg(format!("HC_SOCKET={}",fixture.root.path().join("hc.sock").display()))
+            .args(["HC_SESSION=undo-fixture",r#"PRIM_HERDR=["/bin/false"]"#])
             .args([env!("CARGO_BIN_EXE_prim"),"tui"]).output().unwrap();
         assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
         harness
