@@ -99,14 +99,15 @@ class E2E:
 
     def start(self):
         # Backends run as provider extensions: herdr-core is the `herdr` default extension (prim-herdr next to
-        # the prim under test), reached through PRIM_HERDR. Provider extensions keep running in --safe mode.
+        # the prim under test), reached through PRIM_HERDR. These private defaults hold only that provider, so
+        # the core runs without --safe (safe mode starts nothing, providers included).
         defaults = self.root/'ext'/'defaults.json'
         if not defaults.exists():
             defaults.write_text(json.dumps({'version': 2, 'extensions': [{'name': 'herdr', 'since': 2,
                 'argv': [str(Path(self.args.prim).parent/'prim-herdr'), '--name', 'herdr'], 'kind': 'provider', 'default': True}]}))
         env = dict(self.env, PRIM_HERDR=str(self.args.hc)+' connect')
         with (self.root/'prim.log').open('ab') as output:
-            self.core = subprocess.Popen([str(self.args.prim), 'serve', *([] if self.args.agents_extension else ['--safe'])],
+            self.core = subprocess.Popen([str(self.args.prim), 'serve'],
                                          cwd=self.root/'work', env=env, stdout=output, stderr=subprocess.STDOUT)
         self.tracked.append(identity(self.core.pid))
         self.log.append({'started_prim': self.tracked[-1], 'image_sha256': hashlib.sha256(

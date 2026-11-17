@@ -799,7 +799,9 @@ async fn invoke_deadline(core: &Shared, author: &str, name: &str, args: Value, d
                 c.emit("safe_mode", json!({"on": on}));
                 on
             };
-            // reconcile stops what safe mode does not want; provider extensions keep running.
+            if on {
+                ext::stop_all(core);
+            }
             ext::reconcile(core);
             Ok(json!({"safe_mode": on}))
         }
