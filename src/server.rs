@@ -133,7 +133,7 @@ pub async fn serve(core: Shared, listener: UnixListener) -> anyhow::Result<()> {
     }
 }
 
-async fn connection(core: Shared, conn: Arc<Conn>, mut incoming: mpsc::UnboundedReceiver<Incoming>) {
+async fn connection(core: Shared, conn: Arc<Conn>, mut incoming: crate::rpc::IncomingReceiver) {
     while let Some(msg) = incoming.recv().await {
         match msg {
             // Stream input is handled in order, inline: keystrokes must not be reordered.

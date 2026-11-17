@@ -240,7 +240,7 @@ fn exe_stamp() -> Option<(std::path::PathBuf, std::time::SystemTime)> {
     Some((exe, modified))
 }
 
-type Connection = (Peer, mpsc::UnboundedReceiver<Incoming>, Value);
+type Connection = (Peer, crate::rpc::IncomingReceiver, Value);
 
 enum UiInput {
     Incoming(Option<Incoming>),
@@ -254,7 +254,7 @@ enum UiInput {
 /// In particular, a pending reconnect must never take the key receiver out of this select.
 async fn next_input(
     app: &App,
-    incoming: &mut mpsc::UnboundedReceiver<Incoming>,
+    incoming: &mut crate::rpc::IncomingReceiver,
     messages: &mut mpsc::UnboundedReceiver<Msg>,
     keys: &mut mpsc::UnboundedReceiver<Event>,
     reconnecting: &mut Option<tokio::task::JoinHandle<Connection>>,
@@ -636,8 +636,10 @@ impl App {
                         }
                     }
                     Err(e) => {
-                        // Stay fenced; the connection's closure drives reconnection.
+                        // A local RPC deadline does not close the transport. Close it explicitly
+                        // so the responsive reconnect state machine can recover (never replay input).
                         self.message = format!("resync failed: {e}");
+                        self.peer.close();
                     }
                 }
             }
@@ -2394,6 +2396,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn snapshot_timeout_forces_reconnect_instead_of_permanent_fencing() {
+        let (mut app, _) = app();
+        app.load(&snapshot(1, "old"));
+        app.resyncing = true;
+        app.on_msg(Msg::Snapshot { generation: app.generation, result: Err("snapshot deadline expired".into()) });
+        assert!(app.peer.is_closed(), "a snapshot failure on a live connection must initiate recovery");
+        assert_eq!(app.entries["doc/test/value"], "old", "retain last good state while reconnecting");
+    }
+
+    #[tokio::test]
     async fn resync_snapshot_cannot_overwrite_newer_entries() {
         let (mut app, _) = app();
         app.load(&snapshot(1, "old"));
@@ -2446,8 +2458,7 @@ mod tests {
         terminal.draw(|f| app.draw(f)).unwrap();
         let screen: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
         assert!(screen.contains("reconnecting"));
-        let (in_tx, mut incoming) = mpsc::unbounded_channel();
-        drop(in_tx); // A closed old connection must not starve keys, either.
+        let (_, mut incoming) = Peer::spawn(tokio::io::empty(), tokio::io::sink()); // Closed old connection must not starve keys.
         let (keys_tx, mut keys) = mpsc::unbounded_channel();
         let task = tokio::spawn(std::future::pending::<Connection>());
         let mut reconnecting = Some(task);

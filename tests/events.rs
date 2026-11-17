@@ -6,9 +6,8 @@ use prim::client;
 use prim::rpc::{Incoming, Peer};
 use prim::server::{start, Backend};
 use serde_json::{json, Value};
-use tokio::sync::mpsc;
 
-async fn next_event(rx: &mut mpsc::UnboundedReceiver<Incoming>) -> (String, Value) {
+async fn next_event(rx: &mut prim::rpc::IncomingReceiver) -> (String, Value) {
     loop {
         match tokio::time::timeout(Duration::from_secs(3), rx.recv()).await.expect("event in time").expect("connection open") {
             Incoming::Notification { method, params } if method == "event" || method == "missed" => return (method, params),

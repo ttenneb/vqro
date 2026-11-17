@@ -32,13 +32,14 @@ impl<T> Clone for Sender<T> {
 pub struct Receiver<T> {
     rx: mpsc::Receiver<Item<T>>,
     budget: Arc<Semaphore>,
+    cap: usize,
 }
 
 pub fn channel<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
     assert!(cap >= MIN_CHARGE && cap <= u32::MAX as usize);
     let budget = Arc::new(Semaphore::new(cap));
     let (tx, rx) = mpsc::channel(cap / MIN_CHARGE);
-    (Sender { tx, budget: budget.clone(), cap }, Receiver { rx, budget })
+    (Sender { tx, budget: budget.clone(), cap }, Receiver { rx, budget, cap })
 }
 
 impl<T> Sender<T> {
@@ -71,6 +72,10 @@ impl<T> Sender<T> {
 
 impl<T> Receiver<T> {
     pub async fn recv(&mut self) -> Option<Item<T>> { self.rx.recv().await }
+    pub fn try_recv(&mut self) -> Result<Item<T>, mpsc::error::TryRecvError> { self.rx.try_recv() }
+    pub fn len(&self) -> usize { self.rx.len() }
+    pub fn is_empty(&self) -> bool { self.rx.is_empty() }
+    pub fn used_bytes(&self) -> usize { self.cap - self.budget.available_permits() }
 }
 
 impl<T> Drop for Receiver<T> {

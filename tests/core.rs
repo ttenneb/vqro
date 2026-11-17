@@ -8,7 +8,6 @@ use prim::client;
 use prim::rpc::{Incoming, Peer};
 use prim::server::{start, Backend};
 use serde_json::{json, Value};
-use tokio::sync::mpsc;
 
 struct Env {
     _dir: tempfile::TempDir,
@@ -23,7 +22,7 @@ fn env() -> Env {
     Env { _dir: dir, socket, state }
 }
 
-async fn connect(e: &Env) -> (Peer, mpsc::UnboundedReceiver<Incoming>) {
+async fn connect(e: &Env) -> (Peer, prim::rpc::IncomingReceiver) {
     let (p, rx, _) = client::connect(&e.socket, "test").await.unwrap();
     (p, rx)
 }

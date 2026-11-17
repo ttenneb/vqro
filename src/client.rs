@@ -5,11 +5,10 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use tokio::net::UnixStream;
-use tokio::sync::mpsc;
 
-use crate::rpc::{Incoming, Peer};
+use crate::rpc::{IncomingReceiver, Peer};
 
-pub async fn connect(socket: &Path, client: &str) -> Result<(Peer, mpsc::UnboundedReceiver<Incoming>, Value)> {
+pub async fn connect(socket: &Path, client: &str) -> Result<(Peer, IncomingReceiver, Value)> {
     let stream = UnixStream::connect(socket)
         .await
         .with_context(|| format!("cannot reach prim at {} (is `prim serve` running?)", socket.display()))?;

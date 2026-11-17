@@ -4,18 +4,24 @@
 //! notifications. The core uses this to forward `command.invoke` to the extension that owns a command.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::sync::{mpsc, oneshot, watch, OwnedSemaphorePermit, Semaphore};
 use std::time::Duration;
 use crate::queue;
 
 pub const OUTBOUND_BYTES: usize = 5 * 1024 * 1024;
 pub const STREAM_OUTBOUND_BYTES: usize = 1024 * 1024;
+pub const CONTROL_BYTES: usize = OUTBOUND_BYTES - STREAM_OUTBOUND_BYTES;
+pub const INBOUND_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_PENDING_CALLS: usize = 128;
+/// Recovery envelope: 16 MiB entries + 8 MiB live + 32 MiB resource allowance + 8 MiB metadata.
+/// Larger legacy/external state gets an explicit too_large reply, never a transport disconnect.
+pub const LARGE_REPLY_BYTES: usize = crate::limits::SNAPSHOT_BYTES;
 pub const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// An error with a stable `kind` (in `data.kind`), as herdr-core does.
@@ -59,13 +65,28 @@ pub enum Incoming {
     Notification { method: String, params: Value },
 }
 
-type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<RpcResult>>>>;
+struct PendingReply { result: RpcResult, _permit: Option<OwnedSemaphorePermit> }
+type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<PendingReply>>>>;
+
+/// Byte-bounded application ingress. Dequeue releases its charge; at most one additional record
+/// may be in the consumer's hands. Overflow closes the connection rather than dropping messages.
+pub struct IncomingReceiver { rx: queue::Receiver<Incoming> }
+impl IncomingReceiver {
+    pub async fn recv(&mut self) -> Option<Incoming> { self.rx.recv().await.map(|item| item.value) }
+    pub fn try_recv(&mut self) -> Result<Incoming, mpsc::error::TryRecvError> { self.rx.try_recv().map(|item| item.value) }
+    pub fn len(&self) -> usize { self.rx.len() }
+    pub fn is_empty(&self) -> bool { self.rx.is_empty() }
+    pub fn queued_bytes(&self) -> usize { self.rx.used_bytes() }
+}
 
 /// One side of a connection. Cheap to clone.
 #[derive(Clone)]
 pub struct Peer {
     control: queue::Sender<Outbound>,
     data: queue::Sender<Outbound>,
+    large: queue::Sender<Outbound>,
+    large_bytes: Arc<AtomicUsize>,
+    record_limit: Arc<AtomicUsize>,
     shutdown: watch::Sender<bool>,
     pending: Pending,
     next_id: Arc<AtomicU64>,
@@ -74,7 +95,10 @@ pub struct Peer {
 struct Outbound {
     line: String,
     active: Option<Arc<AtomicBool>>,
+    _large: Option<LargeCharge>,
 }
+struct LargeCharge { bytes: usize, used: Arc<AtomicUsize> }
+impl Drop for LargeCharge { fn drop(&mut self) { self.used.fetch_sub(self.bytes, Ordering::AcqRel); } }
 
 /// A per-stream cancellation flag lets the writer discard bounded queued data after a gap,
 /// without ever splicing or replaying a partially written JSON line.
@@ -100,7 +124,7 @@ impl StreamWriter {
     pub fn finish(&self, reason: Value) {
         let line = json!({"jsonrpc": "2.0", "method": "stream.closed", "params": {"stream": self.id, "reason": reason}}).to_string();
         let bytes = line.len() + 1;
-        if self.peer.data.try_send(Outbound { line, active: Some(self.active.clone()) }, bytes).is_err() {
+        if self.peer.data.try_send(Outbound { line, active: Some(self.active.clone()), _large: None }, bytes).is_err() {
             self.close(json!({"reason": "slow_consumer"}));
         }
     }
@@ -112,30 +136,55 @@ impl Drop for PendingCall {
     fn drop(&mut self) { self.pending.lock().unwrap().remove(&self.id); }
 }
 
+async fn read_record<R: AsyncBufRead + Unpin>(reader: &mut R, limit: &AtomicUsize) -> std::io::Result<Option<Vec<u8>>> {
+    let mut line = Vec::new();
+    loop {
+        let max = limit.load(Ordering::Acquire);
+        if line.len() > max { return Err(std::io::Error::other("record exceeds framing limit")); }
+        let buf = reader.fill_buf().await?;
+        if buf.is_empty() { return Ok(if line.is_empty() { None } else { Some(line) }); }
+        let end = buf.iter().position(|b| *b == b'\n').map(|i| i + 1);
+        let count = end.unwrap_or(buf.len()).min(max.saturating_sub(line.len()) + 1);
+        line.extend_from_slice(&buf[..count]);
+        reader.consume(count);
+        if line.len() > limit.load(Ordering::Acquire) { return Err(std::io::Error::other("record exceeds framing limit")); }
+        if end == Some(count) { return Ok(Some(line)); }
+    }
+}
+
 impl Peer {
     /// Start reader and writer tasks. Incoming requests and notifications arrive on the receiver;
     /// it closes when the connection ends.
-    pub fn spawn<R, W>(reader: R, writer: W) -> (Peer, mpsc::UnboundedReceiver<Incoming>)
+    pub fn spawn<R, W>(reader: R, writer: W) -> (Peer, IncomingReceiver)
     where
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
     {
         let (control, mut control_rx) = queue::channel::<Outbound>(OUTBOUND_BYTES - STREAM_OUTBOUND_BYTES);
         let (data, mut data_rx) = queue::channel::<Outbound>(STREAM_OUTBOUND_BYTES);
-        let (in_tx, in_rx) = mpsc::unbounded_channel();
+        // The large slot charges one item, with actual bytes tracked separately through writing.
+        let (large, mut large_rx) = queue::channel::<Outbound>(64);
+        let large_bytes = Arc::new(AtomicUsize::new(0));
+        let record_limit = Arc::new(AtomicUsize::new(LARGE_REPLY_BYTES));
+        let (in_tx, in_rx) = queue::channel::<Incoming>(INBOUND_BYTES);
+        let response_budget = Arc::new(Semaphore::new(INBOUND_BYTES));
+        let large_response = Arc::new(Semaphore::new(1));
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         let (shutdown, _) = watch::channel(false);
         let (stop, mut stopped) = (shutdown.clone(), shutdown.subscribe());
         tokio::spawn(async move {
             let write = async {
                 let mut writer = writer;
+                let (mut large_done, mut control_done, mut data_done) = (false, false, false);
                 loop {
                     let item = tokio::select! {
                         biased;
-                        item = control_rx.recv() => item,
-                        item = data_rx.recv() => item,
+                        item = large_rx.recv(), if !large_done => { if item.is_none() { large_done = true; continue; } item },
+                        item = control_rx.recv(), if !control_done => { if item.is_none() { control_done = true; continue; } item },
+                        item = data_rx.recv(), if !data_done => { if item.is_none() { data_done = true; continue; } item },
+                        else => break,
                     };
-                    let Some(item) = item else { break };
+                    let item = item.unwrap();
                     if item.value.active.as_ref().is_some_and(|a| !a.load(Ordering::Relaxed)) { continue; }
                     // Keep byte permits charged through the actual socket write/flush. A line
                     // already in flight must finish before control can overtake queued data.
@@ -150,46 +199,47 @@ impl Peer {
         });
 
         let pend = pending.clone();
+        let limit = record_limit.clone();
         let (stop, mut stopped) = (shutdown.clone(), shutdown.subscribe());
         tokio::spawn(async move {
-            let mut lines = BufReader::new(reader).lines();
+            let mut reader = BufReader::new(reader);
             loop {
                 let line = tokio::select! {
-                    line = lines.next_line() => match line { Ok(Some(line)) => line, _ => break },
+                    line = read_record(&mut reader, &limit) => match line { Ok(Some(line)) => line, _ => break },
                     _ = stopped.changed() => break,
                 };
-                if line.trim().is_empty() {
-                    continue;
-                }
-                let Ok(msg) = serde_json::from_str::<Value>(&line) else { continue };
-                if let Some(method) = msg.get("method").and_then(|m| m.as_str()) {
-                    let params = msg.get("params").cloned().unwrap_or(Value::Null);
-                    let incoming = match msg.get("id") {
-                        Some(id) if !id.is_null() => Incoming::Request { id: id.clone(), method: method.to_string(), params },
-                        _ => Incoming::Notification { method: method.to_string(), params },
+                let bytes = line.len();
+                if bytes > limit.load(Ordering::Acquire) { break; }
+                let Ok(mut msg) = serde_json::from_slice::<Value>(&line) else { continue };
+                if let Some(method) = msg.get("method").and_then(Value::as_str).map(str::to_owned) {
+                    if bytes > INBOUND_BYTES { break; }
+                    let params = msg.get_mut("params").map(std::mem::take).unwrap_or(Value::Null);
+                    let incoming = match msg.get_mut("id").map(std::mem::take) {
+                        Some(id) if !id.is_null() => Incoming::Request { id, method, params },
+                        _ => Incoming::Notification { method, params },
                     };
-                    if in_tx.send(incoming).is_err() {
-                        break;
-                    }
-                } else if let Some(id) = msg.get("id").and_then(|i| i.as_u64()) {
-                    let result = match msg.get("error") {
-                        Some(e) => Err(serde_json::from_value(e.clone())
-                            .unwrap_or_else(|_| RpcError::new("error", e.to_string()))),
-                        None => Ok(msg.get("result").cloned().unwrap_or(Value::Null)),
+                    if in_tx.try_send(incoming, bytes).is_err() { break; }
+                } else if let Some(id) = msg.get("id").and_then(Value::as_u64) {
+                    let Some(tx) = pend.lock().unwrap().remove(&id) else { continue };
+                    let permit = if bytes > INBOUND_BYTES {
+                        large_response.clone().try_acquire_owned()
+                    } else { response_budget.clone().try_acquire_many_owned(bytes.max(64) as u32) };
+                    let Ok(permit) = permit else { break; };
+                    let result = match msg.get_mut("error").map(std::mem::take) {
+                        Some(e) => Err(serde_json::from_value(e.clone()).unwrap_or_else(|_| RpcError::new("error", e.to_string()))),
+                        None => Ok(msg.get_mut("result").map(std::mem::take).unwrap_or(Value::Null)),
                     };
-                    if let Some(tx) = pend.lock().unwrap().remove(&id) {
-                        let _ = tx.send(result);
-                    }
+                    let _ = tx.send(PendingReply { result, _permit: Some(permit) });
                 }
             }
             stop.send_replace(true);
             // Connection over: fail everything still waiting.
             for (_, tx) in pend.lock().unwrap().drain() {
-                let _ = tx.send(Err(RpcError::new("disconnected", "connection closed")));
+                let _ = tx.send(PendingReply { result: Err(RpcError::new("disconnected", "connection closed")), _permit: None });
             }
         });
 
-        (Peer { control, data, shutdown, pending, next_id: Arc::new(AtomicU64::new(1)) }, in_rx)
+        (Peer { control, data, large, large_bytes, record_limit, shutdown, pending, next_id: Arc::new(AtomicU64::new(1)) }, IncomingReceiver { rx: in_rx })
     }
 
     pub async fn call(&self, method: &str, params: Value) -> RpcResult {
@@ -199,20 +249,28 @@ impl Peer {
     pub async fn call_with_timeout(&self, method: &str, params: Value, deadline: Duration) -> RpcResult {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().unwrap().insert(id, tx);
+        {
+            let mut pending = self.pending.lock().unwrap();
+            if pending.len() >= MAX_PENDING_CALLS { return Err(RpcError::new("overloaded", "pending call limit; request not sent")); }
+            pending.insert(id, tx);
+        }
         let _guard = PendingCall { id, pending: self.pending.clone() };
         let msg = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
-        if !self.send_control(msg.to_string()) {
+        let line = msg.to_string();
+        if line.len() + 1 > INBOUND_BYTES.min(self.record_limit.load(Ordering::Acquire)) {
+            return Err(RpcError::new("too_large", "request exceeds record limit; not sent"));
+        }
+        if !self.send_control(line) {
             return Err(RpcError::new("disconnected", "connection closed or outbound control queue full"));
         }
         with_deadline(method, deadline, async {
-            rx.await.unwrap_or_else(|_| Err(RpcError::new("disconnected", "connection closed")))
+            rx.await.map(|reply| reply.result).unwrap_or_else(|_| Err(RpcError::new("disconnected", "connection closed")))
         }).await
     }
 
     fn send_control(&self, line: String) -> bool {
         let bytes = line.len() + 1;
-        if self.is_closed() || self.control.try_send(Outbound { line, active: None }, bytes).is_err() {
+        if self.is_closed() || bytes > self.record_limit.load(Ordering::Acquire) || self.control.try_send(Outbound { line, active: None, _large: None }, bytes).is_err() {
             // No room even for recovery/control: disconnect rather than silently dropping replies
             // or events. Stream data has a smaller budget, leaving room for explicit stream closure.
             self.shutdown.send_replace(true);
@@ -229,10 +287,22 @@ impl Peer {
         let bytes = line.len() + 1;
         if self.is_closed() || bytes > STREAM_OUTBOUND_BYTES { return false; }
         if !active.load(Ordering::Relaxed) { return false; }
-        self.data.try_send(Outbound { line, active: Some(active) }, bytes).is_ok()
+        self.data.try_send(Outbound { line, active: Some(active), _large: None }, bytes).is_ok()
     }
 
-    pub fn outbound_bytes(&self) -> usize { self.control.used_bytes() + self.data.used_bytes() }
+    pub fn outbound_bytes(&self) -> usize { self.control.used_bytes() + self.data.used_bytes() + self.large_bytes.load(Ordering::Acquire) }
+
+    pub fn close(&self) { self.shutdown.send_replace(true); }
+    pub async fn closed(&self) {
+        let mut stopped = self.shutdown.subscribe();
+        if !*stopped.borrow() { let _ = stopped.changed().await; }
+    }
+    /// Framing cap, including replies; lowering it also affects a record currently being read.
+    pub fn set_max_record_bytes(&self, bytes: usize) -> Result<(), RpcError> {
+        if bytes == 0 || bytes > LARGE_REPLY_BYTES { return Err(RpcError::invalid("record limit outside transport envelope")); }
+        self.record_limit.store(bytes, Ordering::Release);
+        Ok(())
+    }
 
     pub fn notify(&self, method: &str, params: Value) {
         self.send_control(json!({"jsonrpc": "2.0", "method": method, "params": params}).to_string());
@@ -243,7 +313,20 @@ impl Peer {
             Ok(v) => json!({"jsonrpc": "2.0", "id": id, "result": v}),
             Err(e) => json!({"jsonrpc": "2.0", "id": id, "error": e}),
         };
-        self.send_control(msg.to_string());
+        let line = msg.to_string();
+        let bytes = line.len() + 1;
+        let error = if bytes > self.record_limit.load(Ordering::Acquire) {
+            Some(RpcError::new("too_large", "reply exceeds recovery envelope; use recovery commands to revert/delete state"))
+        } else if bytes > CONTROL_BYTES {
+            if self.large_bytes.compare_exchange(0, bytes, Ordering::AcqRel, Ordering::Acquire).is_err() {
+                Some(RpcError::new("overloaded", "one large reply is already in flight"))
+            } else {
+                let charge = LargeCharge { bytes, used: self.large_bytes.clone() };
+                if self.large.try_send(Outbound { line, active: None, _large: Some(charge) }, 64).is_ok() { return; }
+                Some(RpcError::new("disconnected", "large reply writer closed"))
+            }
+        } else { self.send_control(line); return; };
+        self.send_control(json!({"jsonrpc":"2.0", "id":id, "error":error.unwrap()}).to_string());
     }
 
     pub fn is_closed(&self) -> bool {
@@ -282,6 +365,86 @@ mod tests {
             }
         }
         panic!("explicit close was lost behind the stalled writer");
+    }
+
+    #[tokio::test]
+    async fn aggregate_reply_larger_than_backlog_budget_remains_recoverable() {
+        let (a, b) = tokio::io::duplex(65536);
+        let (ar, aw) = tokio::io::split(a);
+        let (br, bw) = tokio::io::split(b);
+        let (client, _) = Peer::spawn(ar, aw);
+        let (server, mut incoming) = Peer::spawn(br, bw);
+        let task = tokio::spawn(async move {
+            let Some(Incoming::Request { id, .. }) = incoming.recv().await else { panic!("missing request") };
+            server.respond(id, Ok(json!({"entries": "x".repeat(6 * 1024 * 1024)})));
+            server
+        });
+        let reply = client.call("workspace.snapshot", Value::Null).await.expect("aggregate state must not be locked out by a backlog cap");
+        assert_eq!(reply["entries"].as_str().unwrap().len(), 6 * 1024 * 1024);
+        assert!(!task.await.unwrap().is_closed());
+    }
+
+    #[tokio::test]
+    async fn undrained_incoming_queue_is_bounded_and_overflow_is_explicit() {
+        let (reader, mut writer) = tokio::io::duplex(65536);
+        let (peer, incoming) = Peer::spawn(reader, tokio::io::sink());
+        let line = format!("{}\n", json!({"jsonrpc":"2.0","method":"stream.data","params":{"data":"x".repeat(1024)}}));
+        for _ in 0..20_000 {
+            if writer.write_all(line.as_bytes()).await.is_err() { break; }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(incoming.len() <= 4096, "undrained application queue retained {} records", incoming.len());
+        assert!(peer.is_closed(), "overflow must close rather than silently lose records");
+    }
+
+    #[tokio::test]
+    async fn record_limit_catches_unterminated_records_and_replies() {
+        let (reader, mut raw) = tokio::io::duplex(4096);
+        let (peer, _) = Peer::spawn(reader, tokio::io::sink());
+        peer.set_max_record_bytes(128).unwrap();
+        raw.write_all(&vec![b'x'; 129]).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), peer.closed()).await.unwrap();
+        assert!(peer.is_closed());
+
+        let (a, b) = tokio::io::duplex(4096);
+        let (ar, aw) = tokio::io::split(a); let (br, bw) = tokio::io::split(b);
+        let (client, _) = Peer::spawn(ar, aw); let (server, mut incoming) = Peer::spawn(br, bw);
+        client.set_max_record_bytes(1024).unwrap();
+        tokio::spawn(async move {
+            if let Some(Incoming::Request { id, .. }) = incoming.recv().await { server.respond(id, Ok(json!("x".repeat(2048)))); }
+            server.closed().await;
+        });
+        assert!(client.call("small_request", Value::Null).await.is_err());
+        assert!(client.is_closed(), "registered-provider limit includes response records");
+    }
+
+    #[tokio::test]
+    async fn large_slot_is_charged_through_write_and_exclusive() {
+        let (reader, _hold) = tokio::io::duplex(64);
+        let (writer, _stalled_reader) = tokio::io::duplex(64);
+        let (peer, _) = Peer::spawn(reader, writer);
+        peer.respond(json!(1), Ok(json!("x".repeat(6 * 1024 * 1024))));
+        tokio::task::yield_now().await;
+        assert!(peer.large_bytes.load(Ordering::Acquire) >= 6 * 1024 * 1024);
+        peer.respond(json!(2), Ok(json!("x".repeat(6 * 1024 * 1024))));
+        assert!(!peer.is_closed(), "busy large slot reports overload without disconnecting recovery");
+        assert!(peer.outbound_bytes() < 7 * 1024 * 1024);
+        peer.close();
+    }
+
+    #[tokio::test]
+    async fn pending_calls_are_count_bounded_and_cancel_cleanly() {
+        let (reader, _hold) = tokio::io::duplex(64);
+        let (peer, _) = Peer::spawn(reader, tokio::io::sink());
+        let tasks: Vec<_> = (0..MAX_PENDING_CALLS).map(|_| {
+            let p = peer.clone(); tokio::spawn(async move { p.call("held", Value::Null).await })
+        }).collect();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while peer.pending.lock().unwrap().len() != MAX_PENDING_CALLS { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        assert_eq!(peer.call("not_sent", Value::Null).await.unwrap_err().kind(), "overloaded");
+        for task in tasks { task.abort(); let _ = task.await; }
+        assert!(peer.pending.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

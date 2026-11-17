@@ -9,6 +9,7 @@ pub mod ext;
 pub mod paths;
 pub mod provider_client;
 pub mod queue;
+pub mod limits;
 pub mod provider;
 pub mod rpc;
 pub mod server;
