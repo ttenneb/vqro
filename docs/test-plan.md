@@ -55,7 +55,8 @@ listed); state-schema rollback; late crash 30 s after load (crash budget); 5 s s
 (`unittest discover -s tests`). `scripts/check.sh full` adds:
 - every opt-in suite, including ignored tests: `tmux`, `tmux_timeout`, `tmux_provider`, `herdr_provider`,
   `provider_wire`, `provider_errors`;
-- the end-to-end scripts: `e2e_providers.py`, `e2e_tui_providers.py`, `e2e_scale_herdr.py`, and the TUI smoke
+- the end-to-end scripts: `e2e_providers.py`, `e2e_tui_providers.py`, `e2e_tui_paste_dropdown.py` (drop-downs over
+  their popup, bracketed multi-line paste, a 200 KB paste on herdr and tmux), `e2e_scale_herdr.py`, and the TUI smoke
   `e2e_tui_smoke.sh` (private herdr-core and prim core; 30 MB flood, core restart reattach, quit while the core
   cannot start);
 - the default scale profile;

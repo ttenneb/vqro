@@ -247,6 +247,17 @@ with a `reason` string). Input is handled in order; one input message may contai
 A full bounded input queue returns `overloaded` without dispatching that input. A rejected input notification
 produces `stream.error {stream, error, outcome: "rejected"}` instead; it is never replayed.
 
+Clients paste like terminals: wrapped in bracketed-paste markers (`ESC[200~` … `ESC[201~`) when the program in the
+pane enabled bracketed paste (DECSET 2004, tracked by the client's emulator), raw otherwise; markers inside the
+pasted text are removed so a paste can't end its bracket early. The Rust TUI sends a paste over 64 KiB as ordered
+`stream.input` requests of at most 64 KiB, the markers once around the whole paste, each request answered before
+the next. A chunk refused with `overloaded` had no effect and is offered again (for up to 30 s); any other error
+stops the paste with a message saying how many of its bytes were sent, and nothing more is sent or resent. Keys
+typed meanwhile queue behind the paste. The largest paste is **4 MiB** (after markers); a larger one is refused
+whole with a message and nothing is sent. Providers must accept any 64 KiB input message: prim-tmux splits it into
+`send-keys -H` commands of at most 2 KiB (tmux's command parser fails above about 8 000 arguments) and writes input
+from its own task, so a long paste never stops it draining the pane's output.
+
 Terminal input/output buffers are byte-bounded (256 KiB per direction per stream). Each connection has separate
 outbound byte budgets: 1 MiB for stream data, 4 MiB for replies, events and other control messages. Small messages
 have a 64-byte accounting floor to bound queue metadata too. Permits stay charged through the socket write.
@@ -431,7 +442,9 @@ and sets the prefix; the active profile is `doc/keys/profile`, and the list is l
   Per client and temporary; clients refuse terminal views as popups. `focus` leaves zoom and focuses an already
   visible view after the command's layout changes; it never opens a view or changes another client's focus.
   Missing/hidden targets are ignored. Older clients ignore unknown reply fields. Extensions choose what to show;
-  the focus mechanism is independent of resource/view kind.
+  the focus mechanism is independent of resource/view kind. A drop-down, prompt or picker opened from a popup is
+  drawn over it, anchored at its row; the popup stays visible underneath and takes input again when that closes.
+  The prefix key cancels it and opens the prefix menu.
 - Panels: `{title?, items: [row]}` or `{title?, pages: [{title, items}]}`. Rows:
   `{type?: "item"|"toggle"|"header"|"separator"|"text", text, id?, detail?, detail_style?, description?, checked?,
   style?, disabled?, badges?: [{text, style?}], children?: [row], expanded?, command?, args?, input?, pick?,
