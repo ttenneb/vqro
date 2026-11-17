@@ -30,6 +30,7 @@ const BUDGET_SPAWN_P99_MS: f64 = 50.0;
 const BUDGET_TXN_P50_MS: f64 = 10.0;
 const BUDGET_TXN_P99_MS: f64 = 50.0;
 const BUDGET_ECHO_P99_MS: f64 = 50.0; // input -> echo on an idle stream during the output flood
+const BUDGET_SLOW_ECHO_P99_MS: f64 = 250.0; // the same, on a slow-reading client's own idle stream
 const BUDGET_EVENT_LAG_P99_MS: f64 = 250.0; // status change emitted by the backend -> seen by a client
 const BUDGET_MISSED: u64 = 0; // `missed` notifications to the draining observer
 const BUDGET_STATUS_DELIVERED_MIN: f64 = 0.95; // share of emitted status changes the observer saw
@@ -46,6 +47,10 @@ struct Profile {
     status_every_ms: u64,
     txn_per_sec: f64,
     stalled_clients: usize,
+    slow_clients: usize,
+    slow_read_bytes_per_sec: u64,
+    slow_echo_timeout_s: f64,
+    slow_attach_floods: bool,
     ext_restart_every_s: f64,
     adapters: usize,
     duration_s: f64,
@@ -66,6 +71,10 @@ impl Profile {
             status_every_ms: env_num("STATUS_EVERY_MS", 2000),
             txn_per_sec: env_num("TXN_PER_SEC", 20.0),
             stalled_clients: env_num("STALLED_CLIENTS", 1),
+            slow_clients: env_num("SLOW_CLIENTS", 1),
+            slow_read_bytes_per_sec: env_num("SLOW_READ_BYTES_PER_SEC", 65_536),
+            slow_echo_timeout_s: env_num("SLOW_ECHO_TIMEOUT_S", 10.0),
+            slow_attach_floods: env_num("SLOW_ATTACH_FLOODS", 1u8) != 0,
             ext_restart_every_s: env_num("EXT_RESTART_EVERY_S", 5.0),
             adapters: env_num("ADAPTERS", 2),
             duration_s: env_num("DURATION_S", 30.0),
@@ -79,7 +88,9 @@ impl Profile {
         json!({
             "terminals": self.terminals, "agents": self.agents, "floods": self.floods,
             "flood_bytes_per_sec": self.flood_bytes_per_sec, "status_every_ms": self.status_every_ms,
-            "txn_per_sec": self.txn_per_sec, "clients": 2 + self.stalled_clients, "stalled_clients": self.stalled_clients,
+            "txn_per_sec": self.txn_per_sec, "clients": 2 + self.stalled_clients + self.slow_clients, "stalled_clients": self.stalled_clients,
+            "slow_clients": self.slow_clients, "slow_read_bytes_per_sec": self.slow_read_bytes_per_sec, "slow_echo_timeout_s": self.slow_echo_timeout_s,
+            "slow_attach_floods": self.slow_attach_floods,
             "ext_restart_every_s": self.ext_restart_every_s, "adapters": self.adapters,
             "duration_s": self.duration_s, "echo_every_ms": self.echo_every_ms,
         })
@@ -289,6 +300,16 @@ async fn scale_load() {
     let t_load = Instant::now();
     let deadline = t_load + Duration::from_secs_f64(prof.duration_s);
 
+    // Slow clients: like the stalled ones, but they read at a fixed low rate and probe echo on
+    // their own idle stream.
+    let slow_tasks: Vec<_> = (0..prof.slow_clients)
+        .map(|_| {
+            let floods = if prof.slow_attach_floods { floods.as_slice() } else { &[] };
+            let attach: Vec<String> = floods.iter().chain(idle.iter().take(1)).cloned().collect();
+            slow_client(socket.clone(), attach, prof.clone(), stop.clone(), deadline)
+        })
+        .collect();
+
     let rss_abort_mb: f64 = env_num("RSS_ABORT_MB", 4096.0);
     let rss_task = {
         let stop = stop.clone();
@@ -387,6 +408,11 @@ async fn scale_load() {
     let resources_seen = snap.as_ref().map(|s| s["resources"].as_array().map_or(0, |a| a.len())).unwrap_or(0);
     let rss_end = rss_mb(pid).unwrap_or(f64::NAN);
     drop(stalled);
+    let mut slow = Vec::new();
+    for t in slow_tasks {
+        slow.push(t.await.unwrap());
+    }
+    let slow_echo: Vec<f64> = slow.iter().flat_map(|s| s.echo_ms.iter().copied()).collect();
     drop(child);
     pump.abort();
     let observed_s = t_observe.elapsed().as_secs_f64();
@@ -406,6 +432,8 @@ async fn scale_load() {
         ("txn_p50_ms", (pct(&txn_ms, 0.5), BUDGET_TXN_P50_MS, pct(&txn_ms, 0.5) <= BUDGET_TXN_P50_MS)),
         ("txn_p99_ms", (pct(&txn_ms, 0.99), BUDGET_TXN_P99_MS, pct(&txn_ms, 0.99) <= BUDGET_TXN_P99_MS)),
         ("echo_p99_ms", (pct(&echo_ms, 0.99), BUDGET_ECHO_P99_MS, pct(&echo_ms, 0.99) <= BUDGET_ECHO_P99_MS)),
+        // NaN (no slow clients) passes.
+        ("slow_echo_p99_ms", (pct(&slow_echo, 0.99), BUDGET_SLOW_ECHO_P99_MS, !(pct(&slow_echo, 0.99) > BUDGET_SLOW_ECHO_P99_MS))),
         ("event_lag_p99_ms", (pct(&o.event_lag_ms, 0.99), BUDGET_EVENT_LAG_P99_MS, pct(&o.event_lag_ms, 0.99) <= BUDGET_EVENT_LAG_P99_MS)),
         ("missed", (o.missed as f64, BUDGET_MISSED as f64, o.missed <= BUDGET_MISSED)),
         ("status_delivered_ratio", (delivered, BUDGET_STATUS_DELIVERED_MIN, delivered >= BUDGET_STATUS_DELIVERED_MIN)),
@@ -429,6 +457,10 @@ async fn scale_load() {
         "core_rss_mb": {"start": rss_start, "after_setup": rss_after_setup, "peak": rss_peak, "end": rss_end, "samples_t_s_mb": rss_samples},
         "transactions": {"latency": stats(&txn_ms), "errors": txn_errors, "achieved_per_sec": txn_ms.len() as f64 / load_s},
         "echo": {"latency": stats(&echo_ms), "lost_after_5s": echo_lost},
+        "slow_clients": slow.iter().map(|s| json!({
+            "echo": stats(&s.echo_ms), "echo_timed_out": s.timed_out, "bytes_read": s.bytes_read,
+            "idle_stream_attached": s.attached, "missed": s.missed,
+        })).collect::<Vec<_>>(),
         "events": {"received": o.events, "status_received": o.status_events, "status_expected_approx": expected_status, "lag": stats(&o.event_lag_ms), "missed": o.missed},
         "flood": {"observer_bytes": o.flood_bytes, "offered_bytes": flood_expected, "observer_share": o.flood_bytes as f64 / flood_expected.max(1.0)},
         "extension_restarts": {"ok": restarts_ok, "failed": restarts_failed, "latency": stats(&restart_ms)},
@@ -439,4 +471,126 @@ async fn scale_load() {
     std::fs::write(&path, &text).unwrap();
     println!("{text}\nreceipt: {}", path.display());
     assert!(failed.is_empty(), "scale budgets exceeded: {failed:?} (receipt: {})", path.display());
+}
+
+/// What one slow client saw.
+#[derive(Default)]
+struct Slow {
+    echo_ms: Vec<f64>,
+    timed_out: u64,
+    bytes_read: u64,
+    missed: u64,
+    attached: bool,
+}
+
+/// A client that subscribes and attaches like the stalled ones, but reads at most
+/// `slow_read_bytes_per_sec`, and probes input -> echo on its own idle stream (the last attach).
+/// A probe that times out counts as the timeout.
+fn slow_client(socket: PathBuf, attach: Vec<String>, prof: Profile, stop: Arc<std::sync::atomic::AtomicBool>, deadline: Instant) -> tokio::task::JoinHandle<Slow> {
+    use tokio::io::AsyncReadExt;
+    tokio::spawn(async move {
+        let s = tokio::net::UnixStream::connect(&socket).await.unwrap();
+        let (mut r, mut w) = s.into_split();
+        let mut lines = vec![
+            json!({"jsonrpc": "2.0", "id": 1, "method": "hello", "params": {"client": "scale-slow"}}),
+            json!({"jsonrpc": "2.0", "id": 2, "method": "events.subscribe", "params": {}}),
+        ];
+        for (k, res) in attach.iter().enumerate() {
+            lines.push(json!({"jsonrpc": "2.0", "id": 10 + k, "method": "resource.attach", "params": {"resource": res}}));
+        }
+        for l in lines {
+            w.write_all(format!("{l}\n").as_bytes()).await.unwrap();
+        }
+        let idle_id = 10 + attach.len() as u64 - 1;
+
+        // Reader: a token bucket of `slow_read_bytes_per_sec`, in 10 ms ticks.
+        #[derive(Default)]
+        struct Seen {
+            sid: Option<u64>,
+            idle_text: String,
+            bytes: u64,
+            missed: u64,
+        }
+        let seen = Arc::new(Mutex::new(Seen::default()));
+        let per_tick = (prof.slow_read_bytes_per_sec / 100).max(1) as usize;
+        let reader = {
+            let (seen, stop) = (seen.clone(), stop.clone());
+            tokio::spawn(async move {
+                let b64 = base64::engine::general_purpose::STANDARD;
+                let mut buf = vec![0u8; per_tick];
+                let mut pending: Vec<u8> = Vec::new();
+                let mut every = tokio::time::interval(Duration::from_millis(10));
+                while !stop.load(Ordering::Relaxed) {
+                    every.tick().await;
+                    let Ok(Ok(n)) = tokio::time::timeout(Duration::from_millis(5), r.read(&mut buf)).await else { continue };
+                    if n == 0 {
+                        break;
+                    }
+                    pending.extend_from_slice(&buf[..n]);
+                    let mut s = seen.lock().unwrap();
+                    s.bytes += n as u64;
+                    while let Some(nl) = pending.iter().position(|b| *b == b'\n') {
+                        let line: Vec<u8> = pending.drain(..=nl).collect();
+                        let Ok(msg) = serde_json::from_slice::<Value>(&line) else { continue };
+                        if msg["id"].as_u64() == Some(idle_id) {
+                            s.sid = msg["result"]["stream"].as_u64();
+                        } else if msg["method"] == "missed" {
+                            s.missed += 1;
+                        } else if msg["method"] == "stream.data" && s.sid.is_some() && msg["params"]["stream"].as_u64() == s.sid {
+                            let bytes = b64.decode(msg["params"]["data"].as_str().unwrap_or("")).unwrap_or_default();
+                            s.idle_text.push_str(&String::from_utf8_lossy(&bytes));
+                        }
+                    }
+                }
+            })
+        };
+
+        // Prober: one token at a time on the idle stream, once its attach reply has been read.
+        let mut out = Slow::default();
+        let timeout = Duration::from_secs_f64(prof.slow_echo_timeout_s);
+        let mut k = 0u64;
+        while Instant::now() < deadline && !stop.load(Ordering::Relaxed) {
+            let sid = seen.lock().unwrap().sid;
+            let Some(sid) = sid else {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                continue;
+            };
+            out.attached = true;
+            k += 1;
+            let token = format!("<s{k}>");
+            let note = json!({"jsonrpc": "2.0", "method": "stream.input", "params": {"stream": sid, "text": token}});
+            w.write_all(format!("{note}\n").as_bytes()).await.unwrap();
+            let t0 = Instant::now();
+            loop {
+                let hit = {
+                    let mut s = seen.lock().unwrap();
+                    let hit = s.idle_text.contains(&token);
+                    if hit {
+                        s.idle_text.clear();
+                    }
+                    hit
+                };
+                if hit {
+                    out.echo_ms.push(ms(t0.elapsed()));
+                    break;
+                }
+                if t0.elapsed() >= timeout {
+                    out.timed_out += 1;
+                    out.echo_ms.push(ms(timeout));
+                    break;
+                }
+                if stop.load(Ordering::Relaxed) {
+                    break; // load over before this probe could finish: not counted
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            tokio::time::sleep(Duration::from_millis(prof.echo_every_ms)).await;
+        }
+        // Wait for the load to end (the reader stops then), so this client stays connected throughout.
+        let _ = reader.await;
+        let s = seen.lock().unwrap();
+        out.bytes_read = s.bytes;
+        out.missed = s.missed;
+        out
+    })
 }

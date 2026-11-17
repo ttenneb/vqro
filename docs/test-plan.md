@@ -59,10 +59,11 @@ env -i HOME=$HOME PATH=$PATH cargo test --release --test scale -- --ignored --ex
 ```
 
 - Default load (the target floor): 600 terminals, 200 agent-like (status change every 2 s), 8 streams at 1 MB/s,
-  20 transactions/s, an extension restart every 5 s, 30 s, three clients: one observer draining events and
-  streams, one writer, one stalled (subscribes and attaches, never reads).
+  20 transactions/s, an extension restart every 5 s, 30 s, four clients: one observer draining events and
+  streams, one writer, one stalled (subscribes and attaches, never reads) and one slow (the same, but reads
+  64 KiB/s and probes input→echo on its own idle stream, behind the floods unless `SLOW_ATTACH_FLOODS=0`; probes time out after 10 s and count as 10 s).
 - Change it with `PRIM_SCALE_*` variables: `TERMINALS`, `AGENTS`, `FLOODS`, `FLOOD_BYTES_PER_SEC`, `STATUS_EVERY_MS`,
-  `TXN_PER_SEC`, `STALLED_CLIENTS`, `EXT_RESTART_EVERY_S`, `ADAPTERS`, `DURATION_S`, `ECHO_EVERY_MS`;
+  `TXN_PER_SEC`, `STALLED_CLIENTS`, `SLOW_CLIENTS`, `SLOW_READ_BYTES_PER_SEC`, `SLOW_ECHO_TIMEOUT_S`, `EXT_RESTART_EVERY_S`, `ADAPTERS`, `DURATION_S`, `ECHO_EVERY_MS`;
   `RSS_ABORT_MB` (default 4096) stops the load early to protect the machine.
 - Measures core RSS over time, spawn and transaction latency (p50/p99), input→echo p99 on an idle stream sharing
   the observer's connection with the floods, status event lag (backend emit → client), `missed` counts and
@@ -75,6 +76,16 @@ env -i HOME=$HOME PATH=$PATH cargo test --release --test scale -- --ignored --ex
 Baseline on `main` 13c5561 (2026-11-16): fails on core RSS only. The stalled client's unbounded queues grow
 the core from 9 MB to about 520 MB in 30 s; the same run without the stalled client peaks at 31 MB and passes.
 Echo p99 3 ms, transaction p99 6 ms, event lag p99 2 ms, no `missed`.
+
+Follow-ups (same core):
+- Without stalled or slow clients, over 5 minutes, RSS climbs about 0.8 MB/s until about 85 s, which is when the
+  10k-event log fills at about 120 events/s. After that it slows to under 0.05 MB/s and is still easing at 300 s
+  (51 → 60 MB). The tail is probably allocator settling, but that hasn't been checked.
+- A slow client (64 KiB/s) attached to the floods: its idle-stream echo never returns within 10 s, because the
+  echo queues behind about 8 MB/s of output. Core RSS grows like the stalled case: about 520 MB with the slow
+  client alone and about 950 MB with stalled plus slow.
+- The same slow client attached only to its idle stream: echo p50 is 6 ms and p99 is about 610 ms. Event traffic
+  alone (about 40 KB/s) nearly fills its read rate. Core RSS stays flat.
 
 ## Deferred
 
