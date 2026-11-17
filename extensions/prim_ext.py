@@ -416,6 +416,12 @@ def first_tabs(n):
 
 
 def views_in(n, out=None):
+    """Every view named in a layout node, depth-first."""
     out = [] if out is None else out
     if "view" in n:
         out.append(n["view"])
+    for c in n.get("children", []):
+        views_in(c, out)
+    for t in n.get("tabs", []):
+        views_in(t["node"], out)
+    return out

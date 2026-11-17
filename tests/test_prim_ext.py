@@ -316,5 +316,16 @@ class Contributions(unittest.TestCase):
         self.assertEqual(len(core2.applied), 1, "the conflicting attempt applied nothing")
 
 
+class LayoutHelpers(unittest.TestCase):
+    def test_views_in_walks_splits_and_tabs(self):
+        # Regression: views_in lost its recursion and return in f553c6c, which broke panes.close.
+        from prim_ext import views_in
+        layout = {"children": [{"view": "sidebar"}, {"active": 0, "tabs": [
+            {"title": "a", "node": {"split": "h", "children": [{"view": "term-r1"}, {"view": "term-r2"}]}},
+            {"title": "b", "node": {"view": "agents-r8"}}]}]}
+        self.assertEqual(views_in(layout), ["sidebar", "term-r1", "term-r2", "agents-r8"])
+        self.assertEqual(views_in({"view": "x"}), ["x"])
+
+
 if __name__ == "__main__":
     unittest.main()
