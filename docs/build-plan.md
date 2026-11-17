@@ -147,6 +147,17 @@ bridge not built); second backend (tmux) not started; Windows untested.
   helper startup. The scale cleanup check still reports zero leaked extensions under restart/flood load.
   Backend-owned terminal/agent lifetimes are not changed.
 
+## tmux provider, provider side (2026-11-17)
+
+- `src/provider_client.rs`: Rust provider-side helper for `spec/provider-v0.md` section 9 (register and generation,
+  chunked sync, effects with deadlines and a duplicate-id ledger, one reply per request, credited streams with
+  contiguous offsets, gap ends stream). Mirrors `extensions/prim_provider.py`.
+- `src/bin/prim-tmux.rs`: tmux as an out-of-process provider: server identity as instance, panes as terminals, one
+  control client per session, reconcile after structural events, lossy OSC 7501 status, repaint-first streams,
+  gap on pause/lag/dropped client. Details and findings: `research/tmux-provider.md`.
+- Tested against an in-test fake core and private tmux 3.7b (`tests/provider_client.rs`, `tests/tmux_provider.rs`,
+  opt-in). Not yet run against the real core's section 9 side (in progress on `provider-wire`).
+
 ## Windows work (known, 2026-11-17)
 
 From the static portability audit (D22 proposed; nothing compiled for Windows yet; installing a Windows target needs
