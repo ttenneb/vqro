@@ -41,7 +41,8 @@ child processes.
 | Bundled extensions | tabs, panes, gestures, workspaces, sidebar, themes, keys, settings | `extensions/*.py` |
 
 Not built: headless agent bridge and agent views (agents run as terminals; status via OSC 7501), out-of-process
-adapters, a second backend, remote machines, Windows. Order: `roadmap.md`.
+adapters, a second backend, remote machines, Windows. Order: `roadmap.md`. The proposed contract that moves
+adapters and bridges out of process as providers is `spec/provider-v0.md` (D21, proposed).
 
 ## The primitives
 

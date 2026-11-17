@@ -1,6 +1,9 @@
 # prim backend adapter contract, v0 (draft)
 
 > **Status (2026-11-16):** Forward-looking. Today the only adapter (herdr-core) and the test fixture run **in-process** behind a channel interface (`src/adapter/`); the out-of-process protocol is roadmap step 2. prim is a working prototype, and fluid.
+> The proposed wire contract for out-of-process adapters and agent bridges (registration, identity, streams with
+> credit, effects and outcomes) is `provider-v0.md` (D21, proposed). This file stays the catalogue of what each
+> backend can do.
 
 Status: draft (D14). A backend adapter maps one multiplexer onto prim's primitives and **declares** what that backend
 can do. prim exposes the declared capabilities and never compensates for missing ones. Adding a backend should take
@@ -68,4 +71,5 @@ Capability names are reverse-DNS-free in core (`terminal.spawn`) and namespaced 
 A headless agent runs inside an ordinary backend terminal through a small **agent bridge**: the bridge is the terminal's
 program, starts the runtime with clean pipes, connects to the prim core as an agent adapter, and draws a minimal fallback
 view in its own terminal. The backend still owns the process; prim hosts nothing. PTY-backed agents (native TUI) need no
-bridge. Whether the bridge reaches the core over a local socket or through the terminal itself is **Open**.
+bridge. Proposed in `provider-v0.md` (section 6, D21): a local socket with a one-time token passed in the terminal's
+environment, and for remote hosts a relay through the host's provider; not through the terminal itself.
