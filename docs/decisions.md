@@ -348,3 +348,15 @@ started from the prim side (ssh `-R` of the local endpoint), or a backend byte c
 `roadmap.md` lists the streams and constraints. Findings behind this: `platform-review.md` (scratch, static review of
 main `b851d6c`).
 
+
+## D24. Undo covers what the user started; agents may change anything (2026-11-17, CONFIRMED)
+
+**Decision.** (1) A workspace change an extension makes because the user invoked its command (a theme, keymap or
+icon set picked in Settings) is the user's change: the default undo (`u`) reverts it. Changes an extension makes on
+its own (derived state, reconciling, reacting to events) stay outside the user's undo. (2) Agents may change
+anything a user can (layout, commands, state, extensions); no grant system for now. D8 stays: permissions are
+cooperative coordination, every effect records its caller.
+**Why.** The human picks themes, keymaps and icons through extensions and expects `u` to take them back; the user's
+intent, not the writer process, decides whose change it is. The human wants agents to drive the workspace fully.
+**Consequences.** Command invocations carry who started them through to the extension's writes, so history can
+attribute them; the mechanism is generic (any extension). Open question 6 (workspace authority) is answered.

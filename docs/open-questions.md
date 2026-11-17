@@ -13,11 +13,8 @@ Close a question by linking the decision, commit or experiment that answered it.
    needs beyond today's panels.
 3. **Capability granularity.** How fine should backend capabilities be before extensions fill up with special
    cases? Answered only by a second backend (roadmap step 2). First cut: `spec/provider-v0.md` section 3.
-4. **Undo of extension-made changes.** The default revert skips extension writes, so a theme or keymap the user
-   picked through an extension can't be undone with `u`. Attribute user-initiated extension writes to the user?
 5. **Shared versus per-client settings.** Sidebar view, icons, theme and prefix live in workspace docs shared by every
    UI. Some may want to be per client (a terminal without Nerd Fonts, a light-background terminal).
-6. **Workspace authority.** Grant granularity for agents changing layouts, commands and state (cooperative, D8).
 7. **One layout on clients of different sizes.** Today each client renders the shared layout at its own size;
    terminal size follows herdr-core's latest-active-viewer rule. No prim-level rule yet.
 8. **Extension state across versions.** Namespace schema versions and a snapshot at replace time, so rollback
@@ -26,21 +23,25 @@ Close a question by linking the decision, commit or experiment that answered it.
    `research/protocols-and-ui.md`) before anything freezes.
 10. **Agent-to-agent addressing.** Node vs durable agent identity vs execution (vqro lessons). An extension
     concern; core IDs must support it.
-11. **Second backend.** tmux recommended (ubiquitous, lossy status; checked on 3.7b, 2026-11-16: ids reused after a
-    server restart, output dropped while paused, session-scoped output). Zellij (OSC 7501 and library mode since
-    0.46) unverified. Human to confirm.
 12. **Glyph widths.** Nerd Font and emoji widths vary by terminal and font; icon sets declare a width, but some
     terminals may still draw wider.
 13. **Licensing and terms**, for Legal Counsel: pi_agent_rust's rider, Rex third-party-client terms, automating
     Claude Code, and prim's own licence before publishing.
-14. **Providers in safe mode.** Proposed (D21): providers marked `essential` keep running in safe mode. Human to
-    confirm.
-15. **Provider defaults.** Default deadline for forwarded calls; slow-viewer policy (gap and repaint vs close);
-    per-connection byte caps. Proposed: set them from the scale harness, not by guess.
 16. **Unit of configuration for hosts.** One provider extension entry per host (`herdr@rohan`), as proposed, or one
     provider managing several hosts?
 
+## Backlog (decided to wait)
+- **Shared versus per-client settings.** Recommendation on file: shared by default; per-window override only for
+  terminal-dependent choices (icons/glyphs, theme). Backlogged by the human 2026-11-17.
+- **Keys typed while a starved TUI is behind a flood.** Rejected and reported, never delivered late (D10). Keep; a
+  protocol change (input still accepted on a stream closed for slow output) is backlogged.
+
 ## Answered (kept for the record)
+- **Undo of extension-made changes:** user-started extension writes count as the user's (D24).
+- **Workspace authority:** agents may change anything; cooperative, no grants for now (D24, D8).
+- **Second backend:** tmux, built as `prim-tmux` (provider-v0, private prim-owned server).
+- **Providers in safe mode:** safe mode starts with nothing; a chooser enables providers per session (D21 revised).
+- **Provider defaults:** admission limits in provider-v0 §9; load budgets set from measurements (`test-plan.md`, Scale budgets).
 - **How extension views render:** declarative panels plus terminal views (`spec/core-protocol.md`, Panels); the
   hybrid (widgets inside a terminal stream) is untested.
 - **Where prim's own state lives:** the prim store (`~/.local/state/prim/workspace.json`), through transactions;
