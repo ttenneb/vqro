@@ -86,8 +86,9 @@ fn facts(f: &ResourceFacts) -> Value {
 fn unknown(e: adapter::AdapterError) -> ProviderError {
     match e {
         adapter::AdapterError::Rejected(m) => ProviderError::new("unavailable", format!("not sent: {m}")),
+        adapter::AdapterError::RejectedKind { kind, message } => ProviderError::new(&kind, message),
         adapter::AdapterError::Backend(m) => ProviderError::new("backend", format!("herdr-core error; outcome unknown: {m}")),
-        adapter::AdapterError::Indeterminate(m) => ProviderError::new("backend", format!("outcome unknown: {m}")),
+        adapter::AdapterError::Indeterminate(m) | adapter::AdapterError::Timeout(m) => ProviderError::new("backend", format!("outcome unknown: {m}")),
     }
 }
 
@@ -108,7 +109,7 @@ async fn kill(handle: &AdapterHandle, known: &Known, provider: &Provider, r: Str
     let Some(mut f) = current.filter(|f| f["incarnation"].as_str() == Some(incarnation)) else {
         return Err(ProviderError::new("not_found", format!("no terminal {r} with incarnation {incarnation:?}")));
     };
-    let reply = handle.kill(r.clone()).await.map_err(unknown)?;
+    let reply = handle.kill(r.clone()).await.map_err(unknown)?.data;
     // herdr-core's kill reply is the terminal record. When it says finished, that is observed: publish
     // the finished facts now (herdr-core does not always send a `finished` event after a kill).
     if reply["state"] == "finished" {
@@ -135,7 +136,7 @@ async fn spawn(handle: &AdapterHandle, args: &Value) -> Result<Outcome, Provider
         // The provider's default shell for its host (9.4).
         argv = vec![std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/sh".into())];
     }
-    let req = SpawnRequest { argv, cwd: args["cwd"].as_str().map(String::from), name: args["name"].as_str().map(String::from) };
+    let req = SpawnRequest { argv, cwd: args["cwd"].as_str().map(String::from), name: args["name"].as_str().map(String::from), env: Default::default(), cols: None, rows: None, placement: None };
     match handle.spawn(req).await {
         Ok(f) => Ok(Outcome::Observed(Some(json!({"facts": facts(&f)})))),
         Err(e) => Err(unknown(e)),
@@ -181,6 +182,9 @@ async fn pump(mut stream: ProviderStream, mut backend: adapter::Stream) {
                         let _ = stream.gap("backend_dropped").await;
                         break;
                     }
+                }
+                Some(StreamOutput::Error(error)) => {
+                    let _ = stream.error(&ProviderError::new(error["kind"].as_str().unwrap_or("backend"), error["message"].as_str().unwrap_or("native stream input rejected"))).await;
                 }
                 Some(StreamOutput::Closed(reason)) => {
                     if reason["reason"] == "backend_disconnected" {

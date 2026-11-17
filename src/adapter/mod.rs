@@ -9,7 +9,9 @@ pub mod herdr;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, OwnedSemaphorePermit};
+use std::collections::BTreeMap;
+use std::time::Instant;
 use crate::provider::ProviderInfo;
 
 /// Startup selection only. Execution-specific setup stays in the adapter layer, not the server.
@@ -24,24 +26,30 @@ impl Backend {
 }
 
 #[derive(Debug)]
-pub enum AdapterError { Rejected(String), Backend(String), Indeterminate(String) }
+pub enum AdapterError { Rejected(String), RejectedKind { kind: String, message: String }, Backend(String), Indeterminate(String), Timeout(String) }
 impl From<String> for AdapterError { fn from(message: String) -> Self { Self::Rejected(message) } }
 impl From<&str> for AdapterError { fn from(message: &str) -> Self { Self::Rejected(message.into()) } }
 impl std::fmt::Display for AdapterError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self { Self::Rejected(s) | Self::Backend(s) | Self::Indeterminate(s) => s.fmt(f) }
+        match self { Self::Rejected(s) | Self::Backend(s) | Self::Indeterminate(s) | Self::Timeout(s) => s.fmt(f), Self::RejectedKind { message, .. } => message.fmt(f) }
     }
 }
 impl AdapterError {
     pub fn rpc(self) -> crate::rpc::RpcError {
         match self {
             Self::Rejected(s) => crate::provider::rejected("backend", s),
+            Self::RejectedKind { kind, message } => crate::provider::rejected(&kind, message),
             Self::Backend(s) => {
                 let mut error = crate::rpc::RpcError::new("backend", s);
                 error.data.as_mut().unwrap()["outcome"] = serde_json::json!("indeterminate");
                 error
             }
             Self::Indeterminate(s) => crate::provider::indeterminate(s),
+            Self::Timeout(s) => {
+                let mut error = crate::rpc::RpcError::new("timeout", s);
+                error.data.as_mut().unwrap()["outcome"] = serde_json::json!("indeterminate");
+                error
+            }
         }
     }
 }
@@ -114,6 +122,7 @@ impl StreamInput {
 
 pub enum StreamOutput {
     Data(Vec<u8>),
+    Error(Value),
     /// The stream ended, with the backend's reason (JSON).
     Closed(Value),
 }
@@ -122,21 +131,52 @@ pub struct Stream {
     pub initial: &'static str,
     pub input: crate::queue::Sender<StreamInput>,
     pub output: crate::queue::Receiver<StreamOutput>,
+    /// Wire termination is separate from data so a full data window cannot lose its end marker.
+    /// Its permit belongs to the provider-wide control budget until handed downstream.
+    pub terminal: Option<oneshot::Receiver<StreamEnd>>,
+}
+
+pub struct StreamEnd {
+    pub gap: bool,
+    pub reason: Value,
+    pub _permit: Option<OwnedSemaphorePermit>,
+}
+
+#[derive(Clone)]
+pub struct EffectContext {
+    pub effect: String,
+    pub deadline: Instant,
+    pub target: Option<(String, String)>,
+}
+
+#[derive(Debug)]
+pub struct EffectResult {
+    pub outcome: &'static str,
+    pub data: Value,
+    pub facts: Option<ResourceFacts>,
+}
+impl EffectResult {
+    pub fn accepted(data: Value) -> Self { Self { outcome: "accepted", data, facts: None } }
 }
 
 pub struct SpawnRequest {
     pub argv: Vec<String>,
     pub cwd: Option<String>,
     pub name: Option<String>,
+    pub env: BTreeMap<String, String>,
+    pub cols: Option<u16>,
+    pub rows: Option<u16>,
+    pub placement: Option<Value>,
 }
 
 type Reply<T> = oneshot::Sender<Result<T, AdapterError>>;
 
 pub enum AdapterCmd {
     /// A core route binds queued work to the native connection that accepted the registration.
-    Bound { connection: u64, command: Box<AdapterCmd> },
+    Bound { connection: u64, context: Option<EffectContext>, command: Box<AdapterCmd> },
     Spawn(SpawnRequest, Reply<ResourceFacts>),
-    Kill(String, Reply<Value>),
+    Kill(String, Reply<EffectResult>),
+    Invoke { op: String, reference: String, incarnation: String, args: Value, reply: Reply<EffectResult> },
     Attach { backend_ref: String, cols: u16, rows: u16, history: u32, reply: Reply<Stream> },
 }
 
@@ -144,7 +184,7 @@ pub(crate) fn reject_command(command: AdapterCmd, why: &str) {
     match command {
         AdapterCmd::Bound { command, .. } => reject_command(*command, why),
         AdapterCmd::Spawn(_, reply) => { let _ = reply.send(Err(AdapterError::Rejected(why.into()))); }
-        AdapterCmd::Kill(_, reply) => { let _ = reply.send(Err(AdapterError::Rejected(why.into()))); }
+        AdapterCmd::Kill(_, reply) | AdapterCmd::Invoke { reply, .. } => { let _ = reply.send(Err(AdapterError::Rejected(why.into()))); }
         AdapterCmd::Attach { reply, .. } => { let _ = reply.send(Err(AdapterError::Rejected(why.into()))); }
     }
 }
@@ -152,14 +192,14 @@ pub(crate) fn reject_command(command: AdapterCmd, why: &str) {
 pub fn command_for(mut command: AdapterCmd, current: u64) -> Option<AdapterCmd> {
     loop {
         match command {
-            AdapterCmd::Bound { connection, command: inner } => {
+            AdapterCmd::Bound { connection, command: inner, .. } => {
                 if connection != current { reject_command(*inner, "provider connection changed before dispatch"); return None; }
                 command = *inner;
             }
             native => {
                 let cancelled = match &native {
                     AdapterCmd::Spawn(_, reply) => reply.is_closed(),
-                    AdapterCmd::Kill(_, reply) => reply.is_closed(),
+                    AdapterCmd::Kill(_, reply) | AdapterCmd::Invoke { reply, .. } => reply.is_closed(),
                     AdapterCmd::Attach { reply, .. } => reply.is_closed(),
                     AdapterCmd::Bound { .. } => unreachable!(),
                 };
@@ -175,13 +215,20 @@ pub struct AdapterHandle {
     pub name: String,
     pub capabilities: Value,
     pub session: Option<u64>,
+    pub context: Option<EffectContext>,
     pub cmds: mpsc::UnboundedSender<AdapterCmd>,
 }
 
 impl AdapterHandle {
+    pub fn for_effect(&self, context: EffectContext) -> Self {
+        let mut handle = self.clone();
+        handle.context = Some(context);
+        handle
+    }
+
     fn bind(&self, command: AdapterCmd) -> AdapterCmd {
         match self.session {
-            Some(connection) => AdapterCmd::Bound { connection, command: Box::new(command) },
+            Some(connection) => AdapterCmd::Bound { connection, context: self.context.clone(), command: Box::new(command) },
             None => command, // Direct adapter fixture calls; core routes are always bound.
         }
     }
@@ -191,11 +238,18 @@ impl AdapterHandle {
         self.cmds.send(self.bind(AdapterCmd::Spawn(req, tx))).map_err(|_| AdapterError::Rejected("provider stopped before dispatch".into()))?;
         rx.await.map_err(|_| AdapterError::Indeterminate("provider stopped before replying".into()))?
     }
-    pub async fn kill(&self, backend_ref: String) -> Result<Value, AdapterError> {
+    pub async fn kill(&self, backend_ref: String) -> Result<EffectResult, AdapterError> {
         let (tx, rx) = oneshot::channel();
         self.cmds.send(self.bind(AdapterCmd::Kill(backend_ref, tx))).map_err(|_| AdapterError::Rejected("provider stopped before dispatch".into()))?;
         rx.await.map_err(|_| AdapterError::Indeterminate("provider stopped before replying".into()))?
     }
+    pub async fn invoke(&self, op: String, reference: String, incarnation: String, args: Value) -> Result<EffectResult, AdapterError> {
+        if op == "terminal.kill" { return self.kill(reference).await; }
+        let (tx, rx) = oneshot::channel();
+        self.cmds.send(self.bind(AdapterCmd::Invoke { op, reference, incarnation, args, reply: tx })).map_err(|_| AdapterError::Rejected("provider stopped before dispatch".into()))?;
+        rx.await.map_err(|_| AdapterError::Indeterminate("provider stopped before replying".into()))?
+    }
+
     pub async fn attach(&self, backend_ref: String, cols: u16, rows: u16, history: u32) -> Result<Stream, AdapterError> {
         let (tx, rx) = oneshot::channel();
         self.cmds.send(self.bind(AdapterCmd::Attach { backend_ref, cols, rows, history, reply: tx })).map_err(|_| AdapterError::Rejected("provider stopped before dispatch".into()))?;

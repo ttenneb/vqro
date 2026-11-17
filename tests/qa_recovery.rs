@@ -25,7 +25,7 @@ async fn idle_attach_returned_after_viewer_disconnect_is_closed_immediately() {
     let core = server::start(socket.clone(), dir.path().join("state"), false, Backend::Fake, None).unwrap();
     let (tx, mut commands) = tokio::sync::mpsc::unbounded_channel();
     let (events, receiver) = tokio::sync::mpsc::unbounded_channel();
-    prim::core::add_adapter(&core, AdapterHandle { name:"held".into(), session:None, capabilities:json!({"terminal.output":{"raw":true}}), cmds:tx }, receiver, false);
+    prim::core::add_adapter(&core, AdapterHandle { name:"held".into(), session:None, context:None, capabilities:json!({"terminal.output":{"raw":true}}), cmds:tx }, receiver, false);
     events.send(("held".into(), prim::adapter::AdapterEvent::Registered(prim::provider::ProviderInfo {
         connection:1, instance:"fixture".into(), role:"backend".into(), software:json!({"name":"fixture","version":"1"})
     }))).unwrap();
@@ -44,7 +44,7 @@ async fn idle_attach_returned_after_viewer_disconnect_is_closed_immediately() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     let (input, mut input_rx) = queue::channel(256*1024);
     let (_output_tx, output) = queue::channel(256*1024);
-    assert!(reply.send(Ok(Stream { initial:"repaint", input, output })).is_ok());
+    assert!(reply.send(Ok(Stream { initial:"repaint", input, output, terminal:None })).is_ok());
     let closed = tokio::time::timeout(Duration::from_millis(300), input_rx.recv()).await.expect("late silent stream must close without waiting for backend output");
     assert!(closed.is_none_or(|item| matches!(item.value, StreamInput::Close)));
 }

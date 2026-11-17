@@ -1,6 +1,6 @@
 //! The core protocol server: JSON-RPC lines over a local socket. See `docs/spec/core-protocol.md`.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -33,6 +33,7 @@ struct Conn {
     next_stream: AtomicU64,
     subscribed: Mutex<bool>,
     requests: Arc<tokio::sync::Semaphore>,
+    wire: crate::provider_wire::Connection,
 }
 
 impl Conn {
@@ -124,6 +125,7 @@ pub async fn serve(core: Shared, listener: UnixListener) -> anyhow::Result<()> {
         let (peer, incoming) = Peer::spawn(r, w);
         tokio::spawn(connection(core.clone(), Arc::new(Conn {
             id,
+            wire: crate::provider_wire::Connection::new(id, peer.clone()),
             peer,
             author: Mutex::new(format!("client:{id}")),
             extension: Mutex::new(None),
@@ -138,9 +140,27 @@ pub async fn serve(core: Shared, listener: UnixListener) -> anyhow::Result<()> {
 async fn connection(core: Shared, conn: Arc<Conn>, mut incoming: crate::rpc::IncomingReceiver) {
     while let Some(msg) = incoming.recv().await {
         match msg {
+            // Provider lifecycle and fact messages stay ordered on their connection. Native
+            // replies are read independently by Peer, so a pending host-token wait cannot block it.
+            Incoming::Request { id, method, params } if matches!(method.as_str(), "hello" | "provider.register" | "provider.sync") => {
+                let result = dispatch(&core, &conn, &method, params).await;
+                conn.peer.respond(id, result);
+            }
+            Incoming::Notification { method, params } if conn.wire.is_provider() || matches!(method.as_str(), "resource.upsert" | "resource.gone" | "stream.data" | "stream.closed" | "stream.gap" | "stream.error") => {
+                let valid = conn.wire.validate(&core, &params);
+                let result = valid.and_then(|_| {
+                    if matches!(method.as_str(), "resource.upsert" | "resource.gone" | "stream.data" | "stream.closed" | "stream.gap" | "stream.error") {
+                        conn.wire.notification(&core, &method, params)
+                    } else { Ok(()) }
+                });
+                if result.is_err() { conn.peer.close(); }
+            }
             // Stream input is handled in order, inline: keystrokes must not be reordered.
             Incoming::Request { id, method, params } if method.starts_with("stream.") => {
-                conn.peer.respond(id, stream_op(&conn, &method, params));
+                let result = if conn.wire.is_provider() {
+                    conn.wire.validate(&core, &params).and_then(|_| Err(RpcError::method_not_found(&method)))
+                } else { stream_op(&conn, &method, params) };
+                conn.peer.respond(id, result);
             }
             Incoming::Notification { method, params } if method.starts_with("stream.") => {
                 let sid = params["stream"].clone();
@@ -163,7 +183,8 @@ async fn connection(core: Shared, conn: Arc<Conn>, mut incoming: crate::rpc::Inc
             Incoming::Notification { .. } => {}
         }
     }
-    // Disconnected: close streams, and mark this connection's commands unavailable.
+    // Disconnected: invalidate provider routes before closing its viewer streams and commands.
+    conn.wire.disconnect(&core);
     for (_, s) in conn.streams.lock().unwrap().drain() {
         let _ = StreamInput::Close.send(&s.input);
     }
@@ -208,6 +229,13 @@ struct Spawn {
     #[serde(alias = "adapter")]
     provider: Option<String>,
     deadline_ms: Option<u64>,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+    cols: Option<u16>,
+    rows: Option<u16>,
+    placement: Option<Value>,
+    #[serde(default)]
+    bridge: bool,
 }
 
 #[derive(Deserialize)]
@@ -245,9 +273,13 @@ struct Invoke {
 
 async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> RpcResult {
     if conn.peer.is_closed() { return Err(provider::rejected("disconnected", "connection closed before dispatch")); }
+    if method != "provider.register" && conn.wire.is_provider() { conn.wire.validate(core, &p)?; }
     match method {
+        "provider.register" => conn.wire.register(core, p).await,
+        "provider.sync" => conn.wire.sync(core, p),
         "hello" => {
             let h: Hello = params(p)?;
+            conn.wire.hello()?;
             if let Some(ext) = h.extension.clone() {
                 *conn.author.lock().unwrap() = format!("ext:{ext}");
                 *conn.extension.lock().unwrap() = Some(ext);
@@ -295,12 +327,18 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> Rp
                 let c = core.lock().unwrap();
                 (c.resource_route(id, "terminal.kill")?, c.resource(id)?.facts.backend_ref.clone())
             };
-            let handle = route.handle.clone();
+            let (handle, operation, c) = (route.handle.clone(), route.clone(), core.clone());
             let deadline = provider::deadline(p.get("deadline_ms").map(|v| v.as_u64().ok_or_else(|| RpcError::invalid("deadline_ms must be an unsigned integer"))).transpose()?)?;
-            let (effect, result) = effect(core, conn.author(), route, "resource.kill", deadline, "accepted", async move { handle.kill(reference).await.map_err(|e| e.rpc()) }).await?;
-            Ok(json!({"outcome": "accepted", "effect": effect, "backend": result}))
+            let (effect, mut result) = effect(core, conn.author(), route, "resource.kill", deadline, |value: &crate::adapter::EffectResult| value.outcome, move |context| async move {
+                let mut result = handle.for_effect(context).kill(reference).await.map_err(|e| e.rpc())?;
+                if !operation.valid() { return Err(provider::indeterminate("provider changed before kill result was recorded")); }
+                if let Some(facts) = result.facts.take() { c.lock().unwrap().upsert_resource(&operation.handle.name, facts)?; }
+                Ok(result)
+            }).await?;
+            Ok(json!({"outcome": result.outcome, "effect": effect, "backend": result.data.take()}))
         }
         "resource.attach" => attach(core, conn, params(p)?).await,
+        "resource.invoke" => invoke_resource(core, &conn.author(), p).await,
         "command.register" => {
             let r: Register = params(p)?;
             if r.name.starts_with("prim.") {
@@ -466,14 +504,19 @@ fn subscribe(core: &Shared, conn: &Arc<Conn>, opts: crate::events::SubscribeOpti
 
 /// Audit the caller's observed outcome. A timeout drops the reply receiver, never the backend
 /// effect or its independent fact feed. Late replies are ignored, as pinned provider v0 requires.
-async fn effect<T: Send + 'static>(
-    core: &Shared, author: String, route: Route, method: &'static str, deadline: std::time::Duration, success: &'static str,
-    work: impl std::future::Future<Output = Result<T, RpcError>> + Send + 'static,
-) -> Result<(String, T), RpcError> {
+async fn effect<T: Send + 'static, F>(
+    core: &Shared, author: String, route: Route, method: &'static str, deadline: std::time::Duration, success: fn(&T) -> &'static str,
+    work: impl FnOnce(crate::adapter::EffectContext) -> F,
+) -> Result<(String, T), RpcError>
+where F: std::future::Future<Output = Result<T, RpcError>> + Send + 'static {
     if !route.valid() { return Err(provider::rejected("unavailable", "provider changed before dispatch")); }
     let id = core.lock().unwrap().effect_id();
-    let result = crate::rpc::with_deadline(method, deadline, route.guard(work)).await;
-    let outcome = result.as_ref().err().and_then(|e| e.data.as_ref()).and_then(|d| d["outcome"].as_str()).unwrap_or(if result.is_ok() { success } else { "indeterminate" });
+    let context = crate::adapter::EffectContext { effect: id.clone(), deadline: std::time::Instant::now() + deadline, target: route.target.clone() };
+    let result = crate::rpc::with_deadline(method, deadline, route.guard(work(context))).await;
+    let outcome = match &result {
+        Ok(value) => success(value),
+        Err(error) => error.data.as_ref().and_then(|d| d["outcome"].as_str()).unwrap_or("indeterminate"),
+    };
     core.lock().unwrap().emit("effect", json!({"effect": id, "provider": route.handle.name, "generation": route.generation, "method": method, "author": author, "outcome": outcome, "error": result.as_ref().err()}));
     result.map(|value| (id.clone(), value)).map_err(|mut error| {
         if let Some(data) = error.data.as_mut() { data["effect"] = json!(id); }
@@ -484,16 +527,49 @@ async fn effect<T: Send + 'static>(
 async fn spawn(core: &Shared, author: &str, s: Spawn) -> RpcResult {
     let deadline = provider::deadline(s.deadline_ms)?;
     let route = core.lock().unwrap().provider_route(s.provider.as_deref(), "terminal.spawn")?;
-    let argv = s.argv.unwrap_or_else(|| vec![std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())]);
-    if argv.is_empty() { return Err(provider::rejected("invalid", "`argv` is empty")); }
+    let argv = s.argv.unwrap_or_default();
+    if (s.bridge || !s.env.is_empty()) && route.handle.capabilities["terminal.spawn"]["env"] == false {
+        return Err(provider::rejected("unsupported", "provider explicitly does not support spawn environment"));
+    }
+    let reservation = if s.bridge { Some(crate::provider_wire::BridgeReservation::new(core)?) } else { None };
+    let mut env = s.env;
+    if let Some(reservation) = &reservation {
+        env.insert("PRIM_BRIDGE_TOKEN".into(), reservation.token.clone());
+        env.insert("PRIM_SOCKET".into(), core.lock().unwrap().socket.to_string_lossy().into_owned());
+    }
+    for dimension in [s.cols, s.rows].into_iter().flatten() {
+        if !(1..=9999).contains(&dimension) { return Err(provider::rejected("invalid", "spawn dimensions must be between 1 and 9999")); }
+    }
     let (c, operation) = (core.clone(), route.clone());
-    let (effect, id) = effect(core, author.into(), route, "resource.spawn", deadline, "observed", async move {
-        let facts = operation.handle.spawn(SpawnRequest { argv, cwd: s.cwd, name: s.name }).await.map_err(|e| e.rpc())?;
-        let mut c = c.lock().unwrap();
-        if !operation.valid() { return Err(provider::indeterminate("provider changed before spawn result was recorded")); }
-        c.upsert_resource(&operation.handle.name, facts)
+    let (effect, id) = effect(core, author.into(), route, "resource.spawn", deadline, |_| "observed", move |context| async move {
+        let facts = operation.handle.for_effect(context).spawn(SpawnRequest { argv, cwd: s.cwd, name: s.name, env, cols: s.cols, rows: s.rows, placement: s.placement }).await.map_err(|e| e.rpc())?;
+        let id = {
+            let mut c = c.lock().unwrap();
+            if !operation.valid() { return Err(provider::indeterminate("provider changed before spawn result was recorded")); }
+            c.upsert_resource(&operation.handle.name, facts)?
+        };
+        if let Some(reservation) = reservation { reservation.bind(&id)?; }
+        Ok(id)
     }).await?;
     Ok(json!({"outcome": "observed", "effect": effect, "resource": core.lock().unwrap().resource(&id)?.to_json()}))
+}
+
+async fn invoke_resource(core: &Shared, author: &str, p: Value) -> RpcResult {
+    let id = p["resource"].as_str().ok_or_else(|| RpcError::invalid("needs resource"))?;
+    let op = p["op"].as_str().ok_or_else(|| RpcError::invalid("needs op"))?.to_string();
+    let args = p.get("args").cloned().unwrap_or_else(|| json!({}));
+    if !args.is_object() { return Err(RpcError::invalid("args must be an object")); }
+    let route = core.lock().unwrap().resource_route(id, &op)?;
+    let (reference, incarnation) = route.target.clone().unwrap();
+    let (handle, operation, c) = (route.handle.clone(), route.clone(), core.clone());
+    let deadline = provider::deadline(p.get("deadline_ms").map(|v| v.as_u64().ok_or_else(|| RpcError::invalid("deadline_ms must be an unsigned integer"))).transpose()?)?;
+    let (effect, result) = effect(core, author.into(), route, "resource.invoke", deadline, |value: &crate::adapter::EffectResult| value.outcome, move |context| async move {
+        let mut result = handle.for_effect(context).invoke(op, reference, incarnation, args).await.map_err(|e| e.rpc())?;
+        if !operation.valid() { return Err(provider::indeterminate("provider changed before effect result was recorded")); }
+        if let Some(facts) = result.facts.take() { c.lock().unwrap().upsert_resource(&operation.handle.name, facts)?; }
+        Ok(result)
+    }).await?;
+    Ok(json!({"outcome": result.outcome, "effect": effect, "data": result.data}))
 }
 
 async fn attach(core: &Shared, conn: &Arc<Conn>, a: Attach) -> RpcResult {
@@ -504,8 +580,8 @@ async fn attach(core: &Shared, conn: &Arc<Conn>, a: Attach) -> RpcResult {
         (c.resource_route(&a.resource, "terminal.output")?, c.resource(&a.resource)?.facts.backend_ref.clone())
     };
     let handle = route.handle.clone();
-    let (effect, mut stream) = effect(core, conn.author(), route.clone(), "resource.attach", provider::deadline(a.deadline_ms)?, "accepted", async move {
-        handle.attach(reference, cols, rows, a.history.unwrap_or(0)).await.map_err(|e| e.rpc())
+    let (effect, mut stream) = effect(core, conn.author(), route.clone(), "resource.attach", provider::deadline(a.deadline_ms)?, |_| "accepted", move |context| async move {
+        handle.for_effect(context).attach(reference, cols, rows, a.history.unwrap_or(0)).await.map_err(|e| e.rpc())
     }).await?;
     if !route.valid() { return Err(provider::indeterminate("provider changed before stream registration")); }
     let initial = stream.initial;
@@ -526,6 +602,7 @@ async fn attach(core: &Shared, conn: &Arc<Conn>, a: Attach) -> RpcResult {
     tokio::spawn(async move {
         let mut reason = json!({"reason": "slow_consumer"});
         let mut normal_close = false;
+        let mut gap = false;
         'output: loop {
             let out = tokio::select! {
                 biased;
@@ -533,8 +610,17 @@ async fn attach(core: &Shared, conn: &Arc<Conn>, a: Attach) -> RpcResult {
                 _ = route.ended() => { reason = json!({"reason": "provider_disconnected"}); break; }
                 out = stream.output.recv() => out,
             };
-            let Some(out) = out else { break };
+            let Some(out) = out else {
+                if let Some(terminal) = stream.terminal.take() {
+                    match terminal.await {
+                        Ok(end) => { gap = end.gap; reason = end.reason; normal_close = true; }
+                        Err(_) => { reason = json!({"reason": "provider_disconnected"}); }
+                    }
+                }
+                break;
+            };
             match out.value {
+                StreamOutput::Error(error) => peer.notify("stream.error", json!({"stream": sid, "error": error, "outcome": "rejected"})),
                 StreamOutput::Data(d) => {
                     for chunk in d.chunks(crate::adapter::MAX_STREAM_CHUNK) {
                         if !writer.send(B64.encode(chunk)) { break 'output; }
@@ -552,7 +638,10 @@ async fn attach(core: &Shared, conn: &Arc<Conn>, a: Attach) -> RpcResult {
             if peer.is_closed() { break; }
         }
         let _ = StreamInput::Close.send(&stream.input);
-        if normal_close { writer.finish(reason); } else { writer.close(reason); }
+        if normal_close {
+            if gap { writer.finish_as("stream.gap", json!({"stream": sid, "reason": reason})); }
+            else { writer.finish(reason); }
+        } else { writer.close(reason); }
         conn2.streams.lock().unwrap().remove(&sid);
     });
     Ok(json!({"outcome": "accepted", "effect": effect, "initial": initial, "stream": sid, "resource": a.resource}))

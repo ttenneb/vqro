@@ -27,7 +27,7 @@ async fn until(mut condition: impl FnMut() -> bool) {
 async fn register(core: &Shared, name: &str, instance: &str, resources: Vec<ResourceFacts>) -> (mpsc::UnboundedSender<(String, AdapterEvent)>, mpsc::UnboundedReceiver<AdapterCmd>) {
     let (events, receiver) = mpsc::unbounded_channel();
     let (commands, inbox) = mpsc::unbounded_channel();
-    add_adapter(core, AdapterHandle { name: name.into(), session: None, capabilities: json!({"terminal.spawn": {}, "terminal.kill": {}, "terminal.output": {"raw": true}}), cmds: commands }, receiver, false);
+    add_adapter(core, AdapterHandle { name: name.into(), session: None, context: None, capabilities: json!({"terminal.spawn": {}, "terminal.kill": {}, "terminal.output": {"raw": true}}), cmds: commands }, receiver, false);
     events.send((name.into(), AdapterEvent::Registered(info(instance)))).unwrap();
     events.send((name.into(), AdapterEvent::Snapshot(resources))).unwrap();
     until(|| core.lock().unwrap().providers[name].synced).await;
@@ -86,7 +86,7 @@ async fn stale_source_events_and_disconnect_cannot_disable_a_replacement() {
 #[tokio::test]
 async fn queued_effect_from_an_old_native_connection_is_rejected_before_execution() {
     let (commands, mut inbox) = mpsc::unbounded_channel();
-    let handle = AdapterHandle { name: "fixture".into(), session: Some(11), capabilities: json!({"terminal.kill": {}}), cmds: commands };
+    let handle = AdapterHandle { name: "fixture".into(), session: Some(11), context: None, capabilities: json!({"terminal.kill": {}}), cmds: commands };
     let effect = tokio::spawn(async move { handle.kill("t1".into()).await });
     let queued = inbox.recv().await.unwrap();
     assert!(prim::adapter::command_for(queued, 12).is_none(), "an old queue entry must never reach the new native connection");
@@ -150,7 +150,7 @@ async fn timeout_ignores_late_reply_without_resend_and_disconnect_ends_inflight_
     assert_eq!(error.kind(), "unavailable");
     assert_eq!(error.data.as_ref().unwrap()["outcome"], "indeterminate");
     assert!(!core.lock().unwrap().resources[&resource].available);
-    assert!(reply.send(Ok(json!({"late": true}))).is_err());
+    assert!(reply.send(Ok(prim::adapter::EffectResult::accepted(json!({"late": true})))).is_err());
     events.send(("fixture".into(), AdapterEvent::Registered(info("A")))).unwrap();
     events.send(("fixture".into(), AdapterEvent::Snapshot(vec![facts("existing", ""), facts("late", "")]))).unwrap();
     until(|| core.lock().unwrap().resources[&resource].available).await;
@@ -171,7 +171,7 @@ async fn provider_loss_closes_an_idle_stream_and_keeps_its_facts() {
     let Some(AdapterCmd::Attach { reply, .. }) = native(&mut commands).await else { panic!("expected attach") };
     let (input, mut native_input) = prim::queue::channel(256 * 1024);
     let (_output, output) = prim::queue::channel(256 * 1024);
-    assert!(reply.send(Ok(Stream { initial: "none", input, output })).is_ok());
+    assert!(reply.send(Ok(Stream { initial: "none", input, output, terminal: None })).is_ok());
     assert_eq!(attach.await.unwrap().unwrap()["outcome"], "accepted");
     events.send(("fixture".into(), AdapterEvent::Connected(false, None))).unwrap();
     let reason = tokio::time::timeout(Duration::from_secs(1), async {
