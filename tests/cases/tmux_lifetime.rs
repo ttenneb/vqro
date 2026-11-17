@@ -129,8 +129,14 @@ async fn owned_server_survives_disable_safe_mode_crash_and_reinstall_like_restar
     command(&peer, "prim.safe_mode", json!({"on":false})).await;
     assert_eq!(resource(&peer).await["id"], first["id"]);
 
-    let extensions = peer.call("extension.list", json!({})).await.unwrap();
-    let provider_pid = extensions["extensions"]["tmux"]["pid"].as_u64().unwrap();
+    // Harness-local identity only: public extension facts are platform-neutral, not process ids.
+    let expected=std::fs::canonicalize(env!("CARGO_BIN_EXE_prim-tmux")).unwrap();
+    let mut provider_pid=None;
+    for thread in std::fs::read_dir(format!("/proc/{}/task",running.child.as_ref().unwrap().id())).unwrap().flatten() {
+        let Ok(children)=std::fs::read_to_string(thread.path().join("children")) else {continue};
+        for child in children.split_whitespace() {if std::fs::read_link(format!("/proc/{child}/exe")).ok().as_ref()==Some(&expected){provider_pid=child.parse::<u64>().ok();}}
+    }
+    let provider_pid=provider_pid.expect("owned core's prim-tmux child");
     assert!(Command::new("/bin/kill").env_clear().args(["-KILL", &provider_pid.to_string()]).status().unwrap().success());
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert!(live(pane_pid), "provider SIGKILL killed the terminal");

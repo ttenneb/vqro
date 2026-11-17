@@ -143,7 +143,10 @@ try:
         # producer and is closed slow_consumer by design (credit on writer acceptance; viewer credit is OPEN).
         obs.notify("stream.input", {"stream": sid, "text": "while :; do /usr/bin/head -c 65536 /dev/zero | /usr/bin/tr '\\0' x; echo; /usr/bin/sleep 0.05; done\r"})
     core_rss, prov_rss, hc_rss, echo_ms, lost = [], [], [], [], 0
-    prov_pid = c.call("extension.list")["extensions"]["herdr"]["pid"]
+    # Harness-local process measurement, not a process-id-dependent public contract.
+    provider_pids = pids_with("prim-herdr")
+    assert len(provider_pids) == 1, provider_pids
+    prov_pid = provider_pids[0]
     hc_pids = pids_with("herdr-core")
     end, k = time.time() + SECONDS, 0
     while time.time() < end:

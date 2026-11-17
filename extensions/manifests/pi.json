@@ -1,0 +1,8 @@
+{
+  "name":"pi", "title":"Pi launcher", "version":"0.1.0", "kind":"runtime",
+  "summary":"Launch Pi RPC agents and configure their runtime arguments.",
+  "description":"Adds New Pi agent and Pi runtime settings. New agents run through a bridge in a backend-owned terminal; no prompt is sent automatically. Turn it off to remove these launch/settings controls, not existing Pi processes. Agent controls are provided separately by the agents extension.",
+  "requires":{"protocol":1,"client_features":["items","input","menu"]},
+  "settings_command":"pi.settings",
+  "contributes":{"commands":["pi.new","pi.settings","pi.configure"],"keys":["Prefix a: new Pi agent"],"menu_items":["New Pi agent"],"panels":["Pi runtimes"],"settings":["doc/settings/pi"]}
+}

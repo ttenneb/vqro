@@ -8,6 +8,8 @@ cargo build --release
 # Bundled extensions: the core installs the ones in defaults.json on first run.
 mkdir -p "$HOME/.local/share/prim/extensions" "$HOME/.local/bin"
 cp extensions/*.py extensions/defaults.json "$HOME/.local/share/prim/extensions/"
+mkdir -p "$HOME/.local/share/prim/extensions/manifests"
+cp extensions/manifests/*.json "$HOME/.local/share/prim/extensions/manifests/"
 # Python extension packages live beside helpers. Only pi_bridge is replaced as
 # a whole: it is installed code, never session/config data; old modules must go.
 for source in extensions/*; do

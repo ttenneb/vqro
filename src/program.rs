@@ -15,7 +15,7 @@ pub fn resolve_provider(name:&str) -> Result<PathBuf,String> {
     let sibling=crate::client::executable_path().ok().and_then(|p|p.parent().map(Path::to_path_buf));
     if let Some(dir)=&sibling { let path=candidate(dir,name,std::env::consts::EXE_SUFFIX); if executable(&path){return Ok(path)} }
     if let Some(paths)=std::env::var_os("PATH") { for dir in std::env::split_paths(&paths) { let path=candidate(&dir,name,std::env::consts::EXE_SUFFIX);if executable(&path){return Ok(path)} } }
-    Err(format!("provider program {name} not found beside prim ({}) or on PATH; install provider programs, then use recovery choices",sibling.map(|p|p.display().to_string()).unwrap_or_else(||"unknown executable".into())))
+    Err(format!("extension program {name} not found beside prim ({}) or on PATH; install extension programs, then use recovery choices",sibling.map(|p|p.display().to_string()).unwrap_or_else(||"unknown executable".into())))
 }
 #[cfg(test)] mod tests {
     use super::*;

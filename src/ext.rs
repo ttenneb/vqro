@@ -34,7 +34,7 @@ pub struct ExtRuntime {
 
 impl ExtRuntime {
     pub fn to_json(&self) -> Value {
-        json!({"status": self.status, "pid": self.pid, "crashes": self.crashes.len(), "last_exit": self.last_exit, "spec_version": self.spec_version})
+        json!({"status": self.status, "running":self.running, "generation":self.generation, "crashes": self.crashes.len(), "last_exit": self.last_exit, "spec_version": self.spec_version})
     }
 }
 
@@ -57,6 +57,7 @@ pub fn reconcile(core: &Shared) {
         .filter_map(|(k, e)| Some((k.strip_prefix("extension/")?.to_string(), e.version, e.value.clone())))
         .collect();
 
+    c.manifest_catalog.refresh(&specs);
     // Stop extensions whose entry is gone.
     let names: Vec<String> = c.exts.keys().cloned().collect();
     for name in names {

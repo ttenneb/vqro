@@ -1,0 +1,8 @@
+{
+  "name":"sidebar", "title":"Sidebar", "version":"0.1.0", "kind":"interface",
+  "summary":"Browse terminals, agents and workspace activity.",
+  "description":"Publishes the live sidebar, resource status, workspace groups and filtering controls. It can show a resource in a tab or explicitly kill a terminal program. Turn it off to lose live sidebar content and its controls; saved layouts and backend-owned programs remain.",
+  "requires":{"protocol":1,"client_features":["items","tree","chips","menu"]},
+  "settings_command":"sidebar.view",
+  "contributes":{"commands":["sidebar.toggle","sidebar.view","sidebar.show","sidebar.kill","sidebar.preset"],"keys":["Prefix s: toggle sidebar"],"menu_items":["Sidebar status controls"],"panels":["Sidebar","Sidebar view"],"settings":["doc/settings/sidebar"]}
+}

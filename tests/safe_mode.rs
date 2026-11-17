@@ -26,9 +26,9 @@ async fn safe_session_is_empty_allowances_are_temporary_and_provider_links_are_f
     until(||core.lock().unwrap().exts["recovery"].running).await;
     let snap=control.call("workspace.snapshot",Value::Null).await.unwrap();
     assert_eq!(snap["safe_mode_allow"],json!(["recovery"])); assert_eq!(snap["entries"]["extension/recovery"]["value"]["enabled"],false);
-    let pid=snap["extensions"]["recovery"]["pid"].clone();
+    let generation=snap["extensions"]["recovery"]["generation"].clone();
     control.call("command.invoke",json!({"name":"prim.safe_mode.allow","args":{"name":"recovery","on":true}})).await.unwrap();
-    assert_eq!(control.call("workspace.snapshot",Value::Null).await.unwrap()["extensions"]["recovery"]["pid"],pid,"allow is idempotent, not a provider restart");
+    assert_eq!(control.call("workspace.snapshot",Value::Null).await.unwrap()["extensions"]["recovery"]["generation"],generation,"allow is idempotent, not a provider restart");
     let (provider,_rx,_)=client::connect(&socket,"provider-test").await.unwrap();
     let registration=json!({"name":"forged","role":"backend","instance":"fixture","provider_version":"1","software":{"name":"fixture","version":"1"},"capabilities":{}});
     assert_eq!(provider.call("provider.register",registration.clone()).await.unwrap_err().kind(),"forbidden");

@@ -60,10 +60,11 @@ pub fn start(socket: std::path::PathBuf, state: std::path::PathBuf, safe: bool, 
         }
         std::fs::remove_file(&socket)?;
     }
-    if let Some(dir) = defaults {
-        install_defaults(&mut store, &dir);
+    if let Some(dir) = &defaults {
+        install_defaults(&mut store, dir);
     }
     let core: Shared = Arc::new(Mutex::new(Core::new(store, Some(state), socket.clone(), safe)?));
+    if let Some(dir)=defaults {core.lock().unwrap().manifest_catalog.root=dir;}
     let listener = UnixListener::bind(&socket)?;
     #[cfg(unix)]
     {
@@ -538,8 +539,10 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> Rp
         }
         "client.list" => Ok(json!({"clients": core.lock().unwrap().clients.values().cloned().collect::<Vec<_>>()})),
         "extension.list" => {
-            let c = core.lock().unwrap();
-            Ok(json!({"extensions": c.exts.iter().map(|(n, e)| (n.clone(), e.to_json())).collect::<serde_json::Map<_, _>>()}))
+            let mut c = core.lock().unwrap();
+            let specs=c.store.entries().iter().filter_map(|(key,e)|Some((key.strip_prefix("extension/")?.to_string(),e.version,json!({"manifest":e.value["manifest"]})))).collect::<Vec<_>>();
+            c.manifest_catalog.refresh(&specs);
+            Ok(json!({"extensions": c.exts.keys().map(|n| (n.clone(), c.extension_state(n))).collect::<serde_json::Map<_, _>>()}))
         }
         _ => Err(RpcError::method_not_found(method)),
     }

@@ -1,0 +1,7 @@
+{
+  "name":"tabs", "title":"Tabs", "version":"0.1.0", "kind":"interface",
+  "summary":"Open, rename and close tabs without ending their programs.",
+  "description":"Adds shell tabs and lets you show an existing resource or view in a tab. Closing a tab only changes the layout: its programs keep running. Turn this off to remove these tab commands, menus and shortcuts; existing layouts and terminals remain.",
+  "requires":{"protocol":1},
+  "contributes":{"commands":["tabs.open","tabs.show","tabs.close","tabs.rename"],"keys":["Prefix n: new tab"],"menu_items":["New tab","Rename tab","Close tab"]}
+}

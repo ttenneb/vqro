@@ -174,8 +174,23 @@ try:
         except Exception as e:
             check(f"{name}: spawn a long-lived resource", False, repr(e))
     for name, rid in keep.items():
-        pid = c.call("extension.list")["extensions"][name]["pid"]
-        os.kill(pid, 9)
+        # Find only our own core's child with this executable and private endpoint. Pids are harness facts.
+        children = []
+        for thread in os.listdir(f"/proc/{core.pid}/task"):
+            try:
+                children.extend(open(f"/proc/{core.pid}/task/{thread}/children").read().split())
+            except OSError:
+                pass
+        program = PHERDR if name == "herdr" else PTMUX
+        matches = []
+        for child in children:
+            try:
+                if os.path.realpath(f"/proc/{child}/exe") == os.path.realpath(program) and ENV["PRIM_SOCKET"].encode() in open(f"/proc/{child}/environ", "rb").read():
+                    matches.append(int(child))
+            except OSError:
+                pass
+        assert len(matches) == 1, (name, matches)
+        os.kill(matches[0], 9)
         down = wait(lambda: any(x["id"] == rid and x.get("available") is False for x in resources(c)), 10)
         check(f"{name}: provider killed -> its resources unavailable (stale)", bool(down))
         up = wait(lambda: any(x["id"] == rid and x.get("available") is True for x in resources(c)) and providers(c)[name]["state"] == "connected", 30)

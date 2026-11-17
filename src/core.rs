@@ -82,6 +82,7 @@ pub struct Core {
     pub providers: BTreeMap<String, Provider>,
     /// Compatibility connection-state alias; authoritative declarations are in `providers`.
     pub adapter_state: BTreeMap<String, Value>,
+    pub manifest_catalog: crate::manifest::Catalog,
     pub default_adapter: Option<String>,
     pub(crate) embedder_backend: Option<crate::adapter::Backend>,
     next_provider_source: u64,
@@ -133,6 +134,7 @@ impl Core {
             bridge_tokens: crate::bridge_tokens::Tokens::open(state_dir.as_ref().map(|dir| dir.join("runtime-tokens.json")))?,
             providers: BTreeMap::new(),
             adapter_state: BTreeMap::new(),
+            manifest_catalog:crate::manifest::Catalog::new(crate::paths::extensions_dir()),
             default_adapter: None,
             embedder_backend: None,
             next_provider_source: 1,
@@ -221,7 +223,7 @@ impl Core {
             "entries": self.store.entries(),
             "resources": self.resources.values().map(|r| r.to_json()).collect::<Vec<_>>(),
             "commands": self.commands.values().map(|c| c.to_json()).collect::<Vec<_>>(),
-            "extensions": self.exts.iter().map(|(n, e)| (n.clone(), e.to_json())).collect::<BTreeMap<_, _>>(),
+            "extensions": self.exts.keys().map(|n| (n.clone(), self.extension_state(n))).collect::<BTreeMap<_, _>>(),
             "providers": self.providers.keys().map(|n| (n.clone(), self.provider_json(n))).collect::<BTreeMap<_, _>>(),
             "adapters": self.adapter_state,
             "backend_notice":self.backend_notice(), "safe_mode": self.safe_mode, "safe_mode_allow": self.safe_mode_allow, "provider_extensions": self.provider_extensions,
@@ -278,6 +280,17 @@ impl Core {
         route.resource = Some(resource.life.subscribe());
         route.target = Some((resource.facts.backend_ref.clone(), resource.facts.incarnation.clone()));
         Ok(route)
+    }
+
+    pub fn extension_state(&self,name:&str)->Value {
+        let mut value=self.exts.get(name).map(|r|r.to_json()).unwrap_or_else(||json!({"status":"stopped","crashes":0,"last_exit":null}));
+        let key=format!("extension/{name}");let spec=self.store.get(&key).map(|e|&e.value);
+        let enabled=spec.is_some_and(|s|s["enabled"]!=false);
+        value["enabled"]=json!(enabled);
+        value["safe_mode"]=json!(self.safe_mode);value["allowed_in_safe_mode"]=json!(self.safe_mode_allow.contains(name));
+        value["display_status"]=json!(if !enabled && !self.safe_mode_allow.contains(name){"off"}else if self.safe_mode && !self.safe_mode_allow.contains(name){"stopped-by-safe-mode"}else{match value["status"].as_str().unwrap_or("stopped"){"failed"=>"failed","running"=>"running",_=>"starting"}});
+        if let Some(facts)=self.manifest_catalog.facts(name).as_object(){for(k,v)in facts{value[k]=v.clone();}}
+        value
     }
 
     pub fn backend_notice(&self) -> Option<String> {

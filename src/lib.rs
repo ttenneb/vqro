@@ -12,6 +12,7 @@ pub mod paths;
 pub mod provider_client;
 pub mod queue;
 pub mod limits;
+pub mod manifest;
 pub mod provider;
 pub mod program;
 pub mod provider_wire;
