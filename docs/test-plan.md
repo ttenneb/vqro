@@ -49,6 +49,23 @@ This sets priorities for which primitives and adapters matter first.
 On the winner of S3: kill -9 loop (placeholder < 100 ms, other views and terminals unaffected, manifest bindings still
 listed); state-schema rollback; late crash 30 s after load (crash budget); 5 s stall (last good frame kept).
 
+## Release gate: `scripts/check.sh`
+
+`scripts/check.sh quick` builds every target with zero warnings and runs `cargo test` and the Python unittests
+(`unittest discover -s tests`). `scripts/check.sh full` adds:
+- every opt-in suite, including ignored tests: `tmux`, `tmux_timeout`, `tmux_provider`, `herdr_provider`,
+  `provider_wire`, `provider_errors`;
+- the end-to-end scripts: `e2e_providers.py`, `e2e_tui_providers.py`, `e2e_scale_herdr.py`, and the TUI smoke
+  `e2e_tui_smoke.sh` (private herdr-core and prim core; 30 MB flood, core restart reattach, quit while the core
+  cannot start);
+- the default scale profile;
+- a leftover-process check: a before/after diff of processes tied to test roots by environment or by unix socket
+  path. tmux renames its server to `tmux: server`, so `pgrep -x tmux` misses it.
+
+Every step runs under `env -i` with private paths and never touches a live prim, hc or tmux. It prints a PASS/FAIL
+table and writes a JSON receipt to `$CHECK_RECEIPT` (default `<target>/check-receipt.json`), with step logs under
+`<target>/check-logs/`. `full` needs `/usr/bin/tmux` 3.7b and `~/.local/bin/herdr-core`.
+
 ## Scale harness (run after every foundation slice)
 
 `tests/scale.rs`, ignored by default. It starts a real core in its own process (fake backend, two adapter

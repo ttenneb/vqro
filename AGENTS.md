@@ -35,6 +35,7 @@ Read `README.md`, then `docs/decisions.md` (D14 is the center; D15–D19 shape e
 - **Never write into the `herdr-app` document**; keep Unix socket paths under 103 bytes (macOS).
 
 ## How we work
+- **Run `scripts/check.sh full` before installing** (`quick` while iterating): one gate for every suite, private and receipted.
 - **Small, clean commits** with a why in the message; zero warnings; `cargo test` passing; tests for new core or
   store behaviour. Stdlib-only Python for extensions, using `extensions/prim_ext.py`.
 - **Parallel streams** run on git worktrees (`git worktree add -b <stream> ../prim-<stream>`), one branch each,
