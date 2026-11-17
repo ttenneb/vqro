@@ -8,6 +8,13 @@
 {"runtimes":[{"name":"pi","argv":["pi1","--mode","rpc"]}]}
 ```
 
+The default bridge launcher is host-resolved `python3 -m pi_bridge`, never the core's interpreter path or an OS
+choice inferred from the core. A runtime entry may configure `bridge_argv` (for example `["py","-3","-m","pi_bridge"]`
+for its Windows host, or a host-installed wrapper) and `bridge_env` (for example a host-side `PYTHONPATH`). These
+arguments/environment resolve on the terminal host. A configured launcher does not inherit the core's module path;
+the unchanged local default still supplies the locally installed extension directory. Remote endpoint reachability
+is a separate, unimplemented concern; these settings do not make remote bridges supported.
+
 Configure it through Settings → Extensions → Configure Pi runtimes, or the `pi.settings` palette command. The input accepts the JSON list of `{name, argv}` entries. Argument vectors are literal, never shell strings. Multiple entries produce a runtime chooser. Invalid settings fail before execution. Backend terminal names are left to the backend so multiple launches do not collide or guess native naming restrictions.
 
 Once the hosted agent appears, Pi invokes public `agents.show`. If agents is disabled/unavailable, it opens the real backend terminal through `tabs.show` instead. Disabling pi only removes its launcher/settings; existing bridges and agents continue running. Native provider output and bounded terminal fallback remain in the pi_bridge package.

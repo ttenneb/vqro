@@ -494,7 +494,9 @@ default: the per-platform extensions directory, `~/.local/share/prim/extensions`
 `tabs`, `panes`, `gestures`, `workspaces`, `sidebar`, `themes`, `icons`, `keys`, `settings` (`extensions/`, helper
 `prim_ext.py`), and two backends as provider extensions (D21; human decision 2026-11-17):
 - `herdr`: `prim-herdr --name herdr`, `kind: "provider"`, `default: true`. Terminals in herdr-core, reached with
-  `$PRIM_HERDR` (a whole command, e.g. `ssh box hc connect`), else `hc connect`.
+  `$PRIM_HERDR` (JSON argv, e.g. `["ssh","box","hc","connect"]`, or a single literal executable), else `hc connect`.
+  `--hc PATH` with repeated `--hc-arg ARG` passes literal prefix arguments before `connect`; PATH lookup uses
+  platform-native path splitting. A legacy whitespace command string must be converted to JSON argv.
 - `tmux`: `prim-tmux --name tmux`, `kind: "provider"`, `enabled: false`. Terminals in a private tmux server owned by
   prim, never the user's tmux sessions.
 

@@ -8,7 +8,9 @@
 2. **herdr-core:** install with its official installer (it verifies sha256 and codesign), e.g.
    `curl -fsSL https://releases.herdr.dev/core/install.sh` and review it before running. The `herdr` provider
    extension (prim-herdr) finds `hc` on PATH or at herdr-core's standard install (`~/.local/share/herdr-core/current/...`),
-   or set `PRIM_HERDR` to the whole command (e.g. `ssh box hc connect`) in the environment the core starts from.
+   or set JSON argv such as `PRIM_HERDR='["ssh","box","hc","connect"]'` in the environment the core starts from.
+   Arguments are literal (no shell/whitespace parsing). `prim-herdr --hc PATH --hc-arg ARG` also supports literal
+   prefix arguments before `connect`; paths/arguments may contain spaces.
 3. **Install prim:** `./scripts/dev-install.sh` (release build of `prim`, `prim-herdr` and `prim-tmux` to
    `~/.local/bin`, extensions to `~/.local/share/prim/extensions`). Make sure `~/.local/bin` is on PATH.
    Backends run as extensions: `herdr` is on by default; `tmux` (a private tmux server, never your own sessions)

@@ -155,6 +155,15 @@ written the same way was contained by the crash budget and removed with one reve
   replacement smoke and full gate pass18/18,187 Rust/104 Python tests, zero warnings/leftovers.
 - Evidence and limitations: `research/safe-mode-recovery.md`.
 
+## Platform launcher/identity fixes (2026-11-17)
+
+- Host-resolved/configured bridge argv and environment replace the core interpreter/OS assumption. Native backend
+  ids/nonces, not display hostnames, choose provider defaults. Herdr remote refs use Machine.id/session/terminal;
+  aliases are display metadata and identity-unsafe proxied effects are explicitly unsupported pending upstream.
+- prim-herdr now takes JSON argv or repeated literal prefix args, preserves spaced paths and uses split_paths.
+  Red/green, durable migration/tombstone tests, scoped quick gate and real-private herdr/tmux opt-ins pass.
+  No live install/remote/model calls. Migration limits and upstream ask: `research/platform-small-fixes.md`.
+
 ## Known gaps found while building
 
 - **History churn:** extensions that refresh views on every event (the sidebar on status changes) fill the
