@@ -18,9 +18,14 @@ from prim_provider import ProviderError
 
 def watch_stdin(stream, loop, stop):
     """Only lifetime/quit, never forwarded input or a second agent input channel."""
+    # Do not hold sys.stdin's BufferedReader lock in a daemon thread: native
+    # Pi can exit while this read is blocked, and interpreter shutdown would
+    # abort trying to close the locked buffered stream. Raw descriptor reads
+    # work for backend terminal handles and pipes without that Python I/O lock.
+    fd = stream.fileno()
     def read():
         try:
-            while stream.read(4096):
+            while os.read(fd, 4096):
                 pass
         finally:
             try:

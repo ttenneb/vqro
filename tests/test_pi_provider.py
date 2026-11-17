@@ -133,6 +133,12 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             "ref": "agent", "incarnation": "", "args": args or {}, "deadline_ms": 1000})
 
     async def test_cli_explicit_argv_and_managed_stdin_eof_are_clean(self):
+        await self.cli_lifetime_case(native_exit=False)
+
+    async def test_cli_native_exit_with_open_stdin_is_clean(self):
+        await self.cli_lifetime_case(native_exit=True)
+
+    async def cli_lifetime_case(self, *, native_exit):
         core = BridgeCore()
         accepted = asyncio.Event()
         def connection(reader, writer):
@@ -150,9 +156,16 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(accepted.wait(), 2)
             self.extra_cores.append(core)
             await core.wait(lambda: bool(core.notes("view.publish")))
-            process.stdin.close()
-            _, stderr = await asyncio.wait_for(process.communicate(), 3)
-            self.assertEqual(process.returncode, 0, stderr.decode())
+            if native_exit:
+                await core.call("effect.invoke", {"effect": "exit-test", "op": "agent.prompt",
+                    "ref": "agent", "incarnation": "", "args": {"message": "crash"}, "deadline_ms": 1000})
+                # communicate() would close stdin and hide the daemon reader bug.
+                await asyncio.wait_for(process.wait(), 4)
+                stderr = await process.stderr.read()
+            else:
+                process.stdin.close()
+                _, stderr = await asyncio.wait_for(process.communicate(), 3)
+            self.assertEqual(process.returncode, 23 if native_exit else 0, stderr.decode())
             self.assertTrue(core.notes("resource.gone"), "EOF must run graceful bridge cleanup, not prim_ext os._exit")
             self.assertEqual(len(core.notes("provider.register")), 1)
         finally:
