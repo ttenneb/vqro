@@ -924,7 +924,6 @@ impl App {
         let (peer, msgs) = (self.peer.clone(), self.tx.clone());
         tokio::spawn(async move {
             let mut done: u64 = 0;
-            let mut failed = false;
             loop {
                 let item = match rx.try_recv() {
                     Ok(item) => item,
@@ -938,9 +937,8 @@ impl App {
                     Err(mpsc::error::TryRecvError::Disconnected) => break,
                 };
                 done += 1;
-                if failed {
-                    continue; // after an error nothing more is sent on this stream (never replayed)
-                }
+                // Each queued input is tried once in order; an error ends only that input (never resent).
+                let mut failed = false;
                 let mut sent = 0;
                 for chunk in item.chunks(PASTE_CHUNK) {
                     let started = std::time::Instant::now();
