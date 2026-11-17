@@ -62,3 +62,24 @@ The tests need `~/.local/bin/herdr-core`. Each test sets up a private session:
 - a short `/tmp` root with its own `HOME`, `XDG_STATE_HOME`, `XDG_RUNTIME_DIR`, `XDG_CONFIG_HOME` and `HC_SESSION`;
 - an empty `PATH`, so the core can't reach `loginctl` or `systemctl`; programs in its terminals need absolute paths;
 - teardown with `hc server stop`, then a kill by pid if needed. Only that private core is stopped.
+
+## End to end against the real core (2026-11-17, main f069d0c)
+
+`tests/e2e_providers.py`, `tests/e2e_tui_providers.py` and `tests/e2e_scale_herdr.py` (opt-in, `TARGET_DIR` argument)
+run a private `prim serve --fake` with prim-herdr and prim-tmux as extensions, both with an empty `PATH`.
+- **Driver (25 checks):** both providers register and sync as two hosts. For each, spawn (with env), attach, input,
+  resize and kill go through the core. A provider that is SIGKILLed comes back with the same instance and ids. A
+  backend restart or wipe gives a new instance and retires the old ids.
+- **TUI smoke:** the real TUI shows and drives terminals in both providers.
+- **Load probe at the floor:** 600 terminals, 200 agents and 8 floods of 1.3 MB/s through prim-herdr.
+  - spawn p99 19 ms; idle echo p99 2-3 ms during the floods; 10 MB/s delivered; no `missed`;
+  - peak memory: core 18-32 MB, prim-herdr 9-11 MB, herdr-core about 100 MB;
+  - **status: 0/s** with the current adapter, and 92/s of 100 expected with events-channel credit added. The events
+    window runs out after the first few hundred KB of events (600 `created` events). The adapter fix is with
+    prim-slice2b.
+- **Found and fixed on the provider side:**
+  - prim-tmux kept a replaced server's instance;
+  - private tmux servers leaked when the supervisor SIGKILLed the provider;
+  - prim-herdr had a spawn/attach race at scale.
+- **Core, reported:** a provider's protocol error (`not_found`) reaches callers as `backend/indeterminate`
+  (`tests/provider_errors.rs`, ignored until `src/provider_wire.rs` `provider_error()` is fixed).
