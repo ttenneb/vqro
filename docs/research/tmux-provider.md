@@ -39,8 +39,9 @@ server; not yet against the real core, whose section 9 side is still being built
 - **Reconcile.** Panes are re-listed (`list-panes -a`) after structural notifications and every 3 s, because tmux
   has no event history and no pane-exited notification. A vanished pane is `gone` with reason `killed` if this
   provider killed it, else `exited`. Exit codes are not available (tmux removes exited panes).
-- **Status.** OSC 7501 is observed in each pane's output. A JSON object payload is kept as it is; anything else
-  becomes `{raw}` (the payload encoding agents use is unverified). Capability `status.osc7501 {stored: false,
+- **Status.** OSC 7501 is observed in each pane's output and parsed per the Program Status Protocol rev 0.4:
+  `key=value` pairs joined by `:`, with `msg` and `title` in base64. Each report replaces its record (the root, or a
+  child by `id` under `records`), and `state=clear` removes records. Capability `status.osc7501 {stored: false,
   lossy: true}`: tmux stores nothing, and status is lost while a pane is paused.
 - **Effects.**
   - `terminal.spawn` runs `new-window -d` in the spawn session, with `name`, `cwd` and `env` (`-e`). An empty `argv`

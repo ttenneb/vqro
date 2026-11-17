@@ -158,6 +158,13 @@ bridge not built); second backend (tmux) not started; Windows untested.
 - Tested against an in-test fake core and private tmux 3.7b (`tests/provider_client.rs`, `tests/tmux_provider.rs`,
   opt-in). Not yet run against the real core's section 9 side (in progress on `provider-wire`).
 
+## herdr-core provider, provider side (2026-11-17)
+
+- `src/bin/prim-herdr.rs`: herdr-core as an out-of-process provider, wrapping the in-process adapter unchanged
+  (instance = `core.id`, spawn/kill/attach, history streams with credit after send, status, exit codes, re-register
+  per herdr-core connection). Opt-in tests on a private herdr-core (`tests/herdr_provider.rs`). Notes and findings:
+  `research/herdr-provider.md`. Open: an env hook in the adapter (bridge tokens need `terminal.spawn {env}`).
+
 ## Windows work (known, 2026-11-17)
 
 From the static portability audit (D22 proposed; nothing compiled for Windows yet; installing a Windows target needs
