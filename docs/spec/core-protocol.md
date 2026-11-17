@@ -3,19 +3,45 @@
 > **Status:** this is the living protocol of a **working prototype, and fluid**: it documents what the code does
 > today and will change as we learn. Nothing here is frozen yet (`../roadmap.md`, step 5).
 
-Status: implemented in slice 1 (`src/server.rs`), not frozen (D16). JSON-RPC 2.0, one message per line, over a
-local socket (`PRIM_SOCKET`, default `~/.local/state/prim/prim.sock`, mode 0600). Both sides may send requests:
+Status: implemented in slice 1 (`src/server.rs`), not frozen (D16). JSON-RPC 2.0, one message per line, over the
+core's local endpoint (below). Both sides may send requests:
 the core forwards `command.invoke` to the connection that registered the command. Errors carry a stable
 `data.kind`: `invalid`, `conflict`, `not_found`, `unavailable`, `forbidden`, `backend`, `disconnected`, `io`,
 `durability_unconfirmed`, `timeout`, `overloaded`.
+
+## Endpoint and transport (D12, D22 proposed)
+
+- The core listens on one **local endpoint**: a reliable, ordered byte stream per connection, reachable only by the
+  user who started the core. `PRIM_SOCKET` names it. Clients, extensions, providers and bridges treat the value as
+  **opaque**: they pass it to their platform's connect call and never parse it, build paths next to it or assume a
+  file exists. On Unix it is a Unix socket path (mode 0600; default `<state dir>/prim.sock`; implemented). On Windows
+  it is a named pipe name (`\\.\pipe\prim-<per-user id>`) whose DACL admits only the owner and which rejects remote
+  clients (not implemented yet).
+- Messages are UTF-8 JSON, one per line, separated by LF. Open the endpoint in binary mode: no newline translation.
+- Stdlib Python on Windows has no `AF_UNIX` (`socket` docs: the `AF_UNIX` constant is absent where unsupported).
+  A Python client there connects to the named pipe with `asyncio`'s Windows proactor loop
+  (`loop.create_pipe_connection`), not with a synchronous `open()` of the pipe, whose single handle serializes reads
+  and writes. `extensions/prim_ext.py` does this once the Windows endpoint exists (`build-plan.md`, Windows work).
+- The per-platform state directory holds the store and logs: `PRIM_STATE_DIR`; else on Unix
+  `$XDG_STATE_HOME/prim` or `~/.local/state/prim`; on Windows `%LOCALAPPDATA%\prim\state` (not implemented yet).
+- **Stopping the core** is a protocol request, not a pidfile and a signal: `core.shutdown` (below, Session). Platform
+  signals (Ctrl-C, SIGTERM on Unix) remain extra ways in that run the same ordered stop.
 
 ## Session
 
 | Method | Params | Result |
 |---|---|---|
 | `hello` | `client?` or `extension?` (name) | `server`, `version`, `protocol`, `you` (author id), `epoch`, `seq`, `safe_mode` |
+| `core.shutdown` | | `outcome: "accepted"` (contract; implementation pending) |
 
 Every change is recorded with the connection's author (`ext:<name>`, `<client>:<n>`).
+
+`core.shutdown`, **contract; implementation pending (D22 proposed).** Any connection of the owning user may ask the core to stop. It
+replies, then stops in order: it stops its extensions (their lifetime channels close), closes client connections
+and the endpoint, and exits. Durable state is already on disk (every adopted transaction is persisted before it is
+published). The same stop is offered as the built-in command `prim.shutdown`, so it is on the recovery surface
+with every extension broken. `prim stop` calls `core.shutdown`. Today `prim stop` still reads `<state>/serve.pid`
+and sends SIGTERM, which runs the same ordered stop.
 
 ## Workspace (prim-owned state, D15)
 
@@ -31,7 +57,9 @@ Transactions are validated against the resulting state and applied all-or-nothin
 existing views; `workspace/active` must name an existing layout.
 
 A successful apply or revert has persisted the candidate through a unique temporary file in the same directory,
-file sync, replacement, then directory sync. Before replacement, persistence failure returns `io` with no change
+then the platform's **durable replace**: on Unix file sync, rename, then directory sync (implemented); on Windows file
+flush, then a write-through replace (`MoveFileExW` with `MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH`; not
+implemented yet), where "directory sync" below means that final confirmation step. Before replacement, persistence failure returns `io` with no change
 to entries, versions, history, transaction numbering or events. Failed writes clean up their own temporary files;
 other writers' files and legacy `.tmp` paths are not swept or overwritten. Process crashes can leave harmless
 orphaned temporary files, which are never loaded as workspace state.
@@ -82,7 +110,7 @@ but id stability across a core restart is not confirmed until a later successful
 | Method | Params | Result |
 |---|---|---|
 | `resource.list` | | `resources` |
-| `resource.spawn` | `argv?` (default `$SHELL`), `cwd?`, `name?`, `adapter?` | `resource` |
+| `resource.spawn` | `argv?` (default: the provider's default shell for its host), `cwd?`, `name?`, `adapter?` | `resource` |
 | `resource.kill` | `resource` | `outcome`, `backend` |
 | `resource.attach` | `resource`, `cols`, `rows`, `history?` (scrollback lines to replay) | `stream` |
 | `stream.input` | `stream`, `data` (base64) or `text` | `outcome: dispatched` (also accepted as a notification) |
@@ -125,7 +153,8 @@ Resource ids (`r1`, ...) are prim's and stay stable across core restarts while t
 | `command.invoke` | `name`, `args?`, `deadline_ms?` | whatever the owner returns; `unavailable` if its owner is disconnected |
 
 Built-in, non-replaceable commands (recovery surface, D15): `prim.layout.reset`, `prim.revert`
-(default: last change not made by an extension), `prim.safe_mode`, `prim.extension.disable|enable|restart`.
+(default: last change not made by an extension), `prim.safe_mode`, `prim.extension.disable|enable|restart`, and
+`prim.shutdown` (stop the core, as `core.shutdown`; contract, implementation pending).
 Everything opinionated is an extension (D17).
 
 Command registrations belong to the registering connection, not just its author string. A replacement connection
@@ -281,7 +310,8 @@ Icons page.
 ## Default extensions
 
 On first run the core declares the extensions listed in `<extensions dir>/defaults.json` (`PRIM_EXTENSIONS_DIR`,
-default `~/.local/share/prim/extensions`) and records `doc/prim/defaults`, so removing one sticks. Bundled:
+default: the per-platform extensions directory, `~/.local/share/prim/extensions` on Unix and
+`%LOCALAPPDATA%\prim\extensions` on Windows, not implemented yet) and records `doc/prim/defaults`, so removing one sticks. Bundled:
 `tabs`, `panes`, `gestures`, `workspaces`, `sidebar`, `themes`, `icons`, `keys`, `settings` (`extensions/`, helper
 `prim_ext.py`). Client options live in `doc/settings/tui`, the theme in `doc/settings/theme`, the icon set in
 `doc/settings/icons`.
@@ -292,7 +322,10 @@ default `~/.local/share/prim/extensions`) and records `doc/prim/defaults`, so re
 |---|---|
 | `extension.list` | per extension: `status` (running, restarting, failed, disabled, safe_mode, stopped), `pid`, `crashes`, `last_exit` |
 
-Declared by `extension/<name>` entries `{argv, enabled?, cwd?}`. Started with `PRIM_SOCKET`,
+Declared by `extension/<name>` entries `{argv, enabled?, cwd?}`. `argv[0]` is resolved by the platform's process
+launcher (`PATH` on Unix; `CreateProcess` search on Windows, where a `.py` file is not directly executable and
+`python3` is often absent). The bundled `defaults.json` names `python3`, which is Unix-only for now; Windows defaults
+need a portable interpreter choice such as the `py -3` launcher (`build-plan.md`, Windows work). Started with `PRIM_SOCKET`,
 `PRIM_EXTENSION`, and `PRIM_EXTENSION_LIFETIME=stdin`; output goes to `<state>/ext-<name>.log`.
 Crash budget: 3 exits in 5 minutes, then `failed` until the entry changes or `prim.extension.restart`.
 

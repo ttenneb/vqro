@@ -278,3 +278,29 @@ bridges independent of where they run, without a separate prim process per host.
 protocol with an external fake provider and a conformance suite, herdr-core out of process, then tmux and the Pi
 bridge in parallel. `extension/<name>` gains `essential`. `workspace.snapshot` gains `providers` (replacing
 `adapters`). Open: the exact `provider.relay` mapping onto `hc connect` channels and ssh.
+
+## D22. The core endpoint is opaque and owner-only; stopping the core is a protocol request (2026-11-17, PROPOSED)
+
+> **Proposed, not binding** until the human confirms it. Applies D12 to two contract points found in the
+> portability audit (`~/.local/share/herdr/scratch/prim-independent-review/portability-audit.md`, static, main 267a45a).
+
+**Decision.**
+- **Endpoint.** `PRIM_SOCKET` names an opaque local endpoint: an ordered byte stream per connection, reachable only by
+  the user who started the core. On Unix it is a Unix socket path with mode 0600. On Windows it is a named pipe with an
+  owner-only DACL that rejects remote clients. Clients, extensions, providers and bridges pass the value to their
+  platform's connect call and never parse it. Messages are LF-delimited JSON-RPC in binary mode. Relays
+  (`provider.relay`) carry this byte stream, never a path or handle. Stdlib Python on Windows, which lacks `AF_UNIX`,
+  uses `asyncio`'s proactor pipe connection.
+- **Stopping the core.** `core.shutdown` (and the built-in recovery command `prim.shutdown`) stops the core in
+  order: extensions, connections, endpoint, exit. `prim stop` uses it. Pidfiles and signals are not part of the
+  contract; Ctrl-C and SIGTERM remain extra local ways to run the same stop.
+
+**Why.** Both were the only contract points that named a Unix mechanism: a socket path with file permissions, and
+`prim stop` as pidfile plus `kill` plus SIGTERM. Everything else in `core-protocol.md` and `provider-v0.md` was
+already neutral or needed wording only. Both are cheap to fix before the provider wire protocol freezes and awkward
+after.
+
+**Consequences.** Spec text updated (`core-protocol.md`, Endpoint and transport, Session; `provider-v0.md` sections 1,
+3, 6 and 9). Implementation pending: `core.shutdown` and `prim.shutdown`; a transport module with a Windows
+named-pipe arm; `prim_ext.py` on Windows. Known Windows runtime work is listed in `build-plan.md` ("Windows work").
+Unix behaviour is unchanged.

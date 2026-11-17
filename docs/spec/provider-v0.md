@@ -10,7 +10,8 @@ Evidence keys: **src** prim source at `main`; **rec** recorded result (file name
 ## Shape
 
 A backend adapter (herdr-core, tmux, later Rex) and an agent-runtime bridge (Pi RPC first) are both **providers**:
-out-of-process programs speaking the core protocol (`core-protocol.md`) over the same socket. A provider
+out-of-process programs speaking the core protocol (`core-protocol.md`) over the core's local endpoint (opaque
+`PRIM_SOCKET`: a Unix socket or a Windows named pipe; `core-protocol.md`, Endpoint and transport). A provider
 **registers** an instance with declared capabilities, **publishes resources** (kinds `terminal`, `agent`; open set)
 with stable identity, **serves effects** the core routes to it with deadlines, and **serves streams** with byte
 credit. The core keeps a registry, an identity map, routing, bounds and outcome reporting, and nothing specific to a
@@ -56,7 +57,8 @@ Rules:
   is resent.
 - **Several hosts mean one provider per host** (`herdr@rohan`, `tmux@studio`): its own extension entry, process,
   connection, generation and queues. One host stalling or failing affects only its resources. The provider owns
-  its transport (`hc connect`, `ssh host tmux -CC`, ...).
+  its transport (`hc connect`, `ssh host tmux -CC`, ...), which is private to it; the core sees only the provider's
+  own connection to the endpoint.
 - `workspace.snapshot` gains `providers: {name: {role, instance, software, capabilities, state:
   "connected"|"disconnected", generation, since, error}}`, and `provider` events report changes. It replaces today's
   `adapters` field, which carries connection state only.
@@ -99,6 +101,13 @@ ignored. Backend-specific extras are namespaced (`dev.herdr.machines`).
 
 Extensions read `providers[*].capabilities` and degrade: hide status chips when `status.osc7501` is absent, mark them
 possibly stale when `lossy`. Panels can name capabilities in `requires` as today.
+
+**Windows hosts (D12).** A terminal hosted through ConPTY reaches the provider as output re-rendered by the console
+host, not the program's raw bytes, and unknown OSC sequences may be dropped (depends on the Windows build and
+ConPTY passthrough support; unverified). A provider on such a host declares what it observed:
+`terminal.output {raw: false}` and `status.osc7501` absent or `{lossy: true}` until tests show otherwise. The
+capability model covers this; no contract change. tmux has no native Windows build, so a Windows host needs another
+backend provider.
 
 ## 4. Terminal streams through a provider
 
@@ -185,12 +194,12 @@ Public calls stay resource-centric: `resource.spawn {provider?, kind, ...}`, `re
   `resource.spawn {argv: ["prim-bridge-pi", ...]}`. It runs the runtime as its child over fresh pipes (Pi RPC: JSONL,
   not JSON-RPC; split on LF only; drain stdout and stderr separately). The backend owns the process; prim never
   restarts a bridge. The terminal shows a minimal fallback view, so the real process stays one action away (D11).
-- **Reaching the core.** At spawn the core mints a one-time bridge token and adds `PRIM_SOCKET` and
+- **Reaching the core.** At spawn the core mints a one-time bridge token and adds `PRIM_SOCKET` (opaque endpoint) and
   `PRIM_BRIDGE_TOKEN` to the terminal's environment (`terminal.spawn {env}`; herdr-core `terminal.run` takes `env`).
   The bridge connects and sends `provider.register {role: "runtime", token}`. The token links its agent resource to
   the hosting terminal (`facts.host`). Not through the PTY: that mixes with output, has no credit, and corrupts on
   any stray byte.
-- **Remote hosts (proposed default, D21).** A bridge on another machine can't reach a local socket. It reaches the
+- **Remote hosts (proposed default, D21).** A bridge on another machine can't reach the core's local endpoint. It reaches the
   core **through its host's provider**: the provider offers `provider.relay` and carries the bridge's connection over
   its own transport (a channel in `hc connect`, the ssh session for tmux). The bridge sees the same protocol over a
   different byte stream; the core sees a provider-relayed connection. Alternatives (a small per-host relay, or local
@@ -261,7 +270,7 @@ This section is the implementable contract; where sections 1–6 differ, this wi
 
 ### 9.1 Framing, connection and errors
 
-- JSON-RPC 2.0 over the core socket, one JSON object per line, **LF only** (a trailing CR is stripped; U+2028/U+2029
+- JSON-RPC 2.0 over the core's local endpoint (opaque `PRIM_SOCKET`, `core-protocol.md`), one JSON object per line, **LF only** (a trailing CR is stripped; U+2028/U+2029
   inside strings are not separators). Maximum record **1 MiB** on a provider connection; a longer line is a protocol
   error and the core closes the connection (G18).
 - **One provider per connection, registered once** (G3, G16). `hello {extension?}` first, then exactly one
@@ -343,6 +352,8 @@ existing status consumers and partial resource events (`src/events.rs`) work unc
   duplicate id twice on one connection; it rejects it with `conflict`. Providers may use native idempotency keys
   internally. Nobody resends automatically.
 - **`terminal.spawn`**: no `ref`; `args {argv, cwd?, name?, env? (object string→string), cols?, rows?, placement?}`.
+  An empty `argv` means the provider's default shell for its host (`$SHELL` on Unix, `%ComSpec%` or PowerShell on
+  Windows); the core never picks a shell. `cwd` is a host path string in the host's own syntax.
   Result `{outcome: "observed", data: {facts}}`; the core assigns the prim id from these facts. The provider may also
   send `resource.upsert` for it, before or after the reply; identity dedups.
 - **`terminal.kill`**: `ref`, `incarnation`, `args {}`. Result `accepted` (requested) or `observed` (with
@@ -398,6 +409,8 @@ existing status consumers and partial resource events (`src/events.rs`) work unc
   hosting terminal's resource is gone. Unknown, used or expired tokens fail with `forbidden`. A successful register
   links the bridge: every agent resource it publishes gets `host` = the terminal resource id.
 - **OPEN:** `provider.relay` for bridges on other hosts (D21 proposed; no wire schema in v0). v0 bridges are local.
+  Whatever its schema, a relay carries the bridge connection as a **byte stream** (the same LF-delimited JSON-RPC)
+  and never an endpoint path, file descriptor or handle, so it works the same over `hc connect`, ssh and named pipes.
 
 ### 9.7 Gap list disposition
 
