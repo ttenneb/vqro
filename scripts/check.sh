@@ -12,6 +12,20 @@
 set -u
 MODE=${1:-quick}
 case "$MODE" in quick|full) ;; *) echo "usage: $0 quick|full" >&2; exit 2 ;; esac
+# Run inside our own transient user scope (a cgroup): every process this run starts stays in it, even
+# daemons that reparent or rename themselves, and nothing of a concurrent run is in it. The leftover check
+# then lists exactly our processes. Without systemd-run, fall back to a root-pattern heuristic.
+if [ -z "${PRIM_CHECK_SCOPED:-}" ]; then
+  if command -v systemd-run >/dev/null 2>&1 && systemd-run --user --scope --quiet --collect -- true >/dev/null 2>&1; then
+    PRIM_CHECK_SCOPED=1 exec systemd-run --user --scope --quiet --collect --unit="prim-check-$(date +%s)-$$" -- "$0" "$@"
+  fi
+  echo "check: no systemd user scope; the leftover check falls back to a test-root heuristic" >&2
+fi
+CGROUP=
+if [ -n "${PRIM_CHECK_SCOPED:-}" ]; then
+  CGROUP=$(sed -n 's/^0:://p' /proc/self/cgroup)
+  case "$CGROUP" in */prim-check-*.scope) ;; *) CGROUP= ;; esac
+fi
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 TARGET=${CARGO_TARGET_DIR:-$REPO/target}
 STAMP=$(date +%Y%m%d-%H%M%S)
@@ -99,7 +113,37 @@ opt_in() {  # opt_in SUITE: every test of an integration suite, including the ig
   "${CARGO[@]}" cargo test --test "$1" -- --include-ignored --test-threads=1
 }
 
+# Processes of this run still alive: everything in our scope that is not this script or its live helpers
+# (its descendants at this moment). Reparented or renamed daemons stay in the scope and are counted.
+scoped_leftovers() {
+  python3 - "/sys/fs/cgroup$CGROUP" "$$" <<'PY'
+import os, sys
+procs = open(os.path.join(sys.argv[1], "cgroup.procs")).read().split()
+me, mine = int(sys.argv[2]), set()
+def ancestors(pid):
+    seen = []
+    while pid > 1:
+        seen.append(pid)
+        try:
+            pid = int(open(f"/proc/{pid}/stat").read().rsplit(")", 1)[1].split()[1])
+        except (OSError, ValueError, IndexError):
+            break
+    return seen
+for pid in map(int, procs):
+    if me not in ancestors(pid) and pid != me:
+        try:
+            cmd = open(f"/proc/{pid}/cmdline", "rb").read().replace(b"\0", b" ").decode(errors="replace").strip()
+        except OSError:
+            continue
+        print(f"{pid}\t{cmd[:120]}")
+PY
+}
+
 BEFORE=$(snapshot | cut -f1 | sort)
+if [ -n "${PRIM_CHECK_INJECT_LEAK:-}" ]; then
+  # Self-test of the leftover check: one deliberately leaked, detached process of this run.
+  ( setsid sleep 300 < /dev/null > /dev/null 2>&1 & )  # reparented once the subshell exits, like a real leak
+fi
 echo "prim check ($MODE) at $(git describe --always --dirty 2>/dev/null); logs $LOGS"
 step build-zero-warnings no_warnings
 step cargo-test "${CARGO[@]}" cargo test
@@ -119,27 +163,35 @@ if [ "$MODE" = full ]; then
   step scale-harness scale_harness
 fi
 sleep 2
-LEFT=$(comm -13 <(echo "$BEFORE") <(snapshot | cut -f1 | sort) | tr '\n' ' ')
+if [ -n "$CGROUP" ]; then
+  SCOPE="cgroup $CGROUP"
+  LEFT=$(scoped_leftovers | cut -f1 | tr '\n' ' ')
+else
+  SCOPE="heuristic (test roots; concurrent runs can match)"
+  LEFT=$(comm -13 <(echo "$BEFORE") <(snapshot | cut -f1 | sort) | tr '\n' ' ')
+fi
 LEFT=${LEFT% }
 if [ -n "$LEFT" ]; then
   for pid in $LEFT; do printf '%s %s\n' "$pid" "$(tr '\0' ' ' < /proc/$pid/cmdline 2>/dev/null | cut -c1-100)"; done > "$LOGS/leftovers.log"
   printf '%-28s FAIL  pids %s (see %s)\n' "no-leftover-processes" "$LEFT" "$LOGS/leftovers.log"
   printf 'no-leftover-processes\tFAIL\t0\t%s\n' "$LOGS/leftovers.log" >> "$STEPS"
+  # Recorded; now clean up what this run leaked (only possible to attribute safely with a scope).
+  [ -n "$CGROUP" ] && kill -9 $LEFT 2>/dev/null
 else
   printf '%-28s PASS\n' "no-leftover-processes"
   printf 'no-leftover-processes\tPASS\t0\t-\n' >> "$STEPS"
 fi
 rm -rf "$RUN"
 
-python3 - "$STEPS" "$RECEIPT" "$MODE" "$(git describe --always --dirty 2>/dev/null)" "$LOGS" "$LEFT" <<'PY'
+python3 - "$STEPS" "$RECEIPT" "$MODE" "$(git describe --always --dirty 2>/dev/null)" "$LOGS" "$LEFT" "$SCOPE" <<'PY'
 import json, sys, time
-steps_file, receipt, mode, commit, logs, left = sys.argv[1:7]
+steps_file, receipt, mode, commit, logs, left, scope = sys.argv[1:8]
 steps = [dict(zip(("name", "result", "seconds", "log"), l.split("\t"))) for l in open(steps_file).read().splitlines() if l]
 for s in steps:
     s["seconds"] = int(s["seconds"])
 failed = [s["name"] for s in steps if s["result"] != "PASS"]
 r = {"kind": "prim.check-receipt", "version": 1, "mode": mode, "commit": commit, "finished_unix": int(time.time()),
-     "result": "fail" if failed else "pass", "failed": failed, "steps": steps, "leftover_pids": left.split(), "logs": logs}
+     "result": "fail" if failed else "pass", "failed": failed, "steps": steps, "leftover_pids": left.split(), "leftover_scope": scope, "logs": logs}
 scale = logs + "/scale-receipt.json"
 try:
     sr = json.load(open(scale))

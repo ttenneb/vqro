@@ -123,21 +123,27 @@ class PiBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(facts["exit_code"], 23)
         self.assertEqual((await self.client.invoke("abort"))["outcome"], "rejected")
 
-    def kill_lingering(self):
-        pidfile = Path(self.root.name) / "linger.pid"
-        if pidfile.exists():
-            try:
-                os.kill(int(pidfile.read_text()), 9)
-            except ProcessLookupError:
-                pass
+    @staticmethod
+    def kill_pid(pid):
+        try:
+            os.kill(pid, 9)
+        except ProcessLookupError:
+            pass
 
     async def lingering_exit(self, **kwargs):
         """Start a client whose fake Pi exits while a descendant keeps its stdout/stderr open."""
         client = await self.start(limits=Limits(drain=.2), **kwargs)
-        self.addCleanup(self.kill_lingering)
         held = asyncio.create_task(client.invoke("prompt", {"message": "hang"}))
         await asyncio.sleep(0)
         exit_result = await client.invoke("prompt", {"message": "linger"}, timeout=2)
+        # The fake Pi wrote the descendant's pid before exiting. Read it now: asyncTearDown removes the
+        # root before cleanups run, so a cleanup that reads the file later finds nothing (and leaks it).
+        pidfile = Path(self.root.name) / "linger.pid"
+        for _ in range(100):
+            if pidfile.exists() and pidfile.read_text().strip():
+                break
+            await asyncio.sleep(0.01)
+        self.addCleanup(self.kill_pid, int(pidfile.read_text()))
         return client, held, exit_result
 
     async def test_owned_exit_is_authoritative_despite_inherited_pipes(self):
