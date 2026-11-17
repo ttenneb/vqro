@@ -194,7 +194,7 @@ async fn registers_syncs_spawns_streams_status_and_kills_on_real_tmux() {
     assert_eq!(first["params"]["offset"], 0);
     assert!(data_of(&first).starts_with(b"\x1b[H\x1b[2J"), "the repaint is labelled by a clear, not replayed output");
     let mut offset = data_of(&first).len() as u64;
-    let input = "printf '\\033]7501;{\"state\":\"working\"}\\007'; echo prim-$((40+2))\r";
+    let input = "printf '\\033]7501;state=working:app=prim\\007'; echo prim-$((40+2))\r";
     core.send(json!({"jsonrpc": "2.0", "method": "stream.input", "params": {"generation": 3, "stream": 1, "data": B64.encode(input)}})).await;
     let mut seen = Vec::new();
     while !contains(&seen, b"prim-42") {

@@ -106,13 +106,80 @@ struct App {
     reconcile: Notify,
 }
 
-fn status_of(payload: &[u8]) -> Value {
-    // OSC 7501 payloads as reported; JSON objects are kept, anything else as raw text (unverified
-    // which encodings agents use; the spec is OSC 7501 rev 0.4).
-    match serde_json::from_slice::<Value>(payload) {
-        Ok(v) if v.is_object() => v,
-        _ => json!({"raw": String::from_utf8_lossy(payload)}),
+/// Apply one OSC 7501 report (Program Status Protocol rev 0.4: `key=value` pairs joined by `:`,
+/// `msg`/`title` base64) to a pane's status: `{state, app?, kind?, progress?, msg?, title?, records?}`
+/// for the root record, child records under `records` by id. Each report replaces its record;
+/// `state=clear` removes the record and those beneath it. Returns false if the report is discarded.
+fn apply_status(status: &mut Value, payload: &[u8]) -> bool {
+    use base64::Engine;
+    if payload.len() > 4096 {
+        return false;
     }
+    let Ok(text) = std::str::from_utf8(payload) else { return false };
+    let mut record = Map::new();
+    for pair in text.split(':') {
+        let Some((k, v)) = pair.split_once('=') else { continue };
+        let (k, v) = (k.trim(), v.trim());
+        if k.is_empty() || k.len() > 16 || !k.bytes().all(|b| b.is_ascii_lowercase())
+            || !v.bytes().all(|b| b.is_ascii_alphanumeric() || b"_.,+/=-".contains(&b))
+        {
+            continue; // malformed pair: skipped, the rest still counts
+        }
+        let value = match k {
+            "msg" | "title" => {
+                let engine = base64::engine::GeneralPurpose::new(&base64::alphabet::STANDARD,
+                    base64::engine::GeneralPurposeConfig::new().with_decode_padding_mode(base64::engine::DecodePaddingMode::Indifferent));
+                let Ok(bytes) = engine.decode(v) else { return false };
+                let Ok(s) = String::from_utf8(bytes) else { return false };
+                if s.chars().any(char::is_control) {
+                    return false;
+                }
+                json!(s)
+            }
+            "progress" => match v.parse::<u8>() {
+                Ok(p) if p <= 100 => json!(p),
+                _ => continue,
+            },
+            _ => json!(v),
+        };
+        record.insert(k.to_string(), value); // last value wins
+    }
+    let Some(state) = record.get("state").and_then(Value::as_str).map(String::from) else { return false };
+    if !matches!(state.as_str(), "idle" | "working" | "done" | "blocked" | "error" | "clear") {
+        return false;
+    }
+    let id = record.remove("id").and_then(|v| v.as_str().map(String::from));
+    if id.as_deref().is_some_and(|id| id.len() > 128 || id.split('/').any(|s| s.is_empty() || s.len() > 32)) {
+        return false;
+    }
+    let mut records = status.get("records").cloned().unwrap_or_else(|| json!({}));
+    match (id, state == "clear") {
+        (None, true) => *status = Value::Null,
+        (None, false) => {
+            let mut root = Value::Object(record);
+            if records.as_object().is_some_and(|r| !r.is_empty()) {
+                root["records"] = records;
+            }
+            *status = root;
+        }
+        (Some(id), clear) => {
+            let map = records.as_object_mut().unwrap();
+            if clear {
+                map.retain(|k, _| k != &id && !k.starts_with(&format!("{id}/")));
+            } else {
+                map.insert(id, Value::Object(record));
+            }
+            if !status.is_object() {
+                *status = json!({});
+            }
+            if map.is_empty() {
+                status.as_object_mut().unwrap().remove("records");
+            } else {
+                status["records"] = records;
+            }
+        }
+    }
+    true
 }
 
 fn unknown(e: tmux::Error) -> ProviderError {
@@ -261,7 +328,9 @@ impl App {
                         let facts = {
                             let mut st = app.state.lock().unwrap();
                             let Some(info) = st.panes.get_mut(&name) else { return };
-                            info.status = status_of(&payload);
+                            if !apply_status(&mut info.status, &payload) {
+                                continue;
+                            }
                             info.facts["status"] = info.status.clone();
                             info.facts.clone()
                         };
@@ -642,4 +711,29 @@ async fn run() -> Result<(), String> {
     }
     drop(private);
     Err(format!("disconnected from the core: {}", provider.failure().unwrap_or_default()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn osc7501_reports_replace_records_and_bad_reports_are_discarded() {
+        let mut s = Value::Null;
+        // "Installing updates"
+        assert!(apply_status(&mut s, b"state=working:app=brew:msg=SW5zdGFsbGluZyB1cGRhdGVz:progress=40"));
+        assert_eq!(s, json!({"state": "working", "app": "brew", "msg": "Installing updates", "progress": 40}));
+        assert!(apply_status(&mut s, b"state=blocked:kind=auth:junk:X=1"), "malformed pairs are skipped");
+        assert_eq!(s, json!({"state": "blocked", "kind": "auth"}), "a report replaces its record");
+        assert!(!apply_status(&mut s, b"state=sleeping"), "unknown state: ignored");
+        assert!(!apply_status(&mut s, b"state=done:msg=a"), "msg that is not base64: the whole report is discarded");
+        assert!(!apply_status(&mut s, b"msg=aGk="), "state is required");
+        assert_eq!(s["state"], "blocked");
+        assert!(apply_status(&mut s, b"state=working:id=build/test:title=VGVzdHM="));
+        assert_eq!(s["records"]["build/test"], json!({"state": "working", "title": "Tests"}));
+        assert!(apply_status(&mut s, b"state=clear:id=build"));
+        assert!(s.get("records").is_none(), "clear removes the record and those beneath it");
+        assert!(apply_status(&mut s, b"state=clear"));
+        assert_eq!(s, Value::Null);
+    }
 }
