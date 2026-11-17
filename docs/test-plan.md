@@ -59,8 +59,12 @@ listed); state-schema rollback; late crash 30 s after load (crash budget); 5 s s
   `e2e_tui_smoke.sh` (private herdr-core and prim core; 30 MB flood, core restart reattach, quit while the core
   cannot start);
 - the default scale profile;
-- a leftover-process check: a before/after diff of processes tied to test roots by environment or by unix socket
-  path. tmux renames its server to `tmux: server`, so `pgrep -x tmux` misses it.
+- a leftover-process check scoped to this run: `check.sh` re-runs itself in a transient systemd user scope
+  (`systemd-run --user --scope`), so every process it starts stays in that cgroup even after reparenting or
+  renaming (tmux becomes `tmux: server`), and concurrent runs by other agents are never counted. Leftovers are
+  recorded in the receipt (`leftover_pids`, `leftover_scope`) and then killed. Without a systemd user manager it
+  falls back to a before/after diff of processes tied to test roots, labelled as such in the receipt.
+  `PRIM_CHECK_INJECT_LEAK=1` leaks one detached process to prove the check fails.
 
 Every step runs under `env -i` with private paths and never touches a live prim, hc or tmux. It prints a PASS/FAIL
 table and writes a JSON receipt to `$CHECK_RECEIPT` (default `<target>/check-receipt.json`), with step logs under
