@@ -111,6 +111,7 @@ struct Outbound {
     line: String,
     active: Option<Arc<AtomicBool>>,
     _large: Option<LargeCharge>,
+    flushed: Option<oneshot::Sender<()>>,
 }
 struct LargeCharge { bytes: usize, used: Arc<AtomicUsize> }
 impl Drop for LargeCharge { fn drop(&mut self) { self.used.fetch_sub(self.bytes, Ordering::AcqRel); } }
@@ -146,7 +147,7 @@ impl StreamWriter {
         params.insert("stream".into(), json!(self.id));
         let line = json!({"jsonrpc": "2.0", "method": method, "params": params}).to_string();
         let bytes = line.len() + 1;
-        if self.peer.data.try_send(Outbound { line, active: Some(self.active.clone()), _large: None }, bytes).is_err() {
+        if self.peer.data.try_send(Outbound { line, active: Some(self.active.clone()), _large: None, flushed: None }, bytes).is_err() {
             self.close(json!({"reason": "slow_consumer"}));
         }
     }
@@ -213,6 +214,7 @@ impl Peer {
                     writer.write_all(item.value.line.as_bytes()).await?;
                     writer.write_all(b"\n").await?;
                     writer.flush().await?;
+                    if let Some(done) = item.value.flushed { let _ = done.send(()); }
                 }
                 Ok::<(), std::io::Error>(())
             };
@@ -293,7 +295,7 @@ impl Peer {
 
     fn send_control(&self, line: String) -> bool {
         let bytes = line.len() + 1;
-        if self.is_closed() || bytes > self.record_limit.load(Ordering::Acquire) || self.control.try_send(Outbound { line, active: None, _large: None }, bytes).is_err() {
+        if self.is_closed() || bytes > self.record_limit.load(Ordering::Acquire) || self.control.try_send(Outbound { line, active: None, _large: None, flushed: None }, bytes).is_err() {
             // No room even for recovery/control: disconnect rather than silently dropping replies
             // or events. Stream data has a smaller budget, leaving room for explicit stream closure.
             self.shutdown.send_replace(true);
@@ -310,7 +312,7 @@ impl Peer {
         let bytes = line.len() + 1;
         if self.is_closed() || bytes > STREAM_OUTBOUND_BYTES { return false; }
         if !active.load(Ordering::Relaxed) { return false; }
-        self.data.try_send(Outbound { line, active: Some(active), _large: None }, bytes).is_ok()
+        self.data.try_send(Outbound { line, active: Some(active), _large: None, flushed: None }, bytes).is_ok()
     }
 
     pub fn outbound_bytes(&self) -> usize { self.control.used_bytes() + self.data.used_bytes() + self.large_bytes.load(Ordering::Acquire) }
@@ -331,6 +333,22 @@ impl Peer {
         self.send_control(json!({"jsonrpc": "2.0", "method": method, "params": params}).to_string());
     }
 
+    /// A small reply with a completion barrier, used before the caller can tear down this peer.
+    /// Completion means local write/flush only, not that the other process read it.
+    pub async fn respond_flushed(&self, id: Value, result: RpcResult) -> Result<(), RpcError> {
+        let message = match result { Ok(value) => json!({"jsonrpc":"2.0","id":id,"result":value}), Err(error) => json!({"jsonrpc":"2.0","id":id,"error":error}) };
+        let line = serde_json::to_string(&message).map_err(|_| RpcError::invalid("reply encoding failed"))?;
+        let bytes = line.len() + 1;
+        let (done, flushed) = oneshot::channel();
+        if self.is_closed() || bytes > self.record_limit.load(Ordering::Acquire) || self.control.try_send(Outbound { line, active: None, _large: None, flushed: Some(done) }, bytes).is_err() {
+            self.close(); return Err(RpcError::new("disconnected", "reply could not be queued"));
+        }
+        match tokio::time::timeout(Duration::from_secs(1), flushed).await {
+            Ok(Ok(())) => Ok(()),
+            _ => { self.close(); Err(RpcError::new("disconnected", "reply flush unconfirmed")) }
+        }
+    }
+
     pub fn respond(&self, id: Value, result: RpcResult) {
         let msg = match result {
             Ok(v) => json!({"jsonrpc": "2.0", "id": id, "result": v}),
@@ -348,7 +366,7 @@ impl Peer {
                 Some(RpcError::new("overloaded", "one large reply is already in flight"))
             } else {
                 let charge = LargeCharge { bytes, used: self.large_bytes.clone() };
-                if self.large.try_send(Outbound { line, active: None, _large: Some(charge) }, 64).is_ok() { return; }
+                if self.large.try_send(Outbound { line, active: None, _large: Some(charge), flushed: None }, 64).is_ok() { return; }
                 Some(RpcError::new("disconnected", "large reply writer closed"))
             }
         } else { self.send_control(line); return; };

@@ -112,8 +112,16 @@ fn install_defaults(store: &mut crate::store::Store, dir: &std::path::Path) {
 
 pub async fn serve(core: Shared, listener: UnixListener) -> anyhow::Result<()> {
     let next = AtomicU64::new(1);
+    let shutdown = core.lock().unwrap().shutdown.clone();
+    let mut connections = tokio::task::JoinSet::new();
+    let mut peers = HashMap::new();
     loop {
-        let (stream, _) = listener.accept().await?;
+        let (stream, _) = tokio::select! {
+            biased;
+            _ = shutdown.requested() => break,
+            done = connections.join_next(), if !connections.is_empty() => { if let Some(Ok(id)) = done { peers.remove(&id); } continue; }
+            accepted = listener.accept() => match accepted { Ok(stream) => stream, Err(error) => { eprintln!("prim: listener failed: {error}"); break; } },
+        };
         // Bounded outbound: bytes in the OS send buffer can't be revoked when a slow viewer's streams
         // are closed, so keep that buffer small (the OS may round it up; Linux doubles it). Measured
         // with the scale harness: a 64 KiB/s viewer's first echo after attaching to output floods fell
@@ -123,7 +131,8 @@ pub async fn serve(core: Shared, listener: UnixListener) -> anyhow::Result<()> {
         let id = next.fetch_add(1, Ordering::Relaxed);
         let (r, w) = stream.into_split();
         let (peer, incoming) = Peer::spawn(r, w);
-        tokio::spawn(connection(core.clone(), Arc::new(Conn {
+        peers.insert(id, peer.clone());
+        let conn = Arc::new(Conn {
             id,
             wire: crate::provider_wire::Connection::new(id, peer.clone()),
             peer,
@@ -133,8 +142,35 @@ pub async fn serve(core: Shared, listener: UnixListener) -> anyhow::Result<()> {
             next_stream: AtomicU64::new(1),
             subscribed: Mutex::new(false),
             requests: Arc::new(tokio::sync::Semaphore::new(crate::rpc::MAX_PENDING_CALLS)),
-        }), incoming));
+        });
+        let c = core.clone();
+        connections.spawn(async move { connection(c, conn, incoming).await; id });
     }
+    // Keep the endpoint bound until cleanup finishes, so a replacement cannot race our unlink.
+    ext::shutdown(&core).await;
+    let handles: Vec<_> = core.lock().unwrap().providers.values().map(|p| p.handle.clone()).collect();
+    let mut providers = tokio::task::JoinSet::new();
+    for handle in handles { providers.spawn(async move { (handle.name.clone(), handle.shutdown().await) }); }
+    if tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while let Some(result) = providers.join_next().await {
+            if let Ok((name, Err(error))) = result { eprintln!("prim: provider {name} shutdown unconfirmed: {error}"); }
+        }
+    }).await.is_err() { eprintln!("prim: provider shutdown deadline; cleanup unconfirmed"); providers.abort_all(); }
+    { let mut c = core.lock().unwrap(); let names: Vec<_> = c.providers.keys().cloned().collect();
+      for name in names { c.on_adapter_event(&name, crate::adapter::AdapterEvent::Connected(false, None)); } }
+    for peer in peers.values() { peer.close(); }
+    if tokio::time::timeout(std::time::Duration::from_secs(1), async { while connections.join_next().await.is_some() {} }).await.is_err() { connections.abort_all(); }
+    let socket = core.lock().unwrap().socket.clone();
+    let _ = std::fs::remove_file(socket);
+    drop(listener);
+    shutdown.finish();
+    Ok(())
+}
+
+/// Signals and embedders use the same ordered stop as protocol callers.
+pub async fn shutdown(core: &Shared) {
+    let lifetime = core.lock().unwrap().shutdown.clone();
+    lifetime.request(); lifetime.stopped().await;
 }
 
 async fn connection(core: Shared, conn: Arc<Conn>, mut incoming: crate::rpc::IncomingReceiver) {
@@ -176,8 +212,12 @@ async fn connection(core: Shared, conn: Arc<Conn>, mut incoming: crate::rpc::Inc
                 let (core, conn) = (core.clone(), conn.clone());
                 tokio::spawn(async move {
                     let _permit = permit;
+                    let stopping = method == "core.shutdown" || (method == "command.invoke" && params["name"] == "prim.shutdown");
                     let result = dispatch(&core, &conn, &method, params).await;
-                    conn.peer.respond(id, result);
+                    if stopping && result.is_ok() {
+                        let _ = conn.peer.respond_flushed(id, result).await;
+                        core.lock().unwrap().shutdown.request();
+                    } else { conn.peer.respond(id, result); }
                 });
             }
             Incoming::Notification { .. } => {}
@@ -273,8 +313,12 @@ struct Invoke {
 
 async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> RpcResult {
     if conn.peer.is_closed() { return Err(provider::rejected("disconnected", "connection closed before dispatch")); }
+    if core.lock().unwrap().shutdown.is_requested() && method != "core.shutdown" && !(method == "command.invoke" && p["name"] == "prim.shutdown") {
+        return Err(provider::rejected("unavailable", "core is shutting down; not dispatched"));
+    }
     if method != "provider.register" && conn.wire.is_provider() { conn.wire.validate(core, &p)?; }
     match method {
+        "core.shutdown" => Ok(json!({"outcome":"accepted"})),
         "provider.register" => conn.wire.register(core, p).await,
         "provider.sync" => conn.wire.sync(core, p),
         "hello" => {
@@ -677,6 +721,7 @@ async fn invoke_deadline(core: &Shared, author: &str, name: &str, args: Value, d
     let deadline = provider::deadline(deadline_ms)?;
     let arg = |k: &str| args.get(k).cloned().unwrap_or(Value::Null);
     match name {
+        "prim.shutdown" => Ok(json!({"outcome":"accepted"})),
         "prim.layout.reset" => layout_reset(core, author).await,
         "prim.revert" => revert(core, author, arg("txn").as_u64()).await,
         "prim.safe_mode" => {

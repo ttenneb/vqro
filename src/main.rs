@@ -2,7 +2,7 @@ use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 use serde_json::Value;
 
-use prim::{client, ext, paths, server, tui};
+use prim::{client, paths, server, tui};
 
 #[derive(Parser)]
 #[command(name = "prim", version, about = "Workspace primitives over any multiplexer")]
@@ -46,7 +46,7 @@ async fn main() -> Result<()> {
             client::ensure_core().await?;
             tui::run(&paths::socket_path()?).await
         }
-        Cmd::Stop => stop(),
+        Cmd::Stop => stop().await,
         Cmd::Status => {
             match client::connect(&paths::socket_path()?, "cli").await {
                 Ok((peer, _, hello)) => {
@@ -105,10 +105,26 @@ fn herdr_command(explicit: Option<String>) -> Vec<String> {
     cmd.split_whitespace().map(String::from).collect()
 }
 
-fn stop() -> Result<()> {
+async fn stop() -> Result<()> {
+    let request = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let (peer, _incoming, _) = client::connect(&paths::socket_path()?, "cli").await?;
+        peer.call_with_timeout("core.shutdown", Value::Null, std::time::Duration::from_secs(1)).await.map_err(anyhow::Error::from)
+    }).await;
+    match request {
+        Ok(Ok(value)) if value["outcome"] == "accepted" => { println!("core shutdown accepted"); return Ok(()); }
+        Ok(Ok(_)) => bail!("core answered without accepting shutdown; pid fallback not used"),
+        Ok(Err(error)) if error.downcast_ref::<prim::rpc::RpcError>().is_some_and(|e| !matches!(e.kind(), "timeout" | "disconnected")) => return Err(error),
+        _ => {} // No answer: legacy Unix fallback only; never bypass a protocol refusal.
+    }
+    stop_pidfile()
+}
+
+fn stop_pidfile() -> Result<()> {
     let pidfile = paths::state_dir().join("serve.pid");
     let pid = std::fs::read_to_string(&pidfile).map_err(|_| anyhow::anyhow!("no running core (no {})", pidfile.display()))?;
-    let status = std::process::Command::new("kill").arg(pid.trim()).status()?;
+    let number: u32 = pid.trim().parse().map_err(|_| anyhow::anyhow!("invalid core pidfile"))?;
+    if number <= 1 { bail!("refusing invalid core pid {number}"); }
+    let status = std::process::Command::new("kill").arg(number.to_string()).status()?;
     if !status.success() {
         bail!("could not stop pid {}", pid.trim());
     }
@@ -125,12 +141,14 @@ async fn serve(safe: bool, herdr: Option<String>, fake: bool) -> Result<()> {
     std::fs::write(&pidfile, std::process::id().to_string())?;
     eprintln!("prim {} listening on {}{}", env!("CARGO_PKG_VERSION"), socket.display(), if safe { " (safe mode)" } else { "" });
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let lifetime = core.lock().unwrap().shutdown.clone();
     tokio::select! {
         r = tokio::signal::ctrl_c() => r?,
-        _ = term.recv() => {}
+        _ = term.recv() => {},
+        _ = lifetime.stopped() => {},
     }
-    ext::stop_all(&core);
-    let _ = std::fs::remove_file(&socket);
-    let _ = std::fs::remove_file(&pidfile);
+    server::shutdown(&core).await;
+    // The server owns socket unlink. Do not remove a replacement core's fresh pidfile.
+    if std::fs::read_to_string(&pidfile).ok().as_deref() == Some(&std::process::id().to_string()) { let _ = std::fs::remove_file(&pidfile); }
     Ok(())
 }

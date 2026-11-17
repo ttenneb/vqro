@@ -88,6 +88,7 @@ async fn run(
                 _ = &mut retry => break,
                 cmd = cmds.recv() => match cmd {
                     None => return,
+                    Some(AdapterCmd::Shutdown(reply)) => { let _ = reply.send(Ok(())); return; }
                     Some(c) => reject_command(c, "herdr-core is not connected"),
                 }
             }
@@ -116,7 +117,21 @@ async fn session(
     let hello = json!({"jsonrpc": "2.0", "id": 0, "method": "hello", "params": {"framed": true}});
     stdin.write_all(format!("{hello}\n").as_bytes()).await?;
     let mut line = Vec::new();
-    tokio::time::timeout(std::time::Duration::from_secs(5), (&mut stdout).take(1024 * 1024 + 1).read_until(b'\n', &mut line)).await??;
+    let hello_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut hello_reader = (&mut stdout).take(1024 * 1024 + 1);
+    let mut before_hello = std::collections::VecDeque::new();
+    loop {
+        tokio::select! {
+            result = tokio::time::timeout_at(hello_deadline, hello_reader.read_until(b'\n', &mut line)) => { result??; break; }
+            command = cmds.recv() => match command {
+                Some(AdapterCmd::Shutdown(reply)) => { let _ = child.kill().await; let _ = reply.send(Ok(())); return Ok(()); }
+                Some(command) if before_hello.len() < MAX_NATIVE_PENDING => before_hello.push_back(command),
+                Some(command) => reject_command(command, "native pre-hello queue is full"),
+                None => return Ok(()),
+            }
+        }
+    }
+    drop(hello_reader);
     if line.len() > 1024 * 1024 { anyhow::bail!("herdr-core hello exceeds 1 MiB"); }
     let reply: Value = serde_json::from_slice(&line)?;
     if reply.get("result").and_then(|r| r.get("framed")) != Some(&Value::Bool(true)) {
@@ -128,7 +143,7 @@ async fn session(
     let info = ProviderInfo { connection, instance, role: "backend".into(), software: json!({"name": "herdr-core", "version": reply["result"]["version"]}) };
 
     let (frame_tx, mut frame_out) = crate::queue::channel::<Vec<u8>>(1024 * 1024);
-    tokio::spawn(async move {
+    let writer = tokio::spawn(async move {
         while let Some(bytes) = frame_out.recv().await {
             if stdin.write_all(&bytes.value).await.is_err() || stdin.flush().await.is_err() {
                 break;
@@ -136,7 +151,7 @@ async fn session(
         }
     });
     let (in_tx, mut frames_in) = crate::queue::channel::<Frame>(32 * 1024 * 1024);
-    tokio::spawn(read_frames(stdout, in_tx));
+    let reader = tokio::spawn(read_frames(stdout, in_tx));
 
     let mut next_id: u64 = 1;
     let mut pending: HashMap<u64, Pending> = HashMap::new();
@@ -168,7 +183,7 @@ async fn session(
                 if late_attaches.len() >= MAX_NATIVE_PENDING { anyhow::bail!("too many expired native attachments"); }
             }
             _ = tokio::time::sleep_until(subscribe_deadline), if events_channel.is_none() => { anyhow::bail!("herdr-core initial subscription timed out"); }
-            cmd = cmds.recv() => {
+            cmd = async { if let Some(command) = before_hello.pop_front() { Some(command) } else { cmds.recv().await } } => {
                 let Some(cmd) = cmd else { return Ok(()) };
                 let Some(cmd) = command_for(cmd, connection) else { continue };
                 prune_pending(&mut pending, &mut late_attaches);
@@ -176,6 +191,11 @@ async fn session(
                 if pending.len() >= MAX_NATIVE_PENDING { reject_command(cmd, "native pending limit; not sent"); continue; }
                 match cmd {
                     AdapterCmd::Bound { .. } => unreachable!("command_for removes bindings"),
+                    AdapterCmd::Shutdown(reply) => {
+                        writer.abort(); reader.abort(); let _ = writer.await; let _ = reader.await;
+                        if tokio::time::timeout(std::time::Duration::from_millis(500), child.wait()).await.is_err() { let _ = child.kill().await; }
+                        let _ = reply.send(Ok(())); return Ok(());
+                    }
                     AdapterCmd::Spawn(req, reply) => {
                         if req.placement.is_some() { reject_command(AdapterCmd::Spawn(req, reply), "placement is not supported by the in-process herdr adapter"); continue; }
                         let mut p = json!({"no_parent": true});
@@ -210,6 +230,16 @@ async fn session(
                     let Ok(msg) = serde_json::from_slice::<Value>(&f.payload) else { continue };
                     if let Some(method) = msg.get("method").and_then(|m| m.as_str()) {
                         handle_notification(name, method, msg.get("params").cloned().unwrap_or(Value::Null), &mut records, events);
+                        if Some(f.channel) == events_channel {
+                            let (ack, consumed) = tokio::sync::oneshot::channel();
+                            if events.send((name.to_string(), AdapterEvent::Consumed(ack))).is_ok() {
+                                let writer = frame_tx.clone();
+                                let (channel, bytes) = (f.channel, f.payload.len() as u32);
+                                tokio::spawn(async move {
+                                    if consumed.await.is_ok() { let _ = writer.send(frame(channel, CREDIT, &bytes.to_le_bytes()), 13).await; }
+                                });
+                            }
+                        }
                         continue;
                     }
                     let Some(id) = msg.get("id").and_then(|i| i.as_u64()) else { continue };
@@ -232,7 +262,22 @@ async fn session(
                             let _ = events.send((name.to_string(), AdapterEvent::Snapshot(records.values().map(facts).collect())));
                         }
                         Pending::Spawn(reply) => { let _ = reply.send(result.map(|r| facts(&r))); }
-                        Pending::Kill(reply) => { let _ = reply.send(result.map(EffectResult::accepted)); }
+                        Pending::Kill(reply) => {
+                            let result = result.map(|record| {
+                                if record["state"] != "finished" { return EffectResult::accepted(record); }
+                                let observed = facts(&record);
+                                // A kill reply is an independent native fact. Some hc subscribers
+                                // never receive finished while an attachment is open. Do not let an
+                                // old-incarnation reply replace a newer record already seen here.
+                                let current = records.get(&observed.backend_ref).is_some_and(|r| facts(r).incarnation == observed.incarnation);
+                                if current && observed.valid() {
+                                    records.insert(observed.backend_ref.clone(), record.clone());
+                                    let _ = events.send((name.to_string(), AdapterEvent::Upsert(observed.clone())));
+                                    EffectResult { outcome: "observed", data: record, facts: Some(observed) }
+                                } else { EffectResult { outcome: "observed", data: record, facts: None } }
+                            });
+                            let _ = reply.send(result);
+                        }
                         Pending::Attach { reply, history } => match result {
                             Err(e) => { let _ = reply.send(Err(e)); }
                             Ok(r) => {

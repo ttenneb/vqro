@@ -81,6 +81,7 @@ pub fn start_with_instance(name: String, instance: String, events: mpsc::Unbound
             let Some(cmd) = command_for(cmd, 1) else { continue };
             match cmd {
                 AdapterCmd::Bound { .. } => unreachable!("command_for removes bindings"),
+                AdapterCmd::Shutdown(reply) => { let _ = reply.send(Ok(())); return; }
                 AdapterCmd::Spawn(req, reply) => {
                     n += 1;
                     let load = Load::from_argv(&req.argv);

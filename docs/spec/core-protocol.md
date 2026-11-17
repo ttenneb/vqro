@@ -32,16 +32,17 @@ the core forwards `command.invoke` to the connection that registered the command
 | Method | Params | Result |
 |---|---|---|
 | `hello` | `client?` or `extension?` (name) | `server`, `version`, `protocol`, `you` (author id), `epoch`, `seq`, `safe_mode` |
-| `core.shutdown` | | `outcome: "accepted"` (contract; implementation pending) |
+| `core.shutdown` | | `outcome: "accepted"` |
 
 Every change is recorded with the connection's author (`ext:<name>`, `<client>:<n>`).
 
-`core.shutdown`, **contract; implementation pending (D22 proposed).** Any connection of the owning user may ask the core to stop. It
-replies, then stops in order: it stops its extensions (their lifetime channels close), closes client connections
-and the endpoint, and exits. Durable state is already on disk (every adopted transaction is persisted before it is
-published). The same stop is offered as the built-in command `prim.shutdown`, so it is on the recovery surface
-with every extension broken. `prim stop` calls `core.shutdown`. Today `prim stop` still reads `<state>/serve.pid`
-and sends SIGTERM, which runs the same ordered stop.
+`core.shutdown` is implemented (broader D22 transport work remains proposed). The accepted reply is locally
+written/flushed before stop begins, not a remote-read guarantee. The core stops accepting, closes extension lifetime
+pipes (500 ms grace, then kill/reap), stops provider transport links, closes clients/streams, removes the endpoint,
+and exits. Backend-owned terminals are not killed; input is never replayed. Bounded cleanup waits report
+unconfirmed cleanup honestly. Dispatch/restarts are rejected while stopping. `prim.shutdown` is the same built-in
+recovery command, including safe mode. `prim stop` uses RPC even without a pidfile; only no-answer, timeout or
+disconnect uses legacy positive-pid signal fallback, never a protocol refusal. SIGTERM/Ctrl-C use the same cleanup.
 
 ## Workspace (prim-owned state, D15)
 
@@ -260,6 +261,13 @@ senders within 100 ms; cancelled commands still queued before native dispatch ar
 responses retain only bounded cleanup tokens so their returned channel is explicitly closed. At 1024 such tokens
 the native connection is closed/recovered, never replayed. Hello and initial subscription each have a five-second
 startup deadline; hello framing is capped at 1 MiB. These are distinct from the frontend pending-call limit.
+
+The native herdr adapter reconciles a finished `terminal.kill` reply into resource facts even when no finished
+event arrives with an attachment open. It retains unknown exit codes as null and does not replace newer-incarnation
+records with an old reply. Its `events.subscribe` DATA channel returns exact payload-byte CREDIT only after a FIFO
+consumer barrier; the native core acknowledges after applying facts, and `prim-herdr` after its bounded publisher
+accepts prior facts. Credit waiting is off the native session loop. Finite-window fixture evidence is in
+`tests/herdr_event_credit.rs`; real scale receipts are separate from this fixture claim.
 
 ## Commands
 

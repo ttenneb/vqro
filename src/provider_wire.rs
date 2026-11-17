@@ -327,6 +327,7 @@ impl WireProvider {
         loop {
             let cmd = tokio::select! { biased; _ = stopped.changed() => break, _ = health.changed() => { self.peer.close(); break; }, _ = self.peer.closed() => break, cmd = commands.recv() => match cmd { Some(cmd) => cmd, None => break } };
             let (context, cmd) = match cmd {
+                AdapterCmd::Shutdown(reply) => { self.peer.close(); let _ = reply.send(Ok(())); break; }
                 AdapterCmd::Bound { connection, context, command } if connection == self.connection => (context, *command),
                 stale => { adapter::reject_command(stale, "wire provider connection changed"); continue; }
             };
@@ -340,6 +341,7 @@ impl WireProvider {
     }
     async fn command(self: Arc<Self>, context: EffectContext, cmd: AdapterCmd) {
         match cmd {
+            AdapterCmd::Shutdown(reply) => { self.peer.close(); let _ = reply.send(Ok(())); }
             AdapterCmd::Spawn(req, reply) => {
                 let mut args = json!({"argv": req.argv, "env": req.env});
                 if let Some(cwd) = req.cwd { args["cwd"] = json!(cwd); }

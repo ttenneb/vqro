@@ -93,6 +93,8 @@ impl ResourceFacts {
 fn empty_data() -> Value { serde_json::json!({}) }
 
 pub enum AdapterEvent {
+    /// FIFO acknowledgement after earlier native metadata reached its consumer.
+    Consumed(oneshot::Sender<()>),
     Registered(ProviderInfo),
     /// Full current list; resources not in it are gone. Sent on connect and after a resync.
     Snapshot(Vec<ResourceFacts>),
@@ -172,6 +174,8 @@ pub struct SpawnRequest {
 type Reply<T> = oneshot::Sender<Result<T, AdapterError>>;
 
 pub enum AdapterCmd {
+    /// Stop this provider link/worker only, never backend-owned terminal execution.
+    Shutdown(Reply<()>),
     /// A core route binds queued work to the native connection that accepted the registration.
     Bound { connection: u64, context: Option<EffectContext>, command: Box<AdapterCmd> },
     Spawn(SpawnRequest, Reply<ResourceFacts>),
@@ -183,6 +187,7 @@ pub enum AdapterCmd {
 pub(crate) fn reject_command(command: AdapterCmd, why: &str) {
     match command {
         AdapterCmd::Bound { command, .. } => reject_command(*command, why),
+        AdapterCmd::Shutdown(reply) => { let _ = reply.send(Err(AdapterError::Rejected(why.into()))); }
         AdapterCmd::Spawn(_, reply) => { let _ = reply.send(Err(AdapterError::Rejected(why.into()))); }
         AdapterCmd::Kill(_, reply) | AdapterCmd::Invoke { reply, .. } => { let _ = reply.send(Err(AdapterError::Rejected(why.into()))); }
         AdapterCmd::Attach { reply, .. } => { let _ = reply.send(Err(AdapterError::Rejected(why.into()))); }
@@ -201,6 +206,7 @@ pub fn command_for(mut command: AdapterCmd, current: u64) -> Option<AdapterCmd> 
                     AdapterCmd::Spawn(_, reply) => reply.is_closed(),
                     AdapterCmd::Kill(_, reply) | AdapterCmd::Invoke { reply, .. } => reply.is_closed(),
                     AdapterCmd::Attach { reply, .. } => reply.is_closed(),
+                    AdapterCmd::Shutdown(_) => false,
                     AdapterCmd::Bound { .. } => unreachable!(),
                 };
                 return if cancelled { None } else { Some(native) };
@@ -231,6 +237,12 @@ impl AdapterHandle {
             Some(connection) => AdapterCmd::Bound { connection, context: self.context.clone(), command: Box::new(command) },
             None => command, // Direct adapter fixture calls; core routes are always bound.
         }
+    }
+
+    pub async fn shutdown(&self) -> Result<(), AdapterError> {
+        let (tx, rx) = oneshot::channel();
+        if self.cmds.send(AdapterCmd::Shutdown(tx)).is_err() { return Ok(()); }
+        rx.await.map_err(|_| AdapterError::Indeterminate("provider shutdown unconfirmed".into()))?
     }
 
     pub async fn spawn(&self, req: SpawnRequest) -> Result<ResourceFacts, AdapterError> {

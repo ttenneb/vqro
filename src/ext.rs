@@ -37,6 +37,8 @@ impl ExtRuntime {
 /// Bring running extensions in line with the workspace entries and safe mode.
 pub fn reconcile(core: &Shared) {
     let mut c = core.lock().unwrap();
+    if c.shutdown.is_requested() { return; }
+    c.extension_tasks.retain(|task| !task.is_finished());
     let specs: Vec<(String, u64, Value)> = c
         .store
         .entries()
@@ -137,7 +139,7 @@ pub fn reconcile(core: &Shared) {
             Ok(mut child) => {
                 // The core alone holds the writer. Kernel pipe closure on core
                 // death reaches extensions even when no Rust cleanup can run.
-                let lifetime = child.stdin.take();
+                let mut lifetime = child.stdin.take();
                 let (stop_tx, stop_rx) = oneshot::channel();
                 rt.stop = Some(stop_tx);
                 rt.running = true;
@@ -147,10 +149,17 @@ pub fn reconcile(core: &Shared) {
                 c.emit("extension", json!({"name": name, "state": j}));
                 let core = core.clone();
                 let name = name.clone();
-                tokio::spawn(async move {
+                c.extension_tasks.push(tokio::spawn(async move {
                     tokio::select! {
                         _ = stop_rx => {
-                            let _ = child.kill().await;
+                            // Cooperative extensions see EOF and can close owned private backends.
+                            // An uncooperative extension is still bounded and reaped.
+                            drop(lifetime.take());
+                            if tokio::time::timeout(Duration::from_millis(500), child.wait()).await.is_err() { let _ = child.kill().await; }
+                            let mut c = core.lock().unwrap();
+                            if let Some(rt) = c.exts.get_mut(&name) {
+                                if rt.generation == generation + 1 && !rt.running { rt.pid = None; rt.status = "stopped".into(); }
+                            }
                         }
                         status = child.wait() => {
                             let why = match status {
@@ -165,7 +174,7 @@ pub fn reconcile(core: &Shared) {
                         }
                     }
                     drop(lifetime); // retain the writer across the whole child lifetime
-                });
+                }));
             }
         }
     }
@@ -174,6 +183,7 @@ pub fn reconcile(core: &Shared) {
 /// An extension exited on its own. Returns whether to restart it.
 fn on_exit(core: &Shared, name: &str, generation: u64, why: String) -> bool {
     let mut c = core.lock().unwrap();
+    let shutting_down = c.shutdown.is_requested();
     let Some(rt) = c.exts.get_mut(name) else { return false };
     if rt.generation != generation {
         return false; // already replaced or stopped
@@ -187,7 +197,7 @@ fn on_exit(core: &Shared, name: &str, generation: u64, why: String) -> bool {
     while rt.crashes.front().map(|t| now.duration_since(*t) > WINDOW).unwrap_or(false) {
         rt.crashes.pop_front();
     }
-    let restart = rt.crashes.len() < BUDGET;
+    let restart = !shutting_down && rt.crashes.len() < BUDGET;
     rt.status = if restart { "restarting".into() } else { "failed".into() };
     let j = rt.to_json();
     c.emit("extension", json!({"name": name, "state": j}));
@@ -209,6 +219,23 @@ pub fn restart(core: &Shared, name: &str) -> Result<(), crate::rpc::RpcError> {
     }
     reconcile(core);
     Ok(())
+}
+
+/// Close lifetimes, await child cleanup/reaping, and never restart while the core is stopping.
+pub async fn shutdown(core: &Shared) {
+    stop_all(core);
+    let mut tasks = std::mem::take(&mut core.lock().unwrap().extension_tasks);
+    let joined = tokio::time::timeout(Duration::from_secs(2), async {
+        for task in &mut tasks { let _ = task.await; }
+    }).await;
+    if joined.is_ok() {
+        for rt in core.lock().unwrap().exts.values_mut() { rt.pid = None; rt.status = "stopped".into(); }
+    }
+    if joined.is_err() {
+        eprintln!("prim: extension shutdown deadline; cleanup unconfirmed");
+        for task in &tasks { task.abort(); }
+        for task in tasks { let _ = task.await; }
+    }
 }
 
 pub fn stop_all(core: &Shared) {

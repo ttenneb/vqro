@@ -319,6 +319,7 @@ async fn serve(
             ev = events.recv() => {
                 let Some((_, ev)) = ev else { return Ended::Core("adapter stopped".into()) };
                 let result = match ev {
+                    AdapterEvent::Consumed(ack) => { let _ = ack.send(()); Ok(()) }
                     AdapterEvent::Snapshot(list) => {
                         let rows: Vec<Value> = list.iter().filter(|f| f.valid()).map(facts).collect();
                         *known.lock().unwrap() = rows.iter().map(|f| (f["ref"].as_str().unwrap().to_string(), f.clone())).collect();

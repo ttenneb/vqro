@@ -64,6 +64,7 @@ pub const BUILTINS: &[(&str, &str)] = &[
     ("prim.layout.reset", "Reset the layout to one tab per live terminal"),
     ("prim.revert", "Revert a workspace transaction (args: txn; default: the last one not made by an extension)"),
     ("prim.safe_mode", "Stop all extensions, or start them again (args: on)"),
+    ("prim.shutdown", "Stop extensions and provider connections, then exit the core"),
     ("prim.extension.disable", "Disable an extension (args: name)"),
     ("prim.extension.enable", "Enable an extension (args: name)"),
     ("prim.extension.restart", "Restart an extension, clearing its crash budget (args: name)"),
@@ -94,6 +95,8 @@ pub struct Core {
     pub events: broadcast::Sender<(u64, Value)>,
     pub commands: BTreeMap<String, CommandInfo>,
     pub exts: BTreeMap<String, ExtRuntime>,
+    pub shutdown: crate::shutdown::Shutdown,
+    pub(crate) extension_tasks: Vec<tokio::task::JoinHandle<()>>,
     pub safe_mode: bool,
     /// Live view content (`view.publish`): derived, not persisted, not in history.
     /// view -> (content, author, connection id). Cleared when its publisher disconnects.
@@ -137,6 +140,8 @@ impl Core {
             events,
             commands,
             exts: BTreeMap::new(),
+            shutdown: crate::shutdown::Shutdown::default(),
+            extension_tasks: Vec::new(),
             safe_mode,
             live: BTreeMap::new(),
             clients: BTreeMap::new(),
@@ -432,6 +437,7 @@ impl Core {
     pub fn on_adapter_event(&mut self, name: &str, event: AdapterEvent) {
         if !self.providers.contains_key(name) { return; }
         match event {
+            AdapterEvent::Consumed(ack) => { let _ = ack.send(()); }
             AdapterEvent::Registered(info) => {
                 let capabilities = &self.providers[name].handle.capabilities;
                 if info.connection == 0 || info.instance.is_empty() || info.instance.len() > 256

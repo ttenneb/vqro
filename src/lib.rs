@@ -17,6 +17,7 @@ pub mod bridge_tokens;
 pub mod resource_admission;
 pub mod rpc;
 pub mod server;
+pub mod shutdown;
 pub mod store;
 pub mod tui;
 pub mod tmux;
