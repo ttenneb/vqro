@@ -295,7 +295,8 @@ class Agents:
 
 
 def main():
-    ext = Extension("agents", event_types=["entries", "resource", "resource.removed", "provider", "view.content"])
+    ext = Extension("agents", event_types=["entries", "resource", "resource.removed", "provider", "view.content"],
+                    view_content={"prefixes": ["agent-"]})
     Agents(ext)
     ext.run()
 

@@ -70,6 +70,34 @@ async fn subscribers_without_options_get_full_events_of_every_type() {
 }
 
 #[tokio::test]
+async fn live_view_allowlist_filters_both_replay_and_subsequent_publication() {
+    let (dir, _core, p) = setup().await;
+    let snapshot = p.call("workspace.snapshot", json!({})).await.unwrap();
+    p.call("view.publish", json!({"view": "sidebar", "content": {"text": "x".repeat(500_000)}})).await.unwrap();
+    p.call("view.publish", json!({"view": "themes", "content": {"text": "wanted"}})).await.unwrap();
+    let (sub, mut rx, _) = client::connect(&dir.path().join("s.sock"), "filtered").await.unwrap();
+    sub.call("events.subscribe", json!({"from": snapshot["seq"], "epoch": snapshot["epoch"], "types": ["view.content"],
+        "view_content": {"names": ["themes"], "prefixes": ["agent-"]}})).await.unwrap();
+    let (_, first) = next_event(&mut rx).await;
+    assert_eq!(first["data"]["view"], "themes", "unrelated large replay must not reach the subscriber");
+    p.call("view.publish", json!({"view": "sidebar", "content": null})).await.unwrap();
+    p.call("view.publish", json!({"view": "agent-r1", "content": {"text": "wanted prefix"}})).await.unwrap();
+    let (_, next) = next_event(&mut rx).await;
+    assert_eq!(next["data"]["view"], "agent-r1");
+    p.call("view.publish", json!({"view": "agent-r1", "content": null})).await.unwrap();
+    let (_, removed) = next_event(&mut rx).await;
+    assert_eq!(removed["data"]["view"], "agent-r1");
+    assert!(removed["data"]["content"].is_null(), "filtered subscribers still observe matching view removal");
+}
+
+#[tokio::test]
+async fn a_malformed_view_filter_is_rejected() {
+    let (_dir, _core, p) = setup().await;
+    let err = p.call("events.subscribe", json!({"view_content": {"names": "sidebar"}})).await.unwrap_err();
+    assert_eq!(err.kind(), "invalid");
+}
+
+#[tokio::test]
 async fn a_malformed_type_filter_is_rejected() {
     let (_dir, _core, p) = setup().await;
     let err = p.call("events.subscribe", json!({"types": "resource"})).await.unwrap_err();

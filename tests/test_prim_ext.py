@@ -6,7 +6,7 @@ import threading
 import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "extensions"))
-from prim_ext import Extension, Prim, NOTIFICATION_BYTES
+from prim_ext import Extension, Prim, PrimError, NOTIFICATION_BYTES
 
 
 def snapshot(seq, value):
@@ -121,6 +121,71 @@ class InboundBounds(unittest.TestCase):
             count += 1
         self.assertEqual(count, 128)
         self.assertEqual(prim.note_bytes, 128*64)
+
+
+class NotificationRecovery(unittest.TestCase):
+    def prim(self):
+        prim = Prim.__new__(Prim)
+        prim.notes = queue.Queue(maxsize=128)
+        prim.note_lock = threading.Lock()
+        prim.note_bytes = 0
+        prim.recover_notifications = True
+        prim.note_gap = None
+        prim.handler = lambda *_: None
+        return prim
+
+    def test_overflow_collapses_waiting_notifications_into_one_local_gap(self):
+        prim = self.prim()
+        msg = {"method": "event", "params": event(2, "obsolete")}
+        for _ in range(129):
+            self.assertTrue(prim._queue_note(msg, 64), "recovering extensions must not disconnect")
+        self.assertEqual(prim.notes.qsize(), 1)
+        marker, charge = prim.notes.get_nowait()
+        self.assertEqual(marker["method"], "missed")
+        self.assertEqual(marker["params"]["reason"], "notification_backlog")
+        self.assertEqual(prim.note_bytes, 64)
+        for _ in range(100):
+            self.assertTrue(prim._queue_note(msg, 64))
+        self.assertTrue(prim.notes.empty(), "one pending gap replaces the dropped prefix")
+        prim._note(marker, charge)
+        self.assertEqual(prim.note_bytes, 0)
+
+    def test_failed_recovery_disconnects_instead_of_continuing_with_a_divergent_cache(self):
+        prim = self.prim()
+        class Socket:
+            closed = False
+            def shutdown(self, _): self.closed = True
+        prim.sock = Socket()
+        def failed(*_): raise PrimError("snapshot overloaded", "overloaded")
+        prim.handler = failed
+        prim._queue_note({}, NOTIFICATION_BYTES)
+        self.assertFalse(prim._note(*prim.notes.get_nowait()))
+        self.assertTrue(prim.sock.closed)
+        self.assertEqual(prim.note_bytes, 0)
+
+    def test_snapshot_fences_dropped_events_but_retains_events_during_recovery(self):
+        prim = self.prim()
+        ext = Extension.__new__(Extension)
+        ext.cache_lock = threading.RLock()
+        ext.listeners = []
+        ext._load(snapshot(1, "old"))
+        def snapshot_call(method):
+            self.assertIsNone(prim.note_gap, "recovery must buffer new deltas before requesting its snapshot")
+            prim._queue_note({"method": "event", "params": event(11, "after snapshot")}, 64)
+            return snapshot(10, "snapshot")
+        ext.prim = type("Core", (), {"call": staticmethod(snapshot_call)})()
+        prim.handler = ext._handle
+        prim._queue_note({"method": "event", "params": event(2, "in flight")}, 2*1024*1024)
+        active = prim.notes.get_nowait()
+        prim._queue_note({"method": "event", "params": event(3, "dropped")}, 3*1024*1024)
+        self.assertLessEqual(prim.note_bytes, NOTIFICATION_BYTES)
+        prim._note(*active)
+        prim._note(*prim.notes.get_nowait())
+        self.assertEqual(ext.seq, 10)
+        prim._note(*prim.notes.get_nowait())
+        self.assertEqual(ext.seq, 11)
+        self.assertEqual(ext.value("doc/test/value"), "after snapshot")
+        self.assertEqual(prim.note_bytes, 0)
 
 
 class SnapshotFence(unittest.TestCase):

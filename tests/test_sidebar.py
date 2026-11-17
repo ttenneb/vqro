@@ -16,7 +16,7 @@ class CacheLock:
 
 
 class Extension:
-    def __init__(self, *_):
+    def __init__(self, *_, **__):
         self.entries, self.live = {}, {}
         self.resources = {"r1": {"argv": ["sh"], "state": "live", "status": {"state": "idle"}}}
         self.cache_lock, self.published, self.logs = CacheLock(), [], []

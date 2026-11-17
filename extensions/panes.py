@@ -12,7 +12,7 @@ from prim_ext import Extension, PrimError, node_at, replace_at, views_in  # noqa
 
 from prim_views import terminal_target
 
-ext = Extension("panes", event_types=["entries", "resource", "resource.removed", "view.content"])
+ext = Extension("panes", event_types=["entries", "resource", "resource.removed"])
 
 
 def target(args):

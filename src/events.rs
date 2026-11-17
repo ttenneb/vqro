@@ -16,14 +16,31 @@ pub struct SubscribeOptions {
     pub epoch: Option<String>,
     /// Only these event types (`missed` always arrives). Absent: every type. Unknown names are allowed.
     pub types: Option<Vec<String>>,
+    /// Restrict only view.content by exact names or literal prefixes. None: all views.
+    pub view_content: Option<ViewContentFilter>,
     /// `resource` events after the first one per resource carry only the id and changed fields,
     /// marked `"partial": true`.
     #[serde(default)]
     pub partial_resources: bool,
 }
 
+#[derive(Deserialize, Default, Clone)]
+pub struct ViewContentFilter {
+    #[serde(default)]
+    pub names: Vec<String>,
+    #[serde(default)]
+    pub prefixes: Vec<String>,
+}
+
+impl ViewContentFilter {
+    fn matches(&self, name: &str) -> bool {
+        self.names.iter().any(|n| n == name) || self.prefixes.iter().any(|p| name.starts_with(p))
+    }
+}
+
 pub struct EventFilter {
     types: Option<HashSet<String>>,
+    views: Option<ViewContentFilter>,
     partial: bool,
     /// Last full record sent per resource id: the base the client's copy is merged onto.
     sent: HashMap<String, Map<String, Value>>,
@@ -31,7 +48,7 @@ pub struct EventFilter {
 
 impl EventFilter {
     pub fn new(opts: &SubscribeOptions) -> EventFilter {
-        EventFilter { types: opts.types.as_ref().map(|t| t.iter().cloned().collect()), partial: opts.partial_resources, sent: HashMap::new() }
+        EventFilter { types: opts.types.as_ref().map(|t| t.iter().cloned().collect()), views: opts.view_content.clone(), partial: opts.partial_resources, sent: HashMap::new() }
     }
 
     /// After `missed` the client reloads a snapshot, so no earlier base is valid: the next event
@@ -48,6 +65,9 @@ impl EventFilter {
             if let Some(id) = ev["data"]["id"].as_str() { self.sent.remove(id); }
         }
         if self.types.as_ref().is_some_and(|t| !t.contains(ty)) {
+            return None;
+        }
+        if ty == "view.content" && self.views.as_ref().is_some_and(|v| !v.matches(ev["data"]["view"].as_str().unwrap_or(""))) {
             return None;
         }
         if !self.partial {
@@ -120,6 +140,24 @@ mod tests {
         f.shape(res("r1", "a"));
         let p = f.shape(json!({"type": "resource", "data": {"id": "r1", "status": "a"}})).unwrap();
         assert_eq!(p["data"], json!({"id": "r1", "argv": null}));
+    }
+
+    #[test]
+    fn view_content_filter_matches_exact_names_or_prefixes_only() {
+        let opts = serde_json::from_value(json!({"types": ["view.content", "entries"],
+            "view_content": {"names": ["themes", "icons"], "prefixes": ["agent-"]}})).unwrap();
+        let mut f = EventFilter::new(&opts);
+        for view in ["themes", "icons", "agent-r2", "agent-r999"] {
+            assert!(f.shape(json!({"type": "view.content", "data": {"view": view, "content": null}})).is_some());
+        }
+        for view in ["sidebar", "settings", "agents-r2", "themes-preview"] {
+            assert!(f.shape(json!({"type": "view.content", "data": {"view": view, "content": {"items": []}}})).is_none(), "unrequested view {view}");
+        }
+        assert!(f.shape(json!({"type": "entries", "data": {}})).is_some());
+        f.reset();
+        assert!(f.shape(json!({"type": "view.content", "data": {"view": "sidebar"}})).is_none());
+        let opts = serde_json::from_value(json!({"view_content": {}})).unwrap();
+        assert!(EventFilter::new(&opts).shape(json!({"type": "view.content", "data": {"view": "anything"}})).is_none());
     }
 
     #[test]

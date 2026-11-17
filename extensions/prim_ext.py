@@ -45,7 +45,7 @@ MAX_PENDING = 128
 class Prim:
     """JSON-RPC over lines. The core may send us requests (command.invoke) and notifications."""
 
-    def __init__(self, path, handler):
+    def __init__(self, path, handler, *, recover_notifications=False):
         self.sock = socket.socket(socket.AF_UNIX)
         self.sock.connect(path)
         self.file = self.sock.makefile("rwb", buffering=0)
@@ -57,6 +57,10 @@ class Prim:
         self.notes = queue.Queue(maxsize=128)  # ordered; byte charge remains through callback execution
         self.note_lock = threading.Lock()
         self.note_bytes = 0
+        # Extension opts in: its missed handler snapshots/fences cache state.
+        # Raw Prim users retain explicit disconnect rather than silently dropping events.
+        self.recover_notifications = recover_notifications
+        self.note_gap = None
         self.handlers = threading.BoundedSemaphore(32)
         threading.Thread(target=self._read, daemon=True).start()
         threading.Thread(target=self._notes, daemon=True).start()
@@ -96,13 +100,31 @@ class Prim:
     def _queue_note(self, msg, wire_bytes):
         charge = max(64, wire_bytes)
         with self.note_lock:
-            if self.note_bytes + charge > NOTIFICATION_BYTES:
+            recover = getattr(self, "recover_notifications", False)
+            if recover and self.note_gap is not None:
+                return True  # One pending snapshot will cover this dropped prefix.
+            # Reserve a small gap marker even while a maximum-size callback is active.
+            limit = NOTIFICATION_BYTES - (64 if recover else 0)
+            if self.note_bytes + charge <= limit:
+                try:
+                    self.notes.put_nowait((msg, charge))
+                    self.note_bytes += charge
+                    return True
+                except queue.Full:
+                    pass
+            if not recover:
                 return False
-            try:
-                self.notes.put_nowait((msg, charge))
-            except queue.Full:
-                return False
-            self.note_bytes += charge
+            # Keep the active callback charged; discard only callbacks not yet dispatched.
+            while True:
+                try:
+                    _, old_charge = self.notes.get_nowait()
+                    self.note_bytes -= old_charge
+                except queue.Empty:
+                    break
+            marker = {"method": "missed", "params": {"reason": "notification_backlog"}}
+            self.note_gap = marker
+            self.notes.put_nowait((marker, 64))
+            self.note_bytes += 64
             return True
 
     def _read(self):
@@ -138,15 +160,26 @@ class Prim:
             self.handlers.release()
 
     def _note(self, msg, charge):
+        with self.note_lock:
+            local_gap = getattr(self, "note_gap", None) is msg
+            if local_gap:
+                # Buffer events that arrive during snapshot acquisition. The cache
+                # fences them against snapshot.seq; overflow schedules another gap.
+                self.note_gap = None
         try:
-            self._dispatch(msg)
+            if not self._dispatch(msg) and local_gap:
+                print("prim: notification recovery failed; disconnecting rather than using a divergent cache", file=sys.stderr, flush=True)
+                self.sock.shutdown(socket.SHUT_RDWR)
+                return False
+            return True
         finally:
             with self.note_lock:
                 self.note_bytes -= charge
 
     def _notes(self):
         while True:
-            self._note(*self.notes.get())
+            if not self._note(*self.notes.get()):
+                return  # Failed recovery closed the transport; never apply stale queued deltas.
 
     def _dispatch(self, msg):
         context = getattr(self, "_command_context", None)
@@ -159,10 +192,12 @@ class Prim:
             result = self.handler(msg["method"], msg.get("params") or {})
             if "id" in msg:
                 self._send({"jsonrpc": "2.0", "id": msg["id"], "result": result})
+            return True
         except Exception as e:  # report, don't crash
             if "id" in msg:
                 kind = getattr(e, "kind", None) or "extension"
                 self._send({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32000, "message": str(e), "data": {"kind": kind}}})
+            return False
         finally:
             context.invocation = previous
 
@@ -178,11 +213,12 @@ class PrimError(RuntimeError):
 
 
 class Extension:
-    def __init__(self, name=None, event_types=None):
-        """event_types: only these core event types (e.g. ["entries"]); None for all. Caches only
-        follow the types received: without "resource", `resources` stays as of the last snapshot."""
+    def __init__(self, name=None, event_types=None, view_content=None):
+        """event_types: only these types; None for all. view_content: optional {names, prefixes}
+        allowlist for live view events. Caches follow only subscribed facts between snapshots."""
         self.name = os.environ.get("PRIM_EXTENSION", name or "ext")
         self.event_types = event_types
+        self.view_content = view_content
         self.handlers = {}
         self.titles = {}
         self.listeners = []
@@ -190,7 +226,7 @@ class Extension:
         self.resources = {}
         self.providers = {}
         self.cache_lock = threading.RLock()
-        self.prim = Prim(os.environ["PRIM_SOCKET"], self._handle)
+        self.prim = Prim(os.environ["PRIM_SOCKET"], self._handle, recover_notifications=True)
         self.info = self.prim.call("hello", {"extension": self.name, "extension_token": os.environ.get("PRIM_EXTENSION_TOKEN")})
         self._load(self.prim.call("workspace.snapshot"))
 
@@ -254,6 +290,8 @@ class Extension:
         sub = {"from": self.seq, "epoch": self.epoch, "partial_resources": True}
         if self.event_types is not None:
             sub["types"] = list(self.event_types)
+        if self.view_content is not None:
+            sub["view_content"] = self.view_content
         self.prim.call("events.subscribe", sub)
         threading.Event().wait()
 
@@ -374,7 +412,7 @@ class Extension:
             return t, d
         if method == "missed":
             self._load(self.prim.call("workspace.snapshot"))
-            return "missed", {}
+            return "missed", params
         return None
 
 

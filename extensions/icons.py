@@ -21,7 +21,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from prim_ext import Extension, PrimError  # noqa: E402
 
-ext = Extension("icons", event_types=["entries", "view.content"])  # no resource events: not used here
+ext = Extension("icons", event_types=["entries"])  # no resource events: not used here
 ENTRY = "doc/settings/icons"
 
 # The names prim's bundled extensions draw today, and what each marks. A set may leave any out.

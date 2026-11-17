@@ -22,7 +22,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from prim_ext import Extension, PrimError  # noqa: E402
 from prim_views import ended, title
 
-ext = Extension("sidebar")
+ext = Extension("sidebar", event_types=["entries", "resource", "resource.removed", "view.content"],
+                view_content={"names": ["workspaces"]})
 PREFS = "doc/settings/sidebar"
 SHOW_DEFAULT = {"workspaces": True, "worktrees": True, "terminals": True, "stray": True}
 PRESETS = {

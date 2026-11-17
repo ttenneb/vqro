@@ -120,15 +120,21 @@ Framing, including unterminated records and replies, is capped at 64 MiB by defa
 that to 1 MiB, replies included. `Peer::set_max_record_bytes` also checks an in-progress record. Queued response
 values have 4 MiB plus one large-response permit, held until the call consumes them. Pending calls and admitted
 server requests are capped at 128/connection. Overflow closes ingress explicitly: recover facts, never resend
-effects. The Python helper caps notifications at 4 MiB/128 records through callbacks, request handlers at 32,
-and pending calls at 128. These encoded/queue bounds exclude allocator overhead, framing/serialization copies
+effects. The Python helper caps notifications at 4 MiB/128 queued records through callbacks, request handlers at 32,
+and pending calls at 128. `Extension` opts into overflow recovery: discard only undispatched notifications,
+queue one local `missed {reason: "notification_backlog"}`, then snapshot/fence before applying subsequent
+notifications. Arrivals during snapshot acquisition are buffered; another overflow schedules another gap. A
+64-byte gap-marker reservation stays inside the byte cap, and the active callback remains charged. Commands,
+RPC replies and effects are never dropped or replayed by this mechanism. If the recovery snapshot fails, the
+transport closes rather than continuing with a divergent cache. Raw `Prim` users must explicitly opt in with a
+snapshot-capable missed handler; otherwise overflow retains the explicit disconnect/restart behavior. These encoded/queue bounds exclude allocator overhead, framing/serialization copies
 and a consumer-held record.
 
 ## Events
 
 | Method | Params | Result |
 |---|---|---|
-| `events.subscribe` | `from?` (seq), `epoch?` (opaque string, required with `from`), `types?` (list of event types), `partial_resources?` (bool) | `epoch`, `seq` |
+| `events.subscribe` | `from?` (seq), `epoch?` (opaque string, required with `from`), `types?` (list of event types), `partial_resources?` (bool), `view_content?` ({names?: [string], prefixes?: [string]}) | `epoch`, `seq` |
 
 The event log retains at most **10,000 records and 8 MiB encoded JSON** (64-byte floor). Byte eviction, an
 unretainable record, or a replay batch too large for the control backlog produces `missed`; subscription stays
@@ -138,6 +144,10 @@ Client resync buffers have the same 8 MiB byte cap and restart recovery on overf
 Subscription options shape what one subscriber receives; they never change the log or other subscribers.
 - `types`: only events of these types arrive (unknown names are allowed; `missed` always arrives). Caches built
   from a type you don't receive go stale until the next snapshot.
+- `view_content`: restricts only `view.content` events to exact `names` or literal `prefixes` (OR). Omitted means
+  all views; an empty object matches none. Matching includes content removal (`content: null`), replay and new
+  events. Other event types and `missed` are unchanged. Prefixes are plain strings, not globs. Snapshots remain
+  complete; caches of excluded views stay as of their last snapshot. Older cores ignore this optional field.
 - `partial_resources`: the first `resource` event per resource after subscribing, after `missed`, or after its
   `resource.removed` carries the full record. Later ones carry only `id` and the fields that changed (a removed
   field as `null`) and have `"partial": true` at the top level of the event. Merge them onto the record you hold.

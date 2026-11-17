@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from prim_ext import Extension, PrimError, first_tabs, node_at, views_in  # noqa: E402
 from prim_views import ended, terminal_target, title, view_resource
 
-ext = Extension("tabs")
+ext = Extension("tabs", event_types=["entries", "resource", "resource.removed"])
 
 
 def focus_view(node, view):
