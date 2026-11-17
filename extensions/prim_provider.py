@@ -17,9 +17,10 @@ OUTCOMES = frozenset({"dispatched", "accepted", "observed", "rejected"})
 
 
 class ProviderError(Exception):
-    def __init__(self, kind, message):
+    def __init__(self, kind, message, *, remote=False):
         super().__init__(message)
         self.kind = kind
+        self.remote = remote  # An explicit RPC error reply, not a local transport gap.
 
 
 class _IdentityLedger:
@@ -317,7 +318,7 @@ class Provider:
                     if pending is not None and not future.done():
                         if "error" in row:
                             error = row["error"]
-                            future.set_exception(ProviderError(error.get("data", {}).get("kind", "backend"), error.get("message", "core error")))
+                            future.set_exception(ProviderError(error.get("data", {}).get("kind", "backend"), error.get("message", "core error"), remote=True))
                         else:
                             result = row.get("result")
                             if pending_method == "provider.register":

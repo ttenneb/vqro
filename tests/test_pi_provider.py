@@ -29,11 +29,14 @@ class BridgeCore(Core):
         self.allow_register.set()
         self.token = self.state["token"]
         self.drop_registration_reply = False
+        self.refusal = None
 
     async def result(self, row):
         method, params = row["method"], row["params"]
         if method == "provider.register":
             self.registered.set()
+            if self.refusal:
+                raise ProviderError(self.refusal, "registration refused by fixture")
             if params.get("role") != "runtime" or not isinstance(params.get("token"), str) or params["token"] not in (self.state["token"], self.state.get("previous")):
                 raise ProviderError("forbidden", "invalid or used bridge token")
             await self.allow_register.wait()
@@ -369,14 +372,27 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(bridge.ready.wait(), 2)
         self.assertEqual(len(self.core.notes("provider.register")), 1)
 
-    async def test_forbidden_token_keeps_pi_in_fallback_until_lifetime_ends(self):
-        bridge = await self.start(token="wrong", ready=False)
+    async def refused_bridge_stops_owned_runtime(self, kind):
+        self.core.refusal = kind
+        bridge = await self.start(ready=False)
         await asyncio.wait_for(self.core.registered.wait(), 1)
-        self.assertIsNone(bridge.pi.process.returncode)
-        self.assertFalse(self.task.done())
+        result = await asyncio.wait_for(asyncio.gather(self.task, return_exceptions=True), 2)
+        self.assertIsInstance(result[0], ProviderError)
+        self.assertIsNotNone(bridge.pi.process.returncode)
         self.assertFalse(bridge.ready.is_set())
-        self.assertEqual(len(self.core.notes("provider.register")), 1)
+        self.assertEqual(len(self.core.notes("provider.register")), 1, "definitive refusal is never retried")
         self.assertFalse(self.core.resources)
+        self.assertIn("registration refused", "\n".join(self.frames.frames))
+        self.assertFalse(self.core.notes("effect.invoke"))
+
+    async def test_forbidden_registration_exits_and_stops_its_pi(self):
+        await self.refused_bridge_stops_owned_runtime("forbidden")
+
+    async def test_registry_overload_exits_and_stops_its_pi(self):
+        await self.refused_bridge_stops_owned_runtime("overloaded")
+
+    async def test_explicit_unavailable_reply_is_not_mistaken_for_a_transport_gap(self):
+        await self.refused_bridge_stops_owned_runtime("unavailable")
 
     async def test_view_collision_is_not_overwritten_or_published(self):
         original = {"value": {"kind": "panel", "title": "unrelated"}, "version": 1}

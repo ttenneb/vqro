@@ -168,21 +168,26 @@ class Bridge:
                 raise
             except Exception as error:
                 self.failure = tail(plain(error), 1024)
+                if isinstance(error, ProviderError) and provider.generation is None and (error.remote or error.kind not in ("unavailable", "timeout")):
+                    # A definitive refusal cannot become an unreachable, immortal
+                    # Pi process. Exit even for overload: the user may launch again
+                    # after recovery; we never replay input or guess token reuse.
+                    self.fallback.show("Pi bridge registration refused: " + self.failure + "; stopping runtime.")
+                    raise
             finally:
                 self._remember(provider)  # an observed rotated token survives later setup failure
                 self.connected = False
                 self.ready.clear()
                 await provider.close()
-            while not self.closing:
-                await asyncio.sleep(backoff)
-                backoff = min(self.retry_max, backoff * 2)
-                if self._credential is not None:
-                    provider = Provider(**self._template, token=self._credential)
-                    for effect in EFFECTS:
-                        provider.effect("agent." + effect)(self._effect)
-                    break
-                # Never retry a known-consumed spawn token when no resume token
-                # was returned. Pi/fallback stay alive until lifetime EOF/exit.
+            if self._credential is None:
+                raise ProviderError("forbidden", "registration returned no resume credential; stopping runtime rather than keeping an unreachable Pi")
+            # Only a transport gap retries the last observed credential;
+            # registration's grace/rotation contract resolves a lost reply.
+            await asyncio.sleep(backoff)
+            backoff = min(self.retry_max, backoff * 2)
+            provider = Provider(**self._template, token=self._credential)
+            for effect in EFFECTS:
+                provider.effect("agent." + effect)(self._effect)
 
     def _events(self):
         batch = self.pi.events(self.cursor)
