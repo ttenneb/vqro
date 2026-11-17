@@ -93,9 +93,13 @@ try:
         value["active"] = index
         call("workspace.apply", {"note": "e2e active tab", "ops": [{"op": "set", "key": "layout/main", "value": value}]})
         time.sleep(1.5)
-        keys(f"echo tui-$((6*7))-{name}", literal=True)
-        keys("Enter")
-        seen = wait(lambda: f"tui-42-{name}" in screen(), 10)
+        seen = None
+        for _ in range(2):  # the tab switch may still be settling: type once more if nothing showed
+            keys(f"echo tui-$((6*7))-{name}", literal=True)
+            keys("Enter")
+            seen = wait(lambda: f"tui-42-{name}" in screen(), 10)
+            if seen:
+                break
         check(f"{name}: TUI shows the provider's terminal and typing reaches it", bool(seen), screen()[-600:])
         call("resource.kill", {"resource": rid})
         time.sleep(1)
@@ -113,15 +117,22 @@ finally:
         except subprocess.TimeoutExpired:
             core.kill()
     subprocess.run([HC, "server", "stop"], env={**ENV, "PATH": ""}, capture_output=True)
-    time.sleep(1.5)
-    left = []
-    for pid in os.listdir("/proc"):
-        if pid.isdigit():
-            try:
-                if R.encode() in open(f"/proc/{pid}/environ", "rb").read() or R.encode() in open(f"/proc/{pid}/cmdline", "rb").read():
-                    left.append(pid)
-            except OSError:
-                pass
+    def leftovers():
+        found = []
+        for pid in os.listdir("/proc"):
+            if pid.isdigit():
+                try:
+                    if R.encode() in open(f"/proc/{pid}/environ", "rb").read() or R.encode() in open(f"/proc/{pid}/cmdline", "rb").read():
+                        found.append(pid)
+                except OSError:
+                    pass
+        return found
+    left = leftovers()
+    for _ in range(25):  # herdr-core and providers wind down asynchronously
+        if not left:
+            break
+        time.sleep(0.2)
+        left = leftovers()
     check("nothing left running", not left, " ".join(left))
     for pid in left:
         os.kill(int(pid), 9)

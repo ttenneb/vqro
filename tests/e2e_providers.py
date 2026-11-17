@@ -45,14 +45,15 @@ class Client:
     def __init__(self):
         self.s = socket.socket(socket.AF_UNIX)
         self.s.connect(ENV["PRIM_SOCKET"])
-        self.f = self.s.makefile("rwb", buffering=0)
+        self.f = self.s.makefile("wb", buffering=0)
+        self.r = self.s.makefile("rb")  # buffered: line reads must not be byte-at-a-time
         self.n, self.replies, self.notes, self.lock = 0, {}, queue.Queue(), threading.Lock()
         self.cv = threading.Condition()
         threading.Thread(target=self.read, daemon=True).start()
         self.call("hello", {"client": "e2e"})
 
     def read(self):
-        for line in self.f:
+        for line in self.r:
             msg = json.loads(line)
             if "method" in msg:
                 if "id" in msg:  # requests to us: none expected
