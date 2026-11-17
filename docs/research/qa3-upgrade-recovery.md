@@ -31,7 +31,7 @@ Scratch evidence root: `~/.local/share/herdr/scratch/prim-independent-review/`.
 - `qa3-before.log`: baseline `6e9f168` fails eight new integration cases, including wrong-backend dispatch,
   touching a simulated ambient endpoint and accepting a forged supervised name.
 - `qa3-green.log`: 100 unit and 12 focused integration tests pass, zero warnings.
-- `qa3-full.json`: scoped `scripts/check.sh full`, with `XDG_RUNTIME_DIR=/run/user/1000` and the user-bus variable
+- `qa3-full-final.json` (clean code commit `8a1bf22`): scoped `scripts/check.sh full`, with `XDG_RUNTIME_DIR=/run/user/1000` and the user-bus variable
   present: 18/18 pass; 204 Rust tests pass, 19 optional ignored in the regular suite; 112 Python tests pass;
   private optional suites, both Pi variants, scale budgets and no-leftover check pass.
 - `qa3-realistic-copy-final.log`: approved one-time read-only copies of the human's workspace/resources into a
@@ -50,4 +50,5 @@ One initial unit run hit the pre-existing store-lock release race; repeat and fu
 archived baseline and working source through one Cargo target required `cargo clean -p prim` before green;
 otherwise Cargo reused baseline integration artifacts. No installs, live restart, push or merge performed.
 Windows suffix behavior has a unit test, not a Windows runtime run. Tmux lifetime and interpreter/bridge placement
-policy remain owned separately. Work estimate: 60 minutes plus 20 minutes verification/wait; actual report below.
+policy remain owned separately. Work estimate: 60 minutes plus 20 minutes verification/wait; actual about
+76 minutes (approximately 66 work, 10 verification/wait), delivered before the 13:15 EST deadline.
