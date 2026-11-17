@@ -14,7 +14,7 @@
 //! `exited`, or `killed` if this provider killed it.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -104,6 +104,11 @@ struct App {
     spawn_session: String,
     state: Mutex<State>,
     reconcile: Notify,
+    /// The tmux server this registration describes (its identity at registration).
+    instance: String,
+    /// Set when that server is gone or replaced: this registration ends, a new one follows.
+    lost: Notify,
+    lost_flag: std::sync::atomic::AtomicBool,
 }
 
 /// Apply one OSC 7501 report (Program Status Protocol rev 0.4: `key=value` pairs joined by `:`,
@@ -187,6 +192,13 @@ fn unknown(e: tmux::Error) -> ProviderError {
 }
 
 impl App {
+    fn backend_lost(&self, why: &str) {
+        if !self.lost_flag.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            eprintln!("prim-tmux: {why}; ending this registration");
+            self.lost.notify_one();
+        }
+    }
+
     fn any_client(&self) -> Option<Client> {
         self.state.lock().unwrap().clients.values().next().cloned()
     }
@@ -207,6 +219,13 @@ impl App {
             let mut config = tmux::Config::new(self.socket.clone(), session);
             config.binary = self.bin.clone();
             let client = Client::connect(config).await.map_err(|e| e.to_string())?;
+            if client.instance() != self.instance {
+                // Another server behind the same socket: pane ids may be reused, so these are not our
+                // resources. End this registration; the next one gets the new instance (and new ids).
+                client.close().await;
+                self.backend_lost("the tmux server was replaced (new instance)");
+                return Err("tmux server replaced".into());
+            }
             let app = self.clone();
             let mut notes = client.notifications();
             let name = session.to_string();
@@ -235,7 +254,11 @@ impl App {
         if let Err(e) = self.attach_sessions().await {
             eprintln!("prim-tmux: sessions: {e}");
         }
-        let client = self.any_client().ok_or("no tmux session to attach to")?;
+        let Some(client) = self.any_client() else {
+            // No control client and none could attach: the server is gone (or has no session).
+            self.backend_lost("the tmux server is unreachable");
+            return Err("no tmux session to attach to".into());
+        };
         let lines = client.command(&["list-panes", "-a", "-F", PANE_FORMAT]).await.map_err(|e| e.to_string())?;
         let mut seen: BTreeMap<String, (String, String, Value)> = BTreeMap::new();
         for line in lines {
@@ -608,8 +631,48 @@ impl Drop for PrivateServer {
     }
 }
 
+/// `prim-tmux --watch-private PID TMUX SOCKET`: kill the private server once its provider is gone,
+/// even if the provider was SIGKILLed (the extension supervisor's stop) and its cleanup never ran.
+fn watch_private(args: &[String]) -> ! {
+    let (pid, tmux, socket) = (&args[0], PathBuf::from(&args[1]), PathBuf::from(&args[2]));
+    let alive = || {
+        if Path::new("/proc/self").exists() {
+            Path::new(&format!("/proc/{pid}")).exists()
+        } else {
+            std::process::Command::new("/bin/kill").args(["-0", pid]).status().is_ok_and(|s| s.success())
+        }
+    };
+    while alive() {
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    let _ = tmux_cli(&tmux, &socket, &["kill-server"]);
+    // The private socket's own temporary directory (created by the provider under /tmp).
+    if let Some(dir) = socket.parent().filter(|d| d.file_name().is_some_and(|n| n.to_string_lossy().starts_with("prim-tmux"))) {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    std::process::exit(0);
+}
+
+fn spawn_private_watchdog(tmux: &PathBuf, socket: &PathBuf) {
+    let Ok(exe) = std::env::current_exe() else { return };
+    let _ = std::process::Command::new(exe)
+        .arg("--watch-private")
+        .arg(std::process::id().to_string())
+        .arg(tmux)
+        .arg(socket)
+        .env_remove("PRIM_EXTENSION_LIFETIME")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
 #[tokio::main]
 async fn main() {
+    let argv: Vec<String> = std::env::args().collect();
+    if argv.get(1).map(String::as_str) == Some("--watch-private") && argv.len() == 5 {
+        watch_private(&argv[2..]);
+    }
     watch_lifetime();
     let code = match run().await {
         Ok(()) => 0,
@@ -633,10 +696,41 @@ async fn run() -> Result<(), String> {
             // Our own server: the one call that may start one.
             tmux_run(&a.tmux, &socket, &[], &["new-session", "-d", "-s", "prim"])?;
             private = Some(PrivateServer { bin: a.tmux.clone(), socket: socket.clone(), _dir: dir });
+            spawn_private_watchdog(&a.tmux, &socket);
             socket
         }
     };
-    let sessions = tmux_cli(&a.tmux, &socket, &["list-sessions", "-F", "#{session_name}"])?;
+    // One core registration per tmux server instance. When a configured server goes away or is
+    // replaced, the registration ends (the core marks our resources unavailable), and we register
+    // again once a server answers: same instance keeps ids, a new instance retires them.
+    loop {
+        match registration(&a, &endpoint, &socket).await {
+            Ok(()) => {
+                if private.is_some() {
+                    return Err("the private tmux server went away".into());
+                }
+                // Wait for a server behind the configured socket.
+                while tmux_cli(&a.tmux, &socket, &["list-sessions", "-F", "#{session_name}"]).map(|s| s.trim().is_empty()).unwrap_or(true) {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+            }
+            Err(e) => {
+                drop(private);
+                return Err(e);
+            }
+        }
+    }
+}
+
+/// Register once for the current tmux server and serve until the core goes (Err) or the server is
+/// gone or replaced (Ok).
+async fn registration(a: &Args, endpoint: &str, socket: &PathBuf) -> Result<(), String> {
+    let sessions = loop {
+        match tmux_cli(&a.tmux, socket, &["list-sessions", "-F", "#{session_name}"]) {
+            Ok(s) if !s.trim().is_empty() => break s,
+            _ => tokio::time::sleep(Duration::from_millis(500)).await,
+        }
+    };
     let spawn_session = a.session.clone().or_else(|| sessions.lines().next().map(String::from)).ok_or("the tmux server has no session")?;
 
     // Identity: the tmux server (pid, start time and a server-lifetime nonce).
@@ -644,14 +738,16 @@ async fn run() -> Result<(), String> {
     config.binary = a.tmux.clone();
     let first = Client::connect(config).await.map_err(|e| format!("attach {spawn_session}: {e}"))?;
     let instance = first.instance().to_string();
+    // Re-attached uniformly by attach_sessions (which installs the notification task).
+    first.close().await;
     let host = std::fs::read_to_string("/proc/sys/kernel/hostname").map(|h| h.trim().to_string()).unwrap_or_else(|_| "local".into());
     let name = a.name.clone().unwrap_or_else(|| format!("tmux@{host}"));
-    let mut pconfig = Config::new(name, instance, capabilities());
-    let version = tmux_cli(&a.tmux, &socket, &["-V"]).or_else(|_| {
+    let mut pconfig = Config::new(name, instance.clone(), capabilities());
+    let version = tmux_cli(&a.tmux, socket, &["-V"]).or_else(|_| {
         std::process::Command::new(&a.tmux).arg("-V").output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).map_err(|e| e.to_string())
     });
     pconfig.software = json!({"name": "tmux", "version": version.unwrap_or_default().trim().trim_start_matches("tmux ")});
-    let stream = tokio::net::UnixStream::connect(&endpoint).await.map_err(|e| format!("cannot reach the core: {e}"))?;
+    let stream = tokio::net::UnixStream::connect(endpoint).await.map_err(|e| format!("cannot reach the core: {e}"))?;
     let (provider, mut requests) = Provider::connect(stream, pconfig).await.map_err(|e| e.to_string())?;
 
     let app = Arc::new(App {
@@ -660,7 +756,7 @@ async fn run() -> Result<(), String> {
         socket: socket.clone(),
         spawn_session: spawn_session.clone(),
         state: Mutex::new(State {
-            clients: BTreeMap::from([(spawn_session.clone(), first)]),
+            clients: BTreeMap::new(),
             panes: BTreeMap::new(),
             killed: HashSet::new(),
             argv: HashMap::new(),
@@ -668,15 +764,11 @@ async fn run() -> Result<(), String> {
             resuming: HashSet::new(),
         }),
         reconcile: Notify::new(),
+        instance,
+        lost: Notify::new(),
+        lost_flag: std::sync::atomic::AtomicBool::new(false),
     });
-    // The first client's notifications drive reconciliation too.
-    {
-        let c = app.state.lock().unwrap().clients.remove(&spawn_session).unwrap();
-        // Re-attach through attach_sessions so its notification task is installed uniformly.
-        c.close().await;
-    }
-    app.reconcile(true).await?;
-
+    let first_sync = app.reconcile(true).await;
     let reconciler = {
         let app = app.clone();
         tokio::spawn(async move {
@@ -694,23 +786,28 @@ async fn run() -> Result<(), String> {
             }
         })
     };
-    loop {
-        tokio::select! {
-            r = requests.recv() => match r {
-                Some(Request::Effect(e)) => { tokio::spawn(app.clone().effect(e)); }
-                Some(Request::Open(o)) => { tokio::spawn(app.clone().open(o)); }
-                None => break,
-            },
-            _ = provider.closed() => break,
+    let ended = if let Err(e) = first_sync {
+        if app.lost_flag.load(std::sync::atomic::Ordering::Relaxed) { Ok(()) } else { Err(e) }
+    } else {
+        loop {
+            tokio::select! {
+                r = requests.recv() => match r {
+                    Some(Request::Effect(e)) => { tokio::spawn(app.clone().effect(e)); }
+                    Some(Request::Open(o)) => { tokio::spawn(app.clone().open(o)); }
+                    None => break Err(format!("disconnected from the core: {}", provider.failure().unwrap_or_default())),
+                },
+                _ = provider.closed() => break Err(format!("disconnected from the core: {}", provider.failure().unwrap_or_default())),
+                _ = app.lost.notified() => break Ok(()),
+            }
         }
-    }
+    };
     reconciler.abort();
+    provider.close();
     let clients: Vec<Client> = app.state.lock().unwrap().clients.values().cloned().collect();
     for c in clients {
         c.close().await;
     }
-    drop(private);
-    Err(format!("disconnected from the core: {}", provider.failure().unwrap_or_default()))
+    ended
 }
 
 #[cfg(test)]

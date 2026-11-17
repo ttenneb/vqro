@@ -382,3 +382,52 @@ async fn private_server_is_started_synced_and_killed_when_the_core_goes() {
     let _ = Command::new("kill").args(["-KILL", &pid]).status();
     panic!("private tmux server {pid} survived the provider");
 }
+
+#[tokio::test]
+#[ignore]
+async fn private_server_dies_with_a_sigkilled_provider() {
+    // The extension supervisor stops providers with SIGKILL: no cleanup code runs in the provider.
+    let root = tempfile::Builder::new().prefix("ptk").tempdir_in("/tmp").unwrap();
+    let endpoint = root.path().join("core.sock");
+    let listener = UnixListener::bind(&endpoint).unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_prim-tmux"))
+        .args(["--tmux", "/usr/bin/tmux"])
+        .env_clear()
+        .env("HOME", root.path())
+        .env("PATH", "")
+        .env("PRIM_SOCKET", &endpoint)
+        .spawn()
+        .unwrap();
+    let mut provider = Provider(child);
+    let (sock, _) = tokio::time::timeout(Duration::from_secs(10), listener.accept()).await.unwrap().unwrap();
+    let (r, w) = sock.into_split();
+    let mut core = Core { r: BufReader::new(r), w, backlog: Vec::new() };
+    let hello = core.read().await;
+    core.reply(&hello, json!({})).await;
+    let reg = core.read().await;
+    core.reply(&reg, json!({"provider": "tmux", "generation": 1, "limits": {"stream_window_bytes": 65536, "max_record_bytes": 1048576}})).await;
+    let sync = core.read().await;
+    core.reply(&sync, json!({})).await;
+    let mine = || -> Vec<String> {
+        std::fs::read_dir("/proc").unwrap().flatten().filter_map(|e| {
+            let pid = e.file_name().to_string_lossy().to_string();
+            let env = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
+            let cmd = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+            (String::from_utf8_lossy(&env).contains(root.path().to_str().unwrap()) && String::from_utf8_lossy(&cmd).contains("tmux")
+                && String::from_utf8_lossy(&cmd).contains("new-session")).then_some(pid)
+        }).collect()
+    };
+    assert_eq!(mine().len(), 1, "our private server runs");
+    provider.0.kill().unwrap();
+    provider.0.wait().unwrap();
+    for _ in 0..60 {
+        if mine().is_empty() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    for pid in mine() {
+        let _ = Command::new("/bin/kill").args(["-KILL", &pid]).status();
+    }
+    panic!("the private tmux server outlived its SIGKILLed provider");
+}
