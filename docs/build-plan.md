@@ -96,8 +96,8 @@ written the same way was contained by the crash budget and removed with one reve
   exit 0. No prompt/model/provider call or real credential/session involved; network namespace blocks networking.
 - Fixed a bridge daemon stdin BufferedReader lock that caused CPython SIGABRT on native Pi exit. Raw `os.read`
   keeps EOF handling without holding Python I/O locks at interpreter shutdown; native exit code is preserved.
-- Opt-in reproducible harness: `tests/pi_provider_e2e.py`. Native herdr's advertised generic terminal.input dispatch
-  is a separate core gap, retained as `--probe-terminal-invoke`; public attach/stream.input works (dispatched).
+- Opt-in reproducible harness: `tests/pi_provider_e2e.py`. Native herdr now explicitly declares stream-only input;
+  `--probe-terminal-invoke` verifies unsupported/rejected before dispatch; public stream input is dispatched.
 - Details, receipts and unverified limits: `research/pi-provider-e2e.md`.
 
 ## Core shutdown and input transports (2026-11-17)
@@ -109,6 +109,19 @@ written the same way was contained by the crash budget and removed with one reve
 - Native and current wire terminal providers distinguish input transports: `{stream:true,effect:false}`. Generic
   invoke rejects explicit unsupported effects before dispatch; normal literal stream input remains available.
   Evidence and hc schema rationale: `research/native-input-transports.md`.
+
+## Agents extension UI (2026-11-17)
+
+- Bundled `agents`: default pi1 RPC runtime settings, New Pi agent tabbar/prefix a, public tabs.show integration,
+  prompt/steer/follow-up/abort/clear-queue pane actions and a pending-request popup covering native answer kinds.
+- Native outcomes appear in notifications without treating acceptance as settlement or dispatched answers as ack.
+  Runtime settings are editable from Agents and Settings; existing agents and hidden tabs keep running.
+- Bridge live panel now shows semantic status badge, observed run, queues, pending requests and bounded transcript.
+- 15 fake-core unit tests plus private real-core/backend extension-command and physical PTY flows. Prefix launch,
+  typed prompt, abort, request/Yes-No answer, queues and final transcript verified with fake Pi only. Quick gate
+  passes (90 Python/154 Rust), no warnings, no leftovers; no Rust edits, model/provider calls or live install.
+- Limits and receipts: `research/agents-extension.md`; usage: `../extensions/agents.md`. Editor answers use the
+  existing one-line input; multiline UI, Windows and provider-backed turns are not claimed.
 
 ## Known gaps found while building
 

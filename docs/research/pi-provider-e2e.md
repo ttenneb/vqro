@@ -14,7 +14,7 @@ env -i HOME="$HOME" PATH=/usr/bin:/bin python3 tests/pi_provider_e2e.py --run \
   --prim /absolute/path/to/prim --hc /absolute/path/to/herdr-core
 # Optional installed Pi 1.5.0, metadata only:
 # add --real-pi-metadata
-# Known failing native-herdr generic input probe:
+# Assert native-herdr declares stream-only input and rejects raw effects:
 # add --probe-terminal-invoke
 ```
 
@@ -62,14 +62,13 @@ handle. This preserves portable pipe/terminal EOF semantics without holding a Py
 close stdin and hide the bug. It is red before the fix (-6), green after (23). The existing EOF regression also
 continues to exit0. No core source changes.
 
-## Separate core issue
+## Native input transport decision (resolved after initial report)
 
-The in-process herdr adapter advertises terminal.input, but generic `resource.invoke` for that operation returns
-`operation is not supported by the in-process herdr adapter (backend)`. The opt-in `--probe-terminal-invoke`
-retains a failing, zero-byte-input reproducer using fake Pi; all cleanup still passes. Reported to the core owner.
-It is not worked around inside the bridge or misreported as success. The established public attach/stream.input
-path works and is the legitimate EOF route in the real Pi metadata test. This is not a claim that every generic
-native-backend effect is now implemented.
+Herdr-core has no raw input RPC. The approved contract now declares terminal.input `{stream:true,effect:false}`:
+generic `resource.invoke` rejects an unsupported raw input effect before dispatch with outcome rejected.
+`--probe-terminal-invoke` now asserts that declaration and exact rejection, rather than expecting a raw effect.
+No terminal.send/keys or hidden attach emulation is added. The established public attach/stream.input path is
+the legitimate EOF route; its outcome remains dispatched. See `native-input-transports.md`.
 
 ## Test results and receipts
 
@@ -79,7 +78,7 @@ native-backend effect is now implemented.
 - Final installed-binary fake E2E: `~/.local/share/herdr/scratch/ep-9bnij3qr/receipt.json`.
 - Final installed-binary real Pi metadata E2E: `~/.local/share/herdr/scratch/ep-vzhpy4ay/receipt.json`.
 - Source-build repeats: `ep-yhwb804h`, `ep-7qzv2cfk` (fake), `ep-24t9fzkd` (real metadata), under the same scratch parent.
-- Failing generic terminal.input probe: `ep-yegs6ffq/receipt.json`; expected exit1, cleanup PASS.
+- Historical pre-decision terminal.input probe: `ep-yegs6ffq/receipt.json`; exit1, cleanup PASS. Current probe passes with the explicit stream/effect declaration.
 - Native PTY exit regression before fix: `ep-nvg2y8tk/receipt.json`; signal6 instead of exit23, cleanup PASS.
 
 No UI-driving/layout/tmux/remote/Windows or provider-backed model-turn validation is claimed. The existing
