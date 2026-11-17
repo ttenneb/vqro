@@ -63,6 +63,10 @@ struct Profile {
     adapters: usize,
     duration_s: f64,
     echo_every_ms: u64,
+    /// Test-child-only fixed latency before each real durable workspace write.
+    workspace_write_delay_ms: u64,
+    /// 0 retains Tokio's default; a small number makes worker starvation observable.
+    core_workers: usize,
 }
 
 impl Profile {
@@ -96,6 +100,8 @@ impl Profile {
             adapters: env_num("ADAPTERS", 2),
             duration_s: env_num("DURATION_S", 30.0),
             echo_every_ms: env_num("ECHO_EVERY_MS", 200),
+            workspace_write_delay_ms: env_num("WORKSPACE_WRITE_DELAY_MS", 0),
+            core_workers: env_num("CORE_WORKERS", 0),
         };
         assert!(p.agents + p.floods < p.terminals, "need at least one idle terminal for the echo probe");
         assert!(p.adapters >= 1);
@@ -111,6 +117,7 @@ impl Profile {
             "status_phase": self.status_phase,
             "ext_restart_every_s": self.ext_restart_every_s, "adapters": self.adapters,
             "duration_s": self.duration_s, "echo_every_ms": self.echo_every_ms,
+            "workspace_write_delay_ms": self.workspace_write_delay_ms, "core_workers": self.core_workers,
         })
     }
 }
@@ -144,8 +151,19 @@ fn scale_core_child() {
     let Ok(socket) = std::env::var("PRIM_SCALE_CHILD_SOCKET") else { return };
     let state = PathBuf::from(std::env::var("PRIM_SCALE_CHILD_STATE").unwrap());
     let adapters: usize = std::env::var("PRIM_SCALE_CHILD_ADAPTERS").unwrap().parse().unwrap();
-    tokio::runtime::Runtime::new().unwrap().block_on(async move {
+    let workers:usize = std::env::var("PRIM_SCALE_CHILD_WORKERS").unwrap_or_default().parse().unwrap_or(0);
+    let delay:u64 = std::env::var("PRIM_SCALE_CHILD_WRITE_DELAY_MS").unwrap_or_default().parse().unwrap_or(0);
+    let mut runtime = tokio::runtime::Builder::new_multi_thread();
+    runtime.enable_all();
+    if workers > 0 { runtime.worker_threads(workers); }
+    runtime.build().unwrap().block_on(async move {
         let core = prim::server::start(socket.into(), state, false, prim::server::Backend::Fake, None).unwrap();
+        if delay > 0 {
+            core.lock().unwrap().configure_workspace_writer(std::sync::Arc::new(move |path, bytes| {
+                std::thread::sleep(Duration::from_millis(delay));
+                prim::store::write_atomic(path, bytes)
+            })).unwrap();
+        }
         // More fake instances, as more hosts. `server::start` only starts one backend; the core
         // already supports several adapters, so add the rest here.
         for i in 1..if env_num("EXTERNAL_PROVIDERS", 0u8) != 0 { 1 } else { adapters } {
@@ -306,6 +324,8 @@ async fn scale_load() {
         .env("PRIM_SCALE_CHILD_SOCKET", &socket)
         .env("PRIM_SCALE_CHILD_STATE", &state)
         .env("PRIM_SCALE_CHILD_ADAPTERS", prof.adapters.to_string())
+        .env("PRIM_SCALE_CHILD_WORKERS", prof.core_workers.to_string())
+        .env("PRIM_SCALE_CHILD_WRITE_DELAY_MS", prof.workspace_write_delay_ms.to_string())
         .stdout(std::process::Stdio::null())
         .spawn()
         .unwrap();
