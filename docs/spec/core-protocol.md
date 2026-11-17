@@ -46,7 +46,18 @@ reports uncertainty about crash durability, not partial application of operation
 
 | Method | Params | Result |
 |---|---|---|
-| `events.subscribe` | `from?` (seq), `epoch?` (opaque string, required with `from`) | `epoch`, `seq` |
+| `events.subscribe` | `from?` (seq), `epoch?` (opaque string, required with `from`), `types?` (list of event types), `partial_resources?` (bool) | `epoch`, `seq` |
+
+Subscription options shape what one subscriber receives; they never change the log or other subscribers.
+- `types`: only events of these types arrive (unknown names are allowed; `missed` always arrives). Caches built
+  from a type you don't receive go stale until the next snapshot.
+- `partial_resources`: the first `resource` event per resource after subscribing, after `missed`, or after its
+  `resource.removed` carries the full record. Later ones carry only `id` and the fields that changed (a removed
+  field as `null`) and have `"partial": true` at the top level of the event. Merge them onto the record you hold.
+  A partial event for a resource you don't hold means your state diverged: take a snapshot. The base is always
+  the state after this subscriber's previous event for that resource, so the snapshot fencing rules below hold
+  unchanged. Why: status changes dominate event volume at scale and each one otherwise repeats the whole record
+  (`docs/test-plan.md`, scale harness).
 
 The cursor is the pair `(epoch, seq)`. A new random epoch is generated each time the core starts;
 sequence numbers start at zero within that epoch. `hello`, snapshots and every event carry the epoch.

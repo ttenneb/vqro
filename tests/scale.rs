@@ -51,10 +51,18 @@ struct Profile {
     slow_read_bytes_per_sec: u64,
     slow_echo_timeout_s: f64,
     slow_attach_floods: bool,
+    /// Subscribe like the TUI does: partial resource events (`PARTIAL_RESOURCES`, default 1).
+    partial_resources: bool,
     ext_restart_every_s: f64,
     adapters: usize,
     duration_s: f64,
     echo_every_ms: u64,
+}
+
+impl Profile {
+    fn subscribe_params(&self) -> Value {
+        if self.partial_resources { json!({"partial_resources": true}) } else { json!({}) }
+    }
 }
 
 fn env_num<T: std::str::FromStr>(name: &str, default: T) -> T {
@@ -75,6 +83,7 @@ impl Profile {
             slow_read_bytes_per_sec: env_num("SLOW_READ_BYTES_PER_SEC", 65_536),
             slow_echo_timeout_s: env_num("SLOW_ECHO_TIMEOUT_S", 10.0),
             slow_attach_floods: env_num("SLOW_ATTACH_FLOODS", 1u8) != 0,
+            partial_resources: env_num("PARTIAL_RESOURCES", 1u8) != 0,
             ext_restart_every_s: env_num("EXT_RESTART_EVERY_S", 5.0),
             adapters: env_num("ADAPTERS", 2),
             duration_s: env_num("DURATION_S", 30.0),
@@ -90,7 +99,7 @@ impl Profile {
             "flood_bytes_per_sec": self.flood_bytes_per_sec, "status_every_ms": self.status_every_ms,
             "txn_per_sec": self.txn_per_sec, "clients": 2 + self.stalled_clients + self.slow_clients, "stalled_clients": self.stalled_clients,
             "slow_clients": self.slow_clients, "slow_read_bytes_per_sec": self.slow_read_bytes_per_sec, "slow_echo_timeout_s": self.slow_echo_timeout_s,
-            "slow_attach_floods": self.slow_attach_floods,
+            "slow_attach_floods": self.slow_attach_floods, "partial_resources": self.partial_resources,
             "ext_restart_every_s": self.ext_restart_every_s, "adapters": self.adapters,
             "duration_s": self.duration_s, "echo_every_ms": self.echo_every_ms,
         })
@@ -244,6 +253,8 @@ struct Observed {
     events: u64,
     missed: u64,
     flood_bytes: u64,
+    /// Event wire bytes (re-serialized JSON-RPC line) and counts, by event type.
+    event_bytes: BTreeMap<String, (u64, u64)>,
     idle_buf: String,
     /// The echo probe waiting for its token.
     probe: Option<(String, Instant, oneshot::Sender<Duration>)>,
@@ -320,7 +331,7 @@ async fn scale_load() {
         flood_sids.push(a["stream"].as_u64().unwrap());
     }
     let idle_sid = observer.call("resource.attach", json!({"resource": idle[0]})).await.unwrap()["stream"].as_u64().unwrap();
-    observer.call("events.subscribe", json!({})).await.unwrap();
+    observer.call("events.subscribe", prof.subscribe_params()).await.unwrap();
     // Delivery ratios compare what the observer saw against what was offered since here.
     let t_observe = Instant::now();
     let o = obs.clone();
@@ -332,6 +343,11 @@ async fn scale_load() {
             match method.as_str() {
                 "event" => {
                     o.events += 1;
+                    let line = json!({"jsonrpc": "2.0", "method": "event", "params": params}).to_string().len() as u64 + 1;
+                    let ty = params["type"].as_str().unwrap_or("?").to_string();
+                    let e = o.event_bytes.entry(ty).or_default();
+                    e.0 += 1;
+                    e.1 += line;
                     if params["type"] == "resource" {
                         if let Some(at) = params["data"]["status"]["at_ms"].as_u64() {
                             o.status_events += 1;
@@ -366,7 +382,7 @@ async fn scale_load() {
         let mut s = tokio::net::UnixStream::connect(&socket).await.unwrap();
         let mut lines = vec![
             json!({"jsonrpc": "2.0", "id": 1, "method": "hello", "params": {"client": "scale-stalled"}}),
-            json!({"jsonrpc": "2.0", "id": 2, "method": "events.subscribe", "params": {}}),
+            json!({"jsonrpc": "2.0", "id": 2, "method": "events.subscribe", "params": prof.subscribe_params()}),
         ];
         for (k, f) in floods.iter().chain(idle.iter().take(1)).enumerate() {
             lines.push(json!({"jsonrpc": "2.0", "id": 10 + k, "method": "resource.attach", "params": {"resource": f}}));
@@ -545,7 +561,9 @@ async fn scale_load() {
             "echo": stats(&s.echo_ms), "echo_timed_out": s.timed_out, "bytes_read": s.bytes_read,
             "idle_stream_attached": s.attached, "missed": s.missed,
         })).collect::<Vec<_>>(),
-        "events": {"received": o.events, "status_received": o.status_events, "status_expected_approx": expected_status, "lag": stats(&o.event_lag_ms), "missed": o.missed},
+        "events": {"received": o.events, "status_received": o.status_events, "status_expected_approx": expected_status, "lag": stats(&o.event_lag_ms), "missed": o.missed,
+            "wire_by_type": o.event_bytes.iter().map(|(t, (n, b))| (t.clone(), json!({"count": n, "bytes": b, "bytes_per_event": *b as f64 / (*n).max(1) as f64, "bytes_per_sec": *b as f64 / observed_s}))).collect::<serde_json::Map<_, _>>(),
+            "wire_bytes_per_sec": o.event_bytes.values().map(|(_, b)| *b as f64).sum::<f64>() / observed_s},
         "flood": {"observer_bytes": o.flood_bytes, "offered_bytes": flood_expected, "observer_share": o.flood_bytes as f64 / flood_expected.max(1.0)},
         "extension_restarts": {"ok": restarts_ok, "failed": restarts_failed, "latency": stats(&restart_ms)},
         "final_snapshot": {"ok": snap.is_ok(), "ms": final_snapshot_ms},
@@ -578,7 +596,7 @@ fn slow_client(socket: PathBuf, attach: Vec<String>, prof: Profile, stop: Arc<st
         let (mut r, mut w) = s.into_split();
         let mut lines = vec![
             json!({"jsonrpc": "2.0", "id": 1, "method": "hello", "params": {"client": "scale-slow"}}),
-            json!({"jsonrpc": "2.0", "id": 2, "method": "events.subscribe", "params": {}}),
+            json!({"jsonrpc": "2.0", "id": 2, "method": "events.subscribe", "params": prof.subscribe_params()}),
         ];
         for (k, res) in attach.iter().enumerate() {
             lines.push(json!({"jsonrpc": "2.0", "id": 10 + k, "method": "resource.attach", "params": {"resource": res}}));

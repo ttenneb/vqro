@@ -63,7 +63,7 @@ env -i HOME=$HOME PATH=$PATH cargo test --release --test scale -- --ignored --ex
   streams, one writer, one stalled (subscribes and attaches, never reads) and one slow (the same, but reads
   64 KiB/s and probes input→echo on its own idle stream, behind the floods unless `SLOW_ATTACH_FLOODS=0`; probes time out after 10 s and count as 10 s).
 - Change it with `PRIM_SCALE_*` variables: `TERMINALS`, `AGENTS`, `FLOODS`, `FLOOD_BYTES_PER_SEC`, `STATUS_EVERY_MS`,
-  `TXN_PER_SEC`, `STALLED_CLIENTS`, `SLOW_CLIENTS`, `SLOW_READ_BYTES_PER_SEC`, `SLOW_ECHO_TIMEOUT_S`, `EXT_RESTART_EVERY_S`, `ADAPTERS`, `DURATION_S`, `ECHO_EVERY_MS`;
+  `TXN_PER_SEC`, `STALLED_CLIENTS`, `SLOW_CLIENTS`, `SLOW_READ_BYTES_PER_SEC`, `SLOW_ECHO_TIMEOUT_S`, `EXT_RESTART_EVERY_S`, `ADAPTERS`, `DURATION_S`, `ECHO_EVERY_MS`, `PARTIAL_RESOURCES` (default 1: clients subscribe as the TUI does);
   `RSS_ABORT_MB` (default 4096) stops the load early to protect the machine.
 - Measures core RSS over time, spawn and transaction latency (p50/p99), input→echo p99 on an idle stream sharing
   the observer's connection with the floods, status event lag (backend emit → client), `missed` counts and
@@ -92,6 +92,15 @@ Follow-ups (same core):
   client alone and about 950 MB with stalled plus slow.
 - The same slow client attached only to its idle stream: echo p50 is 6 ms and p99 is about 610 ms. Event traffic
   alone (about 40 KB/s) nearly fills its read rate. Core RSS stays flat.
+
+Event volume (bounded streams merged, ed7599c, then partial resource events):
+- The receipt's `events.wire_by_type` gives wire bytes by event type. At the default load, `resource` (status)
+  events were 358 B each and 34.5 of 42.6 KB/s; `entries` 8 KB/s (the harness pads transaction values).
+- With `partial_resources`, a status event is 218 B, and the total is 29.1 KB/s. The slow client's echo p99 falls
+  from about 1100 ms to about 570 ms, which still exceeds the 250 ms placeholder.
+- What's left is burst-shaped: the 200 fake agents tick in phase (spawned within 0.5 s, all every 2 s), so about
+  40 KB arrives at once every 2 s. Per-resource coalescing would not help this load: each resource changes only
+  once per period.
 
 ## Deferred
 
