@@ -13,8 +13,6 @@ Close a question by linking the decision, commit or experiment that answered it.
    needs beyond today's panels.
 3. **Capability granularity.** How fine should backend capabilities be before extensions fill up with special
    cases? Answered only by a second backend (roadmap step 2). First cut: `spec/provider-v0.md` section 3.
-5. **Shared versus per-client settings.** Sidebar view, icons, theme and prefix live in workspace docs shared by every
-   UI. Some may want to be per client (a terminal without Nerd Fonts, a light-background terminal).
 7. **One layout on clients of different sizes.** Today each client renders the shared layout at its own size;
    terminal size follows herdr-core's latest-active-viewer rule. No prim-level rule yet.
 8. **Extension state across versions.** Namespace schema versions and a snapshot at replace time, so rollback
@@ -25,7 +23,7 @@ Close a question by linking the decision, commit or experiment that answered it.
     concern; core IDs must support it.
 12. **Glyph widths.** Nerd Font and emoji widths vary by terminal and font; icon sets declare a width, but some
     terminals may still draw wider.
-13. **Licensing and terms**, for Legal Counsel: pi_agent_rust's rider, Rex third-party-client terms, automating
+13. **Licensing and terms** (human considering, 2026-11-17; nothing pushed), for Legal Counsel: pi_agent_rust's rider, Rex third-party-client terms, automating
     Claude Code, and prim's own licence before publishing.
 16. **Unit of configuration for hosts.** One provider extension entry per host (`herdr@rohan`), as proposed, or one
     provider managing several hosts?
