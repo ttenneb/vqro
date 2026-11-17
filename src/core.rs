@@ -96,6 +96,7 @@ pub struct Core {
     pub epoch: String,
     pub events: broadcast::Sender<(u64, Value)>,
     pub commands: BTreeMap<String, CommandInfo>,
+    pub(crate) invocations: crate::invocation::Shared,
     pub exts: BTreeMap<String, ExtRuntime>,
     pub shutdown: crate::shutdown::Shutdown,
     pub(crate) extension_tasks: Vec<tokio::task::JoinHandle<()>>,
@@ -145,6 +146,7 @@ impl Core {
             epoch,
             events,
             commands,
+            invocations: Default::default(),
             exts: BTreeMap::new(),
             shutdown: crate::shutdown::Shutdown::default(),
             extension_tasks: Vec::new(),
@@ -234,7 +236,7 @@ impl Core {
             .iter()
             .map(|c| json!({"key": c.key, "version": c.after.as_ref().map(|e| e.version), "value": c.after.as_ref().map(|e| e.value.clone())}))
             .collect();
-        self.emit("entries", json!({"txn": txn.id, "author": txn.author, "note": txn.note, "reverts": txn.reverts, "changes": changes}));
+        self.emit("entries", json!({"txn": txn.id, "author": txn.author, "on_behalf_of": txn.on_behalf_of, "note": txn.note, "reverts": txn.reverts, "changes": changes}));
     }
 
     /// Publish every adopted transaction, including a replacement whose final directory sync

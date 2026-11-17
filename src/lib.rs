@@ -4,6 +4,7 @@
 pub mod adapter;
 pub mod client;
 mod commit;
+mod invocation;
 pub mod core;
 pub mod events;
 pub mod ext;

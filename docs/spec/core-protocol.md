@@ -59,9 +59,9 @@ disconnect uses legacy positive-pid signal fallback, never a protocol refusal. S
 | Method | Params | Result |
 |---|---|---|
 | `workspace.snapshot` | | `epoch`, `seq`, `entries` (key → `{version, value}`), `resources`, `commands`, `extensions`, `providers`, `adapters` (compatibility alias), `safe_mode` |
-| `workspace.apply` | `ops: [{op: "set", key, value, expect?} \| {op: "delete", key, expect?}]`, `note?` | `txn`, `changes` |
+| `workspace.apply` | `ops: [{op: "set", key, value, expect?} \| {op: "delete", key, expect?}]`, `note?`, `on_behalf_of?` (invocation proof) | `txn`, `changes` |
 | `workspace.history` | `limit?` | `txns` (newest first) |
-| `workspace.revert` | `txn` | the reverting `txn` |
+| `workspace.revert` | `txn`, `on_behalf_of?` (invocation proof) | the reverting `txn` |
 
 Transactions are validated against the resulting state and applied all-or-nothing. `expect` is compare-and-set
 (0 = must not exist). Key namespaces and value shapes: `src/store.rs` header. Layouts may only reference
@@ -295,16 +295,43 @@ accepts prior facts. Credit waiting is off the native session loop. Finite-windo
 |---|---|---|
 | `command.register` | `name`, `title?` | the command; `prim.*` is reserved for the core |
 | `command.list` | | `commands` |
-| `command.invoke` | `name`, `args?`, `deadline_ms?` | whatever the owner returns; `unavailable` if its owner is disconnected |
+| `command.invoke` | `name`, `args?`, `deadline_ms?`, `on_behalf_of?` (invocation proof) | whatever the owner returns; `unavailable` if its owner is disconnected |
 
 Built-in, non-replaceable commands (recovery surface, D15): `prim.layout.reset`, `prim.revert`
-(default: last change not made by an extension), `prim.safe_mode`, `prim.extension.disable|enable|restart`, and
+(default: latest client-authored or client-started extension transaction), `prim.safe_mode`, `prim.extension.disable|enable|restart`, and
 `prim.shutdown` (stop the core, as `core.shutdown`; contract, implementation pending).
 Everything opinionated is an extension (D17).
 
 Command registrations belong to the registering connection, not just its author string. A replacement connection
 with the same extension identity may re-register a command; closing the old connection does not disable or reroute
 the replacement's command. Commands left registered only by the closing connection become unavailable.
+
+### Command attribution and undo (D24)
+
+A forwarded command receives `command.invoke {name, args, caller, invocation, on_behalf_of}`: `caller` is the immediate
+invoker, `on_behalf_of` is the original invoker's author label, and `invocation` is an opaque proof for this callback.
+An extension returns that **proof**, not an author label, in the `on_behalf_of` request field on `workspace.apply`,
+`workspace.revert` or a nested `command.invoke`. The core validates the proof against the callback's owning connection
+and in-flight scope; forged, cross-connection, completed, expired or revoked-parent proofs fail `forbidden` before a
+workspace write is admitted. Nested commands preserve the original invoker, with no longer lifetime than their parent.
+Proofs are not grants or user identities (D8); they cannot restrict an agent's ordinary workspace primitives.
+
+History and entries events retain actual writer `author` plus optional **author label** `on_behalf_of`; proofs are never
+persisted or broadcast. Legacy history without the field remains valid. Default `prim.revert`/TUI `u` keeps the existing
+**global** history behavior across windows/reconnects: it selects the latest non-extension writer, or extension write
+whose original invoker was not itself an extension. Autonomous extension writes/event reactions stay excluded. Explicit
+transaction revert and CAS conflict rules are unchanged; this does not introduce a per-user identity or undo stack.
+
+The Python SDK propagates proofs automatically within the command-handler thread, including nested calls, without
+mutating caller dictionaries. Event callbacks and detached worker threads do not inherit them. Complete user writes
+before replying: an explicit proof used after reply/timeout is rejected, rather than silently reattributed. Detached
+work without a proof is autonomous. A write validated/admitted while the command was active keeps its attribution if
+commit completion outlives the callback, disconnect or receipt, with the usual no-replay durability rules.
+
+Active proofs are ephemeral: at most1024 entries and8MiB encoded attribution metadata, nesting32; full admission returns
+`overloaded` before callback dispatch. Scope expiry follows the requested command deadline and all ancestors. Proofs
+are retired on callback completion/error/cancellation; expired entries are pruned on admission. They do not resume
+across core restart, and this mechanism does not make native execution effects reversible.
 
 Forwarded invocations default to a 30-second deadline. `deadline_ms` may override it from 1 to 300000 ms; built-in
 commands are local and are not timed by this forwarding deadline. Expiry returns `timeout` with

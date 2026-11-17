@@ -10,8 +10,8 @@ const BYTES: usize = 8 * 1024 * 1024;
 type Prepare = Box<dyn FnOnce(&Core) -> Result<Plan, RpcError> + Send>;
 
 pub(crate) enum Action {
-    Apply { author:String, note:Option<String>, ops:Vec<Op> },
-    Revert { author:String, txn:u64 },
+    Apply { author:String, on_behalf_of:Option<Arc<str>>, note:Option<String>, ops:Vec<Op> },
+    Revert { author:String, on_behalf_of:Option<Arc<str>>, txn:u64 },
 }
 pub(crate) struct Plan {
     pub action: Action,
@@ -122,8 +122,8 @@ async fn run(core:Weak<Mutex<Core>>, queue:Receiver,cancel:Arc<AtomicBool>) {
         // operations run on a blocking thread without the core mutex or an async worker.
         let written = tokio::task::spawn_blocking(move || {
             let result = match plan.action {
-                Action::Apply { author, note, ops } => store.apply(&author, note, ops),
-                Action::Revert { author, txn } => store.revert(&author, txn),
+                Action::Apply { author, on_behalf_of, note, ops } => store.apply_attributed(&author, on_behalf_of.as_deref(), note, ops),
+                Action::Revert { author, on_behalf_of, txn } => store.revert_attributed(&author, on_behalf_of.as_deref(), txn),
             };
             (store, result)
         }).await;
@@ -162,7 +162,7 @@ mod tests {
         Arc::new(Mutex::new(Core::new(crate::store::Store::in_memory(), None, "unused".into(), false).unwrap()))
     }
     fn prepare() -> Prepare {
-        Box::new(|_| Ok(Plan { action:Action::Apply { author:"test".into(), note:None, ops:Vec::new() }, after_adopt:None }))
+        Box::new(|_| Ok(Plan { action:Action::Apply { author:"test".into(), on_behalf_of:None, note:None, ops:Vec::new() }, after_adopt:None }))
     }
     #[test]
     fn cancelled_receipts_and_dequeued_work_keep_the_byte_budget_until_completion() {
@@ -202,7 +202,7 @@ mod tests {
             let _keep=&root;entered.notify_one();let mut open=gate.0.lock().unwrap();while !*open {open=gate.1.wait(open).unwrap();}crate::store::write_atomic(path,bytes)
         }})).unwrap();
         fn hook(core:&Shared) { core.lock().unwrap().safe_mode=true; }
-        let plan=||Box::new(|_:&Core|Ok(Plan { action:Action::Apply { author:"test".into(),note:None,ops:vec![Op::Set {key:"doc/queued".into(),value:serde_json::json!(1),expect:None}] },after_adopt:Some(hook) })) as Prepare;
+        let plan=||Box::new(|_:&Core|Ok(Plan { action:Action::Apply { author:"test".into(),on_behalf_of:None,note:None,ops:vec![Op::Set {key:"doc/queued".into(),value:serde_json::json!(1),expect:None}] },after_adopt:Some(hook) })) as Prepare;
         let first=core.lock().unwrap().committer.enqueue(&core,256,plan()).unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(2),entered.notified()).await.unwrap();
         let second=core.lock().unwrap().committer.enqueue(&core,256,plan()).unwrap();

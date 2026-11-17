@@ -337,6 +337,13 @@ struct Hello {
 struct Apply {
     ops: Vec<Op>,
     note: Option<String>,
+    on_behalf_of: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct Revert {
+    txn: u64,
+    on_behalf_of: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -387,6 +394,12 @@ struct Invoke {
     #[serde(default)]
     args: Value,
     deadline_ms: Option<u64>,
+    on_behalf_of: Option<String>,
+}
+
+fn attribution(core: &Shared, conn: &Conn, proof: Option<String>) -> Result<crate::invocation::Context, RpcError> {
+    let shared = core.lock().unwrap().invocations.clone();
+    crate::invocation::authorize(&shared, conn.id, proof)
 }
 
 async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> RpcResult {
@@ -430,15 +443,17 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> Rp
         "workspace.snapshot" => Ok(core.lock().unwrap().snapshot()),
         "workspace.apply" => {
             let a: Apply = params(p)?;
-            apply(core, &conn.author(), a.note, a.ops).await
+            let context = attribution(core, conn, a.on_behalf_of)?;
+            apply(core, &conn.author(), context.origin, a.note, a.ops).await
         }
         "workspace.history" => {
             let limit = p.get("limit").and_then(|l| l.as_u64()).unwrap_or(20) as usize;
             Ok(json!({"txns": core.lock().unwrap().store.history(limit)}))
         }
         "workspace.revert" => {
-            let txn = p.get("txn").and_then(|t| t.as_u64()).ok_or_else(|| RpcError::invalid("needs `txn`"))?;
-            revert(core, &conn.author(), Some(txn)).await
+            let revert_request: Revert = params(p)?;
+            let context = attribution(core, conn, revert_request.on_behalf_of)?;
+            revert(core, &conn.author(), context.origin, Some(revert_request.txn)).await
         }
         "events.subscribe" => subscribe(core, conn, params(p)?),
         "resource.list" => Ok(json!({"resources": core.lock().unwrap().resources.values().map(|r| r.to_json()).collect::<Vec<_>>()})),
@@ -483,7 +498,8 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> Rp
         "command.list" => Ok(json!({"commands": core.lock().unwrap().commands.values().map(|c| c.to_json()).collect::<Vec<_>>()})),
         "command.invoke" => {
             let i: Invoke = params(p)?;
-            invoke_deadline(core, &conn.author(), &i.name, i.args, i.deadline_ms).await
+            let context = attribution(core, conn, i.on_behalf_of)?;
+            invoke_deadline(core, &conn.author(), context, &i.name, i.args, i.deadline_ms).await
         }
         "ui.notify" => {
             // A transient message for every client (toast). Not state.
@@ -782,47 +798,49 @@ async fn attach(core: &Shared, conn: &Arc<Conn>, a: Attach) -> RpcResult {
     Ok(json!({"outcome": "accepted", "effect": effect, "initial": initial, "stream": sid, "resource": a.resource}))
 }
 
-async fn revert(core: &Shared, author: &str, txn: Option<u64>) -> RpcResult {
+async fn revert(core: &Shared, author: &str, on_behalf_of: Option<Arc<str>>, txn: Option<u64>) -> RpcResult {
     let author = author.to_string();
-    crate::commit::submit(core, crate::limits::encoded_bytes(&author).saturating_add(128), move |c| {
-        // Select default undo only when earlier queued commits have been adopted.
-        let id = txn.or_else(|| c.store.latest_txn_matching(|t| !t.author.starts_with("ext:")))
+    let bytes = crate::limits::encoded_bytes(&(&author, on_behalf_of.as_deref())).saturating_add(128);
+    crate::commit::submit(core, bytes, move |c| {
+        // Preserve global undo: clients and client-started extension writes, never autonomous extensions.
+        // Select only after preceding queued commits have been adopted.
+        let id = txn.or_else(|| c.store.latest_txn_matching(|t| !t.author.starts_with("ext:") || t.on_behalf_of.as_ref().is_some_and(|origin| !origin.starts_with("ext:"))))
             .ok_or_else(|| RpcError::new("not_found", "no transactions to revert"))?;
         let touched_ext = c.store.transaction(id).is_some_and(|t| t.changes.iter().any(|ch| ch.key.starts_with("extension/")));
-        Ok(crate::commit::Plan { action:crate::commit::Action::Revert { author, txn:id }, after_adopt:if touched_ext { Some(ext::reconcile) } else { None } })
+        Ok(crate::commit::Plan { action:crate::commit::Action::Revert { author, on_behalf_of, txn:id }, after_adopt:if touched_ext { Some(ext::reconcile) } else { None } })
     }).await
 }
 
 async fn apply_prepared(
-    core:&Shared, author:&str, note:Option<String>, bytes:usize,
+    core:&Shared, author:&str, on_behalf_of:Option<Arc<str>>, note:Option<String>, bytes:usize,
     ops:impl FnOnce(&Core)->Result<Vec<Op>,RpcError> + Send + 'static,
 ) -> RpcResult {
-    let bytes = bytes.saturating_add(crate::limits::encoded_bytes(&(author, &note)));
+    let bytes = bytes.saturating_add(crate::limits::encoded_bytes(&(author, on_behalf_of.as_deref(), &note)));
     let author = author.to_string();
     crate::commit::submit(core, bytes, move |c| {
         let ops = ops(c)?;
         let touched_ext = ops.iter().any(|o| op_key(o).starts_with("extension/"));
-        Ok(crate::commit::Plan { action:crate::commit::Action::Apply { author, note, ops }, after_adopt:if touched_ext { Some(ext::reconcile) } else { None } })
+        Ok(crate::commit::Plan { action:crate::commit::Action::Apply { author, on_behalf_of, note, ops }, after_adopt:if touched_ext { Some(ext::reconcile) } else { None } })
     }).await
 }
 
-async fn apply(core:&Shared, author:&str, note:Option<String>, ops:Vec<Op>) -> RpcResult {
+async fn apply(core:&Shared, author:&str, on_behalf_of:Option<Arc<str>>, note:Option<String>, ops:Vec<Op>) -> RpcResult {
     let bytes = crate::limits::encoded_bytes(&ops);
-    apply_prepared(core, author, note, bytes, move |_| Ok(ops)).await
+    apply_prepared(core, author, on_behalf_of, note, bytes, move |_| Ok(ops)).await
 }
 
 /// Run a command: built-ins here, everything else forwarded to the connection that owns it.
 pub async fn invoke(core: &Shared, author: &str, name: &str, args: Value) -> RpcResult {
-    invoke_deadline(core, author, name, args, None).await
+    invoke_deadline(core, author, crate::invocation::Context::default(), name, args, None).await
 }
 
-async fn invoke_deadline(core: &Shared, author: &str, name: &str, args: Value, deadline_ms: Option<u64>) -> RpcResult {
+async fn invoke_deadline(core: &Shared, author: &str, context: crate::invocation::Context, name: &str, args: Value, deadline_ms: Option<u64>) -> RpcResult {
     let deadline = provider::deadline(deadline_ms)?;
     let arg = |k: &str| args.get(k).cloned().unwrap_or(Value::Null);
     match name {
         "prim.shutdown" => Ok(json!({"outcome":"accepted"})),
-        "prim.layout.reset" => layout_reset(core, author).await,
-        "prim.revert" => revert(core, author, arg("txn").as_u64()).await,
+        "prim.layout.reset" => layout_reset(core, author, context.origin.clone()).await,
+        "prim.revert" => revert(core, author, context.origin.clone(), arg("txn").as_u64()).await,
         "prim.safe_mode" => {
             let gate=core.lock().unwrap().recovery_gate.clone(); let _guard=gate.lock().await;
             let (on,handles,restart)={
@@ -862,7 +880,7 @@ async fn invoke_deadline(core: &Shared, author: &str, name: &str, args: Value, d
         "prim.extension.disable" | "prim.extension.enable" => {
             let ext_name = arg("name").as_str().map(String::from).or_else(|| arg("text").as_str().map(String::from)).ok_or_else(|| RpcError::invalid("needs `name`"))?;
             let enabled = name == "prim.extension.enable";
-            apply_prepared(core, author, Some(name.into()), crate::limits::encoded_bytes(&ext_name).saturating_add(128), move |c| {
+            apply_prepared(core, author, context.origin.clone(), Some(name.into()), crate::limits::encoded_bytes(&ext_name).saturating_add(128), move |c| {
                 let key = format!("extension/{ext_name}");
                 let mut value = c.store.get(&key).map(|e| e.value.clone()).ok_or_else(|| RpcError::new("not_found", format!("no extension {ext_name}")))?;
                 value["enabled"] = json!(enabled);
@@ -875,22 +893,28 @@ async fn invoke_deadline(core: &Shared, author: &str, name: &str, args: Value, d
             Ok(json!({"restarted": ext_name}))
         }
         _ => {
-            let peer = {
+            let (peer, connection, invocations) = {
                 let c = core.lock().unwrap();
                 let cmd = c.commands.get(name).ok_or_else(|| RpcError::new("not_found", format!("no command {name}")))?;
                 if !cmd.available {
                     return Err(RpcError::new("unavailable", format!("{name} is unavailable: {} is not connected", cmd.owner)));
                 }
-                cmd.peer.clone().ok_or_else(|| RpcError::new("unavailable", format!("{name} has no handler")))?
+                (cmd.peer.clone().ok_or_else(|| RpcError::new("unavailable", format!("{name} has no handler")))?,
+                 cmd.connection.ok_or_else(|| RpcError::new("unavailable", "command has no owning connection"))?, c.invocations.clone())
             };
-            peer.call_with_timeout("command.invoke", json!({"name": name, "args": args, "caller": author}), deadline).await
+            let scope = crate::invocation::enter(&invocations, connection, author, &context, deadline)?;
+            let origin = context.origin.as_deref().unwrap_or(author);
+            let result = peer.call_with_timeout("command.invoke", json!({"name": name, "args": args, "caller": author,
+                "on_behalf_of":origin, "invocation":scope.token()}), deadline).await;
+            drop(scope);
+            result
         }
     }
 }
 
 /// One tab per live terminal. The recovery path when a layout is broken or confusing.
-async fn layout_reset(core: &Shared, author: &str) -> RpcResult {
-    apply_prepared(core, author, Some("prim.layout.reset".into()), 128, |c| {
+async fn layout_reset(core: &Shared, author: &str, on_behalf_of:Option<Arc<str>>) -> RpcResult {
+    apply_prepared(core, author, on_behalf_of, Some("prim.layout.reset".into()), 128, |c| {
         let mut ops = Vec::new();
         let mut tabs = Vec::new();
         for r in c.resources.values().filter(|r| r.facts.kind == "terminal" && r.facts.state == "live") {

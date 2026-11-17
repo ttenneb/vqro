@@ -17,6 +17,70 @@ def event(seq, value):
     return {"epoch": "boot", "seq": seq, "type": "entries", "data": {"changes": [{"key": "doc/test/value", "version": seq, "value": value}]}}
 
 
+class InvocationAttribution(unittest.TestCase):
+    def prim(self, handler):
+        prim = Prim.__new__(Prim)
+        prim.lock = threading.Lock()
+        prim.next = 1
+        prim.waiting = {}
+        prim._command_context = threading.local()
+        prim.handler = handler
+        messages = []
+        def send(message):
+            messages.append(message)
+            if "method" in message:
+                slot = prim.waiting[message["id"]]
+                slot[1] = {"result": {"ok": True}}
+                slot[0].set()
+        prim._send = send
+        return prim, messages
+
+    def test_command_context_covers_workspace_and_nested_calls_without_mutating_params(self):
+        params = {"ops": []}
+        def handler(method, args):
+            prim.call("workspace.apply", params)
+            prim.call("workspace.revert", {"txn": 1})
+            prim.call("command.invoke", {"name": "nested"})
+            prim.call("workspace.snapshot")
+        prim, messages = self.prim(handler)
+        prim._dispatch({"id": 100, "method": "command.invoke", "params": {"invocation": "proof"}})
+        requests = [msg for msg in messages if "method" in msg]
+        self.assertEqual([msg["params"].get("on_behalf_of") for msg in requests], ["proof", "proof", "proof", None])
+        self.assertNotIn("on_behalf_of", params)
+        prim.call("workspace.apply", params)
+        self.assertNotIn("on_behalf_of", messages[-1]["params"], "scope ends with reply")
+
+    def test_events_and_detached_threads_do_not_inherit_a_user_command(self):
+        def handler(method, args):
+            if method == "command.invoke":
+                prim._dispatch({"method": "event", "params": {}})
+                thread = threading.Thread(target=lambda: prim.call("workspace.apply", {"note": "background"}))
+                thread.start(); thread.join(2)
+                self.assertFalse(thread.is_alive())
+                prim.call("workspace.apply", {"note": "command"})
+            else:
+                prim.call("workspace.apply", {"note": "event"})
+        prim, messages = self.prim(handler)
+        prim._dispatch({"id": 100, "method": "command.invoke", "params": {"invocation": "proof"}})
+        requests = [msg["params"] for msg in messages if msg.get("method") == "workspace.apply"]
+        self.assertEqual({p["note"]: p.get("on_behalf_of") for p in requests}, {"event": None, "background": None, "command": "proof"})
+
+    def test_concurrent_invocations_keep_their_own_context(self):
+        from concurrent.futures import ThreadPoolExecutor
+        barrier = threading.Barrier(2)
+        def handler(method, args):
+            barrier.wait(2)
+            prim.call("workspace.apply", {"note": args["name"]})
+        prim, messages = self.prim(handler)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(prim._dispatch, {"id": i, "method": "command.invoke", "params": {"invocation": name, "name": name}})
+                       for i, name in enumerate(("a", "b"), 100)]
+            for future in futures: future.result(3)
+        requests = [msg["params"] for msg in messages if msg.get("method") == "workspace.apply"]
+        self.assertEqual({p["note"]: p.get("on_behalf_of") for p in requests}, {"a": "a", "b": "b"})
+        self.assertFalse(any("error" in msg for msg in messages))
+
+
 class InboundBounds(unittest.TestCase):
     def test_notification_bytes_stay_charged_until_callback_finishes(self):
         prim = Prim.__new__(Prim)

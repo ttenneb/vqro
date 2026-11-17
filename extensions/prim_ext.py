@@ -53,6 +53,7 @@ class Prim:
         self.next = 1
         self.waiting = {}
         self.handler = handler
+        self._command_context = threading.local()
         self.notes = queue.Queue(maxsize=128)  # ordered; byte charge remains through callback execution
         self.note_lock = threading.Lock()
         self.note_bytes = 0
@@ -69,6 +70,10 @@ class Prim:
             self.sock.sendall(wire)
 
     def call(self, method, params=None):
+        proof = getattr(getattr(self, "_command_context", None), "invocation", None)
+        if proof is not None and method in ("workspace.apply", "workspace.revert", "command.invoke") and (params is None or isinstance(params, dict)):
+            params = dict(params or {})
+            params.setdefault("on_behalf_of", proof)
         ev = threading.Event()
         with self.lock:
             if len(self.waiting) >= MAX_PENDING:
@@ -144,6 +149,12 @@ class Prim:
             self._note(*self.notes.get())
 
     def _dispatch(self, msg):
+        context = getattr(self, "_command_context", None)
+        if context is None:
+            context = self._command_context = threading.local()
+        previous = getattr(context, "invocation", None)
+        params = msg.get("params") or {}
+        context.invocation = params.get("invocation") if msg.get("method") == "command.invoke" and isinstance(params, dict) else None
         try:
             result = self.handler(msg["method"], msg.get("params") or {})
             if "id" in msg:
@@ -152,6 +163,8 @@ class Prim:
             if "id" in msg:
                 kind = getattr(e, "kind", None) or "extension"
                 self._send({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32000, "message": str(e), "data": {"kind": kind}}})
+        finally:
+            context.invocation = previous
 
 
 # Namespaces an activation's contribute() reconciles (owner-tagged entries only).

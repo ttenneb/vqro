@@ -53,6 +53,9 @@ pub struct Change {
 pub struct Txn {
     pub id: u64,
     pub author: String,
+    /// Original command invoker, validated before commit admission; writer stays in author.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_behalf_of: Option<String>,
     pub at_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
@@ -157,16 +160,20 @@ impl Store {
     /// Validate and durably apply a transaction. See the module header for the post-rename
     /// `durability_unconfirmed` exception: the transaction is adopted, not safe to retry.
     pub fn apply(&mut self, author: &str, note: Option<String>, ops: Vec<Op>) -> Result<Txn, RpcError> {
-        self.apply_inner(author, note, None, ops)
+        self.apply_attributed(author, None, note, ops)
     }
 
-    fn apply_inner(&mut self, author: &str, note: Option<String>, reverts: Option<u64>, ops: Vec<Op>) -> Result<Txn, RpcError> {
+    pub fn apply_attributed(&mut self, author: &str, on_behalf_of: Option<&str>, note: Option<String>, ops: Vec<Op>) -> Result<Txn, RpcError> {
+        self.apply_inner(author, on_behalf_of, note, None, ops)
+    }
+
+    fn apply_inner(&mut self, author: &str, on_behalf_of: Option<&str>, note: Option<String>, reverts: Option<u64>, ops: Vec<Op>) -> Result<Txn, RpcError> {
         let writer = self.writer.clone();
-        self.apply_with_writer(author, note, reverts, ops, |path, bytes| writer(path, bytes))
+        self.apply_with_writer(author, on_behalf_of, note, reverts, ops, |path, bytes| writer(path, bytes))
     }
 
     fn apply_with_writer(
-        &mut self, author: &str, note: Option<String>, reverts: Option<u64>, ops: Vec<Op>,
+        &mut self, author: &str, on_behalf_of: Option<&str>, note: Option<String>, reverts: Option<u64>, ops: Vec<Op>,
         write: impl FnOnce(&Path, &[u8]) -> Result<(), AtomicWriteError>,
     ) -> Result<Txn, RpcError> {
         if ops.is_empty() {
@@ -217,7 +224,7 @@ impl Store {
             .map(|(key, before)| Change { after: next.get(&key).cloned(), key, before })
             .filter(|c| c.before != c.after)
             .collect();
-        let txn = Txn { id: self.next_txn, author: author.to_string(), at_ms: now_ms(), note, reverts, changes };
+        let txn = Txn { id: self.next_txn, author: author.to_string(), on_behalf_of:on_behalf_of.map(String::from), at_ms: now_ms(), note, reverts, changes };
         let mut candidate = Persisted { rev, next_txn: self.next_txn + 1, entries: next, history: self.history.as_ref().clone() };
         candidate.history.push_back(txn.clone());
         while candidate.history.len() > HISTORY {
@@ -247,6 +254,10 @@ impl Store {
 
     /// Undo a transaction with a new one. Fails with `conflict` if any entry it touched has changed since.
     pub fn revert(&mut self, author: &str, txn_id: u64) -> Result<Txn, RpcError> {
+        self.revert_attributed(author, None, txn_id)
+    }
+
+    pub fn revert_attributed(&mut self, author: &str, on_behalf_of: Option<&str>, txn_id: u64) -> Result<Txn, RpcError> {
         let txn = self
             .history
             .iter()
@@ -264,7 +275,7 @@ impl Store {
         if ops.is_empty() {
             return Err(RpcError::invalid(format!("transaction {txn_id} changed nothing")));
         }
-        self.apply_inner(author, Some(format!("revert {txn_id}")), Some(txn_id), ops)
+        self.apply_inner(author, on_behalf_of, Some(format!("revert {txn_id}")), Some(txn_id), ops)
     }
 }
 
@@ -583,7 +594,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ws.json");
         let mut s = Store::open(path.clone()).unwrap();
-        let err = s.apply_with_writer("t", None, None, vec![set("doc/a/b", json!(1))], |path, bytes| {
+        let err = s.apply_with_writer("t", None, None, None, vec![set("doc/a/b", json!(1))], |path, bytes| {
             write_atomic_with_sync(path, bytes, |_| Err(std::io::Error::other("injected directory sync failure")))
         }).unwrap_err();
         assert_eq!(err.kind(), "durability_unconfirmed");
