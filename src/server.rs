@@ -17,6 +17,8 @@ use crate::store::Op;
 use crate::ext;
 
 pub const PROTOCOL: u64 = 1;
+/// Requested OS send buffer per client connection (see `serve`).
+pub const CONNECTION_SEND_BUFFER: usize = 16 * 1024;
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
 struct Conn {
@@ -112,6 +114,12 @@ pub async fn serve(core: Shared, listener: UnixListener) -> anyhow::Result<()> {
     let next = AtomicU64::new(1);
     loop {
         let (stream, _) = listener.accept().await?;
+        // Bounded outbound: bytes in the OS send buffer can't be revoked when a slow viewer's streams
+        // are closed, so keep that buffer small (the OS may round it up; Linux doubles it). Measured
+        // with the scale harness: a 64 KiB/s viewer's first echo after attaching to output floods fell
+        // from 5.6 s with the 208 KiB default to 0.5-0.65 s; much smaller buffers slow such a reader
+        // down. Draining viewers' throughput is unchanged. Best effort: failure keeps the OS default.
+        let _ = socket2::SockRef::from(&stream).set_send_buffer_size(CONNECTION_SEND_BUFFER);
         let id = next.fetch_add(1, Ordering::Relaxed);
         let (r, w) = stream.into_split();
         let (peer, incoming) = Peer::spawn(r, w);
