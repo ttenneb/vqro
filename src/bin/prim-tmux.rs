@@ -53,7 +53,7 @@ fn args() -> Result<Args, String> {
             "--session" => a.session = Some(value()?),
             "--name" => a.name = Some(value()?),
             "-h" | "--help" => {
-                println!("prim-tmux [--tmux-socket PATH] [--session NAME] [--tmux BIN] [--name NAME]\nConnects to $PRIM_SOCKET.");
+                println!("prim-tmux [--tmux-socket PATH] [--session NAME] [--tmux BIN] [--name NAME]\nConnects to $PRIM_SOCKET.\nprim-tmux server status|stop [--state-dir PATH] [--tmux BIN]\nStop reads an explicit terminal-count confirmation; it never stops configured external servers.");
                 std::process::exit(0);
             }
             other => return Err(format!("unknown argument {other}")),
@@ -638,14 +638,19 @@ mod platform_tests {
     }
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
     let argv: Vec<String> = std::env::args().collect();
-    let result = if argv.get(1).map(String::as_str) == Some("server") {
-        owned_server::command(&argv[2..]).await
+    let server_command = argv.get(1).map(String::as_str) == Some("server");
+    // The status helper is polled: it needs no multi-thread worker pool. Keep the provider's
+    // existing multi-thread runtime so blocking native CLI inventory does not stall streams.
+    let mut builder = if server_command { tokio::runtime::Builder::new_current_thread() }
+        else { tokio::runtime::Builder::new_multi_thread() };
+    let runtime = builder.enable_all().build().expect("tmux runtime");
+    let result = if server_command {
+        runtime.block_on(owned_server::command(&argv[2..]))
     } else {
         watch_lifetime();
-        run().await
+        runtime.block_on(run())
     };
     let code = match result {
         Ok(()) => 0,

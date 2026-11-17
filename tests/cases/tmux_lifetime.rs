@@ -30,9 +30,16 @@ pub fn stop(state: &Path) {
     let output = helper(state, &["stop", "--expect-instance", before["instance"].as_str().unwrap(), "--confirm-terminals", &count]);
     assert!(output.status.success(), "stop: {}", String::from_utf8_lossy(&output.stderr));
     assert_eq!(serde_json::from_slice::<Value>(&output.stdout).unwrap()["outcome"], "accepted");
+    wait_stopped(state);
+}
+fn wait_stopped(state: &Path) {
     let deadline = Instant::now() + Duration::from_secs(3);
-    while status(state)["running"] == true {
-        assert!(Instant::now() < deadline, "tmux still answers after explicit stop");
+    loop {
+        // A read may race native teardown ("server exited unexpectedly"). Retry observation,
+        // never the destructive command, and require an affirmative not-running observation.
+        let output = helper(state, &["status"]);
+        if output.status.success() && serde_json::from_slice::<Value>(&output.stdout).unwrap()["running"] == false { return; }
+        assert!(Instant::now() < deadline, "tmux still answers or cannot be observed after explicit stop");
         std::thread::sleep(Duration::from_millis(10));
     }
 }
@@ -107,6 +114,7 @@ async fn owned_server_survives_disable_safe_mode_crash_and_reinstall_like_restar
     let pane_pid = first["data"]["pid"].as_u64().unwrap();
     let initial = status(&state);
     assert_eq!(initial["terminals"], 1);
+    assert_eq!(first["instance"], initial["instance"], "helper and provider disagree on server identity");
 
     command(&peer, "prim.extension.disable", json!({"name":"tmux"})).await;
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -158,5 +166,52 @@ async fn owned_server_survives_disable_safe_mode_crash_and_reinstall_like_restar
     assert!(!replaced.status.success(), "old confirmation killed a replacement server");
     stop(&state);
     peer.call("core.shutdown", json!({})).await.unwrap();
+    running.reap(false);
+}
+
+#[tokio::test]
+#[ignore]
+async fn independent_controls_stop_offline_provider_and_persist_enabled_provider_off() {
+    let root = tempfile::Builder::new().prefix("ptctrl").tempdir_in("/tmp").unwrap();
+    std::fs::create_dir(root.path().join("extensions")).unwrap();
+    let state = root.path().join("prim");
+    let mut running = Running { child: None, _server: ServerCleanup(state.clone()), root };
+    running.start();
+    let peer = running.peer().await;
+    peer.call("workspace.apply", json!({"ops":[
+        {"op":"set","key":"extension/tmux","expect":0,"value":{"enabled":true,"kind":"provider",
+            "argv":[env!("CARGO_BIN_EXE_prim-tmux"),"--tmux","/usr/bin/tmux","--name","tmux-lifetime"]}},
+        {"op":"set","key":"extension/tmux-server","expect":0,"value":{"enabled":true,
+            "argv":["/usr/bin/python3",Path::new(env!("CARGO_MANIFEST_DIR")).join("extensions/tmux_server.py")]}}
+    ]})).await.unwrap();
+    let initial = resource(&peer).await;
+    command(&peer, "prim.extension.disable", json!({"name":"tmux"})).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let observed = command(&peer, "tmux.server.status", json!({})).await;
+    assert_eq!(observed["running"], true, "status required a connected provider");
+    assert!(command(&peer, "tmux.server.stop", json!({})).await["client"]["popup"].is_object());
+    let rejected = peer.call("command.invoke", json!({"name":"tmux.server.stop", "args":{
+        "instance":observed["instance"],"terminals":1,"text":"yes"}})).await;
+    assert!(rejected.is_err());
+    assert!(live(initial["data"]["pid"].as_u64().unwrap()));
+    let stopped = command(&peer, "tmux.server.stop", json!({"instance":observed["instance"],"terminals":1,"text":"STOP 1"})).await;
+    assert_eq!(stopped["outcome"], "accepted", "stop required a connected provider");
+    wait_stopped(&state);
+    assert_eq!(command(&peer,"tmux.server.status",json!({})).await["running"], false);
+    command(&peer, "prim.extension.enable", json!({"name":"tmux"})).await;
+    resource(&peer).await;
+    let fresh = command(&peer, "tmux.server.status", json!({})).await;
+    assert_ne!(fresh["instance"], observed["instance"]);
+    assert_eq!(command(&peer,"tmux.server.stop",json!({"instance":fresh["instance"],"terminals":1,"text":"STOP 1"})).await["outcome"],"accepted");
+    let snapshot = peer.call("workspace.snapshot",json!({})).await.unwrap();
+    assert_eq!(snapshot["entries"]["extension/tmux"]["value"]["enabled"],false,"stop failed to persist provider off");
+    peer.call("core.shutdown",json!({})).await.unwrap();
+    running.reap(false);
+    running.start();
+    let peer = running.peer().await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(status(&state)["running"],false,"core restart recreated explicitly stopped server");
+    assert_eq!(command(&peer,"tmux.server.stop",json!({})).await["outcome"],"not_submitted");
+    peer.call("core.shutdown",json!({})).await.unwrap();
     running.reap(false);
 }

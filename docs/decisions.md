@@ -158,6 +158,11 @@ drifted into supervisor design (2026-11-16).
 bridge, so prim still hosts nothing. D10 (delivery states) stays as honest *reporting* of what a backend or runtime
 says, not a guarantee prim builds.
 
+**Tmux application (2026-11-17, owner-confirmed).** The prim-owned tmux server outlives its provider, including
+safe mode, extension disable, crashes and core reinstalls. tmux supplies that native lifetime, not a prim watchdog.
+Explicit, confirmed server stop is extension policy using a direct backend helper; configured external servers remain
+untouched. See `research/tmux-server-lifetime.md` for controls and the legacy-server cutover warning.
+
 ## D15. Boundaries: resources and views, extension lifecycle, transactions, safe mode (2026-11-16)
 
 **Decision.**
