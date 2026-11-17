@@ -41,7 +41,9 @@ Read `README.md`, then `docs/decisions.md` (D14 is the center; D15–D19 shape e
 - **Parallel streams** run on git worktrees (`git worktree add -b <stream> ../prim-<stream>`), one branch each,
   reviewed and merged into `main` by a coordinator. Stream agents never merge, push, or touch the live install.
 - **Test against a scratch prim, never the live one:**
-  `PRIM_STATE_DIR=$PWD/.run/st PRIM_SOCKET=$PWD/.run/p.sock PRIM_EXTENSIONS_DIR=$PWD/extensions ./target/debug/prim serve --fake &`
+  `env -u PRIM_SOCKET_SOURCE PRIM_STATE_DIR=$PWD/.run/st PRIM_SOCKET=$PWD/.run/p.sock PRIM_EXTENSIONS_DIR=$PWD/extensions ./target/debug/prim serve --fake &`
+  Terminal-injected `PRIM_SOCKET` carries `PRIM_SOCKET_SOURCE=terminal`; setting `PRIM_STATE_DIR` then selects the
+  scratch endpoint instead of that inherited one. Clear the marker only for an intentional explicit endpoint/state pair.
   (drop `--fake` to use herdr-core, and remove every terminal you create). `.run/` is ignored scratch space.
 - **UI checks:** a pty harness (`.run/harness.py`, kept outside git) runs `prim tui` in a pty, sends keys and SGR
   mouse clicks, and renders the screen through tmux; search raw output bytes for exact colours and glyphs.

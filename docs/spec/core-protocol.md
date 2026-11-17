@@ -31,7 +31,7 @@ the core forwards `command.invoke` to the connection that registered the command
 
 | Method | Params | Result |
 |---|---|---|
-| `hello` | `client?` or `extension?` (name) | `server`, `version`, `protocol`, `you` (author id), `epoch`, `seq`, `safe_mode` |
+| `hello` | `client?` or `extension?` (name), `extension_token?` (supervised lifetime proof) | `server`, `version`, `protocol`, `you` (author id), `epoch`, `seq`, `safe_mode` |
 | `core.shutdown` | | `outcome: "accepted"` |
 
 Every change is recorded with the connection's author (`ext:<name>`, `<client>:<n>`).
@@ -190,7 +190,10 @@ return `stale_generation`; wrong-generation notifications close the connection. 
 records queued before registration, are capped at 1 MiB. Relay remains unimplemented.
 
 Every `resource.spawn` passes the core's opaque endpoint as `PRIM_SOCKET` in the terminal's environment (D22),
-so `prim call` works from any pane. An explicit `env.PRIM_SOCKET` is kept, and a provider declaring
+with `PRIM_SOCKET_SOURCE=terminal`, so `prim call` works from any pane. When that marker is present and
+`PRIM_STATE_DIR` is set, CLI endpoint selection uses that state directory's endpoint instead of the inherited
+`PRIM_SOCKET`: a scratch run cannot silently call the live core. For a deliberate explicit endpoint plus state
+pair, clear `PRIM_SOCKET_SOURCE`; unmarked `PRIM_SOCKET` retains precedence. An explicit `env.PRIM_SOCKET` is kept, and a provider declaring
 `terminal.spawn {env: false}` gets none. `resource.spawn {bridge:true}` additionally opts into `PRIM_BRIDGE_TOKEN`. Runtime
 registration may wait five seconds for durable host identity and returns `resume_token`; bootstrap and resume use
 same `params.token`. Private durable current+previous credentials bind exact host/provider/instance and expire
@@ -314,7 +317,9 @@ has a 60-second default; callers needing longer waits use `call_with_timeout` wi
 `prim.safe_mode {on}` is a built-in command (`command.invoke`): entering/re-entering stops all extensions and
 provider transport links, clears the session allowlist and rejects unapproved provider registration. Backend-owned
 terminals are not killed. `prim serve` has no in-process backend: herdr/tmux are declared provider extensions. Explicit in-process
-adapters used by tests/embedders also remain stopped in safe mode and have no chooser entry. Leaving restores ordinary enabled declarations.
+adapters used by tests/embedders also remain stopped in safe mode and have no chooser entry. Leaving restores ordinary enabled declarations
+and reopens the explicitly configured embedder adapter. Repeated leave does not restart it. Entering safe mode
+preserves failed-extension status and last-exit diagnostics.
 
 `prim.safe_mode.allow {name,on}` temporarily starts/stops one declared extension while safe mode is on. It never
 writes `extension/<name>.enabled` or history; an explicit allowance may override a saved disabled value for this
@@ -325,9 +330,15 @@ are session-only; `safe_mode {on,allow,provider_extensions}` events keep clients
 
 The Rust client opens a built-in recovery popup when safe mode is on, also reachable through the prefix menu:
 provider/backend and UI groups, descriptions, checkboxes, Enable selected and Leave safe mode. Classification uses
-`extension/<name>.kind: "provider"` or remembered successful registration owners (from `hello.extension`). Provider
+`extension/<name>.kind: "provider"` or remembered authenticated registration owners. Managed processes receive a
+fresh `PRIM_EXTENSION_TOKEN` for each supervised lifetime and send it in `hello.extension_token` alongside their
+name. A name alone is a label, not supervision proof. Safe-mode provider admission requires a still-running,
+allowed lifetime; registration rechecks it after asynchronous waits. Credentials are not persisted or published,
+and are stripped before auto-starting hc services so terminals do not inherit them. Provider
 entries may also declare `default:true`; that default-backend migration is independent of this chooser. Recovery
 works without any extension, retains the prefix inside the popup, and ignores extension themes while in safe mode.
+Snapshots/reconnects preserve unapplied checkbox choices and do not reopen a dismissed chooser; a new safe-mode
+transition opens it. Failed declarations show their retained last-exit reason.
 
 ## Contributions (D17)
 
@@ -501,9 +512,12 @@ default: the per-platform extensions directory, `~/.local/share/prim/extensions`
   prim, never the user's tmux sessions.
 
 `prim serve` runs no backend in process; `--fake` adds the in-process fake for tests. A bare `prim-*` program in a
-default resolves next to the running `prim` binary. `defaults.json` is versioned (`version`; entries may carry
+default stays bare in stored state and resolves on each start: executable sibling of the running `prim`, then
+platform-native `PATH` search (including `.exe` on Windows). An unavailable program reports `failed` and an
+actionable diagnostic; hello/snapshot `backend_notice` and the built-in status bar expose unavailable backends.
+Only unchanged installed defaults with an old absolute program path are normalized; custom/edited entries stay intact. `defaults.json` is versioned (`version`; entries may carry
 `since`). Each entry is offered once per state dir: all on first run; later, only entries newer than the recorded
-version. This is how existing installs gain new defaults (here herdr and tmux). An entry that exists is left as it
+version. This is how existing installs gain new defaults (here herdr, tmux and the split Pi launcher). An entry that exists is left as it
 is, and a removed default stays removed. Client options live in `doc/settings/tui`, the theme in `doc/settings/theme`, the icon set in
 `doc/settings/icons`.
 
@@ -516,11 +530,12 @@ is, and a removed default stays removed. Client options live in `doc/settings/tu
 Declared by `extension/<name>` entries `{argv, enabled?, cwd?, kind?, default?, description?}`. `kind: "provider"`
 marks a backend or runtime provider (the safe-mode chooser groups by it). `default: true` makes the backend that
 registers under that name the provider for spawns that name none. Without one, the first backend to register is
-used; a runtime bridge never is. `argv[0]` is resolved by the platform's process
+used; a runtime bridge never is. A declared default that has not registered rejects unnamed spawns as unavailable;
+registration order must never route them to a different backend. Other `argv[0]` values are resolved by the platform's process
 launcher (`PATH` on Unix; `CreateProcess` search on Windows, where a `.py` file is not directly executable and
 `python3` is often absent). The bundled `defaults.json` names `python3`, which is Unix-only for now; Windows defaults
 need a portable interpreter choice such as the `py -3` launcher (`build-plan.md`, Windows work). Started with `PRIM_SOCKET`,
-`PRIM_EXTENSION`, and `PRIM_EXTENSION_LIFETIME=stdin`; output goes to `<state>/ext-<name>.log`.
+`PRIM_EXTENSION`, `PRIM_EXTENSION_TOKEN`, and `PRIM_EXTENSION_LIFETIME=stdin`; output goes to `<state>/ext-<name>.log`.
 Crash budget: 3 exits in 5 minutes, then `failed` until the entry changes or `prim.extension.restart`.
 
 **Lifetime channel (all platforms):** a managed extension's standard input is a pipe reserved for lifetime,

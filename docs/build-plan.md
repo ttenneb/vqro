@@ -145,6 +145,16 @@ written the same way was contained by the crash budget and removed with one reve
 - Full check gate passes17/17 with99 Python tests, all opt-in suites/UI/scale and no leftovers. No Rust changes,
   real prompts/model calls or live install. Details/receipts: `research/agents-split.md`.
 
+## QA3 upgrade/recovery corrections (2026-11-17)
+
+- User-path in-process-herdr -> CLI defaults/provider migration and approved sanitized realistic-copy private-hc proof.
+- Provider names resolve at start, unchanged pinned defaults repair safely, v1 gains Pi once, and declared-default
+  startup cannot misroute spawns. Missing backends are visible.
+- Lifetime-authenticated safe providers, persistent chooser drafts, scratch endpoint isolation, running-image
+  preference, retained failure evidence and explicit embedder restoration. Pi resumes across safe mode without replay.
+- Full scoped gate: 18/18, 204 Rust and 112 Python tests, zero warnings/leftovers. Evidence/limits:
+  `research/qa3-upgrade-recovery.md`.
+
 ## Empty-start safe-mode chooser and reinstall recovery (2026-11-17)
 
 - Human-confirmed D21 revision: no extensions/providers start in safe mode; a built-in grouped checkbox popup
