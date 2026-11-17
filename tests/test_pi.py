@@ -71,12 +71,12 @@ class PiTests(unittest.TestCase):
         self.command("new")
         self.assertEqual(self.native()[0][1]["env"], {})
 
-    def test_multiple_launches_leave_backend_naming_to_backend(self):
+    def test_multiple_launches_name_the_bridge_not_the_interpreter(self):
         self.command("new")
         self.command("new")
         spawns = [params for method, params in self.native() if method == "resource.spawn"]
         self.assertEqual(len(spawns), 2)
-        self.assertTrue(all("name" not in params for params in spawns))
+        self.assertTrue(all(params["name"] == "Pi bridge" for params in spawns))
 
     def test_agents_disabled_falls_back_to_real_terminal_without_respawning(self):
         self.core.fail_agents = True

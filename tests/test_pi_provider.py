@@ -132,6 +132,18 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         return await self.core.call("effect.invoke", {"effect": f"e{self.effects}", "op": "agent." + op,
             "ref": "agent", "incarnation": "", "args": args or {}, "deadline_ms": 1000})
 
+    async def test_readable_status_nonzero_counts_and_single_request_in_fallback(self):
+        bridge = await self.start()
+        content = json.dumps(bridge.content())
+        self.assertIn("Ready for a prompt", content)
+        self.assertNotIn("active=", content)
+        self.assertNotIn("Queued steering", content)
+        await bridge.pi.request("test_dialog", {"dialog_id": "q", "method": "confirm", "title": "Unique question"})
+        bridge._show()
+        self.assertEqual(self.frames.frames[-1].count("Unique question"), 1)
+        await bridge.pi.invoke("steer", {"message": "queued"})
+        self.assertIn("Queued steering: 1", json.dumps(bridge.content()))
+
     async def test_cli_explicit_argv_and_managed_stdin_eof_are_clean(self):
         await self.cli_lifetime_case(native_exit=False)
 

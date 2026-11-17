@@ -98,7 +98,7 @@ class Pi:
         # The local default uses this installed package. A configured host
         # launcher/environment never inherits a core-host module path.
         env = runtime.get("bridge_env", {} if "bridge_argv" in runtime else {"PYTHONPATH": EXTENSIONS})
-        params = {"bridge": True, "argv": [*launcher, "--", *runtime["argv"]], "env": env}
+        params = {"bridge": True, "name": "Pi bridge", "argv": [*launcher, "--", *runtime["argv"]], "env": env}
         if cwd:
             params["cwd"] = cwd
         result = self.ext.prim.call("resource.spawn", params)  # exactly once, never retried
@@ -113,7 +113,9 @@ class Pi:
                 # backend terminal. Fall back to that public terminal view.
                 try:
                     self.ext.invoke("agents.show", {"resource": resource["id"]})
-                except PrimError:
+                except PrimError as error:
+                    if error.kind not in ("unavailable", "not_found"):
+                        raise
                     self.terminal(host)
                 self.ext.notify("Pi agent "+resource["id"]+" created (observed); no prompt sent.", "ok")
                 return {"outcome": result["outcome"], "host": host, "agent": resource["id"], "client": {"close": True}}

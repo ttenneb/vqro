@@ -192,10 +192,14 @@ class Bridge:
         run = snapshot["run"]
         status = plain(snapshot["status"])
         style = {"working": "accent", "blocked": "warn", "done": "ok", "error": "error"}.get(status, "dim")
-        items = [{"text": "Pi run", "badges": [{"text": status, "style": style}],
-                  "description": f"active={run['active']} settled={run['settled']} aborted={run['aborted']}"}]
+        description = ("Stopped (aborted)" if run["aborted"] else "Finished" if run["settled"] else
+                       "Running" if run["active"] else "Ready for a prompt" if run["active"] is False else "Waiting for runtime status")
+        items = [{"text": "Pi", "badges": [{"text": status, "style": style}], "description": description}]
         queues = snapshot["queues"]
-        items.append({"type": "text", "text": f"Queued steering: {len(queues['steering'])} | follow-up: {len(queues['follow_up'])} | pending requests: {len(snapshot['requests'])}"})
+        counts = [("Queued steering", len(queues["steering"])), ("follow-up", len(queues["follow_up"])),
+                  ("pending requests", len(snapshot["requests"]))]
+        if any(count for _, count in counts):
+            items.append({"type": "text", "text": " | ".join(f"{name}: {count}" for name, count in counts if count)})
         for kind, values in queues.items():
             for value in values[:3]:
                 items.append({"type": "text", "style": "dim", "text": tail(plain(kind+": "+value), 512)})
@@ -239,11 +243,6 @@ class Bridge:
             frame += "\nRequest " + tail(plain(f"{request['id']} {request['kind']}: {request['prompt']}"), 1024)
         if self.view_problem or self.failure:
             frame += "\n" + (self.view_problem or self.failure)
-        if snapshot["requests"]:
-            request = snapshot["requests"][0]
-            frame += "\nRequest " + str(request["kind"]) + ": " + tail(plain(request["prompt"]), 512)
-        if self.view_problem or self.failure:
-            frame += "\n" + str(self.view_problem or self.failure)
         if frame != self._fallback_frame:
             self._fallback_frame = frame
             self.fallback.show(frame)

@@ -98,7 +98,7 @@ def agent_data(snapshot, budget=60000):
 
 
 class Fallback:
-    """One-frame mailbox; a stalled terminal never blocks the RPC event loop.
+    """Redrawn diagnostic screen; a stalled terminal never blocks the RPC event loop.
 
     The daemon uses os.write, not Python's buffered stdout lock. Shutdown does
     not wait for a terminal that stopped reading. It is not a second RPC pipe.
@@ -111,7 +111,9 @@ class Fallback:
         self.thread.start()
 
     def show(self, text):
-        frame = tail(plain(text), 4096).encode() + b"\n"
+        # Frames replace the screen, never append a repeated transcript to scrollback.
+        # Only our own cursor controls are emitted; runtime text is sanitized first.
+        frame = b"\x1b[H\x1b[2J" + tail(plain(text), 4096).encode() + b"\n"
         try:
             self.frames.put_nowait(frame)
         except queue.Full:
