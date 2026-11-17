@@ -65,6 +65,17 @@ class InvocationAttribution(unittest.TestCase):
         requests = [msg["params"] for msg in messages if msg.get("method") == "workspace.apply"]
         self.assertEqual({p["note"]: p.get("on_behalf_of") for p in requests}, {"event": None, "background": None, "command": "proof"})
 
+    def test_failed_handler_clears_context_and_explicit_claims_are_not_rewritten(self):
+        def handler(method, args):
+            prim.call("workspace.apply", {"on_behalf_of": "explicit-invalid-proof"})
+            raise RuntimeError("failed after work")
+        prim, messages = self.prim(handler)
+        prim._dispatch({"id": 100, "method": "command.invoke", "params": {"invocation": "proof"}})
+        self.assertEqual(messages[0]["params"]["on_behalf_of"], "explicit-invalid-proof")
+        self.assertIn("error", messages[-1])
+        prim.call("workspace.apply", {})
+        self.assertNotIn("on_behalf_of", messages[-1]["params"])
+
     def test_concurrent_invocations_keep_their_own_context(self):
         from concurrent.futures import ThreadPoolExecutor
         barrier = threading.Barrier(2)

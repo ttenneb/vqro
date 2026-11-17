@@ -157,7 +157,7 @@ step cargo-test "${CARGO[@]}" cargo test
 step python-unittest "${CLEAN[@]}" python3 -m unittest discover -s tests -p 'test_*.py'
 if [ "$MODE" = full ]; then
   "${CARGO[@]}" cargo build --bins >/dev/null 2>&1
-  for suite in tmux tmux_timeout tmux_provider herdr_provider provider_wire provider_errors; do
+  for suite in tmux tmux_timeout tmux_provider herdr_provider provider_wire provider_errors undo_attribution; do
     step "opt-in:$suite" opt_in "$suite"
   done
   step e2e-providers "${CLEAN[@]}" python3 tests/e2e_providers.py "$TARGET"
