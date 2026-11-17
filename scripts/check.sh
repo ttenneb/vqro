@@ -52,7 +52,7 @@ cd "$REPO" || exit 2
 snapshot() {
   python3 - "$RUN" <<'PY'
 import os, sys
-roots = [b"/tmp/pt", b"/tmp/pe2", b"/tmp/phc", b"/tmp/pft", b"/tmp/ppe", b"/tmp/pev", b"/tmp/pscale", b"/tmp/prim-tmux",
+roots = [b"/tmp/pt", b"/tmp/pe2", b"/tmp/ppd", b"/tmp/phc", b"/tmp/pft", b"/tmp/ppe", b"/tmp/pev", b"/tmp/pscale", b"/tmp/prim-tmux",
          b"/tmp/pnf", sys.argv[1].encode()]
 socks = {}
 for line in open("/proc/net/unix").read().splitlines()[1:]:
