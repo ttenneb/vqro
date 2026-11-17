@@ -85,7 +85,20 @@ written the same way was contained by the crash budget and removed with one reve
   ordinary shells do not receive tokens. Native herdr remains default; no essential/safe-mode policy change.
 - 125 Rust tests pass with zero warnings; Python SDK/fake and private real prim-tmux extension interop pass.
   External default 600/200/8 scale passes all budgets, 49.88 MiB peak RSS and zero leaked processes.
-- Details and limits: `research/provider-wire.md`. Relay, Windows and real Pi/runtime-core conformance remain open.
+- Details and limits: `research/provider-wire.md`. Relay, Windows and provider-backed Pi turns remain open.
+
+## Pi provider/core end-to-end (2026-11-17)
+
+- Private real prim + herdr-core, fake Pi: token-injected bridge spawn, one agent/live panel, all six native effects
+  via `prim call`, dispatched UI answer, exact rejected/indeterminate event audits, core SIGKILL/restart with the
+  same host/agent/native process and current run, owned-view reuse and no native command replay; Pi exit -> gone.
+- Installed Pi 1.5.0: private metadata/state, core restart with stable native process, public stream EOF and clean
+  exit 0. No prompt/model/provider call or real credential/session involved; network namespace blocks networking.
+- Fixed a bridge daemon stdin BufferedReader lock that caused CPython SIGABRT on native Pi exit. Raw `os.read`
+  keeps EOF handling without holding Python I/O locks at interpreter shutdown; native exit code is preserved.
+- Opt-in reproducible harness: `tests/pi_provider_e2e.py`. Native herdr's advertised generic terminal.input dispatch
+  is a separate core gap, retained as `--probe-terminal-invoke`; public attach/stream.input works (dispatched).
+- Details, receipts and unverified limits: `research/pi-provider-e2e.md`.
 
 ## Known gaps found while building
 

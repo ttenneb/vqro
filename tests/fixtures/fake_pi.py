@@ -12,6 +12,20 @@ steering = []
 follow = []
 held = []
 accepted = []
+trace_path = sys.argv[sys.argv.index("--trace-file") + 1] if "--trace-file" in sys.argv else None
+
+
+def trace(record):
+    if trace_path:
+        fd = os.open(trace_path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        try:
+            os.write(fd, json.dumps(record).encode() + b"\n")
+        finally:
+            os.close(fd)
+
+
+trace({"pid": os.getpid(), "bootstrap_in_child": "PRIM_BRIDGE_TOKEN" in os.environ,
+       "herdr_in_child": any(key.startswith("HERDR_") for key in os.environ)})
 
 
 def emit(record):
@@ -44,6 +58,7 @@ def settle(aborted=False):
 
 for line in sys.stdin.buffer:
     command = json.loads(line)
+    trace(command)
     kind = command["type"]
     if kind == "get_state":
         reply(command, {"isStreaming": active, "isCompacting": False,
@@ -83,6 +98,9 @@ for line in sys.stdin.buffer:
             emit({"type": "agent_start"})
             emit({"type": "turn_start"})
             emit({"type": "tool_execution_start", "toolCallId": "tool-1", "toolName": "fixture", "args": {}})
+            if "--bridge-e2e" in sys.argv and message == "fixture-dialog":
+                emit({"type": "extension_ui_request", "id": "fixture-confirm", "method": "confirm",
+                      "title": "Fixture confirmation", "message": "Continue without a model call?"})
     elif kind in {"steer", "follow_up"}:
         (steering if kind == "steer" else follow).append(command["message"])
         queues()
@@ -106,6 +124,8 @@ for line in sys.stdin.buffer:
         reply(command)
     elif kind == "extension_ui_response":
         emit({"type": "test_answer_observed", "answer": command})
+        if "--bridge-e2e" in sys.argv and command.get("id") == "fixture-confirm":
+            settle()
     elif kind == "test_end":
         emit({"type": "tool_execution_end", "toolCallId": "tool-1", "toolName": "fixture", "result": {}, "isError": False})
         emit({"type": "turn_end", "message": {}, "toolResults": []})
