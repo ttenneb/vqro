@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "extensions": [
     {
       "name": "tabs",
@@ -101,7 +101,14 @@
       "kind": "provider",
       "enabled": false,
       "since": 2,
-      "description": "Terminals in a private tmux server owned by prim (prim-tmux); never your own tmux sessions. Off by default."
+      "description": "Terminals in a prim-owned tmux server that survives provider/core restarts; stop explicitly with tmux.server.stop. Never your own tmux sessions. Off by default."
+    },
+    {
+      "name": "tmux-server",
+      "argv": ["python3", "tmux_server.py"],
+      "enabled": true,
+      "since": 3,
+      "description": "Independent status and confirmed stop for the prim-owned tmux server, even when its provider is disabled. No menu while no server exists."
     }
   ]
 }
