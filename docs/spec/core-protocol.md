@@ -189,11 +189,14 @@ section 9. Requests/notifications carry generation in params; reply envelopes ne
 return `stale_generation`; wrong-generation notifications close the connection. Wire provider records, including
 records queued before registration, are capped at 1 MiB. Relay remains unimplemented.
 
-`resource.spawn {bridge:true}` opts into `PRIM_BRIDGE_TOKEN` + opaque `PRIM_SOCKET` spawn environment. Runtime
+Every `resource.spawn` passes the core's opaque endpoint as `PRIM_SOCKET` in the terminal's environment (D22),
+so `prim call` works from any pane. An explicit `env.PRIM_SOCKET` is kept, and a provider declaring
+`terminal.spawn {env: false}` gets none. `resource.spawn {bridge:true}` additionally opts into `PRIM_BRIDGE_TOKEN`. Runtime
 registration may wait five seconds for durable host identity and returns `resume_token`; bootstrap and resume use
 same `params.token`. Private durable current+previous credentials bind exact host/provider/instance and expire
 on host removal. Lost-first-reply recovery, rotation and core-restart identity restoration are tested. Ordinary
-spawns receive no token. Native herdr remains the default; no proposed essential/safe-mode policy is implemented.
+spawns receive no token. Backends run as provider extensions (Default extensions); no proposed essential/safe-mode
+policy is implemented yet.
 
 `terminal.exit {exit_code:true|false}` declares whether numeric exit codes are natively reportable; absent/unknown
 parameters imply no numeric-code guarantee. Never manufacture a code from an unknown reason.
@@ -469,7 +472,17 @@ On first run the core declares the extensions listed in `<extensions dir>/defaul
 default: the per-platform extensions directory, `~/.local/share/prim/extensions` on Unix and
 `%LOCALAPPDATA%\prim\extensions` on Windows, not implemented yet) and records `doc/prim/defaults`, so removing one sticks. Bundled:
 `tabs`, `panes`, `gestures`, `workspaces`, `sidebar`, `themes`, `icons`, `keys`, `settings` (`extensions/`, helper
-`prim_ext.py`). Client options live in `doc/settings/tui`, the theme in `doc/settings/theme`, the icon set in
+`prim_ext.py`), and two backends as provider extensions (D21; human decision 2026-11-17):
+- `herdr`: `prim-herdr --name herdr`, `kind: "provider"`, `default: true`. Terminals in herdr-core, reached with
+  `$PRIM_HERDR` (a whole command, e.g. `ssh box hc connect`), else `hc connect`.
+- `tmux`: `prim-tmux --name tmux`, `kind: "provider"`, `enabled: false`. Terminals in a private tmux server owned by
+  prim, never the user's tmux sessions.
+
+`prim serve` runs no backend in process; `--fake` adds the in-process fake for tests. A bare `prim-*` program in a
+default resolves next to the running `prim` binary. `defaults.json` is versioned (`version`; entries may carry
+`since`). Each entry is offered once per state dir: all on first run; later, only entries newer than the recorded
+version. This is how existing installs gain new defaults (here herdr and tmux). An entry that exists is left as it
+is, and a removed default stays removed. Client options live in `doc/settings/tui`, the theme in `doc/settings/theme`, the icon set in
 `doc/settings/icons`.
 
 ## Extensions
@@ -478,7 +491,10 @@ default: the per-platform extensions directory, `~/.local/share/prim/extensions`
 |---|---|
 | `extension.list` | per extension: `status` (running, restarting, failed, disabled, safe_mode, stopped), `pid`, `crashes`, `last_exit` |
 
-Declared by `extension/<name>` entries `{argv, enabled?, cwd?}`. `argv[0]` is resolved by the platform's process
+Declared by `extension/<name>` entries `{argv, enabled?, cwd?, kind?, default?, description?}`. `kind: "provider"`
+marks a backend or runtime provider (the safe-mode chooser groups by it). `default: true` makes the backend that
+registers under that name the provider for spawns that name none. Without one, the first backend to register is
+used; a runtime bridge never is. `argv[0]` is resolved by the platform's process
 launcher (`PATH` on Unix; `CreateProcess` search on Windows, where a `.py` file is not directly executable and
 `python3` is often absent). The bundled `defaults.json` names `python3`, which is Unix-only for now; Windows defaults
 need a portable interpreter choice such as the `py -3` launcher (`build-plan.md`, Windows work). Started with `PRIM_SOCKET`,

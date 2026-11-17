@@ -82,7 +82,8 @@ written the same way was contained by the crash budget and removed with one reve
 - Implemented pinned provider-v0 section 9 registration/generation, chunked sync, facts, forwarded effects,
   deadlines/duplicate-id bounds, credited/offset streams, disconnect fencing and durable runtime resume credentials.
 - Native and wire resource admission enforce the shared snapshot allowance. Opt-in bridge spawn injects env;
-  ordinary shells do not receive tokens. Native herdr remains default; no essential/safe-mode policy change.
+  ordinary shells do not receive tokens. (Superseded 2026-11-17: backends run as provider extensions; every
+  terminal gets `PRIM_SOCKET`; see "Backends as extensions".) No essential/safe-mode policy change.
 - 125 Rust tests pass with zero warnings; Python SDK/fake and private real prim-tmux extension interop pass.
   External default 600/200/8 scale passes all budgets, 49.88 MiB peak RSS and zero leaked processes.
 - Details and limits: `research/provider-wire.md`. Relay, Windows and provider-backed Pi turns remain open.
@@ -266,3 +267,14 @@ the human's OK). Contracts are updated; this is implementation.
   status-phase and output-rate argv flags as the in-process fake. No actual terminals/programs are spawned.
 - Socket-pair fake-core tests exercise the SDK without a real core. Core wire integration and external-provider
   default scale now pass too (`research/provider-wire.md`). API/bounds: `extensions/prim_provider.md`.
+
+## Backends as extensions (2026-11-17)
+
+Human decisions: adapters run as extensions; tmux only as a private server; every terminal reaches prim.
+- `prim serve` runs no backend in process (`Backend::Extensions`); `--fake` adds the in-process fake for tests.
+- Default extensions v2: `herdr` (prim-herdr, `kind: provider`, `default: true`) and `tmux` (prim-tmux, private
+  server, off). Existing installs gain them once through versioned defaults; removed entries stay removed.
+- The default spawn provider is the extension marked `default`, else the first backend, and never a runtime bridge.
+- `PRIM_SOCKET` goes into every spawned terminal's environment; the bridge token stays opt-in.
+- Resource ids carry over from the in-process herdr adapter to prim-herdr (same provider name, instance, ref and
+  incarnation): `tests/herdr_provider.rs` switches a state dir and keeps ids and tabs.

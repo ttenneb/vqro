@@ -64,7 +64,10 @@ pub fn reconcile(core: &Shared) {
 
     for (name, version, spec) in specs {
         let enabled = spec.get("enabled").and_then(|e| e.as_bool()).unwrap_or(true);
-        let want = enabled && !c.safe_mode;
+        // Safe mode stops opinions (UI extensions), not backends: provider extensions keep their terminals
+        // reachable while the user recovers (D21 "essential", interim until the safe-mode chooser lands).
+        let provider = spec.get("kind").and_then(|k| k.as_str()) == Some("provider");
+        let want = enabled && (!c.safe_mode || provider);
         let safe_mode = c.safe_mode;
         let rt = c.exts.entry(name.clone()).or_insert_with(|| ExtRuntime {
             status: "stopped".into(),

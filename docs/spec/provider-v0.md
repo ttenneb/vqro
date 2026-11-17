@@ -2,7 +2,8 @@
 
 > **Status (2026-11-17): section 9 implemented; broader D21 migration remains proposed.** prim is a working
 > prototype, and fluid. Core wire, Python/Rust provider SDKs and private fake/tmux integration are implemented;
-> native in-process herdr remains the default. Essential extensions, relay and the proposed safe-mode policy are
+> backends now run as provider extensions (`prim-herdr` default, `prim-tmux` private, off). Essential extensions,
+> relay and the proposed safe-mode policy are
 > not implemented. Nothing here is frozen (`../roadmap.md`, step 5); it changes as
 > the first two implementations on each side (herdr-core and tmux; Pi and Claude Code) teach us.
 
@@ -270,8 +271,9 @@ cursors with snapshot fencing; the scale harness. Providers reuse these rules.
 ## 9. Wire messages (v0, pinned 2026-11-17)
 
 The core side is implemented in `src/provider_wire.rs`; Python SDK/fake and Rust `prim-tmux` interoperate through
-private extension-backed socket tests (`tests/provider_wire.rs`). Native herdr remains the default: no essential
-extension or safe-mode policy from the earlier proposal is implemented by this step.
+private extension-backed socket tests (`tests/provider_wire.rs`). Since 2026-11-17 `prim serve` runs no backend in
+process: herdr-core is the `herdr` provider extension (prim-herdr) and tmux the optional `tmux` one (step 4 done for
+herdr). No essential extension or safe-mode policy from the earlier proposal is implemented yet.
 
 This section is the implementable contract; where sections 1–6 differ, this wins. It answers the SDK gap list
 (G1–G20 below refer to it). Items marked **OPEN** carry a recommendation and are not built in v0.

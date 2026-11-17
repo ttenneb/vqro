@@ -6,10 +6,13 @@
 
 1. **Prerequisites:** Rust (stable), Python 3 (extensions are stdlib-only), git.
 2. **herdr-core:** install with its official installer (it verifies sha256 and codesign), e.g.
-   `curl -fsSL https://releases.herdr.dev/core/install.sh` and review it before running. prim finds `hc` on PATH
-   or at herdr-core's standard install (`~/.local/share/herdr-core/current/...`), or set `PRIM_HERDR`.
-3. **Install prim:** `./scripts/dev-install.sh` (release build to `~/.local/bin/prim`, extensions to
-   `~/.local/share/prim/extensions`). Make sure `~/.local/bin` is on PATH.
+   `curl -fsSL https://releases.herdr.dev/core/install.sh` and review it before running. The `herdr` provider
+   extension (prim-herdr) finds `hc` on PATH or at herdr-core's standard install (`~/.local/share/herdr-core/current/...`),
+   or set `PRIM_HERDR` to the whole command (e.g. `ssh box hc connect`) in the environment the core starts from.
+3. **Install prim:** `./scripts/dev-install.sh` (release build of `prim`, `prim-herdr` and `prim-tmux` to
+   `~/.local/bin`, extensions to `~/.local/share/prim/extensions`). Make sure `~/.local/bin` is on PATH.
+   Backends run as extensions: `herdr` is on by default; `tmux` (a private tmux server, never your own sessions)
+   is off until enabled. Every terminal gets `PRIM_SOCKET`, so `prim call ...` works from any pane.
 4. **Run:** `prim tui`. The first core start installs the default extensions from `extensions/defaults.json`.
    `prim status` shows the core, extensions and connected UIs.
 5. **Terminal:** Ghostty or WezTerm give Nerd Font icons and the kitty keyboard protocol out of the box; other

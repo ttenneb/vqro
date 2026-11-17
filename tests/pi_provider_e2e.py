@@ -98,9 +98,16 @@ class E2E:
         return next((r for r in self.snapshot()['resources'] if r['id'] == rid), None)
 
     def start(self):
+        # Backends run as provider extensions: herdr-core is the `herdr` default extension (prim-herdr next to
+        # the prim under test), reached through PRIM_HERDR. Provider extensions keep running in --safe mode.
+        defaults = self.root/'ext'/'defaults.json'
+        if not defaults.exists():
+            defaults.write_text(json.dumps({'version': 2, 'extensions': [{'name': 'herdr', 'since': 2,
+                'argv': [str(Path(self.args.prim).parent/'prim-herdr'), '--name', 'herdr'], 'kind': 'provider', 'default': True}]}))
+        env = dict(self.env, PRIM_HERDR=str(self.args.hc)+' connect')
         with (self.root/'prim.log').open('ab') as output:
-            self.core = subprocess.Popen([str(self.args.prim), 'serve', *([] if self.args.agents_extension else ['--safe']), '--herdr', str(self.args.hc)+' connect'],
-                                         cwd=self.root/'work', env=self.env, stdout=output, stderr=subprocess.STDOUT)
+            self.core = subprocess.Popen([str(self.args.prim), 'serve', *([] if self.args.agents_extension else ['--safe'])],
+                                         cwd=self.root/'work', env=env, stdout=output, stderr=subprocess.STDOUT)
         self.tracked.append(identity(self.core.pid))
         self.log.append({'started_prim': self.tracked[-1], 'image_sha256': hashlib.sha256(
             Path(f'/proc/{self.core.pid}/exe').read_bytes()).hexdigest()})

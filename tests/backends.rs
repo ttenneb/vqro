@@ -172,3 +172,34 @@ async fn every_spawn_gets_the_core_endpoint_but_not_a_bridge_token() {
     let (_, args) = seen.recv().await.unwrap();
     assert!(args["env"].as_object().is_none_or(|e| e.is_empty()), "{args}");
 }
+
+#[tokio::test]
+async fn safe_mode_keeps_provider_extensions_running_and_stops_the_rest() {
+    let root = tempfile::Builder::new().prefix("pbx").tempdir_in("/tmp").unwrap();
+    let socket = root.path().join("s.sock");
+    let core = start(socket.clone(), root.path().join("state"), true, Backend::Extensions, None).unwrap();
+    let (c, _, _) = client::connect(&socket, "t").await.unwrap();
+    c.call("workspace.apply", json!({"ops": [
+        {"op": "set", "key": "extension/backend", "value": {"argv": ["/usr/bin/sleep", "30"], "kind": "provider"}},
+        {"op": "set", "key": "extension/ui", "value": {"argv": ["/usr/bin/sleep", "30"]}}]})).await.unwrap();
+    let status = |name: &str| core.lock().unwrap().snapshot()["extensions"][name].clone();
+    for _ in 0..100 {
+        if status("backend")["status"] == "running" { break; }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(status("backend")["status"], "running", "providers run in safe mode");
+    assert_eq!(status("ui")["status"], "safe_mode");
+    // Leaving and re-entering safe mode never restarts the provider (same process).
+    let pid = status("backend")["pid"].clone();
+    c.call("command.invoke", json!({"name": "prim.safe_mode", "args": {"on": false}})).await.unwrap();
+    for _ in 0..100 {
+        if status("ui")["status"] == "running" { break; }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    c.call("command.invoke", json!({"name": "prim.safe_mode", "args": {"on": true}})).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(status("backend")["pid"], pid);
+    assert_eq!(status("backend")["status"], "running");
+    assert_ne!(status("ui")["status"], "running");
+    prim::server::shutdown(&core).await;
+}
