@@ -557,6 +557,7 @@ async fn spawn(core: &Shared, author: &str, s: Spawn) -> RpcResult {
 async fn invoke_resource(core: &Shared, author: &str, p: Value) -> RpcResult {
     let id = p["resource"].as_str().ok_or_else(|| RpcError::invalid("needs resource"))?;
     let op = p["op"].as_str().ok_or_else(|| RpcError::invalid("needs op"))?.to_string();
+    if op == "terminal.spawn" { return Err(provider::rejected("invalid", "terminal.spawn has no target; use resource.spawn")); }
     let args = p.get("args").cloned().unwrap_or_else(|| json!({}));
     if !args.is_object() { return Err(RpcError::invalid("args must be an object")); }
     let route = core.lock().unwrap().resource_route(id, &op)?;

@@ -106,6 +106,8 @@ async fn effects_credit_offsets_gaps_and_dispatched_are_forwarded() {
         }
     });
     let (viewer, mut output) = peer(&e).await;
+    let malformed_spawn = viewer.call("resource.invoke", json!({"resource":id,"op":"terminal.spawn"})).await.unwrap_err();
+    assert_eq!(malformed_spawn.kind(), "invalid"); assert_eq!(malformed_spawn.data.unwrap()["outcome"], "rejected");
     let dispatched = viewer.call("resource.invoke", json!({"resource":id,"op":"fixture.dispatch"})).await.unwrap();
     assert_eq!(dispatched["outcome"], "dispatched");
     let rejected = viewer.call("resource.invoke", json!({"resource":id,"op":"fixture.reject"})).await.unwrap_err();
