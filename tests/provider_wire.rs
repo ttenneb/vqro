@@ -174,7 +174,9 @@ async fn bridge_tokens_wait_rotate_recover_lost_reply_and_survive_core_restart()
     assert_eq!(spent.call("provider.register", old).await.unwrap_err().kind(), "forbidden");
     let persisted: Value = serde_json::from_slice(&std::fs::read(e._dir.path().join("st/runtime-tokens.json")).unwrap()).unwrap();
     assert_eq!(persisted.as_object().unwrap().len(), 2, "credentials are bounded to current + previous");
-    // A new core reads the identity map and credentials; no host/provider process is restarted or replayed.
+    // A new core reads the identity map and credentials; stop the predecessor rather than
+    // simulating a restart with two simultaneous writers to the same state directory.
+    server::shutdown(&e.core).await;
     let socket = e._dir.path().join("new.sock");
     let restarted = server::start(socket.clone(), e._dir.path().join("st"), false, Backend::Fake, None).unwrap();
     let (resumed, _rx, _) = client::connect(&socket, "resume").await.unwrap();
