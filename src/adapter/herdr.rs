@@ -105,6 +105,9 @@ async fn session(
     connection: u64,
 ) -> anyhow::Result<()> {
     let mut child = Command::new(&argv[0])
+        // A backend may auto-start its own service: do not propagate supervisor credentials to terminals.
+        .env_remove("PRIM_EXTENSION_TOKEN").env_remove("PRIM_EXTENSION_LIFETIME").env_remove("PRIM_EXTENSION")
+        .env_remove("PRIM_STATE_DIR").env_remove("PRIM_EXTENSIONS_DIR").env_remove("PRIM_SOCKET").env_remove("PRIM_SOCKET_SOURCE")
         .args(&argv[1..])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())

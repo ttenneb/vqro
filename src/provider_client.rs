@@ -561,7 +561,7 @@ impl Provider {
 
     async fn handshake(&mut self) -> Result<(), ProviderError> {
         let ext = self.config.extension.clone().or_else(|| std::env::var("PRIM_EXTENSION").ok()).unwrap_or_else(|| self.config.name.clone());
-        self.call("hello", json!({"extension": ext})).await?;
+        self.call("hello", json!({"extension": ext,"extension_token":std::env::var("PRIM_EXTENSION_TOKEN").ok()})).await?;
         let mut params = json!({
             "name": self.config.name, "role": self.config.role, "instance": self.config.instance,
             "software": self.config.software, "provider_version": self.config.provider_version,

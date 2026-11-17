@@ -29,6 +29,7 @@ struct Conn {
     peer: Peer,
     author: Mutex<String>,
     extension: Mutex<Option<String>>,
+    supervised: Mutex<Option<crate::ext::Owner>>,
     streams: Mutex<HashMap<u64, StreamBinding>>,
     next_stream: AtomicU64,
     subscribed: Mutex<bool>,
@@ -69,6 +70,7 @@ pub fn start(socket: std::path::PathBuf, state: std::path::PathBuf, safe: bool, 
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
     }
+    core.lock().unwrap().embedder_backend=Some(backend.clone());
     // Only explicit test/embedder adapters remain; even they stay stopped in safe mode.
     if !safe {
         let (tx, rx) = mpsc::unbounded_channel();
@@ -101,10 +103,26 @@ fn install_defaults(store: &mut crate::store::Store, dir: &std::path::Path) {
     let recorded = store.get("doc/prim/defaults").map(|e| e.value.clone());
     // No record: nothing installed yet. A record without a version predates versioned defaults (1).
     let installed = recorded.as_ref().map(|r| r["version"].as_u64().unwrap_or(1)).unwrap_or(0);
+    // Repair only declarations still identical to an installed default, except its old pinned program.
+    let mut repairs=Vec::new();
+    for spec in list["extensions"].as_array().into_iter().flatten() {
+        let (Some(name),Some(program))=(spec["name"].as_str(),spec["argv"][0].as_str()) else {continue};
+        if spec["kind"]!="provider" || !program.starts_with("prim-") {continue}
+        if !recorded.as_ref().and_then(|r|r["installed"].as_array()).is_some_and(|names|names.iter().any(|n|n==name)) {continue}
+        let key=format!("extension/{name}"); let Some(entry)=store.get(&key) else {continue};
+        let Some(old)=entry.value["argv"][0].as_str() else {continue};
+        if old==program || !std::path::Path::new(old).is_absolute() {continue}
+        let filename=std::path::Path::new(old).file_name().and_then(|n|n.to_str()).unwrap_or("");
+        if filename!=program && filename!=format!("{program}.exe") {continue}
+        let mut expected=json!({"argv":spec["argv"]});
+        for field in ["description","kind","enabled","default"] {if !spec[field].is_null(){expected[field]=spec[field].clone();}}
+        let mut current=entry.value.clone();current["argv"][0]=json!(program);
+        if current==expected {repairs.push(Op::Set{key,value:expected,expect:Some(entry.version)});}
+    }
+    if !repairs.is_empty() { if let Err(error)=store.apply("prim:defaults",Some("resolve unchanged default providers at start".into()),repairs) {eprintln!("prim: default program repair failed: {error}");} }
     if installed >= version {
         return;
     }
-    let sibling = std::env::current_exe().ok().and_then(|exe| exe.parent().map(std::path::Path::to_path_buf));
     let mut ops = Vec::new();
     let mut names: Vec<Value> = recorded.as_ref().and_then(|r| r["installed"].as_array().cloned()).unwrap_or_default();
     for e in list["extensions"].as_array().into_iter().flatten() {
@@ -118,11 +136,6 @@ fn install_defaults(store: &mut crate::store::Store, dir: &std::path::Path) {
             .map(|a| {
                 if a.ends_with(".py") && !a.starts_with('/') {
                     json!(dir.join(a).to_string_lossy())
-                } else if a.starts_with("prim-") && !a.contains('/') {
-                    match sibling.as_ref().map(|d| d.join(a)).filter(|p| p.exists()) {
-                        Some(path) => json!(path.to_string_lossy()),
-                        None => json!(a),
-                    }
                 } else {
                     json!(a)
                 }
@@ -177,6 +190,7 @@ pub async fn serve(core: Shared, listener: UnixListener) -> anyhow::Result<()> {
             peer,
             author: Mutex::new(format!("client:{id}")),
             extension: Mutex::new(None),
+            supervised: Mutex::new(None),
             streams: Mutex::new(HashMap::new()),
             next_stream: AtomicU64::new(1),
             subscribed: Mutex::new(false),
@@ -314,6 +328,7 @@ async fn connection(core: Shared, conn: Arc<Conn>, mut incoming: crate::rpc::Inc
 struct Hello {
     client: Option<String>,
     extension: Option<String>,
+    extension_token: Option<String>,
     version: Option<String>,
     /// Build identity (e.g. the binary's modification time), to spot out-of-date clients.
     build: Option<u64>,
@@ -384,8 +399,8 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> Rp
     match method {
         "core.shutdown" => Ok(json!({"outcome":"accepted"})),
         "provider.register" => {
-            let owner=conn.extension.lock().unwrap().clone();
-            { let c=core.lock().unwrap(); if c.safe_mode && owner.as_ref().is_none_or(|name| !c.safe_mode_allow.contains(name)) {
+            let owner=conn.supervised.lock().unwrap().clone();
+            { let c=core.lock().unwrap(); if c.safe_mode && owner.as_ref().is_none_or(|owner| !ext::owner_valid(&c,owner) || !c.safe_mode_allow.contains(&owner.name)) {
                 return Err(provider::rejected("forbidden", "safe mode requires an explicitly allowed extension owner"));
             } }
             conn.wire.register(core,p,owner).await
@@ -393,6 +408,11 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> Rp
         "provider.sync" => conn.wire.sync(core, p),
         "hello" => {
             let h: Hello = params(p)?;
+            let supervised=match (h.extension.as_deref(),h.extension_token.as_deref()) {
+                (Some(name),Some(token))=>Some(ext::authenticate(&core.lock().unwrap(),name,token).ok_or_else(||RpcError::new("forbidden","invalid or expired supervised extension identity"))?),
+                _=>None,
+            };
+            *conn.supervised.lock().unwrap()=supervised;
             conn.wire.hello()?;
             if let Some(ext) = h.extension.clone() {
                 *conn.author.lock().unwrap() = format!("ext:{ext}");
@@ -405,7 +425,7 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> Rp
             c.clients.insert(conn.id, me);
             Ok(json!({
                 "server": "prim", "version": env!("CARGO_PKG_VERSION"), "protocol": PROTOCOL, "you": conn.author(),
-                "epoch": c.epoch, "seq": c.seq, "safe_mode": c.safe_mode, "socket": c.socket, "state_dir": c.state_dir,
+                "epoch": c.epoch, "seq": c.seq, "backend_notice":c.backend_notice(), "safe_mode": c.safe_mode, "socket": c.socket, "state_dir": c.state_dir,
             }))
         }
         "workspace.snapshot" => Ok(core.lock().unwrap().snapshot()),
@@ -640,12 +660,14 @@ async fn spawn(core: &Shared, author: &str, s: Spawn) -> RpcResult {
     let mut env = s.env;
     // Every terminal can reach prim (`prim call` from any pane): its opaque endpoint (D22), unless the
     // provider cannot pass an environment at all. The bridge credential stays opt-in.
-    if route.handle.capabilities["terminal.spawn"]["env"] != false {
-        env.entry("PRIM_SOCKET".into()).or_insert_with(|| core.lock().unwrap().socket.to_string_lossy().into_owned());
+    if route.handle.capabilities["terminal.spawn"]["env"] != false && !env.contains_key("PRIM_SOCKET") {
+        env.insert("PRIM_SOCKET".into(),core.lock().unwrap().socket.to_string_lossy().into_owned());
+        env.insert("PRIM_SOCKET_SOURCE".into(),"terminal".into());
     }
     if let Some(reservation) = &reservation {
         env.insert("PRIM_BRIDGE_TOKEN".into(), reservation.token.clone());
         env.insert("PRIM_SOCKET".into(), core.lock().unwrap().socket.to_string_lossy().into_owned());
+        env.insert("PRIM_SOCKET_SOURCE".into(), "terminal".into());
     }
     for dimension in [s.cols, s.rows].into_iter().flatten() {
         if !(1..=9999).contains(&dimension) { return Err(provider::rejected("invalid", "spawn dimensions must be between 1 and 9999")); }
@@ -804,16 +826,18 @@ async fn invoke_deadline(core: &Shared, author: &str, name: &str, args: Value, d
         "prim.revert" => revert(core, author, arg("txn").as_u64()).await,
         "prim.safe_mode" => {
             let gate=core.lock().unwrap().recovery_gate.clone(); let _guard=gate.lock().await;
-            let (on,handles)={
+            let (on,handles,restart)={
                 let mut c=core.lock().unwrap();
                 let on=arg("on").as_bool().unwrap_or(!c.safe_mode);
+                let restart=if c.safe_mode && !on { c.embedder_backend.clone() } else { None };
                 c.safe_mode=on; c.safe_mode_allow.clear();
                 let handles=if on { ext::stop_all_locked(&mut c); c.fence_providers(None) } else { Vec::new() };
                 let data=json!({"on":on,"allow":c.safe_mode_allow,"provider_extensions":c.provider_extensions}); c.emit("safe_mode",data);
-                (on,handles)
+                (on,handles,restart)
             };
             if on { ext::shutdown(core).await; stop_recovery_providers(handles).await; }
             ext::reconcile(core);
+            if let Some(backend)=restart { let(tx,rx)=mpsc::unbounded_channel(); if let Some(handle)=backend.start(tx) { crate::core::add_adapter(core,handle,rx,true); } }
             Ok(json!({"safe_mode":on,"safe_mode_allow":core.lock().unwrap().safe_mode_allow}))
         }
         "prim.safe_mode.allow" => {

@@ -61,9 +61,17 @@ pub fn executable_path() -> Result<std::path::PathBuf> {
             std::env::split_paths(&std::env::var_os("PATH")?).map(|dir| dir.join(&path)).find(|path| executable_file(path))
         }
     });
-    let path = match invoked.filter(|path| executable_file(path)) { Some(path) => path, None => normalize_executable(std::env::current_exe()?) };
+    let path = select_executable(normalize_executable(std::env::current_exe()?), invoked);
     let _ = PATH.set(path.clone());
     Ok(PATH.get().cloned().unwrap_or(path))
+}
+
+fn select_executable(current: std::path::PathBuf, invoked: Option<std::path::PathBuf>) -> std::path::PathBuf {
+    if executable_file(&current) {
+        // Preserve an install symlink only when it really identifies this running image.
+        if let Some(invoked)=invoked.filter(|p| p.canonicalize().ok().is_some_and(|p| Some(p)==current.canonicalize().ok())) { return invoked; }
+        current
+    } else { invoked.filter(|p| executable_file(p)).unwrap_or(current) }
 }
 
 fn executable_file(path: &Path) -> bool {
@@ -97,6 +105,14 @@ pub fn build_stamp() -> Option<u64> {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
+    #[test]
+    fn running_image_wins_over_shadowed_argv0_and_preserves_verified_symlink() {
+        use std::os::unix::fs::{PermissionsExt,symlink};let root=tempfile::tempdir().unwrap();
+        let running=root.path().join("running");let shadow=root.path().join("prim");
+        for p in [&running,&shadow] {std::fs::write(p,b"fixture").unwrap();std::fs::set_permissions(p,std::fs::Permissions::from_mode(0o700)).unwrap();}
+        assert_eq!(select_executable(running.clone(),Some(shadow)),running);
+        let link=root.path().join("installed");symlink(&running,&link).unwrap();assert_eq!(select_executable(running,Some(link.clone())),link);
+    }
     #[test]
     fn deleted_inode_suffix_resolves_replaced_install_but_not_a_real_suffix_name() {
         let dir=tempfile::tempdir().unwrap(); let installed=dir.path().join("prim");

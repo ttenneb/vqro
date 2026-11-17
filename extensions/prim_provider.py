@@ -165,7 +165,7 @@ class Provider:
             self.reader, self.writer = await asyncio.open_unix_connection(path or os.environ["PRIM_SOCKET"], limit=MAX_RECORD + 1)
         self._reader_task = asyncio.create_task(self._read())
         try:
-            await self.call("hello", {"extension": os.environ.get("PRIM_EXTENSION", self.name)})
+            await self.call("hello", {"extension": os.environ.get("PRIM_EXTENSION", self.name), "extension_token": os.environ.get("PRIM_EXTENSION_TOKEN")})
             params = {"name": self.name, "instance": self.instance, "role": self.role,
                       "software": self.software, "provider_version": self.provider_version,
                       "capabilities": self.capabilities,

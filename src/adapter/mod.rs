@@ -17,6 +17,7 @@ use crate::provider::ProviderInfo;
 /// Startup selection only. Execution-specific setup stays in the adapter layer, not the server.
 /// `prim serve` uses `Extensions`: backends are provider extensions (`extension/<name>` entries,
 /// e.g. prim-herdr, prim-tmux). The in-process adapters remain for tests and embedders.
+#[derive(Clone)]
 pub enum Backend { Herdr(Vec<String>), Fake, Extensions }
 impl Backend {
     /// The in-process adapter to install, if any.

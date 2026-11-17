@@ -59,6 +59,7 @@
     },
     {
       "name": "pi",
+      "since": 2,
       "argv": [
         "python3",
         "pi.py"

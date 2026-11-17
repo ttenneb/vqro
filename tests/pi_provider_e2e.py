@@ -421,7 +421,17 @@ class E2E:
             trace = self.trace()
         else:
             before = self.agent(rid, lambda r: not r['data']['run']['active'])
-        self.stop_ui()  # owned manual core restart; do not race a TUI auto-start
+        self.stop_ui()  # owned lifecycle tests; do not race a TUI auto-start
+        safe_trace = self.trace() if not self.args.real_pi_metadata else None
+        self.call('command.invoke', {'name':'prim.safe_mode','args':{'on':True}})
+        self.wait(lambda: not self.resource(rid).get('available'), 'agent unavailable in safe mode')
+        assert live(native_process) and live(bridge_process), 'safe mode killed backend-owned execution'
+        self.call('command.invoke', {'name':'prim.safe_mode','args':{'on':False}})
+        self.agent(rid, lambda r: r.get('available') and r['instance']==before['instance'])
+        assert live(native_process) and live(bridge_process)
+        if safe_trace is not None: assert self.trace()==safe_trace, 'safe-mode resume replayed effects'
+        if self.args.agents_extension: self.wait(self.extension_ready, 'agent UI after safe mode')
+        self.log.append({'safe_mode_resume':'PASS','same_agent':rid,'no_effect_replay':True})
         old_host = self.resource(host)
         self.stop(crash=True)
         time.sleep(.3)

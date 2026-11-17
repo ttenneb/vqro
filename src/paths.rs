@@ -25,9 +25,11 @@ pub fn extensions_dir() -> PathBuf {
 
 /// `PRIM_SOCKET`, else `<state_dir>/prim.sock`.
 pub fn socket_path() -> Result<PathBuf> {
-    let p = match std::env::var("PRIM_SOCKET") {
-        Ok(s) => PathBuf::from(s),
-        Err(_) => state_dir().join("prim.sock"),
+    // A terminal-injected endpoint is ambient reachability, not an explicit scratch-run choice.
+    let inherited = std::env::var("PRIM_SOCKET_SOURCE").ok().as_deref()==Some("terminal") && std::env::var_os("PRIM_STATE_DIR").is_some();
+    let p = match std::env::var("PRIM_SOCKET").ok().filter(|_|!inherited) {
+        Some(s) => PathBuf::from(s),
+        None => state_dir().join("prim.sock"),
     };
     // macOS limits Unix socket paths to 103 bytes, Linux to 107.
     if p.as_os_str().len() > 100 {

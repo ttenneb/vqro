@@ -12,6 +12,7 @@ pub mod provider_client;
 pub mod queue;
 pub mod limits;
 pub mod provider;
+pub mod program;
 pub mod provider_wire;
 pub mod bridge_tokens;
 pub mod resource_admission;

@@ -178,7 +178,7 @@ class Extension:
         self.providers = {}
         self.cache_lock = threading.RLock()
         self.prim = Prim(os.environ["PRIM_SOCKET"], self._handle)
-        self.info = self.prim.call("hello", {"extension": self.name})
+        self.info = self.prim.call("hello", {"extension": self.name, "extension_token": os.environ.get("PRIM_EXTENSION_TOKEN")})
         self._load(self.prim.call("workspace.snapshot"))
 
     # -- setup --------------------------------------------------------------------------------

@@ -134,6 +134,8 @@ async fn spawns_go_to_the_extension_marked_default_whatever_registers_first() {
     let (tx, mut seen) = tokio::sync::mpsc::unbounded_channel();
     // Registration order: another backend first, then the default one.
     let _tmux = provider(&socket, "tmux", "backend", None, tx.clone()).await;
+    assert_eq!(c.call("resource.spawn",json!({"argv":["sh"]})).await.unwrap_err().kind(),"unavailable","startup must not use the first backend while the configured default is absent");
+    assert!(seen.try_recv().is_err(),"rejected startup spawn must not reach tmux");
     let _herdr = provider(&socket, "herdr", "backend", None, tx.clone()).await;
     spawn(&c, json!({"argv": ["sh"]})).await;
     assert_eq!(seen.recv().await.unwrap().0, "herdr", "the extension marked default wins, whatever registered first");
@@ -164,6 +166,7 @@ async fn every_spawn_gets_the_core_endpoint_but_not_a_bridge_token() {
     let (_, args) = seen.recv().await.unwrap();
     assert_eq!(args["env"]["PRIM_SOCKET"].as_str(), Some(socket.to_str().unwrap()));
     assert_eq!(args["env"]["A"], "b");
+    assert_eq!(args["env"]["PRIM_SOCKET_SOURCE"],"terminal");
     assert!(args["env"].get("PRIM_BRIDGE_TOKEN").is_none(), "the bridge credential stays opt-in");
     spawn(&c, json!({"provider": "herdr", "argv": ["sh"], "env": {"PRIM_SOCKET": "/custom"}})).await;
     assert_eq!(seen.recv().await.unwrap().1["env"]["PRIM_SOCKET"], "/custom", "an explicit value is kept");

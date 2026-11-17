@@ -83,6 +83,7 @@ pub struct Core {
     /// Compatibility connection-state alias; authoritative declarations are in `providers`.
     pub adapter_state: BTreeMap<String, Value>,
     pub default_adapter: Option<String>,
+    pub(crate) embedder_backend: Option<crate::adapter::Backend>,
     next_provider_source: u64,
     next_effect: u64,
     identity_failures: BTreeMap<String, RpcError>,
@@ -132,6 +133,7 @@ impl Core {
             providers: BTreeMap::new(),
             adapter_state: BTreeMap::new(),
             default_adapter: None,
+            embedder_backend: None,
             next_provider_source: 1,
             next_effect: 1,
             identity_failures: BTreeMap::new(),
@@ -220,7 +222,7 @@ impl Core {
             "extensions": self.exts.iter().map(|(n, e)| (n.clone(), e.to_json())).collect::<BTreeMap<_, _>>(),
             "providers": self.providers.keys().map(|n| (n.clone(), self.provider_json(n))).collect::<BTreeMap<_, _>>(),
             "adapters": self.adapter_state,
-            "safe_mode": self.safe_mode, "safe_mode_allow": self.safe_mode_allow, "provider_extensions": self.provider_extensions,
+            "backend_notice":self.backend_notice(), "safe_mode": self.safe_mode, "safe_mode_allow": self.safe_mode_allow, "provider_extensions": self.provider_extensions,
             "live": self.live.iter().map(|(k, (v, _, _))| (k.clone(), v.clone())).collect::<BTreeMap<_, _>>(),
         })
     }
@@ -259,8 +261,11 @@ impl Core {
     }
 
     pub fn provider_route(&self, name: Option<&str>, capability: &str) -> Result<Route, RpcError> {
-        let name = name.or(self.default_adapter.as_deref()).ok_or_else(|| provider::rejected("unavailable", "no provider configured"))?;
-        self.providers.get(name).ok_or_else(|| provider::rejected("not_found", format!("no provider {name}")))?.route(capability)
+        // A declared default is not interchangeable with whichever backend happened to register first.
+        let preferred=self.store.entries().iter().find_map(|(key,entry)| (entry.value["kind"]=="provider" && entry.value["default"]==true).then(||key.strip_prefix("extension/")).flatten());
+        let preferred_provider=preferred.and_then(|owner| self.providers.iter().find(|(name,p)| name.as_str()==owner || p.metadata["owner_extension"].as_str()==Some(owner)).map(|(name,_)|name.as_str())).or(preferred);
+        let name = name.or(preferred_provider).or(self.default_adapter.as_deref()).ok_or_else(|| provider::rejected("unavailable", "no backend provider configured; open recovery choices"))?;
+        self.providers.get(name).ok_or_else(|| provider::rejected("unavailable", format!("configured backend {name} is not connected; open recovery choices")))?.route(capability)
     }
 
     pub fn resource_route(&self, id: &str, capability: &str) -> Result<Route, RpcError> {
@@ -271,6 +276,11 @@ impl Core {
         route.resource = Some(resource.life.subscribe());
         route.target = Some((resource.facts.backend_ref.clone(), resource.facts.incarnation.clone()));
         Ok(route)
+    }
+
+    pub fn backend_notice(&self) -> Option<String> {
+        if self.safe_mode { return None; }
+        self.provider_route(None,"terminal.spawn").err().map(|error|format!("No default backend is ready: {}. Use recovery choices.",error.message))
     }
 
     pub fn has_resource_identity(&self, id: &str) -> bool { self.identities.active(id) }

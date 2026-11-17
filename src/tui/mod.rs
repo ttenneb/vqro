@@ -197,6 +197,7 @@ struct App {
     safe_mode_allow: BTreeSet<String>,
     provider_extensions: BTreeSet<String>,
     safe_selected: BTreeSet<String>,
+    backends_connected: BTreeSet<String>,
     terms: HashMap<String, Term>,
     stream_view: HashMap<u64, String>,
     early: HashMap<u64, Vec<Vec<u8>>>,
@@ -454,7 +455,7 @@ impl App {
             peer, tx,
             entries: BTreeMap::new(), versions: BTreeMap::new(), resources: BTreeMap::new(),
             commands: BTreeMap::new(), extensions: BTreeMap::new(), safe_mode: false,
-            safe_mode_allow: BTreeSet::new(), provider_extensions: BTreeSet::new(), safe_selected: BTreeSet::new(),
+            safe_mode_allow: BTreeSet::new(), provider_extensions: BTreeSet::new(), safe_selected: BTreeSet::new(), backends_connected:BTreeSet::new(),
             terms: HashMap::new(), stream_view: HashMap::new(), early: HashMap::new(), early_closed: HashMap::new(),
             leaves: Vec::new(), focus: 0, overlay: None, pstate: HashMap::new(),
             filtering: None, toast: None, live: HashMap::new(), panel_values: Mutex::new(HashMap::new()), hit: Hit::default(),
@@ -506,11 +507,14 @@ impl App {
         self.resources = snap["resources"].as_array().into_iter().flatten().filter_map(|r| Some((r["id"].as_str()?.to_string(), r.clone()))).collect();
         self.commands = snap["commands"].as_array().into_iter().flatten().filter_map(|c| Some((c["name"].as_str()?.to_string(), c.clone()))).collect();
         self.extensions = snap["extensions"].as_object().map(|o| o.iter().map(|(k, v)| (k.clone(), v.clone())).collect()).unwrap_or_default();
+        let was_safe=self.safe_mode;
         self.safe_mode = snap["safe_mode"].as_bool().unwrap_or(false);
         self.safe_mode_allow = strings(&snap["safe_mode_allow"]);
         self.provider_extensions = strings(&snap["provider_extensions"]);
+        self.backends_connected=snap["providers"].as_object().into_iter().flatten().filter(|(_,p)|p["role"]=="backend" && p["connected"]==true).map(|(name,_)|name.clone()).collect();
         self.live = snap["live"].as_object().map(|o| o.iter().map(|(k, v)| (k.clone(), v.clone())).collect()).unwrap_or_default();
-        if self.safe_mode { self.open_safe_chooser(); }
+        if self.safe_mode && !was_safe { self.open_safe_chooser(); }
+        if !self.safe_mode && matches!(&self.overlay,Some(Overlay::Popup{view,..}) if view=="@prim-safe-mode") { self.overlay=None; }
     }
 
     fn on_incoming(&mut self, m: Incoming) {
@@ -698,6 +702,7 @@ impl App {
                 }
             }
             "adapter" | "provider" => {
+                if let Some(name)=d["name"].as_str() { if d["state"]["role"]=="backend" && d["state"]["connected"]==true {self.backends_connected.insert(name.into());} else {self.backends_connected.remove(name);} }
                 if d["state"]["connected"] == false {
                     self.message = format!("backend {} disconnected: {}", d["name"], d["state"]["error"].as_str().unwrap_or(""));
                 }
@@ -890,7 +895,8 @@ impl App {
             for (name,value) in &declared {
                 if (value["kind"]=="provider" || self.provider_extensions.contains(*name)) != provider { continue; }
                 let check=if self.safe_selected.contains(*name) { "[x]" } else { "[ ]" };
-                let description=value["description"].as_str().or_else(||value["argv"][0].as_str()).unwrap_or("Declared extension").chars().take(160).collect::<String>();
+                let mut description=value["description"].as_str().or_else(||value["argv"][0].as_str()).unwrap_or("Declared extension").chars().take(160).collect::<String>();
+                if let Some(state)=self.extensions.get(*name) { if state["status"]=="failed" {description.push_str(&format!(" -- failed: {}",state["last_exit"].as_str().unwrap_or("unknown failure")));} }
                 items.push(json!({"id":format!("safe/{name}"),"text":format!("{check} {name}"),"description":description,"command":"client.safe_mode.toggle","args":{"name":name}}));count+=1;
             }
             if count==0 { items.push(json!({"type":"text","text":"(none declared)"})); }
@@ -2140,6 +2146,9 @@ impl App {
             x += w;
             spans.push(Span::styled(label, style));
         }
+        if !self.safe_mode && self.backends_connected.is_empty() {
+            spans.push(Span::styled(" No backend connected; prefix ! opens recovery choices.",pal.style(Some("warn"))));
+        }
         spans.push(Span::styled(format!(" {}", self.message), pal.style(Some("muted"))));
         f.render_widget(Paragraph::new(Line::from(spans)), area);
     }
@@ -2511,6 +2520,15 @@ mod tests {
             params["partial"] = json!(true);
         }
         Incoming::Notification { method: "event".into(), params }
+    }
+
+    #[tokio::test]
+    async fn safe_snapshot_and_reconnect_preserve_unapplied_choices_and_dismissal() {
+        let (mut app,_) = app();let snap=json!({"epoch":"one","seq":1,"safe_mode":true,"safe_mode_allow":[],"entries":{"extension/draft":{"value":{"argv":["false"]}}}});
+        app.load(&snap);app.safe_selected.insert("draft".into());app.load(&snap);
+        assert!(app.safe_selected.contains("draft"));
+        app.overlay=None;let mut later=snap.clone();later["epoch"]=json!("two");
+        app.reconnected(app.peer.clone(),&later);assert!(app.overlay.is_none(),"reconnect must not steal focus");assert!(app.safe_selected.contains("draft"));
     }
 
     #[tokio::test]

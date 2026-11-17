@@ -148,7 +148,7 @@ impl Connection {
         }
         Ok(provider)
     }
-    pub async fn register(&self, core: &Shared, p: Value, owner: Option<String>) -> RpcResult {
+    pub async fn register(&self, core: &Shared, p: Value, owner: Option<crate::ext::Owner>) -> RpcResult {
         if !self.hello.load(Ordering::Acquire) { return Err(invalid("hello must precede provider.register")); }
         if self.is_provider() { return Err(RpcError::new("conflict", "one registration per connection")); }
         if encoded_bytes(&p) > MAX_REGISTRATION_BYTES { return Err(overloaded("registration exceeds 128 KiB")); }
@@ -165,7 +165,8 @@ impl Connection {
         let mut c = core.lock().unwrap();
         // Revalidate both stop and recovery admission after a pending host-token wait.
         if c.shutdown.is_requested() { return Err(provider::rejected("unavailable","core stopping; provider registration not admitted")); }
-        if c.safe_mode && owner.as_ref().is_none_or(|name| !c.safe_mode_allow.contains(name)) { return Err(crate::provider::rejected("forbidden", "safe mode requires an explicitly allowed extension owner")); }
+        if owner.as_ref().is_some_and(|owner| !crate::ext::owner_valid(&c,owner)) { return Err(crate::provider::rejected("forbidden","supervised extension lifetime ended before registration")); }
+        if c.safe_mode && owner.as_ref().is_none_or(|owner| !c.safe_mode_allow.contains(&owner.name)) { return Err(crate::provider::rejected("forbidden", "safe mode requires an explicitly allowed extension owner")); }
         if self.is_provider() { return Err(RpcError::new("conflict", "one registration per connection")); }
         if let Some(claim) = &claim {
             if !c.bridge_tokens.valid_claim(r.token.as_deref().unwrap(), claim, &r.name, &r.instance) { return Err(RpcError::new("forbidden", "runtime resume identity mismatch or token used")); }
@@ -189,8 +190,8 @@ impl Connection {
         let source = c.install_provider(handle, preferred, backend)?;
         c.on_adapter_event(&r.name, adapter::AdapterEvent::Registered(ProviderInfo { connection: self.id, instance: r.instance.clone(), role: r.role, software: json!(r.software) }));
         let generation = c.providers[&r.name].generation;
-        c.providers.get_mut(&r.name).unwrap().metadata = json!({"provider_version": r.provider_version, "limits": {"max_streams": r.limits.max_streams.min(512), "stream_window_bytes": window, "max_record_bytes": MAX_RECORD_BYTES}, "host": host, "owner_extension": owner});
-        if let Some(owner) = owner { c.provider_extensions.insert(owner); }
+        c.providers.get_mut(&r.name).unwrap().metadata = json!({"provider_version": r.provider_version, "limits": {"max_streams": r.limits.max_streams.min(512), "stream_window_bytes": window, "max_record_bytes": MAX_RECORD_BYTES}, "host": host, "owner_extension": owner.as_ref().map(|owner|&owner.name)});
+        if let Some(owner) = owner { c.provider_extensions.insert(owner.name); }
         c.provider_event(&r.name);
         let health = c.providers[&r.name].health.subscribe();
         let (stopped, _) = watch::channel(false);

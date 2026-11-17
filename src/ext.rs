@@ -29,6 +29,7 @@ pub struct ExtRuntime {
     pub last_exit: Option<String>,
     pub running: bool,
     stop: Option<oneshot::Sender<()>>,
+    token: String,
 }
 
 impl ExtRuntime {
@@ -36,6 +37,13 @@ impl ExtRuntime {
         json!({"status": self.status, "pid": self.pid, "crashes": self.crashes.len(), "last_exit": self.last_exit, "spec_version": self.spec_version})
     }
 }
+
+#[derive(Clone)]
+pub struct Owner { pub name:String, pub generation:u64 }
+pub fn authenticate(core:&crate::core::Core, name:&str, token:&str)->Option<Owner> {
+    core.exts.get(name).filter(|r|r.running && !r.token.is_empty() && r.token==token).map(|r|Owner{name:name.into(),generation:r.generation})
+}
+pub fn owner_valid(core:&crate::core::Core, owner:&Owner)->bool { core.exts.get(&owner.name).is_some_and(|r|r.running && r.generation==owner.generation) }
 
 /// Bring running extensions in line with the workspace entries and safe mode.
 pub fn reconcile(core: &Shared) {
@@ -75,6 +83,7 @@ pub fn reconcile(core: &Shared) {
             last_exit: None,
             running: false,
             stop: None,
+            token: String::new(),
         });
         let replaced = rt.spec_version != version;
         if replaced {
@@ -95,7 +104,7 @@ pub fn reconcile(core: &Shared) {
         }
         if !want {
             let st = if safe_mode { "safe_mode" } else { "disabled" };
-            if rt.status != st {
+            if rt.status != "failed" && rt.status != st {
                 rt.status = st.into();
                 let j = rt.to_json();
                 c.emit("extension", json!({"name": name, "state": j}));
@@ -112,10 +121,19 @@ pub fn reconcile(core: &Shared) {
         let rt = c.exts.get_mut(&name).unwrap();
         rt.generation += 1;
         let generation = rt.generation;
-        let mut cmd = Command::new(&argv[0]);
+        let mut secret=[0u8;32];
+        if let Err(error)=getrandom::fill(&mut secret) { rt.status="failed".into();rt.last_exit=Some(format!("supervision credential: {error}"));continue; }
+        rt.token=secret.iter().map(|b|format!("{b:02x}")).collect();
+        let program=match crate::program::resolve_provider(&argv[0]) {
+            Ok(program)=>program,
+            Err(error)=>{ rt.status="failed".into();rt.last_exit=Some(error);let state=rt.to_json();c.emit("extension",json!({"name":name,"state":state}));continue; }
+        };
+        let mut cmd = Command::new(program);
         cmd.args(&argv[1..])
             .env("PRIM_SOCKET", &socket)
+            .env_remove("PRIM_SOCKET_SOURCE")
             .env("PRIM_EXTENSION", &name)
+            .env("PRIM_EXTENSION_TOKEN", &rt.token)
             .env("PRIM_EXTENSION_LIFETIME", "stdin")
             .stdin(std::process::Stdio::piped())
             .kill_on_drop(true);
@@ -232,7 +250,7 @@ pub async fn shutdown(core: &Shared) {
         for task in &mut tasks { let _ = task.await; }
     }).await;
     if joined.is_ok() {
-        for rt in core.lock().unwrap().exts.values_mut() { rt.pid = None; rt.status = "stopped".into(); }
+        for rt in core.lock().unwrap().exts.values_mut() { rt.pid = None; if rt.status != "failed" { rt.status = "stopped".into(); } }
     }
     if joined.is_err() {
         eprintln!("prim: extension shutdown deadline; cleanup unconfirmed");
