@@ -12,7 +12,7 @@ import prim_ext  # managed extension lifetime watcher
 
 MAX_RECORD = 1048576
 MAX_DATA = 65536
-OUTCOMES = frozenset({"accepted", "observed", "rejected"})
+OUTCOMES = frozenset({"dispatched", "accepted", "observed", "rejected"})
 
 
 class ProviderError(Exception):

@@ -171,3 +171,13 @@ the human's OK). Contracts are updated; this is implementation.
   the counterpart of the 16 KiB send buffer (re-measure the first-echo case).
 - **Validation:** `cargo check` for `x86_64-pc-windows-msvc` and `-gnu` as a CI gate once the target is approved; a real
   Windows smoke run of the provider transport before any contract is a freeze candidate (`provider-v0.md` step 6).
+
+## Provider SDK half (2026-11-17)
+
+- `extensions/prim_provider.py` and `prim_provider_stream.py`: stdlib async provider-side implementation of
+  `spec/provider-v0.md` section 9: registration/generation, chunked sync, native effect handlers and bounded,
+  credited/ordered streams. Reuses the managed stdin lifetime watcher; never reconnects or resends automatically.
+- `tests/fixtures/fake_provider.py`: standalone external fake, with echo/greeting and the same status-period,
+  status-phase and output-rate argv flags as the in-process fake. No actual terminals/programs are spawned.
+- Socket-pair fake-core tests exercise the SDK without a real core; core-side provider wire integration and
+  scale conformance remain separate work. API/bounds: `extensions/prim_provider.md`.

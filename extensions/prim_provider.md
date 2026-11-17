@@ -1,6 +1,6 @@
 # Python provider helper (stdlib, Python 3.11+)
 
-`prim_provider.py` implements **provider-v0.md section 9** (60716f3); `prim_provider_stream.py` owns bounded
+`prim_provider.py` implements **provider-v0.md section 9** (60716f3 plus the parent's explicit dispatched-outcome amendment); `prim_provider_stream.py` owns bounded
 stream queues/credit. This is the provider side only. No core registration implementation, default extension
 entry, real backend integration or reconnect policy is installed by importing it. `prim_ext` is imported solely
 to reuse the managed extension stdin lifetime watcher; it does not open a socket on import.
@@ -49,9 +49,10 @@ helper does not launch runtimes or turn prim into a workspace-process host.
 - `upsert(facts)` / `gone(ref, incarnation="", why={"reason":...})`: notifications, await socket write, **not core
   application**. Required facts/types and the opaque data size are validated. No hidden resource persistence.
 - `effect(op)` registers a native handler. Declared capabilities and handlers must both include the operation.
-  Callback receives an Effect plus args. Valid results are accepted/observed/rejected; rejected needs
+  Callback receives an Effect plus args. Valid results are dispatched/accepted/observed/rejected; rejected needs
   `{error:{kind,message}}`. Raise ProviderError for JSON-RPC errors. Unexpected handler failures are backend errors,
-  not invented rejections. The core maps provider errors/deadlines to indeterminate.
+  not invented rejections. Dispatched means a native send with no acknowledgment (Pi agent.answer), not accepted
+  and not a failure/indeterminate result. The core maps provider errors/deadlines to indeterminate.
 - The forwarded remaining `deadline_ms` becomes a monotonic context deadline. **Expiry does not cancel or retry
   a possibly dispatched effect.** The handler replies exactly once when it knows, even late. The core owns the
   caller deadline and ignores a late original response. No invented late-outcome notification or replay.
@@ -111,7 +112,7 @@ facts, closes streams, stops future load. No native backend persistence/lifetime
 env -i HOME="$HOME" PATH=/usr/bin:/bin python3 -W error -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
-Nineteen provider tests use an in-test fake core and socket pairs: no real core, hc, tmux, credentials, model or
+Twenty provider tests use an in-test fake core and socket pairs: no real core, hc, tmux, credentials, model or
 provider calls. They cover registration/sync chunks, facts, D10/native errors, late single replies and duplicate
 IDs, generation fencing, LF Unicode/CRLF, open/data ordering, credit units/over-return, slow-stream isolation,
 ordered input/resize/close, input/output/record/call/ledger/stream bounds, final gaps and disconnect cleanup.
