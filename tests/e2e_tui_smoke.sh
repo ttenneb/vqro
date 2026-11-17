@@ -29,6 +29,8 @@ T="/usr/bin/tmux -S $R/t.sock -f /dev/null"
 pass=0; fail=0
 check() { if [ "$2" = 1 ]; then echo "PASS $1"; pass=$((pass+1)); else echo "FAIL $1"; fail=$((fail+1)); fi; }
 seen() { $T capture-pane -p | grep -c -- "$1"; }
+# Poll for screen text up to $2 seconds (bounded; replaces fixed sleeps that assumed an unloaded machine).
+await() { local end=$((SECONDS + $2)); until [ "$(seen "$1")" -ge 1 ]; do [ $SECONDS -ge $end ] && return 1; sleep 0.5; done; }
 cores() { for pid in $(pgrep -f "$P serve"); do tr '\0' '\n' < /proc/$pid/environ 2>/dev/null | grep -q "PRIM_SOCKET=$R/p.sock" && echo $pid; done; }
 # Everything of this run: environment mentions $R, or (tmux renames its server) a unix socket under $R.
 ours() {
@@ -59,9 +61,16 @@ env -i /usr/bin/tmux -S "$R/t.sock" -f /dev/null new-session -d -x 120 -y 30 "/b
 $T send-keys C-g; sleep 0.4; $T send-keys n; sleep 2
 $T send-keys -l 'echo smoke-A'; $T send-keys Enter; sleep 1
 check "new tab + input echo" $([ "$(seen smoke-A)" -ge 1 ] && echo 1 || echo 0)
-$T send-keys -l 'yes flood | head -c 30000000; echo flood-done'; $T send-keys Enter; sleep 6
-$T send-keys -l 'echo smoke-F'; $T send-keys Enter; sleep 2
-check "input after 30 MB output flood" $([ "$(seen smoke-F)" -ge 1 ] && echo 1 || echo 0)
+# Type only once the flood has drawn to its end. On a loaded machine the TUI can fall behind, the core then
+# closes its stream as a slow consumer (bounded streams), and keys sent before the TUI has seen that closure
+# are rejected and reported, never replayed (D10); the TUI reattaches and repaints. The check is that the
+# terminal works after the flood, not that keys typed during a starved flood survive.
+# Markers are split by quotes when typed, so only command output (not the echoed command line) matches.
+$T send-keys -l "yes flood | head -c 30000000; echo flood-''done"; $T send-keys Enter
+flood_start=$SECONDS; await flood-done 60; flood_s=$((SECONDS - flood_start)); sleep 1
+$T send-keys -l "echo smoke-''F"; $T send-keys Enter
+check "input after 30 MB output flood (drawn in ${flood_s}s)" $(await smoke-F 10 && echo 1 || echo 0)
+[ "$(seen smoke-F)" -ge 1 ] || $T capture-pane -p | tail -4 | sed 's/^/screen: /'
 for pid in $(cores); do kill "$pid"; done; sleep 5
 $T send-keys -l 'echo smoke-B'; $T send-keys Enter; sleep 2
 check "core restart: reconnect + reattach + input" $([ "$(seen smoke-B)" -ge 1 ] && echo 1 || echo 0)
