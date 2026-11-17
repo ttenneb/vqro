@@ -70,6 +70,19 @@ extension changes are reconciled too. The file now names the candidate, but a cr
 state. **Do not automatically replay**: inspect snapshot/history using the transaction id instead. This exception
 reports uncertainty about crash durability, not partial application of operations.
 
+All running workspace mutations (including built-in undo/reset/extension changes) share one serialized
+committer. Its FIFO admission is bounded by **128 requests and 8 MiB encoded input**, including the active
+write; each request has a 256-byte metadata floor. Full admission returns `overloaded` with `outcome: rejected`
+and no effect. Candidate copying/validation/encoding and durable filesystem work run off the core lock on a
+blocking worker; snapshots, events and terminal I/O can continue while a write waits on storage.
+
+CAS and default undo selection use the state after preceding queued commits have been adopted, not a snapshot
+captured when the request arrived. Adoption and entries-event publication are ordered before the next commit
+starts. Pending candidates are not visible in snapshot/history. A cancelled receipt, client timeout or disconnect
+does not cancel admitted work or its extension reconciliation: inspect state/history, never replay automatically.
+An unexpected writer-task failure returns `indeterminate` and stops further commits until restart; it is not a
+clean persistence failure or a promise that replacement did not happen. Unadmitted requests remain rejected.
+
 ## Size admission and recovery
 
 Writes reject growth above **1 MiB per encoded workspace entry** (key/version/value), **16 MiB total entries**,

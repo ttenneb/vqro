@@ -297,16 +297,7 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> Rp
         "workspace.snapshot" => Ok(core.lock().unwrap().snapshot()),
         "workspace.apply" => {
             let a: Apply = params(p)?;
-            let touched_ext = a.ops.iter().any(|o| op_key(o).starts_with("extension/"));
-            let summary = {
-                let mut c = core.lock().unwrap();
-                let result = c.store.apply(&conn.author(), a.note, a.ops);
-                c.finish_txn(result).map(|txn| Core::txn_summary(&txn))
-            };
-            if touched_ext && adopted(&summary) {
-                ext::reconcile(core);
-            }
-            summary
+            apply(core, &conn.author(), a.note, a.ops).await
         }
         "workspace.history" => {
             let limit = p.get("limit").and_then(|l| l.as_u64()).unwrap_or(20) as usize;
@@ -314,7 +305,7 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> Rp
         }
         "workspace.revert" => {
             let txn = p.get("txn").and_then(|t| t.as_u64()).ok_or_else(|| RpcError::invalid("needs `txn`"))?;
-            revert(core, &conn.author(), Some(txn))
+            revert(core, &conn.author(), Some(txn)).await
         }
         "events.subscribe" => subscribe(core, conn, params(p)?),
         "resource.list" => Ok(json!({"resources": core.lock().unwrap().resources.values().map(|r| r.to_json()).collect::<Vec<_>>()})),
@@ -648,47 +639,33 @@ async fn attach(core: &Shared, conn: &Arc<Conn>, a: Attach) -> RpcResult {
     Ok(json!({"outcome": "accepted", "effect": effect, "initial": initial, "stream": sid, "resource": a.resource}))
 }
 
-fn revert(core: &Shared, author: &str, txn: Option<u64>) -> RpcResult {
-    let (summary, touched_ext) = {
-        let mut c = core.lock().unwrap();
-        let id = match txn {
-            Some(t) => t,
-            // Default: the last change not made by an extension, so "undo" isn't eaten by an
-            // extension's own refreshes. Pass `txn` to revert anything else.
-            None => c
-                .store
-                .history(usize::MAX)
-                .into_iter()
-                .find(|t| !t.author.starts_with("ext:"))
-                .map(|t| t.id)
-                .ok_or_else(|| RpcError::new("not_found", "no transactions to revert"))?,
-        };
-        let result = c.store.revert(author, id);
-        let result = c.finish_txn(result);
-        let touched_ext = adopted(&result) && c.store.history(1).first().is_some_and(|t| t.changes.iter().any(|ch| ch.key.starts_with("extension/")));
-        (result.map(|t| Core::txn_summary(&t)), touched_ext)
-    };
-    if touched_ext {
-        ext::reconcile(core);
-    }
-    summary
+async fn revert(core: &Shared, author: &str, txn: Option<u64>) -> RpcResult {
+    let author = author.to_string();
+    crate::commit::submit(core, author.len()+128, move |c| {
+        // Select default undo only when earlier queued commits have been adopted.
+        let id = txn.or_else(|| c.store.latest_txn_matching(|t| !t.author.starts_with("ext:")))
+            .ok_or_else(|| RpcError::new("not_found", "no transactions to revert"))?;
+        let touched_ext = c.store.transaction(id).is_some_and(|t| t.changes.iter().any(|ch| ch.key.starts_with("extension/")));
+        Ok(crate::commit::Plan { action:crate::commit::Action::Revert { author, txn:id }, after_adopt:if touched_ext { Some(ext::reconcile) } else { None } })
+    }).await
 }
 
-fn adopted<T>(result: &Result<T, RpcError>) -> bool {
-    result.is_ok() || result.as_ref().is_err_and(|e| e.kind() == "durability_unconfirmed")
+async fn apply_prepared(
+    core:&Shared, author:&str, note:Option<String>, bytes:usize,
+    ops:impl FnOnce(&Core)->Result<Vec<Op>,RpcError> + Send + 'static,
+) -> RpcResult {
+    let bytes = bytes.saturating_add(author.len()).saturating_add(note.as_ref().map_or(0, String::len));
+    let author = author.to_string();
+    crate::commit::submit(core, bytes, move |c| {
+        let ops = ops(c)?;
+        let touched_ext = ops.iter().any(|o| op_key(o).starts_with("extension/"));
+        Ok(crate::commit::Plan { action:crate::commit::Action::Apply { author, note, ops }, after_adopt:if touched_ext { Some(ext::reconcile) } else { None } })
+    }).await
 }
 
-fn apply(core: &Shared, author: &str, note: &str, ops: Vec<Op>) -> RpcResult {
-    let touched_ext = ops.iter().any(|o| op_key(o).starts_with("extension/"));
-    let summary = {
-        let mut c = core.lock().unwrap();
-        let result = c.store.apply(author, Some(note.to_string()), ops);
-        c.finish_txn(result).map(|txn| Core::txn_summary(&txn))
-    };
-    if touched_ext && adopted(&summary) {
-        ext::reconcile(core);
-    }
-    summary
+async fn apply(core:&Shared, author:&str, note:Option<String>, ops:Vec<Op>) -> RpcResult {
+    let bytes = crate::limits::encoded_bytes(&ops);
+    apply_prepared(core, author, note, bytes, move |_| Ok(ops)).await
 }
 
 /// Run a command: built-ins here, everything else forwarded to the connection that owns it.
@@ -700,8 +677,8 @@ async fn invoke_deadline(core: &Shared, author: &str, name: &str, args: Value, d
     let deadline = provider::deadline(deadline_ms)?;
     let arg = |k: &str| args.get(k).cloned().unwrap_or(Value::Null);
     match name {
-        "prim.layout.reset" => layout_reset(core, author),
-        "prim.revert" => revert(core, author, arg("txn").as_u64()),
+        "prim.layout.reset" => layout_reset(core, author).await,
+        "prim.revert" => revert(core, author, arg("txn").as_u64()).await,
         "prim.safe_mode" => {
             let on = {
                 let mut c = core.lock().unwrap();
@@ -718,10 +695,13 @@ async fn invoke_deadline(core: &Shared, author: &str, name: &str, args: Value, d
         }
         "prim.extension.disable" | "prim.extension.enable" => {
             let ext_name = arg("name").as_str().map(String::from).or_else(|| arg("text").as_str().map(String::from)).ok_or_else(|| RpcError::invalid("needs `name`"))?;
-            let key = format!("extension/{ext_name}");
-            let mut value = core.lock().unwrap().store.get(&key).map(|e| e.value.clone()).ok_or_else(|| RpcError::new("not_found", format!("no extension {ext_name}")))?;
-            value["enabled"] = json!(name == "prim.extension.enable");
-            apply(core, author, name, vec![Op::Set { key, value, expect: None }])
+            let enabled = name == "prim.extension.enable";
+            apply_prepared(core, author, Some(name.into()), ext_name.len()+128, move |c| {
+                let key = format!("extension/{ext_name}");
+                let mut value = c.store.get(&key).map(|e| e.value.clone()).ok_or_else(|| RpcError::new("not_found", format!("no extension {ext_name}")))?;
+                value["enabled"] = json!(enabled);
+                Ok(vec![Op::Set { key, value, expect:None }])
+            }).await
         }
         "prim.extension.restart" => {
             let ext_name = arg("name").as_str().map(String::from).or_else(|| arg("text").as_str().map(String::from)).ok_or_else(|| RpcError::invalid("needs `name`"))?;
@@ -743,9 +723,8 @@ async fn invoke_deadline(core: &Shared, author: &str, name: &str, args: Value, d
 }
 
 /// One tab per live terminal. The recovery path when a layout is broken or confusing.
-fn layout_reset(core: &Shared, author: &str) -> RpcResult {
-    let ops = {
-        let c = core.lock().unwrap();
+async fn layout_reset(core: &Shared, author: &str) -> RpcResult {
+    apply_prepared(core, author, Some("prim.layout.reset".into()), 128, |c| {
         let mut ops = Vec::new();
         let mut tabs = Vec::new();
         for r in c.resources.values().filter(|r| r.facts.kind == "terminal" && r.facts.state == "live") {
@@ -765,7 +744,6 @@ fn layout_reset(core: &Shared, author: &str) -> RpcResult {
         ops.push(Op::Set { key: "layout/main".into(), value: json!({"tabs": tabs, "active": 0}), expect: None });
         ops.push(Op::Set { key: "workspace/active".into(), value: json!({"layout": "main"}), expect: None });
         // Nothing is deleted: views other layouts use stay valid.
-        ops
-    };
-    apply(core, author, "prim.layout.reset", ops)
+        Ok(ops)
+    }).await
 }

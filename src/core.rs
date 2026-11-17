@@ -70,7 +70,9 @@ pub const BUILTINS: &[(&str, &str)] = &[
 ];
 
 pub struct Core {
-    pub store: Store,
+    // Runtime mutations must go through the serialized, cancellation-independent committer.
+    pub(crate) store: Store,
+    pub(crate) committer: crate::commit::Committer,
     pub resources: BTreeMap<String, Resource>,
     identities: IdentityMap,
     admission: crate::resource_admission::Admission,
@@ -115,6 +117,7 @@ impl Core {
         }
         Ok(Core {
             store,
+            committer: crate::commit::Committer::new(),
             resources: BTreeMap::new(),
             identities,
             admission: Default::default(),
@@ -141,6 +144,16 @@ impl Core {
             state_dir,
         })
     }
+
+    /// Configure the in-process workspace writer before serving mutations (latency/fault harness).
+    pub fn configure_workspace_writer(&mut self, writer: crate::store::DurableWriter) -> Result<(), RpcError> {
+        if self.committer.started() { return Err(RpcError::new("conflict", "workspace writer cannot change after commit admission begins")); }
+        self.store.set_writer(writer);
+        Ok(())
+    }
+
+    /// Admitted workspace mutations, including the active writer (in-process harness metric).
+    pub fn workspace_pending_commits(&self) -> usize { self.committer.pending() }
 
     /// Append to the event log and broadcast.
     pub fn emit(&mut self, ty: &str, data: Value) {

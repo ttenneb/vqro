@@ -78,17 +78,21 @@ struct Persisted {
     history: VecDeque<Txn>,
 }
 
+/// In-process durable writer injection for deterministic fault/latency harnesses, not a wire API.
+pub type DurableWriter = std::sync::Arc<dyn Fn(&Path, &[u8]) -> Result<(), AtomicWriteError> + Send + Sync>;
+
 pub struct Store {
     rev: u64,
     next_txn: u64,
-    entries: BTreeMap<String, Entry>,
-    history: VecDeque<Txn>,
+    entries: std::sync::Arc<BTreeMap<String, Entry>>,
+    history: std::sync::Arc<VecDeque<Txn>>,
     path: Option<PathBuf>,
+    writer: DurableWriter,
 }
 
 impl Store {
     pub fn in_memory() -> Store {
-        Store { rev: 0, next_txn: 1, entries: BTreeMap::new(), history: VecDeque::new(), path: None }
+        Store { rev: 0, next_txn: 1, entries: std::sync::Arc::new(BTreeMap::new()), history: std::sync::Arc::new(VecDeque::new()), path: None, writer: std::sync::Arc::new(write_atomic) }
     }
 
     /// Load from a file, or start empty if it does not exist.
@@ -98,7 +102,20 @@ impl Store {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Persisted { next_txn: 1, ..Default::default() },
             Err(e) => return Err(e.into()),
         };
-        Ok(Store { rev: p.rev, next_txn: p.next_txn.max(1), entries: p.entries, history: p.history, path: Some(path) })
+        Ok(Store { rev: p.rev, next_txn: p.next_txn.max(1), entries: std::sync::Arc::new(p.entries), history: std::sync::Arc::new(p.history), path: Some(path), writer: std::sync::Arc::new(write_atomic) })
+    }
+
+    pub(crate) fn set_writer(&mut self, writer: DurableWriter) { self.writer = writer; }
+
+    /// O(1) immutable committed-state copy. Only the serialized committer may persist it.
+    pub(crate) fn committed_copy(&self) -> Self {
+        Self { rev:self.rev, next_txn:self.next_txn, entries:self.entries.clone(), history:self.history.clone(), path:self.path.clone(), writer:self.writer.clone() }
+    }
+
+    pub(crate) fn transaction(&self, id:u64) -> Option<&Txn> { self.history.iter().find(|t| t.id == id) }
+
+    pub(crate) fn latest_txn_matching(&self, predicate: impl Fn(&Txn) -> bool) -> Option<u64> {
+        self.history.iter().rev().find(|txn| predicate(txn)).map(|txn| txn.id)
     }
 
     pub fn entries(&self) -> &BTreeMap<String, Entry> {
@@ -106,7 +123,7 @@ impl Store {
     }
 
     pub fn admission_notice(&self) -> Option<&'static str> {
-        (crate::limits::encoded_bytes(&self.entries) > crate::limits::WORKSPACE_BYTES ||
+        (crate::limits::encoded_bytes(self.entries.as_ref()) > crate::limits::WORKSPACE_BYTES ||
             self.entries.iter().any(|item| crate::limits::encoded_bytes(&item) > crate::limits::ENTRY_BYTES))
             .then_some("Legacy workspace exceeds current size limits; it remains loaded. Revert/delete/shrink state to recover.")
     }
@@ -126,7 +143,8 @@ impl Store {
     }
 
     fn apply_inner(&mut self, author: &str, note: Option<String>, reverts: Option<u64>, ops: Vec<Op>) -> Result<Txn, RpcError> {
-        self.apply_with_writer(author, note, reverts, ops, write_atomic)
+        let writer = self.writer.clone();
+        self.apply_with_writer(author, note, reverts, ops, |path, bytes| writer(path, bytes))
     }
 
     fn apply_with_writer(
@@ -136,7 +154,7 @@ impl Store {
         if ops.is_empty() {
             return Err(RpcError::invalid("empty transaction"));
         }
-        let mut next = self.entries.clone();
+        let mut next = self.entries.as_ref().clone();
         let mut rev = self.rev;
         let mut touched: BTreeMap<String, Option<Entry>> = BTreeMap::new();
         for op in ops {
@@ -172,7 +190,7 @@ impl Store {
             }
         }
         let bytes = crate::limits::encoded_bytes(&next);
-        if bytes > crate::limits::WORKSPACE_BYTES && bytes > crate::limits::encoded_bytes(&self.entries) {
+        if bytes > crate::limits::WORKSPACE_BYTES && bytes > crate::limits::encoded_bytes(self.entries.as_ref()) {
             return Err(crate::limits::too_large("workspace entries", bytes, crate::limits::WORKSPACE_BYTES));
         }
 
@@ -182,7 +200,7 @@ impl Store {
             .filter(|c| c.before != c.after)
             .collect();
         let txn = Txn { id: self.next_txn, author: author.to_string(), at_ms: now_ms(), note, reverts, changes };
-        let mut candidate = Persisted { rev, next_txn: self.next_txn + 1, entries: next, history: self.history.clone() };
+        let mut candidate = Persisted { rev, next_txn: self.next_txn + 1, entries: next, history: self.history.as_ref().clone() };
         candidate.history.push_back(txn.clone());
         while candidate.history.len() > HISTORY {
             candidate.history.pop_front();
@@ -201,8 +219,8 @@ impl Store {
         }
         self.rev = candidate.rev;
         self.next_txn = candidate.next_txn;
-        self.entries = candidate.entries;
-        self.history = candidate.history;
+        self.entries = std::sync::Arc::new(candidate.entries);
+        self.history = std::sync::Arc::new(candidate.history);
         match uncertain {
             Some(err) => Err(err),
             None => Ok(txn),
@@ -505,7 +523,7 @@ mod tests {
         let mut s = Store::open(path.clone()).unwrap();
         s.apply("t", None, vec![set("doc/a/b", json!(1))]).unwrap();
         let before_entries = s.entries.clone();
-        let before_history = serde_json::to_value(&s.history).unwrap();
+        let before_history = serde_json::to_value(s.history.as_ref()).unwrap();
         let (rev, next_txn) = (s.rev, s.next_txn);
         let saved = dir.path().join("saved");
         std::fs::rename(&parent, &saved).unwrap();
@@ -514,7 +532,7 @@ mod tests {
         let err = s.apply("t", None, vec![set("doc/a/b", json!(2))]).unwrap_err();
         assert_eq!(err.kind(), "io");
         assert_eq!(s.entries, before_entries);
-        assert_eq!(serde_json::to_value(&s.history).unwrap(), before_history);
+        assert_eq!(serde_json::to_value(s.history.as_ref()).unwrap(), before_history);
         assert_eq!((s.rev, s.next_txn), (rev, next_txn));
 
         std::fs::remove_file(&parent).unwrap();
