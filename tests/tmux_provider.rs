@@ -63,10 +63,8 @@ impl Drop for Tmux {
     fn drop(&mut self) {
         let _ = self.cli(&["kill-server"]);
         // Control clients hand their pipes to the server, so they end with it.
-        if let Some(pid) = self.pid {
-            if Path::new(&format!("/proc/{pid}")).exists() {
-                let _ = Command::new("kill").args(["-KILL", &pid.to_string()]).status();
-            }
+        if let Some(pid) = self.pid.filter(|pid| Path::new(&format!("/proc/{pid}")).exists()) {
+            let _ = Command::new("kill").args(["-KILL", &pid.to_string()]).status();
         }
     }
 }

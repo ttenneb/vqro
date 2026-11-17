@@ -672,7 +672,7 @@ pub fn check_facts(f: &Value) -> Result<(), ProviderError> {
         return bad("not an object");
     }
     for k in ["ref", "kind"] {
-        if !f[k].as_str().is_some_and(|s| !s.is_empty()) {
+        if f[k].as_str().is_none_or(|s| s.is_empty()) {
             return bad(&format!("{k} required"));
         }
     }
