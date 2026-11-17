@@ -83,7 +83,11 @@ helper does not launch runtimes or turn prim into a workspace-process host.
 
 Defaults: 1 MiB wire record; 64 KiB decoded data chunk; 512 streams; 256 KiB stream window and each stream input/output
 queue; 128 queued items per stream (plus a reserved close marker); 64 pending calls/handlers; 2 MiB outstanding
-serialized writes; 65,536 identities per ledger; 30-second transport/call deadline. Counts/byte limits are configurable
+serialized writes;65,536 active+recent identities per ledger;30-second transport/call deadline. Completed
+identities are evicted at capacity, never active handlers/streams: long sessions do not exhaust a lifetime ledger.
+Active/recent duplicates are rejected, and the core never reuses/resends ids; this is not persistent exactly-once
+emulation. Rust effect retention uses `Config.max_effect_ids`; Rust stream retention is `max_streams +256` ids.
+Python `Limits.identities` bounds each effect/stream ledger. Counts/byte limits are configurable
 via Limits. Python object/asyncio/kernel buffers add bounded overhead beyond encoded-byte counters.
 
 The socket writer is serialized and byte-accounted; per-stream wire locks preserve data-before-final-marker order.

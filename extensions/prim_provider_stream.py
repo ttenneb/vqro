@@ -81,6 +81,7 @@ class Stream:
             except Exception as error:
                 self.provider.failure = f"stream cleanup callback: {error}"
         self.provider.streams.pop(self.id, None)
+        self.provider._stream_ids.finish(self.id)
         self._ready.set()
         self._wake.set()
         while self._output:

@@ -80,7 +80,7 @@ pub struct Config {
     pub call_timeout: Duration,
     /// Core requests handled concurrently; beyond this, `overloaded`.
     pub max_in_flight: usize,
-    /// Remembered effect ids (duplicates are `conflict`); beyond this, `overloaded`.
+    /// Active + recently completed effect ids. Evict completed ids at capacity, never active ids.
     pub max_effect_ids: usize,
     /// Bytes of outgoing lines queued for the socket (backpressure for data, upserts and syncs).
     pub outgoing_bytes: usize,
@@ -141,10 +141,27 @@ impl Outcome {
 }
 
 /// One reply to one core request, exactly once.
+#[derive(Default)]
+struct IdLedger<T> { seen:HashSet<T>, active:HashSet<T>, recent:std::collections::VecDeque<T> }
+impl<T:Eq+std::hash::Hash+Clone> IdLedger<T> {
+    fn begin(&mut self,id:T,capacity:usize) -> Result<(),ProviderError> {
+        if self.seen.contains(&id) { return Err(ProviderError::new("conflict","duplicate identity; never executed twice")); }
+        while self.seen.len()>=capacity {
+            let Some(old)=self.recent.pop_front() else { return Err(ProviderError::new("overloaded","all identity slots are active; not started")); };
+            self.seen.remove(&old);
+        }
+        self.seen.insert(id.clone()); self.active.insert(id); Ok(())
+    }
+    fn finish(&mut self,id:&T) {
+        if self.active.remove(id) { self.recent.push_back(id.clone()); }
+    }
+}
+
 struct Responder {
     shared: Arc<Shared>,
     id: Value,
     done: bool,
+    effect:Option<String>,
 }
 
 impl Responder {
@@ -159,6 +176,7 @@ impl Drop for Responder {
         if !self.done {
             self.shared.reply(&self.id, Err(ProviderError::new("backend", "handler dropped the request; outcome unknown")));
         }
+        if let Some(effect)=&self.effect { self.shared.effect_ids.lock().unwrap().finish(effect); }
     }
 }
 
@@ -383,6 +401,7 @@ impl ProviderStream {
         };
         self.inner.finish();
         self.shared.streams.lock().unwrap().remove(&self.id);
+        self.shared.stream_ids.lock().unwrap().finish(&self.id);
         params["generation"] = json!(self.shared.generation());
         params["stream"] = json!(self.id);
         if method == "stream.gap" {
@@ -401,6 +420,7 @@ impl Drop for ProviderStream {
         };
         self.inner.finish();
         self.shared.streams.lock().unwrap().remove(&self.id);
+        self.shared.stream_ids.lock().unwrap().finish(&self.id);
         if live {
             let line = json!({"jsonrpc": "2.0", "method": "stream.closed", "params": {"generation": self.shared.generation(),
                 "stream": self.id, "reason": {"reason": "closed", "message": "provider dropped the stream"}}});
@@ -422,8 +442,8 @@ struct Shared {
     closed_tx: watch::Sender<bool>,
     failure: Mutex<Option<String>>,
     streams: Mutex<HashMap<u64, Arc<StreamInner>>>,
-    stream_ids: Mutex<HashSet<u64>>,
-    effect_ids: Mutex<HashSet<String>>,
+    stream_ids: Mutex<IdLedger<u64>>,
+    effect_ids: Mutex<IdLedger<String>>,
     in_flight: AtomicU64,
     sync_started: AtomicBool,
     max_record: AtomicU64,
@@ -448,8 +468,9 @@ impl Shared {
         for (_, tx) in self.pending.lock().unwrap().drain() {
             let _ = tx.send(Err(ProviderError::new("unavailable", why)));
         }
-        for (_, s) in self.streams.lock().unwrap().drain() {
+        for (id, s) in self.streams.lock().unwrap().drain() {
             s.finish();
+            self.stream_ids.lock().unwrap().finish(&id);
         }
         self.closed_tx.send_replace(true);
     }
@@ -519,8 +540,8 @@ impl Provider {
             closed_tx,
             failure: Mutex::new(None),
             streams: Mutex::new(HashMap::new()),
-            stream_ids: Mutex::new(HashSet::new()),
-            effect_ids: Mutex::new(HashSet::new()),
+            stream_ids: Mutex::new(IdLedger::default()),
+            effect_ids: Mutex::new(IdLedger::default()),
             in_flight: AtomicU64::new(0),
             sync_started: AtomicBool::new(false),
             max_record: AtomicU64::new(MAX_RECORD as u64),
@@ -841,7 +862,7 @@ fn handle(msg: &Value, shared: &Arc<Shared>, config: &Arc<Config>, requests: &mp
 
 fn responder(shared: &Arc<Shared>, id: &Value) -> Responder {
     shared.in_flight.fetch_add(1, Ordering::Relaxed);
-    Responder { shared: shared.clone(), id: id.clone(), done: false }
+    Responder { shared: shared.clone(), id: id.clone(), done: false, effect:None }
 }
 
 fn effect_request(id: &Value, p: &Value, shared: &Arc<Shared>, config: &Arc<Config>) -> Result<Request, ProviderError> {
@@ -852,19 +873,10 @@ fn effect_request(id: &Value, p: &Value, shared: &Arc<Shared>, config: &Arc<Conf
     if !(p["ref"].is_null() || p["ref"].is_string()) || !(p["incarnation"].is_null() || p["incarnation"].is_string()) {
         return Err(ProviderError::new("invalid", "ref and incarnation must be strings"));
     }
-    {
-        let mut ids = shared.effect_ids.lock().unwrap();
-        if ids.contains(effect) {
-            return Err(ProviderError::new("conflict", "duplicate effect id; never executed twice"));
-        }
-        if ids.len() >= config.max_effect_ids {
-            return Err(ProviderError::new("overloaded", "effect id ledger full; not started"));
-        }
-        if !config.capabilities.contains_key(op) {
-            return Err(ProviderError::new("unsupported", format!("op {op} is not a declared capability")));
-        }
-        ids.insert(effect.to_string());
-    }
+    if !config.capabilities.contains_key(op) { return Err(ProviderError::new("unsupported",format!("op {op} is not a declared capability"))); }
+    shared.effect_ids.lock().unwrap().begin(effect.to_string(),config.max_effect_ids)?;
+    let mut response=responder(shared,id);
+    response.effect=Some(effect.to_string());
     Ok(Request::Effect(EffectRequest {
         effect: effect.into(),
         op: op.into(),
@@ -872,7 +884,7 @@ fn effect_request(id: &Value, p: &Value, shared: &Arc<Shared>, config: &Arc<Conf
         incarnation: p["incarnation"].as_str().unwrap_or("").into(),
         args: args.clone(),
         deadline: Instant::now() + Duration::from_millis(deadline_ms),
-        responder: responder(shared, id),
+        responder: response,
     }))
 }
 
@@ -888,12 +900,10 @@ fn open_request(id: &Value, p: &Value, shared: &Arc<Shared>, config: &Arc<Config
     let (Some(r), Some(inc)) = (p["ref"].as_str(), p["incarnation"].as_str()) else {
         return Err(ProviderError::new("invalid", "ref and incarnation required"));
     };
-    if !shared.stream_ids.lock().unwrap().insert(stream) {
-        return Err(ProviderError::new("conflict", "stream id already used on this connection"));
-    }
     if shared.streams.lock().unwrap().len() >= config.max_streams {
         return Err(ProviderError::new("overloaded", "max_streams open"));
     }
+    shared.stream_ids.lock().unwrap().begin(stream,config.max_streams.saturating_add(256))?;
     let (tx, rx) = mpsc::unbounded_channel();
     let inner = Arc::new(StreamInner {
         state: Mutex::new(StreamState { ready: false, closed: false, credit: window, outstanding: 0, offset: 0, queued: 0 }),
@@ -979,4 +989,42 @@ fn notification(method: &str, p: &Value, shared: &Arc<Shared>, config: &Arc<Conf
     }
     let _ = tx.send(command);
     Ok(())
+}
+
+#[cfg(test)]
+mod qa2_tests {
+    use super::*;
+    fn shared() -> Arc<Shared> {
+        let (out,_rx)=mpsc::unbounded_channel(); let (closed_tx,_)=watch::channel(false);
+        Arc::new(Shared { out,budget:Arc::new(Semaphore::new(1024*1024)),outgoing_bytes:1024*1024,generation:AtomicU64::new(1),pending:Mutex::new(HashMap::new()),next_id:AtomicU64::new(1),closed:AtomicBool::new(false),closed_tx,failure:Mutex::new(None),streams:Mutex::new(HashMap::new()),stream_ids:Mutex::new(IdLedger::default()),effect_ids:Mutex::new(IdLedger::default()),in_flight:AtomicU64::new(0),sync_started:AtomicBool::new(false),max_record:AtomicU64::new(MAX_RECORD as u64) })
+    }
+    #[test]
+    fn identity_eviction_never_forgets_active_ids() {
+        let mut ids=IdLedger::default();
+        ids.begin("active",2).unwrap();
+        for _ in 0..10 { ids.begin("recent",2).unwrap();ids.finish(&"recent");ids.begin("other",2).unwrap();ids.finish(&"other"); }
+        assert!(ids.active.contains("active"));
+        assert_eq!(ids.seen.len(),2);
+        assert_eq!(ids.begin("active",2).unwrap_err().kind,"conflict");
+    }
+    #[test]
+    fn sdk_effect_ids_are_completed_when_replied_or_dropped() {
+        let shared=shared(); let mut config=Config::new("test","i",json!({"fixture":{}}).as_object().unwrap().clone());config.max_effect_ids=4;
+        for n in 0..12 {
+            let request=effect_request(&json!(n),&json!({"effect":format!("e{n}"),"op":"fixture","args":{},"deadline_ms":1000}),&shared,&Arc::new(config.clone())).unwrap();
+            if let Request::Effect(effect)=request { if n%2==0 { effect.respond(Ok(Outcome::Accepted(None))); } }
+            assert!(shared.effect_ids.lock().unwrap().seen.len()<=4);
+            assert!(shared.effect_ids.lock().unwrap().active.is_empty());
+        }
+    }
+    #[test]
+    fn sdk_stream_ids_are_bounded_across_repeated_rejected_opens() {
+        let shared=shared();let mut config=Config::new("test","i",json!({"terminal.output":{"raw":true}}).as_object().unwrap().clone());config.max_streams=1;let config=Arc::new(config);
+        for n in 0..300u64 {
+            let request=open_request(&json!(n),&json!({"stream":n,"ref":"r","incarnation":"i","cols":80,"rows":24,"history_lines":0,"window_bytes":1024}),&shared,&config).unwrap();
+            if let Request::Open(open)=request { open.respond(Err(ProviderError::new("unsupported","fixture rejects open"))); }
+            assert!(shared.stream_ids.lock().unwrap().seen.len()<=257);
+            assert!(shared.stream_ids.lock().unwrap().active.is_empty());
+        }
+    }
 }

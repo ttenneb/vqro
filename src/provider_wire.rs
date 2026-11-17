@@ -1,7 +1,7 @@
 //! Socket-backed providers. All backend/runtime policy stays on the other end of the connection.
 //! This module adapts pinned provider-v0 messages to the same routes native adapters use.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Instant;
@@ -19,7 +19,7 @@ pub const MAX_RECORD_BYTES: usize = 1024 * 1024;
 pub const MAX_PROVIDERS: usize = 32;
 pub const MAX_REGISTRATION_BYTES: usize = 128 * 1024;
 pub use crate::resource_admission::{encoded_bytes, MAX_FACT_BYTES, MAX_RESOURCES};
-const MAX_EFFECTS: usize = 65_536;
+const RECENT_EFFECTS: usize = 256;
 const MAX_INFLIGHT: usize = 128;
 const CONTROL_BYTES: usize = 4 * 1024 * 1024;
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
@@ -79,6 +79,19 @@ struct Inventory {
     seen: BTreeMap<String, ResourceFacts>,
     current: BTreeMap<String, ResourceFacts>,
     effects: BTreeSet<String>,
+    recent_effects: VecDeque<String>,
+}
+/// IDs are core-generated and never resent. Retain active calls plus a small duplicate window,
+/// not every effect ever seen by a healthy long-lived provider. Drop also covers cancellation.
+struct EffectLease<'a> { inventory:&'a Mutex<Inventory>, effect:&'a str }
+impl Drop for EffectLease<'_> {
+    fn drop(&mut self) {
+        let mut inventory=self.inventory.lock().unwrap();
+        inventory.recent_effects.push_back(self.effect.to_string());
+        while inventory.recent_effects.len()>RECENT_EFFECTS {
+            if let Some(old)=inventory.recent_effects.pop_front() { inventory.effects.remove(&old); }
+        }
+    }
 }
 struct Credit { offset: u64, outstanding: usize }
 struct WireStream {
@@ -177,7 +190,7 @@ impl Connection {
             peer: self.peer.clone(), core: Arc::downgrade(core), window, streams: Mutex::new(HashMap::new()),
             stream_slots: Arc::new(Semaphore::new(r.limits.max_streams.min(512))), control: Arc::new(Semaphore::new(CONTROL_BYTES)),
             inflight: Arc::new(Semaphore::new(MAX_INFLIGHT)), next_stream: AtomicU64::new(1),
-            inventory: Mutex::new(Inventory { started: false, syncing: false, seen: BTreeMap::new(), current: BTreeMap::new(), effects: BTreeSet::new() }), stopped, health });
+            inventory: Mutex::new(Inventory { started: false, syncing: false, seen: BTreeMap::new(), current: BTreeMap::new(), effects: BTreeSet::new(), recent_effects:VecDeque::new() }), stopped, health });
         *self.provider.lock().unwrap() = Some(provider.clone());
         tokio::spawn(provider.clone().run(inbox));
         let mut result = json!({"provider": provider.name, "generation": generation, "limits": {"stream_window_bytes": window, "max_record_bytes": MAX_RECORD_BYTES}});
@@ -199,48 +212,64 @@ impl Connection {
 }
 
 impl WireProvider {
-    fn current(&self, core: &Shared) -> bool { core.lock().unwrap().providers.get(&self.name).is_some_and(|p| p.source == self.source && p.generation == self.generation && p.health.borrow().connected) }
+    fn current_locked(&self, core:&Core) -> bool { core.providers.get(&self.name).is_some_and(|p| p.source == self.source && p.generation == self.generation && p.health.borrow().connected) }
+    fn current(&self, core: &Shared) -> bool { self.current_locked(&core.lock().unwrap()) }
+    fn check_capacity(inventory:&Inventory, facts:&[ResourceFacts]) -> Result<(),RpcError> {
+        let additional:BTreeSet<_>=facts.iter().filter(|f| !inventory.current.contains_key(&f.backend_ref)).map(|f|f.backend_ref.as_str()).collect();
+        if inventory.current.len().saturating_add(additional.len())>MAX_RESOURCES { return Err(overloaded("provider resource count exceeds 4096")); }
+        Ok(())
+    }
+    fn record_locked(inventory:&mut Inventory,facts:ResourceFacts) {
+        inventory.current.insert(facts.backend_ref.clone(),facts.clone());
+        if inventory.syncing { inventory.seen.insert(facts.backend_ref.clone(),facts); }
+    }
     fn record(&self, facts: ResourceFacts) -> Result<(), RpcError> {
         let mut inventory = self.inventory.lock().unwrap();
-        if !inventory.current.contains_key(&facts.backend_ref) && inventory.current.len() >= MAX_RESOURCES { return Err(overloaded("provider resource count exceeds 4096")); }
-        inventory.current.insert(facts.backend_ref.clone(), facts.clone());
-        if inventory.syncing { inventory.seen.insert(facts.backend_ref.clone(), facts); }
+        Self::check_capacity(&inventory,std::slice::from_ref(&facts))?;
+        Self::record_locked(&mut inventory,facts);
+        Ok(())
+    }
+    fn publish_locked(&self,core:&Shared,inventory:&mut Inventory,facts:ResourceFacts) -> Result<(),RpcError> {
+        // Inventory admission and publication are one critical section: concurrent effect
+        // observations cannot consume the last local slot between checking and recording.
+        let mut c=core.lock().unwrap();
+        if !self.current_locked(&c) { return Err(RpcError::new("stale_generation","provider changed before facts publication")); }
+        if let Err(error)=c.upsert_resource(&self.name,facts.clone()) {
+            if !matches!(error.kind(),"io"|"durability_unconfirmed") { return Err(error); }
+        }
+        Self::record_locked(inventory,facts);
         Ok(())
     }
     fn sync(&self, core: &Shared, p: Value) -> RpcResult {
         let final_chunk = p["final"].as_bool().ok_or_else(|| invalid("sync requires final boolean"))?;
         let records = p["resources"].as_array().ok_or_else(|| invalid("sync requires resources array"))?;
         let facts: Vec<_> = records.iter().cloned().map(parse_facts).collect::<Result<_, _>>()?;
-        {
-            let mut inventory = self.inventory.lock().unwrap();
-            if !inventory.syncing { inventory.seen.clear(); inventory.syncing = true; }
-            inventory.started = true;
-        }
-        for facts in facts {
-            let applied = core.lock().unwrap().upsert_resource(&self.name, facts.clone());
-            if let Err(error) = applied { if !matches!(error.kind(), "io" | "durability_unconfirmed") { return Err(error); } }
-            self.record(facts)?;
-        }
+        let mut inventory=self.inventory.lock().unwrap();
+        Self::check_capacity(&inventory,&facts)?;
+        if !inventory.syncing { inventory.seen.clear(); inventory.syncing=true; }
+        inventory.started=true;
+        for facts in facts { self.publish_locked(core,&mut inventory,facts)?; }
         if final_chunk {
-            let records = self.inventory.lock().unwrap().seen.values().cloned().collect::<Vec<_>>();
-            core.lock().unwrap().on_adapter_event(&self.name, adapter::AdapterEvent::Snapshot(records));
+            let records=inventory.seen.values().cloned().collect::<Vec<_>>();
+            let mut c=core.lock().unwrap();
+            if !self.current_locked(&c) { return Err(RpcError::new("stale_generation","provider changed before sync publication")); }
+            c.on_adapter_event(&self.name,adapter::AdapterEvent::Snapshot(records));
         }
-        if let Some(error) = core.lock().unwrap().provider_persistence_error(&self.name) { return Err(error); }
+        if let Some(error)=core.lock().unwrap().provider_persistence_error(&self.name) { return Err(error); }
         if final_chunk {
-            let mut inventory = self.inventory.lock().unwrap();
-            inventory.current = std::mem::take(&mut inventory.seen);
-            inventory.syncing = false;
+            inventory.current=std::mem::take(&mut inventory.seen);
+            inventory.syncing=false;
         }
         Ok(json!({}))
     }
     fn notification(&self, core: &Shared, method: &str, p: Value) -> Result<(), RpcError> {
         match method {
             "resource.upsert" => {
-                if !self.inventory.lock().unwrap().started { return Err(invalid("first sync must start before upsert")); }
-                let facts = parse_facts(p.get("facts").cloned().ok_or_else(|| invalid("upsert requires facts"))?)?;
-                let applied = core.lock().unwrap().upsert_resource(&self.name, facts.clone());
-                if let Err(error) = applied { if !matches!(error.kind(), "io" | "durability_unconfirmed") { return Err(error); } }
-                self.record(facts)?;
+                let facts=parse_facts(p.get("facts").cloned().ok_or_else(||invalid("upsert requires facts"))?)?;
+                let mut inventory=self.inventory.lock().unwrap();
+                if !inventory.started { return Err(invalid("first sync must start before upsert")); }
+                Self::check_capacity(&inventory,std::slice::from_ref(&facts))?;
+                self.publish_locked(core,&mut inventory,facts)?;
             }
             "resource.gone" => {
                 let reference = p["ref"].as_str().ok_or_else(|| invalid("gone requires ref"))?.to_string();
@@ -362,17 +391,21 @@ impl WireProvider {
         }
     }
     async fn invoke(&self, context: &EffectContext, op: &str, target: Option<(String, String)>, args: Value) -> Result<EffectResult, AdapterError> {
+        let remaining=context.deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() { return Err(AdapterError::RejectedKind { kind:"timeout".into(),message:"effect deadline expired before provider dispatch".into() }); }
         {
-            let mut inventory = self.inventory.lock().unwrap();
-            if inventory.effects.contains(&context.effect) { return Err(AdapterError::RejectedKind { kind: "conflict".into(), message: "duplicate effect id".into() }); }
-            if inventory.effects.len() >= MAX_EFFECTS { return Err(AdapterError::RejectedKind { kind: "overloaded".into(), message: "effect ledger full; reconnect explicitly".into() }); }
+            let mut inventory=self.inventory.lock().unwrap();
+            if inventory.effects.contains(&context.effect) { return Err(AdapterError::RejectedKind { kind:"conflict".into(),message:"duplicate effect id".into() }); }
+            if inventory.effects.len().saturating_sub(inventory.recent_effects.len())>=MAX_INFLIGHT { return Err(AdapterError::RejectedKind { kind:"overloaded".into(),message:"provider in-flight effect limit reached".into() }); }
             inventory.effects.insert(context.effect.clone());
         }
-        let remaining = context.deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() { return Err(AdapterError::Indeterminate("effect deadline expired before provider dispatch".into())); }
+        let _effect=EffectLease { inventory:&self.inventory,effect:&context.effect };
         let mut p = json!({"generation": self.generation, "effect": context.effect, "op": op, "args": args, "deadline_ms": remaining.as_millis().clamp(1, 300000) as u64});
         if let Some((reference, incarnation)) = target { p["ref"] = json!(reference); p["incarnation"] = json!(incarnation); }
         if encoded_bytes(&p) + 128 > MAX_RECORD_BYTES { return Err(AdapterError::RejectedKind { kind: "overloaded".into(), message: "provider effect record exceeds 1 MiB".into() }); }
+        let remaining=context.deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() { return Err(AdapterError::RejectedKind { kind:"timeout".into(),message:"effect deadline expired before provider dispatch".into() }); }
+        p["deadline_ms"]=json!(remaining.as_millis().clamp(1,300000) as u64);
         let response = self.peer.call_with_timeout("effect.invoke", p, remaining).await;
         if Instant::now() >= context.deadline { return Err(AdapterError::Timeout("provider effect deadline expired; outcome indeterminate".into())); }
         let r = response.map_err(provider_error)?;
@@ -455,6 +488,100 @@ fn provider_error(error: RpcError) -> AdapterError {
         "timeout" => AdapterError::Timeout(error.to_string()),
         kind if NO_EFFECT_KINDS.contains(&kind) => AdapterError::RejectedKind { kind: kind.to_string(), message: error.message },
         _ => AdapterError::Backend(error.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod qa2_tests {
+    use super::*;
+    async fn fixture() -> (Shared,Arc<WireProvider>,Peer,crate::rpc::IncomingReceiver) {
+        let core=Arc::new(Mutex::new(Core::new(crate::store::Store::in_memory(),None,"unused".into(),false).unwrap()));
+        let (a,b)=tokio::io::duplex(4096);
+        let (r,w)=tokio::io::split(a); let (local,_incoming)=Peer::spawn(r,w);
+        let (r,w)=tokio::io::split(b); let (remote,incoming)=Peer::spawn(r,w);
+        let connection=Connection::new(1,local);
+        connection.hello().unwrap();
+        connection.register(&core,json!({"name":"qa2","role":"backend","instance":"i","software":{"name":"fixture","version":"1"},"provider_version":"0","capabilities":{"terminal.output":{"raw":true}}})).await.unwrap();
+        let provider=connection.provider.lock().unwrap().clone().unwrap();
+        (core,provider,remote,incoming)
+    }
+    fn facts(reference:&str) -> ResourceFacts { parse_facts(json!({"ref":reference,"kind":"terminal","state":"live"})).unwrap() }
+    fn fill_local(provider:&WireProvider) {
+        let mut inventory=provider.inventory.lock().unwrap();
+        inventory.started=true;
+        for n in 0..MAX_RESOURCES { let facts=facts(&format!("old{n}")); inventory.current.insert(facts.backend_ref.clone(),facts); }
+    }
+    #[tokio::test]
+    async fn expired_before_dispatch_is_definitely_rejected_and_sends_nothing() {
+        let (_core,provider,remote,mut incoming)=fixture().await;
+        let context=EffectContext { effect:"expired".into(),deadline:Instant::now()-std::time::Duration::from_millis(1),target:None };
+        let error=provider.invoke(&context,"fixture",None,json!({})).await.unwrap_err().rpc();
+        assert!(incoming.try_recv().is_err(),"expired effect must never reach provider");
+        assert_eq!(error.kind(),"timeout");
+        assert_eq!(error.data.unwrap()["outcome"],"rejected");
+        remote.close();
+    }
+    #[tokio::test]
+    async fn completed_effect_window_evicts_old_ids_but_never_active_ids() {
+        let (_core,provider,remote,_incoming)=fixture().await;
+        provider.inventory.lock().unwrap().effects.insert("active".into());
+        for n in 0..RECENT_EFFECTS+10 {
+            let effect=format!("e{n}");
+            provider.inventory.lock().unwrap().effects.insert(effect.clone());
+            drop(EffectLease { inventory:&provider.inventory,effect:&effect });
+        }
+        let inventory=provider.inventory.lock().unwrap();
+        assert_eq!(inventory.effects.len(),RECENT_EFFECTS+1);
+        assert_eq!(inventory.recent_effects.len(),RECENT_EFFECTS);
+        assert!(inventory.effects.contains("active"));
+        assert!(!inventory.effects.contains("e0"));
+        assert!(inventory.effects.contains(&format!("e{}",RECENT_EFFECTS+9)));
+        remote.close();
+    }
+    #[tokio::test]
+    async fn duplicate_active_and_recent_effect_ids_never_dispatch_twice() {
+        let (_core,provider,remote,mut incoming)=fixture().await;
+        let context=EffectContext { effect:"same".into(),deadline:Instant::now()+std::time::Duration::from_secs(2),target:None };
+        let call=tokio::spawn({let provider=provider.clone();let context=context.clone();async move { provider.invoke(&context,"fixture",None,json!({})).await }});
+        let Some(crate::rpc::Incoming::Request { id,method,.. })=incoming.recv().await else { panic!("missing effect"); };
+        assert_eq!(method,"effect.invoke");
+        assert_eq!(provider.invoke(&context,"fixture",None,json!({})).await.unwrap_err().rpc().kind(),"conflict");
+        remote.respond(id,Ok(json!({"outcome":"accepted"})));
+        call.await.unwrap().unwrap();
+        assert_eq!(provider.invoke(&context,"fixture",None,json!({})).await.unwrap_err().rpc().kind(),"conflict");
+        assert!(incoming.try_recv().is_err());
+        remote.close();
+    }
+    #[tokio::test]
+    async fn local_sync_cap_is_checked_before_any_core_publication_or_sync_state_change() {
+        let (core,provider,remote,_incoming)=fixture().await;
+        fill_local(&provider);
+        let seq=core.lock().unwrap().seq;
+        let error=provider.sync(&core,json!({"resources":[{"ref":"new","kind":"terminal","state":"live"}],"final":false})).unwrap_err();
+        assert_eq!(error.kind(),"overloaded");
+        assert!(core.lock().unwrap().resources.is_empty(),"local refusal must not leave a core-only resource");
+        assert_eq!(core.lock().unwrap().seq,seq);
+        assert!(!provider.inventory.lock().unwrap().syncing);
+        remote.close();
+    }
+    #[tokio::test]
+    async fn empty_final_sync_cannot_clear_a_replaced_generations_resources() {
+        let (core,provider,remote,_incoming)=fixture().await;
+        { let mut c=core.lock().unwrap();c.providers.get_mut("qa2").unwrap().generation+=1;c.upsert_resource("qa2",facts("new-generation")).unwrap(); }
+        assert_eq!(provider.sync(&core,json!({"resources":[],"final":true})).unwrap_err().kind(),"stale_generation");
+        assert_eq!(core.lock().unwrap().resources.len(),1);
+        remote.close();
+    }
+    #[tokio::test]
+    async fn local_upsert_cap_is_checked_before_core_publication() {
+        let (core,provider,remote,_incoming)=fixture().await;
+        fill_local(&provider);
+        let seq=core.lock().unwrap().seq;
+        let error=provider.notification(&core,"resource.upsert",json!({"facts":{"ref":"new","kind":"terminal","state":"live"}})).unwrap_err();
+        assert_eq!(error.kind(),"overloaded");
+        assert!(core.lock().unwrap().resources.is_empty(),"local refusal must not leave a core-only resource");
+        assert_eq!(core.lock().unwrap().seq,seq);
+        remote.close();
     }
 }
 

@@ -301,9 +301,43 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
         await self.core.wait(lambda: bool(self.core.notes("stream.closed", 1)))
         self.assertIn("result", await self.attach(ref, stream=2))
         await self.effect("terminal.kill", ref=ref)
-        full = await self.effect("terminal.spawn")
-        self.assertEqual(full["error"]["data"]["kind"], "overloaded")
-        self.assertEqual(self.fake.counter, 1)
+        again = await self.effect("terminal.spawn")
+        self.assertEqual(again["result"]["outcome"], "observed")
+        self.assertEqual(self.fake.counter, 2)
+        self.assertLessEqual(len(self.provider._effect_ids), 2)
+
+    async def test_effect_and_stream_identity_windows_survive_many_completed_cycles(self):
+        self.provider.limits = Limits(identities=4, max_streams=1)
+        ref = await self.spawn()
+        for ident in range(1, 13):
+            opened = await self.attach(ref, stream=ident)
+            self.assertIn("result", opened)
+            await self.core.note("stream.close", {"stream": ident})
+            await self.core.wait(lambda: bool(self.core.notes("stream.closed", ident)))
+            self.assertLessEqual(len(self.provider._stream_ids), 4)
+            self.assertEqual(self.provider._stream_ids.active, set())
+            await self.effect("terminal.kill", ref=ref)
+            ref = await self.spawn()
+            self.assertLessEqual(len(self.provider._effect_ids), 4)
+        duplicate = await self.attach(ref, stream=12)
+        self.assertEqual(duplicate["error"]["data"]["kind"], "conflict")
+
+    async def test_identity_window_never_evicts_active_calls(self):
+        from prim_provider import _IdentityLedger
+        ids = _IdentityLedger()
+        ids.add("active", 2)
+        for number in range(10):
+            ids.add(number, 2)
+            ids.finish(number)
+        self.assertIn("active", ids)
+        self.assertEqual(len(ids), 2)
+        with self.assertRaises(ProviderError) as duplicate:
+            ids.add("active", 2)
+        self.assertEqual(duplicate.exception.kind, "conflict")
+        ids.add("second-active", 2)
+        with self.assertRaises(ProviderError) as full:
+            ids.add("third", 2)
+        self.assertEqual(full.exception.kind, "overloaded")
 
     async def test_input_bound_error_and_reserved_ordered_close(self):
         ref = await self.spawn()

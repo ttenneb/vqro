@@ -3,6 +3,7 @@
 Importing prim_ext reuses its managed stdin EOF watcher without connecting.
 """
 import asyncio
+from collections import deque
 from dataclasses import dataclass
 import inspect
 import json
@@ -19,6 +20,33 @@ class ProviderError(Exception):
     def __init__(self, kind, message):
         super().__init__(message)
         self.kind = kind
+
+
+class _IdentityLedger:
+    """Bound active + recent identities; never evict a handler/stream that is still active."""
+    def __init__(self):
+        self.seen, self.active, self.recent = set(), set(), deque()
+
+    def __contains__(self, ident):
+        return ident in self.seen
+
+    def __len__(self):
+        return len(self.seen)
+
+    def add(self, ident, capacity):
+        if ident in self.seen:
+            raise ProviderError("conflict", "duplicate identity; never executed twice")
+        while len(self.seen) >= capacity:
+            if not self.recent:
+                raise ProviderError("overloaded", "all identity slots are active; not started")
+            self.seen.remove(self.recent.popleft())
+        self.seen.add(ident)
+        self.active.add(ident)
+
+    def finish(self, ident):
+        if ident in self.active:
+            self.active.remove(ident)
+            self.recent.append(ident)
 
 
 @dataclass(frozen=True)
@@ -112,7 +140,7 @@ class Provider:
         self.effects = {}
         self.open_stream = None
         self.streams = {}
-        self._effect_ids, self._stream_ids = set(), set()
+        self._effect_ids, self._stream_ids = _IdentityLedger(), _IdentityLedger()
         self._pending, self._tasks, self._workers = {}, set(), set()
         self._sequence = 0
         self._outgoing = 0
@@ -349,11 +377,8 @@ class Provider:
         duration = integer(params.get("deadline_ms"), 1, 300000)
         if ident in self._effect_ids:
             raise ProviderError("conflict", "duplicate effect; never executed again")
-        if len(self._effect_ids) >= self.limits.identities:
-            raise ProviderError("overloaded", "effect identity ledger full")
         if op not in self.capabilities or op not in self.effects:
             raise ProviderError("unsupported", f"unsupported op {op}")
-        self._effect_ids.add(ident)
         if params.get("ref") is not None and not isinstance(params["ref"], str):
             raise ProviderError("invalid", "ref must be a string")
         if not isinstance(params.get("incarnation", ""), str):
@@ -362,14 +387,18 @@ class Provider:
                      asyncio.get_running_loop().time() + duration / 1000)
         # Exactly one eventual reply, even after the core deadline. Never cancel
         # or retry a possibly dispatched backend effect merely because it expired.
-        result = await maybe_await(self.effects[op](ctx, args))
-        if not isinstance(result, dict) or result.get("outcome") not in OUTCOMES:
-            raise ProviderError("backend", "handler did not return a v0 native outcome")
-        if result["outcome"] == "rejected":
-            error = result.get("error")
-            if not isinstance(error, dict) or not isinstance(error.get("kind"), str) or not isinstance(error.get("message"), str):
-                raise ProviderError("backend", "rejected outcome needs kind/message")
-        return result
+        self._effect_ids.add(ident, self.limits.identities)
+        try:
+            result = await maybe_await(self.effects[op](ctx, args))
+            if not isinstance(result, dict) or result.get("outcome") not in OUTCOMES:
+                raise ProviderError("backend", "handler did not return a v0 native outcome")
+            if result["outcome"] == "rejected":
+                error = result.get("error")
+                if not isinstance(error, dict) or not isinstance(error.get("kind"), str) or not isinstance(error.get("message"), str):
+                    raise ProviderError("backend", "rejected outcome needs kind/message")
+            return result
+        finally:
+            self._effect_ids.finish(ident)
 
     async def _open(self, params):
         from prim_provider_stream import Stream
@@ -378,7 +407,7 @@ class Provider:
         ident = integer(params.get("stream"))
         if ident in self._stream_ids:
             raise ProviderError("conflict", "stream id already used")
-        if len(self.streams) >= self.limits.max_streams or len(self._stream_ids) >= self.limits.identities:
+        if len(self.streams) >= self.limits.max_streams:
             raise ProviderError("overloaded", "stream bound full")
         integer(params.get("cols"), 1, 9999)
         integer(params.get("rows"), 1, 9999)
@@ -386,7 +415,7 @@ class Provider:
         integer(params.get("window_bytes"), 1, self.window)
         if not isinstance(params.get("ref"), str) or not isinstance(params.get("incarnation"), str):
             raise ProviderError("invalid", "ref/incarnation required")
-        self._stream_ids.add(ident)
+        self._stream_ids.add(ident, self.limits.identities)
         stream = Stream(self, params)
         self.streams[ident] = stream
         try:
