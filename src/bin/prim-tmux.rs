@@ -614,8 +614,35 @@ fn watch_lifetime() {
             let mut buf = [0u8; 4096];
             let mut stdin = std::io::stdin();
             while matches!(stdin.read(&mut buf), Ok(n) if n > 0) {}
+            LIFETIME_ENDED.store(true, std::sync::atomic::Ordering::SeqCst);
+            // The core ended (graceful shutdown closes this pipe before any kill): clean up exactly
+            // like a normal exit, i.e. stop our private server. A configured server is never ours.
+            stop_private_server();
             std::process::exit(0);
         });
+    }
+}
+
+/// The private server, if this provider started one: (tmux binary, socket). Read by the lifetime
+/// thread, which exits the process without running destructors.
+static PRIVATE: std::sync::Mutex<Option<(PathBuf, PathBuf)>> = std::sync::Mutex::new(None);
+/// Set when the lifetime pipe closed: that thread owns the exit (cleanup, then status 0).
+static LIFETIME_ENDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn stop_private_server() {
+    let private = PRIVATE.lock().unwrap_or_else(|e| e.into_inner()).take();
+    if let Some((bin, socket)) = private {
+        let _ = tmux_cli(&bin, &socket, &["kill-server"]);
+        // kill-server returns before the server has exited; it removes its socket as it goes.
+        for _ in 0..40 {
+            if !socket.exists() && tmux_cli(&bin, &socket, &["list-sessions"]).is_err() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        if let Some(dir) = socket.parent() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 }
 
@@ -627,6 +654,7 @@ struct PrivateServer {
 
 impl Drop for PrivateServer {
     fn drop(&mut self) {
+        PRIVATE.lock().unwrap_or_else(|e| e.into_inner()).take();
         let _ = tmux_cli(&self.bin, &self.socket, &["kill-server"]);
     }
 }
@@ -674,7 +702,14 @@ async fn main() {
         watch_private(&argv[2..]);
     }
     watch_lifetime();
-    let code = match run().await {
+    let result = run().await;
+    if LIFETIME_ENDED.load(std::sync::atomic::Ordering::SeqCst) {
+        // Its own cleanup stops the private server, which can end run() first: let it finish and exit.
+        loop {
+            std::thread::park();
+        }
+    }
+    let code = match result {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("prim-tmux: {e}");
@@ -696,6 +731,7 @@ async fn run() -> Result<(), String> {
             // Our own server: the one call that may start one.
             tmux_run(&a.tmux, &socket, &[], &["new-session", "-d", "-s", "prim"])?;
             private = Some(PrivateServer { bin: a.tmux.clone(), socket: socket.clone(), _dir: dir });
+            *PRIVATE.lock().unwrap_or_else(|e| e.into_inner()) = Some((a.tmux.clone(), socket.clone()));
             spawn_private_watchdog(&a.tmux, &socket);
             socket
         }

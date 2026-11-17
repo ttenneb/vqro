@@ -431,3 +431,56 @@ async fn private_server_dies_with_a_sigkilled_provider() {
     }
     panic!("the private tmux server outlived its SIGKILLed provider");
 }
+
+#[tokio::test]
+#[ignore]
+async fn lifetime_eof_stops_the_private_server_before_the_provider_exits() {
+    // core.shutdown closes the managed extension's stdin (lifetime pipe) before any kill. The provider
+    // must clean up as on a normal exit: its private server is gone by the time the process is.
+    let root = tempfile::Builder::new().prefix("ptl").tempdir_in("/tmp").unwrap();
+    let endpoint = root.path().join("core.sock");
+    let listener = UnixListener::bind(&endpoint).unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_prim-tmux"))
+        .args(["--tmux", "/usr/bin/tmux"])
+        .env_clear()
+        .env("HOME", root.path())
+        .env("PATH", "")
+        .env("PRIM_SOCKET", &endpoint)
+        .env("PRIM_EXTENSION_LIFETIME", "stdin")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut provider = Provider(child);
+    let (sock, _) = tokio::time::timeout(Duration::from_secs(10), listener.accept()).await.unwrap().unwrap();
+    let (r, w) = sock.into_split();
+    let mut core = Core { r: BufReader::new(r), w, backlog: Vec::new() };
+    let hello = core.read().await;
+    core.reply(&hello, json!({})).await;
+    let reg = core.read().await;
+    core.reply(&reg, json!({"provider": "tmux", "generation": 1, "limits": {"stream_window_bytes": 65536, "max_record_bytes": 1048576}})).await;
+    let sync = core.read().await;
+    core.reply(&sync, json!({})).await;
+    let servers = || -> Vec<String> {
+        std::fs::read_dir("/proc").unwrap().flatten().filter_map(|e| {
+            let pid = e.file_name().to_string_lossy().to_string();
+            let env = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
+            let cmd = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+            (String::from_utf8_lossy(&env).contains(root.path().to_str().unwrap()) && String::from_utf8_lossy(&cmd).contains("new-session"))
+                .then_some(pid)
+        }).collect()
+    };
+    assert_eq!(servers().len(), 1, "our private server runs");
+    drop(provider.0.stdin.take()); // EOF on the lifetime pipe, as on graceful core shutdown
+    let status = tokio::task::spawn_blocking(move || {
+        let s = provider.0.wait().unwrap();
+        (s, provider)
+    })
+    .await
+    .unwrap();
+    let left = servers();
+    for pid in &left {
+        let _ = Command::new("/bin/kill").args(["-KILL", pid]).status();
+    }
+    assert!(status.0.success(), "provider exits cleanly on EOF");
+    assert!(left.is_empty(), "private server still running after the provider exited: {left:?}");
+}
