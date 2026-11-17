@@ -73,7 +73,7 @@ written the same way was contained by the crash budget and removed with one reve
 - **Resize ownership:** with several viewers of one terminal, the latest active one sets the size (herdr-core's
   rule). No prim-level rule yet.
 - **Extension views** are only `panel` (declarative) or `terminal`; the hybrid option is untested.
-- **Portability:** Unix socket only; Windows (named pipe) not yet validated (D15 says before locking contracts).
+- **Portability:** Unix socket only; Windows (named pipe) not yet validated (D12, D22 proposed). See "Windows work".
 - **Agents** run PTY-backed for now; the headless agent bridge (pi RPC, Claude Code) is the next slice.
 - **Adapters are in-process** Rust tasks behind a channel interface; the out-of-process adapter protocol from
   `spec/backend-adapter-v0.md` waits until a second backend shows what it needs.
@@ -135,3 +135,28 @@ bridge not built); second backend (tmux) not started; Windows untested.
 - Real fake-core regressions cover SIGKILL, SIGTERM and clean SIGINT shutdown, including blocked-before-connect
   helper startup. The scale cleanup check still reports zero leaked extensions under restart/flood load.
   Backend-owned terminal/agent lifetimes are not changed.
+
+## Windows work (known, 2026-11-17)
+
+From the static portability audit (D22 proposed; nothing compiled for Windows yet; installing a Windows target needs
+the human's OK). Contracts are updated; this is implementation.
+- **Compile:** a transport module with a named-pipe arm for `src/server.rs` / `src/client.rs` (tokio has
+  `net::windows::named_pipe`; `src/rpc.rs` is already generic over the byte stream); `cfg(unix)` around SIGTERM in
+  `src/main.rs`; a Windows branch for the TUI re-exec (today an unused variable there would break zero warnings);
+  `tests/core.rs:141` and `tests/scale.rs` onto the transport or gated to Linux. Estimate about 2-3 h with the runtime
+  fixes below.
+- **Runtime blockers that compile but fail:**
+  - `src/store.rs` opens the state directory to fsync it. On Windows `File::open(dir)` fails, so the core would not
+    start. Use a write-through replace (`MoveFileExW`) and skip the directory sync there.
+  - `src/paths.rs` defaults use `HOME`, usually unset on Windows, so state would land in the current directory. Use
+    `%LOCALAPPDATA%\prim`.
+  - `extensions/prim_ext.py` connects with `AF_UNIX`, which CPython on Windows lacks. Use the `asyncio` proactor
+    pipe connection. About 1-2 h, testable only on Windows.
+- **Defaults and CLI:** `defaults.json` names `python3` (use a portable interpreter choice); `resource.spawn`'s default
+  shell moves to the provider (`$SHELL` / `/bin/sh` in `src/server.rs` today); `prim stop` moves to `core.shutdown`;
+  the background core needs detached creation flags instead of `process_group(0)`; the herdr-core default path in
+  `src/main.rs` is a macOS bundle path.
+- **Optional:** Job Objects for extensions (also covers wrapper grandchildren), and the named pipe's out-buffer size as
+  the counterpart of the 16 KiB send buffer (re-measure the first-echo case).
+- **Validation:** `cargo check` for `x86_64-pc-windows-msvc` and `-gnu` as a CI gate once the target is approved; a real
+  Windows smoke run of the provider transport before any contract is a freeze candidate (`provider-v0.md` step 6).

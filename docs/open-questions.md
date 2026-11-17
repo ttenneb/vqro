@@ -7,7 +7,7 @@ Close a question by linking the decision, commit or experiment that answered it.
 1. **Agent input semantics.** When does mid-turn input take effect in each runtime, and which Claude Code route
    should the adapter use? (`experiments/e1-agent-input.md`, roadmap step 1)
 2. **Remote bridges.** Proposed (D21, `spec/provider-v0.md` section 6): bridges reach the core over the local
-   socket with a one-time token, and from other hosts through their host's provider (`provider.relay`). Human to
+   endpoint (opaque `PRIM_SOCKET`, D22 proposed) with a one-time token, and from other hosts through their host's provider (`provider.relay`). Human to
    confirm, or choose a small per-host relay, or local bridges only for now. Still open: what an agent view needs
    beyond today's panels.
 3. **Capability granularity.** How fine should backend capabilities be before extensions fill up with special
