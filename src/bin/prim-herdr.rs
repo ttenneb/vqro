@@ -9,7 +9,7 @@
 //! - Provider availability follows the backend: when herdr-core is lost, the core connection is
 //!   closed (the core marks the provider disconnected); when the adapter reconnects, the provider
 //!   registers again (new generation) and sends a full sync. Nothing is resent.
-//! - Effects: `terminal.spawn` (argv, cwd, name; no env yet: the adapter has no env hook) and
+//! - Effects: `terminal.spawn` (argv, cwd, name, env, cols, rows, placement) and
 //!   `terminal.kill` (observed with finished facts when herdr-core's reply says finished). herdr-core error replies and lost replies are `backend` errors (outcome unknown),
 //!   as the in-process core treats them.
 //! - Streams: herdr-core attach channels with backend history as initial data. Credit goes back to
@@ -53,7 +53,7 @@ fn args() -> Result<Args, String> {
 
 fn capabilities() -> Map<String, Value> {
     json!({
-        "terminal.spawn": {"env": false, "cwd": true, "name": true},
+        "terminal.spawn": {"env": true, "cwd": true, "name": true},
         "terminal.input": {},
         "terminal.output": {"raw": true, "history": true, "repaint": "none"},
         "terminal.resize": {"owner": "latest_viewer"},
@@ -129,14 +129,26 @@ async fn spawn(handle: &AdapterHandle, args: &Value) -> Result<Outcome, Provider
         Value::Array(a) if a.iter().all(Value::is_string) => a.iter().map(|v| v.as_str().unwrap().to_string()).collect(),
         _ => return Err(ProviderError::new("invalid", "argv must be strings")),
     };
-    if args["env"].as_object().is_some_and(|e| !e.is_empty()) {
-        return Err(ProviderError::new("unsupported", "env is not supported by this provider yet (terminal.spawn {env: false})"));
+    let mut env = std::collections::BTreeMap::new();
+    match &args["env"] {
+        Value::Null => {}
+        Value::Object(m) => {
+            for (k, v) in m {
+                let Some(v) = v.as_str() else { return Err(ProviderError::new("invalid", "env values must be strings")) };
+                if k.is_empty() || k.contains('=') || k.contains('\0') || v.contains('\0') {
+                    return Err(ProviderError::new("invalid", format!("bad env entry {k:?}")));
+                }
+                env.insert(k.clone(), v.to_string());
+            }
+        }
+        _ => return Err(ProviderError::new("invalid", "env must be an object of strings")),
     }
+    let dim = |k: &str| args[k].as_u64().filter(|v| (1..=9999).contains(v)).map(|v| v as u16);
     if argv.is_empty() {
         // The provider's default shell for its host (9.4).
         argv = vec![std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/sh".into())];
     }
-    let req = SpawnRequest { argv, cwd: args["cwd"].as_str().map(String::from), name: args["name"].as_str().map(String::from), env: Default::default(), cols: None, rows: None, placement: None };
+    let req = SpawnRequest { argv, cwd: args["cwd"].as_str().map(String::from), name: args["name"].as_str().map(String::from), env, cols: dim("cols"), rows: dim("rows"), placement: args.get("placement").filter(|p| !p.is_null()).cloned() };
     match handle.spawn(req).await {
         Ok(f) => Ok(Outcome::Observed(Some(json!({"facts": facts(&f)})))),
         Err(e) => Err(unknown(e)),

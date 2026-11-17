@@ -166,6 +166,7 @@ async fn spawn_attach_input_status_and_kill_on_a_private_herdr_core() {
     assert_eq!(reg["instance"].as_str(), hc.core_id().as_deref(), "instance is herdr-core's core.id");
     let caps = &reg["capabilities"];
     assert_eq!(caps["terminal.exit"]["exit_code"], true);
+    assert_eq!(caps["terminal.spawn"]["env"], true);
     assert!(caps["remote.machines"].is_object() && caps["events.resync"].is_object());
     assert!(caps.as_object().unwrap().values().all(Value::is_object));
     assert!(resources.is_empty());
@@ -179,10 +180,17 @@ async fn spawn_attach_input_status_and_kill_on_a_private_herdr_core() {
     assert!(!inc.is_empty(), "incarnation: the terminal's creation time");
     assert_eq!(f["name"], "spawned");
     core.until(|m| m["method"] == "resource.upsert" && m["params"]["facts"]["ref"] == term.as_str()).await;
-    // env needs an adapter hook: refused before anything runs.
+    // env reaches the program.
     core.send(json!({"jsonrpc": "2.0", "id": 2, "method": "effect.invoke", "params": {"generation": 5, "effect": "e2",
-        "op": "terminal.spawn", "args": {"argv": ["/bin/sh"], "env": {"A": "b"}}, "deadline_ms": 10000}})).await;
-    assert_eq!(core.until(|m| m["id"] == 2).await["error"]["data"]["kind"], "unsupported");
+        "op": "terminal.spawn", "args": {"argv": ["/bin/sh", "-c", "echo env=$PRIM_TEST > ../envcheck"], "cwd": hc.root.path().join("h").to_str().unwrap(),
+        "env": {"PRIM_TEST": "passed"}}, "deadline_ms": 10000}})).await;
+    assert_eq!(core.until(|m| m["id"] == 2).await["result"]["outcome"], "observed");
+    let envcheck = hc.root.path().join("envcheck");
+    for _ in 0..100 {
+        if envcheck.exists() { break; }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(std::fs::read_to_string(&envcheck).unwrap().trim(), "env=passed");
 
     core.send(json!({"jsonrpc": "2.0", "id": 3, "method": "stream.open", "params": {"generation": 5, "stream": 1, "ref": term,
         "incarnation": inc, "cols": 100, "rows": 30, "history_lines": 0, "window_bytes": 65536}})).await;
