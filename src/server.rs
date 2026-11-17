@@ -52,13 +52,13 @@ struct StreamBinding {
 /// `defaults`: a directory with `defaults.json` listing extensions to install on first run.
 pub fn start(socket: std::path::PathBuf, state: std::path::PathBuf, safe: bool, backend: Backend, defaults: Option<std::path::PathBuf>) -> anyhow::Result<Shared> {
     crate::store::create_dir_all_durable(&state)?;
+    let mut store=crate::store::Store::open_locked(state.join("workspace.json"))?;
     if socket.exists() {
         if std::os::unix::net::UnixStream::connect(&socket).is_ok() {
             anyhow::bail!("prim is already running at {}", socket.display());
         }
         std::fs::remove_file(&socket)?;
     }
-    let mut store = crate::store::Store::open(state.join("workspace.json"))?;
     if let Some(dir) = defaults {
         install_defaults(&mut store, &dir);
     }

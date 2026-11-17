@@ -43,6 +43,10 @@ commits are cleanly rejected without effects; an already dispatched durable writ
 rolled back or replayed. Completed replacements stay on disk and are loaded on the next start. A further1s wait
 lets mutation handlers flush replies before extensions/providers/peers stop; expiry reports indeterminate delivery,
 not a clean write failure or a remote-read acknowledgement. An in-progress filesystem call cannot be safely cancelled.
+A portable process-held `.workspace.lock` is acquired before state is read and retained by dispatched writer
+snapshots: replacement startup is refused while an old write can still replace state, even after socket cleanup.
+`ensure_core` reports the held state immediately instead of spawning a failing core and silently polling its socket.
+On upgrade from an older build without this lock, wait for that older process to exit before replacement startup.
 The core then closes extension lifetime pipes (1.5s grace, then kill/reap, inside a2s supervisor bound), stops
 provider transport links, closes clients/streams, removes the endpoint, and exits. Backend-owned terminals are
 not killed; input is never replayed. Bounded cooperative cleanup waits report

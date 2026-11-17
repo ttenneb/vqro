@@ -88,11 +88,13 @@ pub struct Store {
     history: std::sync::Arc<VecDeque<Txn>>,
     path: Option<PathBuf>,
     writer: DurableWriter,
+    // Copied into dispatched writers: a late replace must fence replacement core startup.
+    lifetime:Option<std::sync::Arc<std::fs::File>>,
 }
 
 impl Store {
     pub fn in_memory() -> Store {
-        Store { rev: 0, next_txn: 1, entries: std::sync::Arc::new(BTreeMap::new()), history: std::sync::Arc::new(VecDeque::new()), path: None, writer: std::sync::Arc::new(write_atomic) }
+        Store { rev: 0, next_txn: 1, entries: std::sync::Arc::new(BTreeMap::new()), history: std::sync::Arc::new(VecDeque::new()), path: None, writer: std::sync::Arc::new(write_atomic), lifetime:None }
     }
 
     /// Load from a file, or start empty if it does not exist.
@@ -102,14 +104,28 @@ impl Store {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Persisted { next_txn: 1, ..Default::default() },
             Err(e) => return Err(e.into()),
         };
-        Ok(Store { rev: p.rev, next_txn: p.next_txn.max(1), entries: std::sync::Arc::new(p.entries), history: std::sync::Arc::new(p.history), path: Some(path), writer: std::sync::Arc::new(write_atomic) })
+        Ok(Store { rev: p.rev, next_txn: p.next_txn.max(1), entries: std::sync::Arc::new(p.entries), history: std::sync::Arc::new(p.history), path: Some(path), writer: std::sync::Arc::new(write_atomic), lifetime:None })
+    }
+
+    /// Acquire before reading state; blocking writers retain the same process-held lock.
+    pub(crate) fn open_locked(path:PathBuf) -> anyhow::Result<Store> {
+        let lock=Self::lock_state(&path)?;
+        let mut store=Self::open(path)?;
+        store.lifetime=Some(lock);
+        Ok(store)
+    }
+
+    pub(crate) fn lock_state(path:&Path) -> anyhow::Result<std::sync::Arc<std::fs::File>> {
+        let lock=std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(path.with_file_name(".workspace.lock"))?;
+        lock.try_lock().map_err(|error|anyhow::anyhow!("workspace state still in use (possibly a late durable write); wait for the previous core to finish, do not replay: {error}"))?;
+        Ok(std::sync::Arc::new(lock))
     }
 
     pub(crate) fn set_writer(&mut self, writer: DurableWriter) { self.writer = writer; }
 
     /// O(1) immutable committed-state copy. Only the serialized committer may persist it.
     pub(crate) fn committed_copy(&self) -> Self {
-        Self { rev:self.rev, next_txn:self.next_txn, entries:self.entries.clone(), history:self.history.clone(), path:self.path.clone(), writer:self.writer.clone() }
+        Self { rev:self.rev, next_txn:self.next_txn, entries:self.entries.clone(), history:self.history.clone(), path:self.path.clone(), writer:self.writer.clone(), lifetime:self.lifetime.clone() }
     }
 
     pub(crate) fn transaction(&self, id:u64) -> Option<&Txn> { self.history.iter().find(|t| t.id == id) }
@@ -470,6 +486,16 @@ mod tests {
 
     fn set(key: &str, value: Value) -> Op {
         Op::Set { key: key.into(), value, expect: None }
+    }
+
+    #[test]
+    fn replacement_core_is_fenced_until_dispatched_writer_snapshot_drops() {
+        let root=tempfile::tempdir().unwrap();let path=root.path().join("workspace.json");
+        let store=Store::open_locked(path.clone()).unwrap();
+        let writer=store.committed_copy();drop(store);
+        assert!(Store::open_locked(path.clone()).is_err(),"a late old writer must fence replacement startup");
+        drop(writer);
+        assert!(Store::open_locked(path).is_ok());
     }
 
     #[test]

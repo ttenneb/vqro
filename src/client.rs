@@ -26,6 +26,9 @@ pub async fn ensure_core() -> Result<()> {
     }
     let state = crate::paths::state_dir();
     std::fs::create_dir_all(&state)?;
+    // Fail clearly before spawning/retrying a core whose predecessor still owns state.
+    // Release this probe before the child acquires its lifetime lock.
+    drop(crate::store::Store::lock_state(&state.join("workspace.json"))?);
     let log = std::fs::OpenOptions::new().create(true).append(true).open(state.join("serve.log"))?;
     let mut cmd = std::process::Command::new(std::env::current_exe()?);
     cmd.arg("serve").stdin(std::process::Stdio::null()).stdout(log.try_clone()?).stderr(log);
