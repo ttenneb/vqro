@@ -7,6 +7,7 @@ pub mod core;
 pub mod events;
 pub mod ext;
 pub mod paths;
+pub mod provider_client;
 pub mod queue;
 pub mod provider;
 pub mod rpc;
