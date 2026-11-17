@@ -1,12 +1,12 @@
-# Pi runtime pipes (standalone)
+# Pi RPC runtime and bridge program
 
-A stdlib-only, Python 3.11+ asynchronous client for **Pi 1.5 RPC**. This is the runtime half of a future
-bridge, not a prim provider, extension entrypoint, process supervisor or generic agent host.
+A stdlib-only, Python 3.11+ client for **Pi 1.5 RPC**, plus the `python3 -m pi_bridge` runtime provider
+program. Program launch, resume and view behavior: [PROGRAM.md](PROGRAM.md). The client API below remains
+independent of prim; Pi's JSONL protocol is not JSON-RPC.
 
-The future bridge must itself run **inside a backend-owned terminal**. That process may instantiate this
-client to run Pi over fresh child stdin/stdout pipes. Do not instantiate it in prim core or its extension
-supervisor. No PTY is used for RPC, and this package never connects to prim. `prim_ext.py` remains the
-helper for the separate prim JSON-RPC connection; Pi's JSONL protocol is not JSON-RPC.
+The bridge runs **inside a backend-owned terminal**, instantiating the client over fresh child pipes.
+Do not instantiate it in prim core or its extension supervisor. No PTY is used for Pi RPC. The program
+uses `prim_provider.py` for its separate prim connection; it is not a generic agent process host.
 
 ## Interface
 
