@@ -94,7 +94,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.extra_cores = []
         self.extra_sockets = []
 
-    async def start(self, token="bootstrap-once", ready=True, transcript_bytes=16384, connector=None):
+    async def start(self, token="bootstrap-once", ready=True, transcript_bytes=16384, connector=None, interval=.1):
         provider = Provider("pi-test", "one-process", CAPABILITIES, role="runtime", token=token,
                             limits=Limits(deadline=1))
         env = {"HOME": self.root.name, "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8",
@@ -102,7 +102,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                "PRIM_EXTENSION_LIFETIME": "stdin", "PRIM_EXTENSION": "wrong-parent"}
         self.bridge = Bridge([sys.executable, str(ROOT / "tests/fixtures/fake_pi.py")],
                              cwd=self.root.name, env=env, token=token, sock=self.sock,
-                             provider=provider, fallback=self.frames, interval=.1,
+                             provider=provider, fallback=self.frames, interval=interval,
                              transcript_bytes=transcript_bytes, pi_limits=PiLimits(deadline=.5),
                              connector=connector, retry_initial=.05, retry_max=.2)
         self.task = asyncio.create_task(self.bridge.run(self.stop))
@@ -131,6 +131,13 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.effects += 1
         return await self.core.call("effect.invoke", {"effect": f"e{self.effects}", "op": "agent." + op,
             "ref": "agent", "incarnation": "", "args": args or {}, "deadline_ms": 1000})
+
+    async def test_user_effect_wakes_publication_without_waiting_for_sampling_timer(self):
+        bridge = await self.start(interval=10)
+        result = await self.effect("prompt", {"message": "wake"})
+        self.assertEqual(result["result"]["outcome"], "accepted")
+        await asyncio.wait_for(self.core.wait(lambda: self.core.run_facts().get("active") is True), .5)
+        self.assertTrue(bridge.connected)
 
     async def test_readable_status_nonzero_counts_and_single_request_in_fallback(self):
         bridge = await self.start()

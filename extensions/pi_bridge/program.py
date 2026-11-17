@@ -49,6 +49,7 @@ class Bridge:
         self.connections = 0
         self.view_problem = None
         self._publish_lock = asyncio.Lock()
+        self._publish_now = asyncio.Event()
         self._control_task = None
         self.fallback = fallback or Fallback()
         self.interval, self.pi_limits = interval, pi_limits
@@ -87,7 +88,12 @@ class Bridge:
         if effect.remaining <= 0:
             raise ProviderError("backend", "deadline expired before runtime dispatch")
         op = effect.op.removeprefix("agent.")
-        result = await self.pi.invoke(op, args, timeout=effect.remaining)
+        try:
+            result = await self.pi.invoke(op, args, timeout=effect.remaining)
+        finally:
+            # User controls should not wait for the transcript sampling timer.
+            # This only wakes publication; effects are still sent exactly once.
+            self._publish_now.set()
         outcome = result["outcome"]
         if outcome == "indeterminate":
             raise ProviderError("backend", result.get("reason", "runtime outcome unknown"))
@@ -284,7 +290,11 @@ class Bridge:
 
     async def _publish_loop(self):
         while True:
-            await asyncio.sleep(self.interval)
+            try:
+                await asyncio.wait_for(self._publish_now.wait(), self.interval)
+            except TimeoutError:
+                pass
+            self._publish_now.clear()
             await self.publish()
 
     async def run(self, stop=None):

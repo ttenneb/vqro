@@ -6,6 +6,7 @@ controls (barriers, not sleeps) and are not a proposed production protocol.
 import json
 import os
 import sys
+import time
 
 active = False
 steering = []
@@ -13,6 +14,14 @@ follow = []
 held = []
 accepted = []
 trace_path = sys.argv[sys.argv.index("--trace-file") + 1] if "--trace-file" in sys.argv else None
+timing_path = sys.argv[sys.argv.index("--timing-file") + 1] if "--timing-file" in sys.argv else None
+
+
+def timing(kind, record):
+    if timing_path:
+        with open(timing_path, "a") as output:
+            output.write(json.dumps({"event": kind, "ns": time.monotonic_ns(), "id": record.get("id"),
+                                     "command": record.get("command", record.get("type"))}) + "\n")
 
 
 def trace(record):
@@ -29,6 +38,7 @@ trace({"pid": os.getpid(), "bootstrap_in_child": "PRIM_BRIDGE_TOKEN" in os.envir
 
 
 def emit(record):
+    timing("emit", record)
     os.write(1, json.dumps(record, ensure_ascii=False).encode() + b"\n")
 
 
@@ -58,6 +68,7 @@ def settle(aborted=False):
 
 for line in sys.stdin.buffer:
     command = json.loads(line)
+    timing("receive", command)
     trace(command)
     kind = command["type"]
     if kind == "get_state":

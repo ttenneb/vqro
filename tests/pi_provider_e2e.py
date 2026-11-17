@@ -91,6 +91,8 @@ class E2E:
             except (RuntimeError, OSError, KeyError) as error:
                 last = repr(error)
             time.sleep(.1)
+        if self.ui_running:
+            (self.root/'ui-timeout.txt').write_text(self.ui('capture-pane', '-p', '-t', 'ui:0.0'))
         raise AssertionError(f'{label}: timeout; last={last!r}; see prim.log and receipt.json')
 
     def snapshot(self):
@@ -123,7 +125,7 @@ class E2E:
 
     def extension_ready(self):
         names = {c['name'] for c in self.call('command.list')['commands'] if c.get('available')}
-        return {'pi.new', 'agents.answer', 'tabs.show', 'panes.close'} <= names
+        return {'pi.new', 'agents.answer', 'tabs.show', 'panes.close', 'sidebar.show'} <= names
 
     def stop(self, crash=False):
         if self.core and self.core.poll() is None:
@@ -259,18 +261,71 @@ class E2E:
         self.ui_frame('new-binding', 'new Pi agent')
         self.ui('send-keys', '-t', 'ui:0.0', 'a')
         agent = self.wait(lambda: next((r for r in self.snapshot()['resources'] if r.get('kind') == 'agent' and r.get('available')), None), 'UI new agent')
-        self.ui_frame('agent-ready', 'Pi run', 'Queued steering: 0', 'created (observed)')
+        self.ui_frame('agent-ready', 'Ready for a prompt', 'created (observed)')
         event = self.audit_error(cursor, 'observed', 'resource.spawn')
         rid = agent['id']
+        self.ui_navigation(rid, agent['host'])
         self.ui_menu(rid, 'Prompt')
         self.ui('send-keys', '-t', 'ui:0.0', '-l', 'ui-typed-prompt')
         self.ui_frame('prompt-input', 'ui-typed-prompt')
         self.ui('send-keys', '-t', 'ui:0.0', 'Enter')
         self.agent(rid, lambda r: r['data']['run']['active'])
-        self.ui_frame('working', 'working', 'active=True')
+        self.ui_frame('working', 'working', 'Running')
         self.ui_menu(rid, 'Abort')
         self.agent(rid, lambda r: r['data']['run']['settled'] and r['data']['run']['aborted'])
         return {'outcome': event['outcome'], 'host': agent['host'], 'agent': rid}
+
+    def ui_navigation(self, rid, host):
+        def leaves(node):
+            return ([node['view']] if 'view' in node else []) + [view for child in node.get('children', []) for view in leaves(child)] + [view for tab in node.get('tabs', []) for view in leaves(tab['node'])]
+        def layout_views():
+            return [view for key, entry in self.snapshot()['entries'].items() if key.startswith('layout/') for view in leaves(entry['value'])]
+        views = layout_views()
+        assert views.count('agents-'+rid) == 1, views
+        assert 'term-'+rid not in views and 'term-'+host not in views, views
+        # The first actionable row is the generic bridge-terminal escape hatch.
+        self.ui('send-keys', '-t', 'ui:0.0', 'Home', 'Enter')
+        self.wait(lambda: 'term-'+host in layout_views(), 'explicit bridge terminal tab')
+        self.ui_frame('bridge-terminal', 'Pi '+rid+' bridge', 'core connected')
+        self.call('command.invoke', {'name': 'sidebar.toggle'})
+        screen = self.ui_frame('sidebar-agent', 'Terminals', 'Pi '+rid+' bridge')
+        # The agent is a top-level row; its bridge is a collapsed child, not another terminal.
+        rows = self.wait(lambda: self.snapshot().get('live', {}).get('sidebar', {}).get('items'), 'sidebar rows')
+        agent_row = next(row for row in rows if row.get('args', {}).get('resource') == rid)
+        assert agent_row['children'][0]['args']['resource'] == host, rows
+        assert not any(row.get('args', {}).get('resource') == host for row in rows), rows
+        line = next(i for i, line in enumerate(screen.splitlines()) if i > 2 and 'Pi' in line[:35] and 'bridge' not in line[:35])
+        click = f'\x1b[<0;6;{line+1}M\x1b[<0;6;{line+1}m'.encode()
+        self.ui('send-keys', '-t', 'ui:0.0', '-H', *[f'{byte:02x}' for byte in click])
+        self.ui_frame('sidebar-focused-agent', 'Ready for a prompt', 'Bridge terminal')
+        self.ui('send-keys', '-t', 'ui:0.0', 'C-g', 'm')
+        self.ui_frame('sidebar-click-focus-menu', 'Prompt', 'Abort')
+        self.ui('send-keys', '-t', 'ui:0.0', 'Escape')
+        for args in ({'resource': rid}, {'picked': rid}):
+            self.call('command.invoke', {'name': 'tabs.show', 'args': args})
+        assert layout_views().count('agents-'+rid) == 1
+        assert not any(entry['value'].get('kind') == 'terminal' and entry['value'].get('resource') == rid
+                       for key, entry in self.snapshot()['entries'].items() if key.startswith('view/'))
+        self.call('command.invoke', {'name': 'sidebar.toggle'})
+        self.log.append({'agent_navigation': 'PASS', 'one_agent_tab': True, 'bridge_opened_explicitly': host, 'sidebar_mouse_focus': rid})
+
+    def ui_ended(self, rid, host):
+        self.call('command.invoke', {'name': 'tabs.show', 'args': {'view': 'agents-'+rid, 'title': 'Pi '+rid}})
+        self.ui('new-session', '-d', '-s', 'ui', '-x', '150', '-y', '36', '/usr/bin/env', '-i',
+                *[key+'='+value for key, value in self.env.items()], str(self.args.prim), 'tui')
+        self.ui_running = True
+        self.ui_frame('gone-agent', 'Agent gone', '[gone]')
+        self.call('command.invoke', {'name': 'sidebar.toggle'})
+        self.ui_frame('ended-sidebar', 'ended', '[gone]')
+        self.call('command.invoke', {'name': 'sidebar.close_ended'})
+        def cleaned():
+            snap = self.snapshot()
+            rows = snap.get('live', {}).get('sidebar', {}).get('items', [])
+            return not any(row.get('args', {}).get('resource') == host for row in rows)
+        self.wait(cleaned, 'ended host hidden after explicit cleanup')
+        self.ui_frame('cleaned-ended', 'Terminals')
+        self.log.append({'ended_ui': 'PASS', 'gone_agent': rid, 'ended_host': host, 'explicit_cleanup': True})
+        self.stop_ui()
 
     def split_independence(self, rid, native_process):
         self.call('command.invoke', {'name': 'prim.extension.disable', 'args': {'name': 'pi'}})
@@ -287,6 +342,8 @@ class E2E:
         children = Path(f'/proc/{self.core.pid}/task/{self.core.pid}/children').read_text().split()
         self.tracked.extend(identity(int(pid)) for pid in children)
         self.call('command.invoke', {'name': 'prim.extension.disable', 'args': {'name': 'other-agent'}})
+        if self.args.agents_ui:
+            self.ui_frame('unavailable-agent', 'Agent unavailable')
         self.call('command.invoke', {'name': 'prim.extension.enable', 'args': {'name': 'pi'}})
         self.wait(self.extension_ready, 'Pi launcher re-enabled')
         self.call('command.invoke', {'name': 'prim.extension.disable', 'args': {'name': 'agents'}})
@@ -312,6 +369,54 @@ class E2E:
                 self.log.append({'ui_stop_error': str(error)})
             self.ui_running = False
 
+    def prompt_latency(self, rid):
+        """Same public command path as the prefix menu, excluding human typing/model time."""
+        samples = []
+        with socket.socket(socket.AF_UNIX) as sock:
+            sock.settimeout(5)
+            sock.connect(self.env['PRIM_SOCKET'])
+            with sock.makefile('rwb', buffering=0) as wire:
+                ident = 0
+                def send(method, params):
+                    nonlocal ident
+                    ident += 1
+                    wire.write((json.dumps({'jsonrpc': '2.0', 'id': ident, 'method': method, 'params': params})+'\n').encode())
+                    return ident
+                for method, params in [('hello', {'client': 'prompt-latency'}), ('events.subscribe', {'types': ['resource', 'view.content']})]:
+                    request = send(method, params)
+                    while json.loads(wire.readline()).get('id') != request:
+                        pass
+                for index in range(7):
+                    start = time.monotonic_ns()
+                    params = {'resource': rid, 'op': 'agent.prompt', 'args': {'message': 'latency-'+str(index)}}
+                    if self.args.agents_extension:
+                        request = send('command.invoke', {'name': 'agents.prompt', 'args': {'resource': rid, 'text': 'latency-'+str(index)}})
+                    else:
+                        request = send('resource.invoke', params)
+                    reply = facts = panel = None
+                    while reply is None or facts is None or panel is None:
+                        row = json.loads(wire.readline()); now = time.monotonic_ns()
+                        if row.get('id') == request:
+                            assert row.get('result', {}).get('outcome') == 'accepted', row
+                            reply = now
+                        elif row.get('method') == 'event':
+                            event = row['params']; value = event['data']
+                            if event['type'] == 'resource' and value.get('id') == rid and value.get('data', {}).get('run', {}).get('active'):
+                                facts = now
+                            target = ('agents-' if self.args.agents_extension else 'agent-')+rid
+                            if event['type'] == 'view.content' and value.get('view') == target and 'Running' in json.dumps(value.get('content')):
+                                panel = now
+                    native = [json.loads(line) for line in (self.root/'timing.jsonl').read_text().splitlines()]
+                    receive = next(v for v in reversed(native) if v['event'] == 'receive' and v['command'] == 'prompt')
+                    emitted = next(v for v in native if v['event'] == 'emit' and v['id'] == receive['id'] and v['command'] == 'prompt')
+                    runtime = emitted['ns']-receive['ns']
+                    samples.append({'accept_ms': (reply-start)/1e6, 'facts_ms': (facts-start)/1e6,
+                                    'panel_ms': (panel-start)/1e6, 'fake_pi_ms': runtime/1e6,
+                                    'prim_accept_ms': (reply-start-runtime)/1e6})
+                    self.invoke(rid, 'abort')
+                    self.agent(rid, lambda r: r['data']['run']['settled'])
+        self.log.append({'prompt_latency': samples, 'note': 'persistent public RPC; fake Pi only; no model or CLI startup; seven prompt/abort cycles'})
+
     def trace(self):
         return [json.loads(line) for line in (self.root/'native.jsonl').read_text().splitlines()]
 
@@ -336,13 +441,13 @@ class E2E:
                       '--no-prompt-templates', '--no-themes', '--no-tools']
         else:
             native = ['/usr/bin/python3', str(REPO/'tests/fixtures/fake_pi.py'), '--bridge-e2e',
-                      '--trace-file', str(self.root/'native.jsonl')]
+                      '--trace-file', str(self.root/'native.jsonl'), '--timing-file', str(self.root/'timing.jsonl')]
         if self.args.agents_extension:
             assert not self.args.real_pi_metadata, 'extension E2E uses fake Pi only'
             ops = [{'op': 'set', 'key': 'doc/settings/agents', 'value': {'runtimes': [{'name': 'fake', 'argv': native}]}}]
             ops += [{'op': 'set', 'key': 'extension/'+name, 'value': {'enabled': True,
                     'argv': ['/usr/bin/python3', str(self.root/'ext'/(name+'.py'))]}}
-                    for name in ('tabs', 'panes', 'agents', 'pi')]
+                    for name in ('tabs', 'panes', 'agents', 'pi', 'sidebar')]
             self.call('workspace.apply', {'ops': ops, 'note': 'Private agents extension conformance'})
             self.wait(self.extension_ready, 'agents/tabs/panes command registration')
             created = self.ui_launch() if self.args.agents_ui else self.call('command.invoke', {'name': 'pi.new', 'args': {'runtime': 'fake', 'cwd': str(self.root/'work')}})
@@ -381,6 +486,7 @@ class E2E:
         if self.args.probe_terminal_invoke:
             self.probe_terminal_input(host)
         if not self.args.real_pi_metadata:
+            self.prompt_latency(rid)
             first = self.trace()[0]
             assert not first['bootstrap_in_child'] and not first['herdr_in_child'], first
             assert first['pid'] == native_process['pid']
@@ -467,6 +573,8 @@ class E2E:
         assert exited['exit_code'] == (0 if self.args.real_pi_metadata else 23), exited
         assert exited['signal'] is None, exited
         self.wait(lambda: not live(native_process) and not live(bridge_process), 'native runtime exits')
+        if self.args.agents_ui:
+            self.ui_ended(rid, host)
         self.log.append({'native_exit': exited, 'result': 'PASS', 'stable_agent_id': rid, 'host': host, 'native_effect_replay': False,
                          'real_pi_metadata_only': self.args.real_pi_metadata,
                          'agents_extension': self.args.agents_extension})
