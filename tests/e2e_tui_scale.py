@@ -2,7 +2,9 @@
 """Opt-in real-TUI scale probe, entirely private: --fake core and explicit private tmux socket.
 Usage: python3 tests/e2e_tui_scale.py TARGET [--duration 15] [--receipt FILE]
 CPU is percent of one core; latency is tmux send-keys completion to first capture-pane observation.
-Placeholder performance budgets are reported, not enforced. Correctness and owned-process cleanup are gates.
+Performance budgets are enforced, as are correctness and owned-process cleanup. BUDGETS are set from measured
+results (docs/test-plan.md, "Scale budgets"): twice the worst of the current check.sh full runs, rounded up to 10;
+frame-rate limits are the renderer's design caps (background redraw is capped near 60 fps).
 """
 import argparse
 import json
@@ -15,6 +17,15 @@ import subprocess
 import tempfile
 import threading
 import time
+
+# measure -> (limit, worst observed in 7 runs on 2026-11-17)
+BUDGETS = {"cpu_pct_one_core": (40, 18.0), "rss_peak_mib": (80, 38.6), "key_p99_ms": (170, 81.8),
+           "background_fps_peak_complete_second": (64, 55), "fps_peak_complete_second": (120, 94)}
+
+
+def exceeded(measured):
+    """Budget names whose measured value is above its limit (a missing measurement counts as exceeded)."""
+    return sorted(name for name, (limit, _) in BUDGETS.items() if not measured.get(name) or measured[name] > limit)
 
 
 class Peer:
@@ -142,7 +153,7 @@ def main():
     client, observer, core = None, None, None
     receipt = {"kind": "prim.tui-scale", "version": 1, "profile": {"terminals": args.terminals, "agents": args.agents,
                "status_per_second": args.agents / 2, "flood_bytes_per_second": 1_000_000, "views": 3, "sidebar": True, "duration_s": args.duration},
-               "placeholder_budgets": {"enforced": False, "cpu_pct_one_core": 100, "rss_mib": 256, "key_p99_ms": 250, "peak_background_fps": 64, "peak_fps_including_input": 120}}
+               "budgets": {"enforced": True, **{name: limit for name, (limit, _) in BUDGETS.items()}}}
     events = {"resource": 0, "extension": 0, "missed": 0}
     try:
         log = (root / "serve.log").open("wb")
@@ -221,7 +232,10 @@ def main():
             "events": events, "extensions": end_snapshot["extensions"], "status_per_second_observed": events["resource"] / elapsed,
             "sidebar_publishes_estimated_per_second": (end_snapshot["seq"] - start_snapshot["seq"] - events["resource"] - events["extension"]) / elapsed,
             "received_stream_bytes_per_s": received_bps, "workload_valid": workload_valid,
-            "metrics": metrics, "result": "pass" if workload_valid and not lost and not events["missed"] and latencies and end_snapshot["extensions"]["sidebar"]["status"] == "running" and end_snapshot["extensions"]["sidebar"]["crashes"] == 0 else "fail"})
+            "metrics": metrics})
+        over = exceeded({**receipt["tui"], "key_p99_ms": receipt["keys"]["p99_ms"]})
+        receipt["budgets_exceeded"] = over
+        receipt["result"] = "pass" if workload_valid and not lost and not events["missed"] and latencies and not over and end_snapshot["extensions"]["sidebar"]["status"] == "running" and end_snapshot["extensions"]["sidebar"]["crashes"] == 0 else "fail"
     except Exception as error:
         receipt.update(result="fail", error=f"{type(error).__name__}: {error}")
         try:

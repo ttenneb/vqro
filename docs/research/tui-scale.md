@@ -20,8 +20,8 @@ so is an upper observation, not a precise display/scanout timestamp. Carriage re
 wrapped marker lost. `PRIM_TUI_PROBE` opts into bounded local frame/draw/received-byte counters, refreshed at most
 once/second and on normal exit. It does not change protocol or retain an unbounded trace.
 
-The probe is in `scripts/check.sh full`. Performance thresholds are explicitly **non-enforced placeholders**.
-Correct input delivery, no missed events, a stable sidebar, actual status/flood workload and owned-process cleanup
+The probe is in `scripts/check.sh full`. Its performance budgets are enforced since 2026-11-17, set from measured
+results (`docs/test-plan.md`, "Scale budgets"); they were non-enforced placeholders before. Correct input delivery, no missed events, a stable sidebar, actual status/flood workload and owned-process cleanup
 are gates. Received decoded stream bytes must demonstrate at least 90% of the requested flood rate; otherwise the
 receipt cannot claim that workload. This caught an early wrong fake-backend argument: `--output-bytes-per-sec` is
 required. Earlier receipts without `-corrected` in the evidence directory do **not** establish flood performance.

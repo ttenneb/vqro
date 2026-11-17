@@ -91,8 +91,8 @@ env -i HOME=$HOME PATH=$PATH cargo test --release --test scale -- --ignored --ex
 - Measures core RSS over time, spawn and transaction latency (p50/p99), input→echo p99 on an idle stream sharing
   the observer's connection with the floods, status event lag (backend emit → client), `missed` counts and
   delivered share, extension restart failures, and a final snapshot.
-- Budgets are the `BUDGET_*` constants at the top of the file (placeholders until set); the test fails on any
-  exceeded one. Receipt: `$PRIM_SCALE_RECEIPT`, default `<target>/tmp/scale-receipt.json`.
+- Budgets are the `BUDGET_*` constants at the top of the file, set from measured results (see "Scale budgets"
+  below); the test fails on any exceeded one. Receipt: `$PRIM_SCALE_RECEIPT`, default `<target>/tmp/scale-receipt.json`.
 - Cleanup: the core is stopped as `prim stop` does (SIGTERM, so it stops its extensions). Any process still carrying
   the run's `PRIM_SOCKET` is then killed, listed in the receipt (`cleanup`), and fails the test (`leaked_processes`,
   a real budget of 0). Socket and state live in a run directory under `$PRIM_SCALE_RUN_DIR` (default
@@ -141,6 +141,37 @@ Event volume (bounded streams merged, ed7599c, then partial resource events):
 - That first probe now has its own budget, `slow_echo_max_ms` (placeholder 1000 ms). It was 5.6 s because flood bytes
   were already in the OS send buffer. With a 16 KiB send buffer per connection it is about 0.58 s, and the default
   profile passes (`docs/research/bounded-streams.md`).
+
+### Scale budgets (set 2026-11-17 from measured results; human decision)
+
+Rule: each performance budget is **twice the worst value measured** in the current release-build default-profile
+runs of `scripts/check.sh full`, with a 10 ms floor for latencies, rounded up to a multiple of 10 (100 above 1 s).
+The data was every `check.sh full` receipt on this machine from 2026-11-17, across all agents' targets: 13 scale
+runs at commits with the startup/steady split, and 7 TUI probe runs. The machine was usually shared with other
+agents' gates. Correctness limits (`missed`, failures, timeouts, minimum samples, delivered share, leaks) are not
+performance budgets and stay exact. Frame-rate limits are the renderer's design caps, not 2 × measured. Re-measure
+and reset with the same rule when the profile, the machine class or the renderer changes; never raise a budget just
+to pass one run.
+
+| Measure (scale harness, `tests/scale.rs`) | Worst | Budget |
+|---|---:|---:|
+| core RSS peak / growth, MB | 42.5 / 28.3 | 90 / 60 |
+| spawn p99, ms | 4.0 | 10 |
+| transaction p50 / p99, ms | 1.9 / 5.4 | 10 / 20 |
+| input→echo p99 during the flood, ms | 4.0 | 10 |
+| status event lag p99, ms | 3.0 | 10 |
+| slow client echo: startup max / steady p99 / steady max, ms | 2243 / 24 / 25 | 4500 / 50 / 50 |
+| final snapshot, ms | 32 | 70 |
+
+| Measure (TUI probe, `tests/e2e_tui_scale.py`, now enforced) | Worst | Budget |
+|---|---:|---:|
+| TUI CPU, % of one core | 18.0 | 40 |
+| TUI RSS peak, MiB | 38.6 | 80 |
+| key marker observed p99, ms (includes tmux command launch and polling) | 81.8 | 170 |
+| peak fps, background only / including input (design caps) | 55 / 94 | 64 / 120 |
+
+The startup slow-echo budget moved from the 3000 ms set when the phases were split to 4500 ms by this rule (worst
+2243 ms). Everything else tightened, by 2.5 to 25 times.
 
 ## Deferred
 

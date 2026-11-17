@@ -24,22 +24,26 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::oneshot;
 
 // Budgets. PLACEHOLDERS: the human sets the real values. Exceeding any fails the test.
-const BUDGET_CORE_RSS_PEAK_MB: f64 = 512.0;
-const BUDGET_CORE_RSS_GROWTH_MB: f64 = 128.0; // peak minus RSS right after setup
-const BUDGET_SPAWN_P99_MS: f64 = 50.0;
-const BUDGET_TXN_P50_MS: f64 = 10.0;
-const BUDGET_TXN_P99_MS: f64 = 50.0;
-const BUDGET_ECHO_P99_MS: f64 = 50.0; // input -> echo on an idle stream during the output flood
+// Performance budgets are set from measured results (docs/test-plan.md, "Scale budgets"): twice the worst value of
+// the current default-profile release runs in check.sh full (2026-11-17, 13 runs, all agents' targets on this
+// machine), latencies at least 10 ms, rounded up to 10 (100 above 1 s). Worst observed is in each comment.
+// Correctness limits (missed, failures, samples, timeouts, delivered share, leaks) are not performance budgets.
+const BUDGET_CORE_RSS_PEAK_MB: f64 = 90.0; // worst 42.5
+const BUDGET_CORE_RSS_GROWTH_MB: f64 = 60.0; // peak minus RSS right after setup; worst 28.3
+const BUDGET_SPAWN_P99_MS: f64 = 10.0; // worst 4.0
+const BUDGET_TXN_P50_MS: f64 = 10.0; // worst 1.9
+const BUDGET_TXN_P99_MS: f64 = 20.0; // worst 5.4
+const BUDGET_ECHO_P99_MS: f64 = 10.0; // input -> echo on an idle stream during the output flood; worst 4.0
 const SLOW_ECHO_STARTUP_MS: f64 = 3000.0; // measured from successful socket connection, not first probe
-const BUDGET_SLOW_ECHO_STARTUP_MAX_MS: f64 = 3000.0;
-const BUDGET_SLOW_ECHO_P99_MS: f64 = 250.0; // steady state on a slow-reading client's own idle stream
+const BUDGET_SLOW_ECHO_STARTUP_MAX_MS: f64 = 4500.0; // initial backlog drain at 64 KiB/s; worst 2243
+const BUDGET_SLOW_ECHO_P99_MS: f64 = 50.0; // steady state on a slow-reading client's own idle stream; worst 24.0
 const BUDGET_SLOW_ECHO_MIN_SAMPLES: usize = 1; // completed probes per configured slow client
-const BUDGET_SLOW_ECHO_MAX_MS: f64 = 1000.0; // steady-state worst probe, including unfinished lower bounds
-const BUDGET_EVENT_LAG_P99_MS: f64 = 250.0; // status change emitted by the backend -> seen by a client
+const BUDGET_SLOW_ECHO_MAX_MS: f64 = 50.0; // steady-state worst probe, including unfinished lower bounds; worst 25
+const BUDGET_EVENT_LAG_P99_MS: f64 = 10.0; // status change emitted by the backend -> seen by a client; worst 3.0
 const BUDGET_MISSED: u64 = 0; // `missed` notifications to the draining observer
-const BUDGET_STATUS_DELIVERED_MIN: f64 = 0.95; // share of emitted status changes the observer saw
+const BUDGET_STATUS_DELIVERED_MIN: f64 = 0.95; // share of emitted status changes the observer saw (measured 1.00)
 const BUDGET_EXT_RESTART_FAILURES: u64 = 0;
-const BUDGET_FINAL_SNAPSHOT_MS: f64 = 1000.0; // core still answers promptly after the load
+const BUDGET_FINAL_SNAPSHOT_MS: f64 = 70.0; // core still answers promptly after the load; worst 32
 
 /// Load profile, from `PRIM_SCALE_*` environment variables (defaults: the brief's target floor).
 #[derive(Debug, Clone)]
@@ -612,7 +616,7 @@ async fn scale_load() {
         "kind": "prim.scale-receipt", "version": 1,
         "commit": commit, "at_unix_ms": unix_ms(), "release_build": !cfg!(debug_assertions),
         "profile": prof.to_json(),
-        "budgets_are_placeholders": true,
+        "budgets_are_placeholders": false,
         "result": if failed.is_empty() { "pass" } else { "fail" },
         "exceeded": failed,
         "budgets": measured.iter().map(|(k, (v, b, ok))| (k.to_string(), json!({"measured": v, "budget": b, "ok": ok}))).collect::<serde_json::Map<_, _>>(),
@@ -843,9 +847,9 @@ mod slow_phase_tests {
     fn startup_tail_is_not_a_steady_failure_and_all_samples_remain_visible() {
         let s = client(vec![matched(50.0,2250.0),matched(3500.0,30.0)]);
         let m = slow_measurements(std::slice::from_ref(&s),1);
-        assert_eq!(m["slow_echo_startup_max_ms"],(2250.0,3000.0,true));
-        assert_eq!(m["slow_echo_p99_ms"],(30.0,250.0,true));
-        assert_eq!(m["slow_echo_max_ms"],(30.0,1000.0,true));
+        assert_eq!(m["slow_echo_startup_max_ms"],(2250.0,BUDGET_SLOW_ECHO_STARTUP_MAX_MS,true));
+        assert_eq!(m["slow_echo_p99_ms"],(30.0,BUDGET_SLOW_ECHO_P99_MS,true));
+        assert_eq!(m["slow_echo_max_ms"],(30.0,BUDGET_SLOW_ECHO_MAX_MS,true));
         assert_eq!(stats(&s.echo_ms(None))["n"],2);
         assert_eq!(stats(&s.echo_ms(None))["max_ms"],2250.0);
         let samples = serde_json::to_value(&s.samples).unwrap();
@@ -861,15 +865,16 @@ mod slow_phase_tests {
     }
     #[test]
     fn both_phases_still_enforce_their_own_limits() {
-        let m = slow_measurements(&[client(vec![matched(50.0,3001.0),matched(4000.0,300.0)])],1);
+        let steady = BUDGET_SLOW_ECHO_P99_MS + 1.0;
+        let m = slow_measurements(&[client(vec![matched(50.0,BUDGET_SLOW_ECHO_STARTUP_MAX_MS+1.0),matched(4000.0,steady)])],1);
         assert!(!m["slow_echo_startup_max_ms"].2);
         assert!(!m["slow_echo_p99_ms"].2);
-        assert!(m["slow_echo_max_ms"].2);
+        assert_eq!(m["slow_echo_max_ms"].2, steady <= BUDGET_SLOW_ECHO_MAX_MS);
     }
     #[test]
     fn unfinished_lower_bounds_keep_their_start_phase_without_becoming_samples() {
         let mut startup = client(vec![matched(50.0,20.0)]);
-        startup.unfinished = Some(SlowEcho::new(2900.0,3100.0,"unfinished"));
+        startup.unfinished = Some(SlowEcho::new(2900.0,BUDGET_SLOW_ECHO_STARTUP_MAX_MS+100.0,"unfinished"));
         assert!(!slow_measurements(&[startup],1)["slow_echo_startup_max_ms"].2);
         let mut steady = client(vec![matched(50.0,20.0)]);
         steady.unfinished = Some(SlowEcho::new(3000.0,1100.0,"unfinished"));
