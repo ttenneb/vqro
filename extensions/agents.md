@@ -2,7 +2,9 @@
 
 `agents` observes every resource with `kind: agent`. It does not launch programs, select a runtime, or contain a runtime-specific bridge import.
 
-- **Agents** on the tab bar lists observed agents. Selecting one invokes `agents.show` and opens its neutral `agents-rN` panel through the public `tabs.show` command.
+- **Agents** on the tab bar lists observed agents. Selecting one invokes `agents.show` and opens/focuses its neutral `agents-rN` panel through the public `tabs.show` command. Sidebar, resource pickers and pane replacement use the same resource-kind routing: agents never become terminal views. With agents off, only an actual host terminal is used as the fallback.
+- An agent with a terminal host has a **Bridge terminal** action. The sidebar groups that terminal as a collapsed child of the agent instead of showing it as an unrelated terminal.
+- Ended resources and gone agent tabs are visibly marked. **Close ended tabs** removes wholly ended tabs (retaining the last tab and mixed/live panes); **Sidebar view → Close/hide ended items** also hides ended sidebar resources. **Show ended items** restores them. These actions never kill programs or erase backend data. Disconnected/stale resources are unavailable, not falsely called gone.
 - On that panel, the pane menu (normally prefix `m`) offers only native operations declared by that resource's provider: prompt, steer, follow-up, abort, clear queue and answer. Direct commands also reject undeclared operations before sending anything.
 - Prompt-like actions use input. Answer opens a pending-request picker: confirm/select choices, input/editor text, explicit cancellation. Editor uses existing single-line input, not a new multiline editor.
 - Notifications preserve native outcomes: acceptance is not settlement; dispatched answers do not invent acknowledgement. Effects are never automatically replayed.
