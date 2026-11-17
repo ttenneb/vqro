@@ -95,6 +95,7 @@ class Extension:
         self.listeners = []
         self.entries = {}
         self.resources = {}
+        self.cache_lock = threading.RLock()
         self.prim = Prim(os.environ["PRIM_SOCKET"], self._handle)
         self.info = self.prim.call("hello", {"extension": self.name})
         self._load(self.prim.call("workspace.snapshot"))
@@ -126,7 +127,7 @@ class Extension:
     def run(self):
         for name, title in self.titles.items():
             self.prim.call("command.register", {"name": name, "title": title})
-        self.prim.call("events.subscribe", {"from": self.seq})
+        self.prim.call("events.subscribe", {"from": self.seq, "epoch": self.epoch})
         threading.Event().wait()
 
     # -- workspace helpers --------------------------------------------------------------------
@@ -136,7 +137,9 @@ class Extension:
 
     def fresh(self):
         """Reload caches from the core (after a compare-and-set conflict)."""
-        self._load(self.prim.call("workspace.snapshot"))
+        # Serialize snapshot acquisition/application with notifications, including command threads.
+        with self.cache_lock:
+            self._load(self.prim.call("workspace.snapshot"))
 
     def retrying(self, fn, attempts=3):
         """Run fn(); on a `conflict` reload the caches and try again."""
@@ -189,9 +192,31 @@ class Extension:
         self.live = dict(snap.get("live") or {})
         self.resources = {r["id"]: r for r in snap["resources"]}
         self.seq = snap["seq"]
+        self.epoch = snap["epoch"]
 
     def _handle(self, method, params):
+        if method in ("event", "missed"):
+            with self.cache_lock:
+                event = self._notification(method, params)
+            # Extension code may call commands on other threads; never hold the cache lock there.
+            if event is not None:
+                for fn in self.listeners:
+                    fn(*event)
+            return None
+        if method == "command.invoke":
+            fn = self.handlers.get(params["name"])
+            if fn is None:
+                raise PrimError(f"unknown command {params['name']}", "not_found")
+            return fn(params.get("args") or {}) or {"ok": True}
+        return None
+
+    def _notification(self, method, params):
         if method == "event":
+            if params["epoch"] != self.epoch:
+                self.fresh()
+            if params["epoch"] != self.epoch or params["seq"] <= self.seq:
+                return None
+            self.seq = params["seq"]
             t, d = params["type"], params["data"]
             if t == "resource":
                 self.resources[d["id"]] = d
@@ -208,19 +233,10 @@ class Extension:
                         self.entries.pop(c["key"], None)
                     else:
                         self.entries[c["key"]] = {"version": c["version"], "value": c["value"]}
-            for fn in self.listeners:
-                fn(t, d)
-            return None
+            return t, d
         if method == "missed":
             self._load(self.prim.call("workspace.snapshot"))
-            for fn in self.listeners:
-                fn("missed", {})
-            return None
-        if method == "command.invoke":
-            fn = self.handlers.get(params["name"])
-            if fn is None:
-                raise PrimError(f"unknown command {params['name']}", "not_found")
-            return fn(params.get("args") or {}) or {"ok": True}
+            return "missed", {}
         return None
 
 
