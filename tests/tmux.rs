@@ -373,6 +373,15 @@ async fn read_only_timeouts_under_a_flood_keep_the_client_and_replies_paired() {
     let mut long = Config::new(server.socket.clone(), "test");
     long.binary = "/usr/bin/tmux".into();
     let spawner = Client::connect(long).await.unwrap();
+    // Optional load-harness rendezvous: children are already attached on their normal CPUs;
+    // the harness may now constrain only the reader/test threads, not throttle the producer.
+    if let Some(path) = std::env::var_os("TMUX_FLOOD_LOAD_READY") {
+        let path = PathBuf::from(path);
+        std::fs::write(&path, server.socket.as_os_str().as_encoded_bytes()).unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !path.with_extension("go").exists() { tokio::time::sleep(Duration::from_millis(1)).await; }
+        }).await.unwrap();
+    }
     spawner.spawn(&["/bin/sh", "-c", "yes prim-flood-line | head -n 3000000; sleep 600"], None).await.unwrap();
     let (mut ok, mut timed_out) = (0, 0);
     for i in 0..300 {
@@ -383,7 +392,17 @@ async fn read_only_timeouts_under_a_flood_keep_the_client_and_replies_paired() {
                 ok += 1;
             }
             Err(Error::TimedOut(_)) => timed_out += 1,
-            Err(e) => panic!("read-only timeouts are not fatal: {e:?} after {ok} ok, {timed_out} timed out"),
+            Err(e) => {
+                let mut diagnostic = Vec::new();
+                loop {
+                    match notes.try_recv() {
+                        Ok(note) => diagnostic.push(format!("{note:?}")),
+                        Err(broadcast::error::TryRecvError::Lagged(n)) => diagnostic.push(format!("lagged {n}")),
+                        Err(_) => break,
+                    }
+                }
+                panic!("read-only timeouts are not fatal: {e:?} after {ok} ok, {timed_out} timed out; notifications={diagnostic:?}");
+            },
         }
     }
     while let Ok(n) = notes.try_recv() {

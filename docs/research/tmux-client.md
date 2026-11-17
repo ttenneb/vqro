@@ -40,6 +40,12 @@ control client. There is no automatic reconnect or effect resend.
   A peer that exceeds that drain window is treated as desynchronised and dropped. A *mutating* command that times out is `Indeterminate` and drops the
   attachment as before. Nothing is resent. Tests: `tests/tmux_timeout.rs` (deterministic fake control client,
   `tests/fixtures/fake_tmux_cc.py`) and `tests/tmux.rs` (real 3.7b flood with a 30 ms timeout).
+  Linux CPU-pressure repro: build `cargo test --test tmux --no-run`, then run
+  `env -i HOME=$HOME PATH=$PATH python3 tests/tmux_flood_load.py <printed-test-executable> <new-private-evidence-dir> --runs 20`.
+  It constrains only the reader after native clients attach, with four owned busy workers on that CPU; native
+  producers retain their normal affinity. Pinning the whole process tree instead can hide the backlog by throttling
+  the producer. Failure diagnostics retain the native/actor disconnect reason. Caller and mutation deadlines stay
+  unchanged; a silent fake peer still must disconnect within the bounded drain window, and no command is resent.
 
 One attachment sees panes **linked into its session**, not all server sessions. The next provider must
 choose its attachment topology and list/query facts after structural notifications; tmux does not
