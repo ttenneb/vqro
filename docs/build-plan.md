@@ -113,3 +113,15 @@ Built as parallel streams on git worktrees, reviewed and merged by a coordinator
 
 Known gaps: undo skips extension-made changes (e.g. theme picks); agents still run PTY-backed (headless agent
 bridge not built); second backend (tmux) not started; Windows untested.
+
+## Pi runtime bridge half (2026-11-17)
+
+- `extensions/pi_bridge/`: standalone stdlib async Pi 1.5 RPC child-pipe client. Bounded LF framing,
+  independent stdout/stderr drains, ID correlation, native effects with deadlines/no resend, and observed
+  run/queue/dialog facts. Acceptance is not settlement; answering a dialog is dispatched, not acknowledged.
+- `tests/fixtures/fake_pi.py` and `tests/test_pi_bridge.py`: deterministic tool/queue/settlement/dialog,
+  crash, late-response, Unicode framing and backpressure regressions without any provider/model calls.
+- `tests/pi_bridge_smoke.py --run`: opt-in real installed Pi 1.5.0 metadata-only check in a fresh network
+  namespace and private environment/state/config/session roots. No real credentials or sessions used.
+- Not wired to prim/provider registration yet. The future bridge must run inside a backend-owned terminal;
+  this library does not turn prim into an agent process host. API and limits: `extensions/pi_bridge/README.md`.
