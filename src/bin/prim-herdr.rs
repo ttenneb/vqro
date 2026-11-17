@@ -15,7 +15,8 @@
 //! - Streams: herdr-core attach channels with backend history as initial data. Credit goes back to
 //!   herdr-core only after `provider_client` has sent the bytes within the core's window.
 //!
-//! `prim-herdr [--hc PATH] [--session NAME] [--name NAME]`; connects to `$PRIM_SOCKET`.
+//! `prim-herdr [--hc PATH] [--session NAME] [--name NAME]`; connects to `$PRIM_SOCKET`. Without `--hc`:
+//! `$PRIM_HERDR` (a whole command), else `hc connect` on PATH, else herdr-core's standard install.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -27,18 +28,18 @@ use serde_json::{json, Map, Value};
 use tokio::sync::mpsc;
 
 struct Args {
-    hc: String,
+    hc: Option<String>,
     session: Option<String>,
     name: Option<String>,
 }
 
 fn args() -> Result<Args, String> {
-    let mut a = Args { hc: "hc".into(), session: None, name: None };
+    let mut a = Args { hc: None, session: None, name: None };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
         let mut value = || it.next().ok_or_else(|| format!("{flag} needs a value"));
         match flag.as_str() {
-            "--hc" => a.hc = value()?,
+            "--hc" => a.hc = Some(value()?),
             "--session" => a.session = Some(value()?),
             "--name" => a.name = Some(value()?),
             "-h" | "--help" => {
@@ -268,7 +269,7 @@ async fn main() {
 async fn run() -> Result<(), String> {
     let a = args()?;
     let endpoint = std::env::var("PRIM_SOCKET").map_err(|_| "PRIM_SOCKET is not set")?;
-    let mut argv = vec![a.hc.clone(), "connect".into()];
+    let mut argv = herdr_command(a.hc.as_deref());
     if let Some(s) = &a.session {
         argv.extend(["--session".into(), s.clone()]);
     }
@@ -352,6 +353,23 @@ async fn serve(
             _ = provider.closed() => return Ended::Core(provider.failure().unwrap_or_default()),
         }
     }
+}
+
+/// How to reach herdr-core: `--hc PATH` (+ `connect`); else `$PRIM_HERDR`, a whole command such as
+/// `ssh box hc connect`; else `hc connect` from PATH; else herdr-core's standard install.
+fn herdr_command(hc: Option<&str>) -> Vec<String> {
+    if let Some(hc) = hc {
+        return vec![hc.to_string(), "connect".into()];
+    }
+    if let Some(cmd) = std::env::var("PRIM_HERDR").ok().filter(|c| !c.trim().is_empty()) {
+        return cmd.split_whitespace().map(String::from).collect();
+    }
+    let on_path = std::env::var("PATH").unwrap_or_default().split(':').any(|d| !d.is_empty() && std::path::Path::new(d).join("hc").exists());
+    let installed = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/share/herdr-core/current/Contents/MacOS/herdr-core");
+    if !on_path && installed.exists() {
+        return vec![installed.to_string_lossy().into_owned(), "connect".into()];
+    }
+    vec!["hc".into(), "connect".into()]
 }
 
 fn hostname() -> String {

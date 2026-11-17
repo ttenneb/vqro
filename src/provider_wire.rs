@@ -182,7 +182,11 @@ impl Connection {
         } else { None };
         let window = r.limits.stream_window_bytes.min(default_window());
         let handle = AdapterHandle { name: r.name.clone(), capabilities: json!(r.capabilities), session: None, context: None, cmds: commands };
-        let source = c.install_adapter(handle, false)?;
+        // The default backend is the one whose extension entry says so (`extension/<name>`
+        // `{kind: "provider", default: true}`), else the first backend; never a runtime bridge.
+        let backend = r.role == "backend";
+        let preferred = backend && c.store.get(&format!("extension/{}", r.name)).is_some_and(|e| e.value["default"] == true);
+        let source = c.install_provider(handle, preferred, backend)?;
         c.on_adapter_event(&r.name, adapter::AdapterEvent::Registered(ProviderInfo { connection: self.id, instance: r.instance.clone(), role: r.role, software: json!(r.software) }));
         let generation = c.providers[&r.name].generation;
         c.providers.get_mut(&r.name).unwrap().metadata = json!({"provider_version": r.provider_version, "limits": {"max_streams": r.limits.max_streams.min(512), "stream_window_bytes": window, "max_record_bytes": MAX_RECORD_BYTES}, "host": host});

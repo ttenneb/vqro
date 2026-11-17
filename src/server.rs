@@ -70,8 +70,9 @@ pub fn start(socket: std::path::PathBuf, state: std::path::PathBuf, safe: bool, 
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
     }
     let (tx, rx) = mpsc::unbounded_channel();
-    let handle = backend.start(tx);
-    crate::core::add_adapter(&core, handle, rx, true);
+    if let Some(handle) = backend.start(tx) {
+        crate::core::add_adapter(&core, handle, rx, true);
+    }
     ext::reconcile(&core);
     let c = core.clone();
     tokio::spawn(async move {
@@ -82,31 +83,62 @@ pub fn start(socket: std::path::PathBuf, state: std::path::PathBuf, safe: bool, 
     Ok(core)
 }
 
-/// First run only: declare the default extensions listed in `<dir>/defaults.json`
-/// (`{"extensions": [{"name": "tabs", "argv": ["python3", "tabs.py"]}]}`, paths relative to `dir`).
-/// Marked done in `doc/prim/defaults`, so removing a default extension sticks.
+/// Declare the default extensions listed in `<dir>/defaults.json`:
+/// `{"version": 2, "extensions": [{"name", "argv", "description"?, "kind"?, "enabled"?, "default"?, "since"?}]}`
+/// (`.py` paths relative to `dir`; a bare `prim-*` program resolves next to this binary when present).
+/// Each entry is offered once per state dir: all on first run, and later only entries whose `since` is
+/// newer than the version recorded in `doc/prim/defaults` (migrations of existing installs). An entry
+/// that already exists is left as it is, and removing a default extension sticks.
 fn install_defaults(store: &mut crate::store::Store, dir: &std::path::Path) {
-    if store.get("doc/prim/defaults").is_some() {
-        return;
-    }
     let Ok(bytes) = std::fs::read(dir.join("defaults.json")) else { return };
     let Ok(list) = serde_json::from_slice::<Value>(&bytes) else { return };
+    let version = list["version"].as_u64().unwrap_or(1);
+    let recorded = store.get("doc/prim/defaults").map(|e| e.value.clone());
+    // No record: nothing installed yet. A record without a version predates versioned defaults (1).
+    let installed = recorded.as_ref().map(|r| r["version"].as_u64().unwrap_or(1)).unwrap_or(0);
+    if installed >= version {
+        return;
+    }
+    let sibling = std::env::current_exe().ok().and_then(|exe| exe.parent().map(std::path::Path::to_path_buf));
     let mut ops = Vec::new();
-    let mut names = Vec::new();
+    let mut names: Vec<Value> = recorded.as_ref().and_then(|r| r["installed"].as_array().cloned()).unwrap_or_default();
     for e in list["extensions"].as_array().into_iter().flatten() {
         let (Some(name), Some(argv)) = (e["name"].as_str(), e["argv"].as_array()) else { continue };
+        if e["since"].as_u64().unwrap_or(1) <= installed {
+            continue; // offered before: never re-add what the user removed
+        }
         let argv: Vec<Value> = argv
             .iter()
             .filter_map(|a| a.as_str())
-            .map(|a| if a.ends_with(".py") && !a.starts_with('/') { json!(dir.join(a).to_string_lossy()) } else { json!(a) })
+            .map(|a| {
+                if a.ends_with(".py") && !a.starts_with('/') {
+                    json!(dir.join(a).to_string_lossy())
+                } else if a.starts_with("prim-") && !a.contains('/') {
+                    match sibling.as_ref().map(|d| d.join(a)).filter(|p| p.exists()) {
+                        Some(path) => json!(path.to_string_lossy()),
+                        None => json!(a),
+                    }
+                } else {
+                    json!(a)
+                }
+            })
             .collect();
         if store.get(&format!("extension/{name}")).is_none() {
-            ops.push(Op::Set { key: format!("extension/{name}"), value: json!({"argv": argv}), expect: None });
+            let mut value = json!({"argv": argv});
+            for key in ["description", "kind", "enabled", "default"] {
+                if !e[key].is_null() {
+                    value[key] = e[key].clone();
+                }
+            }
+            ops.push(Op::Set { key: format!("extension/{name}"), value, expect: None });
         }
-        names.push(name.to_string());
+        if !names.iter().any(|n| n == name) {
+            names.push(json!(name));
+        }
     }
-    ops.push(Op::Set { key: "doc/prim/defaults".into(), value: json!({"installed": names, "from": dir.to_string_lossy()}), expect: None });
-    if let Err(e) = store.apply("prim:defaults", Some("install default extensions".into()), ops) {
+    ops.push(Op::Set { key: "doc/prim/defaults".into(), value: json!({"installed": names, "from": dir.to_string_lossy(), "version": version}), expect: None });
+    let note = if installed == 0 { "install default extensions" } else { "add new default extensions" };
+    if let Err(e) = store.apply("prim:defaults", Some(note.into()), ops) {
         eprintln!("prim: could not install default extensions: {e}");
     }
 }
@@ -595,6 +627,11 @@ async fn spawn(core: &Shared, author: &str, s: Spawn) -> RpcResult {
     }
     let reservation = if s.bridge { Some(crate::provider_wire::BridgeReservation::new(core)?) } else { None };
     let mut env = s.env;
+    // Every terminal can reach prim (`prim call` from any pane): its opaque endpoint (D22), unless the
+    // provider cannot pass an environment at all. The bridge credential stays opt-in.
+    if route.handle.capabilities["terminal.spawn"]["env"] != false {
+        env.entry("PRIM_SOCKET".into()).or_insert_with(|| core.lock().unwrap().socket.to_string_lossy().into_owned());
+    }
     if let Some(reservation) = &reservation {
         env.insert("PRIM_BRIDGE_TOKEN".into(), reservation.token.clone());
         env.insert("PRIM_SOCKET".into(), core.lock().unwrap().socket.to_string_lossy().into_owned());

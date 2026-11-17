@@ -18,11 +18,8 @@ enum Cmd {
         /// Start with all extensions stopped.
         #[arg(long)]
         safe: bool,
-        /// Command that connects to herdr-core (stdio), e.g. "ssh box hc connect".
-        /// Default: $PRIM_HERDR, else `hc connect` from PATH or herdr-core's standard install.
-        #[arg(long)]
-        herdr: Option<String>,
-        /// Use the in-memory fake backend instead (a test fixture).
+        /// Also run the in-memory fake backend in process (a test fixture). Real backends are
+        /// provider extensions (extension/herdr runs prim-herdr; extension/tmux runs prim-tmux).
         #[arg(long)]
         fake: bool,
     },
@@ -41,7 +38,7 @@ enum Cmd {
 #[tokio::main]
 async fn main() -> Result<()> {
     match Cli::parse().cmd {
-        Cmd::Serve { safe, herdr, fake } => serve(safe, herdr, fake).await,
+        Cmd::Serve { safe, fake } => serve(safe, fake).await,
         Cmd::Tui => {
             client::ensure_core().await?;
             tui::run(&paths::socket_path()?).await
@@ -92,19 +89,6 @@ async fn call(method: &str, params: Value) -> Result<()> {
     }
 }
 
-fn herdr_command(explicit: Option<String>) -> Vec<String> {
-    let cmd = explicit.or_else(|| std::env::var("PRIM_HERDR").ok()).unwrap_or_else(|| {
-        let on_path = std::env::var("PATH").unwrap_or_default().split(':').any(|d| std::path::Path::new(d).join("hc").exists());
-        let installed = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/share/herdr-core/current/Contents/MacOS/herdr-core");
-        if !on_path && installed.exists() {
-            format!("{} connect", installed.display())
-        } else {
-            "hc connect".into()
-        }
-    });
-    cmd.split_whitespace().map(String::from).collect()
-}
-
 async fn stop() -> Result<()> {
     let request = tokio::time::timeout(std::time::Duration::from_secs(2), async {
         let (peer, _incoming, _) = client::connect(&paths::socket_path()?, "cli").await?;
@@ -133,9 +117,9 @@ fn stop_pidfile() -> Result<()> {
     Ok(())
 }
 
-async fn serve(safe: bool, herdr: Option<String>, fake: bool) -> Result<()> {
+async fn serve(safe: bool, fake: bool) -> Result<()> {
     let socket = paths::socket_path()?;
-    let backend = if fake { prim::adapter::Backend::Fake } else { prim::adapter::Backend::Herdr(herdr_command(herdr)) };
+    let backend = if fake { prim::adapter::Backend::Fake } else { prim::adapter::Backend::Extensions };
     let core = server::start(socket.clone(), paths::state_dir(), safe, backend, Some(paths::extensions_dir()))?;
     let pidfile = paths::state_dir().join("serve.pid");
     std::fs::write(&pidfile, std::process::id().to_string())?;

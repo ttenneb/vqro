@@ -15,12 +15,16 @@ use std::time::Instant;
 use crate::provider::ProviderInfo;
 
 /// Startup selection only. Execution-specific setup stays in the adapter layer, not the server.
-pub enum Backend { Herdr(Vec<String>), Fake }
+/// `prim serve` uses `Extensions`: backends are provider extensions (`extension/<name>` entries,
+/// e.g. prim-herdr, prim-tmux). The in-process adapters remain for tests and embedders.
+pub enum Backend { Herdr(Vec<String>), Fake, Extensions }
 impl Backend {
-    pub fn start(self, events: mpsc::UnboundedSender<(String, AdapterEvent)>) -> AdapterHandle {
+    /// The in-process adapter to install, if any.
+    pub fn start(self, events: mpsc::UnboundedSender<(String, AdapterEvent)>) -> Option<AdapterHandle> {
         match self {
-            Self::Herdr(argv) => herdr::start("herdr".into(), argv, events),
-            Self::Fake => fake::start("fake".into(), events),
+            Self::Herdr(argv) => Some(herdr::start("herdr".into(), argv, events)),
+            Self::Fake => Some(fake::start("fake".into(), events)),
+            Self::Extensions => None,
         }
     }
 }

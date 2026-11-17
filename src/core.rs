@@ -342,13 +342,19 @@ impl Core {
 
     /// Administrative install shared by native starts and a validated wire registration.
     /// Wire callers check duplicate live names before using this operation.
+    /// Install (or replace) a provider. `default`: it becomes the provider for spawns that name none;
+    /// `may_default`: it becomes that provider only while there is none yet (runtime bridges never are).
     pub fn install_adapter(&mut self, handle: AdapterHandle, default: bool) -> Result<u64, RpcError> {
+        self.install_provider(handle, default, true)
+    }
+
+    pub fn install_provider(&mut self, handle: AdapterHandle, default: bool, may_default: bool) -> Result<u64, RpcError> {
         let name = handle.name.clone();
         if name.is_empty() || name.len() > 128 || crate::resource_admission::encoded_bytes(&handle.capabilities) > 128 * 1024 {
             return Err(provider::rejected("overloaded", format!("provider {name}: name/registration metadata exceeds admission limits")));
         }
         if !self.providers.contains_key(&name) && self.providers.len() >= 32 { return Err(provider::rejected("overloaded", format!("provider {name}: registry limit is 32"))); }
-        if default || self.default_adapter.is_none() { self.default_adapter = Some(name.clone()); }
+        if default || (may_default && self.default_adapter.is_none()) { self.default_adapter = Some(name.clone()); }
         let generation = self.providers.get(&name).map(|p| p.generation).unwrap_or(0);
         if self.providers.contains_key(&name) { self.on_adapter_event(&name, AdapterEvent::Connected(false, Some("provider replaced".into()))); }
         let source = self.next_provider_source;

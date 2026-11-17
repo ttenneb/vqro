@@ -1,4 +1,5 @@
 {
+  "version": 2,
   "extensions": [
     {
       "name": "tabs",
@@ -76,6 +77,30 @@
         "python3",
         "settings.py"
       ]
+    },
+    {
+      "name": "herdr",
+      "argv": [
+        "prim-herdr",
+        "--name",
+        "herdr"
+      ],
+      "kind": "provider",
+      "default": true,
+      "since": 2,
+      "description": "Terminals in herdr-core (prim-herdr): the default backend. Reaches herdr-core with $PRIM_HERDR or `hc connect`."
+    },
+    {
+      "name": "tmux",
+      "argv": [
+        "prim-tmux",
+        "--name",
+        "tmux"
+      ],
+      "kind": "provider",
+      "enabled": false,
+      "since": 2,
+      "description": "Terminals in a private tmux server owned by prim (prim-tmux); never your own tmux sessions. Off by default."
     }
   ]
 }
