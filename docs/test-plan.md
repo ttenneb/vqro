@@ -113,6 +113,10 @@ Event volume (bounded streams merged, ed7599c, then partial resource events):
   about 570 ms. In every run with floods attached, the slow client's first probe takes about 5.6-6 s. It waits behind
   flood output already written to its socket before the core closed those streams as slow consumers (bounded
   streams). With `SLOW_ATTACH_FLOODS=0` the worst probe is 24 ms. p99 hides that single outlier at about 115 probes.
+- A configured slow client must complete at least one probe (`slow_echo_samples`, `BUDGET_SLOW_ECHO_MIN_SAMPLES`):
+  zero samples fails instead of passing on an empty measurement, and a probe still unfinished at the end counts as a
+  lower bound on `slow_echo_max_ms` (receipt `echo_unfinished_ms`). With no slow clients configured these budgets do
+  not apply.
 - That first probe now has its own budget, `slow_echo_max_ms` (placeholder 1000 ms). It was 5.6 s because flood bytes
   were already in the OS send buffer. With a 16 KiB send buffer per connection it is about 0.58 s, and the default
   profile passes (`docs/research/bounded-streams.md`).

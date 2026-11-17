@@ -31,6 +31,7 @@ const BUDGET_TXN_P50_MS: f64 = 10.0;
 const BUDGET_TXN_P99_MS: f64 = 50.0;
 const BUDGET_ECHO_P99_MS: f64 = 50.0; // input -> echo on an idle stream during the output flood
 const BUDGET_SLOW_ECHO_P99_MS: f64 = 250.0; // the same, on a slow-reading client's own idle stream
+const BUDGET_SLOW_ECHO_MIN_SAMPLES: usize = 1; // completed probes per configured slow client
 const BUDGET_SLOW_ECHO_MAX_MS: f64 = 1000.0; // its worst probe, usually the first, right after attaching to floods
 const BUDGET_EVENT_LAG_P99_MS: f64 = 250.0; // status change emitted by the backend -> seen by a client
 const BUDGET_MISSED: u64 = 0; // `missed` notifications to the draining observer
@@ -538,6 +539,11 @@ async fn scale_load() {
         slow.push(t.await.unwrap());
     }
     let slow_echo: Vec<f64> = slow.iter().flat_map(|s| s.echo_ms.iter().copied()).collect();
+    // No slow clients configured: the slow budgets don't apply. Otherwise NaN (nothing measured) fails.
+    let slow_none = prof.slow_clients == 0;
+    let slow_min_samples = if slow_none { BUDGET_SLOW_ECHO_MIN_SAMPLES } else { slow.iter().map(|s| s.echo_ms.len()).min().unwrap_or(0) };
+    // The worst echo is at least as long as any probe still unfinished at the end.
+    let slow_max = slow.iter().filter_map(|s| s.unfinished_ms).fold(pct(&slow_echo, 1.0), |m, u| if m.is_nan() { m } else { m.max(u) });
     let cleanup = core.shutdown();
     pump.abort();
     let observed_s = t_observe.elapsed().as_secs_f64();
@@ -558,8 +564,10 @@ async fn scale_load() {
         ("txn_p99_ms", (pct(&txn_ms, 0.99), BUDGET_TXN_P99_MS, pct(&txn_ms, 0.99) <= BUDGET_TXN_P99_MS)),
         ("echo_p99_ms", (pct(&echo_ms, 0.99), BUDGET_ECHO_P99_MS, pct(&echo_ms, 0.99) <= BUDGET_ECHO_P99_MS)),
         // NaN (no slow clients) passes.
-        ("slow_echo_p99_ms", (pct(&slow_echo, 0.99), BUDGET_SLOW_ECHO_P99_MS, !(pct(&slow_echo, 0.99) > BUDGET_SLOW_ECHO_P99_MS))),
-        ("slow_echo_max_ms", (pct(&slow_echo, 1.0), BUDGET_SLOW_ECHO_MAX_MS, !(pct(&slow_echo, 1.0) > BUDGET_SLOW_ECHO_MAX_MS))),
+        // A configured slow client must have measured something: no samples is a failure, not a pass.
+        ("slow_echo_samples", (slow_min_samples as f64, BUDGET_SLOW_ECHO_MIN_SAMPLES as f64, slow_min_samples >= BUDGET_SLOW_ECHO_MIN_SAMPLES)),
+        ("slow_echo_p99_ms", (pct(&slow_echo, 0.99), BUDGET_SLOW_ECHO_P99_MS, slow_none || pct(&slow_echo, 0.99) <= BUDGET_SLOW_ECHO_P99_MS)),
+        ("slow_echo_max_ms", (slow_max, BUDGET_SLOW_ECHO_MAX_MS, slow_none || slow_max <= BUDGET_SLOW_ECHO_MAX_MS)),
         ("event_lag_p99_ms", (pct(&o.event_lag_ms, 0.99), BUDGET_EVENT_LAG_P99_MS, pct(&o.event_lag_ms, 0.99) <= BUDGET_EVENT_LAG_P99_MS)),
         ("missed", (o.missed as f64, BUDGET_MISSED as f64, o.missed <= BUDGET_MISSED)),
         ("status_delivered_ratio", (delivered, BUDGET_STATUS_DELIVERED_MIN, delivered >= BUDGET_STATUS_DELIVERED_MIN)),
@@ -587,6 +595,7 @@ async fn scale_load() {
         "echo": {"latency": stats(&echo_ms), "lost_after_5s": echo_lost},
         "slow_clients": slow.iter().map(|s| json!({
             "echo": stats(&s.echo_ms), "echo_timed_out": s.timed_out, "bytes_read": s.bytes_read,
+            "echo_unfinished_ms": s.unfinished_ms,
             "echo_series_ms": s.echo_ms.iter().map(|m| m.round()).collect::<Vec<_>>(),
             "idle_stream_attached": s.attached, "missed": s.missed,
         })).collect::<Vec<_>>(),
@@ -609,6 +618,8 @@ async fn scale_load() {
 #[derive(Default)]
 struct Slow {
     echo_ms: Vec<f64>,
+    /// A probe still waiting when the load ended: its echo took at least this long (censored).
+    unfinished_ms: Option<f64>,
     timed_out: u64,
     bytes_read: u64,
     missed: u64,
@@ -712,7 +723,9 @@ fn slow_client(socket: PathBuf, attach: Vec<String>, prof: Profile, stop: Arc<st
                     break;
                 }
                 if stop.load(Ordering::Relaxed) {
-                    break; // load over before this probe could finish: not counted
+                    // Load over before this probe finished: not a sample, but a lower bound.
+                    out.unfinished_ms = Some(ms(t0.elapsed()));
+                    break;
                 }
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
