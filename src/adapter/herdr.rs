@@ -111,20 +111,20 @@ async fn session(
         anyhow::bail!("herdr-core did not accept framed mode: {line}");
     }
 
-    let (frame_tx, mut frame_out) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (frame_tx, mut frame_out) = crate::queue::channel::<Vec<u8>>(1024 * 1024);
     tokio::spawn(async move {
         while let Some(bytes) = frame_out.recv().await {
-            if stdin.write_all(&bytes).await.is_err() || stdin.flush().await.is_err() {
+            if stdin.write_all(&bytes.value).await.is_err() || stdin.flush().await.is_err() {
                 break;
             }
         }
     });
-    let (in_tx, mut frames_in) = mpsc::unbounded_channel::<Frame>();
+    let (in_tx, mut frames_in) = crate::queue::channel::<Frame>(32 * 1024 * 1024);
     tokio::spawn(read_frames(stdout, in_tx));
 
     let mut next_id: u64 = 1;
     let mut pending: HashMap<u64, Pending> = HashMap::new();
-    let mut streams: HashMap<u32, mpsc::UnboundedSender<StreamOutput>> = HashMap::new();
+    let mut streams: HashMap<u32, crate::queue::Sender<StreamOutput>> = HashMap::new();
     let mut records: HashMap<String, Value> = HashMap::new();
     let mut events_channel: Option<u32> = None;
 
@@ -137,7 +137,7 @@ async fn session(
 
     let (id, bytes) = call(&mut next_id, "events.subscribe", json!({}));
     pending.insert(id, Pending::Subscribe);
-    frame_tx.send(bytes)?;
+    send_frame(&frame_tx, bytes)?;
     let _ = events.send((name.to_string(), AdapterEvent::Connected(true, None)));
 
     loop {
@@ -151,22 +151,23 @@ async fn session(
                         if let Some(n) = req.name { p["name"] = json!(n); }
                         let (id, bytes) = call(&mut next_id, "terminal.run", p);
                         pending.insert(id, Pending::Spawn(reply));
-                        frame_tx.send(bytes)?;
+                        send_frame(&frame_tx, bytes)?;
                     }
                     AdapterCmd::Kill(r, reply) => {
                         let (id, bytes) = call(&mut next_id, "terminal.kill", json!({"terminal": r}));
                         pending.insert(id, Pending::Kill(reply));
-                        frame_tx.send(bytes)?;
+                        send_frame(&frame_tx, bytes)?;
                     }
                     AdapterCmd::Attach { backend_ref, cols, rows, history, reply } => {
                         let (id, bytes) = call(&mut next_id, "terminal.attach", json!({"terminal": backend_ref, "cols": cols, "rows": rows, "history": history}));
                         pending.insert(id, Pending::Attach(reply));
-                        frame_tx.send(bytes)?;
+                        send_frame(&frame_tx, bytes)?;
                     }
                 }
             }
             f = frames_in.recv() => {
-                let Some(f) = f else { break };
+                let Some(item) = f else { break };
+                let f = item.value;
                 if f.channel == 0 || Some(f.channel) == events_channel {
                     if f.kind != DATA { continue; }
                     let Ok(msg) = serde_json::from_slice::<Value>(&f.payload) else { continue };
@@ -197,23 +198,27 @@ async fn session(
                                     let _ = reply.send(Err("attach returned no channel".into()));
                                     continue;
                                 };
-                                let (out_tx, out_rx) = mpsc::unbounded_channel();
-                                let (inp_tx, mut inp_rx) = mpsc::unbounded_channel::<StreamInput>();
+                                let (out_tx, out_rx) = crate::queue::channel(STREAM_BUFFER_BYTES);
+                                let (inp_tx, mut inp_rx) = crate::queue::channel::<StreamInput>(STREAM_BUFFER_BYTES);
                                 streams.insert(ch, out_tx);
                                 let ftx = frame_tx.clone();
                                 tokio::spawn(async move {
                                     while let Some(i) = inp_rx.recv().await {
-                                        let bytes = match i {
+                                        let bytes = match i.value {
                                             StreamInput::Data(d) => frame(ch, DATA, &d),
                                             StreamInput::Resize(c, r) => {
                                                 let mut p = c.to_le_bytes().to_vec();
                                                 p.extend_from_slice(&r.to_le_bytes());
                                                 frame(ch, RESIZE, &p)
                                             }
-                                            StreamInput::Close => { let _ = ftx.send(frame(ch, CLOSE, &[])); break; }
+                                            StreamInput::Consumed(n) => frame(ch, CREDIT, &n.to_le_bytes()),
+                                            StreamInput::Close => break,
                                         };
-                                        if ftx.send(bytes).is_err() { break; }
+                                        let n = bytes.len();
+                                        if ftx.send(bytes, n).await.is_err() { break; }
                                     }
+                                    let close = frame(ch, CLOSE, &[]);
+                                    let _ = ftx.send(close, 9).await;
                                 });
                                 let _ = reply.send(Ok(Stream { input: inp_tx, output: out_rx }));
                             }
@@ -223,17 +228,18 @@ async fn session(
                     match f.kind {
                         DATA => {
                             let n = f.payload.len() as u32;
-                            if out.send(StreamOutput::Data(f.payload)).is_err() {
-                                // The viewer is gone; tell the backend.
-                                let _ = frame_tx.send(frame(f.channel, CLOSE, &[]));
+                            if out.try_send(StreamOutput::Data(f.payload), n as usize).is_err() {
+                                // A stalled viewer must not block other channels on this backend.
+                                // Dropping its sender closes output after the bounded backlog drains.
+                                let _ = send_frame(&frame_tx, frame(f.channel, CLOSE, &[]));
                                 streams.remove(&f.channel);
-                            } else {
-                                let _ = frame_tx.send(frame(f.channel, CREDIT, &n.to_le_bytes()));
                             }
+                            // CREDIT comes back through StreamInput::Consumed only after the core
+                            // successfully hands this chunk to its bounded connection writer.
                         }
                         CLOSE => {
                             let reason = serde_json::from_slice(&f.payload).unwrap_or(json!({"reason": "closed"}));
-                            let _ = out.send(StreamOutput::Closed(reason));
+                            let _ = out.try_send(StreamOutput::Closed(reason), f.payload.len().max(64));
                             streams.remove(&f.channel);
                         }
                         _ => {}
@@ -244,7 +250,7 @@ async fn session(
         }
     }
     for (_, out) in streams.drain() {
-        let _ = out.send(StreamOutput::Closed(json!({"reason": "backend_disconnected"})));
+        let _ = out.try_send(StreamOutput::Closed(json!({"reason": "backend_disconnected"})), 128);
     }
     for (_, p) in pending.drain() {
         match p {
@@ -342,7 +348,12 @@ fn frame(channel: u32, kind: u8, payload: &[u8]) -> Vec<u8> {
     b
 }
 
-async fn read_frames(mut r: BufReader<ChildStdout>, tx: mpsc::UnboundedSender<Frame>) {
+fn send_frame(tx: &crate::queue::Sender<Vec<u8>>, bytes: Vec<u8>) -> Result<(), crate::queue::QueueError> {
+    let n = bytes.len();
+    tx.try_send(bytes, n)
+}
+
+async fn read_frames(mut r: BufReader<ChildStdout>, tx: crate::queue::Sender<Frame>) {
     let mut head = [0u8; 9];
     loop {
         if r.read_exact(&mut head).await.is_err() {
@@ -358,7 +369,7 @@ async fn read_frames(mut r: BufReader<ChildStdout>, tx: mpsc::UnboundedSender<Fr
         if r.read_exact(&mut payload).await.is_err() {
             return;
         }
-        if tx.send(Frame { channel, kind, payload }).is_err() {
+        if tx.send(Frame { channel, kind, payload }, len + 9).await.is_err() {
             return;
         }
     }

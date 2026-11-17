@@ -111,6 +111,63 @@ async fn commands_route_to_their_owner_and_go_unavailable() {
 }
 
 #[tokio::test]
+async fn hung_command_reports_indeterminate_deadline_without_resending() {
+    let e = env();
+    let _core = start(e.socket.clone(), e.state.clone(), false, Backend::Fake, None).unwrap();
+    let (handler, mut requests) = connect(&e).await;
+    handler.call("command.register", json!({"name": "hang"})).await.unwrap();
+    let (caller, _caller_rx) = connect(&e).await;
+    let started = std::time::Instant::now();
+    let error = tokio::time::timeout(Duration::from_millis(500), caller.call("command.invoke", json!({"name": "hang", "deadline_ms": 30}))).await.expect("forwarded deadline was ignored").unwrap_err();
+    assert_eq!(error.kind(), "timeout");
+    assert_eq!(error.data.unwrap()["outcome"], "indeterminate");
+    assert!(started.elapsed() < Duration::from_millis(500));
+    let Some(Incoming::Request { id, method, .. }) = requests.recv().await else { panic!("handler never received invocation") };
+    assert_eq!(method, "command.invoke");
+    handler.respond(id, Ok(json!({"late": true})));
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(requests.try_recv().is_err(), "deadline must never resend");
+    let snap = caller.call("workspace.snapshot", Value::Null).await.unwrap();
+    assert!(snap["commands"].is_array(), "late reply does not poison the connection");
+}
+
+#[tokio::test]
+async fn stalled_socket_flood_closes_only_its_stream_explicitly() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let e = env();
+    let _core = start(e.socket.clone(), e.state.clone(), false, Backend::Fake, None).unwrap();
+    let (controller, _controller_rx) = connect(&e).await;
+    let resource = controller.call("resource.spawn", json!({"argv": ["flood", "--output-bytes-per-sec", "32000000"]})).await.unwrap()["resource"]["id"].clone();
+    let socket = tokio::net::UnixStream::connect(&e.socket).await.unwrap();
+    let (r, mut w) = socket.into_split();
+    let mut lines = BufReader::new(r).lines();
+    let attach = json!({"jsonrpc": "2.0", "id": 1, "method": "resource.attach", "params": {"resource": resource, "cols": 80, "rows": 24}});
+    w.write_all(format!("{attach}\n").as_bytes()).await.unwrap();
+    // Do not read the socket at all while the shared fake load profile floods output.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let snap = tokio::time::timeout(Duration::from_secs(1), controller.call("workspace.snapshot", Value::Null)).await.unwrap().unwrap();
+    assert!(snap["resources"].as_array().unwrap().iter().any(|r| r["id"] == resource));
+    let closed = tokio::time::timeout(Duration::from_secs(3), async {
+        let mut bytes = 0;
+        while let Some(line) = lines.next_line().await.unwrap() {
+            let msg: Value = serde_json::from_str(&line).unwrap();
+            if msg["method"] == "stream.data" { bytes += msg["params"]["data"].as_str().unwrap().len(); }
+            if msg["method"] == "stream.closed" {
+                assert!(bytes < 4 * 1024 * 1024, "queued flood exceeded the bounded writer plus socket buffers");
+                return msg;
+            }
+        }
+        panic!("socket disconnected without explicit stream closure");
+    }).await.expect("stalled viewer was never told its stream overflowed");
+    assert_eq!(closed["params"]["reason"]["reason"], "slow_consumer");
+    // A different resource/viewer remains usable; one stalled socket does not stall the adapter.
+    let normal = controller.call("resource.spawn", json!({"argv": ["sh"]})).await.unwrap()["resource"]["id"].clone();
+    let attached = controller.call("resource.attach", json!({"resource": normal})).await.unwrap();
+    controller.call("stream.input", json!({"stream": attached["stream"], "text": "still works"})).await.unwrap();
+    controller.call("stream.close", json!({"stream": attached["stream"]})).await.unwrap();
+}
+
+#[tokio::test]
 async fn old_extension_disconnect_does_not_disable_replacement() {
     let e = env();
     let core = start(e.socket.clone(), e.state.clone(), false, Backend::Fake, None).unwrap();

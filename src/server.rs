@@ -24,7 +24,7 @@ struct Conn {
     peer: Peer,
     author: Mutex<String>,
     extension: Mutex<Option<String>>,
-    streams: Mutex<HashMap<u64, mpsc::UnboundedSender<StreamInput>>>,
+    streams: Mutex<HashMap<u64, crate::queue::Sender<StreamInput>>>,
     next_stream: AtomicU64,
     subscribed: Mutex<bool>,
 }
@@ -135,7 +135,10 @@ async fn connection(core: Shared, conn: Arc<Conn>, mut incoming: mpsc::Unbounded
                 conn.peer.respond(id, stream_op(&conn, &method, params));
             }
             Incoming::Notification { method, params } if method.starts_with("stream.") => {
-                let _ = stream_op(&conn, &method, params);
+                let sid = params["stream"].clone();
+                if let Err(error) = stream_op(&conn, &method, params) {
+                    conn.peer.notify("stream.error", json!({"stream": sid, "error": error, "outcome": "rejected"}));
+                }
             }
             Incoming::Request { id, method, params } => {
                 let (core, conn) = (core.clone(), conn.clone());
@@ -149,7 +152,7 @@ async fn connection(core: Shared, conn: Arc<Conn>, mut incoming: mpsc::Unbounded
     }
     // Disconnected: close streams, and mark this connection's commands unavailable.
     for (_, s) in conn.streams.lock().unwrap().drain() {
-        let _ = s.send(StreamInput::Close);
+        let _ = StreamInput::Close.send(&s);
     }
     let mut c = core.lock().unwrap();
     c.clients.remove(&conn.id);
@@ -221,6 +224,7 @@ struct Invoke {
     name: String,
     #[serde(default)]
     args: Value,
+    deadline_ms: Option<u64>,
 }
 
 async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> RpcResult {
@@ -302,7 +306,7 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> Rp
         "command.list" => Ok(json!({"commands": core.lock().unwrap().commands.values().map(|c| c.to_json()).collect::<Vec<_>>()})),
         "command.invoke" => {
             let i: Invoke = params(p)?;
-            invoke(core, &conn.author(), &i.name, i.args).await
+            invoke_deadline(core, &conn.author(), &i.name, i.args, i.deadline_ms).await
         }
         "ui.notify" => {
             // A transient message for every client (toast). Not state.
@@ -349,13 +353,16 @@ fn stream_op(conn: &Arc<Conn>, method: &str, p: Value) -> RpcResult {
                 (None, Some(t)) => t.into_bytes(),
                 _ => return Err(RpcError::invalid("needs `data` (base64) or `text`")),
             };
+            if bytes.len() > crate::adapter::MAX_STREAM_CHUNK {
+                return Err(RpcError::invalid("stream.input exceeds 64 KiB; input was not dispatched"));
+            }
             StreamInput::Data(bytes)
         }
         "stream.resize" => StreamInput::Resize(s.cols.unwrap_or(80), s.rows.unwrap_or(24)),
         "stream.close" => StreamInput::Close,
         _ => return Err(RpcError::method_not_found(method)),
     };
-    tx.send(input).map_err(|_| RpcError::new("closed", "stream is closed"))?;
+    input.send(tx).map_err(|e| RpcError::new("overloaded", format!("stream input not dispatched: {e}")))?;
     Ok(json!({"outcome": "dispatched"}))
 }
 
@@ -426,21 +433,27 @@ async fn attach(core: &Shared, conn: &Arc<Conn>, a: Attach) -> RpcResult {
     let sid = conn.next_stream.fetch_add(1, Ordering::Relaxed);
     conn.streams.lock().unwrap().insert(sid, stream.input.clone());
     let peer = conn.peer.clone();
+    let writer = peer.stream_writer(sid);
     let conn2 = conn.clone();
     tokio::spawn(async move {
-        while let Some(out) = stream.output.recv().await {
-            match out {
-                StreamOutput::Data(d) => peer.notify("stream.data", json!({"stream": sid, "data": B64.encode(d)})),
-                StreamOutput::Closed(reason) => {
-                    peer.notify("stream.closed", json!({"stream": sid, "reason": reason}));
-                    break;
+        let mut reason = json!({"reason": "slow_consumer"});
+        let mut normal_close = false;
+        'output: while let Some(out) = stream.output.recv().await {
+            match out.value {
+                StreamOutput::Data(d) => {
+                    for chunk in d.chunks(crate::adapter::MAX_STREAM_CHUNK) {
+                        if !writer.send(B64.encode(chunk)) { break 'output; }
+                    }
+                    // Credit follows acceptance by a bounded downstream buffer, never an
+                    // unbounded adapter enqueue. The backend still owns its native history.
+                    if StreamInput::Consumed(d.len() as u32).send(&stream.input).is_err() { break; }
                 }
+                StreamOutput::Closed(why) => { reason = why; normal_close = true; break; }
             }
-            if peer.is_closed() {
-                let _ = stream.input.send(StreamInput::Close);
-                break;
-            }
+            if peer.is_closed() { break; }
         }
+        let _ = StreamInput::Close.send(&stream.input);
+        if normal_close { writer.finish(reason); } else { writer.close(reason); }
         conn2.streams.lock().unwrap().remove(&sid);
     });
     Ok(json!({"stream": sid, "resource": a.resource}))
@@ -491,6 +504,14 @@ fn apply(core: &Shared, author: &str, note: &str, ops: Vec<Op>) -> RpcResult {
 
 /// Run a command: built-ins here, everything else forwarded to the connection that owns it.
 pub async fn invoke(core: &Shared, author: &str, name: &str, args: Value) -> RpcResult {
+    invoke_deadline(core, author, name, args, None).await
+}
+
+async fn invoke_deadline(core: &Shared, author: &str, name: &str, args: Value, deadline_ms: Option<u64>) -> RpcResult {
+    let deadline_ms = deadline_ms.unwrap_or(30_000);
+    if !(1..=300_000).contains(&deadline_ms) {
+        return Err(RpcError::invalid("deadline_ms must be between 1 and 300000"));
+    }
     let arg = |k: &str| args.get(k).cloned().unwrap_or(Value::Null);
     match name {
         "prim.layout.reset" => layout_reset(core, author),
@@ -530,7 +551,7 @@ pub async fn invoke(core: &Shared, author: &str, name: &str, args: Value) -> Rpc
                 }
                 cmd.peer.clone().ok_or_else(|| RpcError::new("unavailable", format!("{name} has no handler")))?
             };
-            peer.call("command.invoke", json!({"name": name, "args": args, "caller": author})).await
+            peer.call_with_timeout("command.invoke", json!({"name": name, "args": args, "caller": author}), std::time::Duration::from_millis(deadline_ms)).await
         }
     }
 }

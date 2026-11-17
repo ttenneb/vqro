@@ -41,10 +41,22 @@ pub enum AdapterEvent {
     Connected(bool, Option<String>),
 }
 
+pub const STREAM_BUFFER_BYTES: usize = 256 * 1024;
+pub const MAX_STREAM_CHUNK: usize = 64 * 1024;
+
 pub enum StreamInput {
     Data(Vec<u8>),
     Resize(u16, u16),
     Close,
+    /// Bytes handed to the connection's bounded writer queue, not merely enqueued by the adapter.
+    Consumed(u32),
+}
+
+impl StreamInput {
+    pub fn send(self, tx: &crate::queue::Sender<Self>) -> Result<(), crate::queue::QueueError> {
+        let bytes = match &self { Self::Data(d) => d.len(), _ => 64 };
+        tx.try_send(self, bytes)
+    }
 }
 
 pub enum StreamOutput {
@@ -54,8 +66,8 @@ pub enum StreamOutput {
 }
 
 pub struct Stream {
-    pub input: mpsc::UnboundedSender<StreamInput>,
-    pub output: mpsc::UnboundedReceiver<StreamOutput>,
+    pub input: crate::queue::Sender<StreamInput>,
+    pub output: crate::queue::Receiver<StreamOutput>,
 }
 
 pub struct SpawnRequest {

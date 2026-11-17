@@ -116,23 +116,26 @@ pub fn start(name: String, events: mpsc::UnboundedSender<(String, AdapterEvent)>
                         let _ = reply.send(Err(format!("no terminal {backend_ref}")));
                         continue;
                     };
-                    let (in_tx, mut in_rx) = mpsc::unbounded_channel();
-                    let (out_tx, out_rx) = mpsc::unbounded_channel();
-                    let _ = out_tx.send(StreamOutput::Data(format!("fake {backend_ref}\r\n").into_bytes()));
+                    let (in_tx, mut in_rx) = crate::queue::channel(STREAM_BUFFER_BYTES);
+                    let (out_tx, out_rx) = crate::queue::channel(STREAM_BUFFER_BYTES);
+                    let greeting = format!("fake {backend_ref}\r\n").into_bytes();
+                    let n = greeting.len();
+                    let _ = out_tx.try_send(StreamOutput::Data(greeting), n);
                     if let Some(bps) = t.load.output_bytes_per_sec {
                         flood(out_tx.clone(), bps, t.alive.clone());
                     }
                     tokio::spawn(async move {
                         while let Some(i) = in_rx.recv().await {
-                            match i {
+                            match i.value {
                                 StreamInput::Data(d) => {
-                                    if out_tx.send(StreamOutput::Data(d)).is_err() {
+                                    let n = d.len();
+                                    if out_tx.send(StreamOutput::Data(d), n).await.is_err() {
                                         break;
                                     }
                                 }
-                                StreamInput::Resize(..) => {}
+                                StreamInput::Resize(..) | StreamInput::Consumed(_) => {}
                                 StreamInput::Close => {
-                                    let _ = out_tx.send(StreamOutput::Closed(json!({"reason": "detached"})));
+                                    let _ = out_tx.send(StreamOutput::Closed(json!({"reason": "detached"})), 64).await;
                                     break;
                                 }
                             }
@@ -147,18 +150,21 @@ pub fn start(name: String, events: mpsc::UnboundedSender<(String, AdapterEvent)>
 }
 
 /// Write `bps` bytes per second of printable lines to one stream until it closes or the terminal ends.
-fn flood(out: mpsc::UnboundedSender<StreamOutput>, bps: u64, alive: Arc<AtomicBool>) {
+fn flood(out: crate::queue::Sender<StreamOutput>, bps: u64, alive: Arc<AtomicBool>) {
     const TICK_MS: u64 = 10;
-    let per_tick = (bps * TICK_MS / 1000).max(1) as usize;
+    let per_tick = (bps.saturating_mul(TICK_MS) / 1000).clamp(1, 16 * 1024 * 1024) as usize;
     let line = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ flood output\r\n";
-    let chunk: Vec<u8> = line.iter().copied().cycle().take(per_tick).collect();
+    let chunk: Vec<u8> = line.iter().copied().cycle().take(per_tick.min(MAX_STREAM_CHUNK)).collect();
     tokio::spawn(async move {
         let mut every = tokio::time::interval(Duration::from_millis(TICK_MS));
         every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         while alive.load(Ordering::Relaxed) {
             every.tick().await;
-            if out.send(StreamOutput::Data(chunk.clone())).is_err() {
-                break;
+            let mut remaining = per_tick;
+            while remaining > 0 {
+                let n = remaining.min(chunk.len());
+                if out.send(StreamOutput::Data(chunk[..n].to_vec()), n).await.is_err() { return; }
+                remaining -= n;
             }
         }
     });
