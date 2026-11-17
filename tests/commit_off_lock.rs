@@ -220,3 +220,48 @@ async fn clean_failure_is_invisible_but_post_rename_failure_is_adopted_once() {
         assert!(tokio::time::timeout(Duration::from_millis(20), events.recv()).await.is_err(), "no phantom or duplicate adopted event");
     }
 }
+
+#[tokio::test]
+async fn commit_admission_counts_escaped_note_bytes_not_only_raw_text() {
+    let f = Fixture::new().await;
+    let (a, _) = f.peer().await; let (b, _) = f.peer().await; let (c, _) = f.peer().await;
+    // Each note occupies about3MiB on the wire but only500KiB as a Rust string.
+    let input = || { let mut p = set(1, 0); p["note"] = "\0".repeat(500*1024).into(); p };
+    let first_input = input(); let second_input = input();
+    let first = tokio::spawn(async move { a.call("workspace.apply", first_input).await });
+    tokio::time::timeout(Duration::from_secs(2), f.gate.entered.notified()).await.unwrap();
+    let second = tokio::spawn(async move { b.call("workspace.apply", second_input).await });
+    f.pending(2).await;
+    let rejected = c.call_with_timeout("workspace.apply", input(), Duration::from_secs(2)).await;
+    f.gate.release();
+    let err = rejected.unwrap_err();
+    assert_eq!(err.kind(), "overloaded");
+    assert_eq!(err.data.unwrap()["outcome"], "rejected");
+    assert_eq!(first.await.unwrap().unwrap()["txn"], 1);
+    assert_eq!(second.await.unwrap().unwrap_err().kind(), "conflict");
+    f.pending(0).await;
+}
+
+#[tokio::test]
+async fn writer_panic_is_indeterminate_and_fails_closed_without_replay() {
+    let f = Fixture::new().await;
+    let writer = f.gate.writer();
+    f.core.lock().unwrap().configure_workspace_writer(Arc::new(move |path, bytes| {
+        writer(path, bytes)?;
+        panic!("injected writer crash after durable replace");
+    })).unwrap();
+    let (a, _) = f.peer().await; let (b, _) = f.peer().await; let (reader, _) = f.peer().await;
+    let first = tokio::spawn(async move { a.call("workspace.apply", set(1, 0)).await });
+    tokio::time::timeout(Duration::from_secs(2), f.gate.entered.notified()).await.unwrap();
+    let queued = tokio::spawn(async move { b.call("workspace.apply", set(2, 0)).await });
+    f.pending(2).await;
+    f.gate.release();
+    assert_eq!(first.await.unwrap().unwrap_err().kind(), "indeterminate");
+    assert_eq!(queued.await.unwrap().unwrap_err().kind(), "indeterminate");
+    f.pending(0).await;
+    assert_eq!(reader.call("workspace.apply", set(3, 0)).await.unwrap_err().kind(), "unavailable");
+    assert!(reader.call("workspace.snapshot", Value::Null).await.unwrap()["entries"].get("doc/value").is_none());
+    let persisted = store::Store::open(f._dir.path().join("state/workspace.json")).unwrap();
+    assert_eq!(persisted.get("doc/value").unwrap().value, 1, "no later queued write or replay may overwrite an uncertain rename");
+    assert_eq!(persisted.history(10).len(), 1);
+}

@@ -641,7 +641,7 @@ async fn attach(core: &Shared, conn: &Arc<Conn>, a: Attach) -> RpcResult {
 
 async fn revert(core: &Shared, author: &str, txn: Option<u64>) -> RpcResult {
     let author = author.to_string();
-    crate::commit::submit(core, author.len()+128, move |c| {
+    crate::commit::submit(core, crate::limits::encoded_bytes(&author).saturating_add(128), move |c| {
         // Select default undo only when earlier queued commits have been adopted.
         let id = txn.or_else(|| c.store.latest_txn_matching(|t| !t.author.starts_with("ext:")))
             .ok_or_else(|| RpcError::new("not_found", "no transactions to revert"))?;
@@ -654,7 +654,7 @@ async fn apply_prepared(
     core:&Shared, author:&str, note:Option<String>, bytes:usize,
     ops:impl FnOnce(&Core)->Result<Vec<Op>,RpcError> + Send + 'static,
 ) -> RpcResult {
-    let bytes = bytes.saturating_add(author.len()).saturating_add(note.as_ref().map_or(0, String::len));
+    let bytes = bytes.saturating_add(crate::limits::encoded_bytes(&(author, &note)));
     let author = author.to_string();
     crate::commit::submit(core, bytes, move |c| {
         let ops = ops(c)?;
@@ -696,7 +696,7 @@ async fn invoke_deadline(core: &Shared, author: &str, name: &str, args: Value, d
         "prim.extension.disable" | "prim.extension.enable" => {
             let ext_name = arg("name").as_str().map(String::from).or_else(|| arg("text").as_str().map(String::from)).ok_or_else(|| RpcError::invalid("needs `name`"))?;
             let enabled = name == "prim.extension.enable";
-            apply_prepared(core, author, Some(name.into()), ext_name.len()+128, move |c| {
+            apply_prepared(core, author, Some(name.into()), crate::limits::encoded_bytes(&ext_name).saturating_add(128), move |c| {
                 let key = format!("extension/{ext_name}");
                 let mut value = c.store.get(&key).map(|e| e.value.clone()).ok_or_else(|| RpcError::new("not_found", format!("no extension {ext_name}")))?;
                 value["enabled"] = json!(enabled);
