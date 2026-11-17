@@ -292,6 +292,26 @@ default `~/.local/share/prim/extensions`) and records `doc/prim/defaults`, so re
 |---|---|
 | `extension.list` | per extension: `status` (running, restarting, failed, disabled, safe_mode, stopped), `pid`, `crashes`, `last_exit` |
 
-Declared by `extension/<name>` entries `{argv, enabled?, cwd?}`. Started with `PRIM_SOCKET` and
-`PRIM_EXTENSION`; output goes to `<state>/ext-<name>.log`. Crash budget: 3 exits in 5 minutes, then `failed`
-until the entry changes or `prim.extension.restart`.
+Declared by `extension/<name>` entries `{argv, enabled?, cwd?}`. Started with `PRIM_SOCKET`,
+`PRIM_EXTENSION`, and `PRIM_EXTENSION_LIFETIME=stdin`; output goes to `<state>/ext-<name>.log`.
+Crash budget: 3 exits in 5 minutes, then `failed` until the entry changes or `prim.extension.restart`.
+
+**Lifetime channel (all platforms):** a managed extension's standard input is a pipe reserved for lifetime,
+not application input or the JSON-RPC connection. Only the launching core holds its sending end open;
+it sends no data. EOF means that core has ended, including a crash or forced termination where cleanup
+code cannot run. The extension **must monitor this channel independently of RPC and command work and
+exit promptly on EOF**, even if it has not connected to `PRIM_SOCKET` yet. It must not keep using a dead
+core's socket or reconnect/replay automatically. Wrappers must preserve the channel through to the
+extension. This contract requires no process ids, signals or platform-specific parent-death facilities.
+
+`extensions/prim_ext.py` starts the lifetime watcher on import when the marker is `stdin`; EOF exits the
+whole Python process, including blocked command/startup threads. Its existing socket-EOF exit remains
+an additional disconnect path. Without the marker (for example a manually launched helper/client), it
+does not consume stdin. Other runtimes must implement the same EOF rule. Standard input must not be
+repurposed, and ordinary helper subprocesses should not inherit the marker unless they also receive
+and follow a suitable lifetime channel.
+
+Explicit stop/replacement and crash-budget behavior are unchanged. Noncompliant programs that ignore
+the lifetime channel can still outlive a crashed core; prim does not promise to enforce this contract
+through an external process supervisor. This channel governs **prim's extensions only**, not backend-owned
+terminals, agents, or their process-lifetime guarantees (D14/D15).

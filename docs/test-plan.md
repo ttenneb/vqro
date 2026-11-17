@@ -76,8 +76,13 @@ env -i HOME=$HOME PATH=$PATH cargo test --release --test scale -- --ignored --ex
   the run's `PRIM_SOCKET` is then killed, listed in the receipt (`cleanup`), and fails the test (`leaked_processes`,
   a real budget of 0). Socket and state live in a run directory under `$PRIM_SCALE_RUN_DIR` (default
   `~/.local/share/herdr/scratch/prim-scale`), which is removed afterwards.
-- Known product gap, not fixed yet: if the core dies abruptly (SIGKILL, crash), its extensions keep running,
-  reparented to init. Earlier versions of this harness SIGKILLed the core and leaked one extension per run.
+- Abrupt core death previously orphaned extensions. Managed extensions now receive a reserved stdin lifetime
+  pipe (`spec/core-protocol.md`, Extensions); EOF must exit the extension, independently of socket handling.
+  `tests/ext_lifetime.rs` kills a real private `prim serve --fake` with SIGKILL/SIGTERM and verifies a connected
+  helper, a helper blocked before connecting, and a non-Python stdin reader exit within three seconds. SIGINT
+  covers clean shutdown. These process-observation tests run on Linux; the pipe/EOF contract is platform-neutral.
+  Programs that ignore the channel remain noncompliant and may still outlive a crash; no external process
+  supervisor or Unix parent-death signal is part of the contract.
 - The load shapes come from the fake backend's load profile (`src/adapter/fake.rs`: `--status-every-ms`,
   `--output-bytes-per-sec` in a spawned terminal's argv), so a real backend can replace it later.
 

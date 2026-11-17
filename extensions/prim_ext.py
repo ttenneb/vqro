@@ -21,6 +21,21 @@ import sys
 import threading
 
 
+def _watch_lifetime():
+    """Managed stdin is a lifetime pipe, never extension input or the RPC wire."""
+    try:
+        while sys.stdin.buffer.read(4096):
+            pass
+    finally:
+        # Exit every thread, even if startup/commands are blocked outside RPC.
+        # The parent may have crashed, so no cleanup callback can be required.
+        os._exit(0)
+
+
+if os.environ.get("PRIM_EXTENSION_LIFETIME") == "stdin":
+    threading.Thread(target=_watch_lifetime, daemon=True, name="prim-lifetime").start()
+
+
 class Prim:
     """JSON-RPC over lines. The core may send us requests (command.invoke) and notifications."""
 

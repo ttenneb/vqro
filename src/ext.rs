@@ -108,7 +108,12 @@ pub fn reconcile(core: &Shared) {
         rt.generation += 1;
         let generation = rt.generation;
         let mut cmd = Command::new(&argv[0]);
-        cmd.args(&argv[1..]).env("PRIM_SOCKET", &socket).env("PRIM_EXTENSION", &name).stdin(std::process::Stdio::null()).kill_on_drop(true);
+        cmd.args(&argv[1..])
+            .env("PRIM_SOCKET", &socket)
+            .env("PRIM_EXTENSION", &name)
+            .env("PRIM_EXTENSION_LIFETIME", "stdin")
+            .stdin(std::process::Stdio::piped())
+            .kill_on_drop(true);
         if let Some(cwd) = cwd {
             cmd.current_dir(cwd);
         }
@@ -130,6 +135,9 @@ pub fn reconcile(core: &Shared) {
                 c.emit("extension", json!({"name": name, "state": j}));
             }
             Ok(mut child) => {
+                // The core alone holds the writer. Kernel pipe closure on core
+                // death reaches extensions even when no Rust cleanup can run.
+                let lifetime = child.stdin.take();
                 let (stop_tx, stop_rx) = oneshot::channel();
                 rt.stop = Some(stop_tx);
                 rt.running = true;
@@ -156,6 +164,7 @@ pub fn reconcile(core: &Shared) {
                             }
                         }
                     }
+                    drop(lifetime); // retain the writer across the whole child lifetime
                 });
             }
         }

@@ -125,3 +125,13 @@ bridge not built); second backend (tmux) not started; Windows untested.
   namespace and private environment/state/config/session roots. No real credentials or sessions used.
 - Not wired to prim/provider registration yet. The future bridge must run inside a backend-owned terminal;
   this library does not turn prim into an agent process host. API and limits: `extensions/pi_bridge/README.md`.
+
+## Extension lifetime (2026-11-17)
+
+- Every managed extension receives a reserved stdin lifetime pipe and `PRIM_EXTENSION_LIFETIME=stdin`.
+  The core retains its writer; core death closes it without requiring cleanup code. Extensions must exit on EOF.
+- `prim_ext.py` watches from import on an independent thread, so startup/command code need not reach socket EOF.
+  A plain non-Python pipe reader follows the same contract; no Unix-only parent-death API is required.
+- Real fake-core regressions cover SIGKILL, SIGTERM and clean SIGINT shutdown, including blocked-before-connect
+  helper startup. The scale cleanup check still reports zero leaked extensions under restart/flood load.
+  Backend-owned terminal/agent lifetimes are not changed.
