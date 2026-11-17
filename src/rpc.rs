@@ -122,7 +122,14 @@ impl StreamWriter {
     /// Normal backend closure follows all accepted bytes in the data queue. If even that marker
     /// cannot fit, report a gap instead of silently losing the final output.
     pub fn finish(&self, reason: Value) {
-        let line = json!({"jsonrpc": "2.0", "method": "stream.closed", "params": {"stream": self.id, "reason": reason}}).to_string();
+        self.finish_as("stream.closed", json!({"reason": reason}));
+    }
+
+    /// An ordered end/gap marker follows all accepted bytes, unlike control-priority notify.
+    pub fn finish_as(&self, method: &str, params: Value) {
+        let mut params = params.as_object().cloned().unwrap_or_default();
+        params.insert("stream".into(), json!(self.id));
+        let line = json!({"jsonrpc": "2.0", "method": method, "params": params}).to_string();
         let bytes = line.len() + 1;
         if self.peer.data.try_send(Outbound { line, active: Some(self.active.clone()), _large: None }, bytes).is_err() {
             self.close(json!({"reason": "slow_consumer"}));
@@ -313,11 +320,14 @@ impl Peer {
             Ok(v) => json!({"jsonrpc": "2.0", "id": id, "result": v}),
             Err(e) => json!({"jsonrpc": "2.0", "id": id, "error": e}),
         };
+        let bytes = crate::limits::encoded_bytes(&msg).saturating_add(1);
+        if bytes > self.record_limit.load(Ordering::Acquire) {
+            let error = RpcError::new("too_large", "reply exceeds recovery envelope; use recovery commands to revert/delete state");
+            self.send_control(json!({"jsonrpc":"2.0", "id":id, "error":error}).to_string());
+            return;
+        }
         let line = msg.to_string();
-        let bytes = line.len() + 1;
-        let error = if bytes > self.record_limit.load(Ordering::Acquire) {
-            Some(RpcError::new("too_large", "reply exceeds recovery envelope; use recovery commands to revert/delete state"))
-        } else if bytes > CONTROL_BYTES {
+        let error = if bytes > CONTROL_BYTES {
             if self.large_bytes.compare_exchange(0, bytes, Ordering::AcqRel, Ordering::Acquire).is_err() {
                 Some(RpcError::new("overloaded", "one large reply is already in flight"))
             } else {
@@ -462,6 +472,22 @@ mod tests {
         assert_eq!(first["params"]["data"], "YWJj");
         assert_eq!(last["method"], "stream.closed");
         assert_eq!(last["params"]["reason"]["reason"], "finished");
+    }
+
+    #[tokio::test]
+    async fn gap_marker_follows_all_accepted_data() {
+        let (a, b) = tokio::io::duplex(64);
+        let (r, w) = tokio::io::split(a);
+        let (peer, _) = Peer::spawn(r, w);
+        let stream = peer.stream_writer(3);
+        assert!(stream.send("YWJj".into()));
+        stream.finish_as("stream.gap", json!({"reason":"paused"}));
+        let mut lines = BufReader::new(b).lines();
+        let data: Value = serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        let gap: Value = serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        assert_eq!(data["method"], "stream.data");
+        assert_eq!(gap["method"], "stream.gap");
+        assert_eq!(gap["params"]["stream"], 3);
     }
 
     #[tokio::test]
