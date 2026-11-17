@@ -11,7 +11,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from prim_ext import Extension  # noqa: E402
 
-ext = Extension("gestures")
+ext = Extension("gestures", event_types=["entries", "view.content"])  # no resource events: not used here
 ext.contribute({
     "binding/gestures.pane-menu": {"key": "mouse.right", "where": "pane", "command": "client.menu", "args": {"where": "pane"}, "label": "pane menu"},
     "binding/gestures.tab-menu": {"key": "mouse.right", "where": "tab", "command": "client.menu", "args": {"where": "tab"}, "label": "tab menu"},

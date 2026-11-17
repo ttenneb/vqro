@@ -10,7 +10,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from prim_ext import Extension, PrimError, node_at, replace_at, views_in  # noqa: E402
 
-ext = Extension("panes")
+ext = Extension("panes", event_types=["entries", "view.content"])  # no resource events: not used here
 
 
 def target(args):

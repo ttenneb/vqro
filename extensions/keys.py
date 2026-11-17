@@ -18,7 +18,7 @@ import threading
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from prim_ext import Extension, PrimError  # noqa: E402
 
-ext = Extension("keys")
+ext = Extension("keys", event_types=["entries", "view.content"])  # no resource events: not used here
 STATE = "doc/keys/profile"
 TUI = "doc/settings/tui"
 PREFIX = "binding/keys."

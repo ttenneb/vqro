@@ -88,8 +88,11 @@ class PrimError(RuntimeError):
 
 
 class Extension:
-    def __init__(self, name=None):
+    def __init__(self, name=None, event_types=None):
+        """event_types: only these core event types (e.g. ["entries"]); None for all. Caches only
+        follow the types received: without "resource", `resources` stays as of the last snapshot."""
         self.name = os.environ.get("PRIM_EXTENSION", name or "ext")
+        self.event_types = event_types
         self.handlers = {}
         self.titles = {}
         self.listeners = []
@@ -127,7 +130,10 @@ class Extension:
     def run(self):
         for name, title in self.titles.items():
             self.prim.call("command.register", {"name": name, "title": title})
-        self.prim.call("events.subscribe", {"from": self.seq, "epoch": self.epoch})
+        sub = {"from": self.seq, "epoch": self.epoch, "partial_resources": True}
+        if self.event_types is not None:
+            sub["types"] = list(self.event_types)
+        self.prim.call("events.subscribe", sub)
         threading.Event().wait()
 
     # -- workspace helpers --------------------------------------------------------------------
@@ -219,6 +225,14 @@ class Extension:
             self.seq = params["seq"]
             t, d = params["type"], params["data"]
             if t == "resource":
+                if params.get("partial"):
+                    # Only changed fields (we subscribe with partial_resources): merge onto the cache.
+                    base = self.resources.get(d["id"])
+                    if base is None:
+                        # No base: our cache is not what the core assumed. Reload.
+                        self._load(self.prim.call("workspace.snapshot"))
+                        return "missed", {}
+                    d = dict(base, **d)
                 self.resources[d["id"]] = d
             elif t == "resource.removed":
                 self.resources.pop(d["id"], None)

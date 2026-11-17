@@ -14,7 +14,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from prim_ext import Extension, PrimError  # noqa: E402
 
-ext = Extension("workspaces")
+ext = Extension("workspaces", event_types=["entries", "view.content"])  # no resource events: not used here
 LIST = "doc/workspaces/list"
 REFRESH_SECS = 20
 lock = threading.Lock()

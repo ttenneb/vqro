@@ -18,7 +18,7 @@ import unicodedata
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from prim_ext import Extension, PrimError  # noqa: E402
 
-ext = Extension("settings")
+ext = Extension("settings", event_types=["entries", "view.content", "extension", "safe_mode", "command"])  # no resource events: not used here
 TUI = "doc/settings/tui"
 THEME = "doc/settings/theme"
 ICONS = "doc/settings/icons"

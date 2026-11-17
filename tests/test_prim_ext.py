@@ -92,5 +92,28 @@ class SnapshotFence(unittest.TestCase):
         self.assertEqual(ext.seq, 3)
 
 
+class PartialResources(unittest.TestCase):
+    def test_partial_resource_events_merge_onto_the_cached_record(self):
+        ext = SnapshotFence.extension(self)
+        ext._handle("event", {"epoch": "boot", "seq": 2, "type": "resource", "data": {"id": "r1", "argv": ["pi"], "status": {"state": "idle"}}})
+        ext._handle("event", {"epoch": "boot", "seq": 3, "type": "resource", "partial": True, "data": {"id": "r1", "status": {"state": "working"}}})
+        self.assertEqual(ext.resources["r1"], {"id": "r1", "argv": ["pi"], "status": {"state": "working"}})
+
+    def test_partial_event_without_a_base_reloads_the_snapshot(self):
+        ext = SnapshotFence.extension(self)
+
+        class Prim:
+            calls = 0
+
+            def call(self, method):
+                Prim.calls += 1
+                return dict(snapshot(5, "x"), resources=[{"id": "r9", "argv": ["sh"], "status": None}])
+
+        ext.prim = Prim()
+        ext._handle("event", {"epoch": "boot", "seq": 2, "type": "resource", "partial": True, "data": {"id": "r9", "status": "busy"}})
+        self.assertEqual(Prim.calls, 1)
+        self.assertEqual(ext.resources["r9"]["argv"], ["sh"])
+
+
 if __name__ == "__main__":
     unittest.main()
