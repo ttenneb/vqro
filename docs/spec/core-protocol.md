@@ -446,6 +446,38 @@ and sets the prefix; the active profile is `doc/keys/profile`, and the list is l
 - Status-bar menu items may name a live `view`; clients take the label, icon and style from its content
   (`{label, icon?, style}`), hiding it while the label is empty.
 
+### Optional list with detail (`list_detail`)
+
+Any panel, or individual page, may carry `list_detail: {requires: ["list_detail"]}`. Its ordinary `items`
+remain a complete plain-list fallback. A selectable row may carry `detail_panel: {title?, requires?, toolbar?,
+items: [row]}`. Selecting it shows that content beside the list at wide widths, or below it at narrow widths.
+These are ordinary rows/actions, not an extension-specific client screen. `list_detail` enhancement requirements
+are scoped inside that object: an unknown requirement disables the enhancement, not the fallback list. Do **not**
+put this optional feature in the outer panel's mandatory `requires` if older clients should retain the list.
+Older clients ignore the extra objects; row `menu` actions can provide the same controls in the plain list.
+
+- Selection, pane focus and each pane's scroll are per-client state. Detail scroll/selection resets when the
+  selected row id changes, not on a status refresh. List clicks select without running the row command; clicking
+  a toggle's checkbox, or Enter/Space on the list, explicitly activates it. Detail actions activate normally.
+- Tab/Shift-Tab switches list/detail focus. Within either pane arrows retain normal tree/chip semantics.
+  `[`/`]` selects outer pages; PgUp/PgDn moves by the visible selectable-row count; Home/End selects first/last.
+  The list shows matching `n of m`, visible row range and a scrollbar; scrolled groups retain a readable header.
+- `/` filters the list over text, detail, description, optional `summary` and string `tags: [...]`. Header rows
+  with expanded children form groups and remain when descendants match. Headers/toolbars do not count as results.
+- Text rows may use `wrap:true` (feature `wrap`) for plain word-wrapped paragraphs and `focusable:true` for
+  keyboard reading/scrolling; they remain inert unless they explicitly carry a command. Styles stay semantic.
+- Mouse wheel scrolls the detail text independently. A keyboard activation after manual scrolling first reveals
+  its selection rather than invoking an off-screen action. The prefix menu remains reachable inside popups and
+  while filtering, regardless of extension failure.
+
+Illustrative row (inside an enhanced panel/page):
+```json
+{"id":"record-a","text":"Record A","description":"One-line summary","tags":["example"],
+ "command":"example.open","detail_panel":{"title":"Record A","requires":["wrap"],
+ "items":[{"type":"text","text":"A short explanatory paragraph.","wrap":true,"focusable":true},
+          {"text":"Open","command":"example.open"}]}}
+```
+
 ### Client rendering under load
 
 The TUI coalesces background invalidations to a 60 fps frame budget; input-triggered UI changes remain immediate
@@ -552,9 +584,9 @@ is, and a removed default stays removed. Client options live in `doc/settings/tu
 
 | Method | Result |
 |---|---|
-| `extension.list` | per extension: `status` (running, restarting, failed, disabled, safe_mode, stopped), `pid`, `crashes`, `last_exit` |
+| `extension.list` | `extensions`: per declaration, runtime facts and static manifest metadata (below); no process ids |
 
-Declared by `extension/<name>` entries `{argv, enabled?, cwd?, kind?, default?, description?}`. `kind: "provider"`
+Declared by `extension/<name>` entries `{argv, enabled?, cwd?, kind?, default?, description?, manifest?}`. `kind: "provider"`
 marks a backend or runtime provider (the safe-mode chooser groups by it). `default: true` makes the backend that
 registers under that name the provider for spawns that name none. Without one, the first backend to register is
 used; a runtime bridge never is. A declared default that has not registered rejects unnamed spawns as unavailable;
@@ -564,6 +596,43 @@ launcher (`PATH` on Unix; `CreateProcess` search on Windows, where a `.py` file 
 need a portable interpreter choice such as the `py -3` launcher (`build-plan.md`, Windows work). Started with `PRIM_SOCKET`,
 `PRIM_EXTENSION`, `PRIM_EXTENSION_TOKEN`, and `PRIM_EXTENSION_LIFETIME=stdin`; output goes to `<state>/ext-<name>.log`.
 Crash budget: 3 exits in 5 minutes, then `failed` until the entry changes or `prim.extension.restart`.
+
+### Static manifests and observed facts
+
+A manifest is a UTF-8 JSON object with required string `name` matching the declaration name. Every other field
+is optional; unknown fields are retained for forward-compatible consumers and ignored by this UI. It is the same
+metadata object a future registry can list; it does not install packages, execute code or resolve dependencies.
+Bundled files are `<extensions dir>/manifests/<name>.json`. A declaration may override the path with
+`manifest: "path/to/manifest.json"` (relative to the core's extensions directory, or an explicit core-host path).
+Reading metadata never starts the extension, so disabled, failed and safe-mode declarations remain discoverable.
+
+Fields:
+- `title`, `summary` (one line), `description` (short plain-language paragraph: purpose and what turning it off loses),
+  `version`, `kind` (open names such as `provider`, `runtime`, `interface`, `management`), `author`, `license`, `homepage`.
+- `requires: {protocol?: integer, client_features?: [string]}`: informational compatibility requirements, not an
+  authorization grant or an automatic dependency resolver.
+- `contributes: {commands?: [string], keys?: [string], menu_items?: [string], panels?: [string], settings?: [string]}`:
+  human-readable summaries, not registrations. Actual commands/capabilities remain authoritative.
+- `settings_command?: string`: its own settings command, enabled in the catalogue only while running and available.
+
+Files must be regular files and at most **32 KiB**; cached manifest records (including source/diagnostics) have a
+**1 MiB** aggregate budget. Malformed, mismatched, unreadable or oversized metadata reports `manifest_error`, never
+blocks normal extension execution. No program is run to discover a version. File stamps are checked during
+reconciliation and `extension.list`; unchanged parsed values are reused. Snapshots contain the last observed cache
+without filesystem I/O. This is not a file watcher or a registry/install mechanism.
+
+`extension.list` and snapshot `extensions` export `manifest` (object or null), `manifest_source` (display-only
+core-host path or null), `manifest_error`, `enabled`, raw `status`, `display_status` (`running`, `off`, `failed`,
+`starting`, `stopped-by-safe-mode`), `safe_mode`, `allowed_in_safe_mode`, `running`, `generation`, `spec_version`, `crashes`, and `last_exit`. Unknown
+statuses should display as text. `generation` is an ephemeral supervisor counter (changes on launch/stop, resets
+with a core), not an execution-lifetime guarantee. Process ids stay internal. Last-exit evidence survives disabling
+or safe entry even when the display badge is off/stopped-by-safe-mode. Logs remain core-host files at
+`<state dir>/ext-<name>.log`; no generic in-app log viewer exists, so Settings reports the path and that limitation.
+
+Settings uses these same public facts and generic panel features for every declaration, including itself; it has
+no Pi-specific child row or always-on exception. If explicitly allowed to run in safe mode, its on/off controls
+use `prim.safe_mode.allow` session choices rather than editing normal enabled declarations (D21). Turning Settings
+off stops that page, not built-in recovery.
 
 **Lifetime channel (all platforms):** a managed extension's standard input is a pipe reserved for lifetime,
 not application input or the JSON-RPC connection. Only the launching core holds its sending end open;

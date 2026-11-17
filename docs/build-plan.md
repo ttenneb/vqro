@@ -145,6 +145,17 @@ written the same way was contained by the crash budget and removed with one reve
 - Full check gate passes17/17 with99 Python tests, all opt-in suites/UI/scale and no leftovers. No Rust changes,
   real prompts/model calls or live install. Details/receipts: `research/agents-split.md`.
 
+## Searchable Extensions catalogue and static metadata (2026-11-17)
+
+- Fourteen static bundled manifests; disabled/failed/safe declarations remain inspectable without execution.
+  Bounded file/cache admission, refreshable metadata and pid-free runtime facts through public APIs.
+- Generic optional `list_detail`, wrapped text and responsive panes, per-client interaction state, filter/count,
+  viewport paging, readable groups and explicit actions. Older clients retain ordinary list content.
+- Settings uses those primitives uniformly, including its own controls and manifest settings commands; D21
+  session choices remain separate from normal enabled declarations. No registry/install or log viewer added.
+- Private real-TUI harness 17/17; full gate 18/18, zero warnings/leftovers. Guide: `extensions.md`;
+  captures, evidence and limits: `research/extensions-page.md`.
+
 ## QA3 upgrade/recovery corrections (2026-11-17)
 
 - User-path in-process-herdr -> CLI defaults/provider migration and approved sanitized realistic-copy private-hc proof.

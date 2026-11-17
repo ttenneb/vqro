@@ -14,6 +14,9 @@
 //! `select` (`{"type": "select", "text", "value", "options": [{"label", "value"}], "command", "args"?}`).
 //! Anything with `options` opens a pick-one menu; the chosen `value` is added to its args.
 //! A panel may pin rows above its list with `"toolbar": [row]`; they never scroll away.
+//! Optional `list_detail: {requires:["list_detail"]}` on a panel/page displays the selected row's
+//! `detail_panel: {title?, requires?, toolbar?, items}` beside/below it; ordinary items remain a fallback.
+//! `summary`/string `tags` extend search. Text rows support `wrap:true` and `focusable:true` for reading.
 //! Unknown types render as plain items (forward compatible). Selection, expansion, page, filter and
 //! scroll are client state (per view), never written back.
 //!
