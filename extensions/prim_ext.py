@@ -154,6 +154,10 @@ class Prim:
                 self._send({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32000, "message": str(e), "data": {"kind": kind}}})
 
 
+# Namespaces an activation's contribute() reconciles (owner-tagged entries only).
+CONTRIBUTION_NAMESPACES = ("menu/", "binding/", "view/")
+
+
 class PrimError(RuntimeError):
     def __init__(self, message, kind=None):
         super().__init__(message)
@@ -190,15 +194,45 @@ class Extension:
         self.listeners.append(fn)
         return fn
 
-    def contribute(self, entries):
-        """Set entries (menu items, bindings, ...) owned by this extension; only writes changes."""
-        ops = []
-        for key, value in entries.items():
-            value = dict(value, owner=self.name)
-            if self.entries.get(key, {}).get("value") != value:
-                ops.append({"op": "set", "key": key, "value": value})
-        if ops:
-            self.apply(ops, f"{self.name}: contribute")
+    def contribute(self, entries, exclusive=None):
+        """Set entries (menu items, bindings, views, ...) owned by this extension; only writes changes.
+
+        Reconciled on activation: the first call of a run is, by default, the extension's whole declared
+        set, so entries it owns (`owner` = this extension) under menu/, binding/ and view/ that are not in
+        the set are deleted in the same transaction. A new version that stops contributing an item leaves
+        no ghost menu item or binding. Later calls only add or update. An extension that builds its
+        contributions over several calls passes exclusive=False (or reconciles later with
+        exclusive=True and its full set). Every write is compare-and-set; on a conflict the caches are
+        reloaded and the whole set is recomputed and retried. Entries owned by others are never touched.
+        """
+        if exclusive is None:
+            exclusive = not getattr(self, "_contributed", False)
+        self._contributed = True
+        wanted = {key: dict(value, owner=self.name) for key, value in entries.items()}
+
+        def attempt():
+            with self.cache_lock:
+                ops = [{"op": "set", "key": key, "value": value, "expect": self.version(key)}
+                       for key, value in wanted.items() if self.value(key) != value]
+                if exclusive:
+                    ops += [{"op": "delete", "key": key, "expect": e["version"]}
+                            for key, e in self.entries.items()
+                            if key.startswith(CONTRIBUTION_NAMESPACES) and key not in wanted
+                            and isinstance(e.get("value"), dict) and e["value"].get("owner") == self.name]
+            if not ops:
+                return None
+            result = self.apply(ops, f"{self.name}: contribute")
+            # Keep the cache current until the matching event arrives (a later call compares with it).
+            versions = {c["key"]: c.get("version") for c in (result or {}).get("changes", [])}
+            with self.cache_lock:
+                for op in ops:
+                    if op["op"] == "delete":
+                        self.entries.pop(op["key"], None)
+                    elif versions.get(op["key"]) is not None:
+                        self.entries[op["key"]] = {"version": versions[op["key"]], "value": op["value"]}
+            return result
+
+        return self.retrying(attempt)
 
     def run(self):
         for name, title in self.titles.items():
@@ -368,8 +402,3 @@ def views_in(n, out=None):
     out = [] if out is None else out
     if "view" in n:
         out.append(n["view"])
-    for c in n.get("children", []):
-        views_in(c, out)
-    for t in n.get("tabs", []):
-        views_in(t["node"], out)
-    return out

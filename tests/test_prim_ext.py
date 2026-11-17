@@ -147,5 +147,99 @@ class PartialResources(unittest.TestCase):
         self.assertEqual(ext.resources["r9"]["argv"], ["sh"])
 
 
+class FakeCore:
+    """workspace.apply with versions and compare-and-set, like the core (src/store.rs)."""
+
+    def __init__(self, entries):
+        self.entries = {k: {"version": 1, "value": v} for k, v in entries.items()}
+        self.applied = []
+        self.interfere = None  # one-shot: a concurrent writer's (key, value) applied before the next apply
+
+    def call(self, method, params=None):
+        from prim_ext import PrimError
+        if method == "workspace.snapshot":
+            return {"epoch": "boot", "seq": 1, "entries": {k: dict(e) for k, e in self.entries.items()}, "resources": []}
+        assert method == "workspace.apply", method
+        if self.interfere:
+            key, value = self.interfere
+            self.interfere = None
+            old = self.entries.get(key, {"version": 0})
+            self.entries[key] = {"version": old["version"] + 1, "value": value}
+        for op in params["ops"]:
+            current = self.entries.get(op["key"], {"version": 0})["version"]
+            if op.get("expect") is not None and op["expect"] != current:
+                raise PrimError(f"{op['key']}: version {current}, expected {op['expect']}", "conflict")
+        changes = []
+        for op in params["ops"]:
+            if op["op"] == "set":
+                version = self.entries.get(op["key"], {"version": 0})["version"] + 1
+                self.entries[op["key"]] = {"version": version, "value": op["value"]}
+                changes.append({"key": op["key"], "version": version})
+            else:
+                self.entries.pop(op["key"], None)
+                changes.append({"key": op["key"], "version": None})
+        self.applied.append(params["ops"])
+        return {"txn": len(self.applied), "changes": changes}
+
+
+class Contributions(unittest.TestCase):
+    def extension(self, entries, name="tabs"):
+        core = FakeCore(entries)
+        ext = Extension.__new__(Extension)
+        ext.name = name
+        ext.cache_lock = threading.RLock()
+        ext.listeners = []
+        ext.prim = core
+        ext._load(core.call("workspace.snapshot"))
+        return ext, core
+
+    def test_first_contribution_removes_entries_this_extension_no_longer_declares(self):
+        ext, core = self.extension({
+            "menu/tabs.new": {"label": "New", "command": "tabs.open", "owner": "tabs"},
+            "menu/tabs.old": {"label": "Old item", "command": "tabs.old", "owner": "tabs"},
+            "binding/tabs.old": {"key": "o", "command": "tabs.old", "owner": "tabs"},
+            "view/tabs.old": {"kind": "panel", "owner": "tabs"},
+        })
+        ext.contribute({"menu/tabs.new": {"label": "New", "command": "tabs.open"}})
+        self.assertEqual(set(core.entries), {"menu/tabs.new"})
+        self.assertEqual(len(core.applied), 1, "one transaction")
+        self.assertTrue(all(op["op"] == "delete" and op["expect"] == 1 for op in core.applied[0]))
+        self.assertEqual(set(ext.entries), {"menu/tabs.new"}, "the cache follows")
+
+    def test_entries_of_others_and_unowned_or_other_namespaces_are_never_touched(self):
+        ext, core = self.extension({
+            "menu/panes.split": {"label": "Split", "command": "panes.split", "owner": "panes"},
+            "binding/keys.n": {"key": "n", "command": "tabs.open", "owner": "keys"},
+            "view/term-r1": {"kind": "terminal", "resource": "r1"},
+            "doc/tabs/state": {"owner": "tabs", "last": 3},
+            "layout/main": {"tabs": [], "owner": "tabs"},
+        })
+        before = {k: dict(e) for k, e in core.entries.items()}
+        ext.contribute({"menu/tabs.new": {"label": "New", "command": "tabs.open"}})
+        for key, e in before.items():
+            self.assertEqual(core.entries[key], e, key)
+        self.assertIn("menu/tabs.new", core.entries)
+
+    def test_incremental_contributions_opt_out_and_later_calls_only_add(self):
+        ext, core = self.extension({"menu/tabs.kept": {"label": "Kept", "command": "x", "owner": "tabs"}})
+        ext.contribute({"menu/tabs.a": {"label": "A", "command": "a"}}, exclusive=False)
+        ext.contribute({"menu/tabs.b": {"label": "B", "command": "b"}})  # not the first call: adds only
+        self.assertEqual(set(core.entries), {"menu/tabs.kept", "menu/tabs.a", "menu/tabs.b"})
+        # An explicit exclusive call with the full set reconciles.
+        ext.contribute({"menu/tabs.a": {"label": "A", "command": "a"}, "menu/tabs.b": {"label": "B", "command": "b"}}, exclusive=True)
+        self.assertEqual(set(core.entries), {"menu/tabs.a", "menu/tabs.b"})
+
+    def test_unchanged_set_writes_nothing_and_a_conflict_refreshes_and_retries(self):
+        ext, core = self.extension({"menu/tabs.new": {"label": "New", "command": "tabs.open", "owner": "tabs"}})
+        ext.contribute({"menu/tabs.new": {"label": "New", "command": "tabs.open"}})
+        self.assertEqual(core.applied, [])
+        ext2, core2 = self.extension({"menu/tabs.old": {"label": "Old", "command": "o", "owner": "tabs"}})
+        # Someone else edits the stale item just before our delete lands: we reload and retry.
+        core2.interfere = ("menu/tabs.old", {"label": "Old (edited)", "command": "o", "owner": "tabs"})
+        ext2.contribute({"menu/tabs.new": {"label": "New", "command": "tabs.open"}})
+        self.assertEqual(set(core2.entries), {"menu/tabs.new"})
+        self.assertEqual(len(core2.applied), 1, "the conflicting attempt applied nothing")
+
+
 if __name__ == "__main__":
     unittest.main()

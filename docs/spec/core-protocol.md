@@ -301,6 +301,13 @@ has a 60-second default; callers needing longer waits use `call_with_timeout` wi
 Extensions contribute `menu/*` and `binding/*` entries carrying `owner`; clients hide them while that extension is
 disabled, removed or in safe mode, or when their command is unavailable.
 
+Contributions are reconciled on activation (helper behaviour, `extensions/prim_ext.py` `contribute`). An extension's
+first contribution of a run is its whole declared set, so entries it owns (`owner` = its name) under `menu/`,
+`binding/` and `view/` that are not in that set are deleted in the same compare-and-set transaction. A new
+version that drops an item leaves no ghost. On a conflict the helper reloads and retries. Entries of other owners and
+other namespaces are never touched. Extensions that contribute over several calls opt out (`exclusive=False`) or
+reconcile later with their full set (`exclusive=True`). Other runtimes should follow the same rule.
+
 - `menu/<id>`: `{where: "pane"|"tab"|"tabbar"|"status", label, icon?, command, args?, input?, pick?: "resource", when?,
   order?}`. `icon` (see Icons) is drawn before the label; an empty label shows the icon alone. `input` makes the client prompt for text (passed as `args.text`); `pick` makes it offer a choice (`args.picked`);
   `when` is matched field by field against the invocation context.
