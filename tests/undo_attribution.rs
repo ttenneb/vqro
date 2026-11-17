@@ -130,6 +130,11 @@ impl TuiHarness {
         assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
         harness
     }
+    fn ready(&self) -> bool {
+        let output=Command::new("/usr/bin/tmux").env_clear().args(["-N","-S"]).arg(&self.socket)
+            .args(["capture-pane","-p","-t","undo"]).output().unwrap();
+        output.status.success() && String::from_utf8_lossy(&output.stdout).contains(" prim ")
+    }
     fn key(&self,key:&str) {
         assert!(Command::new("/usr/bin/tmux").env_clear().args(["-N","-S"]).arg(&self.socket)
             .args(["send-keys","-t","undo",key]).status().unwrap().success());
@@ -145,8 +150,8 @@ async fn actual_tui_u_restores_a_real_theme_selected_from_settings() {
     let deadline=Instant::now()+Duration::from_secs(5);
     loop {
         let clients=observer.call("client.list",json!({})).await.unwrap();
-        if clients["clients"].as_array().unwrap().iter().any(|client|client["client"]=="tui") {break;}
-        assert!(Instant::now()<deadline,"TUI connected");
+        if clients["clients"].as_array().unwrap().iter().any(|client|client["client"]=="tui") && ui.ready() {break;}
+        assert!(Instant::now()<deadline,"TUI connected and rendered its recovery badge");
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     let before=pick_real_settings_theme(&fixture,&observer).await;
