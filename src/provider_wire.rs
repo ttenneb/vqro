@@ -163,6 +163,9 @@ impl Connection {
         self.peer.set_max_record_bytes(MAX_RECORD_BYTES)?;
         let (commands, inbox) = mpsc::unbounded_channel();
         let mut c = core.lock().unwrap();
+        // Runtime token claims may await a host: revalidate stop admission after that await,
+        // before rotating credentials or mutating a core whose state fence may be released.
+        if c.shutdown.is_requested() { return Err(provider::rejected("unavailable","core stopping; provider registration not admitted")); }
         if self.is_provider() { return Err(RpcError::new("conflict", "one registration per connection")); }
         if let Some(claim) = &claim {
             if !c.bridge_tokens.valid_claim(r.token.as_deref().unwrap(), claim, &r.name, &r.instance) { return Err(RpcError::new("forbidden", "runtime resume identity mismatch or token used")); }
@@ -504,6 +507,16 @@ mod qa2_tests {
         connection.register(&core,json!({"name":"qa2","role":"backend","instance":"i","software":{"name":"fixture","version":"1"},"provider_version":"0","capabilities":{"terminal.output":{"raw":true}}})).await.unwrap();
         let provider=connection.provider.lock().unwrap().clone().unwrap();
         (core,provider,remote,incoming)
+    }
+    #[tokio::test]
+    async fn registration_rechecks_shutdown_before_mutating_state() {
+        let (core,_provider,remote,_incoming)=fixture().await;
+        let (a,_b)=tokio::io::duplex(4096);let (r,w)=tokio::io::split(a);let (peer,_rx)=Peer::spawn(r,w);
+        let connection=Connection::new(2,peer);connection.hello().unwrap();
+        core.lock().unwrap().shutdown.request();
+        let error=connection.register(&core,json!({"name":"late","role":"backend","instance":"i","software":{"name":"fixture","version":"1"},"provider_version":"0","capabilities":{}})).await.unwrap_err();
+        assert_eq!(error.kind(),"unavailable");assert_eq!(error.data.unwrap()["outcome"],"rejected");
+        assert!(!core.lock().unwrap().providers.contains_key("late"));remote.close();
     }
     fn facts(reference:&str) -> ResourceFacts { parse_facts(json!({"ref":reference,"kind":"terminal","state":"live"})).unwrap() }
     fn fill_local(provider:&WireProvider) {
