@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Optional tmux server controls, independent of the tmux provider extension.
 
-Only the direct helper knows tmux. Commands remain usable when the provider is off;
-menu presence changes only with server existence, counts use live view content.
+Only the direct helper executes tmux. Idle polling stats its owned endpoint; commands
+remain usable when the provider is off. Counts use live view content.
 """
 import json
 import os
@@ -16,18 +16,25 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from prim_ext import Extension, PrimError
 from prim_display import label
 
+POLL_INTERVAL = 5
+
 
 class TmuxServer:
     def __init__(self, ext, helper=None):
         self.ext = ext
         self.helper = helper or os.environ.get("PRIM_TMUX_HELPER", "prim-tmux")
+        self.state_dir = ext.info.get("state_dir")
+        # Same local owned-server rule as prim-tmux; no helper process needed to locate it.
+        self.socket = Path(self.state_dir) / "tmux.sock" if self.state_dir else None
+        self._negative_stamp = None
+        self._absent_stamp = None
         self.last = None
         self.menu = None
         ext.command("tmux.server.status", "Prim-owned tmux server status")(self.status)
         ext.command("tmux.server.stop", "Stop prim-owned tmux server (kills its terminals)")(self.stop)
 
     def call(self, action, *args):
-        state = self.ext.info.get("state_dir")
+        state = self.state_dir
         if not state:
             raise PrimError("tmux needs a persistent prim state directory", "unavailable")
         argv = [self.helper, "server", action, "--state-dir", state, *args]
@@ -57,9 +64,32 @@ class TmuxServer:
             raise PrimError("invalid helper reply; stop outcome may be indeterminate, do not retry",
                             "indeterminate" if action == "stop" else "backend")
 
+    def poll(self):
+        absent = {"running": False, "terminals": 0, "socket": str(self.socket) if self.socket else None}
+        try:
+            metadata = self.socket.stat() if self.socket else None
+        except FileNotFoundError:
+            metadata = None
+        if metadata is None:
+            self._negative_stamp = self._absent_stamp = None
+            return self.refresh(absent)
+        stamp = (metadata.st_dev, metadata.st_ino, metadata.st_mtime_ns, metadata.st_ctime_ns)
+        if stamp == self._absent_stamp:
+            return self.refresh(absent)
+        observed = self.refresh()
+        if not observed.get("running"):
+            # tmux can leave a stale socket. Confirm the same unchanged endpoint twice before
+            # caching absence, rather than cache an initial startup observation immediately.
+            self._absent_stamp = stamp if stamp == self._negative_stamp else None
+            self._negative_stamp = stamp
+        return observed
+
     def refresh(self, observed=None):
         observed = self.call("status") if observed is None else observed
         exists = observed.get("running") is True
+        if exists:
+            # Explicit commands always query; a positive observation invalidates cached absence.
+            self._negative_stamp = self._absent_stamp = None
         if exists != self.menu:
             entries = {"view/tmux-server": {"kind": "panel", "title": "Prim-owned tmux server", "items": []}}
             if exists:
@@ -135,14 +165,14 @@ def main():
     error = None
     while True:
         try:
-            server.refresh()
+            server.poll()
             error = None
         except Exception as exc:
             message = str(exc)
             if message != error:
                 print("tmux-server: " + label(message), file=sys.stderr)
                 error = message
-        time.sleep(1)
+        time.sleep(POLL_INTERVAL)
 
 
 if __name__ == "__main__":

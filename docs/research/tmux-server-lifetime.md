@@ -22,6 +22,10 @@ registered, including while the tmux provider is disconnected or disabled. With 
 prim-owned tmux server running”. A **tmux server** status-menu item appears only while that server exists. It opens a
 live panel with the terminal count and a Stop action using the existing generic menu/input primitives; settings has no
 tmux-specific code. Only server-presence transitions change contributions; changing counts use `view.publish`.
+The extension resolves the owned endpoint once and stats it every five seconds. No helper is spawned while the path
+is absent. A stale socket is queried twice before caching absence until its filesystem identity changes; normal tmux
+restarts replace that endpoint. Explicit commands always query immediately and invalidate cached absence on success.
+A new endpoint is discovered at the next polling tick, without a per-second helper process when tmux is unused.
 
 Stop asks the user to type `STOP N` and names all N currently observed terminals. Changed instance/count requires fresh
 confirmation. Before the native action the extension transactionally disables enabled direct `prim-tmux` provider
