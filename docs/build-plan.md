@@ -51,6 +51,21 @@ written the same way was contained by the crash budget and removed with one reve
 - Regression coverage: failed write rollback and retry, uncertain directory sync and event publication, temporary-file
   cleanup, resource-map error reporting, and same-identity extension replacement routing/live-content cleanup.
 
+## Bounded terminal streams and deadlines (2026-11-17)
+
+- Terminal and herdr frame queues now have byte budgets. Backend CREDIT follows downstream handoff into the
+  connection's bounded writer queue, rather than an unbounded adapter enqueue.
+- Connection control/data budgets are independent. Slow streams close explicitly; their queued output is
+  discarded without replay, while normal final output remains ordered before closure. Control overflow disconnects.
+- Forwarded command deadlines report `timeout` with an indeterminate outcome, never retry, and clean pending calls.
+- The TUI resets parser state and retries closed live terminal views with backend history, including closure racing
+  the attach reply. Event-resync connection fencing is preserved.
+- Release scale harness at the default 600-terminal/200-agent profile: stalled-only budgets passed; with both a
+  stalled client and a 64 KiB/s reader, RSS peaked at 33.9 MiB and no slow echoes timed out, but the placeholder
+  slow-echo p99 budget still failed (1.10 s versus 250 ms). Bounded memory does not imply bounded transport latency;
+  existing socket bytes and status-event bursts cannot be preempted. Final teardown leaked no processes.
+  Evidence and the explicit scale-test failure: `research/bounded-streams.md`.
+
 ## Known gaps found while building
 
 - **History churn:** extensions that refresh views on every event (the sidebar on status changes) fill the

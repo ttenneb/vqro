@@ -7,7 +7,7 @@ Status: implemented in slice 1 (`src/server.rs`), not frozen (D16). JSON-RPC 2.0
 local socket (`PRIM_SOCKET`, default `~/.local/state/prim/prim.sock`, mode 0600). Both sides may send requests:
 the core forwards `command.invoke` to the connection that registered the command. Errors carry a stable
 `data.kind`: `invalid`, `conflict`, `not_found`, `unavailable`, `forbidden`, `backend`, `disconnected`, `io`,
-`durability_unconfirmed`.
+`durability_unconfirmed`, `timeout`, `overloaded`.
 
 ## Session
 
@@ -78,9 +78,32 @@ but id stability across a core restart is not confirmed until a later successful
 | `stream.resize` | `stream`, `cols`, `rows` | |
 | `stream.close` | `stream` | |
 
-Streams push `stream.data {stream, data}` and `stream.closed {stream, reason}`. Stream messages are handled in
-order. Resource ids (`r1`, ...) are prim's and stay stable across core restarts while the backend keeps the
-resource.
+Streams push `stream.data {stream, data}` (base64) and `stream.closed {stream, reason}` (reason is an object
+with a `reason` string). Input is handled in order; one input message may contain at most 64 KiB of decoded bytes.
+A full bounded input queue returns `overloaded` without dispatching that input. A rejected input notification
+produces `stream.error {stream, error, outcome: "rejected"}` instead; it is never replayed.
+
+Terminal input/output buffers are byte-bounded (256 KiB per direction per stream). Each connection has separate
+outbound byte budgets: 1 MiB for stream data, 4 MiB for replies, events and other control messages. Small messages
+have a 64-byte accounting floor to bound queue metadata too. Permits stay charged through the socket write.
+Control has priority over queued stream data; an in-flight JSON line must finish before control can overtake it.
+These are payload/queue bounds, not a promise about allocator overhead, operating-system socket buffers or latency.
+The herdr adapter also bounds its frame queues (1 MiB outbound, 32 MiB inbound; individual frames at most 16 MiB).
+
+When a viewer cannot keep up, its affected stream closes with `reason: {reason: "slow_consumer"}`. Queued data for
+that stream may be discarded; closure is an explicit gap, not a complete-output claim. Other streams/connections
+continue. A normal backend closure follows accepted output in order; if its closing marker cannot fit, it becomes
+`slow_consumer` rather than silently dropping final output. Control queue overflow disconnects the connection:
+reconnect and recover events using the epoch cursor/snapshot mechanism, never resend input.
+
+After a gap, discard the old VT parser state and attach again with backend history for a fresh repaint; do not
+concatenate partial escape sequences across streams. The TUI retries closed live views after a paced one-second
+retry, without requiring a new resource event. It also handles `stream.gap {stream, reason}` from future producers
+by closing the old stream and reattaching. No new viewer/provider credit wire method is introduced in this slice:
+internal herdr CREDIT follows acceptance into the core's bounded connection writer queue, not an unbounded enqueue
+and not a claim that the viewer parsed the bytes.
+
+Resource ids (`r1`, ...) are prim's and stay stable across core restarts while the backend keeps the resource.
 
 ## Commands
 
@@ -88,7 +111,7 @@ resource.
 |---|---|---|
 | `command.register` | `name`, `title?` | the command; `prim.*` is reserved for the core |
 | `command.list` | | `commands` |
-| `command.invoke` | `name`, `args?` | whatever the owner returns; `unavailable` if its owner is disconnected |
+| `command.invoke` | `name`, `args?`, `deadline_ms?` | whatever the owner returns; `unavailable` if its owner is disconnected |
 
 Built-in, non-replaceable commands (recovery surface, D15): `prim.layout.reset`, `prim.revert`
 (default: last change not made by an extension), `prim.safe_mode`, `prim.extension.disable|enable|restart`.
@@ -97,6 +120,12 @@ Everything opinionated is an extension (D17).
 Command registrations belong to the registering connection, not just its author string. A replacement connection
 with the same extension identity may re-register a command; closing the old connection does not disable or reroute
 the replacement's command. Commands left registered only by the closing connection become unavailable.
+
+Forwarded invocations default to a 30-second deadline. `deadline_ms` may override it from 1 to 300000 ms; built-in
+commands are local and are not timed by this forwarding deadline. Expiry returns `timeout` with
+`data.outcome: "indeterminate"`: the handler may already have run and is not cancelled. No resend occurs. Late
+replies are ignored; timeout/cancellation removes the pending call entry. The Rust `Peer::call` helper independently
+has a 60-second default; callers needing longer waits use `call_with_timeout` with an appropriate local deadline.
 
 ## Contributions (D17)
 

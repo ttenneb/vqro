@@ -50,6 +50,28 @@ struct Term {
     size: (u16, u16),
     attaching: bool,
     closed: Option<String>,
+    retry_at: Option<std::time::Instant>,
+}
+
+impl Term {
+    fn close(&mut self, reason: String) {
+        self.stream = None;
+        self.attaching = false;
+        self.closed = Some(reason);
+        self.retry_at = Some(std::time::Instant::now() + std::time::Duration::from_secs(1));
+    }
+
+    fn can_attach(&self, live: bool, now: std::time::Instant) -> bool {
+        live && self.stream.is_none() && !self.attaching && self.retry_at.is_none_or(|at| now >= at)
+    }
+
+    fn begin_attach(&mut self) {
+        self.attaching = true;
+        self.closed = None;
+        // A gap invalidates VT parser state. Only the backend's new attach/history repaint can
+        // restore it; never concatenate an old partial escape sequence with a fresh stream.
+        self.parser = new_parser(self.size.0, self.size.1);
+    }
 }
 
 enum Overlay {
@@ -172,6 +194,7 @@ struct App {
     terms: HashMap<String, Term>,
     stream_view: HashMap<u64, String>,
     early: HashMap<u64, Vec<Vec<u8>>>,
+    early_closed: HashMap<u64, String>,
     leaves: Vec<String>,
     focus: usize,
     overlay: Option<Overlay>,
@@ -241,7 +264,7 @@ async fn next_input(
         result = async { reconnecting.as_mut().unwrap().await }, if reconnecting.is_some() => UiInput::Reconnected(result?),
         Some(m) = messages.recv() => UiInput::Message(m),
         Some(ev) = keys.recv() => UiInput::Key(ev),
-        _ = tokio::time::sleep(std::time::Duration::from_millis(500)), if app.toast.is_some() => UiInput::Tick,
+        _ = tokio::time::sleep(std::time::Duration::from_millis(500)), if app.toast.is_some() || app.terms.values().any(|t| t.retry_at.is_some()) => UiInput::Tick,
         else => UiInput::Closed,
     })
 }
@@ -386,7 +409,7 @@ impl App {
             peer, tx,
             entries: BTreeMap::new(), versions: BTreeMap::new(), resources: BTreeMap::new(),
             commands: BTreeMap::new(), extensions: BTreeMap::new(), safe_mode: false,
-            terms: HashMap::new(), stream_view: HashMap::new(), early: HashMap::new(),
+            terms: HashMap::new(), stream_view: HashMap::new(), early: HashMap::new(), early_closed: HashMap::new(),
             leaves: Vec::new(), focus: 0, overlay: None, pstate: HashMap::new(),
             filtering: None, toast: None, live: HashMap::new(), hit: Hit::default(),
             drag: None, overrides: HashMap::new(), mouse_owner: None, mouse_on: true,
@@ -412,6 +435,7 @@ impl App {
         self.terms.clear();
         self.stream_view.clear();
         self.early.clear();
+        self.early_closed.clear();
         self.load(snap);
         self.message = "reconnected".into();
     }
@@ -445,15 +469,19 @@ impl App {
                     None => self.early.entry(sid).or_default().push(bytes),
                 }
             }
-            "stream.closed" => {
+            "stream.closed" | "stream.gap" => {
                 let Some(sid) = params["stream"].as_u64() else { return };
+                let reason = params["reason"]["reason"].as_str().or_else(|| params["reason"].as_str()).unwrap_or("closed").to_string();
+                self.early.remove(&sid);
+                if method == "stream.gap" { self.peer.notify("stream.close", json!({"stream": sid})); }
                 if let Some(view) = self.stream_view.remove(&sid) {
-                    if let Some(t) = self.terms.get_mut(&view) {
-                        t.stream = None;
-                        t.closed = Some(params["reason"]["reason"].as_str().unwrap_or("closed").to_string());
-                    }
+                    if let Some(t) = self.terms.get_mut(&view) { t.close(reason); }
+                } else if self.terms.values().any(|t| t.attaching) {
+                    // Output/closure can race the attach reply's delivery to the UI task.
+                    self.early_closed.insert(sid, reason);
                 }
             }
+            "stream.error" => self.message = format!("stream input rejected (not replayed): {}", params["error"]["message"].as_str().unwrap_or("error")),
             "missed" => self.resync(),
             "event" => {
                 if self.resyncing {
@@ -618,6 +646,8 @@ impl App {
                 }
                 let Some(t) = self.terms.get_mut(&view) else {
                     if let Ok(sid) = result {
+                        self.early.remove(&sid);
+                        self.early_closed.remove(&sid);
                         self.peer.notify("stream.close", json!({"stream": sid}));
                     }
                     return;
@@ -625,19 +655,28 @@ impl App {
                 t.attaching = false;
                 if t.resource != resource {
                     if let Ok(sid) = result {
+                        self.early.remove(&sid);
+                        self.early_closed.remove(&sid);
                         self.peer.notify("stream.close", json!({"stream": sid}));
                     }
                     return;
                 }
                 match result {
                     Ok(sid) => {
-                        t.stream = Some(sid);
-                        self.stream_view.insert(sid, view);
-                        for bytes in self.early.remove(&sid).unwrap_or_default() {
-                            t.parser.process(&bytes);
+                        if let Some(reason) = self.early_closed.remove(&sid) {
+                            self.early.remove(&sid);
+                            t.close(reason);
+                        } else {
+                            t.stream = Some(sid);
+                            t.retry_at = None;
+                            t.closed = None;
+                            self.stream_view.insert(sid, view);
+                            for bytes in self.early.remove(&sid).unwrap_or_default() {
+                                t.parser.process(&bytes);
+                            }
                         }
                     }
-                    Err(e) => t.closed = Some(e),
+                    Err(e) => t.close(e),
                 }
             }
         }
@@ -1794,13 +1833,14 @@ impl App {
                     size: (inner.width, inner.height),
                     attaching: false,
                     closed: None,
+                    retry_at: None,
                 });
                 if t.resource != rid {
                     if let Some(sid) = t.stream.take() {
                         self.stream_view.remove(&sid);
                         self.peer.notify("stream.close", json!({"stream": sid}));
                     }
-                    *t = Term { resource: rid.clone(), stream: None, parser: new_parser(inner.width, inner.height), size: (inner.width, inner.height), attaching: false, closed: None };
+                    *t = Term { resource: rid.clone(), stream: None, parser: new_parser(inner.width, inner.height), size: (inner.width, inner.height), attaching: false, closed: None, retry_at: None };
                 }
                 // While a border is being dragged, programs keep their size; they resize once on release.
                 if t.size != (inner.width, inner.height) && !dragging {
@@ -1810,8 +1850,8 @@ impl App {
                         self.peer.notify("stream.resize", json!({"stream": sid, "cols": inner.width, "rows": inner.height}));
                     }
                 }
-                if self.connected && t.stream.is_none() && !t.attaching && t.closed.is_none() && live {
-                    t.attaching = true;
+                if self.connected && t.can_attach(live, std::time::Instant::now()) {
+                    t.begin_attach();
                     let (peer, tx, view, rid) = (self.peer.clone(), self.tx.clone(), view.to_string(), rid.clone());
                     let (cols, rows) = (inner.width, inner.height);
                     let connection = self.connection;
@@ -2366,7 +2406,7 @@ mod tests {
         app.reconnected(peer, &snapshot(1, "current"));
         app.terms.insert("view".into(), Term {
             resource: "r1".into(), stream: None, parser: new_parser(80, 24),
-            size: (80, 24), attaching: true, closed: None,
+            size: (80, 24), attaching: true, closed: None, retry_at: None,
         });
         app.on_msg(Msg::Attached { connection: old_connection, view: "view".into(), resource: "r1".into(), result: Ok(1) });
         assert!(app.terms["view"].attaching);
@@ -2392,7 +2432,7 @@ mod tests {
         let (mut app, mut messages) = app();
         app.terms.insert("term-r1".into(), Term {
             resource: "r1".into(), stream: Some(99), parser: new_parser(80, 24),
-            size: (80, 24), attaching: false, closed: None,
+            size: (80, 24), attaching: false, closed: None, retry_at: None,
         });
         app.stream_view.insert(99, "term-r1".into());
         app.early.insert(99, vec![b"stale".to_vec()]);
@@ -2417,6 +2457,55 @@ mod tests {
         terminal.draw(|f| app.draw(f)).unwrap();
         let screen: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
         assert!(screen.contains("fake f1"), "reattached output must be repainted");
+        // A stream can close while its resource stays live and emits no new resource event.
+        let sid = app.terms["term-r1"].stream.unwrap();
+        app.on_incoming(Incoming::Notification { method: "stream.closed".into(), params: json!({"stream": sid, "reason": {"reason": "slow_consumer"}}) });
+        assert!(app.terms["term-r1"].stream.is_none());
+        app.terms.get_mut("term-r1").unwrap().retry_at = Some(std::time::Instant::now());
+        terminal.draw(|f| app.draw(f)).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                tokio::select! {
+                    Some(m) = incoming.recv() => app.on_incoming(m),
+                    Some(m) = messages.recv() => app.on_msg(m),
+                }
+                let term = &app.terms["term-r1"];
+                if term.stream.is_some_and(|new| new != sid) && term.parser.screen().contents().contains("fake f1") { break; }
+            }
+        }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn closure_before_attach_reply_cannot_adopt_a_closed_stream() {
+        let (mut app, _) = app();
+        app.terms.insert("view".into(), Term {
+            resource: "r1".into(), stream: None, parser: new_parser(80, 24),
+            size: (80, 24), attaching: true, closed: None, retry_at: None,
+        });
+        app.on_incoming(Incoming::Notification { method: "stream.closed".into(), params: json!({"stream": 7, "reason": {"reason": "slow_consumer"}}) });
+        app.on_msg(Msg::Attached { connection: app.connection, view: "view".into(), resource: "r1".into(), result: Ok(7) });
+        assert!(app.terms["view"].stream.is_none());
+        assert_eq!(app.terms["view"].closed.as_deref(), Some("slow_consumer"));
+        assert!(app.early_closed.is_empty());
+    }
+
+    #[test]
+    fn closed_live_terminal_retries_without_a_resource_event_and_resets_parser() {
+        let mut term = Term {
+            resource: "r1".into(), stream: Some(1), parser: new_parser(80, 24),
+            size: (80, 24), attaching: false, closed: None, retry_at: None,
+        };
+        term.parser.process(b"old\x1b[");
+        term.close("slow_consumer".into());
+        let now = std::time::Instant::now();
+        assert!(!term.can_attach(true, now), "retry is paced");
+        assert!(!term.can_attach(false, now + std::time::Duration::from_secs(2)));
+        assert!(term.can_attach(true, now + std::time::Duration::from_secs(2)));
+        term.begin_attach();
+        assert!(term.attaching);
+        assert!(term.closed.is_none());
+        term.parser.process(b"repaint");
+        assert_eq!(term.parser.screen().contents(), "repaint", "fresh attach cannot reuse old VT state");
     }
 
     fn winner(cands: &[(String, Value)], key: &str) -> String {
