@@ -106,6 +106,7 @@ class Provider:
         self.provider_version, self.token = provider_version, token
         self.limits = limits or Limits()
         self.generation = None
+        self.registration = {}
         self.window = min(self.limits.stream_window_bytes, 262144)
         self.max_record = MAX_RECORD
         self.effects = {}
@@ -144,6 +145,7 @@ class Provider:
             if self.token is not None:
                 params["token"] = self.token
             result = await self.call("provider.register", params)
+            self.registration = result
             self.generation = integer(result["generation"], 1)
             self.window = integer(result["limits"]["stream_window_bytes"], 1, self.window)
             self.max_record = integer(result["limits"]["max_record_bytes"], 1, MAX_RECORD)
@@ -291,6 +293,7 @@ class Provider:
                         else:
                             result = row.get("result")
                             if pending_method == "provider.register":
+                                self.registration = result
                                 # Activate before reading the next record: a core
                                 # request may follow this reply in the same read.
                                 self.generation = integer(result["generation"], 1)

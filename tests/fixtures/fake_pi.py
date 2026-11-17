@@ -122,7 +122,8 @@ for line in sys.stdin.buffer:
         reply(command)
     elif kind == "test_dialog":
         emit({"type": "extension_ui_request", "id": command["dialog_id"],
-              "method": command["method"], "title": "Fixture question", "options": ["one", "two"],
+              "method": command["method"], "title": command.get("title", "Fixture question"),
+              "message": command.get("message", ""), "options": command.get("options", ["one", "two"]),
               "timeout": command.get("timeout", 0)})
         reply(command)
     elif kind == "test_release":
@@ -132,6 +133,15 @@ for line in sys.stdin.buffer:
         reply(command)
     elif kind == "test_hold":
         held.append(command)
+    elif kind == "test_transcript":
+        emit({"type": "message_start", "message": {"role": "assistant", "content": []}})
+        for _ in range(command.get("count", 1)):
+            emit({"type": "message_update", "assistantMessageEvent": {
+                "type": "text_delta", "contentIndex": 0, "delta": command.get("text", "fixture text")}})
+        if "final" in command:
+            emit({"type": "message_end", "message": {"role": "assistant", "content": [
+                {"type": "text", "text": command["final"]}]}})
+        reply(command)
     elif kind == "test_accepted":
         reply(command, {"accepted": accepted})
     elif kind == "test_unicode":

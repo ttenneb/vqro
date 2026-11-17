@@ -1,0 +1,330 @@
+"""Pi RPC child + runtime provider, intended as a backend terminal's program."""
+import asyncio
+import json
+import math
+import re
+import uuid
+
+from prim_provider import Provider, ProviderError
+from .client import DIALOGS, EFFECTS, PiRpcClient
+from .display import Fallback, Transcript, agent_data, plain, tail
+
+CAPABILITIES = {
+    "agent.prompt": {"while_running": "needs_mode"},
+    "agent.steer": {"applies": "after_current_tool_calls"},
+    "agent.follow_up": {"applies": "when_idle"},
+    "agent.abort": {"clears_queue": False, "waits_for_idle": True},
+    "agent.clear_queue": {"returns": "texts"},
+    "agent.answer": {"kinds": sorted(DIALOGS)},
+    "agent.correlation": {"per_input": False},
+}
+
+
+class Bridge:
+    def __init__(self, argv, *, cwd, env, token, endpoint=None, sock=None,
+                 provider=None, fallback=None, interval=.2, transcript_bytes=16384,
+                 pi_limits=None, connector=None, retry_initial=.25, retry_max=5):
+        if not argv:
+            raise ValueError("Pi argv is required; no installed runtime is selected implicitly")
+        if not isinstance(token, str) or not token:
+            raise ValueError("PRIM_BRIDGE_TOKEN is required")
+        if not isinstance(interval, (int, float)) or not math.isfinite(interval) or interval < .1:
+            raise ValueError("publication interval must be finite and at least 0.1 seconds")
+        self.argv, self.cwd = list(argv), cwd
+        self.env = {k: v for k, v in env.items() if not k.startswith("HERDR_") and
+                    k not in {"PRIM_BRIDGE_TOKEN", "PRIM_EXTENSION", "PRIM_EXTENSION_LIFETIME"}}
+        instance = str(uuid.uuid4())
+        self.provider = provider or Provider("pi-" + instance, instance, CAPABILITIES, role="runtime", token=token,
+                                            software={"name": "pi-rpc", "version": "unknown"})
+        if not all(isinstance(v, (int, float)) and math.isfinite(v) and v > 0 for v in (retry_initial, retry_max)) or retry_max < retry_initial:
+            raise ValueError("reconnect backoff must be positive and bounded")
+        self.endpoint, self.sock = endpoint, sock
+        self.connector = connector
+        self.retry_initial, self.retry_max = retry_initial, retry_max
+        self._credential = token
+        self._template = {"name": self.provider.name, "instance": self.provider.instance,
+                          "capabilities": self.provider.capabilities, "role": "runtime",
+                          "software": self.provider.software, "provider_version": self.provider.provider_version,
+                          "limits": self.provider.limits}
+        self.connections = 0
+        self.view_problem = None
+        self._publish_lock = asyncio.Lock()
+        self._control_task = None
+        self.fallback = fallback or Fallback()
+        self.interval, self.pi_limits = interval, pi_limits
+        self.transcript = Transcript(transcript_bytes)
+        self.ready, self.started = asyncio.Event(), asyncio.Event()
+        self.pi = None
+        self.rid = None
+        self.view = None
+        self.cursor = 0
+        self.connected = False
+        self.closing = False
+        self._facts = self._content = self._fallback_frame = None
+        self._tasks = set()
+        self.failure = None
+        self._cancel_attempts = set()
+        for effect in EFFECTS:
+            self.provider.effect("agent." + effect)(self._effect)
+
+    def _task(self, coroutine):
+        task = asyncio.create_task(coroutine)
+        self._tasks.add(task)
+        return task
+
+    def facts(self):
+        snapshot = self.pi.snapshot()
+        return {"ref": "agent", "incarnation": "", "kind": "agent", "state": "live",
+                "name": "Pi", "title": "Pi RPC", "cwd": str(self.cwd),
+                "status": {"state": snapshot["status"]}, "data": {**agent_data(snapshot),
+                    **({"view_error": self.view_problem} if self.view_problem else {})}}
+
+    async def _effect(self, effect, args):
+        if self.closing or self.pi is None:
+            raise ProviderError("unavailable", "bridge is closing")
+        if effect.ref != "agent" or effect.incarnation != "":
+            raise ProviderError("not_found", "no matching Pi agent")
+        if effect.remaining <= 0:
+            raise ProviderError("backend", "deadline expired before runtime dispatch")
+        op = effect.op.removeprefix("agent.")
+        result = await self.pi.invoke(op, args, timeout=effect.remaining)
+        outcome = result["outcome"]
+        if outcome == "indeterminate":
+            raise ProviderError("backend", result.get("reason", "runtime outcome unknown"))
+        if outcome == "rejected":
+            error = result.get("error", result.get("reason", "Pi rejected input"))
+            return {"outcome": "rejected", "error": {"kind": "backend", "message": str(error)}}
+        reply = {"outcome": outcome}  # includes dispatched: no acknowledgment for UI answers
+        if "data" in result:
+            reply["data"] = result["data"]
+        return reply
+
+    def _remember(self, provider):
+        registration = provider.registration
+        if registration:
+            token = registration.get("resume_token")
+            self._credential = token if isinstance(token, str) and token else None
+
+    async def _connect(self, provider):
+        if self.connector is not None:
+            await self.connector(provider)
+        else:
+            sock, self.sock = self.sock, None
+            await provider.connect(self.endpoint, sock=sock)
+        self._remember(provider)
+        if self._credential is None:
+            raise ProviderError("backend", "core omitted required resume_token; cannot resume")
+        self.view_problem = None
+        initial = self.facts()
+        await provider.full_sync([initial])
+        snapshot = await provider.call("workspace.snapshot", {})
+        resources = [r for r in snapshot.get("resources", [])
+                     if r.get("provider") == provider.name and r.get("backend_ref") == "agent"]
+        if len(resources) != 1 or not isinstance(resources[0].get("id"), str) or not re.fullmatch(r"r[0-9]+", resources[0]["id"]):
+            raise ProviderError("backend", "acknowledged sync did not publish exactly one agent resource")
+        self.rid = resources[0]["id"]
+        view = "agent-" + self.rid
+        marker = {"instance": provider.instance, "ref": "agent"}
+        entry = snapshot.get("entries", {}).get("view/" + view)
+        if entry is None:
+            await provider.call("workspace.apply", {"note": "Declare Pi agent fallback view", "ops": [{
+                "op": "set", "key": "view/" + view, "expect": 0,
+                "value": {"kind": "panel", "title": "Pi " + self.rid, "bridge": marker,
+                          "items": [{"type": "text", "text": "Pi bridge not connected; use its backend terminal."}]}}]})
+            self.view = view
+        elif entry.get("value", {}).get("kind") == "panel" and entry["value"].get("bridge") == marker:
+            self.view = view
+        else:
+            self.view = None
+            self.view_problem = "Agent view belongs to someone else; not overwritten or published."
+        async with self._publish_lock:
+            self._facts, self._content = initial, None
+            self.connected = True
+        self.connections += 1
+        self.failure = None
+        await self.publish()
+        if not self.connected:
+            raise ProviderError("unavailable", "control disconnected during initial publication")
+        self.ready.set()
+
+    async def _control(self):
+        provider = self.provider
+        backoff = self.retry_initial
+        while not self.closing:
+            self.provider = provider
+            self.connected = False
+            self.ready.clear()
+            try:
+                await self._connect(provider)
+                backoff = self.retry_initial
+                await provider.wait_closed()
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                self.failure = tail(plain(error), 1024)
+            finally:
+                self._remember(provider)  # an observed rotated token survives later setup failure
+                self.connected = False
+                self.ready.clear()
+                await provider.close()
+            while not self.closing:
+                await asyncio.sleep(backoff)
+                backoff = min(self.retry_max, backoff * 2)
+                if self._credential is not None:
+                    provider = Provider(**self._template, token=self._credential)
+                    for effect in EFFECTS:
+                        provider.effect("agent." + effect)(self._effect)
+                    break
+                # Never retry a known-consumed spawn token when no resume token
+                # was returned. Pi/fallback stay alive until lifetime EOF/exit.
+
+    def _events(self):
+        batch = self.pi.events(self.cursor)
+        self.cursor = batch["cursor"]
+        if batch["gap"]:
+            self.transcript.gap()
+        for event in batch["events"]:
+            self.transcript.feed(event)
+
+    def content(self):
+        snapshot = self.pi.snapshot()
+        rows, clipped, lost = self.transcript.window()
+        run = snapshot["run"]
+        status = plain(snapshot["status"])
+        items = [{"type": "text", "text": f"{status} | active={run['active']} settled={run['settled']} aborted={run['aborted']} | bounded view"}]
+        if clipped or lost:
+            items.append({"type": "text", "style": "warn", "text": "Bounded transcript tail; some earlier output is unavailable."})
+        for request in snapshot["requests"]:
+            detail = request.get("data", {})
+            label = f"Request {request['id']} ({request['kind']}): {request['prompt']}"
+            if detail.get("message"):
+                label += " - " + str(detail["message"])
+            if detail.get("options"):
+                label += " | choices: " + str(detail["options"])
+            items.append({"type": "text", "style": "warn", "text": tail(plain(label), 2048)})
+        items.extend({"type": "text", "text": tail(row, 2048)} for row in rows)
+        result = {"title": "Pi " + (self.rid or "starting"), "items": items,
+                  "truncated": clipped, "output_gap": lost}
+        while len(json.dumps(result, ensure_ascii=False).encode()) > 32768 and len(items) > 1:
+            del items[1]
+            result["truncated"] = True
+        return result
+
+    def _show(self):
+        snapshot = self.pi.snapshot()
+        rows, _, _ = self.transcript.window()
+        frame = f"Pi {self.rid or 'starting'} | {snapshot['status']} | core {'connected' if self.connected else 'unavailable'}"
+        frame += "\n" + "\n".join(rows[-2:])
+        if snapshot["requests"]:
+            request = snapshot["requests"][0]
+            frame += "\nRequest " + tail(plain(f"{request['id']} {request['kind']}: {request['prompt']}"), 1024)
+        if self.view_problem or self.failure:
+            frame += "\n" + (self.view_problem or self.failure)
+        if snapshot["requests"]:
+            request = snapshot["requests"][0]
+            frame += "\nRequest " + str(request["kind"]) + ": " + tail(plain(request["prompt"]), 512)
+        if self.view_problem or self.failure:
+            frame += "\n" + str(self.view_problem or self.failure)
+        if frame != self._fallback_frame:
+            self._fallback_frame = frame
+            self.fallback.show(frame)
+
+    async def publish(self, final=False):
+        self._events()
+        # Unrepresentable dialogs must not leave the runtime invisibly blocked.
+        observed = self.pi.snapshot()
+        data = agent_data(observed)
+        self._cancel_attempts.intersection_update(r["id"] for r in observed["requests"])
+        if data.get("requests") is None and observed["available"]:
+            for request in observed["requests"]:
+                if request["id"] not in self._cancel_attempts:
+                    self._cancel_attempts.add(request["id"])
+                    await self.pi.invoke("answer", {"id": request["id"], "cancelled": True})
+                    self.transcript.append("Oversized dialog cancellation dispatched/attempted; no automatic resend.")
+        provider = self.provider
+        async with self._publish_lock:
+            if provider is self.provider and provider.failure is not None:
+                self.connected = False
+            if provider is self.provider and self.connected:
+                try:
+                    current = self.facts()
+                    if not final and current != self._facts:
+                        await provider.upsert(current)
+                        if provider is self.provider:
+                            self._facts = current
+                    content = self.content()
+                    if self.view is not None and content != self._content:
+                        await provider.call("view.publish", {"view": self.view, "content": content}, timeout=1 if final else None)
+                        if provider is self.provider:
+                            self._content = content
+                except ProviderError as error:
+                    if provider is self.provider:
+                        self.connected = False
+                        self.failure = tail(plain(error), 1024)
+                    await provider.close()
+        self._show()
+
+    async def _publish_loop(self):
+        while True:
+            await asyncio.sleep(self.interval)
+            await self.publish()
+
+    async def run(self, stop=None):
+        stop = stop or asyncio.Event()
+        why = {"reason": "closed"}
+        try:
+            self.pi = await PiRpcClient.start(self.argv, cwd=self.cwd, env=self.env, limits=self.pi_limits)
+            self.started.set()
+            ended = self._task(self.pi.wait_closed())
+            stopping = self._task(stop.wait())
+            metadata = self._task(self.pi.request("get_state"))
+            done, _ = await asyncio.wait({metadata, ended, stopping}, return_when=asyncio.FIRST_COMPLETED)
+            if metadata in done:
+                state = await metadata
+                if state["outcome"] != "accepted":
+                    raise ProviderError("backend", "Pi did not accept startup metadata request")
+                self._control_task = self._task(self._control())
+                publishing = self._task(self._publish_loop())
+                done, _ = await asyncio.wait({publishing, self._control_task, ended, stopping}, return_when=asyncio.FIRST_COMPLETED)
+                if publishing in done:
+                    await publishing
+                if self._control_task in done:
+                    await self._control_task
+            if ended in done:
+                code = self.pi.process.returncode
+                why = {"reason": "exited", "exit_code": code}
+            else:
+                why = {"reason": "closed", "message": "bridge stdin/lifetime EOF or explicit stop"}
+        except asyncio.CancelledError:
+            why = {"reason": "closed", "message": "bridge cancelled"}
+            raise
+        except Exception as error:
+            self.failure = f"bridge failure: {error}"
+            why = {"reason": "closed", "message": tail(plain(self.failure), 1024)}
+            raise
+        finally:
+            self.closing = True
+            finishing = [task for task in self._tasks if task is not self._control_task]
+            for task in finishing:
+                task.cancel()
+            await asyncio.gather(*finishing, return_exceptions=True)
+            if self.pi is not None:
+                await self.pi.close(grace=.5)
+                if self.view is not None and self.connected:
+                    try:
+                        await asyncio.wait_for(self.publish(final=True), 1.5)
+                    except (TimeoutError, ProviderError):
+                        pass
+            if self.provider.generation is not None and self.connected:
+                try:
+                    await asyncio.wait_for(self.provider.gone("agent", why=why), 1)
+                except (TimeoutError, ProviderError):
+                    pass
+            if self._control_task is not None:
+                self._control_task.cancel()
+                await asyncio.gather(self._control_task, return_exceptions=True)
+            await self.provider.close()
+            self.connected = False
+            self.fallback.show(f"Pi bridge stopped | {why['reason']} | {self.failure or ''}")
+            self.fallback.close()
+        return why

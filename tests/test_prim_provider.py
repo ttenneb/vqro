@@ -21,13 +21,17 @@ class Core:
         left, right = socket.socketpair()
         left.setblocking(False)
         right.setblocking(False)
-        self.reader, self.writer = await asyncio.open_connection(sock=right, limit=1048577)
+        reader, writer = await asyncio.open_connection(sock=right, limit=1048577)
+        self.attach(reader, writer)
+        return left
+
+    def attach(self, reader, writer):
+        self.reader, self.writer = reader, writer
         self.rows, self.pending = [], {}
         self.changed = asyncio.Event()
         self.serial = 0
         self.hold = set()
         self.task = asyncio.create_task(self.read())
-        return left
 
     async def send(self, row):
         self.writer.write(json.dumps(row, ensure_ascii=False).encode() + b"\r\n")
@@ -45,19 +49,30 @@ class Core:
                     if future is not None:
                         future.set_result(row)
                     continue
-                if "id" not in row or row["method"] in self.hold:
+                if "id" not in row:
+                    self.notification(row)
                     continue
-                if row["method"] == "provider.register":
-                    result = {"provider": "fake", "generation": 7, "limits": {
-                        "stream_window_bytes": min(row["params"]["limits"]["stream_window_bytes"], 262144),
-                        "max_record_bytes": 1048576}}
-                elif row["method"] == "probe":
-                    result = row["params"]
-                else:
-                    result = {}
-                await self.send({"jsonrpc": "2.0", "id": row["id"], "result": result})
+                if row["method"] in self.hold:
+                    continue
+                try:
+                    result = await self.result(row)
+                    response = {"jsonrpc": "2.0", "id": row["id"], "result": result}
+                except ProviderError as error:
+                    response = {"jsonrpc": "2.0", "id": row["id"], "error": {
+                        "code": -32000, "message": str(error), "data": {"kind": error.kind}}}
+                await self.send(response)
         except (ConnectionError, asyncio.CancelledError):
             pass
+
+    def notification(self, row):
+        pass
+
+    async def result(self, row):
+        if row["method"] == "provider.register":
+            return {"provider": row["params"]["name"], "generation": 7, "limits": {
+                "stream_window_bytes": min(row["params"]["limits"]["stream_window_bytes"], 262144),
+                "max_record_bytes": 1048576}}
+        return row["params"] if row["method"] == "probe" else {}
 
     async def call(self, method, params=None, generation=7):
         self.serial += 1
