@@ -279,7 +279,7 @@ pub async fn run(socket: &Path) -> Result<()> {
     let mut app = App::new(peer.clone(), tx);
     app.load(&snap);
     app.message = format!("click prim or press {} for the menu", app.prefix());
-    peer.call("events.subscribe", json!({"from": seq, "epoch": snap["epoch"]})).await?;
+    peer.call("events.subscribe", json!({"from": seq, "epoch": snap["epoch"], "partial_resources": true})).await?;
 
     let mut terminal = ratatui::init();
     // Asked before the input thread starts reading: the query reads the terminal's reply.
@@ -390,7 +390,7 @@ async fn reconnect(socket: std::path::PathBuf, tx: mpsc::UnboundedSender<Msg>) -
             client::ensure_core().await?;
             let (peer, incoming, _) = client::connect(&socket, "tui").await?;
             let snap = peer.call("workspace.snapshot", Value::Null).await?;
-            peer.call("events.subscribe", json!({"from": snap["seq"], "epoch": snap["epoch"]})).await?;
+            peer.call("events.subscribe", json!({"from": snap["seq"], "epoch": snap["epoch"], "partial_resources": true})).await?;
             Ok((peer, incoming, snap))
         }.await;
         match attempt {
@@ -544,12 +544,26 @@ impl App {
             }
             "resource" => {
                 if let Some(id) = d["id"].as_str() {
+                    // Partial events (we subscribe with `partial_resources`) carry only changed fields.
+                    let record = if ev["partial"] == true {
+                        let Some(mut base) = self.resources.get(id).cloned() else {
+                            // No base to merge onto: our state is not what the core assumed.
+                            self.resync();
+                            return;
+                        };
+                        for (k, v) in d.as_object().into_iter().flatten() {
+                            base[k] = v.clone();
+                        }
+                        base
+                    } else {
+                        d.clone()
+                    };
                     if d["state"] == "live" {
                         for t in self.terms.values_mut().filter(|t| t.resource == id) {
                             t.closed = None;
                         }
                     }
-                    self.resources.insert(id.to_string(), d.clone());
+                    self.resources.insert(id.to_string(), record);
                 }
             }
             "resource.removed" => {
@@ -2324,6 +2338,28 @@ mod tests {
                 {"key": "doc/test/value", "version": seq, "value": value}
             ]}
         }) }
+    }
+
+    fn resource_event(seq: u64, data: Value, partial: bool) -> Incoming {
+        let mut params = json!({"epoch": "boot", "seq": seq, "type": "resource", "data": data});
+        if partial {
+            params["partial"] = json!(true);
+        }
+        Incoming::Notification { method: "event".into(), params }
+    }
+
+    #[tokio::test]
+    async fn partial_resource_events_merge_onto_the_known_record() {
+        let (mut app, _) = app();
+        app.load(&snapshot(1, "x"));
+        app.on_incoming(resource_event(2, json!({"id": "r1", "argv": ["pi"], "state": "live", "status": {"state": "idle"}}), false));
+        app.on_incoming(resource_event(3, json!({"id": "r1", "status": {"state": "working"}}), true));
+        assert_eq!(app.resources["r1"]["status"]["state"], "working");
+        assert_eq!(app.resources["r1"]["argv"][0], "pi", "unchanged fields are kept");
+        let before = app.generation;
+        app.on_incoming(resource_event(4, json!({"id": "r9", "status": null}), true));
+        assert!(!app.resources.contains_key("r9"));
+        assert!(app.resyncing && app.generation > before, "a partial event without a base forces a resync");
     }
 
     #[tokio::test]
