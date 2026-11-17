@@ -16,6 +16,9 @@ use crate::core::Shared;
 const BUDGET: usize = 3;
 const WINDOW: Duration = Duration::from_secs(300);
 const RESTART_DELAY: Duration = Duration::from_millis(500);
+// Cooperative providers (prim-tmux) allow up to1s for their private backend to exit.
+// Leave a cleanup margin inside the supervisor's2s overall shutdown bound.
+const STOP_GRACE: Duration = Duration::from_millis(1500);
 
 pub struct ExtRuntime {
     pub status: String,
@@ -155,7 +158,7 @@ pub fn reconcile(core: &Shared) {
                             // Cooperative extensions see EOF and can close owned private backends.
                             // An uncooperative extension is still bounded and reaped.
                             drop(lifetime.take());
-                            if tokio::time::timeout(Duration::from_millis(500), child.wait()).await.is_err() { let _ = child.kill().await; }
+                            if tokio::time::timeout(STOP_GRACE, child.wait()).await.is_err() { let _ = child.kill().await; }
                             let mut c = core.lock().unwrap();
                             if let Some(rt) = c.exts.get_mut(&name) {
                                 if rt.generation == generation + 1 && !rt.running { rt.pid = None; rt.status = "stopped".into(); }
@@ -246,5 +249,37 @@ pub fn stop_all(core: &Shared) {
         }
         rt.running = false;
         rt.generation += 1;
+    }
+}
+
+#[cfg(test)]
+mod qa2_tests {
+    use super::*;
+    #[tokio::test]
+    async fn cooperative_provider_gets_time_for_its_one_second_cleanup() {
+        let root=tempfile::Builder::new().prefix("pxq").tempdir_in("/tmp").unwrap();
+        let ready=root.path().join("ready"); let done=root.path().join("done");
+        let script="import pathlib,sys,time; pathlib.Path(sys.argv[1]).write_text('ready'); sys.stdin.buffer.read(); time.sleep(0.8); pathlib.Path(sys.argv[2]).write_text('done')";
+        let mut store=crate::store::Store::in_memory();
+        store.apply("test",None,vec![crate::store::Op::Set { key:"extension/cleanup".into(),value:json!({"argv":["/usr/bin/python3","-c",script,ready,done]}),expect:None }]).unwrap();
+        let core=std::sync::Arc::new(std::sync::Mutex::new(crate::core::Core::new(store,None,root.path().join("s"),false).unwrap()));
+        reconcile(&core);
+        let started=tokio::time::timeout(Duration::from_secs(2),async { while !ready.exists() { tokio::time::sleep(Duration::from_millis(5)).await; } }).await;
+        // Always reap the private child before any assertion, including the red assertion.
+        shutdown(&core).await;
+        assert!(started.is_ok(),"private helper did not start");
+        assert!(done.exists(),"500ms grace killed a cooperative provider during its bounded cleanup");
+        assert!(core.lock().unwrap().exts.values().all(|rt|rt.pid.is_none()));
+    }
+    #[tokio::test]
+    async fn repeated_reconciliation_prunes_finished_supervisor_handles() {
+        let core=std::sync::Arc::new(std::sync::Mutex::new(crate::core::Core::new(crate::store::Store::in_memory(),None,"unused".into(),false).unwrap()));
+        for _ in 0..64 {
+            let task=tokio::spawn(async {});
+            tokio::time::timeout(Duration::from_secs(1),async { while !task.is_finished() { tokio::task::yield_now().await; } }).await.unwrap();
+            core.lock().unwrap().extension_tasks.push(task);
+            reconcile(&core);
+            assert!(core.lock().unwrap().extension_tasks.is_empty());
+        }
     }
 }

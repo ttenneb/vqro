@@ -195,7 +195,7 @@ Public calls stay resource-centric: `resource.spawn {provider?, kind, ...}`, `re
   `resource.spawn {argv: ["prim-bridge-pi", ...]}`. It runs the runtime as its child over fresh pipes (Pi RPC: JSONL,
   not JSON-RPC; split on LF only; drain stdout and stderr separately). The backend owns the process; prim never
   restarts a bridge. The terminal shows a minimal fallback view, so the real process stays one action away (D11).
-- **Reaching the core.** At spawn the core mints a one-time bridge token and adds `PRIM_SOCKET` (opaque endpoint) and
+- **Reaching the core.** At spawn the core mints a bootstrap bridge credential (also usable as the previous resume credential after first registration; see9.6) and adds `PRIM_SOCKET` (opaque endpoint) and
   `PRIM_BRIDGE_TOKEN` to the terminal's environment (`terminal.spawn {env}`; herdr-core `terminal.run` takes `env`).
   The bridge connects and sends `provider.register {role: "runtime", token}`. The token links its agent resource to
   the hosting terminal (`facts.host`). Not through the PTY: that mixes with output, has no credit, and corrupts on
@@ -453,8 +453,12 @@ existing status consumers and partial resource events (`src/events.rs`) work unc
   presenting previous reissues a current credential. The initial bootstrap becomes previous after first success,
   permitting recovery when the first registration reply was lost. Each successful registration rotates current;
   the presented credential remains previous, so a lost reply is retryable. Only the same bound identity may resume.
+  Presenting that previous credential deliberately displaces a live bridge registration for the same bound
+  host/provider/instance. A process retaining the bootstrap environment can therefore replace its bridge while
+  that credential remains previous. This is lost-reply recovery within the same-user, owner-only socket trust
+  boundary, not permission to replay effects or claim a different identity.
 - Credentials live in private `runtime-tokens.json`, never snapshots/ordinary logs. File sync/rename/directory sync
-  precede acknowledgement. Post-rename uncertainty is adopted and reported as `io`, with recovery `resume_token`;
+  precede acknowledgement. Post-rename uncertainty is adopted and reported as `durability_unconfirmed`, with recovery `data.resume_token`;
   the spawn is never resent.
 - **OPEN:** `provider.relay` for bridges on other hosts (D21 proposed; no wire schema in v0). v0 bridges are local.
   Whatever its schema, a relay carries the bridge connection as a **byte stream** (the same LF-delimited JSON-RPC)
