@@ -448,7 +448,7 @@ fn stream_op(conn: &Arc<Conn>, method: &str, p: Value) -> RpcResult {
     let tx = &binding.input;
     let input = match method {
         "stream.input" => {
-            if !binding.route.handle.capabilities.get("terminal.input").is_some_and(Value::is_object) {
+            if !binding.route.handle.capabilities.get("terminal.input").is_some_and(Value::is_object) || binding.route.handle.capabilities["terminal.input"]["stream"] == false {
                 return Err(provider::rejected("unsupported", "provider does not declare terminal.input"));
             }
             let bytes = match (s.data, s.text) {
@@ -596,6 +596,9 @@ async fn invoke_resource(core: &Shared, author: &str, p: Value) -> RpcResult {
     let args = p.get("args").cloned().unwrap_or_else(|| json!({}));
     if !args.is_object() { return Err(RpcError::invalid("args must be an object")); }
     let route = core.lock().unwrap().resource_route(id, &op)?;
+    if route.handle.capabilities[&op]["effect"] == false {
+        return Err(provider::rejected("unsupported", format!("provider declares {op} unavailable through effects")));
+    }
     let (reference, incarnation) = route.target.clone().unwrap();
     let (handle, operation, c) = (route.handle.clone(), route.clone(), core.clone());
     let deadline = provider::deadline(p.get("deadline_ms").map(|v| v.as_u64().ok_or_else(|| RpcError::invalid("deadline_ms must be an unsigned integer"))).transpose()?)?;

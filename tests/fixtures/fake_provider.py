@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "extensions"))
 from prim_provider import Provider, ProviderError
 
 CAPABILITIES = {"terminal.spawn": {"env": True, "cwd": True}, "terminal.kill": {},
-                "terminal.input": {}, "terminal.output": {"raw": True, "history": False, "repaint": "none"},
+                "terminal.input": {"stream": True, "effect": False}, "terminal.output": {"raw": True, "history": False, "repaint": "none"},
                 "terminal.resize": {"owner": "per_client"}, "terminal.exit": {"exit_code": False}}
 
 

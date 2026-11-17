@@ -18,6 +18,9 @@ out.write(b'{"jsonrpc":"2.0","id":0,"result":{"framed":true,"core":{"id":"kill-f
 try:
     while True:
         channel, kind, size = struct.unpack("<IBI", exact(9)); payload=exact(size)
+        if channel == 2 and kind == 0:
+            frame(2, 0, payload)  # Literal stream echo, without submit/Enter or scheduling policy.
+            continue
         if channel != 0: continue
         request=json.loads(payload); method=request["method"]
         if method == "events.subscribe": result={"channel":1,"terminals":[terminal]}

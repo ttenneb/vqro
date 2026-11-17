@@ -163,7 +163,11 @@ new failure each time. `persistence.recovered {scope: "resources", provider}` ma
 The registry exports `providers: {name: {name, role, instance, generation, software, capabilities, state,
 connected, synced, since, error, identity_persistence}}`. `state` is `connected` or `disconnected`; `synced` means
 a complete native inventory has arrived. `capabilities` maps names to parameter objects; absent means unsupported,
-unknown names are preserved, and non-object declarations are invalid. `identity_persistence` separately reports
+unknown names are preserved, and non-object declarations are invalid. Explicit capability parameter `effect:false`
+rejects generic `resource.invoke` before dispatch with `unsupported`/`outcome:rejected`. `terminal.input` also
+supports `stream:false` to reject `stream.input`; missing flags retain legacy handler behaviour. Current native
+herdr/fake and wire herdr/tmux/Python fake declare `{stream:true,effect:false}` for terminal input: literal input
+still works on attached streams, but no unsupported raw-input RPC, automatic Enter, or temporary attach is invented. `identity_persistence` separately reports
 `{state: "ok"|"failed", error?}`. `provider {name, state}` events publish registry changes. `adapters` and `adapter`
 events temporarily remain aliases so existing extensions continue to work.
 

@@ -90,7 +90,7 @@ ignored. Backend-specific extras are namespaced (`dev.herdr.machines`).
 | Capability | Parameters (examples) | herdr-core | tmux 3.7b |
 |---|---|---|---|
 | `terminal.spawn` | `{env, cwd, placement?}` | yes; `terminal.run` takes `env` and `on` (0.1.21 schema) | yes |
-| `terminal.input` | | yes | yes, `send-keys -H` (rec tmux-check item 1) |
+| `terminal.input` | `{stream, effect}` | stream only; no raw-input RPC | stream only, `send-keys -H` (rec tmux-check item 1) |
 | `terminal.output` | `{raw, history, repaint: "screen"\|"none", lossy_when_paused}` | raw, history | raw; repaint via `capture-pane`; lossy when paused |
 | `terminal.resize` | `{owner: "latest_viewer"\|"per_client"\|"none"}` | latest viewer (open question 7) | control client sets window size via `refresh-client -C` (rec item 6); arbitration between clients untested |
 | `terminal.kill`, `terminal.exit` | | yes | yes |
@@ -309,6 +309,14 @@ This section is the implementable contract; where sections 1–6 differ, this wi
 - **Capabilities** (G19): an object mapping name → parameter object (`{}` when none). Absent means unsupported;
   `false`, `null` or a non-object value is `invalid` at register. Unknown names are accepted and exported verbatim.
   An op is allowed only if a capability of the same name is declared (`terminal.spawn`, `agent.steer`, ...).
+  Capability presence does not imply every transport: explicit `effect: false` excludes generic `resource.invoke`
+  (and hence forwarded `effect.invoke`) before dispatch, with `unsupported` and `outcome: rejected`. For
+  `terminal.input`, explicit `stream: false` likewise excludes `stream.input`. Missing flags retain legacy
+  handler behaviour; unknown parameters are preserved, not invented support guarantees.
+  Current native herdr/fake and wire herdr/tmux/Python fake declare `terminal.input {stream: true, effect: false}`.
+  They accept literal bytes only on attached streams. Native hc has no raw-input RPC: `terminal.send` adds Enter
+  and quiet-time policy, and `terminal.keys` also waits. Neither is emulated, and no hidden temporary attach/resize
+  is created to make an unsupported effect appear supported. Callers attach, send bytes, then close explicitly.
 - **Admission bounds (native and wire):** 4096 retained resource references per provider; 128 KiB per whole facts
   record (including status/argv/name/cwd, in addition to the 64 KiB data bound); 32 MiB globally for published plus
   pending-IO resource JSON. Candidates reserve space before publication. Registration metadata is at most 128 KiB,

@@ -592,7 +592,7 @@ impl App {
 fn capabilities() -> Map<String, Value> {
     json!({
         "terminal.spawn": {"env": true, "cwd": true, "name": true},
-        "terminal.input": {},
+        "terminal.input": {"stream": true, "effect": false},
         "terminal.output": {"raw": true, "history": false, "repaint": "screen", "lossy_when_paused": true},
         "terminal.resize": {"owner": "latest_viewer"},
         "terminal.kill": {},

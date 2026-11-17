@@ -100,6 +100,16 @@ written the same way was contained by the crash budget and removed with one reve
   is a separate core gap, retained as `--probe-terminal-invoke`; public attach/stream.input works (dispatched).
 - Details, receipts and unverified limits: `research/pi-provider-e2e.md`.
 
+## Core shutdown and input transports (2026-11-17)
+
+- `core.shutdown`, recovery `prim.shutdown`, CLI protocol-first stop and signals share ordered cleanup; no backend
+  terminal kill or input replay. Extension EOF grace/reaping and provider-link stop are fixture/subprocess tested.
+- Native kill replies reconcile finished facts even with open attach and no finished event. Native event DATA
+  CREDIT follows a FIFO consumption barrier; evidence: `research/core-shutdown.md`.
+- Native and current wire terminal providers distinguish input transports: `{stream:true,effect:false}`. Generic
+  invoke rejects explicit unsupported effects before dispatch; normal literal stream input remains available.
+  Evidence and hc schema rationale: `research/native-input-transports.md`.
+
 ## Known gaps found while building
 
 - **History churn:** extensions that refresh views on every event (the sidebar on status changes) fill the

@@ -21,7 +21,7 @@ const RESIZE: u8 = 3;
 
 pub fn capabilities() -> Value {
     json!({
-        "terminal.spawn": {"env": true, "cwd": true}, "terminal.input": {}, "terminal.output": {"raw": true}, "terminal.resize": {},
+        "terminal.spawn": {"env": true, "cwd": true}, "terminal.input": {"stream": true, "effect": false}, "terminal.output": {"raw": true}, "terminal.resize": {},
         "terminal.kill": {}, "terminal.list": {}, "terminal.exit": {"exit_code": true}, "status.osc7501": {},
         "persist.detach": {}, "events.resync": {}, "remote.machines": {}
     })
