@@ -123,6 +123,18 @@ written the same way was contained by the crash budget and removed with one reve
 - Limits and receipts: `research/agents-extension.md`; usage: `../extensions/agents.md`. Editor answers use the
   existing one-line input; multiline UI, Windows and provider-backed turns are not claimed.
 
+## Real TUI scale (2026-11-17)
+
+- Opt-in `tests/e2e_tui_scale.py`: private fake core + real sidebar/TUI/tmux; 600 terminals, 200 status producers,
+  three visible terminal views and a byte-validated 1 MB/s flood. Added to `scripts/check.sh full` with explicitly
+  non-enforced placeholder performance budgets.
+- Background redraws are frame-budgeted; keys retain priority. Unchanged panel values/flattened rows are shared,
+  with invalidation for content, shape and snapshots; geometry/themes still render fresh.
+- Sidebar coalesces derived publication in its own worker without holding the SDK cache lock across RPC.
+- Corrected full-load probe: sidebar failed after three crashes before, stays running after; TUI CPU23.18→17.55%
+  of one core, background peak55fps,37.65MiB RSS, marker p9952.07ms; no lost input/missed events/leaks. Earlier
+  wrong-flag receipts are not flood evidence. Methodology/caveats: `research/tui-scale.md`.
+
 ## Known gaps found while building
 
 - **History churn:** extensions that refresh views on every event (the sidebar on status changes) fill the

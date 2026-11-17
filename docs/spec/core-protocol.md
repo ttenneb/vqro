@@ -375,6 +375,16 @@ and sets the prefix; the active profile is `doc/keys/profile`, and the list is l
 - Status-bar menu items may name a live `view`; clients take the label, icon and style from its content
   (`{label, icon?, style}`), hiding it while the label is empty.
 
+### Client rendering under load
+
+The TUI coalesces background invalidations to a 60 fps frame budget; input-triggered UI changes remain immediate
+and keyboard input takes priority over queued background work. Total fps can therefore exceed 60 while typing.
+All resource events and terminal bytes are still consumed in order: drawing is coalesced, not protocol data.
+Merged panel values and flattened rows are reused while content and page/filter/expansion remain unchanged;
+entry/live/snapshot updates invalidate caches. Selection/scroll, current geometry, theme and icons stay fresh.
+The default sidebar separately batches derived publications at most ten times/second in the extension, not core.
+See `research/tui-scale.md` for the opt-in private probe, measured floor and non-enforced placeholder budgets.
+
 ## Themes
 
 The active theme is the entry `doc/settings/theme` = `{name, palette: {token: colour}}`. Clients read it live and
