@@ -31,6 +31,13 @@ control client. There is no automatic reconnect or effect resend.
   prevent a cancelled caller from shifting the next reply. This is not completion tracking for
   detached/asynchronous tmux jobs. Native rejection is distinct from timeout/disconnect after a write
   (`Indeterminate`); neither is replayed. Newline/NUL command arguments fail locally.
+- **Timeouts (2026-11-17).** A *read-only* command (`list-*`, `display-message`, `capture-pane`, `show-*`,
+  `has-session`) that gets no reply within `command_timeout` fails with `TimedOut`: no effect, and the control
+  client stays attached. The request stays at the head and absorbs its late reply blocks up to its end barrier, so
+  the next command is never paired with them. If the late reply takes more than 10 further timeouts, the attachment
+  is treated as desynchronised and dropped. A *mutating* command that times out is `Indeterminate` and drops the
+  attachment as before. Nothing is resent. Tests: `tests/tmux_timeout.rs` (deterministic fake control client,
+  `tests/fixtures/fake_tmux_cc.py`) and `tests/tmux.rs` (real 3.7b flood with a 30 ms timeout).
 
 One attachment sees panes **linked into its session**, not all server sessions. The next provider must
 choose its attachment topology and list/query facts after structural notifications; tmux does not

@@ -71,8 +71,12 @@ server; not yet against the real core, whose section 9 side is still being built
      watchers.
 
    Seen by stalling the provider (SIGSTOP) for 3 s during a flood. Across runs the stream ended with `paused`,
-   `viewer_slow` or `backend_dropped`; recovery worked every time. A per-command timeout that doesn't end the
-   attachment, or a longer one for read-only commands such as `list-panes`, would reduce how much a flood breaks.
+   `viewer_slow` or `backend_dropped`; recovery worked every time.
+
+   **Since 2026-11-17 (tmux-timeout):** read-only command timeouts are no longer fatal (`tmux-client.md`,
+   Timeouts). A reconcile `list-panes` or a repaint capture stuck behind a flood now fails alone, and the session's
+   control client stays. A mutating command (spawn, kill, input) that times out still drops it, because its
+   outcome is unknown.
 2. **tmux format output replaces tabs, and without a UTF-8 locale also non-ASCII bytes, with `_`.** The pane list
    therefore uses an ASCII separator token. A title or path that contains that token would be mis-split (unlikely,
    not handled).
