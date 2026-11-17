@@ -4,6 +4,7 @@
 pub mod adapter;
 pub mod client;
 pub mod core;
+pub mod events;
 pub mod ext;
 pub mod paths;
 pub mod queue;
