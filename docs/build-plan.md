@@ -66,6 +66,17 @@ written the same way was contained by the crash budget and removed with one reve
   existing socket bytes and status-event bursts cannot be preempted. Final teardown leaked no processes.
   Evidence and the explicit scale-test failure: `research/bounded-streams.md`.
 
+## In-process provider reshape (2026-11-17)
+
+- Registry exports provider instance, generation, capabilities and health. Disconnect keeps unavailable stale facts;
+  fresh same-instance facts restore ids, while changed identities retire ids durably with tombstones.
+- Native queued effects, replies and streams are generation-fenced; spawn/kill/attach use shared deadlines and D10
+  outcomes without replay. Late replies are ignored; ordinary effect audits retain caller attribution.
+- Identity persistence errors publish no unpersisted ids, retain native facts for recovery, coalesce failures and
+  expose recovery. Legacy two-field ids are tombstoned rather than guessed; layout reset/rebinding is explicit.
+- TUI merges partial facts before checking availability and reattaches only when the resource is available.
+- Provider-v0 step 1 only: no external provider wire methods, tokens or relay. Evidence: `research/provider-reshape.md`.
+
 ## Known gaps found while building
 
 - **History churn:** extensions that refresh views on every event (the sidebar on status changes) fill the

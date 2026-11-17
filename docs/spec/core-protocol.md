@@ -7,7 +7,7 @@ Status: implemented in slice 1 (`src/server.rs`), not frozen (D16). JSON-RPC 2.0
 core's local endpoint (below). Both sides may send requests:
 the core forwards `command.invoke` to the connection that registered the command. Errors carry a stable
 `data.kind`: `invalid`, `conflict`, `not_found`, `unavailable`, `forbidden`, `backend`, `disconnected`, `io`,
-`durability_unconfirmed`, `timeout`, `overloaded`.
+`durability_unconfirmed`, `timeout`, `overloaded`, `unsupported`.
 
 ## Endpoint and transport (D12, D22 proposed)
 
@@ -47,7 +47,7 @@ and sends SIGTERM, which runs the same ordered stop.
 
 | Method | Params | Result |
 |---|---|---|
-| `workspace.snapshot` | | `epoch`, `seq`, `entries` (key → `{version, value}`), `resources`, `commands`, `extensions`, `adapters`, `safe_mode` |
+| `workspace.snapshot` | | `epoch`, `seq`, `entries` (key → `{version, value}`), `resources`, `commands`, `extensions`, `providers`, `adapters` (compatibility alias), `safe_mode` |
 | `workspace.apply` | `ops: [{op: "set", key, value, expect?} \| {op: "delete", key, expect?}]`, `note?` | `txn`, `changes` |
 | `workspace.history` | `limit?` | `txns` (newest first) |
 | `workspace.revert` | `txn` | the reverting `txn` |
@@ -100,22 +100,65 @@ Only one snapshot generation may complete recovery; ignore replies superseded by
 connection. A bounded recovery buffer may discard its batch and request a newer snapshot on overflow.
 
 Then notifications `event {epoch, seq, type, data}` with types `entries`, `resource`, `resource.removed`, `command`,
-`extension`, `adapter`, `safe_mode`, `persistence.error`; or `missed` when the bounded log can't serve the cursor
-(re-snapshot). `persistence.error {scope: "resources", message}` reports a failed resource-id map write; the same
-error is logged by the server. The backend effect is not undone: resource facts and ids remain available in memory,
-but id stability across a core restart is not confirmed until a later successful map write.
+`extension`, `provider`, `adapter` (compatibility alias), `safe_mode`, `effect`, `persistence.error`, `persistence.recovered`; or `missed` when the bounded log can't serve the cursor
+(re-snapshot). `effect {effect, provider, generation, method, author, outcome, error?}` audits the result observed by
+the caller, including an indeterminate timeout; it is not a late-reply notification. Publishing a late
+`effect.outcome` remains OPEN in `provider-v0.md` section 9.4.
+
+`persistence.error {scope: "resources", provider, message, error}` reports a resource-identity map failure and is
+logged once per affected provider until recovery. Repeated resource/status events are coalesced, not logged as a
+new failure each time. `persistence.recovered {scope: "resources", provider}` makes recovery visible.
+
+## In-process providers
+
+The registry exports `providers: {name: {name, role, instance, generation, software, capabilities, state,
+connected, synced, since, error, identity_persistence}}`. `state` is `connected` or `disconnected`; `synced` means
+a complete native inventory has arrived. `capabilities` maps names to parameter objects; absent means unsupported,
+unknown names are preserved, and non-object declarations are invalid. `identity_persistence` separately reports
+`{state: "ok"|"failed", error?}`. `provider {name, state}` events publish registry changes. `adapters` and `adapter`
+events temporarily remain aliases so existing extensions continue to work.
+
+A provider registration/start is connection-bound and gets a new generation. Old event sources, queued commands,
+effect replies and streams cannot act through a replacement connection. The native adapter's connection token is
+internal, distinct from the core-assigned public generation. No `provider.*` wire methods, bridge-token validation
+or relay are exposed yet; `provider-v0.md` section 9 pins the later wire step.
+
+A resource's identity is `(provider, instance, backend_ref, incarnation)`. IDs never reuse a retired identity's id.
+Herdr's instance is the stable `hello.core.id` (not pid/uptime); `created_ms` identifies a terminal incarnation.
+The fake gets a random instance per start. Instance/incarnation changes retire old ids and emit
+`resource.removed {id, reason: {reason: "replaced"}}`; an authoritative inventory removes absent identities with
+`reason: {reason: "closed"}`. Views/layouts are never rebound automatically. A disconnect instead keeps known facts
+with `available: false, stale: true`; the same instance and identity returns with its original id after fresh facts.
+
+Identity reservations and tombstones are durably persisted before publication. A pre-rename failure publishes no
+new prim id. Because the backend spawn may already have happened, the call returns `io` with
+`data.outcome: "indeterminate"`, `backend_outcome: "observed"`, `provider`, `instance` and `resource_facts`
+(including `backend_ref`); never resend automatically. Facts are retained internally and assigned ids after an
+authoritative sync or a later successful map write. A post-rename directory-sync failure adopts the identity but
+returns `durability_unconfirmed`, like the workspace store; later success must confirm durability. Legacy two-field
+maps cannot prove an instance: their ids become tombstones, new ids are assigned from the first native inventory,
+and old layouts may show gone resources until explicitly repaired/reset. No identity is guessed during migration.
 
 ## Resources (backend-owned, D14)
 
 | Method | Params | Result |
 |---|---|---|
 | `resource.list` | | `resources` |
-| `resource.spawn` | `argv?` (default: the provider's default shell for its host), `cwd?`, `name?`, `adapter?` | `resource` |
-| `resource.kill` | `resource` | `outcome`, `backend` |
-| `resource.attach` | `resource`, `cols`, `rows`, `history?` (scrollback lines to replay) | `stream` |
+| `resource.spawn` | `argv?` (default: the provider's default shell for its host), `cwd?`, `name?`, `provider?` (`adapter` alias), `deadline_ms?` | `outcome: observed`, `effect`, `resource` |
+| `resource.kill` | `resource`, `deadline_ms?` | `outcome: accepted`, `effect`, `backend` |
+| `resource.attach` | `resource`, `cols`, `rows`, `history?` (backend scrollback), `deadline_ms?` | `outcome: accepted`, `effect`, `stream`, `initial` (`history` or `none`) |
 | `stream.input` | `stream`, `data` (base64) or `text` | `outcome: dispatched` (also accepted as a notification) |
 | `stream.resize` | `stream`, `cols`, `rows` | |
 | `stream.close` | `stream` | |
+
+Spawn, kill and attach check declared capabilities and provider/resource availability before dispatch. Their default
+deadline is 30000 ms, override 1–300000 ms. Expiry is `timeout` with an indeterminate outcome; connection or resource
+loss while in flight is `unavailable` with an indeterminate outcome. Pre-dispatch unavailability is rejected.
+Late replies are ignored; independent resource facts reconcile what happened. No effect is automatically resent.
+
+Published resources include `provider`, `instance`, `incarnation`, `available`, `stale`, and opaque kind-specific
+`data` (object, at most 64 KiB); `adapter` and `backend_ref` remain for compatibility. Unknown kinds stay opaque.
+Attach/resize dimensions are 1–9999. Unavailable views show that state and reattach when availability returns.
 
 Streams push `stream.data {stream, data}` (base64) and `stream.closed {stream, reason}` (reason is an object
 with a `reason` string). Input is handled in order; one input message may contain at most 64 KiB of decoded bytes.
