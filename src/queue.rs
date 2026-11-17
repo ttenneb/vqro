@@ -75,6 +75,8 @@ impl<T> Sender<T> {
 }
 
 impl<T> Receiver<T> {
+    /// Stop new sends while allowing the owner to drain/reject already accepted items.
+    pub fn close(&mut self) { self.rx.close(); self.budget.close(); }
     pub async fn recv(&mut self) -> Option<Item<T>> { self.rx.recv().await }
     pub fn try_recv(&mut self) -> Result<Item<T>, mpsc::error::TryRecvError> { self.rx.try_recv() }
     pub fn len(&self) -> usize { self.rx.len() }

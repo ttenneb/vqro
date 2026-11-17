@@ -37,9 +37,15 @@ the core forwards `command.invoke` to the connection that registered the command
 Every change is recorded with the connection's author (`ext:<name>`, `<client>:<n>`).
 
 `core.shutdown` is implemented (broader D22 transport work remains proposed). The accepted reply is locally
-written/flushed before stop begins, not a remote-read guarantee. The core stops accepting, closes extension lifetime
-pipes (500 ms grace, then kill/reap), stops provider transport links, closes clients/streams, removes the endpoint,
-and exits. Backend-owned terminals are not killed; input is never replayed. Bounded cleanup waits report
+written/flushed before stop begins, not a remote-read guarantee. The core stops accepting and rejects new workspace
+commits, then gives admitted commits3s to persist, publish and run adoption hooks. At expiry queued/unstarted
+commits are cleanly rejected without effects; an already dispatched durable write remains indeterminate, never
+rolled back or replayed. Completed replacements stay on disk and are loaded on the next start. A further1s wait
+lets mutation handlers flush replies before extensions/providers/peers stop; expiry reports indeterminate delivery,
+not a clean write failure or a remote-read acknowledgement. An in-progress filesystem call cannot be safely cancelled.
+The core then closes extension lifetime pipes (1.5s grace, then kill/reap, inside a2s supervisor bound), stops
+provider transport links, closes clients/streams, removes the endpoint, and exits. Backend-owned terminals are
+not killed; input is never replayed. Bounded cooperative cleanup waits report
 unconfirmed cleanup honestly. Dispatch/restarts are rejected while stopping. `prim.shutdown` is the same built-in
 recovery command, including safe mode. `prim stop` uses RPC even without a pidfile; only no-answer, timeout or
 disconnect uses legacy positive-pid signal fallback, never a protocol refusal. SIGTERM/Ctrl-C use the same cleanup.

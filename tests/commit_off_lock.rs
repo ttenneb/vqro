@@ -243,6 +243,25 @@ async fn commit_admission_counts_escaped_note_bytes_not_only_raw_text() {
 }
 
 #[tokio::test]
+async fn shutdown_drains_admitted_write_and_its_reply_but_rejects_new_commits() {
+    let f=Fixture::new().await;
+    let (writer,_)=f.peer().await; let (other,_)=f.peer().await;
+    let apply=tokio::spawn(async move { writer.call("workspace.apply",set(1,0)).await });
+    tokio::time::timeout(Duration::from_secs(2),f.gate.entered.notified()).await.unwrap();
+    let mut stop=tokio::spawn({let core=f.core.clone();async move { server::shutdown(&core).await }});
+    let early=tokio::time::timeout(Duration::from_millis(50),&mut stop).await;
+    let rejected=other.call_with_timeout("workspace.apply",set(2,0),Duration::from_secs(1)).await;
+    f.gate.release();
+    let applied=apply.await.unwrap();
+    if early.is_err() { stop.await.unwrap(); }
+    assert!(early.is_err(),"shutdown completed before its admitted durable write");
+    assert_eq!(applied.unwrap()["txn"],1,"admitted commit reply must flush before peer closes");
+    let error=rejected.unwrap_err();
+    assert_eq!(error.kind(),"unavailable");
+    assert_eq!(error.data.unwrap()["outcome"],"rejected");
+}
+
+#[tokio::test]
 async fn writer_panic_is_indeterminate_and_fails_closed_without_replay() {
     let f = Fixture::new().await;
     let writer = f.gate.writer();

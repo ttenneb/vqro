@@ -33,6 +33,7 @@ struct Conn {
     next_stream: AtomicU64,
     subscribed: Mutex<bool>,
     requests: Arc<tokio::sync::Semaphore>,
+    mutations:Arc<tokio::sync::Semaphore>,
     wire: crate::provider_wire::Connection,
 }
 
@@ -131,7 +132,8 @@ pub async fn serve(core: Shared, listener: UnixListener) -> anyhow::Result<()> {
         let id = next.fetch_add(1, Ordering::Relaxed);
         let (r, w) = stream.into_split();
         let (peer, incoming) = Peer::spawn(r, w);
-        peers.insert(id, peer.clone());
+        let mutations=Arc::new(tokio::sync::Semaphore::new(crate::rpc::MAX_PENDING_CALLS));
+        peers.insert(id,(peer.clone(),mutations.clone()));
         let conn = Arc::new(Conn {
             id,
             wire: crate::provider_wire::Connection::new(id, peer.clone()),
@@ -142,11 +144,26 @@ pub async fn serve(core: Shared, listener: UnixListener) -> anyhow::Result<()> {
             next_stream: AtomicU64::new(1),
             subscribed: Mutex::new(false),
             requests: Arc::new(tokio::sync::Semaphore::new(crate::rpc::MAX_PENDING_CALLS)),
+            mutations,
         });
         let c = core.clone();
         connections.spawn(async move { connection(c, conn, incoming).await; id });
     }
+    // A listener failure also enters the same stop state as an explicit shutdown request.
+    shutdown.request();
     // Keep the endpoint bound until cleanup finishes, so a replacement cannot race our unlink.
+    let commits=crate::commit::shutdown(&core,std::time::Duration::from_secs(3)).await;
+    if !commits.completed { eprintln!("prim: workspace shutdown deadline: {} queued commits rejected without effects; {} active outcomes indeterminate; do not replay",commits.rejected,commits.active); }
+    // A worker receipt is not yet a transport reply. Mutation handlers retain these permits
+    // through reply flushing, including replies issued on provider/extension connections.
+    let replies=tokio::time::timeout(std::time::Duration::from_secs(1),async {
+        let mut held=Vec::new();
+        for (_,mutations) in peers.values() {
+            held.push(mutations.clone().acquire_many_owned(crate::rpc::MAX_PENDING_CALLS as u32).await.map_err(|_|())?);
+        }
+        Ok::<_,()>(held)
+    }).await;
+    if !matches!(replies,Ok(Ok(_))) { eprintln!("prim: workspace reply delivery indeterminate at shutdown deadline; inspect history, never replay"); }
     ext::shutdown(&core).await;
     let handles: Vec<_> = core.lock().unwrap().providers.values().map(|p| p.handle.clone()).collect();
     let mut providers = tokio::task::JoinSet::new();
@@ -158,7 +175,7 @@ pub async fn serve(core: Shared, listener: UnixListener) -> anyhow::Result<()> {
     }).await.is_err() { eprintln!("prim: provider shutdown deadline; cleanup unconfirmed"); providers.abort_all(); }
     { let mut c = core.lock().unwrap(); let names: Vec<_> = c.providers.keys().cloned().collect();
       for name in names { c.on_adapter_event(&name, crate::adapter::AdapterEvent::Connected(false, None)); } }
-    for peer in peers.values() { peer.close(); }
+    for (peer,_) in peers.values() { peer.close(); }
     if tokio::time::timeout(std::time::Duration::from_secs(1), async { while connections.join_next().await.is_some() {} }).await.is_err() { connections.abort_all(); }
     let socket = core.lock().unwrap().socket.clone();
     let _ = std::fs::remove_file(socket);
@@ -213,11 +230,21 @@ async fn connection(core: Shared, conn: Arc<Conn>, mut incoming: crate::rpc::Inc
                 tokio::spawn(async move {
                     let _permit = permit;
                     let stopping = method == "core.shutdown" || (method == "command.invoke" && params["name"] == "prim.shutdown");
+                    let mutation=matches!(method.as_str(),"workspace.apply"|"workspace.revert") || (method=="command.invoke" && matches!(params["name"].as_str(),Some("prim.revert"|"prim.layout.reset"|"prim.extension.enable"|"prim.extension.disable")));
+                    let _mutation=if mutation {
+                        if core.lock().unwrap().shutdown.is_requested() { conn.peer.respond(id,Err(provider::rejected("unavailable","core shutting down; commit not admitted"))); return; }
+                        match conn.mutations.clone().try_acquire_owned() { Ok(permit)=>Some(permit),Err(_)=>{conn.peer.respond(id,Err(provider::rejected("unavailable","core shutting down; commit not admitted")));return;} }
+                    } else { None };
                     let result = dispatch(&core, &conn, &method, params).await;
                     if stopping && result.is_ok() {
                         let _ = conn.peer.respond_flushed(id, result).await;
                         core.lock().unwrap().shutdown.request();
-                    } else { conn.peer.respond(id, result); }
+                    } else {
+                        conn.peer.respond(id,result);
+                        if mutation && !matches!(tokio::time::timeout(std::time::Duration::from_secs(1),conn.peer.flush_control()).await,Ok(true)) {
+                            eprintln!("prim: workspace reply delivery indeterminate; inspect history, never replay");
+                        }
+                    }
                 });
             }
             Incoming::Notification { .. } => {}

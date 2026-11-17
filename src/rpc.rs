@@ -208,6 +208,11 @@ impl Peer {
                         else => break,
                     };
                     let item = item.unwrap();
+                    // Local-only FIFO barrier: never emit an empty JSON record on the wire.
+                    if item.value.line.is_empty() {
+                        if let Some(done)=item.value.flushed { let _=done.send(()); }
+                        continue;
+                    }
                     if item.value.active.as_ref().is_some_and(|a| !a.load(Ordering::Relaxed)) { continue; }
                     // Keep byte permits charged through the actual socket write/flush. A line
                     // already in flight must finish before control can overtake queued data.
@@ -331,6 +336,15 @@ impl Peer {
 
     pub fn notify(&self, method: &str, params: Value) {
         self.send_control(json!({"jsonrpc": "2.0", "method": method, "params": params}).to_string());
+    }
+
+    /// Barrier behind already queued control replies (large replies have higher priority).
+    /// This confirms local transport flushing, not that the remote application read a reply.
+    pub async fn flush_control(&self) -> bool {
+        if self.is_closed() { return false; }
+        let (done,flushed)=oneshot::channel();
+        if self.control.send(Outbound { line:String::new(),active:None,_large:None,flushed:Some(done) },64).await.is_err() { return false; }
+        flushed.await.is_ok()
     }
 
     /// A small reply with a completion barrier, used before the caller can tear down this peer.
