@@ -97,7 +97,7 @@ type Known = Arc<Mutex<HashMap<String, Value>>>;
 
 async fn effect(handle: AdapterHandle, known: Known, provider: Provider, e: EffectRequest) {
     let result = match e.op.as_str() {
-        "terminal.spawn" => spawn(&handle, &e.args).await,
+        "terminal.spawn" => spawn(&handle, &known, &e.args).await,
         "terminal.kill" => kill(&handle, &known, &provider, e.r#ref.clone().unwrap_or_default(), &e.incarnation).await,
         other => Err(ProviderError::new("unsupported", format!("op {other} is not served"))),
     };
@@ -123,7 +123,7 @@ async fn kill(handle: &AdapterHandle, known: &Known, provider: &Provider, r: Str
     Ok(Outcome::Accepted(Some(json!({"backend": reply}))))
 }
 
-async fn spawn(handle: &AdapterHandle, args: &Value) -> Result<Outcome, ProviderError> {
+async fn spawn(handle: &AdapterHandle, known: &Known, args: &Value) -> Result<Outcome, ProviderError> {
     let mut argv: Vec<String> = match &args["argv"] {
         Value::Null => vec![],
         Value::Array(a) if a.iter().all(Value::is_string) => a.iter().map(|v| v.as_str().unwrap().to_string()).collect(),
@@ -150,7 +150,13 @@ async fn spawn(handle: &AdapterHandle, args: &Value) -> Result<Outcome, Provider
     }
     let req = SpawnRequest { argv, cwd: args["cwd"].as_str().map(String::from), name: args["name"].as_str().map(String::from), env, cols: dim("cols"), rows: dim("rows"), placement: args.get("placement").filter(|p| !p.is_null()).cloned() };
     match handle.spawn(req).await {
-        Ok(f) => Ok(Outcome::Observed(Some(json!({"facts": facts(&f)})))),
+        Ok(f) => {
+            // Known now: the core may attach as soon as it has the reply, before the adapter's
+            // `created` event reaches us.
+            let row = facts(&f);
+            known.lock().unwrap().entry(f.backend_ref.clone()).or_insert_with(|| row.clone());
+            Ok(Outcome::Observed(Some(json!({"facts": row}))))
+        }
         Err(e) => Err(unknown(e)),
     }
 }
