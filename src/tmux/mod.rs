@@ -1,4 +1,6 @@
 //! Standalone tmux backend library; no provider protocol or prim core dependency.
-pub mod parser;
+mod client;
 pub mod osc;
+pub mod parser;
+pub use client::{Client, Config, Error, GapReason, PaneEvent, PaneStream};
 pub use parser::{Notification, PaneId};
