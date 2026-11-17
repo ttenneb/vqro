@@ -46,6 +46,28 @@ use theme::Palette;
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
+/// Largest paste the client sends (after bracketed-paste markers). Bigger pastes are refused whole,
+/// with a message; nothing is sent. Sent in ordered chunks of at most `PASTE_CHUNK` bytes (the core's
+/// per-message input limit), each confirmed before the next.
+const MAX_PASTE: usize = 4 * 1024 * 1024;
+const PASTE_CHUNK: usize = crate::adapter::MAX_STREAM_CHUNK;
+/// How long one chunk may keep meeting a full input queue (`overloaded`) before the paste stops.
+const PASTE_STALL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// What to send for a paste: the text, wrapped in bracketed-paste markers when the program asked for
+/// them (DECSET 2004). Markers inside the text are removed so a paste can't end the bracket early.
+fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
+    if !bracketed {
+        return text.as_bytes().to_vec();
+    }
+    let clean = text.replace("\x1b[201~", "").replace("\x1b[200~", "");
+    let mut out = Vec::with_capacity(clean.len() + 12);
+    out.extend_from_slice(b"\x1b[200~");
+    out.extend_from_slice(clean.as_bytes());
+    out.extend_from_slice(b"\x1b[201~");
+    out
+}
+
 struct Term {
     resource: String,
     stream: Option<u64>,
@@ -154,6 +176,9 @@ enum Msg {
     ClosePopup,
     /// A command's reply asks to focus a visible view, independently of its kind.
     FocusView(String),
+    /// A stream's ordered input sender found its queue empty after `n` items: if nothing was queued
+    /// since, its input can go direct again.
+    InputIdle(u64, u64),
 }
 
 /// Where things were drawn last frame, for mouse hit-testing.
@@ -224,6 +249,8 @@ struct App {
     mouse_on: bool,
     /// A popup waiting under a menu, prompt or picker opened from it; it comes back when that closes.
     under: Option<Overlay>,
+    /// Streams with a paste in progress: all their input goes through this ordered sender until idle.
+    input_queues: HashMap<u64, (mpsc::UnboundedSender<Vec<u8>>, u64)>,
     /// The pane shown alone (`client.zoom`): this window's presentation only, never workspace state.
     zoomed: Option<String>,
     /// Focus this view on the next draw (after leaving zoom the leaves are recomputed).
@@ -462,7 +489,7 @@ impl App {
             leaves: Vec::new(), focus: 0, overlay: None, pstate: HashMap::new(),
             filtering: None, toast: None, live: HashMap::new(), panel_values: Mutex::new(HashMap::new()), hit: Hit::default(),
             drag: None, overrides: HashMap::new(), mouse_owner: None, mouse_on: true,
-            under: None, zoomed: None, pending_focus: None, kbd_enhance: false,
+            under: None, input_queues: HashMap::new(), zoomed: None, pending_focus: None, kbd_enhance: false,
             held: KeyModifiers::NONE, message: "click prim or press Ctrl-g for the menu".into(),
             quit: false, connected: true, connection: 0, epoch: String::new(), seq: 0,
             generation: 0, resyncing: false, buffered: Vec::new(), buffered_bytes: 0, recovery_only: false, retry_snapshot: None,
@@ -767,6 +794,13 @@ impl App {
                 self.zoomed = None;
                 self.pending_focus = Some(view);
             }
+            Msg::InputIdle(sid, done) => {
+                // Everything queued was sent: dropping the sender ends the task, and input goes direct
+                // again without overtaking anything.
+                if self.input_queues.get(&sid).is_some_and(|(_, queued)| *queued == done) {
+                    self.input_queues.remove(&sid);
+                }
+            }
             Msg::ClosePopup => {
                 if matches!(self.overlay, Some(Overlay::Popup { .. })) {
                     self.overlay = None;
@@ -831,7 +865,7 @@ impl App {
             }
             Event::Mouse(m) => self.on_mouse(m),
             Event::Paste(text) => {
-                self.send_to_focused(text.into_bytes());
+                self.paste(&text);
                 false
             }
             Event::Resize(..) => true,
@@ -844,14 +878,103 @@ impl App {
         if let Some(t) = self.terms.get_mut(&view) {
             t.parser.screen_mut().set_scrollback(0);
             if let Some(sid) = t.stream {
-                self.peer.notify("stream.input", json!({"stream": sid, "data": B64.encode(bytes)}));
+                self.send_input(sid, bytes);
             }
         }
     }
 
+    /// Input for a stream, in order. Direct, unless a paste is still being sent on that stream: then
+    /// it queues behind the paste so keys never overtake it.
+    fn send_input(&mut self, sid: u64, bytes: Vec<u8>) {
+        if let Some((tx, queued)) = self.input_queues.get_mut(&sid) {
+            if tx.send(bytes.clone()).is_ok() {
+                *queued += 1;
+                return;
+            }
+            self.input_queues.remove(&sid);
+        }
+        self.peer.notify("stream.input", json!({"stream": sid, "data": B64.encode(bytes)}));
+    }
+
+    /// A paste into the focused terminal: bracketed when its program enabled bracketed paste (DECSET
+    /// 2004), raw otherwise, like a terminal. Small pastes go as one input; large ones in ordered chunks,
+    /// each confirmed by the core (a full input queue is waited out, never dropped). Over `MAX_PASTE`
+    /// nothing is sent. A failure part-way says how much was sent; nothing is resent after an error.
+    fn paste(&mut self, text: &str) {
+        let Some(view) = self.leaves.get(self.focus).cloned() else { return };
+        let Some(t) = self.terms.get_mut(&view) else { return };
+        let Some(sid) = t.stream else {
+            self.message = "paste not sent: the terminal is not attached".into();
+            return;
+        };
+        t.parser.screen_mut().set_scrollback(0);
+        let bytes = paste_bytes(text, t.parser.screen().bracketed_paste());
+        if bytes.len() > MAX_PASTE {
+            self.message = format!("paste not sent: {} bytes is over the {} MiB limit", bytes.len(), MAX_PASTE / (1024 * 1024));
+            return;
+        }
+        // Small, or behind a paste still being sent (the queue chunks it): the ordinary path.
+        if bytes.len() <= PASTE_CHUNK || self.input_queues.contains_key(&sid) {
+            return self.send_input(sid, bytes);
+        }
+        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let total = bytes.len();
+        let _ = tx.send(bytes);
+        self.input_queues.insert(sid, (tx, 1));
+        let (peer, msgs) = (self.peer.clone(), self.tx.clone());
+        tokio::spawn(async move {
+            let mut done: u64 = 0;
+            let mut failed = false;
+            loop {
+                let item = match rx.try_recv() {
+                    Ok(item) => item,
+                    Err(mpsc::error::TryRecvError::Empty) => {
+                        let _ = msgs.send(Msg::InputIdle(sid, done));
+                        match rx.recv().await {
+                            Some(item) => item,
+                            None => break,
+                        }
+                    }
+                    Err(mpsc::error::TryRecvError::Disconnected) => break,
+                };
+                done += 1;
+                if failed {
+                    continue; // after an error nothing more is sent on this stream (never replayed)
+                }
+                let mut sent = 0;
+                for chunk in item.chunks(PASTE_CHUNK) {
+                    let started = std::time::Instant::now();
+                    loop {
+                        match peer.call("stream.input", json!({"stream": sid, "data": B64.encode(chunk)})).await {
+                            Ok(_) => break,
+                            // A full input queue rejects without effect: wait and offer the same chunk again.
+                            Err(e) if e.kind() == "overloaded" && started.elapsed() < PASTE_STALL => {
+                                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                            }
+                            Err(e) => {
+                                failed = true;
+                                let _ = msgs.send(Msg::Info(format!("paste stopped after {sent} of {} bytes ({}); the rest was not sent", item.len(), e)));
+                                break;
+                            }
+                        }
+                    }
+                    if failed {
+                        break;
+                    }
+                    sent += chunk.len();
+                }
+                if !failed && item.len() == total && total > PASTE_CHUNK {
+                    let _ = msgs.send(Msg::Info(format!("pasted {total} bytes")));
+                }
+            }
+        });
+    }
+
     fn on_key(&mut self, k: KeyEvent) {
         let is_prefix = keys::name(&k) == Some(self.prefix());
-        if is_prefix && (self.filtering.is_some() || matches!(self.overlay,Some(Overlay::Popup{..}))) {self.filtering=None;self.overlay=Some(Overlay::Prefix{sel:0});return;}
+        // The prefix reaches recovery from popups, filters and anything opened over them (a drop-down,
+        // prompt or picker is cancelled; a popup waiting underneath returns when the prefix menu closes).
+        if is_prefix && (self.filtering.is_some() || matches!(self.overlay,Some(Overlay::Popup{..}|Overlay::Menu{..}|Overlay::Input{..}|Overlay::Pick{..}))) {self.filtering=None;self.overlay=Some(Overlay::Prefix{sel:0});return;}
         if self.filtering.is_some() {
             return self.on_filter_key(k);
         }
@@ -1736,7 +1859,7 @@ impl App {
                             let key = KeyEvent::new(if up { KeyCode::Up } else { KeyCode::Down }, KeyModifiers::NONE);
                             let bytes = keys::encode(&key, t.parser.screen().application_cursor()).unwrap_or_default().repeat(3);
                             if let Some(sid) = t.stream {
-                                self.peer.notify("stream.input", json!({"stream": sid, "data": B64.encode(bytes)}));
+                                self.send_input(sid, bytes);
                             }
                             false
                         } else {
@@ -1837,7 +1960,7 @@ impl App {
         let row = m.row.saturating_sub(inner.y).min(inner.height.saturating_sub(1));
         let Some(bytes) = mouse::encode(m, col, row, screen.mouse_protocol_mode(), screen.mouse_protocol_encoding()) else { return false };
         if let Some(sid) = t.stream {
-            self.peer.notify("stream.input", json!({"stream": sid, "data": B64.encode(bytes)}));
+            self.send_input(sid, bytes);
         }
         true
     }
@@ -2215,6 +2338,21 @@ impl App {
     fn draw_overlay(&mut self, f: &mut Frame, area: Rect, pal: &Palette, icons: &Icons) {
         if let Some(Overlay::Popup { view, width, .. }) = &self.overlay {
             let (view, width) = (view.clone(), *width);
+            self.draw_popup(f, area, pal, icons, &view, width);
+            return;
+        }
+        // A menu, prompt or picker opened from a popup is drawn over it: the popup stays visible
+        // underneath (it waits in `under` and takes input again when the menu closes).
+        if let Some(Overlay::Popup { view, width, .. }) = &self.under {
+            let (view, width) = (view.clone(), *width);
+            self.draw_popup(f, area, pal, icons, &view, width);
+        }
+        self.draw_menu_overlay(f, area, pal, icons);
+    }
+
+    fn draw_popup(&mut self, f: &mut Frame, area: Rect, pal: &Palette, icons: &Icons, view: &str, width: u16) {
+        {
+            let view = view.to_string();
             let v = self.panel_value(&view);
             let mut st = self.pstate.remove("@popup").unwrap_or_default();
             let w = width.max(20).min(area.width);
@@ -2242,8 +2380,11 @@ impl App {
             self.pstate.insert("@popup".into(), st);
             self.hit.panels.insert("@popup".into(), hits);
             self.hit.overlay = Some((rect, Rect::default(), 0));
-            return;
         }
+    }
+
+    /// Menus, prompts, pickers, the prefix menu and the palette (everything but popups).
+    fn draw_menu_overlay(&mut self, f: &mut Frame, area: Rect, pal: &Palette, icons: &Icons) {
         let (title, items, sel, query) = match &self.overlay {
             Some(Overlay::Popup { .. }) => return,
             None => {
@@ -2959,5 +3100,38 @@ mod tests {
         assert_eq!(neighbour(&rects, 2, "left"), Some(0));
         assert_eq!(neighbour(&rects, 0, "left"), None);
         assert_eq!(neighbour(&rects, 0, "sideways"), None);
+    }
+
+    #[test]
+    fn paste_is_bracketed_only_when_the_program_asked_and_cannot_close_the_bracket_early() {
+        assert_eq!(paste_bytes("a\nb\n", false), b"a\nb\n".to_vec());
+        assert_eq!(paste_bytes("a\nb\n", true), b"\x1b[200~a\nb\n\x1b[201~".to_vec());
+        // A paste that contains the end marker must not end the bracket and run the rest as typed input.
+        assert_eq!(paste_bytes("x\x1b[201~rm -rf ~\n", true), b"\x1b[200~xrm -rf ~\n\x1b[201~".to_vec());
+    }
+
+    #[tokio::test]
+    async fn a_dropdown_is_drawn_over_its_popup_and_the_prefix_reaches_recovery_from_it() {
+        let (mut app, _) = app();
+        app.entries.insert("view/pop".into(), json!({"kind": "panel", "title": "Popup Title", "items": [
+            {"type": "select", "text": "Choice", "value": "a", "command": "x.pick", "options": [{"label": "Alpha", "value": "a"}, {"label": "Beta", "value": "b"}]}]}));
+        app.overlay = Some(Overlay::Popup { view: "pop".into(), width: 60, ctx: json!({}) });
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(app.overlay, Some(Overlay::Menu { .. })) && app.under.is_some(), "Enter on a select opens its menu over the popup");
+        terminal.draw(|f| app.draw(f)).unwrap();
+        let screen: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
+        assert!(screen.contains("Popup Title"), "the popup stays visible under its drop-down");
+        assert!(screen.contains("Beta"), "the drop-down is drawn");
+        // Anchored under the row, not at the screen origin.
+        let Some(Overlay::Menu { at, .. }) = &app.overlay else { unreachable!() };
+        assert!(at.x > 0 && at.y > 0);
+        // The prefix cancels the drop-down and opens the prefix menu; the popup returns afterwards.
+        app.on_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL));
+        assert!(matches!(app.overlay, Some(Overlay::Prefix { .. })));
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        app.restore_under();
+        assert!(matches!(&app.overlay, Some(Overlay::Popup { view, .. }) if view == "pop"));
     }
 }
