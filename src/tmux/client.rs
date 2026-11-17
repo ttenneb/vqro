@@ -22,6 +22,19 @@ const MAX_COMMAND: usize = 64 * 1024;
 const MAX_INPUT: usize = 16 * 1024;
 const CHUNK: usize = 16 * 1024;
 const MAX_WATCHED: usize = 1024;
+/// After a read-only command times out, how many more command timeouts its late reply may take
+/// before the attachment is treated as desynchronised and dropped.
+const LATE_REPLY_FACTOR: u32 = 10;
+/// Commands that only read tmux state: a timeout leaves nothing unknown, so it is not fatal.
+const READ_ONLY: &[&str] = &[
+    "list-panes", "list-windows", "list-sessions", "list-clients", "list-buffers", "list-keys", "list-commands",
+    "display-message", "capture-pane", "show-options", "show-window-options", "show-environment", "show-hooks",
+    "show-buffer", "has-session",
+];
+
+fn read_only(command: &str) -> bool {
+    READ_ONLY.contains(&command)
+}
 type Reply = Result<Vec<Vec<u8>>, Error>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -31,6 +44,9 @@ pub enum Error {
     Disconnected,
     /// The command was written, but its acknowledgement was lost. Never automatically resend.
     Indeterminate(String),
+    /// A read-only command got no reply in time. It had no effect; the control client stays
+    /// attached and absorbs the late reply, so later replies stay paired.
+    TimedOut(String),
     Protocol(String),
 }
 impl std::fmt::Display for Error {
@@ -117,7 +133,10 @@ struct Request {
     marker: String,
     flow: Vec<(PaneId, bool)>,
     repaint: Option<PaneId>,
-    reply: oneshot::Sender<Reply>,
+    /// Taken when answered, or when a read-only command times out (its late reply is absorbed).
+    reply: Option<oneshot::Sender<Reply>>,
+    /// Safe to abandon on timeout: tmux commands that only read state.
+    read_only: bool,
 }
 enum Action {
     Command(Request),
@@ -273,7 +292,7 @@ impl Client {
             Vec::new()
         };
         self.commands
-            .send(Action::Command(Request { command, marker, flow, repaint, reply: tx }))
+            .send(Action::Command(Request { command, marker, flow, repaint, reply: Some(tx), read_only: read_only(args[0]) }))
             .await
             .map_err(|_| Error::Disconnected)?;
         rx.await.unwrap_or(Err(Error::Indeterminate("connection closed before command acknowledgement".into())))
@@ -537,7 +556,9 @@ async fn actor(
                         } else if !error && lines == [format!("{}_end", request.marker).into_bytes()] {
                             let request = pending.take().unwrap();
                             let result = first.take().unwrap_or(Err(Error::Protocol("missing command block between barriers".into())));
-                            let _ = request.reply.send(result);
+                            if let Some(reply) = request.reply {
+                                let _ = reply.send(result);
+                            }
                         } else if started && first.is_none() {
                             // tmux 3.7b emits manual %pause/%continue *inside* refresh-client's reply
                             // block, despite the manual's general no-notifications-inside-block rule.
@@ -573,12 +594,24 @@ async fn actor(
                     Some(Err(e)) => { reason = e.to_string(); break; }
                     None => break,
                 },
-                _ = tokio::time::sleep_until(deadline), if pending.is_some() => { reason = "command acknowledgement timed out".into(); break; },
+                _ = tokio::time::sleep_until(deadline), if pending.is_some() => {
+                    let request = pending.as_mut().unwrap();
+                    if request.read_only && request.reply.is_some() {
+                        // No effect to be unsure about: tell the caller, keep the attachment, and
+                        // keep this request at the head so its late blocks are absorbed, not paired
+                        // with the next command. Bounded: no reply at all means desync.
+                        let _ = request.reply.take().unwrap().send(Err(Error::TimedOut("read-only command timed out; no effect".into())));
+                        deadline = tokio::time::Instant::now() + timeout * LATE_REPLY_FACTOR;
+                        continue;
+                    }
+                    reason = if request.reply.is_none() { "late reply never arrived".into() } else { "command acknowledgement timed out".into() };
+                    break;
+                },
             }
         }
     }
-    if let Some(request) = pending {
-        let _ = request.reply.send(Err(Error::Indeterminate(reason.clone())));
+    if let Some(reply) = pending.and_then(|r| r.reply) {
+        let _ = reply.send(Err(Error::Indeterminate(reason.clone())));
     }
     reader.abort();
     drop(stdin);

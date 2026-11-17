@@ -332,3 +332,51 @@ async fn native_pause_after_is_gap_then_labelled_capture_repaint_not_raw_history
     assert!(statuses.is_empty(), "capture must not fabricate lost OSC status");
     client.close().await;
 }
+
+#[tokio::test]
+#[ignore = "requires /usr/bin/tmux 3.7b; private server"]
+async fn read_only_timeouts_under_a_flood_keep_the_client_and_replies_paired() {
+    let server = Server::new();
+    let mut config = Config::new(server.socket.clone(), "test");
+    config.binary = "/usr/bin/tmux".into();
+    config.command_timeout = Duration::from_millis(30);
+    let client = Client::connect(config).await.unwrap();
+    let mut notes = client.notifications();
+    // A long flood in a second pane of this session: its %output precedes our replies on the pipe.
+    let mut long = Config::new(server.socket.clone(), "test");
+    long.binary = "/usr/bin/tmux".into();
+    let spawner = Client::connect(long).await.unwrap();
+    spawner.spawn(&["/bin/sh", "-c", "yes prim-flood-line | head -n 3000000; sleep 600"], None).await.unwrap();
+    let (mut ok, mut timed_out) = (0, 0);
+    for i in 0..300 {
+        let probe = format!("probe-{i}");
+        match client.command(&["display-message", "-p", &probe]).await {
+            Ok(lines) => {
+                assert_eq!(lines, vec![probe.into_bytes()], "a late reply never pairs with a later command");
+                ok += 1;
+            }
+            Err(Error::TimedOut(_)) => timed_out += 1,
+            Err(e) => panic!("read-only timeouts are not fatal: {e:?} after {ok} ok, {timed_out} timed out"),
+        }
+    }
+    while let Ok(n) = notes.try_recv() {
+        assert!(!matches!(n, Notification::Disconnected { .. }), "the control client stayed attached");
+    }
+    eprintln!("under flood: {ok} replies, {timed_out} timeouts (30 ms)");
+    // Still paired and alive afterwards.
+    let mut answered = false;
+    for _ in 0..200 {
+        match client.command(&["display-message", "-p", "final"]).await {
+            Ok(lines) => {
+                assert_eq!(lines, vec![b"final".to_vec()]);
+                answered = true;
+                break;
+            }
+            Err(Error::TimedOut(_)) => tokio::time::sleep(Duration::from_millis(20)).await,
+            Err(e) => panic!("{e:?}"),
+        }
+    }
+    assert!(answered);
+    client.close().await;
+    spawner.close().await;
+}
