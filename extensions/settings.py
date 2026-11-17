@@ -8,8 +8,8 @@ update in place while the popup is open.
 Extensions are switched with the core's `prim.extension.enable|disable`; client options live in
 `doc/settings/tui` and each client reads the ones it understands. The Theme page draws the `themes`
 extension's live data and applies one with its `themes.apply` command; the Icons page does the same with
-the `icons` extension (`icons.apply`), under the client's own Nerd Font choice. This extension can't switch
-itself off from its own popup: turning settings off from settings would leave you without a way back.
+the `icons` extension (`icons.apply`), under the client's own Nerd Font choice. Every declared extension uses the
+same static manifest and runtime facts; built-in recovery can enable settings again if this page is turned off.
 """
 import os
 import sys
@@ -17,6 +17,7 @@ import unicodedata
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from prim_ext import Extension, PrimError  # noqa: E402
+from prim_display import label
 
 ext = Extension("settings", event_types=["entries", "view.content", "extension", "safe_mode", "command"])  # no resource events: not used here
 TUI = "doc/settings/tui"
@@ -26,7 +27,7 @@ OPTIONS = [
     ("mouse", "Capture the mouse", "off: your terminal handles the mouse and selects text", True),
     ("wheel_arrows", "Wheel scrolls full-screen programs", "sends arrow keys when a program has no mouse support", True),
 ]
-STATUS_STYLE = {"running": "ok", "failed": "error", "restarting": "warn"}
+STATUS_STYLE = {"running": "ok", "failed": "error", "starting": "warn", "stopped-by-safe-mode": "warn"}
 
 
 def tui():
@@ -88,25 +89,79 @@ def theme_rows():
     return rows
 
 
-def ext_rows(states):
-    rows = []
+def manifest_text(manifest, key, fallback=""):
+    value = manifest.get(key)
+    return label(value, 4096) if isinstance(value, str) else label(fallback, 4096) if isinstance(fallback, str) else ""
+
+
+def info_row(text, style=None):
+    return {"type": "text", "text": label(text, 8192), "wrap": True, "focusable": True, "style": style}
+
+
+def ext_rows(states, commands=None):
+    """All declarations follow the same manifest-driven list/detail contract, including this extension."""
+    commands = commands or set()
+    groups = {}
     for key in sorted(k for k in ext.entries if k.startswith("extension/")):
         name = key.split("/", 1)[1]
-        on = ext.value(key).get("enabled", True)
-        st = states.get(name, {})
-        status = st.get("status", "stopped")
-        row = {"type": "toggle", "text": name, "checked": on, "detail": status,
-               "detail_style": STATUS_STYLE.get(status, "dim"),
-               "command": "settings.toggle", "args": {"extension": name}}
-        if status == "failed" and st.get("last_exit"):
-            row["description"] = st["last_exit"]
-        if name == ext.name:
-            row.update(disabled=True, style="plain", description="always on here; use the palette to turn it off")
-        rows.append(row)
-        if name == "pi" and on and status == "running":
-            rows.append({"text": "Configure Pi runtimes", "command": "pi.settings",
-                         "description": "Explicit Pi RPC argv; existing agents are unchanged"})
-    return rows
+        value = ext.value(key) or {}
+        state = states.get(name, {})
+        safe = bool(state.get("safe_mode"))
+        on = bool(state.get("allowed_in_safe_mode")) if safe else value.get("enabled", True)
+        manifest = state.get("manifest") or {}
+        kind = manifest_text(manifest, "kind", value.get("kind", "other"))
+        title = manifest_text(manifest, "title", name)
+        shown = title if title == name else f"{title} ({name})"
+        summary = manifest_text(manifest, "summary", value.get("description") or "No summary provided.").replace("\n", " ")
+        status = state.get("display_status") or ("off" if not on else {"running": "running", "failed": "failed", "safe_mode": "stopped-by-safe-mode", "disabled": "off"}.get(state.get("status"), "starting"))
+        switch = "prim.safe_mode.allow" if safe else "prim.extension.disable" if on else "prim.extension.enable"
+        switch_args = {"name": name, "on": not on} if safe else {"name": name}
+        actions = [{"text": "Turn off" if on else "Turn on", "command": switch, "args": switch_args},
+                   {"text": "Restart", "command": "prim.extension.restart", "args": {"name": name}, "disabled": not on}]
+        settings_command = manifest_text(manifest, "settings_command")
+        if settings_command:
+            actions.append({"text": "Extension settings", "command": settings_command,
+                            "disabled": status != "running" or settings_command not in commands})
+        details = [info_row(manifest_text(manifest, "description", value.get("description") or "No description provided.")),
+                   {"type": "header", "text": "Runtime"},
+                   info_row(f"Status: {status}", STATUS_STYLE.get(status)),
+                   info_row(f"Recorded crashes: {state.get('crashes', 0)}"),
+                   info_row(f"Last exit: {state.get('last_exit') or 'none recorded'}"),
+                   {"type": "header", "text": "About"},
+                   info_row(f"Kind: {kind}"),
+                   info_row(f"Version: {manifest_text(manifest, 'version', 'not provided')}"),
+                   info_row(f"Source: {state.get('manifest_source') or 'manifest not provided'}")]
+        if safe:
+            details.insert(1, info_row("Safe-mode session choice only; the normal enabled declaration is unchanged.", "warn"))
+        if state.get("manifest_error"):
+            details.append(info_row(f"Manifest: {state['manifest_error']}", "warn"))
+        for field in ("author", "license", "homepage"):
+            if manifest_text(manifest, field):
+                details.append(info_row(f"{field.title()}: {manifest_text(manifest, field)}"))
+        requires = manifest.get("requires")
+        if isinstance(requires, dict):
+            details.append(info_row(f"Requires protocol: {requires.get('protocol', 'not specified')}"))
+            features = requires.get("client_features")
+            if isinstance(features, list):
+                details.append(info_row("Client features: " + ", ".join(label(f) for f in features if isinstance(f, str))))
+        details.append({"type": "header", "text": "Contributes (manifest summary)"})
+        contributes = manifest.get("contributes") or {}
+        if isinstance(contributes, dict):
+            for field in ("commands", "keys", "menu_items", "panels", "settings"):
+                items = contributes.get(field)
+                if isinstance(items, list) and items:
+                    details.append(info_row(field.replace("_", " ").title() + ": " + ", ".join(label(s) for s in items if isinstance(s, str))))
+        log_root = ext.info.get("state_dir")
+        details.append(info_row(f"Log: {os.path.join(log_root, 'ext-'+name+'.log')} (open externally; no in-app log viewer)" if log_root else "No in-app log viewer; log location unavailable."))
+        groups.setdefault(kind, []).append({"id": "extension/"+name, "type": "toggle", "text": shown,
+            "checked": on, "description": summary, "tags": [name, kind, summary],
+            "badges": [{"text": status, "style": STATUS_STYLE.get(status, "dim")}],
+            "command": switch, "args": switch_args,
+            "menu": [{"label": a["text"], "command": a["command"], "args": a.get("args", {})} for a in actions if not a.get("disabled")],
+            "detail_panel": {"title": shown, "requires": ["items", "chips", "wrap"],
+                             "toolbar": [{"type": "chips", "chips": actions}], "items": details}})
+    return [{"type": "header", "id": "kind/"+kind, "text": kind.replace("-", " ").title(),
+             "expanded": True, "children": groups[kind]} for kind in sorted(groups)]
 
 
 # Keys page. Mirrors the client's key rules (src/tui/keys.rs, src/tui/mod.rs `rank`) to show
@@ -209,6 +264,7 @@ def key_rows():
 
 def refresh(*_):
     states = ext.prim.call("extension.list")["extensions"]
+    commands = {c["name"] for c in ext.prim.call("command.list")["commands"] if c.get("available")}
     t = tui()
     interface = [{"type": "toggle", "text": label, "description": desc, "checked": bool(t[k]),
                   "command": "settings.toggle", "args": {"tui": k}} for k, label, desc, _ in OPTIONS]
@@ -221,7 +277,7 @@ def refresh(*_):
         {"type": "text", "text": "Everything here is an extension; see docs/decisions.md D17."},
     ]
     ext.publish("settings", {"title": "Settings", "requires": ["pages", "menu", "input"], "pages": [
-        {"title": "Extensions", "items": ext_rows(states)},
+        {"title": "Extensions", "list_detail": {"requires": ["list_detail"]}, "items": ext_rows(states, commands)},
         {"title": "Interface", "items": interface},
         {"title": "Theme", "items": theme_rows()},
         {"title": "Icons", "items": icon_rows()},
@@ -240,7 +296,7 @@ def on_event(t, d):
 @ext.command("settings.open", "Open settings")
 def open_settings(args):
     refresh()
-    return {"client": {"popup": {"view": "settings", "width": 72}}}
+    return {"client": {"popup": {"view": "settings", "width": 112}}}
 
 
 @ext.command("settings.set", "Set a client option (args: tui, value)")
@@ -256,8 +312,6 @@ def set_option(args):
 def toggle(args):
     if "extension" in args:
         name = args["extension"]
-        if name == ext.name:
-            raise PrimError("settings can't turn itself off from here", "invalid")
         on = (ext.value(f"extension/{name}") or {}).get("enabled", True)
         return ext.invoke("prim.extension.disable" if on else "prim.extension.enable", {"name": name})
     if "tui" in args:

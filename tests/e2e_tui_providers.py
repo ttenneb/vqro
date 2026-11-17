@@ -19,6 +19,7 @@ os.chmod(os.path.join(R, "run"), 0o700)
 for f in os.listdir(os.path.join(REPO, "extensions")):
     if f.endswith(".py") or f == "defaults.json":
         shutil.copy(os.path.join(REPO, "extensions", f), os.path.join(R, "ext", f))
+shutil.copytree(os.path.join(REPO, "extensions", "manifests"), os.path.join(R, "ext", "manifests"))
 os.symlink(shutil.which("python3") or "/usr/bin/python3", os.path.join(R, "bin", "python3"))
 ENV = {"HOME": f"{R}/home", "PATH": f"{R}/bin", "TERM": "xterm-256color", "SHELL": "/bin/sh", "PRIM_STATE_DIR": f"{R}/st",
        "PRIM_SOCKET": f"{R}/p.sock", "PRIM_EXTENSIONS_DIR": f"{R}/ext", "XDG_STATE_HOME": f"{R}/xst",
@@ -103,7 +104,49 @@ try:
         check(f"{name}: TUI shows the provider's terminal and typing reaches it", bool(seen), screen()[-600:])
         call("resource.kill", {"resource": rid})
         time.sleep(1)
-    keys("C-g")
+    # Settings is an extension using the same list/detail primitives available to every panel.
+    keys("C-g", ",")
+    check("Extensions page opens with static manifests", bool(wait(lambda: "14 of 14" in screen() and "Agent controls" in screen())))
+    wide = screen()
+    print("CAPTURE extensions-wide\n" + wide, flush=True)
+    keys("/"); keys("pi", literal=True); keys("Enter")
+    check("manifest list search and count", bool(wait(lambda: "1 of 14" in screen() and "Pi launcher" in screen())))
+    # Clicking a row selects details; only its checkbox or explicit keyboard activation changes state.
+    row = next((i, line) for i, line in enumerate(screen().splitlines()) if "[x]" in line and "Pi launcher" in line)
+    before = call("extension.list")["extensions"]["pi"]["generation"]
+    x = row[1].index("Pi launcher") + 2; y = row[0] + 1
+    keys(f"\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m", literal=True); time.sleep(.2)
+    check("mouse row selection has no toggle effect", call("extension.list")["extensions"]["pi"]["generation"] == before)
+    # Tab enters detail actions; restart is generic and keeps the list selection/filter.
+    keys("Tab", "Right", "Enter")
+    check("detail restart action", bool(wait(lambda: call("extension.list")["extensions"]["pi"]["generation"] > before)))
+    check("detail restart preserves list search", bool(wait(lambda: "1 of 14" in screen())))
+    wait(lambda: any(c["name"] == "pi.settings" and c.get("available") for c in call("command.list")["commands"]))
+    keys("Right", "Enter")
+    check("manifest settings_command opens its own settings", bool(wait(lambda: "Pi runtime argv" in screen())))
+    keys("Escape"); keys("C-g", ","); keys("/"); keys("Escape")
+    keys("End", "PageUp", "Home")
+    check("Home End and paging retain catalogue", bool(wait(lambda: "14 of 14" in screen())))
+    keys("/"); keys("icons", literal=True); keys("Enter", "Space")
+    check("keyboard turns extension off", bool(wait(lambda: call("extension.list")["extensions"]["icons"]["display_status"] == "off")))
+    check("disabled extension keeps static description", bool(wait(lambda: "saved icon set remains" in screen())))
+    wait(lambda: "[ ] Icons (icons)" in screen())
+    icon_row = next((i, line) for i, line in enumerate(screen().splitlines()) if "[ ] Icons (icons)" in line)
+    x = icon_row[1].index("[ ]") + 2; y = icon_row[0] + 1
+    keys(f"\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m", literal=True)
+    check("mouse checkbox turns extension on", bool(wait(lambda: call("extension.list")["extensions"]["icons"]["display_status"] == "running")))
+    broken = dict(call("workspace.snapshot")["entries"]["extension/icons"]["value"], argv=["prim-extension-page-test-missing"])
+    call("workspace.apply", {"ops":[{"op":"set","key":"extension/icons","value":broken}]})
+    check("failed extension retains manifest and visible reason", bool(wait(lambda: "failed" in screen() and "extension program" in screen() and "prim-extension-page-test-missing" in screen() and "Publishes icon sets" in screen())))
+    subprocess.run([*HARNESS, "resize-window", "-x", "72", "-y", "36"], capture_output=True)
+    time.sleep(.3)
+    check("narrow list detail stacks below", bool(wait(lambda: "Icons (icons)" in screen() and "1 of 14" in screen())))
+    narrow = screen(); print("CAPTURE extensions-narrow\n" + narrow, flush=True)
+    if len(sys.argv) > 2:
+        os.makedirs(sys.argv[2], exist_ok=True)
+        for name, content in (("extensions-wide.txt", wide), ("extensions-narrow.txt", narrow)):
+            with open(os.path.join(sys.argv[2], name), "w") as f: f.write(content)
+    keys("Escape"); keys("C-g")
     time.sleep(0.4)
     keys("q")
     gone = wait(lambda: subprocess.run([*HARNESS, "list-sessions"], capture_output=True).returncode != 0, 10)

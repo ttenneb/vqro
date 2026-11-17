@@ -845,6 +845,7 @@ impl App {
 
     fn on_key(&mut self, k: KeyEvent) {
         let is_prefix = keys::name(&k) == Some(self.prefix());
+        if is_prefix && (self.filtering.is_some() || matches!(self.overlay,Some(Overlay::Popup{..}))) {self.filtering=None;self.overlay=Some(Overlay::Prefix{sel:0});return;}
         if self.filtering.is_some() {
             return self.on_filter_key(k);
         }
@@ -922,20 +923,32 @@ impl App {
         v
     }
 
-    fn panel_rows(&self, key: &str, view: &str) -> Vec<panel::Flat> {
-        let st = self.pstate.get(key).cloned().unwrap_or_default();
-        panel::rows(&self.panel_value(view), &st)
-    }
-
     /// Keys for a panel (in a pane or a popup). Returns whether it used the key.
     fn panel_key(&mut self, key: &str, view: &str, k: KeyEvent, ctx: Value) -> bool {
         let mut ctx = ctx;
         ctx["panel"] = json!(key);
         ctx["panel_view"] = json!(view);
         let value = self.panel_value(view);
-        let mut st = self.pstate.get(key).cloned().unwrap_or_default();
-        let rows = panel::rows(&value, &st);
+        let mut container = self.pstate.get(key).cloned().unwrap_or_default();
         let pages = panel::page_titles(&value).len();
+        if pages>0 && matches!(k.code,KeyCode::Char('[')|KeyCode::Char(']')) {
+            container.page=if k.code==KeyCode::Char(']'){(container.page+1)%pages}else{(container.page+pages-1)%pages};container.sel=0;container.top=0;container.detail_focus=false;
+            self.pstate.insert(key.into(),container);return true;
+        }
+        if let Some((id,_))=panel::selected_detail(&value,&container) {
+            if matches!(k.code,KeyCode::Tab|KeyCode::BackTab) {
+                panel::sync_detail(&mut container,&id);container.detail_focus=!container.detail_focus;self.pstate.insert(key.into(),container);return true;
+            }
+        }
+        if k.code==KeyCode::Char('/') {container.detail_focus=false;self.pstate.insert(key.into(),container);self.filtering=Some(key.into());return true;}
+        let selected=panel::selected_detail(&value,&container);
+        let in_detail=container.detail_focus && selected.is_some();
+        let (value,mut st)=if in_detail {let(id,v)=selected.unwrap();panel::sync_detail(&mut container,&id);(Arc::new(v),*container.detail.take().unwrap_or_default())}else{(value,container.clone())};
+        let was_scrolling=st.manual_scroll;st.manual_scroll=false;
+        let save=|mut root:panel::State,state:panel::State|{if in_detail{root.detail=Some(Box::new(state));root}else{state}};
+        // A wheel-scrolled pane may have moved its selection out of view: reveal before activating.
+        if was_scrolling && matches!(k.code,KeyCode::Enter|KeyCode::Char(' ')){self.pstate.insert(key.into(),save(container,st));return true;}
+        let rows = panel::rows(&value, &st);
         let mut run = None;
         let chips = rows.get(st.sel).filter(|r| panel::kind(&r.item) == "chips").map(|r| r.item["chips"].as_array().map(|a| a.len()).unwrap_or(0));
         match k.code {
@@ -943,8 +956,8 @@ impl App {
             KeyCode::Right | KeyCode::Char('l') if chips.is_some() => st.chip = (st.chip + 1).min(chips.unwrap_or(1).saturating_sub(1)),
             KeyCode::Up | KeyCode::Char('k') => st.sel = panel::step(&rows, st.sel, -1),
             KeyCode::Down | KeyCode::Char('j') => st.sel = panel::step(&rows, st.sel, 1),
-            KeyCode::PageUp => st.sel = panel::step(&rows, st.sel, -10),
-            KeyCode::PageDown => st.sel = panel::step(&rows, st.sel, 10),
+            KeyCode::PageUp => st.sel = panel::step(&rows, st.sel, -(st.page_step.max(1) as i64)),
+            KeyCode::PageDown => st.sel = panel::step(&rows, st.sel, st.page_step.max(1) as i64),
             KeyCode::Home | KeyCode::Char('g') => st.sel = panel::first(&rows),
             KeyCode::End | KeyCode::Char('G') => st.sel = panel::last(&rows),
             KeyCode::Left | KeyCode::Char('h') => panel::left(&rows, &mut st),
@@ -965,7 +978,7 @@ impl App {
             KeyCode::Char('m') => {
                 if let Some(r) = rows.get(st.sel) {
                     let item = r.item.clone();
-                    self.pstate.insert(key.to_string(), st);
+                    self.pstate.insert(key.to_string(), save(container,st));
                     self.row_menu(&item, ctx, None);
                     return true;
                 }
@@ -977,7 +990,7 @@ impl App {
             _ => return false,
         }
         let sel = st.sel;
-        self.pstate.insert(key.to_string(), st);
+        self.pstate.insert(key.to_string(), save(container,st));
         if let Some(item) = run {
             if item["options"].is_array() {
                 let at = self.row_position(key, sel);
@@ -991,8 +1004,11 @@ impl App {
 
     /// Where a panel row was drawn, for anchoring dropdowns under it.
     fn row_position(&self, key: &str, row: usize) -> Option<Position> {
-        let hits = self.hit.panels.get(key)?;
-        let chip = self.pstate.get(key).map(|s| s.chip).unwrap_or(0);
+        let root_hits = self.hit.panels.get(key)?;
+        let state=self.pstate.get(key);
+        let detail=state.is_some_and(|s|s.detail_focus);
+        let hits=if detail{root_hits.detail.as_deref()?}else{root_hits};
+        let chip = state.map(|s|if detail{s.detail.as_deref().map(|s|s.chip).unwrap_or(0)}else{s.chip}).unwrap_or(0);
         let r = hits.chips.iter().find(|(_, r, c)| *r == row && *c == chip).map(|x| x.0).or_else(|| hits.rows.iter().find(|(_, i)| *i == row).map(|x| x.0))?;
         Some(Position { x: r.x, y: r.y + 1 })
     }
@@ -1059,7 +1075,6 @@ impl App {
 
     fn on_popup_key(&mut self, k: KeyEvent) {
         let Some(Overlay::Popup { view, ctx, .. }) = self.overlay.clone_popup() else { return };
-        if view=="@prim-safe-mode" && keys::name(&k)==Some(self.prefix()) { self.overlay=Some(Overlay::Prefix{sel:0}); return; }
         match k.code {
             KeyCode::Esc | KeyCode::Char('q') => {
                 let st = self.pstate.entry("@popup".into()).or_default();
@@ -1582,8 +1597,9 @@ impl App {
                     }
                     return true;
                 }
-                MouseEventKind::ScrollUp => self.on_popup_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
-                MouseEventKind::ScrollDown => self.on_popup_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                    if let Some(Overlay::Popup{view,ctx,..})=self.overlay.clone_popup(){self.panel_scroll("@popup",&view,pos,m.kind==MouseEventKind::ScrollUp,ctx);}
+                },
                 _ => return false,
             }
             return true;
@@ -1726,7 +1742,7 @@ impl App {
                     }
                     "panel" => {
                         let ctx = self.ctx_leaf(self.focus);
-                        self.panel_key(&view.clone(), &view, KeyEvent::new(if up { KeyCode::Up } else { KeyCode::Down }, KeyModifiers::NONE), ctx);
+                        self.panel_scroll(&view,&view,pos,up,ctx);
                         true
                     }
                     _ => false,
@@ -1742,19 +1758,30 @@ impl App {
         }
     }
 
+    fn panel_scroll(&mut self,key:&str,view:&str,pos:Position,up:bool,ctx:Value) {
+        let detail=self.hit.panels.get(key).and_then(|h|h.detail_area).is_some_and(|r|r.contains(pos));
+        if detail {let root=self.pstate.entry(key.into()).or_default();root.detail_focus=true;let st=root.detail.get_or_insert_with(Box::default);st.manual_scroll=true;st.top=if up{st.top.saturating_sub(3)}else{st.top.saturating_add(3)};}
+        else {self.pstate.entry(key.into()).or_default().detail_focus=false;self.panel_key(key,view,KeyEvent::new(if up{KeyCode::Up}else{KeyCode::Down},KeyModifiers::NONE),ctx);}
+    }
+
     /// A click in a panel: page tabs, expanders, rows (left activates, right opens the row's menu).
     /// Returns whether it hit something.
     fn panel_click(&mut self, key: &str, view: &str, pos: Position, button: MouseButton, ctx: Value) -> bool {
-        let Some(hits) = self.hit.panels.get(key) else { return false };
+        let Some(root_hits) = self.hit.panels.get(key) else { return false };
+        let in_detail=root_hits.detail_area.is_some_and(|r|r.contains(pos));
+        let hits=if in_detail {let Some(h)=root_hits.detail.as_deref()else{return false};h}else{root_hits};
         if let Some((_, page)) = hits.pages.iter().find(|(r, _)| r.contains(pos)).copied() {
             let st = self.pstate.entry(key.to_string()).or_default();
             st.page = page;
             st.sel = 0;
             st.top = 0;
+            st.detail_focus=false;
             return true;
         }
+        let toggle=hits.toggles.iter().any(|(r,_)|r.contains(pos));
         if let Some((_, row, chip)) = hits.chips.iter().find(|(r, _, _)| r.contains(pos)).copied() {
-            let st = self.pstate.entry(key.to_string()).or_default();
+            let root = self.pstate.entry(key.to_string()).or_default();root.detail_focus=in_detail;
+            let st=if in_detail{root.detail.get_or_insert_with(Box::default).as_mut()}else{root};
             st.sel = row;
             st.chip = chip;
             if button == MouseButton::Left {
@@ -1764,17 +1791,21 @@ impl App {
         }
         let expander = hits.expanders.iter().find(|(r, _)| r.contains(pos)).map(|x| x.1);
         let Some(i) = expander.or_else(|| hits.rows.iter().find(|(r, _)| r.contains(pos)).map(|x| x.1)) else { return false };
-        let rows = self.panel_rows(key, view);
-        let mut st = self.pstate.get(key).cloned().unwrap_or_default();
-        st.sel = i;
+        let value=self.panel_value(view);
+        let mut container=self.pstate.get(key).cloned().unwrap_or_default();container.detail_focus=in_detail;
+        let (value,mut st)=if in_detail {let Some((id,v))=panel::selected_detail(&value,&container)else{return false};panel::sync_detail(&mut container,&id);(Arc::new(v),*container.detail.take().unwrap_or_default())}else{(value,container.clone())};
+        let rows=panel::rows(&value,&st);
+        let save=|mut root:panel::State,state:panel::State|{if in_detail{root.detail=Some(Box::new(state));root}else{state}};
+        st.sel = i;st.manual_scroll=false;
         if expander.is_some() {
             if let Some(r) = rows.get(i) {
                 st.open.insert(r.id.clone(), !r.expanded);
             }
-            self.pstate.insert(key.to_string(), st);
+            self.pstate.insert(key.to_string(), save(container,st));
             return true;
         }
-        self.pstate.insert(key.to_string(), st);
+        self.pstate.insert(key.to_string(), save(container,st));
+        if !in_detail && !toggle && button==MouseButton::Left && rows.get(i).is_some_and(|r|r.item["detail_panel"].is_object()){return true;}
         match button {
             MouseButton::Right => {
                 let item = rows.get(i).map(|r| r.item.clone()).unwrap_or(Value::Null);
@@ -2177,7 +2208,7 @@ impl App {
             let (view, width) = (view.clone(), *width);
             let v = self.panel_value(&view);
             let mut st = self.pstate.remove("@popup").unwrap_or_default();
-            let w = width.clamp(20, area.width);
+            let w = width.max(20).min(area.width);
             // Size to the largest page so switching pages doesn't jump.
             let tallest = (0..panel::page_titles(&v).len().max(1))
                 .map(|p| panel::height(&v, &panel::State { page: p, filter: st.filter.clone(), open: st.open.clone(), ..Default::default() }, w.saturating_sub(4), icons))
@@ -2191,7 +2222,7 @@ impl App {
                 .border_type(ratatui::widgets::BorderType::Rounded)
                 .title(Span::styled(format!(" {title} "), pal.style(Some("accent")).add_modifier(Modifier::BOLD)))
                 .title_bottom(Line::from(Span::styled(
-                    if panel::page_titles(&v).is_empty() { " ↑↓ move · enter select · / filter · esc close " } else { " ↑↓ move · tab page · enter select · / filter · esc close " },
+                    if panel::list_detail(&v,&st) {" ↑↓ list · Tab details · [ ] pages · / search · Esc close "}else if panel::page_titles(&v).is_empty() { " ↑↓ move · enter select · / filter · esc close " } else { " ↑↓ move · tab page · enter select · / filter · esc close " },
                     pal.style(Some("dim")),
                 )).right_aligned())
                 .border_style(pal.border(true));
@@ -2523,6 +2554,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn generic_details_keep_chip_keys_paging_and_prefix_recovery() {
+        let(mut app,_)=app();
+        let items=(0..10).map(|i|json!({"id":format!("row{i}"),"text":format!("Row {i}"),"detail_panel":{"items":[],"toolbar":[{"type":"chips","chips":[{"text":"one","command":"client.quit"},{"text":"two"}]}]}})).collect::<Vec<_>>();
+        app.entries.insert("view/test".into(),json!({"kind":"panel","list_detail":{"requires":["list_detail"]},"items":items}));
+        app.pstate.entry("test".into()).or_default().page_step=3;
+        app.panel_key("test","test",KeyEvent::new(KeyCode::PageDown,KeyModifiers::NONE),json!({}));assert_eq!(app.pstate["test"].sel,3);
+        app.panel_key("test","test",KeyEvent::new(KeyCode::Tab,KeyModifiers::NONE),json!({}));assert!(app.pstate["test"].detail_focus);
+        app.panel_key("test","test",KeyEvent::new(KeyCode::Right,KeyModifiers::NONE),json!({}));assert_eq!(app.pstate["test"].detail.as_ref().unwrap().chip,1);
+        app.panel_key("test","test",KeyEvent::new(KeyCode::Left,KeyModifiers::NONE),json!({}));assert_eq!(app.pstate["test"].detail.as_ref().unwrap().chip,0);assert!(app.pstate["test"].detail_focus);
+        app.pstate.get_mut("test").unwrap().detail.as_mut().unwrap().manual_scroll=true;
+        app.panel_key("test","test",KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE),json!({}));assert!(!app.quit,"off-screen action must be revealed before execution");
+        app.panel_key("test","test",KeyEvent::new(KeyCode::BackTab,KeyModifiers::NONE),json!({}));assert!(!app.pstate["test"].detail_focus);
+        app.overlay=Some(Overlay::Popup{view:"test".into(),width:100,ctx:json!({})});app.filtering=Some("@popup".into());
+        app.on_key(KeyEvent::new(KeyCode::Char('g'),KeyModifiers::CONTROL));assert!(matches!(app.overlay,Some(Overlay::Prefix{..})));assert!(app.filtering.is_none());
+    }
+
+    #[tokio::test]
     async fn safe_snapshot_and_reconnect_preserve_unapplied_choices_and_dismissal() {
         let (mut app,_) = app();let snap=json!({"epoch":"one","seq":1,"safe_mode":true,"safe_mode_allow":[],"entries":{"extension/draft":{"value":{"argv":["false"]}}}});
         app.load(&snap);app.safe_selected.insert("draft".into());app.load(&snap);
@@ -2551,7 +2599,7 @@ mod tests {
         app.run_command("client.safe_mode.toggle",json!({"name":"herdr"}),Value::Null,None);
         assert!(app.safe_selected.contains("herdr"));assert!(!app.safe_mode_allow.contains("herdr"));
         assert_eq!(app.entries["extension/herdr"]["enabled"],false);
-        app.on_popup_key(KeyEvent::new(KeyCode::Char('g'),KeyModifiers::CONTROL));
+        app.on_key(KeyEvent::new(KeyCode::Char('g'),KeyModifiers::CONTROL));
         assert!(matches!(app.overlay,Some(Overlay::Prefix{..})),"prefix recovery remains reachable inside chooser");
         assert!(app.prefix_items().iter().any(|r|r.binding["command"]=="client.safe_mode"));
     }
