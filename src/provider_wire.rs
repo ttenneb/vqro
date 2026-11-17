@@ -133,6 +133,10 @@ pub struct WireProvider {
     health: watch::Receiver<crate::provider::Health>,
 }
 
+#[cfg(test)]
+#[path = "provider_wire_lifecycle_tests.rs"]
+mod lifecycle_tests;
+
 impl Connection {
     pub fn new(id: u64, peer: Peer) -> Self { Self { id, peer, hello: AtomicBool::new(false), provider: Mutex::new(None) } }
     pub fn is_provider(&self) -> bool { self.provider.lock().unwrap().is_some() }
@@ -211,7 +215,16 @@ impl Connection {
         provider.sync(core, p)
     }
     pub fn notification(&self, core: &Shared, method: &str, p: Value) -> Result<(), RpcError> {
-        let provider = self.validate(core, &p)?;
+        let provider = if method == "resource.gone" {
+            // Peer EOF can disable execution routes before connection() drains
+            // complete accepted records. Retirement is monotonic, but must still
+            // belong to this generation/source (checked atomically below).
+            let provider = self.provider.lock().unwrap().clone().ok_or_else(|| invalid("provider must register first"))?;
+            if p["generation"].as_u64() != Some(provider.generation) {
+                return Err(RpcError::new("stale_generation", "provider generation does not match this connection"));
+            }
+            provider
+        } else { self.validate(core, &p)? };
         provider.notification(core, method, p)
     }
     pub fn disconnect(&self, core: &Shared) {
@@ -289,7 +302,11 @@ impl WireProvider {
                     if inventory.current.get(&reference).is_some_and(|f| f.incarnation == incarnation) { inventory.current.remove(&reference); }
                     if inventory.seen.get(&reference).is_some_and(|f| f.incarnation == incarnation) { inventory.seen.remove(&reference); }
                 }
-                core.lock().unwrap().on_adapter_event(&self.name, adapter::AdapterEvent::Removed { reference, incarnation });
+                let mut c = core.lock().unwrap();
+                if !c.providers.get(&self.name).is_some_and(|p| p.source == self.source && p.generation == self.generation) {
+                    return Err(RpcError::new("stale_generation", "provider changed before retirement publication"));
+                }
+                c.on_adapter_event(&self.name, adapter::AdapterEvent::Removed { reference, incarnation });
             }
             "stream.data" | "stream.closed" | "stream.gap" | "stream.error" => self.stream_message(method, p)?,
             _ => return Err(RpcError::method_not_found(method)),

@@ -251,12 +251,11 @@ async fn connection(core: Shared, conn: Arc<Conn>, mut incoming: crate::rpc::Inc
                 conn.peer.respond(id, result);
             }
             Incoming::Notification { method, params } if conn.wire.is_provider() || matches!(method.as_str(), "resource.upsert" | "resource.gone" | "stream.data" | "stream.closed" | "stream.gap" | "stream.error") => {
-                let valid = conn.wire.validate(&core, &params);
-                let result = valid.and_then(|_| {
-                    if matches!(method.as_str(), "resource.upsert" | "resource.gone" | "stream.data" | "stream.closed" | "stream.gap" | "stream.error") {
-                        conn.wire.notification(&core, &method, params)
-                    } else { Ok(()) }
-                });
+                let result = if matches!(method.as_str(), "resource.upsert" | "resource.gone" | "stream.data" | "stream.closed" | "stream.gap" | "stream.error") {
+                    // Notification validation includes the EOF-safe retirement
+                    // path; do not reject an accepted tail before it can drain.
+                    conn.wire.notification(&core, &method, params)
+                } else { conn.wire.validate(&core, &params).map(|_| ()) };
                 if result.is_err() { conn.peer.close(); }
             }
             // Stream input is handled in order, inline: keystrokes must not be reordered.
