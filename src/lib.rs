@@ -6,6 +6,7 @@ pub mod client;
 pub mod core;
 pub mod ext;
 pub mod paths;
+pub mod queue;
 pub mod rpc;
 pub mod server;
 pub mod store;
