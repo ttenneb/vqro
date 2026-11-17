@@ -77,6 +77,16 @@ written the same way was contained by the crash budget and removed with one reve
 - TUI merges partial facts before checking availability and reattaches only when the resource is available.
 - Provider-v0 step 1 only: no external provider wire methods, tokens or relay. Evidence: `research/provider-reshape.md`.
 
+## Core provider wire (2026-11-17)
+
+- Implemented pinned provider-v0 section 9 registration/generation, chunked sync, facts, forwarded effects,
+  deadlines/duplicate-id bounds, credited/offset streams, disconnect fencing and durable runtime resume credentials.
+- Native and wire resource admission enforce the shared snapshot allowance. Opt-in bridge spawn injects env;
+  ordinary shells do not receive tokens. Native herdr remains default; no essential/safe-mode policy change.
+- 125 Rust tests pass with zero warnings; Python SDK/fake and private real prim-tmux extension interop pass.
+  External default 600/200/8 scale passes all budgets, 49.88 MiB peak RSS and zero leaked processes.
+- Details and limits: `research/provider-wire.md`. Relay, Windows and real Pi/runtime-core conformance remain open.
+
 ## Known gaps found while building
 
 - **History churn:** extensions that refresh views on every event (the sidebar on status changes) fill the
@@ -156,14 +166,14 @@ bridge not built); second backend (tmux) not started; Windows untested.
   control client per session, reconcile after structural events, lossy OSC 7501 status, repaint-first streams,
   gap on pause/lag/dropped client. Details and findings: `research/tmux-provider.md`.
 - Tested against an in-test fake core and private tmux 3.7b (`tests/provider_client.rs`, `tests/tmux_provider.rs`,
-  opt-in). Not yet run against the real core's section 9 side (in progress on `provider-wire`).
+  opt-in). Real core section 9 spawn/repaint/input/echo/kill extension interop now passes (`tests/provider_wire.rs`).
 
 ## herdr-core provider, provider side (2026-11-17)
 
 - `src/bin/prim-herdr.rs`: herdr-core as an out-of-process provider, wrapping the in-process adapter unchanged
   (instance = `core.id`, spawn/kill/attach, history streams with credit after send, status, exit codes, re-register
   per herdr-core connection). Opt-in tests on a private herdr-core (`tests/herdr_provider.rs`). Notes and findings:
-  `research/herdr-provider.md`. Open: an env hook in the adapter (bridge tokens need `terminal.spawn {env}`).
+  `research/herdr-provider.md`. Native adapter env now reaches hc; the external wrapper still declares env unsupported.
 
 ## Windows work (known, 2026-11-17)
 
@@ -197,5 +207,5 @@ the human's OK). Contracts are updated; this is implementation.
   credited/ordered streams. Reuses the managed stdin lifetime watcher; never reconnects or resends automatically.
 - `tests/fixtures/fake_provider.py`: standalone external fake, with echo/greeting and the same status-period,
   status-phase and output-rate argv flags as the in-process fake. No actual terminals/programs are spawned.
-- Socket-pair fake-core tests exercise the SDK without a real core; core-side provider wire integration and
-  scale conformance remain separate work. API/bounds: `extensions/prim_provider.md`.
+- Socket-pair fake-core tests exercise the SDK without a real core. Core wire integration and external-provider
+  default scale now pass too (`research/provider-wire.md`). API/bounds: `extensions/prim_provider.md`.
