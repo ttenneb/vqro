@@ -117,6 +117,9 @@ finally:
         except subprocess.TimeoutExpired:
             core.kill()
     subprocess.run([HC, "server", "stop"], env={**ENV, "PATH": ""}, capture_output=True)
+    # Provider/core exit intentionally no longer owns the tmux backend's lifetime.
+    subprocess.run(["/usr/bin/tmux", "-N", "-S", f"{R}/st/tmux.sock", "kill-server"],
+                   env={"HOME": f"{R}/home", "PATH": "/usr/bin:/bin"}, capture_output=True)
     def leftovers():
         found = []
         for pid in os.listdir("/proc"):

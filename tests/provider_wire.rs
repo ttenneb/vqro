@@ -204,11 +204,21 @@ async fn oversized_whole_facts_are_rejected_before_publication() {
 }
 
 #[tokio::test(flavor="multi_thread", worker_threads=2)]
-#[ignore = "requires /usr/bin/tmux; provider creates and removes its own private server"]
+#[ignore = "requires /usr/bin/tmux; test explicitly stops its owned native server"]
 async fn prim_tmux_extension_interoperates_with_core_wire() {
     let e = env().await;
+    struct StopOwnedServer(PathBuf);
+    impl Drop for StopOwnedServer {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("/usr/bin/tmux").env_clear().args(["-N", "-S"])
+                .arg(&self.0).arg("kill-server").output();
+        }
+    }
+    let _server = StopOwnedServer(e._dir.path().join("st/tmux.sock"));
+    let home = e._dir.path().join("home");
+    std::fs::create_dir(&home).unwrap();
     let (viewer, mut output) = peer(&e).await;
-    viewer.call("workspace.apply", json!({"ops":[{"op":"set","key":"extension/tmux-wire-fixture","value":{"argv":[env!("CARGO_BIN_EXE_prim-tmux"),"--name","native-tmux","--tmux","/usr/bin/tmux"]}}]})).await.unwrap();
+    viewer.call("workspace.apply", json!({"ops":[{"op":"set","key":"extension/tmux-wire-fixture","value":{"argv":["/usr/bin/env",format!("HOME={}",home.display()),env!("CARGO_BIN_EXE_prim-tmux"),"--name","native-tmux","--tmux","/usr/bin/tmux"]}}]})).await.unwrap();
     until(|| e.core.lock().unwrap().providers.get("native-tmux").is_some_and(|p| p.synced)).await;
     let spawned = viewer.call("resource.spawn", json!({"provider":"native-tmux","argv":["/bin/sh","-c","cat"]})).await.unwrap();
     let id = spawned["resource"]["id"].clone();
