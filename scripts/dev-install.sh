@@ -20,9 +20,12 @@ for source in extensions/*; do
   mkdir -p "$destination"
   cp "$source"/*.py "$destination/"
 done
-# Atomic replace: a running binary keeps its old inode.
-install -m 755 target/release/prim "$HOME/.local/bin/.prim.new"
-mv -f "$HOME/.local/bin/.prim.new" "$HOME/.local/bin/prim"
+# Atomic replace: a running binary keeps its old inode. The provider programs (backends run as
+# extensions: prim-herdr, prim-tmux) go next to prim, where the default extensions find them.
+for bin in prim-herdr prim-tmux prim; do
+  install -m 755 "target/release/$bin" "$HOME/.local/bin/.$bin.new"
+  mv -f "$HOME/.local/bin/.$bin.new" "$HOME/.local/bin/$bin"
+done
 echo "installed $("$HOME/.local/bin/prim" --version) to ~/.local/bin/prim"
 if "$HOME/.local/bin/prim" status 2>/dev/null | grep -q '^running'; then
   # UIs too old to restart themselves need a manual restart; say so.

@@ -1,5 +1,6 @@
 #!/bin/bash
-# Opt-in real-backend TUI smoke: a private herdr-core, a private prim core (native herdr), and the real
+# Opt-in real-backend TUI smoke: a private herdr-core, a private prim core (herdr via the default prim-herdr
+# provider extension), and the real
 # `prim tui` in a private tmux harness, with a restricted PATH. Leaves nothing running.
 # Usage: tests/e2e_tui_smoke.sh <prim binary>
 # Checks: new tab + input echo; input after a 30 MB output flood; core restart -> reconnect, reattach and

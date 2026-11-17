@@ -273,3 +273,58 @@ async fn status_events_keep_flowing_past_a_kilobyte_of_events() {
     }
     core.until(|m| m["method"] == "resource.upsert" && m["params"]["facts"]["status"]["app"] == "n11").await;
 }
+
+/// argv prefix that runs a program in this Hc's private environment (keeping PRIM_SOCKET and friends).
+fn private_env(hc: &Hc) -> Vec<String> {
+    let p = hc.root.path();
+    ["/usr/bin/env".to_string(), format!("HOME={}", p.join("h").display()), format!("XDG_STATE_HOME={}", p.join("s").display()),
+        format!("XDG_RUNTIME_DIR={}", p.join("r").display()), format!("XDG_CONFIG_HOME={}", p.join("c").display()),
+        "HC_SESSION=p".into(), "PATH=".into()].to_vec()
+}
+
+#[tokio::test]
+#[ignore = "requires ~/.local/bin/herdr-core; private core"]
+async fn switching_a_state_dir_from_in_process_herdr_to_prim_herdr_keeps_resource_ids() {
+    use prim::server::{start, Backend};
+    let hc = Hc::new();
+    let state = hc.root.path().join("prim-state");
+    // 1. The old way: the in-process herdr adapter.
+    let mut argv = private_env(&hc);
+    argv.extend([herdr_core().to_string_lossy().into_owned(), "connect".into()]);
+    let sock_a = hc.root.path().join("a.sock");
+    let core_a = start(sock_a.clone(), state.clone(), false, Backend::Herdr(argv), None).unwrap();
+    let (a, _, _) = prim::client::connect(&sock_a, "t").await.unwrap();
+    let synced = |c: &prim::core::Shared| c.lock().unwrap().snapshot()["providers"]["herdr"]["synced"] == true;
+    for _ in 0..200 { if synced(&core_a) { break; } tokio::time::sleep(Duration::from_millis(50)).await; }
+    let r = a.call("resource.spawn", json!({"argv": ["/usr/bin/sleep", "600"]})).await.unwrap();
+    let rid = r["resource"]["id"].as_str().unwrap().to_string();
+    let (reference, instance) = (r["resource"]["backend_ref"].clone(), r["resource"]["instance"].clone());
+    a.call("command.invoke", json!({"name": "prim.layout.reset"})).await.unwrap();
+    prim::server::shutdown(&core_a).await;
+
+    // 2. The new way: same state dir, no in-process backend, prim-herdr as the `herdr` extension.
+    let sock_b = hc.root.path().join("b.sock");
+    let core_b = start(sock_b.clone(), state, false, Backend::Extensions, None).unwrap();
+    let (b, _, _) = prim::client::connect(&sock_b, "t").await.unwrap();
+    let mut ext = private_env(&hc);
+    ext.extend([env!("CARGO_BIN_EXE_prim-herdr").to_string(), "--hc".into(), herdr_core().to_string_lossy().into_owned(), "--name".into(), "herdr".into()]);
+    b.call("workspace.apply", json!({"ops": [{"op": "set", "key": "extension/herdr", "value": {"argv": ext, "kind": "provider", "default": true}}]})).await.unwrap();
+    let mut back = Value::Null;
+    for _ in 0..200 {
+        let snap = b.call("workspace.snapshot", Value::Null).await.unwrap();
+        if let Some(res) = snap["resources"].as_array().unwrap().iter().find(|x| x["id"] == rid.as_str() && x["available"] == true) {
+            back = res.clone();
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(back["id"], rid.as_str(), "the same prim id comes back through prim-herdr");
+    assert_eq!((&back["backend_ref"], &back["instance"], back["provider"].as_str()), (&reference, &instance, Some("herdr")));
+    // The tab made by layout reset still points at it.
+    let layout = b.call("workspace.snapshot", Value::Null).await.unwrap()["entries"]["view/term-".to_string() + &rid].clone();
+    assert_eq!(layout["value"]["resource"], rid.as_str());
+    // New spawns without a provider go to prim-herdr (the default provider extension).
+    let fresh = b.call("resource.spawn", json!({"argv": ["/usr/bin/sleep", "600"]})).await.unwrap();
+    assert_eq!(fresh["resource"]["provider"], "herdr");
+    prim::server::shutdown(&core_b).await;
+}
