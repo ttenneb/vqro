@@ -70,6 +70,12 @@ env -i HOME=$HOME PATH=$PATH cargo test --release --test scale -- --ignored --ex
   delivered share, extension restart failures, and a final snapshot.
 - Budgets are the `BUDGET_*` constants at the top of the file (placeholders until set); the test fails on any
   exceeded one. Receipt: `$PRIM_SCALE_RECEIPT`, default `<target>/tmp/scale-receipt.json`.
+- Cleanup: the core is stopped as `prim stop` does (SIGTERM, so it stops its extensions). Any process still carrying
+  the run's `PRIM_SOCKET` is then killed, listed in the receipt (`cleanup`), and fails the test (`leaked_processes`,
+  a real budget of 0). Socket and state live in a run directory under `$PRIM_SCALE_RUN_DIR` (default
+  `~/.local/share/herdr/scratch/prim-scale`), which is removed afterwards.
+- Known product gap, not fixed yet: if the core dies abruptly (SIGKILL, crash), its extensions keep running,
+  reparented to init. Earlier versions of this harness SIGKILLed the core and leaked one extension per run.
 - The load shapes come from the fake backend's load profile (`src/adapter/fake.rs`: `--status-every-ms`,
   `--output-bytes-per-sec` in a spawned terminal's argv), so a real backend can replace it later.
 

@@ -116,17 +116,96 @@ fn scale_core_child() {
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
             prim::core::add_adapter(&core, prim::adapter::fake::start(adapter_name(i), tx), rx, false);
         }
-        loop {
-            tokio::time::sleep(Duration::from_secs(3600)).await;
-        }
+        // Stop like `prim serve` does: on SIGTERM, stop the extensions, then exit. Dropping the
+        // runtime drops their child handles, which kill anything still running.
+        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
+        term.recv().await;
+        prim::ext::stop_all(&core);
+        tokio::time::sleep(Duration::from_millis(200)).await;
     });
 }
 
-struct KillOnDrop(std::process::Child);
-impl Drop for KillOnDrop {
+/// The core child process. Stopped as `prim stop` does (SIGTERM, so the core stops its own
+/// extensions); afterwards any process still carrying this run's `PRIM_SOCKET` has leaked: it is
+/// killed and reported, and the test fails. Dropping (e.g. on a panic) does the same.
+struct CoreProc {
+    child: Option<std::process::Child>,
+    socket: PathBuf,
+}
+
+#[derive(Default)]
+struct Cleanup {
+    core_exit: String,
+    /// (pid, command line) of processes from this run still alive after the core stopped.
+    leaked: Vec<(u32, String)>,
+}
+
+fn signal(pid: u32, sig: &str) {
+    let _ = std::process::Command::new("kill").arg(format!("-{sig}")).arg(pid.to_string()).stderr(std::process::Stdio::null()).status();
+}
+
+/// Live processes whose environment has exactly `PRIM_SOCKET=<socket>`: this run's extensions.
+fn run_processes(socket: &std::path::Path) -> Vec<(u32, String)> {
+    let needle = format!("PRIM_SOCKET={}", socket.display());
+    let me = std::process::id();
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+        let Some(pid) = entry.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else { continue };
+        if pid == me {
+            continue;
+        }
+        let Ok(env) = std::fs::read(entry.path().join("environ")) else { continue };
+        if env.split(|b| *b == 0).any(|var| var == needle.as_bytes()) {
+            let cmd = std::fs::read(entry.path().join("cmdline")).unwrap_or_default();
+            let cmd = String::from_utf8_lossy(&cmd).replace('\0', " ").trim().to_string();
+            found.push((pid, cmd));
+        }
+    }
+    found
+}
+
+impl CoreProc {
+    fn pid(&self) -> u32 {
+        self.child.as_ref().map(|c| c.id()).unwrap_or(0)
+    }
+
+    fn shutdown(&mut self) -> Cleanup {
+        let Some(mut child) = self.child.take() else { return Cleanup::default() };
+        signal(child.id(), "TERM");
+        let t0 = Instant::now();
+        let mut exit = None;
+        while exit.is_none() && t0.elapsed() < Duration::from_secs(10) {
+            exit = child.try_wait().ok().flatten();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let core_exit = match exit {
+            Some(s) => format!("exited after SIGTERM in {:.0} ms: {s}", ms(t0.elapsed())),
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                "killed: no exit within 10 s of SIGTERM".into()
+            }
+        };
+        // Killed extensions exit asynchronously; give them a moment before calling them leaked.
+        let t1 = Instant::now();
+        let mut leaked = run_processes(&self.socket);
+        while !leaked.is_empty() && t1.elapsed() < Duration::from_secs(2) {
+            std::thread::sleep(Duration::from_millis(50));
+            leaked = run_processes(&self.socket);
+        }
+        for (pid, _) in &leaked {
+            signal(*pid, "KILL");
+        }
+        Cleanup { core_exit, leaked }
+    }
+}
+
+impl Drop for CoreProc {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        let c = self.shutdown();
+        if !c.leaked.is_empty() {
+            eprintln!("scale: killed leaked processes after an aborted run: {:?}", c.leaked);
+        }
     }
 }
 
@@ -175,11 +254,14 @@ struct Observed {
 async fn scale_load() {
     let prof = Profile::from_env();
     eprintln!("scale profile: {prof:?}");
-    // Socket in /tmp (short path); state on the build disk, so durable writes cost what they do.
-    let sock_dir = tempfile::Builder::new().prefix("pscale").tempdir_in("/tmp").unwrap();
-    let socket = sock_dir.path().join("s.sock");
-    let state_root = tempfile::Builder::new().prefix("scale-state").tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
-    let state = state_root.path().join("state");
+    // One run directory for socket and state, on a real disk so durable writes cost what they do:
+    // $PRIM_SCALE_RUN_DIR, default ~/.local/share/herdr/scratch/prim-scale. Removed after the run.
+    let base = std::env::var("PRIM_SCALE_RUN_DIR").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap()).join(".local/share/herdr/scratch/prim-scale"));
+    std::fs::create_dir_all(&base).unwrap();
+    let run_dir = tempfile::Builder::new().prefix("run").tempdir_in(&base).unwrap();
+    let socket = run_dir.path().join("s.sock");
+    assert!(socket.as_os_str().len() < 100, "socket path too long for a Unix socket: {}", socket.display());
+    let state = run_dir.path().join("state");
 
     let child = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--ignored", "--exact", "scale_core_child", "--nocapture", "--test-threads=1"])
@@ -189,8 +271,8 @@ async fn scale_load() {
         .stdout(std::process::Stdio::null())
         .spawn()
         .unwrap();
-    let child = KillOnDrop(child);
-    let pid = child.0.id();
+    let mut core = CoreProc { child: Some(child), socket: socket.clone() };
+    let pid = core.pid();
     for _ in 0..200 {
         if tokio::net::UnixStream::connect(&socket).await.is_ok() {
             break;
@@ -413,7 +495,7 @@ async fn scale_load() {
         slow.push(t.await.unwrap());
     }
     let slow_echo: Vec<f64> = slow.iter().flat_map(|s| s.echo_ms.iter().copied()).collect();
-    drop(child);
+    let cleanup = core.shutdown();
     pump.abort();
     let observed_s = t_observe.elapsed().as_secs_f64();
 
@@ -439,6 +521,8 @@ async fn scale_load() {
         ("status_delivered_ratio", (delivered, BUDGET_STATUS_DELIVERED_MIN, delivered >= BUDGET_STATUS_DELIVERED_MIN)),
         ("ext_restart_failures", (restarts_failed as f64, BUDGET_EXT_RESTART_FAILURES as f64, restarts_failed <= BUDGET_EXT_RESTART_FAILURES)),
         ("final_snapshot_ms", (final_snapshot_ms, BUDGET_FINAL_SNAPSHOT_MS, snap.is_ok() && final_snapshot_ms <= BUDGET_FINAL_SNAPSHOT_MS)),
+        // Not a placeholder: a run must leave nothing behind.
+        ("leaked_processes", (cleanup.leaked.len() as f64, 0.0, cleanup.leaked.is_empty())),
     ]);
     let failed: Vec<&str> = measured.iter().filter(|(_, (_, _, ok))| !ok).map(|(k, _)| *k).collect();
     let commit = std::process::Command::new("git").args(["describe", "--always", "--dirty"]).output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
@@ -465,6 +549,7 @@ async fn scale_load() {
         "flood": {"observer_bytes": o.flood_bytes, "offered_bytes": flood_expected, "observer_share": o.flood_bytes as f64 / flood_expected.max(1.0)},
         "extension_restarts": {"ok": restarts_ok, "failed": restarts_failed, "latency": stats(&restart_ms)},
         "final_snapshot": {"ok": snap.is_ok(), "ms": final_snapshot_ms},
+        "cleanup": {"core_exit": cleanup.core_exit, "leaked_and_killed": cleanup.leaked.iter().map(|(p, c)| json!({"pid": p, "cmd": c})).collect::<Vec<_>>()},
     });
     let text = serde_json::to_string_pretty(&receipt).unwrap();
     let path = std::env::var("PRIM_SCALE_RECEIPT").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("scale-receipt.json"));
