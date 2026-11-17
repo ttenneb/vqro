@@ -12,3 +12,4 @@ pub mod rpc;
 pub mod server;
 pub mod store;
 pub mod tui;
+pub mod tmux;
