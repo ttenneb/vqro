@@ -53,6 +53,9 @@ struct Profile {
     slow_attach_floods: bool,
     /// Subscribe like the TUI does: partial resource events (`PARTIAL_RESOURCES`, default 1).
     partial_resources: bool,
+    /// When each agent's status ticks start (`STATUS_PHASE`): `random` (default; deterministic per agent),
+    /// `spread` (evenly spaced) or `lockstep` (all at once every period: the worst case).
+    status_phase: String,
     ext_restart_every_s: f64,
     adapters: usize,
     duration_s: f64,
@@ -84,6 +87,7 @@ impl Profile {
             slow_echo_timeout_s: env_num("SLOW_ECHO_TIMEOUT_S", 10.0),
             slow_attach_floods: env_num("SLOW_ATTACH_FLOODS", 1u8) != 0,
             partial_resources: env_num("PARTIAL_RESOURCES", 1u8) != 0,
+            status_phase: env_num("STATUS_PHASE", "random".to_string()),
             ext_restart_every_s: env_num("EXT_RESTART_EVERY_S", 5.0),
             adapters: env_num("ADAPTERS", 2),
             duration_s: env_num("DURATION_S", 30.0),
@@ -100,9 +104,27 @@ impl Profile {
             "txn_per_sec": self.txn_per_sec, "clients": 2 + self.stalled_clients + self.slow_clients, "stalled_clients": self.stalled_clients,
             "slow_clients": self.slow_clients, "slow_read_bytes_per_sec": self.slow_read_bytes_per_sec, "slow_echo_timeout_s": self.slow_echo_timeout_s,
             "slow_attach_floods": self.slow_attach_floods, "partial_resources": self.partial_resources,
+            "status_phase": self.status_phase,
             "ext_restart_every_s": self.ext_restart_every_s, "adapters": self.adapters,
             "duration_s": self.duration_s, "echo_every_ms": self.echo_every_ms,
         })
+    }
+}
+
+/// First status change of agent `i`, in ms after spawn (None: one period, i.e. lock-step).
+fn status_phase_ms(prof: &Profile, i: usize) -> Option<u64> {
+    let period = prof.status_every_ms.max(1);
+    match prof.status_phase.as_str() {
+        "lockstep" => None,
+        "spread" => Some(i as u64 * period / prof.agents.max(1) as u64 + 1),
+        "random" => {
+            // splitmix64: reproducible, but clumps like independent agents do.
+            let mut z = (i as u64).wrapping_add(0x9E37_79B9_7F4A_7C15);
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            Some((z ^ (z >> 31)) % period + 1)
+        }
+        other => panic!("PRIM_SCALE_STATUS_PHASE must be random, spread or lockstep, not {other}"),
     }
 }
 
@@ -304,7 +326,11 @@ async fn scale_load() {
     let (mut floods, mut idle) = (Vec::new(), Vec::new());
     for i in 0..prof.terminals {
         let argv: Vec<String> = if i < prof.agents {
-            vec!["agent".into(), "--status-every-ms".into(), prof.status_every_ms.to_string()]
+            let mut argv = vec!["agent".into(), "--status-every-ms".into(), prof.status_every_ms.to_string()];
+            if let Some(phase) = status_phase_ms(&prof, i) {
+                argv.extend(["--status-phase-ms".into(), phase.to_string()]);
+            }
+            argv
         } else if i < prof.agents + prof.floods {
             vec!["flood".into(), "--output-bytes-per-sec".into(), prof.flood_bytes_per_sec.to_string()]
         } else {
@@ -559,6 +585,7 @@ async fn scale_load() {
         "echo": {"latency": stats(&echo_ms), "lost_after_5s": echo_lost},
         "slow_clients": slow.iter().map(|s| json!({
             "echo": stats(&s.echo_ms), "echo_timed_out": s.timed_out, "bytes_read": s.bytes_read,
+            "echo_series_ms": s.echo_ms.iter().map(|m| m.round()).collect::<Vec<_>>(),
             "idle_stream_attached": s.attached, "missed": s.missed,
         })).collect::<Vec<_>>(),
         "events": {"received": o.events, "status_received": o.status_events, "status_expected_approx": expected_status, "lag": stats(&o.event_lag_ms), "missed": o.missed,

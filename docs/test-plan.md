@@ -63,7 +63,9 @@ env -i HOME=$HOME PATH=$PATH cargo test --release --test scale -- --ignored --ex
   streams, one writer, one stalled (subscribes and attaches, never reads) and one slow (the same, but reads
   64 KiB/s and probes input→echo on its own idle stream, behind the floods unless `SLOW_ATTACH_FLOODS=0`; probes time out after 10 s and count as 10 s).
 - Change it with `PRIM_SCALE_*` variables: `TERMINALS`, `AGENTS`, `FLOODS`, `FLOOD_BYTES_PER_SEC`, `STATUS_EVERY_MS`,
-  `TXN_PER_SEC`, `STALLED_CLIENTS`, `SLOW_CLIENTS`, `SLOW_READ_BYTES_PER_SEC`, `SLOW_ECHO_TIMEOUT_S`, `EXT_RESTART_EVERY_S`, `ADAPTERS`, `DURATION_S`, `ECHO_EVERY_MS`, `PARTIAL_RESOURCES` (default 1: clients subscribe as the TUI does);
+  `TXN_PER_SEC`, `STALLED_CLIENTS`, `SLOW_CLIENTS`, `SLOW_READ_BYTES_PER_SEC`, `SLOW_ECHO_TIMEOUT_S`, `EXT_RESTART_EVERY_S`, `ADAPTERS`, `DURATION_S`, `ECHO_EVERY_MS`, `PARTIAL_RESOURCES` (default 1: clients subscribe as the TUI does), `STATUS_PHASE` (`random`, the default: each
+  agent's first status change at a reproducible pseudo-random offset within the period; `spread`; `lockstep`, the
+  worst case where all agents change together);
   `RSS_ABORT_MB` (default 4096) stops the load early to protect the machine.
 - Measures core RSS over time, spawn and transaction latency (p50/p99), input→echo p99 on an idle stream sharing
   the observer's connection with the floods, status event lag (backend emit → client), `missed` counts and
@@ -101,6 +103,11 @@ Event volume (bounded streams merged, ed7599c, then partial resource events):
 - What's left is burst-shaped: the 200 fake agents tick in phase (spawned within 0.5 s, all every 2 s), so about
   40 KB arrives at once every 2 s. Per-resource coalescing would not help this load: each resource changes only
   once per period.
+- Real agents are not phase-locked, so the default is now `STATUS_PHASE=random`. The slow client's echo p99 is then
+  67-92 ms (spread: 38 ms), within the 250 ms placeholder, and the whole default profile passes. `lockstep` still gives
+  about 570 ms. In every run with floods attached, the slow client's first probe takes about 5.6-6 s. It waits behind
+  flood output already written to its socket before the core closed those streams as slow consumers (bounded
+  streams). With `SLOW_ATTACH_FLOODS=0` the worst probe is 24 ms. p99 hides that single outlier at about 115 probes.
 
 ## Deferred
 
