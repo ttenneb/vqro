@@ -57,6 +57,13 @@
       ]
     },
     {
+      "name": "agents",
+      "argv": [
+        "python3",
+        "agents.py"
+      ]
+    },
+    {
       "name": "settings",
       "argv": [
         "python3",

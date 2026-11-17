@@ -66,6 +66,15 @@ class E2E:
         return self.command([str(self.args.hc), *args])
 
     def call(self, method, params=None, allow_error=False):
+        if self.args.agents_extension and method == 'resource.invoke' and (params or {}).get('op', '').startswith('agent.'):
+            args = dict(params.get('args') or {}, resource=params['resource'])
+            if 'message' in args:
+                args['text'] = args.pop('message')
+            if 'id' in args:
+                args['request'] = args.pop('id')
+            if 'confirmed' in args:
+                args['value'] = args.pop('confirmed')
+            method, params = 'command.invoke', {'name': 'agents.'+params['op'][6:], 'args': args}
         return self.command([str(self.args.prim), 'call', method, json.dumps(params or {})], allow_error)
 
     def wait(self, predicate, label, timeout=15):
@@ -88,7 +97,7 @@ class E2E:
 
     def start(self):
         with (self.root/'prim.log').open('ab') as output:
-            self.core = subprocess.Popen([str(self.args.prim), 'serve', '--safe', '--herdr', str(self.args.hc)+' connect'],
+            self.core = subprocess.Popen([str(self.args.prim), 'serve', *([] if self.args.agents_extension else ['--safe']), '--herdr', str(self.args.hc)+' connect'],
                                          cwd=self.root/'work', env=self.env, stdout=output, stderr=subprocess.STDOUT)
         self.tracked.append(identity(self.core.pid))
         self.log.append({'started_prim': self.tracked[-1], 'image_sha256': hashlib.sha256(
@@ -96,6 +105,12 @@ class E2E:
         self.wait(lambda: self.snapshot().get('providers', {}).get('herdr', {}).get('connected'), 'prim herdr registration')
         children = Path(f'/proc/{self.core.pid}/task/{self.core.pid}/children').read_text().split()
         self.tracked.extend(identity(int(pid)) for pid in children)
+        if self.args.agents_extension and self.snapshot()['entries'].get('extension/agents'):
+            self.wait(self.extension_ready, 'agent commands restored after core restart')
+
+    def extension_ready(self):
+        names = {c['name'] for c in self.call('command.list')['commands'] if c.get('available')}
+        return {'agents.new', 'agents.answer', 'tabs.show', 'panes.close'} <= names
 
     def stop(self, crash=False):
         if self.core and self.core.poll() is None:
@@ -196,10 +211,26 @@ class E2E:
         else:
             native = ['/usr/bin/python3', str(REPO/'tests/fixtures/fake_pi.py'), '--bridge-e2e',
                       '--trace-file', str(self.root/'native.jsonl')]
-        spawned = self.call('resource.spawn', {'bridge': True, 'name': 'isolated-pi-provider',
-                'argv': ['/usr/bin/python3', '-m', 'pi_bridge', '--', *native], 'cwd': str(self.root/'work'),
-                'env': {'PYTHONPATH': str(REPO/'extensions'), 'PI_CODING_AGENT_DIR': str(self.root/'agent'),
-                        'PI_SKIP_VERSION_CHECK': '1'}})
+        if self.args.agents_extension:
+            assert not self.args.real_pi_metadata, 'extension E2E uses fake Pi only'
+            ops = [{'op': 'set', 'key': 'doc/settings/agents', 'value': {'runtimes': [{'name': 'fake', 'argv': native}]}}]
+            ops += [{'op': 'set', 'key': 'extension/'+name, 'value': {'enabled': True,
+                    'argv': ['/usr/bin/python3', str(REPO/'extensions'/(name+'.py'))]}}
+                    for name in ('tabs', 'panes', 'agents')]
+            self.call('workspace.apply', {'ops': ops, 'note': 'Private agents extension conformance'})
+            self.wait(self.extension_ready, 'agents/tabs/panes command registration')
+            created = self.call('command.invoke', {'name': 'agents.new', 'args': {'runtime': 'fake', 'cwd': str(self.root/'work')}})
+            assert created.get('agent'), created
+            spawned = {'outcome': created['outcome'], 'resource': self.resource(created['host'])}
+            layout = [entry['value'] for key, entry in self.snapshot()['entries'].items() if key.startswith('layout/')]
+            assert 'agent-'+created['agent'] in json.dumps(layout), 'agents.new did not open the agent tab'
+            children = Path(f'/proc/{self.core.pid}/task/{self.core.pid}/children').read_text().split()
+            self.tracked.extend(identity(int(pid)) for pid in children)
+        else:
+            spawned = self.call('resource.spawn', {'bridge': True, 'name': 'isolated-pi-provider',
+                    'argv': ['/usr/bin/python3', '-m', 'pi_bridge', '--', *native], 'cwd': str(self.root/'work'),
+                    'env': {'PYTHONPATH': str(REPO/'extensions'), 'PI_CODING_AGENT_DIR': str(self.root/'agent'),
+                            'PI_SKIP_VERSION_CHECK': '1'}})
         assert spawned['outcome'] == 'observed', spawned
         host = spawned['resource']['id']
         def find_agent():
@@ -285,7 +316,8 @@ class E2E:
         assert exited['signal'] is None, exited
         self.wait(lambda: not live(native_process) and not live(bridge_process), 'native runtime exits')
         self.log.append({'native_exit': exited, 'result': 'PASS', 'stable_agent_id': rid, 'host': host, 'native_effect_replay': False,
-                         'real_pi_metadata_only': self.args.real_pi_metadata})
+                         'real_pi_metadata_only': self.args.real_pi_metadata,
+                         'agents_extension': self.args.agents_extension})
 
     def cleanup(self):
         self.stop()
@@ -308,6 +340,7 @@ def main():
     parser.add_argument('--prim', type=Path, required=True)
     parser.add_argument('--hc', type=Path, required=True)
     parser.add_argument('--real-pi-metadata', action='store_true')
+    parser.add_argument('--agents-extension', action='store_true', help='drive agents extension commands with fake Pi')
     parser.add_argument('--probe-terminal-invoke', action='store_true', help='regression probe for advertised terminal.input dispatch')
     parser.add_argument('--scratch-parent', type=Path, default=Path.home()/'.local/share/herdr/scratch')
     parser.add_argument('--isolated-root', type=Path, help=argparse.SUPPRESS)
@@ -328,6 +361,8 @@ def main():
             command.append('--real-pi-metadata')
         if args.probe_terminal_invoke:
             command.append('--probe-terminal-invoke')
+        if args.agents_extension:
+            command.append('--agents-extension')
         result = subprocess.run(command, cwd=root, env={'HOME': str(root/'home'), 'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8'})
         print(json.dumps({'code': result.returncode, 'receipt': str(root/'receipt.json')}), flush=True)
         raise SystemExit(result.returncode)

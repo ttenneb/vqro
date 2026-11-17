@@ -103,6 +103,9 @@ def ext_rows(states):
         if name == ext.name:
             row.update(disabled=True, style="plain", description="always on here; use the palette to turn it off")
         rows.append(row)
+        if name == "agents" and on and status == "running":
+            rows.append({"text": "Configure agent runtimes", "command": "agents.settings",
+                         "description": "Explicit Pi RPC argv; existing agents are unchanged"})
     return rows
 
 

@@ -191,9 +191,19 @@ class Bridge:
         rows, clipped, lost = self.transcript.window()
         run = snapshot["run"]
         status = plain(snapshot["status"])
-        items = [{"type": "text", "text": f"{status} | active={run['active']} settled={run['settled']} aborted={run['aborted']} | bounded view"}]
+        style = {"working": "accent", "blocked": "warn", "done": "ok", "error": "error"}.get(status, "dim")
+        items = [{"text": "Pi run", "badges": [{"text": status, "style": style}],
+                  "description": f"active={run['active']} settled={run['settled']} aborted={run['aborted']}"}]
+        queues = snapshot["queues"]
+        items.append({"type": "text", "text": f"Queued steering: {len(queues['steering'])} | follow-up: {len(queues['follow_up'])} | pending requests: {len(snapshot['requests'])}"})
+        for kind, values in queues.items():
+            for value in values[:3]:
+                items.append({"type": "text", "style": "dim", "text": tail(plain(kind+": "+value), 512)})
+            if len(values) > 3:
+                items.append({"type": "text", "style": "dim", "text": f"{kind}: more queued messages omitted"})
         if clipped or lost:
             items.append({"type": "text", "style": "warn", "text": "Bounded transcript tail; some earlier output is unavailable."})
+        request_bytes = 0
         for request in snapshot["requests"]:
             detail = request.get("data", {})
             label = f"Request {request['id']} ({request['kind']}): {request['prompt']}"
@@ -201,13 +211,22 @@ class Bridge:
                 label += " - " + str(detail["message"])
             if detail.get("options"):
                 label += " | choices: " + str(detail["options"])
-            items.append({"type": "text", "style": "warn", "text": tail(plain(label), 2048)})
+            label = tail(plain(label), 1024)
+            request_bytes += len(label.encode())
+            if request_bytes > 8192:
+                items.append({"type": "text", "style": "warn", "text": "Additional request details omitted; inspect the pending request facts."})
+                break
+            items.append({"type": "text", "style": "warn", "text": label})
+        transcript_start = len(items)
         items.extend({"type": "text", "text": tail(row, 2048)} for row in rows)
-        result = {"title": "Pi " + (self.rid or "starting"), "items": items,
+        result = {"title": "Pi " + (self.rid or "starting"), "requires": ["badges", "description"], "items": items,
                   "truncated": clipped, "output_gap": lost}
-        while len(json.dumps(result, ensure_ascii=False).encode()) > 32768 and len(items) > 1:
-            del items[1]
-            result["truncated"] = True
+        if len(json.dumps(result, ensure_ascii=False).encode()) > 32768:
+            items.insert(transcript_start, {"type": "text", "style": "warn", "text": "Bounded view: older transcript rows omitted."})
+            transcript_start += 1
+            while len(json.dumps(result, ensure_ascii=False).encode()) > 32768 and len(items) > transcript_start:
+                del items[transcript_start]
+                result["truncated"] = True
         return result
 
     def _show(self):
