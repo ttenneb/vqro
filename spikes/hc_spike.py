@@ -1,7 +1,7 @@
 """Spike: drive herdr-core over its JSON-RPC socket.
 
 Run with an isolated session:
-  HC_SESSION=primspike XDG_STATE_HOME=... XDG_RUNTIME_DIR=... python3 hc_spike.py
+  HC_SESSION=vqrospike XDG_STATE_HOME=... XDG_RUNTIME_DIR=... python3 hc_spike.py
 """
 import json, os, socket, subprocess, sys, threading, time
 

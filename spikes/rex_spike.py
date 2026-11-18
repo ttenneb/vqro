@@ -3,7 +3,7 @@ import json, os, subprocess, threading, time
 
 REX = os.path.expanduser("~/Projects/bin/rex")
 AGENT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake-agent.sh")
-S = "primspike"
+S = "vqrospike"
 
 
 def log(*a):

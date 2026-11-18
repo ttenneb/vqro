@@ -7,7 +7,7 @@ import os, subprocess, sys, threading, time
 
 BIN = sys.argv[1] if len(sys.argv) > 1 else "tmux"
 AGENT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake-agent.sh")
-SOCK = ["-L", "primspike"]
+SOCK = ["-L", "vqrospike"]
 
 
 def log(*a):
