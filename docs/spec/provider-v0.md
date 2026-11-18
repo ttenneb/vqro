@@ -454,9 +454,14 @@ parameters remain ignorable; this adds no core sizing arbitration.
 - **Offsets.** Per stream, starting at 0, counting decoded bytes the provider has sent on that stream. Each
   `stream.data.offset` equals the previous offset plus the previous length; the core closes the stream with
   `reason: invalid` on a mismatch.
-- **Gaps end the stream.** `stream.gap` is the last message for that stream (the core treats it as closed, frees it,
-  and forwards `stream.gap {stream, reason}` to the viewer, which `main`'s TUI handles by reattaching). Its `offset`
-  is where valid data ended. Recovery is a fresh `stream.open`.
+- **Gaps end the stream's output, not its input.** `stream.gap` (and a provider's `stream.closed`) is the last output
+  message for that stream (the core frees its output side and forwards `stream.gap {stream, reason}` to the viewer,
+  which `main`'s TUI handles by reattaching). Its `offset` is where valid data ended. Recovery is a fresh
+  `stream.open`. Input the core had already accepted for the stream may still be on its way: the provider keeps
+  delivering `stream.input` for it, in order, until the core's `stream.close`, which the core always sends once the
+  viewer's input side has ended (also after a provider-initiated gap or close). The Rust SDK keeps such a stream
+  registered for input until then; a provider reads its commands until `Close` (prim-tmux does, bounded at 30 s).
+  So input the core accepted is not lost because output fell behind. The Python SDK still drops input after a gap.
 - **Initial data and repaint.** After a successful `stream.open` reply, the provider sends initial data from offset
   0, as the reply's `initial` says: `history` (backend raw history, e.g. herdr-core), `repaint` (a synthetic screen
   such as tmux `capture-pane`; labelled, not replay, carries no OSC status), or `none`. Repaint bytes consume credit

@@ -359,8 +359,11 @@ impl WireProvider {
         }
         Ok(())
     }
-    fn end(&self, id: u64, gap: bool, why: Value, tell_provider: bool) {
-        if let Some(mut stream) = self.streams.lock().unwrap().remove(&id) {
+    /// End stream `id` if it is still open; returns whether it was.
+    fn end(&self, id: u64, gap: bool, why: Value, tell_provider: bool) -> bool {
+        let removed = self.streams.lock().unwrap().remove(&id);
+        let ended = removed.is_some();
+        if let Some(mut stream) = removed {
             let bytes = encoded_bytes(&why).max(64);
             match self.control.clone().try_acquire_many_owned(bytes.min(u32::MAX as usize) as u32) {
                 Ok(permit) => { if let Some(reply) = stream.terminal.take() { let _ = reply.send(StreamEnd { gap, reason: why, _permit: Some(permit) }); } }
@@ -368,6 +371,7 @@ impl WireProvider {
             }
             if tell_provider { self.peer.notify("stream.close", json!({"generation": self.generation, "stream": id})); }
         }
+        ended
     }
     fn disconnect(&self, core: &Shared) {
         self.stopped.send_replace(true);
@@ -494,7 +498,11 @@ impl WireProvider {
                     StreamInput::Close => break,
                 }
             }
-            provider.end(id, false, json!({"reason": "closed"}), true);
+            // The viewer's input side is done. If the provider already ended this stream's output (a gap
+            // or close), it still delivers the input forwarded above until it hears this close.
+            if !provider.end(id, false, json!({"reason": "closed"}), true) {
+                provider.peer.notify("stream.close", json!({"generation": provider.generation, "stream": id}));
+            }
         });
         opening.armed = false;
         Ok(Stream { initial, input, output: receiver, terminal: Some(end) })

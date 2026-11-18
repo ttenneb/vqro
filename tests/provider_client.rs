@@ -175,8 +175,13 @@ async fn streams_wait_for_open_reply_and_credit_with_contiguous_offsets() {
     s.gap("paused").await.unwrap();
     let g = core.recv().await;
     assert_eq!((g["method"].as_str(), g["params"]["offset"].as_u64(), g["params"]["reason"]["gap"].as_str()), (Some("stream.gap"), Some(16), Some("paused")));
-    assert_eq!(s.next().await, None, "a gap ends the stream");
+    // A gap ends output, not input: input the core sent before it heard the gap is still delivered,
+    // until the core's stream.close.
     assert_eq!(s.send(b"late").await.unwrap_err(), ProviderError::new("unavailable", "stream ended"));
+    core.send(json!({"jsonrpc": "2.0", "method": "stream.input", "params": {"generation": 7, "stream": 5, "data": B64.encode(b"crossed")}})).await;
+    core.send(json!({"jsonrpc": "2.0", "method": "stream.close", "params": {"generation": 7, "stream": 5}})).await;
+    assert_eq!(s.next().await, Some(StreamCommand::Input(b"crossed".to_vec())), "input that crossed the gap still arrives");
+    assert_eq!(s.next().await, Some(StreamCommand::Close));
     core.nothing().await;
 }
 

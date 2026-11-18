@@ -275,6 +275,13 @@ impl StreamInner {
         self.state.lock().unwrap().ready = true;
         self.changed.notify_waiters();
     }
+    /// Output ended by the provider (gap or close): no more data lines. Input the core already sent
+    /// for this stream keeps arriving as commands until the core's `stream.close` (provider-v0 9.5):
+    /// a gap ends output, not input, so input taken before it is still delivered.
+    fn finish_output(&self) {
+        self.state.lock().unwrap().closed = true;
+        self.changed.notify_waiters();
+    }
     /// Locally finished: no more lines for it; command receiver ends.
     fn finish(&self) {
         self.state.lock().unwrap().closed = true;
@@ -399,9 +406,8 @@ impl ProviderStream {
             }
             s.offset
         };
-        self.inner.finish();
-        self.shared.streams.lock().unwrap().remove(&self.id);
-        self.shared.stream_ids.lock().unwrap().finish(&self.id);
+        // Stay registered for input until the core closes the stream or this handle is dropped.
+        self.inner.finish_output();
         params["generation"] = json!(self.shared.generation());
         params["stream"] = json!(self.id);
         if method == "stream.gap" {

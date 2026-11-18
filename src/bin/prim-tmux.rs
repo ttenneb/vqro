@@ -566,6 +566,8 @@ impl App {
             })
         };
         let mut held: Option<Vec<u8>> = None;
+        // Whether input for this stream can still come: false once the core closed it or the pane is gone.
+        let mut input_open = true;
         loop {
             tokio::select! {
                 permit = input_tx.reserve(), if held.is_some() => match permit {
@@ -626,13 +628,15 @@ impl App {
                     }
                     Some(StreamCommand::Close) => {
                         let _ = stream.close(json!({"reason": "closed"})).await;
+                        input_open = false;
                         break;
                     }
-                    None => break,
+                    None => { input_open = false; break; }
                 },
                 _ = gone.notified() => {
                     let why = if self.state.lock().unwrap().killed.contains(&pane) { "killed" } else { "exited" };
                     let _ = stream.close(json!({"reason": why})).await;
+                    input_open = false;
                     break;
                 }
             }
@@ -652,6 +656,30 @@ impl App {
                     break;
                 }
             }
+        }
+        // Output ended here (a gap, or the stream closed for output) but the core may already have sent
+        // input for this stream: a gap ends output, not input. Deliver that input, in order, until the
+        // core closes the stream (bounded, in case it never does).
+        if input_open {
+            let drain = async {
+                if let Some(bytes) = held.take() {
+                    if input_tx.send(bytes).await.is_err() {
+                        return;
+                    }
+                }
+                while let Some(cmd) = stream.next().await {
+                    match cmd {
+                        StreamCommand::Input(bytes) => {
+                            if input_tx.send(bytes).await.is_err() {
+                                return;
+                            }
+                        }
+                        StreamCommand::Close => return,
+                        StreamCommand::Resize(..) => {}
+                    }
+                }
+            };
+            let _ = tokio::time::timeout(Duration::from_secs(30), drain).await;
         }
         // Input already handed to the writer finishes in order; nothing is resent.
         drop(input_tx);
