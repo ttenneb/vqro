@@ -61,7 +61,13 @@ class E2E:
             result = json.loads(p.stdout)
         except json.JSONDecodeError:
             result = None
-        self.log.append({'argv': argv, 'code': p.returncode, 'result': result, 'stderr': p.stderr})
+        logged = result
+        if isinstance(result, dict) and isinstance(result.get('entries'), dict):
+            # Keep the real snapshot for assertions, but do not retain megabytes
+            # of known synthetic padding for every polling receipt entry.
+            logged = dict(result, entries={key: dict(entry, value={'omitted_test_padding_bytes': len(entry['value'].encode())})
+                if key.startswith('doc/test/snapshot-padding-') else entry for key, entry in result['entries'].items()})
+        self.log.append({'argv': argv, 'code': p.returncode, 'result': logged, 'stderr': p.stderr})
         if not allow_error and p.returncode:
             raise RuntimeError(self.log[-1])
         return result if not allow_error else p
@@ -452,7 +458,26 @@ class E2E:
             for helper in (REPO/'extensions').glob('*.py'):
                 shutil.copy2(helper, self.root/'ext'/helper.name)
             shutil.copytree(REPO/'extensions/pi_bridge', self.root/'ext/pi_bridge', ignore=shutil.ignore_patterns('__pycache__'))
+            if self.args.bridge_program:
+                shutil.copy2(self.args.bridge_program, self.root/'ext/pi_bridge/program.py')
         self.start()
+        if self.args.large_workspace:
+            # A normal public RPC connection avoids OS per-argument limits; the
+            # production provider still retains its unchanged 1 MiB record cap.
+            with socket.socket(socket.AF_UNIX) as sock:
+                sock.settimeout(20)
+                sock.connect(self.env['PRIM_SOCKET'])
+                with sock.makefile('rwb') as wire:
+                    for ident, method, params in [(1, 'hello', {'client': 'private-large-workspace'}),
+                        (2, 'workspace.apply', {'ops': [{'op': 'set', 'key': 'doc/test/snapshot-padding-'+str(index),
+                            'value': char*650000} for index, char in enumerate(('x', 'y'))], 'note': 'Private provider-cap regression padding'})]:
+                        wire.write((json.dumps({'jsonrpc': '2.0', 'id': ident, 'method': method, 'params': params})+'\n').encode())
+                        wire.flush()
+                        row = json.loads(wire.readline())
+                        assert row.get('id') == ident and 'error' not in row, row
+            size = len(json.dumps(self.snapshot()).encode())
+            assert size > 1048576, size
+            self.log.append({'large_workspace_bytes': size, 'provider_record_cap': 1048576})
         if self.args.real_pi_metadata:
             assert json.loads((PACKAGE/'package.json').read_text())['version'] == '1.5.0'
             native = ['/usr/bin/node', str(PACKAGE/'dist/bundle/cli.js'), '--mode', 'rpc', '--no-session',
@@ -623,6 +648,8 @@ def main():
     parser.add_argument('--agents-extension', action='store_true', help='drive agents extension commands with fake Pi')
     parser.add_argument('--agents-ui', action='store_true', help='also drive a real TUI in private tmux with fake Pi')
     parser.add_argument('--probe-terminal-invoke', action='store_true', help='assert declared stream-only input rejects an unsupported effect')
+    parser.add_argument('--large-workspace', action='store_true', help='exercise startup and resume with a workspace snapshot above the provider record cap')
+    parser.add_argument('--bridge-program', type=Path, help='private staged bridge implementation for deterministic old/new regression checks (agents extension only)')
     parser.add_argument('--scratch-parent', type=Path, default=Path.home()/'.local/share/herdr/scratch')
     parser.add_argument('--isolated-root', type=Path, help=argparse.SUPPRESS)
     parser.add_argument('--parent-net', help=argparse.SUPPRESS)
@@ -648,6 +675,11 @@ def main():
             command.append('--agents-extension')
         if args.agents_ui:
             command.append('--agents-ui')
+        if args.large_workspace:
+            command.append('--large-workspace')
+        if args.bridge_program:
+            assert args.agents_extension and args.bridge_program.is_absolute()
+            command.extend(['--bridge-program', str(args.bridge_program)])
         result = subprocess.run(command, cwd=root, env={'HOME': str(root/'home'), 'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8'})
         print(json.dumps({'code': result.returncode, 'receipt': str(root/'receipt.json')}), flush=True)
         raise SystemExit(result.returncode)
