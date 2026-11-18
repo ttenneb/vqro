@@ -16,6 +16,11 @@ packages before bridge/stdlib imports; the launcher adds only its own trusted in
 A custom launcher is responsible for its own import isolation. `scripts/dev-install.sh` copies the package,
 including the launcher; this task does not run the installer.
 
+The `pi.new` launcher reads only its settings entry and scoped source/host resources, not full workspace snapshots
+while waiting for registration. It retries transient status reads only; an already-observed host/agent remains in
+the command result even if registration lookup or UI presentation is unavailable. The terminal fallback warns not
+to blindly retry; the spawn effect is sent once.
+
 Spawn through the public primitive with opt-in `bridge: true`. The core supplies opaque `PRIM_SOCKET` and
 single-use `PRIM_BRIDGE_TOKEN`; do not type/log/copy real bootstrap secrets manually. Runtime registration uses
 role runtime and token. The bridge starts Pi over clean child pipes, inspects get_state without a model call,

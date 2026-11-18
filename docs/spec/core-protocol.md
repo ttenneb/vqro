@@ -18,6 +18,12 @@ the core forwards `command.invoke` to the connection that registered the command
   it is a named pipe name (`\\.\pipe\prim-<per-user id>`) whose DACL admits only the owner and which rejects remote
   clients (not implemented yet).
 - Messages are UTF-8 JSON, one per line, separated by LF. Open the endpoint in binary mode: no newline translation.
+- Clean request-input EOF is a one-shot half-close: the serving core finishes already-read valid requests under
+  normal admission limits, locally flushes their replies, then closes the response half and runs connection cleanup.
+  It cannot issue new callbacks after input EOF. Clients must keep reading if they want those replies; subscriptions,
+  interactive streams and command owners keep a full-duplex connection instead. This is not remote-read/delivery
+  acknowledgement: reset, write failure, protocol/queue failure or core shutdown can still make an admitted effect
+  indeterminate. Inspect state/history, never replay it automatically. No admitted write is rolled back.
 - Stdlib Python on Windows has no `AF_UNIX` (`socket` docs: the `AF_UNIX` constant is absent where unsupported).
   A Python client there connects to the named pipe with `asyncio`'s Windows proactor loop
   (`loop.create_pipe_connection`), not with a synchronous `open()` of the pipe, whose single handle serializes reads
@@ -319,7 +325,7 @@ and old layouts may show gone resources until explicitly repaired/reset. No iden
 
 | Method | Params | Result |
 |---|---|---|
-| `resource.list` | `provider?`, `backend_ref?` (exact strings) | `resources` |
+| `resource.list` | `provider?`, `backend_ref?`, `id?`, `host?` (exact strings) | `resources` |
 | `resource.spawn` | `argv?` (default: the provider's default shell for its host), `cwd?`, `name?`, `env?`, `cols?`, `rows?`, `placement?`, `bridge?` (default false), `provider?` (`adapter` alias), `deadline_ms?` | `outcome: observed`, `effect`, `resource` |
 | `resource.kill` | `resource`, `deadline_ms?` | `outcome: accepted`, `effect`, `backend` |
 | `resource.forget` | `resource`, `deadline_ms?` | `outcome: observed`, `effect`, `data` |
@@ -330,10 +336,14 @@ and old layouts may show gone resources until explicitly repaired/reset. No iden
 | `stream.resize` | `stream`, `cols`, `rows` | |
 | `stream.close` | `stream` | |
 
-`resource.list` optionally filters by exact `provider` and/or `backend_ref` (AND), before serializing records.
+`resource.list` optionally filters by exact `provider`, `backend_ref`, prim `id` and/or hosting-terminal `host`
+(AND), before serializing records.
 Absent filters retain the complete list. Malformed filter types are `invalid`; a nonmatching filter returns an
 empty list. These scoped reads are generic, read-only, and retain normal reply caps: a broad filtered result
-can still be too large. Runtime bridges can read their own provider/ref records instead of a full workspace.
+can still be too large. Runtime bridges read their own provider/ref records; launchers read a source id and the
+new host's agents without full snapshots. The Pi launcher reads its settings via `workspace.get` and polls only
+`resource.list {host}` after an observed spawn. Transient status-read failures may retry that read, never spawn;
+expiry/UI failure retains the observed host/result and offers the terminal fallback, not an apparent failed launch.
 
 Spawn, kill and attach check declared capabilities and provider/resource availability before dispatch. Their default
 deadline is 30000 ms, override 1–300000 ms. Expiry is `timeout` with an indeterminate outcome; connection or resource
@@ -385,7 +395,10 @@ the next. A chunk refused with `overloaded` had no effect and is offered again (
 stops the paste with a message saying how many of its bytes were sent, and nothing more is sent or resent. If the
 stream ends meanwhile (a slow viewer's gap ends a stream; the TUI reattaches), the chunk refused with `not_found` or
 `unavailable` had no effect and is sent on the view's new stream, continuing from there; chunks already accepted
-are never sent again, and the provider still delivers them (provider-v0 9.5, gaps end output, not input). Keys
+are never sent again. `dispatched` means core-queue acceptance, not native consumption: a later provider/native
+input close can leave those bytes indeterminate. prim-tmux drains queued input until ordered close (bounded 30 s),
+while prim-herdr/Python input can end with the output path; there is no generic post-gap delivery promise
+(provider-v0 9.5). Keys
 typed meanwhile queue behind the paste. The largest paste is **4 MiB** (after markers); a larger one is refused
 whole with a message and nothing is sent. Providers must accept any 64 KiB input message: prim-tmux splits it into
 `send-keys -H` commands of at most 2 KiB (tmux's command parser fails above about 8 000 arguments) and writes input
@@ -443,16 +456,24 @@ load/pruning/forget/no-reconnect regression is `tests/e2e_herdr_drift.py`. No po
 |---|---|---|
 | `command.register` | `name`, `title?` | the command; `prim.*` is reserved for the core |
 | `command.list` | | `commands` |
-| `command.invoke` | `name`, `args?`, `deadline_ms?`, `on_behalf_of?` (invocation proof) | whatever the owner returns; `unavailable` if its owner is disconnected |
+| `command.invoke` | `name`, `args?`, `deadline_ms?`, `on_behalf_of?` (invocation proof) | whatever the owner returns; closing owners can be unavailable/disconnected, removed names are `not_found` |
 
 Built-in, non-replaceable commands (recovery surface, D15): `prim.layout.reset`, `prim.revert`
 (default: latest client-authored or client-started extension transaction), `prim.safe_mode`, `prim.extension.disable|enable|restart`, and
-`prim.shutdown` (stop the core, as `core.shutdown`; contract, implementation pending).
+`prim.shutdown` (implemented: the same ordered stop and accepted-reply flush as `core.shutdown`, including safe mode).
 Everything opinionated is an extension (D17).
 
 Command registrations belong to the registering connection, not just its author string. A replacement connection
 with the same extension identity may re-register a command; closing the old connection does not disable or reroute
-the replacement's command. Commands left registered only by the closing connection become unavailable.
+the replacement's command. Commands left registered only by the closing connection are **removed**, not retained
+as historical names. The existing `command {name, available:false, ...}` event withdraws the row; clients remove it
+from live caches. Built-in core commands remain. The live registry is bounded to 1 MiB of encoded rows/separators,
+including names/titles/owners and built-ins. A single oversized row is `too_large`; aggregate pressure is `overloaded`
+without changing registration. Same-name replacement releases its old charge before admission; disconnect frees it.
+
+`prim.revert` accepts an omitted `txn` for default/latest selection. A supplied target must be an unsigned JSON
+integer; strings, floats, booleans, objects and explicit null are `invalid` before any undo selection or mutation,
+never silently treated as latest.
 
 ### Command attribution and undo (D24)
 

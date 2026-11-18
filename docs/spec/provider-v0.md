@@ -451,26 +451,28 @@ parameters remain ignorable; this adds no core sizing arbitration.
   bounded per-connection writer has accepted those bytes for the viewer (the rule `main` uses internally; it is not
   a claim that the viewer parsed them). The core never returns more than is outstanding; a provider ignores the
   excess. There is no input-side credit: input is bounded by the core's 256 KiB queue (`overloaded` to the client)
-  and a provider that can't take input sends `stream.error` with `outcome: "rejected"` (never drops silently).
+  and a provider refusing new input while its input receiver is active sends `stream.error` with
+  `outcome: "rejected"`. This is not acknowledgement of bytes already dispatched before a later native close/gap.
   **OPEN:** viewer-acknowledged credit, only if measurements show the writer rule is insufficient.
 - **Offsets.** Per stream, starting at 0, counting decoded bytes the provider has sent on that stream. Each
   `stream.data.offset` equals the previous offset plus the previous length; the core closes the stream with
   `reason: invalid` on a mismatch.
-- **Gaps end the stream's output, not its input.** `stream.gap` (and a provider's `stream.closed`) is the last output
-  message for that stream (the core frees its output side and forwards `stream.gap {stream, reason}` to the viewer,
-  which `main`'s TUI handles by reattaching). Its `offset` is where valid data ended. Recovery is a fresh
-  `stream.open`. Input the core had already accepted for the stream may still be on its way: the provider keeps
-  delivering `stream.input` for it, in order, until the core's `stream.close`, which the core always sends once the
-  viewer's input side has ended (also after a provider-initiated gap or close). The Rust SDK keeps such a stream
-  registered for input until then; a provider reads its commands until `Close` (prim-tmux does, bounded at 30 s).
-  So input the core accepted is not lost because output fell behind. The Python SDK still drops input after a gap.
+- **An output gap is not an input-delivery acknowledgement.** `stream.gap` (and a provider's `stream.closed`) is
+  the last output message for that stream. The core frees its output side and forwards the end/gap to the viewer,
+  whose TUI reattaches. Its `offset` is where valid output ended; recovery is a fresh `stream.open`.
+  The core sends accepted input and its final `stream.close` in order, including after provider output ends, but
+  backend input lifetime is implementation-specific. The Rust SDK retains the command receiver until close;
+  prim-tmux drains it (bounded 30 s). prim-herdr's pump can stop and close the native attach channel on a gap/end,
+  and the Python SDK drops input after a gap. There is **no generic post-gap native-delivery guarantee**.
+  `dispatched` reports core-queue acceptance, not backend consumption; bytes accepted before a later close may
+  remain indeterminate and are never automatically resent. Do not emulate native input with a hidden reattach.
 - **Initial data and repaint.** After a successful `stream.open` reply, the provider sends initial data from offset
   0, as the reply's `initial` says: `history` (backend raw history, e.g. herdr-core), `repaint` (a synthetic screen
   such as tmux `capture-pane`; labelled, not replay, carries no OSC status), or `none`. Repaint bytes consume credit
   like any data. The core passes `initial` to the viewer in the `resource.attach` result (an additive field).
 - **Ordering.** The provider must not send `stream.data` before its `stream.open` reply. Per stream, the core sends
-  `stream.input`, `stream.resize` and `stream.close` in the order the viewer sent them, and the provider applies them
-  in that order; streams interleave freely. `stream.closed`/`stream.gap` follow all data the provider sent for that
+  `stream.input`, `stream.resize` and `stream.close` in the order the viewer sent them; any input the provider
+  applies is applied in that order. A native close/gap can prevent consumption (above); streams interleave freely. `stream.closed`/`stream.gap` follow all data the provider sent for that
   stream. The core's control-over-data priority applies between different streams and connections, never within one
   stream's data and close. Resize and close are fire-and-forget; their effect is seen in output or `stream.closed`.
 

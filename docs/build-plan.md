@@ -3,6 +3,15 @@
 D16: build prim itself, smallest complete and usable first. The north star: an agent can substantially modify its own
 workspace through reliable public primitives, without changing the host or endangering underlying processes.
 
+## Final fuzz P2 / scoped launch hardening (2026-11-18)
+
+Clean request-input EOF now drains already-read requests and local reply flush before connection cleanup; a real
+write failure still has indeterminate delivery, never rollback/replay. Connection-owned commands leave on close,
+TUI caches withdraw them, and live command metadata has a 1 MiB encoded bound. Explicit noninteger revert targets
+reject before undo selection. Pi launch uses settings/source/host scoped reads and preserves observed results on
+post-spawn lookup/UI failure, without retrying spawn. Native post-gap input delivery is documented per implementation,
+not overpromised; prim.shutdown is documented as implemented. Red/green details: `research/final-fuzz-p2.md`.
+
 ## Bridge P2 import/environment/idle hardening (2026-11-18)
 
 Default Pi launch now uses an isolated Python interpreter and explicit installed launcher, never the project cwd
