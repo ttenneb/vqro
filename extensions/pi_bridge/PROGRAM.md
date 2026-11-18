@@ -3,19 +3,23 @@
 Run as a backend terminal's program, never as a core-managed extension or process host:
 
 ```sh
-PYTHONPATH=/path/to/prim/extensions python3 -m pi_bridge -- \
+python3 -I /path/to/prim/extensions/pi_bridge/launch.py -- \
   /absolute/path/to/node /absolute/path/to/pi/cli.js --mode rpc
 ```
 
 The Pi argv after `--` is mandatory and used verbatim. There is **no installed pi1 default**, runtime/provider
-selection, credential copying or automatic prompt. The installed extensions directory can replace the source
-PYTHONPATH after `scripts/dev-install.sh`; that script now copies Python packages and replaces only the known
-pi_bridge package directory to remove old installed modules. This task does not run the installer.
+selection, credential copying or automatic prompt. `-I` excludes the project cwd, `PYTHONPATH` and user site
+packages before bridge/stdlib imports; the launcher adds only its own trusted installation. Do not use plain
+`python -m pi_bridge` in an agent project. The default `pi` extension uses this installed launcher without exporting
+`PYTHONPATH`. Existing `bridge_argv`/`bridge_env` stay literal and configurable on the terminal host (for example,
+`["py", "-3", "-I", "C:\\installed\\prim\\extensions\\pi_bridge\\launch.py"]`); no shell or core-OS inference.
+A custom launcher is responsible for its own import isolation. `scripts/dev-install.sh` copies the package,
+including the launcher; this task does not run the installer.
 
 Spawn through the public primitive with opt-in `bridge: true`. The core supplies opaque `PRIM_SOCKET` and
 single-use `PRIM_BRIDGE_TOKEN`; do not type/log/copy real bootstrap secrets manually. Runtime registration uses
 role runtime and token. The bridge starts Pi over clean child pipes, inspects get_state without a model call,
-registers, syncs one agent (`ref: agent`), finds its assigned rN in workspace.snapshot, and declares
+registers, syncs one agent (`ref: agent`), finds its assigned rN through scoped resource.list, and declares
 `view/agent-rN` once. Live content uses the existing bare `view: agent-rN` API. No automatic layout change.
 
 ## Native effects and facts
@@ -39,13 +43,17 @@ resend if that cancellation is uncertain. Unknown UI kinds are cancelled by the 
 Two independently deduplicated views separate status/queues/dialogs (`agent-status-rN`) from the stable
 transcript (`agent-rN`). Resource data advertises their ordered names in `views`; neutral agents references them
 read-only rather than copying their rows. Older runtimes without `data.views` retain the canonical `agent-rN`
-fallback convention. No relative times are inserted into transcript rows. The views are coalesced at 5 Hz by default (minimum interval 0.1 seconds), <=32 KiB, with a 16 KiB transcript tail
+fallback convention. No relative times are inserted into transcript rows. Dirty runtime output is coalesced at 5 Hz
+by default (minimum interval 0.1 seconds); idle has no sampling timer. Runtime journal revisions wake publication,
+while user-control and connection diagnostics remain immediate. Owned-child exit uses asyncio's native process-exit
+callback independently of inherited-pipe EOF, not PID polling. The views are <=32 KiB, with a 16 KiB transcript tail
 and 128 rows. The SDK journal retains at most 512 events / 512 KiB (whichever fills first), bounding tiny-record
 Python overhead as well as wire bytes. The bridge's provider keeps at most 2048 active/recent effect identities;
 active identities are never evicted, and a full active ledger rejects before native execution. Custom injected
 provider limits remain explicit caller choices. Final messages replace provisional deltas. Native journal gaps discard partial reconstruction and
 show an output-loss warning; no durable transcript/history claim. Terminal control bytes are escaped, including
-in the fallback. The fallback has a one-frame mailbox and never blocks RPC on a terminal that stopped reading.
+in the fallback. The fallback blocks on its one-frame mailbox until changed/closed, with no idle polling. A terminal that stops
+reading never blocks RPC.
 It is a read-only status/output tail: input is reserved for lifetime EOF; it does not secretly forward typed text.
 Ctrl-C or stdin EOF exits the bridge and closes Pi. Runtime argv/cwd are configurable (`--cwd`, `--interval`,
 `--transcript-bytes`); no model/provider call is made until an explicit agent effect asks for one.
@@ -75,7 +83,11 @@ the error and exits through owned-Pi cleanup, rather than keeping an unreachable
 transient refusal exception is structured `data.reason: safe_mode`: it keeps the owned Pi while backing off,
 not treating every forbidden error or matching message text as transient. Transport gaps and that explicit
 safe-mode state retry the last observed credential; user/runtime exit interrupts them. Resume tokens
-and HERDR_* / extension-lifetime markers are not passed to Pi. A runtime bridge owns stdin shutdown itself,
+are not passed to Pi. Pi/tools receive no `HERDR_*` or `PRIM_*` internals except the opaque `PRIM_SOCKET` and
+`PRIM_SOCKET_SOURCE=terminal`, preserving scratch-state endpoint selection. The bridge installation is removed
+from legacy/custom `PYTHONPATH`; unrelated user entries are preserved. Default launch injects no Python path at all.
+This is environment hygiene, not a same-user security sandbox: bridge-process memory/environ remains inside that
+trust boundary. A runtime bridge owns stdin shutdown itself,
 rather than letting the generic extension watcher's os._exit bypass child/resource cleanup.
 
 ## Verification and limits
@@ -85,7 +97,9 @@ acceptance vs settled, steering, abort/clear behavior, dispatched answers, bound
 child crash/gone, EOF cleanup, stalled fallback, auth rejection, resumed core with unchanged Pi PID, current facts,
 owned-view reuse, lost registration reply, >1 MiB workspace startup, oversized foreign views, and capped jittered
 reconnect/flapping-link backoff. A CLI subprocess check uses a private
-in-test Unix-socket fake core and fake Pi; it confirms module argv and graceful managed-stdin EOF cleanup.
+in-test Unix-socket fake core and fake Pi; it confirms isolated launcher argv and graceful managed-stdin EOF cleanup.
+Project-module shadow, actual child environment capture, no-idle-rebuild, native exit-notification and blocking
+fallback regressions are included. CPU/memory measurement evidence: `docs/research/bridge-p2.md`.
 
 Run with `env -i HOME="$HOME" PATH=/usr/bin:/bin python3 -W error -m unittest discover -s tests -p 'test_*.py' -v`.
 Those unit tests use no-model fixtures. `tests/pi_provider_e2e.py --run --prim /absolute/prim --hc /absolute/herdr-core`

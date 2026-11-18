@@ -1,7 +1,7 @@
 # Pi RPC runtime and bridge program
 
-A stdlib-only, Python 3.11+ client for **Pi 1.5 RPC**, plus the `python3 -m pi_bridge` runtime provider
-program. Program launch, resume and view behavior: [PROGRAM.md](PROGRAM.md). The client API below remains
+A stdlib-only, Python 3.11+ client for **Pi 1.5 RPC**, plus an isolated `python3 -I /installed/pi_bridge/launch.py`
+runtime provider program. Program launch, resume and view behavior: [PROGRAM.md](PROGRAM.md). The client API below remains
 independent of prim; Pi's JSONL protocol is not JSON-RPC.
 
 The bridge runs **inside a backend-owned terminal**, instantiating the client over fresh child pipes.
@@ -41,6 +41,8 @@ async def inspect(argv, private_cwd, explicit_child_env):
   or backend replay. Events can include raw Pi records, `late_response`, `dialog_timeout`,
   `answer_dispatched`, `disconnected`, and `child_exit`.
 - `await wait_for_facts(predicate, timeout=...)`: fixture/consumer observation barrier, not a provider task wait.
+- `await wait_changed(after=cursor)`: edge-triggered journal revision notification, with no idle polling. A cursor
+  no longer matching the current revision returns immediately; read `events(after=cursor)`/facts to catch up.
 - `diagnostics()`: bounded stderr tail/total, event bytes, pending requests, stdin-buffer bytes and failure.
 - `await close(grace=1)`: close stdin for orderly EOF shutdown; terminate/kill only this owned child if it
   does not exit during the grace periods. Context manager exit does this too. No process tree/lifetime
@@ -79,7 +81,9 @@ Defaults (`Limits`): 256 KiB per incoming/outgoing record, 32 pending commands, 
 events **and at most 512 event objects**, 64 KiB stderr tail, 32 outstanding dialogs, 5-second effect deadline. Python object overhead and
 asyncio/kernel pipe buffers are additional bounded overhead, not included in the retained-byte counters.
 
-Stdout and stderr drain independently. JSON records split **only on LF**, accept CRLF, and permit literal
+Owned exit is observed through the native asyncio subprocess protocol callback, independently of pipe EOF; no
+PID polling is needed. After exit, pending stdout/stderr readers drain only for the configured `Limits.drain`,
+then inherited pipes are abandoned without signalling unowned descendants. Stdout and stderr drain independently. JSON records split **only on LF**, accept CRLF, and permit literal
 U+2028/U+2029 and UTF-8 split across reads. Malformed/oversized records fail the connection rather than
 retain unbounded data. Stdin records serialize under a lock and honor `drain()` backpressure. A drain
 timeout fails the write side closed: repeated deadlines cannot accumulate an unbounded transport buffer.

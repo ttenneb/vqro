@@ -3,6 +3,17 @@
 D16: build prim itself, smallest complete and usable first. The north star: an agent can substantially modify its own
 workspace through reliable public primitives, without changing the host or endangering underlying processes.
 
+## Bridge P2 import/environment/idle hardening (2026-11-18)
+
+Default Pi launch now uses an isolated Python interpreter and explicit installed launcher, never the project cwd
+or injected `PYTHONPATH` for bridge imports. Configured host argv/environment remain literal. Pi/tools keep user
+Python paths but not bridge modules or supervision/core configuration; only the terminal endpoint/marker remains.
+Native asyncio exit notification, a blocking latest-frame fallback queue and journal-triggered/coalesced updates
+remove idle polling while retaining immediate controls, EOF and bounded inherited-pipe cleanup. Reviewer-shaped
+200-bridge idle measurement improved 114.3% of one core to 0.0% observed over 30 s; interpreter memory is unchanged.
+Mechanism, red/green regressions, load sample and limits: `research/bridge-p2.md` and
+`../extensions/pi_bridge/PROGRAM.md`. No native port, runtime restart or new core transport.
+
 ## Native herdr drift hardening (2026-11-17)
 
 Found the soak's load-dependent loss: hc event DATA coalesces NDJSON records, while the adapter parsed one JSON
