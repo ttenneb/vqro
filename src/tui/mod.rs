@@ -289,6 +289,7 @@ struct App {
     buffered_bytes: usize,
     recovery_only: bool,
     retry_snapshot: Option<std::time::Instant>,
+    snapshot_retries: u32,
 }
 
 /// The installed binary's identity, to notice a reinstall.
@@ -326,9 +327,11 @@ async fn next_input(
         Some(ev) = keys.recv() => UiInput::Key(ev),
         _ = tokio::time::sleep_until(tokio::time::Instant::from_std(redraw.unwrap_or_else(std::time::Instant::now))), if redraw.is_some() => UiInput::Frame,
         result = async { reconnecting.as_mut().unwrap().await }, if reconnecting.is_some() => UiInput::Reconnected(result?),
+        // An absolute deadline ahead of incoming events cannot be reset/starved by a storm.
+        _ = tokio::time::sleep_until(tokio::time::Instant::from_std(app.retry_snapshot.unwrap_or_else(std::time::Instant::now))), if app.retry_snapshot.is_some() => UiInput::Tick,
         Some(m) = messages.recv() => UiInput::Message(m),
         m = incoming.recv(), if app.connected => UiInput::Incoming(m),
-        _ = tokio::time::sleep(std::time::Duration::from_millis(500)), if app.toast.is_some() || app.retry_snapshot.is_some() || app.terms.values().any(|t| t.retry_at.is_some()) => UiInput::Tick,
+        _ = tokio::time::sleep(std::time::Duration::from_millis(500)), if app.toast.is_some() || app.terms.values().any(|t| t.retry_at.is_some()) => UiInput::Tick,
         else => UiInput::Closed,
     })
 }
@@ -340,10 +343,30 @@ fn recovery_snapshot(hello: &Value, notice: &str) -> Value {
         "commands":crate::core::BUILTINS.iter().map(|(name,title)| json!({"name":name,"title":title,"available":true,"owner":"core"})).collect::<Vec<_>>()})
 }
 
+const SNAPSHOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+fn snapshot_transient(error: &crate::rpc::RpcError) -> bool {
+    matches!(error.kind(), "overloaded" | "unavailable" | "timeout")
+}
+
+/// Bounded exponential backoff with independent jitter: 0.5–3 seconds, never a hot retry loop.
+fn snapshot_retry_delay(attempt: u32) -> std::time::Duration {
+    let base = 250_u64 << attempt.clamp(1,3);
+    let mut bytes = [0; 8];
+    let _ = getrandom::fill(&mut bytes);
+    std::time::Duration::from_millis(base + u64::from_ne_bytes(bytes) % (base / 2 + 1))
+}
+
 async fn snapshot_for_client(peer: &Peer, hello: &Value) -> Result<Value> {
-    match peer.call("workspace.snapshot", Value::Null).await {
+    match peer.call_with_timeout("workspace.snapshot", Value::Null, SNAPSHOT_TIMEOUT).await {
         Ok(snapshot) => Ok(snapshot),
         Err(error) if error.kind() == "too_large" => Ok(recovery_snapshot(hello, &error.message)),
+        Err(error) if snapshot_transient(&error) => {
+            let mut snap = recovery_snapshot(hello, &error.message);
+            snap["recovery_notice"] = json!(format!("core busy: {error}; retrying snapshot (input is not replayed)"));
+            snap["retry_snapshot"] = json!(true);
+            Ok(snap)
+        }
         Err(error) => Err(error.into()),
     }
 }
@@ -518,7 +541,7 @@ impl App {
             under: None, input_queues: HashMap::new(), view_streams: Arc::default(), zoomed: None, pending_focus: None, kbd_enhance: false,
             held: KeyModifiers::NONE, message: String::new(), key_hint: None,
             quit: false, connected: true, connection: 0, epoch: String::new(), seq: 0,
-            generation: 0, resyncing: false, buffered: Vec::new(), buffered_bytes: 0, recovery_only: false, retry_snapshot: None,
+            generation: 0, resyncing: false, buffered: Vec::new(), buffered_bytes: 0, recovery_only: false, retry_snapshot: None, snapshot_retries: 0,
         }
     }
 
@@ -531,6 +554,7 @@ impl App {
         self.buffered.clear();
         self.buffered_bytes = 0;
         self.retry_snapshot = None;
+        self.snapshot_retries = 0;
     }
 
     fn reconnected(&mut self, peer: Peer, snap: &Value) {
@@ -546,7 +570,8 @@ impl App {
 
     fn load(&mut self, snap: &Value) {
         self.recovery_only = snap["recovery_only"].as_bool().unwrap_or(false);
-        self.retry_snapshot = None;
+        self.snapshot_retries = u32::from(snap["retry_snapshot"] == true);
+        self.retry_snapshot = (self.snapshot_retries > 0).then(|| std::time::Instant::now() + snapshot_retry_delay(self.snapshot_retries));
         self.epoch = snap["epoch"].as_str().unwrap_or("").to_string();
         self.seq = snap["seq"].as_u64().unwrap_or(0);
         self.panel_values.lock().unwrap().clear();
@@ -611,6 +636,9 @@ impl App {
             "stream.error" => self.message = format!("stream input rejected (not replayed): {}", params["error"]["message"].as_str().unwrap_or("error")),
             "missed" => self.resync(),
             "event" => {
+                // The next snapshot subsumes these events. Do not mutate a stale cache or
+                // let an event storm bypass admission backoff while waiting to retry.
+                if self.retry_snapshot.is_some() { return; }
                 if self.recovery_only && !self.resyncing {
                     self.retry_snapshot.get_or_insert_with(|| std::time::Instant::now() + std::time::Duration::from_secs(1));
                     return;
@@ -636,11 +664,14 @@ impl App {
     }
 
     fn retry_snapshot_if_due(&mut self) {
-        if self.retry_snapshot.is_some_and(|at| std::time::Instant::now() >= at) && !self.resyncing { self.resync(); }
+        if self.retry_snapshot.is_some_and(|at| std::time::Instant::now() >= at) && !self.resyncing {
+            self.retry_snapshot = None;
+            self.resync();
+        }
     }
 
     fn resync(&mut self) {
-        self.retry_snapshot = None;
+        if self.retry_snapshot.is_some() { return; }
         self.generation += 1;
         self.resyncing = true;
         self.buffered.clear();
@@ -648,7 +679,7 @@ impl App {
         let generation = self.generation;
         let (peer, tx) = (self.peer.clone(), self.tx.clone());
         tokio::spawn(async move {
-            let result = peer.call("workspace.snapshot", Value::Null).await;
+            let result = peer.call_with_timeout("workspace.snapshot", Value::Null, SNAPSHOT_TIMEOUT).await;
             let _ = tx.send(Msg::Snapshot { generation, result });
         });
     }
@@ -786,7 +817,9 @@ impl App {
                 }
                 match result {
                     Ok(s) => {
+                        let was_busy = self.snapshot_retries > 0;
                         self.load(&s);
+                        if was_busy && self.message.starts_with("core busy:") { self.message = "core synchronized".into(); }
                         self.resyncing = false;
                         self.buffered_bytes = 0;
                         for ev in std::mem::take(&mut self.buffered) {
@@ -795,7 +828,15 @@ impl App {
                             }
                         }
                     }
+                    Err(e) if snapshot_transient(&e) => {
+                        self.resyncing = false;
+                        self.buffered.clear(); self.buffered_bytes = 0;
+                        self.snapshot_retries = self.snapshot_retries.saturating_add(1);
+                        self.retry_snapshot = Some(std::time::Instant::now() + snapshot_retry_delay(self.snapshot_retries));
+                        self.message = format!("core busy: {e}; retrying snapshot (input is not replayed)");
+                    }
                     Err(e) if e.kind() == "too_large" => {
+                        self.snapshot_retries = 0;
                         self.recovery_only = true;
                         self.resyncing = false;
                         self.buffered.clear(); self.buffered_bytes = 0;
@@ -2337,7 +2378,8 @@ impl App {
         self.hit.badge = Rect { x: area.x, y: area.y, width: badge.chars().count() as u16, height: 1 };
         self.hit.status = area;
         let mut spans = vec![Span::styled(badge, Style::new().bg(if open { pal.prompt } else { pal.accent }).fg(pal.badge_text))];
-        if self.recovery_only { spans.push(Span::styled(" recovery only ", pal.badge(Some("warn")))); }
+        if self.snapshot_retries > 0 { spans.push(Span::styled(" core busy ", pal.badge(Some("warn")))); }
+        else if self.recovery_only { spans.push(Span::styled(" recovery only ", pal.badge(Some("warn")))); }
         if !self.connected {
             spans.push(Span::styled(" reconnecting ", pal.badge(Some("warn"))));
         }
@@ -3073,13 +3115,67 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn snapshot_timeout_forces_reconnect_instead_of_permanent_fencing() {
-        let (mut app, _) = app();
-        app.load(&snapshot(1, "old"));
-        app.resyncing = true;
-        app.on_msg(Msg::Snapshot { generation: app.generation, result: Err(crate::rpc::RpcError::new("timeout", "snapshot deadline expired")) });
-        assert!(app.peer.is_closed(), "a snapshot failure on a live connection must initiate recovery");
-        assert_eq!(app.entries["doc/test/value"], "old", "retain last good state while reconnecting");
+    async fn busy_snapshot_starts_recovery_and_retries_without_exiting() {
+        for kind in ["overloaded","unavailable","timeout"] {
+            let (a,b)=tokio::io::duplex(4096);
+            let (ar,aw)=tokio::io::split(a);let(br,bw)=tokio::io::split(b);
+            let(client,_)=Peer::spawn(ar,aw);let(server,mut incoming)=Peer::spawn(br,bw);
+            tokio::spawn(async move {while let Some(Incoming::Request{id,..})=incoming.recv().await {
+                server.respond(id,Err(crate::rpc::RpcError::new(kind,"snapshot busy")));
+            }});
+            let snap=snapshot_for_client(&client,&json!({"epoch":"boot","seq":1})).await.expect("busy startup must reach recovery UI");
+            assert_eq!(snap["retry_snapshot"],true);
+            let(tx,_)=mpsc::unbounded_channel();let mut app=App::new(client.clone(),tx);app.load(&snap);
+            assert!(app.retry_snapshot.is_some(),"startup and reconnect must schedule recovery without waiting for an event");
+            let mut terminal=ratatui::Terminal::new(ratatui::backend::TestBackend::new(100,24)).unwrap();
+            terminal.draw(|f|app.draw(f)).unwrap();
+            assert!(terminal.backend().buffer().content.iter().map(|c|c.symbol()).collect::<String>().contains("core busy"));
+            assert!(!client.is_closed());
+            app.run_command("client.quit",Value::Null,Value::Null,None);assert!(app.quit);
+        }
+    }
+
+    #[test]
+    fn snapshot_backoff_is_jittered_and_bounded_even_after_long_outage() {
+        for attempt in [0,1,2,3,99,u32::MAX] {for _ in 0..16 {
+            let delay=snapshot_retry_delay(attempt);
+            assert!((std::time::Duration::from_millis(500)..=std::time::Duration::from_secs(3)).contains(&delay));
+        }}
+    }
+
+    #[tokio::test]
+    async fn busy_snapshot_retry_deadline_is_not_starved_by_ready_messages() {
+        let(mut app,mut messages)=app();
+        app.retry_snapshot=Some(std::time::Instant::now()-std::time::Duration::from_secs(1));
+        app.tx.send(Msg::Info("event storm".into())).unwrap();
+        let(_,mut incoming)=Peer::spawn(tokio::io::empty(),tokio::io::sink());
+        let(key_tx,mut keys)=mpsc::unbounded_channel();let mut reconnecting=None;
+        key_tx.send(Event::Key(KeyEvent::new(KeyCode::Char('g'),KeyModifiers::CONTROL))).unwrap();
+        let UiInput::Key(key)=next_input(&app,&mut incoming,&mut messages,&mut keys,&mut reconnecting,None).await.unwrap() else{panic!("keys retain priority")};
+        app.on_event(key);assert!(matches!(app.overlay,Some(Overlay::Prefix{..})));
+        assert!(matches!(next_input(&app,&mut incoming,&mut messages,&mut keys,&mut reconnecting,None).await.unwrap(),UiInput::Tick));
+    }
+
+    #[tokio::test]
+    async fn transient_snapshot_refusal_retries_in_place_and_preserves_event_fencing() {
+        for kind in ["overloaded","unavailable","timeout"] {
+            let(mut app,_)=app();app.load(&snapshot(1,"old"));app.resyncing=true;
+            app.on_msg(Msg::Snapshot{generation:app.generation,result:Err(crate::rpc::RpcError::new(kind,"snapshot busy"))});
+            assert!(!app.peer.is_closed(),"{kind} must not reconnect/reattach terminals");
+            assert!(app.retry_snapshot.is_some());
+            app.on_incoming(delta(2,"discard-until-snapshot"));
+            assert_eq!(app.entries["doc/test/value"],"old","retry wait must remain fenced");
+            let before=app.generation;
+            app.on_incoming(Incoming::Notification{method:"missed".into(),params:Value::Null});
+            assert_eq!(app.generation,before,"events must not bypass backoff");
+            app.retry_snapshot=Some(std::time::Instant::now());app.retry_snapshot_if_due();
+            assert!(app.resyncing&&app.generation>before);
+            app.on_incoming(delta(4,"new"));
+            app.on_msg(Msg::Snapshot{generation:app.generation,result:Ok(snapshot(3,"base"))});
+            assert_eq!(app.entries["doc/test/value"],"new");assert_eq!(app.seq,4);
+            assert!(app.retry_snapshot.is_none());assert!(!app.resyncing);
+            assert!(!app.message.contains("core busy"),"busy notice clears once a fresh snapshot arrives");
+        }
     }
 
     #[tokio::test]
