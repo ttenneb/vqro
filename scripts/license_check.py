@@ -16,7 +16,7 @@ OUTPUT = "THIRD_PARTY_LICENSES.md"
 ALLOWED = frozenset({"Apache-2.0", "MIT", "ISC", "Zlib", "Unlicense",
     # Explicit maintainer approval, 2026-11-18; exceptions are not inferred from the base licence.
     "Unicode-3.0", "Unicode-DFS-2016", "WTFPL", "Apache-2.0 WITH LLVM-exception"})
-ROOT_LICENSE_SHA = "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+ROOT_LICENSE_SHA = "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
 MISSING_TEXT = "licence text not shipped in the crate; standard text for the declared licence"
 STANDARD = {"MIT": ROOT / "scripts/license-texts/MIT.txt", "Apache-2.0": ROOT / "LICENSE"}
 STANDARD_SOURCES = {"MIT": "https://raw.githubusercontent.com/spdx/license-list-data/main/text/MIT.txt",

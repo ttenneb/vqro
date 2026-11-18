@@ -5,11 +5,9 @@ own terms. Nothing is published/installed by this work. URLs and copyright holde
 
 ## Root text / metadata
 
-`LICENSE` is byte-identical to `~/Projects/herdr/LICENSE`:
-`c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4`.
-The official https://www.apache.org/licenses/LICENSE-2.0.txt was fetched without installing tools:
-`cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30`.
-Its only difference is one extra initial blank line; the maintainer confirmed retaining the herdr bytes.
+`LICENSE` is the official https://www.apache.org/licenses/LICENSE-2.0.txt, byte-identical (fetched without
+installing tools): `cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30`. `~/Projects/herdr/LICENSE` has the same text without
+the official file's initial blank line (`c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4`).
 Cargo and15 bundled manifests now declare Apache-2.0/the established author Bennett Garcia. README, NOTICE,
 CONTRIBUTING and the extension guide establish scope, third-party exceptions and brand/official-build distinctions.
 DCO1.1 is reproduced verbatim from https://developercertificate.org/ under its own verbatim-copy terms.

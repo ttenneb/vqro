@@ -110,7 +110,7 @@ class Licenses(unittest.TestCase):
         m = module()
         m.check_project(ROOT)
         self.assertEqual(hashlib.sha256((ROOT / "LICENSE").read_bytes()).hexdigest(),
-                         "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4")
+                         "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30")
         for path in (ROOT / "extensions/manifests").glob("*.json"):
             manifest = json.loads(path.read_text())
             self.assertEqual(manifest["license"], "Apache-2.0", str(path))
