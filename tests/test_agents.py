@@ -37,6 +37,14 @@ class AgentsTests(unittest.TestCase):
         self.agents.event("entries", {})
         self.assertEqual(self.core.value("view/agents-r99")["owner"], "user")
 
+    def test_cleanup_ignores_scalar_and_array_workspace_documents(self):
+        self.core.apply([{"op": "set", "key": "doc/theme", "value": "fixture"},
+                         {"op": "set", "key": "doc/list", "value": [1, 2]}], "fixture")
+        self.agents.event("entries", {})
+        Agents(self.core)
+        self.assertEqual(self.core.value("doc/theme"), "fixture")
+        self.assertEqual(self.core.value("doc/list"), [1, 2])
+
     def test_neutral_extension_has_no_launcher_or_runtime_settings(self):
         self.assertNotIn("agents.new", self.core.handlers)
         self.assertNotIn("agents.settings", self.core.handlers)

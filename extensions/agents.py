@@ -283,7 +283,7 @@ class Agents:
                              for view in views_in(entry.get("value", {}))}
                     stale = []
                     for key, entry in self.ext.entries.items():
-                        if entry["value"].get("owner") != "agents":
+                        if not isinstance(entry.get("value"), dict) or entry["value"].get("owner") != "agents":
                             continue
                         rid = next((key[len(prefix):] for prefix in ("view/agents-requests-", "view/agents-")
                                     if key.startswith(prefix)), "")
