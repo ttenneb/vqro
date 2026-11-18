@@ -33,6 +33,19 @@ class PiBridgeTests(unittest.IsolatedAsyncioTestCase):
     async def barrier(self):
         self.assertEqual((await self.client.request("get_state"))["outcome"], "accepted")
 
+    async def test_small_event_object_count_is_bounded_and_reports_cursor_gap(self):
+        client = PiRpcClient(Limits(event_rows=3), set())
+        for i in range(20):
+            client._publish({"type": "tiny", "number": i})
+        batch = client.events()
+        self.assertTrue(batch["gap"])
+        self.assertEqual([row["seq"] for row in batch["events"]], [18, 19, 20])
+        self.assertLess(client._event_bytes, client.limits.event_bytes)
+        self.assertFalse(client.events(17)["gap"])
+        self.assertEqual(client.events(20)["events"], [])
+        with self.assertRaises(ValueError):
+            Limits(event_rows=0)
+
     async def test_acceptance_is_not_completion_and_agent_end_is_not_settled(self):
         result = await self.client.invoke("prompt", {"message": "start"})
         self.assertEqual(result["data"], {"disposition": "started"})

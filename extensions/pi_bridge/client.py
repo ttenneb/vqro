@@ -14,6 +14,7 @@ class Limits:
     record_bytes: int = 262144
     pending: int = 32
     event_bytes: int = 524288
+    event_rows: int = 512  # Wire bytes alone undercount Python dictionaries/strings for tiny events.
     stderr_bytes: int = 65536
     requests: int = 32
     deadline: float = 5.0
@@ -22,7 +23,7 @@ class Limits:
     drain: float = 1.0
 
     def __post_init__(self):
-        for name in ("record_bytes", "pending", "event_bytes", "stderr_bytes", "requests"):
+        for name in ("record_bytes", "pending", "event_bytes", "event_rows", "stderr_bytes", "requests"):
             if not isinstance(getattr(self, name), int) or getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be positive")
         for name in ("deadline", "drain"):
@@ -97,7 +98,7 @@ class PiRpcClient:
 
     def diagnostics(self):
         return {"stderr": bytes(self._stderr_tail), "stderr_total": self._stderr_total,
-                "event_bytes": self._event_bytes, "pending": len(self._waiting),
+                "event_bytes": self._event_bytes, "event_rows": len(self._events), "pending": len(self._waiting),
                 "stdin_buffer_bytes": self.process.stdin.transport.get_write_buffer_size(),
                 "failure": self._failure}
 
@@ -115,8 +116,11 @@ class PiRpcClient:
         self._sequence += 1
         row = {**event, "seq": self._sequence}
         size = len(json.dumps(row, ensure_ascii=True).encode())
-        # Oversized events cause an explicit journal gap, not unbounded retention.
-        while self._events and self._event_bytes + size > self.limits.event_bytes:
+        # Bound object count as well as encoded payload. Small JSON records otherwise retain
+        # thousands of dictionaries/strings while still appearing far below the wire-byte cap.
+        # Either limit causes the same explicit cursor gap; native effects are never replayed.
+        while self._events and (self._event_bytes + size > self.limits.event_bytes or
+                                len(self._events) >= self.limits.event_rows):
             old_size, old = self._events.popleft()
             self._event_bytes -= old_size
             self._lost_through = old["seq"]

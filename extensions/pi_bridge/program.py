@@ -6,7 +6,7 @@ import re
 import random
 import uuid
 
-from prim_provider import Provider, ProviderError
+from prim_provider import Limits as ProviderLimits, Provider, ProviderError
 from .client import DIALOGS, EFFECTS, PiRpcClient
 from .display import Fallback, Transcript, agent_data, plain, tail
 
@@ -36,7 +36,8 @@ class Bridge:
                     k not in {"PRIM_BRIDGE_TOKEN", "PRIM_EXTENSION", "PRIM_EXTENSION_LIFETIME"}}
         instance = str(uuid.uuid4())
         self.provider = provider or Provider("pi-" + instance, instance, CAPABILITIES, role="runtime", token=token,
-                                            software={"name": "pi-rpc", "version": "unknown"})
+                                            software={"name": "pi-rpc", "version": "unknown"},
+                                            limits=ProviderLimits(identities=2048))
         if not all(isinstance(v, (int, float)) and math.isfinite(v) and v > 0 for v in (retry_initial, retry_max)) or retry_max < retry_initial:
             raise ValueError("reconnect backoff must be positive and bounded")
         self.endpoint, self.sock = endpoint, sock

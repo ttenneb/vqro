@@ -150,6 +150,20 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         return await self.core.call("effect.invoke", {"effect": f"e{self.effects}", "op": "agent." + op,
             "ref": "agent", "incarnation": "", "args": args or {}, "deadline_ms": 1000})
 
+    async def test_default_bridge_bounds_recent_effect_history_without_changing_sdk_default(self):
+        bridge = Bridge(["not-executed"], cwd=self.root.name, env={}, token="test", fallback=self.frames)
+        self.assertEqual(bridge.provider.limits.identities, 2048)
+        self.assertEqual(Limits().identities, 65536)
+        ledger = bridge.provider._effect_ids
+        for i in range(12000):
+            ledger.add(str(i), bridge.provider.limits.identities)
+            ledger.finish(str(i))
+        self.assertEqual(len(ledger), 2048)
+        self.assertIn("11999", ledger)
+        self.assertNotIn("0", ledger)
+        with self.assertRaises(ProviderError):
+            ledger.add("11999", bridge.provider.limits.identities)
+
     async def test_startup_uses_scoped_reads_when_the_full_workspace_exceeds_provider_cap(self):
         for key in ("doc/unrelated/one", "doc/unrelated/two"):
             self.core.entries[key] = {"version": 1, "value": "x"*650000}

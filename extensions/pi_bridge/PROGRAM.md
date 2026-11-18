@@ -37,7 +37,10 @@ incomplete marker, never falsely empty. Dialogs that cannot be represented are c
 resend if that cancellation is uncertain. Unknown UI kinds are cancelled by the runtime client.
 
 The view is coalesced at 5 Hz by default (minimum interval 0.1 seconds), <=32 KiB, with a 16 KiB transcript tail
-and 128 rows. Final messages replace provisional deltas. Native journal gaps discard partial reconstruction and
+and 128 rows. The SDK journal retains at most 512 events / 512 KiB (whichever fills first), bounding tiny-record
+Python overhead as well as wire bytes. The bridge's provider keeps at most 2048 active/recent effect identities;
+active identities are never evicted, and a full active ledger rejects before native execution. Custom injected
+provider limits remain explicit caller choices. Final messages replace provisional deltas. Native journal gaps discard partial reconstruction and
 show an output-loss warning; no durable transcript/history claim. Terminal control bytes are escaped, including
 in the fallback. The fallback has a one-frame mailbox and never blocks RPC on a terminal that stopped reading.
 It is a read-only status/output tail: input is reserved for lifetime EOF; it does not secretly forward typed text.
