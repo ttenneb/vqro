@@ -153,6 +153,21 @@ try:
     check("label changes preserve stored bindings and prefix", bindings=={k:v for k,v in call("workspace.snapshot")["entries"].items() if k.startswith("binding/")} and
           call("workspace.snapshot")["entries"]["doc/settings/tui"]["value"].get("prefix","C-g")==current.get("prefix","C-g"))
     keys("Escape")
+    # Restart the UI while the kitty program keeps running: its push is in no history herdr-core repeats,
+    # so the new UI must start from the core's observation, or Shift-Enter would submit (sent as Enter).
+    keys("C-g"); time.sleep(0.4); keys("q")
+    wait(lambda: subprocess.run([*HARNESS, "list-sessions"], capture_output=True).returncode != 0, 10)
+    subprocess.run([*HARNESS, "new-session", "-d", "-x", "120", "-y", "34", f"/bin/sh {R}/tui.sh"], env={"PATH": "/usr/bin:/bin", "HOME": f"{R}/home"})
+    time.sleep(3)
+    show(rid)
+    wait(lambda: "KEYECHO-READY" in screen() or "KEY " in screen(), 10)
+    before = len(received())
+    for k in ("S-Enter", "M-x"):
+        subprocess.run([*HARNESS, "send-keys", "-l", CSI_U[k]]) if k in CSI_U else keys(k)
+        time.sleep(0.3)
+    after = wait(lambda: len(received()) >= before + 2 and received(), 8) or received()
+    check("herdr: after a UI restart the kitty program still gets Shift-Enter and Alt-x as CSI u",
+          after[before:before + 2] == ["1b5b31333b3275", "1b5b3132303b3375"], f"got {after[before:]}")
     call("resource.kill", {"resource": rid})
     time.sleep(1)
     rid, got = run("herdr", "mok", ["S-Enter", "C-Enter", "Enter"])

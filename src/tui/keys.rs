@@ -540,6 +540,26 @@ mod tests {
         assert_eq!(m.extended(), Extended::Legacy);
     }
 
+    /// herdr-core's attach history restores keyboard modes in its first paint as kitty *set* sequences
+    /// (`CSI = 0;1u` then `CSI = flags;1u`, measured on hc 0.1.21) plus `CSI > 4;n m`, not as the original
+    /// push. A fresh tracker (restarted UI, new view) and one that kept stale state both land on the program's
+    /// current modes.
+    #[test]
+    fn herdr_first_paint_restores_modes_without_the_original_push() {
+        let paint = b"\x1b[?2004l\x1b[=0;1u\x1b[=7;1u\x1b[>4;2m\x1b[?1l";
+        let mut fresh = KeyModes::default();
+        fresh.feed(paint);
+        assert_eq!(fresh.extended(), Extended::Kitty, "pi-tui pushes flags 7; disambiguate is bit 1");
+        let mut stale = KeyModes::default();
+        stale.feed(b"\x1b[>2u");
+        stale.feed(paint);
+        assert_eq!(stale.extended(), Extended::Kitty);
+        let mut off = KeyModes::default();
+        off.feed(b"\x1b[>1u");
+        off.feed(b"\x1b[=0;1u");
+        assert_eq!(off.extended(), Extended::Legacy, "a paint for a program without kitty mode clears it");
+    }
+
     #[test]
     fn names() {
         let k = |code, m| name(&KeyEvent::new(code, m)).unwrap();
