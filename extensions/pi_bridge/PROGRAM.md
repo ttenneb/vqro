@@ -52,8 +52,9 @@ reuses its agent view. No stream/effect/prompt replay. Native pending work conti
 core request became indeterminate.
 
 SDK reconnection remains explicit: each attempt creates a fresh Provider, never reuses an old generation.
-A missing required resume token leaves Pi/fallback running but cannot justify reusing a known-consumed bootstrap
-credential. Failed auth/endpoint attempts are bounded; user/runtime exit still interrupts them. Resume tokens
+An explicit registration refusal (including overload/auth rejection) or a missing required resume token reports
+the error and exits through owned-Pi cleanup, rather than keeping an unreachable runtime alive. Transport gaps
+retry the last observed credential with bounded exponential backoff; user/runtime exit interrupts them. Resume tokens
 and HERDR_* / extension-lifetime markers are not passed to Pi. A runtime bridge owns stdin shutdown itself,
 rather than letting the generic extension watcher's os._exit bypass child/resource cleanup.
 
