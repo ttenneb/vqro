@@ -278,6 +278,15 @@ written the same way was contained by the crash budget and removed with one reve
 - Red/green, real3MB/6-caller startup repro and physical private replacement/re-exec evidence:
   `research/tui-startup-busy.md`.
 
+## Licence and contribution policy (2026-11-18)
+
+- D25: Apache-2.0 for all original material, DCO1.1 sign-off/no CLA; established Cargo/bundled-manifest
+  author/licence metadata, canonical root LICENSE, NOTICE and contribution/brand guidance.
+- Offline stdlib SPDX check covers214 metadata packages. Deterministic notices preserve original legal texts
+  for all213 third-party packages (including unbuilt/target variants), with labelled reviewed fallback text where absent.
+  Quick/full gates reject disallowed declarations or stale notices. No speculative dependency-feature trim.
+- Policy, sources, target scope and evidence: `research/licensing.md`.
+
 ## Known gaps found while building
 
 - **History churn:** extensions that refresh views on every event (the sidebar on status changes) fill the

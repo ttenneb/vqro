@@ -1,0 +1,4 @@
+# Legal texts and their digest inventory retain upstream bytes, including CRLF/whitespace.
+LICENSE -text
+scripts/license-texts/*.txt -text
+THIRD_PARTY_LICENSES.md -text -whitespace

@@ -371,7 +371,7 @@ No trademark licence, registered-mark claim or invented distribution/repository 
 contributions. Nothing is being published by this change.
 **Consequences.** Root LICENSE is the approved standard text (byte-identical to herdr's LICENSE); NOTICE identifies
 Bennett Garcia. Bundled manifests/Cargo declare the established author/licence. Third-party terms remain their
-own: an offline SPDX policy check covers all Cargo metadata packages; generated notices cover normal/build
-packages for the five installed Linux/macOS/Windows check targets. Original notices are retained; missing archive
+own: offline SPDX policy and generated notices cover every Cargo metadata package, conservatively including
+unbuilt optional, build, dev and target-specific packages (not a claim that all are shipped). Original notices are retained; missing archive
 texts use clearly labelled standard text with actual declared metadata, never invented copyright holders.
 The explicit dependency allowlist is documented in CONTRIBUTING.md; changes require maintainer approval.

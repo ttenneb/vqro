@@ -1,7 +1,7 @@
 #!/bin/bash
 # Release gate. Run `scripts/check.sh full` before installing.
 #
-#   scripts/check.sh quick   cargo build (zero warnings) + cargo test + Python unittests
+#   scripts/check.sh quick   licence policy/notices + cargo build (zero warnings) + cargo test + Python unittests
 #   scripts/check.sh full    quick + every opt-in private suite (tmux, providers, herdr-core), the e2e
 #                            scripts, TUI smoke/scale probe, the default scale profile, and a leftover check
 #
@@ -156,6 +156,7 @@ if [ -n "${PRIM_CHECK_INJECT_LEAK:-}" ]; then
   ( setsid sleep 300 < /dev/null > /dev/null 2>&1 & )  # reparented once the subshell exits, like a real leak
 fi
 echo "prim check ($MODE) at $(git describe --always --dirty 2>/dev/null); logs $LOGS"
+step licenses "${CARGO[@]}" python3 scripts/license_check.py --check
 step build-zero-warnings no_warnings
 step cargo-test "${CARGO[@]}" cargo test
 step python-unittest "${CLEAN[@]}" python3 -m unittest discover -s tests -p 'test_*.py'
