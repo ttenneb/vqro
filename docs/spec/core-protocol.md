@@ -237,6 +237,7 @@ and old layouts may show gone resources until explicitly repaired/reset. No iden
 | `resource.list` | | `resources` |
 | `resource.spawn` | `argv?` (default: the provider's default shell for its host), `cwd?`, `name?`, `env?`, `cols?`, `rows?`, `placement?`, `bridge?` (default false), `provider?` (`adapter` alias), `deadline_ms?` | `outcome: observed`, `effect`, `resource` |
 | `resource.kill` | `resource`, `deadline_ms?` | `outcome: accepted`, `effect`, `backend` |
+| `resource.forget` | `resource`, `deadline_ms?` | `outcome: observed`, `effect`, `data` |
 | `resource.attach` | `resource`, `cols`, `rows`, `history?` (backend scrollback), `deadline_ms?` | `outcome: accepted`, `effect`, `stream`, `initial` (`history`, `repaint` or `none`) |
 | `resource.invoke` | `resource`, `op`, `args?` (object), `deadline_ms?` | `outcome`, `effect`, `data?`; capability-checked generic provider operation |
 | `stream.input` | `stream`, `data` (base64) or `text` | `outcome: dispatched` (also accepted as a notification) |
@@ -247,6 +248,15 @@ Spawn, kill and attach check declared capabilities and provider/resource availab
 deadline is 30000 ms, override 1–300000 ms. Expiry is `timeout` with an indeterminate outcome; connection or resource
 loss while in flight is `unavailable` with an indeterminate outcome. Pre-dispatch unavailability is rejected.
 Late replies are ignored; independent resource facts reconcile what happened. No effect is automatically resent.
+
+`resource.forget` releases a **finished** resource: the owning provider drops it backend-side (herdr-core
+`terminal.rm`; tmux already deleted the exited pane; the fake drops it), then the core retires its id like a
+`resource.gone` (`resource.removed` event; ids are never reused, including across restarts; views showing it show
+it gone). A live resource is `invalid` (end it with `resource.kill` first); a provider without the
+`resource.forget` capability is `unsupported`; `resource.invoke` with that op is refused. When to forget is policy:
+the bundled `retention` extension forgets a finished resource once no layout shows it after one did, and keeps
+the newest 64 never-shown finished resources. Without a policy, finished resources stay until the backend drops
+them, counted against the 4096-per-provider admission bound.
 
 Published resources include `provider`, `instance`, `incarnation`, `available`, `stale`, and opaque kind-specific
 `data` (object, at most 64 KiB); `adapter` and `backend_ref` remain for compatibility. Unknown kinds stay opaque.

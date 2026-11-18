@@ -1,5 +1,5 @@
 {
-  "version": 3,
+  "version": 4,
   "extensions": [
     {
       "name": "tabs",
@@ -109,6 +109,15 @@
       "enabled": true,
       "since": 3,
       "description": "Independent status and confirmed stop for the prim-owned tmux server, even when its provider is disabled. No menu while no server exists."
+    },
+    {
+      "name": "retention",
+      "argv": [
+        "python3",
+        "retention.py"
+      ],
+      "since": 4,
+      "description": "Forgets finished terminals once no layout shows them (keeps the newest 64 never-shown). Off keeps every finished terminal."
     }
   ]
 }
