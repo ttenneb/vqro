@@ -186,8 +186,9 @@ async fn spawn_attach_input_status_and_kill_on_a_private_herdr_core() {
         "env": {"PRIM_TEST": "passed"}}, "deadline_ms": 10000}})).await;
     assert_eq!(core.until(|m| m["id"] == 2).await["result"]["outcome"], "observed");
     let envcheck = hc.root.path().join("envcheck");
-    for _ in 0..100 {
-        if envcheck.exists() { break; }
+    // The shell creates the file before `echo` writes to it: wait for the complete line, not just the file.
+    for _ in 0..250 {
+        if std::fs::read_to_string(&envcheck).is_ok_and(|s| s.ends_with('\n')) { break; }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert_eq!(std::fs::read_to_string(&envcheck).unwrap().trim(), "env=passed");
