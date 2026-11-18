@@ -1,4 +1,4 @@
-//! Standalone tmux control-mode backend client, not connected to prim's provider/core layers.
+//! Standalone tmux control-mode backend client, not connected to vqro's provider/core layers.
 //!
 //! One connection observes only panes linked into its attached session. Effects are never retried.
 //! Slow subscribers and native pause-after loss are explicit gaps; capture is a labelled screen
@@ -222,12 +222,12 @@ impl Client {
         let mut random = [0u8; 16];
         getrandom::fill(&mut random).map_err(|e| Error::Invalid(e.to_string()))?;
         let nonce: String = random.iter().map(|b| format!("{b:02x}")).collect();
-        match client.command(&["set-option", "-s", "-o", "@prim_control_instance", &nonce]).await {
+        match client.command(&["set-option", "-s", "-o", "@vqro_control_instance", &nonce]).await {
             Ok(_) => {}
-            Err(Error::Rejected(lines)) if lines == [b"already set: @prim_control_instance".to_vec()] => {}
+            Err(Error::Rejected(lines)) if lines == [b"already set: @vqro_control_instance".to_vec()] => {}
             Err(e) => return Err(e),
         }
-        let identity = client.command(&["display-message", "-p", "#{pid}:#{start_time}:#{@prim_control_instance}"]).await?;
+        let identity = client.command(&["display-message", "-p", "#{pid}:#{start_time}:#{@vqro_control_instance}"]).await?;
         client.instance = String::from_utf8(identity.into_iter().next().ok_or_else(|| Error::Protocol("empty server identity".into()))?)
             .map_err(|_| Error::Protocol("invalid server identity".into()))?;
         if !client.instance.ends_with(&nonce)
@@ -277,7 +277,7 @@ impl Client {
         }
         let mut token = [0u8; 16];
         getrandom::fill(&mut token).map_err(|e| Error::Invalid(e.to_string()))?;
-        let marker = format!("prim_barrier_{}", token.iter().map(|b| format!("{b:02x}")).collect::<String>());
+        let marker = format!("vqro_barrier_{}", token.iter().map(|b| format!("{b:02x}")).collect::<String>());
         let (tx, rx) = oneshot::channel();
         let flow = if args[0] == "refresh-client" {
             args.windows(2)
@@ -417,7 +417,7 @@ impl Client {
     }
     async fn capture_paused(&self, pane: &PaneId) -> Result<Vec<u8>, Error> {
         let nonce = self.instance.rsplit(':').next().unwrap();
-        let mismatch = format!("prim_wrong_instance_{nonce}");
+        let mismatch = format!("vqro_wrong_instance_{nonce}");
         let capture = format!("capture-pane -p -e -t {}", quote(pane.as_str())?);
         // Both identity check and capture run on the SAME server command queue. Never address a
         // reused %N on a replacement server merely because its socket path has been recreated.
@@ -433,7 +433,7 @@ impl Client {
                 "/dev/null",
                 "if-shell",
                 "-F",
-                &format!("#{{==:#{{@prim_control_instance}},{nonce}}}"),
+                &format!("#{{==:#{{@vqro_control_instance}},{nonce}}}"),
                 &capture,
                 &format!("display-message -p {mismatch}"),
             ])

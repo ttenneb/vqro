@@ -1,4 +1,4 @@
-//! prim-herdr against an in-test fake core (provider-v0 section 9) and a PRIVATE herdr-core.
+//! vqro-herdr against an in-test fake core (provider-v0 section 9) and a PRIVATE herdr-core.
 //! Opt-in: cargo test --test herdr_provider -- --ignored --test-threads=1
 //! The core runs from ~/.local/bin/herdr-core with env -i: private HOME/XDG dirs, its own HC_SESSION
 //! and an empty PATH (it cannot reach loginctl/systemctl). Only that private core is ever stopped.
@@ -128,14 +128,14 @@ impl Drop for Provider {
     }
 }
 
-/// Start prim-herdr against a fresh fake core; answer hello and register. Returns the register
+/// Start vqro-herdr against a fresh fake core; answer hello and register. Returns the register
 /// params and the sync's resources.
 async fn start(hc: &Hc, tag: &str) -> (Core, Provider, Value, Vec<Value>) {
     let endpoint = hc.root.path().join(format!("core-{tag}.sock"));
     let listener = UnixListener::bind(&endpoint).unwrap();
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_prim-herdr"));
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_vqro-herdr"));
     hc.env(&mut cmd);
-    cmd.args(["--hc", herdr_core().to_str().unwrap(), "--name", "herdr@test"]).env("PRIM_SOCKET", &endpoint);
+    cmd.args(["--hc", herdr_core().to_str().unwrap(), "--name", "herdr@test"]).env("VQRO_SOCKET", &endpoint);
     let provider = Provider(cmd.spawn().unwrap());
     let (sock, _) = tokio::time::timeout(Duration::from_secs(15), listener.accept()).await.unwrap().unwrap();
     let (r, w) = sock.into_split();
@@ -182,8 +182,8 @@ async fn spawn_attach_input_status_and_kill_on_a_private_herdr_core() {
     core.until(|m| m["method"] == "resource.upsert" && m["params"]["facts"]["ref"] == term.as_str()).await;
     // env reaches the program.
     core.send(json!({"jsonrpc": "2.0", "id": 2, "method": "effect.invoke", "params": {"generation": 5, "effect": "e2",
-        "op": "terminal.spawn", "args": {"argv": ["/bin/sh", "-c", "echo env=$PRIM_TEST > ../envcheck"], "cwd": hc.root.path().join("h").to_str().unwrap(),
-        "env": {"PRIM_TEST": "passed"}}, "deadline_ms": 10000}})).await;
+        "op": "terminal.spawn", "args": {"argv": ["/bin/sh", "-c", "echo env=$VQRO_TEST > ../envcheck"], "cwd": hc.root.path().join("h").to_str().unwrap(),
+        "env": {"VQRO_TEST": "passed"}}, "deadline_ms": 10000}})).await;
     assert_eq!(core.until(|m| m["id"] == 2).await["result"]["outcome"], "observed");
     let envcheck = hc.root.path().join("envcheck");
     // The shell creates the file before `echo` writes to it: wait for the complete line, not just the file.
@@ -196,7 +196,7 @@ async fn spawn_attach_input_status_and_kill_on_a_private_herdr_core() {
     core.send(json!({"jsonrpc": "2.0", "id": 3, "method": "stream.open", "params": {"generation": 5, "stream": 1, "ref": term,
         "incarnation": inc, "cols": 100, "rows": 30, "history_lines": 0, "window_bytes": 65536}})).await;
     assert_eq!(core.until(|m| m["id"] == 3).await["result"]["initial"], "none");
-    let input = "printf '\\033]7501;state=working:app=prim\\007'; echo hi-$((40+2))\r";
+    let input = "printf '\\033]7501;state=working:app=vqro\\007'; echo hi-$((40+2))\r";
     core.send(json!({"jsonrpc": "2.0", "method": "stream.input", "params": {"generation": 5, "stream": 1, "data": B64.encode(input)}})).await;
     let mut seen = Vec::new();
     let mut offset = 0u64;
@@ -286,8 +286,8 @@ async fn copied_realistic_state_upgrades_through_actual_defaults_and_provider_lo
     for (key,entry) in workspace["entries"].as_object_mut().unwrap() { if key.starts_with("extension/") {entry["value"]["enabled"]=json!(false);} }
     let layouts:Vec<_>=workspace["entries"].as_object().unwrap().iter().filter(|(key,_)|key.starts_with("layout/")).map(|(key,value)|(key.clone(),value.clone())).collect();
     let mut argv=private_env(&hc);argv.extend([herdr_core().to_string_lossy().into_owned(),"connect".into()]);
-    let native=prim::server::start(root.join("native.sock"),root.join("native-state"),false,prim::server::Backend::Herdr(argv),None).unwrap();
-    let (old,_,_)=prim::client::connect(&root.join("native.sock"),"copy-upgrade").await.unwrap();
+    let native=vqro::server::start(root.join("native.sock"),root.join("native-state"),false,vqro::server::Backend::Herdr(argv),None).unwrap();
+    let (old,_,_)=vqro::client::connect(&root.join("native.sock"),"copy-upgrade").await.unwrap();
     for _ in 0..200 {if native.lock().unwrap().providers["herdr"].synced {break;}tokio::time::sleep(Duration::from_millis(20)).await;}
     let mut expected=Vec::new();
     for (id,record) in identities["ids"].as_object_mut().unwrap() {
@@ -295,17 +295,17 @@ async fn copied_realistic_state_upgrades_through_actual_defaults_and_provider_lo
         let resource=old.call("resource.spawn",json!({"argv":["/usr/bin/sleep","600"]})).await.unwrap()["resource"].clone();
         record["identity"]=json!({"provider":"herdr","instance":resource["instance"],"reference":resource["backend_ref"],"incarnation":resource["incarnation"]});expected.push(id.clone());
     }
-    prim::server::shutdown(&native).await;
+    vqro::server::shutdown(&native).await;
     std::fs::write(state.join("workspace.json"),workspace.to_string()).unwrap();std::fs::write(state.join("resources.json"),identities.to_string()).unwrap();
     let ext=root.join("extensions");std::fs::create_dir(&ext).unwrap();
     let mut defaults:Value=serde_json::from_slice(&std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("extensions/defaults.json")).unwrap()).unwrap();
     for item in defaults["extensions"].as_array_mut().unwrap() {if item["name"]!="herdr" {item["enabled"]=json!(false);}}
     std::fs::write(ext.join("defaults.json"),defaults.to_string()).unwrap();
     let bin=root.join("bin");std::fs::create_dir(&bin).unwrap();std::os::unix::fs::symlink(herdr_core(),bin.join("hc")).unwrap();
-    let socket=root.join("new.sock");let mut cmd=Command::new(env!("CARGO_BIN_EXE_prim"));hc.env(&mut cmd);
-    cmd.arg("serve").env("PATH",&bin).env("PRIM_STATE_DIR",&state).env("PRIM_SOCKET",&socket).env_remove("PRIM_SOCKET_SOURCE").env("PRIM_EXTENSIONS_DIR",&ext).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    let socket=root.join("new.sock");let mut cmd=Command::new(env!("CARGO_BIN_EXE_vqro"));hc.env(&mut cmd);
+    cmd.arg("serve").env("PATH",&bin).env("VQRO_STATE_DIR",&state).env("VQRO_SOCKET",&socket).env_remove("VQRO_SOCKET_SOURCE").env("VQRO_EXTENSIONS_DIR",&ext).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
     let mut process=Provider(cmd.spawn().unwrap());
-    let peer=tokio::time::timeout(Duration::from_secs(10),async{loop{if let Ok((p,_,_))=prim::client::connect(&socket,"copy-upgrade").await {break p;}tokio::time::sleep(Duration::from_millis(20)).await;}}).await.unwrap();
+    let peer=tokio::time::timeout(Duration::from_secs(10),async{loop{if let Ok((p,_,_))=vqro::client::connect(&socket,"copy-upgrade").await {break p;}tokio::time::sleep(Duration::from_millis(20)).await;}}).await.unwrap();
     let snapshot=tokio::time::timeout(Duration::from_secs(10),async{loop{let snap=peer.call("workspace.snapshot",Value::Null).await.unwrap();if expected.iter().all(|id|snap["resources"].as_array().unwrap().iter().any(|r|r["id"]==id.as_str()&&r["available"]==true)){break snap;}tokio::time::sleep(Duration::from_millis(20)).await;}}).await.unwrap();
     for (key,value) in layouts {assert_eq!(snapshot["entries"][&key],value,"copied layout/id structure changed");}
     assert_eq!(peer.call("resource.spawn",json!({"argv":["/usr/bin/sleep","600"]})).await.unwrap()["resource"]["provider"],"herdr");
@@ -314,7 +314,7 @@ async fn copied_realistic_state_upgrades_through_actual_defaults_and_provider_lo
     println!("private realistic-copy upgrade passed: {} remapped identities; no source values logged",expected.len());
 }
 
-/// argv prefix that runs a program in this Hc's private environment (keeping PRIM_SOCKET and friends).
+/// argv prefix that runs a program in this Hc's private environment (keeping VQRO_SOCKET and friends).
 fn private_env(hc: &Hc) -> Vec<String> {
     let p = hc.root.path();
     ["/usr/bin/env".to_string(), format!("HOME={}", p.join("h").display()), format!("XDG_STATE_HOME={}", p.join("s").display()),
@@ -324,30 +324,30 @@ fn private_env(hc: &Hc) -> Vec<String> {
 
 #[tokio::test]
 #[ignore = "requires ~/.local/bin/herdr-core; private core"]
-async fn switching_a_state_dir_from_in_process_herdr_to_prim_herdr_keeps_resource_ids() {
-    use prim::server::{start, Backend};
+async fn switching_a_state_dir_from_in_process_herdr_to_vqro_herdr_keeps_resource_ids() {
+    use vqro::server::{start, Backend};
     let hc = Hc::new();
-    let state = hc.root.path().join("prim-state");
+    let state = hc.root.path().join("vqro-state");
     // 1. The old way: the in-process herdr adapter.
     let mut argv = private_env(&hc);
     argv.extend([herdr_core().to_string_lossy().into_owned(), "connect".into()]);
     let sock_a = hc.root.path().join("a.sock");
     let core_a = start(sock_a.clone(), state.clone(), false, Backend::Herdr(argv), None).unwrap();
-    let (a, _, _) = prim::client::connect(&sock_a, "t").await.unwrap();
-    let synced = |c: &prim::core::Shared| c.lock().unwrap().snapshot()["providers"]["herdr"]["synced"] == true;
+    let (a, _, _) = vqro::client::connect(&sock_a, "t").await.unwrap();
+    let synced = |c: &vqro::core::Shared| c.lock().unwrap().snapshot()["providers"]["herdr"]["synced"] == true;
     for _ in 0..200 { if synced(&core_a) { break; } tokio::time::sleep(Duration::from_millis(50)).await; }
     let r = a.call("resource.spawn", json!({"argv": ["/usr/bin/sleep", "600"]})).await.unwrap();
     let rid = r["resource"]["id"].as_str().unwrap().to_string();
     let (reference, instance) = (r["resource"]["backend_ref"].clone(), r["resource"]["instance"].clone());
-    a.call("command.invoke", json!({"name": "prim.layout.reset"})).await.unwrap();
-    prim::server::shutdown(&core_a).await;
+    a.call("command.invoke", json!({"name": "vqro.layout.reset"})).await.unwrap();
+    vqro::server::shutdown(&core_a).await;
 
-    // 2. The new way: same state dir, no in-process backend, prim-herdr as the `herdr` extension.
+    // 2. The new way: same state dir, no in-process backend, vqro-herdr as the `herdr` extension.
     let sock_b = hc.root.path().join("b.sock");
     let core_b = start(sock_b.clone(), state, false, Backend::Extensions, None).unwrap();
-    let (b, _, _) = prim::client::connect(&sock_b, "t").await.unwrap();
+    let (b, _, _) = vqro::client::connect(&sock_b, "t").await.unwrap();
     let mut ext = private_env(&hc);
-    ext.extend([env!("CARGO_BIN_EXE_prim-herdr").to_string(), "--hc".into(), herdr_core().to_string_lossy().into_owned(), "--name".into(), "herdr".into()]);
+    ext.extend([env!("CARGO_BIN_EXE_vqro-herdr").to_string(), "--hc".into(), herdr_core().to_string_lossy().into_owned(), "--name".into(), "herdr".into()]);
     b.call("workspace.apply", json!({"ops": [{"op": "set", "key": "extension/herdr", "value": {"argv": ext, "kind": "provider", "default": true}}]})).await.unwrap();
     let mut back = Value::Null;
     for _ in 0..200 {
@@ -358,15 +358,15 @@ async fn switching_a_state_dir_from_in_process_herdr_to_prim_herdr_keeps_resourc
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert_eq!(back["id"], rid.as_str(), "the same prim id comes back through prim-herdr");
+    assert_eq!(back["id"], rid.as_str(), "the same vqro id comes back through vqro-herdr");
     assert_eq!((&back["backend_ref"], &back["instance"], back["provider"].as_str()), (&reference, &instance, Some("herdr")));
     // The tab made by layout reset still points at it.
     let layout = b.call("workspace.snapshot", Value::Null).await.unwrap()["entries"]["view/term-".to_string() + &rid].clone();
     assert_eq!(layout["value"]["resource"], rid.as_str());
-    // New spawns without a provider go to prim-herdr (the default provider extension).
+    // New spawns without a provider go to vqro-herdr (the default provider extension).
     let fresh = b.call("resource.spawn", json!({"argv": ["/usr/bin/sleep", "600"]})).await.unwrap();
     assert_eq!(fresh["resource"]["provider"], "herdr");
-    prim::server::shutdown(&core_b).await;
+    vqro::server::shutdown(&core_b).await;
 }
 
 #[tokio::test]

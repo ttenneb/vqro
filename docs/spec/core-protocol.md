@@ -1,4 +1,4 @@
-# prim core protocol, v0
+# vqro core protocol, v0
 
 > **Status:** this is the living protocol of a **working prototype, and fluid**: it documents what the code does
 > today and will change as we learn. Nothing here is frozen yet (`../roadmap.md`, step 5).
@@ -12,10 +12,10 @@ the core forwards `command.invoke` to the connection that registered the command
 ## Endpoint and transport (D12, D22 confirmed)
 
 - The core listens on one **local endpoint**: a reliable, ordered byte stream per connection, reachable only by the
-  user who started the core. `PRIM_SOCKET` names it. Clients, extensions, providers and bridges treat the value as
+  user who started the core. `VQRO_SOCKET` names it. Clients, extensions, providers and bridges treat the value as
   **opaque**: they pass it to their platform's connect call and never parse it, build paths next to it or assume a
-  file exists. On Unix it is a Unix socket path (mode 0600; default `<state dir>/prim.sock`; implemented). On Windows
-  it is a named pipe name (`\\.\pipe\prim-<per-user id>`) whose DACL admits only the owner and which rejects remote
+  file exists. On Unix it is a Unix socket path (mode 0600; default `<state dir>/vqro.sock`; implemented). On Windows
+  it is a named pipe name (`\\.\pipe\vqro-<per-user id>`) whose DACL admits only the owner and which rejects remote
   clients (not implemented yet).
 - Messages are UTF-8 JSON, one per line, separated by LF. Open the endpoint in binary mode: no newline translation.
 - Clean request-input EOF is a one-shot half-close: the serving core finishes already-read valid requests under
@@ -27,9 +27,9 @@ the core forwards `command.invoke` to the connection that registered the command
 - Stdlib Python on Windows has no `AF_UNIX` (`socket` docs: the `AF_UNIX` constant is absent where unsupported).
   A Python client there connects to the named pipe with `asyncio`'s Windows proactor loop
   (`loop.create_pipe_connection`), not with a synchronous `open()` of the pipe, whose single handle serializes reads
-  and writes. `extensions/prim_ext.py` does this once the Windows endpoint exists (`build-plan.md`, Windows work).
-- The per-platform state directory holds the store and logs: `PRIM_STATE_DIR`; else on Unix
-  `$XDG_STATE_HOME/prim` or `~/.local/state/prim`; on Windows `%LOCALAPPDATA%\prim\state` (not implemented yet).
+  and writes. `extensions/vqro_ext.py` does this once the Windows endpoint exists (`build-plan.md`, Windows work).
+- The per-platform state directory holds the store and logs: `VQRO_STATE_DIR`; else on Unix
+  `$XDG_STATE_HOME/vqro` or `~/.local/state/vqro`; on Windows `%LOCALAPPDATA%\vqro\state` (not implemented yet).
 - **Stopping the core** is a protocol request, not a pidfile and a signal: `core.shutdown` (below, Session). Platform
   signals (Ctrl-C, SIGTERM on Unix) remain extra ways in that run the same ordered stop.
 
@@ -59,11 +59,11 @@ On upgrade from an older build without this lock, wait for that older process to
 The core then closes extension lifetime pipes (1.5s grace, then kill/reap, inside a2s supervisor bound), stops
 provider transport links, closes clients/streams, removes the endpoint, and exits. Backend-owned terminals are
 not killed; input is never replayed. Bounded cooperative cleanup waits report
-unconfirmed cleanup honestly. Dispatch/restarts are rejected while stopping. `prim.shutdown` is the same built-in
-recovery command, including safe mode. `prim stop` uses RPC even without a pidfile; only no-answer, timeout or
+unconfirmed cleanup honestly. Dispatch/restarts are rejected while stopping. `vqro.shutdown` is the same built-in
+recovery command, including safe mode. `vqro stop` uses RPC even without a pidfile; only no-answer, timeout or
 disconnect uses legacy positive-pid signal fallback, never a protocol refusal. SIGTERM/Ctrl-C use the same cleanup.
 
-## Workspace (prim-owned state, D15)
+## Workspace (vqro-owned state, D15)
 
 | Method | Params | Result |
 |---|---|---|
@@ -152,8 +152,8 @@ subsumed by the next snapshot; in-flight deltas still use the captured epoch/seq
 be postponed by incoming event traffic, and keys/recovery remain responsive. `too_large` keeps its separate explicit
 recovery path; other failures still use normal error/disconnection handling.
 
-CLI diagnostics do not silently retry refusals. `prim status`/`call` allow 2 s for connection/hello; status allows
-2 s for its optional client list and reports its failure rather than swallowing it. `prim call workspace.snapshot`
+CLI diagnostics do not silently retry refusals. `vqro status`/`call` allow 2 s for connection/hello; status allows
+2 s for its optional client list and reports its failure rather than swallowing it. `vqro call workspace.snapshot`
 has a 5 s request deadline; arbitrary calls/commands retain the existing 60 s request deadline. A timeout reports
 what is known, never permission to replay a command/effect.
 
@@ -225,7 +225,7 @@ the snapshot with jittered backoff (0.5 s doubling, 30 s cap); on success listen
 has subscribed, requests safe to resend (reads, registrations, `view.publish`, workspace writes whose every op has
 `expect`) wait out a slow core the same way; other requests report `timeout` and are never resent. A listener whose
 write gets `conflict` or `timeout` is rerun later as `missed`. A closed connection still exits the process, so
-supervision restarts it. Raw `Prim` users must explicitly opt in with a
+supervision restarts it. Raw `Vqro` users must explicitly opt in with a
 snapshot-capable missed handler; otherwise overflow retains the explicit disconnect/restart behavior. These encoded/queue bounds exclude allocator overhead, framing/serialization copies
 and a consumer-held record.
 
@@ -314,12 +314,12 @@ section 9. Requests/notifications carry generation in params; reply envelopes ne
 return `stale_generation`; wrong-generation notifications close the connection. Wire provider records, including
 records queued before registration, are capped at 1 MiB. Relay remains unimplemented.
 
-Every `resource.spawn` passes the core's opaque endpoint as `PRIM_SOCKET` in the terminal's environment (D22),
-with `PRIM_SOCKET_SOURCE=terminal`, so `prim call` works from any pane. When that marker is present and
-`PRIM_STATE_DIR` is set, CLI endpoint selection uses that state directory's endpoint instead of the inherited
-`PRIM_SOCKET`: a scratch run cannot silently call the live core. For a deliberate explicit endpoint plus state
-pair, clear `PRIM_SOCKET_SOURCE`; unmarked `PRIM_SOCKET` retains precedence. An explicit `env.PRIM_SOCKET` is kept, and a provider declaring
-`terminal.spawn {env: false}` gets none. `resource.spawn {bridge:true}` additionally opts into `PRIM_BRIDGE_TOKEN`. Runtime
+Every `resource.spawn` passes the core's opaque endpoint as `VQRO_SOCKET` in the terminal's environment (D22),
+with `VQRO_SOCKET_SOURCE=terminal`, so `vqro call` works from any pane. When that marker is present and
+`VQRO_STATE_DIR` is set, CLI endpoint selection uses that state directory's endpoint instead of the inherited
+`VQRO_SOCKET`: a scratch run cannot silently call the live core. For a deliberate explicit endpoint plus state
+pair, clear `VQRO_SOCKET_SOURCE`; unmarked `VQRO_SOCKET` retains precedence. An explicit `env.VQRO_SOCKET` is kept, and a provider declaring
+`terminal.spawn {env: false}` gets none. `resource.spawn {bridge:true}` additionally opts into `VQRO_BRIDGE_TOKEN`. Runtime
 registration may wait five seconds for durable host identity and returns `resume_token`; bootstrap and resume use
 same `params.token`. Private durable current+previous credentials bind exact host/provider/instance and expire
 on host removal. Lost-first-reply recovery, rotation and core-restart identity restoration are tested. Ordinary
@@ -342,7 +342,7 @@ records are dropped, not retained as a growing tombstone table. Opening old file
 lookups are indexed. A native inventory or wire sync chunk uses one candidate/identity-map write, including
 final-chunk removals, before publication; failed batches retain bounded pending facts. Host credential expiry is
 likewise batched on retirement. Storage stays on the core lock; the 600-new-inventory regression bounds the hold. A pre-rename failure publishes no
-new prim id. Because the backend spawn may already have happened, the call returns `io` with
+new vqro id. Because the backend spawn may already have happened, the call returns `io` with
 `data.outcome: "indeterminate"`, `backend_outcome: "observed"`, `provider`, `instance` and `resource_facts`
 (including `backend_ref`); never resend automatically. Facts are retained internally and assigned ids after an
 authoritative sync or a later successful map write. A post-rename directory-sync failure adopts the identity but
@@ -365,7 +365,7 @@ and old layouts may show gone resources until explicitly repaired/reset. No iden
 | `stream.resize` | `stream`, `cols`, `rows` | |
 | `stream.close` | `stream` | |
 
-`resource.list` optionally filters by exact `provider`, `backend_ref`, prim `id` and/or hosting-terminal `host`
+`resource.list` optionally filters by exact `provider`, `backend_ref`, vqro `id` and/or hosting-terminal `host`
 (AND), before serializing records.
 Absent filters retain the complete list. Malformed filter types are `invalid`; a nonmatching filter returns an
 empty list. These scoped reads are generic, read-only, and retain normal reply caps: a broad filtered result
@@ -425,11 +425,11 @@ stops the paste with a message saying how many of its bytes were sent, and nothi
 stream ends meanwhile (a slow viewer's gap ends a stream; the TUI reattaches), the chunk refused with `not_found` or
 `unavailable` had no effect and is sent on the view's new stream, continuing from there; chunks already accepted
 are never sent again. `dispatched` means core-queue acceptance, not native consumption: a later provider/native
-input close can leave those bytes indeterminate. prim-tmux drains queued input until ordered close (bounded 30 s),
-while prim-herdr/Python input can end with the output path; there is no generic post-gap delivery promise
+input close can leave those bytes indeterminate. vqro-tmux drains queued input until ordered close (bounded 30 s),
+while vqro-herdr/Python input can end with the output path; there is no generic post-gap delivery promise
 (provider-v0 9.5). Keys
 typed meanwhile queue behind the paste. The largest paste is **4 MiB** (after markers); a larger one is refused
-whole with a message and nothing is sent. Providers must accept any 64 KiB input message: prim-tmux splits it into
+whole with a message and nothing is sent. Providers must accept any 64 KiB input message: vqro-tmux splits it into
 `send-keys -H` commands of at most 2 KiB (tmux's command parser fails above about 8 000 arguments) and writes input
 from its own task, so a long paste never stops it draining the pane's output.
 
@@ -460,7 +460,7 @@ gap/closed markers; wrong offsets or exceeded credit close that stream. `stream.
 rejection and does not close output. Native herdr CREDIT follows the same consumption boundary. Viewer credit is
 still not negotiated; slow viewers use explicit closure/repaint rather than simulated end-to-end acknowledgement.
 
-Resource ids (`r1`, ...) are prim's and stay stable across core restarts while the backend keeps the resource.
+Resource ids (`r1`, ...) are vqro's and stay stable across core restarts while the backend keeps the resource.
 
 The shared native herdr adapter also caps native pending calls at 1024. Effect deadlines retire cancelled reply
 senders within 100 ms; cancelled commands still queued before native dispatch are skipped. Late attachment
@@ -474,7 +474,7 @@ records with an old reply. Its `events.subscribe` DATA is an incremental **NDJSO
 object per frame. Coalesced and split records are decoded with a 16 MiB unfinished-record bound; malformed/oversized
 records close/recover the native link rather than silently discarding observations. Subscribe/`missed` snapshot
 sequence cutoffs suppress queued older events. Exact per-frame payload-byte CREDIT follows a FIFO consumer barrier:
-the native core acknowledges after applying facts, and `prim-herdr` after its bounded publisher accepts prior facts.
+the native core acknowledges after applying facts, and `vqro-herdr` after its bounded publisher accepts prior facts.
 Bounded partial-record acceptance also returns credit, avoiding a record-larger-than-window deadlock. Credit waiting
 is off the native session loop. Finite-window evidence is `tests/herdr_event_credit.rs`; the separate real private
 load/pruning/forget/no-reconnect regression is `tests/e2e_herdr_drift.py`. No polling reconciler or effect replay.
@@ -483,13 +483,13 @@ load/pruning/forget/no-reconnect regression is `tests/e2e_herdr_drift.py`. No po
 
 | Method | Params | Result |
 |---|---|---|
-| `command.register` | `name`, `title?` | the command; `prim.*` is reserved for the core |
+| `command.register` | `name`, `title?` | the command; `vqro.*` is reserved for the core |
 | `command.list` | | `commands` |
 | `command.invoke` | `name`, `args?`, `deadline_ms?`, `on_behalf_of?` (invocation proof) | whatever the owner returns; closing owners can be unavailable/disconnected, removed names are `not_found` |
 
-Built-in, non-replaceable commands (recovery surface, D15): `prim.layout.reset`, `prim.revert`
-(default: latest client-authored or client-started extension transaction), `prim.safe_mode`, `prim.extension.disable|enable|restart`, and
-`prim.shutdown` (implemented: the same ordered stop and accepted-reply flush as `core.shutdown`, including safe mode).
+Built-in, non-replaceable commands (recovery surface, D15): `vqro.layout.reset`, `vqro.revert`
+(default: latest client-authored or client-started extension transaction), `vqro.safe_mode`, `vqro.extension.disable|enable|restart`, and
+`vqro.shutdown` (implemented: the same ordered stop and accepted-reply flush as `core.shutdown`, including safe mode).
 Everything opinionated is an extension (D17).
 
 Command registrations belong to the registering connection, not just its author string. A replacement connection
@@ -500,7 +500,7 @@ from live caches. Built-in core commands remain. The live registry is bounded to
 including names/titles/owners and built-ins. A single oversized row is `too_large`; aggregate pressure is `overloaded`
 without changing registration. Same-name replacement releases its old charge before admission; disconnect frees it.
 
-`prim.revert` accepts an omitted `txn` for default/latest selection. A supplied target must be an unsigned JSON
+`vqro.revert` accepts an omitted `txn` for default/latest selection. A supplied target must be an unsigned JSON
 integer; strings, floats, booleans, objects and explicit null are `invalid` before any undo selection or mutation,
 never silently treated as latest.
 
@@ -515,7 +515,7 @@ workspace write is admitted. Nested commands preserve the original invoker, with
 Proofs are not grants or user identities (D8); they cannot restrict an agent's ordinary workspace primitives.
 
 History and entries events retain actual writer `author` plus optional **author label** `on_behalf_of`; proofs are never
-persisted or broadcast. Legacy history without the field remains valid. Default `prim.revert`/TUI `u` keeps the existing
+persisted or broadcast. Legacy history without the field remains valid. Default `vqro.revert`/TUI `u` keeps the existing
 **global** history behavior across windows/reconnects: it selects the latest non-extension writer, or extension write
 whose original invoker was not itself an extension. Autonomous extension writes/event reactions stay excluded. Explicit
 transaction revert and CAS conflict rules are unchanged; this does not introduce a per-user identity or undo stack.
@@ -539,14 +539,14 @@ has a 60-second default; callers needing longer waits use `call_with_timeout` wi
 
 ## Safe-mode recovery (D21 revised)
 
-`prim.safe_mode {on}` is a built-in command (`command.invoke`): entering/re-entering stops all extensions and
+`vqro.safe_mode {on}` is a built-in command (`command.invoke`): entering/re-entering stops all extensions and
 provider transport links, clears the session allowlist and rejects unapproved provider registration. Backend-owned
-terminals are not killed. `prim serve` has no in-process backend: herdr/tmux are declared provider extensions. Explicit in-process
+terminals are not killed. `vqro serve` has no in-process backend: herdr/tmux are declared provider extensions. Explicit in-process
 adapters used by tests/embedders also remain stopped in safe mode and have no chooser entry. Leaving restores ordinary enabled declarations
 and reopens the explicitly configured embedder adapter. Repeated leave does not restart it. Entering safe mode
 preserves failed-extension status and last-exit diagnostics.
 
-`prim.safe_mode.allow {name,on}` temporarily starts/stops one declared extension while safe mode is on. It never
+`vqro.safe_mode.allow {name,on}` temporarily starts/stops one declared extension while safe mode is on. It never
 writes `extension/<name>.enabled` or history; an explicit allowance may override a saved disabled value for this
 session. Healthy repeated allowance is idempotent, not a provider restart. Unknown names fail `not_found`; use
 outside safe mode fails `conflict`. Provider owner removal immediately fences old generations/streams, closes
@@ -556,7 +556,7 @@ are session-only; `safe_mode {on,allow,provider_extensions}` events keep clients
 The Rust client opens a built-in recovery popup when safe mode is on, also reachable through the prefix menu:
 provider/backend and UI groups, descriptions, checkboxes, Enable selected and Leave safe mode. Classification uses
 `extension/<name>.kind: "provider"` or remembered authenticated registration owners. Managed processes receive a
-fresh `PRIM_EXTENSION_TOKEN` for each supervised lifetime and send it in `hello.extension_token` alongside their
+fresh `VQRO_EXTENSION_TOKEN` for each supervised lifetime and send it in `hello.extension_token` alongside their
 name. A name alone is a label, not supervision proof. Safe-mode provider admission requires a still-running,
 allowed lifetime; registration rechecks it after asynchronous waits. Credentials are not persisted or published,
 and are stripped before auto-starting hc services so terminals do not inherit them. Provider
@@ -570,7 +570,7 @@ transition opens it. Failed declarations show their retained last-exit reason.
 Extensions contribute `menu/*` and `binding/*` entries carrying `owner`; clients hide them while that extension is
 disabled, removed, not explicitly allowed in safe mode, or when their command is unavailable.
 
-Contributions are reconciled on activation (helper behaviour, `extensions/prim_ext.py` `contribute`). An extension's
+Contributions are reconciled on activation (helper behaviour, `extensions/vqro_ext.py` `contribute`). An extension's
 first contribution of a run is its whole declared set, so entries it owns (`owner` = its name) under `menu/`,
 `binding/` and `view/` that are not in that set are deleted in the same compare-and-set transaction. A new
 version that drops an item leaves no ghost. On a conflict the helper reloads and retries. Entries of other owners and
@@ -614,7 +614,7 @@ reconcile later with their full set (`exclusive=True`). Other runtimes should fo
   hints use `PageUp/PageDown` in full mode. This works with all extensions off and in safe mode; it does not
   change stored keys, matching or bytes sent to programs. Editable configuration values retain their syntax.
   Settings exposes the choice through the generic `settings.set` Interface select. Extensions embedding key ids
-  in text read this same workspace option and use `prim_display.key_labels(text, setting)`; Settings' Keys page
+  in text read this same workspace option and use `vqro_display.key_labels(text, setting)`; Settings' Keys page
   and key-profile labels do this without new RPC or rich-text fields. Native and Python formatters share the
   test table `tests/fixtures/key_labels.json`. Unknown/future key tokens stay literal; formatting never writes
   bindings or profile state. Other clients may retain their own presentation, ignoring this native TUI option.
@@ -622,8 +622,8 @@ reconcile later with their full set (`exclusive=True`). Other runtimes should fo
   wins (an integer, default 0), then the client's own defaults, then the lowest entry id. A winning binding to
   `client.none` unbinds the key, so a profile can remove a key without deleting another extension's entry.
 - **Client defaults** are bindings at priority 0: `:` `client.palette`, `o`/`O` `client.focus` next/prev, `1`-`9`
-  `client.tab`, `u` `prim.revert`, `R` `prim.layout.reset`, `!` `prim.safe_mode`, `q` `client.quit`.
-- **Recovery survives any keymap.** The prefix menu (prefix key, the clickable `prim` badge, or `client.prefix`)
+  `client.tab`, `u` `vqro.revert`, `R` `vqro.layout.reset`, `!` `vqro.safe_mode`, `q` `client.quit`.
+- **Recovery survives any keymap.** The prefix menu (prefix key, the clickable `vqro` badge, or `client.prefix`)
   lists the winning binding of each key, then any recovery action (commands, undo, reset layout, safe mode, quit)
   that no key reaches any more, without a key. Safe mode hides every extension's bindings.
 - **Live feedback.** While the prefix menu is open a client may ask the terminal for richer key reports (the TUI
@@ -650,11 +650,11 @@ reconcile later with their full set (`exclusive=True`). Other runtimes should fo
   reach it at all; this needs an outer terminal with the kitty keyboard protocol (Ghostty, kitty, WezTerm, foot,
   recent iTerm2); with others Shift-Enter stays Enter. Only "disambiguate" is emulated: other kitty flags (event
   types, alternate keys, all keys as escape codes) are not, and the client does not answer the kitty query
-  `CSI ? u`, so programs that probe before enabling keep their legacy behaviour. Programs inside the prim-owned
+  `CSI ? u`, so programs that probe before enabling keep their legacy behaviour. Programs inside the vqro-owned
   tmux server talk to tmux, which consumes their mode requests: there extended keys depend on tmux and arrive
   the legacy way. The prefix key always works and is never sent on unless pressed twice.
 
-The bundled `keys` extension owns keymap profiles (`prim`, `tmux`, `screen`; tables and gaps in
+The bundled `keys` extension owns keymap profiles (`vqro`, `tmux`, `screen`; tables and gaps in
 `extensions/keys.py`). Applying one with `keys.profile {value}` replaces its `binding/keys.*` entries (priority 10)
 and sets the prefix; the active profile is `doc/keys/profile`, and the list is live data `keys`
 (`{profile, profiles: [{label, value}]}`) for the settings page.
@@ -768,7 +768,7 @@ Colours: a name (the 16 ANSI names such as `cyan`, `darkgray`, `lightblue`), `#R
 | `dim` | details, descriptions, disabled rows, hints; `dim` style | `darkgray` |
 | `accent` | headers, values, buttons, scrollbar thumb, open page; `accent` style | `cyan` |
 | `ok`, `warn`, `error` | the matching styles, badges and toasts | `green`, `yellow`, `red` |
-| `prompt` | keyboard modes: prompt line, open prim badge, filter | `magenta` |
+| `prompt` | keyboard modes: prompt line, open vqro badge, filter | `magenta` |
 | `border` | unfocused borders, rules, separators, scrollbar track | `darkgray` |
 | `border_focus` | the focused pane, popups and menus | `cyan` |
 | `selection`, `selection_text` | the selected row; unset `selection` means reverse video | unset |
@@ -792,7 +792,7 @@ Extensions ask for icons by name; the active icon set says how each name looks (
 The active set is the entry `doc/settings/icons` = `{name, width?, glyphs: {name: glyph}}`. Clients resolve an
 icon to: the set's glyph for the first name it has; else the icon's own glyph, `nerd` or `text` by the client's
 `icons` setting (`doc/settings/tui.icons`: `auto`, `nerd`, `text`; fonts can't be detected, so `auto` trusts
-terminals that bundle Nerd Font symbols, Ghostty and WezTerm, or `PRIM_NERD_FONT=1`; `nerd` falls back to `text`);
+terminals that bundle Nerd Font symbols, Ghostty and WezTerm, or `VQRO_NERD_FONT=1`; `nerd` falls back to `text`);
 else nothing. With no set, or an empty `glyphs`, every icon looks as the extension drew it. Unknown names, and
 glyphs a client can't use (empty, control characters, wider than two cells), fall back the same way, so sets and
 extensions can evolve independently. In safe mode clients ignore the set (recovery, D15).
@@ -820,20 +820,20 @@ Icons page.
 
 ## Default extensions
 
-On first run the core declares the extensions listed in `<extensions dir>/defaults.json` (`PRIM_EXTENSIONS_DIR`,
-default: the per-platform extensions directory, `~/.local/share/prim/extensions` on Unix and
-`%LOCALAPPDATA%\prim\extensions` on Windows, not implemented yet) and records `doc/prim/defaults`, so removing one sticks. Bundled:
+On first run the core declares the extensions listed in `<extensions dir>/defaults.json` (`VQRO_EXTENSIONS_DIR`,
+default: the per-platform extensions directory, `~/.local/share/vqro/extensions` on Unix and
+`%LOCALAPPDATA%\vqro\extensions` on Windows, not implemented yet) and records `doc/vqro/defaults`, so removing one sticks. Bundled:
 `tabs`, `panes`, `gestures`, `workspaces`, `sidebar`, `themes`, `icons`, `keys`, `settings` (`extensions/`, helper
-`prim_ext.py`), and two backends as provider extensions (D21; human decision 2026-11-17):
-- `herdr`: `prim-herdr --name herdr`, `kind: "provider"`, `default: true`. Terminals in herdr-core, reached with
-  `$PRIM_HERDR` (JSON argv, e.g. `["ssh","box","hc","connect"]`, or a single literal executable), else `hc connect`.
+`vqro_ext.py`), and two backends as provider extensions (D21; human decision 2026-11-17):
+- `herdr`: `vqro-herdr --name herdr`, `kind: "provider"`, `default: true`. Terminals in herdr-core, reached with
+  `$VQRO_HERDR` (JSON argv, e.g. `["ssh","box","hc","connect"]`, or a single literal executable), else `hc connect`.
   `--hc PATH` with repeated `--hc-arg ARG` passes literal prefix arguments before `connect`; PATH lookup uses
   platform-native path splitting. A legacy whitespace command string must be converted to JSON argv.
-- `tmux`: `prim-tmux --name tmux`, `kind: "provider"`, `enabled: false`. Terminals in a private tmux server owned by
-  prim, never the user's tmux sessions.
+- `tmux`: `vqro-tmux --name tmux`, `kind: "provider"`, `enabled: false`. Terminals in a private tmux server owned by
+  vqro, never the user's tmux sessions.
 
-`prim serve` runs no backend in process; `--fake` adds the in-process fake for tests. A bare `prim-*` program in a
-default stays bare in stored state and resolves on each start: executable sibling of the running `prim`, then
+`vqro serve` runs no backend in process; `--fake` adds the in-process fake for tests. A bare `vqro-*` program in a
+default stays bare in stored state and resolves on each start: executable sibling of the running `vqro`, then
 platform-native `PATH` search (including `.exe` on Windows). An unavailable program reports `failed` and an
 actionable diagnostic; hello/snapshot `backend_notice` and the built-in status bar expose unavailable backends.
 `entries`, `provider` (and compatibility `adapter`), and `safe_mode` event data also carry the current
@@ -859,9 +859,9 @@ used; a runtime bridge never is. A declared default that has not registered reje
 registration order must never route them to a different backend. Other `argv[0]` values are resolved by the platform's process
 launcher (`PATH` on Unix; `CreateProcess` search on Windows, where a `.py` file is not directly executable and
 `python3` is often absent). The bundled `defaults.json` names `python3`, which is Unix-only for now; Windows defaults
-need a portable interpreter choice such as the `py -3` launcher (`build-plan.md`, Windows work). Started with `PRIM_SOCKET`,
-`PRIM_EXTENSION`, `PRIM_EXTENSION_TOKEN`, and `PRIM_EXTENSION_LIFETIME=stdin`; output goes to `<state>/ext-<name>.log`.
-Crash budget: 3 exits in 5 minutes, then `failed` until the entry changes or `prim.extension.restart`.
+need a portable interpreter choice such as the `py -3` launcher (`build-plan.md`, Windows work). Started with `VQRO_SOCKET`,
+`VQRO_EXTENSION`, `VQRO_EXTENSION_TOKEN`, and `VQRO_EXTENSION_LIFETIME=stdin`; output goes to `<state>/ext-<name>.log`.
+Crash budget: 3 exits in 5 minutes, then `failed` until the entry changes or `vqro.extension.restart`.
 
 ### Static manifests and observed facts
 
@@ -917,18 +917,18 @@ while remaining stopped; restarting never enables a declaration or bypasses safe
 
 Settings uses these same public facts and generic panel features for every declaration, including itself; it has
 no Pi-specific child row or always-on exception. If explicitly allowed to run in safe mode, its on/off controls
-use `prim.safe_mode.allow` session choices rather than editing normal enabled declarations (D21). Turning Settings
+use `vqro.safe_mode.allow` session choices rather than editing normal enabled declarations (D21). Turning Settings
 off stops that page, not built-in recovery.
 
 **Lifetime channel (all platforms):** a managed extension's standard input is a pipe reserved for lifetime,
 not application input or the JSON-RPC connection. Only the launching core holds its sending end open;
 it sends no data. EOF means that core has ended, including a crash or forced termination where cleanup
 code cannot run. The extension **must monitor this channel independently of RPC and command work and
-exit promptly on EOF**, even if it has not connected to `PRIM_SOCKET` yet. It must not keep using a dead
+exit promptly on EOF**, even if it has not connected to `VQRO_SOCKET` yet. It must not keep using a dead
 core's socket or reconnect/replay automatically. Wrappers must preserve the channel through to the
 extension. This contract requires no process ids, signals or platform-specific parent-death facilities.
 
-`extensions/prim_ext.py` starts the lifetime watcher on import when the marker is `stdin`; EOF exits the
+`extensions/vqro_ext.py` starts the lifetime watcher on import when the marker is `stdin`; EOF exits the
 whole Python process, including blocked command/startup threads. Its existing socket-EOF exit remains
 an additional disconnect path. Without the marker (for example a manually launched helper/client), it
 does not consume stdin. Other runtimes must implement the same EOF rule. Standard input must not be
@@ -936,6 +936,6 @@ repurposed, and ordinary helper subprocesses should not inherit the marker unles
 and follow a suitable lifetime channel.
 
 Explicit stop/replacement and crash-budget behavior are unchanged. Noncompliant programs that ignore
-the lifetime channel can still outlive a crashed core; prim does not promise to enforce this contract
-through an external process supervisor. This channel governs **prim's extensions only**, not backend-owned
+the lifetime channel can still outlive a crashed core; vqro does not promise to enforce this contract
+through an external process supervisor. This channel governs **vqro's extensions only**, not backend-owned
 terminals, agents, or their process-lifetime guarantees (D14/D15).

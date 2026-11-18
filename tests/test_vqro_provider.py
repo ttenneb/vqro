@@ -10,7 +10,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "extensions"))
-from prim_provider import Limits, Provider, ProviderError, facts
+from vqro_provider import Limits, Provider, ProviderError, facts
 spec = importlib.util.spec_from_file_location("fake_provider", ROOT / "tests/fixtures/fake_provider.py")
 fixture = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fixture)
@@ -323,7 +323,7 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(duplicate["error"]["data"]["kind"], "conflict")
 
     async def test_identity_window_never_evicts_active_calls(self):
-        from prim_provider import _IdentityLedger
+        from vqro_provider import _IdentityLedger
         ids = _IdentityLedger()
         ids.add("active", 2)
         for number in range(10):

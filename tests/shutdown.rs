@@ -1,6 +1,6 @@
 //! Disposable core processes only; these tests never use the user's endpoint, pidfile or hc.
 use std::{path::{Path, PathBuf}, process::{Child, Command, Stdio}, time::Duration};
-use prim::{client, rpc::{Incoming, Peer, RpcError}};
+use vqro::{client, rpc::{Incoming, Peer, RpcError}};
 use serde_json::{json, Value};
 
 struct Owned(Child);
@@ -9,8 +9,8 @@ struct Root { dir: tempfile::TempDir, socket: PathBuf, state: PathBuf }
 impl Root {
     fn new() -> Self { let dir = tempfile::Builder::new().prefix("ps").tempdir_in("/tmp").unwrap(); let socket = dir.path().join("s"); let state = dir.path().join("st"); std::fs::create_dir(&state).unwrap(); Self { dir, socket, state } }
     fn cli(&self) -> Command {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_prim"));
-        cmd.env_clear().env("HOME", self.dir.path()).env("PATH", std::env::var("PATH").unwrap()).env("PRIM_SOCKET", &self.socket).env("PRIM_STATE_DIR", &self.state).env("PRIM_EXTENSIONS_DIR", self.dir.path().join("no-extensions")); cmd
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_vqro"));
+        cmd.env_clear().env("HOME", self.dir.path()).env("PATH", std::env::var("PATH").unwrap()).env("VQRO_SOCKET", &self.socket).env("VQRO_STATE_DIR", &self.state).env("VQRO_EXTENSIONS_DIR", self.dir.path().join("no-extensions")); cmd
     }
     async fn start(&self) -> (Owned, Peer) {
         let child = Owned(self.cli().args(["serve", "--fake"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
@@ -31,8 +31,8 @@ async fn shutdown_by_protocol_and_recovery_command_acknowledges_and_exits() {
     for recovery in [false, true] {
         let root = Root::new(); let (mut child, peer) = root.start().await;
         extension(&peer, &root).await;
-        if recovery { peer.call("command.invoke", json!({"name":"prim.safe_mode","args":{"on":true}})).await.unwrap(); }
-        let reply = if recovery { peer.call("command.invoke", json!({"name":"prim.shutdown"})).await } else { peer.call("core.shutdown", Value::Null).await }.unwrap();
+        if recovery { peer.call("command.invoke", json!({"name":"vqro.safe_mode","args":{"on":true}})).await.unwrap(); }
+        let reply = if recovery { peer.call("command.invoke", json!({"name":"vqro.shutdown"})).await } else { peer.call("core.shutdown", Value::Null).await }.unwrap();
         assert_eq!(reply["outcome"], "accepted", "reply must arrive before core disconnect");
         tokio::time::timeout(Duration::from_secs(4), peer.closed()).await.unwrap();
         assert_eq!(std::fs::read_to_string(root.dir.path().join("cleaned")).unwrap(), "EOF", "extension cleanup must precede closing clients");

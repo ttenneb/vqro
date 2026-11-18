@@ -49,7 +49,7 @@ for raw in sys.stdin.buffer:
     if command == "display-message":
         text = args[-1]
         if "#{pid}" in text:
-            text = f"4242:1700000000:{options.get('@prim_control_instance', '')}"
+            text = f"4242:1700000000:{options.get('@vqro_control_instance', '')}"
         block([text])
     elif command == "set-option":
         name, value = args[-2], args[-1]

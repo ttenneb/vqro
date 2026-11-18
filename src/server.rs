@@ -57,7 +57,7 @@ pub fn start(socket: std::path::PathBuf, state: std::path::PathBuf, safe: bool, 
     let mut store=crate::store::Store::open_locked(state.join("workspace.json"))?;
     if socket.exists() {
         if std::os::unix::net::UnixStream::connect(&socket).is_ok() {
-            anyhow::bail!("prim is already running at {}", socket.display());
+            anyhow::bail!("vqro is already running at {}", socket.display());
         }
         std::fs::remove_file(&socket)?;
     }
@@ -82,7 +82,7 @@ pub fn start(socket: std::path::PathBuf, state: std::path::PathBuf, safe: bool, 
     let c = core.clone();
     tokio::spawn(async move {
         if let Err(e) = serve(c, listener).await {
-            eprintln!("prim: server stopped: {e}");
+            eprintln!("vqro: server stopped: {e}");
         }
     });
     Ok(core)
@@ -92,7 +92,7 @@ async fn stop_recovery_providers(handles: Vec<crate::adapter::AdapterHandle>) {
     let mut tasks=tokio::task::JoinSet::new();
     for handle in handles { tasks.spawn(async move { let _=handle.shutdown().await; }); }
     if tokio::time::timeout(std::time::Duration::from_secs(2),async { while tasks.join_next().await.is_some() {} }).await.is_err() {
-        eprintln!("prim: safe-mode provider stop deadline; transport cleanup unconfirmed"); tasks.abort_all();
+        eprintln!("vqro: safe-mode provider stop deadline; transport cleanup unconfirmed"); tasks.abort_all();
     }
 }
 
@@ -102,14 +102,14 @@ fn install_defaults(store: &mut crate::store::Store, dir: &std::path::Path) {
     let Ok(bytes) = std::fs::read(dir.join("defaults.json")) else { return };
     let Ok(list) = serde_json::from_slice::<Value>(&bytes) else { return };
     let version = list["version"].as_u64().unwrap_or(1);
-    let recorded = store.get("doc/prim/defaults").map(|e| e.value.clone());
+    let recorded = store.get("doc/vqro/defaults").map(|e| e.value.clone());
     // No record: nothing installed yet. A record without a version predates versioned defaults (1).
     let installed = recorded.as_ref().map(|r| r["version"].as_u64().unwrap_or(1)).unwrap_or(0);
     // Repair only declarations still identical to an installed default, except its old pinned program.
     let mut repairs=Vec::new();
     for spec in list["extensions"].as_array().into_iter().flatten() {
         let (Some(name),Some(program))=(spec["name"].as_str(),spec["argv"][0].as_str()) else {continue};
-        if spec["kind"]!="provider" || !program.starts_with("prim-") {continue}
+        if spec["kind"]!="provider" || !program.starts_with("vqro-") {continue}
         if !recorded.as_ref().and_then(|r|r["installed"].as_array()).is_some_and(|names|names.iter().any(|n|n==name)) {continue}
         let key=format!("extension/{name}"); let Some(entry)=store.get(&key) else {continue};
         let Some(old)=entry.value["argv"][0].as_str() else {continue};
@@ -121,7 +121,7 @@ fn install_defaults(store: &mut crate::store::Store, dir: &std::path::Path) {
         let mut current=entry.value.clone();current["argv"][0]=json!(program);
         if current==expected {repairs.push(Op::Set{key,value:expected,expect:Some(entry.version)});}
     }
-    if !repairs.is_empty() { if let Err(error)=store.apply("prim:defaults",Some("resolve unchanged default providers at start".into()),repairs) {eprintln!("prim: default program repair failed: {error}");} }
+    if !repairs.is_empty() { if let Err(error)=store.apply("vqro:defaults",Some("resolve unchanged default providers at start".into()),repairs) {eprintln!("vqro: default program repair failed: {error}");} }
     if installed >= version {
         return;
     }
@@ -156,10 +156,10 @@ fn install_defaults(store: &mut crate::store::Store, dir: &std::path::Path) {
             names.push(json!(name));
         }
     }
-    ops.push(Op::Set { key: "doc/prim/defaults".into(), value: json!({"installed": names, "from": dir.to_string_lossy(), "version": version}), expect: None });
+    ops.push(Op::Set { key: "doc/vqro/defaults".into(), value: json!({"installed": names, "from": dir.to_string_lossy(), "version": version}), expect: None });
     let note = if installed == 0 { "install default extensions" } else { "add new default extensions" };
-    if let Err(e) = store.apply("prim:defaults", Some(note.into()), ops) {
-        eprintln!("prim: could not install default extensions: {e}");
+    if let Err(e) = store.apply("vqro:defaults", Some(note.into()), ops) {
+        eprintln!("vqro: could not install default extensions: {e}");
     }
 }
 
@@ -171,11 +171,11 @@ fn raise_nofile_limit() {
     let mut limit=libc::rlimit {rlim_cur:0,rlim_max:0};
     // SAFETY: valid pointers to the OS resource-limit struct; no ownership crosses the call.
     unsafe {
-        if libc::getrlimit(libc::RLIMIT_NOFILE,&mut limit)!=0 {eprintln!("prim: could not inspect nofile limit: {}",std::io::Error::last_os_error());return;}
+        if libc::getrlimit(libc::RLIMIT_NOFILE,&mut limit)!=0 {eprintln!("vqro: could not inspect nofile limit: {}",std::io::Error::last_os_error());return;}
         if limit.rlim_cur<limit.rlim_max {
             let old=limit.rlim_cur;limit.rlim_cur=limit.rlim_max;
-            if libc::setrlimit(libc::RLIMIT_NOFILE,&limit)==0 {eprintln!("prim: raised soft nofile limit {old} -> {} (hard limit unchanged)",limit.rlim_cur);}
-            else {eprintln!("prim: could not raise soft nofile limit: {}",std::io::Error::last_os_error());}
+            if libc::setrlimit(libc::RLIMIT_NOFILE,&limit)==0 {eprintln!("vqro: raised soft nofile limit {old} -> {} (hard limit unchanged)",limit.rlim_cur);}
+            else {eprintln!("vqro: could not raise soft nofile limit: {}",std::io::Error::last_os_error());}
         }
     }
 }
@@ -227,12 +227,12 @@ pub async fn serve(core: Shared, listener: UnixListener) -> anyhow::Result<()> {
                 Err(error) if transient_accept_error(&error)=>{
                     let now=std::time::Instant::now();
                     if last_accept_notice.is_none_or(|last|now.duration_since(last)>=std::time::Duration::from_secs(5)) {
-                        eprintln!("prim: listener resource pressure ({error}); retrying, existing connections remain served");last_accept_notice=Some(now);
+                        eprintln!("vqro: listener resource pressure ({error}); retrying, existing connections remain served");last_accept_notice=Some(now);
                     }
                     tokio::select! {_=shutdown.requested()=>break,_=tokio::time::sleep(std::time::Duration::from_millis(100))=>{}}
                     continue;
                 }
-                Err(error)=>{eprintln!("prim: listener failed: {error}");break;}
+                Err(error)=>{eprintln!("vqro: listener failed: {error}");break;}
             },
         };
         if connections.len()>=MAX_CONNECTIONS {refuse_connection(stream).await;continue;}
@@ -267,7 +267,7 @@ pub async fn serve(core: Shared, listener: UnixListener) -> anyhow::Result<()> {
     shutdown.request();
     // Keep the endpoint bound until cleanup finishes, so a replacement cannot race our unlink.
     let commits=crate::commit::shutdown(&core,std::time::Duration::from_secs(3)).await;
-    if !commits.completed { eprintln!("prim: workspace shutdown deadline: {} queued commits rejected without effects; {} active outcomes indeterminate; do not replay",commits.rejected,commits.active); }
+    if !commits.completed { eprintln!("vqro: workspace shutdown deadline: {} queued commits rejected without effects; {} active outcomes indeterminate; do not replay",commits.rejected,commits.active); }
     // A worker receipt is not yet a transport reply. Mutation handlers retain these permits
     // through reply flushing, including replies issued on provider/extension connections.
     let replies=tokio::time::timeout(std::time::Duration::from_secs(1),async {
@@ -277,16 +277,16 @@ pub async fn serve(core: Shared, listener: UnixListener) -> anyhow::Result<()> {
         }
         Ok::<_,()>(held)
     }).await;
-    if !matches!(replies,Ok(Ok(_))) { eprintln!("prim: workspace reply delivery indeterminate at shutdown deadline; inspect history, never replay"); }
+    if !matches!(replies,Ok(Ok(_))) { eprintln!("vqro: workspace reply delivery indeterminate at shutdown deadline; inspect history, never replay"); }
     ext::shutdown(&core).await;
     let handles: Vec<_> = core.lock().unwrap().providers.values().map(|p| p.handle.clone()).collect();
     let mut providers = tokio::task::JoinSet::new();
     for handle in handles { providers.spawn(async move { (handle.name.clone(), handle.shutdown().await) }); }
     if tokio::time::timeout(std::time::Duration::from_secs(2), async {
         while let Some(result) = providers.join_next().await {
-            if let Ok((name, Err(error))) = result { eprintln!("prim: provider {name} shutdown unconfirmed: {error}"); }
+            if let Ok((name, Err(error))) = result { eprintln!("vqro: provider {name} shutdown unconfirmed: {error}"); }
         }
-    }).await.is_err() { eprintln!("prim: provider shutdown deadline; cleanup unconfirmed"); providers.abort_all(); }
+    }).await.is_err() { eprintln!("vqro: provider shutdown deadline; cleanup unconfirmed"); providers.abort_all(); }
     { let mut c = core.lock().unwrap(); let names: Vec<_> = c.providers.keys().cloned().collect();
       for name in names { c.on_adapter_event(&name, crate::adapter::AdapterEvent::Connected(false, None)); } }
     for (peer,_) in peers.values() { peer.close(); }
@@ -345,8 +345,8 @@ async fn connection(core: Shared, conn: Arc<Conn>, mut incoming: crate::rpc::Inc
                 let (core, conn) = (core.clone(), conn.clone());
                 tasks.spawn(async move {
                     let _permit = permit;
-                    let stopping = method == "core.shutdown" || (method == "command.invoke" && params["name"] == "prim.shutdown");
-                    let mutation=matches!(method.as_str(),"workspace.apply"|"workspace.revert") || (method=="command.invoke" && matches!(params["name"].as_str(),Some("prim.revert"|"prim.layout.reset"|"prim.extension.enable"|"prim.extension.disable")));
+                    let stopping = method == "core.shutdown" || (method == "command.invoke" && params["name"] == "vqro.shutdown");
+                    let mutation=matches!(method.as_str(),"workspace.apply"|"workspace.revert") || (method=="command.invoke" && matches!(params["name"].as_str(),Some("vqro.revert"|"vqro.layout.reset"|"vqro.extension.enable"|"vqro.extension.disable")));
                     let _mutation=if mutation {
                         if core.lock().unwrap().shutdown.is_requested() { conn.peer.respond(id,Err(provider::rejected("unavailable","core shutting down; commit not admitted"))); return; }
                         match conn.mutations.clone().try_acquire_owned() { Ok(permit)=>Some(permit),Err(_)=>{conn.peer.respond(id,Err(provider::rejected("unavailable","core shutting down; commit not admitted")));return;} }
@@ -358,7 +358,7 @@ async fn connection(core: Shared, conn: Arc<Conn>, mut incoming: crate::rpc::Inc
                     } else {
                         conn.peer.respond(id,result);
                         if mutation && !matches!(tokio::time::timeout(std::time::Duration::from_secs(1),conn.peer.flush_control()).await,Ok(true)) {
-                            eprintln!("prim: workspace reply delivery indeterminate; inspect history, never replay");
+                            eprintln!("vqro: workspace reply delivery indeterminate; inspect history, never replay");
                         }
                     }
                 });
@@ -489,7 +489,7 @@ fn attribution(core: &Shared, conn: &Conn, proof: Option<String>) -> Result<crat
 async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> RpcResult {
     crate::limits::json_depth(&p,crate::limits::MESSAGE_DEPTH)?;
     if conn.peer.is_closed() { return Err(provider::rejected("disconnected", "connection closed before dispatch")); }
-    if core.lock().unwrap().shutdown.is_requested() && method != "core.shutdown" && !(method == "command.invoke" && p["name"] == "prim.shutdown") {
+    if core.lock().unwrap().shutdown.is_requested() && method != "core.shutdown" && !(method == "command.invoke" && p["name"] == "vqro.shutdown") {
         return Err(provider::rejected("unavailable", "core is shutting down; not dispatched"));
     }
     if method != "provider.register" && conn.wire.is_provider() { conn.wire.validate(core, &p)?; }
@@ -524,7 +524,7 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> Rp
             let me = json!({"id": conn.id, "author": conn.author(), "client": h.client, "version": h.version, "build": h.build});
             c.clients.insert(conn.id, me);
             Ok(json!({
-                "server": "prim", "version": env!("CARGO_PKG_VERSION"), "protocol": PROTOCOL, "you": conn.author(),
+                "server": "vqro", "version": env!("CARGO_PKG_VERSION"), "protocol": PROTOCOL, "you": conn.author(),
                 "epoch": c.epoch, "seq": c.seq, "backend_notice":c.backend_notice(), "safe_mode": c.safe_mode, "socket": c.socket, "state_dir": c.state_dir,
             }))
         }
@@ -597,8 +597,8 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> Rp
         "resource.invoke" => invoke_resource(core, &conn.author(), p).await,
         "command.register" => {
             let r: Register = params(p)?;
-            if r.name.starts_with("prim.") {
-                return Err(RpcError::new("forbidden", "`prim.` commands belong to the core"));
+            if r.name.starts_with("vqro.") {
+                return Err(RpcError::new("forbidden", "`vqro.` commands belong to the core"));
             }
             let mut c = core.lock().unwrap();
             if let Some(existing) = c.commands.get(&r.name) {
@@ -804,16 +804,16 @@ async fn spawn(core: &Shared, author: &str, s: Spawn) -> RpcResult {
     }
     let reservation = if s.bridge { Some(crate::provider_wire::BridgeReservation::new(core)?) } else { None };
     let mut env = s.env;
-    // Every terminal can reach prim (`prim call` from any pane): its opaque endpoint (D22), unless the
+    // Every terminal can reach vqro (`vqro call` from any pane): its opaque endpoint (D22), unless the
     // provider cannot pass an environment at all. The bridge credential stays opt-in.
-    if route.handle.capabilities["terminal.spawn"]["env"] != false && !env.contains_key("PRIM_SOCKET") {
-        env.insert("PRIM_SOCKET".into(),core.lock().unwrap().socket.to_string_lossy().into_owned());
-        env.insert("PRIM_SOCKET_SOURCE".into(),"terminal".into());
+    if route.handle.capabilities["terminal.spawn"]["env"] != false && !env.contains_key("VQRO_SOCKET") {
+        env.insert("VQRO_SOCKET".into(),core.lock().unwrap().socket.to_string_lossy().into_owned());
+        env.insert("VQRO_SOCKET_SOURCE".into(),"terminal".into());
     }
     if let Some(reservation) = &reservation {
-        env.insert("PRIM_BRIDGE_TOKEN".into(), reservation.token.clone());
-        env.insert("PRIM_SOCKET".into(), core.lock().unwrap().socket.to_string_lossy().into_owned());
-        env.insert("PRIM_SOCKET_SOURCE".into(), "terminal".into());
+        env.insert("VQRO_BRIDGE_TOKEN".into(), reservation.token.clone());
+        env.insert("VQRO_SOCKET".into(), core.lock().unwrap().socket.to_string_lossy().into_owned());
+        env.insert("VQRO_SOCKET_SOURCE".into(), "terminal".into());
     }
     for dimension in [s.cols, s.rows].into_iter().flatten() {
         if !(1..=9999).contains(&dimension) { return Err(provider::rejected("invalid", "spawn dimensions must be between 1 and 9999")); }
@@ -1016,14 +1016,14 @@ async fn invoke_deadline(core: &Shared, author: &str, context: crate::invocation
     let deadline = provider::deadline(deadline_ms)?;
     let arg = |k: &str| args.get(k).cloned().unwrap_or(Value::Null);
     match name {
-        "prim.shutdown" => Ok(json!({"outcome":"accepted"})),
-        "prim.layout.reset" => layout_reset(core, author, context.origin.clone()).await,
-        "prim.revert" => {
+        "vqro.shutdown" => Ok(json!({"outcome":"accepted"})),
+        "vqro.layout.reset" => layout_reset(core, author, context.origin.clone()).await,
+        "vqro.revert" => {
             if !args.is_null() && !args.is_object() {return Err(RpcError::invalid("revert args must be an object"));}
             let txn=match args.get("txn") {None=>None,Some(value)=>Some(value.as_u64().ok_or_else(||RpcError::invalid("txn must be an unsigned integer when supplied"))?)};
             revert(core, author, context.origin.clone(), txn).await
         },
-        "prim.safe_mode" => {
+        "vqro.safe_mode" => {
             let gate=core.lock().unwrap().recovery_gate.clone(); let _guard=gate.lock().await;
             let (on,handles,restart)={
                 let mut c=core.lock().unwrap();
@@ -1039,7 +1039,7 @@ async fn invoke_deadline(core: &Shared, author: &str, context: crate::invocation
             if let Some(backend)=restart { let(tx,rx)=mpsc::unbounded_channel(); if let Some(handle)=backend.start(tx) { crate::core::add_adapter(core,handle,rx,true); } }
             Ok(json!({"safe_mode":on,"safe_mode_allow":core.lock().unwrap().safe_mode_allow}))
         }
-        "prim.safe_mode.allow" => {
+        "vqro.safe_mode.allow" => {
             let gate=core.lock().unwrap().recovery_gate.clone(); let _guard=gate.lock().await;
             let ext_name=arg("name").as_str().map(String::from).ok_or_else(|| RpcError::invalid("needs name"))?;
             let on=arg("on").as_bool().ok_or_else(|| RpcError::invalid("needs boolean on"))?;
@@ -1059,9 +1059,9 @@ async fn invoke_deadline(core: &Shared, author: &str, context: crate::invocation
             stop_recovery_providers(handles).await;
             Ok(json!({"safe_mode":true,"safe_mode_allow":core.lock().unwrap().safe_mode_allow}))
         }
-        "prim.extension.disable" | "prim.extension.enable" => {
+        "vqro.extension.disable" | "vqro.extension.enable" => {
             let ext_name = arg("name").as_str().map(String::from).or_else(|| arg("text").as_str().map(String::from)).ok_or_else(|| RpcError::invalid("needs `name`"))?;
-            let enabled = name == "prim.extension.enable";
+            let enabled = name == "vqro.extension.enable";
             apply_prepared(core, author, context.origin.clone(), Some(name.into()), crate::limits::encoded_bytes(&ext_name).saturating_add(128), move |c| {
                 let key = format!("extension/{ext_name}");
                 let mut value = c.store.get(&key).map(|e| e.value.clone()).ok_or_else(|| RpcError::new("not_found", format!("no extension {ext_name}")))?;
@@ -1069,7 +1069,7 @@ async fn invoke_deadline(core: &Shared, author: &str, context: crate::invocation
                 Ok(vec![Op::Set { key, value, expect:None }])
             }).await
         }
-        "prim.extension.restart" => {
+        "vqro.extension.restart" => {
             let ext_name = arg("name").as_str().map(String::from).or_else(|| arg("text").as_str().map(String::from)).ok_or_else(|| RpcError::invalid("needs `name`"))?;
             ext::restart(core, &ext_name)?;
             Ok(json!({"restarted": ext_name}))
@@ -1096,7 +1096,7 @@ async fn invoke_deadline(core: &Shared, author: &str, context: crate::invocation
 
 /// One tab per live terminal. The recovery path when a layout is broken or confusing.
 async fn layout_reset(core: &Shared, author: &str, on_behalf_of:Option<Arc<str>>) -> RpcResult {
-    apply_prepared(core, author, on_behalf_of, Some("prim.layout.reset".into()), 128, |c| {
+    apply_prepared(core, author, on_behalf_of, Some("vqro.layout.reset".into()), 128, |c| {
         let mut ops = Vec::new();
         let mut tabs = Vec::new();
         for r in c.resources.values().filter(|r| r.facts.kind == "terminal" && r.facts.state == "live") {
@@ -1107,11 +1107,11 @@ async fn layout_reset(core: &Shared, author: &str, on_behalf_of:Option<Arc<str>>
         }
         if tabs.is_empty() {
             ops.push(Op::Set {
-                key: "view/prim-empty".into(),
-                value: json!({"kind": "panel", "title": "prim", "items": [{"text": "No terminals yet."}, {"text": "Open the command palette", "command": "client.palette"}]}),
+                key: "view/vqro-empty".into(),
+                value: json!({"kind": "panel", "title": "vqro", "items": [{"text": "No terminals yet."}, {"text": "Open the command palette", "command": "client.palette"}]}),
                 expect: None,
             });
-            tabs.push(json!({"title": "prim", "node": {"view": "prim-empty"}}));
+            tabs.push(json!({"title": "vqro", "node": {"view": "vqro-empty"}}));
         }
         ops.push(Op::Set { key: "layout/main".into(), value: json!({"tabs": tabs, "active": 0}), expect: None });
         ops.push(Op::Set { key: "workspace/active".into(), value: json!({"layout": "main"}), expect: None });

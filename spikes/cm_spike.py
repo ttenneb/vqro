@@ -50,11 +50,11 @@ def main():
 
     time.sleep(0.8)
     cmd("refresh-client -B status:%*:#{pane_id}=#{pane_title}")  # format subscription
-    cmd("send-keys -t spike 'echo hi-from-prim' Enter")
+    cmd("send-keys -t spike 'echo hi-from-vqro' Enter")
     time.sleep(0.8)
-    log("output saw hi:", b"hi-from-prim" in raw)
-    cmd("set-option -p -t spike @prim_role worker")
-    cmd("display-message -p -t spike '#{@prim_role}'")
+    log("output saw hi:", b"hi-from-vqro" in raw)
+    cmd("set-option -p -t spike @vqro_role worker")
+    cmd("display-message -p -t spike '#{@vqro_role}'")
     cmd(f"split-window -t spike {AGENT}")
     time.sleep(5.5)
     log("OSC 7501 bytes in %output stream:", b"\x1b]7501" in raw)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""prim extension: panes. Split, rename, close, kill, and show another terminal in a pane.
+"""vqro extension: panes. Split, rename, close, kill, and show another terminal in a pane.
 
 All actions arrive with the client's context (layout, layout_version, path, view, resource) and edit
 the layout with compare-and-set, so a pane that moved meanwhile is reported instead of mangled.
@@ -8,9 +8,9 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from prim_ext import Extension, PrimError, node_at, replace_at, views_in  # noqa: E402
+from vqro_ext import Extension, VqroError, node_at, replace_at, views_in  # noqa: E402
 
-from prim_views import terminal_target
+from vqro_views import terminal_target
 
 ext = Extension("panes", event_types=["entries", "resource", "resource.removed"])
 
@@ -18,18 +18,18 @@ ext = Extension("panes", event_types=["entries", "resource", "resource.removed"]
 def target(args):
     ctx = args.get("context") or {}
     if "path" not in ctx or "layout" not in ctx:
-        raise PrimError("no pane here", "invalid")
+        raise VqroError("no pane here", "invalid")
     key = f"layout/{ctx['layout']}"
     root = ext.value(key)
     if root is None or node_at(root, ctx["path"]) is None:
-        raise PrimError("that pane is gone", "conflict")
+        raise VqroError("that pane is gone", "conflict")
     return ctx, key, ctx.get("layout_version"), root
 
 
 @ext.command("panes.split", "Split a pane with a new shell (args: dir = right | down)")
 def split(args):
     ctx, key, ver, root = target(args)
-    r = ext.prim.call("resource.spawn", {})["resource"]
+    r = ext.vqro.call("resource.spawn", {})["resource"]
     view = f"term-{r['id']}"
     old = node_at(root, ctx["path"])
     new = {"split": "v" if args.get("dir") == "down" else "h", "children": [old, {"view": view}], "sizes": [1, 1]}
@@ -66,7 +66,7 @@ def close(args):
     ctx, key, ver, root = target(args)
     path = ctx["path"]
     if not path:
-        raise PrimError("this is the only pane", "invalid")
+        raise VqroError("this is the only pane", "invalid")
     parent = node_at(root, path[:-1])
     i = path[-1]
     if "children" in parent:
@@ -77,7 +77,7 @@ def close(args):
             root = replace_at(root, path[:-1], parent["children"][0])
     else:
         if len(parent["tabs"]) <= 1:
-            raise PrimError("can't close the last tab", "invalid")
+            raise VqroError("can't close the last tab", "invalid")
         parent["tabs"].pop(i)
         a = parent.get("active", 0)
         parent["active"] = min(a - 1 if a >= i and a > 0 else a, len(parent["tabs"]) - 1)
@@ -96,8 +96,8 @@ def close(args):
 def kill(args):
     ctx = args.get("context") or {}
     if not ctx.get("resource"):
-        raise PrimError("no program here", "invalid")
-    return ext.prim.call("resource.kill", {"resource": ctx["resource"]})
+        raise VqroError("no program here", "invalid")
+    return ext.vqro.call("resource.kill", {"resource": ctx["resource"]})
 
 
 @ext.command("panes.show", "Show another resource in a pane (args: picked)")
@@ -106,7 +106,7 @@ def show(args):
     vkey = f"view/{ctx.get('view')}"
     v = dict(ext.value(vkey) or {})
     if v.get("kind") != "terminal" or not args.get("picked"):
-        raise PrimError("pick a terminal for a terminal pane", "invalid")
+        raise VqroError("pick a terminal for a terminal pane", "invalid")
     ext.fresh()
     resource, result = terminal_target(ext, args["picked"])
     if resource is None:

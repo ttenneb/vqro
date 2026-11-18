@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def module():
-    spec = importlib.util.spec_from_file_location("prim_license_check", ROOT / "scripts/license_check.py")
+    spec = importlib.util.spec_from_file_location("vqro_license_check", ROOT / "scripts/license_check.py")
     result = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(result)
     return result
@@ -37,8 +37,8 @@ class Licenses(unittest.TestCase):
         crate = root / "crate"
         crate.mkdir()
         (crate / "Cargo.toml").write_text("[package]\nname='fixture'\n")
-        return {"workspace_members": ["prim"], "packages": [
-            {"id": "prim", "name": "prim", "version": "0.1.0", "license": "Apache-2.0"},
+        return {"workspace_members": ["vqro"], "packages": [
+            {"id": "vqro", "name": "vqro", "version": "0.1.0", "license": "Apache-2.0"},
             {"id": "fixture", "name": "fixture", "version": "1.0.0", "license": license,
              "manifest_path": str(crate / "Cargo.toml"), "license_file": None,
              "source": "registry+https://github.com/rust-lang/crates.io-index", "authors": ["Declared Author"],

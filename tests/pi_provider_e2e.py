@@ -1,6 +1,6 @@
-"""Opt-in public-CLI Pi provider E2E on private prim + herdr-core.
+"""Opt-in public-CLI Pi provider E2E on private vqro + herdr-core.
 
-python3 tests/pi_provider_e2e.py --run --prim /absolute/prim --hc /absolute/herdr-core
+python3 tests/pi_provider_e2e.py --run --vqro /absolute/vqro --hc /absolute/herdr-core
 Add --real-pi-metadata for installed Pi 1.5 metadata-only (no agent effects).
 Always re-execs in a new user/network namespace, empty PATH and private HOME,
 state/config/runtime/sockets. Never installs or contacts a live/default server.
@@ -42,7 +42,7 @@ class E2E:
         self.log, self.core, self.hc_process = [], None, None
         self.tracked = []
         self.ui_running = False
-        for name in ('home', 'config', 'state', 'run', 'work', 'ext', 'empty', 'prim', 'agent', 'sessions'):
+        for name in ('home', 'config', 'state', 'run', 'work', 'ext', 'empty', 'vqro', 'agent', 'sessions'):
             (self.root / name).mkdir(exist_ok=True)
         r = self.root
         if args.agents_extension:
@@ -51,9 +51,9 @@ class E2E:
                     'XDG_CONFIG_HOME': str(r/'config'), 'XDG_STATE_HOME': str(r/'state'),
                     'XDG_RUNTIME_DIR': str(r/'run'), 'SHELL': '/bin/sh', 'TERM': 'xterm-256color',
                     'HC_SESSION': 'pi-e2e', 'HC_SOCKET': str(r/'h.sock'),
-                    'PRIM_STATE_DIR': str(r/'prim'), 'PRIM_SOCKET': str(r/'p.sock'),
-                    'PRIM_EXTENSIONS_DIR': str(r/'ext')}
-        assert max(len(self.env[k].encode()) for k in ('HC_SOCKET', 'PRIM_SOCKET')) < 103
+                    'VQRO_STATE_DIR': str(r/'vqro'), 'VQRO_SOCKET': str(r/'p.sock'),
+                    'VQRO_EXTENSIONS_DIR': str(r/'ext')}
+        assert max(len(self.env[k].encode()) for k in ('HC_SOCKET', 'VQRO_SOCKET')) < 103
 
     def command(self, argv, allow_error=False):
         p = subprocess.run(argv, env=self.env, cwd=self.root/'work', capture_output=True, text=True, timeout=20)
@@ -85,7 +85,7 @@ class E2E:
             if 'confirmed' in args:
                 args['value'] = args.pop('confirmed')
             method, params = 'command.invoke', {'name': 'agents.'+params['op'][6:], 'args': args}
-        return self.command([str(self.args.prim), 'call', method, json.dumps(params or {})], allow_error)
+        return self.command([str(self.args.vqro), 'call', method, json.dumps(params or {})], allow_error)
 
     def wait(self, predicate, label, timeout=15):
         end, last = time.monotonic() + timeout, None
@@ -99,7 +99,7 @@ class E2E:
             time.sleep(.1)
         if self.ui_running:
             (self.root/'ui-timeout.txt').write_text(self.ui('capture-pane', '-p', '-t', 'ui:0.0'))
-        raise AssertionError(f'{label}: timeout; last={last!r}; see prim.log and receipt.json')
+        raise AssertionError(f'{label}: timeout; last={last!r}; see vqro.log and receipt.json')
 
     def snapshot(self):
         return self.call('workspace.snapshot')
@@ -108,22 +108,22 @@ class E2E:
         return next((r for r in self.snapshot()['resources'] if r['id'] == rid), None)
 
     def start(self):
-        # Backends run as provider extensions: herdr-core is the `herdr` default extension (prim-herdr next to
-        # the prim under test), reached through PRIM_HERDR. These private defaults hold only that provider, so
+        # Backends run as provider extensions: herdr-core is the `herdr` default extension (vqro-herdr next to
+        # the vqro under test), reached through VQRO_HERDR. These private defaults hold only that provider, so
         # the core runs without --safe (safe mode starts nothing, providers included).
         defaults = self.root/'ext'/'defaults.json'
         if not defaults.exists():
             defaults.write_text(json.dumps({'version': 2, 'extensions': [{'name': 'herdr', 'since': 2,
-                'argv': [str(Path(self.args.prim).parent/'prim-herdr'), '--name', 'herdr'], 'kind': 'provider', 'default': True}]}))
-        env = dict(self.env, PRIM_HERDR=json.dumps([str(self.args.hc), 'connect']))
-        with (self.root/'prim.log').open('ab') as output:
+                'argv': [str(Path(self.args.vqro).parent/'vqro-herdr'), '--name', 'herdr'], 'kind': 'provider', 'default': True}]}))
+        env = dict(self.env, VQRO_HERDR=json.dumps([str(self.args.hc), 'connect']))
+        with (self.root/'vqro.log').open('ab') as output:
             # Safe mode deliberately starts no providers and is not an isolation shortcut.
-            self.core = subprocess.Popen([str(self.args.prim), 'serve'],
+            self.core = subprocess.Popen([str(self.args.vqro), 'serve'],
                                          cwd=self.root/'work', env=env, stdout=output, stderr=subprocess.STDOUT)
         self.tracked.append(identity(self.core.pid))
-        self.log.append({'started_prim': self.tracked[-1], 'image_sha256': hashlib.sha256(
+        self.log.append({'started_vqro': self.tracked[-1], 'image_sha256': hashlib.sha256(
             Path(f'/proc/{self.core.pid}/exe').read_bytes()).hexdigest()})
-        self.wait(lambda: self.snapshot().get('providers', {}).get('herdr', {}).get('connected'), 'prim herdr registration')
+        self.wait(lambda: self.snapshot().get('providers', {}).get('herdr', {}).get('connected'), 'vqro herdr registration')
         children = Path(f'/proc/{self.core.pid}/task/{self.core.pid}/children').read_text().split()
         self.tracked.extend(identity(int(pid)) for pid in children)
         if self.args.agents_extension and self.snapshot()['entries'].get('extension/agents'):
@@ -147,7 +147,7 @@ class E2E:
         # effects. Never repeat an effect merely to discover its outcome.
         with socket.socket(socket.AF_UNIX) as sock:
             sock.settimeout(4)
-            sock.connect(self.env['PRIM_SOCKET'])
+            sock.connect(self.env['VQRO_SOCKET'])
             with sock.makefile('rwb', buffering=0) as wire:
                 for ident, method, params in [(1, 'hello', {'client': 'e2e-audit'}),
                         (2, 'events.subscribe', {'from': cursor['seq'], 'epoch': cursor['epoch'], 'types': ['effect']})]:
@@ -190,7 +190,7 @@ class E2E:
         assert caps.get('stream') is True and caps.get('effect') is False, caps
         with socket.socket(socket.AF_UNIX) as sock:
             sock.settimeout(5)
-            sock.connect(self.env['PRIM_SOCKET'])
+            sock.connect(self.env['VQRO_SOCKET'])
             with sock.makefile('rwb', buffering=0) as wire:
                 for ident, method, params in [(1, 'hello', {'client': 'input-transport-probe'}),
                         (2, 'resource.invoke', {'resource': host, 'op': 'terminal.input', 'args': {'text': ''}})]:
@@ -207,10 +207,10 @@ class E2E:
 
     def terminal_eof(self, host):
         # Stream handles are connection-scoped: attach and input share one public
-        # protocol connection. Agent effects still all use the public prim CLI.
+        # protocol connection. Agent effects still all use the public vqro CLI.
         with socket.socket(socket.AF_UNIX) as sock:
             sock.settimeout(5)
-            sock.connect(self.env['PRIM_SOCKET'])
+            sock.connect(self.env['VQRO_SOCKET'])
             with sock.makefile('rwb', buffering=0) as wire:
                 def request(ident, method, params):
                     wire.write((json.dumps({'jsonrpc': '2.0', 'id': ident, 'method': method, 'params': params})+'\n').encode())
@@ -258,11 +258,11 @@ class E2E:
         before = self.snapshot()
         cursor = {key: before[key] for key in ('epoch', 'seq')}
         self.ui('new-session', '-d', '-s', 'ui', '-x', '150', '-y', '36', '/usr/bin/env', '-i',
-                *[key+'='+value for key, value in self.env.items()], str(self.args.prim), 'tui')
+                *[key+'='+value for key, value in self.env.items()], str(self.args.vqro), 'tui')
         self.ui_running = True
         for format_ in ('#{pid}', '#{pane_pid}'):
             self.tracked.append(identity(int(self.ui('display-message', '-p', '-t', 'ui:0.0', format_).strip())))
-        self.ui_frame('initial', 'prim')
+        self.ui_frame('initial', 'vqro')
         self.ui('send-keys', '-t', 'ui:0.0', 'C-g')
         self.ui_frame('new-binding', 'new Pi agent')
         self.ui('send-keys', '-t', 'ui:0.0', 'a')
@@ -337,7 +337,7 @@ class E2E:
     def ui_ended(self, rid, host):
         self.call('command.invoke', {'name': 'tabs.show', 'args': {'view': 'agents-'+rid, 'title': 'Pi '+rid}})
         self.ui('new-session', '-d', '-s', 'ui', '-x', '150', '-y', '36', '/usr/bin/env', '-i',
-                *[key+'='+value for key, value in self.env.items()], str(self.args.prim), 'tui')
+                *[key+'='+value for key, value in self.env.items()], str(self.args.vqro), 'tui')
         self.ui_running = True
         self.ui_frame('gone-agent', 'Agent gone', '[gone]')
         self.call('command.invoke', {'name': 'sidebar.toggle'})
@@ -353,7 +353,7 @@ class E2E:
         self.stop_ui()
 
     def split_independence(self, rid, native_process):
-        self.call('command.invoke', {'name': 'prim.extension.disable', 'args': {'name': 'pi'}})
+        self.call('command.invoke', {'name': 'vqro.extension.disable', 'args': {'name': 'pi'}})
         assert live(native_process) and self.resource(rid)['available']
         self.call('workspace.apply', {'ops': [{'op': 'set', 'key': 'extension/other-agent', 'value': {'enabled': True,
             'argv': ['/usr/bin/python3', str(REPO/'tests/fixtures/other_agent.py')]}}], 'note': 'Other native runtime fixture'})
@@ -366,12 +366,12 @@ class E2E:
             self.ui_frame('other-runtime', 'Other agent', 'abort_count', 'other native runtime')
         children = Path(f'/proc/{self.core.pid}/task/{self.core.pid}/children').read_text().split()
         self.tracked.extend(identity(int(pid)) for pid in children)
-        self.call('command.invoke', {'name': 'prim.extension.disable', 'args': {'name': 'other-agent'}})
+        self.call('command.invoke', {'name': 'vqro.extension.disable', 'args': {'name': 'other-agent'}})
         if self.args.agents_ui:
             self.ui_frame('unavailable-agent', 'Agent unavailable')
-        self.call('command.invoke', {'name': 'prim.extension.enable', 'args': {'name': 'pi'}})
+        self.call('command.invoke', {'name': 'vqro.extension.enable', 'args': {'name': 'pi'}})
         self.wait(self.extension_ready, 'Pi launcher re-enabled')
-        self.call('command.invoke', {'name': 'prim.extension.disable', 'args': {'name': 'agents'}})
+        self.call('command.invoke', {'name': 'vqro.extension.disable', 'args': {'name': 'agents'}})
         assert live(native_process) and self.resource(rid)['available']
         auxiliary = self.call('command.invoke', {'name': 'pi.new', 'args': {'runtime': 'fake'}})
         host = self.resource(auxiliary['host'])
@@ -382,7 +382,7 @@ class E2E:
         assert host['kind'] == 'terminal' and 'term-'+host['id'] in json.dumps(self.snapshot()['entries'])
         assert self.resource(auxiliary['agent'])['available'], 'agents disable killed the runtime'
         self.call('resource.kill', {'resource': host['id']})  # explicit fixture cleanup only
-        self.call('command.invoke', {'name': 'prim.extension.enable', 'args': {'name': 'agents'}})
+        self.call('command.invoke', {'name': 'vqro.extension.enable', 'args': {'name': 'agents'}})
         self.wait(self.extension_ready, 'neutral agents re-enabled')
         self.log.append({'independent_extensions': 'PASS', 'other_runtime': other['id'], 'terminal_fallback': host['id']})
 
@@ -399,7 +399,7 @@ class E2E:
         samples = []
         with socket.socket(socket.AF_UNIX) as sock:
             sock.settimeout(5)
-            sock.connect(self.env['PRIM_SOCKET'])
+            sock.connect(self.env['VQRO_SOCKET'])
             with sock.makefile('rwb', buffering=0) as wire:
                 ident = 0
                 def send(method, params):
@@ -437,7 +437,7 @@ class E2E:
                     runtime = emitted['ns']-receive['ns']
                     samples.append({'accept_ms': (reply-start)/1e6, 'facts_ms': (facts-start)/1e6,
                                     'panel_ms': (panel-start)/1e6, 'fake_pi_ms': runtime/1e6,
-                                    'prim_accept_ms': (reply-start-runtime)/1e6})
+                                    'vqro_accept_ms': (reply-start-runtime)/1e6})
                     self.invoke(rid, 'abort')
                     self.agent(rid, lambda r: r['data']['run']['settled'])
         self.log.append({'prompt_latency': samples, 'note': 'persistent public RPC; fake Pi only; no model or CLI startup; seven prompt/abort cycles'})
@@ -466,7 +466,7 @@ class E2E:
             # production provider still retains its unchanged 1 MiB record cap.
             with socket.socket(socket.AF_UNIX) as sock:
                 sock.settimeout(20)
-                sock.connect(self.env['PRIM_SOCKET'])
+                sock.connect(self.env['VQRO_SOCKET'])
                 with sock.makefile('rwb') as wire:
                     for ident, method, params in [(1, 'hello', {'client': 'private-large-workspace'}),
                         (2, 'workspace.apply', {'ops': [{'op': 'set', 'key': 'doc/test/snapshot-padding-'+str(index),
@@ -573,10 +573,10 @@ class E2E:
             before = self.agent(rid, lambda r: not r['data']['run']['active'])
         self.stop_ui()  # owned lifecycle tests; do not race a TUI auto-start
         safe_trace = self.trace() if not self.args.real_pi_metadata else None
-        self.call('command.invoke', {'name':'prim.safe_mode','args':{'on':True}})
+        self.call('command.invoke', {'name':'vqro.safe_mode','args':{'on':True}})
         self.wait(lambda: not self.resource(rid).get('available'), 'agent unavailable in safe mode')
         assert live(native_process) and live(bridge_process), 'safe mode killed backend-owned execution'
-        self.call('command.invoke', {'name':'prim.safe_mode','args':{'on':False}})
+        self.call('command.invoke', {'name':'vqro.safe_mode','args':{'on':False}})
         self.agent(rid, lambda r: r.get('available') and r['instance']==before['instance'])
         assert live(native_process) and live(bridge_process)
         if safe_trace is not None: assert self.trace()==safe_trace, 'safe-mode resume replayed effects'
@@ -642,7 +642,7 @@ class E2E:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--run', action='store_true')
-    parser.add_argument('--prim', type=Path, required=True)
+    parser.add_argument('--vqro', type=Path, required=True)
     parser.add_argument('--hc', type=Path, required=True)
     parser.add_argument('--real-pi-metadata', action='store_true')
     parser.add_argument('--agents-extension', action='store_true', help='drive agents extension commands with fake Pi')
@@ -659,13 +659,13 @@ def main():
     if not args.isolated_root:
         if not args.run:
             parser.error('requires --run; never part of ordinary unit discovery')
-        assert args.prim.is_absolute() and args.hc.is_absolute()
+        assert args.vqro.is_absolute() and args.hc.is_absolute()
         args.scratch_parent.mkdir(parents=True, exist_ok=True)
         root = Path(tempfile.mkdtemp(prefix='ep-', dir=args.scratch_parent))
         (root/'.private-e2e').touch()
         (root/'home').mkdir()
         command = ['/usr/bin/unshare', '-Urn', '/usr/bin/python3', str(Path(__file__).resolve()), '--run',
-                   '--prim', str(args.prim), '--hc', str(args.hc), '--isolated-root', str(root),
+                   '--vqro', str(args.vqro), '--hc', str(args.hc), '--isolated-root', str(root),
                    '--parent-net', os.readlink('/proc/self/ns/net')]
         if args.real_pi_metadata:
             command.append('--real-pi-metadata')

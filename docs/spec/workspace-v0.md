@@ -1,6 +1,6 @@
-# prim workspace primitives, v0 (sketch)
+# vqro workspace primitives, v0 (sketch)
 
-> **Status (2026-11-16):** **Superseded by `core-protocol.md`**, which documents what was built: views and layouts, commands, bindings and gestures, menus, panels (pages, trees, toolbars, chips, icons), popups, live content, transactions with revert, the extension lifecycle (crash budget, safe mode). Rendering was decided as declarative panels plus terminal views; the hybrid is untested. Leftover questions moved to `../open-questions.md`. prim is a working prototype, and fluid.
+> **Status (2026-11-16):** **Superseded by `core-protocol.md`**, which documents what was built: views and layouts, commands, bindings and gestures, menus, panels (pages, trees, toolbars, chips, icons), popups, live content, transactions with revert, the extension lifecycle (crash budget, safe mode). Rendering was decided as declarative panels plus terminal views; the hybrid is untested. Leftover questions moved to `../open-questions.md`. vqro is a working prototype, and fluid.
 
 Status: sketch, to be shaped by the tests in `../test-plan.md`. This is the standard surface (D14) through which humans **and agents** build and change the
 workspace. Success criterion: *an agent can safely build and change meaningful workspace behaviour using only

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""prim extension: the sidebar, one tree of workspaces → worktrees → terminals.
+"""vqro extension: the sidebar, one tree of workspaces → worktrees → terminals.
 
 Data comes from public sources only: resources (with their current folder) from the core, and the
 `workspaces` extension's live data. A terminal sits under the deepest workspace or worktree folder it is
@@ -21,8 +21,8 @@ import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from prim_ext import Extension, PrimError  # noqa: E402
-from prim_views import ended, title
+from vqro_ext import Extension, VqroError  # noqa: E402
+from vqro_views import ended, title
 
 ext = Extension("sidebar", event_types=["entries", "resource", "resource.removed", "view.content"],
                 view_content={"names": ["workspaces"]})
@@ -357,7 +357,7 @@ def toggle(args):
         # layout write is normal and must not surface to the user as an error.
         lay = ext.active_layout()
         if lay is None:
-            raise PrimError("no active layout yet", "invalid")
+            raise VqroError("no active layout yet", "invalid")
         key, ver, root = lay
         if root.get("split") == "h" and root["children"][0].get("view") == "sidebar":
             new = root["children"][1]
@@ -378,7 +378,7 @@ def page_cmd(args):
         try:
             selected = int(args["text"])-1 if "text" in args else page_state[0]+int(args.get("delta", 0))
         except (ValueError, TypeError):
-            raise PrimError("enter a sidebar page number", "invalid")
+            raise VqroError("enter a sidebar page number", "invalid")
         page_state[0] = max(0, min(selected, page_state[1]-1))
     refresh_pending.set()
 
@@ -408,7 +408,7 @@ def set_ended_visibility(hidden):
 
 @ext.command("sidebar.kill", "Kill a terminal's program (args: resource)")
 def kill(args):
-    return ext.prim.call("resource.kill", {"resource": args["resource"]})
+    return ext.vqro.call("resource.kill", {"resource": args["resource"]})
 
 
 @ext.command("sidebar.preset", "Choose what the sidebar shows (args: preset, or show: {...})")
@@ -418,7 +418,7 @@ def preset(args):
     elif any(args.get(k) in PRESETS for k in ("preset", "value", "text")):
         new = PRESETS[next(args[k] for k in ("preset", "value", "text") if args.get(k) in PRESETS)]
     else:
-        raise PrimError(f"presets: {', '.join(PRESETS)}", "invalid")
+        raise VqroError(f"presets: {', '.join(PRESETS)}", "invalid")
     ext.apply([{"op": "set", "key": PREFS, "value": dict(ext.value(PREFS) or {}, show=new), "expect": ext.version(PREFS)}], "sidebar: show")
 
 

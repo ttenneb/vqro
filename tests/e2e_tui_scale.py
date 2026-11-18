@@ -131,7 +131,7 @@ def main():
     parser.add_argument("--agents", type=int, default=200)
     parser.add_argument("--receipt", type=Path)
     args = parser.parse_args()
-    binary = args.target.resolve() / "release/prim"
+    binary = args.target.resolve() / "release/vqro"
     if not binary.exists():
         parser.error(f"build release binary first: {binary}")
     repo = Path(__file__).resolve().parent.parent
@@ -143,15 +143,15 @@ def main():
         shutil.copy(source, root / "ext" / source.name)
     (root / "run").chmod(0o700)
     env = {"HOME": str(root / "home"), "PATH": "/usr/bin:/bin", "TERM": "xterm-256color", "LANG": "C.UTF-8",
-           "SHELL": "/bin/sh", "PRIM_STATE_DIR": str(root / "st"), "PRIM_SOCKET": str(root / "p.sock"),
-           "PRIM_EXTENSIONS_DIR": str(root / "ext"), "PRIM_HERDR": "/bin/false", "HC_SOCKET": str(root / "unused-hc.sock"),
+           "SHELL": "/bin/sh", "VQRO_STATE_DIR": str(root / "st"), "VQRO_SOCKET": str(root / "p.sock"),
+           "VQRO_EXTENSIONS_DIR": str(root / "ext"), "VQRO_HERDR": "/bin/false", "HC_SOCKET": str(root / "unused-hc.sock"),
            "HC_SESSION": "private-tui-scale", "XDG_CONFIG_HOME": str(root / "cfg"), "XDG_RUNTIME_DIR": str(root / "run"),
-           "PRIM_TUI_PROBE": str(root / "tui-metrics.json")}
+           "VQRO_TUI_PROBE": str(root / "tui-metrics.json")}
     harness = ["/usr/bin/tmux", "-S", str(root / "tmux.sock"), "-f", "/dev/null"]
     def tmux(*command):
         return subprocess.run([*harness, *([] if command[0] == "new-session" else ["-N"]), *command], env=env, capture_output=True, timeout=5, check=True).stdout.decode()
     client, observer, core = None, None, None
-    receipt = {"kind": "prim.tui-scale", "version": 1, "profile": {"terminals": args.terminals, "agents": args.agents,
+    receipt = {"kind": "vqro.tui-scale", "version": 1, "profile": {"terminals": args.terminals, "agents": args.agents,
                "status_per_second": args.agents / 2, "flood_bytes_per_second": 1_000_000, "views": 3, "sidebar": True, "duration_s": args.duration},
                "budgets": {"enforced": True, **{name: limit for name, (limit, _) in BUDGETS.items()}}}
     events = {"resource": 0, "extension": 0, "missed": 0}

@@ -1,5 +1,7 @@
 # Decisions
 
+> Renamed prim -> vqro on 2026-11-18; earlier records keep the old name.
+
 > Decisions guide a **working prototype, and fluid**: each one holds until a later entry supersedes it.
 
 Each entry is binding until superseded. Format: decision, why, consequences. Add new ones at the end; don't edit
@@ -375,3 +377,12 @@ own: offline SPDX policy and generated notices cover every Cargo metadata packag
 unbuilt optional, build, dev and target-specific packages (not a claim that all are shipped). Original notices are retained; missing archive
 texts use clearly labelled standard text with actual declared metadata, never invented copyright holders.
 The explicit dependency allowlist is documented in CONTRIBUTING.md; changes require maintainer approval.
+
+## D27. Project name: vqro (2026-11-18, CONFIRMED)
+
+**Decision.** The product name is **vqro**, lowercase. Rename current binaries, crate/SDKs, environment, paths,
+commands and documentation now, before publication. A one-time offline copy migration replaces old install/state
+names; the runtime has no long-term old-name aliases. Earlier decision/research records stay as written.
+**Why.** The human chose the final name while nothing is published.
+**Consequences.** Brand identifies the project, official builds and maintained extension repository under D25;
+Apache-2.0/DCO terms do not change. No registered-mark claim or public repository/distribution URL is implied.

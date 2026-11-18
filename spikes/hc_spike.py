@@ -65,14 +65,14 @@ def main():
     t = r.get("terminal", {}).get("id") or r.get("id") or "sh1"
     time.sleep(0.5)
     # 2. send + read
-    c.call("terminal.send", {"terminal": t, "text": "echo hi-from-prim"})
+    c.call("terminal.send", {"terminal": t, "text": "echo hi-from-vqro"})
     time.sleep(1)
     out = c.call("terminal.read", {"terminal": t, "lines": 20})
-    log("read contains hi:", "hi-from-prim" in json.dumps(out))
+    log("read contains hi:", "hi-from-vqro" in json.dumps(out))
     # 3. labels + docs
-    c.call("terminal.label", {"terminal": t, "labels": {"prim.role": "worker"}})
-    v = c.call("doc.set", {"name": "prim-spike", "value": {"layout": "x"}, "version": 0})
-    log("doc.set ->", v, "doc.get ->", c.call("doc.get", {"name": "prim-spike"}))
+    c.call("terminal.label", {"terminal": t, "labels": {"vqro.role": "worker"}})
+    v = c.call("doc.set", {"name": "vqro-spike", "value": {"layout": "x"}, "version": 0})
+    log("doc.set ->", v, "doc.get ->", c.call("doc.get", {"name": "vqro-spike"}))
     # 4. fake agent with OSC 7501
     r2 = c.call("terminal.run", {"argv": [AGENT], "name": "agent1"})
     a = r2.get("terminal", {}).get("id") or "agent1"

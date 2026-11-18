@@ -2,12 +2,12 @@
 
 use std::time::Duration;
 
-use prim::client;
-use prim::rpc::{Incoming, Peer};
-use prim::server::{start, Backend};
+use vqro::client;
+use vqro::rpc::{Incoming, Peer};
+use vqro::server::{start, Backend};
 use serde_json::{json, Value};
 
-async fn next_event(rx: &mut prim::rpc::IncomingReceiver) -> (String, Value) {
+async fn next_event(rx: &mut vqro::rpc::IncomingReceiver) -> (String, Value) {
     loop {
         match tokio::time::timeout(Duration::from_secs(3), rx.recv()).await.expect("event in time").expect("connection open") {
             Incoming::Notification { method, params } if method == "event" || method == "missed" => return (method, params),
@@ -16,7 +16,7 @@ async fn next_event(rx: &mut prim::rpc::IncomingReceiver) -> (String, Value) {
     }
 }
 
-async fn setup() -> (tempfile::TempDir, prim::core::Shared, Peer) {
+async fn setup() -> (tempfile::TempDir, vqro::core::Shared, Peer) {
     let dir = tempfile::Builder::new().prefix("pev").tempdir_in("/tmp").unwrap();
     let core = start(dir.path().join("s.sock"), dir.path().join("state"), false, Backend::Fake, None).unwrap();
     let (p, _, _) = client::connect(&dir.path().join("s.sock"), "test").await.unwrap();

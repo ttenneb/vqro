@@ -8,7 +8,7 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "extensions"))
-import prim_ext
+import vqro_ext
 from agent_fixture import FakeCore
 
 
@@ -18,8 +18,8 @@ class RetentionTests(unittest.TestCase):
         self.core.cache_lock = threading.RLock()
         self.core.run = lambda: None
         replacement = types.SimpleNamespace(Extension=lambda *a, **k: self.core,
-                                           PrimError=prim_ext.PrimError, views_in=prim_ext.views_in)
-        with mock.patch.dict(sys.modules, {"prim_ext": replacement}), mock.patch("threading.Thread"):
+                                           VqroError=vqro_ext.VqroError, views_in=vqro_ext.views_in)
+        with mock.patch.dict(sys.modules, {"vqro_ext": replacement}), mock.patch("threading.Thread"):
             self.module = runpy.run_path(str(Path(__file__).resolve().parents[1] / "extensions/retention.py"))
 
     def plan(self, now, **kwargs):
@@ -56,7 +56,7 @@ class RetentionTests(unittest.TestCase):
         self.assertEqual(self.plan(60, cached_due=cached)[0], ["r1"])
         self.core.resources["r1"].update(available=True, state="finished")
         call = mock.Mock(return_value={"outcome": "observed"})
-        self.core.prim = types.SimpleNamespace(call=call)
+        self.core.vqro = types.SimpleNamespace(call=call)
         self.module["forget"]("r1", cached="r1" in cached)
         call.assert_called_once_with("resource.forget_cached", {"resource": "r1"})
 

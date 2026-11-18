@@ -7,7 +7,7 @@ import time
 import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "extensions"))
-from prim_ext import Extension, Prim, PrimError, NOTIFICATION_BYTES
+from vqro_ext import Extension, Vqro, VqroError, NOTIFICATION_BYTES
 
 
 def snapshot(seq, value):
@@ -51,62 +51,62 @@ class LayoutSnapshotCoherence(unittest.TestCase):
 
 
 class InvocationAttribution(unittest.TestCase):
-    def prim(self, handler):
-        prim = Prim.__new__(Prim)
-        prim.lock = threading.Lock()
-        prim.next = 1
-        prim.waiting = {}
-        prim._command_context = threading.local()
-        prim.handler = handler
+    def vqro(self, handler):
+        vqro = Vqro.__new__(Vqro)
+        vqro.lock = threading.Lock()
+        vqro.next = 1
+        vqro.waiting = {}
+        vqro._command_context = threading.local()
+        vqro.handler = handler
         messages = []
         def send(message):
             messages.append(message)
             if "method" in message:
-                slot = prim.waiting[message["id"]]
+                slot = vqro.waiting[message["id"]]
                 slot[1] = {"result": {"ok": True}}
                 slot[0].set()
-        prim._send = send
-        return prim, messages
+        vqro._send = send
+        return vqro, messages
 
     def test_command_context_covers_workspace_and_nested_calls_without_mutating_params(self):
         params = {"ops": []}
         def handler(method, args):
-            prim.call("workspace.apply", params)
-            prim.call("workspace.revert", {"txn": 1})
-            prim.call("command.invoke", {"name": "nested"})
-            prim.call("workspace.snapshot")
-        prim, messages = self.prim(handler)
-        prim._dispatch({"id": 100, "method": "command.invoke", "params": {"invocation": "proof"}})
+            vqro.call("workspace.apply", params)
+            vqro.call("workspace.revert", {"txn": 1})
+            vqro.call("command.invoke", {"name": "nested"})
+            vqro.call("workspace.snapshot")
+        vqro, messages = self.vqro(handler)
+        vqro._dispatch({"id": 100, "method": "command.invoke", "params": {"invocation": "proof"}})
         requests = [msg for msg in messages if "method" in msg]
         self.assertEqual([msg["params"].get("on_behalf_of") for msg in requests], ["proof", "proof", "proof", None])
         self.assertNotIn("on_behalf_of", params)
-        prim.call("workspace.apply", params)
+        vqro.call("workspace.apply", params)
         self.assertNotIn("on_behalf_of", messages[-1]["params"], "scope ends with reply")
 
     def test_events_and_detached_threads_do_not_inherit_a_user_command(self):
         def handler(method, args):
             if method == "command.invoke":
-                prim._dispatch({"method": "event", "params": {}})
-                thread = threading.Thread(target=lambda: prim.call("workspace.apply", {"note": "background"}))
+                vqro._dispatch({"method": "event", "params": {}})
+                thread = threading.Thread(target=lambda: vqro.call("workspace.apply", {"note": "background"}))
                 thread.start(); thread.join(2)
                 self.assertFalse(thread.is_alive())
-                prim.call("workspace.apply", {"note": "command"})
+                vqro.call("workspace.apply", {"note": "command"})
             else:
-                prim.call("workspace.apply", {"note": "event"})
-        prim, messages = self.prim(handler)
-        prim._dispatch({"id": 100, "method": "command.invoke", "params": {"invocation": "proof"}})
+                vqro.call("workspace.apply", {"note": "event"})
+        vqro, messages = self.vqro(handler)
+        vqro._dispatch({"id": 100, "method": "command.invoke", "params": {"invocation": "proof"}})
         requests = [msg["params"] for msg in messages if msg.get("method") == "workspace.apply"]
         self.assertEqual({p["note"]: p.get("on_behalf_of") for p in requests}, {"event": None, "background": None, "command": "proof"})
 
     def test_failed_handler_clears_context_and_explicit_claims_are_not_rewritten(self):
         def handler(method, args):
-            prim.call("workspace.apply", {"on_behalf_of": "explicit-invalid-proof"})
+            vqro.call("workspace.apply", {"on_behalf_of": "explicit-invalid-proof"})
             raise RuntimeError("failed after work")
-        prim, messages = self.prim(handler)
-        prim._dispatch({"id": 100, "method": "command.invoke", "params": {"invocation": "proof"}})
+        vqro, messages = self.vqro(handler)
+        vqro._dispatch({"id": 100, "method": "command.invoke", "params": {"invocation": "proof"}})
         self.assertEqual(messages[0]["params"]["on_behalf_of"], "explicit-invalid-proof")
         self.assertIn("error", messages[-1])
-        prim.call("workspace.apply", {})
+        vqro.call("workspace.apply", {})
         self.assertNotIn("on_behalf_of", messages[-1]["params"])
 
     def test_concurrent_invocations_keep_their_own_context(self):
@@ -114,10 +114,10 @@ class InvocationAttribution(unittest.TestCase):
         barrier = threading.Barrier(2)
         def handler(method, args):
             barrier.wait(2)
-            prim.call("workspace.apply", {"note": args["name"]})
-        prim, messages = self.prim(handler)
+            vqro.call("workspace.apply", {"note": args["name"]})
+        vqro, messages = self.vqro(handler)
         with ThreadPoolExecutor(max_workers=2) as pool:
-            futures = [pool.submit(prim._dispatch, {"id": i, "method": "command.invoke", "params": {"invocation": name, "name": name}})
+            futures = [pool.submit(vqro._dispatch, {"id": i, "method": "command.invoke", "params": {"invocation": name, "name": name}})
                        for i, name in enumerate(("a", "b"), 100)]
             for future in futures: future.result(3)
         requests = [msg["params"] for msg in messages if msg.get("method") == "workspace.apply"]
@@ -127,98 +127,98 @@ class InvocationAttribution(unittest.TestCase):
 
 class InboundBounds(unittest.TestCase):
     def test_notification_bytes_stay_charged_until_callback_finishes(self):
-        prim = Prim.__new__(Prim)
-        prim.notes = queue.Queue(maxsize=128)
-        prim.note_lock = threading.Lock()
-        prim.note_bytes = 0
-        prim.handler = lambda method, params: None
+        vqro = Vqro.__new__(Vqro)
+        vqro.notes = queue.Queue(maxsize=128)
+        vqro.note_lock = threading.Lock()
+        vqro.note_bytes = 0
+        vqro.handler = lambda method, params: None
         msg = {"method":"event", "params":{}}
         accepted = 0
-        while prim._queue_note(msg, 65536):
+        while vqro._queue_note(msg, 65536):
             accepted += 1
         self.assertEqual(accepted, NOTIFICATION_BYTES // 65536)
-        self.assertLessEqual(prim.note_bytes, NOTIFICATION_BYTES)
-        prim._note(*prim.notes.get_nowait())
-        self.assertTrue(prim._queue_note(msg, 65536))
-        while not prim.notes.empty():
-            prim._note(*prim.notes.get_nowait())
-        self.assertEqual(prim.note_bytes, 0)
+        self.assertLessEqual(vqro.note_bytes, NOTIFICATION_BYTES)
+        vqro._note(*vqro.notes.get_nowait())
+        self.assertTrue(vqro._queue_note(msg, 65536))
+        while not vqro.notes.empty():
+            vqro._note(*vqro.notes.get_nowait())
+        self.assertEqual(vqro.note_bytes, 0)
 
     def test_tiny_notifications_have_a_metadata_and_count_bound(self):
-        prim = Prim.__new__(Prim)
-        prim.notes = queue.Queue(maxsize=128)
-        prim.note_lock = threading.Lock()
-        prim.note_bytes = 0
+        vqro = Vqro.__new__(Vqro)
+        vqro.notes = queue.Queue(maxsize=128)
+        vqro.note_lock = threading.Lock()
+        vqro.note_bytes = 0
         count = 0
-        while prim._queue_note({}, 1):
+        while vqro._queue_note({}, 1):
             count += 1
         self.assertEqual(count, 128)
-        self.assertEqual(prim.note_bytes, 128*64)
+        self.assertEqual(vqro.note_bytes, 128*64)
 
 
 class NotificationRecovery(unittest.TestCase):
-    def prim(self):
-        prim = Prim.__new__(Prim)
-        prim.notes = queue.Queue(maxsize=128)
-        prim.note_lock = threading.Lock()
-        prim.note_bytes = 0
-        prim.recover_notifications = True
-        prim.note_gap = None
-        prim.handler = lambda *_: None
-        return prim
+    def vqro(self):
+        vqro = Vqro.__new__(Vqro)
+        vqro.notes = queue.Queue(maxsize=128)
+        vqro.note_lock = threading.Lock()
+        vqro.note_bytes = 0
+        vqro.recover_notifications = True
+        vqro.note_gap = None
+        vqro.handler = lambda *_: None
+        return vqro
 
     def test_overflow_collapses_waiting_notifications_into_one_local_gap(self):
-        prim = self.prim()
+        vqro = self.vqro()
         msg = {"method": "event", "params": event(2, "obsolete")}
         for _ in range(129):
-            self.assertTrue(prim._queue_note(msg, 64), "recovering extensions must not disconnect")
-        self.assertEqual(prim.notes.qsize(), 1)
-        marker, charge = prim.notes.get_nowait()
+            self.assertTrue(vqro._queue_note(msg, 64), "recovering extensions must not disconnect")
+        self.assertEqual(vqro.notes.qsize(), 1)
+        marker, charge = vqro.notes.get_nowait()
         self.assertEqual(marker["method"], "missed")
         self.assertEqual(marker["params"]["reason"], "notification_backlog")
-        self.assertEqual(prim.note_bytes, 64)
+        self.assertEqual(vqro.note_bytes, 64)
         for _ in range(100):
-            self.assertTrue(prim._queue_note(msg, 64))
-        self.assertTrue(prim.notes.empty(), "one pending gap replaces the dropped prefix")
-        prim._note(marker, charge)
-        self.assertEqual(prim.note_bytes, 0)
+            self.assertTrue(vqro._queue_note(msg, 64))
+        self.assertTrue(vqro.notes.empty(), "one pending gap replaces the dropped prefix")
+        vqro._note(marker, charge)
+        self.assertEqual(vqro.note_bytes, 0)
 
     def test_failed_recovery_disconnects_instead_of_continuing_with_a_divergent_cache(self):
-        prim = self.prim()
+        vqro = self.vqro()
         class Socket:
             closed = False
             def shutdown(self, _): self.closed = True
-        prim.sock = Socket()
-        def failed(*_): raise PrimError("snapshot overloaded", "overloaded")
-        prim.handler = failed
-        prim._queue_note({}, NOTIFICATION_BYTES)
-        self.assertFalse(prim._note(*prim.notes.get_nowait()))
-        self.assertTrue(prim.sock.closed)
-        self.assertEqual(prim.note_bytes, 0)
+        vqro.sock = Socket()
+        def failed(*_): raise VqroError("snapshot overloaded", "overloaded")
+        vqro.handler = failed
+        vqro._queue_note({}, NOTIFICATION_BYTES)
+        self.assertFalse(vqro._note(*vqro.notes.get_nowait()))
+        self.assertTrue(vqro.sock.closed)
+        self.assertEqual(vqro.note_bytes, 0)
 
     def test_snapshot_fences_dropped_events_but_retains_events_during_recovery(self):
-        prim = self.prim()
+        vqro = self.vqro()
         ext = Extension.__new__(Extension)
         ext.cache_lock = threading.RLock()
         ext.listeners = []
         ext._load(snapshot(1, "old"))
         def snapshot_call(method):
-            self.assertIsNone(prim.note_gap, "recovery must buffer new deltas before requesting its snapshot")
-            prim._queue_note({"method": "event", "params": event(11, "after snapshot")}, 64)
+            self.assertIsNone(vqro.note_gap, "recovery must buffer new deltas before requesting its snapshot")
+            vqro._queue_note({"method": "event", "params": event(11, "after snapshot")}, 64)
             return snapshot(10, "snapshot")
-        ext.prim = type("Core", (), {"call": staticmethod(snapshot_call)})()
-        prim.handler = ext._handle
-        prim._queue_note({"method": "event", "params": event(2, "in flight")}, 2*1024*1024)
-        active = prim.notes.get_nowait()
-        prim._queue_note({"method": "event", "params": event(3, "dropped")}, 3*1024*1024)
-        self.assertLessEqual(prim.note_bytes, NOTIFICATION_BYTES)
-        prim._note(*active)
-        prim._note(*prim.notes.get_nowait())
+        ext.vqro = type("Core", (), {"call": staticmethod(snapshot_call)})()
+        vqro.handler = ext._handle
+        vqro._queue_note({"method": "event", "params": event(2, "in flight")}, 2*1024*1024)
+        active = vqro.notes.get_nowait()
+        vqro._queue_note({"method": "event", "params": event(3, "dropped")}, 3*1024*1024)
+        self.assertLessEqual(vqro.note_bytes, NOTIFICATION_BYTES)
+        vqro._note(*active)
+        vqro._note(*vqro.notes.get_nowait())
         self.assertEqual(ext.seq, 10)
-        prim._note(*prim.notes.get_nowait())
+        vqro._note(*vqro.notes.get_nowait())
         self.assertEqual(ext.seq, 11)
         self.assertEqual(ext.value("doc/test/value"), "after snapshot")
-        self.assertEqual(prim.note_bytes, 0)
+        self.assertEqual(vqro.note_bytes, 0)
 
 
 class SnapshotFence(unittest.TestCase):
@@ -232,11 +232,11 @@ class SnapshotFence(unittest.TestCase):
     def test_queued_pre_snapshot_event_cannot_regress_cache(self):
         ext = self.extension()
 
-        class Prim:
+        class Vqro:
             def call(self, method):
                 return snapshot(3, "current")
 
-        ext.prim = Prim()
+        ext.vqro = Vqro()
         ext._handle("missed", {})
         ext._handle("event", event(2, "stale"))
         self.assertEqual(ext.value("doc/test/value"), "current")
@@ -247,11 +247,11 @@ class SnapshotFence(unittest.TestCase):
     def test_listeners_do_not_hold_cache_lock_across_extension_code(self):
         ext = self.extension()
 
-        class Prim:
+        class Vqro:
             def call(self, method):
                 return snapshot(3, "fresh")
 
-        ext.prim = Prim()
+        ext.vqro = Vqro()
 
         def listener(kind, data):
             thread = threading.Thread(target=ext.fresh)
@@ -269,14 +269,14 @@ class SnapshotFence(unittest.TestCase):
         release = threading.Event()
         attempted = threading.Event()
 
-        class Prim:
+        class Vqro:
             def call(self, method):
                 requested.set()
                 if not release.wait(2):
                     raise AssertionError("snapshot was not released")
                 return snapshot(2, "snapshot")
 
-        ext.prim = Prim()
+        ext.vqro = Vqro()
         fresh = threading.Thread(target=ext.fresh)
         fresh.start()
         self.assertTrue(requested.wait(2))
@@ -307,16 +307,16 @@ class PartialResources(unittest.TestCase):
     def test_partial_event_without_a_base_reloads_the_snapshot(self):
         ext = SnapshotFence.extension(self)
 
-        class Prim:
+        class Vqro:
             calls = 0
 
             def call(self, method):
-                Prim.calls += 1
+                Vqro.calls += 1
                 return dict(snapshot(5, "x"), resources=[{"id": "r9", "argv": ["sh"], "status": None}])
 
-        ext.prim = Prim()
+        ext.vqro = Vqro()
         ext._handle("event", {"epoch": "boot", "seq": 2, "type": "resource", "partial": True, "data": {"id": "r9", "status": "busy"}})
-        self.assertEqual(Prim.calls, 1)
+        self.assertEqual(Vqro.calls, 1)
         self.assertEqual(ext.resources["r9"]["argv"], ["sh"])
 
 
@@ -329,7 +329,7 @@ class FakeCore:
         self.interfere = None  # one-shot: a concurrent writer's (key, value) applied before the next apply
 
     def call(self, method, params=None):
-        from prim_ext import PrimError
+        from vqro_ext import VqroError
         if method == "workspace.snapshot":
             return {"epoch": "boot", "seq": 1, "entries": {k: dict(e) for k, e in self.entries.items()}, "resources": []}
         assert method == "workspace.apply", method
@@ -341,7 +341,7 @@ class FakeCore:
         for op in params["ops"]:
             current = self.entries.get(op["key"], {"version": 0})["version"]
             if op.get("expect") is not None and op["expect"] != current:
-                raise PrimError(f"{op['key']}: version {current}, expected {op['expect']}", "conflict")
+                raise VqroError(f"{op['key']}: version {current}, expected {op['expect']}", "conflict")
         changes = []
         for op in params["ops"]:
             if op["op"] == "set":
@@ -362,7 +362,7 @@ class Contributions(unittest.TestCase):
         ext.name = name
         ext.cache_lock = threading.RLock()
         ext.listeners = []
-        ext.prim = core
+        ext.vqro = core
         ext._load(core.call("workspace.snapshot"))
         return ext, core
 
@@ -418,11 +418,11 @@ class ListenerConflicts(unittest.TestCase):
     """Soak 2 P1-A: a listener's compare-and-set conflict during missed-recovery marked tabs failed."""
 
     def setup(self, conflicts):
-        prim = NotificationRecovery.prim(self)
+        vqro = NotificationRecovery.vqro(self)
         class Socket:
             closed = False
             def shutdown(self, _): self.closed = True
-        prim.sock = Socket()
+        vqro.sock = Socket()
         core = FakeCore({"layout/main": {"view": "a"}})
         core.snapshots = 0
         apply = core.call
@@ -441,9 +441,9 @@ class ListenerConflicts(unittest.TestCase):
         ext.event_types = ["entries", "resource", "resource.removed"]
         ext.cache_lock = threading.RLock()
         ext.listeners = []
-        ext.prim = transport
+        ext.vqro = transport
         ext._load(core.call("workspace.snapshot"))
-        prim.handler = ext._handle
+        vqro.handler = ext._handle
         writes = []
         @ext.on_event
         def mark(kind, data):
@@ -452,15 +452,15 @@ class ListenerConflicts(unittest.TestCase):
                 ext.apply([{"op": "set", "key": "layout/main", "value": {"view": "marked"}, "expect": ext.version("layout/main")}], "mark")
                 writes.append(kind)
             ext.retrying(attempt)
-        return prim, core, ext, deferred, writes
+        return vqro, core, ext, deferred, writes
 
     def test_conflicts_during_local_gap_recovery_defer_instead_of_disconnecting(self):
-        prim, core, ext, deferred, writes = self.setup(conflicts=5)
-        prim._queue_note({}, NOTIFICATION_BYTES)  # overflow: one local gap marker
-        marker = prim.notes.get_nowait()
+        vqro, core, ext, deferred, writes = self.setup(conflicts=5)
+        vqro._queue_note({}, NOTIFICATION_BYTES)  # overflow: one local gap marker
+        marker = vqro.notes.get_nowait()
         self.assertEqual(marker[0]["method"], "missed")
-        self.assertTrue(prim._note(*marker), "a write conflict is not a failed cache recovery")
-        self.assertFalse(prim.sock.closed)
+        self.assertTrue(vqro._note(*marker), "a write conflict is not a failed cache recovery")
+        self.assertFalse(vqro.sock.closed)
         self.assertEqual(writes, [])
         self.assertEqual(len(deferred), 1, "the reaction is retried later, not dropped")
         # Later events bring the concurrent writes into the cache; the deferred retry converges.
@@ -470,40 +470,40 @@ class ListenerConflicts(unittest.TestCase):
             ext._load(core.call("workspace.snapshot"))  # stands in for the entries events
             msg, delay = deferred.pop(0)
             self.assertLessEqual(delay, 7.5, "bounded backoff")
-            prim._queue_note(msg, 64)
-            self.assertTrue(prim._note(*prim.notes.get_nowait()))
+            vqro._queue_note(msg, 64)
+            self.assertTrue(vqro._note(*vqro.notes.get_nowait()))
         self.assertEqual(writes, ["missed"])
         self.assertEqual(core.entries["layout/main"]["value"], {"view": "marked"})
         self.assertEqual(deferred, [], "nothing left pending once it converged")
 
     def test_listener_conflicts_do_not_reload_the_snapshot_when_events_keep_the_cache(self):
-        prim, core, ext, deferred, writes = self.setup(conflicts=1)
+        vqro, core, ext, deferred, writes = self.setup(conflicts=1)
         before = core.snapshots
-        prim._queue_note({"method": "event", "params": event(2, "x")}, 64)
-        self.assertTrue(prim._note(*prim.notes.get_nowait()))
+        vqro._queue_note({"method": "event", "params": event(2, "x")}, 64)
+        self.assertTrue(vqro._note(*vqro.notes.get_nowait()))
         self.assertEqual(core.snapshots, before, "entries events, not a multi-MB snapshot, catch the cache up")
         self.assertEqual(len(deferred), 1)
 
     def test_other_listeners_still_run_after_one_fails(self):
-        prim, core, ext, deferred, writes = self.setup(conflicts=0)
+        vqro, core, ext, deferred, writes = self.setup(conflicts=0)
         seen = []
         ext.listeners.insert(0, lambda *_: (_ for _ in ()).throw(ValueError("bug in a listener")))
         ext.on_event(lambda kind, data: seen.append(kind))
-        prim._queue_note({"method": "event", "params": event(2, "x")}, 64)
-        self.assertTrue(prim._note(*prim.notes.get_nowait()))
+        vqro._queue_note({"method": "event", "params": event(2, "x")}, 64)
+        self.assertTrue(vqro._note(*vqro.notes.get_nowait()))
         self.assertEqual(seen, ["entries"])
         self.assertEqual(writes, ["entries"])
 
 
 class ListenerConflictsOverASocket(unittest.TestCase):
-    """The same soak sequence with real Prim threads and timers, against a scripted core: a slow
+    """The same soak sequence with real Vqro threads and timers, against a scripted core: a slow
     listener lets 300 events overflow the queue (local gap), then the recovery's layout write
     conflicts 4 times with a concurrent writer. The child must stay connected and converge."""
 
     CHILD = r'''
 import sys, time
 sys.path.insert(0, sys.argv[1])
-from prim_ext import Extension
+from vqro_ext import Extension
 ext = Extension("tabs", event_types=["entries"])
 slow = [True]
 @ext.on_event
@@ -523,7 +523,7 @@ time.sleep(30)
         path = os.path.join(d, "s")
         srv = socket.socket(socket.AF_UNIX); srv.bind(path); srv.listen(1)
         ext_dir = str(pathlib.Path(__file__).resolve().parents[1] / "extensions")
-        child = subprocess.Popen([sys.executable, "-c", self.CHILD, ext_dir], env={"PATH": os.environ.get("PATH", ""), "PRIM_SOCKET": path},
+        child = subprocess.Popen([sys.executable, "-c", self.CHILD, ext_dir], env={"PATH": os.environ.get("PATH", ""), "VQRO_SOCKET": path},
                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         try:
             srv.settimeout(10); conn, _ = srv.accept()
@@ -589,7 +589,7 @@ time.sleep(30)
 class LayoutHelpers(unittest.TestCase):
     def test_views_in_walks_splits_and_tabs(self):
         # Regression: views_in lost its recursion and return in f553c6c, which broke panes.close.
-        from prim_ext import views_in
+        from vqro_ext import views_in
         layout = {"children": [{"view": "sidebar"}, {"active": 0, "tabs": [
             {"title": "a", "node": {"split": "h", "children": [{"view": "term-r1"}, {"view": "term-r2"}]}},
             {"title": "b", "node": {"view": "agents-r8"}}]}]}

@@ -1,7 +1,7 @@
 //! Read EOF is a half-close, not permission to throw away replies to accepted work.
 //! Private fake backend/state only; no native programs or real sessions.
 use std::{sync::{Arc,Mutex,Condvar},time::Duration};
-use prim::{server::{self,Backend},store};
+use vqro::{server::{self,Backend},store};
 use serde_json::{json,Value};
 use tokio::{io::{AsyncBufReadExt,AsyncWriteExt,BufReader},net::UnixStream};
 

@@ -1,6 +1,6 @@
-//! prim-tmux: the tmux backend as an out-of-process provider (`docs/spec/provider-v0.md`, section 9).
+//! vqro-tmux: the tmux backend as an out-of-process provider (`docs/spec/provider-v0.md`, section 9).
 //!
-//! Connects to the core at `$PRIM_SOCKET`, registers one provider for one tmux server, and publishes
+//! Connects to the core at `$VQRO_SOCKET`, registers one provider for one tmux server, and publishes
 //! its panes as `terminal` resources. One control client per session (tmux sends output only for panes
 //! linked into a client's session); panes are re-listed after structural notifications and every few
 //! seconds, because tmux has no event history or pane-exited notification. OSC 7501 status is observed
@@ -9,8 +9,8 @@
 //! native pause ends the stream with a gap, the pane is resumed, and the viewer reopens.
 //!
 //! Server: `--tmux-socket PATH` attaches to an existing server (it is never killed); without it, a
-//! prim-owned server at the core's stable state directory is created or reused. It outlives this
-//! provider; only explicit `prim-tmux server stop` stops it. Never the default tmux server.
+//! vqro-owned server at the core's stable state directory is created or reused. It outlives this
+//! provider; only explicit `vqro-tmux server stop` stops it. Never the default tmux server.
 //! Exit codes are not reported (tmux removes exited panes); a vanished pane is `gone` with reason
 //! `exited`, or `killed` if this provider killed it.
 
@@ -19,18 +19,18 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use prim::provider_client::{Config, EffectRequest, Initial, OpenRequest, Outcome, Provider, ProviderError, Request, StreamCommand};
-use prim::tmux::{self, Client, GapReason, Notification, PaneEvent, PaneId};
+use vqro::provider_client::{Config, EffectRequest, Initial, OpenRequest, Outcome, Provider, ProviderError, Request, StreamCommand};
+use vqro::tmux::{self, Client, GapReason, Notification, PaneEvent, PaneId};
 use serde_json::{json, Map, Value};
 use tokio::sync::Notify;
 
-#[path = "prim-tmux/server.rs"]
+#[path = "vqro-tmux/server.rs"]
 mod owned_server;
 
 /// tmux replaces control characters (tabs too) and, without a UTF-8 locale, non-ASCII bytes in format
 /// output, so fields are split on a printable ASCII token that names and titles are unlikely to contain.
-const SEP: &str = "|@prim@|";
-const PANE_FORMAT: &str = "#{pane_id}|@prim@|#{session_name}|@prim@|#{window_id}|@prim@|#{window_name}|@prim@|#{pane_title}|@prim@|#{pane_current_path}|@prim@|#{pane_current_command}|@prim@|#{pane_pid}|@prim@|#{@prim_bootstrap}";
+const SEP: &str = "|@vqro@|";
+const PANE_FORMAT: &str = "#{pane_id}|@vqro@|#{session_name}|@vqro@|#{window_id}|@vqro@|#{window_name}|@vqro@|#{pane_title}|@vqro@|#{pane_current_path}|@vqro@|#{pane_current_command}|@vqro@|#{pane_pid}|@vqro@|#{@vqro_bootstrap}";
 const RECONCILE_EVERY: Duration = Duration::from_secs(3);
 /// Clears and homes the viewer's screen before a repaint (a screen snapshot, not replay).
 const REPAINT_PREFIX: &[u8] = b"\x1b[H\x1b[2J";
@@ -53,7 +53,7 @@ fn args() -> Result<Args, String> {
             "--session" => a.session = Some(value()?),
             "--name" => a.name = Some(value()?),
             "-h" | "--help" => {
-                println!("prim-tmux [--tmux-socket PATH] [--session NAME] [--tmux BIN] [--name NAME]\nConnects to $PRIM_SOCKET.\nprim-tmux server status|stop [--state-dir PATH] [--tmux BIN]\nStop reads an explicit terminal-count confirmation; it never stops configured external servers.");
+                println!("vqro-tmux [--tmux-socket PATH] [--session NAME] [--tmux BIN] [--name NAME]\nConnects to $VQRO_SOCKET.\nvqro-tmux server status|stop [--state-dir PATH] [--tmux BIN]\nStop reads an explicit terminal-count confirmation; it never stops configured external servers.");
                 std::process::exit(0);
             }
             other => return Err(format!("unknown argument {other}")),
@@ -198,7 +198,7 @@ fn unknown(e: tmux::Error) -> ProviderError {
 impl App {
     fn backend_lost(&self, why: &str) {
         if !self.lost_flag.swap(true, std::sync::atomic::Ordering::Relaxed) {
-            eprintln!("prim-tmux: {why}; ending this registration");
+            eprintln!("vqro-tmux: {why}; ending this registration");
             self.lost.notify_one();
         }
     }
@@ -256,7 +256,7 @@ impl App {
     /// List panes and publish the differences. The first call is the full sync.
     async fn reconcile(self: &Arc<Self>, first: bool) -> Result<(), String> {
         if let Err(e) = self.attach_sessions().await {
-            eprintln!("prim-tmux: sessions: {e}");
+            eprintln!("vqro-tmux: sessions: {e}");
         }
         let Some(client) = self.any_client() else {
             // No control client and none could attach: the server is gone (or has no session).
@@ -384,7 +384,7 @@ impl App {
         let (app, client, pane) = (self.clone(), client.clone(), pane.clone());
         tokio::spawn(async move {
             if let Err(e) = client.resume(&pane).await {
-                eprintln!("prim-tmux: resume {pane}: {e}");
+                eprintln!("vqro-tmux: resume {pane}: {e}");
             }
             app.state.lock().unwrap().resuming.remove(pane.as_str());
         });
@@ -463,7 +463,7 @@ impl App {
         self.state.lock().unwrap().argv.insert(pane.clone(), argv);
         // Publish it now, so the core can map the reply's facts.
         if let Err(e) = self.reconcile(false).await {
-            eprintln!("prim-tmux: reconcile after spawn: {e}");
+            eprintln!("vqro-tmux: reconcile after spawn: {e}");
         }
         let facts = self.state.lock().unwrap().panes.get(&pane).map(|p| p.facts.clone());
         match facts {
@@ -710,7 +710,7 @@ fn capabilities() -> Map<String, Value> {
 
 /// Exit when the core's lifetime pipe closes (managed extensions, core-protocol.md).
 fn watch_lifetime() {
-    if std::env::var("PRIM_EXTENSION_LIFETIME").as_deref() == Ok("stdin") {
+    if std::env::var("VQRO_EXTENSION_LIFETIME").as_deref() == Ok("stdin") {
         std::thread::spawn(|| {
             use std::io::Read;
             let mut buf = [0u8; 4096];
@@ -753,7 +753,7 @@ fn main() {
     let code = match result {
         Ok(()) => 0,
         Err(e) => {
-            eprintln!("prim-tmux: {e}");
+            eprintln!("vqro-tmux: {e}");
             1
         }
     };
@@ -762,7 +762,7 @@ fn main() {
 
 async fn run() -> Result<(), String> {
     let a = args()?;
-    let endpoint = std::env::var("PRIM_SOCKET").map_err(|_| "PRIM_SOCKET is not set")?;
+    let endpoint = std::env::var("VQRO_SOCKET").map_err(|_| "VQRO_SOCKET is not set")?;
     let socket = match a.socket.clone() {
         Some(s) => s,
         None => {
@@ -843,7 +843,7 @@ async fn registration(a: &Args, endpoint: &str, socket: &PathBuf) -> Result<(), 
                     _ = tokio::time::sleep(RECONCILE_EVERY) => {}
                 }
                 if let Err(e) = app.reconcile(false).await {
-                    eprintln!("prim-tmux: reconcile: {e}");
+                    eprintln!("vqro-tmux: reconcile: {e}");
                     if app.provider.is_closed() {
                         return;
                     }

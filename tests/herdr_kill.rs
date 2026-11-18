@@ -1,6 +1,6 @@
 //! Native kill reply reconciliation, no hc executable or real backend.
 use std::time::Duration;
-use prim::{client, server::{self,Backend}};
+use vqro::{client, server::{self,Backend}};
 use serde_json::{json,Value};
 #[tokio::test(flavor="multi_thread",worker_threads=2)]
 async fn kill_reply_finishes_resource_with_attach_open_without_finished_event() {

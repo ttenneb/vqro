@@ -1,4 +1,4 @@
-//! prim-tmux against an in-test fake core (provider-v0 section 9) and a private tmux 3.7b server.
+//! vqro-tmux against an in-test fake core (provider-v0 section 9) and a private tmux 3.7b server.
 //! Opt-in: cargo test --test tmux_provider -- --ignored
 //! Every tmux call uses this test's own -S socket and allowlisted environment; cleanup stops only it.
 
@@ -130,7 +130,7 @@ impl Drop for Provider {
 async fn start(tmux: &Tmux) -> (Core, Provider) {
     let endpoint = tmux.root.path().join("core.sock");
     let listener = UnixListener::bind(&endpoint).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_prim-tmux"))
+    let child = Command::new(env!("CARGO_BIN_EXE_vqro-tmux"))
         .args(["--tmux", "/usr/bin/tmux", "--tmux-socket"])
         .arg(&tmux.socket)
         .args(["--name", "tmux@test"])
@@ -138,7 +138,7 @@ async fn start(tmux: &Tmux) -> (Core, Provider) {
         .env("HOME", tmux.root.path())
         .env("PATH", "/usr/bin:/bin")
         .env("TERM", "xterm-256color")
-        .env("PRIM_SOCKET", &endpoint)
+        .env("VQRO_SOCKET", &endpoint)
         .spawn()
         .unwrap();
     let provider = Provider(child);
@@ -195,7 +195,7 @@ async fn registers_syncs_spawns_streams_status_and_kills_on_real_tmux() {
 
     // Spawn: observed, with facts the core can map; the pane is also upserted.
     core.send(json!({"jsonrpc": "2.0", "id": 10, "method": "effect.invoke", "params": {"generation": 3, "effect": "e1",
-        "op": "terminal.spawn", "args": {"argv": ["/bin/sh"], "name": "spawned", "env": {"PRIM_TEST": "yes"}, "cols": 110, "rows": 33}, "deadline_ms": 10000}})).await;
+        "op": "terminal.spawn", "args": {"argv": ["/bin/sh"], "name": "spawned", "env": {"VQRO_TEST": "yes"}, "cols": 110, "rows": 33}, "deadline_ms": 10000}})).await;
     let r = core.until(|m| m["id"] == 10).await;
     assert_eq!(r["result"]["outcome"], "observed", "{r}");
     let facts = &r["result"]["data"]["facts"];
@@ -217,10 +217,10 @@ async fn registers_syncs_spawns_streams_status_and_kills_on_real_tmux() {
     assert_eq!(first["params"]["offset"], 0);
     assert!(data_of(&first).starts_with(b"\x1b[H\x1b[2J"), "the repaint is labelled by a clear, not replayed output");
     let mut offset = data_of(&first).len() as u64;
-    let input = "printf '\\033]7501;state=working:app=prim\\007'; echo prim-$((40+2))\r";
+    let input = "printf '\\033]7501;state=working:app=vqro\\007'; echo vqro-$((40+2))\r";
     core.send(json!({"jsonrpc": "2.0", "method": "stream.input", "params": {"generation": 3, "stream": 1, "data": B64.encode(input)}})).await;
     let mut seen = Vec::new();
-    while !contains(&seen, b"prim-42") {
+    while !contains(&seen, b"vqro-42") {
         let d = core.until(|m| m["method"] == "stream.data").await;
         assert_eq!(d["params"]["offset"].as_u64(), Some(offset), "contiguous offsets");
         offset += data_of(&d).len() as u64;
@@ -300,7 +300,7 @@ async fn open_and_resize_apply_native_sizes_with_latest_viewer_winning() {
 
 #[tokio::test]
 #[ignore]
-async fn panes_created_and_closed_outside_prim_are_reconciled() {
+async fn panes_created_and_closed_outside_vqro_are_reconciled() {
     let tmux = Tmux::start();
     let (mut core, _provider) = start(&tmux).await;
     let reg = core.read().await;
@@ -316,7 +316,7 @@ async fn panes_created_and_closed_outside_prim_are_reconciled() {
     let other = String::from_utf8_lossy(&out.stdout).trim().to_string();
     let up = core.until(|m| m["method"] == "resource.upsert" && m["params"]["facts"]["ref"] == other.as_str()).await;
     assert_eq!(up["params"]["facts"]["data"]["session"], "other");
-    // Closed outside prim: gone with reason exited.
+    // Closed outside vqro: gone with reason exited.
     assert!(tmux.cli(&["kill-pane", "-t", &outside]).status.success());
     let gone = core.until(|m| m["method"] == "resource.gone" && m["params"]["ref"] == outside.as_str()).await;
     assert_eq!(gone["params"]["reason"]["reason"], "exited");
@@ -354,9 +354,9 @@ async fn native_pause_ends_the_stream_with_a_gap_and_a_reopen_repaints() {
     core.send(open(1, 1)).await;
     assert_eq!(core.until(|m| m["id"] == 1).await["result"]["initial"], "repaint");
     // A flood that keeps going while the provider is stalled, then ends.
-    let flood = "end=$(($(date +%s)+5)); while [ $(date +%s) -lt $end ]; do yes prim-flood-line | head -n 20000; done; echo flood-done\r";
+    let flood = "end=$(($(date +%s)+5)); while [ $(date +%s) -lt $end ]; do yes vqro-flood-line | head -n 20000; done; echo flood-done\r";
     core.send(json!({"jsonrpc": "2.0", "method": "stream.input", "params": {"generation": 1, "stream": 1, "data": B64.encode(flood)}})).await;
-    read_until(&mut core, 1, b"prim-flood-line").await;
+    read_until(&mut core, 1, b"vqro-flood-line").await;
     // Stall the provider (our own child) past tmux's pause-after (1 s) while output floods.
     let pid = provider.0.id().to_string();
     assert!(Command::new("kill").args(["-STOP", &pid]).status().unwrap().success());
@@ -399,14 +399,14 @@ async fn private_server_survives_when_the_core_goes() {
     let root = tempfile::Builder::new().prefix("ptq").tempdir_in("/tmp").unwrap();
     let endpoint = root.path().join("core.sock");
     let listener = UnixListener::bind(&endpoint).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_prim-tmux"))
+    let child = Command::new(env!("CARGO_BIN_EXE_vqro-tmux"))
         .args(["--tmux", "/usr/bin/tmux"])
         .env_clear()
         .env("HOME", root.path())
         .env("PATH", "/usr/bin:/bin")
         .env("TERM", "xterm-256color")
-        .env("PRIM_SOCKET", &endpoint)
-        .env("PRIM_STATE_DIR", root.path())
+        .env("VQRO_SOCKET", &endpoint)
+        .env("VQRO_STATE_DIR", root.path())
         .spawn()
         .unwrap();
     let _server = lifetime::ServerCleanup(root.path().to_path_buf());
@@ -424,7 +424,7 @@ async fn private_server_survives_when_the_core_goes() {
     core.send(json!({"jsonrpc":"2.0","id":10,"method":"effect.invoke","params":{
         "generation":1,"effect":"owned-shell","op":"terminal.spawn","args":{"argv":["/bin/sh"]},"deadline_ms":10000}})).await;
     let spawned=core.until(|m|m["id"]==10).await;
-    assert_eq!(spawned["result"]["data"]["facts"]["data"]["session"],"prim");
+    assert_eq!(spawned["result"]["data"]["facts"]["data"]["session"],"vqro");
     // Find only the server at this test's owned state root.
     let servers = || -> Vec<String> {
         let out = Command::new("pgrep").args(["-f", "-a", "tmux"]).output().unwrap();
@@ -467,14 +467,14 @@ async fn private_server_survives_a_sigkilled_provider() {
     let listener = UnixListener::bind(&endpoint).unwrap();
     // Allows a pinned old provider to demonstrate the regression without editing production code.
     let binary = std::env::var_os("TMUX_LIFETIME_PROVIDER_BIN").map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_prim-tmux")));
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_vqro-tmux")));
     let child = Command::new(binary)
         .args(["--tmux", "/usr/bin/tmux"])
         .env_clear()
         .env("HOME", root.path())
         .env("PATH", "")
-        .env("PRIM_SOCKET", &endpoint)
-        .env("PRIM_STATE_DIR", root.path())
+        .env("VQRO_SOCKET", &endpoint)
+        .env("VQRO_STATE_DIR", root.path())
         .spawn()
         .unwrap();
     let _server = lifetime::ServerCleanup(root.path().to_path_buf());
@@ -512,14 +512,14 @@ async fn lifetime_eof_keeps_the_server_after_the_provider_exits() {
     let root = tempfile::Builder::new().prefix("ptl").tempdir_in("/tmp").unwrap();
     let endpoint = root.path().join("core.sock");
     let listener = UnixListener::bind(&endpoint).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_prim-tmux"))
+    let child = Command::new(env!("CARGO_BIN_EXE_vqro-tmux"))
         .args(["--tmux", "/usr/bin/tmux"])
         .env_clear()
         .env("HOME", root.path())
         .env("PATH", "")
-        .env("PRIM_SOCKET", &endpoint)
-        .env("PRIM_EXTENSION_LIFETIME", "stdin")
-        .env("PRIM_STATE_DIR", root.path())
+        .env("VQRO_SOCKET", &endpoint)
+        .env("VQRO_EXTENSION_LIFETIME", "stdin")
+        .env("VQRO_STATE_DIR", root.path())
         .stdin(std::process::Stdio::piped())
         .spawn()
         .unwrap();

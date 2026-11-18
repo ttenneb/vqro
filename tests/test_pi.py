@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "extensions"))
 from pi import Pi, DEFAULTS, EXTENSIONS, LEGACY, SETTINGS, default_bridge, runtimes
-from prim_ext import PrimError
+from vqro_ext import VqroError
 from agent_fixture import FakeCore
 
 
@@ -58,7 +58,7 @@ class PiTests(unittest.TestCase):
         def call(method,params):
             if method=="resource.list" and "host" in params:
                 reads.append(params)
-                if len(reads)==1:raise PrimError("busy","overloaded")
+                if len(reads)==1:raise VqroError("busy","overloaded")
             return original(method,params)
         with patch.object(self.core,"call",side_effect=call),patch("pi.time.sleep"):
             result=self.command("new")
@@ -67,7 +67,7 @@ class PiTests(unittest.TestCase):
     def test_agent_lookup_failure_reports_already_observed_host_without_retrying_spawn(self):
         original=self.core.call
         def call(method,params):
-            if method=="resource.list" and "host" in params:raise PrimError("busy","overloaded")
+            if method=="resource.list" and "host" in params:raise VqroError("busy","overloaded")
             return original(method,params)
         with patch.object(self.core,"call",side_effect=call),patch("pi.time.monotonic",side_effect=[0,13]):
             result=self.command("new")
@@ -78,7 +78,7 @@ class PiTests(unittest.TestCase):
     def test_post_spawn_ui_failure_preserves_host_and_agent_result(self):
         original=self.core.invoke
         def invoke(name,args=None):
-            if name=="agents.show":raise PrimError("busy","overloaded")
+            if name=="agents.show":raise VqroError("busy","overloaded")
             return original(name,args)
         with patch.object(self.core,"invoke",side_effect=invoke):
             result=self.command("new")
@@ -103,7 +103,7 @@ class PiTests(unittest.TestCase):
 
     def test_invalid_host_launcher_is_rejected_before_spawn(self):
         for extra in ({"bridge_argv": "python -m pi_bridge"}, {"bridge_env": {"PYTHONPATH": None}}):
-            with self.assertRaises(PrimError):
+            with self.assertRaises(VqroError):
                 runtimes({"runtimes": [{"name": "bad", "argv": ["pi1"], **extra}]})
         self.assertEqual(self.native(), [])
 
@@ -121,7 +121,7 @@ class PiTests(unittest.TestCase):
 
     def test_custom_host_launcher_does_not_inject_core_module_path(self):
         self.core.apply([{"op": "set", "key": SETTINGS, "value": {"runtimes": [{"name": "host", "argv": ["pi-host"],
-            "bridge_argv": ["prim-bridge-pi"]}]}}], "host")
+            "bridge_argv": ["vqro-bridge-pi"]}]}}], "host")
         self.command("new")
         self.assertEqual(self.native()[0][1]["env"], {})
 
@@ -178,10 +178,10 @@ class PiTests(unittest.TestCase):
     def test_configuration_validates_before_write_or_launch(self):
         for value in ({}, {"runtimes": []}, {"runtimes": [{"name": "x", "argv": "shell string"}]},
                       {"runtimes": [{"name": "x", "argv": ["ok"]}, {"name": "x", "argv": ["again"]}]}):
-            with self.assertRaises(PrimError):
+            with self.assertRaises(VqroError):
                 runtimes(value)
         before = self.core.value(SETTINGS)
-        with self.assertRaises(PrimError):
+        with self.assertRaises(VqroError):
             self.command("configure", text="not JSON")
         self.assertEqual(self.core.value(SETTINGS), before)
         self.command("configure", text='[{"name":"fake","argv":["/python","fixture"]}]')

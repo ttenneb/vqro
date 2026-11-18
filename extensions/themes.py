@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""prim extension: themes. A few named palettes, and a command that applies one.
+"""vqro extension: themes. A few named palettes, and a command that applies one.
 
 A theme is data: applying one writes `doc/settings/theme` = `{"name", "palette": {token: colour}}`, which
 clients read live (`docs/spec/core-protocol.md`, Themes). The available themes are published as live data
@@ -13,7 +13,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from prim_ext import Extension, PrimError  # noqa: E402
+from vqro_ext import Extension, VqroError  # noqa: E402
 
 ext = Extension("themes", event_types=["entries"])  # no resource events: not used here
 ENTRY = "doc/settings/theme"
@@ -189,14 +189,14 @@ def publish():
 def write(name, accent=None):
     theme = BY_NAME.get(name)
     if theme is None:
-        raise PrimError(f"no theme {name!r}; try one of: {', '.join(BY_NAME)}", "invalid")
+        raise VqroError(f"no theme {name!r}; try one of: {', '.join(BY_NAME)}", "invalid")
     value = {"name": name, "palette": dict(theme["palette"])}
     if "accents" in theme:
         current = ext.value(ENTRY) or {}
         # Keep the accent you chose when switching between flavours that have one.
         accent = accent or (current.get("accent") if current.get("accent") in theme["accents"] else None) or theme["accent"]
         if accent not in theme["accents"]:
-            raise PrimError(f"no accent {accent!r}; try one of: {', '.join(theme['accents'])}", "invalid")
+            raise VqroError(f"no accent {accent!r}; try one of: {', '.join(theme['accents'])}", "invalid")
         value["accent"] = accent
         for k in ACCENT_TOKENS:
             value["palette"][k] = theme["accents"][accent]
@@ -214,7 +214,7 @@ def apply(args):
 def accent(args):
     name = (ext.value(ENTRY) or {}).get("name")
     if name not in BY_NAME or "accents" not in BY_NAME[name]:
-        raise PrimError("the current theme has no accent choice", "invalid")
+        raise VqroError("the current theme has no accent choice", "invalid")
     return write(name, args.get("value") or args.get("accent") or args.get("text"))
 
 

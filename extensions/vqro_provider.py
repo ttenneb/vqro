@@ -1,6 +1,6 @@
 """Bounded stdlib asyncio provider SDK: provider-v0.md section 9, no replay.
 
-Importing prim_ext reuses its managed stdin EOF watcher without connecting.
+Importing vqro_ext reuses its managed stdin EOF watcher without connecting.
 """
 import asyncio
 from collections import deque
@@ -9,7 +9,7 @@ import inspect
 import json
 import math
 import os
-import prim_ext  # managed extension lifetime watcher
+import vqro_ext  # managed extension lifetime watcher
 
 MAX_RECORD = 1048576
 MAX_DATA = 65536
@@ -164,10 +164,10 @@ class Provider:
         if sock is not None:
             self.reader, self.writer = await asyncio.open_connection(sock=sock, limit=MAX_RECORD + 1)
         else:
-            self.reader, self.writer = await asyncio.open_unix_connection(path or os.environ["PRIM_SOCKET"], limit=MAX_RECORD + 1)
+            self.reader, self.writer = await asyncio.open_unix_connection(path or os.environ["VQRO_SOCKET"], limit=MAX_RECORD + 1)
         self._reader_task = asyncio.create_task(self._read())
         try:
-            await self.call("hello", {"extension": os.environ.get("PRIM_EXTENSION", self.name), "extension_token": os.environ.get("PRIM_EXTENSION_TOKEN")})
+            await self.call("hello", {"extension": os.environ.get("VQRO_EXTENSION", self.name), "extension_token": os.environ.get("VQRO_EXTENSION_TOKEN")})
             params = {"name": self.name, "instance": self.instance, "role": self.role,
                       "software": self.software, "provider_version": self.provider_version,
                       "capabilities": self.capabilities,
@@ -404,7 +404,7 @@ class Provider:
             self._effect_ids.finish(ident)
 
     async def _open(self, params):
-        from prim_provider_stream import Stream
+        from vqro_provider_stream import Stream
         if "terminal.output" not in self.capabilities or self.open_stream is None:
             raise ProviderError("unsupported", "terminal output unsupported")
         ident = integer(params.get("stream"))

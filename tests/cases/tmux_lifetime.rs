@@ -2,7 +2,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
-use prim::{client, rpc::Peer};
+use vqro::{client, rpc::Peer};
 use serde_json::{json, Value};
 
 pub struct ServerCleanup(pub PathBuf);
@@ -15,8 +15,8 @@ impl Drop for ServerCleanup {
 }
 
 fn helper(state: &Path, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_prim-tmux")).env_clear().env("HOME", state).env("PATH", "/usr/bin:/bin")
-        .env("PRIM_STATE_DIR", state).args(["server"]).args(args).args(["--tmux", "/usr/bin/tmux"]).output().unwrap()
+    Command::new(env!("CARGO_BIN_EXE_vqro-tmux")).env_clear().env("HOME", state).env("PATH", "/usr/bin:/bin")
+        .env("VQRO_STATE_DIR", state).args(["server"]).args(args).args(["--tmux", "/usr/bin/tmux"]).output().unwrap()
 }
 fn status(state: &Path) -> Value {
     let output = helper(state, &["status"]);
@@ -52,12 +52,12 @@ struct Running {
 impl Running {
     fn start(&mut self) {
         assert!(self.child.is_none());
-        self.child = Some(Command::new(env!("CARGO_BIN_EXE_prim")).env_clear().args(["serve", "--fake"])
+        self.child = Some(Command::new(env!("CARGO_BIN_EXE_vqro")).env_clear().args(["serve", "--fake"])
             .env("HOME", self.root.path()).env("PATH", "/usr/bin:/bin")
             .env("XDG_STATE_HOME", self.root.path()) // provider must discover the actual root through hello
-            .env("PRIM_SOCKET", self.root.path().join("p.sock"))
-            .env("PRIM_EXTENSIONS_DIR", self.root.path().join("extensions"))
-            .env("PRIM_TMUX_HELPER", env!("CARGO_BIN_EXE_prim-tmux"))
+            .env("VQRO_SOCKET", self.root.path().join("p.sock"))
+            .env("VQRO_EXTENSIONS_DIR", self.root.path().join("extensions"))
+            .env("VQRO_TMUX_HELPER", env!("CARGO_BIN_EXE_vqro-tmux"))
             .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
     }
     async fn peer(&self) -> Peer {
@@ -115,12 +115,12 @@ fn live(pid: u64) -> bool {
 async fn owned_server_survives_disable_safe_mode_crash_and_reinstall_like_restart() {
     let root = tempfile::Builder::new().prefix("ptlife").tempdir_in("/tmp").unwrap();
     std::fs::create_dir(root.path().join("extensions")).unwrap();
-    let state = root.path().join("prim");
+    let state = root.path().join("vqro");
     let mut running = Running { child: None, _server: ServerCleanup(state.clone()), root };
     running.start();
     let peer = running.peer().await;
     peer.call("workspace.apply", json!({"ops":[{"op":"set", "key":"extension/tmux", "expect":0,
-        "value":{"enabled":true,"kind":"provider","argv":[env!("CARGO_BIN_EXE_prim-tmux"),"--tmux","/usr/bin/tmux","--name","tmux-lifetime"]}}]})).await.unwrap();
+        "value":{"enabled":true,"kind":"provider","argv":[env!("CARGO_BIN_EXE_vqro-tmux"),"--tmux","/usr/bin/tmux","--name","tmux-lifetime"]}}]})).await.unwrap();
     let deadline = Instant::now()+Duration::from_secs(5);
     loop {
         let snap=peer.call("workspace.snapshot",json!({})).await.unwrap();
@@ -132,7 +132,7 @@ async fn owned_server_survives_disable_safe_mode_crash_and_reinstall_like_restar
     assert!(!inventory["resources"].as_array().unwrap().iter().any(|r|r["provider"]=="tmux-lifetime"),"bootstrap must not become a shell/tab: {inventory}");
     assert_eq!(status(&state)["terminals"],0,"bootstrap is not a user terminal");
     let bootstrap=Command::new("/usr/bin/tmux").env_clear().args(["-N","-S"]).arg(state.join("tmux.sock"))
-        .args(["list-panes","-a","-F","#{pane_dead}:#{@prim_bootstrap}"]).output().unwrap();
+        .args(["list-panes","-a","-F","#{pane_dead}:#{@vqro_bootstrap}"]).output().unwrap();
     assert_eq!(String::from_utf8_lossy(&bootstrap.stdout).trim(),"1:1","internal pane has no running shell");
     peer.call("resource.spawn",json!({"provider":"tmux-lifetime","argv":["/bin/sh"]})).await.unwrap();
     let first = resource(&peer).await;
@@ -141,27 +141,27 @@ async fn owned_server_survives_disable_safe_mode_crash_and_reinstall_like_restar
     assert_eq!(initial["terminals"], 1);
     assert_eq!(first["instance"], initial["instance"], "helper and provider disagree on server identity");
 
-    command(&peer, "prim.extension.disable", json!({"name":"tmux"})).await;
+    command(&peer, "vqro.extension.disable", json!({"name":"tmux"})).await;
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert!(live(pane_pid), "disabling the extension killed its backend terminal");
     assert_eq!(status(&state)["instance"], initial["instance"]);
-    command(&peer, "prim.extension.enable", json!({"name":"tmux"})).await;
+    command(&peer, "vqro.extension.enable", json!({"name":"tmux"})).await;
     assert_eq!(resource(&peer).await["id"], first["id"]);
 
-    command(&peer, "prim.safe_mode", json!({"on":true})).await;
+    command(&peer, "vqro.safe_mode", json!({"on":true})).await;
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert!(live(pane_pid), "safe mode killed the backend terminal");
-    command(&peer, "prim.safe_mode", json!({"on":false})).await;
+    command(&peer, "vqro.safe_mode", json!({"on":false})).await;
     assert_eq!(resource(&peer).await["id"], first["id"]);
 
     // Harness-local identity only: public extension facts are platform-neutral, not process ids.
-    let expected=std::fs::canonicalize(env!("CARGO_BIN_EXE_prim-tmux")).unwrap();
+    let expected=std::fs::canonicalize(env!("CARGO_BIN_EXE_vqro-tmux")).unwrap();
     let mut provider_pid=None;
     for thread in std::fs::read_dir(format!("/proc/{}/task",running.child.as_ref().unwrap().id())).unwrap().flatten() {
         let Ok(children)=std::fs::read_to_string(thread.path().join("children")) else {continue};
         for child in children.split_whitespace() {if std::fs::read_link(format!("/proc/{child}/exe")).ok().as_ref()==Some(&expected){provider_pid=child.parse::<u64>().ok();}}
     }
-    let provider_pid=provider_pid.expect("owned core's prim-tmux child");
+    let provider_pid=provider_pid.expect("owned core's vqro-tmux child");
     assert!(Command::new("/bin/kill").env_clear().args(["-KILL", &provider_pid.to_string()]).status().unwrap().success());
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert!(live(pane_pid), "provider SIGKILL killed the terminal");
@@ -189,8 +189,8 @@ async fn owned_server_survives_disable_safe_mode_crash_and_reinstall_like_restar
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert!(!live(pane_pid), "explicit stop left the terminal running");
     assert_eq!(status(&state)["running"], false, "provider silently recreated a stopped server");
-    command(&peer, "prim.extension.disable", json!({"name":"tmux"})).await;
-    command(&peer, "prim.extension.enable", json!({"name":"tmux"})).await;
+    command(&peer, "vqro.extension.disable", json!({"name":"tmux"})).await;
+    command(&peer, "vqro.extension.enable", json!({"name":"tmux"})).await;
     let fresh = spawn_resource(&peer).await;
     assert_ne!(fresh["id"], first["id"], "new server reused an old terminal identity");
     let replaced = helper(&state, &["stop", "--expect-instance", initial["instance"].as_str().unwrap(), "--confirm-terminals", "1"]);
@@ -205,18 +205,18 @@ async fn owned_server_survives_disable_safe_mode_crash_and_reinstall_like_restar
 async fn independent_controls_stop_offline_provider_and_persist_enabled_provider_off() {
     let root = tempfile::Builder::new().prefix("ptctrl").tempdir_in("/tmp").unwrap();
     std::fs::create_dir(root.path().join("extensions")).unwrap();
-    let state = root.path().join("prim");
+    let state = root.path().join("vqro");
     let mut running = Running { child: None, _server: ServerCleanup(state.clone()), root };
     running.start();
     let peer = running.peer().await;
     peer.call("workspace.apply", json!({"ops":[
         {"op":"set","key":"extension/tmux","expect":0,"value":{"enabled":true,"kind":"provider",
-            "argv":[env!("CARGO_BIN_EXE_prim-tmux"),"--tmux","/usr/bin/tmux","--name","tmux-lifetime"]}},
+            "argv":[env!("CARGO_BIN_EXE_vqro-tmux"),"--tmux","/usr/bin/tmux","--name","tmux-lifetime"]}},
         {"op":"set","key":"extension/tmux-server","expect":0,"value":{"enabled":true,
             "argv":["/usr/bin/python3",Path::new(env!("CARGO_MANIFEST_DIR")).join("extensions/tmux_server.py")]}}
     ]})).await.unwrap();
     let initial = spawn_resource(&peer).await;
-    command(&peer, "prim.extension.disable",  json!({"name":"tmux"})).await;
+    command(&peer, "vqro.extension.disable",  json!({"name":"tmux"})).await;
     tokio::time::sleep(Duration::from_secs(2)).await;
     let observed = command(&peer, "tmux.server.status", json!({})).await;
     assert_eq!(observed["running"], true, "status required a connected provider");
@@ -229,7 +229,7 @@ async fn independent_controls_stop_offline_provider_and_persist_enabled_provider
     assert_eq!(stopped["outcome"], "accepted", "stop required a connected provider");
     wait_stopped(&state);
     assert_eq!(command(&peer,"tmux.server.status",json!({})).await["running"], false);
-    command(&peer, "prim.extension.enable", json!({"name":"tmux"})).await;
+    command(&peer, "vqro.extension.enable", json!({"name":"tmux"})).await;
     spawn_resource(&peer).await;
     let fresh = command(&peer, "tmux.server.status", json!({})).await;
     assert_ne!(fresh["instance"], observed["instance"]);

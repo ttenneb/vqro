@@ -8,9 +8,9 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "extensions"))
-import prim_ext
-from prim_ext import PrimError, first_tabs
-from prim_views import terminal_target
+import vqro_ext
+from vqro_ext import VqroError, first_tabs
+from vqro_views import terminal_target
 from agent_fixture import FakeCore
 
 
@@ -20,7 +20,7 @@ class Core(FakeCore):
         return ("layout/main", self.version("layout/main"), copy.deepcopy(value)) if value else None
 
     def retrying(self, fn, attempts=3):
-        return prim_ext.Extension.retrying(self, fn, attempts)
+        return vqro_ext.Extension.retrying(self, fn, attempts)
 
     def run(self):
         pass
@@ -32,7 +32,7 @@ class Core(FakeCore):
 
 def load(name):
     core = Core(name)
-    with mock.patch.dict(sys.modules, {"prim_ext": types.SimpleNamespace(**dict(vars(prim_ext), Extension=lambda *a, **k: core))}):
+    with mock.patch.dict(sys.modules, {"vqro_ext": types.SimpleNamespace(**dict(vars(vqro_ext), Extension=lambda *a, **k: core))}):
         module = runpy.run_path(str(Path(__file__).resolve().parents[1] / "extensions" / (name+".py")))
     core.resources = {"r1": {"id": "r1", "kind": "terminal", "name": "Bridge", "state": "live"}}
     core.add_agent()
@@ -65,9 +65,9 @@ class ResourceViews(unittest.TestCase):
                 root=copy.deepcopy(core.value("layout/main"))
                 root["tabs"].append({"title":f"other-{count}","node":{"view":f"other-{count}"}})
                 apply([{"op":"set","key":"layout/main","value":root}],"concurrent writer")
-                raise PrimError("CAS lost","conflict")
+                raise VqroError("CAS lost","conflict")
             return apply(ops,note)
-        with mock.patch.object(core,"apply",side_effect=competing_write), mock.patch("prim_ext.time.sleep"):
+        with mock.patch.object(core,"apply",side_effect=competing_write), mock.patch("vqro_ext.time.sleep"):
             result=module["show_cmd"]({"resource":"r1"})
         self.assertEqual(count,5)
         tabs=core.value("layout/main")["tabs"]
@@ -75,18 +75,18 @@ class ResourceViews(unittest.TestCase):
         self.assertEqual(sum(t["node"].get("view")=="term-r1" for t in tabs),1)
         self.assertEqual(result["client"],{"focus":{"view":"term-r1"}})
         self.assertFalse(any(c[0]=="resource.spawn" for c in core.calls))
-        with mock.patch.object(core,"apply",side_effect=PrimError("unknown write outcome","timeout")) as failed:
-            with self.assertRaises(PrimError):module["show_cmd"]({"view":"other-view"})
+        with mock.patch.object(core,"apply",side_effect=VqroError("unknown write outcome","timeout")) as failed:
+            with self.assertRaises(VqroError):module["show_cmd"]({"view":"other-view"})
             self.assertEqual(failed.call_count,1,"unknown outcomes are never retried as CAS")
 
     def test_failed_agent_show_does_not_replay_as_terminal_navigation(self):
         _, core = load("tabs")
-        with mock.patch.object(core, "invoke", side_effect=PrimError("unknown layout outcome", "timeout")):
-            with self.assertRaises(PrimError):
+        with mock.patch.object(core, "invoke", side_effect=VqroError("unknown layout outcome", "timeout")):
+            with self.assertRaises(VqroError):
                 terminal_target(core, "r2")
         self.assertIsNone(core.value("layout/main"))
         core.resources["r3"] = {"id": "r3", "kind": "opaque"}
-        with self.assertRaises(PrimError):
+        with self.assertRaises(VqroError):
             terminal_target(core, "r3")
 
     def test_pane_picker_routes_agent_but_only_rebinds_terminal_to_terminal(self):
@@ -147,8 +147,8 @@ class ResourceViews(unittest.TestCase):
         root = {"tabs": [{"title": "a", "node": {"view": "a"}}, {"title": "b", "node": {"view": "b"}}], "active": 0}
         core.apply([{"op": "set", "key": "layout/main", "value": root}], "fixture")
         with mock.patch.object(core, "value", side_effect=lambda key, default=None: core.entries.get(key, {}).get("value", default)), \
-             mock.patch.object(core, "apply", side_effect=PrimError("layout changed", "conflict")):
-            with self.assertRaises(PrimError):
+             mock.patch.object(core, "apply", side_effect=VqroError("layout changed", "conflict")):
+            with self.assertRaises(VqroError):
                 module["close_tab"]({"context": {"layout": "main", "layout_version": 1, "tab_path": [], "tab_index": 0}})
         self.assertEqual(core.value("layout/main"), root)
 

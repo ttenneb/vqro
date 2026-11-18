@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Real private hc: coalesced natural exits, automatic pruning and explicit forget converge.
 Usage: python3 tests/e2e_herdr_drift.py TARGET [--receipt FILE]
-No model calls. Every child has a clean environment and private HOME/XDG/HC/PRIM endpoints.
+No model calls. Every child has a clean environment and private HOME/XDG/HC/VQRO endpoints.
 """
 import argparse
 import concurrent.futures
@@ -29,10 +29,10 @@ def main():
         env = {'HOME': str(root / 'home'), 'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8', 'SHELL': '/bin/sh',
                'XDG_RUNTIME_DIR': str(root / 'run'), 'XDG_STATE_HOME': str(root / 'state'),
                'XDG_CONFIG_HOME': str(root / 'config'), 'HC_SOCKET': str(root / 'h'), 'HC_SESSION': 'drift-private',
-               'PRIM_SOCKET': str(root / 'p'), 'PRIM_STATE_DIR': str(root / 'prim'),
-               'PRIM_EXTENSIONS_DIR': str(root / 'ext'), 'PRIM_HERDR': json.dumps([str(hc_binary), 'connect'])}
+               'VQRO_SOCKET': str(root / 'p'), 'VQRO_STATE_DIR': str(root / 'vqro'),
+               'VQRO_EXTENSIONS_DIR': str(root / 'ext'), 'VQRO_HERDR': json.dumps([str(hc_binary), 'connect'])}
         (root / 'ext/defaults.json').write_text(json.dumps({'version': 1, 'extensions': [
-            {'name': 'herdr', 'since': 1, 'argv': [str(binary / 'prim-herdr'), '--name', 'herdr'],
+            {'name': 'herdr', 'since': 1, 'argv': [str(binary / 'vqro-herdr'), '--name', 'herdr'],
              'kind': 'provider', 'default': True}]}))
 
         def hc(*argv):
@@ -73,7 +73,7 @@ def main():
                                 for ref, row in native.items())):
                     return native, observed
                 assert time.monotonic() < deadline, {
-                    'native': len(native), 'prim': len(observed),
+                    'native': len(native), 'vqro': len(observed),
                     'phantom_live': sum(row['state'] == 'live' for row in observed.values()),
                     'pruned_not_retired': len(observed.keys() - native.keys())}
                 time.sleep(.05)
@@ -81,7 +81,7 @@ def main():
         try:
             receipt['hc'] = hc('server', 'start')['version']
             with (root / 'core.log').open('w') as log:
-                core = subprocess.Popen([str(binary / 'prim'), 'serve'], env=env, stdout=log, stderr=subprocess.STDOUT)
+                core = subprocess.Popen([str(binary / 'vqro'), 'serve'], env=env, stdout=log, stderr=subprocess.STDOUT)
             deadline = time.monotonic() + 10
             while True:
                 try:
@@ -108,7 +108,7 @@ def main():
                 # hc0.1.21 retains500 finished rows: every wave must exercise actual automatic pruning.
                 assert len(native) < 600, 'native finished pruning was not exercised'
                 receipt['waves'].append({'command': command, 'spawned': 600, 'native': len(native),
-                                         'prim': len(observed), 'seconds': round(time.monotonic() - started, 3)})
+                                         'vqro': len(observed), 'seconds': round(time.monotonic() - started, 3)})
             for row in list(observed.values())[:3]:
                 call('resource.forget', {'resource': row['id']})
             native, observed = converged(generation)

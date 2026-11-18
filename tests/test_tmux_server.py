@@ -18,8 +18,8 @@ class Ext:
         self.commands = {}
         self.entries = {
             "doc/scalar": {"value": "not an extension"},
-            "extension/tmux": {"version": 4, "value": {"enabled": True, "argv": ["/bin/prim-tmux", "--name", "tmux"]}},
-            "extension/other": {"version": 2, "value": {"enabled": True, "argv": ["prim-tmux", "--tmux-socket", "/other"]}},
+            "extension/tmux": {"version": 4, "value": {"enabled": True, "argv": ["/bin/vqro-tmux", "--name", "tmux"]}},
+            "extension/other": {"version": 2, "value": {"enabled": True, "argv": ["vqro-tmux", "--tmux-socket", "/other"]}},
         }
         self.contributions = []
         self.published = []
@@ -76,7 +76,7 @@ class TmuxServerTests(unittest.TestCase):
         for args in [{"text": "yes", "instance": "old-instance", "terminals": 3},
                      {"text": "STOP 3", "instance": "replacement", "terminals": 3},
                      {"text": "STOP 4", "instance": "old-instance", "terminals": 4}]:
-            with self.assertRaises(m.PrimError): self.server.stop(args)
+            with self.assertRaises(m.VqroError): self.server.stop(args)
         self.assertFalse(self.ext.applied)
         self.assertFalse(any(action == "stop" for action, _ in self.server.calls))
 
@@ -179,7 +179,7 @@ class TmuxServerTests(unittest.TestCase):
                 with patch.object(m.os, "name", "nt"), \
                         patch.object(m.os, "killpg", create=True) as kill_group, \
                         patch.object(m.subprocess, "Popen", return_value=child) as spawn:
-                    with self.assertRaises(m.PrimError) as error: server.call(action)
+                    with self.assertRaises(m.VqroError) as error: server.call(action)
                 self.assertEqual(error.exception.kind, kind)
                 self.assertNotIn("start_new_session", spawn.call_args.kwargs)
                 child.kill.assert_called_once_with()
@@ -193,7 +193,7 @@ class TmuxServerTests(unittest.TestCase):
         child.communicate.side_effect = [subprocess.TimeoutExpired("helper", 4), (b"", b"")]
         with patch.object(m.os, "killpg", None, create=True), \
                 patch.object(m.subprocess, "Popen", return_value=child) as spawn:
-            with self.assertRaises(m.PrimError) as error: server.call("stop")
+            with self.assertRaises(m.VqroError) as error: server.call("stop")
         self.assertEqual(error.exception.kind, "indeterminate")
         self.assertNotIn("start_new_session", spawn.call_args.kwargs)
         child.kill.assert_called_once_with()
@@ -205,7 +205,7 @@ class TmuxServerTests(unittest.TestCase):
         child = Mock(pid=123)
         child.communicate.side_effect = [subprocess.TimeoutExpired("helper", 4), (b"", b"")]
         with patch.object(m.subprocess, "Popen", return_value=child), patch.object(m.os, "killpg") as kill:
-            with self.assertRaises(m.PrimError) as error: server.call("stop")
+            with self.assertRaises(m.VqroError) as error: server.call("stop")
         self.assertEqual(error.exception.kind, "indeterminate")
         kill.assert_called_once_with(123, m.signal.SIGKILL)
         self.assertEqual(child.communicate.call_count, 2)

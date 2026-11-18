@@ -5,7 +5,7 @@ import runpy
 import unittest
 
 ROOT=Path(__file__).resolve().parents[1]
-key_labels=runpy.run_path(str(ROOT/'extensions/prim_display.py'))['key_labels']
+key_labels=runpy.run_path(str(ROOT/'extensions/vqro_display.py'))['key_labels']
 
 class KeyLabelTests(unittest.TestCase):
     def test_shared_native_extension_table(self):

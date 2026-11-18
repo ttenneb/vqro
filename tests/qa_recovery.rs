@@ -1,6 +1,6 @@
 //! Regressions from the independent foundation review. Private fake adapters/sockets only.
 use std::time::Duration;
-use prim::{adapter::{AdapterCmd, AdapterHandle, ResourceFacts, Stream, StreamInput}, client, core::Core, queue, server::{self, Backend}, store::Store};
+use vqro::{adapter::{AdapterCmd, AdapterHandle, ResourceFacts, Stream, StreamInput}, client, core::Core, queue, server::{self, Backend}, store::Store};
 use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt;
 
@@ -25,12 +25,12 @@ async fn idle_attach_returned_after_viewer_disconnect_is_closed_immediately() {
     let core = server::start(socket.clone(), dir.path().join("state"), false, Backend::Fake, None).unwrap();
     let (tx, mut commands) = tokio::sync::mpsc::unbounded_channel();
     let (events, receiver) = tokio::sync::mpsc::unbounded_channel();
-    prim::core::add_adapter(&core, AdapterHandle { name:"held".into(), session:None, context:None, capabilities:json!({"terminal.output":{"raw":true}}), cmds:tx }, receiver, false);
-    events.send(("held".into(), prim::adapter::AdapterEvent::Registered(prim::provider::ProviderInfo {
+    vqro::core::add_adapter(&core, AdapterHandle { name:"held".into(), session:None, context:None, capabilities:json!({"terminal.output":{"raw":true}}), cmds:tx }, receiver, false);
+    events.send(("held".into(), vqro::adapter::AdapterEvent::Registered(vqro::provider::ProviderInfo {
         connection:1, instance:"fixture".into(), role:"backend".into(), software:json!({"name":"fixture","version":"1"})
     }))).unwrap();
     let facts: ResourceFacts = serde_json::from_value(json!({"backend_ref":"one","kind":"terminal","state":"live","name":null,"title":null})).unwrap();
-    events.send(("held".into(), prim::adapter::AdapterEvent::Snapshot(vec![facts]))).unwrap();
+    events.send(("held".into(), vqro::adapter::AdapterEvent::Snapshot(vec![facts]))).unwrap();
     let resource = tokio::time::timeout(Duration::from_secs(1), async {
         loop {
             if let Some(id) = core.lock().unwrap().resources.values().find(|r| r.adapter == "held").map(|r| r.id.clone()) { break id; }
@@ -39,7 +39,7 @@ async fn idle_attach_returned_after_viewer_disconnect_is_closed_immediately() {
     }).await.unwrap();
     let mut viewer = tokio::net::UnixStream::connect(&socket).await.unwrap();
     viewer.write_all(format!("{}\n",json!({"jsonrpc":"2.0","id":1,"method":"resource.attach","params":{"resource":resource}})).as_bytes()).await.unwrap();
-    let Some(AdapterCmd::Attach { reply, .. }) = prim::adapter::command_for(commands.recv().await.unwrap(), 1) else { panic!("expected attach") };
+    let Some(AdapterCmd::Attach { reply, .. }) = vqro::adapter::command_for(commands.recv().await.unwrap(), 1) else { panic!("expected attach") };
     viewer.shutdown().await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
     let (input, mut input_rx) = queue::channel(256*1024);
@@ -61,7 +61,7 @@ async fn retained_backlog_larger_than_control_queue_becomes_missed_not_disconnec
     };
     let (peer, mut incoming, _) = client::connect(&socket, "qa").await.unwrap();
     peer.call("events.subscribe", json!({"epoch":epoch,"from":0})).await.unwrap();
-    let Some(prim::rpc::Incoming::Notification { method, params }) = incoming.recv().await else { panic!("missing recovery notice") };
+    let Some(vqro::rpc::Incoming::Notification { method, params }) = incoming.recv().await else { panic!("missing recovery notice") };
     assert_eq!(method, "missed"); assert_eq!(params["reason"], "backlog_budget");
     assert!(!peer.is_closed());
 }

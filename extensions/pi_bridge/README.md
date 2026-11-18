@@ -2,11 +2,11 @@
 
 A stdlib-only, Python 3.11+ client for **Pi 1.5 RPC**, plus an isolated `python3 -I /installed/pi_bridge/launch.py`
 runtime provider program. Program launch, resume and view behavior: [PROGRAM.md](PROGRAM.md). The client API below remains
-independent of prim; Pi's JSONL protocol is not JSON-RPC.
+independent of vqro; Pi's JSONL protocol is not JSON-RPC.
 
 The bridge runs **inside a backend-owned terminal**, instantiating the client over fresh child pipes.
-Do not instantiate it in prim core or its extension supervisor. No PTY is used for Pi RPC. The program
-uses `prim_provider.py` for its separate prim connection; it is not a generic agent process host.
+Do not instantiate it in vqro core or its extension supervisor. No PTY is used for Pi RPC. The program
+uses `vqro_provider.py` for its separate vqro connection; it is not a generic agent process host.
 
 ## Interface
 
@@ -109,5 +109,5 @@ The opt-in smoke reexecutes under `unshare -Urn` with an environment allowlist (
 HOME/cwd/config/state/session directories, disabled extensions/tools/resources and the absolute installed CLI.
 It refuses to fall back if network namespace isolation is unavailable, sends only get_state/get_messages/
 get_commands/get_session_stats, closes stdin and records a scratch receipt. No credential copy/read from real
-configuration, provider prompt, model call, networking or real prim/Herdr connection. Created scratch files,
+configuration, provider prompt, model call, networking or real vqro/Herdr connection. Created scratch files,
 including Pi's empty auth store, are retained for inspection. No provider-wire compatibility is claimed yet.

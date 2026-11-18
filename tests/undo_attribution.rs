@@ -2,7 +2,7 @@
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
-use prim::{client, rpc::{Incoming, IncomingReceiver, Peer}};
+use vqro::{client, rpc::{Incoming, IncomingReceiver, Peer}};
 use serde_json::{json, Value};
 #[path="support/managed.rs"] mod managed;
 
@@ -15,8 +15,8 @@ impl Fixture {
         std::fs::create_dir(root.path().join("st")).unwrap();
         // Offline fixture declarations precede the user scenario; only genuine supervised lifetimes
         // can supply ext: writers now. This is not a wire authentication bypass.
-        let mut store=prim::store::Store::open(root.path().join("st/workspace.json")).unwrap();
-        let ops=["seed","themes","writer","slow","background","worker","outer","inner"].into_iter().map(|name|prim::store::Op::Set{key:format!("extension/{name}"),value:managed::spec(&root.path().join(format!("{name}.token"))),expect:None}).collect();
+        let mut store=vqro::store::Store::open(root.path().join("st/workspace.json")).unwrap();
+        let ops=["seed","themes","writer","slow","background","worker","outer","inner"].into_iter().map(|name|vqro::store::Op::Set{key:format!("extension/{name}"),value:managed::spec(&root.path().join(format!("{name}.token"))),expect:None}).collect();
         store.apply("ext:fixture-bootstrap",None,ops).unwrap();
         let mut fixture = Self { child:None, root };
         fixture.start();
@@ -25,15 +25,15 @@ impl Fixture {
     }
     fn start(&mut self) {
         for entry in std::fs::read_dir(self.root.path()).unwrap().flatten(){if entry.path().extension().is_some_and(|s|s=="token"){std::fs::remove_file(entry.path()).unwrap();}}
-        let binary = std::env::var_os("UNDO_CORE_BIN").map(PathBuf::from).unwrap_or_else(|| env!("CARGO_BIN_EXE_prim").into());
+        let binary = std::env::var_os("UNDO_CORE_BIN").map(PathBuf::from).unwrap_or_else(|| env!("CARGO_BIN_EXE_vqro").into());
         self.child = Some(Command::new(binary).env_clear().args(["serve","--fake"])
             .env("HOME",self.root.path()).env("PATH","/usr/bin:/bin")
-            .env("PRIM_STATE_DIR",self.root.path().join("st"))
-            .env("PRIM_SOCKET",self.root.path().join("s"))
-            .env("PRIM_EXTENSIONS_DIR",self.root.path().join("extensions"))
+            .env("VQRO_STATE_DIR",self.root.path().join("st"))
+            .env("VQRO_SOCKET",self.root.path().join("s"))
+            .env("VQRO_EXTENSIONS_DIR",self.root.path().join("extensions"))
             .env("XDG_RUNTIME_DIR",self.root.path().join("run"))
             .env("HC_SOCKET",self.root.path().join("hc.sock")).env("HC_SESSION","undo-fixture")
-            .env("PRIM_HERDR",r#"["/bin/false"]"#)
+            .env("VQRO_HERDR",r#"["/bin/false"]"#)
             .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
     }
     async fn peer(&self, name:&str) -> (Peer,IncomingReceiver,Value) {
@@ -115,7 +115,7 @@ async fn real_settings_theme_command_uses_sdk_attribution_and_default_undo_resto
     let fixture=Fixture::new().await;
     let (user,_,hello)=fixture.peer("settings-user").await;
     let before=pick_real_settings_theme(&fixture,&user).await;
-    user.call("command.invoke",json!({"name":"prim.revert"})).await.unwrap();
+    user.call("command.invoke",json!({"name":"vqro.revert"})).await.unwrap();
     let snapshot=user.call("workspace.snapshot",json!({})).await.unwrap();
     assert_eq!(snapshot["entries"]["doc/settings/theme"]["value"],before);
     assert_eq!(snapshot["entries"]["doc/autonomous-after-theme"]["value"],1);
@@ -136,20 +136,20 @@ impl TuiHarness {
             .args(["-S"]).arg(&harness.socket).args(["-f","/dev/null","new-session","-d","-s","undo","-x","120","-y","32",
                 "/usr/bin/env","-i"])
             .arg(format!("HOME={}",fixture.root.path().display())).args(["PATH=/usr/bin:/bin","TERM=xterm-256color"])
-            .arg(format!("PRIM_SOCKET={}",fixture.root.path().join("s").display()))
-            .arg(format!("PRIM_STATE_DIR={}",fixture.root.path().join("st").display()))
-            .arg(format!("PRIM_EXTENSIONS_DIR={}",fixture.root.path().join("extensions").display()))
+            .arg(format!("VQRO_SOCKET={}",fixture.root.path().join("s").display()))
+            .arg(format!("VQRO_STATE_DIR={}",fixture.root.path().join("st").display()))
+            .arg(format!("VQRO_EXTENSIONS_DIR={}",fixture.root.path().join("extensions").display()))
             .arg(format!("XDG_RUNTIME_DIR={}",fixture.root.path().join("run").display()))
             .arg(format!("HC_SOCKET={}",fixture.root.path().join("hc.sock").display()))
-            .args(["HC_SESSION=undo-fixture",r#"PRIM_HERDR=["/bin/false"]"#])
-            .args([env!("CARGO_BIN_EXE_prim"),"tui"]).output().unwrap();
+            .args(["HC_SESSION=undo-fixture",r#"VQRO_HERDR=["/bin/false"]"#])
+            .args([env!("CARGO_BIN_EXE_vqro"),"tui"]).output().unwrap();
         assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
         harness
     }
     fn ready(&self) -> bool {
         let output=Command::new("/usr/bin/tmux").env_clear().args(["-N","-S"]).arg(&self.socket)
             .args(["capture-pane","-p","-t","undo"]).output().unwrap();
-        output.status.success() && String::from_utf8_lossy(&output.stdout).contains(" prim ")
+        output.status.success() && String::from_utf8_lossy(&output.stdout).contains(" vqro ")
     }
     fn key(&self,key:&str) {
         assert!(Command::new("/usr/bin/tmux").env_clear().args(["-N","-S"]).arg(&self.socket)
@@ -203,7 +203,7 @@ async fn client_started_theme_is_undone_globally_but_autonomous_writes_are_not()
     set(&extension,"doc/autonomous",json!(1),None).await;
     let (other_window,_,_)=fixture.peer("other-window").await;
     // Same command as TUI u; preserve existing global behavior across clients/reconnects.
-    let undone=other_window.call("command.invoke",json!({"name":"prim.revert"})).await.unwrap();
+    let undone=other_window.call("command.invoke",json!({"name":"vqro.revert"})).await.unwrap();
     let snapshot=user.call("workspace.snapshot",json!({})).await.unwrap();
     assert_eq!(snapshot["entries"]["doc/settings/theme"]["value"]["name"],"old");
     assert_eq!(snapshot["entries"]["doc/autonomous"]["value"],1);
@@ -271,7 +271,7 @@ async fn extension_started_nested_commands_remain_autonomous_for_global_undo() {
     set(&worker,"doc/automatic",json!(1),params["invocation"].as_str()).await;
     worker.respond(id,Ok(json!({})));
     invocation.await.unwrap().unwrap();
-    user.call("command.invoke",json!({"name":"prim.revert"})).await.unwrap();
+    user.call("command.invoke",json!({"name":"vqro.revert"})).await.unwrap();
     let snapshot=user.call("workspace.snapshot",json!({})).await.unwrap();
     assert!(snapshot["entries"].get("doc/user-change").is_none());
     assert_eq!(snapshot["entries"]["doc/automatic"]["value"],1);

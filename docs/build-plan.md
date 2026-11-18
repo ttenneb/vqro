@@ -1,6 +1,6 @@
 # Build plan
 
-D16: build prim itself, smallest complete and usable first. The north star: an agent can substantially modify its own
+D16: build vqro itself, smallest complete and usable first. The north star: an agent can substantially modify its own
 workspace through reliable public primitives, without changing the host or endangering underlying processes.
 
 ## Final fuzz P2 / scoped launch hardening (2026-11-18)
@@ -10,7 +10,7 @@ write failure still has indeterminate delivery, never rollback/replay. Connectio
 TUI caches withdraw them, and live command metadata has a 1 MiB encoded bound. Explicit noninteger revert targets
 reject before undo selection. Pi launch uses settings/source/host scoped reads and preserves observed results on
 post-spawn lookup/UI failure, without retrying spawn. Native post-gap input delivery is documented per implementation,
-not overpromised; prim.shutdown is documented as implemented. Red/green details: `research/final-fuzz-p2.md`.
+not overpromised; vqro.shutdown is documented as implemented. Red/green details: `research/final-fuzz-p2.md`.
 
 ## Bridge P2 import/environment/idle hardening (2026-11-18)
 
@@ -53,19 +53,19 @@ registration p99 16 ms, active Core RSS 88.7 MiB; registry aliases, clients, ide
 Evidence, fault/restart regressions and final full-gate authority: `research/identity-hygiene.md`.
 Architecture is current; the old backend-adapter sketch is explicitly superseded by the implemented provider wire.
 
-## Slice 1: first working prim
+## Slice 1: first working vqro
 
 | Component | Scope |
 |---|---|
-| `prim serve` (core) | JSON-RPC 2.0 lines over a local socket. Workspace store: versioned entries (views, layouts, bindings, docs, extensions) changed only by transactions, persisted atomically, with history and revert. Resources from adapters. Event log with seq, cursors and `missed`. Command registry routed to owners. Extension supervisor with crash budget. Built-in recovery commands. |
+| `vqro serve` (core) | JSON-RPC 2.0 lines over a local socket. Workspace store: versioned entries (views, layouts, bindings, docs, extensions) changed only by transactions, persisted atomically, with history and revert. Resources from adapters. Event log with seq, cursors and `missed`. Command registry routed to owners. Extension supervisor with crash budget. Built-in recovery commands. |
 | herdr-core adapter | Through `hc connect` (stdio, works locally and over ssh): list, spawn, kill, raw attach streams for input and output, resize, events (status from OSC 7501, exit). |
 | Fake adapter | Deterministic test fixture only. |
-| `prim tui` | Renders the active layout (splits, tabs) of terminal views (VT emulator over the raw stream) and declarative panel views; key prefix with built-in recovery menu that workspace bindings can't override; command palette. |
-| `prim call` | CLI for scripts and agents: any core method from the shell. This is how agents modify the workspace. |
+| `vqro tui` | Renders the active layout (splits, tabs) of terminal views (VT emulator over the raw stream) and declarative panel views; key prefix with built-in recovery menu that workspace bindings can't override; command palette. |
+| `vqro call` | CLI for scripts and agents: any core method from the shell. This is how agents modify the workspace. |
 | First extension | A real extension, outside the core, that builds part of the workspace through public primitives only. |
 
-Done when: the owner can open prim over herdr-core, run shells and agents in it, an extension adds a panel, command and
-binding, an agent changes the layout with `prim call`, a broken extension is contained and reverted, and the core
+Done when: the owner can open vqro over herdr-core, run shells and agents in it, an extension adds a panel, command and
+binding, an agent changes the layout with `vqro call`, a broken extension is contained and reverted, and the core
 restarts without disturbing any terminal.
 
 ## Then, driven by use
@@ -78,17 +78,17 @@ restarts without disturbing any terminal.
 ## Slice 1 status (2026-11-16)
 
 Working and tested (`cargo test`: store unit tests, key encoding, end-to-end core tests over the fake backend):
-- `prim serve` over herdr-core via `hc connect`: spawn, attach, immediate input, resize, OSC 7501 status, exit.
+- `vqro serve` over herdr-core via `hc connect`: spawn, attach, immediate input, resize, OSC 7501 status, exit.
   Core restarts leave terminals running and keep resource ids.
 - Workspace store: validated, all-or-nothing transactions with compare-and-set, history, revert, atomic persistence.
-- Commands routed to owning connections; `prim.*` recovery commands built in.
+- Commands routed to owning connections; `vqro.*` recovery commands built in.
 - Extension supervisor: live replacement on spec change, crash budget, safe mode, per-extension logs.
-- `prim tui`: tabs and splits from the layout, terminal views (vt100) and panel views, palette, resource picker,
+- `vqro tui`: tabs and splits from the layout, terminal views (vt100) and panel views, palette, resource picker,
   built-in prefix that bindings can't override, status bar showing safe mode and failed extensions.
-- `prim call` / `prim run`: the agent path for changing the workspace.
+- `vqro call` / `vqro run`: the agent path for changing the workspace.
 - `extensions/sidebar.py`: a real extension using only public primitives (panel view, commands, binding, layout CAS).
 
-Verified by hand against herdr-core: an agent-style `prim call` installed the sidebar; a broken extension
+Verified by hand against herdr-core: an agent-style `vqro call` installed the sidebar; a broken extension
 written the same way was contained by the crash budget and removed with one revert.
 
 ## Foundation hardening (2026-11-16)
@@ -133,15 +133,15 @@ written the same way was contained by the crash budget and removed with one reve
   deadlines/duplicate-id bounds, credited/offset streams, disconnect fencing and durable runtime resume credentials.
 - Native and wire resource admission enforce the shared snapshot allowance. Opt-in bridge spawn injects env;
   ordinary shells do not receive tokens. (Superseded 2026-11-17: backends run as provider extensions; every
-  terminal gets `PRIM_SOCKET`; see "Backends as extensions".) No essential/safe-mode policy change.
-- 125 Rust tests pass with zero warnings; Python SDK/fake and private real prim-tmux extension interop pass.
+  terminal gets `VQRO_SOCKET`; see "Backends as extensions".) No essential/safe-mode policy change.
+- 125 Rust tests pass with zero warnings; Python SDK/fake and private real vqro-tmux extension interop pass.
   External default 600/200/8 scale passes all budgets, 49.88 MiB peak RSS and zero leaked processes.
 - Details and limits: `research/provider-wire.md`. Relay, Windows and provider-backed Pi turns remain open.
 
 ## Pi provider/core end-to-end (2026-11-17)
 
-- Private real prim + herdr-core, fake Pi: token-injected bridge spawn, one agent/live panel, all six native effects
-  via `prim call`, dispatched UI answer, exact rejected/indeterminate event audits, core SIGKILL/restart with the
+- Private real vqro + herdr-core, fake Pi: token-injected bridge spawn, one agent/live panel, all six native effects
+  via `vqro call`, dispatched UI answer, exact rejected/indeterminate event audits, core SIGKILL/restart with the
   same host/agent/native process and current run, owned-view reuse and no native command replay; Pi exit -> gone.
 - Installed Pi 1.5.0: private metadata/state, core restart with stable native process, public stream EOF and clean
   exit 0. No prompt/model/provider call or real credential/session involved; network namespace blocks networking.
@@ -153,7 +153,7 @@ written the same way was contained by the crash budget and removed with one reve
 
 ## Core shutdown and input transports (2026-11-17)
 
-- `core.shutdown`, recovery `prim.shutdown`, CLI protocol-first stop and signals share ordered cleanup; no backend
+- `core.shutdown`, recovery `vqro.shutdown`, CLI protocol-first stop and signals share ordered cleanup; no backend
   terminal kill or input replay. Extension EOF grace/reaping and provider-link stop are fixture/subprocess tested.
 - Native kill replies reconcile finished facts even with open attach and no finished event. Native event DATA
   CREDIT follows a FIFO consumption barrier; evidence: `research/core-shutdown.md`.
@@ -231,7 +231,7 @@ written the same way was contained by the crash budget and removed with one reve
 - Host-resolved/configured bridge argv and environment replace the core interpreter/OS assumption. Native backend
   ids/nonces, not display hostnames, choose provider defaults. Herdr remote refs use Machine.id/session/terminal;
   aliases are display metadata and identity-unsafe proxied effects are explicitly unsupported pending upstream.
-- prim-herdr now takes JSON argv or repeated literal prefix args, preserves spaced paths and uses split_paths.
+- vqro-herdr now takes JSON argv or repeated literal prefix args, preserves spaced paths and uses split_paths.
   Red/green, durable migration/tombstone tests, scoped quick gate and real-private herdr/tmux opt-ins pass.
   No live install/remote/model calls. Migration limits and upstream ask: `research/platform-small-fixes.md`.
 
@@ -241,7 +241,7 @@ written the same way was contained by the crash budget and removed with one reve
   drained. Retirement now checks source/generation atomically even across EOF; upserts/effects remain unavailable
   and an old provider cannot retire a replacement. No timeout increase or replay.
 - Deterministic lifecycle regressions red/green; exact agents UI flake reproduced 3/6 under owned single-CPU
-  contention, then 6/6 pass. Full gate 18/18 passes, zero warnings/no leftovers; live prim not touched.
+  contention, then 6/6 pass. Full gate 18/18 passes, zero warnings/no leftovers; live vqro not touched.
 - Evidence and bounds: `research/agent-exit-flake.md`.
 
 ## tmux sizes and backend readiness (2026-11-17)
@@ -292,7 +292,7 @@ written the same way was contained by the crash budget and removed with one reve
 - **History churn:** extensions that refresh views on every event (the sidebar on status changes) fill the
   transaction history. Consider a separate, unversioned channel for derived view content, or coalescing.
 - **Resize ownership:** with several viewers of one terminal, the latest active one sets the size (herdr-core's
-  rule). No prim-level rule yet.
+  rule). No vqro-level rule yet.
 - **Extension views** are only `panel` (declarative) or `terminal`; the hybrid option is untested.
 - **Portability:** Unix socket only; Windows (named pipe) not yet validated (D12, D22 proposed). See "Windows work".
 - **Agents** run PTY-backed for now; the headless agent bridge (pi RPC, Claude Code) is the next slice.
@@ -301,12 +301,12 @@ written the same way was contained by the crash budget and removed with one reve
 
 ## Slice 2: opinions as extensions (D17), 2026-11-16
 
-- Core lost `prim.open`; keeps only recovery commands. New `menu/*` entries and gesture bindings (`mouse.right`,
+- Core lost `vqro.open`; keeps only recovery commands. New `menu/*` entries and gesture bindings (`mouse.right`,
   `mouse.middle`), contributions carry `owner` and disappear when their extension is off.
 - TUI draws pane/tab menus, tab-bar and status-bar buttons from entries; prompts (`input`) and pickers (`pick`);
   passes `context` to commands; `client.menu|prefix|palette` are its only commands.
 - Bundled default extensions, installed on first run from `defaults.json`: `tabs`, `panes`, `gestures`, `sidebar`,
-  `settings` (helper `extensions/prim_ext.py`). Settings toggle extensions and client options (`doc/settings/tui`).
+  `settings` (helper `extensions/vqro_ext.py`). Settings toggle extensions and client options (`doc/settings/tui`).
 - Verified through a pty: prefix `n`, `+`, right-click pane/tab menus, rename prompt, middle-click close, status
   buttons, settings tab, and disabling the gestures extension (then `mouse`) removing right-click behaviour.
 - Seen once, not reproduced: one `+` click opened two tabs.
@@ -328,9 +328,9 @@ Built as parallel streams on git worktrees, reviewed and merged by a coordinator
   accent choice, Dracula, Tokyo Night, Nord, Gruvbox, Solarized, One Dark, Rosé Pine, Kanagawa, Light);
   tab bar band; safe mode ignores the theme.
 - **Keys (D19):** rebindable prefix, binding priority and `client.none`, `client.focus|tab|quit|zoom`, keymap
-  profiles (prim, tmux, screen) in the `keys` extension, live key feedback (kitty protocol, prefix only).
+  profiles (vqro, tmux, screen) in the `keys` extension, live key feedback (kitty protocol, prefix only).
 - **UI:** zoom, popups that survive their dropdowns, Nerd Font icons with fallback, self-restart on reinstall,
-  client build tracking in `prim status`.
+  client build tracking in `vqro status`.
 
 Known gaps: undo skips extension-made changes (e.g. theme picks); agents still run PTY-backed (headless agent
 bridge not built); second backend (tmux) not started; Windows untested.
@@ -344,14 +344,14 @@ bridge not built); second backend (tmux) not started; Windows untested.
   crash, late-response, Unicode framing and backpressure regressions without any provider/model calls.
 - `tests/pi_bridge_smoke.py --run`: opt-in real installed Pi 1.5.0 metadata-only check in a fresh network
   namespace and private environment/state/config/session roots. No real credentials or sessions used.
-- Not wired to prim/provider registration yet. The future bridge must run inside a backend-owned terminal;
-  this library does not turn prim into an agent process host. API and limits: `extensions/pi_bridge/README.md`.
+- Not wired to vqro/provider registration yet. The future bridge must run inside a backend-owned terminal;
+  this library does not turn vqro into an agent process host. API and limits: `extensions/pi_bridge/README.md`.
 
 ## Extension lifetime (2026-11-17)
 
-- Every managed extension receives a reserved stdin lifetime pipe and `PRIM_EXTENSION_LIFETIME=stdin`.
+- Every managed extension receives a reserved stdin lifetime pipe and `VQRO_EXTENSION_LIFETIME=stdin`.
   The core retains its writer; core death closes it without requiring cleanup code. Extensions must exit on EOF.
-- `prim_ext.py` watches from import on an independent thread, so startup/command code need not reach socket EOF.
+- `vqro_ext.py` watches from import on an independent thread, so startup/command code need not reach socket EOF.
   A plain non-Python pipe reader follows the same contract; no Unix-only parent-death API is required.
 - Real fake-core regressions cover SIGKILL, SIGTERM and clean SIGINT shutdown, including blocked-before-connect
   helper startup. The scale cleanup check still reports zero leaked extensions under restart/flood load.
@@ -361,8 +361,8 @@ bridge not built); second backend (tmux) not started; Windows untested.
 
 - `src/provider_client.rs`: Rust provider-side helper for `spec/provider-v0.md` section 9 (register and generation,
   chunked sync, effects with deadlines and a duplicate-id ledger, one reply per request, credited streams with
-  contiguous offsets, gap ends stream). Mirrors `extensions/prim_provider.py`.
-- `src/bin/prim-tmux.rs`: tmux as an out-of-process provider: server identity as instance, panes as terminals, one
+  contiguous offsets, gap ends stream). Mirrors `extensions/vqro_provider.py`.
+- `src/bin/vqro-tmux.rs`: tmux as an out-of-process provider: server identity as instance, panes as terminals, one
   control client per session, reconcile after structural events, lossy OSC 7501 status, repaint-first streams,
   gap on pause/lag/dropped client. Details and findings: `research/tmux-provider.md`.
 - Tested against an in-test fake core and private tmux 3.7b (`tests/provider_client.rs`, `tests/tmux_provider.rs`,
@@ -370,7 +370,7 @@ bridge not built); second backend (tmux) not started; Windows untested.
 
 ## herdr-core provider, provider side (2026-11-17)
 
-- `src/bin/prim-herdr.rs`: herdr-core as an out-of-process provider, wrapping the in-process adapter unchanged
+- `src/bin/vqro-herdr.rs`: herdr-core as an out-of-process provider, wrapping the in-process adapter unchanged
   (instance = `core.id`, spawn/kill/attach, history streams with credit after send, status, exit codes, re-register
   per herdr-core connection). Opt-in tests on a private herdr-core (`tests/herdr_provider.rs`). Notes and findings:
   `research/herdr-provider.md`. Native adapter env now reaches hc; the external wrapper still declares env unsupported.
@@ -388,11 +388,11 @@ the human's OK). Contracts are updated; this is implementation.
   - `src/store.rs` opens the state directory to fsync it. On Windows `File::open(dir)` fails, so the core would not
     start. Use a write-through replace (`MoveFileExW`) and skip the directory sync there.
   - `src/paths.rs` defaults use `HOME`, usually unset on Windows, so state would land in the current directory. Use
-    `%LOCALAPPDATA%\prim`.
-  - `extensions/prim_ext.py` connects with `AF_UNIX`, which CPython on Windows lacks. Use the `asyncio` proactor
+    `%LOCALAPPDATA%\vqro`.
+  - `extensions/vqro_ext.py` connects with `AF_UNIX`, which CPython on Windows lacks. Use the `asyncio` proactor
     pipe connection. About 1-2 h, testable only on Windows.
 - **Defaults and CLI:** `defaults.json` names `python3` (use a portable interpreter choice); `resource.spawn`'s default
-  shell moves to the provider (`$SHELL` / `/bin/sh` in `src/server.rs` today); `prim stop` moves to `core.shutdown`;
+  shell moves to the provider (`$SHELL` / `/bin/sh` in `src/server.rs` today); `vqro stop` moves to `core.shutdown`;
   the background core needs detached creation flags instead of `process_group(0)`; the herdr-core default path in
   `src/main.rs` is a macOS bundle path.
 - **Optional:** Job Objects for extensions (also covers wrapper grandchildren), and the named pipe's out-buffer size as
@@ -402,21 +402,21 @@ the human's OK). Contracts are updated; this is implementation.
 
 ## Provider SDK half (2026-11-17)
 
-- `extensions/prim_provider.py` and `prim_provider_stream.py`: stdlib async provider-side implementation of
+- `extensions/vqro_provider.py` and `vqro_provider_stream.py`: stdlib async provider-side implementation of
   `spec/provider-v0.md` section 9: registration/generation, chunked sync, native effect handlers and bounded,
   credited/ordered streams. Reuses the managed stdin lifetime watcher; never reconnects or resends automatically.
 - `tests/fixtures/fake_provider.py`: standalone external fake, with echo/greeting and the same status-period,
   status-phase and output-rate argv flags as the in-process fake. No actual terminals/programs are spawned.
 - Socket-pair fake-core tests exercise the SDK without a real core. Core wire integration and external-provider
-  default scale now pass too (`research/provider-wire.md`). API/bounds: `extensions/prim_provider.md`.
+  default scale now pass too (`research/provider-wire.md`). API/bounds: `extensions/vqro_provider.md`.
 
 ## Backends as extensions (2026-11-17)
 
-Human decisions: adapters run as extensions; tmux only as a private server; every terminal reaches prim.
-- `prim serve` runs no backend in process (`Backend::Extensions`); `--fake` adds the in-process fake for tests.
-- Default extensions v2: `herdr` (prim-herdr, `kind: provider`, `default: true`) and `tmux` (prim-tmux, private
+Human decisions: adapters run as extensions; tmux only as a private server; every terminal reaches vqro.
+- `vqro serve` runs no backend in process (`Backend::Extensions`); `--fake` adds the in-process fake for tests.
+- Default extensions v2: `herdr` (vqro-herdr, `kind: provider`, `default: true`) and `tmux` (vqro-tmux, private
   server, off). Existing installs gain them once through versioned defaults; removed entries stay removed.
 - The default spawn provider is the extension marked `default`, else the first backend, and never a runtime bridge.
-- `PRIM_SOCKET` goes into every spawned terminal's environment; the bridge token stays opt-in.
-- Resource ids carry over from the in-process herdr adapter to prim-herdr (same provider name, instance, ref and
+- `VQRO_SOCKET` goes into every spawned terminal's environment; the bridge token stays opt-in.
+- Resource ids carry over from the in-process herdr adapter to vqro-herdr (same provider name, instance, ref and
   incarnation): `tests/herdr_provider.rs` switches a state dir and keeps ids and tabs.

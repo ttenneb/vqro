@@ -2,11 +2,11 @@
 use std::path::PathBuf;
 use std::time::Duration;
 use base64::Engine;
-use prim::{client, rpc::{Incoming, IncomingReceiver, Peer}, server::{self, Backend}};
+use vqro::{client, rpc::{Incoming, IncomingReceiver, Peer}, server::{self, Backend}};
 use serde_json::{json, Value};
 
-struct Env { _dir: tempfile::TempDir, socket: PathBuf, core: prim::core::Shared }
-impl Drop for Env { fn drop(&mut self) { prim::ext::stop_all(&self.core); } }
+struct Env { _dir: tempfile::TempDir, socket: PathBuf, core: vqro::core::Shared }
+impl Drop for Env { fn drop(&mut self) { vqro::ext::stop_all(&self.core); } }
 async fn env() -> Env {
     let dir = tempfile::Builder::new().prefix("pw").tempdir_in("/tmp").unwrap();
     let socket = dir.path().join("s");
@@ -102,7 +102,7 @@ async fn effects_credit_offsets_gaps_and_dispatched_are_forwarded() {
                             match params["op"].as_str().unwrap() {
                                 "fixture.dispatch" => actor.respond(id, Ok(json!({"outcome":"dispatched","data":{"ok":true}}))),
                                 "fixture.reject" => actor.respond(id, Ok(json!({"outcome":"rejected","error":{"kind":"forbidden","message":"no effect"}}))),
-                                "fixture.error" => actor.respond(id, Err(prim::rpc::RpcError::new("backend", "native uncertainty"))),
+                                "fixture.error" => actor.respond(id, Err(vqro::rpc::RpcError::new("backend", "native uncertainty"))),
                                 "fixture.hang" => { let late = actor.clone(); tokio::spawn(async move { tokio::time::sleep(Duration::from_millis(40)).await; late.respond(id, Ok(json!({"outcome":"observed","data":{"late":true}}))); }); }
                                 other => panic!("unexpected op {other}"),
                             }
@@ -167,8 +167,8 @@ async fn bridge_tokens_wait_rotate_recover_lost_reply_and_survive_core_restart()
     let spawn = tokio::spawn(async move { caller.call("resource.spawn", json!({"provider":"host-provider","bridge":true})).await });
     let Some(Incoming::Request { id, method, params }) = requests.recv().await else { panic!("missing host spawn") };
     assert_eq!(method, "effect.invoke");
-    let bootstrap = params["args"]["env"]["PRIM_BRIDGE_TOKEN"].as_str().unwrap().to_string();
-    assert_eq!(params["args"]["env"]["PRIM_SOCKET"], e.socket.to_string_lossy().as_ref());
+    let bootstrap = params["args"]["env"]["VQRO_BRIDGE_TOKEN"].as_str().unwrap().to_string();
+    assert_eq!(params["args"]["env"]["VQRO_SOCKET"], e.socket.to_string_lossy().as_ref());
     let mut reg = registration("runtime");
     reg["role"] = json!("runtime"); reg["capabilities"] = json!({"agent.steer":{}}); reg["token"] = json!(bootstrap);
     let (runtime, _rx) = peer(&e).await;
@@ -233,7 +233,7 @@ async fn oversized_whole_facts_are_rejected_before_publication() {
 
 #[tokio::test(flavor="multi_thread", worker_threads=2)]
 #[ignore = "requires /usr/bin/tmux; test explicitly stops its owned native server"]
-async fn prim_tmux_extension_interoperates_with_core_wire() {
+async fn vqro_tmux_extension_interoperates_with_core_wire() {
     let e = env().await;
     struct StopOwnedServer(PathBuf);
     impl Drop for StopOwnedServer {
@@ -246,7 +246,7 @@ async fn prim_tmux_extension_interoperates_with_core_wire() {
     let home = e._dir.path().join("home");
     std::fs::create_dir(&home).unwrap();
     let (viewer, mut output) = peer(&e).await;
-    viewer.call("workspace.apply", json!({"ops":[{"op":"set","key":"extension/tmux-wire-fixture","value":{"argv":["/usr/bin/env",format!("HOME={}",home.display()),env!("CARGO_BIN_EXE_prim-tmux"),"--name","native-tmux","--tmux","/usr/bin/tmux"]}}]})).await.unwrap();
+    viewer.call("workspace.apply", json!({"ops":[{"op":"set","key":"extension/tmux-wire-fixture","value":{"argv":["/usr/bin/env",format!("HOME={}",home.display()),env!("CARGO_BIN_EXE_vqro-tmux"),"--name","native-tmux","--tmux","/usr/bin/tmux"]}}]})).await.unwrap();
     until(|| e.core.lock().unwrap().providers.get("native-tmux").is_some_and(|p| p.synced)).await;
     let spawned = viewer.call("resource.spawn", json!({"provider":"native-tmux","argv":["/bin/sh","-c","cat"]})).await.unwrap();
     let id = spawned["resource"]["id"].clone();

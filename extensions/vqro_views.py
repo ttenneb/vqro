@@ -1,6 +1,6 @@
 """Resource-kind navigation policy shared by workspace extensions (not core)."""
-from prim_ext import PrimError
-from prim_display import label
+from vqro_ext import VqroError
+from vqro_display import label
 
 
 def ended(resource):
@@ -23,18 +23,18 @@ def terminal_target(ext, rid):
     """
     resource = ext.resources.get(rid)
     if resource is None:
-        raise PrimError("resource is gone", "not_found")
+        raise VqroError("resource is gone", "not_found")
     if resource.get("kind") == "agent":
         try:
             return None, ext.invoke("agents.show", {"resource": rid})
-        except PrimError as error:
+        except VqroError as error:
             if error.kind not in ("unavailable", "not_found"):
                 raise
         resource = ext.resources.get(resource.get("host"))
         if not resource or resource.get("kind") != "terminal":
-            raise PrimError("agent UI is off and no bridge terminal is available", "unavailable")
+            raise VqroError("agent UI is off and no bridge terminal is available", "unavailable")
     if resource.get("kind") != "terminal":
-        raise PrimError("no view for resource kind " + str(resource.get("kind")), "unsupported")
+        raise VqroError("no view for resource kind " + str(resource.get("kind")), "unsupported")
     return resource, None
 
 

@@ -1,6 +1,6 @@
 //! A healthy wire-provider connection must not exhaust a lifetime effect-id ledger.
 use std::time::Duration;
-use prim::{client, provider_client::{Config, Outcome, Provider, Request}, server::{self, Backend}};
+use vqro::{client, provider_client::{Config, Outcome, Provider, Request}, server::{self, Backend}};
 use serde_json::{json, Value};
 
 #[tokio::test(flavor="multi_thread",worker_threads=4)]

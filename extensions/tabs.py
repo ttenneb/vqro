@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""prim extension: tabs. New tab with a shell, show a resource or view in a tab, rename and close tabs.
+"""vqro extension: tabs. New tab with a shell, show a resource or view in a tab, rename and close tabs.
 
 Contributes the tab bar `+`, the tab context menu items, and the `n` prefix key.
 """
@@ -8,8 +8,8 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from prim_ext import Extension, PrimError, first_tabs, node_at, views_in  # noqa: E402
-from prim_views import ended, terminal_target, title, view_resource
+from vqro_ext import Extension, VqroError, first_tabs, node_at, views_in  # noqa: E402
+from vqro_views import ended, terminal_target, title, view_resource
 
 ext = Extension("tabs", event_types=["entries", "resource", "resource.removed"])
 
@@ -63,7 +63,7 @@ def title_of(r):
 @ext.command("tabs.open", "New tab with a shell (args: argv, cwd, name)")
 def open_tab(args):
     spawn = {k: args[k] for k in ("argv", "cwd", "name") if k in args}
-    r = ext.prim.call("resource.spawn", spawn)["resource"]
+    r = ext.vqro.call("resource.spawn", spawn)["resource"]
     return show(f"term-{r['id']}", title_of(r), {"kind": "terminal", "resource": r["id"]})
 
 
@@ -82,18 +82,18 @@ def show_cmd(args):
         if value.get("kind") == "terminal":
             return show_cmd({"resource": value["resource"]})
         return show(args["view"], args.get("title") or args["view"])
-    raise PrimError("needs `resource` or `view`", "invalid")
+    raise VqroError("needs `resource` or `view`", "invalid")
 
 
 def tab_target(args):
     ctx = args.get("context") or {}
     if "tab_path" not in ctx:
-        raise PrimError("no tab here", "invalid")
+        raise VqroError("no tab here", "invalid")
     key = f"layout/{ctx['layout']}"
     root = copy.deepcopy(ext.value(key))
     tabs = node_at(root, ctx["tab_path"]) if root else None
     if not tabs or "tabs" not in tabs:
-        raise PrimError("that tab is gone", "conflict")
+        raise VqroError("that tab is gone", "conflict")
     return key, ctx.get("layout_version"), root, tabs, ctx["tab_index"]
 
 
@@ -118,7 +118,7 @@ def orphan_view_deletes(candidates, layouts):
 def close_tab(args):
     key, ver, root, tabs, i = tab_target(args)
     if len(tabs["tabs"]) <= 1:
-        raise PrimError("can't close the last tab", "invalid")
+        raise VqroError("can't close the last tab", "invalid")
     removed = views_in(tabs["tabs"].pop(i)["node"])
     a = tabs.get("active", 0)
     tabs["active"] = min(a - 1 if a >= i and a > 0 else a, len(tabs["tabs"]) - 1)
@@ -132,7 +132,7 @@ def rename_tab(args):
     key, ver, root, tabs, i = tab_target(args)
     text = (args.get("text") or "").strip()
     if not text:
-        raise PrimError("empty name", "invalid")
+        raise VqroError("empty name", "invalid")
     tabs["tabs"][i]["title"] = text
     ext.apply([{"op": "set", "key": key, "value": root, "expect": ver}], "tabs: rename")
 

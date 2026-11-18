@@ -1,4 +1,4 @@
-//! Scale harness: a deterministic load test of a real prim core over its socket, with budgets.
+//! Scale harness: a deterministic load test of a real vqro core over its socket, with budgets.
 //!
 //! Ignored by default. Run (see docs/test-plan.md, "Scale harness"):
 //!   cargo test --release --test scale -- --ignored --exact scale_load --nocapture
@@ -17,8 +17,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
-use prim::client;
-use prim::rpc::Incoming;
+use vqro::client;
+use vqro::rpc::Incoming;
 use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::oneshot;
@@ -45,7 +45,7 @@ const BUDGET_STATUS_DELIVERED_MIN: f64 = 0.95; // share of emitted status change
 const BUDGET_EXT_RESTART_FAILURES: u64 = 0;
 const BUDGET_FINAL_SNAPSHOT_MS: f64 = 70.0; // core still answers promptly after the load; worst 32
 
-/// Load profile, from `PRIM_SCALE_*` environment variables (defaults: the brief's target floor).
+/// Load profile, from `VQRO_SCALE_*` environment variables (defaults: the brief's target floor).
 #[derive(Debug, Clone)]
 struct Profile {
     terminals: usize,
@@ -82,7 +82,7 @@ impl Profile {
 }
 
 fn env_num<T: std::str::FromStr>(name: &str, default: T) -> T {
-    std::env::var(format!("PRIM_SCALE_{name}")).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(format!("VQRO_SCALE_{name}")).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
 impl Profile {
@@ -141,7 +141,7 @@ fn status_phase_ms(prof: &Profile, i: usize) -> Option<u64> {
             z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
             Some((z ^ (z >> 31)) % period + 1)
         }
-        other => panic!("PRIM_SCALE_STATUS_PHASE must be random, spread or lockstep, not {other}"),
+        other => panic!("VQRO_SCALE_STATUS_PHASE must be random, spread or lockstep, not {other}"),
     }
 }
 
@@ -154,39 +154,39 @@ fn adapter_name(i: usize) -> String {
 #[test]
 #[ignore]
 fn scale_core_child() {
-    let Ok(socket) = std::env::var("PRIM_SCALE_CHILD_SOCKET") else { return };
-    let state = PathBuf::from(std::env::var("PRIM_SCALE_CHILD_STATE").unwrap());
-    let adapters: usize = std::env::var("PRIM_SCALE_CHILD_ADAPTERS").unwrap().parse().unwrap();
-    let workers:usize = std::env::var("PRIM_SCALE_CHILD_WORKERS").unwrap_or_default().parse().unwrap_or(0);
-    let delay:u64 = std::env::var("PRIM_SCALE_CHILD_WRITE_DELAY_MS").unwrap_or_default().parse().unwrap_or(0);
+    let Ok(socket) = std::env::var("VQRO_SCALE_CHILD_SOCKET") else { return };
+    let state = PathBuf::from(std::env::var("VQRO_SCALE_CHILD_STATE").unwrap());
+    let adapters: usize = std::env::var("VQRO_SCALE_CHILD_ADAPTERS").unwrap().parse().unwrap();
+    let workers:usize = std::env::var("VQRO_SCALE_CHILD_WORKERS").unwrap_or_default().parse().unwrap_or(0);
+    let delay:u64 = std::env::var("VQRO_SCALE_CHILD_WRITE_DELAY_MS").unwrap_or_default().parse().unwrap_or(0);
     let mut runtime = tokio::runtime::Builder::new_multi_thread();
     runtime.enable_all();
     if workers > 0 { runtime.worker_threads(workers); }
     runtime.build().unwrap().block_on(async move {
-        let core = prim::server::start(socket.into(), state, false, prim::server::Backend::Fake, None).unwrap();
+        let core = vqro::server::start(socket.into(), state, false, vqro::server::Backend::Fake, None).unwrap();
         if delay > 0 {
             core.lock().unwrap().configure_workspace_writer(std::sync::Arc::new(move |path, bytes| {
                 std::thread::sleep(Duration::from_millis(delay));
-                prim::store::write_atomic(path, bytes)
+                vqro::store::write_atomic(path, bytes)
             })).unwrap();
         }
         // More fake instances, as more hosts. `server::start` only starts one backend; the core
         // already supports several adapters, so add the rest here.
         for i in 1..if env_num("EXTERNAL_PROVIDERS", 0u8) != 0 { 1 } else { adapters } {
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-            prim::core::add_adapter(&core, prim::adapter::fake::start(adapter_name(i), tx), rx, false);
+            vqro::core::add_adapter(&core, vqro::adapter::fake::start(adapter_name(i), tx), rx, false);
         }
-        // Stop like `prim serve` does: on SIGTERM, stop the extensions, then exit. Dropping the
+        // Stop like `vqro serve` does: on SIGTERM, stop the extensions, then exit. Dropping the
         // runtime drops their child handles, which kill anything still running.
         let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
         term.recv().await;
-        prim::ext::stop_all(&core);
+        vqro::ext::stop_all(&core);
         tokio::time::sleep(Duration::from_millis(200)).await;
     });
 }
 
-/// The core child process. Stopped as `prim stop` does (SIGTERM, so the core stops its own
-/// extensions); afterwards any process still carrying this run's `PRIM_SOCKET` has leaked: it is
+/// The core child process. Stopped as `vqro stop` does (SIGTERM, so the core stops its own
+/// extensions); afterwards any process still carrying this run's `VQRO_SOCKET` has leaked: it is
 /// killed and reported, and the test fails. Dropping (e.g. on a panic) does the same.
 struct CoreProc {
     child: Option<std::process::Child>,
@@ -204,9 +204,9 @@ fn signal(pid: u32, sig: &str) {
     let _ = std::process::Command::new("kill").arg(format!("-{sig}")).arg(pid.to_string()).stderr(std::process::Stdio::null()).status();
 }
 
-/// Live processes whose environment has exactly `PRIM_SOCKET=<socket>`: this run's extensions.
+/// Live processes whose environment has exactly `VQRO_SOCKET=<socket>`: this run's extensions.
 fn run_processes(socket: &std::path::Path) -> Vec<(u32, String)> {
-    let needle = format!("PRIM_SOCKET={}", socket.display());
+    let needle = format!("VQRO_SOCKET={}", socket.display());
     let me = std::process::id();
     let mut found = Vec::new();
     for entry in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
@@ -317,8 +317,8 @@ async fn scale_load() {
     let prof = Profile::from_env();
     eprintln!("scale profile: {prof:?}");
     // One run directory for socket and state, on a real disk so durable writes cost what they do:
-    // $PRIM_SCALE_RUN_DIR, default ~/.local/share/herdr/scratch/prim-scale. Removed after the run.
-    let base = std::env::var("PRIM_SCALE_RUN_DIR").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap()).join(".local/share/herdr/scratch/prim-scale"));
+    // $VQRO_SCALE_RUN_DIR, default ~/.local/share/herdr/scratch/vqro-scale. Removed after the run.
+    let base = std::env::var("VQRO_SCALE_RUN_DIR").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap()).join(".local/share/herdr/scratch/vqro-scale"));
     std::fs::create_dir_all(&base).unwrap();
     let run_dir = tempfile::Builder::new().prefix("run").tempdir_in(&base).unwrap();
     let socket = run_dir.path().join("s.sock");
@@ -327,11 +327,11 @@ async fn scale_load() {
 
     let child = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--ignored", "--exact", "scale_core_child", "--nocapture", "--test-threads=1"])
-        .env("PRIM_SCALE_CHILD_SOCKET", &socket)
-        .env("PRIM_SCALE_CHILD_STATE", &state)
-        .env("PRIM_SCALE_CHILD_ADAPTERS", prof.adapters.to_string())
-        .env("PRIM_SCALE_CHILD_WORKERS", prof.core_workers.to_string())
-        .env("PRIM_SCALE_CHILD_WRITE_DELAY_MS", prof.workspace_write_delay_ms.to_string())
+        .env("VQRO_SCALE_CHILD_SOCKET", &socket)
+        .env("VQRO_SCALE_CHILD_STATE", &state)
+        .env("VQRO_SCALE_CHILD_ADAPTERS", prof.adapters.to_string())
+        .env("VQRO_SCALE_CHILD_WORKERS", prof.core_workers.to_string())
+        .env("VQRO_SCALE_CHILD_WRITE_DELAY_MS", prof.workspace_write_delay_ms.to_string())
         .stdout(std::process::Stdio::null())
         .spawn()
         .unwrap();
@@ -534,7 +534,7 @@ async fn scale_load() {
             while !stop.load(Ordering::Relaxed) {
                 every.tick().await;
                 let t = Instant::now();
-                match w.call("command.invoke", json!({"name": "prim.extension.restart", "args": {"name": "scale-noop"}})).await {
+                match w.call("command.invoke", json!({"name": "vqro.extension.restart", "args": {"name": "scale-noop"}})).await {
                     Ok(_) => {
                         ok += 1;
                         lat.push(ms(t.elapsed()));
@@ -613,7 +613,7 @@ async fn scale_load() {
     let commit = std::process::Command::new("git").args(["describe", "--always", "--dirty"]).output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
 
     let receipt = json!({
-        "kind": "prim.scale-receipt", "version": 1,
+        "kind": "vqro.scale-receipt", "version": 1,
         "commit": commit, "at_unix_ms": unix_ms(), "release_build": !cfg!(debug_assertions),
         "profile": prof.to_json(),
         "budgets_are_placeholders": false,
@@ -646,7 +646,7 @@ async fn scale_load() {
         "cleanup": {"core_exit": cleanup.core_exit, "leaked_and_killed": cleanup.leaked.iter().map(|(p, c)| json!({"pid": p, "cmd": c})).collect::<Vec<_>>()},
     });
     let text = serde_json::to_string_pretty(&receipt).unwrap();
-    let path = std::env::var("PRIM_SCALE_RECEIPT").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("scale-receipt.json"));
+    let path = std::env::var("VQRO_SCALE_RECEIPT").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("scale-receipt.json"));
     std::fs::write(&path, &text).unwrap();
     println!("{text}\nreceipt: {}", path.display());
     assert!(failed.is_empty(), "scale budgets exceeded: {failed:?} (receipt: {})", path.display());

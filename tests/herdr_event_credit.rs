@@ -1,7 +1,7 @@
 //! Finite-window NDJSON split/coalescing, snapshot fencing and consumed-credit regression.
 //! Real hc under-load convergence is covered by e2e_herdr_drift.py.
 use std::time::Duration;
-use prim::server::{self,Backend};
+use vqro::server::{self,Backend};
 #[tokio::test(flavor="multi_thread",worker_threads=4)]
 async fn event_credit_waits_for_core_consumption_and_advances_fixture() {
     let dir=tempfile::Builder::new().prefix("pe").tempdir_in("/tmp").unwrap();

@@ -1,9 +1,9 @@
-"""Credited streams for prim_provider; byte bounds and ordering, no replay policy."""
+"""Credited streams for vqro_provider; byte bounds and ordering, no replay policy."""
 import asyncio
 import base64
 import binascii
 from collections import deque
-from prim_provider import MAX_DATA, ProviderError, integer, maybe_await, reason
+from vqro_provider import MAX_DATA, ProviderError, integer, maybe_await, reason
 
 
 class Stream:

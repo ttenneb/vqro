@@ -4,7 +4,7 @@ use serde_json::json;
 
 pub(super) struct Probe { path: Option<PathBuf>, start: Instant, frames: u64, stream_bytes: u64, draw: Duration, max: Duration, buckets: VecDeque<(u64,u64,u64,u64)>, closures: VecDeque<serde_json::Value> }
 impl Probe {
-    pub fn from_env() -> Self { Self { path: std::env::var_os("PRIM_TUI_PROBE").map(PathBuf::from), start: Instant::now(), frames:0, stream_bytes:0, draw:Duration::ZERO, max:Duration::ZERO, buckets:VecDeque::new(), closures:VecDeque::new() } }
+    pub fn from_env() -> Self { Self { path: std::env::var_os("VQRO_TUI_PROBE").map(PathBuf::from), start: Instant::now(), frames:0, stream_bytes:0, draw:Duration::ZERO, max:Duration::ZERO, buckets:VecDeque::new(), closures:VecDeque::new() } }
     pub fn incoming(&mut self, message: &crate::rpc::Incoming) {
         if self.path.is_none() { return; }
         if let crate::rpc::Incoming::Notification { method, params } = message {
@@ -38,9 +38,9 @@ impl Probe {
     }
     fn write(&self) {
         if let Some(path)=&self.path {
-            let report=json!({"kind":"prim.tui-probe","version":1,"elapsed_s":self.start.elapsed().as_secs_f64(),"frames":self.frames,"received_stream_bytes":self.stream_bytes,
+            let report=json!({"kind":"vqro.tui-probe","version":1,"elapsed_s":self.start.elapsed().as_secs_f64(),"frames":self.frames,"received_stream_bytes":self.stream_bytes,
                 "draw_total_ms":self.draw.as_secs_f64()*1000.,"draw_max_ms":self.max.as_secs_f64()*1000.,"bucket_columns":["second","total","background","interactive"],"frames_by_second":self.buckets,"stream_closures":self.closures});
-            if let Err(error)=std::fs::write(path,format!("{report}\n")) { eprintln!("prim: TUI probe report: {error}"); }
+            if let Err(error)=std::fs::write(path,format!("{report}\n")) { eprintln!("vqro: TUI probe report: {error}"); }
         }
     }
 }

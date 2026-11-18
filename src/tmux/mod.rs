@@ -1,4 +1,4 @@
-//! Standalone tmux backend library; no provider protocol or prim core dependency.
+//! Standalone tmux backend library; no provider protocol or vqro core dependency.
 mod client;
 pub mod osc;
 pub mod parser;

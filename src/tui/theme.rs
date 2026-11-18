@@ -28,7 +28,7 @@ pub struct Palette {
     pub ok: Color,
     pub warn: Color,
     pub error: Color,
-    /// Keyboard modes: the prompt line, the open prim badge, the filter.
+    /// Keyboard modes: the prompt line, the open vqro badge, the filter.
     pub prompt: Color,
     /// Borders of unfocused panes, rules, separators, the scrollbar track.
     pub border: Color,
@@ -40,7 +40,7 @@ pub struct Palette {
     pub selection_text: Option<Color>,
     /// Fill of neutral badges and unchecked chips.
     pub badge: Color,
-    /// Text drawn on a filled background: badges, the prim badge, the active page, checked chips.
+    /// Text drawn on a filled background: badges, the vqro badge, the active page, checked chips.
     pub badge_text: Color,
     /// Fill of plain (non-toggle) chips: a raised surface.
     pub surface: Color,

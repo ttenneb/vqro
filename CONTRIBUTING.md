@@ -1,6 +1,6 @@
 # Contributing
 
-Original contributions to prim are licensed under Apache-2.0, including the core, bundled extensions, SDKs and
+Original contributions to vqro are licensed under Apache-2.0, including the core, bundled extensions, SDKs and
 protocol specifications. See [LICENSE](LICENSE). Upstream third-party material retains its own terms and notices.
 
 Contributions use the **Developer Certificate of Origin 1.1 (DCO)**, not a Contributor License Agreement (CLA).
@@ -68,7 +68,7 @@ not an invented copyright holder. New missing-text licences without a reviewed l
 
 ## Name and official distributions
 
-Apache-2.0 does not grant trademark rights (section 6). The prim name/branding identify the project; modified
+Apache-2.0 does not grant trademark rights (section 6). The vqro name/branding identify the project; modified
 builds must not imply that they are official or endorsed. The maintainer designates official builds and the
 maintained extension repository. This does not restrict the copyright permissions in Apache-2.0 or claim a
 registered trademark. No public distribution or repository URL is established here.

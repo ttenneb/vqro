@@ -1,21 +1,21 @@
 #!/bin/bash
-# Opt-in real-backend TUI smoke: a private herdr-core, a private prim core (herdr via the default prim-herdr
+# Opt-in real-backend TUI smoke: a private herdr-core, a private vqro core (herdr via the default vqro-herdr
 # provider extension), and the real
-# `prim tui` in a private tmux harness, with a restricted PATH. Leaves nothing running.
-# Usage: tests/e2e_tui_smoke.sh <prim binary>
+# `vqro tui` in a private tmux harness, with a restricted PATH. Leaves nothing running.
+# Usage: tests/e2e_tui_smoke.sh <vqro binary>
 # Checks: new tab + input echo; input after a 30 MB output flood; core restart -> reconnect, reattach and
 # input; quit while the core cannot start; no leftover processes (tmux servers matched by socket path).
 set -u
-SOURCE_P=${1:?prim binary}
+SOURCE_P=${1:?vqro binary}
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 HC=$HOME/.local/bin/herdr-core
 R=$(mktemp -d /tmp/ptsXXXXXX)
 mkdir -p "$R"/{home,st,cfg,xst,run,bin,ext}
 chmod 700 "$R/run"
-P="$R/bin/prim"
+P="$R/bin/vqro"
 cp "$SOURCE_P" "$P"
 # Provider programs stay next to the private install path after the backend migration.
-for program in prim-herdr prim-tmux; do
+for program in vqro-herdr vqro-tmux; do
   [ ! -x "$(dirname "$SOURCE_P")/$program" ] || ln -s "$(dirname "$SOURCE_P")/$program" "$R/bin/$program"
 done
 cp "$REPO"/extensions/*.py "$REPO"/extensions/defaults.json "$R/ext/"
@@ -23,7 +23,7 @@ cp -R "$REPO"/extensions/pi_bridge "$R/ext/"
 for t in python3 sh cat ls env head yes; do ln -sf "$(command -v $t)" "$R/bin/$t"; done
 HC_ARGV=$(python3 -c 'import json, shlex, sys; print(shlex.quote(json.dumps([sys.argv[1], "connect"])))' "$HC")
 cat > "$R/env.sh" <<EOF
-export HOME=$R/home PATH=$R/bin TERM=xterm-256color SHELL=/bin/sh PRIM_STATE_DIR=$R/st PRIM_SOCKET=$R/p.sock PRIM_EXTENSIONS_DIR=$R/ext XDG_CONFIG_HOME=$R/cfg XDG_STATE_HOME=$R/xst XDG_RUNTIME_DIR=$R/run HC_SESSION=smoke HC_SOCKET=$R/h.sock PRIM_HERDR=$HC_ARGV
+export HOME=$R/home PATH=$R/bin TERM=xterm-256color SHELL=/bin/sh VQRO_STATE_DIR=$R/st VQRO_SOCKET=$R/p.sock VQRO_EXTENSIONS_DIR=$R/ext XDG_CONFIG_HOME=$R/cfg XDG_STATE_HOME=$R/xst XDG_RUNTIME_DIR=$R/run HC_SESSION=smoke HC_SOCKET=$R/h.sock VQRO_HERDR=$HC_ARGV
 EOF
 printf '. %s/env.sh; exec %s tui\n' "$R" "$P" > "$R/tui.sh"
 T="/usr/bin/tmux -S $R/t.sock -f /dev/null"
@@ -32,7 +32,7 @@ check() { if [ "$2" = 1 ]; then echo "PASS $1"; pass=$((pass+1)); else echo "FAI
 seen() { $T capture-pane -p | grep -c -- "$1"; }
 # Poll for screen text up to $2 seconds (bounded; replaces fixed sleeps that assumed an unloaded machine).
 await() { local end=$((SECONDS + $2)); until [ "$(seen "$1")" -ge 1 ]; do [ $SECONDS -ge $end ] && return 1; sleep 0.5; done; }
-cores() { for pid in $(pgrep -f "$P serve"); do tr '\0' '\n' < /proc/$pid/environ 2>/dev/null | grep -q "PRIM_SOCKET=$R/p.sock" && echo $pid; done; }
+cores() { for pid in $(pgrep -f "$P serve"); do tr '\0' '\n' < /proc/$pid/environ 2>/dev/null | grep -q "VQRO_SOCKET=$R/p.sock" && echo $pid; done; }
 # Everything of this run: environment mentions $R, or (tmux renames its server) a unix socket under $R.
 ours() {
   python3 - "$R" <<'PY'
@@ -77,7 +77,7 @@ $T send-keys -l 'echo smoke-B'; $T send-keys Enter; sleep 2
 check "core restart: reconnect + reattach + input" $([ "$(seen smoke-B)" -ge 1 ] && echo 1 || echo 0)
 # Reinstall only this run's private executable, leaving the open UI on an unlinked inode.
 ui_pid=$($T display-message -p '#{pane_pid}')
-cp "$SOURCE_P" "$R/bin/prim-new"; mv "$R/bin/prim-new" "$P"
+cp "$SOURCE_P" "$R/bin/vqro-new"; mv "$R/bin/vqro-new" "$P"
 check "replacement leaves old TUI inode deleted" $([ "$(readlink /proc/$ui_pid/exe)" = "$P (deleted)" ] && echo 1 || echo 0)
 for pid in $(cores); do kill "$pid"; done; sleep 5
 $T send-keys -l 'echo smoke-reinstalled'; $T send-keys Enter; sleep 2
@@ -87,7 +87,7 @@ chmod 500 "$R/st"; for pid in $(cores); do kill "$pid"; done; sleep 4
 $T send-keys C-g; sleep 0.4; $T send-keys q; sleep 2
 check "quit while core cannot start" $($T list-sessions >/dev/null 2>&1 && echo 0 || echo 1)
 chmod 700 "$R/st"
-# Cleanup: tmux, prim cores, private hc terminals and core.
+# Cleanup: tmux, vqro cores, private hc terminals and core.
 $T kill-server 2>/dev/null; for pid in $(cores); do kill "$pid"; done; sleep 1
 env -i bash -c ". $R/env.sh; for t in \$($HC ls --all --json | python3 -c 'import json,sys; print(\" \".join(x[\"address\"] for x in json.load(sys.stdin)[\"terminals\"]))'); do $HC kill \$t >/dev/null 2>&1; $HC rm \$t >/dev/null 2>&1; done; $HC server stop >/dev/null"
 for _ in 1 2 3 4 5; do [ -z "$(ours)" ] && break; sleep 1; done

@@ -6,7 +6,7 @@ import queue
 import threading
 
 
-from prim_display import label, plain, tail
+from vqro_display import label, plain, tail
 
 
 def message_text(message):

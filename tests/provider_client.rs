@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use base64::Engine;
-use prim::provider_client::{Config, Initial, Outcome, Provider, ProviderError, Request, StreamCommand};
+use vqro::provider_client::{Config, Initial, Outcome, Provider, ProviderError, Request, StreamCommand};
 use serde_json::{json, Map, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream, ReadHalf, WriteHalf};
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -53,7 +53,7 @@ async fn registered() -> (Provider, UnboundedReceiver<Request>, Core) {
     assert_eq!(hello["method"], "hello");
     assert_eq!(hello["params"]["extension"], "tmux");
     assert!(hello["params"].get("generation").is_none());
-    core.reply(&hello, json!({"server": "prim"})).await;
+    core.reply(&hello, json!({"server": "vqro"})).await;
     let reg = core.recv().await;
     assert_eq!(reg["method"], "provider.register");
     assert_eq!(reg["params"]["name"], "tmux@test");

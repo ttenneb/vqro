@@ -39,7 +39,7 @@ if "--env-file" in sys.argv:
     with open(sys.argv[sys.argv.index("--env-file")+1],"w") as output:
         json.dump({"env":dict(os.environ),"settings":settings.origin if settings else None},output)
 
-trace({"pid": os.getpid(), "bootstrap_in_child": "PRIM_BRIDGE_TOKEN" in os.environ,
+trace({"pid": os.getpid(), "bootstrap_in_child": "VQRO_BRIDGE_TOKEN" in os.environ,
        "herdr_in_child": any(key.startswith("HERDR_") for key in os.environ)})
 
 

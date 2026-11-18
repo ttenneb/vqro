@@ -5,29 +5,29 @@
 use std::path::Path;
 use std::time::Duration;
 
-use prim::client;
-use prim::provider_client::{Config, Outcome, Provider, Request};
-use prim::rpc::Peer;
-use prim::server::{start, Backend};
+use vqro::client;
+use vqro::provider_client::{Config, Outcome, Provider, Request};
+use vqro::rpc::Peer;
+use vqro::server::{start, Backend};
 use serde_json::{json, Value};
 
 fn defaults(dir: &Path) {
     std::fs::write(dir.join("defaults.json"), json!({"version": 2, "extensions": [
         {"name": "tabs", "argv": ["python3", "tabs.py"]},
         {"name": "panes", "argv": ["python3", "panes.py"]},
-        {"name": "herdr", "argv": ["prim-herdr", "--name", "herdr"], "kind": "provider", "default": true, "since": 2, "description": "herdr-core"},
-        {"name": "tmux", "argv": ["prim-tmux", "--name", "tmux"], "kind": "provider", "enabled": false, "since": 2, "description": "private tmux"},
+        {"name": "herdr", "argv": ["vqro-herdr", "--name", "herdr"], "kind": "provider", "default": true, "since": 2, "description": "herdr-core"},
+        {"name": "tmux", "argv": ["vqro-tmux", "--name", "tmux"], "kind": "provider", "enabled": false, "since": 2, "description": "private tmux"},
     ]}).to_string()).unwrap();
 }
 
 /// Defaults migration uses safe mode; manual-provider cases use normal mode with no declarations.
-fn core(root: &Path, name: &str, defaults_dir: Option<&Path>) -> (prim::core::Shared, std::path::PathBuf) {
+fn core(root: &Path, name: &str, defaults_dir: Option<&Path>) -> (vqro::core::Shared, std::path::PathBuf) {
     let socket = root.join(format!("{name}.sock"));
     let core = start(socket.clone(), root.join("state"), defaults_dir.is_some(), Backend::Extensions, defaults_dir.map(Path::to_path_buf)).unwrap();
     (core, socket)
 }
 
-fn entries(core: &prim::core::Shared) -> Value {
+fn entries(core: &vqro::core::Shared) -> Value {
     core.lock().unwrap().snapshot()["entries"].clone()
 }
 
@@ -52,10 +52,10 @@ async fn first_run_installs_all_defaults_with_provider_fields() {
         assert!(e[format!("extension/{name}")].is_object(), "{name}");
     }
     let herdr = &e["extension/herdr"]["value"];
-    assert_eq!((herdr["kind"].as_str(), herdr["default"].as_bool(), herdr["argv"][0].as_str()), (Some("provider"), Some(true), Some("prim-herdr")));
+    assert_eq!((herdr["kind"].as_str(), herdr["default"].as_bool(), herdr["argv"][0].as_str()), (Some("provider"), Some(true), Some("vqro-herdr")));
     assert_eq!(e["extension/tmux"]["value"]["enabled"], false);
     assert_eq!(e["extension/tmux"]["value"]["description"], "private tmux");
-    assert_eq!(e["doc/prim/defaults"]["value"]["version"], 2);
+    assert_eq!(e["doc/vqro/defaults"]["value"]["version"], 2);
 }
 
 #[tokio::test]
@@ -71,9 +71,9 @@ async fn existing_installs_gain_new_defaults_once_and_removals_stick() {
         // As written by cores before versioned defaults: no `version` in the record.
         c.call("workspace.apply", json!({"ops": [{"op": "delete", "key": "extension/panes"},
             {"op": "set", "key": "extension/tabs", "value": {"argv": ["python3", "my-tabs.py"]}},
-            {"op": "set", "key": "doc/prim/defaults", "value": {"installed": ["tabs", "panes"], "from": d.path().to_string_lossy()}}]})).await.unwrap();
-        assert!(entries(&core)["doc/prim/defaults"]["value"]["version"].is_null());
-        prim::server::shutdown(&core).await;
+            {"op": "set", "key": "doc/vqro/defaults", "value": {"installed": ["tabs", "panes"], "from": d.path().to_string_lossy()}}]})).await.unwrap();
+        assert!(entries(&core)["doc/vqro/defaults"]["value"]["version"].is_null());
+        vqro::server::shutdown(&core).await;
     }
     defaults(d.path());
     let (core2, socket2) = core(root.path(), "v2", Some(d.path()));
@@ -81,12 +81,12 @@ async fn existing_installs_gain_new_defaults_once_and_removals_stick() {
     assert!(e["extension/herdr"].is_object() && e["extension/tmux"].is_object(), "new defaults added to an existing install");
     assert!(e["extension/panes"].is_null(), "an extension the user removed is not re-added");
     assert_eq!(e["extension/tabs"]["value"]["argv"][1], "my-tabs.py", "existing entries are left as they are");
-    assert_eq!(e["doc/prim/defaults"]["value"]["version"], 2);
+    assert_eq!(e["doc/vqro/defaults"]["value"]["version"], 2);
     let (c, _, _) = client::connect(&socket2, "t").await.unwrap();
     let txns = c.call("workspace.history", json!({"limit": 100})).await.unwrap()["txns"].as_array().unwrap().len();
     // Removing a migrated default sticks too, and a restart changes nothing (idempotent).
     c.call("workspace.apply", json!({"ops": [{"op": "delete", "key": "extension/tmux"}]})).await.unwrap();
-    prim::server::shutdown(&core2).await;
+    vqro::server::shutdown(&core2).await;
     let (core3, socket3) = core(root.path(), "v3", Some(d.path()));
     assert!(entries(&core3)["extension/tmux"].is_null());
     let (c3, _, _) = client::connect(&socket3, "t").await.unwrap();
@@ -130,7 +130,7 @@ async fn spawns_go_to_the_extension_marked_default_whatever_registers_first() {
     let (core, socket) = core(root.path(), "a", None);
     let (c, _, _) = client::connect(&socket, "t").await.unwrap();
     c.call("workspace.apply", json!({"ops": [{"op": "set", "key": "extension/herdr",
-        "value": {"argv": ["prim-herdr"], "kind": "provider", "default": true, "enabled": false}}]})).await.unwrap();
+        "value": {"argv": ["vqro-herdr"], "kind": "provider", "default": true, "enabled": false}}]})).await.unwrap();
     let (tx, mut seen) = tokio::sync::mpsc::unbounded_channel();
     // Registration order: another backend first, then the default one.
     let _tmux = provider(&socket, "tmux", "backend", None, tx.clone()).await;
@@ -164,12 +164,12 @@ async fn every_spawn_gets_the_core_endpoint_but_not_a_bridge_token() {
     let _noenv = provider(&socket, "noenv", "backend", Some(false), tx.clone()).await;
     spawn(&c, json!({"provider": "herdr", "argv": ["sh"], "env": {"A": "b"}})).await;
     let (_, args) = seen.recv().await.unwrap();
-    assert_eq!(args["env"]["PRIM_SOCKET"].as_str(), Some(socket.to_str().unwrap()));
+    assert_eq!(args["env"]["VQRO_SOCKET"].as_str(), Some(socket.to_str().unwrap()));
     assert_eq!(args["env"]["A"], "b");
-    assert_eq!(args["env"]["PRIM_SOCKET_SOURCE"],"terminal");
-    assert!(args["env"].get("PRIM_BRIDGE_TOKEN").is_none(), "the bridge credential stays opt-in");
-    spawn(&c, json!({"provider": "herdr", "argv": ["sh"], "env": {"PRIM_SOCKET": "/custom"}})).await;
-    assert_eq!(seen.recv().await.unwrap().1["env"]["PRIM_SOCKET"], "/custom", "an explicit value is kept");
+    assert_eq!(args["env"]["VQRO_SOCKET_SOURCE"],"terminal");
+    assert!(args["env"].get("VQRO_BRIDGE_TOKEN").is_none(), "the bridge credential stays opt-in");
+    spawn(&c, json!({"provider": "herdr", "argv": ["sh"], "env": {"VQRO_SOCKET": "/custom"}})).await;
+    assert_eq!(seen.recv().await.unwrap().1["env"]["VQRO_SOCKET"], "/custom", "an explicit value is kept");
     // A provider that cannot pass an environment still spawns (without it).
     spawn(&c, json!({"provider": "noenv", "argv": ["sh"]})).await;
     let (_, args) = seen.recv().await.unwrap();

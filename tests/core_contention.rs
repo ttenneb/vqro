@@ -1,5 +1,5 @@
 //! In-process, isolated target-scale lifecycle regression/profile; no backend processes.
-use prim::{core::Core,store::{Store,Op},adapter::{AdapterHandle,AdapterEvent,ResourceFacts},provider::ProviderInfo};
+use vqro::{core::Core,store::{Store,Op},adapter::{AdapterHandle,AdapterEvent,ResourceFacts},provider::ProviderInfo};
 use serde_json::json;
 use std::time::Instant;
 fn install(c:&mut Core,name:&str,role:&str) {

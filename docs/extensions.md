@@ -18,7 +18,7 @@ mode. A missing/bad manifest affects information, not whether the program is per
   An extension's settings button comes from its manifest, not from a hard-coded name.
 - On/off edits the normal enabled declaration. If Settings is explicitly run in safe mode, on/off instead uses
   the existing session-only recovery allowance; saved enabled declarations remain unchanged.
-- Turning Settings itself off stops that page. The prim badge/prefix still reaches commands and recovery,
+- Turning Settings itself off stops that page. The vqro badge/prefix still reaches commands and recovery,
   including enabling it again. The prefix remains available inside the popup and while searching.
 - There is no in-app log viewer yet. The detail reports the core-host log path for external inspection.
 
@@ -30,7 +30,7 @@ panel enhancement in `spec/core-protocol.md`; other extensions can use exactly t
 Each bundled extension has UTF-8 JSON at `extensions/manifests/<name>.json`. The supervisor looks for
 `<extensions directory>/manifests/<declaration name>.json` by convention. An explicit declaration field
 `manifest: "some/path.json"` selects a different file: absolute paths are used as supplied, relative paths are
-relative to the core's extensions directory (`PRIM_EXTENSIONS_DIR`). These are core-host filesystem paths, not
+relative to the core's extensions directory (`VQRO_EXTENSIONS_DIR`). These are core-host filesystem paths, not
 endpoints and not paths on a terminal's execution host.
 
 Example:

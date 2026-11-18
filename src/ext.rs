@@ -1,5 +1,5 @@
-//! Extension supervisor (D15). prim runs its own extensions as plain processes declared by
-//! `extension/<name>` entries: started with `PRIM_SOCKET` and `PRIM_EXTENSION`, restarted after a
+//! Extension supervisor (D15). vqro runs its own extensions as plain processes declared by
+//! `extension/<name>` entries: started with `VQRO_SOCKET` and `VQRO_EXTENSION`, restarted after a
 //! crash within a budget (3 crashes in 5 minutes), then marked `failed` until changed or restarted.
 //! Changing the entry replaces the extension live. Terminals and agents are never touched: they
 //! belong to backends.
@@ -16,7 +16,7 @@ use crate::core::Shared;
 const BUDGET: usize = 3;
 pub(crate) const CRASH_WINDOW: Duration = Duration::from_secs(300);
 const RESTART_DELAY: Duration = Duration::from_millis(500);
-// Cooperative providers (prim-tmux) allow up to1s for their private backend to exit.
+// Cooperative providers (vqro-tmux) allow up to1s for their private backend to exit.
 // Leave a cleanup margin inside the supervisor's2s overall shutdown bound.
 const STOP_GRACE: Duration = Duration::from_millis(1500);
 
@@ -158,11 +158,11 @@ pub fn reconcile(core: &Shared) {
         };
         let mut cmd = Command::new(program);
         cmd.args(&argv[1..])
-            .env("PRIM_SOCKET", &socket)
-            .env_remove("PRIM_SOCKET_SOURCE")
-            .env("PRIM_EXTENSION", &name)
-            .env("PRIM_EXTENSION_TOKEN", &rt.token)
-            .env("PRIM_EXTENSION_LIFETIME", "stdin")
+            .env("VQRO_SOCKET", &socket)
+            .env_remove("VQRO_SOCKET_SOURCE")
+            .env("VQRO_EXTENSION", &name)
+            .env("VQRO_EXTENSION_TOKEN", &rt.token)
+            .env("VQRO_EXTENSION_LIFETIME", "stdin")
             .stdin(std::process::Stdio::piped())
             .kill_on_drop(true);
         if let Some(cwd) = cwd {
@@ -288,7 +288,7 @@ pub async fn shutdown(core: &Shared) {
         for rt in core.lock().unwrap().exts.values_mut() { rt.pid = None; if rt.status != "failed" { rt.status = "stopped".into(); } }
     }
     if joined.is_err() {
-        eprintln!("prim: extension shutdown deadline; cleanup unconfirmed");
+        eprintln!("vqro: extension shutdown deadline; cleanup unconfirmed");
         for task in &tasks { task.abort(); }
         for task in tasks { let _ = task.await; }
     }

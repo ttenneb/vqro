@@ -1,6 +1,6 @@
 //! Connection-owned commands cannot outlive their owner or exhaust snapshot metadata.
 use std::time::Duration;
-use prim::{client,server::{self,Backend}};
+use vqro::{client,server::{self,Backend}};
 use serde_json::json;
 
 #[tokio::test]
@@ -26,10 +26,10 @@ async fn command_metadata_admission_counts_escaped_bytes_and_replacement_credit(
     assert_eq!(error.kind(),"overloaded");assert!(!core.lock().unwrap().commands.contains_key("budget.c"));
     peer.call("command.register",json!({"name":"budget.a","title":"short"})).await.unwrap();
     peer.call("command.register",json!({"name":"budget.c","title":title})).await.unwrap();
-    let list=peer.call("command.list",json!({})).await.unwrap();assert!(prim::limits::encoded_bytes(&list["commands"])<=1024*1024);
+    let list=peer.call("command.list",json!({})).await.unwrap();assert!(vqro::limits::encoded_bytes(&list["commands"])<=1024*1024);
     let oversized=peer.call("command.register",json!({"name":"budget.too-large","title":"\0".repeat(200*1024)})).await.unwrap_err();
     assert_eq!(oversized.kind(),"too_large");
     let snapshot=peer.call("workspace.snapshot",json!({})).await.unwrap();
-    assert!(prim::limits::encoded_bytes(&snapshot["commands"])<=1024*1024,"command names/titles cannot consume the recovery envelope");
+    assert!(vqro::limits::encoded_bytes(&snapshot["commands"])<=1024*1024,"command names/titles cannot consume the recovery envelope");
     server::shutdown(&core).await;
 }

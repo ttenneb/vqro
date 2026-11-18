@@ -1,6 +1,6 @@
-# Working on prim
+# Working on vqro
 
-**prim is a working prototype, and fluid.** It runs daily over herdr-core, but its protocols, extension APIs and
+**vqro is a working prototype, and fluid.** It runs daily over herdr-core, but its protocols, extension APIs and
 UI are expected to change as we learn. Prefer clear, simple, well-explained code over premature stability; fix
 forward; remove what proves wrong. Nothing is frozen until a decision says so.
 
@@ -11,8 +11,8 @@ Read `README.md`, then `docs/decisions.md` (D14 is the center; D15–D19 shape e
 - **The center (D14).** One lean, standardized layer of primitives over any multiplexer and agent runtime.
   Coordination is workspace behaviour, not a separate system. Judge a change by: is it lean, standardized, does it
   keep adding a backend or runtime quick, and could an agent make it using only public primitives?
-- **Backends own execution (D14).** prim hosts no terminals or agents and builds no persistence or lifetime
-  guarantees; adapters declare capabilities and never compensate. prim does supervise its own extensions (D15).
+- **Backends own execution (D14).** vqro hosts no terminals or agents and builds no persistence or lifetime
+  guarantees; adapters declare capabilities and never compensate. vqro does supervise its own extensions (D15).
 - **No policy in core (D0); opinions are extensions (D17).** Anything that is a choice about how to work (tabs,
   splits, sidebar, settings, themes, keymaps, icons) is an extension using public primitives. The core and
   clients keep only mechanism and recovery, which must work with every extension broken or in safe mode.
@@ -21,7 +21,7 @@ Read `README.md`, then `docs/decisions.md` (D14 is the center; D15–D19 shape e
   `requires`.
 - **Workspace state changes only through transactions** (validated, all or nothing, history, revert). Derived,
   frequently changing UI goes through live content (`view.publish`), never transactions.
-- **Recovery is sacred (D15).** The `prim` badge and prefix menu always reach commands, undo, reset layout, safe
+- **Recovery is sacred (D15).** The `vqro` badge and prefix menu always reach commands, undo, reset layout, safe
   mode and quit, whatever the keymap; bad settings fall back (prefix → Ctrl-g, theme → built-in palette).
 - **Report, don't promise (D10); no replay.** Effects say what the layer below said happened. Nothing resends
   input to an agent after a restart.
@@ -37,22 +37,22 @@ Read `README.md`, then `docs/decisions.md` (D14 is the center; D15–D19 shape e
 ## How we work
 - **Run `scripts/check.sh full` before installing** (`quick` while iterating): one gate for every suite, private and receipted.
 - **Small, clean commits** with a why in the message; zero warnings; `cargo test` passing; tests for new core or
-  store behaviour. Stdlib-only Python for extensions, using `extensions/prim_ext.py`.
-- **Parallel streams** run on git worktrees (`git worktree add -b <stream> ../prim-<stream>`), one branch each,
+  store behaviour. Stdlib-only Python for extensions, using `extensions/vqro_ext.py`.
+- **Parallel streams** run on git worktrees (`git worktree add -b <stream> ../vqro-<stream>`), one branch each,
   reviewed and merged into `main` by a coordinator. Stream agents never merge, push, or touch the live install.
-- **Test against a scratch prim, never the live one:**
-  `env -u PRIM_SOCKET_SOURCE PRIM_STATE_DIR=$PWD/.run/st PRIM_SOCKET=$PWD/.run/p.sock PRIM_EXTENSIONS_DIR=$PWD/extensions ./target/debug/prim serve --fake &`
-  Terminal-injected `PRIM_SOCKET` carries `PRIM_SOCKET_SOURCE=terminal`; setting `PRIM_STATE_DIR` then selects the
+- **Test against a scratch vqro, never the live one:**
+  `env -u VQRO_SOCKET_SOURCE VQRO_STATE_DIR=$PWD/.run/st VQRO_SOCKET=$PWD/.run/p.sock VQRO_EXTENSIONS_DIR=$PWD/extensions ./target/debug/vqro serve --fake &`
+  Terminal-injected `VQRO_SOCKET` carries `VQRO_SOCKET_SOURCE=terminal`; setting `VQRO_STATE_DIR` then selects the
   scratch endpoint instead of that inherited one. Clear the marker only for an intentional explicit endpoint/state pair.
   (drop `--fake` to use herdr-core, and remove every terminal you create). `.run/` is ignored scratch space.
   **`--fake` does not isolate you from the user's real herdr-core:** the default `herdr` provider extension still
   starts and connects to the user's default herdr-core (and any `hc` call auto-starts one). Always also set a private
-  `XDG_RUNTIME_DIR`, `HC_SOCKET` and `HC_SESSION`, or `PRIM_HERDR='["/bin/false"]'` when you only need the fake
+  `XDG_RUNTIME_DIR`, `HC_SOCKET` and `HC_SESSION`, or `VQRO_HERDR='["/bin/false"]'` when you only need the fake
   backend, e.g. `env -i HOME=$PWD/.run/home PATH=$PATH XDG_RUNTIME_DIR=$PWD/.run/xrun HC_SOCKET=$PWD/.run/h.sock
-  HC_SESSION=scratch PRIM_STATE_DIR=... PRIM_SOCKET=... PRIM_EXTENSIONS_DIR=... ./target/debug/prim serve --fake`.
-- **UI checks:** a pty harness (`.run/harness.py`, kept outside git) runs `prim tui` in a pty, sends keys and SGR
+  HC_SESSION=scratch VQRO_STATE_DIR=... VQRO_SOCKET=... VQRO_EXTENSIONS_DIR=... ./target/debug/vqro serve --fake`.
+- **UI checks:** a pty harness (`.run/harness.py`, kept outside git) runs `vqro tui` in a pty, sends keys and SGR
   mouse clicks, and renders the screen through tmux; search raw output bytes for exact colours and glyphs.
-- **Install for daily use:** `scripts/dev-install.sh` (release build to `~/.local/bin/prim`, extensions to
-  `~/.local/share/prim/extensions`, then restarts the core; open UIs reconnect and restart into the new build).
+- **Install for daily use:** `scripts/dev-install.sh` (release build to `~/.local/bin/vqro`, extensions to
+  `~/.local/share/vqro/extensions`, then restarts the core; open UIs reconnect and restart into the new build).
 - Record findings in `docs/research/`, binding choices in `docs/decisions.md`, progress in `docs/build-plan.md`,
   direction in `docs/roadmap.md`. Commit only when asked.

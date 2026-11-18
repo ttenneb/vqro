@@ -1,10 +1,10 @@
-# prim: architecture
+# vqro: architecture
 
 Status: **implemented working prototype, and fluid**, revised 2026-11-17. This replaces the 2026-11-16
 in-process-adapter architecture. The living contracts are `spec/core-protocol.md` and the implemented wire section
 9 of `spec/provider-v0.md`. Earlier sketches are historical, not alternative APIs.
 
-prim is one lean, standardized layer of workspace primitives over backends and agent runtimes (D14). Humans and
+vqro is one lean, standardized layer of workspace primitives over backends and agent runtimes (D14). Humans and
 agents use the same public operations. Coordination is workspace behavior composed from those primitives, not a
 second authority system. No contract is called stable before two implementations exercise it.
 
@@ -14,11 +14,11 @@ second authority system. No contract is called stable before two implementations
 Clients (Rust TUI now; other clients later)
   render terminal streams and declarative panels; own local focus/selection/scroll
                     |
-prim core: transactions/history/undo, commands/bindings, resource identities,
+vqro core: transactions/history/undo, commands/bindings, resource identities,
   provider registry, bounded events/live content, capability routing and effect outcomes
           |                                      |
 supervised extension processes           external providers over core protocol
-  tabs, panes, settings, sidebar, ...       prim-herdr, prim-tmux, runtime bridges
+  tabs, panes, settings, sidebar, ...       vqro-herdr, vqro-tmux, runtime bridges
                                                  |
                                 backends own terminals/programs/persistence
                                 runtime bridges use backend-owned execution
@@ -27,7 +27,7 @@ supervised extension processes           external providers over core protocol
 The core **does supervise its own extensions** (D15): process start/stop, lifetime channel, crash budget and
 replacement on declaration changes. It does **not** host workspace terminals, agent processes or their lifetime
 guarantees. A core/provider restart reconnects to facts; it never replays agent input or invents a backend's
-capabilities. Explicit in-process adapters remain for tests/embedders, not the normal `prim serve` architecture.
+capabilities. Explicit in-process adapters remain for tests/embedders, not the normal `vqro serve` architecture.
 
 ## What exists now
 
@@ -37,7 +37,7 @@ capabilities. Explicit in-process adapters remain for tests/embedders, not the n
 | Workspace | Validated durable candidate-first transactions, history/revert, D24 original-invoker attribution, serialized bounded commit admission | `src/store.rs`, `src/commit.rs`, `src/invocation.rs` |
 | Providers | External backend/runtime registration, generation/source fencing, inventory chunks, capabilities, forwarded effects and credited streams | `src/provider.rs`, `src/provider_wire.rs`, `src/provider_client.rs` |
 | Identity/facts | Indexed active identity map with durable monotonic id counter; batched inventory replacement; observed availability and explicit retirement | `src/provider.rs`, `src/core.rs`, `src/resource_admission.rs` |
-| Backend implementations | `prim-herdr` over hc framing; `prim-tmux` over its separate native server; fake backend/provider fixtures | `src/bin/prim-herdr.rs`, `src/bin/prim-tmux.rs`, `src/adapter/`, `src/tmux/` |
+| Backend implementations | `vqro-herdr` over hc framing; `vqro-tmux` over its separate native server; fake backend/provider fixtures | `src/bin/vqro-herdr.rs`, `src/bin/vqro-tmux.rs`, `src/adapter/`, `src/tmux/` |
 | Pi integration | Backend-owned bridge process driving Pi RPC; durable bootstrap/resume binding and runtime resources; fake-Pi E2Es require no model calls | `extensions/pi_bridge/`, `src/bridge_tokens.rs` |
 | Extensions | Supervised declarations, static manifests, versioned defaults, live replacement/crash diagnostics and empty-start safe-mode recovery | `src/ext.rs`, `src/manifest.rs`, `extensions/` |
 | TUI | Terminal VT rendering, layouts/tabs/splits, generic panels/list-detail, menus/popups, mouse, themes/icons/keymaps, recovery prefix and reinstall re-exec | `src/tui/` |
@@ -49,7 +49,7 @@ natively support; raw input, exit codes, history/repaint and capability paramete
 
 ## State and observation
 
-- Workspace entries are authoritative prim-owned configuration/layout. Changes go through transactions, with
+- Workspace entries are authoritative vqro-owned configuration/layout. Changes go through transactions, with
   validation, persistence and undo. User-triggered extension writes carry actual writer plus proven original
   invoker (D24); autonomous extension updates remain outside default user undo.
 - Resource facts are backend observations. Identity is `(provider, instance, ref, incarnation)`. A durable
@@ -77,7 +77,7 @@ panel data. Settings' searchable list/detail is the same optional capability ano
 are static descriptive data, not an installer, permission system or dependency solver (`extensions.md`).
 
 Safe mode starts no extensions/providers automatically. The built-in chooser gives explicit session-only
-allowances; normal enabled declarations are unchanged. The prim badge/prefix still reaches commands, undo, reset,
+allowances; normal enabled declarations are unchanged. The vqro badge/prefix still reaches commands, undo, reset,
 safe mode and quit with every extension broken. Bad key/theme settings fall back to built-ins. Core shutdown stops
 extension/provider links in order, not backend-owned terminal execution (D22).
 

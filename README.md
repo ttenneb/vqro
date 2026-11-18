@@ -1,38 +1,39 @@
-# prim
+# vqro
 
 One lean, standardized layer of workspace primitives over any multiplexer and any agent runtime. Humans and agents use
 the same primitives to build and change their agent workspace; coordination is workspace behaviour too. Backends
-(herdr-core, Rex, tmux, Zellij, ...) own execution; prim adapts to them through thin adapters that declare capabilities.
+(herdr-core, Rex, tmux, Zellij, ...) own execution; vqro adapts to them through thin adapters that declare capabilities.
 
 Status: **a working prototype, and fluid.** It is usable daily over herdr-core, but protocols, extension APIs and
 UI will keep changing as we learn (`docs/roadmap.md` for direction, `docs/build-plan.md` for the build log).
 
 ## Licence and contributions
 
-All original prim material—core, bundled extensions, SDKs, documentation and protocol specifications—is licensed
+All original vqro material—core, bundled extensions, SDKs, documentation and protocol specifications—is licensed
 under **Apache-2.0**. See [LICENSE](LICENSE) and [NOTICE](NOTICE). Dependencies and other third-party material keep
 their own terms; [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) is the offline-generated Cargo notice inventory.
-Contributions use [DCO sign-off, no CLA](CONTRIBUTING.md). Apache-2.0 grants no trademark rights: the prim
+Contributions use [DCO sign-off, no CLA](CONTRIBUTING.md). Apache-2.0 grants no trademark rights: the vqro
 name/branding, official builds and maintained extension repository identify the project, not every modified build.
+The final name is **vqro** (D27); see [TRADEMARKS.md](TRADEMARKS.md).
 
 ## Install and run
 
 ```sh
-./scripts/dev-install.sh        # release build to ~/.local/bin/prim, extensions to ~/.local/share/prim/extensions
-prim tui                        # starts the core in the background if needed (herdr-core must be installed)
-prim status                     # core, extensions and connected UIs (flags out-of-date UIs)
-prim stop                       # stop the core; terminals keep running in herdr-core
+./scripts/dev-install.sh        # release build to ~/.local/bin/vqro, extensions to ~/.local/share/vqro/extensions
+vqro tui                        # starts the core in the background if needed (herdr-core must be installed)
+vqro status                     # core, extensions and connected UIs (flags out-of-date UIs)
+vqro stop                       # stop the core; terminals keep running in herdr-core
 ```
 
-In the UI, everything starts from the prefix (Ctrl-g by default, rebindable) or by clicking the `prim` badge:
+In the UI, everything starts from the prefix (Ctrl-g by default, rebindable) or by clicking the `vqro` badge:
 `n` new tab, `h`/`v` split, `x` close pane, `z` zoom, `s` sidebar, `,` settings, `:` all commands, `u` undo,
-`!` safe mode, `q` quit. Settings has pages for extensions, interface, themes, keys (profiles: prim, tmux,
+`!` safe mode, `q` quit. Settings has pages for extensions, interface, themes, keys (profiles: vqro, tmux,
 screen) and more. The [Extensions guide](docs/extensions.md) covers the searchable catalogue, detail/actions and static manifests.
-Agents and scripts drive the same primitives with `prim call <method> '<json>'` and
-`prim run <command> '<json args>'`. Reinstalling restarts the core and any open UI restarts into the new build.
+Agents and scripts drive the same primitives with `vqro call <method> '<json>'` and
+`vqro run <command> '<json args>'`. Reinstalling restarts the core and any open UI restarts into the new build.
 
-Development: `cargo test`; `.run/harness.py` (ignored) drives `prim tui` in a pty for UI checks against a scratch
-core (`PRIM_STATE_DIR`, `PRIM_SOCKET`, `PRIM_EXTENSIONS_DIR`, `prim serve --fake`).
+Development: `cargo test`; `.run/harness.py` (ignored) drives `vqro tui` in a pty for UI checks against a scratch
+core (`VQRO_STATE_DIR`, `VQRO_SOCKET`, `VQRO_EXTENSIONS_DIR`, `vqro serve --fake`).
 
 Protocol: `docs/spec/core-protocol.md`.
 

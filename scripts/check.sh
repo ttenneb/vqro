@@ -5,7 +5,7 @@
 #   scripts/check.sh full    quick + every opt-in private suite (tmux, providers, herdr-core), the e2e
 #                            scripts, TUI smoke/scale probe, the default scale profile, and a leftover check
 #
-# Every step runs under `env -i` with private paths: no live prim, hc/herdr-core or tmux server is
+# Every step runs under `env -i` with private paths: no live vqro, hc/herdr-core or tmux server is
 # touched (suites start their own private ones and stop only those). Prints a PASS/FAIL table and writes
 # a JSON receipt to $CHECK_RECEIPT (default <target>/check-receipt.json); step logs go next to it.
 # Needs: cargo, python3, /usr/bin/tmux 3.7b and ~/.local/bin/herdr-core for `full`.
@@ -18,20 +18,20 @@ case "$MODE" in quick|full) ;; *) echo "usage: $0 quick|full" >&2; exit 2 ;; esa
 # DBUS_SESSION_BUS_ADDRESS); under `env -i` they are recovered from /run/user/<uid> when that is ours.
 # Without a scope the leftover check is UNSCOPED: it only reports (it can match concurrent runs by other
 # agents), never kills and never fails the gate.
-if [ -z "${PRIM_CHECK_SCOPED:-}" ]; then
+if [ -z "${VQRO_CHECK_SCOPED:-}" ]; then
   if [ -z "${XDG_RUNTIME_DIR:-}" ] && [ -O "/run/user/$(id -u)" ]; then export XDG_RUNTIME_DIR=/run/user/$(id -u); fi
   if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && [ -S "${XDG_RUNTIME_DIR:-/nonexistent}/bus" ]; then
     export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
   fi
   if command -v systemd-run >/dev/null 2>&1 && systemd-run --user --scope --quiet --collect -- true >/dev/null 2>&1; then
-    PRIM_CHECK_SCOPED=1 exec systemd-run --user --scope --quiet --collect --unit="prim-check-$(date +%s)-$$" -- "$0" "$@"
+    VQRO_CHECK_SCOPED=1 exec systemd-run --user --scope --quiet --collect --unit="vqro-check-$(date +%s)-$$" -- "$0" "$@"
   fi
   echo "check: no systemd user scope (set XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS); the leftover check is UNSCOPED: report only, no kill, no failure" >&2
 fi
 CGROUP=
-if [ -n "${PRIM_CHECK_SCOPED:-}" ]; then
+if [ -n "${VQRO_CHECK_SCOPED:-}" ]; then
   CGROUP=$(sed -n 's/^0:://p' /proc/self/cgroup)
-  case "$CGROUP" in */prim-check-*.scope) ;; *) CGROUP= ;; esac
+  case "$CGROUP" in */vqro-check-*.scope) ;; *) CGROUP= ;; esac
 fi
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 TARGET=${CARGO_TARGET_DIR:-$REPO/target}
@@ -52,7 +52,7 @@ cd "$REPO" || exit 2
 snapshot() {
   python3 - "$RUN" <<'PY'
 import os, sys
-roots = [b"/tmp/pt", b"/tmp/pe2", b"/tmp/ppd", b"/tmp/pke", b"/tmp/phc", b"/tmp/pft", b"/tmp/ppe", b"/tmp/pev", b"/tmp/pscale", b"/tmp/prim-tmux",
+roots = [b"/tmp/pt", b"/tmp/pe2", b"/tmp/ppd", b"/tmp/pke", b"/tmp/phc", b"/tmp/pft", b"/tmp/ppe", b"/tmp/pev", b"/tmp/pscale", b"/tmp/vqro-tmux",
          b"/tmp/pnf", sys.argv[1].encode()]
 socks = {}
 for line in open("/proc/net/unix").read().splitlines()[1:]:
@@ -107,7 +107,7 @@ sys.exit(0 if ok else 1)'
 }
 
 scale_harness() {
-  "${CARGO[@]}" PRIM_SCALE_RUN_DIR="$RUN" PRIM_SCALE_RECEIPT="$LOGS/scale-receipt.json" \
+  "${CARGO[@]}" VQRO_SCALE_RUN_DIR="$RUN" VQRO_SCALE_RECEIPT="$LOGS/scale-receipt.json" \
     cargo test --release --test scale -- --ignored --exact scale_load --nocapture
 }
 
@@ -116,7 +116,7 @@ history_budget() {
 }
 
 tui_scale_probe() {
-  "${CARGO[@]}" cargo build --release --bin prim || return 1
+  "${CARGO[@]}" cargo build --release --bin vqro || return 1
   "${CLEAN[@]}" python3 tests/e2e_tui_scale.py "$TARGET" --receipt "$LOGS/tui-scale-receipt.json"
 }
 
@@ -151,11 +151,11 @@ PY
 }
 
 BEFORE=$(snapshot | cut -f1 | sort)
-if [ -n "${PRIM_CHECK_INJECT_LEAK:-}" ]; then
+if [ -n "${VQRO_CHECK_INJECT_LEAK:-}" ]; then
   # Self-test of the leftover check: one deliberately leaked, detached process of this run.
   ( setsid sleep 300 < /dev/null > /dev/null 2>&1 & )  # reparented once the subshell exits, like a real leak
 fi
-echo "prim check ($MODE) at $(git describe --always --dirty 2>/dev/null); logs $LOGS"
+echo "vqro check ($MODE) at $(git describe --always --dirty 2>/dev/null); logs $LOGS"
 step licenses "${CARGO[@]}" python3 scripts/license_check.py --check
 step build-zero-warnings no_warnings
 step cargo-test "${CARGO[@]}" cargo test
@@ -172,11 +172,11 @@ if [ "$MODE" = full ]; then
   step e2e-tui-keys "${CLEAN[@]}" python3 tests/e2e_tui_keys.py "$TARGET"
   step e2e-herdr-drift "${CLEAN[@]}" python3 tests/e2e_herdr_drift.py "$TARGET" --receipt "$LOGS/herdr-drift-receipt.json"
   step e2e-scale-herdr scale_probe
-  step e2e-tui-smoke "${CLEAN[@]}" bash tests/e2e_tui_smoke.sh "$TARGET/debug/prim"
-  step e2e-pi-provider "${CLEAN[@]}" python3 tests/pi_provider_e2e.py --run --large-workspace --probe-terminal-invoke --prim "$TARGET/debug/prim" --hc "$HOME/.local/bin/herdr-core"
-  step e2e-agents-ui "${CLEAN[@]}" python3 tests/pi_provider_e2e.py --run --agents-ui --large-workspace --probe-terminal-invoke --prim "$TARGET/debug/prim" --hc "$HOME/.local/bin/herdr-core"
+  step e2e-tui-smoke "${CLEAN[@]}" bash tests/e2e_tui_smoke.sh "$TARGET/debug/vqro"
+  step e2e-pi-provider "${CLEAN[@]}" python3 tests/pi_provider_e2e.py --run --large-workspace --probe-terminal-invoke --vqro "$TARGET/debug/vqro" --hc "$HOME/.local/bin/herdr-core"
+  step e2e-agents-ui "${CLEAN[@]}" python3 tests/pi_provider_e2e.py --run --agents-ui --large-workspace --probe-terminal-invoke --vqro "$TARGET/debug/vqro" --hc "$HOME/.local/bin/herdr-core"
   step pi-bridge-memory "${CLEAN[@]}" python3 tests/pi_bridge_memory.py --report "$LOGS/pi-memory-receipt.json"
-  step e2e-sidebar-scale "${CLEAN[@]}" python3 tests/e2e_sidebar_scale.py "$TARGET/debug/prim" --receipt "$LOGS/sidebar-scale-receipt.json"
+  step e2e-sidebar-scale "${CLEAN[@]}" python3 tests/e2e_sidebar_scale.py "$TARGET/debug/vqro" --receipt "$LOGS/sidebar-scale-receipt.json"
   step e2e-tui-scale-budgets tui_scale_probe
   step scale-harness scale_harness
 fi
@@ -217,7 +217,7 @@ steps = [dict(zip(("name", "result", "seconds", "log"), l.split("\t"))) for l in
 for s in steps:
     s["seconds"] = int(s["seconds"])
 failed = [s["name"] for s in steps if s["result"] not in ("PASS", "UNSCOPED")]
-r = {"kind": "prim.check-receipt", "version": 1, "mode": mode, "commit": commit, "finished_unix": int(time.time()),
+r = {"kind": "vqro.check-receipt", "version": 1, "mode": mode, "commit": commit, "finished_unix": int(time.time()),
      "result": "fail" if failed else "pass", "failed": failed, "steps": steps, "leftover_pids": left.split(), "leftover_scope": scope, "logs": logs}
 scale = logs + "/scale-receipt.json"
 try:

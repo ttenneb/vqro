@@ -4,7 +4,7 @@ Generated offline by `python3 scripts/license_check.py --write`; do not edit.
 
 Policy and notices cover every Cargo metadata package, conservatively including unbuilt
 optional, build, dev and target-specific packages; inclusion does not claim they are shipped.
-Upstream terms remain upstream terms, not prim's Apache-2.0 licence. Choices satisfy the approved
+Upstream terms remain upstream terms, not vqro's Apache-2.0 licence. Choices satisfy the approved
 allowlist; original supplied notices are retained even for other offered licence alternatives.
 When an archive omits a licence, standard text is labelled explicitly; declared authors/repositories
 are metadata, not an invented copyright attribution. Preserve these notices with distributions.

@@ -1,4 +1,4 @@
-//! Backend adapters (D14, D15). An adapter maps one backend onto prim resources and declares what it
+//! Backend adapters (D14, D15). An adapter maps one backend onto vqro resources and declares what it
 //! can do. It translates protocols honestly and never invents guarantees the backend lacks.
 //!
 //! Adapters run as tasks that talk to the core through channels, so the core never blocks on a
@@ -15,8 +15,8 @@ use std::time::Instant;
 use crate::provider::ProviderInfo;
 
 /// Startup selection only. Execution-specific setup stays in the adapter layer, not the server.
-/// `prim serve` uses `Extensions`: backends are provider extensions (`extension/<name>` entries,
-/// e.g. prim-herdr, prim-tmux). The in-process adapters remain for tests and embedders.
+/// `vqro serve` uses `Extensions`: backends are provider extensions (`extension/<name>` entries,
+/// e.g. vqro-herdr, vqro-tmux). The in-process adapters remain for tests and embedders.
 #[derive(Clone)]
 pub enum Backend { Herdr(Vec<String>), Fake, Extensions }
 impl Backend {

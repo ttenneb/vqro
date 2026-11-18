@@ -1,6 +1,6 @@
 //! Store-only history regressions. Large fixtures live in the agent's cargo scratch target.
 use std::{path::PathBuf,sync::Arc,time::Instant};
-use prim::store::{Store,Op,HISTORY_BYTES,NOTE_BYTES};
+use vqro::store::{Store,Op,HISTORY_BYTES,NOTE_BYTES};
 use serde_json::{json,Value};
 fn set(key:impl Into<String>,value:Value)->Op {Op::Set {key:key.into(),value,expect:None}}
 fn root()->tempfile::TempDir {

@@ -3,9 +3,9 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use prim::client;
-use prim::rpc::Peer;
-use prim::server::{start, Backend};
+use vqro::client;
+use vqro::rpc::Peer;
+use vqro::server::{start, Backend};
 use serde_json::{json, Value};
 
 struct Env {
@@ -19,7 +19,7 @@ fn env() -> Env {
     Env { socket: dir.path().join("s.sock"), state: dir.path().join("state"), _dir: dir }
 }
 
-async fn connect(socket: &std::path::Path) -> (Peer, prim::rpc::IncomingReceiver) {
+async fn connect(socket: &std::path::Path) -> (Peer, vqro::rpc::IncomingReceiver) {
     let (p, rx, _) = client::connect(socket, "test").await.unwrap();
     (p, rx)
 }
@@ -59,7 +59,7 @@ async fn forget_refuses_live_and_retires_finished_ids() {
     assert_eq!(p.call("resource.forget", json!({"resource": id})).await.unwrap_err().kind(), "not_found");
 
     // Restart: ids continue past the forgotten one, never reusing it.
-    prim::server::shutdown(&core).await;
+    vqro::server::shutdown(&core).await;
     let socket = e._dir.path().join("again.sock");
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let _again = loop {
@@ -114,11 +114,11 @@ async fn retention_extension_forgets_closed_and_old_never_shown_finished_termina
     let now = ids(&p).await;
     assert!(now.contains(&shown) && now.contains(&never) && now.contains(&live), "shown and recent never-shown finished stay: {now:?}");
 
-    // Closing its last view starts the grace; undo (`u`, prim.revert) within it keeps the terminal.
+    // Closing its last view starts the grace; undo (`u`, vqro.revert) within it keeps the terminal.
     let close = json!({"ops": [{"op": "set", "key": "layout/main", "value": {"view": "x"}}]});
     p.call("workspace.apply", close.clone()).await.unwrap();
     tokio::time::sleep(Duration::from_millis(1000)).await;
-    p.call("command.invoke", json!({"name": "prim.revert"})).await.unwrap();
+    p.call("command.invoke", json!({"name": "vqro.revert"})).await.unwrap();
     tokio::time::sleep(Duration::from_millis(4500)).await;
     assert!(ids(&p).await.contains(&shown), "undo within the grace cancelled the forget");
     let attached = p.call("resource.attach", json!({"resource": shown, "cols": 80, "rows": 24})).await.unwrap();
@@ -190,7 +190,7 @@ async fn tab_view_cleanup_preserves_layout_pins_and_retention_undo_grace() {
     let snap = p.call("workspace.snapshot", Value::Null).await.unwrap();
     assert!(snap["entries"].get(&key).is_none(), "the final closed layout reference removes its view entry");
     assert!(ids(&p).await.contains(&shown), "view deletion does not bypass retention grace or kill a terminal");
-    p.call("command.invoke", json!({"name": "prim.revert"})).await.unwrap();
+    p.call("command.invoke", json!({"name": "vqro.revert"})).await.unwrap();
     let snap = p.call("workspace.snapshot", Value::Null).await.unwrap();
     assert!(snap["entries"].get(&key).is_some(), "undo restores the view and layout atomically");
     assert_eq!(p.call("command.invoke", json!({"name": "retention.forget_ended"})).await.unwrap()["forgotten"], 0, "undo restores the layout pin and cancels pending forget");
@@ -199,7 +199,7 @@ async fn tab_view_cleanup_preserves_layout_pins_and_retention_undo_grace() {
     p.call("command.invoke", json!({"name": "tabs.close_ended"})).await.unwrap();
     eventually("closed view forgotten after grace", async || !ids(&p).await.contains(&shown)).await;
     assert!(ids(&p).await.contains(&live), "live programs are untouched");
-    prim::server::shutdown(&core).await;
+    vqro::server::shutdown(&core).await;
 }
 
 #[tokio::test]
@@ -207,7 +207,7 @@ async fn churn_of_forgotten_terminals_keeps_resources_bounded() {
     let e = env();
     let core = start(e.socket.clone(), e.state.clone(), false, Backend::Fake, None).unwrap();
     let (p, _rx) = connect(&e.socket).await;
-    let n: usize = std::env::var("PRIM_FORGET_CHURN").ok().and_then(|v| v.parse().ok()).unwrap_or(500);
+    let n: usize = std::env::var("VQRO_FORGET_CHURN").ok().and_then(|v| v.parse().ok()).unwrap_or(500);
     let started = std::time::Instant::now();
     for _ in 0..n {
         let id = p.call("resource.spawn", json!({"argv": ["sh"]})).await.unwrap()["resource"]["id"].clone();

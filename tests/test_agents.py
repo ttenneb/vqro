@@ -7,7 +7,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "extensions"))
 from agents import Agents, EFFECTS
-from prim_ext import Extension, PrimError
+from vqro_ext import Extension, VqroError
 from agent_fixture import FakeCore
 
 
@@ -76,7 +76,7 @@ class AgentsTests(unittest.TestCase):
         result = self.command("show", resource="r2")
         self.assertEqual(result["view"], "agents-r2")
         self.assertIn("native other runtime", json.dumps(self.core.live["agents-r2"]))
-        with self.assertRaises(PrimError) as failure:
+        with self.assertRaises(VqroError) as failure:
             self.command("prompt", resource="r2", text="must not send")
         self.assertEqual(failure.exception.kind, "unsupported")
         self.assertEqual(self.native(), [])
@@ -127,18 +127,18 @@ class AgentsTests(unittest.TestCase):
 
     def test_invalid_context_empty_prompt_and_unavailable_agent_send_nothing(self):
         for args in ({}, {"context": {"view": "settings"}}, {"resource": "r2", "text": ""}):
-            with self.assertRaises(PrimError):
+            with self.assertRaises(VqroError):
                 self.command("prompt", **args)
         self.core.add_agent()
         self.core.resources["r2"]["available"] = False
-        with self.assertRaises(PrimError):
+        with self.assertRaises(VqroError):
             self.command("abort", resource="r2")
         self.assertEqual(self.native(), [])
 
     def test_uncertain_effect_is_not_retried(self):
         self.core.add_agent()
         self.core.fail_effect = "indeterminate"
-        with self.assertRaises(PrimError):
+        with self.assertRaises(VqroError):
             self.command("prompt", resource="r2", text="one attempt")
         self.assertEqual(len(self.native()), 1)
         self.assertIn("no automatic retry", self.core.notices[-1][0])
@@ -164,7 +164,7 @@ class AgentsTests(unittest.TestCase):
         self.core.add_agent()
         self.core.resources["r2"]["data"]["requests"] = [{"id": "q", "kind": "confirm", "prompt": "?", "data": {}}]
         for args in ({"request": "old", "value": True}, {"request": "q", "value": "true"}):
-            with self.assertRaises(PrimError):
+            with self.assertRaises(VqroError):
                 self.command("answer", resource="r2", **args)
         self.assertEqual(self.native(), [])
 
@@ -222,7 +222,7 @@ class AgentsTests(unittest.TestCase):
         bridge = next(row for row in panel["items"] if row.get("text") == "Bridge terminal")
         self.assertEqual((bridge["command"], bridge["args"]), ("tabs.show", {"resource": "r1"}))
         self.assertIn("unavailable", json.dumps(panel))
-        with self.assertRaises(PrimError):
+        with self.assertRaises(VqroError):
             self.command("prompt", resource="r2", text="not sent")
 
     def test_palette_template_targets_focused_agent(self):

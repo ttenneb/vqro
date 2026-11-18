@@ -1,5 +1,5 @@
 //! Safe admission and raw legacy recovery; no live backend or user state.
-use prim::{store::{Store,Op},limits,core::Core};
+use vqro::{store::{Store,Op},limits,core::Core};
 use serde_json::{json,Value};
 fn nested(depth:usize)->Value {(0..depth).fold(Value::Null,|v,_|Value::Array(vec![v]))}
 fn set(key:&str,value:Value)->Op {Op::Set {key:key.into(),value,expect:None}}
@@ -10,9 +10,9 @@ fn native_fact_fields_have_the_same_opaque_value_depth_bound() {
  let base=json!({"backend_ref":"fixture","kind":"terminal","state":"live","data":{}});
  for field in ["status","exit","data"] {
   let mut value=base.clone();value[field]=if field=="data" {json!({"nested":nested(64)})}else{nested(65)};
-  let facts:prim::adapter::ResourceFacts=serde_json::from_value(value).unwrap();assert!(!facts.valid(),"{field} escaped native depth admission");
+  let facts:vqro::adapter::ResourceFacts=serde_json::from_value(value).unwrap();assert!(!facts.valid(),"{field} escaped native depth admission");
  }
- let mut value=base;value["status"]=nested(64);let facts:prim::adapter::ResourceFacts=serde_json::from_value(value).unwrap();assert!(facts.valid());
+ let mut value=base;value["status"]=nested(64);let facts:vqro::adapter::ResourceFacts=serde_json::from_value(value).unwrap();assert!(facts.valid());
 }
 #[test]
 fn depth_boundary_survives_history_revert_and_restart() {
@@ -64,12 +64,12 @@ fn quarantined_declarations_preserve_healthy_layout_references() {
 #[tokio::test]
 async fn rpc_rejects_deep_entries_live_content_and_provider_metadata_without_poisoning_snapshot() {
  let root=tempfile::Builder::new().prefix("pdepth").tempdir_in("/tmp").unwrap();let socket=root.path().join("p");
- let core=prim::server::start(socket.clone(),root.path().join("st"),false,prim::server::Backend::Fake,None).unwrap();
- let(peer,_incoming,_)=prim::client::connect(&socket,"depth-test").await.unwrap();
+ let core=vqro::server::start(socket.clone(),root.path().join("st"),false,vqro::server::Backend::Fake,None).unwrap();
+ let(peer,_incoming,_)=vqro::client::connect(&socket,"depth-test").await.unwrap();
  let error=peer.call("workspace.apply",json!({"ops":[{"op":"set","key":"doc/deep","value":nested(65)}]})).await.unwrap_err();assert_eq!(error.kind(),"too_large");
  let error=peer.call("view.publish",json!({"view":"deep","content":{"nested":nested(64)}})).await.unwrap_err();assert_eq!(error.kind(),"too_large");
  assert!(!core.lock().unwrap().live.contains_key("deep"));
- let(provider,_requests,_)=prim::client::connect(&socket,"depth-provider").await.unwrap();
+ let(provider,_requests,_)=vqro::client::connect(&socket,"depth-provider").await.unwrap();
  let mut config=json!({"name":"depth-provider","role":"backend","instance":"fixture","software":{"name":"fixture","version":"1"},"provider_version":"0","capabilities":{}});
  config["capabilities"]=json!({"op":{"deep":nested(64)}});
  assert_eq!(provider.call("provider.register",config.clone()).await.unwrap_err().kind(),"too_large");assert!(!core.lock().unwrap().providers.contains_key("depth-provider"));
@@ -77,7 +77,7 @@ async fn rpc_rejects_deep_entries_live_content_and_provider_metadata_without_poi
  assert_eq!(provider.call("provider.sync",json!({"generation":generation,"final":true,"resources":[{"ref":"deep","kind":"terminal","state":"live","data":{"nested":nested(64)}}]})).await.unwrap_err().kind(),"too_large");
  assert!(!core.lock().unwrap().resources.values().any(|r|r.adapter=="depth-provider"));
  let snapshot=peer.call("workspace.snapshot",Value::Null).await.unwrap();assert!(snapshot["entries"].get("doc/deep").is_none());
- provider.close();peer.close();prim::server::shutdown(&core).await;
+ provider.close();peer.close();vqro::server::shutdown(&core).await;
 }
 #[test]
 fn raw_depth_scanner_does_not_quarantine_brackets_or_escaped_quotes_in_strings() {

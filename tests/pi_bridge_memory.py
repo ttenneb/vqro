@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Accelerated sustained bridge memory gate: real fake-Pi child, bounded socket-pair core.
 
-No model/provider installation, HC, prim endpoint, or user session. The mock core and fallback retain
+No model/provider installation, HC, vqro endpoint, or user session. The mock core and fallback retain
 at most eight/one frames; this measures bridge retention, not an unbounded test observer's history.
 """
 import argparse

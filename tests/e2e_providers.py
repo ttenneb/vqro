@@ -1,22 +1,22 @@
 #!/usr/bin/python3
-"""End to end: private prim core + prim-herdr (private herdr-core) + prim-tmux (private tmux).
+"""End to end: private vqro core + vqro-herdr (private herdr-core) + vqro-tmux (private tmux).
 
-Usage: tests/e2e_providers.py TARGET_DIR   (debug binaries: TARGET_DIR/debug/{prim,prim-herdr,prim-tmux})
+Usage: tests/e2e_providers.py TARGET_DIR   (debug binaries: TARGET_DIR/debug/{vqro,vqro-herdr,vqro-tmux})
 Everything lives under a short /tmp root; PATH is empty for the core, providers, hc and tmux.
 Stops only what it started. Prints PASS/FAIL lines and exits non-zero on failure.
 """
 import base64, fcntl, json, os, queue, shutil, socket, struct, subprocess, sys, tempfile, termios, threading, time
 
 TARGET = sys.argv[1]
-PRIM, PHERDR, PTMUX = (os.path.join(TARGET, "debug", b) for b in ("prim", "prim-herdr", "prim-tmux"))
+VQRO, PHERDR, PTMUX = (os.path.join(TARGET, "debug", b) for b in ("vqro", "vqro-herdr", "vqro-tmux"))
 HC = os.path.expanduser("~/.local/bin/herdr-core")
 TMUX = "/usr/bin/tmux"
 R = tempfile.mkdtemp(prefix="pe2e", dir="/tmp")
 for d in ("home", "st", "xst", "run", "cfg", "ext"):
     os.makedirs(os.path.join(R, d))
 os.chmod(os.path.join(R, "run"), 0o700)
-ENV = {"HOME": f"{R}/home", "PATH": "", "TERM": "xterm-256color", "SHELL": "/bin/sh", "PRIM_STATE_DIR": f"{R}/st",
-       "PRIM_SOCKET": f"{R}/p.sock", "PRIM_EXTENSIONS_DIR": f"{R}/ext", "XDG_STATE_HOME": f"{R}/xst",
+ENV = {"HOME": f"{R}/home", "PATH": "", "TERM": "xterm-256color", "SHELL": "/bin/sh", "VQRO_STATE_DIR": f"{R}/st",
+       "VQRO_SOCKET": f"{R}/p.sock", "VQRO_EXTENSIONS_DIR": f"{R}/ext", "XDG_STATE_HOME": f"{R}/xst",
        "XDG_RUNTIME_DIR": f"{R}/run", "XDG_CONFIG_HOME": f"{R}/cfg", "HC_SOCKET": f"{R}/hc.sock", "HC_SESSION": "e2e"}
 TSOCK = f"{R}/t.sock"
 results = []
@@ -55,7 +55,7 @@ def hc(*args):
 class Client:
     def __init__(self):
         self.s = socket.socket(socket.AF_UNIX)
-        self.s.connect(ENV["PRIM_SOCKET"])
+        self.s.connect(ENV["VQRO_SOCKET"])
         self.f = self.s.makefile("wb", buffering=0)
         self.r = self.s.makefile("rb")  # buffered: line reads must not be byte-at-a-time
         self.n, self.replies, self.notes, self.lock = 0, {}, queue.Queue(), threading.Lock()
@@ -133,12 +133,12 @@ def resources(c, provider=None):
 
 procs = []
 try:
-    # Private tmux server (a configured server for prim-tmux; this script owns it).
+    # Private tmux server (a configured server for vqro-tmux; this script owns it).
     out = tmux("new-session", "-d", "-s", "work", "-x", "100", "-y", "30", "/bin/sh", start=True)
     assert out.returncode == 0, out.stderr
-    core = subprocess.Popen([PRIM, "serve", "--fake"], env=ENV, stdout=open(f"{R}/serve.log", "w"), stderr=subprocess.STDOUT)
+    core = subprocess.Popen([VQRO, "serve", "--fake"], env=ENV, stdout=open(f"{R}/serve.log", "w"), stderr=subprocess.STDOUT)
     procs.append(core)
-    assert wait(lambda: os.path.exists(ENV["PRIM_SOCKET"]) and Client(), 10), "core did not start"
+    assert wait(lambda: os.path.exists(ENV["VQRO_SOCKET"]) and Client(), 10), "core did not start"
     c = Client()
     c.call("events.subscribe", {"partial_resources": False})
     ops = [{"op": "set", "key": "extension/herdr", "value": {"argv": [PHERDR, "--hc", HC, "--name", "herdr"]}},
@@ -200,7 +200,7 @@ try:
         matches = []
         for child in children:
             try:
-                if os.path.realpath(f"/proc/{child}/exe") == os.path.realpath(program) and ENV["PRIM_SOCKET"].encode() in open(f"/proc/{child}/environ", "rb").read():
+                if os.path.realpath(f"/proc/{child}/exe") == os.path.realpath(program) and ENV["VQRO_SOCKET"].encode() in open(f"/proc/{child}/environ", "rb").read():
                     matches.append(int(child))
             except OSError:
                 pass

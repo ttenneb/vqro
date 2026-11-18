@@ -1,4 +1,4 @@
-//! The workspace store: prim's authoritative workspace state (D15).
+//! The workspace store: vqro's authoritative workspace state (D15).
 //!
 //! State is a map of keyed JSON entries, each with a version. It changes only through transactions:
 //! a list of operations that is validated against the resulting state and applied all-or-nothing,
@@ -254,7 +254,7 @@ impl Store {
         };
         let quarantined=p.entries.iter().filter(|(_,entry)|entry.depth_quarantined).map(|(key,_)|key.clone()).collect::<Vec<_>>();
         let panel=json!({"kind":"panel","title":"Quarantined view","items":[{"type":"text","style":"warn","text":"Unsafe legacy JSON quarantined. Use recovery commands to repair this view/layout; original data is preserved."}]});
-        let mut recovery_view=String::from("prim-depth-quarantine");
+        let mut recovery_view=String::from("vqro-depth-quarantine");
         if quarantined.iter().any(|key|key.starts_with("layout/")) {
             while p.entries.contains_key(&format!("view/{recovery_view}")) {recovery_view.push('-');}
             p.entries.insert(format!("view/{recovery_view}"),std::sync::Arc::new(Entry {version:p.rev.max(1),value:panel.clone(),depth_quarantined:false}));
@@ -269,7 +269,7 @@ impl Store {
         let recovery=if !quarantined.is_empty() || unsafe_history>0 {
             let keys=quarantined.iter().take(5).map(|key|key.chars().take(120).collect::<String>()).collect::<Vec<_>>().join(", ");
             let note=format!("Recovered over-deep JSON: {} entries quarantined ({keys}); {unsafe_history} unsafe undo records disabled. Other entries are unchanged. Repair affected layouts with recovery commands if necessary.",quarantined.len());
-            eprintln!("prim: {note}");
+            eprintln!("vqro: {note}");
             Some(std::sync::Arc::new(Recovery {info:RecoveryInfo {note,backup:None},preserve_source:true,backup:Default::default()}))
         } else {p.recovery.map(|info|std::sync::Arc::new(Recovery {info,preserve_source:false,backup:Default::default()}))};
         Ok(Store { rev: p.rev, next_txn: p.next_txn.max(1), entries: std::sync::Arc::new(p.entries), history: std::sync::Arc::new(p.history), path: Some(path), writer: std::sync::Arc::new(write_atomic), lifetime:None,recovery })
@@ -519,7 +519,7 @@ fn write_atomic_with_sync(path: &Path, bytes: &[u8], sync_dir: impl FnOnce(&std:
     let directory = std::fs::File::open(dir)?;
     // Exclusive, randomly named files in the destination directory. The guard removes only our
     // own temp on any pre-rename failure, never another writer's file or a fixed `.tmp` path.
-    let mut tmp = tempfile::Builder::new().prefix(".prim-").tempfile_in(dir)?;
+    let mut tmp = tempfile::Builder::new().prefix(".vqro-").tempfile_in(dir)?;
     tmp.write_all(bytes)?;
     tmp.as_file().sync_all()?;
     tmp.persist(path).map_err(|e| e.error)?;

@@ -7,13 +7,13 @@ import sys
 import threading
 
 # This program owns its stdin EOF and must close its Pi child cleanly. It is not
-# a managed backend extension; don't let prim_ext's import watcher os._exit first.
-os.environ.pop("PRIM_EXTENSION_LIFETIME", None)
-os.environ.pop("PRIM_EXTENSION", None)
+# a managed backend extension; don't let vqro_ext's import watcher os._exit first.
+os.environ.pop("VQRO_EXTENSION_LIFETIME", None)
+os.environ.pop("VQRO_EXTENSION", None)
 
 from .program import Bridge
 from .display import plain, tail
-from prim_provider import ProviderError
+from vqro_provider import ProviderError
 
 
 def watch_stdin(stream, loop, stop):
@@ -40,8 +40,8 @@ def watch_stdin(stream, loop, stop):
 async def run(args):
     stop = asyncio.Event()
     watch_stdin(sys.stdin.buffer, asyncio.get_running_loop(), stop)
-    bridge = Bridge(args.argv, cwd=args.cwd, env=os.environ, token=os.environ["PRIM_BRIDGE_TOKEN"],
-                    endpoint=os.environ["PRIM_SOCKET"], interval=args.interval,
+    bridge = Bridge(args.argv, cwd=args.cwd, env=os.environ, token=os.environ["VQRO_BRIDGE_TOKEN"],
+                    endpoint=os.environ["VQRO_SOCKET"], interval=args.interval,
                     transcript_bytes=args.transcript_bytes)
     result = await bridge.run(stop)
     code = result.get("exit_code", 0)
@@ -59,8 +59,8 @@ def main():
         args.argv = args.argv[1:]
     if not args.argv:
         parser.error("explicit Pi argv is required after -- (include --mode rpc)")
-    if not os.environ.get("PRIM_BRIDGE_TOKEN") or not os.environ.get("PRIM_SOCKET"):
-        parser.error("PRIM_BRIDGE_TOKEN and opaque PRIM_SOCKET must come from bridge:true spawn")
+    if not os.environ.get("VQRO_BRIDGE_TOKEN") or not os.environ.get("VQRO_SOCKET"):
+        parser.error("VQRO_BRIDGE_TOKEN and opaque VQRO_SOCKET must come from bridge:true spawn")
     if not 256 <= args.transcript_bytes <= 65536:
         parser.error("transcript byte limit must be 256..65536")
     try:

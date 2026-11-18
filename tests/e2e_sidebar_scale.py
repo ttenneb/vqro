@@ -2,7 +2,7 @@
 """Private public-protocol sidebar load: 600 terminal + 200 agent facts, 350 workspaces.
 
 One synthetic backend publishes facts, not processes/models; this isolates extension bandwidth from backend
-execution and the separately tested runtime registry. No live prim/hc/tmux or inherited HERDR environment.
+execution and the separately tested runtime registry. No live vqro/hc/tmux or inherited HERDR environment.
 """
 import argparse
 from collections import Counter
@@ -153,19 +153,19 @@ def run(args, root):
     (root/'ext/defaults.json').write_text(json.dumps({'version': 1, 'extensions': [
         {'name': name, 'argv': ['/usr/bin/python3', str(root/'ext'/(name+'.py'))]} for name in names]}))
     env = {'HOME': str(root/'home'), 'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8',
-           'PRIM_STATE_DIR': str(root/'state'), 'PRIM_SOCKET': str(root/'p.sock'), 'PRIM_EXTENSIONS_DIR': str(root/'ext'),
+           'VQRO_STATE_DIR': str(root/'state'), 'VQRO_SOCKET': str(root/'p.sock'), 'VQRO_EXTENSIONS_DIR': str(root/'ext'),
            'XDG_CONFIG_HOME': str(root/'config'), 'XDG_STATE_HOME': str(root/'state'), 'XDG_RUNTIME_DIR': str(root/'run'),
-           'HC_SOCKET': str(root/'h.sock'), 'HC_SESSION': 'sidebar-scale', 'PRIM_HERDR': '["/bin/false"]'}
-    assert len(env['PRIM_SOCKET'].encode()) < 103
+           'HC_SOCKET': str(root/'h.sock'), 'HC_SESSION': 'sidebar-scale', 'VQRO_HERDR': '["/bin/false"]'}
+    assert len(env['VQRO_SOCKET'].encode()) < 103
     clients, core = [], None
     receipt = {'population': {'terminals': 600, 'agents': 200, 'workspaces': 350}, 'synthetic_facts_only': True,
                'baseline_sidebar': bool(args.baseline_sidebar), 'root': str(root)}
     try:
         with (root/'serve.log').open('w') as log:
-            core = subprocess.Popen([str(args.prim), 'serve'], env=env, cwd=root, stdout=log, stderr=subprocess.STDOUT)
-        wait(lambda: Path(env['PRIM_SOCKET']).exists())
+            core = subprocess.Popen([str(args.vqro), 'serve'], env=env, cwd=root, stdout=log, stderr=subprocess.STDOUT)
+        wait(lambda: Path(env['VQRO_SOCKET']).exists())
         def connect():
-            client = Client(env['PRIM_SOCKET']); clients.append(client); return client
+            client = Client(env['VQRO_SOCKET']); clients.append(client); return client
         control, provider, observer, filtered = connect(), connect(), connect(), connect()
         observer.call('events.subscribe', {'types': ['view.content']})
         filtered.call('events.subscribe', {'types': ['view.content'], 'view_content': {'names': ['themes', 'icons', 'keys'], 'prefixes': ['agent-']}})
@@ -258,14 +258,14 @@ def run(args, root):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('prim', type=Path)
+    parser.add_argument('vqro', type=Path)
     parser.add_argument('--seconds', type=int, default=5, help='seconds per phase at 20 resource updates/second')
-    parser.add_argument('--scratch-parent', type=Path, default=Path.home()/'.local/share/herdr/scratch/prim-sidebar-scale')
+    parser.add_argument('--scratch-parent', type=Path, default=Path.home()/'.local/share/herdr/scratch/vqro-sidebar-scale')
     parser.add_argument('--baseline-sidebar', type=Path)
     parser.add_argument('--receipt', type=Path)
     args = parser.parse_args()
     assert not any(key.startswith('HERDR_') for key in os.environ), 'run under env -i'
-    args.prim = args.prim.resolve()
+    args.vqro = args.vqro.resolve()
     args.scratch_parent.mkdir(parents=True, exist_ok=True)
     root = Path(tempfile.mkdtemp(prefix='ss-', dir=args.scratch_parent))
     receipt = run(args, root)

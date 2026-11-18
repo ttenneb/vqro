@@ -1,6 +1,6 @@
 //! Scoped reads must stay small on the provider wire even when workspace snapshots do not.
-use prim::client;
-use prim::server::{start, Backend};
+use vqro::client;
+use vqro::server::{start, Backend};
 use serde_json::{json, Value};
 
 #[tokio::test]
@@ -41,7 +41,7 @@ async fn scoped_reads_work_under_the_unchanged_provider_record_cap() {
     assert!(control.call("resource.list", json!({"provider": "query-provider-prefix"})).await.unwrap()["resources"].as_array().unwrap().is_empty());
     assert_eq!(control.call("resource.list", json!({"backend_ref": "other"})).await.unwrap()["resources"].as_array().unwrap().len(), 1);
     assert_eq!(control.call("resource.list", Value::Null).await.unwrap()["resources"].as_array().unwrap().len(), 2, "unfiltered callers keep their existing behavior");
-    prim::server::shutdown(&core).await;
+    vqro::server::shutdown(&core).await;
 }
 
 #[tokio::test]
@@ -56,5 +56,5 @@ async fn malformed_scoped_read_params_are_rejected_without_effects() {
     for params in [json!({}), json!({"key": true})] {
         assert_eq!(peer.call("workspace.get", params).await.unwrap_err().kind(), "invalid");
     }
-    prim::server::shutdown(&core).await;
+    vqro::server::shutdown(&core).await;
 }

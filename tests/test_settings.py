@@ -20,7 +20,7 @@ class Extension:
                           "manifest":{"name":n,"title":n.title(),"kind":"interface","summary":"A searchable summary",
                                       "description":"Readable even while not running","settings_command":"demo.configure"}}
                        for n in (name,"off","broken","third-party")}
-        self.prim = self
+        self.vqro = self
         self.published = {}
     def call(self, method, *_):
         if method == "extension.list": return {"extensions":self.states}
@@ -35,8 +35,8 @@ class Extension:
 
 
 def load():
-    fake=types.SimpleNamespace(Extension=Extension,PrimError=RuntimeError)
-    with mock.patch.dict(sys.modules,{"prim_ext":fake}):
+    fake=types.SimpleNamespace(Extension=Extension,VqroError=RuntimeError)
+    with mock.patch.dict(sys.modules,{"vqro_ext":fake}):
         return runpy.run_path(str(Path(__file__).resolve().parents[1]/"extensions/settings.py"))
 
 
@@ -53,12 +53,12 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(row["description"],"A searchable summary")
             self.assertEqual(row["detail_panel"]["items"][0]["text"],"Readable even while not running")
         own=next(r for r in rows if r["id"]=="extension/settings")
-        self.assertEqual(own["command"],"prim.extension.disable")
+        self.assertEqual(own["command"],"vqro.extension.disable")
         third=next(r for r in rows if r["id"]=="extension/third-party")
         self.assertEqual(third["detail_panel"]["toolbar"][0]["chips"][-1]["command"],"demo.configure")
         off=next(r for r in rows if r["id"]=="extension/off")
         self.assertEqual(off["badges"][0]["text"],"off")
-        self.assertEqual(off["command"],"prim.extension.enable")
+        self.assertEqual(off["command"],"vqro.extension.enable")
         self.assertTrue(off["detail_panel"]["toolbar"][0]["chips"][-1]["disabled"])
         broken=next(r for r in rows if r["id"]=="extension/broken")
         self.assertIn("fixture failure",str(broken["detail_panel"]))
@@ -78,7 +78,7 @@ class SettingsTests(unittest.TestCase):
         ext.states["off"].update(safe_mode=True,allowed_in_safe_mode=False,display_status="off")
         groups=module["ext_rows"](ext.states,{"demo.configure"})
         row=next(r for g in groups for r in g["children"] if r["id"]=="extension/off")
-        self.assertEqual(row["command"],"prim.safe_mode.allow")
+        self.assertEqual(row["command"],"vqro.safe_mode.allow")
         self.assertEqual(row["args"],{"name":"off","on":True})
         self.assertIn("normal enabled declaration is unchanged",str(row["detail_panel"]))
 
@@ -126,7 +126,7 @@ class SettingsTests(unittest.TestCase):
         for text in ("Recent crashes (last 300 s): 0","Total crashes this supervision: 3","At failure: 3 exits",
                      module["time_text"](at),"exit-2","Stopped until explicitly restarted","built-in failed/recover"):
             self.assertIn(text,details)
-        action=next(c for c in row["detail_panel"]["toolbar"][0]["chips"] if c["command"]=="prim.extension.restart")
+        action=next(c for c in row["detail_panel"]["toolbar"][0]["chips"] if c["command"]=="vqro.extension.restart")
         self.assertEqual(action["args"],{"name":"broken"})
         self.assertFalse(action["disabled"])
 

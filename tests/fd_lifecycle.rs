@@ -1,7 +1,7 @@
 //! Linux transport lifetime matrix. Private fake core, owned provider children, explicit cleanup.
 //! The long-soak driver must close its own sockets; these tests assert core fds after real EOF.
 #![cfg(target_os = "linux")]
-use prim::{
+use vqro::{
     client,
     rpc::{Incoming, IncomingReceiver, Peer},
 };
@@ -59,7 +59,7 @@ impl Fixture {
         for d in ["home", "state", "ext", "run", "hc-state", "cfg"] {
             std::fs::create_dir(root.path().join(d)).unwrap();
         }
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_prim"));
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_vqro"));
         Self::configure(root.path(), &mut cmd);
         let core = Owned(
             cmd.args(["serve", "--fake"])
@@ -93,10 +93,10 @@ impl Fixture {
             .env("HOME", root.join("home"))
             .env("PATH", "/usr/bin:/bin")
             .env("TERM", "xterm-256color")
-            .env("PRIM_STATE_DIR", root.join("state"))
-            .env("PRIM_SOCKET", root.join("p"))
-            .env("PRIM_EXTENSIONS_DIR", root.join("ext"))
-            .env("PRIM_HERDR", r#"["/bin/false"]"#)
+            .env("VQRO_STATE_DIR", root.join("state"))
+            .env("VQRO_SOCKET", root.join("p"))
+            .env("VQRO_EXTENSIONS_DIR", root.join("ext"))
+            .env("VQRO_HERDR", r#"["/bin/false"]"#)
             .env("XDG_RUNTIME_DIR", root.join("run"))
             .env("XDG_STATE_HOME", root.join("hc-state"))
             .env("XDG_CONFIG_HOME", root.join("cfg"))
@@ -342,7 +342,7 @@ async fn socket_fds_return_after_native_herdr_reconnect_and_sigkill() {
     };
     let helper = || {
         Owned(
-            f.command(env!("CARGO_BIN_EXE_prim-herdr"))
+            f.command(env!("CARGO_BIN_EXE_vqro-herdr"))
                 .arg("--hc")
                 .arg(&hc)
                 .args(["--name", "fd-herdr"])
@@ -381,10 +381,10 @@ async fn socket_fds_return_after_native_herdr_reconnect_and_sigkill() {
         )
         .await;
         p.close();
-        f.stable(baseline, "prim-herdr SIGKILL then viewer EOF")
+        f.stable(baseline, "vqro-herdr SIGKILL then viewer EOF")
             .await;
     }
-    f.report("prim_herdr_sigkill", baseline);
+    f.report("vqro_herdr_sigkill", baseline);
     let mut child = helper();
     let mut current = f.provider_ready("fd-herdr", true).await;
     let connected = fds(f.core.0.id());
@@ -417,7 +417,7 @@ async fn socket_fds_return_after_extension_kills_and_tui_quits() {
     let baseline = fds(f.core.0.id());
     let script = f.root.path().join("ext.py");
     let marker = f.root.path().join("pid");
-    std::fs::write(&script,format!("import os,sys\nfrom pathlib import Path\nsys.path.insert(0,{:?})\nfrom prim_ext import Extension\ne=Extension('fd-fixture')\ne.command('fd-fixture.ready','FD fixture')(lambda args: {{}})\nPath({:?}).write_text(str(os.getpid()))\ne.run()\n",Path::new(env!("CARGO_MANIFEST_DIR")).join("extensions"),marker)).unwrap();
+    std::fs::write(&script,format!("import os,sys\nfrom pathlib import Path\nsys.path.insert(0,{:?})\nfrom vqro_ext import Extension\ne=Extension('fd-fixture')\ne.command('fd-fixture.ready','FD fixture')(lambda args: {{}})\nPath({:?}).write_text(str(os.getpid()))\ne.run()\n",Path::new(env!("CARGO_MANIFEST_DIR")).join("extensions"),marker)).unwrap();
     f.control.call("workspace.apply",json!({"ops":[{"op":"set","key":"extension/fd-fixture","value":{"argv":["/usr/bin/python3",script]}}]})).await.unwrap();
     async fn ready(f: &Fixture, marker: &Path, previous: u32) -> u32 {
         let until = Instant::now() + Duration::from_secs(5);
@@ -448,7 +448,7 @@ async fn socket_fds_return_after_extension_kills_and_tui_quits() {
         f.control
             .call(
                 "command.invoke",
-                json!({"name":"prim.extension.restart","args":{"name":"fd-fixture"}}),
+                json!({"name":"vqro.extension.restart","args":{"name":"fd-fixture"}}),
             )
             .await
             .unwrap();
@@ -482,7 +482,7 @@ async fn socket_fds_return_after_extension_kills_and_tui_quits() {
     f.control
         .call(
             "command.invoke",
-            json!({"name":"prim.extension.disable","args":{"name":"fd-fixture"}}),
+            json!({"name":"vqro.extension.disable","args":{"name":"fd-fixture"}}),
         )
         .await
         .unwrap();
@@ -514,7 +514,7 @@ async fn socket_fds_return_after_extension_kills_and_tui_quits() {
             "-d",
             "-s",
             "fd",
-            env!("CARGO_BIN_EXE_prim"),
+            env!("CARGO_BIN_EXE_vqro"),
             "tui",
         ]);
         assert!(
@@ -531,7 +531,7 @@ async fn socket_fds_return_after_extension_kills_and_tui_quits() {
                 .unwrap()
                 .iter()
                 .any(|c| c["client"] == "tui");
-            if String::from_utf8_lossy(&screen.stdout).contains("prim")
+            if String::from_utf8_lossy(&screen.stdout).contains("vqro")
                 && connected
                 && fds(f.core.0.id()).sockets > baseline.sockets
             {

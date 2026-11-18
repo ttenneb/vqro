@@ -1,4 +1,4 @@
-"""Tiny helper for writing prim extensions in Python (stdlib only).
+"""Tiny helper for writing vqro extensions in Python (stdlib only).
 
 An extension connects to the core, keeps a cache of workspace entries and resources, registers
 commands, and contributes entries (menu items, bindings, views) that carry `owner` so clients hide
@@ -37,12 +37,12 @@ def _watch_lifetime():
         os._exit(0)
 
 
-if os.environ.get("PRIM_EXTENSION_LIFETIME") == "stdin":
-    threading.Thread(target=_watch_lifetime, daemon=True, name="prim-lifetime").start()
+if os.environ.get("VQRO_EXTENSION_LIFETIME") == "stdin":
+    threading.Thread(target=_watch_lifetime, daemon=True, name="vqro-lifetime").start()
 
 # A reply not received by then is `timeout` (outcome indeterminate). Tests shorten it; raising it
 # would only hide a slow core. Callers distinguish it from protocol/state errors (TRANSIENT).
-CALL_DEADLINE = float(os.environ.get("PRIM_EXT_DEADLINE_S") or 60)
+CALL_DEADLINE = float(os.environ.get("VQRO_EXT_DEADLINE_S") or 60)
 TRANSIENT = ("timeout", "overloaded")  # no answer yet / not admitted: retry later, never a crash
 RESEND_SAFE = {"hello", "workspace.snapshot", "command.register", "events.subscribe", "view.publish"}
 
@@ -62,7 +62,7 @@ NOTIFICATION_BYTES = 4 * 1024 * 1024
 MAX_PENDING = 128
 
 
-class Prim:
+class Vqro:
     """JSON-RPC over lines. The core may send us requests (command.invoke) and notifications."""
 
     def __init__(self, path, handler, *, recover_notifications=False):
@@ -78,7 +78,7 @@ class Prim:
         self.note_lock = threading.Lock()
         self.note_bytes = 0
         # Extension opts in: its missed handler snapshots/fences cache state.
-        # Raw Prim users retain explicit disconnect rather than silently dropping events.
+        # Raw Vqro users retain explicit disconnect rather than silently dropping events.
         self.recover_notifications = recover_notifications
         self.note_gap = None
         self.handlers = threading.BoundedSemaphore(32)
@@ -90,7 +90,7 @@ class Prim:
             wire = (json.dumps(msg) + "\n").encode()
             cap = MAX_REQUEST_BYTES if "method" in msg else MAX_RECORD_BYTES
             if len(wire) > cap:
-                raise PrimError("request exceeds 4 MiB; not sent" if "method" in msg else "reply exceeds recovery envelope; handler may have already run", "too_large")
+                raise VqroError("request exceeds 4 MiB; not sent" if "method" in msg else "reply exceeds recovery envelope; handler may have already run", "too_large")
             self.sock.sendall(wire)
 
     def call(self, method, params=None):
@@ -102,12 +102,12 @@ class Prim:
         while True:
             try:
                 return self._call(method, params)
-            except PrimError as e:
+            except VqroError as e:
                 if e.kind not in TRANSIENT or not getattr(self, "patient", False) or not _resend_safe(method, params):
                     raise
                 n += 1
                 delay = min(30.0, 0.5 * 2 ** n) * (0.5 + random.random())
-                print(f"prim: {getattr(self, 'name', 'ext')}: {method}: {e.kind} (core slow); retrying in {delay:.1f}s", file=sys.stderr, flush=True)
+                print(f"vqro: {getattr(self, 'name', 'ext')}: {method}: {e.kind} (core slow); retrying in {delay:.1f}s", file=sys.stderr, flush=True)
                 time.sleep(delay)
 
     def _call(self, method, params=None):
@@ -118,17 +118,17 @@ class Prim:
         ev = threading.Event()
         with self.lock:
             if len(self.waiting) >= MAX_PENDING:
-                raise PrimError("pending request limit; not sent", "overloaded")
+                raise VqroError("pending request limit; not sent", "overloaded")
             i = self.next
             self.next += 1
             slot = self.waiting[i] = [ev, None]
         try:
             self._send({"jsonrpc": "2.0", "id": i, "method": method, "params": params or {}})
             if not ev.wait(CALL_DEADLINE):
-                raise PrimError("response deadline; outcome indeterminate, never resend automatically", "timeout")
+                raise VqroError("response deadline; outcome indeterminate, never resend automatically", "timeout")
             msg = slot[1]
             if "error" in msg:
-                raise PrimError(msg["error"].get("message"), (msg["error"].get("data") or {}).get("kind"))
+                raise VqroError(msg["error"].get("message"), (msg["error"].get("data") or {}).get("kind"))
             return msg.get("result")
         finally:
             with self.lock:
@@ -217,7 +217,7 @@ class Prim:
                 self.note_gap = None
         try:
             if not self._dispatch(msg) and local_gap:
-                print("prim: notification recovery failed; disconnecting rather than using a divergent cache", file=sys.stderr, flush=True)
+                print("vqro: notification recovery failed; disconnecting rather than using a divergent cache", file=sys.stderr, flush=True)
                 self.sock.shutdown(socket.SHUT_RDWR)
                 return False
             return True
@@ -255,7 +255,7 @@ class Prim:
 CONTRIBUTION_NAMESPACES = ("menu/", "binding/", "view/")
 
 
-class PrimError(RuntimeError):
+class VqroError(RuntimeError):
     def __init__(self, message, kind=None):
         super().__init__(message)
         self.kind = kind
@@ -265,7 +265,7 @@ class Extension:
     def __init__(self, name=None, event_types=None, view_content=None):
         """event_types: only these types; None for all. view_content: optional {names, prefixes}
         allowlist for live view events. Caches follow only subscribed facts between snapshots."""
-        self.name = os.environ.get("PRIM_EXTENSION", name or "ext")
+        self.name = os.environ.get("VQRO_EXTENSION", name or "ext")
         self.event_types = event_types
         self.view_content = view_content
         self.handlers = {}
@@ -275,12 +275,12 @@ class Extension:
         self.resources = {}
         self.providers = {}
         self.cache_lock = threading.RLock()
-        self.prim = Prim(os.environ["PRIM_SOCKET"], self._handle, recover_notifications=True)
+        self.vqro = Vqro(os.environ["VQRO_SOCKET"], self._handle, recover_notifications=True)
         # A slow core delays startup (until run() subscribes); it must not burn the crash budget.
         # A dead connection still exits (the reader's EOF).
-        self.prim.name, self.prim.patient = self.name, True
-        self.info = self.prim.call("hello", {"extension": self.name, "extension_token": os.environ.get("PRIM_EXTENSION_TOKEN")})
-        self._load(self.prim.call("workspace.snapshot"))
+        self.vqro.name, self.vqro.patient = self.name, True
+        self.info = self.vqro.call("hello", {"extension": self.name, "extension_token": os.environ.get("VQRO_EXTENSION_TOKEN")})
+        self._load(self.vqro.call("workspace.snapshot"))
 
     # -- setup --------------------------------------------------------------------------------
 
@@ -343,30 +343,30 @@ class Extension:
 
     def run(self):
         for name, title in self.titles.items():
-            self.prim.call("command.register", {"name": name, "title": title})
+            self.vqro.call("command.register", {"name": name, "title": title})
         sub = {"from": self.seq, "epoch": self.epoch, "partial_resources": True}
         if self.event_types is not None:
             sub["types"] = list(self.event_types)
         if self.view_content is not None:
             sub["view_content"] = self.view_content
         try:
-            self.prim.call("events.subscribe", sub)
-        except PrimError as e:
+            self.vqro.call("events.subscribe", sub)
+        except VqroError as e:
             if e.kind != "conflict":
                 raise  # `conflict`: an earlier attempt that timed out did subscribe
-        self.prim.patient = False  # running: later calls report timeouts to their callers
+        self.vqro.patient = False  # running: later calls report timeouts to their callers
         threading.Event().wait()
 
     # -- workspace helpers --------------------------------------------------------------------
 
     def apply(self, ops, note):
-        return self.prim.call("workspace.apply", {"ops": ops, "note": note})
+        return self.vqro.call("workspace.apply", {"ops": ops, "note": note})
 
     def fresh(self):
         """Reload caches from the core (after a compare-and-set conflict)."""
         # Serialize snapshot acquisition/application with notifications, including command threads.
         with self.cache_lock:
-            self._load(self.prim.call("workspace.snapshot"))
+            self._load(self.vqro.call("workspace.snapshot"))
 
     def retrying(self, fn, attempts=3):
         """Run fn(); on a `conflict` reload the caches and try again, with a short jittered backoff.
@@ -381,7 +381,7 @@ class Extension:
         for i in range(attempts):
             try:
                 return fn()
-            except PrimError as e:
+            except VqroError as e:
                 if e.kind != "conflict" or i == attempts - 1:
                     raise
                 time.sleep(0.02 * 2 ** i * (0.5 + random.random()))
@@ -390,14 +390,14 @@ class Extension:
     def publish(self, view, content):
         """Set a view's live content (merged over its entry; not saved, not in history,
         cleared if this extension disconnects). Use for derived, frequently changing UI."""
-        return self.prim.call("view.publish", {"view": view, "content": content})
+        return self.vqro.call("view.publish", {"view": view, "content": content})
 
     def notify(self, text, style=None):
         """A short message every client shows briefly (style: ok, warn, error)."""
-        return self.prim.call("ui.notify", {"text": text, "style": style})
+        return self.vqro.call("ui.notify", {"text": text, "style": style})
 
     def invoke(self, name, args=None):
-        return self.prim.call("command.invoke", {"name": name, "args": args or {}})
+        return self.vqro.call("command.invoke", {"name": name, "args": args or {}})
 
     def value(self, key, default=None):
         e = self.entries.get(key)
@@ -444,7 +444,7 @@ class Extension:
             with self.cache_lock:
                 try:
                     event = self._notification(method, params)
-                except PrimError as e:
+                except VqroError as e:
                     if e.kind not in TRANSIENT:
                         raise
                     event = None
@@ -457,10 +457,10 @@ class Extension:
                 for fn in self.listeners:
                     self._listen(fn, event)
             return None
-        if method == "prim.recover":
+        if method == "vqro.recover":
             self._recover()
             return None
-        if method == "prim.retry":
+        if method == "vqro.retry":
             # Deferred reactions rerun as `missed`: recompute from the (now current) caches.
             for fn in list(getattr(self, "_deferred", {})):
                 self._listen(fn, ("missed", {"reason": "retry"}), retry=True)
@@ -468,7 +468,7 @@ class Extension:
         if method == "command.invoke":
             fn = self.handlers.get(params["name"])
             if fn is None:
-                raise PrimError(f"unknown command {params['name']}", "not_found")
+                raise VqroError(f"unknown command {params['name']}", "not_found")
             return fn(params.get("args") or {}) or {"ok": True}
         return None
 
@@ -479,7 +479,7 @@ class Extension:
             return
         self._degraded = reason
         self._recover_attempts = 0
-        print(f"prim: {getattr(self, 'name', 'ext')}: degraded: {reason}; keeping the last state and retrying", file=sys.stderr, flush=True)
+        print(f"vqro: {getattr(self, 'name', 'ext')}: degraded: {reason}; keeping the last state and retrying", file=sys.stderr, flush=True)
         threading.Thread(target=self._say, args=(f"{getattr(self, 'name', 'ext')}: core is slow; keeping the last state and retrying", "warn"), daemon=True).start()
         self._schedule_recover()
 
@@ -491,29 +491,29 @@ class Extension:
 
     def _schedule_recover(self):
         n = self._recover_attempts = self.__dict__.get("_recover_attempts", 0) + 1
-        self.prim.defer({"method": "prim.recover", "params": {}}, min(30.0, 0.5 * 2 ** n) * (0.5 + random.random()))
+        self.vqro.defer({"method": "vqro.recover", "params": {}}, min(30.0, 0.5 * 2 ** n) * (0.5 + random.random()))
 
     def _recover(self):
         if not self.__dict__.get("_degraded"):
             return  # another reload already recovered
         try:
             with self.cache_lock:
-                self._load(self.prim.call("workspace.snapshot"))
-        except PrimError as e:
+                self._load(self.vqro.call("workspace.snapshot"))
+        except VqroError as e:
             if e.kind in TRANSIENT:
-                print(f"prim: {getattr(self, 'name', 'ext')}: still degraded ({e.kind}); retrying", file=sys.stderr, flush=True)
+                print(f"vqro: {getattr(self, 'name', 'ext')}: still degraded ({e.kind}); retrying", file=sys.stderr, flush=True)
                 self._schedule_recover()
                 return
             # A state/protocol error: never continue on a divergent cache; supervision restarts us.
-            print(f"prim: {getattr(self, 'name', 'ext')}: notification recovery failed ({e.kind}: {e}); disconnecting", file=sys.stderr, flush=True)
-            self.prim.sock.shutdown(socket.SHUT_RDWR)
+            print(f"vqro: {getattr(self, 'name', 'ext')}: notification recovery failed ({e.kind}: {e}); disconnecting", file=sys.stderr, flush=True)
+            self.vqro.sock.shutdown(socket.SHUT_RDWR)
             return
         self._recovered()
         for fn in self.listeners:
             self._listen(fn, ("missed", {"reason": "recovered"}))
 
     def _recovered(self):
-        print(f"prim: {getattr(self, 'name', 'ext')}: recovered after: {self._degraded}", file=sys.stderr, flush=True)
+        print(f"vqro: {getattr(self, 'name', 'ext')}: recovered after: {self._degraded}", file=sys.stderr, flush=True)
         self._degraded = None
         self._recover_attempts = 0
 
@@ -534,18 +534,18 @@ class Extension:
             fn(*event)
             if retry or event[0] == "missed":
                 deferred.pop(fn, None)  # a full recompute succeeded; other events may not redo it
-        except PrimError as e:
+        except VqroError as e:
             if e.kind != "conflict" and e.kind not in TRANSIENT:
-                print(f"prim: {getattr(self, 'name', 'ext')}: listener failed: {e.kind}: {e}", file=sys.stderr, flush=True)
+                print(f"vqro: {getattr(self, 'name', 'ext')}: listener failed: {e.kind}: {e}", file=sys.stderr, flush=True)
                 return
             # A conflict, or no answer yet from a slow core: rerun later (writes are CAS-guarded).
             n = deferred[fn] = deferred.get(fn, 0) + 1
             delay = min(5.0 if e.kind == "conflict" else 30.0, 0.1 * 2 ** n) * (0.5 + random.random())
             what = "conflicted" if e.kind == "conflict" else f"got {e.kind}"
-            print(f"prim: {getattr(self, 'name', 'ext')}: listener write {what} ({n}); retrying in {delay:.2f}s", file=sys.stderr, flush=True)
-            self.prim.defer({"method": "prim.retry", "params": {}}, delay)
+            print(f"vqro: {getattr(self, 'name', 'ext')}: listener write {what} ({n}); retrying in {delay:.2f}s", file=sys.stderr, flush=True)
+            self.vqro.defer({"method": "vqro.retry", "params": {}}, delay)
         except Exception:
-            print(f"prim: {getattr(self, 'name', 'ext')}: listener failed:\n{traceback.format_exc()}", file=sys.stderr, flush=True)
+            print(f"vqro: {getattr(self, 'name', 'ext')}: listener failed:\n{traceback.format_exc()}", file=sys.stderr, flush=True)
         finally:
             local.active = False
 
@@ -563,7 +563,7 @@ class Extension:
                     base = self.resources.get(d["id"])
                     if base is None:
                         # No base: our cache is not what the core assumed. Reload.
-                        self._load(self.prim.call("workspace.snapshot"))
+                        self._load(self.vqro.call("workspace.snapshot"))
                         return "missed", {}
                     d = dict(base, **d)
                 self.resources[d["id"]] = d
@@ -584,7 +584,7 @@ class Extension:
                         self.entries[c["key"]] = {"version": c["version"], "value": c["value"]}
             return t, d
         if method == "missed":
-            self._load(self.prim.call("workspace.snapshot"))
+            self._load(self.vqro.call("workspace.snapshot"))
             return "missed", params
         return None
 

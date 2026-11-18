@@ -1,9 +1,9 @@
 //! Private slow-writer regressions. Core has its own two-worker runtime so a blocked core cannot
-//! also stop the test's deadlines. No live backend/prim, fault environment or disk sleeps required.
+//! also stop the test's deadlines. No live backend/vqro, fault environment or disk sleeps required.
 use std::sync::{Arc, Condvar, Mutex, atomic::{AtomicBool, Ordering}};
 use std::time::{Duration, Instant};
 use base64::Engine;
-use prim::{client, core::Shared, rpc::{Incoming, Peer}, server::{self, Backend}, store};
+use vqro::{client, core::Shared, rpc::{Incoming, Peer}, server::{self, Backend}, store};
 use serde_json::{json, Value};
 
 struct Gate {
@@ -58,7 +58,7 @@ impl Fixture {
         core.lock().unwrap().configure_workspace_writer(gate.writer()).unwrap();
         Self { core, socket, gate, stop:Some(stop), thread:Some(thread), _dir:dir }
     }
-    async fn peer(&self) -> (Peer, prim::rpc::IncomingReceiver) {
+    async fn peer(&self) -> (Peer, vqro::rpc::IncomingReceiver) {
         let (peer, incoming, _) = client::connect(&self.socket, "commit-test").await.unwrap();
         (peer, incoming)
     }
@@ -149,7 +149,7 @@ async fn queued_cas_and_default_revert_use_the_preceding_adopted_state() {
     let second = tokio::spawn(async move { b.call("workspace.apply", set(2, 1)).await });
     f.pending(2).await;
     let core = f.core.clone();
-    let undo = tokio::spawn(async move { server::invoke(&core, "test", "prim.revert", Value::Null).await });
+    let undo = tokio::spawn(async move { server::invoke(&core, "test", "vqro.revert", Value::Null).await });
     f.pending(3).await;
     f.gate.release();
     assert_eq!(first.await.unwrap().unwrap()["txn"], 1);
@@ -167,7 +167,7 @@ async fn cancelled_caller_cannot_suppress_adoption_or_extension_reconciliation()
     assert_eq!(f.core.lock().unwrap().exts["gated"].spec_version, 1);
     f.gate.armed.store(true, Ordering::SeqCst);
     let core = f.core.clone();
-    let invoke = tokio::spawn(async move { server::invoke(&core, "test", "prim.extension.disable", json!({"name":"gated"})).await });
+    let invoke = tokio::spawn(async move { server::invoke(&core, "test", "vqro.extension.disable", json!({"name":"gated"})).await });
     tokio::time::timeout(Duration::from_secs(2), f.gate.entered.notified()).await.unwrap();
     invoke.abort();
     assert!(invoke.await.unwrap_err().is_cancelled());
@@ -233,9 +233,9 @@ async fn commit_admission_counts_escaped_note_bytes_not_only_raw_text() {
     let note="\0".repeat(store::NOTE_BYTES);
     let input=||json!({"note":note,"ops":(0..3).map(|i|json!({"op":"set","key":format!("doc/escaped-{i}"),"value":"x".repeat(budget/9-store::NOTE_BYTES),"expect":0})).collect::<Vec<_>>()});
     let ops:Vec<store::Op>=serde_json::from_value(input()["ops"].clone()).unwrap();
-    let payload=prim::limits::encoded_bytes(&ops);
+    let payload=vqro::limits::encoded_bytes(&ops);
     let raw=3*payload+authors.iter().map(|author|author.len()+note.len()).sum::<usize>();
-    let encoded=3*payload+authors.iter().map(|author|prim::limits::encoded_bytes(&(author,None::<&str>,Some(&note)))).sum::<usize>();
+    let encoded=3*payload+authors.iter().map(|author|vqro::limits::encoded_bytes(&(author,None::<&str>,Some(&note)))).sum::<usize>();
     assert!(raw<budget && encoded>budget,"raw {raw}, encoded {encoded}, budget {budget}");
     let first_input = input(); let second_input = input();
     let first = tokio::spawn(async move { a.call("workspace.apply", first_input).await });
@@ -268,7 +268,7 @@ async fn descriptive_client_labels_are_not_duplicated_into_commit_metadata() {
     assert_eq!(second.await.unwrap().unwrap_err().kind(),"conflict");assert_eq!(third.await.unwrap().unwrap_err().kind(),"conflict");f.pending(0).await;
     let history=reader.call("workspace.history",json!({"limit":10})).await.unwrap();
     assert_eq!(history["txns"][0]["author"],authors[0]);
-    assert!(prim::limits::encoded_bytes(&history)<4096,"client labels must not be retained per transaction");
+    assert!(vqro::limits::encoded_bytes(&history)<4096,"client labels must not be retained per transaction");
 }
 
 #[tokio::test]
@@ -302,7 +302,7 @@ async fn default_undo_reaccounts_a_changed_target_before_copying_its_payload() {
     let deleting=tokio::spawn(async move {a.call("workspace.apply",json!({"ops":(0..3).map(|i|json!({"op":"delete","key":format!("doc/big{i}")})).collect::<Vec<_>>()})).await});
     tokio::time::timeout(Duration::from_secs(2),f.gate.entered.notified()).await.unwrap();
     // Admission sees the old create (tiny undo); queue head sees deletion (3MiB undo).
-    let undo=tokio::spawn(async move {undo.call("command.invoke",json!({"name":"prim.revert"})).await});
+    let undo=tokio::spawn(async move {undo.call("command.invoke",json!({"name":"vqro.revert"})).await});
     f.pending(2).await;
     let input=big();let next=tokio::spawn(async move {b.call("workspace.apply",input).await});
     let input=big();let last=tokio::spawn(async move {c.call("workspace.apply",input).await});
@@ -319,7 +319,7 @@ async fn default_undo_stops_at_an_oversized_record_instead_of_skipping_to_older_
     for i in 0..10 {peer.call("workspace.apply",json!({"ops":[{"op":"set","key":format!("doc/large{i}"),"value":"x".repeat(900*1024)}]})).await.unwrap();}
     let deleted=peer.call("workspace.apply",json!({"ops":(0..10).map(|i|json!({"op":"delete","key":format!("doc/large{i}")})).collect::<Vec<_>>()})).await.unwrap();
     assert_eq!(deleted["undoable"],false);
-    let error=peer.call("command.invoke",json!({"name":"prim.revert"})).await.unwrap_err();
+    let error=peer.call("command.invoke",json!({"name":"vqro.revert"})).await.unwrap_err();
     assert_eq!(error.kind(),"unavailable");assert!(error.message.contains("undo history byte horizon"));
     assert_eq!(peer.call("workspace.history",json!({"limit":1})).await.unwrap()["txns"][0]["id"],deleted["txn"]);
 }

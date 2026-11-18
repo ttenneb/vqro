@@ -1,6 +1,6 @@
 //! Process supervision and provider readiness are different facts. No live backend.
 use std::time::Duration;
-use prim::{client,server::{self,Backend}};
+use vqro::{client,server::{self,Backend}};
 use serde_json::{json,Value};
 
 #[tokio::test]

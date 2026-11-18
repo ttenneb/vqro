@@ -1,7 +1,7 @@
 //! Opt-in real tmux 3.7b tests: cargo test --test tmux -- --ignored
 //! Every child has an allowlisted environment and unique explicit -S socket. Drop kills ONLY it.
 #![cfg(unix)]
-use prim::tmux::{Client, Config, Error, GapReason, Notification, PaneEvent, PaneId, PaneStream};
+use vqro::tmux::{Client, Config, Error, GapReason, Notification, PaneEvent, PaneId, PaneStream};
 use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::time::{Duration, Instant};
@@ -202,7 +202,7 @@ async fn server_incarnation_survives_reconnect_but_not_restart_with_reused_ids()
     assert_eq!(first, server.cli(&["list-panes", "-F", "#{pane_id}"]).stdout);
     assert_ne!(instance, fresh.instance());
     // The independent capture path must also refuse a replaced backend identity atomically.
-    fresh.command(&["set-option", "-s", "@prim_control_instance", "00000000000000000000000000000000"]).await.unwrap();
+    fresh.command(&["set-option", "-s", "@vqro_control_instance", "00000000000000000000000000000000"]).await.unwrap();
     assert!(matches!(fresh.resume(&PaneId::parse("%0").unwrap()).await, Err(Error::Disconnected)));
     fresh.close().await;
 }
@@ -382,7 +382,7 @@ async fn read_only_timeouts_under_a_flood_keep_the_client_and_replies_paired() {
             while !path.with_extension("go").exists() { tokio::time::sleep(Duration::from_millis(1)).await; }
         }).await.unwrap();
     }
-    spawner.spawn(&["/bin/sh", "-c", "yes prim-flood-line | head -n 3000000; sleep 600"], None).await.unwrap();
+    spawner.spawn(&["/bin/sh", "-c", "yes vqro-flood-line | head -n 3000000; sleep 600"], None).await.unwrap();
     let (mut ok, mut timed_out) = (0, 0);
     for i in 0..300 {
         let probe = format!("probe-{i}");

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""prim extension: settings, as a popup.
+"""vqro extension: settings, as a popup.
 
 `settings.open` asks the invoking client to show `view/settings` as a popup. Its rows are live content
 (`view.publish`: not saved, not in history) rebuilt whenever extensions or settings change, so toggles
 update in place while the popup is open.
 
-Extensions are switched with the core's `prim.extension.enable|disable`; client options live in
+Extensions are switched with the core's `vqro.extension.enable|disable`; client options live in
 `doc/settings/tui` and each client reads the ones it understands. The Theme page draws the `themes`
 extension's live data and applies one with its `themes.apply` command; the Icons page does the same with
 the `icons` extension (`icons.apply`), under the client's own Nerd Font choice. Every declared extension uses the
@@ -17,8 +17,8 @@ import time
 import unicodedata
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from prim_ext import Extension, PrimError  # noqa: E402
-from prim_display import label, key_labels
+from vqro_ext import Extension, VqroError  # noqa: E402
+from vqro_display import label, key_labels
 
 ext = Extension("settings", event_types=["entries", "view.content", "extension", "provider", "safe_mode", "command"],
                 view_content={"names": ["themes", "icons", "keys"]})  # no resource events: not used here
@@ -125,10 +125,10 @@ def ext_rows(states, commands=None):
         shown = title if title == name else f"{title} ({name})"
         summary = manifest_text(manifest, "summary", value.get("description") or "No summary provided.").replace("\n", " ")
         status = state.get("display_status") or ("off" if not on else {"running": "running", "failed": "failed", "safe_mode": "stopped-by-safe-mode", "disabled": "off"}.get(state.get("status"), "starting"))
-        switch = "prim.safe_mode.allow" if safe else "prim.extension.disable" if on else "prim.extension.enable"
+        switch = "vqro.safe_mode.allow" if safe else "vqro.extension.disable" if on else "vqro.extension.enable"
         switch_args = {"name": name, "on": not on} if safe else {"name": name}
         actions = [{"text": "Turn off" if on else "Turn on", "command": switch, "args": switch_args},
-                   {"text": "Restart", "command": "prim.extension.restart", "args": {"name": name}, "disabled": not on}]
+                   {"text": "Restart", "command": "vqro.extension.restart", "args": {"name": name}, "disabled": not on}]
         settings_command = manifest_text(manifest, "settings_command")
         if settings_command:
             actions.append({"text": "Extension settings", "command": settings_command,
@@ -192,7 +192,7 @@ PREFIXES = ["C-g", "C-a", "C-b", "C-Space"]
 NAMED = {n.lower(): n for n in ("Up", "Down", "Left", "Right", "Home", "End", "PageUp", "PageDown", "Insert",
                                 "Delete", "Tab", "BackTab", "Enter", "Esc", "Backspace", "Space")}
 NAMED.update({f"f{n}": f"F{n}" for n in range(1, 13)})
-# The client's default keys (recovery ones stay reachable from the prim badge whatever wins).
+# The client's default keys (recovery ones stay reachable from the vqro badge whatever wins).
 BUILTIN = [(":", "all commands"), ("o", "next pane"), ("O", "previous pane"), ("u", "undo last change"),
            ("R", "reset layout"), ("!", "safe mode"), ("q", "quit")] + [(str(n), f"tab {n}") for n in range(1, 10)]
 
@@ -236,7 +236,7 @@ def key_rows():
     """Profile and prefix, then every binding grouped by key, the winner first."""
     titles = {}
     try:
-        titles = {c["name"]: c["title"] for c in ext.prim.call("command.list")["commands"] if c.get("available")}
+        titles = {c["name"]: c["title"] for c in ext.vqro.call("command.list")["commands"] if c.get("available")}
     except Exception:
         pass
     mode = tui().get("key_labels")
@@ -287,8 +287,8 @@ def key_rows():
 
 
 def refresh(*_):
-    states = ext.prim.call("extension.list")["extensions"]
-    commands = {c["name"] for c in ext.prim.call("command.list")["commands"] if c.get("available")}
+    states = ext.vqro.call("extension.list")["extensions"]
+    commands = {c["name"] for c in ext.vqro.call("command.list")["commands"] if c.get("available")}
     t = tui()
     interface = [{"type": "toggle", "text": label, "description": desc, "checked": bool(t[k]),
                   "command": "settings.toggle", "args": {"tui": k}} for k, label, desc, _ in OPTIONS]
@@ -298,7 +298,7 @@ def refresh(*_):
                       "description":"Display names only; configured key syntax stays unchanged."})
     info = ext.info
     about = [
-        {"text": "prim", "detail": f"{info.get('server')} {info.get('version')} · protocol {info.get('protocol')}", "disabled": True, "style": "plain"},
+        {"text": "vqro", "detail": f"{info.get('server')} {info.get('version')} · protocol {info.get('protocol')}", "disabled": True, "style": "plain"},
         {"text": "socket", "detail": str(info.get("socket")), "disabled": True, "style": "plain"},
         {"text": "state", "detail": str(info.get("state_dir")), "disabled": True, "style": "plain"},
         {"type": "separator"},
@@ -331,7 +331,7 @@ def open_settings(args):
 def set_option(args):
     key, value = args.get("tui"), args.get("value")
     if not key:
-        raise PrimError("needs `tui`", "invalid")
+        raise VqroError("needs `tui`", "invalid")
     t = dict(ext.value(TUI) or {}, **{key: value})
     ext.apply([{"op": "set", "key": TUI, "value": t, "expect": ext.version(TUI)}], f"settings: {key}")
 
@@ -341,7 +341,7 @@ def toggle(args):
     if "extension" in args:
         name = args["extension"]
         on = (ext.value(f"extension/{name}") or {}).get("enabled", True)
-        return ext.invoke("prim.extension.disable" if on else "prim.extension.enable", {"name": name})
+        return ext.invoke("vqro.extension.disable" if on else "vqro.extension.enable", {"name": name})
     if "tui" in args:
         t = tui()
         t[args["tui"]] = not t[args["tui"]]
@@ -353,7 +353,7 @@ def set_prefix(args):
     want = (args.get("value") or args.get("text") or "").strip()
     key = norm_key(want)
     if not key or not (key[:2] in ("C-", "M-") or (key[0] == "F" and len(key) > 1)):
-        raise PrimError(f"{want!r} can't be a prefix: use {key_labels('C-a or M-Space', tui().get('key_labels'))} or F1-F12", "invalid")
+        raise VqroError(f"{want!r} can't be a prefix: use {key_labels('C-a or M-Space', tui().get('key_labels'))} or F1-F12", "invalid")
     t = dict(ext.value(TUI) or {}, prefix=key)
     ext.apply([{"op": "set", "key": TUI, "value": t, "expect": ext.version(TUI)}], "settings: prefix")
 

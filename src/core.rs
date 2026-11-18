@@ -1,4 +1,4 @@
-//! The prim core: workspace store, resources from adapters, the event log, commands and extensions.
+//! The vqro core: workspace store, resources from adapters, the event log, commands and extensions.
 //!
 //! Shared as `Arc<Mutex<Core>>`. The lock is never held across an await.
 
@@ -95,14 +95,14 @@ impl CommandInfo {
 
 /// Built-in recovery and convenience commands. Owned by the core, never replaceable (D15).
 pub const BUILTINS: &[(&str, &str)] = &[
-    ("prim.layout.reset", "Reset the layout to one tab per live terminal"),
-    ("prim.revert", "Revert a workspace transaction (args: txn; default: the last one not made by an extension)"),
-    ("prim.safe_mode", "Stop all extensions/providers, or leave safe mode (args: on)"),
-    ("prim.safe_mode.allow", "Temporarily allow a declared extension in safe mode (args: name, on)"),
-    ("prim.shutdown", "Stop extensions and provider connections, then exit the core"),
-    ("prim.extension.disable", "Disable an extension (args: name)"),
-    ("prim.extension.enable", "Enable an extension (args: name)"),
-    ("prim.extension.restart", "Restart an extension, clearing its crash budget (args: name)"),
+    ("vqro.layout.reset", "Reset the layout to one tab per live terminal"),
+    ("vqro.revert", "Revert a workspace transaction (args: txn; default: the last one not made by an extension)"),
+    ("vqro.safe_mode", "Stop all extensions/providers, or leave safe mode (args: on)"),
+    ("vqro.safe_mode.allow", "Temporarily allow a declared extension in safe mode (args: name, on)"),
+    ("vqro.shutdown", "Stop extensions and provider connections, then exit the core"),
+    ("vqro.extension.disable", "Disable an extension (args: name)"),
+    ("vqro.extension.enable", "Enable an extension (args: name)"),
+    ("vqro.extension.restart", "Restart an extension, clearing its crash budget (args: name)"),
 ];
 
 pub struct Core {
@@ -359,7 +359,7 @@ impl Core {
         data["provider"] = json!(provider);
         data["instance"] = json!(self.providers.get(provider).and_then(|p| p.info.as_ref()).map(|i| &i.instance));
         if !self.identity_failures.contains_key(provider) {
-            eprintln!("prim: resource identities for {provider}: {error}");
+            eprintln!("vqro: resource identities for {provider}: {error}");
             self.identity_failures.insert(provider.into(), error.clone());
             self.emit("persistence.error", json!({"scope": "resources", "provider": provider, "message": error.message, "error": error}));
             self.provider_event(provider);
@@ -369,7 +369,7 @@ impl Core {
 
     fn identity_recovered(&mut self, provider: &str) {
         if self.identity_failures.remove(provider).is_some() {
-            eprintln!("prim: resource identity persistence recovered for {provider}");
+            eprintln!("vqro: resource identity persistence recovered for {provider}");
             self.emit("persistence.recovered", json!({"scope": "resources", "provider": provider}));
             self.provider_event(provider);
         }
@@ -411,7 +411,7 @@ impl Core {
     fn retire_visible(&mut self, ids: Vec<String>, reason: &str) {
         if ids.is_empty(){return;}
         let hosts=ids.iter().map(String::as_str).collect::<std::collections::HashSet<_>>();
-        if let Err(error)=self.bridge_tokens.expire_hosts(&hosts){eprintln!("prim: runtime credential revocation persistence failed: {error}");self.emit("persistence.error",json!({"scope":"runtime_tokens","message":error.message}));}
+        if let Err(error)=self.bridge_tokens.expire_hosts(&hosts){eprintln!("vqro: runtime credential revocation persistence failed: {error}");self.emit("persistence.error",json!({"scope":"runtime_tokens","message":error.message}));}
         for id in ids {
             self.admission.remove_resource(&id);
             if let Some(resource) = self.resources.remove(&id) { resource.life.send_replace(false); }
@@ -659,7 +659,7 @@ pub fn add_adapter(core: &Shared, handle: AdapterHandle, events: mpsc::Unbounded
         let mut c = core.lock().unwrap();
         match c.install_adapter(handle, default) {
             Ok(source) => source,
-            Err(error) => { eprintln!("prim: native provider admission rejected: {error}"); c.emit("provider.rejected", json!({"name":name,"error":error})); return; }
+            Err(error) => { eprintln!("vqro: native provider admission rejected: {error}"); c.emit("provider.rejected", json!({"name":name,"error":error})); return; }
         }
     };
     let core = core.clone();

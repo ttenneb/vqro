@@ -1,39 +1,39 @@
-//! Where prim keeps its socket and state. Environment overrides first, then per-user defaults.
+//! Where vqro keeps its socket and state. Environment overrides first, then per-user defaults.
 
 use std::path::PathBuf;
 
 use anyhow::{bail, Result};
 
-/// `PRIM_STATE_DIR`, else `$XDG_STATE_HOME/prim`, else `~/.local/state/prim`.
+/// `VQRO_STATE_DIR`, else `$XDG_STATE_HOME/vqro`, else `~/.local/state/vqro`.
 pub fn state_dir() -> PathBuf {
-    if let Ok(d) = std::env::var("PRIM_STATE_DIR") {
+    if let Ok(d) = std::env::var("VQRO_STATE_DIR") {
         return PathBuf::from(d);
     }
     if let Ok(d) = std::env::var("XDG_STATE_HOME") {
-        return PathBuf::from(d).join("prim");
+        return PathBuf::from(d).join("vqro");
     }
-    home().join(".local/state/prim")
+    home().join(".local/state/vqro")
 }
 
-/// Bundled extensions: `PRIM_EXTENSIONS_DIR`, else `~/.local/share/prim/extensions`.
+/// Bundled extensions: `VQRO_EXTENSIONS_DIR`, else `~/.local/share/vqro/extensions`.
 pub fn extensions_dir() -> PathBuf {
-    match std::env::var("PRIM_EXTENSIONS_DIR") {
+    match std::env::var("VQRO_EXTENSIONS_DIR") {
         Ok(d) => PathBuf::from(d),
-        Err(_) => home().join(".local/share/prim/extensions"),
+        Err(_) => home().join(".local/share/vqro/extensions"),
     }
 }
 
-/// `PRIM_SOCKET`, else `<state_dir>/prim.sock`.
+/// `VQRO_SOCKET`, else `<state_dir>/vqro.sock`.
 pub fn socket_path() -> Result<PathBuf> {
     // A terminal-injected endpoint is ambient reachability, not an explicit scratch-run choice.
-    let inherited = std::env::var("PRIM_SOCKET_SOURCE").ok().as_deref()==Some("terminal") && std::env::var_os("PRIM_STATE_DIR").is_some();
-    let p = match std::env::var("PRIM_SOCKET").ok().filter(|_|!inherited) {
+    let inherited = std::env::var("VQRO_SOCKET_SOURCE").ok().as_deref()==Some("terminal") && std::env::var_os("VQRO_STATE_DIR").is_some();
+    let p = match std::env::var("VQRO_SOCKET").ok().filter(|_|!inherited) {
         Some(s) => PathBuf::from(s),
-        None => state_dir().join("prim.sock"),
+        None => state_dir().join("vqro.sock"),
     };
     // macOS limits Unix socket paths to 103 bytes, Linux to 107.
     if p.as_os_str().len() > 100 {
-        bail!("socket path is too long ({} bytes): {}; set PRIM_SOCKET to a shorter path", p.as_os_str().len(), p.display());
+        bail!("socket path is too long ({} bytes): {}; set VQRO_SOCKET to a shorter path", p.as_os_str().len(), p.display());
     }
     Ok(p)
 }

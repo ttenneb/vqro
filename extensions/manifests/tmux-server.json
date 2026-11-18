@@ -1,7 +1,7 @@
 {
   "name":"tmux-server", "title":"tmux server controls", "version":"0.1.0", "license":"Apache-2.0", "author":"Bennett Garcia", "kind":"management",
-  "summary":"Inspect or explicitly stop the separate prim-owned tmux server.",
+  "summary":"Inspect or explicitly stop the separate vqro-owned tmux server.",
   "description":"Adds independent server status and a confirmed stop action, even while the tmux provider is disabled. Stop ends the owned server and its terminal programs; no server is started just to inspect it. Turn this extension off to remove its controls, not to stop the server. It never stops a configured external tmux server.",
   "requires":{"protocol":1,"client_features":["items","input","menu"]},
-  "contributes":{"commands":["tmux.server.status","tmux.server.stop"],"menu_items":["Prim-owned tmux server, only while present"],"panels":["tmux server status"]}
+  "contributes":{"commands":["tmux.server.status","tmux.server.stop"],"menu_items":["vqro-owned tmux server, only while present"],"panels":["tmux server status"]}
 }

@@ -1,5 +1,5 @@
 //! Private persistence/RSS regressions; no real backend, credentials or live endpoint.
-use prim::provider::{Identity,IdentityMap};
+use vqro::provider::{Identity,IdentityMap};
 use serde_json::{json,Value};
 use std::time::{Duration,Instant};
 fn identity()->Identity{Identity{provider:"fixture".into(),instance:"instance".into(),reference:"terminal".into(),incarnation:"birth".into()}}
@@ -25,26 +25,26 @@ fn old_tombstones_and_legacy_records_advance_high_water_without_being_retained()
 
 #[tokio::test]
 async fn native_inventory_600_new_ids_has_a_bounded_lock_hold(){
- use prim::{core::Core,adapter::{AdapterHandle,AdapterEvent},provider::ProviderInfo};
- let root=tempfile::tempdir().unwrap();let core=std::sync::Mutex::new(Core::new(prim::store::Store::in_memory(),Some(root.path().into()),root.path().join("unused"),false).unwrap());let(tx,_rx)=tokio::sync::mpsc::unbounded_channel();
+ use vqro::{core::Core,adapter::{AdapterHandle,AdapterEvent},provider::ProviderInfo};
+ let root=tempfile::tempdir().unwrap();let core=std::sync::Mutex::new(Core::new(vqro::store::Store::in_memory(),Some(root.path().into()),root.path().join("unused"),false).unwrap());let(tx,_rx)=tokio::sync::mpsc::unbounded_channel();
  let mut c=core.lock().unwrap();c.install_adapter(AdapterHandle{name:"fixture".into(),session:None,context:None,capabilities:json!({}),cmds:tx},true).unwrap();c.on_adapter_event("fixture",AdapterEvent::Registered(ProviderInfo{connection:1,instance:"A".into(),role:"backend".into(),software:json!({"name":"fixture","version":"1"})}));
  let facts=(0..600).map(|i|serde_json::from_value(json!({"backend_ref":format!("t{i}"),"kind":"terminal","state":"live"})).unwrap()).collect();let start=Instant::now();c.on_adapter_event("fixture",AdapterEvent::Snapshot(facts));let held=start.elapsed();assert_eq!(c.resources.len(),600);
  println!("public inventory600 lock_hold_ms={:.3}",held.as_secs_f64()*1000.0);assert!(held<Duration::from_millis(150),"inventory core lock held {held:?}");
 }
 #[tokio::test]
 async fn claimed_extension_names_do_not_grant_extension_authorship(){
- let root=tempfile::Builder::new().prefix("pih").tempdir_in("/tmp").unwrap();let socket=root.path().join("s");let core=prim::server::start(socket.clone(),root.path().join("st"),false,prim::server::Backend::Extensions,None).unwrap();
- let(a,_a,_)=prim::client::connect(&socket,"a").await.unwrap();let(b,_b,_)=prim::client::connect(&socket,"b").await.unwrap();
+ let root=tempfile::Builder::new().prefix("pih").tempdir_in("/tmp").unwrap();let socket=root.path().join("s");let core=vqro::server::start(socket.clone(),root.path().join("st"),false,vqro::server::Backend::Extensions,None).unwrap();
+ let(a,_a,_)=vqro::client::connect(&socket,"a").await.unwrap();let(b,_b,_)=vqro::client::connect(&socket,"b").await.unwrap();
  let one=a.call("hello",json!({"extension":"claimed"})).await.unwrap();let two=b.call("hello",json!({"extension":"claimed"})).await.unwrap();assert!(!one["you"].as_str().unwrap().starts_with("ext:"));assert_ne!(one["you"],two["you"]);
- prim::server::shutdown(&core).await;
+ vqro::server::shutdown(&core).await;
 }
 #[tokio::test]
 async fn different_live_authors_cannot_overwrite_or_clear_a_published_view(){
- let root=tempfile::Builder::new().prefix("pih").tempdir_in("/tmp").unwrap();let socket=root.path().join("s");let core=prim::server::start(socket.clone(),root.path().join("st"),false,prim::server::Backend::Extensions,None).unwrap();
- let(a,_a,_)=prim::client::connect(&socket,"a").await.unwrap();let(b,_b,_)=prim::client::connect(&socket,"b").await.unwrap();
+ let root=tempfile::Builder::new().prefix("pih").tempdir_in("/tmp").unwrap();let socket=root.path().join("s");let core=vqro::server::start(socket.clone(),root.path().join("st"),false,vqro::server::Backend::Extensions,None).unwrap();
+ let(a,_a,_)=vqro::client::connect(&socket,"a").await.unwrap();let(b,_b,_)=vqro::client::connect(&socket,"b").await.unwrap();
  a.call("view.publish",json!({"view":"owned","content":{"label":"original"}})).await.unwrap();
  assert_eq!(b.call("view.publish",json!({"view":"owned","content":{"label":"replacement"}})).await.unwrap_err().kind(),"conflict");
- assert_eq!(b.call("view.publish",json!({"view":"owned","content":null})).await.unwrap_err().kind(),"conflict");prim::server::shutdown(&core).await;
+ assert_eq!(b.call("view.publish",json!({"view":"owned","content":null})).await.unwrap_err().kind(),"conflict");vqro::server::shutdown(&core).await;
 }
 
 #[cfg(target_os="linux")]
@@ -59,7 +59,7 @@ fn ten_thousand_idle_subscribers_disconnect_without_retained_rss(){
  }
  fn rss(pid:u32)->u64{std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap().lines().find_map(|l|l.strip_prefix("VmRSS:").map(|v|v.split_whitespace().next().unwrap().parse::<u64>().unwrap()*1024)).unwrap()}
  let root=tempfile::Builder::new().prefix("pih").tempdir_in("/tmp").unwrap();let socket=root.path().join("s");let ext=root.path().join("ext");std::fs::create_dir(&ext).unwrap();
- let mut child=Owned(Command::new(env!("CARGO_BIN_EXE_prim")).args(["serve","--safe"]).env_clear().env("HOME",root.path()).env("PATH","/usr/bin:/bin").env("PRIM_STATE_DIR",root.path().join("st")).env("PRIM_SOCKET",&socket).env("PRIM_EXTENSIONS_DIR",ext).env("XDG_RUNTIME_DIR",root.path()).env("HC_SOCKET",root.path().join("private-hc.sock")).env("HC_SESSION","identity-private").env("PRIM_HERDR","[\"/bin/false\"]").stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
+ let mut child=Owned(Command::new(env!("CARGO_BIN_EXE_vqro")).args(["serve","--safe"]).env_clear().env("HOME",root.path()).env("PATH","/usr/bin:/bin").env("VQRO_STATE_DIR",root.path().join("st")).env("VQRO_SOCKET",&socket).env("VQRO_EXTENSIONS_DIR",ext).env("XDG_RUNTIME_DIR",root.path()).env("HC_SOCKET",root.path().join("private-hc.sock")).env("HC_SESSION","identity-private").env("VQRO_HERDR","[\"/bin/false\"]").stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
  let deadline=Instant::now()+Duration::from_secs(5);while !socket.exists(){assert!(child.0.try_wait().unwrap().is_none());assert!(Instant::now()<deadline);std::thread::sleep(Duration::from_millis(5));}
  for _ in 0..200{cycle(&socket);}std::thread::sleep(Duration::from_millis(100));let before=rss(child.0.id());let mut peak=before;
  for n in 0..10_000{cycle(&socket);if n%1000==0{peak=peak.max(rss(child.0.id()));}}

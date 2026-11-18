@@ -3,7 +3,7 @@
 Run as a backend terminal's program, never as a core-managed extension or process host:
 
 ```sh
-python3 -I /path/to/prim/extensions/pi_bridge/launch.py -- \
+python3 -I /path/to/vqro/extensions/pi_bridge/launch.py -- \
   /absolute/path/to/node /absolute/path/to/pi/cli.js --mode rpc
 ```
 
@@ -12,7 +12,7 @@ selection, credential copying or automatic prompt. `-I` excludes the project cwd
 packages before bridge/stdlib imports; the launcher adds only its own trusted installation. Do not use plain
 `python -m pi_bridge` in an agent project. The default `pi` extension uses this installed launcher without exporting
 `PYTHONPATH`. Existing `bridge_argv`/`bridge_env` stay literal and configurable on the terminal host (for example,
-`["py", "-3", "-I", "C:\\installed\\prim\\extensions\\pi_bridge\\launch.py"]`); no shell or core-OS inference.
+`["py", "-3", "-I", "C:\\installed\\vqro\\extensions\\pi_bridge\\launch.py"]`); no shell or core-OS inference.
 A custom launcher is responsible for its own import isolation. `scripts/dev-install.sh` copies the package,
 including the launcher; this task does not run the installer.
 
@@ -21,8 +21,8 @@ while waiting for registration. It retries transient status reads only; an alrea
 the command result even if registration lookup or UI presentation is unavailable. The terminal fallback warns not
 to blindly retry; the spawn effect is sent once.
 
-Spawn through the public primitive with opt-in `bridge: true`. The core supplies opaque `PRIM_SOCKET` and
-single-use `PRIM_BRIDGE_TOKEN`; do not type/log/copy real bootstrap secrets manually. Runtime registration uses
+Spawn through the public primitive with opt-in `bridge: true`. The core supplies opaque `VQRO_SOCKET` and
+single-use `VQRO_BRIDGE_TOKEN`; do not type/log/copy real bootstrap secrets manually. Runtime registration uses
 role runtime and token. The bridge starts Pi over clean child pipes, inspects get_state without a model call,
 registers, syncs one agent (`ref: agent`), finds its assigned rN through scoped resource.list, and declares
 `view/agent-rN` once. Live content uses the existing bare `view: agent-rN` API. No automatic layout change.
@@ -88,8 +88,8 @@ the error and exits through owned-Pi cleanup, rather than keeping an unreachable
 transient refusal exception is structured `data.reason: safe_mode`: it keeps the owned Pi while backing off,
 not treating every forbidden error or matching message text as transient. Transport gaps and that explicit
 safe-mode state retry the last observed credential; user/runtime exit interrupts them. Resume tokens
-are not passed to Pi. Pi/tools receive no `HERDR_*` or `PRIM_*` internals except the opaque `PRIM_SOCKET` and
-`PRIM_SOCKET_SOURCE=terminal`, preserving scratch-state endpoint selection. The bridge installation is removed
+are not passed to Pi. Pi/tools receive no `HERDR_*` or `VQRO_*` internals except the opaque `VQRO_SOCKET` and
+`VQRO_SOCKET_SOURCE=terminal`, preserving scratch-state endpoint selection. The bridge installation is removed
 from legacy/custom `PYTHONPATH`; unrelated user entries are preserved. Default launch injects no Python path at all.
 This is environment hygiene, not a same-user security sandbox: bridge-process memory/environ remains inside that
 trust boundary. A runtime bridge owns stdin shutdown itself,
@@ -107,7 +107,7 @@ Project-module shadow, actual child environment capture, no-idle-rebuild, native
 fallback regressions are included. CPU/memory measurement evidence: `docs/research/bridge-p2.md`.
 
 Run with `env -i HOME="$HOME" PATH=/usr/bin:/bin python3 -W error -m unittest discover -s tests -p 'test_*.py' -v`.
-Those unit tests use no-model fixtures. `tests/pi_provider_e2e.py --run --prim /absolute/prim --hc /absolute/herdr-core`
+Those unit tests use no-model fixtures. `tests/pi_provider_e2e.py --run --vqro /absolute/vqro --hc /absolute/herdr-core`
 also exercises a real private core/backend and fake Pi through public CLI effects, durable token/core restart,
 unchanged native processes, live view and native exit. Add `--real-pi-metadata` for installed Pi 1.5.0 state/restart/EOF
 only, never agent effects or model calls. Runs require a fresh user/network namespace and retain private receipts.

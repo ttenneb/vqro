@@ -1,8 +1,8 @@
 #!/usr/bin/python3
 """Opt-in TUI check: drop-downs keep their popup visible, and pastes reach programs intact.
 
-The real `prim tui` runs in an outer tmux harness; its terminals live in prim-herdr (a private herdr-core)
-and prim-tmux (its private tmux server). Checks:
+The real `vqro tui` runs in an outer tmux harness; its terminals live in vqro-herdr (a private herdr-core)
+and vqro-tmux (its private tmux server). Checks:
 - Settings: a drop-down opened from a popup (keyboard and mouse) is drawn over the popup, which stays
   visible; Esc returns to the popup.
 - A multi-line paste into bash (which enables bracketed paste, DECSET 2004) is inserted, not run line by
@@ -16,7 +16,7 @@ Private /tmp root; nothing live is touched. Stops only what it started.
 import hashlib, json, os, shutil, socket, subprocess, sys, tempfile, time
 
 TARGET = sys.argv[1]
-PRIM, PHERDR, PTMUX = (os.path.join(TARGET, "debug", b) for b in ("prim", "prim-herdr", "prim-tmux"))
+VQRO, PHERDR, PTMUX = (os.path.join(TARGET, "debug", b) for b in ("vqro", "vqro-herdr", "vqro-tmux"))
 HC = os.path.expanduser("~/.local/bin/herdr-core")
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 R = tempfile.mkdtemp(prefix="ppd", dir="/tmp")
@@ -28,10 +28,10 @@ for f in os.listdir(os.path.join(REPO, "extensions")):
         shutil.copy(os.path.join(REPO, "extensions", f), os.path.join(R, "ext", f))
 shutil.copytree(os.path.join(REPO, "extensions", "manifests"), os.path.join(R, "ext", "manifests"))
 os.symlink(shutil.which("python3") or "/usr/bin/python3", os.path.join(R, "bin", "python3"))
-ENV = {"HOME": f"{R}/home", "PATH": f"{R}/bin", "TERM": "xterm-256color", "SHELL": "/bin/sh", "PRIM_STATE_DIR": f"{R}/st",
-       "PRIM_SOCKET": f"{R}/p.sock", "PRIM_EXTENSIONS_DIR": f"{R}/ext", "XDG_STATE_HOME": f"{R}/xst",
+ENV = {"HOME": f"{R}/home", "PATH": f"{R}/bin", "TERM": "xterm-256color", "SHELL": "/bin/sh", "VQRO_STATE_DIR": f"{R}/st",
+       "VQRO_SOCKET": f"{R}/p.sock", "VQRO_EXTENSIONS_DIR": f"{R}/ext", "XDG_STATE_HOME": f"{R}/xst",
        "XDG_RUNTIME_DIR": f"{R}/run", "XDG_CONFIG_HOME": f"{R}/cfg", "HC_SESSION": "paste", "HC_SOCKET": f"{R}/hc.sock",
-       "LANG": "C.UTF-8", "PRIM_TUI_PROBE": f"{R}/tui-probe.json"}
+       "LANG": "C.UTF-8", "VQRO_TUI_PROBE": f"{R}/tui-probe.json"}
 HARNESS = ["/usr/bin/tmux", "-S", f"{R}/harness.sock", "-f", "/dev/null"]
 SHELL_ENV = {"PATH": "/usr/bin:/bin", "HOME": f"{R}/home", "TERM": "xterm-256color", "LANG": "C.UTF-8", "PS1": "$ "}
 results = []
@@ -44,7 +44,7 @@ def check(name, ok, detail=""):
 
 def call(method, params=None):
     s = socket.socket(socket.AF_UNIX)
-    s.connect(ENV["PRIM_SOCKET"])
+    s.connect(ENV["VQRO_SOCKET"])
     f = s.makefile("rwb", buffering=0)
     for i, (m, p) in enumerate([("hello", {"client": "e2e-paste"}), (method, params or {})]):
         f.write((json.dumps({"jsonrpc": "2.0", "id": i, "method": m, "params": p}) + "\n").encode())
@@ -87,7 +87,7 @@ def paste(path):
 
 def show(rid):
     """Make the tab of resource `rid` the active one."""
-    call("command.invoke", {"name": "prim.layout.reset"})
+    call("command.invoke", {"name": "vqro.layout.reset"})
     def activate():
         entry = call("workspace.snapshot")["entries"]["layout/main"]
         value = entry["value"]
@@ -111,15 +111,15 @@ def bash(provider):
 
 core = None
 try:
-    core = subprocess.Popen([PRIM, "serve", "--fake"], env=ENV, stdout=open(f"{R}/serve.log", "w"), stderr=subprocess.STDOUT)
-    wait(lambda: os.path.exists(ENV["PRIM_SOCKET"]), 10)
+    core = subprocess.Popen([VQRO, "serve", "--fake"], env=ENV, stdout=open(f"{R}/serve.log", "w"), stderr=subprocess.STDOUT)
+    wait(lambda: os.path.exists(ENV["VQRO_SOCKET"]), 10)
     call("workspace.apply", {"note": "providers", "ops": [
         {"op": "set", "key": "extension/herdr", "value": {"argv": ["/usr/bin/env", "PATH=", PHERDR, "--hc", HC, "--name", "herdr"], "kind": "provider", "default": True}},
         {"op": "set", "key": "extension/tmux", "value": {"argv": ["/usr/bin/env", "PATH=", PTMUX, "--tmux", "/usr/bin/tmux", "--name", "tmux"], "kind": "provider"}}]})
     ok = wait(lambda: all(call("workspace.snapshot")["providers"].get(n, {}).get("state") == "connected" for n in ("herdr", "tmux")), 30)
     check("providers connected", bool(ok))
     with open(f"{R}/tui.sh", "w") as f:
-        f.write("".join(f"export {k}='{v}'\n" for k, v in ENV.items()) + f"exec {PRIM} tui\n")
+        f.write("".join(f"export {k}='{v}'\n" for k, v in ENV.items()) + f"exec {VQRO} tui\n")
     subprocess.run([*HARNESS, "new-session", "-d", "-x", "120", "-y", "34", f"/bin/sh {R}/tui.sh"], env={"PATH": "/usr/bin:/bin", "HOME": f"{R}/home"})
     time.sleep(3)
 
@@ -131,16 +131,16 @@ try:
     keys_page = wait(lambda: "Profile:" in screen() and "Settings" in screen(), 10)
     check("Settings Keys page shows the Profile select", bool(keys_page), screen())
     keys("Enter")
-    both = wait(lambda: "● prim (Ctrl-g)" in screen() and "Settings" in screen() and "Extensions   Interface" in screen(), 5)
+    both = wait(lambda: "● vqro (Ctrl-g)" in screen() and "Settings" in screen() and "Extensions   Interface" in screen(), 5)
     check("keyboard drop-down is drawn over a still-visible Settings popup", bool(both), screen())
     open(f"{R}/out/dropdown-keyboard.txt", "w").write(screen())
     keys("Escape")
-    check("Esc returns to the popup", bool(wait(lambda: "Profile:" in screen() and "● prim (Ctrl-g)" not in screen(), 5)), screen())
+    check("Esc returns to the popup", bool(wait(lambda: "Profile:" in screen() and "● vqro (Ctrl-g)" not in screen(), 5)), screen())
     row = next(((i, line) for i, line in enumerate(screen().splitlines()) if "Profile:" in line), None)
     if row:
         x = row[1].index("Profile:") + 2; y = row[0] + 1
         keys(f"\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m", literal=True)
-    both = wait(lambda: "● prim (Ctrl-g)" in screen() and "Extensions   Interface" in screen(), 5)
+    both = wait(lambda: "● vqro (Ctrl-g)" in screen() and "Extensions   Interface" in screen(), 5)
     check("mouse drop-down is drawn over a still-visible Settings popup", bool(both), screen())
     open(f"{R}/out/dropdown-mouse.txt", "w").write(screen())
     keys("Escape"); time.sleep(0.3); keys("Escape"); time.sleep(0.5)

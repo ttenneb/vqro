@@ -1,5 +1,5 @@
 //! Collision hygiene is cooperative, not a new workspace-authority boundary.
-use prim::{client,server::{self,Backend}};
+use vqro::{client,server::{self,Backend}};
 use serde_json::{json,Value};
 #[tokio::test]
 async fn unverified_names_cannot_replace_live_commands_or_views_and_sizes_reconcile(){
@@ -13,7 +13,7 @@ async fn unverified_names_cannot_replace_live_commands_or_views_and_sizes_reconc
  assert_eq!(b.call("view.publish",json!({"view":"v0","content":{"text":"hijack"}})).await.unwrap_err().kind(),"conflict");
  assert_eq!(b.call("view.publish",json!({"view":"v0","content":null})).await.unwrap_err().kind(),"conflict");assert_eq!(core.lock().unwrap().live_bytes,before);
  a.call("view.publish",json!({"view":"v0","content":{"text":"small"}})).await.unwrap();
- {let c=core.lock().unwrap();assert!(c.live_bytes<before);assert_eq!(c.live_bytes,c.live.iter().map(|(key,(value,_,_,bytes))|{assert_eq!(*bytes,prim::limits::encoded_bytes(&(key,value)));*bytes}).sum::<usize>());}
+ {let c=core.lock().unwrap();assert!(c.live_bytes<before);assert_eq!(c.live_bytes,c.live.iter().map(|(key,(value,_,_,bytes))|{assert_eq!(*bytes,vqro::limits::encoded_bytes(&(key,value)));*bytes}).sum::<usize>());}
  a.call("view.publish",json!({"view":"v0","content":null})).await.unwrap();
  a.close();tokio::time::timeout(std::time::Duration::from_secs(3),async{loop{if core.lock().unwrap().live.is_empty(){break;}tokio::time::sleep(std::time::Duration::from_millis(5)).await;}}).await.unwrap();assert_eq!(core.lock().unwrap().live_bytes,0);
  b.call("view.publish",json!({"view":"v0","content":{"text":"available after disconnect"}})).await.unwrap();

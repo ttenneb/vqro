@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""prim extension: retention. Decides when finished resources are forgotten (`resource.forget`).
+"""vqro extension: retention. Decides when finished resources are forgotten (`resource.forget`).
 
 Backends keep finished terminals (herdr-core until `terminal.rm`), and the core keeps whatever its
 providers report, so without a policy every exit stays forever. This is that policy; the core and
@@ -24,8 +24,8 @@ import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from prim_ext import Extension, PrimError, views_in  # noqa: E402
-from prim_views import view_resource  # noqa: E402
+from vqro_ext import Extension, VqroError, views_in  # noqa: E402
+from vqro_views import view_resource  # noqa: E402
 
 KEEP = 64        # never-shown finished resources kept for the sidebar's ended items
 SETTLE = 0.3     # seconds: batch bursts of events into one pass
@@ -102,8 +102,8 @@ def _plan(keep, grace, include_unavailable, cached_due):
 def forget(rid, cached=False):
     try:
         # Never reinterpret a stale cached candidate as a native effect after a reconnect race.
-        ext.prim.call("resource.forget_cached" if cached else "resource.forget", {"resource": rid})
-    except PrimError as error:
+        ext.vqro.call("resource.forget_cached" if cached else "resource.forget", {"resource": rid})
+    except VqroError as error:
         if error.kind in ("unsupported", "invalid"):
             refused.add(rid)  # retried only after a new fact about it (see `changed`)
         elif error.kind != "not_found":
@@ -132,7 +132,7 @@ def prune_bridge_views():
             ext.apply(ops, "retention: orphan bridge views")
     try:
         ext.retrying(attempt)
-    except PrimError as error:
+    except VqroError as error:
         if error.kind != "invalid":
             raise
         # A newly added layout reference can invalidate deletion after our scan. The
@@ -156,7 +156,7 @@ def worker():
             forget(rid, cached=rid in cached_due)
         try:
             prune_bridge_views()
-        except PrimError as error:
+        except VqroError as error:
             print(f"retention: view cleanup: {error.kind}: {error}", file=sys.stderr, flush=True)
         if wait is not None:
             wait = max(wait, SETTLE)

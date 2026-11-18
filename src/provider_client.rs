@@ -9,7 +9,7 @@
 //! Streams are credit-driven: [`ProviderStream::send`] waits for credit, never has more than the
 //! window outstanding, and numbers decoded bytes with contiguous offsets from 0. A gap or close ends
 //! the stream; recovery is a fresh `stream.open` from the core. Nothing is replayed or resent.
-//! Mirrors the Python SDK (`extensions/prim_provider.py`) where the spec leaves room.
+//! Mirrors the Python SDK (`extensions/vqro_provider.py`) where the spec leaves room.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -74,7 +74,7 @@ pub struct Config {
     pub stream_window_bytes: u64,
     /// Runtime bridges only.
     pub token: Option<String>,
-    /// Name sent in `hello {extension}`; default `$PRIM_EXTENSION`, else `name`.
+    /// Name sent in `hello {extension}`; default `$VQRO_EXTENSION`, else `name`.
     pub extension: Option<String>,
     /// Deadline for this provider's own calls (hello, register, sync).
     pub call_timeout: Duration,
@@ -566,8 +566,8 @@ impl Provider {
     }
 
     async fn handshake(&mut self) -> Result<(), ProviderError> {
-        let ext = self.config.extension.clone().or_else(|| std::env::var("PRIM_EXTENSION").ok()).unwrap_or_else(|| self.config.name.clone());
-        self.call("hello", json!({"extension": ext,"extension_token":std::env::var("PRIM_EXTENSION_TOKEN").ok()})).await?;
+        let ext = self.config.extension.clone().or_else(|| std::env::var("VQRO_EXTENSION").ok()).unwrap_or_else(|| self.config.name.clone());
+        self.call("hello", json!({"extension": ext,"extension_token":std::env::var("VQRO_EXTENSION_TOKEN").ok()})).await?;
         let mut params = json!({
             "name": self.config.name, "role": self.config.role, "instance": self.config.instance,
             "software": self.config.software, "provider_version": self.config.provider_version,

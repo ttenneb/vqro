@@ -1,7 +1,7 @@
 """Fake public extension/core surface; never starts a program or connects a socket."""
 import copy
 import threading
-from prim_ext import PrimError
+from vqro_ext import VqroError
 
 OPS = ("prompt", "steer", "follow_up", "abort", "clear_queue", "answer")
 
@@ -13,7 +13,7 @@ class FakeCore:
         self.entries, self.resources, self.handlers, self.live = {}, {}, {}, {}
         self.providers = {"other": {"name": "other", "capabilities": {"agent."+op: {} for op in OPS}}}
         self.calls, self.notices, self.transactions = [], [], []
-        self.prim = self
+        self.vqro = self
         self.fail_agents, self.fail_tabs, self.fail_effect, self.make_agent = False, False, None, True
         self.contributed = False
 
@@ -29,7 +29,7 @@ class FakeCore:
     def apply(self, ops, note):
         for op in ops:
             if "expect" in op and op["expect"] != self.version(op["key"]):
-                raise PrimError("changed", "conflict")
+                raise VqroError("changed", "conflict")
         self.transactions.append(copy.deepcopy(ops))
         for op in ops:
             if op["op"] == "delete":
@@ -70,7 +70,7 @@ class FakeCore:
     def invoke(self, name, args=None):
         self.calls.append((name, copy.deepcopy(args)))
         if name == "agents.show" and self.fail_agents or name == "tabs.show" and self.fail_tabs:
-            raise PrimError("extension stopped", "unavailable")
+            raise VqroError("extension stopped", "unavailable")
         return {"ok": True}
 
     def add_agent(self):
@@ -91,5 +91,5 @@ class FakeCore:
                 self.add_agent()
             return {"outcome": "observed", "resource": {"id": "r1"}}
         if self.fail_effect:
-            raise PrimError("native outcome unknown", self.fail_effect)
+            raise VqroError("native outcome unknown", self.fail_effect)
         return {"outcome": "dispatched" if params["op"] == "agent.answer" else "accepted", "effect": "e1"}

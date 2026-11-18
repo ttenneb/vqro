@@ -7,8 +7,8 @@ import time
 import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from prim_ext import Extension, PrimError
-from prim_display import label
+from vqro_ext import Extension, VqroError
+from vqro_display import label
 
 SETTINGS = "doc/settings/pi"
 LEGACY = "doc/settings/agents"
@@ -30,21 +30,21 @@ def valid_argv(argv):
 def runtimes(value):
     rows = value.get("runtimes") if isinstance(value, dict) else None
     if not isinstance(rows, list) or not 1 <= len(rows) <= 32:
-        raise PrimError("Pi runtimes must be a nonempty list (at most 32)", "invalid")
+        raise VqroError("Pi runtimes must be a nonempty list (at most 32)", "invalid")
     seen = set()
     for row in rows:
         if not isinstance(row, dict) or not isinstance(row.get("name"), str) or not row["name"].strip() \
                 or len(row["name"]) > 64 or row["name"] in seen:
-            raise PrimError("runtime names must be unique, nonempty strings (at most 64 characters)", "invalid")
+            raise VqroError("runtime names must be unique, nonempty strings (at most 64 characters)", "invalid")
         argv = row.get("argv")
         if not valid_argv(argv):
-            raise PrimError("runtime argv must be a nonempty list of literal argument strings", "invalid")
+            raise VqroError("runtime argv must be a nonempty list of literal argument strings", "invalid")
         if "bridge_argv" in row and not valid_argv(row["bridge_argv"]):
-            raise PrimError("bridge_argv must be literal argv for the terminal host", "invalid")
+            raise VqroError("bridge_argv must be literal argv for the terminal host", "invalid")
         env = row.get("bridge_env", {})
         if not isinstance(env, dict) or any(not isinstance(k, str) or not k or "=" in k or "\0" in k
                 or not isinstance(v, str) or "\0" in v for k, v in env.items()):
-            raise PrimError("bridge_env must map host environment names to strings", "invalid")
+            raise VqroError("bridge_env must map host environment names to strings", "invalid")
         seen.add(row["name"])
     return rows
 
@@ -72,13 +72,13 @@ class Pi:
         def command(args):
             try:
                 return fn(args)
-            except PrimError as error:
+            except VqroError as error:
                 self.ext.notify(label(f"Pi: {error} ({error.kind}); no automatic retry."), "warn" if error.kind in ("timeout", "indeterminate") else "error")
                 raise
         return command
 
     def new(self, args):
-        entry=self.ext.prim.call("workspace.get",{"key":SETTINGS})
+        entry=self.ext.vqro.call("workspace.get",{"key":SETTINGS})
         options = runtimes(entry["value"] if entry else DEFAULTS)
         selected = args.get("runtime") or args.get("value")
         context = args.get("context") or {}
@@ -88,7 +88,7 @@ class Pi:
                 source_id = context["view"][len(prefix):]
         cwd = args.get("cwd")
         if not cwd and source_id:
-            scoped=self.ext.prim.call("resource.list",{"id":source_id})
+            scoped=self.ext.vqro.call("resource.list",{"id":source_id})
             source=next((r for r in scoped.get("resources",[]) if r.get("id")==source_id),{})
             cwd=source.get("cwd")
         if selected is None and len(options) > 1:
@@ -98,7 +98,7 @@ class Pi:
             return {"client": {"popup": {"view": "pi-runtimes", "width": 72}}}
         runtime = next((r for r in options if r["name"] == selected), None) if selected is not None else options[0]
         if runtime is None:
-            raise PrimError("configured runtime not found", "invalid")
+            raise VqroError("configured runtime not found", "invalid")
         launcher = runtime.get("bridge_argv", default_bridge())
         # The local isolated launcher locates its installed package itself. Neither it nor
         # a configured host launcher injects a module path into the agent environment.
@@ -106,16 +106,16 @@ class Pi:
         params = {"bridge": True, "name": "pi-bridge-"+uuid.uuid4().hex[:12], "argv": [*launcher, "--", *runtime["argv"]], "env": env}
         if cwd:
             params["cwd"] = cwd
-        result = self.ext.prim.call("resource.spawn", params)  # exactly once, never retried
+        result = self.ext.vqro.call("resource.spawn", params)  # exactly once, never retried
         host = result["resource"]["id"]
         end = time.monotonic() + 12
         lookup_problem=None
         while True:
             try:
-                scoped=self.ext.prim.call("resource.list",{"host":host})
+                scoped=self.ext.vqro.call("resource.list",{"host":host})
                 rows=scoped.get("resources",[])
                 lookup_problem=None
-            except PrimError as error:
+            except VqroError as error:
                 lookup_problem=label(f"{error} ({error.kind})",256)
                 rows=[]
                 if error.kind not in ("timeout","overloaded","unavailable","disconnected"):
@@ -127,7 +127,7 @@ class Pi:
                 # backend terminal. Fall back to that public terminal view.
                 try:
                     shown = self.ext.invoke("agents.show", {"resource": resource["id"]})
-                except PrimError as error:
+                except VqroError as error:
                     # Showing a view is not part of the already-observed spawn. Never turn
                     # a UI/read failure into an apparent failed launch that invites a retry.
                     if error.kind not in ("unavailable", "not_found"):
@@ -146,7 +146,7 @@ class Pi:
     def terminal(self, host):
         try:
             return self.ext.invoke("tabs.show", {"resource": host})
-        except PrimError:
+        except VqroError:
             self.ext.notify("Terminal "+host+" still exists; tabs unavailable. Use the resource picker.", "warn")
 
     def settings(self, args):
@@ -164,7 +164,7 @@ class Pi:
             value = dict(value) if isinstance(value, dict) else {}
             value["runtimes"] = json.loads(args.get("text", ""))
         except (ValueError, TypeError):
-            raise PrimError("enter a JSON list of {name, argv}", "invalid") from None
+            raise VqroError("enter a JSON list of {name, argv}", "invalid") from None
         runtimes(value)
         def save():
             self.ext.apply([{"op": "set", "key": SETTINGS, "value": value, "expect": self.ext.version(SETTINGS)}], "pi: runtimes")

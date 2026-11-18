@@ -1,6 +1,6 @@
 # Test plan: assumptions to clear up now
 
-> **Status (2026-11-16):** **Superseded by D16** (build prim directly; answer questions inside the build). Kept as the record of what we meant to test. Still open: S1, agent input routes, now `experiments/e1-agent-input.md` and roadmap step 1. prim is a working prototype, and fluid.
+> **Status (2026-11-16):** **Superseded by D16** (build vqro directly; answer questions inside the build). Kept as the record of what we meant to test. Still open: S1, agent input routes, now `experiments/e1-agent-input.md` and roadmap step 1. vqro is a working prototype, and fluid.
 
 Revised 2026-11-16 around D14. Evidence: `research/` (agents, backends, prior-art-tools, protocols-and-ui,
 workspace-extension-models). Every test is throwaway code or no code, ends with a written result in `research/`, and
@@ -14,7 +14,7 @@ answers a question that changes the primitives.
 | A2 | Backends can be adapted thinly through declared capabilities, without leaking into the primitives | Backends differ widely in events, metadata, layout and status (`spec/backend-adapter-v0.md`) | the adapter contract, lowest-common-denominator risk |
 | A3 | Extension views can be expressed in a way agents can author and any client can render | No declarative standard renders in a terminal; Zellij and Neovim use hybrids | `spec/workspace-v0.md` views |
 | A4 | Extensions can be replaced and rolled back live | Nobody does automatic rollback; rollback restores code, not state | extension lifecycle |
-| A5 | The owner's daily work needs what prim offers across tools | Only measured by use | priorities |
+| A5 | The owner's daily work needs what vqro offers across tools | Only measured by use | priorities |
 
 ## Now: no code
 
@@ -31,7 +31,7 @@ This sets priorities for which primitives and adapters matter first.
 
 **S2 Two thin backend adapters** (A2)
 - Write capability manifests and minimal adapters for herdr-core and tmux (reusing `spikes/`), exposing terminal
-  spawn, input, raw output, exit and OSC 7501 status as prim events.
+  spawn, input, raw output, exit and OSC 7501 status as vqro events.
 - One tiny extension (list terminals with status, send input to one) runs unchanged on both.
 - Measure: adapter size, what had to be declared `lossy` or absent, and any place the extension needed to know which
   backend it was on. Any such place is a leak in the primitives.
@@ -58,7 +58,7 @@ listed); state-schema rollback; late crash 30 s after load (crash budget); 5 s s
 - the end-to-end scripts: `e2e_providers.py`, `e2e_tui_providers.py`, `e2e_tui_paste_dropdown.py` (drop-downs over
   their popup, bracketed multi-line paste, a 200 KB paste on herdr and tmux), `e2e_tui_keys.py` (keys with
   modifiers like xterm; Shift-Enter for kitty-protocol and modifyOtherKeys programs), `e2e_scale_herdr.py`, and the TUI smoke
-  `e2e_tui_smoke.sh` (private herdr-core and prim core; 30 MB flood, core restart reattach, quit while the core
+  `e2e_tui_smoke.sh` (private herdr-core and vqro core; 30 MB flood, core restart reattach, quit while the core
   cannot start);
 - the default scale profile;
 - a leftover-process check scoped to this run: `check.sh` re-runs itself in a transient systemd user scope
@@ -69,9 +69,9 @@ listed); state-schema rollback; late crash 30 s after load (crash budget); 5 s s
   when that directory is the user's. Without a scope (no systemd user manager, or no bus), the step is
   `UNSCOPED`: a before/after diff of processes tied to test roots that can match other agents' concurrent runs,
   so it only reports them; it never kills them and never fails the gate.
-  `PRIM_CHECK_INJECT_LEAK=1` leaks one detached process to prove the check fails.
+  `VQRO_CHECK_INJECT_LEAK=1` leaks one detached process to prove the check fails.
 
-Every step runs under `env -i` with private paths and never touches a live prim, hc or tmux. It prints a PASS/FAIL
+Every step runs under `env -i` with private paths and never touches a live vqro, hc or tmux. It prints a PASS/FAIL
 table and writes a JSON receipt to `$CHECK_RECEIPT` (default `<target>/check-receipt.json`), with step logs under
 `<target>/check-logs/`. `full` needs `/usr/bin/tmux` 3.7b and `~/.local/bin/herdr-core`.
 
@@ -88,7 +88,7 @@ env -i HOME=$HOME PATH=$PATH cargo test --release --test scale -- --ignored --ex
   20 transactions/s, an extension restart every 5 s, 30 s, four clients: one observer draining events and
   streams, one writer, one stalled (subscribes and attaches, never reads) and one slow (the same, but reads
   64 KiB/s and probes input→echo on its own idle stream, behind the floods unless `SLOW_ATTACH_FLOODS=0`; probes time out after 10 s and count as 10 s).
-- Change it with `PRIM_SCALE_*` variables: `TERMINALS`, `AGENTS`, `FLOODS`, `FLOOD_BYTES_PER_SEC`, `STATUS_EVERY_MS`,
+- Change it with `VQRO_SCALE_*` variables: `TERMINALS`, `AGENTS`, `FLOODS`, `FLOOD_BYTES_PER_SEC`, `STATUS_EVERY_MS`,
   `TXN_PER_SEC`, `STALLED_CLIENTS`, `SLOW_CLIENTS`, `SLOW_READ_BYTES_PER_SEC`, `SLOW_ECHO_TIMEOUT_S`, `EXT_RESTART_EVERY_S`, `ADAPTERS`, `DURATION_S`, `ECHO_EVERY_MS`, `PARTIAL_RESOURCES` (default 1: clients subscribe as the TUI does), `STATUS_PHASE` (`random`, the default: each
   agent's first status change at a reproducible pseudo-random offset within the period; `spread`; `lockstep`, the
   worst case where all agents change together);
@@ -97,14 +97,14 @@ env -i HOME=$HOME PATH=$PATH cargo test --release --test scale -- --ignored --ex
   the observer's connection with the floods, status event lag (backend emit → client), `missed` counts and
   delivered share, extension restart failures, and a final snapshot.
 - Budgets are the `BUDGET_*` constants at the top of the file, set from measured results (see "Scale budgets"
-  below); the test fails on any exceeded one. Receipt: `$PRIM_SCALE_RECEIPT`, default `<target>/tmp/scale-receipt.json`.
-- Cleanup: the core is stopped as `prim stop` does (SIGTERM, so it stops its extensions). Any process still carrying
-  the run's `PRIM_SOCKET` is then killed, listed in the receipt (`cleanup`), and fails the test (`leaked_processes`,
-  a real budget of 0). Socket and state live in a run directory under `$PRIM_SCALE_RUN_DIR` (default
-  `~/.local/share/herdr/scratch/prim-scale`), which is removed afterwards.
+  below); the test fails on any exceeded one. Receipt: `$VQRO_SCALE_RECEIPT`, default `<target>/tmp/scale-receipt.json`.
+- Cleanup: the core is stopped as `vqro stop` does (SIGTERM, so it stops its extensions). Any process still carrying
+  the run's `VQRO_SOCKET` is then killed, listed in the receipt (`cleanup`), and fails the test (`leaked_processes`,
+  a real budget of 0). Socket and state live in a run directory under `$VQRO_SCALE_RUN_DIR` (default
+  `~/.local/share/herdr/scratch/vqro-scale`), which is removed afterwards.
 - Abrupt core death previously orphaned extensions. Managed extensions now receive a reserved stdin lifetime
   pipe (`spec/core-protocol.md`, Extensions); EOF must exit the extension, independently of socket handling.
-  `tests/ext_lifetime.rs` kills a real private `prim serve --fake` with SIGKILL/SIGTERM and verifies a connected
+  `tests/ext_lifetime.rs` kills a real private `vqro serve --fake` with SIGKILL/SIGTERM and verifies a connected
   helper, a helper blocked before connecting, and a non-Python stdin reader exit within three seconds. SIGINT
   covers clean shutdown. These process-observation tests run on Linux; the pipe/EOF contract is platform-neutral.
   Programs that ignore the channel remain noncompliant and may still outlive a crash; no external process
@@ -188,4 +188,4 @@ Concurrent layout edits (versioned docs vs Loro); protocol compatibility gate; m
 - Commands and bindings declared in extension manifests; context keys for contextual bindings.
 - Crash budget; namespace schema versions and a snapshot at `replace`.
 - A size rule for one layout shown on clients of different sizes.
-- A small prim widget catalogue borrowing A2UI's shape, if S3 favours declarative or hybrid.
+- A small vqro widget catalogue borrowing A2UI's shape, if S3 favours declarative or hybrid.

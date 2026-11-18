@@ -83,7 +83,7 @@ def allowed_expression(expression):
 
 def check_project(root):
     package = tomllib.loads((root / "Cargo.toml").read_text())["package"]
-    if package.get("license") != "Apache-2.0": raise ValueError("prim package must declare Apache-2.0")
+    if package.get("license") != "Apache-2.0": raise ValueError("vqro package must declare Apache-2.0")
     if hashlib.sha256((root / "LICENSE").read_bytes()).hexdigest() != ROOT_LICENSE_SHA:
         raise ValueError("root LICENSE differs from the approved Apache-2.0 text")
     for path in sorted((root / "extensions/manifests").glob("*.json")):
@@ -150,7 +150,7 @@ def render(metadata):
         "Generated offline by `python3 scripts/license_check.py --write`; do not edit.\n\n",
         "Policy and notices cover every Cargo metadata package, conservatively including unbuilt\n",
         "optional, build, dev and target-specific packages; inclusion does not claim they are shipped.\n",
-        "Upstream terms remain upstream terms, not prim's Apache-2.0 licence. Choices satisfy the approved\n",
+        "Upstream terms remain upstream terms, not vqro's Apache-2.0 licence. Choices satisfy the approved\n",
         "allowlist; original supplied notices are retained even for other offered licence alternatives.\n",
         "When an archive omits a licence, standard text is labelled explicitly; declared authors/repositories\n",
         "are metadata, not an invented copyright attribution. Preserve these notices with distributions.\n\n",

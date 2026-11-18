@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
-use prim::client;
+use vqro::client;
 use serde_json::json;
 
 fn process(pid: u32) -> Option<(String, bool)> {
@@ -68,7 +68,7 @@ async fn exercise(signal: &str, include_reader: bool) {
     let python = root.path().join("helper.py");
     std::fs::write(&python, r#"
 import pathlib, sys, threading
-from prim_ext import Extension
+from vqro_ext import Extension
 if sys.argv[1] == 'connected':
     Extension()
 # blocked deliberately never connects to the socket: lifetime must not depend
@@ -76,15 +76,15 @@ if sys.argv[1] == 'connected':
 pathlib.Path(sys.argv[2]).write_text(str(__import__('os').getpid()))
 threading.Event().wait()
 "#).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_prim"))
+    let child = Command::new(env!("CARGO_BIN_EXE_vqro"))
         .args(["serve", "--fake"]).env_clear()
         .env("HOME", root.path().join("home")).env("PATH", "/usr/bin:/bin")
         .env("XDG_CONFIG_HOME", root.path().join("config"))
         .env("XDG_STATE_HOME", root.path().join("state"))
         .env("XDG_RUNTIME_DIR", root.path().join("run"))
-        .env("PRIM_STATE_DIR", root.path().join("state"))
-        .env("PRIM_SOCKET", &socket)
-        .env("PRIM_EXTENSIONS_DIR", root.path().join("extensions"))
+        .env("VQRO_STATE_DIR", root.path().join("state"))
+        .env("VQRO_SOCKET", &socket)
+        .env("VQRO_EXTENSIONS_DIR", root.path().join("extensions"))
         .env("PYTHONPATH", PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("extensions"))
         .current_dir(root.path())
         .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
@@ -104,7 +104,7 @@ threading.Event().wait()
     for &name in names {
         let ready = core.root.path().join(format!("{name}.ready"));
         let argv = if name == "reader" {
-            // A non-Python extension with no prim/socket awareness. EOF is its
+            // A non-Python extension with no vqro/socket awareness. EOF is its
             // only lifetime signal. No Linux parent-death API is involved.
             json!(["/bin/sh", "-c", "printf '%s' \"$$\" > \"$1\"; while IFS= read -r line; do :; done", "lifetime-reader", ready])
         } else {

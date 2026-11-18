@@ -1,4 +1,4 @@
-//! prim: one lean, standardized layer of workspace primitives over any multiplexer and agent runtime.
+//! vqro: one lean, standardized layer of workspace primitives over any multiplexer and agent runtime.
 //! See `docs/` (start with README.md and decisions D14-D16).
 
 pub mod adapter;

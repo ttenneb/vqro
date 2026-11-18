@@ -82,33 +82,33 @@
     {
       "name": "herdr",
       "argv": [
-        "prim-herdr",
+        "vqro-herdr",
         "--name",
         "herdr"
       ],
       "kind": "provider",
       "default": true,
       "since": 2,
-      "description": "Terminals in herdr-core (prim-herdr): the default backend. Reaches herdr-core with $PRIM_HERDR or `hc connect`."
+      "description": "Terminals in herdr-core (vqro-herdr): the default backend. Reaches herdr-core with $VQRO_HERDR or `hc connect`."
     },
     {
       "name": "tmux",
       "argv": [
-        "prim-tmux",
+        "vqro-tmux",
         "--name",
         "tmux"
       ],
       "kind": "provider",
       "enabled": false,
       "since": 2,
-      "description": "Terminals in a prim-owned tmux server that survives provider/core restarts; stop explicitly with tmux.server.stop. Never your own tmux sessions. Off by default."
+      "description": "Terminals in a vqro-owned tmux server that survives provider/core restarts; stop explicitly with tmux.server.stop. Never your own tmux sessions. Off by default."
     },
     {
       "name": "tmux-server",
       "argv": ["python3", "tmux_server.py"],
       "enabled": true,
       "since": 3,
-      "description": "Independent status and confirmed stop for the prim-owned tmux server, even when its provider is disabled. No menu while no server exists."
+      "description": "Independent status and confirmed stop for the vqro-owned tmux server, even when its provider is disabled. No menu while no server exists."
     },
     {
       "name": "retention",

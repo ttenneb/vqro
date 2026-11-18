@@ -1,17 +1,17 @@
 //! Wire provider errors reach callers with the right certainty (provider-v0 9.1, 9.4): protocol errors
 //! mean no effect (outcome rejected, the provider's kind); a provider's `backend` error stays
-//! indeterminate. A real in-process core, with prim::provider_client as the provider.
+//! indeterminate. A real in-process core, with vqro::provider_client as the provider.
 
 use std::time::Duration;
 
-use prim::client;
-use prim::provider_client::{Config, Outcome, Provider, ProviderError, Request};
-use prim::rpc::Peer;
-use prim::server::{start, Backend};
+use vqro::client;
+use vqro::provider_client::{Config, Outcome, Provider, ProviderError, Request};
+use vqro::rpc::Peer;
+use vqro::server::{start, Backend};
 use serde_json::{json, Value};
 
 /// Core + a wire provider "wire" with one live resource. Requests are answered by `answer`.
-async fn setup(answer: fn(&str, &Value) -> Result<Outcome, ProviderError>) -> (tempfile::TempDir, prim::core::Shared, Peer, String) {
+async fn setup(answer: fn(&str, &Value) -> Result<Outcome, ProviderError>) -> (tempfile::TempDir, vqro::core::Shared, Peer, String) {
     let dir = tempfile::Builder::new().prefix("ppe").tempdir_in("/tmp").unwrap();
     let socket = dir.path().join("s.sock");
     let core = start(socket.clone(), dir.path().join("state"), false, Backend::Fake, None).unwrap();

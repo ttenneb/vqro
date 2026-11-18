@@ -1,7 +1,7 @@
 //! A terminal's raw stream input is not automatically an effect.invoke operation.
 use std::{path::PathBuf,time::Duration};
 use base64::Engine;
-use prim::{client,rpc::Incoming,server::{self,Backend}};
+use vqro::{client,rpc::Incoming,server::{self,Backend}};
 use serde_json::{json,Value};
 
 async fn stream_only_input(backend: Backend, name: &str, spawn: bool) {

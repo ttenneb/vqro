@@ -135,8 +135,8 @@ async fn session(
 ) -> anyhow::Result<()> {
     let mut child = Command::new(&argv[0])
         // A backend may auto-start its own service: do not propagate supervisor credentials to terminals.
-        .env_remove("PRIM_EXTENSION_TOKEN").env_remove("PRIM_EXTENSION_LIFETIME").env_remove("PRIM_EXTENSION")
-        .env_remove("PRIM_STATE_DIR").env_remove("PRIM_EXTENSIONS_DIR").env_remove("PRIM_SOCKET").env_remove("PRIM_SOCKET_SOURCE")
+        .env_remove("VQRO_EXTENSION_TOKEN").env_remove("VQRO_EXTENSION_LIFETIME").env_remove("VQRO_EXTENSION")
+        .env_remove("VQRO_STATE_DIR").env_remove("VQRO_EXTENSIONS_DIR").env_remove("VQRO_SOCKET").env_remove("VQRO_SOCKET_SOURCE")
         .args(&argv[1..])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -504,10 +504,10 @@ fn inventory(snapshot: &Value) -> HashMap<String, Value> {
             let machine = snapshot["machines"].as_array().into_iter().flatten().find(|machine|
                 machine["name"].as_str() == Some(alias) && machine["id"].as_str().is_some_and(|id| !id.is_empty()));
             let Some(machine) = machine else { continue };
-            record["_prim_ref"] = json!(json!(["hc-machine-v1", machine["id"], machine.get("session").unwrap_or(&Value::Null), terminal]).to_string());
-            record["_prim_machine"] = json!({"id": machine["id"], "name": alias, "session": machine.get("session").unwrap_or(&Value::Null)});
+            record["_vqro_ref"] = json!(json!(["hc-machine-v1", machine["id"], machine.get("session").unwrap_or(&Value::Null), terminal]).to_string());
+            record["_vqro_machine"] = json!({"id": machine["id"], "name": alias, "session": machine.get("session").unwrap_or(&Value::Null)});
         }
-        let reference = record["_prim_ref"].as_str().unwrap_or(address);
+        let reference = record["_vqro_ref"].as_str().unwrap_or(address);
         if seen.insert(reference.to_string()) { records.insert(address.to_string(), record); }
     }
     records
@@ -525,11 +525,11 @@ fn remote_unsupported() -> AdapterError {
     AdapterError::RejectedKind { kind: "unsupported".into(), message: "remote terminal effects require identity-safe herdr-core addressing; aliases may be renamed/reused".into() }
 }
 
-/// herdr-core `Terminal` record to prim facts.
+/// herdr-core `Terminal` record to vqro facts.
 fn facts(t: &Value) -> ResourceFacts {
     let s = |k: &str| t.get(k).and_then(|v| v.as_str()).map(String::from);
     ResourceFacts {
-        backend_ref: s("_prim_ref").or_else(|| s("address")).unwrap_or_default(),
+        backend_ref: s("_vqro_ref").or_else(|| s("address")).unwrap_or_default(),
         incarnation: t.get("created_ms").and_then(Value::as_u64).map(|ms| ms.to_string()).unwrap_or_default(),
         kind: "terminal".into(),
         name: s("name"),
@@ -538,7 +538,7 @@ fn facts(t: &Value) -> ResourceFacts {
         status: t.get("status").cloned().unwrap_or(Value::Null),
         exit: json!({"reason": t.get("reason"), "exit_code": t.get("exit_code"), "signal": t.get("signal")}),
         argv: t.get("argv").and_then(|a| a.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default(),
-        data: t.get("_prim_machine").map(|machine| json!({"machine": machine, "hc_address": t["address"]})).unwrap_or_else(|| json!({})),
+        data: t.get("_vqro_machine").map(|machine| json!({"machine": machine, "hc_address": t["address"]})).unwrap_or_else(|| json!({})),
         // The foreground process's folder (read about twice a second), else where it started.
         cwd: t.get("foreground").and_then(|f| f.get("cwd")).and_then(|c| c.as_str()).or_else(|| t.get("cwd").and_then(|c| c.as_str())).map(String::from),
     }

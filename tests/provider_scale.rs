@@ -1,14 +1,14 @@
 //! P0 target: one runtime provider per agent, not one provider per runtime product.
 #![cfg(target_os="linux")]
 use std::{path::PathBuf,process::{Child,Command,Stdio},time::{Duration,Instant}};
-use prim::{client,rpc::{Peer,Incoming,IncomingReceiver},provider_client::{Provider,Config}};
+use vqro::{client,rpc::{Peer,Incoming,IncomingReceiver},provider_client::{Provider,Config}};
 use serde_json::{json,Value};
 struct Private { child:Child,root:tempfile::TempDir,socket:PathBuf }
 impl Drop for Private{fn drop(&mut self){let _=self.child.kill();let _=self.child.wait();}}
 impl Private{
  async fn start()->Self{
   let root=tempfile::Builder::new().prefix("prgs").tempdir_in("/tmp").unwrap();let socket=root.path().join("s");let ext=root.path().join("ext");std::fs::create_dir(&ext).unwrap();
-  let child=Command::new(env!("CARGO_BIN_EXE_prim")).arg("serve").env_clear().env("HOME",root.path()).env("PATH","/usr/bin:/bin").env("PRIM_STATE_DIR",root.path().join("st")).env("PRIM_SOCKET",&socket).env("PRIM_EXTENSIONS_DIR",ext).env("PRIM_HERDR","[\"/bin/false\"]").env("XDG_RUNTIME_DIR",root.path()).env("HC_SOCKET",root.path().join("never-live-hc")).env("HC_SESSION","registry-test").stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+  let child=Command::new(env!("CARGO_BIN_EXE_vqro")).arg("serve").env_clear().env("HOME",root.path()).env("PATH","/usr/bin:/bin").env("VQRO_STATE_DIR",root.path().join("st")).env("VQRO_SOCKET",&socket).env("VQRO_EXTENSIONS_DIR",ext).env("VQRO_HERDR","[\"/bin/false\"]").env("XDG_RUNTIME_DIR",root.path()).env("HC_SOCKET",root.path().join("never-live-hc")).env("HC_SESSION","registry-test").stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
   let p=Self{child,root,socket};let end=Instant::now()+Duration::from_secs(5);while !p.socket.exists(){assert!(Instant::now()<end);tokio::time::sleep(Duration::from_millis(5)).await;}p
  }
  fn rss(&self)->u64{std::fs::read_to_string(format!("/proc/{}/status",self.child.id())).unwrap().lines().find_map(|l|l.strip_prefix("VmRSS:").map(|v|v.split_whitespace().next().unwrap().parse::<u64>().unwrap()*1024)).unwrap()}
@@ -17,9 +17,9 @@ fn facts(reference:&str,kind:&str)->Value{json!({"ref":reference,"incarnation":"
 async fn host_spawn(viewer:&Peer,host:&Peer,requests:&mut IncomingReceiver,i:usize)->String{
  let caller=viewer.clone();let spawn=tokio::spawn(async move{caller.call("resource.spawn",json!({"provider":"hosts","bridge":true,"argv":["fake-pi"]})).await.unwrap()});
  let(id,params)=loop{if let Some(Incoming::Request{id,method,params})=requests.recv().await{assert_eq!(method,"effect.invoke");break(id,params);}};
- let token=params["args"]["env"]["PRIM_BRIDGE_TOKEN"].as_str().unwrap().to_string();host.respond(id,Ok(json!({"outcome":"observed","data":{"facts":facts(&format!("h{i}"),"terminal")}})));spawn.await.unwrap();token
+ let token=params["args"]["env"]["VQRO_BRIDGE_TOKEN"].as_str().unwrap().to_string();host.respond(id,Ok(json!({"outcome":"observed","data":{"facts":facts(&format!("h{i}"),"terminal")}})));spawn.await.unwrap();token
 }
-async fn runtime(socket:&std::path::Path,i:usize,token:String)->(Provider,tokio::sync::mpsc::UnboundedReceiver<prim::provider_client::Request>){
+async fn runtime(socket:&std::path::Path,i:usize,token:String)->(Provider,tokio::sync::mpsc::UnboundedReceiver<vqro::provider_client::Request>){
  let mut config=Config::new(format!("pi-{i}"),format!("runtime-{i}"),serde_json::from_value(json!({"agent.prompt":{},"agent.abort":{}})).unwrap());config.role="runtime".into();config.token=Some(token);
  Provider::connect(tokio::net::UnixStream::connect(socket).await.unwrap(),config).await.unwrap()
 }

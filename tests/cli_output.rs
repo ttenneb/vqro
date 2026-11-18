@@ -1,6 +1,6 @@
 //! CLI plumbing and bounded diagnostics. Only private fake endpoints.
 use std::{io::BufRead,process::Stdio};
-use prim::rpc::{Incoming,Peer,RpcError};
+use vqro::rpc::{Incoming,Peer,RpcError};
 use serde_json::json;
 #[tokio::test(flavor="multi_thread",worker_threads=2)]
 async fn status_exits_quietly_when_stdout_closes_after_first_line() {
@@ -15,7 +15,7 @@ async fn status_exits_quietly_when_stdout_closes_after_first_line() {
         peer.respond(id,Ok(json!({"clients":[{"client":"other","author":"fixture","version":"1"}]})));
         peer.closed().await;
     });
-    let mut child=std::process::Command::new(env!("CARGO_BIN_EXE_prim")).arg("status").env_clear().env("HOME",dir.path()).env("PRIM_SOCKET",socket)
+    let mut child=std::process::Command::new(env!("CARGO_BIN_EXE_vqro")).arg("status").env_clear().env("HOME",dir.path()).env("VQRO_SOCKET",socket)
         .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
     let mut reader=std::io::BufReader::new(child.stdout.take().unwrap());let mut line=String::new();reader.read_line(&mut line).unwrap();assert!(line.starts_with("running:"));
     drop(reader);closed.send(()).unwrap();
@@ -37,9 +37,9 @@ async fn cli_reports_busy_once_without_retrying_requests() {
             peer.respond(id,Err(RpcError::new("overloaded","core busy")));
             assert!(incoming.recv().await.is_none(),"CLI must not silently repeat a refused request");
         });
-        let mut command=tokio::process::Command::new(env!("CARGO_BIN_EXE_prim"));
+        let mut command=tokio::process::Command::new(env!("CARGO_BIN_EXE_vqro"));
         command.args(if status {vec!["status"]}else{vec!["call","workspace.snapshot"]})
-            .env_clear().env("HOME",dir.path()).env("PRIM_SOCKET",socket).kill_on_drop(true);
+            .env_clear().env("HOME",dir.path()).env("VQRO_SOCKET",socket).kill_on_drop(true);
         let output=tokio::time::timeout(std::time::Duration::from_secs(4),command.output()).await.expect("busy CLI must promptly report").unwrap();
         assert_eq!(output.status.success(),status);
         assert!(String::from_utf8_lossy(&output.stderr).contains("overloaded"),"a refused diagnostic must not disappear");
@@ -61,8 +61,8 @@ async fn diagnostic_cli_requests_have_short_deadlines() {
         }
         peer.closed().await;
     });
-    let mut command=tokio::process::Command::new(env!("CARGO_BIN_EXE_prim"));
-    command.args(if status {vec!["status"]}else{vec!["call","workspace.snapshot"]}).env_clear().env("HOME",dir.path()).env("PRIM_SOCKET",socket).kill_on_drop(true);
+    let mut command=tokio::process::Command::new(env!("CARGO_BIN_EXE_vqro"));
+    command.args(if status {vec!["status"]}else{vec!["call","workspace.snapshot"]}).env_clear().env("HOME",dir.path()).env("VQRO_SOCKET",socket).kill_on_drop(true);
     let output=tokio::time::timeout(std::time::Duration::from_secs(8),command.output()).await.expect("CLI must have a short diagnostic deadline").unwrap();
     assert_eq!(output.status.success(),status);
     assert!(format!("{}{}",String::from_utf8_lossy(&output.stdout),String::from_utf8_lossy(&output.stderr)).contains("timeout"));

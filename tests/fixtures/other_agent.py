@@ -3,8 +3,8 @@ import asyncio
 import os
 import sys
 
-sys.path.insert(0, os.environ["PRIM_EXTENSIONS_DIR"])
-from prim_provider import Provider
+sys.path.insert(0, os.environ["VQRO_EXTENSIONS_DIR"])
+from vqro_provider import Provider
 
 
 async def main():
@@ -19,7 +19,7 @@ async def main():
         count += 1
         await provider.upsert(facts())
         return {"outcome": "observed", "data": {"abort_count": count}}
-    await provider.connect(os.environ["PRIM_SOCKET"])
+    await provider.connect(os.environ["VQRO_SOCKET"])
     await provider.full_sync([facts()])
     await provider.wait_closed()
 

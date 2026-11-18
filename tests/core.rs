@@ -4,9 +4,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use base64::Engine;
-use prim::client;
-use prim::rpc::{Incoming, Peer};
-use prim::server::{start, Backend};
+use vqro::client;
+use vqro::rpc::{Incoming, Peer};
+use vqro::server::{start, Backend};
 use serde_json::{json, Value};
 #[path="support/managed.rs"] mod managed;
 
@@ -23,7 +23,7 @@ fn env() -> Env {
     Env { _dir: dir, socket, state }
 }
 
-async fn connect(e: &Env) -> (Peer, prim::rpc::IncomingReceiver) {
+async fn connect(e: &Env) -> (Peer, vqro::rpc::IncomingReceiver) {
     let (p, rx, _) = client::connect(&e.socket, "test").await.unwrap();
     (p, rx)
 }
@@ -53,7 +53,7 @@ async fn provider_capabilities_and_unavailable_resources_are_exported() {
     let snap = p.call("workspace.snapshot", Value::Null).await.unwrap();
     assert!(snap["providers"]["fake"]["capabilities"]["terminal.spawn"].is_object());
     assert_eq!(spawned["resource"]["available"], true);
-    core.lock().unwrap().on_adapter_event("fake", prim::adapter::AdapterEvent::Connected(false, Some("test disconnect".into())));
+    core.lock().unwrap().on_adapter_event("fake", vqro::adapter::AdapterEvent::Connected(false, Some("test disconnect".into())));
     let snap = p.call("workspace.snapshot", Value::Null).await.unwrap();
     let resource = snap["resources"].as_array().unwrap().iter().find(|r| r["id"] == id).unwrap();
     assert_eq!(resource["available"], false, "disconnect keeps stale facts without deleting identity");
@@ -74,25 +74,25 @@ async fn changed_incarnation_retires_ids_instead_of_resurrecting_them() {
     let original = core.lock().unwrap().resources[&first].facts.as_ref().clone();
     let mut changed = serde_json::to_value(&original).unwrap();
     changed["incarnation"] = json!("replacement");
-    core.lock().unwrap().on_adapter_event("fake", prim::adapter::AdapterEvent::Upsert(serde_json::from_value(changed).unwrap()));
+    core.lock().unwrap().on_adapter_event("fake", vqro::adapter::AdapterEvent::Upsert(serde_json::from_value(changed).unwrap()));
     let second = core.lock().unwrap().resources.keys().next().unwrap().clone();
     assert_ne!(first, second, "same backend ref with a new incarnation must retire its old id");
-    core.lock().unwrap().on_adapter_event("fake", prim::adapter::AdapterEvent::Upsert(original));
+    core.lock().unwrap().on_adapter_event("fake", vqro::adapter::AdapterEvent::Upsert(original));
     let third = core.lock().unwrap().resources.keys().next().unwrap().clone();
     assert_ne!(third, first, "a tombstoned id cannot come back");
     assert_ne!(third, second);
 }
 
 #[tokio::test]
-async fn new_fake_instance_cannot_reuse_a_previous_prim_id() {
+async fn new_fake_instance_cannot_reuse_a_previous_vqro_id() {
     let e = env();
     let _old = start(e.socket.clone(), e.state.clone(), false, Backend::Fake, None).unwrap();
     let (old, _rx) = connect(&e).await;
     let first = old.call("resource.spawn", json!({"argv": ["sh"]})).await.unwrap()["resource"]["id"].clone();
     // A restart stops the old writer first; two live cores must not share one state directory.
-    prim::server::shutdown(&_old).await;
+    vqro::server::shutdown(&_old).await;
     let stale_facts=_old.lock().unwrap().resources.values().next().unwrap().facts.as_ref().clone();
-    _old.lock().unwrap().on_adapter_event("fake",prim::adapter::AdapterEvent::Removed { reference:stale_facts.backend_ref,incarnation:stale_facts.incarnation });
+    _old.lock().unwrap().on_adapter_event("fake",vqro::adapter::AdapterEvent::Removed { reference:stale_facts.backend_ref,incarnation:stale_facts.incarnation });
     assert_eq!(_old.lock().unwrap().resources.len(),1,"stopped cores ignore late backend state mutations");
     // The fake starts empty with refs f1, f2... again, but belongs to a new instance.
     let socket = e._dir.path().join("new.sock");
@@ -120,7 +120,7 @@ async fn open_attach_and_type() {
     let (p, mut rx) = connect(&e).await;
     let r = p.call("resource.spawn", json!({"argv": ["sh"]})).await.unwrap();
     let res = r["resource"]["id"].as_str().unwrap().to_string();
-    p.call("command.invoke", json!({"name": "prim.layout.reset"})).await.unwrap();
+    p.call("command.invoke", json!({"name": "vqro.layout.reset"})).await.unwrap();
     let snap = p.call("workspace.snapshot", Value::Null).await.unwrap();
     assert_eq!(snap["entries"]["workspace/active"]["value"]["layout"], "main");
     assert_eq!(snap["entries"][format!("view/term-{res}")]["value"]["resource"], res.as_str());
@@ -161,8 +161,8 @@ async fn commands_route_to_their_owner_and_are_removed_on_disconnect() {
     let r = p.call("command.invoke", json!({"name": "greet"})).await.unwrap();
     assert!(r["hi"].as_str().unwrap().starts_with("client:"));
 
-    // Only the core owns `prim.*`, and names can't be stolen from a live owner.
-    assert_eq!(p.call("command.register", json!({"name": "prim.revert"})).await.unwrap_err().kind(), "forbidden");
+    // Only the core owns `vqro.*`, and names can't be stolen from a live owner.
+    assert_eq!(p.call("command.register", json!({"name": "vqro.revert"})).await.unwrap_err().kind(), "forbidden");
     assert_eq!(p.call("command.register", json!({"name": "greet"})).await.unwrap_err().kind(), "conflict");
 
     // The owner goes away: drop every handle so its socket closes.
@@ -307,11 +307,11 @@ async fn crash_budget_then_replace_then_safe_mode() {
     assert_eq!(replaced["extensions"]["bad"]["crashes"], 0, "replacement resets the budget");
     assert_eq!(replaced["extensions"]["bad"]["crashes_total"], 3, "historical exits remain explicit");
 
-    p.call("command.invoke", json!({"name": "prim.safe_mode", "args": {"on": true}})).await.unwrap();
+    p.call("command.invoke", json!({"name": "vqro.safe_mode", "args": {"on": true}})).await.unwrap();
     assert_eq!(ext_status(&p, "bad").await, "safe_mode");
-    p.call("command.invoke", json!({"name": "prim.safe_mode", "args": {"on": false}})).await.unwrap();
+    p.call("command.invoke", json!({"name": "vqro.safe_mode", "args": {"on": false}})).await.unwrap();
     assert_eq!(ext_status(&p, "bad").await, "running");
-    p.call("command.invoke", json!({"name": "prim.extension.disable", "args": {"name": "bad"}})).await.unwrap();
+    p.call("command.invoke", json!({"name": "vqro.extension.disable", "args": {"name": "bad"}})).await.unwrap();
     assert_eq!(ext_status(&p, "bad").await, "disabled");
     let disabled = p.call("extension.list", Value::Null).await.unwrap();
     assert_eq!(disabled["extensions"]["bad"]["crashes_total"], 3, "intentional stops are not crashes");
@@ -324,7 +324,7 @@ async fn restarted_core_rejects_old_epoch_even_when_sequence_matches() {
     until(|| old_core.lock().unwrap().adapter_state.contains_key("fake")).await;
     let (old, _) = connect(&e).await;
     let before = old.call("workspace.snapshot", Value::Null).await.unwrap();
-    prim::server::shutdown(&old_core).await;
+    vqro::server::shutdown(&old_core).await;
     let socket = e._dir.path().join("new.sock");
     let new_core = start(socket.clone(), e.state.clone(), false, Backend::Fake, None).unwrap();
     until(|| new_core.lock().unwrap().adapter_state.contains_key("fake")).await;
@@ -449,9 +449,9 @@ async fn resource_map_write_failure_is_reported_without_hiding_backend_effect() 
     assert_eq!(data["provider"], "fake");
     assert!(data["instance"].is_string());
     assert_eq!(data["resource_facts"]["backend_ref"], "f1");
-    let facts: prim::adapter::ResourceFacts = serde_json::from_value(data["resource_facts"].clone()).unwrap();
+    let facts: vqro::adapter::ResourceFacts = serde_json::from_value(data["resource_facts"].clone()).unwrap();
     // Repeated status changes while the disk remains broken must not spam the event log.
-    for _ in 0..100 { core.lock().unwrap().on_adapter_event("fake", prim::adapter::AdapterEvent::Upsert(facts.clone())); }
+    for _ in 0..100 { core.lock().unwrap().on_adapter_event("fake", vqro::adapter::AdapterEvent::Upsert(facts.clone())); }
     let events = core.lock().unwrap().events_since(0).unwrap();
     assert_eq!(events.iter().filter(|ev| ev["type"] == "persistence.error").count(), 1);
     assert!(!events.iter().any(|ev| ev["type"] == "resource"), "never publish an unpersisted id");
@@ -480,8 +480,8 @@ async fn defaults_install_once() {
     assert!(snap["entries"].get("extension/nap").is_some());
     // Removing a default sticks: it is not reinstalled on the next start.
     p.call("workspace.apply", json!({"ops": [{"op": "delete", "key": "extension/nap"}]})).await.unwrap();
-    let mut store = prim::store::Store::open(e.state.join("workspace.json")).unwrap();
-    assert!(store.get("doc/prim/defaults").is_some());
+    let mut store = vqro::store::Store::open(e.state.join("workspace.json")).unwrap();
+    assert!(store.get("doc/vqro/defaults").is_some());
     let _ = &mut store;
 }
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""prim extension: gestures. Right-click opens the pane or tab menu; middle-click closes a tab.
+"""vqro extension: gestures. Right-click opens the pane or tab menu; middle-click closes a tab.
 
 Only bindings: clients own mouse mechanics (and whether the mouse is captured at all, a client
 setting), this decides what gestures mean. Remove it and these gestures do nothing; left-click
@@ -9,7 +9,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from prim_ext import Extension  # noqa: E402
+from vqro_ext import Extension  # noqa: E402
 
 ext = Extension("gestures", event_types=["entries"])  # no resource events: not used here
 ext.contribute({

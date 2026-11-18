@@ -15,7 +15,7 @@ FIXTURE = Path(__file__).parent / "fixtures" / "fake_pi.py"
 
 class PiBridgeTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.root = tempfile.TemporaryDirectory(prefix="prim-pi-unit-")
+        self.root = tempfile.TemporaryDirectory(prefix="vqro-pi-unit-")
         self.clients = []
         self.client = await self.start()
 

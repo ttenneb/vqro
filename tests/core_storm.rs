@@ -1,6 +1,6 @@
 //! Real RPC storm against a private fake core. CORE_CONTENTION_BIN pins a baseline binary for red evidence.
 use std::{process::{Command,Child,Stdio},sync::{Arc,atomic::{AtomicBool,Ordering}},time::{Duration,Instant}};
-use prim::{client,rpc::Incoming};
+use vqro::{client,rpc::Incoming};
 use serde_json::json;
 use base64::Engine;
 struct Running(Child);
@@ -11,10 +11,10 @@ async fn rejected_provider_snapshots_do_not_starve_healthy_control_or_echo() {
  let root=tempfile::Builder::new().prefix("pcc").tempdir_in("/tmp").unwrap();
  for dir in ["state","run","ext","home"] {std::fs::create_dir(root.path().join(dir)).unwrap();}
  let socket=root.path().join("p");
- let binary=std::env::var_os("CORE_CONTENTION_BIN").unwrap_or_else(||env!("CARGO_BIN_EXE_prim").into());
+ let binary=std::env::var_os("CORE_CONTENTION_BIN").unwrap_or_else(||env!("CARGO_BIN_EXE_vqro").into());
  let _core=Running(Command::new(binary).args(["serve","--fake"]).env_clear().env("HOME",root.path().join("home")).env("PATH","/usr/bin:/bin")
-  .env("PRIM_SOCKET",&socket).env("PRIM_STATE_DIR",root.path().join("state")).env("PRIM_EXTENSIONS_DIR",root.path().join("ext"))
-  .env("XDG_RUNTIME_DIR",root.path().join("run")).env("HC_SOCKET",root.path().join("h")).env("HC_SESSION","core-storm").env("PRIM_HERDR",r#"["/bin/false"]"#)
+  .env("VQRO_SOCKET",&socket).env("VQRO_STATE_DIR",root.path().join("state")).env("VQRO_EXTENSIONS_DIR",root.path().join("ext"))
+  .env("XDG_RUNTIME_DIR",root.path().join("run")).env("HC_SOCKET",root.path().join("h")).env("HC_SESSION","core-storm").env("VQRO_HERDR",r#"["/bin/false"]"#)
   .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
  let until=Instant::now()+Duration::from_secs(5);
  let (probe,mut incoming,_)=loop {match client::connect(&socket,"healthy").await {Ok(p)=>break p,Err(_) if Instant::now()<until=>tokio::time::sleep(Duration::from_millis(10)).await,Err(e)=>panic!("private core: {e}")}};

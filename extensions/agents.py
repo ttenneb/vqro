@@ -6,9 +6,9 @@ import sys
 import threading
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from prim_ext import Extension, PrimError, views_in
-from prim_display import label
-from prim_views import ended
+from vqro_ext import Extension, VqroError, views_in
+from vqro_display import label
+from vqro_views import ended
 
 EFFECTS = {"prompt": "Prompt", "steer": "Steer", "follow_up": "Follow-up", "abort": "Abort",
            "clear_queue": "Clear queue", "answer": "Answer pending request"}
@@ -69,7 +69,7 @@ class Agents:
         def command(args):
             try:
                 return fn(args)
-            except PrimError as error:
+            except VqroError as error:
                 self.ext.notify(label(f"Agents: {error} ({error.kind}); no automatic retry."), "warn" if error.kind in ("timeout", "indeterminate") else "error")
                 raise
         return command
@@ -82,11 +82,11 @@ class Agents:
                 rid = context["view"][len(prefix):]
         resource = self.ext.resources.get(rid)
         if not resource or resource.get("kind") != "agent":
-            raise PrimError("choose an agent pane or an agent from Agents", "invalid")
+            raise VqroError("choose an agent pane or an agent from Agents", "invalid")
         if not inspect and (not resource.get("available", False) or resource.get("state") != "live"):
-            raise PrimError("agent is unavailable; nothing sent", "unavailable")
+            raise VqroError("agent is unavailable; nothing sent", "unavailable")
         if op and not self.supported(resource, op):
-            raise PrimError("agent provider does not declare agent."+op+"; nothing sent", "unsupported")
+            raise VqroError("agent provider does not declare agent."+op+"; nothing sent", "unsupported")
         return resource
 
     def show(self, args):
@@ -104,9 +104,9 @@ class Agents:
         if op in ("prompt", "steer", "follow_up"):
             text = args.get("text")
             if not isinstance(text, str) or not text.strip():
-                raise PrimError("message must not be empty", "invalid")
+                raise VqroError("message must not be empty", "invalid")
             native["message"] = text
-        result = self.ext.prim.call("resource.invoke", {"resource": r["id"], "op": "agent."+op, "args": native})
+        result = self.ext.vqro.call("resource.invoke", {"resource": r["id"], "op": "agent."+op, "args": native})
         self.outcome(op, result)
         return result
 
@@ -159,7 +159,7 @@ class Agents:
         requests = data(r).get("requests")
         request = next((q for q in requests if isinstance(q, dict) and q.get("id") == args["request"]), None) if isinstance(requests, list) else None
         if request is None:
-            raise PrimError("that request is no longer pending; nothing sent", "not_found")
+            raise VqroError("that request is no longer pending; nothing sent", "not_found")
         detail = request.get("data") if isinstance(request.get("data"), dict) else {}
         native = {"id": request["id"]}
         if args.get("cancelled") is True:
@@ -171,8 +171,8 @@ class Agents:
         elif request.get("kind") in ("input", "editor") and isinstance(args.get("text"), str):
             native["value"] = args["text"]
         else:
-            raise PrimError("choose a valid answer for this request", "invalid")
-        result = self.ext.prim.call("resource.invoke", {"resource": rid, "op": "agent.answer", "args": native})
+            raise VqroError("choose a valid answer for this request", "invalid")
+        result = self.ext.vqro.call("resource.invoke", {"resource": rid, "op": "agent.answer", "args": native})
         self.outcome("answer", result)
         return {**result, "client": {"close": True}}
 
@@ -294,7 +294,7 @@ class Agents:
                             self.ext.publish(key[5:], None)  # release this publisher's derived cache too
             try:
                 self.ext.retrying(prune)
-            except PrimError as error:
+            except VqroError as error:
                 if error.kind != "invalid":
                     raise
                 # A layout can reference a view after our scan; atomic validation refused the

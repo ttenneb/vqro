@@ -16,8 +16,8 @@ sys.path.insert(0, str(ROOT / "extensions"))
 from pi_bridge.client import Limits as PiLimits
 from pi_bridge.display import Fallback, Transcript, agent_data
 from pi_bridge.program import Bridge, CAPABILITIES
-from prim_provider import Limits, Provider, ProviderError
-from test_prim_provider import Core
+from vqro_provider import Limits, Provider, ProviderError
+from test_vqro_provider import Core
 
 
 class BridgeCore(Core):
@@ -117,8 +117,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         provider = Provider("pi-test", "one-process", CAPABILITIES, role="runtime", token=token,
                             limits=Limits(deadline=1))
         env = {"HOME": self.root.name, "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8",
-               "HERDR_SOCKET_PATH": "must-not-inherit", "PRIM_BRIDGE_TOKEN": token,
-               "PRIM_EXTENSION_LIFETIME": "stdin", "PRIM_EXTENSION": "wrong-parent"}
+               "HERDR_SOCKET_PATH": "must-not-inherit", "VQRO_BRIDGE_TOKEN": token,
+               "VQRO_EXTENSION_LIFETIME": "stdin", "VQRO_EXTENSION": "wrong-parent"}
         env.update(env_extra or {})
         self.bridge = Bridge([sys.executable, str(ROOT / "tests/fixtures/fake_pi.py"), *fixture_args],
                              cwd=self.root.name, env=env, token=token, sock=self.sock,
@@ -275,8 +275,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         endpoint = str(Path(self.root.name) / "p.sock")
         server = await asyncio.start_unix_server(connection, endpoint)
         env = {"HOME": self.root.name, "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8",
-               "PRIM_SOCKET": endpoint,
-               "PRIM_BRIDGE_TOKEN": "bootstrap-once", "PRIM_EXTENSION_LIFETIME": "stdin"}
+               "VQRO_SOCKET": endpoint,
+               "VQRO_BRIDGE_TOKEN": "bootstrap-once", "VQRO_EXTENSION_LIFETIME": "stdin"}
         process = await asyncio.create_subprocess_exec(sys.executable, "-I", str(ROOT / "extensions/pi_bridge/launch.py"), "--",
             sys.executable, str(ROOT / "tests/fixtures/fake_pi.py"), cwd=self.root.name, env=env,
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
@@ -294,7 +294,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 process.stdin.close()
                 _, stderr = await asyncio.wait_for(process.communicate(), 3)
             self.assertEqual(process.returncode, 23 if native_exit else 0, stderr.decode())
-            self.assertTrue(core.notes("resource.gone"), "EOF must run graceful bridge cleanup, not prim_ext os._exit")
+            self.assertTrue(core.notes("resource.gone"), "EOF must run graceful bridge cleanup, not vqro_ext os._exit")
             self.assertEqual(len(core.notes("provider.register")), 1)
         finally:
             if process.returncode is None:
@@ -313,14 +313,14 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         user=Path(self.root.name)/"user-modules";user.mkdir()
         capture=Path(self.root.name)/"child-env.json"
         bridge=await self.start(env_extra={"PYTHONPATH":os.pathsep.join([str(ROOT/"extensions"),str(user)]),
-            "PRIM_SOCKET":"private-terminal-endpoint","PRIM_STATE_DIR":"core-only","PRIM_EXTENSIONS_DIR":"core-only",
-            "PRIM_EXTENSION_TOKEN":"supervised-secret","PRIM_OTHER_INTERNAL":"core-only"},fixture_args=("--env-file",str(capture)))
+            "VQRO_SOCKET":"private-terminal-endpoint","VQRO_STATE_DIR":"core-only","VQRO_EXTENSIONS_DIR":"core-only",
+            "VQRO_EXTENSION_TOKEN":"supervised-secret","VQRO_OTHER_INTERNAL":"core-only"},fixture_args=("--env-file",str(capture)))
         record=json.loads(capture.read_text());child=record["env"]
         self.assertEqual(child.get("PYTHONPATH"),str(user))
-        self.assertIsNone(record["settings"],"agent tools must not discover prim's settings extension")
-        self.assertEqual({k for k in child if k.startswith("PRIM_")},{"PRIM_SOCKET","PRIM_SOCKET_SOURCE"})
-        self.assertEqual(child["PRIM_SOCKET_SOURCE"],"terminal")
-        self.assertEqual(child["PRIM_SOCKET"],"private-terminal-endpoint")
+        self.assertIsNone(record["settings"],"agent tools must not discover vqro's settings extension")
+        self.assertEqual({k for k in child if k.startswith("VQRO_")},{"VQRO_SOCKET","VQRO_SOCKET_SOURCE"})
+        self.assertEqual(child["VQRO_SOCKET_SOURCE"],"terminal")
+        self.assertEqual(child["VQRO_SOCKET"],"private-terminal-endpoint")
         self.assertFalse(any(k.startswith("HERDR_") for k in child))
 
     async def test_register_token_host_view_and_no_secret_in_child_environment(self):
@@ -335,8 +335,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(resource["data"]["run"]["settled"])
         self.assertEqual(self.core.entries["view/agent-r7"]["value"]["kind"], "panel")
         self.assertEqual(self.core.notes("view.publish")[0]["params"]["view"], "agent-r7")
-        self.assertNotIn("PRIM_BRIDGE_TOKEN", bridge.env)
-        self.assertNotIn("PRIM_EXTENSION_LIFETIME", bridge.env)
+        self.assertNotIn("VQRO_BRIDGE_TOKEN", bridge.env)
+        self.assertNotIn("VQRO_EXTENSION_LIFETIME", bridge.env)
         self.assertFalse(any(k.startswith("HERDR_") for k in bridge.env))
 
     async def test_prompt_accepted_steer_during_run_and_native_settled(self):

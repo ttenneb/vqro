@@ -299,7 +299,7 @@ pub fn normalize(s: &str) -> Option<String> {
 
 /// Display only: canonical key ids and whitespace-separated hints keep their input syntax.
 /// Unknown label settings use full names; unknown/future key tokens stay untouched.
-/// Shared parity cases: tests/fixtures/key_labels.json (also checked by Python prim_display).
+/// Shared parity cases: tests/fixtures/key_labels.json (also checked by Python vqro_display).
 pub fn display_labels(text: &str, setting: Option<&str>) -> String {
     let short = setting == Some("short");
     text.split_inclusive(char::is_whitespace).map(|part| {

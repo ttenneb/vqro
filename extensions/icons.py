@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""prim extension: icon sets. A few named sets of glyphs, and a command that applies one.
+"""vqro extension: icon sets. A few named sets of glyphs, and a command that applies one.
 
 An icon set is data: applying one writes `doc/settings/icons` = `{"name", "width", "glyphs": {name: glyph}}`,
 which clients read live (`docs/spec/core-protocol.md`, Icons; D20). Extensions ask for icons by name
@@ -9,7 +9,7 @@ available sets are published as live data under the name `icons`
 for any extension to draw; settings shows them on its Icons page. The current set is the entry's `name`.
 
 `default` has no glyphs: every icon keeps its extension's own glyph (Nerd Font or Unicode, by the client's
-`icons` setting), which is prim's look with no set at all.
+`icons` setting), which is vqro's look with no set at all.
 
 Every Nerd Font codepoint below was checked against Nerd Fonts' glyphnames.json (v3.5.1) and carries its
 glyph name; every other glyph carries its Unicode name. Emoji are all Emoji_Presentation characters
@@ -19,12 +19,12 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from prim_ext import Extension, PrimError  # noqa: E402
+from vqro_ext import Extension, VqroError  # noqa: E402
 
 ext = Extension("icons", event_types=["entries"])  # no resource events: not used here
 ENTRY = "doc/settings/icons"
 
-# The names prim's bundled extensions draw today, and what each marks. A set may leave any out.
+# The names vqro's bundled extensions draw today, and what each marks. A set may leave any out.
 NAMES = {
     "repo": "a workspace that is a git repository (sidebar)",
     "worktree": "a git worktree of a workspace (sidebar)",
@@ -65,7 +65,7 @@ SETS = [
     {
         "name": "default", "title": "Default", "width": 1, "glyphs": {},
         "description": "each extension's own glyphs: Nerd Font or Unicode, as chosen above",
-        "credit": "prim's look with no icon set",
+        "credit": "vqro's look with no icon set",
     },
     {
         "name": "material", "title": "Material Design", "width": 1, "glyphs": MATERIAL,
@@ -160,7 +160,7 @@ def apply(args):
     name = args.get("name") or args.get("value")
     s = BY_NAME.get(name)
     if s is None:
-        raise PrimError(f"no icon set {name!r}; try one of: {', '.join(BY_NAME)}", "invalid")
+        raise VqroError(f"no icon set {name!r}; try one of: {', '.join(BY_NAME)}", "invalid")
     value = {"name": name, "width": s["width"], "glyphs": dict(s["glyphs"])}
     ext.retrying(lambda: ext.apply([{"op": "set", "key": ENTRY, "value": value, "expect": ext.version(ENTRY)}],
                                    f"icons: {name}"))

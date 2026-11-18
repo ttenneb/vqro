@@ -1,4 +1,4 @@
-"""Raw tmux fixture; runs only in a test-owned server and never talks to prim/Herdr."""
+"""Raw tmux fixture; runs only in a test-owned server and never talks to vqro/Herdr."""
 import json
 import os
 import pathlib

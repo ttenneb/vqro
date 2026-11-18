@@ -4,7 +4,7 @@
 //! an extension (D17, D20), exactly like a theme. The client only resolves and lays out. An icon value is
 //! a plain string (drawn as is), or `{"name"?, "nerd"?, "text"?}` where `name` is one name or a list,
 //! most specific first (`["working", "agent"]`). Resolution: the first name the active set has, then
-//! the value's own `nerd` (when this client uses a Nerd Font) or `text`, then nothing. So prim looks
+//! the value's own `nerd` (when this client uses a Nerd Font) or `text`, then nothing. So vqro looks
 //! the same as before with no set, and a set that lacks a name falls back the same way.
 //!
 //! Widths follow `unicode-width`, the rules ratatui lays text out with. A set's glyphs share one icon

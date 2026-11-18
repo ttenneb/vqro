@@ -1,9 +1,9 @@
-//! `prim tui`: a client that renders workspace primitives. It holds no workspace behaviour (D17):
+//! `vqro tui`: a client that renders workspace primitives. It holds no workspace behaviour (D17):
 //! layout, views, menus, bindings and commands all come from the core and extensions. It owns only
 //! mechanism (rendering, focus, mouse mechanics, menus drawn from `menu/*` entries, text prompts,
 //! pickers) and recovery that must work when every extension is broken:
 //!
-//! Prefix: Ctrl-g (setting `doc/settings/tui.prefix`), or click the `prim` badge. A menu lists every
+//! Prefix: Ctrl-g (setting `doc/settings/tui.prefix`), or click the `vqro` badge. A menu lists every
 //!   action; press its key or click it. Default keys: : commands · o/O next/previous pane · 1-9 tab
 //!   · u undo · R reset layout · ! safe mode · q quit; the prefix twice sends it to the program.
 //!   `binding/*` entries add keys and, with a higher `priority`, override these. Whatever the keymap,
@@ -381,7 +381,7 @@ pub async fn run(socket: &Path) -> Result<()> {
     let mut app = App::new(peer.clone(), tx);
     app.load(&snap);
     if let Some(notice)=snap["recovery_notice"].as_str() {app.message=notice.into();}
-    else {app.set_key_hint("click prim or press ", &app.prefix(), " for the menu");}
+    else {app.set_key_hint("click vqro or press ", &app.prefix(), " for the menu");}
     peer.call("events.subscribe", json!({"from": seq, "epoch": snap["epoch"], "partial_resources": true})).await?;
 
     let mut terminal = ratatui::init();
@@ -500,7 +500,7 @@ pub async fn run(socket: &Path) -> Result<()> {
                 use std::os::unix::process::CommandExt;
                 let args: Vec<String> = std::env::args().skip(1).collect();
                 let err = std::process::Command::new(exe).args(args).exec();
-                anyhow::bail!("could not restart into the new prim: {err}");
+                anyhow::bail!("could not restart into the new vqro: {err}");
             }
         }
     }
@@ -596,7 +596,7 @@ impl App {
         self.backends_connected=snap["providers"].as_object().into_iter().flatten().filter(|(_,p)|p["role"]=="backend" && p["connected"]==true).map(|(name,_)|name.clone()).collect();
         self.live = snap["live"].as_object().map(|o| o.iter().map(|(k, v)| (k.clone(), v.clone())).collect()).unwrap_or_default();
         if self.safe_mode && !was_safe { self.open_safe_chooser(); }
-        if !self.safe_mode && matches!(&self.overlay,Some(Overlay::Popup{view,..}) if view=="@prim-safe-mode") { self.overlay=None; }
+        if !self.safe_mode && matches!(&self.overlay,Some(Overlay::Popup{view,..}) if view=="@vqro-safe-mode") { self.overlay=None; }
     }
 
     fn on_incoming(&mut self, m: Incoming) {
@@ -776,7 +776,7 @@ impl App {
                 let was=self.safe_mode; self.safe_mode=d["on"].as_bool().unwrap_or(false);
                 self.safe_mode_allow=strings(&d["allow"]); self.provider_extensions=strings(&d["provider_extensions"]);
                 if self.safe_mode && !was { self.open_safe_chooser(); }
-                if !self.safe_mode && matches!(&self.overlay,Some(Overlay::Popup{view,..}) if view=="@prim-safe-mode") { self.overlay=None; }
+                if !self.safe_mode && matches!(&self.overlay,Some(Overlay::Popup{view,..}) if view=="@vqro-safe-mode") { self.overlay=None; }
             }
             "notify" => {
                 let text = d["text"].as_str().unwrap_or("").to_string();
@@ -1099,7 +1099,7 @@ impl App {
     fn open_safe_chooser(&mut self) {
         self.safe_selected=self.safe_mode_allow.clone();
         self.pstate.remove("@popup");
-        self.overlay=Some(Overlay::Popup { view:"@prim-safe-mode".into(),width:76,ctx:json!({}) });
+        self.overlay=Some(Overlay::Popup { view:"@vqro-safe-mode".into(),width:76,ctx:json!({}) });
     }
 
     /// Recovery UI is generated in Rust, never published or supplied by an extension.
@@ -1127,7 +1127,7 @@ impl App {
 
     /// A panel's value: the view entry with its live content merged over it.
     fn panel_value(&self, view: &str) -> Arc<Value> {
-        if view=="@prim-safe-mode" { return Arc::new(self.safe_chooser_value()); }
+        if view=="@vqro-safe-mode" { return Arc::new(self.safe_chooser_value()); }
         if let Some(value) = self.panel_values.lock().unwrap().get(view).cloned() { return value; }
         let (v, deps) = compose::resolve(view, &self.entries, &self.live);
         self.panel_dependencies.lock().unwrap().insert(view.into(), deps);
@@ -1369,7 +1369,7 @@ impl App {
         let failed=self.extensions.iter().filter(|(_,state)|state["status"]=="failed").map(|(name,_)| {
             let allowed=if self.safe_mode {self.safe_mode_allow.contains(name)} else {self.entries.get(&format!("extension/{name}")).is_some_and(|v|v["enabled"]!=false)};
             let label=if allowed {format!("restart {name} (failed)")} else {format!("clear failure: {name} (stays stopped)")};
-            PrefixRow {key:None,label,binding:json!({"command":"prim.extension.restart","args":{"name":name}})}
+            PrefixRow {key:None,label,binding:json!({"command":"vqro.extension.restart","args":{"name":name}})}
         }).collect::<Vec<_>>();
         let at=rows.len().min(1);rows.splice(at..at,failed);
         for b in builtin_bindings().into_iter().filter(|b| b["recovery"] == true) {
@@ -1382,7 +1382,7 @@ impl App {
 
     fn binding_label(&self, b: &Value) -> String {
         let cmd = b["command"].as_str().unwrap_or("");
-        if cmd == "prim.safe_mode" && self.safe_mode {
+        if cmd == "vqro.safe_mode" && self.safe_mode {
             return "leave safe mode".into();
         }
         b["label"].as_str().or_else(|| self.commands.get(cmd).and_then(|c| c["title"].as_str())).unwrap_or(cmd).to_string()
@@ -1699,7 +1699,7 @@ impl App {
             "client.focus" => self.focus_to(args["dir"].as_str().unwrap_or("next")),
             "client.tab" => self.tab_to(&args["to"], &ctx),
             "client.safe_mode" => {
-                if self.safe_mode { self.open_safe_chooser(); } else { self.invoke("prim.safe_mode",json!({"on":true})); }
+                if self.safe_mode { self.open_safe_chooser(); } else { self.invoke("vqro.safe_mode",json!({"on":true})); }
             }
             "client.safe_mode.toggle" => {
                 if let Some(name)=args["name"].as_str() { if !self.safe_selected.remove(name) { self.safe_selected.insert(name.to_string()); } }
@@ -1709,12 +1709,12 @@ impl App {
                 let(peer,tx)=(self.peer.clone(),self.tx.clone());
                 tokio::spawn(async move {
                     for name in names {
-                        if let Err(error)=peer.call("command.invoke",json!({"name":"prim.safe_mode.allow","args":{"on":selected.contains(&name),"name":name}})).await { let _=tx.send(Msg::Info(error.to_string())); return; }
+                        if let Err(error)=peer.call("command.invoke",json!({"name":"vqro.safe_mode.allow","args":{"on":selected.contains(&name),"name":name}})).await { let _=tx.send(Msg::Info(error.to_string())); return; }
                     }
                     let _=tx.send(Msg::Info("Safe-mode choices applied; enabled declarations were not changed".into()));
                 });
             }
-            "client.safe_mode.leave" => self.invoke("prim.safe_mode",json!({"on":false})),
+            "client.safe_mode.leave" => self.invoke("vqro.safe_mode",json!({"on":false})),
             "client.quit" => self.quit = true,
             "client.none" => {}
             // Never sent to the core: a client that doesn't know one says so.
@@ -1796,13 +1796,13 @@ impl App {
 
     /// Nerd Font icons: the `icons` setting (`nerd`, `text`, or `auto`). Fonts can't be detected from
     /// a terminal, so `auto` trusts terminals that bundle the Nerd Font symbols (Ghostty, WezTerm), or
-    /// `PRIM_NERD_FONT=1`.
+    /// `VQRO_NERD_FONT=1`.
     fn nerd_icons(&self) -> bool {
         match self.entries.get("doc/settings/tui").and_then(|s| s["icons"].as_str()) {
             Some("nerd") => true,
             Some("text") => false,
             _ => {
-                std::env::var("PRIM_NERD_FONT").map(|v| v == "1").unwrap_or(false)
+                std::env::var("VQRO_NERD_FONT").map(|v| v == "1").unwrap_or(false)
                     || matches!(std::env::var("TERM_PROGRAM").as_deref(), Ok("ghostty") | Ok("WezTerm"))
             }
         }
@@ -1937,7 +1937,7 @@ impl App {
                     }
                 }
                 if let Some(g) = gesture {
-                    // Programs that asked for the mouse get it first; Ctrl/Alt makes it prim's.
+                    // Programs that asked for the mouse get it first; Ctrl/Alt makes it vqro's.
                     let force = m.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
                     if !force && inner.contains(pos) && self.view_kind(&view) == "terminal" && self.forward_mouse(&view, &m) {
                         self.mouse_owner = Some(view);
@@ -2216,8 +2216,8 @@ impl App {
                 }
             }
             None => {
-                let text = format!("No layout yet.\n\nClick prim (bottom left) or press {} for the menu:\n  n  open a shell\n  R  one tab per terminal\n  :  all commands", self.key_labels(&self.prefix()));
-                f.render_widget(Paragraph::new(text).style(pal.style(None)).block(Block::bordered().title(" prim ").border_style(pal.border(true))), main);
+                let text = format!("No layout yet.\n\nClick vqro (bottom left) or press {} for the menu:\n  n  open a shell\n  R  one tab per terminal\n  :  all commands", self.key_labels(&self.prefix()));
+                f.render_widget(Paragraph::new(text).style(pal.style(None)).block(Block::bordered().title(" vqro ").border_style(pal.border(true))), main);
             }
         }
         self.leaves = hit.leaves.iter().map(|(v, _, _)| v.clone()).collect();
@@ -2375,7 +2375,7 @@ impl App {
             _ => None,
         };
         let open = prompt.is_some();
-        let badge = if open { " prim ▴ " } else { " prim ▾ " };
+        let badge = if open { " vqro ▴ " } else { " vqro ▾ " };
         self.hit.badge = Rect { x: area.x, y: area.y, width: badge.chars().count() as u16, height: 1 };
         self.hit.status = area;
         let mut spans = vec![Span::styled(badge, Style::new().bg(if open { pal.prompt } else { pal.accent }).fg(pal.badge_text))];
@@ -2525,7 +2525,7 @@ impl App {
                 let rows = self.prefix_items();
                 let w = rows.iter().filter_map(|r| r.key.as_ref()).map(|k| k.chars().count()).max().unwrap_or(1).max(2);
                 let items = rows.into_iter().map(|r| format!(" {:>w$}  {}", r.key.unwrap_or_else(|| "·".into()), r.label)).collect();
-                (" prim (press a key or click) ", items, *sel, None::<String>)
+                (" vqro (press a key or click) ", items, *sel, None::<String>)
             }
             Some(Overlay::Palette { query, sel }) => {
                 let items = self.palette_items().into_iter().map(|n| format!("{n}  {}", self.commands[&n]["title"].as_str().unwrap_or(""))).collect();
@@ -2592,8 +2592,8 @@ fn builtin_bindings() -> Vec<Value> {
         json!({"key": ":", "command": "client.palette", "label": "all commands", "recovery": true}),
         json!({"key": "o", "command": "client.focus", "args": {"dir": "next"}, "label": "next pane"}),
         json!({"key": "O", "command": "client.focus", "args": {"dir": "prev"}, "label": "previous pane", "hidden": true}),
-        json!({"key": "u", "command": "prim.revert", "label": "undo last change", "recovery": true}),
-        json!({"key": "R", "command": "prim.layout.reset", "label": "reset layout", "recovery": true}),
+        json!({"key": "u", "command": "vqro.revert", "label": "undo last change", "recovery": true}),
+        json!({"key": "R", "command": "vqro.layout.reset", "label": "reset layout", "recovery": true}),
         json!({"key": "!", "command": "client.safe_mode", "label": "safe mode / recovery choices", "recovery": true}),
         json!({"key": "q", "command": "client.quit", "label": "quit this UI", "recovery": true}),
     ];
@@ -2908,7 +2908,7 @@ mod tests {
             "extensions":{"pi":{"status":"failed","crashes":0,"crashes_total":3,"last_exit":"signal9",
                 "failure":{"kind":"crash_budget","at_ms":1234,"crashes":3,"window_seconds":300}}}}));
         let rows=app.prefix_items();
-        let restart=rows.iter().find(|r|r.binding["command"]=="prim.extension.restart" && r.binding["args"]["name"]=="pi").expect("built-in recovery restart row");
+        let restart=rows.iter().find(|r|r.binding["command"]=="vqro.extension.restart" && r.binding["args"]["name"]=="pi").expect("built-in recovery restart row");
         assert!(restart.label.contains("restart pi"));
         let mut terminal=ratatui::Terminal::new(ratatui::backend::TestBackend::new(100,24)).unwrap();
         terminal.draw(|f|app.draw(f)).unwrap();
@@ -2916,7 +2916,7 @@ mod tests {
         app.on_mouse(MouseEvent {kind:MouseEventKind::Down(MouseButton::Left),column:badge.x,row:badge.y,modifiers:KeyModifiers::NONE});
         assert!(matches!(app.overlay,Some(Overlay::Prefix{..})),"failed badge opens built-in recovery without an extension");
         app.safe_mode=true;
-        assert!(app.prefix_items().iter().any(|r|r.binding["command"]=="prim.extension.restart"),"recovery remains reachable; core still controls safe-mode admission");
+        assert!(app.prefix_items().iter().any(|r|r.binding["command"]=="vqro.extension.restart"),"recovery remains reachable; core still controls safe-mode admission");
     }
 
     #[tokio::test]
@@ -2986,13 +2986,13 @@ mod tests {
     async fn safe_chooser_is_builtin_grouped_and_temporary_even_with_no_extensions_running() {
         let (mut app,_) = app();
         app.load(&json!({"epoch":"boot","seq":1,"safe_mode":true,"safe_mode_allow":["ui"],"provider_extensions":["remembered"],"entries":{
-            "extension/herdr":{"value":{"kind":"provider","default":true,"description":"Backend connection","enabled":false,"argv":["prim-herdr"]}},
-            "extension/tmux":{"value":{"kind":"provider","description":"Optional tmux backend","enabled":false,"argv":["prim-tmux"]}},
+            "extension/herdr":{"value":{"kind":"provider","default":true,"description":"Backend connection","enabled":false,"argv":["vqro-herdr"]}},
+            "extension/tmux":{"value":{"kind":"provider","description":"Optional tmux backend","enabled":false,"argv":["vqro-tmux"]}},
             "extension/remembered":{"value":{"description":"Registered provider","argv":["false"]}},
             "extension/ui":{"value":{"description":"User interface","enabled":false,"argv":["false"]}}
         }}));
-        assert!(matches!(&app.overlay,Some(Overlay::Popup{view,..}) if view=="@prim-safe-mode"));
-        let panel=app.panel_value("@prim-safe-mode");let rows=panel["items"].as_array().unwrap();
+        assert!(matches!(&app.overlay,Some(Overlay::Popup{view,..}) if view=="@vqro-safe-mode"));
+        let panel=app.panel_value("@vqro-safe-mode");let rows=panel["items"].as_array().unwrap();
         let at=|text:&str| rows.iter().position(|r|r["text"].as_str()==Some(text)).unwrap();
         assert!(at("Providers / backends")<at("[ ] herdr"));
         assert!(at("[ ] tmux")<at("UI extensions"));
@@ -3103,9 +3103,9 @@ mod tests {
         assert_eq!(snap["recovery_only"], true);
         let (tx, _) = mpsc::unbounded_channel();
         let mut app = App::new(client.clone(), tx); app.load(&snap);
-        assert!(app.prefix_items().iter().any(|r| r.binding["command"] == "prim.revert"));
+        assert!(app.prefix_items().iter().any(|r| r.binding["command"] == "vqro.revert"));
         assert!(app.prefix_items().iter().any(|r| r.binding["command"] == "client.quit"));
-        assert!(client.call("command.invoke", json!({"name":"prim.revert"})).await.is_ok());
+        assert!(client.call("command.invoke", json!({"name":"vqro.revert"})).await.is_ok());
         assert!(!client.is_closed());
         app.run_command("client.quit", Value::Null, Value::Null, None);
         assert!(app.quit);
@@ -3288,7 +3288,7 @@ mod tests {
         let _core = start(socket.clone(), dir.path().join("state"), false, Backend::Fake, None).unwrap();
         let (peer, mut incoming, _) = client::connect(&socket, "test").await.unwrap();
         peer.call("resource.spawn", json!({"argv": ["sh"]})).await.unwrap();
-        peer.call("command.invoke", json!({"name": "prim.layout.reset"})).await.unwrap();
+        peer.call("command.invoke", json!({"name": "vqro.layout.reset"})).await.unwrap();
         let snap = peer.call("workspace.snapshot", Value::Null).await.unwrap();
         let (mut app, mut messages) = app();
         app.terms.insert("term-r1".into(), Term {

@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Opt-in load probe through a wire provider: private prim core + prim-herdr + private herdr-core.
+"""Opt-in load probe through a wire provider: private vqro core + vqro-herdr + private herdr-core.
 
 Usage: tests/e2e_scale_herdr.py TARGET_DIR [TERMINALS=150] [AGENTS=50] [FLOODS=2] [SECONDS=30]
 Real terminals in herdr-core (agents report OSC 7501 every 2 s; floods are `yes` drained by an observer),
@@ -10,21 +10,21 @@ import base64, json, os, queue, shutil, socket, subprocess, sys, tempfile, threa
 
 TARGET = sys.argv[1]
 N, AGENTS, FLOODS, SECONDS = (int(x) for x in (sys.argv[2:] + ["150", "50", "2", "30"][len(sys.argv) - 2:])[:4])
-PRIM, PHERDR = (os.path.join(TARGET, "debug", b) for b in ("prim", "prim-herdr"))
+VQRO, PHERDR = (os.path.join(TARGET, "debug", b) for b in ("vqro", "vqro-herdr"))
 HC = os.path.expanduser("~/.local/bin/herdr-core")
 R = tempfile.mkdtemp(prefix="pe2s", dir="/tmp")
 for d in ("home", "st", "xst", "run", "cfg", "ext"):
     os.makedirs(os.path.join(R, d))
 os.chmod(os.path.join(R, "run"), 0o700)
-ENV = {"HOME": f"{R}/home", "PATH": "", "TERM": "xterm-256color", "SHELL": "/bin/sh", "PRIM_STATE_DIR": f"{R}/st",
-       "PRIM_SOCKET": f"{R}/p.sock", "PRIM_EXTENSIONS_DIR": f"{R}/ext", "XDG_STATE_HOME": f"{R}/xst",
+ENV = {"HOME": f"{R}/home", "PATH": "", "TERM": "xterm-256color", "SHELL": "/bin/sh", "VQRO_STATE_DIR": f"{R}/st",
+       "VQRO_SOCKET": f"{R}/p.sock", "VQRO_EXTENSIONS_DIR": f"{R}/ext", "XDG_STATE_HOME": f"{R}/xst",
        "XDG_RUNTIME_DIR": f"{R}/run", "XDG_CONFIG_HOME": f"{R}/cfg", "HC_SESSION": "scale"}
 
 
 class Client:
     def __init__(self, name):
         self.s = socket.socket(socket.AF_UNIX)
-        self.s.connect(ENV["PRIM_SOCKET"])
+        self.s.connect(ENV["VQRO_SOCKET"])
         self.f = self.s.makefile("wb", buffering=0)
         self.r = self.s.makefile("rb")  # buffered: line reads must not be byte-at-a-time
         self.n, self.replies, self.cv, self.lock = 0, {}, threading.Condition(), threading.Lock()
@@ -88,9 +88,9 @@ def pids_with(word):
 
 core, receipt = None, {"profile": {"terminals": N, "agents": AGENTS, "floods": FLOODS, "seconds": SECONDS}}
 try:
-    core = subprocess.Popen([PRIM, "serve", "--fake"], env=ENV, stdout=open(f"{R}/serve.log", "w"), stderr=subprocess.STDOUT)
+    core = subprocess.Popen([VQRO, "serve", "--fake"], env=ENV, stdout=open(f"{R}/serve.log", "w"), stderr=subprocess.STDOUT)
     for _ in range(50):
-        if os.path.exists(ENV["PRIM_SOCKET"]):
+        if os.path.exists(ENV["VQRO_SOCKET"]):
             break
         time.sleep(0.2)
     c = Client("scale-writer")
@@ -144,7 +144,7 @@ try:
         obs.notify("stream.input", {"stream": sid, "text": "while :; do /usr/bin/head -c 65536 /dev/zero | /usr/bin/tr '\\0' x; echo; /usr/bin/sleep 0.05; done\r"})
     core_rss, prov_rss, hc_rss, echo_ms, lost = [], [], [], [], 0
     # Harness-local process measurement, not a process-id-dependent public contract.
-    provider_pids = pids_with("prim-herdr")
+    provider_pids = pids_with("vqro-herdr")
     assert len(provider_pids) == 1, provider_pids
     prov_pid = provider_pids[0]
     hc_pids = pids_with("herdr-core")
@@ -169,7 +169,7 @@ try:
         "status_expected_per_s": round(AGENTS / 2, 1), "missed": stats["missed"],
         "flood_mb_per_s_to_observer": round(stats["flood_bytes"] / SECONDS / 1e6, 2),
         "stream_ends": stats["stream_ends"][:10],
-        "rss_mb": {"core_peak": round(max(filter(None, core_rss)), 1), "prim_herdr_peak": round(max(filter(None, prov_rss)), 1),
+        "rss_mb": {"core_peak": round(max(filter(None, core_rss)), 1), "vqro_herdr_peak": round(max(filter(None, prov_rss)), 1),
                    "herdr_core_peak": round(max(hc_rss), 1)},
     })
 finally:

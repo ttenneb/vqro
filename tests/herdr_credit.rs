@@ -1,6 +1,6 @@
 //! The real adapter protocol over a disposable stdio fixture, never hc or a live server.
 use std::time::Duration;
-use prim::adapter::{herdr, StreamInput};
+use vqro::adapter::{herdr, StreamInput};
 
 #[tokio::test]
 async fn herdr_credit_is_withheld_until_downstream_handoff() {

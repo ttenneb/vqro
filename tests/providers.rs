@@ -2,9 +2,9 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use prim::adapter::{AdapterCmd, AdapterEvent, AdapterHandle, ResourceFacts, Stream, StreamInput};
-use prim::core::{add_adapter, Core, Shared};
-use prim::provider::{Identity, IdentityMap, ProviderInfo};
+use vqro::adapter::{AdapterCmd, AdapterEvent, AdapterHandle, ResourceFacts, Stream, StreamInput};
+use vqro::core::{add_adapter, Core, Shared};
+use vqro::provider::{Identity, IdentityMap, ProviderInfo};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
@@ -17,7 +17,7 @@ fn facts(reference: &str, incarnation: &str) -> ResourceFacts {
 }
 fn core(state: &Path) -> Shared {
     std::fs::create_dir_all(state).unwrap();
-    Arc::new(Mutex::new(Core::new(prim::store::Store::in_memory(), Some(state.into()), state.join("unused"), false).unwrap()))
+    Arc::new(Mutex::new(Core::new(vqro::store::Store::in_memory(), Some(state.into()), state.join("unused"), false).unwrap()))
 }
 async fn until(mut condition: impl FnMut() -> bool) {
     tokio::time::timeout(Duration::from_secs(2), async {
@@ -34,7 +34,7 @@ async fn register(core: &Shared, name: &str, instance: &str, resources: Vec<Reso
     (events, inbox)
 }
 async fn native(commands: &mut mpsc::UnboundedReceiver<AdapterCmd>) -> Option<AdapterCmd> {
-    prim::adapter::command_for(commands.recv().await?, 1)
+    vqro::adapter::command_for(commands.recv().await?, 1)
 }
 fn id(core: &Shared, provider: &str, reference: &str) -> String {
     core.lock().unwrap().resources.values().find(|r| r.adapter == provider && r.facts.backend_ref == reference).unwrap().id.clone()
@@ -109,7 +109,7 @@ async fn queued_effect_from_an_old_native_connection_is_rejected_before_executio
     let handle = AdapterHandle { name: "fixture".into(), session: Some(11), context: None, capabilities: json!({"terminal.kill": {}}), cmds: commands };
     let effect = tokio::spawn(async move { handle.kill("t1".into()).await });
     let queued = inbox.recv().await.unwrap();
-    assert!(prim::adapter::command_for(queued, 12).is_none(), "an old queue entry must never reach the new native connection");
+    assert!(vqro::adapter::command_for(queued, 12).is_none(), "an old queue entry must never reach the new native connection");
     let error = effect.await.unwrap().unwrap_err().rpc();
     assert_eq!(error.data.unwrap()["outcome"], "rejected");
     assert!(inbox.try_recv().is_err(), "there is no replay onto connection 12");
@@ -141,9 +141,9 @@ fn identity_write_failure_does_not_consume_an_id_and_legacy_ids_are_tombstones()
 async fn timeout_ignores_late_reply_without_resend_and_disconnect_ends_inflight_kill() {
     let dir = tempfile::Builder::new().prefix("pv").tempdir_in("/tmp").unwrap();
     let socket = dir.path().join("s");
-    let core = prim::server::start(socket.clone(), dir.path().join("state"), false, prim::adapter::Backend::Fake, None).unwrap();
+    let core = vqro::server::start(socket.clone(), dir.path().join("state"), false, vqro::adapter::Backend::Fake, None).unwrap();
     let (events, mut commands) = register(&core, "fixture", "A", vec![facts("existing", "")]).await;
-    let (peer, _incoming, _) = prim::client::connect(&socket, "test").await.unwrap();
+    let (peer, _incoming, _) = vqro::client::connect(&socket, "test").await.unwrap();
     let caller = peer.clone();
     let request = tokio::spawn(async move { caller.call("resource.spawn", json!({"provider": "fixture", "argv": ["sh"], "deadline_ms": 20})).await });
     let Some(AdapterCmd::Spawn(_, reply)) = native(&mut commands).await else { panic!("expected one native spawn") };
@@ -170,7 +170,7 @@ async fn timeout_ignores_late_reply_without_resend_and_disconnect_ends_inflight_
     assert_eq!(error.kind(), "unavailable");
     assert_eq!(error.data.as_ref().unwrap()["outcome"], "indeterminate");
     assert!(!core.lock().unwrap().resources[&resource].available);
-    assert!(reply.send(Ok(prim::adapter::EffectResult::accepted(json!({"late": true})))).is_err());
+    assert!(reply.send(Ok(vqro::adapter::EffectResult::accepted(json!({"late": true})))).is_err());
     events.send(("fixture".into(), AdapterEvent::Registered(info("A")))).unwrap();
     events.send(("fixture".into(), AdapterEvent::Snapshot(vec![facts("existing", ""), facts("late", "")]))).unwrap();
     until(|| core.lock().unwrap().resources[&resource].available).await;
@@ -181,22 +181,22 @@ async fn timeout_ignores_late_reply_without_resend_and_disconnect_ends_inflight_
 async fn provider_loss_closes_an_idle_stream_and_keeps_its_facts() {
     let dir = tempfile::Builder::new().prefix("pv").tempdir_in("/tmp").unwrap();
     let socket = dir.path().join("s");
-    let core = prim::server::start(socket.clone(), dir.path().join("state"), false, prim::adapter::Backend::Fake, None).unwrap();
+    let core = vqro::server::start(socket.clone(), dir.path().join("state"), false, vqro::adapter::Backend::Fake, None).unwrap();
     let (events, mut commands) = register(&core, "fixture", "A", vec![facts("t1", "")]).await;
     let resource = id(&core, "fixture", "t1");
-    let (peer, mut incoming, _) = prim::client::connect(&socket, "test").await.unwrap();
+    let (peer, mut incoming, _) = vqro::client::connect(&socket, "test").await.unwrap();
     let caller = peer.clone();
     let target = resource.clone();
     let attach = tokio::spawn(async move { caller.call("resource.attach", json!({"resource": target})).await });
     let Some(AdapterCmd::Attach { reply, .. }) = native(&mut commands).await else { panic!("expected attach") };
-    let (input, mut native_input) = prim::queue::channel(256 * 1024);
-    let (_output, output) = prim::queue::channel(256 * 1024);
+    let (input, mut native_input) = vqro::queue::channel(256 * 1024);
+    let (_output, output) = vqro::queue::channel(256 * 1024);
     assert!(reply.send(Ok(Stream { initial: "none", input, output, terminal: None })).is_ok());
     assert_eq!(attach.await.unwrap().unwrap()["outcome"], "accepted");
     events.send(("fixture".into(), AdapterEvent::Connected(false, None))).unwrap();
     let reason = tokio::time::timeout(Duration::from_secs(1), async {
         loop {
-            if let Some(prim::rpc::Incoming::Notification { method, params }) = incoming.recv().await {
+            if let Some(vqro::rpc::Incoming::Notification { method, params }) = incoming.recv().await {
                 if method == "stream.closed" { break params["reason"]["reason"].clone(); }
             }
         }

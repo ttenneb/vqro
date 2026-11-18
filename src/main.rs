@@ -3,10 +3,10 @@ use clap::{Parser, Subcommand};
 use serde_json::Value;
 use std::io::Write;
 
-use prim::{client, paths, server, tui};
+use vqro::{client, paths, server, tui};
 
 #[derive(Parser)]
-#[command(name = "prim", version, about = "Workspace primitives over any multiplexer")]
+#[command(name = "vqro", version, about = "Workspace primitives over any multiplexer")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -20,7 +20,7 @@ enum Cmd {
         #[arg(long)]
         safe: bool,
         /// Also run the in-memory fake backend in process (a test fixture). Real backends are
-        /// provider extensions (extension/herdr runs prim-herdr; extension/tmux runs prim-tmux).
+        /// provider extensions (extension/herdr runs vqro-herdr; extension/tmux runs vqro-tmux).
         #[arg(long)]
         fake: bool,
     },
@@ -30,7 +30,7 @@ enum Cmd {
     Stop,
     /// Show whether the core is running.
     Status,
-    /// Call a core method: `prim call workspace.snapshot` or `prim call command.invoke '{"name":"tabs.open"}'`.
+    /// Call a core method: `vqro call workspace.snapshot` or `vqro call command.invoke '{"name":"tabs.open"}'`.
     Call { method: String, params: Option<String> },
     /// Run a command by name, with optional JSON args.
     Run { name: String, args: Option<String> },
@@ -73,7 +73,7 @@ async fn run() -> Result<()> {
                         Err(e) => writeln!(std::io::stderr(), "client list unavailable: {e}")?,
                     }
                 }
-                Err(e) if e.downcast_ref::<prim::rpc::RpcError>().is_some() => writeln!(std::io::stdout(), "core status unavailable ({e})")?,
+                Err(e) if e.downcast_ref::<vqro::rpc::RpcError>().is_some() => writeln!(std::io::stdout(), "core status unavailable ({e})")?,
                 Err(e) => writeln!(std::io::stdout(), "not running ({e})")?,
             }
             Ok(())
@@ -89,17 +89,17 @@ async fn run() -> Result<()> {
     }
 }
 
-async fn connect_cli() -> Result<(prim::rpc::Peer, prim::rpc::IncomingReceiver, Value)> {
+async fn connect_cli() -> Result<(vqro::rpc::Peer, vqro::rpc::IncomingReceiver, Value)> {
     let socket = paths::socket_path()?;
     tokio::time::timeout(std::time::Duration::from_secs(2), client::connect(&socket, "cli")).await
-        .map_err(|_| prim::rpc::RpcError::new("timeout", "core hello deadline expired"))?
+        .map_err(|_| vqro::rpc::RpcError::new("timeout", "core hello deadline expired"))?
 }
 
 async fn call(method: &str, params: Value) -> Result<()> {
     let (peer, _incoming, _) = connect_cli().await?;
     // Snapshot recovery is read-only and should report promptly. Keep the existing
     // deadline for arbitrary commands/effects; never replay an uncertain request.
-    let deadline = if method == "workspace.snapshot" { std::time::Duration::from_secs(5) } else { prim::rpc::DEFAULT_CALL_TIMEOUT };
+    let deadline = if method == "workspace.snapshot" { std::time::Duration::from_secs(5) } else { vqro::rpc::DEFAULT_CALL_TIMEOUT };
     match peer.call_with_timeout(method, params, deadline).await {
         Ok(v) => {
             writeln!(std::io::stdout(), "{}", serde_json::to_string_pretty(&v)?)?;
@@ -117,7 +117,7 @@ async fn stop() -> Result<()> {
     match request {
         Ok(Ok(value)) if value["outcome"] == "accepted" => { writeln!(std::io::stdout(), "core shutdown accepted")?; return Ok(()); }
         Ok(Ok(_)) => bail!("core answered without accepting shutdown; pid fallback not used"),
-        Ok(Err(error)) if error.downcast_ref::<prim::rpc::RpcError>().is_some_and(|e| !matches!(e.kind(), "timeout" | "disconnected")) => return Err(error),
+        Ok(Err(error)) if error.downcast_ref::<vqro::rpc::RpcError>().is_some_and(|e| !matches!(e.kind(), "timeout" | "disconnected")) => return Err(error),
         _ => {} // No answer: legacy Unix fallback only; never bypass a protocol refusal.
     }
     stop_pidfile()
@@ -139,11 +139,11 @@ fn stop_pidfile() -> Result<()> {
 
 async fn serve(safe: bool, fake: bool) -> Result<()> {
     let socket = paths::socket_path()?;
-    let backend = if fake { prim::adapter::Backend::Fake } else { prim::adapter::Backend::Extensions };
+    let backend = if fake { vqro::adapter::Backend::Fake } else { vqro::adapter::Backend::Extensions };
     let core = server::start(socket.clone(), paths::state_dir(), safe, backend, Some(paths::extensions_dir()))?;
     let pidfile = paths::state_dir().join("serve.pid");
     std::fs::write(&pidfile, std::process::id().to_string())?;
-    eprintln!("prim {} listening on {}{}", env!("CARGO_PKG_VERSION"), socket.display(), if safe { " (safe mode)" } else { "" });
+    eprintln!("vqro {} listening on {}{}", env!("CARGO_PKG_VERSION"), socket.display(), if safe { " (safe mode)" } else { "" });
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let lifetime = core.lock().unwrap().shutdown.clone();
     tokio::select! {

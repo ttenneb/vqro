@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""prim extension: workspaces. Folders you add by hand: git repos (with their worktrees) or plain folders.
+"""vqro extension: workspaces. Folders you add by hand: git repos (with their worktrees) or plain folders.
 
 Owns the list (`doc/workspaces/list`) and the git facts. It publishes them as live data under the name
 `workspaces` (`{"data": [...]}`) for any extension to draw; the sidebar turns them into a tree. Git is
@@ -12,7 +12,7 @@ import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from prim_ext import Extension, PrimError  # noqa: E402
+from vqro_ext import Extension, VqroError  # noqa: E402
 
 ext = Extension("workspaces", event_types=["entries"])  # no resource events: not used here
 LIST = "doc/workspaces/list"
@@ -90,13 +90,13 @@ def save(items, note):
 def add(args):
     raw = (args.get("text") or args.get("path") or "").strip()
     if not raw:
-        raise PrimError("give a folder path", "invalid")
+        raise VqroError("give a folder path", "invalid")
     path = os.path.abspath(os.path.expanduser(raw))
     if not os.path.isdir(path):
-        raise PrimError(f"not a folder: {path}", "invalid")
+        raise VqroError(f"not a folder: {path}", "invalid")
     items = entries()
     if any(os.path.abspath(os.path.expanduser(i["path"])) == path for i in items):
-        raise PrimError("already added", "conflict")
+        raise VqroError("already added", "conflict")
     items.append({"path": path})
     save(items, "workspaces: add")
     ext.notify(f"added {os.path.basename(path)}", "ok")
@@ -119,14 +119,14 @@ def open_here(args):
 def new_worktree(args):
     repo, branch = args.get("repo"), (args.get("text") or "").strip()
     if not repo or not branch:
-        raise PrimError("needs a repo and a branch name", "invalid")
+        raise VqroError("needs a repo and a branch name", "invalid")
     dest = os.path.join(os.path.dirname(repo.rstrip("/")), f"{os.path.basename(repo.rstrip('/'))}-{branch.replace('/', '-')}")
     exists = git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}") is not None
     cmd = ["git", "-C", repo, "worktree", "add", dest] + ([branch] if exists else ["-b", branch])
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     if r.returncode != 0:
         ext.notify(f"worktree failed: {r.stderr.strip().splitlines()[-1] if r.stderr.strip() else r.returncode}", "error")
-        raise PrimError(r.stderr.strip() or "git worktree add failed", "backend")
+        raise VqroError(r.stderr.strip() or "git worktree add failed", "backend")
     scan()
     ext.notify(f"worktree {branch} at {dest}", "ok")
 

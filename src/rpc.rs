@@ -1,6 +1,6 @@
 //! JSON-RPC 2.0, one message per line, in both directions on one connection.
 //!
-//! Every prim connection (client, extension, CLI) is symmetric: either side may send requests and
+//! Every vqro connection (client, extension, CLI) is symmetric: either side may send requests and
 //! notifications. The core uses this to forward `command.invoke` to the extension that owns a command.
 
 use std::collections::HashMap;

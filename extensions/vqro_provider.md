@@ -1,14 +1,14 @@
 # Python provider helper (stdlib, Python 3.11+)
 
-`prim_provider.py` implements **provider-v0.md section 9** (60716f3 plus the parent's explicit dispatched-outcome amendment); `prim_provider_stream.py` owns bounded
+`vqro_provider.py` implements **provider-v0.md section 9** (60716f3 plus the parent's explicit dispatched-outcome amendment); `vqro_provider_stream.py` owns bounded
 stream queues/credit. This is the provider side only. No core registration implementation, default extension
-entry, real backend integration or reconnect policy is installed by importing it. `prim_ext` is imported solely
+entry, real backend integration or reconnect policy is installed by importing it. `vqro_ext` is imported solely
 to reuse the managed extension stdin lifetime watcher; it does not open a socket on import.
 
 ## API
 
 ```python
-from prim_provider import Provider, ProviderError, Limits
+from vqro_provider import Provider, ProviderError, Limits
 
 provider = Provider("backend@host", "backend-incarnation", capabilities,
                     software={"name": "backend", "version": "1"})
@@ -31,7 +31,7 @@ async def attach(stream):
 
 provider.open_stream = attach
 try:
-    await provider.connect()  # PRIM_SOCKET; or explicit path / connected sock=
+    await provider.connect()  # VQRO_SOCKET; or explicit path / connected sock=
     await provider.full_sync(native_resources)
     await provider.wait_closed()
 finally:
@@ -40,10 +40,10 @@ finally:
 
 This is a shape example, not an executable backend. `tests/fixtures/fake_provider.py` is a complete example.
 Runtime bridges use `role="runtime", token=...` and must themselves run inside backend-owned terminals; the
-helper does not launch runtimes or turn prim into a workspace-process host.
+helper does not launch runtimes or turn vqro into a workspace-process host.
 
 - `connect(path=None, sock=None)`: hello + exactly one register, stores negotiated generation/window/record cap.
-  A connected socket supports in-test socket pairs and other transports. Default path is PRIM_SOCKET.
+  A connected socket supports in-test socket pairs and other transports. Default path is VQRO_SOCKET.
 - `sync(resources, final=True)`: acknowledged chunk; `full_sync(iterable)` chunks a whole listing to the negotiated
   record bound. First sync must be acknowledged before SDK upserts; further upserts during chunked sync work.
 - `upsert(facts)` / `gone(ref, incarnation="", why={"reason":...})`: notifications, await socket write, **not core
@@ -103,7 +103,7 @@ Launch (once core-side wire lands), as an ordinary managed extension:
 /usr/bin/python3 <checkout>/tests/fixtures/fake_provider.py --name fake --socket <private-core-socket>
 ```
 
-`--socket` defaults to PRIM_SOCKET. `--instance` optionally supplies a stable instance for a test; default is one UUID
+`--socket` defaults to VQRO_SOCKET. `--instance` optionally supplies a stable instance for a test; default is one UUID
 per process. Several hosts/providers use distinct names/instances. No actual terminal or command is launched.
 
 Resource spawn argv supports the existing fake load flags:

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import json
 import math
 
-from prim_display import label
+from vqro_display import label
 
 
 @dataclass(frozen=True)
@@ -56,7 +56,7 @@ class PiRpcClient:
     """One child, one event loop, no automatic retries or reconnects.
 
     Construct with ``await PiRpcClient.start(argv, cwd=..., env={...})`` inside
-    the backend-owned bridge, never in prim core. ``request`` is the metadata
+    the backend-owned bridge, never in vqro core. ``request`` is the metadata
     escape hatch; ``invoke`` limits the public effects to native Pi commands.
     """
 
@@ -237,7 +237,7 @@ class PiRpcClient:
             self._waiting.pop(ident, None)
 
     async def invoke(self, op, args=None, *, timeout=None):
-        """Native effects for a future provider layer. Does not connect to prim."""
+        """Native effects for a future provider layer. Does not connect to vqro."""
         if not isinstance(op, str) or op not in EFFECTS:
             return {"outcome": "rejected", "reason": "unsupported effect"}
         if op == "answer":

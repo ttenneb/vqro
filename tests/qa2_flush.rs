@@ -1,4 +1,4 @@
-use prim::rpc::Peer;
+use vqro::rpc::Peer;
 use serde_json::{json,Value};
 use tokio::io::{AsyncBufReadExt,AsyncReadExt};
 use std::time::Duration;

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""prim extension: keys. Named keymap profiles; applying one writes its bindings and the prefix.
+"""vqro extension: keys. Named keymap profiles; applying one writes its bindings and the prefix.
 
 A profile is an opinion about keys (D17), so it lives here and not in the client. Its bindings are
 `binding/keys.*` entries owned by `keys` with priority 10, so they override extensions' own keys
@@ -9,16 +9,16 @@ Switching also sets the client prefix (`doc/settings/tui.prefix`); changing the 
 published live as view `keys` (`{profile, profiles: [{label, value}]}`) for the settings page.
 
 Turn this extension off (or enter safe mode) and its bindings disappear; the prefix setting stays,
-and whatever it is, the client's `prim` badge still opens the prefix menu with every recovery action.
+and whatever it is, the client's `vqro` badge still opens the prefix menu with every recovery action.
 """
 import os
 import sys
 import threading
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from prim_ext import Extension, PrimError  # noqa: E402
+from vqro_ext import Extension, VqroError  # noqa: E402
 
-from prim_display import key_labels
+from vqro_display import key_labels
 
 ext = Extension("keys", event_types=["entries"])  # no resource events: not used here
 STATE = "doc/keys/profile"
@@ -41,11 +41,11 @@ SPLIT_STACK = {"dir": "down"}
 PICK_TAB = dict(pick="resource")  # choose a terminal; tabs.show activates its tab or opens one
 
 PROFILES = {
-    # prim: the client's defaults and the extensions' own keys, nothing added.
-    "prim": {"label": "prim (C-g)", "prefix": "C-g", "keys": {}},
-    # tmux's default prefix key table (`tmux list-keys -T prefix`), mapped onto prim commands.
-    # Gaps (no prim command): ! break-pane, ; last pane, l last window, { } swap panes, [ ] copy and
-    # paste, q display-panes (prim's q quit stays), space/M-1..5 layouts, C-arrows resize, C-o
+    # vqro: the client's defaults and the extensions' own keys, nothing added.
+    "vqro": {"label": "vqro (C-g)", "prefix": "C-g", "keys": {}},
+    # tmux's default prefix key table (`tmux list-keys -T prefix`), mapped onto vqro commands.
+    # Gaps (no vqro command): ! break-pane, ; last pane, l last window, { } swap panes, [ ] copy and
+    # paste, q display-panes (vqro's q quit stays), space/M-1..5 layouts, C-arrows resize, C-o
     # rotate, s/$ sessions, . move window, f find, t clock, i info, ~ messages, D/L clients.
     # Differences: x and & close without asking and keep the programs running; d quits this UI,
     # which is close to detaching because terminals live in the backend.
@@ -68,7 +68,7 @@ PROFILES = {
         "keys": b("?", "client.prefix", "list keys"),
         "zoom": b("z", "client.zoom", "zoom pane (toggle)"),
     }},
-    # GNU screen's default key bindings (`man screen`, "Default Key Bindings"), mapped onto prim.
+    # GNU screen's default key bindings (`man screen`, "Default Key Bindings"), mapped onto vqro.
     # Gaps: C-a (other window) and a (send C-a; here press C-a twice), w (window list in the message
     # line), Q (only this region), [ ] copy and paste, x lock, H log, M/_ monitor, F fit, i info,
     # ' select by name, z suspend, \ quit all.
@@ -98,7 +98,7 @@ PROFILES = {
         "keys": b("?", "client.prefix", "list keys"),
     }},
 }
-DEFAULT = "prim"
+DEFAULT = "vqro"
 lock = threading.Lock()
 
 
@@ -141,11 +141,11 @@ def on_event(t, d):
         publish()  # display change only: never reconcile/rewrite bindings for a label preference
 
 
-@ext.command("keys.profile", "Apply a keymap profile (args: value = prim | tmux | screen)")
+@ext.command("keys.profile", "Apply a keymap profile (args: value = vqro | tmux | screen)")
 def apply_profile(args):
     name = args.get("value") or args.get("text")
     if name not in PROFILES:
-        raise PrimError(f"unknown profile {name!r} (have: {', '.join(PROFILES)})", "invalid")
+        raise VqroError(f"unknown profile {name!r} (have: {', '.join(PROFILES)})", "invalid")
 
     def attempt():
         tui = dict(ext.value(TUI) or {}, prefix=PROFILES[name]["prefix"])

@@ -1,17 +1,17 @@
-# prim backend adapter contract, v0 (draft)
+# vqro backend adapter contract, v0 (draft)
 
 > **Historical draft; superseded as a public adapter contract (2026-11-17).** External providers are implemented:
 > use `provider-v0.md` section9 and `core-protocol.md`, not the illustrative messages below. Herdr-core, tmux and
 > the Pi runtime bridge are shipped implementations; in-process channels remain test/embedder machinery.
 > This document is retained only as a capability/research catalogue; it is not the current wire schema.
 
-Status: draft (D14). A backend adapter maps one multiplexer onto prim's primitives and **declares** what that backend
-can do. prim exposes the declared capabilities and never compensates for missing ones. Adding a backend should take
-days, not weeks: if a backend needs prim to build something, the capability is simply absent.
+Status: draft (D14). A backend adapter maps one multiplexer onto vqro's primitives and **declares** what that backend
+can do. vqro exposes the declared capabilities and never compensates for missing ones. Adding a backend should take
+days, not weeks: if a backend needs vqro to build something, the capability is simply absent.
 
 ## Shape
 
-An adapter is a process (any language) speaking the prim core protocol. On connect it sends a manifest:
+An adapter is a process (any language) speaking the vqro core protocol. On connect it sends a manifest:
 
 ```json
 {
@@ -34,9 +34,9 @@ Capability names are reverse-DNS-free in core (`terminal.spawn`) and namespaced 
 | `terminal.exit` | report exit (and code, if known) |
 | `status.osc7501` | report agent status from OSC 7501, parsed by the backend or the adapter |
 | `meta.labels` | key/value metadata on terminals |
-| `store.docs` | versioned documents (could hold prim layout/state) |
+| `store.docs` | versioned documents (could hold vqro layout/state) |
 | `layout.native` | the backend has its own layout the adapter can read or drive |
-| `persist.detach` | terminals keep running when no prim client is attached |
+| `persist.detach` | terminals keep running when no vqro client is attached |
 | `remote.machines` | terminals on other machines |
 | `events.resync` | the event stream can report missed events |
 
@@ -63,13 +63,13 @@ Capability names are reverse-DNS-free in core (`terminal.spawn`) and namespaced 
 - **Report honestly.** If a backend can lose events (tmux under load), the capability says so (`lossy: true`), and the
   core surfaces gaps rather than hiding them.
 - **Thin.** Backend policy stays in the backend; adapters don't add waits, retries or delivery rules.
-- **prim's own state** (layouts, extension state) lives in prim's store, or in `store.docs` when the backend offers it,
+- **vqro's own state** (layouts, extension state) lives in vqro's store, or in `store.docs` when the backend offers it,
   never in another client's document (`herdr-app`).
 
 ## Agent bridges (D11, D14)
 
 A headless agent runs inside an ordinary backend terminal through a small **agent bridge**: the bridge is the terminal's
-program, starts the runtime with clean pipes, connects to the prim core as an agent adapter, and draws a minimal fallback
-view in its own terminal. The backend still owns the process; prim hosts nothing. PTY-backed agents (native TUI) need no
+program, starts the runtime with clean pipes, connects to the vqro core as an agent adapter, and draws a minimal fallback
+view in its own terminal. The backend still owns the process; vqro hosts nothing. PTY-backed agents (native TUI) need no
 bridge. Proposed in `provider-v0.md` (section 6, D21): a local socket with a one-time token passed in the terminal's
 environment, and for remote hosts a relay through the host's provider; not through the terminal itself.

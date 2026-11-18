@@ -13,8 +13,8 @@ import sys
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from prim_ext import Extension, PrimError
-from prim_display import label
+from vqro_ext import Extension, VqroError
+from vqro_display import label
 
 POLL_INTERVAL = 5
 
@@ -22,21 +22,21 @@ POLL_INTERVAL = 5
 class TmuxServer:
     def __init__(self, ext, helper=None):
         self.ext = ext
-        self.helper = helper or os.environ.get("PRIM_TMUX_HELPER", "prim-tmux")
+        self.helper = helper or os.environ.get("VQRO_TMUX_HELPER", "vqro-tmux")
         self.state_dir = ext.info.get("state_dir")
-        # Same local owned-server rule as prim-tmux; no helper process needed to locate it.
+        # Same local owned-server rule as vqro-tmux; no helper process needed to locate it.
         self.socket = Path(self.state_dir) / "tmux.sock" if self.state_dir else None
         self._negative_stamp = None
         self._absent_stamp = None
         self.last = None
         self.menu = None
-        ext.command("tmux.server.status", "Prim-owned tmux server status")(self.status)
-        ext.command("tmux.server.stop", "Stop prim-owned tmux server (kills its terminals)")(self.stop)
+        ext.command("tmux.server.status", "vqro-owned tmux server status")(self.status)
+        ext.command("tmux.server.stop", "Stop vqro-owned tmux server (kills its terminals)")(self.stop)
 
     def call(self, action, *args):
         state = self.state_dir
         if not state:
-            raise PrimError("tmux needs a persistent prim state directory", "unavailable")
+            raise VqroError("tmux needs a persistent vqro state directory", "unavailable")
         argv = [self.helper, "server", action, "--state-dir", state, *args]
         use_groups = os.name == "posix" and callable(getattr(os, "killpg", None)) and hasattr(signal, "SIGKILL")
         group_options = {"start_new_session": True} if use_groups else {}
@@ -59,15 +59,15 @@ class TmuxServer:
             except subprocess.TimeoutExpired:
                 child.stdout.close()
                 child.stderr.close()
-            raise PrimError("tmux helper timed out; never automatically retry a stop",
+            raise VqroError("tmux helper timed out; never automatically retry a stop",
                             "indeterminate" if action == "stop" else "timeout")
         if child.returncode:
             message = label(err.decode(errors="replace")[:2000])
-            raise PrimError(message, "indeterminate" if "indeterminate stop:" in message else "backend")
+            raise VqroError(message, "indeterminate" if "indeterminate stop:" in message else "backend")
         try:
             return json.loads(out)
         except (ValueError, UnicodeError):
-            raise PrimError("invalid helper reply; stop outcome may be indeterminate, do not retry",
+            raise VqroError("invalid helper reply; stop outcome may be indeterminate, do not retry",
                             "indeterminate" if action == "stop" else "backend")
 
     def poll(self):
@@ -97,7 +97,7 @@ class TmuxServer:
             # Explicit commands always query; a positive observation invalidates cached absence.
             self._negative_stamp = self._absent_stamp = None
         if exists != self.menu:
-            entries = {"view/tmux-server": {"kind": "panel", "title": "Prim-owned tmux server", "items": []}}
+            entries = {"view/tmux-server": {"kind": "panel", "title": "vqro-owned tmux server", "items": []}}
             if exists:
                 entries["menu/tmux-server"] = {"where": "status", "label": "tmux server",
                                                "command": "tmux.server.status", "order": 40}
@@ -111,10 +111,10 @@ class TmuxServer:
     @staticmethod
     def panel(observed):
         if not observed.get("running"):
-            return {"title": "Prim-owned tmux server", "requires": ["menu", "input"], "items": [
-                {"type": "text", "text": "No prim-owned tmux server running"}]}
+            return {"title": "vqro-owned tmux server", "requires": ["menu", "input"], "items": [
+                {"type": "text", "text": "No vqro-owned tmux server running"}]}
         n = observed["terminals"]
-        return {"title": "Prim-owned tmux server", "requires": ["menu", "input"], "items": [
+        return {"title": "vqro-owned tmux server", "requires": ["menu", "input"], "items": [
             {"type": "text", "text": f"Running · {n} terminals"},
             {"type": "text", "text": "Survives provider/core restarts, safe mode and extension disable."},
             {"text": "Stop server…", "description": f"Disable its provider and kill all {n} current terminals",
@@ -122,7 +122,7 @@ class TmuxServer:
              "args": {"instance": observed["instance"], "terminals": n}}]}
 
     def absent(self):
-        self.ext.notify("No prim-owned tmux server running")
+        self.ext.notify("No vqro-owned tmux server running")
         return {"running": False, "outcome": "not_submitted"}
 
     def status(self, args):
@@ -140,9 +140,9 @@ class TmuxServer:
             return {"client": {"popup": {"view": "tmux-server", "width": 74}}}
         n = observed["terminals"]
         if args.get("instance") != observed["instance"] or args.get("terminals") != n:
-            raise PrimError("Server instance or terminal count changed; confirm again. No stop submitted.", "conflict")
+            raise VqroError("Server instance or terminal count changed; confirm again. No stop submitted.", "conflict")
         if args["text"].strip() != f"STOP {n}":
-            raise PrimError("Confirmation did not match; no stop submitted", "invalid")
+            raise VqroError("Confirmation did not match; no stop submitted", "invalid")
         # Persist off before the destructive native action: future core installs/restarts must not
         # recreate the server. Configured servers (--tmux-socket) are never changed or stopped here.
         self.ext.fresh()
@@ -152,7 +152,7 @@ class TmuxServer:
                 continue
             value = entry.get("value") or {}
             argv = value.get("argv") or []
-            if argv and Path(argv[0]).name == "prim-tmux" \
+            if argv and Path(argv[0]).name == "vqro-tmux" \
                     and "--tmux-socket" not in argv and value.get("enabled", True):
                 ops.append({"op": "set", "key": key, "expect": entry["version"], "value": dict(value, enabled=False)})
         if ops:

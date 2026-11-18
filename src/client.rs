@@ -11,14 +11,14 @@ use crate::rpc::{IncomingReceiver, Peer};
 pub async fn connect(socket: &Path, client: &str) -> Result<(Peer, IncomingReceiver, Value)> {
     let stream = UnixStream::connect(socket)
         .await
-        .with_context(|| format!("cannot reach prim at {} (is `prim serve` running?)", socket.display()))?;
+        .with_context(|| format!("cannot reach vqro at {} (is `vqro serve` running?)", socket.display()))?;
     let (r, w) = stream.into_split();
     let (peer, incoming) = Peer::spawn(r, w);
     let hello = peer.call("hello", json!({"client": client, "version": env!("CARGO_PKG_VERSION"), "build": build_stamp()})).await?;
     Ok((peer, incoming, hello))
 }
 
-/// Start `prim serve` in the background if nothing answers on the socket.
+/// Start `vqro serve` in the background if nothing answers on the socket.
 pub async fn ensure_core() -> Result<()> {
     let socket = crate::paths::socket_path()?;
     if tokio::net::UnixStream::connect(&socket).await.is_ok() {
@@ -44,7 +44,7 @@ pub async fn ensure_core() -> Result<()> {
             return Ok(());
         }
     }
-    anyhow::bail!("started `prim serve` but it isn't answering; see {}", state.join("serve.log").display())
+    anyhow::bail!("started `vqro serve` but it isn't answering; see {}", state.join("serve.log").display())
 }
 
 
@@ -108,16 +108,16 @@ mod tests {
     #[test]
     fn running_image_wins_over_shadowed_argv0_and_preserves_verified_symlink() {
         use std::os::unix::fs::{PermissionsExt,symlink};let root=tempfile::tempdir().unwrap();
-        let running=root.path().join("running");let shadow=root.path().join("prim");
+        let running=root.path().join("running");let shadow=root.path().join("vqro");
         for p in [&running,&shadow] {std::fs::write(p,b"fixture").unwrap();std::fs::set_permissions(p,std::fs::Permissions::from_mode(0o700)).unwrap();}
         assert_eq!(select_executable(running.clone(),Some(shadow)),running);
         let link=root.path().join("installed");symlink(&running,&link).unwrap();assert_eq!(select_executable(running,Some(link.clone())),link);
     }
     #[test]
     fn deleted_inode_suffix_resolves_replaced_install_but_not_a_real_suffix_name() {
-        let dir=tempfile::tempdir().unwrap(); let installed=dir.path().join("prim");
+        let dir=tempfile::tempdir().unwrap(); let installed=dir.path().join("vqro");
         std::fs::write(&installed,b"replacement").unwrap();
-        assert_eq!(normalize_executable(dir.path().join("prim (deleted)")),installed);
+        assert_eq!(normalize_executable(dir.path().join("vqro (deleted)")),installed);
         let literal=dir.path().join("literal (deleted)"); std::fs::write(&literal,b"real filename").unwrap();
         assert_eq!(normalize_executable(literal.clone()),literal);
     }

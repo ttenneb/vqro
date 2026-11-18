@@ -2,7 +2,7 @@
 #![cfg(target_os="linux")]
 use std::{path::PathBuf,process::{Child,Command,Stdio},time::{Duration,Instant}};
 use std::os::unix::process::CommandExt;
-use prim::{client,rpc::{Peer,IncomingReceiver}};
+use vqro::{client,rpc::{Peer,IncomingReceiver}};
 use serde_json::json;
 struct Running(Child);
 impl Drop for Running {fn drop(&mut self){let _=self.0.kill();let _=self.0.wait();}}
@@ -12,10 +12,10 @@ impl Fixture {
   let root=tempfile::Builder::new().prefix("pacc").tempdir_in("/tmp").unwrap();
   for name in ["home","state","ext","run"] {std::fs::create_dir(root.path().join(name)).unwrap();}
   let log=std::fs::File::create(root.path().join("core.log")).unwrap();
-  let binary=std::env::var_os("ACCEPT_CORE_BIN").unwrap_or_else(||env!("CARGO_BIN_EXE_prim").into());
+  let binary=std::env::var_os("ACCEPT_CORE_BIN").unwrap_or_else(||env!("CARGO_BIN_EXE_vqro").into());
   let mut cmd=Command::new(binary);cmd.args(["serve","--fake"]).env_clear().env("HOME",root.path().join("home")).env("PATH","/usr/bin:/bin")
-   .env("PRIM_STATE_DIR",root.path().join("state")).env("PRIM_SOCKET",root.path().join("p")).env("PRIM_EXTENSIONS_DIR",root.path().join("ext"))
-   .env("PRIM_HERDR",r#"["/bin/false"]"#).env("XDG_RUNTIME_DIR",root.path().join("run")).env("HC_SOCKET",root.path().join("h")).env("HC_SESSION","accept-limit")
+   .env("VQRO_STATE_DIR",root.path().join("state")).env("VQRO_SOCKET",root.path().join("p")).env("VQRO_EXTENSIONS_DIR",root.path().join("ext"))
+   .env("VQRO_HERDR",r#"["/bin/false"]"#).env("XDG_RUNTIME_DIR",root.path().join("run")).env("HC_SOCKET",root.path().join("h")).env("HC_SESSION","accept-limit")
    .stdin(Stdio::null()).stdout(Stdio::null()).stderr(log);
   // SAFETY: the child-only pre-exec hook uses only async-signal-safe setrlimit and errno.
   unsafe {cmd.pre_exec(move || {let limit=libc::rlimit{rlim_cur:soft,rlim_max:hard};if libc::setrlimit(libc::RLIMIT_NOFILE,&limit)!=0 {Err(std::io::Error::last_os_error())}else{Ok(())}});}
@@ -58,11 +58,11 @@ async fn connection_cap_refuses_clearly_and_releases_slots_on_eof() {
  let mut limit=libc::rlimit{rlim_cur:0,rlim_max:0};
  unsafe {assert_eq!(libc::getrlimit(libc::RLIMIT_NOFILE,&mut limit),0);if limit.rlim_cur<4096 {limit.rlim_cur=4096;assert!(limit.rlim_max>=4096);assert_eq!(libc::setrlimit(libc::RLIMIT_NOFILE,&limit),0);}}
  let f=Fixture::new(4096,4096).await;let mut sockets=Vec::new();
- for _ in 1..prim::server::MAX_CONNECTIONS {sockets.push(tokio::net::UnixStream::connect(f.socket()).await.unwrap());}
+ for _ in 1..vqro::server::MAX_CONNECTIONS {sockets.push(tokio::net::UnixStream::connect(f.socket()).await.unwrap());}
  // Accept callbacks may still be catching up; their count is independent of hello registration.
  tokio::time::sleep(Duration::from_millis(100)).await;
  let error=match client::connect(&f.socket(),"over-cap").await {Ok((peer,_,_))=>{peer.close();panic!("connection above cap admitted")},Err(error)=>error};
- let rpc=error.downcast_ref::<prim::rpc::RpcError>().unwrap_or_else(||panic!("missing structured refusal: {error}"));
+ let rpc=error.downcast_ref::<vqro::rpc::RpcError>().unwrap_or_else(||panic!("missing structured refusal: {error}"));
  assert_eq!(rpc.kind(),"overloaded");assert_eq!(rpc.data.as_ref().unwrap()["reason"],"connection_limit");
  f.control.call("hello",json!({"client":"healthy-at-cap"})).await.unwrap();drop(sockets);
  let until=Instant::now()+Duration::from_secs(5);

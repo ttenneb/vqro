@@ -305,7 +305,7 @@ pub fn render(buf: &mut Buffer, area: Rect, v: &Arc<Value>, st: &mut State, focu
     }
     let missing = missing(v);
     if !missing.is_empty() {
-        buf.set_string(area.x, area.y, "This view needs a newer prim UI", pal.style(Some("warn")));
+        buf.set_string(area.x, area.y, "This view needs a newer vqro UI", pal.style(Some("warn")));
         if area.height > 1 {
             buf.set_string(area.x, area.y + 1, format!("(missing: {})", missing.join(", ")), pal.style(Some("dim")));
         }

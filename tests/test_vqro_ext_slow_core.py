@@ -1,4 +1,4 @@
-"""A slow core must not turn into failed extensions (soak 2 P1-B). Real prim_ext in a child process
+"""A slow core must not turn into failed extensions (soak 2 P1-B). Real vqro_ext in a child process
 against a scripted core over a Unix socket; replies can be withheld past the client deadline."""
 import json
 import os
@@ -32,8 +32,8 @@ class ScriptedCore:
 
     def start(self, code, env=None, stdin=None):
         self.child = subprocess.Popen([sys.executable, "-c", code, EXT_DIR], stdin=stdin, stdout=subprocess.PIPE,
-                                      stderr=subprocess.STDOUT, env={"PATH": os.environ.get("PATH", ""), "PRIM_SOCKET": self.path,
-                                                                   "PRIM_EXT_DEADLINE_S": "0.5", **(env or {})})
+                                      stderr=subprocess.STDOUT, env={"PATH": os.environ.get("PATH", ""), "VQRO_SOCKET": self.path,
+                                                                   "VQRO_EXT_DEADLINE_S": "0.5", **(env or {})})
         self.srv.settimeout(10)
         self.conn, _ = self.srv.accept()
         threading.Thread(target=self.serve, daemon=True).start()
@@ -96,7 +96,7 @@ class ScriptedCore:
 CHILD = r'''
 import sys, time
 sys.path.insert(0, sys.argv[1])
-from prim_ext import Extension
+from vqro_ext import Extension
 ext = Extension("slowtest", event_types=["entries"])
 slow = [True]
 @ext.on_event
@@ -174,12 +174,12 @@ class SlowCore(unittest.TestCase):
         code = r'''
 import sys
 sys.path.insert(0, sys.argv[1])
-from prim_ext import Extension, PrimError
+from vqro_ext import Extension, VqroError
 ext = Extension("slowtest")
 ext.contribute({"menu/slowtest.x": {"where": "pane", "label": "X", "command": "x"}})  # compare-and-set: resent
 try:
     ext.notify("hello")  # not resend-safe: reported, never repeated
-except PrimError as e:
+except VqroError as e:
     print("NOTIFY", e.kind, flush=True)
 print("READY", flush=True)
 ext.run()
@@ -214,8 +214,8 @@ ext.run()
 
     def test_normal_interpreter_exit_with_a_lifetime_pipe_is_not_a_fatal_error(self):
         # Soak 2: "Fatal Python error: _enter_buffered_busy: could not acquire lock for <stdin>".
-        child = subprocess.Popen([sys.executable, "-c", "import sys, time; sys.path.insert(0, sys.argv[1]); import prim_ext; time.sleep(0.2)", EXT_DIR],
-                                 stdin=subprocess.PIPE, stderr=subprocess.PIPE, env={"PATH": os.environ.get("PATH", ""), "PRIM_EXTENSION_LIFETIME": "stdin"})
+        child = subprocess.Popen([sys.executable, "-c", "import sys, time; sys.path.insert(0, sys.argv[1]); import vqro_ext; time.sleep(0.2)", EXT_DIR],
+                                 stdin=subprocess.PIPE, stderr=subprocess.PIPE, env={"PATH": os.environ.get("PATH", ""), "VQRO_EXTENSION_LIFETIME": "stdin"})
         try:
             rc = child.wait(timeout=10)  # stdin stays open: the lifetime thread is mid-read at shutdown
             err = child.stderr.read().decode()

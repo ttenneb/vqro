@@ -1,4 +1,4 @@
-"""External deterministic fake backend using only prim_provider (no actual programs).
+"""External deterministic fake backend using only vqro_provider (no actual programs).
 
 Resource argv flags mirror src/adapter/fake.rs: --status-every-ms,
 --status-phase-ms, --output-bytes-per-sec. This is a fixture, not a backend product.
@@ -12,7 +12,7 @@ import time
 import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "extensions"))
-from prim_provider import Provider, ProviderError
+from vqro_provider import Provider, ProviderError
 
 CAPABILITIES = {"terminal.spawn": {"env": True, "cwd": True}, "terminal.kill": {},
                 "terminal.input": {"stream": True, "effect": False}, "terminal.output": {"raw": True, "history": False, "repaint": "none"},

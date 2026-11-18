@@ -39,14 +39,14 @@ def run(args, count, before):
     if before:
         shutil.copy2(args.before_agents, root/'ext/agents.py')
     (root/'ext/defaults.json').write_text(json.dumps({'version':1,'extensions':[{'name':'agents','argv':['/usr/bin/python3',str(root/'ext/agents.py')]}]}))
-    env = {'HOME':str(root/'home'),'PATH':'/usr/bin:/bin','LANG':'C.UTF-8','PRIM_SOCKET':str(root/'p.sock'),
-           'PRIM_STATE_DIR':str(root/'state'),'PRIM_EXTENSIONS_DIR':str(root/'ext'),'PRIM_HERDR':'["/bin/false"]',
+    env = {'HOME':str(root/'home'),'PATH':'/usr/bin:/bin','LANG':'C.UTF-8','VQRO_SOCKET':str(root/'p.sock'),
+           'VQRO_STATE_DIR':str(root/'state'),'VQRO_EXTENSIONS_DIR':str(root/'ext'),'VQRO_HERDR':'["/bin/false"]',
            'XDG_RUNTIME_DIR':str(root/'run'),'HC_SOCKET':str(root/'h.sock'),'HC_SESSION':'panel-bandwidth'}
     program = load('pi_bridge.before_program' if before else 'pi_bridge.current_program', args.before_program if before else ROOT/'extensions/pi_bridge/program.py')
     agents_module = load('before_agents' if before else 'current_agents', args.before_agents if before else ROOT/'extensions/agents.py')
     clients = []
     with (root/'serve.log').open('w') as log:
-        core = subprocess.Popen([str(args.prim),'serve'],env=env,stdout=log,stderr=log)
+        core = subprocess.Popen([str(args.vqro),'serve'],env=env,stdout=log,stderr=log)
     try:
         wait(lambda:(root/'p.sock').exists())
         for _ in range(3):
@@ -144,7 +144,7 @@ def run(args, count, before):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('prim',type=Path)
+    parser.add_argument('vqro',type=Path)
     parser.add_argument('--before-agents',type=Path,required=True)
     parser.add_argument('--before-program',type=Path,required=True)
     parser.add_argument('--scratch',type=Path,required=True)

@@ -1,7 +1,7 @@
-//! prim-herdr: herdr-core as an out-of-process provider (`docs/spec/provider-v0.md`, section 9).
+//! vqro-herdr: herdr-core as an out-of-process provider (`docs/spec/provider-v0.md`, section 9).
 //!
-//! Wraps the existing in-process adapter (`prim::adapter::herdr`, which speaks herdr-core's framed
-//! protocol through `hc connect`) and bridges its commands and events to `prim::provider_client`.
+//! Wraps the existing in-process adapter (`vqro::adapter::herdr`, which speaks herdr-core's framed
+//! protocol through `hc connect`) and bridges its commands and events to `vqro::provider_client`.
 //! Nothing herdr-specific is duplicated here: this file only translates.
 //!
 //! - Instance: herdr-core's `core.id` (stable across core restarts, new after its state is wiped).
@@ -17,15 +17,15 @@
 //! - Streams: herdr-core attach channels with backend history as initial data. Credit goes back to
 //!   herdr-core only after `provider_client` has sent the bytes within the core's window.
 //!
-//! `prim-herdr [--hc PATH] [--session NAME] [--name NAME]`; connects to `$PRIM_SOCKET`. Without `--hc`:
-//! `$PRIM_HERDR` (a whole command), else `hc connect` on PATH, else herdr-core's standard install.
+//! `vqro-herdr [--hc PATH] [--session NAME] [--name NAME]`; connects to `$VQRO_SOCKET`. Without `--hc`:
+//! `$VQRO_HERDR` (a whole command), else `hc connect` on PATH, else herdr-core's standard install.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use prim::adapter::{self, AdapterEvent, AdapterHandle, ResourceFacts, SpawnRequest, StreamInput, StreamOutput};
-use prim::provider_client::{Config, EffectRequest, Initial, OpenRequest, Outcome, Provider, ProviderError, ProviderStream, Request, StreamCommand};
+use vqro::adapter::{self, AdapterEvent, AdapterHandle, ResourceFacts, SpawnRequest, StreamInput, StreamOutput};
+use vqro::provider_client::{Config, EffectRequest, Initial, OpenRequest, Outcome, Provider, ProviderError, ProviderStream, Request, StreamCommand};
 use serde_json::{json, Map, Value};
 use tokio::sync::mpsc;
 
@@ -47,7 +47,7 @@ fn args() -> Result<Args, String> {
             "--session" => a.session = Some(value()?),
             "--name" => a.name = Some(value()?),
             "-h" | "--help" => {
-                println!("prim-herdr [--hc PATH] [--hc-arg ARG]... [--session NAME] [--name NAME]\nPRIM_HERDR may supply JSON argv. Paths/arguments are literal; no shell parsing.");
+                println!("vqro-herdr [--hc PATH] [--hc-arg ARG]... [--session NAME] [--name NAME]\nVQRO_HERDR may supply JSON argv. Paths/arguments are literal; no shell parsing.");
                 std::process::exit(0);
             }
             other => return Err(format!("unknown argument {other}")),
@@ -272,7 +272,7 @@ async fn pump(mut stream: ProviderStream, mut backend: adapter::Stream) {
 
 /// Exit when the core's lifetime pipe closes (managed extensions, core-protocol.md).
 fn watch_lifetime() {
-    if std::env::var("PRIM_EXTENSION_LIFETIME").as_deref() == Ok("stdin") {
+    if std::env::var("VQRO_EXTENSION_LIFETIME").as_deref() == Ok("stdin") {
         std::thread::spawn(|| {
             use std::io::Read;
             let mut buf = [0u8; 4096];
@@ -287,14 +287,14 @@ fn watch_lifetime() {
 async fn main() {
     watch_lifetime();
     if let Err(e) = run().await {
-        eprintln!("prim-herdr: {e}");
+        eprintln!("vqro-herdr: {e}");
         std::process::exit(1);
     }
 }
 
 async fn run() -> Result<(), String> {
     let a = args()?;
-    let endpoint = std::env::var("PRIM_SOCKET").map_err(|_| "PRIM_SOCKET is not set")?;
+    let endpoint = std::env::var("VQRO_SOCKET").map_err(|_| "VQRO_SOCKET is not set")?;
     let mut argv = herdr_command(a.hc.as_deref(), &a.hc_args)?;
     if let Some(s) = &a.session {
         argv.extend(["--session".into(), s.clone()]);
@@ -309,7 +309,7 @@ async fn run() -> Result<(), String> {
         let info = loop {
             match events.recv().await.ok_or("adapter stopped")?.1 {
                 AdapterEvent::Registered(info) => break info,
-                AdapterEvent::Connected(false, why) => eprintln!("prim-herdr: herdr-core not reachable: {}", why.unwrap_or_default()),
+                AdapterEvent::Connected(false, why) => eprintln!("vqro-herdr: herdr-core not reachable: {}", why.unwrap_or_default()),
                 _ => {}
             }
         };
@@ -324,7 +324,7 @@ async fn run() -> Result<(), String> {
         match ended {
             Ended::Core(why) => return Err(format!("disconnected from the core: {why}")),
             Ended::Backend => {
-                eprintln!("prim-herdr: herdr-core lost; provider marked disconnected until it is back");
+                eprintln!("vqro-herdr: herdr-core lost; provider marked disconnected until it is back");
                 tokio::time::sleep(Duration::from_millis(200)).await;
             }
         }
@@ -381,7 +381,7 @@ async fn serve(
     }
 }
 
-/// Paths and arguments are never shell-parsed. PRIM_HERDR is JSON argv (or a
+/// Paths and arguments are never shell-parsed. VQRO_HERDR is JSON argv (or a
 /// single literal executable); --hc PATH and repeated --hc-arg prefix connect.
 fn herdr_command(hc: Option<&str>, extra: &[String]) -> Result<Vec<String>, String> {
     if let Some(hc) = hc {
@@ -391,7 +391,7 @@ fn herdr_command(hc: Option<&str>, extra: &[String]) -> Result<Vec<String>, Stri
         return Ok(argv);
     }
     if !extra.is_empty() { return Err("--hc-arg requires --hc".into()); }
-    if let Some(cmd) = std::env::var("PRIM_HERDR").ok().filter(|c| !c.trim().is_empty()) {
+    if let Some(cmd) = std::env::var("VQRO_HERDR").ok().filter(|c| !c.trim().is_empty()) {
         return parse_hc_command(&cmd);
     }
     Ok(default_hc(std::env::var_os("PATH").as_deref(), &crate_home()))
@@ -415,10 +415,10 @@ fn default_hc(path: Option<&std::ffi::OsStr>, home: &std::path::Path) -> Vec<Str
 
 fn parse_hc_command(cmd: &str) -> Result<Vec<String>, String> {
     let argv: Vec<String> = if cmd.trim_start().starts_with('[') {
-        serde_json::from_str(cmd).map_err(|error| format!("PRIM_HERDR must be JSON argv: {error}"))?
+        serde_json::from_str(cmd).map_err(|error| format!("VQRO_HERDR must be JSON argv: {error}"))?
     } else { vec![cmd.to_string()] };
     if argv.is_empty() || argv.iter().any(|arg| arg.is_empty() || arg.contains('\0')) {
-        return Err("PRIM_HERDR needs nonempty literal arguments without NUL".into());
+        return Err("VQRO_HERDR needs nonempty literal arguments without NUL".into());
     }
     Ok(argv)
 }

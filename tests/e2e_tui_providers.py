@@ -1,6 +1,6 @@
 #!/usr/bin/python3
-"""Opt-in TUI smoke over wire providers: the real `prim tui` (in an outer tmux harness) shows and drives
-terminals that live in prim-herdr (private herdr-core) and prim-tmux (its private tmux server).
+"""Opt-in TUI smoke over wire providers: the real `vqro tui` (in an outer tmux harness) shows and drives
+terminals that live in vqro-herdr (private herdr-core) and vqro-tmux (its private tmux server).
 
 Usage: tests/e2e_tui_providers.py TARGET_DIR   (debug binaries in TARGET_DIR/debug)
 Private /tmp root; providers and herdr-core run with an empty PATH; default extensions get python3 only.
@@ -9,7 +9,7 @@ Stops only what it started.
 import json, os, shutil, socket, subprocess, sys, tempfile, time
 
 TARGET = sys.argv[1]
-PRIM, PHERDR, PTMUX = (os.path.join(TARGET, "debug", b) for b in ("prim", "prim-herdr", "prim-tmux"))
+VQRO, PHERDR, PTMUX = (os.path.join(TARGET, "debug", b) for b in ("vqro", "vqro-herdr", "vqro-tmux"))
 HC = os.path.expanduser("~/.local/bin/herdr-core")
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 R = tempfile.mkdtemp(prefix="pe2t", dir="/tmp")
@@ -21,8 +21,8 @@ for f in os.listdir(os.path.join(REPO, "extensions")):
         shutil.copy(os.path.join(REPO, "extensions", f), os.path.join(R, "ext", f))
 shutil.copytree(os.path.join(REPO, "extensions", "manifests"), os.path.join(R, "ext", "manifests"))
 os.symlink(shutil.which("python3") or "/usr/bin/python3", os.path.join(R, "bin", "python3"))
-ENV = {"HOME": f"{R}/home", "PATH": f"{R}/bin", "TERM": "xterm-256color", "SHELL": "/bin/sh", "PRIM_STATE_DIR": f"{R}/st",
-       "PRIM_SOCKET": f"{R}/p.sock", "PRIM_EXTENSIONS_DIR": f"{R}/ext", "XDG_STATE_HOME": f"{R}/xst",
+ENV = {"HOME": f"{R}/home", "PATH": f"{R}/bin", "TERM": "xterm-256color", "SHELL": "/bin/sh", "VQRO_STATE_DIR": f"{R}/st",
+       "VQRO_SOCKET": f"{R}/p.sock", "VQRO_EXTENSIONS_DIR": f"{R}/ext", "XDG_STATE_HOME": f"{R}/xst",
        "XDG_RUNTIME_DIR": f"{R}/run", "XDG_CONFIG_HOME": f"{R}/cfg", "HC_SOCKET": f"{R}/hc.sock", "HC_SESSION": "tui", "LANG": "C.UTF-8"}
 HARNESS = ["/usr/bin/tmux", "-S", f"{R}/harness.sock", "-f", "/dev/null"]
 results = []
@@ -35,7 +35,7 @@ def check(name, ok, detail=""):
 
 def call(method, params=None):
     s = socket.socket(socket.AF_UNIX)
-    s.connect(ENV["PRIM_SOCKET"])
+    s.connect(ENV["VQRO_SOCKET"])
     f = s.makefile("rwb", buffering=0)
     for i, (m, p) in enumerate([("hello", {"client": "e2e-tui"}), (method, params or {})]):
         f.write((json.dumps({"jsonrpc": "2.0", "id": i, "method": m, "params": p}) + "\n").encode())
@@ -72,20 +72,20 @@ def keys(*k, literal=False):
 
 core = None
 try:
-    core = subprocess.Popen([PRIM, "serve", "--fake"], env=ENV, stdout=open(f"{R}/serve.log", "w"), stderr=subprocess.STDOUT)
-    wait(lambda: os.path.exists(ENV["PRIM_SOCKET"]), 10)
+    core = subprocess.Popen([VQRO, "serve", "--fake"], env=ENV, stdout=open(f"{R}/serve.log", "w"), stderr=subprocess.STDOUT)
+    wait(lambda: os.path.exists(ENV["VQRO_SOCKET"]), 10)
     call("workspace.apply", {"note": "providers", "ops": [
         {"op": "set", "key": "extension/herdr", "value": {"argv": ["/usr/bin/env", "PATH=", PHERDR, "--hc", HC, "--name", "herdr"]}},
         {"op": "set", "key": "extension/tmux", "value": {"argv": ["/usr/bin/env", "PATH=", PTMUX, "--tmux", "/usr/bin/tmux", "--name", "tmux"]}}]})
     ok = wait(lambda: all(call("workspace.snapshot")["providers"].get(n, {}).get("state") == "connected" for n in ("herdr", "tmux")), 30)
     check("providers connected (with default extensions running)", bool(ok))
     with open(f"{R}/tui.sh", "w") as f:
-        f.write("".join(f"export {k}='{v}'\n" for k, v in ENV.items()) + f"exec {PRIM} tui\n")
+        f.write("".join(f"export {k}='{v}'\n" for k, v in ENV.items()) + f"exec {VQRO} tui\n")
     subprocess.run([*HARNESS, "new-session", "-d", "-x", "120", "-y", "32", f"/bin/sh {R}/tui.sh"], env={"PATH": "/usr/bin:/bin", "HOME": f"{R}/home"})
     time.sleep(3)
     for name in ("herdr", "tmux"):
         rid = call("resource.spawn", {"provider": name, "argv": ["/bin/sh"], "name": f"tui-{name}"})["resource"]["id"]
-        call("command.invoke", {"name": "prim.layout.reset"})
+        call("command.invoke", {"name": "vqro.layout.reset"})
         time.sleep(2)
         # One tab per live terminal: the newest is last; make it active.
         tabs = call("workspace.snapshot")["entries"]["layout/main"]["value"]["tabs"]
@@ -152,9 +152,9 @@ try:
     x = icon_row[1].index("[ ]") + 2; y = icon_row[0] + 1
     keys(f"\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m", literal=True)
     check("mouse checkbox turns extension on", bool(wait(lambda: call("extension.list")["extensions"]["icons"]["display_status"] == "running")))
-    broken = dict(call("workspace.snapshot")["entries"]["extension/icons"]["value"], argv=["prim-extension-page-test-missing"])
+    broken = dict(call("workspace.snapshot")["entries"]["extension/icons"]["value"], argv=["vqro-extension-page-test-missing"])
     call("workspace.apply", {"ops":[{"op":"set","key":"extension/icons","value":broken}]})
-    check("failed extension retains manifest and visible reason", bool(wait(lambda: "failed" in screen() and "extension program" in screen() and "prim-extension-page-test-missing" in screen() and "Publishes icon sets" in screen())))
+    check("failed extension retains manifest and visible reason", bool(wait(lambda: "failed" in screen() and "extension program" in screen() and "vqro-extension-page-test-missing" in screen() and "Publishes icon sets" in screen())))
     subprocess.run([*HARNESS, "resize-window", "-x", "72", "-y", "36"], capture_output=True)
     time.sleep(.3)
     check("narrow list detail stacks below", bool(wait(lambda: "Icons (icons)" in screen() and "1 of 15" in screen())))
@@ -164,7 +164,7 @@ try:
         for name, content in (("extensions-wide.txt", wide), ("extensions-narrow.txt", narrow)):
             with open(os.path.join(sys.argv[2], name), "w") as f: f.write(content)
     # Restore only our private missing executable, without changing the failed declaration.
-    wrapper=f"{R}/bin/prim-extension-page-test-missing"
+    wrapper=f"{R}/bin/vqro-extension-page-test-missing"
     with open(wrapper,"w") as output:
         output.write(f"#!/bin/sh\nexec /usr/bin/python3 '{R}/ext/icons.py'\n")
     os.chmod(wrapper,0o700)
@@ -172,7 +172,7 @@ try:
     check("recovery setup clears catalogue filter", bool(wait(lambda:not any(line.strip(" │")=="/icons" for line in screen().splitlines()))))
     keys("Escape")
     check("failed status badge offers recovery", bool(wait(lambda:"failed · recover" in screen() and "Settings ─" not in screen())),screen())
-    call("command.invoke",{"name":"prim.extension.disable","args":{"name":"settings"}})
+    call("command.invoke",{"name":"vqro.extension.disable","args":{"name":"settings"}})
     check("recovery does not require the Settings extension",call("extension.list")["extensions"]["settings"]["enabled"] is False)
     status=screen().splitlines()
     y=next(i for i,line in enumerate(status) if "failed · recover" in line)

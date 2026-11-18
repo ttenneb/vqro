@@ -36,10 +36,10 @@ def main():
     threading.Thread(target=listen, daemon=True).start()
     time.sleep(0.8)
 
-    rex("send", "-s", sid, "-b", shell, "echo hi-from-prim\n")
+    rex("send", "-s", sid, "-b", shell, "echo hi-from-vqro\n")
     time.sleep(1)
     out = rex("capture", "-s", sid, "-b", shell, "--trim")
-    log("capture saw hi:", "hi-from-prim" in out)
+    log("capture saw hi:", "hi-from-vqro" in out)
 
     sp = rex("split", "-s", sid, "-b", shell, "--shell=none", "--label", "fake-agent",
              "--focus=false", "--keep-open", "--json", "--", AGENT, j=True)

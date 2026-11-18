@@ -8,7 +8,7 @@ import re
 import random
 import uuid
 
-from prim_provider import Limits as ProviderLimits, Provider, ProviderError
+from vqro_provider import Limits as ProviderLimits, Provider, ProviderError
 from .client import DIALOGS, EFFECTS, PiRpcClient
 from .display import Fallback, Transcript, agent_data, plain, tail
 
@@ -30,16 +30,16 @@ class Bridge:
         if not argv:
             raise ValueError("Pi argv is required; no installed runtime is selected implicitly")
         if not isinstance(token, str) or not token:
-            raise ValueError("PRIM_BRIDGE_TOKEN is required")
+            raise ValueError("VQRO_BRIDGE_TOKEN is required")
         if not isinstance(interval, (int, float)) or not math.isfinite(interval) or interval < .1:
             raise ValueError("publication interval must be finite and at least 0.1 seconds")
         self.argv, self.cwd = list(argv), cwd
         # Pi/tools receive only the terminal endpoint, not bridge/supervisor credentials or
-        # core configuration. Keep the marker so an agent's scratch PRIM_STATE_DIR wins.
+        # core configuration. Keep the marker so an agent's scratch VQRO_STATE_DIR wins.
         self.env = {k: v for k, v in env.items() if not k.startswith("HERDR_") and
-                    (not k.startswith("PRIM_") or k == "PRIM_SOCKET")}
-        if "PRIM_SOCKET" in self.env:
-            self.env["PRIM_SOCKET_SOURCE"] = "terminal"
+                    (not k.startswith("VQRO_") or k == "VQRO_SOCKET")}
+        if "VQRO_SOCKET" in self.env:
+            self.env["VQRO_SOCKET_SOURCE"] = "terminal"
         # Legacy/custom launchers may still use PYTHONPATH for the bridge. Remove only this
         # installation's import root, preserving the user's unrelated path entries verbatim.
         if "PYTHONPATH" in self.env:

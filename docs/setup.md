@@ -1,25 +1,25 @@
 # Setup on a new machine
 
-> prim is a working prototype, and fluid: expect these steps to change.
+> vqro is a working prototype, and fluid: expect these steps to change.
 
-## Run prim on a new machine
+## Run vqro on a new machine
 
 1. **Prerequisites:** Rust (stable), Python 3 (extensions are stdlib-only), git.
 2. **herdr-core:** install with its official installer (it verifies sha256 and codesign), e.g.
    `curl -fsSL https://releases.herdr.dev/core/install.sh` and review it before running. The `herdr` provider
-   extension (prim-herdr) finds `hc` on PATH or at herdr-core's standard install (`~/.local/share/herdr-core/current/...`),
-   or set JSON argv such as `PRIM_HERDR='["ssh","box","hc","connect"]'` in the environment the core starts from.
-   Arguments are literal (no shell/whitespace parsing). `prim-herdr --hc PATH --hc-arg ARG` also supports literal
+   extension (vqro-herdr) finds `hc` on PATH or at herdr-core's standard install (`~/.local/share/herdr-core/current/...`),
+   or set JSON argv such as `VQRO_HERDR='["ssh","box","hc","connect"]'` in the environment the core starts from.
+   Arguments are literal (no shell/whitespace parsing). `vqro-herdr --hc PATH --hc-arg ARG` also supports literal
    prefix arguments before `connect`; paths/arguments may contain spaces.
-3. **Install prim:** `./scripts/dev-install.sh` (release build of `prim`, `prim-herdr` and `prim-tmux` to
-   `~/.local/bin`, extensions to `~/.local/share/prim/extensions`). Make sure `~/.local/bin` is on PATH.
+3. **Install vqro:** `./scripts/dev-install.sh` (release build of `vqro`, `vqro-herdr` and `vqro-tmux` to
+   `~/.local/bin`, extensions to `~/.local/share/vqro/extensions`). Make sure `~/.local/bin` is on PATH.
    Backends run as extensions: `herdr` is on by default; `tmux` (a private tmux server, never your own sessions)
-   is off until enabled. Every terminal gets `PRIM_SOCKET`, so `prim call ...` works from any pane.
-4. **Run:** `prim tui`. The first core start installs the default extensions from `extensions/defaults.json`.
-   `prim status` shows the core, extensions and connected UIs.
+   is off until enabled. Every terminal gets `VQRO_SOCKET`, so `vqro call ...` works from any pane.
+4. **Run:** `vqro tui`. The first core start installs the default extensions from `extensions/defaults.json`.
+   `vqro status` shows the core, extensions and connected UIs.
 5. **Terminal:** Ghostty or WezTerm give Nerd Font icons and the kitty keyboard protocol out of the box; other
    terminals work with plain-text icons (Settings → Interface → Icons) and without live modifier display.
-6. **Moving state (optional):** your workspace, theme and keymap live in `~/.local/state/prim/`; copy
+6. **Moving state (optional):** your workspace, theme and keymap live in `~/.local/state/vqro/`; copy
    `workspace.json` across if you want the same setup (resource ids are re-mapped to the new machine's terminals).
 
 Nothing outside this repo moves with you. Reference clones, installed tools and the assistant's local memory all stay
@@ -40,11 +40,11 @@ on the old machine, so everything needed is listed here.
 
 ## Tools
 
-- Rust (stable), for prim itself.
+- Rust (stable), for vqro itself.
 - `pi` (recent; check RPC `steer` support) and `claude` (Claude Code 2.1.325+), both logged in, for E1.
 - Optional for backend work: herdr-core (`hc`) via its official installer (verifies sha256 and codesign), tmux 3.2+.
   Building herdr-core from source needs zig and its vendored ghostty.
-- Keep socket paths short: macOS limits Unix socket paths to 103 bytes. Use `~/prim/.run/` for scratch runtime dirs.
+- Keep socket paths short: macOS limits Unix socket paths to 103 bytes. Use `~/vqro/.run/` for scratch runtime dirs.
 
 ## Old spikes
 

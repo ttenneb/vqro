@@ -1,6 +1,6 @@
 # E0: workspace programmability
 
-> **Status (2026-11-16):** **Answered by building** (D16): extensions build the whole default workspace (tabs, panes, gestures, sidebar, settings, themes, keys) from public primitives, are replaced live and contained by the crash budget, and are reverted with transactions. Not done as specified: fake-source fixtures and the extension kill -9 / late-crash matrix. prim is a working prototype, and fluid.
+> **Status (2026-11-16):** **Answered by building** (D16): extensions build the whole default workspace (tabs, panes, gestures, sidebar, settings, themes, keys) from public primitives, are replaced live and contained by the crash budget, and are reverted with transactions. Not done as specified: fake-source fixtures and the extension kill -9 / late-crash matrix. vqro is a working prototype, and fluid.
 
 Goal: prove the workspace primitives (`spec/workspace-v0.md`) can carry substantially different workspaces built
 entirely by extensions, with live replacement and rollback, before building the core (D14, `test-plan.md`).

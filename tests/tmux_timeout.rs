@@ -1,4 +1,4 @@
-//! Command timeouts in prim::tmux against a deterministic fake control-mode tmux
+//! Command timeouts in vqro::tmux against a deterministic fake control-mode tmux
 //! (`tests/fixtures/fake_tmux_cc.py`): a read-only command that times out is not fatal and its late
 //! reply never pairs with a later command; a mutating one is (outcome unknown); a late reply that
 //! never comes is a desync.
@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use prim::tmux::{Client, Config, Error, Notification};
+use vqro::tmux::{Client, Config, Error, Notification};
 use tokio::sync::broadcast;
 
 fn fake() -> Option<PathBuf> {

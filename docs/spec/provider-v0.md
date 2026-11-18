@@ -1,19 +1,19 @@
-# prim provider contract, v0 (proposed)
+# vqro provider contract, v0 (proposed)
 
-> **Status (2026-11-17): section 9 implemented; broader D21 migration remains proposed.** prim is a working
+> **Status (2026-11-17): section 9 implemented; broader D21 migration remains proposed.** vqro is a working
 > prototype, and fluid. Core wire, Python/Rust provider SDKs and private fake/tmux integration are implemented;
-> backends now run as provider extensions (`prim-herdr` default, `prim-tmux` private, off). Essential extensions,
+> backends now run as provider extensions (`vqro-herdr` default, `vqro-tmux` private, off). Essential extensions,
 > relay and the proposed safe-mode policy are
 > not implemented. Nothing here is frozen (`../roadmap.md`, step 5); it changes as
 > the first two implementations on each side (herdr-core and tmux; Pi and Claude Code) teach us.
 
-Evidence keys: **src** prim source at `main`; **rec** recorded result (file named); **unverified** not yet checked.
+Evidence keys: **src** vqro source at `main`; **rec** recorded result (file named); **unverified** not yet checked.
 
 ## Shape
 
 A backend adapter (herdr-core, tmux, later Rex) and an agent-runtime bridge (Pi RPC first) are both **providers**:
 out-of-process programs speaking the core protocol (`core-protocol.md`) over the core's local endpoint (opaque
-`PRIM_SOCKET`: a Unix socket or a Windows named pipe; `core-protocol.md`, Endpoint and transport). A provider
+`VQRO_SOCKET`: a Unix socket or a Windows named pipe; `core-protocol.md`, Endpoint and transport). A provider
 **registers** an instance with declared capabilities, **publishes resources** (kinds `terminal`, `agent`; open set)
 with stable identity, **serves effects** the core routes to it with deadlines, and **serves streams** with byte
 credit. The core keeps a registry, an identity map, routing, bounds and outcome reporting, and nothing specific to a
@@ -21,12 +21,12 @@ backend or runtime. Adding one means adding a provider, never editing `src/serve
 (today `server.rs` and `main.rs` select a built-in `Backend`).
 
 Backend and runtime capabilities keep separate namespaces (`terminal.*`, `agent.*`) over one registration mechanism.
-`backend-adapter-v0.md` remains the catalogue of what each backend can do; this file is how a provider talks to prim.
+`backend-adapter-v0.md` remains the catalogue of what each backend can do; this file is how a provider talks to vqro.
 
 ## 1. Registration and lifecycle
 
 Backend providers are launched and supervised as extensions (`extension/<name>`, `src/ext.rs`). Runtime bridges are
-the program of a backend-owned terminal (section 6); prim does not supervise or restart them (D14).
+the program of a backend-owned terminal (section 6); vqro does not supervise or restart them (D14).
 
 ```jsonc
 // provider → core, after hello
@@ -55,7 +55,7 @@ Rules:
   `available: false` (facts kept, flagged stale), closes its streams with `reason: "provider_disconnected"`, and
   resolves its in-flight effects as `indeterminate` (section 5). Views and layouts are untouched.
 - **Re-registration.** The next `provider.sync` with `complete: true` is authoritative for that provider. Resources
-  whose identity matches come back `available: true`; absent ones are removed and their prim ids retired. Nothing
+  whose identity matches come back `available: true`; absent ones are removed and their vqro ids retired. Nothing
   is resent.
 - **Several hosts mean one provider per host** (`herdr@rohan`, `tmux@studio`): its own extension entry, process,
   connection, generation and queues. One host stalling or failing affects only its resources. The provider owns
@@ -67,7 +67,7 @@ Rules:
 
 ## 2. Identity
 
-Prim resource ids (`r1`, ...) are never reused. Each maps to **(provider name, instance, ref, incarnation)**:
+vqro resource ids (`r1`, ...) are never reused. Each maps to **(provider name, instance, ref, incarnation)**:
 - **`instance`**: opaque. The provider guarantees that within one instance a ref keeps meaning the same resource.
   herdr-core returns its core identity from `hello` and `server.status` (herdr-core 0.1.21 schema), and keeps
   terminal ids across a core restart (rec `research/review-1-backends.md`, finding 9), so it reports a stable
@@ -77,7 +77,7 @@ Prim resource ids (`r1`, ...) are never reused. Each maps to **(provider name, i
 - **`incarnation`**: opaque. It changes when the same ref starts meaning a different process lineage, for example
   herdr-core's `restarted` event (`src/adapter/herdr.rs`, `"created" | "restarted"`) if the provider treats that as
   a new lineage. Empty when refs are never reused within an instance.
-- A change of instance or incarnation retires the old prim id (`resource.removed` with `reason: "replaced"`) and mints
+- A change of instance or incarnation retires the old vqro id (`resource.removed` with `reason: "replaced"`) and mints
   a new one. Views pointing at the old id show it as gone. Rebinding them is an extension's choice, never automatic.
 - The identity map is persisted under the store's durability rules; failures are reported as `persistence.error`
   (`core-protocol.md`). Retired records are dropped while a durable monotonic high-water mark prevents their ids
@@ -98,7 +98,7 @@ ignored. Backend-specific extras are namespaced (`dev.herdr.machines`).
 | `terminal.kill`, `terminal.exit` | | yes | yes |
 | `status.osc7501` | `{stored, lossy}` | stored | parsed from the stream by the provider, not stored, lost after a pause (rec item 3) |
 | `events.resync` | absent: the provider may miss changes it can't report | yes (`missed`) | absent; re-list to resynchronise (rec item 4) |
-| `layout.native` | informational; prim never mirrors it | absent | present |
+| `layout.native` | informational; vqro never mirrors it | absent | present |
 | `identity` | `{refs_survive_backend_restart}` | true | false |
 | `remote.machines` | informational | yes (`on`) | absent; one provider per host |
 
@@ -151,7 +151,7 @@ follows acceptance by the core's bounded writer, not a viewer acknowledgement.
   after `%continue`, and `capture-pane` recovers screen and history but **not** OSC 7501 (rec tmux-check item 3).
   `%pause` may only arrive after the reader resumes, so a provider can't rely on seeing it in time.
 - **Session scope (tmux).** A control client receives output only for panes linked into its attached session
-  (rec item 5). A tmux provider either keeps every prim terminal in one session it attaches, or holds one control
+  (rec item 5). A tmux provider either keeps every vqro terminal in one session it attaches, or holds one control
   client per session; either way this is the provider's business, invisible to the core.
 - **Core bounds, per connection.** Separate control and data outbound queues with byte caps. Data overflow closes that
   connection's streams with `overflow`; control overflow disconnects the client, which resumes from its
@@ -178,7 +178,7 @@ Public calls stay resource-centric: `resource.spawn {provider?, kind, ...}`, `re
 
 | Outcome | Meaning |
 |---|---|
-| `dispatched` | prim handed it to the provider; nothing more is known (stream input) |
+| `dispatched` | vqro handed it to the provider; nothing more is known (stream input) |
 | `accepted` | the layer below acknowledged it (Pi `disposition`, a herdr-core reply) |
 | `observed` | the layer below reported that the effect took place (resource appeared, process exited) |
 | `rejected` | the layer below refused it; no effect |
@@ -194,20 +194,20 @@ Public calls stay resource-centric: `resource.spawn {provider?, kind, ...}`, `re
 ## 6. Agent runtimes (bridges)
 
 - **Placement.** A bridge is the program of a backend-owned terminal, started by an extension through
-  `resource.spawn {argv: ["prim-bridge-pi", ...]}`. It runs the runtime as its child over fresh pipes (Pi RPC: JSONL,
-  not JSON-RPC; split on LF only; drain stdout and stderr separately). The backend owns the process; prim never
+  `resource.spawn {argv: ["vqro-bridge-pi", ...]}`. It runs the runtime as its child over fresh pipes (Pi RPC: JSONL,
+  not JSON-RPC; split on LF only; drain stdout and stderr separately). The backend owns the process; vqro never
   restarts a bridge. The terminal shows a minimal fallback view, so the real process stays one action away (D11).
-- **Reaching the core.** At spawn the core mints a bootstrap bridge credential (also usable as the previous resume credential after first registration; see9.6) and adds `PRIM_SOCKET` (opaque endpoint) and
-  `PRIM_BRIDGE_TOKEN` to the terminal's environment (`terminal.spawn {env}`; herdr-core `terminal.run` takes `env`).
+- **Reaching the core.** At spawn the core mints a bootstrap bridge credential (also usable as the previous resume credential after first registration; see9.6) and adds `VQRO_SOCKET` (opaque endpoint) and
+  `VQRO_BRIDGE_TOKEN` to the terminal's environment (`terminal.spawn {env}`; herdr-core `terminal.run` takes `env`).
   The bridge connects and sends `provider.register {role: "runtime", token}`. The token links its agent resource to
   the hosting terminal (`facts.host`). Not through the PTY: that mixes with output, has no credit, and corrupts on
   any stray byte.
 - **Remote hosts (backlog; D23 proposed supersedes D21's relay default).** A bridge on another machine, or in WSL2 when
   the core is native Windows, can't reach the core's local endpoint. The mechanism is backend-neutral and chosen
-  later (D23 lists candidates: a stdio connector given as `PRIM_CONNECT` argv, endpoint forwarding started from the
-  prim side, or a backend byte channel as one optional transport). Rules that hold now: the bridge never derives how
-  to reach the core; the provider that places it on a host supplies a usable value (`PRIM_SOCKET`, or later
-  `PRIM_CONNECT`) or refuses the spawn with `unsupported`; whatever carries it is a byte stream of the same
+  later (D23 lists candidates: a stdio connector given as `VQRO_CONNECT` argv, endpoint forwarding started from the
+  vqro side, or a backend byte channel as one optional transport). Rules that hold now: the bridge never derives how
+  to reach the core; the provider that places it on a host supplies a usable value (`VQRO_SOCKET`, or later
+  `VQRO_CONNECT`) or refuses the spawn with `unsupported`; whatever carries it is a byte stream of the same
   LF-delimited JSON-RPC. Today's code injects the core's own endpoint for every bridge spawn (`src/server.rs`,
   bridge spawn), which is correct only for terminals on the core's host.
 - **Resource kind `agent`.** Facts: `{status: "idle"|"working"|"blocked"|"done", run: {active, settled, aborted?},
@@ -272,9 +272,9 @@ cursors with snapshot fencing; the scale harness. Providers reuse these rules.
 
 ## 9. Wire messages (v0, pinned 2026-11-17)
 
-The core side is implemented in `src/provider_wire.rs`; Python SDK/fake and Rust `prim-tmux` interoperate through
-private extension-backed socket tests (`tests/provider_wire.rs`). `prim serve` runs no in-process backend:
-herdr-core is the `herdr` provider extension (prim-herdr), tmux the optional `tmux` one. Safe mode uses the
+The core side is implemented in `src/provider_wire.rs`; Python SDK/fake and Rust `vqro-tmux` interoperate through
+private extension-backed socket tests (`tests/provider_wire.rs`). `vqro serve` runs no in-process backend:
+herdr-core is the `herdr` provider extension (vqro-herdr), tmux the optional `tmux` one. Safe mode uses the
 empty-start chooser and session allowlist from revised D21, not the superseded essential-provider proposal.
 
 This section is the implementable contract; where sections 1–6 differ, this wins. It answers the SDK gap list
@@ -282,7 +282,7 @@ This section is the implementable contract; where sections 1–6 differ, this wi
 
 ### 9.1 Framing, connection and errors
 
-- JSON-RPC 2.0 over the core's local endpoint (opaque `PRIM_SOCKET`, `core-protocol.md`), one JSON object per line, **LF only** (a trailing CR is stripped; U+2028/U+2029
+- JSON-RPC 2.0 over the core's local endpoint (opaque `VQRO_SOCKET`, `core-protocol.md`), one JSON object per line, **LF only** (a trailing CR is stripped; U+2028/U+2029
   inside strings are not separators). Maximum record **1 MiB** on a provider connection; a longer line is a protocol
   error and the core closes the connection (G18).
 - **One provider per connection, registered once** (G3, G16). `hello {extension?}` first, then exactly one
@@ -366,7 +366,7 @@ This section is the implementable contract; where sections 1–6 differ, this wi
  "data": {}}                 // optional, opaque object preserved verbatim (≤ 64 KiB); kind-specific facts
 ```
 
-The core maps `ref` to today's internal `backend_ref` and publishes resources with prim fields added (`id`,
+The core maps `ref` to today's internal `backend_ref` and publishes resources with vqro fields added (`id`,
 `provider`, `available`, and for bridges `host`). Unknown top-level fields are ignored; put extras in `data`. Agent
 facts live in `data`: `{run: {active, settled, aborted?}, queues: {steering, follow_up}, requests: [...]}`; the
 agent's coarse state goes in `status` like a terminal's (`{state: "idle"|"working"|"blocked"|"done", ...}`), so
@@ -401,7 +401,7 @@ existing status consumers and partial resource events (`src/events.rs`) work unc
 - **`terminal.spawn`**: no `ref`; `args {argv, cwd?, name?, env? (object string→string), cols?, rows?, placement?}`.
   An empty `argv` means the provider's default shell for its host (`$SHELL` on Unix, `%ComSpec%` or PowerShell on
   Windows); the core never picks a shell. `cwd` is a host path string in the host's own syntax.
-  Result `{outcome: "observed", data: {facts}}`; the core assigns the prim id from these facts. The provider may also
+  Result `{outcome: "observed", data: {facts}}`; the core assigns the vqro id from these facts. The provider may also
   send `resource.upsert` for it, before or after the reply; identity dedups. Creation completion does not overwrite
   facts for that already-published exact identity: independent observations may already describe a later state
   (including a finished short-lived terminal). The result exposes the current resource, not a promise it is live.
@@ -420,7 +420,7 @@ existing status consumers and partial resource events (`src/events.rs`) work unc
 
 ### 9.5 Streams (G6, G7, G8, G13, G14)
 
-`prim-tmux` submits requested native dimensions on spawn (80×24 when omitted), before the observed spawn reply,
+`vqro-tmux` submits requested native dimensions on spawn (80×24 when omitted), before the observed spawn reply,
 and on stream open before repaint, as well as subsequent resize notifications. It declares
 `terminal.resize {owner: "latest_viewer", scope: "window", pane: "native_layout_constraints"}`: native
 `resize-window` manually sizes the containing window, then `resize-pane` requests the pane size. Native split
@@ -462,7 +462,7 @@ parameters remain ignorable; this adds no core sizing arbitration.
   whose TUI reattaches. Its `offset` is where valid output ended; recovery is a fresh `stream.open`.
   The core sends accepted input and its final `stream.close` in order, including after provider output ends, but
   backend input lifetime is implementation-specific. The Rust SDK retains the command receiver until close;
-  prim-tmux drains it (bounded 30 s). prim-herdr's pump can stop and close the native attach channel on a gap/end,
+  vqro-tmux drains it (bounded 30 s). vqro-herdr's pump can stop and close the native attach channel on a gap/end,
   and the Python SDK drops input after a gap. There is **no generic post-gap native-delivery guarantee**.
   `dispatched` reports core-queue acceptance, not backend consumption; bytes accepted before a later close may
   remain indeterminate and are never automatically resent. Do not emulate native input with a hidden reattach.
@@ -483,7 +483,7 @@ parameters remain ignorable; this adds no core sizing arbitration.
   group or place resources by machine. Not implemented; additive.
 
 - `resource.spawn {bridge: true, ...}` opts in. Ordinary shells receive no bridge credentials. The core injects
-  `PRIM_BRIDGE_TOKEN` and opaque `PRIM_SOCKET` in spawn `env` (native herdr: `terminal.run.env`; wire:
+  `VQRO_BRIDGE_TOKEN` and opaque `VQRO_SOCKET` in spawn `env` (native herdr: `terminal.run.env`; wire:
   `terminal.spawn.args.env`). A provider explicitly declaring spawn `env: false` is rejected before dispatch.
 - `role: "runtime"` requires `token` (string). Registration can wait up to five seconds for a pending spawn's
   durable host id. Failed/expired pending spawns invalidate bootstrap credentials. Success links published agent
