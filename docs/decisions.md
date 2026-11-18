@@ -369,7 +369,7 @@ name/branding, official builds and maintained extension repository, not copyrigh
 No trademark licence, registered-mark claim or invented distribution/repository URL is implied.
 **Why.** The human chose a single permissive licence for the whole project and low-friction, accountable
 contributions. Nothing is being published by this change.
-**Consequences.** Root LICENSE is the approved standard text (byte-identical to herdr's LICENSE); NOTICE identifies
+**Consequences.** Root LICENSE is the official apache.org Apache-2.0 text, byte-identical; NOTICE identifies
 Bennett Garcia. Bundled manifests/Cargo declare the established author/licence. Third-party terms remain their
 own: offline SPDX policy and generated notices cover every Cargo metadata package, conservatively including
 unbuilt optional, build, dev and target-specific packages (not a claim that all are shipped). Original notices are retained; missing archive
