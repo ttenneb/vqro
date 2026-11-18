@@ -228,6 +228,7 @@ class Bridge:
                 self._remember(provider)  # an observed rotated token survives later setup failure
                 self.connected = False
                 self.ready.clear()
+                self._publish_now.set()  # connection diagnostics changed even if Pi is idle
                 await provider.close()
             if self._credential is None:
                 raise ProviderError("forbidden", "registration returned no resume credential; stopping runtime rather than keeping an unreachable Pi")
@@ -356,13 +357,26 @@ class Bridge:
         self._show()
 
     async def _publish_loop(self):
+        loop=asyncio.get_running_loop()
+        next_sample=0
         while True:
+            changed=asyncio.create_task(self.pi.wait_changed(self.cursor))
+            immediate=asyncio.create_task(self._publish_now.wait())
             try:
-                await asyncio.wait_for(self._publish_now.wait(), self.interval)
-            except TimeoutError:
-                pass
-            self._publish_now.clear()
-            await self.publish()
+                await asyncio.wait({changed,immediate},return_when=asyncio.FIRST_COMPLETED)
+                # Only dirty runtime output needs sampling/coalescing. User controls and
+                # connection diagnostics remain immediate, as before; idle has no timer.
+                if not immediate.done():
+                    remaining=next_sample-loop.time()
+                    if remaining>0:
+                        await asyncio.wait({immediate},timeout=remaining)
+                self._publish_now.clear()
+                await self.publish()
+                next_sample=loop.time()+self.interval
+            finally:
+                for task in (changed,immediate):
+                    task.cancel()
+                await asyncio.gather(changed,immediate,return_exceptions=True)
 
     async def run(self, stop=None):
         stop = stop or asyncio.Event()

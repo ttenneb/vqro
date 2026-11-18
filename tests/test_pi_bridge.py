@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "extensions"))
 from pi_bridge import Limits, PiRpcClient
@@ -45,6 +46,25 @@ class PiBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.events(20)["events"], [])
         with self.assertRaises(ValueError):
             Limits(event_rows=0)
+
+    async def test_owned_exit_uses_native_notification_not_sleep_polling(self):
+        with mock.patch("pi_bridge.client.asyncio.sleep",side_effect=AssertionError("owned exit polled")):
+            owned=asyncio.create_task(self.client._owned_exit())
+            tick=asyncio.get_running_loop().create_future()
+            asyncio.get_running_loop().call_soon(tick.set_result,None)
+            await tick
+            if owned.done():
+                await owned  # surfaces a polling attempt before the child has exited
+            self.client.process.stdin.close()
+            self.assertEqual(await asyncio.wait_for(owned,1),0)
+            await asyncio.wait_for(self.client.wait_closed(),1)
+
+    async def test_journal_change_wait_is_edge_triggered_and_cannot_miss_a_revision(self):
+        cursor=self.client.events()["cursor"]
+        changed=asyncio.create_task(self.client.wait_changed(cursor))
+        await self.barrier()
+        self.assertGreater(await asyncio.wait_for(changed,1),cursor)
+        self.assertGreater(await asyncio.wait_for(self.client.wait_changed(cursor),1),cursor)
 
     async def test_acceptance_is_not_completion_and_agent_end_is_not_settled(self):
         result = await self.client.invoke("prompt", {"message": "start"})

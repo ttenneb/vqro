@@ -37,6 +37,21 @@ NOTICES = frozenset({"notify", "setStatus", "setWidget", "setTitle", "set_editor
 EFFECTS = frozenset({"prompt", "steer", "follow_up", "abort", "clear_queue", "answer"})
 
 
+class _ExitProtocol(asyncio.subprocess.SubprocessStreamProtocol):
+    """Keep asyncio's bounded streams/flow control, but expose owned exit before pipe EOF.
+
+    Process.wait() can wait forever on a descendant's inherited pipe. The subprocess protocol's
+    cross-platform process_exited callback is independent of that pipe lifetime; no PID polling.
+    """
+    def __init__(self, limit, loop):
+        super().__init__(limit, loop)
+        self.owned_exit = asyncio.Event()
+
+    def process_exited(self):
+        self.owned_exit.set()
+        super().process_exited()
+
+
 class PiRpcClient:
     """One child, one event loop, no automatic retries or reconnects.
 
@@ -48,11 +63,14 @@ class PiRpcClient:
     @classmethod
     async def start(cls, argv, *, cwd, env, limits=None, supported_dialogs=DIALOGS):
         self = cls(limits or Limits(), supported_dialogs)
-        self.process = await asyncio.create_subprocess_exec(
+        loop=asyncio.get_running_loop()
+        transport,protocol=await loop.subprocess_exec(
+            lambda: _ExitProtocol(self.limits.record_bytes+1,loop),
             *argv, cwd=cwd, env=dict(env), stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            limit=self.limits.record_bytes + 1,
         )
+        self.process=asyncio.subprocess.Process(transport,protocol,loop)
+        self._owned_exited=protocol.owned_exit
         self._stdout = asyncio.create_task(self._read_stdout())
         self._stderr = asyncio.create_task(self._read_stderr())
         self._watcher = asyncio.create_task(self._watch())
@@ -111,6 +129,13 @@ class PiRpcClient:
                 changed = self._changed
                 await changed.wait()
         return await asyncio.wait_for(wait(), timeout)
+
+    async def wait_changed(self, after):
+        """Wait for a journal revision without a timer; a stale/future cursor returns immediately."""
+        while self._sequence == after:
+            changed=self._changed
+            await changed.wait()
+        return self._sequence
 
     def _publish(self, event):
         self._sequence += 1
@@ -410,11 +435,8 @@ class PiRpcClient:
             del self._stderr_tail[:-self.limits.stderr_bytes]
 
     async def _owned_exit(self):
-        # asyncio's Process.wait() also waits for stdout/stderr EOF, which a descendant
-        # holding the inherited pipes can delay forever. The owned child's own exit status
-        # is authoritative, so watch it directly.
-        while self.process.returncode is None:
-            await asyncio.sleep(0.02)
+        # The native subprocess exit callback is authoritative even if a descendant holds pipes.
+        await self._owned_exited.wait()
         return self.process.returncode
 
     async def _watch(self):
@@ -433,7 +455,8 @@ class PiRpcClient:
                 break
             abandon = asyncio.ensure_future(self._abandon.wait())
             try:
-                await asyncio.wait(readers | {abandon}, timeout=remaining, return_when=asyncio.FIRST_COMPLETED)
+                await asyncio.wait({task for task in readers if not task.done()} | {abandon},
+                                   timeout=remaining, return_when=asyncio.FIRST_COMPLETED)
             finally:
                 abandon.cancel()
         abandoned = not all(t.done() for t in readers)

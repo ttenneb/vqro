@@ -143,6 +143,8 @@ class Fallback:
         self.thread.start()
 
     def show(self, text):
+        if self.stopped.is_set():
+            return
         # Frames replace the screen, never append a repeated transcript to scrollback.
         # Only our own cursor controls are emitted; runtime text is sanitized first.
         frame = b"\x1b[H\x1b[2J" + tail(plain(text), 4096).encode() + b"\n"
@@ -159,17 +161,22 @@ class Fallback:
                 pass
 
     def _write(self):
-        while not self.stopped.is_set() or not self.frames.empty():
-            try:
-                frame = self.frames.get(timeout=.05)
-            except queue.Empty:
-                continue
+        while True:
+            frame = self.frames.get()
+            if frame is None:
+                return
             try:
                 while frame:
                     frame = frame[os.write(self.fd, frame):]
             except OSError:
                 return
+            if self.stopped.is_set() and self.frames.empty():
+                return
 
     def close(self):
         self.stopped.set()
+        try:
+            self.frames.put_nowait(None)  # wake an idle writer; a queued final frame also wakes it
+        except queue.Full:
+            pass
         self.thread.join(.05)

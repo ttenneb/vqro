@@ -591,6 +591,12 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(self.task, 3)
         await self.core.wait(lambda: bool(self.core.notes("resource.gone")))
 
+    async def test_idle_bridge_does_not_rebuild_unchanged_content(self):
+        bridge=await self.start()
+        with mock.patch.object(bridge,"content",wraps=bridge.content) as content:
+            await asyncio.sleep(.35)
+            content.assert_not_called()
+
     async def test_transcript_is_bounded_sanitized_and_coalesced(self):
         bridge = await self.start(transcript_bytes=512)
         before = len(self.core.notes("view.publish"))
@@ -648,6 +654,25 @@ class DisplayTests(unittest.TestCase):
         self.assertTrue(lost)
         self.assertIn("assistant> final", rows)
         self.assertNotIn("assistant> partial", rows)
+
+    def test_idle_fallback_blocks_without_a_poll_timeout(self):
+        import queue
+        read_fd,write_fd=os.pipe()
+        frames=queue.Queue(maxsize=1)
+        entered=threading.Event();get=frames.get
+        def blocking(*args,**kwargs):
+            entered.set()
+            return get(*args,**kwargs)
+        frames.get=mock.Mock(side_effect=blocking)
+        with mock.patch("pi_bridge.display.queue.Queue",return_value=frames):
+            fallback=Fallback(write_fd)
+        try:
+            self.assertTrue(entered.wait(1))
+            self.assertEqual(frames.get.call_args,mock.call())
+            fallback.close()
+            self.assertFalse(fallback.thread.is_alive())
+        finally:
+            fallback.close();os.close(read_fd);os.close(write_fd)
 
     def test_stalled_fallback_is_bounded_and_does_not_block_caller(self):
         read_fd, write_fd = os.pipe()
