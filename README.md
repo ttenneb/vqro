@@ -32,6 +32,11 @@ screen) and more. The [Extensions guide](docs/extensions.md) covers the searchab
 Agents and scripts drive the same primitives with `vqro call <method> '<json>'` and
 `vqro run <command> '<json args>'`. Reinstalling restarts the core and any open UI restarts into the new build.
 
+Upgrading a pre-rename installation is a one-time offline operation: use the copy-only migration utility in
+`scripts/` (`--help` first), with old UIs/launchers closed and the old core stopped. It retains the old state as a
+backup, refuses an existing destination and never changes live backends or creates compatibility links. The
+operator installs the new binaries/extensions and chooses any temporary endpoint handoff for existing clients.
+
 Development: `cargo test`; `.run/harness.py` (ignored) drives `vqro tui` in a pty for UI checks against a scratch
 core (`VQRO_STATE_DIR`, `VQRO_SOCKET`, `VQRO_EXTENSIONS_DIR`, `vqro serve --fake`).
 

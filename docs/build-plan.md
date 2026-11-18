@@ -3,6 +3,22 @@
 D16: build vqro itself, smallest complete and usable first. The north star: an agent can substantially modify its own
 workspace through reliable public primitives, without changing the host or endangering underlying processes.
 
+## Final project name and offline state-copy migration (2026-11-18)
+
+D27 fixes the lowercase name **vqro** before publication: crate/binaries (`vqro`, `vqro-herdr`, `vqro-tmux`),
+`VQRO_*` environment, `vqro.*` recovery commands, `doc/vqro/*`, default state/share/socket paths, badge and current
+documentation. Python SDKs use `vqro_ext`, `vqro_provider*`, `vqro_display`, `vqro_views`, `Vqro`/`VqroError` and
+`Extension.vqro`. Historical research and earlier decisions stay byte-identical; no runtime old-name aliases.
+
+The stdlib migration utility copies offline state to a new, exclusive private destination, translates only known
+references (including undo values), preserves transaction metadata and opaque identity/credential files, and leaves
+the source intact. It refuses active source locks, collisions and symlinks; it skips transient endpoints/PIDs and
+never contacts a backend. The parent owns installation and the human's one-time endpoint cutover.
+Twelve focused regressions pass. An actual pre-rename build's generated state resumes five resource IDs and a
+runtime credential on the new build; migrated undo restores new command names. An authorized read-only copy of
+the daily state (82 entries, 253 transactions) passes, with identity/credential bytes preserved and both private
+copies deleted. No live configuration was executed, and no live migration/install was performed.
+
 ## Final fuzz P2 / scoped launch hardening (2026-11-18)
 
 Clean request-input EOF now drains already-read requests and local reply flush before connection cleanup; a real
