@@ -575,6 +575,12 @@ reconcile later with their full set (`exclusive=True`). Other runtimes should fo
   (`CSI > 4;n m`, n ≥ 1) gives `CSI 27;m;code~`; the kitty keyboard protocol with its "disambiguate" flag
   (`CSI > 1 u`, also `CSI = … u`, popped with `CSI < u`) gives `CSI code;m u`, also for Alt combinations and Esc.
   The client tracks these requests from each terminal's output (kept across a reattach repaint; RIS resets them).
+  A viewer that starts later (a restarted UI, another client, a new view) relies on the backend to repeat the
+  current modes in its attach history: herdr-core's first paint does, as `CSI = 0;1u` `CSI = flags;1u` and
+  `CSI > 4;n m` (measured on hc 0.1.21; tested end to end by `tests/e2e_tui_keys.py`, UI restart). A backend
+  that doesn't repeat them leaves later viewers on legacy keys until the program sets its modes again; the core
+  does not reconstruct them (D14). pi-tui pushes kitty flags 7 unconditionally and accepts `CSI 13;2u` as
+  Shift-Enter even without a reply to its `CSI ? u` query.
   While the focused program has asked, the TUI asks the outer terminal for "disambiguate" reports so such keys
   reach it at all; this needs an outer terminal with the kitty keyboard protocol (Ghostty, kitty, WezTerm, foot,
   recent iTerm2); with others Shift-Enter stays Enter. Only "disambiguate" is emulated: other kitty flags (event
