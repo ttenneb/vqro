@@ -59,7 +59,7 @@ class Core:
                     response = {"jsonrpc": "2.0", "id": row["id"], "result": result}
                 except ProviderError as error:
                     response = {"jsonrpc": "2.0", "id": row["id"], "error": {
-                        "code": -32000, "message": str(error), "data": {"kind": error.kind}}}
+                        "code": -32000, "message": str(error), "data": {**error.data, "kind": error.kind}}}
                 await self.send(response)
         except (ConnectionError, asyncio.CancelledError):
             pass

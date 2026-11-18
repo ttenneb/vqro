@@ -65,8 +65,10 @@ core request became indeterminate.
 
 SDK reconnection remains explicit: each attempt creates a fresh Provider, never reuses an old generation.
 An explicit registration refusal (including overload/auth rejection) or a missing required resume token reports
-the error and exits through owned-Pi cleanup, rather than keeping an unreachable runtime alive. Transport gaps
-retry the last observed credential with bounded exponential backoff; user/runtime exit interrupts them. Resume tokens
+the error and exits through owned-Pi cleanup, rather than keeping an unreachable runtime alive. The sole
+transient refusal exception is structured `data.reason: safe_mode`: it keeps the owned Pi while backing off,
+not treating every forbidden error or matching message text as transient. Transport gaps and that explicit
+safe-mode state retry the last observed credential; user/runtime exit interrupts them. Resume tokens
 and HERDR_* / extension-lifetime markers are not passed to Pi. A runtime bridge owns stdin shutdown itself,
 rather than letting the generic extension watcher's os._exit bypass child/resource cleanup.
 

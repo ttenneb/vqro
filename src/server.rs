@@ -425,7 +425,9 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> Rp
         "provider.register" => {
             let owner=conn.supervised.lock().unwrap().clone();
             { let c=core.lock().unwrap(); if c.safe_mode && owner.as_ref().is_none_or(|owner| !ext::owner_valid(&c,owner) || !c.safe_mode_allow.contains(&owner.name)) {
-                return Err(provider::rejected("forbidden", "safe mode requires an explicitly allowed extension owner"));
+                let mut error = provider::rejected("forbidden", "safe mode requires an explicitly allowed extension owner");
+                error.data.as_mut().unwrap()["reason"] = json!("safe_mode");
+                return Err(error);
             } }
             conn.wire.register(core,p,owner).await
         },
@@ -456,7 +458,8 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> Rp
         "workspace.snapshot" => Ok(core.lock().unwrap().snapshot()),
         "workspace.get" => {
             let query: WorkspaceGet = params(p)?;
-            Ok(json!(core.lock().unwrap().store.get(&query.key)))
+            let entry = { core.lock().unwrap().store.entries().get(&query.key).cloned() };
+            Ok(json!(entry))
         }
         "workspace.apply" => {
             let a: Apply = params(p)?;
@@ -475,10 +478,12 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> Rp
         "events.subscribe" => subscribe(core, conn, params(p)?),
         "resource.list" => {
             let query: ResourceList = params(p)?;
-            let c = core.lock().unwrap();
-            let resources = c.resources.values().filter(|r| query.provider.as_deref().is_none_or(|name| r.adapter == name)
-                && query.backend_ref.as_deref().is_none_or(|reference| r.facts.backend_ref == reference)).map(|r| r.to_json()).collect::<Vec<_>>();
-            Ok(json!({"resources": resources}))
+            let resources = {
+                let c = core.lock().unwrap();
+                c.resources.values().filter(|r| query.provider.as_deref().is_none_or(|name| r.adapter == name)
+                    && query.backend_ref.as_deref().is_none_or(|reference| r.facts.backend_ref == reference)).cloned().collect::<Vec<_>>()
+            };
+            Ok(json!({"resources": resources.iter().map(|r| r.to_json()).collect::<Vec<_>>()}))
         }
         "resource.spawn" => {
             spawn(core, &conn.author(), params(p)?).await

@@ -32,13 +32,14 @@ class BridgeCore(Core):
         self.token = self.state["token"]
         self.drop_registration_reply = False
         self.refusal = None
+        self.refusal_data = {}
 
     async def result(self, row):
         method, params = row["method"], row["params"]
         if method == "provider.register":
             self.registered.set()
             if self.refusal:
-                raise ProviderError(self.refusal, "registration refused by fixture")
+                raise ProviderError(self.refusal, "registration refused by fixture", data=self.refusal_data)
             if params.get("role") != "runtime" or not isinstance(params.get("token"), str) or params["token"] not in (self.state["token"], self.state.get("previous")):
                 raise ProviderError("forbidden", "invalid or used bridge token")
             await self.allow_register.wait()
@@ -425,6 +426,31 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(bridge.pi.process.returncode)
         self.stop.set()
         await asyncio.wait_for(self.task, 2)
+
+    async def test_explicit_safe_mode_refusal_preserves_running_pi_then_resumes_without_replay(self):
+        blocked = BridgeCore(self.core.state, generation=8)
+        blocked.refusal, blocked.refusal_data = "forbidden", {"reason": "safe_mode", "outcome": "rejected"}
+        resumed = BridgeCore(self.core.state, generation=9)
+        sockets = [self.sock]
+        for core in (blocked, resumed):
+            sock = await core.start()
+            self.extra_cores.append(core); self.extra_sockets.append(sock); sockets.append(sock)
+        async def connector(provider):
+            await provider.connect(sock=sockets.pop(0))
+        bridge = await self.start(connector=connector)
+        pid = bridge.pi.process.pid
+        await self.effect("prompt", {"message": "start"})
+        await self.core.wait(lambda: self.core.run_facts().get("active") is True)
+        self.core.writer.close()
+        await asyncio.wait_for(blocked.registered.wait(), 2)
+        await asyncio.wait_for(resumed.registered.wait(), 2)
+        await asyncio.wait_for(bridge.ready.wait(), 2)
+        self.assertEqual(bridge.pi.process.pid, pid)
+        self.assertIsNone(bridge.pi.process.returncode)
+        self.assertTrue(resumed.run_facts()["active"])
+        self.assertEqual(len(blocked.notes("provider.register")), 1)
+        accepted = await bridge.pi.request("test_accepted")
+        self.assertEqual(accepted["data"]["accepted"], ["start"])
 
     async def test_briefly_accepted_flapping_links_do_not_reset_reconnect_backoff(self):
         others = [BridgeCore(self.core.state, generation=g) for g in (8, 9)]

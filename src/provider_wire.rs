@@ -170,7 +170,11 @@ impl Connection {
         // Revalidate both stop and recovery admission after a pending host-token wait.
         if c.shutdown.is_requested() { return Err(provider::rejected("unavailable","core stopping; provider registration not admitted")); }
         if owner.as_ref().is_some_and(|owner| !crate::ext::owner_valid(&c,owner)) { return Err(crate::provider::rejected("forbidden","supervised extension lifetime ended before registration")); }
-        if c.safe_mode && owner.as_ref().is_none_or(|owner| !c.safe_mode_allow.contains(&owner.name)) { return Err(crate::provider::rejected("forbidden", "safe mode requires an explicitly allowed extension owner")); }
+        if c.safe_mode && owner.as_ref().is_none_or(|owner| !c.safe_mode_allow.contains(&owner.name)) {
+            let mut error = crate::provider::rejected("forbidden", "safe mode requires an explicitly allowed extension owner");
+            error.data.as_mut().unwrap()["reason"] = json!("safe_mode");
+            return Err(error);
+        }
         if self.is_provider() { return Err(RpcError::new("conflict", "one registration per connection")); }
         if let Some(claim) = &claim {
             if !c.bridge_tokens.valid_claim(r.token.as_deref().unwrap(), claim, &r.name, &r.instance) { return Err(RpcError::new("forbidden", "runtime resume identity mismatch or token used")); }

@@ -192,7 +192,8 @@ class Bridge:
                 raise
             except Exception as error:
                 self.failure = tail(plain(error), 1024)
-                if isinstance(error, ProviderError) and provider.generation is None and (error.remote or error.kind not in ("unavailable", "timeout")):
+                safe_mode = isinstance(error, ProviderError) and error.remote and error.kind == "forbidden" and error.data.get("reason") == "safe_mode"
+                if isinstance(error, ProviderError) and provider.generation is None and not safe_mode and (error.remote or error.kind not in ("unavailable", "timeout")):
                     # A definitive refusal cannot become an unreachable, immortal
                     # Pi process. Exit even for overload: the user may launch again
                     # after recovery; we never replay input or guess token reuse.
@@ -208,8 +209,9 @@ class Bridge:
             # A briefly accepted, flapping connection must not reset the backoff.
             if connected_at is not None and asyncio.get_running_loop().time() - connected_at >= 30:
                 backoff = self.retry_initial
-            # Only a transport gap retries the last observed credential;
-            # registration's grace/rotation contract resolves a lost reply.
+            # Transport gaps and explicit temporary safe-mode admission retry
+            # the last observed credential. No input/effect is replayed; a lost
+            # registration reply uses the core's credential grace/rotation.
             await asyncio.sleep(self._retry_delay(backoff))
             backoff = min(self.retry_max, backoff * 2)
             provider = Provider(**self._template, token=self._credential)

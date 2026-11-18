@@ -31,7 +31,10 @@ async fn safe_session_is_empty_allowances_are_temporary_and_provider_links_are_f
     assert_eq!(control.call("workspace.snapshot",Value::Null).await.unwrap()["extensions"]["recovery"]["generation"],generation,"allow is idempotent, not a provider restart");
     let (provider,_rx,_)=client::connect(&socket,"provider-test").await.unwrap();
     let registration=json!({"name":"forged","role":"backend","instance":"fixture","provider_version":"1","software":{"name":"fixture","version":"1"},"capabilities":{}});
-    assert_eq!(provider.call("provider.register",registration.clone()).await.unwrap_err().kind(),"forbidden");
+    let blocked = provider.call("provider.register",registration.clone()).await.unwrap_err();
+    assert_eq!(blocked.kind(),"forbidden");
+    assert_eq!(blocked.data.as_ref().unwrap()["reason"],"safe_mode");
+    assert_eq!(blocked.data.as_ref().unwrap()["outcome"],"rejected");
     provider.call("hello",json!({"extension":"recovery"})).await.unwrap();
     assert_eq!(provider.call("provider.register",registration).await.unwrap_err().kind(),"forbidden","self-declared hello identity is not supervision proof");
     until(||core.lock().unwrap().providers.get("wire").is_some_and(|p|p.health.borrow().connected)).await;

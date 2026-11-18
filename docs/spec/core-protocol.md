@@ -231,6 +231,11 @@ only when it has no active identities, retained resources or pending facts; `pro
 remain while relevant. Host-bound resume credentials survive independently until their host retires. A core-wide
 lease counter preserves monotonic generations when a reaped name returns; old sources/routes remain fenced.
 
+Safe-mode provider admission refusals retain `kind: "forbidden"` and `outcome: "rejected"`, with the additional
+structured `data.reason: "safe_mode"`. This identifies a temporary core admission state, not an authentication
+failure or permission grant. Runtime bridges may keep their backend-owned process while backing off until
+admission becomes possible; they never replay input. Other refusals do not acquire that transient meaning.
+
 A provider registration/start is connection-bound and gets a new generation. Old event sources, queued commands,
 effect replies and streams cannot act through a replacement connection. The native adapter's connection token is
 internal, distinct from the core-assigned public generation. `provider.register`, chunked `provider.sync`,
