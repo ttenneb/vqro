@@ -3,6 +3,7 @@ from pathlib import Path
 import sys
 import threading
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "extensions"))
 from agents import Agents, EFFECTS
@@ -128,6 +129,20 @@ class AgentsTests(unittest.TestCase):
             with self.assertRaises(PrimError):
                 self.command("answer", resource="r2", **args)
         self.assertEqual(self.native(), [])
+
+    def test_resource_updates_publish_only_changed_agent_panels(self):
+        self.core.add_agent()
+        self.core.resources["r1"] = {"id": "r1", "kind": "terminal", "state": "live", "name": "Bridge"}
+        self.core.resources["r4"] = dict(self.core.resources["r2"], id="r4", host="r3")
+        self.agents.event("resource", {})
+        with mock.patch.object(self.core, "publish", wraps=self.core.publish) as published:
+            self.core.resources["r2"]["status"] = {"state": "working"}
+            self.agents.event("resource", {"id": "r2"})
+            self.assertEqual([call.args[0] for call in published.call_args_list], ["agents-r2"])
+            published.reset_mock()
+            for _ in range(20):
+                self.agents.event("resource", {"id": "r1"})
+            self.assertFalse(published.called, "unchanged terminal status cannot republish every agent")
 
     def test_resource_status_updates_do_not_churn_contributions(self):
         self.core.add_agent()

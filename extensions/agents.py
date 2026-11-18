@@ -36,6 +36,7 @@ class Agents:
     def __init__(self, ext):
         self.ext, self.lock = ext, threading.RLock()
         self.open_requests = set()
+        self.published = {}  # Only current agents; suppress unchanged derived panel RPCs.
         self.list_open = False
         for name, fn, title in [("list", self.list_agents, "Show agents"), ("show", self.show, "Show an agent in a tab")]:
             ext.command("agents."+name, title)(self.guarded(fn))
@@ -91,7 +92,7 @@ class Agents:
         self.ext.fresh()
         r = self.agent(args, inspect=True)
         self.ext.contribute(self.declarations([r]))
-        self.ext.publish(view(r["id"]), self.panel(r))
+        self.publish_panel(r)
         result = self.ext.invoke("tabs.show", {"view": view(r["id"]), "title": label(r.get("name") or "Agent")+" "+r["id"]})
         return {"resource": r["id"], "view": view(r["id"]), "tab": result, "client": {"close": True, "focus": {"view": view(r["id"])}}}
 
@@ -267,21 +268,43 @@ class Agents:
             self.ext.contribute(entries)
             self.signature = signature
 
-    def publish_panels(self):
-        for r in list(self.ext.resources.values()):
+    def publish_panel(self, resource):
+        rid = resource["id"]
+        content = self.panel(resource)
+        if self.published.get(rid) != content:
+            self.ext.publish(view(rid), content)
+            self.published[rid] = content
+
+    def publish_gone(self, rid):
+        self.published.pop(rid, None)
+        entry = self.ext.entries.get("view/"+view(rid), {})
+        if entry.get("value", {}).get("owner") == "agents":
+            self.ext.publish(view(rid), {"items": [{"type": "text", "style": "warn", "text": "Agent gone (facts not currently available); no operation sent. Close this tab or use Close ended tabs."}]})
+
+    def publish_panels(self, resources=None):
+        if resources is None:
+            self.published = {rid: content for rid, content in self.published.items() if rid in self.ext.resources}
+        for r in list(self.ext.resources.values()) if resources is None else resources:
             if r.get("kind") == "agent":
-                self.ext.publish(view(r["id"]), self.panel(r))
-        for key, entry in list(self.ext.entries.items()):
-            if panel_key(key) and entry["value"].get("owner") == "agents" and key[12:] not in self.ext.resources:
-                self.ext.publish(key[5:], {"items": [{"type": "text", "style": "warn", "text": "Agent gone (facts not currently available); no operation sent. Close this tab or use Close ended tabs."}]})
+                self.publish_panel(r)
+        if resources is None:
+            for key, entry in list(self.ext.entries.items()):
+                if panel_key(key) and entry["value"].get("owner") == "agents" and key[12:] not in self.ext.resources:
+                    self.publish_gone(key[12:])
 
     def event(self, kind, event):
         if kind in ("resource", "resource.removed", "provider", "missed"):
             self.refresh()
-            self.publish_panels()
-            if self.list_open:
+            changed = event.get("id") if kind in ("resource", "resource.removed") else None
+            selected = [r for r in self.ext.resources.values() if r.get("kind") == "agent" and (r["id"] == changed or r.get("host") == changed)] if changed else None
+            self.publish_panels(selected)
+            if kind == "resource.removed" and changed:
+                self.publish_gone(changed)
+            if self.list_open and (not changed or self.ext.resources.get(changed, {}).get("kind") == "agent" or kind == "resource.removed"):
                 self.publish_list()
             for rid in tuple(self.open_requests):
+                if changed and rid != changed:
+                    continue
                 r = self.ext.resources.get(rid)
                 if r:
                     self.ext.publish("agents-requests-"+rid, self.requests_panel(r))
@@ -291,7 +314,7 @@ class Agents:
         elif kind == "view.content" and str(event.get("view", "")).startswith("agent-"):
             r = self.ext.resources.get(event["view"][6:])
             if r and r.get("kind") == "agent":
-                self.ext.publish(view(r["id"]), self.panel(r))
+                self.publish_panel(r)
 
 
 def main():
