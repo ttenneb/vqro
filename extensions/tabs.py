@@ -88,11 +88,28 @@ def tab_target(args):
     if "tab_path" not in ctx:
         raise PrimError("no tab here", "invalid")
     key = f"layout/{ctx['layout']}"
-    root = ext.value(key)
+    root = copy.deepcopy(ext.value(key))
     tabs = node_at(root, ctx["tab_path"]) if root else None
     if not tabs or "tabs" not in tabs:
         raise PrimError("that tab is gone", "conflict")
     return key, ctx.get("layout_version"), root, tabs, ctx["tab_index"]
+
+
+def orphan_view_deletes(candidates, layouts):
+    """Delete only views this action removed, after checking every resulting layout.
+
+    Unreferenced popup/declaration views not closed by the action are not garbage.
+    The layout writes and CAS-guarded deletes are committed in one transaction.
+    """
+    candidates = set(candidates)
+    if not candidates:
+        return []
+    used = set()
+    for key, entry in list(ext.entries.items()):
+        if key.startswith("layout/"):
+            used.update(views_in(layouts.get(key, entry["value"])))
+    return [{"op": "delete", "key": "view/"+view, "expect": ext.version("view/"+view)}
+            for view in sorted(candidates-used) if "view/"+view in ext.entries]
 
 
 @ext.command("tabs.close", "Close a tab (its programs keep running)")
@@ -100,10 +117,12 @@ def close_tab(args):
     key, ver, root, tabs, i = tab_target(args)
     if len(tabs["tabs"]) <= 1:
         raise PrimError("can't close the last tab", "invalid")
-    tabs["tabs"].pop(i)
+    removed = views_in(tabs["tabs"].pop(i)["node"])
     a = tabs.get("active", 0)
     tabs["active"] = min(a - 1 if a >= i and a > 0 else a, len(tabs["tabs"]) - 1)
-    ext.apply([{"op": "set", "key": key, "value": root, "expect": ver}], "tabs: close")
+    ops = [{"op": "set", "key": key, "value": root, "expect": ver}]
+    ops += orphan_view_deletes(removed, {key: root})
+    ext.apply(ops, "tabs: close")
 
 
 @ext.command("tabs.rename", "Rename a tab (args: text)")
@@ -138,13 +157,16 @@ def prune_ended(node):
 def close_ended(args):
     def attempt():
         ext.fresh()
-        ops = []
+        ops, removed, layouts = [], set(), {}
         for key, entry in list(ext.entries.items()):
             if key.startswith("layout/"):
                 root = copy.deepcopy(entry["value"])
                 prune_ended(root)
                 if root != entry["value"]:
                     ops.append({"op": "set", "key": key, "value": root, "expect": entry["version"]})
+                    removed.update(set(views_in(entry["value"]))-set(views_in(root)))
+                    layouts[key] = root
+        ops += orphan_view_deletes(removed, layouts)
         return ext.apply(ops, "tabs: close ended") if ops else {}
     return ext.retrying(attempt)
 

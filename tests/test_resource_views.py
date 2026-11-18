@@ -96,6 +96,57 @@ class ResourceViews(unittest.TestCase):
         module["resource_state"]("resource", {"id": "r2"})
         self.assertEqual(core.value("layout/main")["tabs"][0]["title"], "User title")
 
+    def test_close_tab_deletes_nested_orphans_but_preserves_other_layout_and_popup_views(self):
+        module, core = load("tabs")
+        root = {"tabs": [{"title": "closed", "node": {"split": "h", "children": [{"view": "orphan"}, {"view": "shared"}]}},
+                         {"title": "kept", "node": {"view": "kept"}}], "active": 0}
+        ops = [{"op": "set", "key": "view/"+name, "value": {"kind": "panel", "items": []}} for name in ("orphan", "shared", "kept", "popup")]
+        ops += [{"op": "set", "key": "layout/main", "value": root},
+                {"op": "set", "key": "layout/other", "value": {"view": "shared"}}]
+        core.apply(ops, "fixture")
+        module["close_tab"]({"context": {"layout": "main", "layout_version": core.version("layout/main"), "tab_path": [], "tab_index": 0}})
+        self.assertIsNone(core.value("view/orphan"))
+        for name in ("shared", "kept", "popup"):
+            self.assertIsNotNone(core.value("view/"+name))
+        deleted = [op["key"] for op in core.transactions[-1] if op["op"] == "delete"]
+        self.assertEqual(deleted, ["view/orphan"])
+        self.assertFalse(any(method == "resource.kill" for method, _ in core.calls))
+
+    def test_close_failure_does_not_mutate_the_cached_layout_before_commit(self):
+        module, core = load("tabs")
+        root = {"tabs": [{"title": "a", "node": {"view": "a"}}, {"title": "b", "node": {"view": "b"}}], "active": 0}
+        core.apply([{"op": "set", "key": "layout/main", "value": root}], "fixture")
+        with mock.patch.object(core, "value", side_effect=lambda key, default=None: core.entries.get(key, {}).get("value", default)), \
+             mock.patch.object(core, "apply", side_effect=PrimError("layout changed", "conflict")):
+            with self.assertRaises(PrimError):
+                module["close_tab"]({"context": {"layout": "main", "layout_version": 1, "tab_path": [], "tab_index": 0}})
+        self.assertEqual(core.value("layout/main"), root)
+
+    def test_close_ended_deletes_only_unreferenced_removed_views(self):
+        module, core = load("tabs")
+        for rid in ("r3", "r4"):
+            core.resources[rid] = {"id": rid, "kind": "terminal", "state": "finished"}
+            core.apply([{"op": "set", "key": "view/term-"+rid, "value": {"kind": "terminal", "resource": rid}}], "fixture")
+        root = {"tabs": [{"title": rid, "node": {"view": "term-"+rid}} for rid in ("r3", "r4")]+[
+            {"title": "live", "node": {"view": "agents-r2"}}], "active": 0}
+        core.apply([{"op": "set", "key": "layout/main", "value": root},
+                    {"op": "set", "key": "layout/other", "value": {"view": "term-r3"}}], "fixture")
+        module["close_ended"]({})
+        self.assertIsNone(core.value("view/term-r4"))
+        self.assertIsNotNone(core.value("view/term-r3"), "another layout still pins the shared view")
+        self.assertEqual([op["key"] for op in core.transactions[-1] if op["op"] == "delete"], ["view/term-r4"])
+
+    def test_close_ended_removes_a_view_only_after_its_last_layout_reference(self):
+        module, core = load("tabs")
+        core.resources["r3"] = {"id": "r3", "kind": "terminal", "state": "finished"}
+        core.apply([{"op": "set", "key": "view/term-r3", "value": {"kind": "terminal", "resource": "r3"}}], "fixture")
+        for name in ("main", "other"):
+            core.apply([{"op": "set", "key": "layout/"+name, "value": {"tabs": [
+                {"title": "ended", "node": {"view": "term-r3"}}, {"title": "live", "node": {"view": "agents-r2"}}], "active": 0}}], "fixture")
+        module["close_ended"]({})
+        self.assertIsNone(core.value("view/term-r3"))
+        self.assertEqual([op["key"] for op in core.transactions[-1] if op["op"] == "delete"], ["view/term-r3"])
+
     def test_close_ended_preserves_live_mixed_and_last_tabs(self):
         module, core = load("tabs")
         core.resources["r3"] = {"id": "r3", "kind": "terminal", "state": "finished"}

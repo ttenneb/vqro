@@ -151,6 +151,58 @@ async fn retention_extension_forgets_closed_and_old_never_shown_finished_termina
 }
 
 #[tokio::test]
+async fn tab_view_cleanup_preserves_layout_pins_and_retention_undo_grace() {
+    let e = env();
+    let defaults = e._dir.path().join("defaults");
+    std::fs::create_dir_all(&defaults).unwrap();
+    let extensions = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("extensions");
+    std::fs::write(defaults.join("defaults.json"), json!({"version": 1, "extensions": [
+        {"name": "tabs", "argv": ["python3", extensions.join("tabs.py")]},
+        {"name": "retention", "argv": ["python3", extensions.join("retention.py"), "--grace", "3"]}
+    ]}).to_string()).unwrap();
+    let core = start(e.socket.clone(), e.state.clone(), false, Backend::Fake, Some(defaults)).unwrap();
+    let (p, _rx) = connect(&e.socket).await;
+    eventually("tab and retention commands", async || {
+        let commands = p.call("command.list", Value::Null).await.unwrap();
+        ["tabs.show", "tabs.close", "tabs.close_ended", "retention.forget_ended"].iter().all(|name|
+            commands["commands"].as_array().unwrap().iter().any(|c| c["name"] == *name && c["available"] == true))
+    }).await;
+    let shown = p.call("resource.spawn", json!({"argv": ["sh"]})).await.unwrap()["resource"]["id"].as_str().unwrap().to_string();
+    let live = p.call("resource.spawn", json!({"argv": ["sh"]})).await.unwrap()["resource"]["id"].as_str().unwrap().to_string();
+    for id in [&shown, &live] {
+        p.call("command.invoke", json!({"name": "tabs.show", "args": {"resource": id}})).await.unwrap();
+    }
+    p.call("resource.kill", json!({"resource": shown})).await.unwrap();
+    finished(&p, &json!(shown)).await;
+    eventually("ended tab title reconciled", async || {
+        p.call("workspace.snapshot", Value::Null).await.unwrap()["entries"]["layout/main"]["value"]["tabs"][0]["title"].as_str().is_some_and(|title| title.ends_with(" [ended]"))
+    }).await;
+    let snap = p.call("workspace.snapshot", Value::Null).await.unwrap();
+    p.call("workspace.apply", json!({"ops": [{"op": "set", "key": "layout/mirror", "value": snap["entries"]["layout/main"]["value"]}]})).await.unwrap();
+    let snap = p.call("workspace.snapshot", Value::Null).await.unwrap();
+    p.call("command.invoke", json!({"name": "tabs.close", "args": {"context": {"layout": "main", "layout_version": snap["entries"]["layout/main"]["version"], "tab_path": [], "tab_index": 0}}})).await.unwrap();
+    let key = format!("view/term-{shown}");
+    let snap = p.call("workspace.snapshot", Value::Null).await.unwrap();
+    assert!(snap["entries"].get(&key).is_some(), "the mirror layout still uses the view");
+    assert_eq!(p.call("command.invoke", json!({"name": "retention.forget_ended"})).await.unwrap()["forgotten"], 0, "retention observes the layout pin");
+
+    p.call("command.invoke", json!({"name": "tabs.close_ended"})).await.unwrap();
+    let snap = p.call("workspace.snapshot", Value::Null).await.unwrap();
+    assert!(snap["entries"].get(&key).is_none(), "the final closed layout reference removes its view entry");
+    assert!(ids(&p).await.contains(&shown), "view deletion does not bypass retention grace or kill a terminal");
+    p.call("command.invoke", json!({"name": "prim.revert"})).await.unwrap();
+    let snap = p.call("workspace.snapshot", Value::Null).await.unwrap();
+    assert!(snap["entries"].get(&key).is_some(), "undo restores the view and layout atomically");
+    assert_eq!(p.call("command.invoke", json!({"name": "retention.forget_ended"})).await.unwrap()["forgotten"], 0, "undo restores the layout pin and cancels pending forget");
+    tokio::time::sleep(Duration::from_millis(3500)).await;
+    assert!(ids(&p).await.contains(&shown), "undo keeps the finished terminal beyond the old grace");
+    p.call("command.invoke", json!({"name": "tabs.close_ended"})).await.unwrap();
+    eventually("closed view forgotten after grace", async || !ids(&p).await.contains(&shown)).await;
+    assert!(ids(&p).await.contains(&live), "live programs are untouched");
+    prim::server::shutdown(&core).await;
+}
+
+#[tokio::test]
 async fn churn_of_forgotten_terminals_keeps_resources_bounded() {
     let e = env();
     let core = start(e.socket.clone(), e.state.clone(), false, Backend::Fake, None).unwrap();
