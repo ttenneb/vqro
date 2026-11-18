@@ -428,7 +428,7 @@ class E2E:
                             event = row['params']; value = event['data']
                             if event['type'] == 'resource' and value.get('id') == rid and value.get('data', {}).get('run', {}).get('active'):
                                 facts = now
-                            target = ('agents-' if self.args.agents_extension else 'agent-')+rid
+                            target = 'agent-status-'+rid  # composed status source, not a mirrored shell publication
                             if event['type'] == 'view.content' and value.get('view') == target and 'Running' in json.dumps(value.get('content')):
                                 panel = now
                     native = [json.loads(line) for line in (self.root/'timing.jsonl').read_text().splitlines()]

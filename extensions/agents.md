@@ -9,7 +9,10 @@
 - Prompt-like actions use input. Answer opens a pending-request picker: confirm/select choices, input/editor text, explicit cancellation. Editor uses existing single-line input, not a new multiline editor.
 - Notifications preserve native outcomes: acceptance is not settlement; dispatched answers do not invent acknowledgement. Effects are never automatically replayed.
 
-The panel uses resource/provider facts and optionally displays the provider's `agent-rN` live content read-only.
+The panel uses resource/provider facts and optionally references provider output read-only, never mirroring its
+rows into a second publication. Runtime-neutral `data.views` may advertise up to eight ordered view names;
+otherwise the existing `agent-rN` convention is used. Generic `embedded_views` client composition preserves the
+extension's own controls and warnings while keeping native status/transcript publications independent.
 Optional runtime-neutral `data.failure.message` and `data.retry` (`active`, `attempt`, `max_attempts`, `delay_ms`,
 `success`) facts are rendered as bounded semantic error/retry rows, including alongside native output. Only
 reported attempt counts are shown; the UI never implements retries. Providers remain responsible for mapping

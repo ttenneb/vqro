@@ -103,10 +103,15 @@ class AgentsTests(unittest.TestCase):
         self.core.live["agent-r2"] = {"items": [{"text": "other native transcript", "command": "not.allowed"}]}
         self.agents.event("resource", {})
         panel = self.core.live["agents-r2"]
-        self.assertIn("other native transcript", json.dumps(panel))
-        self.assertNotIn("command", panel["items"][0])
+        self.assertNotIn("other native transcript", json.dumps(panel), "native output must not be copied")
+        reference = next(row for row in panel["items"] if row.get("type") == "view")
+        self.assertEqual(reference["view"], "agent-r2")
+        self.assertTrue(reference["readonly"])
+        self.assertIn("embedded_views", panel["requires"])
+        before = json.dumps(panel)
         self.core.live["agent-r2"] = {"items": [{"text": "x"*1024} for _ in range(100)]}
         self.agents.event("view.content", {"view": "agent-r2"})
+        self.assertEqual(json.dumps(self.core.live["agents-r2"]), before, "transcript changes must not republish a mirror")
         self.assertLessEqual(len(json.dumps(self.core.live["agents-r2"]).encode()), 32768)
 
     def test_all_native_effects_and_truthful_notifications(self):

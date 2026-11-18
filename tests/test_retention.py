@@ -63,11 +63,15 @@ class RetentionTests(unittest.TestCase):
     def test_bridge_cleanup_preserves_live_referenced_and_user_views(self):
         for i in range(1, 5):
             self.core.entries[f"view/agent-r{i}"] = {"version": 1, "value": {"kind": "panel", "bridge": {"instance": "i", "ref": "agent"}}}
+        self.core.entries["view/agent-status-r1"] = {"version": 1, "value": {"kind": "panel", "bridge": {"instance": "i", "ref": "agent"}}}
+        self.core.entries["view/agent-status-r2"] = {"version": 1, "value": {"kind": "panel", "bridge": {"instance": "i", "ref": "agent"}}}
         self.core.resources["r2"] = {"id": "r2", "kind": "agent"}
         self.core.entries["layout/main"] = {"version": 1, "value": {"tabs": [{"node": {"view": "agent-r3"}}]}}
         del self.core.entries["view/agent-r4"]["value"]["bridge"]
         self.module["prune_bridge_views"]()
         self.assertNotIn("view/agent-r1", self.core.entries)
+        self.assertNotIn("view/agent-status-r1", self.core.entries)
+        self.assertIn("view/agent-status-r2", self.core.entries)
         for i in (2, 3, 4):
             self.assertIn(f"view/agent-r{i}", self.core.entries)
 

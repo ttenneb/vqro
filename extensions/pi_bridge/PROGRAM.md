@@ -36,7 +36,10 @@ confirmation body) remain available. Data is capped below 64 KiB: oversized fiel
 incomplete marker, never falsely empty. Dialogs that cannot be represented are cancelled once, with no automatic
 resend if that cancellation is uncertain. Unknown UI kinds are cancelled by the runtime client.
 
-The view is coalesced at 5 Hz by default (minimum interval 0.1 seconds), <=32 KiB, with a 16 KiB transcript tail
+Two independently deduplicated views separate status/queues/dialogs (`agent-status-rN`) from the stable
+transcript (`agent-rN`). Resource data advertises their ordered names in `views`; neutral agents references them
+read-only rather than copying their rows. Older runtimes without `data.views` retain the canonical `agent-rN`
+fallback convention. No relative times are inserted into transcript rows. The views are coalesced at 5 Hz by default (minimum interval 0.1 seconds), <=32 KiB, with a 16 KiB transcript tail
 and 128 rows. The SDK journal retains at most 512 events / 512 KiB (whichever fills first), bounding tiny-record
 Python overhead as well as wire bytes. The bridge's provider keeps at most 2048 active/recent effect identities;
 active identities are never evicted, and a full active ledger rejects before native execution. Custom injected

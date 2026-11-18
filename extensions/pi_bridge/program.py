@@ -59,11 +59,11 @@ class Bridge:
         self.ready, self.started = asyncio.Event(), asyncio.Event()
         self.pi = None
         self.rid = None
-        self.view = None
+        self.view = self.status_view = None
         self.cursor = 0
         self.connected = False
         self.closing = False
-        self._facts = self._content = self._fallback_frame = None
+        self._facts = self._content = self._status_content = self._fallback_frame = None
         self._tasks = set()
         self.failure = None
         self._cancel_attempts = set()
@@ -80,6 +80,7 @@ class Bridge:
         return {"ref": "agent", "incarnation": "", "kind": "agent", "state": "live",
                 "name": "Pi", "title": "Pi RPC", "cwd": str(self.cwd),
                 "status": {"state": snapshot["status"]}, "data": {**agent_data(snapshot),
+                    "views": [view for view in (self.status_view, self.view) if view is not None],
                     **({"view_error": self.view_problem} if self.view_problem else {})}}
 
     async def _effect(self, effect, args):
@@ -131,9 +132,21 @@ class Bridge:
         if len(resources) != 1 or not isinstance(resources[0].get("id"), str) or not re.fullmatch(r"r[0-9]+", resources[0]["id"]):
             raise ProviderError("backend", "acknowledged sync did not publish exactly one agent resource")
         self.rid = resources[0]["id"]
-        view = "agent-" + self.rid
+        self.view = await self._declare_view(provider, "agent-" + self.rid)
+        self.status_view = await self._declare_view(provider, "agent-status-" + self.rid)
+        async with self._publish_lock:
+            self._facts, self._content, self._status_content = initial, None, None
+            self.connected = True
+        self.connections += 1
+        self.failure = None
+        await self.publish()
+        if not self.connected:
+            raise ProviderError("unavailable", "control disconnected during initial publication")
+        self.ready.set()
+
+    async def _declare_view(self, provider, view):
         marker = {"instance": provider.instance, "ref": "agent"}
-        self.view = None
+        accepted = None
         try:
             # A provider has a 1 MiB wire cap. Never fetch the whole workspace
             # just to locate one resource and inspect its one owned view.
@@ -144,7 +157,7 @@ class Bridge:
                         "op": "set", "key": "view/" + view, "expect": 0,
                         "value": {"kind": "panel", "title": "Pi " + self.rid, "bridge": marker,
                                   "items": [{"type": "text", "text": "Pi bridge not connected; use its backend terminal."}]}}]})
-                    self.view = view
+                    accepted = view
                 except ProviderError as error:
                     if error.kind != "conflict":
                         raise
@@ -152,10 +165,10 @@ class Bridge:
             if entry is not None:
                 value = entry.get("value") if isinstance(entry, dict) else None
                 if isinstance(value, dict) and value.get("kind") == "panel" and value.get("bridge") == marker:
-                    self.view = view
+                    accepted = view
                 else:
                     self.view_problem = "Agent view belongs to someone else; not overwritten or published."
-            elif self.view is None:
+            elif accepted is None:
                 self.view_problem = "Agent view changed during declaration; not overwritten or published."
         except ProviderError as error:
             if error.kind not in ("too_large", "forbidden", "unknown_method", "unsupported"):
@@ -163,15 +176,7 @@ class Bridge:
             # An oversized/foreign view is not a reason to reconnect and sync
             # repeatedly. Resource controls and the backend terminal still work.
             self.view_problem = "Agent view unavailable (" + str(error.kind) + "): " + tail(plain(error), 512)
-        async with self._publish_lock:
-            self._facts, self._content = initial, None
-            self.connected = True
-        self.connections += 1
-        self.failure = None
-        await self.publish()
-        if not self.connected:
-            raise ProviderError("unavailable", "control disconnected during initial publication")
-        self.ready.set()
+        return accepted
 
     def _retry_delay(self, backoff):
         # Equal jitter retains a nonzero floor and spreads even capped retries.
@@ -227,7 +232,7 @@ class Bridge:
         for event in batch["events"]:
             self.transcript.feed(event)
 
-    def content(self):
+    def content(self, part=None):
         snapshot = self.pi.snapshot()
         rows, clipped, lost = self.transcript.window(styled=True)
         run = snapshot["run"]
@@ -265,6 +270,12 @@ class Bridge:
             items.append({"type": "text", "style": "warn", "text": label})
         transcript_start = len(items)
         items.extend({"type": "text", **row, "text": tail(row["text"], 2048)} for row in rows)
+        if part == "status":
+            items = items[:transcript_start]
+            transcript_start = len(items)
+        elif part == "output":
+            items = items[transcript_start:]
+            transcript_start = 0
         result = {"title": "Pi " + (self.rid or "starting"), "requires": ["badges", "description"], "items": items,
                   "truncated": clipped, "output_gap": lost}
         if len(json.dumps(result, ensure_ascii=False).encode()) > 32768:
@@ -312,11 +323,12 @@ class Bridge:
                         await provider.upsert(current)
                         if provider is self.provider:
                             self._facts = current
-                    content = self.content()
-                    if self.view is not None and content != self._content:
-                        await provider.call("view.publish", {"view": self.view, "content": content}, timeout=1 if final else None)
-                        if provider is self.provider:
-                            self._content = content
+                    for view, part, cache in ((self.view, "output", "_content"), (self.status_view, "status", "_status_content")):
+                        content = self.content(part)
+                        if view is not None and content != getattr(self, cache):
+                            await provider.call("view.publish", {"view": view, "content": content}, timeout=1 if final else None)
+                            if provider is self.provider:
+                                setattr(self, cache, content)
                 except ProviderError as error:
                     if provider is self.provider:
                         self.connected = False

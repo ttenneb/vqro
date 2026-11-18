@@ -19,11 +19,12 @@ mod icons;
 mod keys;
 mod mouse;
 mod panel;
+mod compose;
 mod probe;
 mod frame_budget;
 mod theme;
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -252,6 +253,7 @@ struct App {
     live: HashMap<String, Value>,
     /// Merged immutable panel values; invalidate only on this view's entry/live update or snapshot.
     panel_values: Mutex<HashMap<String, Arc<Value>>>,
+    panel_dependencies: Mutex<HashMap<String, HashSet<String>>>,
     hit: Hit,
     drag: Option<Drag>,
     overrides: HashMap<Vec<usize>, Vec<u16>>,
@@ -511,7 +513,7 @@ impl App {
             safe_mode_allow: BTreeSet::new(), provider_extensions: BTreeSet::new(), safe_selected: BTreeSet::new(), backends_connected:BTreeSet::new(), backend_notice:None,
             terms: HashMap::new(), stream_view: HashMap::new(), early: HashMap::new(), early_closed: HashMap::new(),
             leaves: Vec::new(), focus: 0, overlay: None, pstate: HashMap::new(),
-            filtering: None, toast: None, live: HashMap::new(), panel_values: Mutex::new(HashMap::new()), hit: Hit::default(),
+            filtering: None, toast: None, live: HashMap::new(), panel_values: Mutex::new(HashMap::new()), panel_dependencies: Mutex::new(HashMap::new()), hit: Hit::default(),
             drag: None, overrides: HashMap::new(), mouse_owner: None, mouse_on: true,
             under: None, input_queues: HashMap::new(), view_streams: Arc::default(), zoomed: None, pending_focus: None, kbd_enhance: false,
             held: KeyModifiers::NONE, message: String::new(), key_hint: None,
@@ -548,6 +550,7 @@ impl App {
         self.epoch = snap["epoch"].as_str().unwrap_or("").to_string();
         self.seq = snap["seq"].as_u64().unwrap_or(0);
         self.panel_values.lock().unwrap().clear();
+        self.panel_dependencies.lock().unwrap().clear();
         for state in self.pstate.values_mut() { state.prepared = None; }
         self.entries.clear();
         self.versions.clear();
@@ -669,7 +672,7 @@ impl App {
                 for c in d["changes"].as_array().into_iter().flatten() {
                     let Some(k) = c["key"].as_str() else { continue };
                     if let Some(view) = k.strip_prefix("view/") {
-                        self.panel_values.lock().unwrap().remove(view);
+                        self.invalidate_panel(view);
                         for state in self.pstate.values_mut() { state.prepared = None; }
                     }
                     if k.starts_with("layout/") {
@@ -749,7 +752,7 @@ impl App {
             }
             "view.content" => {
                 if let Some(v) = d["view"].as_str() {
-                    self.panel_values.lock().unwrap().remove(v);
+                    self.invalidate_panel(v);
                     for state in self.pstate.values_mut() { state.prepared = None; }
                     if d["content"].is_null() {
                         self.live.remove(v);
@@ -1084,15 +1087,18 @@ impl App {
     fn panel_value(&self, view: &str) -> Arc<Value> {
         if view=="@prim-safe-mode" { return Arc::new(self.safe_chooser_value()); }
         if let Some(value) = self.panel_values.lock().unwrap().get(view).cloned() { return value; }
-        let mut v = self.entries.get(&format!("view/{view}")).cloned().unwrap_or(json!({}));
-        if let (Some(live), Some(obj)) = (self.live.get(view).and_then(|l| l.as_object()), v.as_object_mut()) {
-            for (k, x) in live {
-                obj.insert(k.clone(), x.clone());
-            }
-        }
+        let (v, deps) = compose::resolve(view, &self.entries, &self.live);
+        self.panel_dependencies.lock().unwrap().insert(view.into(), deps);
         let v = Arc::new(v);
         self.panel_values.lock().unwrap().insert(view.to_string(), v.clone());
         v
+    }
+
+    fn invalidate_panel(&self, source: &str) {
+        let mut deps = self.panel_dependencies.lock().unwrap();
+        let mut values = self.panel_values.lock().unwrap();
+        values.retain(|view, _| view != source && !deps.get(view).is_some_and(|d| d.contains(source)));
+        deps.retain(|view, _| values.contains_key(view));
     }
 
     /// Keys for a panel (in a pane or a popup). Returns whether it used the key.
@@ -2938,6 +2944,25 @@ mod tests {
         assert!(!Arc::ptr_eq(&before_reload,&app.panel_value("p")));
         app.on_event_record(&json!({"epoch":"boot","seq":2,"type":"entries","data":{"changes":[{"key":"view/p","value":null}]}}));
         assert!(!app.panel_values.lock().unwrap().contains_key("p"));
+    }
+
+    #[tokio::test]
+    async fn source_updates_invalidate_composed_panels_but_unrelated_views_do_not() {
+        let (mut app, _) = app();
+        app.load(&json!({"epoch":"boot","seq":1,"entries":{
+            "view/root":{"version":1,"value":{"kind":"panel","items":[{"type":"view","view":"source","readonly":true}]}},
+            "view/source":{"version":1,"value":{"kind":"panel","items":[{"text":"fallback"}]}}},
+            "live":{"source":{"items":[{"text":"native"}]}}}));
+        let first = app.panel_value("root");
+        assert_eq!(first["items"][0]["text"],"native");
+        app.on_event_record(&json!({"epoch":"boot","seq":2,"type":"view.content","data":{"view":"unrelated","content":{"items":[]}}}));
+        assert!(Arc::ptr_eq(&first,&app.panel_value("root")));
+        app.on_event_record(&json!({"epoch":"boot","seq":3,"type":"view.content","data":{"view":"source","content":{"items":[{"text":"changed"}]}}}));
+        let changed = app.panel_value("root");
+        assert!(!Arc::ptr_eq(&first,&changed));
+        assert_eq!(changed["items"][0]["text"],"changed");
+        app.on_event_record(&json!({"epoch":"boot","seq":4,"type":"view.content","data":{"view":"source","content":null}}));
+        assert_eq!(app.panel_value("root")["items"][0]["text"],"fallback");
     }
 
     #[tokio::test]

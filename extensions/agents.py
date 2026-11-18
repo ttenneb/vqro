@@ -178,24 +178,19 @@ class Agents:
 
     def panel(self, r):
         title = label(r.get("name") or r.get("title") or "Agent")+" "+r["id"]
-        native = self.ext.live.get("agent-"+r["id"])
-        if isinstance(native, dict) and isinstance(native.get("items"), list):
-            # Provider-native output is optional, read-only data. Controls stay
-            # here and are offered only from declared native capabilities.
-            def readonly(row):
-                if not isinstance(row, dict):
-                    return {"type": "text", "text": label(row)}
-                kept = {k: v for k, v in row.items() if k in ("type", "text", "style", "description", "detail", "detail_style", "badges", "id", "expanded")}
-                for key in ("text", "description", "detail"):
-                    if key in kept:
-                        kept[key] = label(kept[key], 8192)
-                if isinstance(kept.get("badges"), list):
-                    kept["badges"] = [{"text": label(b.get("text", ""), 200), "style": b.get("style", "plain")}
-                                      for b in kept["badges"] if isinstance(b, dict)]
-                if isinstance(row.get("children"), list):
-                    kept["children"] = [readonly(child) for child in row["children"]]
-                return kept
-            content = {"title": title, "requires": native.get("requires", []), "items": [readonly(row) for row in native["items"]]}
+        declared = data(r).get("views")
+        if isinstance(declared, list):
+            sources = list(dict.fromkeys(v for v in declared[:8] if isinstance(v, str) and v))
+        else:
+            canonical = "agent-"+r["id"]
+            sources = [canonical] if canonical in self.ext.live or "view/"+canonical in self.ext.entries else []
+        if sources:
+            # Keep controls/warnings here, but never copy a provider's transcript into another
+            # publication. Generic client composition enforces read-only source rows.
+            content = {"title": title, "requires": ["embedded_views"], "items": [
+                {"text": title, "badges": [{"text": status(r), "style": "dim"}]},
+                *[{"type": "view", "view": source, "readonly": True,
+                   "text": "Native output unavailable or unsupported: "+label(source)} for source in sources]]}
         else:
             items = [{"text": title, "badges": [{"text": status(r), "style": "dim"}],
                       "description": label("provider: "+str(r.get("provider"))+" | available="+str(r.get("available")))}]

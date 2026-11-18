@@ -596,6 +596,19 @@ and sets the prefix; the active profile is `doc/keys/profile`, and the list is l
   overwrite or clear the publisher (`conflict`), matching command-registration collision hygiene. Verified same-
   extension replacement connections may take over; late old disconnects do not clear the replacement. Live encoded
   sizes and the total are cached: each publish encodes only its candidate, not all other live content.
+- **Read-only panel references (`embedded_views`).** A panel's ordinary `items` (including nested `children`)
+  may contain `{type:"view", view:"source-id", readonly:true, text:"fallback"}`. Declare `embedded_views` in
+  `requires`. The client displays the source panel's current ordinary items in place, without another writer or
+  publication; source entry/live changes and removal invalidate the containing panel. Only declared panel views
+  or undeclared live fragments with an `items` array are eligible; terminal sources never attach. Source toolbar,
+  pages and detail panels are not embedded by this initial capability. Missing/unsupported sources, cycles and
+  reference nesting beyond eight show `text` (or a built-in unavailable placeholder). At most 2048 source rows are
+  expanded, with a visible bound warning. Referenced rows are always read-only: commands/args/input/options/menu,
+  interactive chips and detail panels are not imported; text/description/detail and nested children/badges remain.
+  Control text is escaped and text fields are bounded to 8192 characters. Parent-owned controls/context remain
+  separate. `readonly:false` does not enable interactions. References do not create effects, persistence, backend
+  lifetime or resource-retention promises. Older clients reject the declared capability gracefully rather than
+  silently showing an incomplete composition; the badge/prefix recovery path remains independent.
 - A command's reply may ask the invoking client for UI: `{"client": {"popup": {"view", "width"?}}}`,
   `{"client": {"close": true}}`, or `{"client": {"focus": {"view": "view-id"}}}`. These fields may be combined.
   Per client and temporary; clients refuse terminal views as popups. `focus` leaves zoom and focuses an already

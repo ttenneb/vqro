@@ -118,7 +118,7 @@ def prune_bridge_views():
                      for view in views_in(entry.get("value", {}))}
             ops = []
             for key, entry in ext.entries.items():
-                rid = key[len("view/agent-"):] if key.startswith("view/agent-") else ""
+                rid = next((key[len(prefix):] for prefix in ("view/agent-status-", "view/agent-") if key.startswith(prefix)), "")
                 value = entry.get("value", {})
                 if not isinstance(value, dict):
                     continue

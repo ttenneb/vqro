@@ -184,7 +184,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("too_large", bridge.view_problem)
         self.assertEqual(len(self.core.notes("provider.register")), 1)
         self.assertEqual(len(self.core.notes("provider.sync")), 1)
-        self.assertFalse(self.core.notes("view.publish"))
+        self.assertFalse([row for row in self.core.notes("view.publish") if row["params"]["view"] == "agent-r7"])
+        self.assertEqual(bridge.status_view, "agent-status-r7")
         await self.core.wait(lambda: "view_error" in self.core.resources["r7"]["data"])
         self.assertIn("view_error", self.core.resources["r7"]["data"])
         self.assertIsNone(bridge.pi.process.returncode)
@@ -203,11 +204,23 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             return await original_result(row)
         self.core.result = race
         bridge = await self.start()
-        self.assertEqual(reads, 2)
+        self.assertEqual(reads, 3)  # two collision reads for output, one independent status entry
         self.assertIsNone(bridge.view)
         self.assertEqual(self.core.entries["view/agent-r7"], original_entry)
         self.assertEqual(len(self.core.notes("provider.register")), 1)
-        self.assertFalse(self.core.notes("view.publish"))
+        self.assertFalse([row for row in self.core.notes("view.publish") if row["params"]["view"] == "agent-r7"])
+
+    async def test_queue_status_changes_do_not_republish_the_transcript_view(self):
+        bridge = await self.start()
+        await bridge.publish()
+        before = len([r for r in self.core.notes("view.publish") if r["params"]["view"] == bridge.view])
+        result = await self.effect("steer", {"message": "queued status only"})
+        self.assertEqual(result["result"]["outcome"], "accepted")
+        await bridge.publish()
+        self.assertEqual(len([r for r in self.core.notes("view.publish") if r["params"]["view"] == bridge.view]), before)
+        self.assertIn("queued status only", json.dumps(bridge._status_content))
+        self.assertNotIn("queued status only", json.dumps(bridge._content))
+        self.assertEqual(self.core.resources["r7"]["data"]["views"], ["agent-status-r7", "agent-r7"])
 
     async def test_user_effect_wakes_publication_without_waiting_for_sampling_timer(self):
         bridge = await self.start(interval=10)
@@ -555,7 +568,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.core.entries["view/agent-r7"] = deepcopy(original)
         bridge = await self.start()
         self.assertEqual(self.core.entries["view/agent-r7"], original)
-        self.assertFalse(self.core.notes("view.publish"))
+        self.assertFalse([row for row in self.core.notes("view.publish") if row["params"]["view"] == "agent-r7"])
         self.assertIsNotNone(bridge.view_problem)
         self.assertTrue(bridge.connected)
         self.stop.set()

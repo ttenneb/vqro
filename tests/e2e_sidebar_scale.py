@@ -218,6 +218,9 @@ def run(args, root):
                 assert fence['content'] == before_content, 'an off-page change altered visible sidebar content, even across the fence'
         assert filtered.counts.get('sidebar', 0) == 0, 'view allowlist must exclude the large sidebar before delivery'
         assert filtered.counts.get('agent-'+agent['id'], 0) > 0, 'matching native agent views must still arrive'
+        shell = observer.last['agents-'+agent['id']]
+        assert any(row.get('type') == 'view' and row.get('view') == 'agent-'+agent['id'] and row.get('readonly') for row in shell['items'])
+        assert not any('transcript ' in row.get('text', '') for row in shell['items']), 'neutral panel mirrored native output'
         final = control.call('workspace.snapshot')
         receipt['extensions'] = {name: {key: final['extensions'][name][key] for key in ('display_status', 'crashes')} for name in names}
         assert all(value['display_status'] == 'running' and value['crashes'] == 0 for value in receipt['extensions'].values())
