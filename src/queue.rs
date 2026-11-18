@@ -16,11 +16,34 @@ impl std::error::Error for QueueError {}
 
 pub struct Item<T> {
     pub value: T,
-    _permit: OwnedSemaphorePermit,
+    pub(crate) charge: Charge,
+}
+pub(crate) struct Charge {
+    permit: OwnedSemaphorePermit,
+    budget: Arc<Semaphore>,
+    cap: usize,
     bytes: usize,
 }
+impl Charge {
+    /// Re-account expanded work before copying/dispatch. Never wait behind queued work that
+    /// this consumer itself must drain: rejection is definite and leaves the old lease intact.
+    pub(crate) fn try_resize(&mut self, bytes:usize)->Result<(),QueueError> {
+        let wanted=bytes.max(MIN_CHARGE);
+        if wanted>self.cap {return Err(QueueError::Oversized);}
+        let held=self.permit.num_permits();
+        if wanted>held {
+            let extra=self.budget.clone().try_acquire_many_owned((wanted-held)as u32).map_err(|error|match error {
+                tokio::sync::TryAcquireError::Closed=>QueueError::Closed,
+                tokio::sync::TryAcquireError::NoPermits=>QueueError::Full,
+            })?;
+            self.permit.merge(extra);
+        } else if wanted<held {drop(self.permit.split(held-wanted).unwrap());}
+        self.bytes=bytes;
+        Ok(())
+    }
+}
 impl<T> Item<T> {
-    pub(crate) fn payload_bytes(&self) -> usize { self.bytes }
+    pub(crate) fn payload_bytes(&self) -> usize { self.charge.bytes }
 }
 
 pub struct Sender<T> {
@@ -58,7 +81,7 @@ impl<T> Sender<T> {
             tokio::sync::TryAcquireError::Closed => QueueError::Closed,
             tokio::sync::TryAcquireError::NoPermits => QueueError::Full,
         })?;
-        self.tx.try_send(Item { value, _permit: permit, bytes }).map_err(|e| match e {
+        self.tx.try_send(Item { value, charge:Charge {permit,budget:self.budget.clone(),cap:self.cap,bytes} }).map_err(|e| match e {
             mpsc::error::TrySendError::Full(_) => QueueError::Full,
             mpsc::error::TrySendError::Closed(_) => QueueError::Closed,
         })
@@ -67,7 +90,7 @@ impl<T> Sender<T> {
     pub async fn send(&self, value: T, bytes: usize) -> Result<(), QueueError> {
         let charge = self.charge(bytes)?;
         let permit = self.budget.clone().acquire_many_owned(charge).await.map_err(|_| QueueError::Closed)?;
-        self.tx.send(Item { value, _permit: permit, bytes }).await.map_err(|_| QueueError::Closed)
+        self.tx.send(Item { value, charge:Charge {permit,budget:self.budget.clone(),cap:self.cap,bytes} }).await.map_err(|_| QueueError::Closed)
     }
 
     pub fn is_closed(&self) -> bool { self.tx.is_closed() }
@@ -92,6 +115,18 @@ impl<T> Drop for Receiver<T> {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn expansion_is_charged_atomically_without_waiting_and_shrink_releases_bytes() {
+        let (tx,mut rx)=channel(256);
+        tx.try_send(1,64).unwrap();tx.try_send(2,128).unwrap();
+        let mut first=rx.recv().await.unwrap();
+        assert_eq!(first.charge.try_resize(192),Err(QueueError::Full));
+        assert_eq!(tx.used_bytes(),192,"failed growth keeps the original lease");
+        let second=rx.recv().await.unwrap();drop(second);
+        first.charge.try_resize(200).unwrap();assert_eq!(tx.used_bytes(),200);
+        first.charge.try_resize(64).unwrap();assert_eq!(tx.used_bytes(),64);
+        drop(first);assert_eq!(tx.used_bytes(),0);
+    }
     #[tokio::test]
     async fn bytes_remain_charged_until_consumed_and_waiters_wake_on_close() {
         let (tx, mut rx) = channel(128);

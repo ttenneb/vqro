@@ -106,7 +106,7 @@ async fn run(core:Weak<Mutex<Core>>, queue:Receiver,cancel:Arc<AtomicBool>) {
         let item={ queue.lock().await.recv().await };
         let Some(item)=item else { break; };
         // Keep both the byte charge and request slot through writing, adoption and hooks.
-        let Request { prepare, receipt, _slot } = item.value;
+        let queue::Item {value:Request {prepare,receipt,_slot},mut charge}=item;
         if cancel.load(Ordering::Acquire) { let _=receipt.send(Err(rejected("unavailable","shutdown before commit started; no effect"))); continue; }
         let Some(core) = core.upgrade() else { let _ = receipt.send(Err(rejected("unavailable", "core stopped before commit"))); continue; };
         let prepared = {
@@ -117,6 +117,14 @@ async fn run(core:Weak<Mutex<Core>>, queue:Receiver,cancel:Arc<AtomicBool>) {
             Ok(work) => work,
             Err(err) => { let _ = receipt.send(Err(err)); continue; }
         };
+        let expanded_bytes=match &plan.action {
+            Action::Apply {author,on_behalf_of,note,ops}=>crate::limits::encoded_bytes(ops).saturating_add(crate::limits::encoded_bytes(&(author,on_behalf_of.as_deref(),note))),
+            Action::Revert {author,on_behalf_of,txn}=>store.revert_bytes(*txn).unwrap_or(0).saturating_add(crate::limits::encoded_bytes(&(author,on_behalf_of.as_deref(),format!("revert {txn}")))),
+        };
+        if let Err(error)=charge.try_resize(expanded_bytes.max(256)) {
+            let _=receipt.send(Err(rejected(if error==queue::QueueError::Closed {"unavailable"} else {"overloaded"},format!("expanded workspace mutation ({expanded_bytes} bytes) was not dispatched: {error}"))));
+            continue;
+        }
         let after_adopt = plan.after_adopt;
         // Candidate cloning, CAS/validation, size accounting, encoding and all filesystem
         // operations run on a blocking thread without the core mutex or an async worker.

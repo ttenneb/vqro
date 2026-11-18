@@ -832,13 +832,19 @@ async fn attach(core: &Shared, conn: &Arc<Conn>, a: Attach) -> RpcResult {
     Ok(json!({"outcome": "accepted", "effect": effect, "initial": initial, "stream": sid, "resource": a.resource}))
 }
 
+fn undo_target(core:&Core,txn:Option<u64>)->Option<u64> {
+    txn.or_else(||core.store.latest_txn_matching(|txn|!txn.author.starts_with("ext:") || txn.on_behalf_of.as_ref().is_some_and(|origin|!origin.starts_with("ext:"))))
+}
 async fn revert(core: &Shared, author: &str, on_behalf_of: Option<Arc<str>>, txn: Option<u64>) -> RpcResult {
     let author = author.to_string();
-    let bytes = crate::limits::encoded_bytes(&(&author, on_behalf_of.as_deref())).saturating_add(128);
+    // Reserve the currently known undo payload, without cloning it. A preceding queued
+    // commit may change default undo; the worker re-resolves and re-accounts before dispatch.
+    let known_bytes={let core=core.lock().unwrap();undo_target(&core,txn).and_then(|id|core.store.revert_bytes(id)).unwrap_or(0)};
+    let bytes = known_bytes.saturating_add(crate::limits::encoded_bytes(&(&author, on_behalf_of.as_deref()))).saturating_add(128);
     crate::commit::submit(core, bytes, move |c| {
         // Preserve global undo: clients and client-started extension writes, never autonomous extensions.
         // Select only after preceding queued commits have been adopted.
-        let id = txn.or_else(|| c.store.latest_txn_matching(|t| !t.author.starts_with("ext:") || t.on_behalf_of.as_ref().is_some_and(|origin| !origin.starts_with("ext:"))))
+        let id = undo_target(c,txn)
             .ok_or_else(|| RpcError::new("not_found", "no transactions to revert"))?;
         let touched_ext = c.store.transaction(id).is_some_and(|t| t.changes.iter().any(|ch| ch.key.starts_with("extension/")));
         Ok(crate::commit::Plan { action:crate::commit::Action::Revert { author, on_behalf_of, txn:id }, after_adopt:if touched_ext { Some(ext::reconcile) } else { None } })
@@ -849,6 +855,7 @@ async fn apply_prepared(
     core:&Shared, author:&str, on_behalf_of:Option<Arc<str>>, note:Option<String>, bytes:usize,
     ops:impl FnOnce(&Core)->Result<Vec<Op>,RpcError> + Send + 'static,
 ) -> RpcResult {
+    crate::store::validate_note(note.as_deref())?;
     let bytes = bytes.saturating_add(crate::limits::encoded_bytes(&(author, on_behalf_of.as_deref(), &note)));
     let author = author.to_string();
     crate::commit::submit(core, bytes, move |c| {

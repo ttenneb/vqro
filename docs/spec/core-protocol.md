@@ -59,9 +59,9 @@ disconnect uses legacy positive-pid signal fallback, never a protocol refusal. S
 | Method | Params | Result |
 |---|---|---|
 | `workspace.snapshot` | | `epoch`, `seq`, `entries` (key → `{version, value}`), `resources`, `commands`, `extensions`, `providers`, `adapters` (compatibility alias), `safe_mode` |
-| `workspace.apply` | `ops: [{op: "set", key, value, expect?} \| {op: "delete", key, expect?}]`, `note?`, `on_behalf_of?` (invocation proof) | `txn`, `changes` |
+| `workspace.apply` | `ops: [{op: "set", key, value, expect?} \| {op: "delete", key, expect?}]`, `note?`, `on_behalf_of?` (invocation proof) | `txn`, `undoable`, `changes` |
 | `workspace.history` | `limit?` | `txns` (newest first) |
-| `workspace.revert` | `txn`, `on_behalf_of?` (invocation proof) | the reverting `txn` |
+| `workspace.revert` | `txn`, `on_behalf_of?` (invocation proof) | reverting `txn`, `undoable`, `changes` |
 
 Transactions are validated against the resulting state and applied all-or-nothing. `expect` is compare-and-set
 (0 = must not exist). Key namespaces and value shapes: `src/store.rs` header. Layouts may only reference
@@ -82,8 +82,11 @@ state. **Do not automatically replay**: inspect snapshot/history using the trans
 reports uncertainty about crash durability, not partial application of operations.
 
 All running workspace mutations (including built-in undo/reset/extension changes) share one serialized
-committer. Its FIFO admission is bounded by **128 requests and 8 MiB encoded input**, including the active
-write; each request has a 256-byte metadata floor. Full admission returns `overloaded` with `outcome: rejected`
+committer. Its FIFO admission is bounded by **128 requests and 8 MiB encoded work**, including the active
+write; each request has a 256-byte metadata floor. Revert reserves its currently known serialized undo operations,
+not just its small request. At queue head the ordered target and expanded work are rechecked before copying undo
+values or dispatching a writer. If growth cannot be reserved immediately, it returns `overloaded` with
+`outcome: rejected` and no effect; it never waits for later queued work to release its budget. Full admission returns `overloaded` with `outcome: rejected`
 and no effect. Candidate copying/validation/encoding and durable filesystem work run off the core lock on a
 blocking worker; snapshots, events and terminal I/O can continue while a write waits on storage.
 
@@ -93,6 +96,29 @@ starts. Pending candidates are not visible in snapshot/history. A cancelled rece
 does not cancel admitted work or its extension reconciliation: inspect state/history, never replay automatically.
 An unexpected writer-task failure returns `indeterminate` and stops further commits until restart; it is not a
 clean persistence failure or a promise that replacement did not happen. Unadmitted requests remain rejected.
+
+### Undo horizon and history storage
+
+Workspace files use compact JSON. History retains at most **500 records and 8 MiB of compact serialized history**
+(including array delimiters); the oldest records are evicted first. This budget is separate from current entries.
+An evicted id returns `not_found`, not a synthetic undo. Notes are capped at **4096 UTF-8 bytes**: new oversized
+notes reject atomically with `too_large`. Existing pretty files and full `after` entries load unchanged; old notes
+are visibly truncated to the note limit and history is bounded while reading. Loading alone never rewrites the
+file; the next successful mutation persists the compact form and bounded horizon.
+
+Each history change stores `key`, `before: {version, value} | null`, and `after_version: integer | null`.
+The after value comes from current entries for publication, not a second retained history copy. Transactions keep
+`author`, optional D24 `on_behalf_of`, `at_ms`, optional `note`, and optional `reverts`; reverting is another audited
+transaction with fresh versions and CAS against the recorded after versions. Immutable history records and entry
+preimages are shared in memory rather than deep-cloned for every candidate.
+
+A single undo snapshot exceeding 8 MiB **does not reject a valid state change**: its record retains metadata, keys
+and after versions but has `undoable: false` and no preimages. Apply/revert replies and entries events include
+`undoable`; on history records it defaults to true when absent (including legacy records). Reverting such a record returns `unavailable` with a
+clear horizon message. Default undo stops there, never silently reaching past it to older eligible work. New small
+changes beyond that boundary remain undoable. A record whose metadata alone cannot fit is rejected with `too_large`;
+for legacy files, such a record and older undo history are discarded rather than undoing across an unrecorded gap.
+The D24 global selection rule still applies within this finite horizon; autonomous extension work is not selected.
 
 ## Size admission and recovery
 

@@ -236,14 +236,14 @@ impl Core {
         let changes: Vec<Value> = txn
             .changes
             .iter()
-            .map(|c| json!({"key": c.key, "version": c.after.as_ref().map(|e| e.version), "value": c.after.as_ref().map(|e| e.value.clone())}))
+            .map(|c| json!({"key": c.key, "version": c.after_version, "value": self.store.get(&c.key).map(|entry|entry.value.clone())}))
             .collect();
-        self.emit("entries", json!({"txn": txn.id, "author": txn.author, "on_behalf_of": txn.on_behalf_of, "note": txn.note, "reverts": txn.reverts, "changes": changes}));
+        self.emit("entries", json!({"txn": txn.id, "author": txn.author, "on_behalf_of": txn.on_behalf_of, "undoable":txn.undoable, "note": txn.note, "reverts": txn.reverts, "changes": changes}));
     }
 
     /// Publish every adopted transaction, including a replacement whose final directory sync
     /// failed. Clean persistence errors do not change state and never produce an entries event.
-    pub fn finish_txn(&mut self, result: Result<Txn, RpcError>) -> Result<Txn, RpcError> {
+    pub fn finish_txn(&mut self, result: Result<Arc<Txn>, RpcError>) -> Result<Arc<Txn>, RpcError> {
         match &result {
             Ok(txn) => self.emit_txn(txn),
             Err(err) if err.kind() == "durability_unconfirmed" => {
@@ -257,7 +257,7 @@ impl Core {
     }
 
     pub fn txn_summary(txn: &Txn) -> Value {
-        json!({"txn": txn.id, "changes": txn.changes.iter().map(|c| json!({"key": c.key, "version": c.after.as_ref().map(|e| e.version)})).collect::<Vec<_>>()})
+        json!({"txn": txn.id, "undoable":txn.undoable, "changes": txn.changes.iter().map(|c| json!({"key": c.key, "version": c.after_version})).collect::<Vec<_>>()})
     }
 
     pub fn resource(&self, id: &str) -> Result<&Resource, RpcError> {

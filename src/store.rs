@@ -30,11 +30,26 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json,Value};
 
 use crate::rpc::RpcError;
 
 const HISTORY: usize = 500;
+pub const HISTORY_BYTES: usize = 8 * 1024 * 1024;
+pub const NOTE_BYTES: usize = 4096;
+pub(crate) fn validate_note(note:Option<&str>)->Result<(),RpcError> {
+    if let Some(note)=note {
+        if note.len()>NOTE_BYTES {
+            let mut error=crate::limits::too_large("transaction note",note.len(),NOTE_BYTES);
+            error.message=format!("transaction note uses {} UTF-8 bytes; limit is {NOTE_BYTES}; write not applied",note.len());
+            error.data.as_mut().unwrap()["unit"]=json!("utf8_bytes");
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+type SharedEntry = std::sync::Arc<Entry>;
+pub type Entries = BTreeMap<String, SharedEntry>;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
@@ -42,12 +57,23 @@ pub struct Entry {
     pub value: Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Change {
     pub key: String,
-    pub before: Option<Entry>,
-    pub after: Option<Entry>,
+    pub before: Option<SharedEntry>,
+    pub after_version: Option<u64>,
 }
+impl<'de> Deserialize<'de> for Change {
+    fn deserialize<D:serde::Deserializer<'de>>(deserializer:D)->Result<Self,D::Error> {
+        // Legacy after.value is ignored while parsing, not allocated just to discard it.
+        #[derive(Deserialize)] struct Version { version:u64 }
+        #[derive(Deserialize)] struct Wire { key:String, before:Option<SharedEntry>, #[serde(default)] after_version:Option<u64>, #[serde(default)] after:Option<Version> }
+        let wire=Wire::deserialize(deserializer)?;
+        Ok(Self {key:wire.key,before:wire.before,after_version:wire.after_version.or(wire.after.map(|entry|entry.version))})
+    }
+}
+fn yes()->bool { true }
+fn is_true(value:&bool)->bool { *value }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Txn {
@@ -62,6 +88,86 @@ pub struct Txn {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reverts: Option<u64>,
     pub changes: Vec<Change>,
+    #[serde(default="yes", skip_serializing_if="is_true")]
+    pub undoable: bool,
+    #[serde(skip)]
+    encoded_bytes: usize,
+    #[serde(skip)]
+    revert_bytes: usize,
+}
+
+#[derive(Serialize)]
+#[serde(tag="op",rename_all="snake_case")]
+enum UndoRef<'a> {
+    Set { key:&'a str, value:&'a Value, expect:u64 },
+    Delete { key:&'a str, expect:u64 },
+}
+fn retained_txn(mut txn:Txn, legacy:bool)->Result<std::sync::Arc<Txn>,RpcError> {
+    if legacy {
+        if let Some(note)=&txn.note {
+            if note.len()>NOTE_BYTES {
+                let suffix="... [truncated]";
+                let mut end=NOTE_BYTES-suffix.len(); while !note.is_char_boundary(end) {end-=1;}
+                txn.note=Some(format!("{}{suffix}",&note[..end]));
+            }
+        }
+    }
+    let mut bytes=crate::limits::encoded_bytes(&txn);
+    if !txn.undoable || bytes.saturating_add(2)>HISTORY_BYTES {
+        txn.undoable=false;
+        for change in &mut txn.changes {change.before=None;}
+        bytes=crate::limits::encoded_bytes(&txn);
+    }
+    txn.encoded_bytes=bytes;
+    if txn.encoded_bytes.saturating_add(2)>HISTORY_BYTES {
+        return Err(crate::limits::too_large("transaction metadata",txn.encoded_bytes,HISTORY_BYTES-2));
+    }
+    if txn.undoable {
+        let undo:Vec<_>=txn.changes.iter().map(|change|match &change.before {
+            Some(before)=>UndoRef::Set {key:&change.key,value:&before.value,expect:change.after_version.unwrap_or(0)},
+            None=>UndoRef::Delete {key:&change.key,expect:change.after_version.unwrap_or(0)},
+        }).collect();
+        txn.revert_bytes=crate::limits::encoded_bytes(&undo);
+    }
+    Ok(std::sync::Arc::new(txn))
+}
+
+#[derive(Clone)]
+struct History { txns:VecDeque<std::sync::Arc<Txn>>, bytes:usize }
+impl Default for History {fn default()->Self {Self {txns:VecDeque::new(),bytes:2}}}
+impl History {
+    fn push(&mut self,txn:std::sync::Arc<Txn>) {
+        self.bytes+=txn.encoded_bytes+usize::from(!self.txns.is_empty());
+        self.txns.push_back(txn);
+        while self.txns.len()>HISTORY || self.bytes>HISTORY_BYTES {
+            self.bytes-=self.txns.pop_front().unwrap().encoded_bytes+usize::from(!self.txns.is_empty());
+        }
+    }
+}
+impl Serialize for History {
+    fn serialize<S:serde::Serializer>(&self,serializer:S)->Result<S::Ok,S::Error> {serializer.collect_seq(self.txns.iter())}
+}
+impl<'de> Deserialize<'de> for History {
+    fn deserialize<D:serde::Deserializer<'de>>(deserializer:D)->Result<Self,D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value=History;
+            fn expecting(&self,f:&mut std::fmt::Formatter)->std::fmt::Result {write!(f,"workspace transaction history")}
+            fn visit_seq<A:serde::de::SeqAccess<'de>>(self,mut seq:A)->Result<History,A::Error> {
+                let mut history=History::default();
+                while let Some(txn)=seq.next_element::<Txn>()? {
+                    match retained_txn(txn,true) {
+                        Ok(txn)=>history.push(txn),
+                        // An unretainable legacy metadata record is an undo boundary: never
+                        // silently undo an older change across it. New writes reject it instead.
+                        Err(_)=>history=History::default(),
+                    }
+                }
+                Ok(history)
+            }
+        }
+        deserializer.deserialize_seq(Visitor)
+    }
 }
 
 /// One operation in a transaction. `expect` is compare-and-set: the entry's current version,
@@ -77,8 +183,8 @@ pub enum Op {
 struct Persisted {
     rev: u64,
     next_txn: u64,
-    entries: BTreeMap<String, Entry>,
-    history: VecDeque<Txn>,
+    entries: Entries,
+    history: History,
 }
 
 /// In-process durable writer injection for deterministic fault/latency harnesses, not a wire API.
@@ -87,8 +193,8 @@ pub type DurableWriter = std::sync::Arc<dyn Fn(&Path, &[u8]) -> Result<(), Atomi
 pub struct Store {
     rev: u64,
     next_txn: u64,
-    entries: std::sync::Arc<BTreeMap<String, Entry>>,
-    history: std::sync::Arc<VecDeque<Txn>>,
+    entries: std::sync::Arc<Entries>,
+    history: std::sync::Arc<History>,
     path: Option<PathBuf>,
     writer: DurableWriter,
     // Copied into dispatched writers: a late replace must fence replacement core startup.
@@ -97,13 +203,13 @@ pub struct Store {
 
 impl Store {
     pub fn in_memory() -> Store {
-        Store { rev: 0, next_txn: 1, entries: std::sync::Arc::new(BTreeMap::new()), history: std::sync::Arc::new(VecDeque::new()), path: None, writer: std::sync::Arc::new(write_atomic), lifetime:None }
+        Store { rev: 0, next_txn: 1, entries: std::sync::Arc::new(BTreeMap::new()), history: std::sync::Arc::new(History::default()), path: None, writer: std::sync::Arc::new(write_atomic), lifetime:None }
     }
 
     /// Load from a file, or start empty if it does not exist.
     pub fn open(path: PathBuf) -> anyhow::Result<Store> {
-        let p: Persisted = match std::fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes)?,
+        let p: Persisted = match std::fs::File::open(&path) {
+            Ok(file) => serde_json::from_reader(std::io::BufReader::new(file))?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Persisted { next_txn: 1, ..Default::default() },
             Err(e) => return Err(e.into()),
         };
@@ -133,13 +239,15 @@ impl Store {
         Self { rev:self.rev, next_txn:self.next_txn, entries:self.entries.clone(), history:self.history.clone(), path:self.path.clone(), writer:self.writer.clone(), lifetime:self.lifetime.clone() }
     }
 
-    pub(crate) fn transaction(&self, id:u64) -> Option<&Txn> { self.history.iter().find(|t| t.id == id) }
+    pub(crate) fn transaction(&self, id:u64) -> Option<&Txn> { self.history.txns.iter().find(|t| t.id == id).map(|txn|txn.as_ref()) }
+    pub(crate) fn revert_bytes(&self,id:u64)->Option<usize> {self.transaction(id).map(|txn|txn.revert_bytes)}
+    pub fn history_bytes(&self)->usize {self.history.bytes}
 
     pub(crate) fn latest_txn_matching(&self, predicate: impl Fn(&Txn) -> bool) -> Option<u64> {
-        self.history.iter().rev().find(|txn| predicate(txn)).map(|txn| txn.id)
+        self.history.txns.iter().rev().find(|txn| predicate(txn)).map(|txn| txn.id)
     }
 
-    pub fn entries(&self) -> &BTreeMap<String, Entry> {
+    pub fn entries(&self) -> &Entries {
         &self.entries
     }
 
@@ -150,24 +258,24 @@ impl Store {
     }
 
     pub fn get(&self, key: &str) -> Option<&Entry> {
-        self.entries.get(key)
+        self.entries.get(key).map(|entry|entry.as_ref())
     }
 
-    pub fn history(&self, limit: usize) -> Vec<Txn> {
-        self.history.iter().rev().take(limit).cloned().collect()
+    pub fn history(&self, limit: usize) -> Vec<std::sync::Arc<Txn>> {
+        self.history.txns.iter().rev().take(limit).cloned().collect()
     }
 
     /// Validate and durably apply a transaction. See the module header for the post-rename
     /// `durability_unconfirmed` exception: the transaction is adopted, not safe to retry.
-    pub fn apply(&mut self, author: &str, note: Option<String>, ops: Vec<Op>) -> Result<Txn, RpcError> {
+    pub fn apply(&mut self, author: &str, note: Option<String>, ops: Vec<Op>) -> Result<std::sync::Arc<Txn>, RpcError> {
         self.apply_attributed(author, None, note, ops)
     }
 
-    pub fn apply_attributed(&mut self, author: &str, on_behalf_of: Option<&str>, note: Option<String>, ops: Vec<Op>) -> Result<Txn, RpcError> {
+    pub fn apply_attributed(&mut self, author: &str, on_behalf_of: Option<&str>, note: Option<String>, ops: Vec<Op>) -> Result<std::sync::Arc<Txn>, RpcError> {
         self.apply_inner(author, on_behalf_of, note, None, ops)
     }
 
-    fn apply_inner(&mut self, author: &str, on_behalf_of: Option<&str>, note: Option<String>, reverts: Option<u64>, ops: Vec<Op>) -> Result<Txn, RpcError> {
+    fn apply_inner(&mut self, author: &str, on_behalf_of: Option<&str>, note: Option<String>, reverts: Option<u64>, ops: Vec<Op>) -> Result<std::sync::Arc<Txn>, RpcError> {
         let writer = self.writer.clone();
         self.apply_with_writer(author, on_behalf_of, note, reverts, ops, |path, bytes| writer(path, bytes))
     }
@@ -175,13 +283,14 @@ impl Store {
     fn apply_with_writer(
         &mut self, author: &str, on_behalf_of: Option<&str>, note: Option<String>, reverts: Option<u64>, ops: Vec<Op>,
         write: impl FnOnce(&Path, &[u8]) -> Result<(), AtomicWriteError>,
-    ) -> Result<Txn, RpcError> {
+    ) -> Result<std::sync::Arc<Txn>, RpcError> {
+        validate_note(note.as_deref())?;
         if ops.is_empty() {
             return Err(RpcError::invalid("empty transaction"));
         }
         let mut next = self.entries.as_ref().clone();
         let mut rev = self.rev;
-        let mut touched: BTreeMap<String, Option<Entry>> = BTreeMap::new();
+        let mut touched: BTreeMap<String, Option<SharedEntry>> = BTreeMap::new();
         for op in ops {
             let (key, expect) = match &op {
                 Op::Set { key, expect, .. } | Op::Delete { key, expect } => (key.clone(), *expect),
@@ -197,7 +306,7 @@ impl Store {
                 Op::Set { value, .. } => {
                     validate_entry(&key, &value)?;
                     rev += 1;
-                    next.insert(key, Entry { version: rev, value });
+                    next.insert(key, std::sync::Arc::new(Entry { version: rev, value }));
                 }
                 Op::Delete { .. } => {
                     next.remove(&key);
@@ -221,18 +330,15 @@ impl Store {
 
         let changes: Vec<Change> = touched
             .into_iter()
-            .map(|(key, before)| Change { after: next.get(&key).cloned(), key, before })
-            .filter(|c| c.before != c.after)
+            .map(|(key, before)| Change { after_version: next.get(&key).map(|entry|entry.version), key, before })
+            .filter(|change| change.before.as_ref().map(|entry|entry.version) != change.after_version)
             .collect();
-        let txn = Txn { id: self.next_txn, author: author.to_string(), on_behalf_of:on_behalf_of.map(String::from), at_ms: now_ms(), note, reverts, changes };
+        let txn = retained_txn(Txn { id: self.next_txn, author: author.to_string(), on_behalf_of:on_behalf_of.map(String::from), at_ms: now_ms(), note, reverts, changes, undoable:true, encoded_bytes:0, revert_bytes:0 },false)?;
         let mut candidate = Persisted { rev, next_txn: self.next_txn + 1, entries: next, history: self.history.as_ref().clone() };
-        candidate.history.push_back(txn.clone());
-        while candidate.history.len() > HISTORY {
-            candidate.history.pop_front();
-        }
+        candidate.history.push(txn.clone());
         let mut uncertain = None;
         if let Some(path) = &self.path {
-            let bytes = serde_json::to_vec_pretty(&candidate).map_err(|e| RpcError::new("io", format!("could not serialize workspace: {e}")))?;
+            let bytes = serde_json::to_vec(&candidate).map_err(|e| RpcError::new("io", format!("could not serialize workspace: {e}")))?;
             if let Err(e) = write(path, &bytes) {
                 if !e.renamed {
                     return Err(RpcError::new("io", format!("could not persist workspace: {e}")));
@@ -253,20 +359,26 @@ impl Store {
     }
 
     /// Undo a transaction with a new one. Fails with `conflict` if any entry it touched has changed since.
-    pub fn revert(&mut self, author: &str, txn_id: u64) -> Result<Txn, RpcError> {
+    pub fn revert(&mut self, author: &str, txn_id: u64) -> Result<std::sync::Arc<Txn>, RpcError> {
         self.revert_attributed(author, None, txn_id)
     }
 
-    pub fn revert_attributed(&mut self, author: &str, on_behalf_of: Option<&str>, txn_id: u64) -> Result<Txn, RpcError> {
+    pub fn revert_attributed(&mut self, author: &str, on_behalf_of: Option<&str>, txn_id: u64) -> Result<std::sync::Arc<Txn>, RpcError> {
         let txn = self
-            .history
+            .history.txns
             .iter()
             .find(|t| t.id == txn_id)
             .cloned()
             .ok_or_else(|| RpcError::new("not_found", format!("no transaction {txn_id} in history")))?;
+        if !txn.undoable {
+            let mut error=RpcError::new("unavailable",format!("transaction {txn_id} exceeds the undo history byte horizon; undo data not retained"));
+            let data=error.data.as_mut().unwrap();
+            data["outcome"]=json!("rejected");data["txn"]=json!(txn_id);data["undoable"]=json!(false);
+            return Err(error);
+        }
         let mut ops = Vec::new();
         for c in &txn.changes {
-            let expect = Some(c.after.as_ref().map(|e| e.version).unwrap_or(0));
+            let expect = Some(c.after_version.unwrap_or(0));
             ops.push(match &c.before {
                 Some(b) => Op::Set { key: c.key.clone(), value: b.value.clone(), expect },
                 None => Op::Delete { key: c.key.clone(), expect },
@@ -443,7 +555,7 @@ fn validate_node(key: &str, n: &Value, depth: usize) -> Result<(), RpcError> {
 }
 
 /// Cross-entry consistency: layouts only reference existing views, the active layout exists.
-fn validate_references(entries: &BTreeMap<String, Entry>) -> Result<(), RpcError> {
+fn validate_references(entries: &Entries) -> Result<(), RpcError> {
     for (key, e) in entries.range("layout/".to_string()..) {
         if !key.starts_with("layout/") {
             break;
