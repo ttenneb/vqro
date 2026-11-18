@@ -102,6 +102,7 @@ pub struct Peer {
     large: queue::Sender<Outbound>,
     large_bytes: Arc<AtomicUsize>,
     record_limit: Arc<AtomicUsize>,
+    read_ended: Arc<AtomicBool>,
     shutdown: watch::Sender<bool>,
     pending: Pending,
     next_id: Arc<AtomicU64>,
@@ -183,12 +184,25 @@ impl Peer {
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
     {
+        Self::spawn_transport(reader,writer,false)
+    }
+
+    /// A serving application drains already-read requests and explicitly closes after flushing replies.
+    /// Clean read EOF alone does not revoke its still-writable response half.
+    pub(crate) fn spawn_serving<R,W>(reader:R,writer:W)->(Peer,IncomingReceiver)
+    where R:AsyncRead+Unpin+Send+'static,W:AsyncWrite+Unpin+Send+'static {
+        Self::spawn_transport(reader,writer,true)
+    }
+
+    fn spawn_transport<R,W>(reader:R,writer:W,drain_read_eof:bool)->(Peer,IncomingReceiver)
+    where R:AsyncRead+Unpin+Send+'static,W:AsyncWrite+Unpin+Send+'static {
         let (control, mut control_rx) = queue::channel::<Outbound>(OUTBOUND_BYTES - STREAM_OUTBOUND_BYTES);
         let (data, mut data_rx) = queue::channel::<Outbound>(STREAM_OUTBOUND_BYTES);
         // The large slot charges one item, with actual bytes tracked separately through writing.
         let (large, mut large_rx) = queue::channel::<Outbound>(64);
         let large_bytes = Arc::new(AtomicUsize::new(0));
         let record_limit = Arc::new(AtomicUsize::new(LARGE_REPLY_BYTES));
+        let read_ended=Arc::new(AtomicBool::new(false));
         let (in_tx, in_rx) = queue::channel::<Incoming>(INBOUND_BYTES);
         let response_budget = Arc::new(Semaphore::new(INBOUND_BYTES));
         let large_response = Arc::new(Semaphore::new(1));
@@ -229,12 +243,14 @@ impl Peer {
 
         let pend = pending.clone();
         let limit = record_limit.clone();
+        let ended=read_ended.clone();
         let (stop, mut stopped) = (shutdown.clone(), shutdown.subscribe());
         tokio::spawn(async move {
             let mut reader = BufReader::new(reader);
+            let mut clean_eof=false;
             loop {
                 let line = tokio::select! {
-                    line = read_record(&mut reader, &limit) => match line { Ok(Some(line)) => line, _ => break },
+                    line = read_record(&mut reader, &limit) => match line { Ok(Some(line)) => line, Ok(None)=>{clean_eof=true;break}, Err(_)=>break },
                     _ = stopped.changed() => break,
                 };
                 let bytes = line.len();
@@ -261,15 +277,16 @@ impl Peer {
                     let _ = tx.send(PendingReply { result, _permit: Some(permit) });
                 }
             }
-            stop.send_replace(true);
-            // Connection over: fail everything still waiting.
+            ended.store(true,Ordering::Release);
+            if !drain_read_eof || !clean_eof {stop.send_replace(true);}
+            // No further response can arrive, even if the serving side can still send replies.
             for (_, tx) in pend.lock().unwrap().drain() {
                 let _ = tx.send(PendingReply { result: Err(RpcError::new("disconnected", "connection closed")), _permit: None });
             }
         });
 
         let incoming = IncomingReceiver { rx: in_rx, limit: record_limit.clone(), shutdown: shutdown.clone(), closed: false };
-        (Peer { control, data, large, large_bytes, record_limit, shutdown, pending, next_id: Arc::new(AtomicU64::new(1)) }, incoming)
+        (Peer { control, data, large, large_bytes, record_limit, read_ended, shutdown, pending, next_id: Arc::new(AtomicU64::new(1)) }, incoming)
     }
 
     pub async fn call(&self, method: &str, params: Value) -> RpcResult {
@@ -281,6 +298,7 @@ impl Peer {
         let (tx, rx) = oneshot::channel();
         {
             let mut pending = self.pending.lock().unwrap();
+            if self.read_ended.load(Ordering::Acquire) {return Err(RpcError::new("disconnected","request input ended; peer cannot answer a new call"));}
             if pending.len() >= MAX_PENDING_CALLS { return Err(RpcError::new("overloaded", "pending call limit; request not sent")); }
             pending.insert(id, tx);
         }
@@ -396,6 +414,19 @@ impl Peer {
 mod tests {
     use super::*;
     use tokio::io::AsyncBufReadExt;
+
+    #[tokio::test]
+    async fn serving_read_eof_keeps_replies_writable_but_refuses_new_callbacks() {
+        let(raw,serving)=tokio::io::duplex(4096);let(r,w)=tokio::io::split(serving);
+        let(peer,mut incoming)=Peer::spawn_serving(r,w);let(r,mut w)=tokio::io::split(raw);
+        w.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"work\"}\n").await.unwrap();w.shutdown().await.unwrap();
+        let Some(Incoming::Request{id,..})=incoming.recv().await else{panic!("missing request")};
+        assert!(incoming.recv().await.is_none());assert!(!peer.is_closed());
+        assert_eq!(peer.call("callback",Value::Null).await.unwrap_err().kind(),"disconnected");
+        peer.respond_flushed(id,Ok(json!(42))).await.unwrap();
+        let mut r=BufReader::new(r);let mut line=String::new();r.read_line(&mut line).await.unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&line).unwrap()["result"],42);peer.close();
+    }
 
     #[tokio::test]
     async fn stalled_writer_is_byte_bounded_and_keeps_room_for_explicit_close() {

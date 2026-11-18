@@ -182,7 +182,7 @@ pub async fn serve(core: Shared, listener: UnixListener) -> anyhow::Result<()> {
         let _ = socket2::SockRef::from(&stream).set_send_buffer_size(CONNECTION_SEND_BUFFER);
         let id = next.fetch_add(1, Ordering::Relaxed);
         let (r, w) = stream.into_split();
-        let (peer, incoming) = Peer::spawn(r, w);
+        let (peer, incoming) = Peer::spawn_serving(r, w);
         let mutations=Arc::new(tokio::sync::Semaphore::new(crate::rpc::MAX_PENDING_CALLS));
         peers.insert(id,(peer.clone(),mutations.clone()));
         let conn = Arc::new(Conn {
@@ -243,7 +243,10 @@ pub async fn shutdown(core: &Shared) {
 }
 
 async fn connection(core: Shared, conn: Arc<Conn>, mut incoming: crate::rpc::IncomingReceiver) {
+    let mut tasks=tokio::task::JoinSet::new();
     while let Some(msg) = incoming.recv().await {
+        // Reap finished handlers continuously; a long-lived connection cannot accumulate task results.
+        while tasks.try_join_next().is_some() {}
         match msg {
             // Provider lifecycle and fact messages stay ordered on their connection. Native
             // replies are read independently by Peer, so a pending host-token wait cannot block it.
@@ -278,7 +281,7 @@ async fn connection(core: Shared, conn: Arc<Conn>, mut incoming: crate::rpc::Inc
                     continue;
                 };
                 let (core, conn) = (core.clone(), conn.clone());
-                tokio::spawn(async move {
+                tasks.spawn(async move {
                     let _permit = permit;
                     let stopping = method == "core.shutdown" || (method == "command.invoke" && params["name"] == "prim.shutdown");
                     let mutation=matches!(method.as_str(),"workspace.apply"|"workspace.revert") || (method=="command.invoke" && matches!(params["name"].as_str(),Some("prim.revert"|"prim.layout.reset"|"prim.extension.enable"|"prim.extension.disable")));
@@ -301,6 +304,11 @@ async fn connection(core: Shared, conn: Arc<Conn>, mut incoming: crate::rpc::Inc
             Incoming::Notification { .. } => {}
         }
     }
+    // Clean input EOF is a half-close. Finish already-read work and flush its replies before
+    // revoking the writable half. Real write failure remains indeterminate, never replayed.
+    while tasks.join_next().await.is_some() {}
+    let _=conn.peer.flush_control().await;
+    conn.peer.close();
     // Disconnected: invalidate provider routes before closing its viewer streams and commands.
     conn.wire.disconnect(&core);
     for (_, s) in conn.streams.lock().unwrap().drain() {
