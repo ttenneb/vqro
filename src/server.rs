@@ -477,6 +477,7 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> Rp
             }).await?;
             Ok(json!({"outcome": result.outcome, "effect": effect, "backend": result.data.take()}))
         }
+        "resource.forget" => forget(core, &conn.author(), p).await,
         "resource.attach" => attach(core, conn, params(p)?).await,
         "resource.invoke" => invoke_resource(core, &conn.author(), p).await,
         "command.register" => {
@@ -708,6 +709,7 @@ async fn invoke_resource(core: &Shared, author: &str, p: Value) -> RpcResult {
     let id = p["resource"].as_str().ok_or_else(|| RpcError::invalid("needs resource"))?;
     let op = p["op"].as_str().ok_or_else(|| RpcError::invalid("needs op"))?.to_string();
     if op == "terminal.spawn" { return Err(provider::rejected("invalid", "terminal.spawn has no target; use resource.spawn")); }
+    if op == "resource.forget" { return Err(provider::rejected("invalid", "use resource.forget (it checks the resource finished and retires its id)")); }
     let args = p.get("args").cloned().unwrap_or_else(|| json!({}));
     if !args.is_object() { return Err(RpcError::invalid("args must be an object")); }
     let route = core.lock().unwrap().resource_route(id, &op)?;
@@ -721,6 +723,35 @@ async fn invoke_resource(core: &Shared, author: &str, p: Value) -> RpcResult {
         let mut result = handle.for_effect(context).invoke(op, reference, incarnation, args).await.map_err(|e| e.rpc())?;
         if !operation.valid() { return Err(provider::indeterminate("provider changed before effect result was recorded")); }
         if let Some(facts) = result.facts.take() { c.lock().unwrap().upsert_resource(&operation.handle.name, facts)?; }
+        Ok(result)
+    }).await?;
+    Ok(json!({"outcome": result.outcome, "effect": effect, "data": result.data}))
+}
+
+/// Ask the owning backend to release a finished resource, then retire its id (never reused).
+/// Live resources are refused: ending a program is `resource.kill`. Mechanism only: when to
+/// forget is extension policy (`extensions/retention.py`).
+async fn forget(core: &Shared, author: &str, p: Value) -> RpcResult {
+    let id = p["resource"].as_str().ok_or_else(|| RpcError::invalid("needs `resource`"))?;
+    let mut route = {
+        let c = core.lock().unwrap();
+        if c.resource(id)?.facts.state != "finished" {
+            return Err(provider::rejected("invalid", format!("resource {id} is live; end it with resource.kill first")));
+        }
+        c.resource_route(id, "resource.forget")?
+    };
+    // Retirement is this effect's purpose: a `resource.gone` that overtakes the reply must not
+    // turn success into an indeterminate outcome. Provider generation fencing still applies.
+    route.resource = None;
+    let (reference, incarnation) = route.target.clone().unwrap();
+    let (handle, operation, c) = (route.handle.clone(), route.clone(), core.clone());
+    let deadline = provider::deadline(p.get("deadline_ms").map(|v| v.as_u64().ok_or_else(|| RpcError::invalid("deadline_ms must be an unsigned integer"))).transpose()?)?;
+    let (effect, result) = effect(core, author.into(), route, "resource.forget", deadline, |value: &crate::adapter::EffectResult| value.outcome, move |context| async move {
+        let result = handle.for_effect(context).invoke("resource.forget".into(), reference.clone(), incarnation.clone(), json!({})).await.map_err(|e| e.rpc())?;
+        if !operation.valid() { return Err(provider::indeterminate("provider changed before forget result was recorded")); }
+        if result.outcome == "observed" {
+            c.lock().unwrap().on_adapter_event(&operation.handle.name, crate::adapter::AdapterEvent::Removed { reference, incarnation });
+        }
         Ok(result)
     }).await?;
     Ok(json!({"outcome": result.outcome, "effect": effect, "data": result.data}))

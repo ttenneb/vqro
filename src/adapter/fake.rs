@@ -56,7 +56,7 @@ pub fn start(name: String, events: mpsc::UnboundedSender<(String, AdapterEvent)>
 /// Deterministic identity injection for conformance fixtures; ordinary starts always get a new instance.
 pub fn start_with_instance(name: String, instance: String, events: mpsc::UnboundedSender<(String, AdapterEvent)>) -> AdapterHandle {
     let (cmd_tx, mut cmds) = mpsc::unbounded_channel::<AdapterCmd>();
-    let handle = AdapterHandle { name: name.clone(), session: None, context: None, capabilities: json!({"terminal.spawn": {}, "terminal.input": {"stream": true, "effect": false}, "terminal.output": {"raw": true}, "terminal.kill": {}, "terminal.list": {}, "terminal.resize": {}}), cmds: cmd_tx };
+    let handle = AdapterHandle { name: name.clone(), session: None, context: None, capabilities: json!({"terminal.spawn": {}, "terminal.input": {"stream": true, "effect": false}, "terminal.output": {"raw": true}, "terminal.kill": {}, "terminal.list": {}, "terminal.resize": {}, "resource.forget": {}}), cmds: cmd_tx };
     // Status ticks from agent-like terminals come back through the adapter loop, so `terms` stays
     // the one source of truth for facts.
     let (tick_tx, mut ticks) = mpsc::unbounded_channel::<String>();
@@ -116,6 +116,15 @@ pub fn start_with_instance(name: String, instance: String, events: mpsc::Unbound
                     let _ = events.send((name.clone(), AdapterEvent::Upsert(f.clone())));
                     let _ = reply.send(Ok(f));
                 }
+                AdapterCmd::Invoke { op, reference, reply, .. } if op == "resource.forget" => match terms.get(&reference).map(|t| t.facts.state == "finished") {
+                    Some(false) => drop(reply.send(Err(AdapterError::RejectedKind { kind: "invalid".into(), message: format!("terminal {reference} is live") }))),
+                    // Unknown counts as already forgotten: the outcome the caller asked for holds.
+                    _ => {
+                        terms.remove(&reference);
+                        let _ = events.send((name.clone(), AdapterEvent::Removed { reference, incarnation: String::new() }));
+                        let _ = reply.send(Ok(EffectResult { outcome: "observed", data: json!({}), facts: None }));
+                    }
+                },
                 cmd @ AdapterCmd::Invoke { .. } => reject_command(cmd, "operation is not supported by the in-process fake adapter"),
                 AdapterCmd::Kill(r, reply) => match terms.get_mut(&r) {
                     None => drop(reply.send(Err(format!("no terminal {r}").into()))),

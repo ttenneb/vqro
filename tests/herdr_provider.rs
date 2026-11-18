@@ -367,3 +367,41 @@ async fn switching_a_state_dir_from_in_process_herdr_to_prim_herdr_keeps_resourc
     assert_eq!(fresh["resource"]["provider"], "herdr");
     prim::server::shutdown(&core_b).await;
 }
+
+#[tokio::test]
+#[ignore = "requires ~/.local/bin/herdr-core; private core"]
+async fn forget_removes_only_finished_terminals_from_a_private_herdr_core() {
+    let hc = Hc::new();
+    let (mut core, _provider, reg, _) = start(&hc, "f").await;
+    assert!(reg["capabilities"]["resource.forget"].is_object());
+    core.send(json!({"jsonrpc": "2.0", "id": 1, "method": "effect.invoke", "params": {"generation": 5, "effect": "e1",
+        "op": "terminal.spawn", "args": {"argv": ["/bin/sh"]}, "deadline_ms": 10000}})).await;
+    let f = core.until(|m| m["id"] == 1).await["result"]["data"]["facts"].clone();
+    let (term, inc) = (f["ref"].as_str().unwrap().to_string(), f["incarnation"].as_str().unwrap().to_string());
+    core.until(|m| m["method"] == "resource.upsert" && m["params"]["facts"]["ref"] == term.as_str()).await;
+    let forget = |id: u64, effect: &str| json!({"jsonrpc": "2.0", "id": id, "method": "effect.invoke", "params": {"generation": 5, "effect": effect,
+        "op": "resource.forget", "ref": term, "incarnation": inc, "args": {}, "deadline_ms": 10000}});
+
+    core.send(forget(2, "e2")).await;
+    let live = core.until(|m| m["id"] == 2).await;
+    assert_eq!((live["result"]["outcome"].as_str(), live["result"]["error"]["kind"].as_str()), (Some("rejected"), Some("invalid")), "{live}");
+    let listed = |all: &Value| all["terminals"].as_array().map(|t| t.iter().any(|t| t["address"] == term.as_str())).unwrap_or(false);
+    let all = hc.hc(&["ls", "--all"]);
+    assert!(listed(&all), "a live terminal is untouched: {all}");
+
+    core.send(json!({"jsonrpc": "2.0", "id": 3, "method": "effect.invoke", "params": {"generation": 5, "effect": "e3",
+        "op": "terminal.kill", "ref": term, "incarnation": inc, "args": {}, "deadline_ms": 10000}})).await;
+    core.until(|m| m["id"] == 3).await;
+    core.until(|m| m["method"] == "resource.upsert" && m["params"]["facts"]["state"] == "finished").await;
+    assert!(listed(&hc.hc(&["ls", "--all"])), "herdr-core keeps the finished terminal until it is forgotten");
+
+    core.send(forget(4, "e4")).await;
+    let done = core.until(|m| m["id"] == 4).await;
+    assert_eq!(done["result"]["outcome"], "observed", "{done}");
+    let gone = core.until(|m| m["method"] == "resource.gone" && m["params"]["ref"] == term.as_str()).await;
+    assert_eq!(gone["params"]["incarnation"], inc.as_str());
+    assert!(!listed(&hc.hc(&["ls", "--all"])), "herdr-core removed it");
+    // Forgetting again: already gone is the requested outcome.
+    core.send(forget(5, "e5")).await;
+    assert_eq!(core.until(|m| m["id"] == 5).await["result"]["outcome"], "observed");
+}

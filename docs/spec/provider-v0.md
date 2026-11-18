@@ -396,6 +396,13 @@ existing status consumers and partial resource events (`src/events.rs`) work unc
 - **`terminal.kill`**: `ref`, `incarnation`, `args {}`. Result `accepted` (requested) or `observed` (with
   `data.facts` in the finished state). Final facts also arrive as `resource.upsert` (`state: finished`) or
   `resource.gone`; open streams then get `stream.closed`.
+- **`resource.forget`** (capability `resource.forget`): `ref`, `incarnation`, `args {}`. Release a **finished**
+  resource backend-side and stop reporting it. Result `observed` once released (an unknown ref counts as already
+  released); a live resource is `rejected` with `invalid`. The provider also sends `resource.gone` (reason
+  `{reason: "forgotten"}`), which frees its inventory slot; the core retires the id on either signal and never
+  reuses it. The core only dispatches it for resources it holds as finished. A backend that cannot release
+  finished resources does not declare the capability. Bundled: herdr (`terminal.rm`), tmux (exited panes are
+  already deleted; clears the record), fake.
 - Agent ops (`agent.prompt`, `agent.steer`, ...) use `ref`, `args` per runtime; result `accepted` with
   `data.disposition` (Pi: `started` | `queued` | `handled`).
 

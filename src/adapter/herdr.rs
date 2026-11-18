@@ -23,7 +23,7 @@ pub fn capabilities() -> Value {
     json!({
         "terminal.spawn": {"env": true, "cwd": true}, "terminal.input": {"stream": true, "effect": false}, "terminal.output": {"raw": true}, "terminal.resize": {},
         "terminal.kill": {}, "terminal.list": {}, "terminal.exit": {"exit_code": true}, "status.osc7501": {},
-        "persist.detach": {}, "events.resync": {}, "remote.machines": {"listing": true, "terminal_effects": false}
+        "resource.forget": {}, "persist.detach": {}, "events.resync": {}, "remote.machines": {"listing": true, "terminal_effects": false}
     })
 }
 
@@ -47,6 +47,7 @@ enum Pending {
     Refresh(tokio::time::Instant),
     Spawn(Reply<ResourceFacts>),
     Kill(Reply<EffectResult>),
+    Remove(Reply<EffectResult>),
     Attach { reply: Reply<Stream>, history: u32 },
 }
 
@@ -57,7 +58,7 @@ fn prune_pending(pending: &mut HashMap<u64, Pending>, late_attaches: &mut HashSe
         let cancelled = match call {
             Pending::Subscribe | Pending::Refresh(_) => false,
             Pending::Spawn(reply) => reply.is_closed(),
-            Pending::Kill(reply) => reply.is_closed(),
+            Pending::Kill(reply) | Pending::Remove(reply) => reply.is_closed(),
             Pending::Attach { reply, .. } => {
                 if reply.is_closed() { late_attaches.insert(*id); true } else { false }
             }
@@ -223,6 +224,13 @@ async fn session(
                         pending.insert(id, Pending::Spawn(reply));
                         send_frame(&frame_tx, bytes)?;
                     }
+                    AdapterCmd::Invoke { op, reference, reply, .. } if op == "resource.forget" => {
+                        if remote_effect(&reference) { let _ = reply.send(Err(remote_unsupported())); continue; }
+                        // herdr-core removes only finished terminals (`live` error otherwise).
+                        let (id, bytes) = call(&mut next_id, "terminal.rm", json!({"terminal": reference}));
+                        pending.insert(id, Pending::Remove(reply));
+                        send_frame(&frame_tx, bytes)?;
+                    }
                     cmd @ AdapterCmd::Invoke { .. } => reject_command(cmd, "operation is not supported by the in-process herdr adapter"),
                     AdapterCmd::Kill(r, reply) => {
                         if remote_effect(&r) { let _ = reply.send(Err(remote_unsupported())); continue; }
@@ -307,6 +315,16 @@ async fn session(
                             });
                             let _ = reply.send(result);
                         }
+                        Pending::Remove(reply) => {
+                            // `not_found` means it is already gone: the requested outcome holds.
+                            let kind = msg["error"]["data"]["kind"].as_str();
+                            let result = match kind {
+                                Some("live") => Err(AdapterError::RejectedKind { kind: "invalid".into(), message: "terminal is live; herdr-core removed nothing".into() }),
+                                Some("not_found") => Ok(EffectResult { outcome: "observed", data: json!({"removed": null}), facts: None }),
+                                _ => result.map(|r| EffectResult { outcome: "observed", data: r, facts: None }),
+                            };
+                            let _ = reply.send(result);
+                        }
                         Pending::Attach { reply, history } => match result {
                             Err(e) => { let _ = reply.send(Err(e)); }
                             Ok(r) => {
@@ -372,7 +390,7 @@ async fn session(
     for (_, p) in pending.drain() {
         match p {
             Pending::Spawn(r) => drop(r.send(Err(AdapterError::Indeterminate("herdr-core disconnected".into())))),
-            Pending::Kill(r) => drop(r.send(Err(AdapterError::Indeterminate("herdr-core disconnected".into())))),
+            Pending::Kill(r) | Pending::Remove(r) => drop(r.send(Err(AdapterError::Indeterminate("herdr-core disconnected".into())))),
             Pending::Attach { reply, .. } => drop(reply.send(Err(AdapterError::Indeterminate("herdr-core disconnected".into())))),
             Pending::Subscribe | Pending::Refresh(_) => {}
         }

@@ -11,7 +11,8 @@
 //!   closed (the core marks the provider disconnected); when the adapter reconnects, the provider
 //!   registers again (new generation) and sends a full sync. Nothing is resent.
 //! - Effects: `terminal.spawn` (argv, cwd, name, env, cols, rows, placement) and
-//!   `terminal.kill` (observed with finished facts when herdr-core's reply says finished). herdr-core error replies and lost replies are `backend` errors (outcome unknown),
+//!   `terminal.kill` (observed with finished facts when herdr-core's reply says finished),
+//!   `resource.forget` (herdr-core `terminal.rm` of a finished terminal, then `resource.gone`). herdr-core error replies and lost replies are `backend` errors (outcome unknown),
 //!   as the in-process core treats them.
 //! - Streams: herdr-core attach channels with backend history as initial data. Credit goes back to
 //!   herdr-core only after `provider_client` has sent the bytes within the core's window.
@@ -62,6 +63,7 @@ fn capabilities() -> Map<String, Value> {
         "terminal.output": {"raw": true, "history": true, "repaint": "none"},
         "terminal.resize": {"owner": "latest_viewer"},
         "terminal.kill": {},
+        "resource.forget": {},
         "terminal.list": {},
         "terminal.exit": {"exit_code": true},
         "status.osc7501": {"stored": true, "lossy": false},
@@ -103,6 +105,7 @@ async fn effect(handle: AdapterHandle, known: Known, provider: Provider, e: Effe
     let result = match e.op.as_str() {
         "terminal.spawn" => spawn(&handle, &known, &e.args).await,
         "terminal.kill" => kill(&handle, &known, &provider, e.r#ref.clone().unwrap_or_default(), &e.incarnation).await,
+        "resource.forget" => forget(&handle, &known, &provider, e.r#ref.clone().unwrap_or_default(), &e.incarnation).await,
         other => Err(ProviderError::new("unsupported", format!("op {other} is not served"))),
     };
     e.respond(result);
@@ -125,6 +128,26 @@ async fn kill(handle: &AdapterHandle, known: &Known, provider: &Provider, r: Str
         return Ok(Outcome::Observed(Some(json!({"facts": f}))));
     }
     Ok(Outcome::Accepted(Some(json!({"backend": reply}))))
+}
+
+/// herdr-core `terminal.rm`: only a finished terminal, and only the incarnation the core named.
+/// The `gone` is sent here too, so the core's inventory frees the slot even if herdr-core's own
+/// `removed` event is late or missing (a second `gone` is a no-op).
+async fn forget(handle: &AdapterHandle, known: &Known, provider: &Provider, r: String, incarnation: &str) -> Result<Outcome, ProviderError> {
+    let current = known.lock().unwrap().get(&r).cloned();
+    match current {
+        Some(f) if f["incarnation"].as_str() != Some(incarnation) => return Err(ProviderError::new("not_found", format!("no terminal {r} with incarnation {incarnation:?}"))),
+        Some(f) if f["state"] != "finished" => return Ok(Outcome::Rejected { kind: "invalid".into(), message: format!("terminal {r} is live; kill it first") }),
+        _ => {}
+    }
+    match handle.invoke("resource.forget".into(), r.clone(), incarnation.into(), json!({})).await {
+        Ok(_) => {}
+        Err(adapter::AdapterError::RejectedKind { kind, message }) => return Ok(Outcome::Rejected { kind, message }),
+        Err(e) => return Err(unknown(e)),
+    }
+    known.lock().unwrap().remove(&r);
+    let _ = provider.gone(&r, incarnation, json!({"reason": "forgotten"})).await;
+    Ok(Outcome::Observed(None))
 }
 
 async fn spawn(handle: &AdapterHandle, known: &Known, args: &Value) -> Result<Outcome, ProviderError> {

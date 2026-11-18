@@ -394,6 +394,7 @@ impl App {
         let result = match e.op.as_str() {
             "terminal.spawn" => self.spawn(&e.args).await,
             "terminal.kill" => self.kill(e.r#ref.as_deref(), &e.incarnation).await,
+            "resource.forget" => self.forget(e.r#ref.as_deref(), &e.incarnation).await,
             other => Err(ProviderError::new("unsupported", format!("op {other} is not served"))),
         };
         e.respond(result);
@@ -453,6 +454,18 @@ impl App {
             None => Ok(Outcome::Observed(Some(json!({"facts": {"ref": pane, "incarnation": "", "kind": "terminal", "state": "finished",
                 "exit": {"reason": "exited"}}})))),
         }
+    }
+
+    /// tmux deletes exited panes itself (they become `gone`), so nothing backend-side is retained.
+    /// Forget only clears a finished record the core still holds (e.g. kill facts that arrived after
+    /// the pane's `gone`). A pane tmux still lists is live: refuse.
+    async fn forget(self: &Arc<Self>, pane: Option<&str>, incarnation: &str) -> Result<Outcome, ProviderError> {
+        let pane = pane.ok_or_else(|| ProviderError::new("invalid", "forget needs ref"))?;
+        if incarnation.is_empty() && self.state.lock().unwrap().panes.contains_key(pane) {
+            return Ok(Outcome::Rejected { kind: "invalid".into(), message: format!("pane {pane} is live; kill it first") });
+        }
+        self.provider.gone(pane, incarnation, json!({"reason": "forgotten"})).await.map_err(|e| ProviderError::new("unavailable", e.to_string()))?;
+        Ok(Outcome::Observed(None))
     }
 
     async fn kill(self: &Arc<Self>, pane: Option<&str>, incarnation: &str) -> Result<Outcome, ProviderError> {
@@ -634,6 +647,7 @@ fn capabilities() -> Map<String, Value> {
         "terminal.output": {"raw": true, "history": false, "repaint": "screen", "lossy_when_paused": true},
         "terminal.resize": {"owner": "latest_viewer"},
         "terminal.kill": {},
+        "resource.forget": {},
         "terminal.exit": {"exit_code": false},
         "status.osc7501": {"stored": false, "lossy": true},
         "layout.native": {},

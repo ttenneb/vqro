@@ -211,6 +211,12 @@ async fn registers_syncs_spawns_streams_status_and_kills_on_real_tmux() {
     let status = core.until(|m| m["method"] == "resource.upsert" && m["params"]["facts"]["status"]["state"] == "working").await;
     assert_eq!(status["params"]["facts"]["ref"], pane.as_str());
 
+    // Forget refuses a pane tmux still lists: that is kill's job.
+    core.send(json!({"jsonrpc": "2.0", "id": 25, "method": "effect.invoke", "params": {"generation": 3, "effect": "e5",
+        "op": "resource.forget", "ref": pane, "incarnation": "", "args": {}, "deadline_ms": 10000}})).await;
+    let r = core.until(|m| m["id"] == 25).await;
+    assert_eq!((r["result"]["outcome"].as_str(), r["result"]["error"]["kind"].as_str()), (Some("rejected"), Some("invalid")), "{r}");
+
     // Kill: observed finished, the open stream closes, the resource goes with reason killed.
     core.send(json!({"jsonrpc": "2.0", "id": 30, "method": "effect.invoke", "params": {"generation": 3, "effect": "e2",
         "op": "terminal.kill", "ref": pane, "incarnation": "", "args": {}, "deadline_ms": 10000}})).await;
@@ -220,6 +226,12 @@ async fn registers_syncs_spawns_streams_status_and_kills_on_real_tmux() {
     assert_eq!(closed["params"]["stream"], 1);
     let gone = core.until(|m| m["method"] == "resource.gone").await;
     assert_eq!((gone["params"]["ref"].as_str(), gone["params"]["reason"]["reason"].as_str()), (Some(pane.as_str()), Some("killed")));
+    // tmux already deleted it; forgetting a record the core may still hold is observed and gone again.
+    core.send(json!({"jsonrpc": "2.0", "id": 35, "method": "effect.invoke", "params": {"generation": 3, "effect": "e6",
+        "op": "resource.forget", "ref": pane, "incarnation": "", "args": {}, "deadline_ms": 10000}})).await;
+    assert_eq!(core.until(|m| m["id"] == 35).await["result"]["outcome"], "observed");
+    let gone = core.until(|m| m["method"] == "resource.gone").await;
+    assert_eq!(gone["params"]["reason"]["reason"], "forgotten");
 
     // Unknown pane: not_found, no effect.
     core.send(json!({"jsonrpc": "2.0", "id": 40, "method": "stream.open", "params": {"generation": 3, "stream": 2, "ref": pane,
