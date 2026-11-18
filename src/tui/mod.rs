@@ -187,7 +187,7 @@ enum Msg {
     FocusView(String),
     /// A stream's ordered input sender found its queue empty after `n` items: if nothing was queued
     /// since, its input can go direct again.
-    InputIdle(u64, u64),
+    InputIdle(String, u64),
 }
 
 /// Where things were drawn last frame, for mouse hit-testing.
@@ -260,7 +260,10 @@ struct App {
     /// A popup waiting under a menu, prompt or picker opened from it; it comes back when that closes.
     under: Option<Overlay>,
     /// Streams with a paste in progress: all their input goes through this ordered sender until idle.
-    input_queues: HashMap<u64, (mpsc::UnboundedSender<Vec<u8>>, u64)>,
+    input_queues: HashMap<String, (mpsc::UnboundedSender<Vec<u8>>, u64)>,
+    /// Each terminal view's current stream, shared with paste senders so a paste interrupted by a
+    /// reattach (a gap ends a stream) continues on the view's new stream.
+    view_streams: Arc<Mutex<HashMap<String, u64>>>,
     /// The pane shown alone (`client.zoom`): this window's presentation only, never workspace state.
     zoomed: Option<String>,
     /// Focus this view on the next draw (after leaving zoom the leaves are recomputed).
@@ -507,7 +510,7 @@ impl App {
             leaves: Vec::new(), focus: 0, overlay: None, pstate: HashMap::new(),
             filtering: None, toast: None, live: HashMap::new(), panel_values: Mutex::new(HashMap::new()), hit: Hit::default(),
             drag: None, overrides: HashMap::new(), mouse_owner: None, mouse_on: true,
-            under: None, input_queues: HashMap::new(), zoomed: None, pending_focus: None, kbd_enhance: false,
+            under: None, input_queues: HashMap::new(), view_streams: Arc::default(), zoomed: None, pending_focus: None, kbd_enhance: false,
             held: KeyModifiers::NONE, message: "click prim or press Ctrl-g for the menu".into(),
             quit: false, connected: true, connection: 0, epoch: String::new(), seq: 0,
             generation: 0, resyncing: false, buffered: Vec::new(), buffered_bytes: 0, recovery_only: false, retry_snapshot: None,
@@ -816,11 +819,11 @@ impl App {
                 self.zoomed = None;
                 self.pending_focus = Some(view);
             }
-            Msg::InputIdle(sid, done) => {
+            Msg::InputIdle(view, done) => {
                 // Everything queued was sent: dropping the sender ends the task, and input goes direct
                 // again without overtaking anything.
-                if self.input_queues.get(&sid).is_some_and(|(_, queued)| *queued == done) {
-                    self.input_queues.remove(&sid);
+                if self.input_queues.get(&view).is_some_and(|(_, queued)| *queued == done) {
+                    self.input_queues.remove(&view);
                 }
             }
             Msg::ClosePopup => {
@@ -859,6 +862,7 @@ impl App {
                             t.stream = Some(sid);
                             t.retry_at = None;
                             t.closed = None;
+                            self.view_streams.lock().unwrap().insert(view.clone(), sid);
                             self.stream_view.insert(sid, view);
                             for bytes in self.early.remove(&sid).unwrap_or_default() {
                                 t.feed(&bytes);
@@ -913,12 +917,13 @@ impl App {
     /// Input for a stream, in order. Direct, unless a paste is still being sent on that stream: then
     /// it queues behind the paste so keys never overtake it.
     fn send_input(&mut self, sid: u64, bytes: Vec<u8>) {
-        if let Some((tx, queued)) = self.input_queues.get_mut(&sid) {
+        let view = self.stream_view.get(&sid).cloned().unwrap_or_default();
+        if let Some((tx, queued)) = self.input_queues.get_mut(&view) {
             if tx.send(bytes.clone()).is_ok() {
                 *queued += 1;
                 return;
             }
-            self.input_queues.remove(&sid);
+            self.input_queues.remove(&view);
         }
         self.peer.notify("stream.input", json!({"stream": sid, "data": B64.encode(bytes)}));
     }
@@ -941,21 +946,22 @@ impl App {
             return;
         }
         // Small, or behind a paste still being sent (the queue chunks it): the ordinary path.
-        if bytes.len() <= PASTE_CHUNK || self.input_queues.contains_key(&sid) {
+        if bytes.len() <= PASTE_CHUNK || self.input_queues.contains_key(&view) {
             return self.send_input(sid, bytes);
         }
         let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
         let total = bytes.len();
         let _ = tx.send(bytes);
-        self.input_queues.insert(sid, (tx, 1));
-        let (peer, msgs) = (self.peer.clone(), self.tx.clone());
+        self.input_queues.insert(view.clone(), (tx, 1));
+        let (peer, msgs, streams) = (self.peer.clone(), self.tx.clone(), self.view_streams.clone());
         tokio::spawn(async move {
             let mut done: u64 = 0;
+            let mut sid = sid;
             loop {
                 let item = match rx.try_recv() {
                     Ok(item) => item,
                     Err(mpsc::error::TryRecvError::Empty) => {
-                        let _ = msgs.send(Msg::InputIdle(sid, done));
+                        let _ = msgs.send(Msg::InputIdle(view.clone(), done));
                         match rx.recv().await {
                             Some(item) => item,
                             None => break,
@@ -975,6 +981,15 @@ impl App {
                             // A full input queue rejects without effect: wait and offer the same chunk again.
                             Err(e) if e.kind() == "overloaded" && started.elapsed() < PASTE_STALL => {
                                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                            }
+                            // The stream ended (a gap or slow-viewer close) before this chunk was taken:
+                            // refused, so it had no effect. Continue with it on the view's reattached
+                            // stream; chunks already taken are never sent again.
+                            Err(e) if matches!(e.kind(), "not_found" | "unavailable") && started.elapsed() < PASTE_STALL => {
+                                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                                if let Some(next) = streams.lock().unwrap().get(&view).copied().filter(|n| *n != sid) {
+                                    sid = next;
+                                }
                             }
                             Err(e) => {
                                 failed = true;

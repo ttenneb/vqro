@@ -314,7 +314,10 @@ pane enabled bracketed paste (DECSET 2004, tracked by the client's emulator), ra
 pasted text are removed so a paste can't end its bracket early. The Rust TUI sends a paste over 64 KiB as ordered
 `stream.input` requests of at most 64 KiB, the markers once around the whole paste, each request answered before
 the next. A chunk refused with `overloaded` had no effect and is offered again (for up to 30 s); any other error
-stops the paste with a message saying how many of its bytes were sent, and nothing more is sent or resent. Keys
+stops the paste with a message saying how many of its bytes were sent, and nothing more is sent or resent. If the
+stream ends meanwhile (a slow viewer's gap ends a stream; the TUI reattaches), the chunk refused with `not_found` or
+`unavailable` had no effect and is sent on the view's new stream, continuing from there; chunks already accepted
+are never sent again, and the provider still delivers them (provider-v0 9.5, gaps end output, not input). Keys
 typed meanwhile queue behind the paste. The largest paste is **4 MiB** (after markers); a larger one is refused
 whole with a message and nothing is sent. Providers must accept any 64 KiB input message: prim-tmux splits it into
 `send-keys -H` commands of at most 2 KiB (tmux's command parser fails above about 8 000 arguments) and writes input
