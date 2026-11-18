@@ -112,13 +112,15 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.extra_cores = []
         self.extra_sockets = []
 
-    async def start(self, token="bootstrap-once", ready=True, transcript_bytes=16384, connector=None, interval=.1):
+    async def start(self, token="bootstrap-once", ready=True, transcript_bytes=16384, connector=None, interval=.1,
+                    env_extra=None, fixture_args=()):
         provider = Provider("pi-test", "one-process", CAPABILITIES, role="runtime", token=token,
                             limits=Limits(deadline=1))
         env = {"HOME": self.root.name, "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8",
                "HERDR_SOCKET_PATH": "must-not-inherit", "PRIM_BRIDGE_TOKEN": token,
                "PRIM_EXTENSION_LIFETIME": "stdin", "PRIM_EXTENSION": "wrong-parent"}
-        self.bridge = Bridge([sys.executable, str(ROOT / "tests/fixtures/fake_pi.py")],
+        env.update(env_extra or {})
+        self.bridge = Bridge([sys.executable, str(ROOT / "tests/fixtures/fake_pi.py"), *fixture_args],
                              cwd=self.root.name, env=env, token=token, sock=self.sock,
                              provider=provider, fallback=self.frames, interval=interval,
                              transcript_bytes=transcript_bytes, pi_limits=PiLimits(deadline=.5),
@@ -306,6 +308,20 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 await core.close()
             server.close()
             await asyncio.wait_for(server.wait_closed(), 1)
+
+    async def test_runtime_environment_preserves_user_path_but_not_bridge_imports_or_supervision(self):
+        user=Path(self.root.name)/"user-modules";user.mkdir()
+        capture=Path(self.root.name)/"child-env.json"
+        bridge=await self.start(env_extra={"PYTHONPATH":os.pathsep.join([str(ROOT/"extensions"),str(user)]),
+            "PRIM_SOCKET":"private-terminal-endpoint","PRIM_STATE_DIR":"core-only","PRIM_EXTENSIONS_DIR":"core-only",
+            "PRIM_EXTENSION_TOKEN":"supervised-secret","PRIM_OTHER_INTERNAL":"core-only"},fixture_args=("--env-file",str(capture)))
+        record=json.loads(capture.read_text());child=record["env"]
+        self.assertEqual(child.get("PYTHONPATH"),str(user))
+        self.assertIsNone(record["settings"],"agent tools must not discover prim's settings extension")
+        self.assertEqual({k for k in child if k.startswith("PRIM_")},{"PRIM_SOCKET","PRIM_SOCKET_SOURCE"})
+        self.assertEqual(child["PRIM_SOCKET_SOURCE"],"terminal")
+        self.assertEqual(child["PRIM_SOCKET"],"private-terminal-endpoint")
+        self.assertFalse(any(k.startswith("HERDR_") for k in child))
 
     async def test_register_token_host_view_and_no_secret_in_child_environment(self):
         bridge = await self.start()

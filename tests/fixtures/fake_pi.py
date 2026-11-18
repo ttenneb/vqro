@@ -33,6 +33,12 @@ def trace(record):
             os.close(fd)
 
 
+if "--env-file" in sys.argv:
+    import importlib.util
+    settings=importlib.util.find_spec("settings")
+    with open(sys.argv[sys.argv.index("--env-file")+1],"w") as output:
+        json.dump({"env":dict(os.environ),"settings":settings.origin if settings else None},output)
+
 trace({"pid": os.getpid(), "bootstrap_in_child": "PRIM_BRIDGE_TOKEN" in os.environ,
        "herdr_in_child": any(key.startswith("HERDR_") for key in os.environ)})
 

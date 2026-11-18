@@ -2,6 +2,8 @@
 import asyncio
 import json
 import math
+import os
+from pathlib import Path
 import re
 import random
 import uuid
@@ -32,8 +34,25 @@ class Bridge:
         if not isinstance(interval, (int, float)) or not math.isfinite(interval) or interval < .1:
             raise ValueError("publication interval must be finite and at least 0.1 seconds")
         self.argv, self.cwd = list(argv), cwd
+        # Pi/tools receive only the terminal endpoint, not bridge/supervisor credentials or
+        # core configuration. Keep the marker so an agent's scratch PRIM_STATE_DIR wins.
         self.env = {k: v for k, v in env.items() if not k.startswith("HERDR_") and
-                    k not in {"PRIM_BRIDGE_TOKEN", "PRIM_EXTENSION", "PRIM_EXTENSION_LIFETIME"}}
+                    (not k.startswith("PRIM_") or k == "PRIM_SOCKET")}
+        if "PRIM_SOCKET" in self.env:
+            self.env["PRIM_SOCKET_SOURCE"] = "terminal"
+        # Legacy/custom launchers may still use PYTHONPATH for the bridge. Remove only this
+        # installation's import root, preserving the user's unrelated path entries verbatim.
+        if "PYTHONPATH" in self.env:
+            installed=Path(__file__).resolve().parent.parent
+            paths=[]
+            for entry in self.env["PYTHONPATH"].split(os.pathsep):
+                try:
+                    is_bridge=(Path(cwd or ".")/entry).resolve()==installed
+                except (OSError,RuntimeError):
+                    is_bridge=False  # preserve unrelated/unresolvable user entries
+                if not is_bridge:paths.append(entry)
+            if paths:self.env["PYTHONPATH"]=os.pathsep.join(paths)
+            else:self.env.pop("PYTHONPATH")
         instance = str(uuid.uuid4())
         self.provider = provider or Provider("pi-" + instance, instance, CAPABILITIES, role="runtime", token=token,
                                             software={"name": "pi-rpc", "version": "unknown"},
