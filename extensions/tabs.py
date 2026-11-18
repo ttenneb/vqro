@@ -200,7 +200,7 @@ def resource_state(kind, event):
 ext.contribute({
     # An icon alone: the label stays empty so a set's `add` glyph replaces the `+`.
     "menu/tabs.new": {"where": "tabbar", "label": "", "icon": {"name": "add", "text": "+"}, "command": "tabs.open", "order": 0},
-    "menu/tabs.rename": {"where": "tab", "label": "Rename tab", "command": "tabs.rename", "input": "Tab name", "order": 10},
+    "menu/tabs.rename": {"where": "tab", "label": "Rename tab", "command": "tabs.rename", "input": "Tab name", "prefill": {"context": "tab_title"}, "order": 10},
     "menu/tabs.close": {"where": "tab", "label": "Close tab", "command": "tabs.close", "order": 20},
     "menu/tabs.close-ended": {"where": "tabbar", "label": "Close ended tabs", "command": "tabs.close_ended", "order": 30},
     "binding/tabs.new": {"key": "n", "command": "tabs.open", "label": "new shell in a tab"},

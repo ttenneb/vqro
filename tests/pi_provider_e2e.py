@@ -271,10 +271,10 @@ class E2E:
         self.ui('send-keys', '-t', 'ui:0.0', 'Enter')
         self.agent(rid, lambda r: r['data']['run']['active'])
         self.ui_frame('working', 'working', 'Running')
+        assert next(row for row in reversed(self.trace()) if row.get('type') == 'prompt')['message'] == 'ui-typed-prompt', 'agent input was implicitly prefilled'
         self.ui_menu(rid, 'Abort')
         self.agent(rid, lambda r: r['data']['run']['settled'] and r['data']['run']['aborted'])
         self.ui_menu(rid, 'Prompt')
-        self.ui('send-keys', '-t', 'ui:0.0', '-N', '100', 'BSpace')  # Clear any generic input prefill before exact fixture text.
         self.ui('send-keys', '-t', 'ui:0.0', '-l', 'fixture-model-error')
         self.ui('send-keys', '-t', 'ui:0.0', 'Enter')
         failed = self.agent(rid, lambda r: r['status']['state'] == 'error' and r['data']['run']['settled'])

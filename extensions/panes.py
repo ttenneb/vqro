@@ -116,7 +116,7 @@ def show(args):
 
 
 ext.contribute({
-    "menu/panes.rename": {"where": "pane", "label": "Rename", "command": "panes.rename", "input": "Pane name", "order": 10},
+    "menu/panes.rename": {"where": "pane", "label": "Rename", "command": "panes.rename", "input": "Pane name", "prefill": {"context": "title"}, "order": 10},
     "menu/panes.split-right": {"where": "pane", "label": "Split right (new shell)", "command": "panes.split", "args": {"dir": "right"}, "order": 20},
     "menu/panes.split-down": {"where": "pane", "label": "Split down (new shell)", "command": "panes.split", "args": {"dir": "down"}, "order": 21},
     "menu/panes.show": {"where": "pane", "label": "Show another resource", "command": "panes.show", "pick": "resource", "when": {"kind": "terminal"}, "order": 30},

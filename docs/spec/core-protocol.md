@@ -452,14 +452,20 @@ version that drops an item leaves no ghost. On a conflict the helper reloads and
 other namespaces are never touched. Extensions that contribute over several calls opt out (`exclusive=False`) or
 reconcile later with their full set (`exclusive=True`). Other runtimes should follow the same rule.
 
-- `menu/<id>`: `{where: "pane"|"tab"|"tabbar"|"status", label, icon?, command, args?, input?, pick?: "resource", when?,
+- `menu/<id>`: `{where: "pane"|"tab"|"tabbar"|"status", label, icon?, command, args?, input?, prefill?, pick?: "resource", when?,
   order?}`. `icon` (see Icons) is drawn before the label; an empty label shows the icon alone. `input` makes the client prompt for text (passed as `args.text`); `pick` makes it offer a choice (`args.picked`);
   `when` is matched field by field against the invocation context.
-- `binding/<id>`: `{key, command, args?, where?, label?, priority?, input?, pick?, hidden?}`. `key` is a prefix key
+- `binding/<id>`: `{key, command, args?, where?, label?, priority?, input?, prefill?, pick?, hidden?}`. `key` is a prefix key
   (`"n"`, `"Left"`, see Keys) or a gesture (`"mouse.right"`, `"mouse.middle"`) with `where` = `"pane"` or `"tab"`.
-  `input` and `pick` work as for menu items; `hidden` keeps a key out of the prefix menu (it still works).
+  `input`, `prefill` and `pick` work as for menu items; `hidden` keeps a key out of the prefix menu (it still works).
+- `prefill` explicitly supplies an input's initial text: a string, or `{"context": "field"}` to read a string
+  from invocation context. Without it, inputs start empty; pane/tab titles and option `value` never implicitly
+  become input text. Missing/unknown context fields or unsupported values produce empty input. Options may
+  override their parent row's explicit prefill. For example pane rename asks for `{"context":"title"}`, while
+  tab rename uses `{"context":"tab_title"}`; ordinary agent prompts provide none.
 - Clients add `args.context` when invoking from a place: `{layout, layout_version, path, view, kind, resource, live,
-  title}` for a pane, `{layout, layout_version, tab_path, tab_index}` for a tab. Use `layout_version` as `expect`.
+  title, tab_title?}` for a pane, `{layout, layout_version, tab_path, tab_index, tab_title}` for a tab.
+  `tab_title` is the current/innermost tab's title, or null when none exists. Use `layout_version` as `expect`.
 - Client-side commands (mechanism, never sent to the core): `client.menu {where}`, `client.prefix`, `client.palette`,
   `client.zoom` (toggle: the focused pane fills this window; per window, not workspace state; moving focus leaves it).
 - More client-side commands, so bindings can reach what the prefix keys do: `client.focus {dir: next|prev|left|right|
@@ -528,9 +534,9 @@ and sets the prefix; the active profile is `doc/keys/profile`, and the list is l
   The prefix key cancels it and opens the prefix menu.
 - Panels: `{title?, items: [row]}` or `{title?, pages: [{title, items}]}`. Rows:
   `{type?: "item"|"toggle"|"header"|"separator"|"text", text, id?, detail?, detail_style?, description?, checked?,
-  style?, disabled?, badges?: [{text, style?}], children?: [row], expanded?, command?, args?, input?, pick?,
+  style?, disabled?, badges?: [{text, style?}], children?: [row], expanded?, command?, args?, input?, prefill?, pick?,
   menu?: [menu item], icon?: an icon (see Icons) before the text, in the icon column, icon_style?}`, plus `chips`
-  rows (`{type: "chips", chips: [{text, icon?, checked?, style?, command, args?, input?, options?}]}`, wrapping; a
+  rows (`{type: "chips", chips: [{text, icon?, checked?, style?, command, args?, input?, prefill?, options?}]}`, wrapping; a
   chip with an icon and empty text is the icon alone) and `select` rows (`{type: "select", text, value, options: [{label, value}], command}`);
   anything with `options` opens a pick-one menu and adds `value` to its args; an option with `input` (e.g.
   "custom…") prompts for text instead, passed as `text`. `toolbar: [row]` pins rows above the

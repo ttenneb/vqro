@@ -146,8 +146,8 @@ struct Item {
     pick: Option<String>,
     /// For status items: take the label (and style) from this view's live content.
     view: Option<String>,
-    /// What an `input` prompt starts with, instead of the current pane or tab name.
-    prefill: Option<String>,
+    /// Explicit initial input text: a string, or {context: field} read from invocation context.
+    prefill: Value,
 }
 
 /// A row of the prefix menu: the key that runs it (None for a recovery action whose key now does
@@ -168,7 +168,7 @@ impl Item {
             input: v["input"].as_str().map(String::from),
             pick: v["pick"].as_str().map(String::from),
             view: v["view"].as_str().map(String::from),
-            prefill: None,
+            prefill: v["prefill"].clone(),
         }
     }
 }
@@ -1145,7 +1145,7 @@ impl App {
                 let at = self.row_position(key, sel);
                 self.options_menu(&item, ctx, at);
             } else {
-                self.activate_item(Item::from_entry(&json!({"label": item["text"], "command": item["command"], "args": item["args"], "input": item["input"], "pick": item["pick"]})), ctx, None);
+                self.activate_item(Item::from_entry(&json!({"label": item["text"], "command": item["command"], "args": item["args"], "input": item["input"], "pick": item["pick"], "prefill": item["prefill"]})), ctx, None);
             }
         }
         true
@@ -1180,7 +1180,7 @@ impl App {
                     input: o["input"].as_str().map(String::from),
                     pick: None,
                     view: None,
-                    prefill: current.as_str().map(String::from),
+                    prefill: o.get("prefill").or_else(|| item.get("prefill")).cloned().unwrap_or(Value::Null),
                 }
             })
             .collect();
@@ -1513,12 +1513,15 @@ impl App {
                 }
             }
         }
+        ctx["tab_title"] = json!(self.tab_title(&ctx));
         ctx
     }
 
     fn ctx_tab(&self, path: &[usize], i: usize) -> Value {
         let (layout, version) = self.active_layout_key();
-        json!({"layout": layout, "layout_version": version, "tab_path": path, "tab_index": i})
+        let mut ctx = json!({"layout": layout, "layout_version": version, "tab_path": path, "tab_index": i});
+        ctx["tab_title"] = json!(self.tab_title(&ctx));
+        ctx
     }
 
     fn active_layout_key(&self) -> (Option<String>, Option<u64>) {
@@ -1539,8 +1542,8 @@ impl App {
     /// Run an item: prompt or pick first if it asks to.
     fn activate_item(&mut self, item: Item, ctx: Value, at: Option<Position>) {
         if let Some(prompt) = item.input.clone() {
-            // Prefill with the current name when renaming something that has one.
-            let text = item.prefill.clone().or_else(|| ctx["title"].as_str().map(String::from)).or_else(|| self.tab_title(&ctx)).unwrap_or_default();
+            // Input is empty unless its author explicitly supplies text or a context source.
+            let text = item.prefill.as_str().or_else(|| item.prefill["context"].as_str().and_then(|field| ctx[field].as_str())).unwrap_or_default().to_string();
             self.open_over(Overlay::Input { prompt, text, item, ctx });
         } else if item.pick.as_deref() == Some("resource") {
             self.open_over(Overlay::Pick { sel: 0, item, ctx });
@@ -2701,6 +2704,41 @@ mod tests {
         let (peer, _) = Peer::spawn(tokio::io::empty(), tokio::io::sink());
         let (tx, rx) = mpsc::unbounded_channel();
         (App::new(peer, tx), rx)
+    }
+
+    #[tokio::test]
+    async fn text_inputs_require_explicit_prefill_and_preserve_rename_context() {
+        let (mut app, _) = app();
+        app.entries.insert("workspace/active".into(), json!({"layout": "main"}));
+        app.entries.insert("layout/main".into(), json!({"tabs": [{"title": "Named tab", "node": {"view": "form"}}], "active": 0}));
+        app.entries.insert("view/form".into(), json!({"kind": "panel", "title": "Agent r8", "items": []}));
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let pane = app.ctx_leaf(0);
+        for (entry, expected) in [
+            (json!({"command": "any.prompt", "input": "Prompt"}), ""),
+            (json!({"command": "any.prompt", "input": "Prompt", "prefill": "explicit text"}), "explicit text"),
+            (json!({"command": "any.prompt", "input": "Prompt", "prefill": ""}), ""),
+            (json!({"command": "any.rename", "input": "Name", "prefill": {"context": "title"}}), "Agent r8"),
+            (json!({"command": "any.prompt", "input": "Prompt", "prefill": {"context": "missing"}}), ""),
+        ] {
+            app.activate_item(Item::from_entry(&entry), pane.clone(), None);
+            assert!(matches!(&app.overlay, Some(Overlay::Input { text, .. }) if text == expected));
+        }
+        let tab = app.ctx_tab(&[], 0);
+        assert_eq!(tab["tab_title"], "Named tab");
+        assert_eq!(pane["tab_title"], "Named tab");
+        app.activate_item(Item::from_entry(&json!({"command": "any.rename", "input": "Name", "prefill": {"context": "tab_title"}})), tab, None);
+        assert!(matches!(&app.overlay, Some(Overlay::Input { text, .. }) if text == "Named tab"));
+        app.entries.insert("view/row-form".into(), json!({"kind": "panel", "items": [{"text": "Edit", "command": "any.edit", "input": "Value", "prefill": "row initial value"}]}));
+        app.panel_key("row-form", "row-form", KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), pane.clone());
+        assert!(matches!(&app.overlay, Some(Overlay::Input { text, .. }) if text == "row initial value"));
+        app.options_menu(&json!({"command": "any.option", "value": "implicit value", "options": [{"label": "Custom", "input": "Value"}]}), pane.clone(), None);
+        app.activate_overlay();
+        assert!(matches!(&app.overlay, Some(Overlay::Input { text, .. }) if text.is_empty()));
+        app.options_menu(&json!({"command": "any.option", "value": "implicit value", "options": [{"label": "Custom", "input": "Value", "prefill": "explicit option"}]}), pane, None);
+        app.activate_overlay();
+        assert!(matches!(&app.overlay, Some(Overlay::Input { text, .. }) if text == "explicit option"));
     }
 
     #[tokio::test]

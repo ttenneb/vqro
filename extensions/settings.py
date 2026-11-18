@@ -227,7 +227,7 @@ def key_rows():
     options = [{"label": p, "value": p} for p in PREFIXES]
     if current not in PREFIXES:
         options.append({"label": current, "value": current})
-    options.append({"label": "custom…", "input": "Prefix key (e.g. C-a, M-Space, F12)"})
+    options.append({"label": "custom…", "input": "Prefix key (e.g. C-a, M-Space, F12)", "prefill": current})
     rows.append({"type": "select", "text": "Prefix", "value": current, "options": options, "command": "settings.prefix",
                  "description": "falls back to C-g if unusable; press it twice to send it to the program"})
     rows += [{"type": "separator"}, {"type": "header", "text": f"Keys after {prefix} (first wins)"}]

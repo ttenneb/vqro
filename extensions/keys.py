@@ -58,7 +58,7 @@ PROFILES = {
         "next-pane": b("o", "client.focus", "next pane", args={"dir": "next"}),
         **{f"focus-{d}": b(d.capitalize(), "client.focus", f"pane {d}", args={"dir": d}, hidden=True)
            for d in ("left", "right", "up", "down")},
-        "rename-tab": b(",", "tabs.rename", "rename tab", input="Tab name"),
+        "rename-tab": b(",", "tabs.rename", "rename tab", input="Tab name", prefill={"context": "tab_title"}),
         "close-tab": b("&", "tabs.close", "close tab (programs keep running)"),
         "choose": b("w", "tabs.show", "choose a terminal", **PICK_TAB),
         "detach": b("d", "client.quit", "detach (quit this UI)"),
@@ -89,7 +89,7 @@ PROFILES = {
         "list": b('"', "tabs.show", "choose a terminal", **PICK_TAB),
         "kill": b("k", "panes.kill", "kill the program"),
         "kill-c": b("C-k", "panes.kill", "kill the program", hidden=True),
-        "title": b("A", "tabs.rename", "rename tab", input="Tab name"),
+        "title": b("A", "tabs.rename", "rename tab", input="Tab name", prefill={"context": "tab_title"}),
         "detach": b("d", "client.quit", "detach (quit this UI)"),
         "detach-c": b("C-d", "client.quit", "detach (quit this UI)", hidden=True),
         "commands": b(":", "client.palette", "all commands"),
