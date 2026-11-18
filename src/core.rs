@@ -80,6 +80,7 @@ pub struct Core {
     admission: crate::resource_admission::Admission,
     pub bridge_tokens: crate::bridge_tokens::Tokens,
     pub providers: BTreeMap<String, Provider>,
+    provider_metadata_bytes:usize,
     /// Compatibility connection-state alias; authoritative declarations are in `providers`.
     pub adapter_state: BTreeMap<String, Value>,
     pub manifest_catalog: crate::manifest::Catalog,
@@ -132,7 +133,7 @@ impl Core {
             identities,
             admission: Default::default(),
             bridge_tokens: crate::bridge_tokens::Tokens::open(state_dir.as_ref().map(|dir| dir.join("runtime-tokens.json")))?,
-            providers: BTreeMap::new(),
+            providers: BTreeMap::new(),provider_metadata_bytes:0,
             adapter_state: BTreeMap::new(),
             manifest_catalog:crate::manifest::Catalog::new(crate::paths::extensions_dir()),
             default_adapter: None,
@@ -334,17 +335,19 @@ impl Core {
         let pending = std::mem::take(&mut self.pending_facts);
         self.admission.clear_pending();
         for (name, records) in pending {
+            let mut ready_facts=Vec::new();
             for (reference, (instance, facts)) in records {
                 let current = self.providers.get(&name).is_some_and(|p| p.info.as_ref().is_some_and(|i| i.instance == instance));
                 if !current { continue; }
                 let ready = self.providers[&name].synced && self.providers[&name].health.borrow().connected;
-                if ready { let _ = self.upsert_resource(&name, facts); }
+                if ready { ready_facts.push(facts); }
                 else {
                     let host = self.providers[&name].metadata["host"].as_str();
                     self.admission.pending(&name, &reference, crate::resource_admission::charge(&name, &instance, host, &facts));
                     self.pending_facts.entry(name.clone()).or_default().insert(reference, (instance, facts));
                 }
             }
+            if !ready_facts.is_empty(){let _=self.upsert_resources(&name,ready_facts,false);}
         }
         self.recovering_identities = false;
     }
@@ -360,12 +363,11 @@ impl Core {
     }
 
     fn retire_visible(&mut self, ids: Vec<String>, reason: &str) {
+        if ids.is_empty(){return;}
+        let hosts=ids.iter().map(String::as_str).collect::<std::collections::HashSet<_>>();
+        if let Err(error)=self.bridge_tokens.expire_hosts(&hosts){eprintln!("prim: runtime credential revocation persistence failed: {error}");self.emit("persistence.error",json!({"scope":"runtime_tokens","message":error.message}));}
         for id in ids {
             self.admission.remove_resource(&id);
-            if let Err(error) = self.bridge_tokens.expire_host(&id) {
-                eprintln!("prim: runtime credential revocation persistence failed: {error}");
-                self.emit("persistence.error", json!({"scope": "runtime_tokens", "message": error.message}));
-            }
             if let Some(resource) = self.resources.remove(&id) { resource.life.send_replace(false); }
             self.emit("resource.removed", json!({"id": id, "reason": {"reason": reason}}));
         }
@@ -393,18 +395,40 @@ impl Core {
         self.install_provider(handle, default, true)
     }
 
+    pub fn admit_provider_registration(&self,name:&str,bytes:usize)->Result<(),RpcError>{
+        if !self.providers.contains_key(name)&&self.providers.len()>=provider::MAX_PROVIDERS{return Err(provider::rejected("overloaded",format!("provider {name}: registry limit is {}",provider::MAX_PROVIDERS)));}
+        if bytes.saturating_sub(provider::REGISTRATION_FLOOR)>128*1024{return Err(provider::rejected("overloaded",format!("provider {name}: registration metadata exceeds128KiB")));}
+        let old=self.providers.get(name).map(|p|p.registration_bytes).unwrap_or(0);
+        if self.provider_metadata_bytes.saturating_sub(old).saturating_add(bytes)>provider::MAX_REGISTRY_METADATA_BYTES{return Err(provider::rejected("overloaded",format!("provider {name}: aggregate registration metadata exceeds4MiB")));}
+        Ok(())
+    }
+    fn charge_provider_registration(&mut self,name:&str,info:&crate::provider::ProviderInfo)->Result<(),RpcError>{
+        let p=&self.providers[name];let charge=provider::registration_charge(name,&p.handle.capabilities,Some(info),&p.metadata);self.admit_provider_registration(name,charge)?;
+        let p=self.providers.get_mut(name).unwrap();self.provider_metadata_bytes=self.provider_metadata_bytes.saturating_sub(p.registration_bytes).saturating_add(charge);p.registration_bytes=charge;Ok(())
+    }
+    pub fn reap_runtime_provider(&mut self,name:&str){
+        let eligible=self.providers.get(name).is_some_and(|p|!p.health.borrow().connected&&p.info.as_ref().is_some_and(|i|i.role=="runtime"));
+        if !eligible||self.admission.has_provider(name)||self.identities.has_provider(name){return;}
+        if let Some(p)=self.providers.remove(name){self.provider_metadata_bytes=self.provider_metadata_bytes.saturating_sub(p.registration_bytes);}
+        self.adapter_state.remove(name);self.identity_failures.remove(name);self.pending_facts.remove(name);
+        if self.default_adapter.as_deref()==Some(name){self.default_adapter=None;}
+        self.emit("provider.removed",json!({"name":name,"reason":"retired"}));self.emit("adapter.removed",json!({"name":name,"reason":"retired"}));
+    }
+
     pub fn install_provider(&mut self, handle: AdapterHandle, default: bool, may_default: bool) -> Result<u64, RpcError> {
         let name = handle.name.clone();
         if name.is_empty() || name.len() > 128 || crate::resource_admission::encoded_bytes(&handle.capabilities) > 128 * 1024 {
             return Err(provider::rejected("overloaded", format!("provider {name}: name/registration metadata exceeds admission limits")));
         }
-        if !self.providers.contains_key(&name) && self.providers.len() >= 32 { return Err(provider::rejected("overloaded", format!("provider {name}: registry limit is 32"))); }
-        if default || (may_default && self.default_adapter.is_none()) { self.default_adapter = Some(name.clone()); }
+        let charge=provider::registration_charge(&name,&handle.capabilities,None,&json!({}));self.admit_provider_registration(&name,charge)?;
         let generation = self.providers.get(&name).map(|p| p.generation).unwrap_or(0);
         if self.providers.contains_key(&name) { self.on_adapter_event(&name, AdapterEvent::Connected(false, Some("provider replaced".into()))); }
         let source = self.next_provider_source;
         self.next_provider_source += 1;
-        self.providers.insert(name, Provider::new(handle, source, generation));
+        let old=self.providers.get(&name).map(|p|p.registration_bytes).unwrap_or(0);self.provider_metadata_bytes=self.provider_metadata_bytes.saturating_sub(old).saturating_add(charge);
+        let mut p=Provider::new(handle,source,generation);p.registration_bytes=charge;
+        if default || (may_default&&self.default_adapter.is_none()){self.default_adapter=Some(name.clone());}
+        self.providers.insert(name,p);
         Ok(source)
     }
 
@@ -422,67 +446,72 @@ impl Core {
         self.emit("adapter", json!({"name": name, "state": state}));
     }
 
-    pub fn upsert_resource(&mut self, name: &str, facts: ResourceFacts) -> Result<String, RpcError> {
-        if !facts.valid() {
-            self.on_adapter_event(name, AdapterEvent::Connected(false, Some("provider supplied invalid facts".into())));
+    pub fn upsert_resource(&mut self,name:&str,facts:ResourceFacts)->Result<String,RpcError>{
+        self.upsert_resources(name,vec![facts],false).map(|mut ids|ids.remove(0))
+    }
+
+    /// Admit a complete observed batch before its one identity-map replace. Publication follows adoption.
+    pub fn upsert_resources(&mut self,name:&str,list:Vec<ResourceFacts>,authoritative:bool)->Result<Vec<String>,RpcError>{
+        let mut references=std::collections::HashSet::new();
+        if list.iter().any(|f|!f.valid() || !references.insert(f.backend_ref.clone())) {
+            self.on_adapter_event(name,AdapterEvent::Connected(false,Some("provider supplied invalid/duplicate inventory facts".into())));
             return Err(provider::indeterminate("provider supplied invalid facts; effect may already have happened"));
         }
-        let provider = self.providers.get(name).ok_or_else(|| provider::rejected("not_found", "unknown provider"))?;
-        if !provider.health.borrow().connected { return Err(provider::rejected("unavailable", "provider disconnected")); }
-        let instance = provider.health.borrow().instance.clone();
-        let host = if facts.kind == "agent" { provider.metadata["host"].as_str().map(String::from) } else { None };
-        // Even if disk persistence fails, an observed replacement must immediately stop old
-        // routes targeting the reused reference. Retiring its id still waits for durable commit.
-        let mut replaced = Vec::new();
-        for resource in self.resources.values_mut().filter(|r| r.adapter == name && r.facts.backend_ref == facts.backend_ref
-            && (r.instance != instance || r.facts.incarnation != facts.incarnation) && r.available) {
-            resource.available = false;
-            resource.life.send_replace(false);
-            replaced.push(resource.to_json());
+        let p=self.providers.get(name).ok_or_else(||provider::rejected("not_found","unknown provider"))?;
+        if !p.health.borrow().connected{return Err(provider::rejected("unavailable","provider disconnected"));}
+        let instance=p.health.borrow().instance.clone();let agent_host=p.metadata["host"].as_str().map(String::from);
+        let identities=list.iter().map(|f|provider::identity(name,&instance,f)).collect::<Vec<_>>();
+        let seen=identities.iter().cloned().collect::<std::collections::HashSet<_>>();
+        // Independent observations fence replacements/missing refs even if durability subsequently fails.
+        let mut fenced=Vec::new();
+        for r in self.resources.values_mut().filter(|r|r.adapter==name&&r.available&&(authoritative||references.contains(&r.facts.backend_ref))){
+            let identity=provider::identity(name,&r.instance,&r.facts);
+            if !seen.contains(&identity) {r.available=false;r.life.send_replace(false);fenced.push(r.to_json());}
         }
-        for resource in replaced { self.emit("resource", resource); }
-        let bytes = crate::resource_admission::charge(name, &instance, host.as_deref(), &facts);
-        if let Err(mut error) = self.admission.check(name, &facts.backend_ref, &facts, bytes) {
-            let data = error.data.as_mut().unwrap();
-            data["outcome"] = json!("indeterminate"); data["backend_outcome"] = json!("observed");
-            data["provider"] = json!(name); data["instance"] = json!(instance); data["resource_facts"] = json!(facts);
-            self.on_adapter_event(name, AdapterEvent::Connected(false, Some(error.message.clone())));
-            return Err(error);
+        for r in fenced{self.emit("resource",r);}
+        if authoritative {if let Some(pending)=self.pending_facts.get_mut(name){pending.retain(|_,(i,f)|seen.contains(&provider::identity(name,i,f)));}self.refresh_pending_admission();}
+        let mut staged=(list.len()>1).then(||self.admission.clone());let mut prepared=Vec::with_capacity(list.len());
+        for (facts,identity) in list.into_iter().zip(&identities){
+            let host=if facts.kind=="agent"{agent_host.clone()}else{None};
+            let bytes=crate::resource_admission::charge(name,&instance,host.as_deref(),&facts);
+            let unchanged=self.identities.lookup(identity).and_then(|id|self.resources.get(id)).is_some_and(|r|r.facts==facts&&r.available);
+            if !unchanged {
+                if let Err(mut error)=staged.as_ref().unwrap_or(&self.admission).check(name,&facts.backend_ref,&facts,bytes){
+                    let data=error.data.as_mut().unwrap();data["outcome"]=json!("indeterminate");data["backend_outcome"]=json!("observed");data["provider"]=json!(name);data["instance"]=json!(instance);data["resource_facts"]=json!(facts);
+                    self.on_adapter_event(name,AdapterEvent::Connected(false,Some(error.message.clone())));return Err(error);
+                }
+                // Reserve all facts that would need retaining on an IO failure, not just the last one.
+                if let Some(staged)=&mut staged{staged.pending(name,&facts.backend_ref,bytes);}
+            }
+            prepared.push((facts,host,bytes,!unchanged));
         }
-        let update = match self.identities.identify(provider::identity(name, &instance, &facts)) {
-            Ok(update) => update,
-            Err(mut error) => {
-                self.admission.pending(name, &facts.backend_ref, bytes);
-                self.pending_facts.entry(name.into()).or_default().insert(facts.backend_ref.clone(), (instance.clone(), facts.clone()));
-                let data = error.data.as_mut().unwrap();
-                data["backend_outcome"] = json!("observed");
-                data["resource_facts"] = json!(facts);
-                return Err(self.identity_error(name, error));
+        let newly_synced=authoritative&&!self.providers[name].synced;
+        if authoritative{self.providers.get_mut(name).unwrap().synced=true;}
+        let result=if authoritative{self.identities.batch(&identities,|i|i.provider==name&&!seen.contains(i))}else{self.identities.identify_many(&identities)};
+        let update=match result{
+            Ok(update)=>update,
+            Err(mut error)=>{
+                if let Some(staged)=staged{self.admission=staged;}else{for(facts,_,bytes,changed)in &prepared{if *changed{self.admission.pending(name,&facts.backend_ref,*bytes);}}}
+                for(facts,_,_,changed)in &prepared{if *changed{self.pending_facts.entry(name.into()).or_default().insert(facts.backend_ref.clone(),(instance.clone(),facts.clone()));}}
+                let data=error.data.as_mut().unwrap();data["backend_outcome"]=json!("observed");data["resource_count"]=json!(prepared.len());if prepared.len()==1{data["resource_facts"]=json!(prepared[0].0);}
+                if newly_synced{self.provider_event(name);}return Err(self.identity_error(name,error));
             }
         };
-        self.retire_visible(update.retired, "replaced");
-        self.admission.remove_pending(name, &facts.backend_ref);
-        if let Some(pending) = self.pending_facts.get_mut(name) { pending.remove(&facts.backend_ref); }
-        self.admission.resource(&update.id, name, &facts.backend_ref, bytes);
-        let changed = self.resources.get(&update.id).is_none_or(|r| r.facts != facts || !r.available);
-        if changed {
-            let life = self.resources.get(&update.id).map(|r| r.life.clone()).unwrap_or_else(|| watch::channel(true).0);
-            let was_available = *life.borrow();
-            if !was_available { life.send_replace(true); }
-            let resource = Resource { id: update.id.clone(), adapter: name.into(), instance, available: true, host, life, facts };
-            self.emit("resource", resource.to_json());
-            self.resources.insert(update.id.clone(), resource);
+        self.retire_visible(update.replaced,"replaced");self.retire_visible(update.removed,"closed");
+        for ((facts,host,bytes,_),id) in prepared.into_iter().zip(&update.ids){
+            self.admission.remove_pending(name,&facts.backend_ref);if let Some(pending)=self.pending_facts.get_mut(name){pending.remove(&facts.backend_ref);}
+            self.admission.resource(id,name,&facts.backend_ref,bytes);
+            if self.resources.get(id).is_none_or(|r|r.facts!=facts||!r.available){
+                let life=self.resources.get(id).map(|r|r.life.clone()).unwrap_or_else(||watch::channel(true).0);let available=*life.borrow();if !available{life.send_replace(true);}
+                let resource=Resource{id:id.clone(),adapter:name.into(),instance:instance.clone(),available:true,host,life,facts};self.emit("resource",resource.to_json());self.resources.insert(id.clone(),resource);
+            }
         }
-        if let Some(mut error) = update.uncertain {
-            let data = error.data.as_mut().unwrap();
-            data["resource"] = json!(update.id);
-            data["backend_outcome"] = json!("observed");
-            data["resource_facts"] = json!(self.resources.get(&update.id).map(|r| &r.facts));
-            return Err(self.identity_error(name, error));
+        if newly_synced{self.provider_event(name);}
+        if let Some(mut error)=update.uncertain {
+            let data=error.data.as_mut().unwrap();data["backend_outcome"]=json!("observed");data["resource_count"]=json!(update.ids.len());if update.ids.len()==1{data["resource"]=json!(update.ids[0]);data["resource_facts"]=json!(self.resources.get(&update.ids[0]).map(|r|&r.facts));}
+            return Err(self.identity_error(name,error));
         }
-        self.identity_recovered(name);
-        self.recover_pending_identities();
-        Ok(update.id)
+        self.identity_recovered(name);self.recover_pending_identities();Ok(update.ids)
     }
 
     pub fn on_adapter_event(&mut self, name: &str, event: AdapterEvent) {
@@ -500,14 +529,18 @@ impl Core {
                     self.on_adapter_event(name, AdapterEvent::Connected(false, Some("provider supplied invalid registration facts or capabilities".into())));
                     return;
                 }
+                if let Err(error)=self.charge_provider_registration(name,&info){self.on_adapter_event(name,AdapterEvent::Connected(false,Some(error.message)));return;}
                 self.mark_unavailable(name);
+                // One core-wide lease counter preserves monotonic generations even after a name is reaped.
+                let generation=self.next_provider_source;self.next_provider_source+=1;
+                self.providers.get_mut(name).unwrap().generation=generation-1;
                 self.providers.get_mut(name).unwrap().register(info.clone());
                 if let Some(pending) = self.pending_facts.get_mut(name) { pending.retain(|_, (instance, _)| instance == &info.instance); }
                 self.refresh_pending_admission();
-                match self.identities.retire(|i| i.provider == name && i.instance != info.instance) {
+                if self.identities.has_provider(name){match self.identities.retire(|i| i.provider == name && i.instance != info.instance) {
                     Ok((ids, error)) => { self.retire_visible(ids, "replaced"); if let Some(error) = error { self.identity_error(name, error); } }
                     Err(error) => { self.identity_error(name, error); }
-                }
+                }}
                 self.provider_event(name);
             }
             AdapterEvent::Connected(up, error) => {
@@ -518,35 +551,15 @@ impl Core {
                 self.providers.get_mut(name).unwrap().disconnect(error);
                 self.mark_unavailable(name);
                 self.provider_event(name);
+                self.reap_runtime_provider(name);
             }
-            AdapterEvent::Snapshot(list) => {
-                if list.iter().any(|facts| !facts.valid()) {
-                    self.on_adapter_event(name, AdapterEvent::Connected(false, Some("provider supplied an invalid inventory".into())));
-                    return;
-                }
-                let Some(info) = self.providers[name].info.clone() else { return };
-                if !self.providers[name].health.borrow().connected { return; }
-                let seen: Vec<_> = list.iter().map(|f| provider::identity(name, &info.instance, f)).collect();
-                if let Some(pending) = self.pending_facts.get_mut(name) {
-                    pending.retain(|_, (instance, facts)| seen.contains(&provider::identity(name, instance, facts)));
-                }
-                self.refresh_pending_admission();
-                let newly_synced = !self.providers[name].synced;
-                self.providers.get_mut(name).unwrap().synced = true;
-                for facts in list { let _ = self.upsert_resource(name, facts); }
-                match self.identities.retire(|i| i.provider == name && !seen.contains(i)) {
-                    Ok((ids, error)) => {
-                        self.retire_visible(ids, "closed");
-                        if let Some(error) = error { self.identity_error(name, error); }
-                        else { self.identity_recovered(name); self.recover_pending_identities(); }
-                    }
-                    Err(error) => { self.identity_error(name, error); }
-                }
-                if newly_synced { self.provider_event(name); }
-            }
+            AdapterEvent::Snapshot(list) => {let _=self.upsert_resources(name,list,true);}
             AdapterEvent::Upsert(facts) => { let _ = self.upsert_resource(name, facts); }
             AdapterEvent::Removed { reference, incarnation } => {
                 let Some(info) = self.providers[name].info.clone() else { return };
+                let mut fenced=Vec::new();
+                for r in self.resources.values_mut().filter(|r|r.adapter==name&&r.instance==info.instance&&r.facts.backend_ref==reference&&r.facts.incarnation==incarnation&&r.available){r.available=false;r.life.send_replace(false);fenced.push(r.to_json());}
+                for r in fenced{self.emit("resource",r);}
                 if let Some(pending) = self.pending_facts.get_mut(name) {
                     if pending.get(&reference).is_some_and(|(instance, facts)| instance == &info.instance && facts.incarnation == incarnation) { pending.remove(&reference); self.admission.remove_pending(name, &reference); }
                 }
@@ -554,6 +567,7 @@ impl Core {
                     Ok((ids, error)) => { self.retire_visible(ids, "closed"); if let Some(error) = error { self.identity_error(name, error); } }
                     Err(error) => { self.identity_error(name, error); }
                 }
+                self.reap_runtime_provider(name);
             }
         }
     }
@@ -581,4 +595,52 @@ pub fn add_adapter(core: &Shared, handle: AdapterHandle, events: mpsc::Unbounded
             core.on_adapter_event(&name, AdapterEvent::Connected(false, Some("provider event connection closed".into())));
         }
     });
+}
+
+#[cfg(test)] mod hygiene_tests {
+    use super::*;
+    #[test]
+    fn reaped_runtime_names_keep_old_routes_fenced_and_generations_monotonic(){
+        let mut c=Core::new(Store::in_memory(),None,PathBuf::from("unused"),false).unwrap();
+        let register=|c:&mut Core|{let(tx,_rx)=mpsc::unbounded_channel();c.install_provider(AdapterHandle{name:"runtime".into(),session:None,context:None,capabilities:json!({"agent.prompt":{}}),cmds:tx},false,false).unwrap();c.on_adapter_event("runtime",AdapterEvent::Registered(crate::provider::ProviderInfo{connection:1,instance:"A".into(),role:"runtime".into(),software:json!({"name":"fixture","version":"1"})}));};
+        register(&mut c);let generation=c.providers["runtime"].generation;let old=c.provider_route(Some("runtime"),"agent.prompt").unwrap();c.on_adapter_event("runtime",AdapterEvent::Connected(false,None));assert!(!c.providers.contains_key("runtime"));assert_eq!(c.provider_metadata_bytes,0);
+        register(&mut c);assert!(c.providers["runtime"].generation>generation);assert!(!old.valid());assert_eq!(c.providers.len(),1);
+    }
+    #[test]
+    fn registry_count_and_aggregate_registration_metadata_are_bounded(){
+        let mut c=Core::new(Store::in_memory(),None,PathBuf::from("unused"),false).unwrap();
+        for i in 0..crate::provider::MAX_PROVIDERS{let(tx,_rx)=mpsc::unbounded_channel();c.install_provider(AdapterHandle{name:format!("p{i}"),session:None,context:None,capabilities:json!({}),cmds:tx},false,false).unwrap();}
+        let(tx,_rx)=mpsc::unbounded_channel();assert_eq!(c.install_provider(AdapterHandle{name:"extra".into(),session:None,context:None,capabilities:json!({}),cmds:tx},false,false).unwrap_err().kind(),"overloaded");
+        assert_eq!(c.provider_metadata_bytes,c.providers.values().map(|p|p.registration_bytes).sum::<usize>());
+        let mut c=Core::new(Store::in_memory(),None,PathBuf::from("unused"),false).unwrap();let mut rejected=false;
+        for i in 0..1024{let(tx,_rx)=mpsc::unbounded_channel();if let Err(error)=c.install_provider(AdapterHandle{name:format!("large{i}"),session:None,context:None,capabilities:json!({"op":{"description":"x".repeat(8192)}}),cmds:tx},false,false){assert!(error.message.contains("aggregate"));rejected=true;break;}}
+        assert!(rejected);assert!(c.provider_metadata_bytes<=crate::provider::MAX_REGISTRY_METADATA_BYTES);
+    }
+    #[tokio::test]
+    async fn identity_batch_faults_publish_only_after_adoption_and_retry_once(){
+        for renamed in [false,true] {
+            let root=tempfile::tempdir().unwrap();let mut c=Core::new(Store::in_memory(),Some(root.path().into()),root.path().join("unused"),false).unwrap();let(tx,_rx)=mpsc::unbounded_channel();
+            c.install_adapter(AdapterHandle{name:"fault".into(),session:None,context:None,capabilities:json!({}),cmds:tx},true).unwrap();
+            c.on_adapter_event("fault",AdapterEvent::Registered(crate::provider::ProviderInfo{connection:1,instance:"A".into(),role:"backend".into(),software:json!({"name":"fixture","version":"1"})}));
+            c.identities.set_writer(Arc::new(move|path,bytes|{if renamed{crate::store::write_atomic(path,bytes)?;}let mut error:crate::store::AtomicWriteError=std::io::Error::other("injected identity write").into();error.renamed=renamed;Err(error)}));
+            let facts=(0..4).map(|i|serde_json::from_value(json!({"backend_ref":format!("f{i}"),"kind":"terminal","state":"live"})).unwrap()).collect::<Vec<_>>();
+            let before=c.identities.writes();let error=c.upsert_resources("fault",facts.clone(),true).unwrap_err();assert_eq!(error.kind(),if renamed{"durability_unconfirmed"}else{"io"});
+            assert_eq!(c.resources.len(),if renamed{4}else{0});assert_eq!(c.identities.writes()-before,1);if !renamed{assert_eq!(c.pending_facts["fault"].len(),4);}
+            c.identities.set_writer(Arc::new(crate::store::write_atomic));let ids=c.upsert_resources("fault",facts,true).unwrap();assert_eq!(ids,vec!["r1","r2","r3","r4"]);assert_eq!(c.identities.writes()-before,2);
+            assert_eq!(c.resources.len(),4);assert!(c.pending_facts.values().all(|p|p.is_empty()));assert!(c.provider_persistence_error("fault").is_none());
+        }
+    }
+    #[tokio::test]
+    async fn inventory_is_one_durable_write_with_a_bounded_core_lock_hold(){
+        let root=tempfile::tempdir().unwrap();let core=Arc::new(Mutex::new(Core::new(Store::in_memory(),Some(root.path().into()),root.path().join("unused"),false).unwrap()));
+        let(tx,_rx)=mpsc::unbounded_channel();let mut c=core.lock().unwrap();
+        c.install_adapter(AdapterHandle{name:"batch".into(),session:None,context:None,capabilities:json!({}),cmds:tx},true).unwrap();
+        c.on_adapter_event("batch",AdapterEvent::Registered(crate::provider::ProviderInfo{connection:1,instance:"A".into(),role:"backend".into(),software:json!({"name":"fixture","version":"1"})}));
+        let facts=(0..600).map(|i|serde_json::from_value(json!({"backend_ref":format!("t{i}"),"incarnation":"birth","kind":"terminal","state":"live","argv":["sh"]})).unwrap()).collect();
+        let before=c.identities.writes();let started=std::time::Instant::now();c.on_adapter_event("batch",AdapterEvent::Snapshot(facts));let elapsed=started.elapsed();
+        assert_eq!(c.resources.len(),600);assert_eq!(c.identities.writes()-before,1,"one durable map write per complete inventory");
+        println!("identity inventory600 lock_hold_ms={:.3}",elapsed.as_secs_f64()*1000.0);
+        assert!(elapsed<std::time::Duration::from_millis(150),"inventory held core lock for {elapsed:?}");
+        let before=c.identities.writes();c.on_adapter_event("batch",AdapterEvent::Snapshot(Vec::new()));assert_eq!(c.identities.writes()-before,1);assert!(c.resources.is_empty());
+    }
 }

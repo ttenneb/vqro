@@ -71,15 +71,17 @@ impl Tokens {
         })?;
         Ok(next)
     }
-    pub fn expire_host(&mut self, host: &str) -> Result<(), RpcError> {
+    pub fn expire_host(&mut self,host:&str)->Result<(),RpcError>{self.expire_matching(|id|id==host)}
+    pub fn expire_hosts(&mut self,hosts:&std::collections::HashSet<&str>)->Result<(),RpcError>{self.expire_matching(|id|hosts.contains(id))}
+    fn expire_matching(&mut self,expired:impl Fn(&str)->bool)->Result<(),RpcError>{
         self.pending.retain(|_, token| {
-            let remove = matches!(&*token.borrow(), State::Ready(id) if id == host);
+            let remove = matches!(&*token.borrow(), State::Ready(id) if expired(id));
             if remove { token.send_replace(State::Invalid); }
             !remove
         });
+        if !self.resumes.values().any(|resume|expired(&resume.host)){return Ok(());}
         let mut candidate = self.resumes.clone();
-        candidate.retain(|_, resume| resume.host != host);
-        if candidate.len() == self.resumes.len() { return Ok(()); }
+        candidate.retain(|_, resume| !expired(&resume.host));
         // Identity tombstones independently reject this host even if persisting revocation fails.
         self.resumes = candidate.clone();
         self.save(candidate)

@@ -60,8 +60,8 @@ async fn same_instance_survives_core_restart_but_replacement_retires_every_old_i
     until(|| restarted.lock().unwrap().resources.values().any(|r| r.facts.backend_ref == "t1")).await;
     assert_ne!(id(&restarted, "fixture", "t1"), old, "a retired id cannot resurrect even if the old instance returns");
     let saved: Value = serde_json::from_slice(&std::fs::read(dir.path().join("resources.json")).unwrap()).unwrap();
-    assert_eq!(saved["ids"][&old]["retired"], true);
-    assert_eq!(saved["ids"][&replacement]["retired"], true);
+    assert!(saved["ids"].get(&old).is_none());
+    assert!(saved["ids"].get(&replacement).is_none());
 }
 
 #[tokio::test]
@@ -80,8 +80,8 @@ async fn remote_ref_shape_migration_and_alias_reuse_tombstone_old_ids() {
     until(|| state.lock().unwrap().resources.values().any(|r| r.facts.backend_ref == stable_b)).await;
     assert_ne!(id(&state, "fixture", &stable_b), first);
     let saved: Value = serde_json::from_slice(&std::fs::read(dir.path().join("resources.json")).unwrap()).unwrap();
-    assert_eq!(saved["ids"][&legacy]["retired"], true);
-    assert_eq!(saved["ids"][&first]["retired"], true);
+    assert!(saved["ids"].get(&legacy).is_none());
+    assert!(saved["ids"].get(&first).is_none());
 }
 
 #[tokio::test]
@@ -133,7 +133,7 @@ fn identity_write_failure_does_not_consume_an_id_and_legacy_ids_are_tombstones()
     assert_eq!(map.identify(identity.clone()).unwrap().id, "r8");
     assert_eq!(IdentityMap::open(Some(path.clone())).unwrap().identify(identity).unwrap().id, "r8");
     let disk: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-    assert_eq!(disk["ids"]["r7"]["retired"], true);
+    assert!(disk["ids"].get("r7").is_none());
     assert_eq!(disk["next"], 9);
 }
 

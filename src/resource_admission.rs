@@ -30,7 +30,7 @@ pub fn charge(provider: &str, instance: &str, host: Option<&str>, facts: &Resour
     encoded_bytes(&value)
 }
 
-#[derive(Default)]
+#[derive(Default,Clone)]
 pub struct Admission {
     resources: BTreeMap<String, (String, String, usize)>,
     pending: BTreeMap<(String, String), usize>,
@@ -39,6 +39,7 @@ pub struct Admission {
     bytes: usize,
 }
 impl Admission {
+    pub fn has_provider(&self,name:&str)->bool{self.counts.get(name).copied().unwrap_or(0)>0}
     pub fn check(&self, provider: &str, reference: &str, facts: &ResourceFacts, bytes: usize) -> Result<(), RpcError> {
         let key = (provider.to_string(), reference.to_string());
         if encoded_bytes(facts) > MAX_FACT_BYTES { return Err(crate::provider::rejected("overloaded", format!("provider {provider}: whole facts record exceeds 128 KiB"))); }

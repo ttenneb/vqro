@@ -27,7 +27,15 @@ pub struct Health {
     pub instance: String,
 }
 
+pub const MAX_PROVIDERS:usize=1024;
+pub const MAX_REGISTRY_METADATA_BYTES:usize=4*1024*1024;
+pub const REGISTRATION_FLOOR:usize=1024;
+pub fn registration_charge(name:&str,capabilities:&Value,info:Option<&ProviderInfo>,metadata:&Value)->usize {
+    crate::resource_admission::encoded_bytes(&json!({"name":name,"capabilities":capabilities,"info":info,"metadata":metadata})).saturating_add(REGISTRATION_FLOOR)
+}
+
 pub struct Provider {
+    pub registration_bytes:usize,
     pub handle: AdapterHandle,
     pub info: Option<ProviderInfo>,
     pub source: u64,
@@ -43,7 +51,7 @@ pub struct Provider {
 impl Provider {
     pub fn new(handle: AdapterHandle, source: u64, generation: u64) -> Self {
         let (health, _) = watch::channel(Health { connected: false, generation, instance: String::new() });
-        Self { handle, info: None, source, generation, since: crate::store::now_ms(), error: None, synced: false, metadata: json!({}), health }
+        Self { registration_bytes:0,handle, info: None, source, generation, since: crate::store::now_ms(), error: None, synced: false, metadata: json!({}), health }
     }
 
     pub fn register(&mut self, info: ProviderInfo) {
@@ -153,7 +161,7 @@ pub fn deadline(ms: Option<u64>) -> Result<Duration, RpcError> {
     Ok(Duration::from_millis(ms))
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Identity {
     pub provider: String,
     pub instance: String,
@@ -177,6 +185,15 @@ pub struct IdentityMap {
     state: Persisted,
     path: Option<PathBuf>,
     needs_sync: bool,
+    writer: crate::store::DurableWriter,
+    by_identity: std::collections::HashMap<Identity,String>,
+    by_reference: std::collections::HashMap<(String,String),String>,
+    by_provider:std::collections::HashMap<String,usize>,
+    #[cfg(test)] writes:usize,
+}
+
+pub struct IdentityBatch {
+    pub ids:Vec<String>, pub replaced:Vec<String>, pub removed:Vec<String>, pub uncertain:Option<RpcError>,
 }
 
 pub struct IdentityUpdate {
@@ -209,7 +226,8 @@ impl IdentityMap {
                         };
                         let number: u64 = id.strip_prefix('r').ok_or_else(|| anyhow::anyhow!("invalid resource id {id}"))?.parse()?;
                         state.next = state.next.max(number.checked_add(1).ok_or_else(|| anyhow::anyhow!("resource id exhausted"))?);
-                        state.ids.insert(id, record);
+                        // The high-water mark was advanced above even for discarded legacy/tombstone ids.
+                        if !record.retired {state.ids.insert(id, record);}
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -219,14 +237,20 @@ impl IdentityMap {
         // Confirm loaded identities (and any legacy migration) before returning durable ids,
         // including a restart following an earlier unconfirmed directory sync.
         let needs_sync = path.is_some();
-        Ok(Self { state, path, needs_sync })
+        let mut map=Self { state, path, needs_sync, writer:std::sync::Arc::new(crate::store::write_atomic), by_identity:Default::default(),by_reference:Default::default(), by_provider:Default::default(), #[cfg(test)] writes:0 };
+        for (id,record) in &map.state.ids {
+            *map.by_provider.entry(record.identity.provider.clone()).or_default()+=1;
+            if map.by_identity.insert(record.identity.clone(),id.clone()).is_some() || map.by_reference.insert((record.identity.provider.clone(),record.identity.reference.clone()),id.clone()).is_some() {anyhow::bail!("duplicate active resource identity/reference");}
+        }
+        Ok(map)
     }
 
     fn commit(&mut self, candidate: Persisted) -> Result<Option<RpcError>, RpcError> {
         let mut uncertain = None;
         if let Some(path) = &self.path {
-            let bytes = serde_json::to_vec_pretty(&candidate).map_err(|e| RpcError::new("io", e.to_string()))?;
-            if let Err(error) = crate::store::write_atomic(path, &bytes) {
+            #[cfg(test)] {self.writes+=1;}
+            let bytes = serde_json::to_vec(&candidate).map_err(|e| RpcError::new("io", e.to_string()))?;
+            if let Err(error) = (self.writer)(path, &bytes) {
                 if !error.renamed {
                     self.needs_sync = true;
                     return Err(RpcError::new("io", format!("could not persist resource identities: {error}")));
@@ -234,45 +258,48 @@ impl IdentityMap {
                 uncertain = Some(RpcError::new("durability_unconfirmed", format!("resource identities adopted after rename; directory sync failed: {error}")));
             }
         }
+        self.by_identity=candidate.ids.iter().map(|(id,r)|(r.identity.clone(),id.clone())).collect();
+        self.by_reference=candidate.ids.iter().map(|(id,r)|((r.identity.provider.clone(),r.identity.reference.clone()),id.clone())).collect();
+        self.by_provider.clear();for record in candidate.ids.values(){*self.by_provider.entry(record.identity.provider.clone()).or_default()+=1;}
         self.state = candidate;
         self.needs_sync = uncertain.is_some();
         Ok(uncertain)
     }
 
-    pub fn active(&self, id: &str) -> bool { self.state.ids.get(id).is_some_and(|record| !record.retired) }
+    pub fn has_provider(&self,name:&str)->bool{self.by_provider.contains_key(name)}
+    pub fn active(&self, id: &str) -> bool { self.state.ids.contains_key(id) }
+    pub fn lookup(&self,identity:&Identity)->Option<&str>{self.by_identity.get(identity).map(String::as_str)}
 
+    /// One candidate, one durable replace, then adoption. No candidate id escapes a failed write.
+    pub fn batch(&mut self,identities:&[Identity],mut remove:impl FnMut(&Identity)->bool)->Result<IdentityBatch,RpcError>{
+        let mut candidate=self.state.clone();let mut exact=self.by_identity.clone();let mut references=self.by_reference.clone();
+        let mut result=IdentityBatch{ids:Vec::with_capacity(identities.len()),replaced:Vec::new(),removed:Vec::new(),uncertain:None};
+        let mut changed=false;
+        for identity in identities {
+            if let Some(id)=exact.get(identity){result.ids.push(id.clone());continue;}
+            let reference=(identity.provider.clone(),identity.reference.clone());
+            if let Some(old)=references.remove(&reference) {if let Some(record)=candidate.ids.remove(&old){exact.remove(&record.identity);}result.replaced.push(old);}
+            let id=format!("r{}",candidate.next);candidate.next=candidate.next.checked_add(1).ok_or_else(||RpcError::new("io","resource ids exhausted"))?;
+            candidate.ids.insert(id.clone(),IdentityRecord{identity:identity.clone(),retired:false});exact.insert(identity.clone(),id.clone());references.insert(reference,id.clone());result.ids.push(id);changed=true;
+        }
+        candidate.ids.retain(|id,record|{if remove(&record.identity){result.removed.push(id.clone());changed=true;false}else{true}});
+        if changed || self.needs_sync {result.uncertain=self.commit(candidate)?;}
+        Ok(result)
+    }
+    pub fn identify_many(&mut self,identities:&[Identity])->Result<IdentityBatch,RpcError>{
+        if !self.needs_sync {if let Some(ids)=identities.iter().map(|i|self.lookup(i).map(String::from)).collect::<Option<Vec<_>>>() {return Ok(IdentityBatch{ids,replaced:Vec::new(),removed:Vec::new(),uncertain:None});}}
+        self.batch(identities,|_|false)
+    }
     pub fn identify(&mut self, identity: Identity) -> Result<IdentityUpdate, RpcError> {
-        if let Some(id) = self.state.ids.iter().find(|(_, r)| !r.retired && r.identity == identity).map(|(id, _)| id.clone()) {
-            // A previous rename may have become visible without confirmed directory durability.
-            // A repeated observation must not accidentally turn that uncertainty into success.
-            let uncertain = if self.needs_sync { self.commit(self.state.clone())? } else { None };
-            return Ok(IdentityUpdate { id, retired: Vec::new(), uncertain });
-        }
-        let mut candidate = self.state.clone();
-        let mut retired = Vec::new();
-        for (id, record) in &mut candidate.ids {
-            if !record.retired && record.identity.provider == identity.provider && record.identity.reference == identity.reference {
-                record.retired = true;
-                retired.push(id.clone());
-            }
-        }
-        let id = format!("r{}", candidate.next);
-        candidate.next = candidate.next.checked_add(1).ok_or_else(|| RpcError::new("io", "resource ids exhausted"))?;
-        candidate.ids.insert(id.clone(), IdentityRecord { identity, retired: false });
-        let uncertain = self.commit(candidate)?;
-        Ok(IdentityUpdate { id, retired, uncertain })
+        if !self.needs_sync {if let Some(id)=self.lookup(&identity){return Ok(IdentityUpdate{id:id.into(),retired:Vec::new(),uncertain:None});}}
+        let mut batch=self.batch(&[identity],|_|false)?;
+        Ok(IdentityUpdate{id:batch.ids.remove(0),retired:batch.replaced,uncertain:batch.uncertain})
     }
-
-    pub fn retire(&mut self, mut predicate: impl FnMut(&Identity) -> bool) -> Result<(Vec<String>, Option<RpcError>), RpcError> {
-        let mut candidate = self.state.clone();
-        let mut retired = Vec::new();
-        for (id, record) in &mut candidate.ids {
-            if !record.retired && predicate(&record.identity) { record.retired = true; retired.push(id.clone()); }
-        }
-        if retired.is_empty() && !self.needs_sync { return Ok((retired, None)); }
-        let uncertain = self.commit(candidate)?;
-        Ok((retired, uncertain))
+    pub fn retire(&mut self, predicate: impl FnMut(&Identity) -> bool) -> Result<(Vec<String>, Option<RpcError>), RpcError> {
+        let batch=self.batch(&[],predicate)?;Ok((batch.removed,batch.uncertain))
     }
+    #[cfg(test)] pub(crate) fn writes(&self)->usize{self.writes}
+    #[cfg(test)] pub(crate) fn set_writer(&mut self,writer:crate::store::DurableWriter){self.writer=writer;}
 }
 
 pub fn identity(provider: &str, instance: &str, facts: &ResourceFacts) -> Identity {

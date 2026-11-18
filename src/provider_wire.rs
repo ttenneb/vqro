@@ -16,7 +16,7 @@ use crate::provider::{self, ProviderInfo};
 use crate::rpc::{params, Peer, RpcError, RpcResult};
 
 pub const MAX_RECORD_BYTES: usize = 1024 * 1024;
-pub const MAX_PROVIDERS: usize = 32;
+pub use crate::provider::MAX_PROVIDERS;
 pub const MAX_REGISTRATION_BYTES: usize = 128 * 1024;
 pub use crate::resource_admission::{encoded_bytes, MAX_FACT_BYTES, MAX_RESOURCES};
 const RECENT_EFFECTS: usize = 256;
@@ -180,21 +180,23 @@ impl Connection {
             && !(resuming && c.providers[&r.name].metadata["host"].as_str() == host.as_deref()) {
             return Err(RpcError::new("conflict", "provider name already has a live connection"));
         }
-        if !c.providers.contains_key(&r.name) && c.providers.len() >= MAX_PROVIDERS { return Err(overloaded("provider registry is full (32)")); }
+        let window=r.limits.stream_window_bytes.min(default_window());
+        let metadata=json!({"provider_version":r.provider_version,"limits":{"max_streams":r.limits.max_streams.min(512),"stream_window_bytes":window,"max_record_bytes":MAX_RECORD_BYTES},"host":host,"owner_extension":owner.as_ref().map(|o|&o.name)});
+        let info=ProviderInfo{connection:self.id,instance:r.instance.clone(),role:r.role.clone(),software:json!(r.software)};
+        let charge=provider::registration_charge(&r.name,&json!(r.capabilities),Some(&info),&metadata);c.admit_provider_registration(&r.name,charge)?;
         let resume_token = if let Some(claim) = &claim {
             if !c.has_resource_identity(&claim.host) { return Err(RpcError::new("forbidden", "runtime host removed")); }
             Some(c.bridge_tokens.rotate(r.token.as_deref().unwrap(), claim, &r.name, &r.instance)?)
         } else { None };
-        let window = r.limits.stream_window_bytes.min(default_window());
         let handle = AdapterHandle { name: r.name.clone(), capabilities: json!(r.capabilities), session: None, context: None, cmds: commands };
         // The default backend is the one whose extension entry says so (`extension/<name>`
         // `{kind: "provider", default: true}`), else the first backend; never a runtime bridge.
         let backend = r.role == "backend";
         let preferred = backend && c.store.get(&format!("extension/{}", r.name)).is_some_and(|e| e.value["default"] == true);
         let source = c.install_provider(handle, preferred, backend)?;
-        c.on_adapter_event(&r.name, adapter::AdapterEvent::Registered(ProviderInfo { connection: self.id, instance: r.instance.clone(), role: r.role, software: json!(r.software) }));
-        let generation = c.providers[&r.name].generation;
-        c.providers.get_mut(&r.name).unwrap().metadata = json!({"provider_version": r.provider_version, "limits": {"max_streams": r.limits.max_streams.min(512), "stream_window_bytes": window, "max_record_bytes": MAX_RECORD_BYTES}, "host": host, "owner_extension": owner.as_ref().map(|owner|&owner.name)});
+        c.providers.get_mut(&r.name).unwrap().metadata=metadata;
+        c.on_adapter_event(&r.name,adapter::AdapterEvent::Registered(info));
+        let generation=c.providers[&r.name].generation;
         if let Some(owner) = owner { c.provider_extensions.insert(owner.name); }
         c.provider_event(&r.name);
         let health = c.providers[&r.name].health.subscribe();
@@ -270,13 +272,14 @@ impl WireProvider {
         Self::check_capacity(&inventory,&facts)?;
         if !inventory.syncing { inventory.seen.clear(); inventory.syncing=true; }
         inventory.started=true;
-        for facts in facts { self.publish_locked(core,&mut inventory,facts)?; }
-        if final_chunk {
-            let records=inventory.seen.values().cloned().collect::<Vec<_>>();
+        // The final chunk includes authoritative removals in this same durable batch, not a second write.
+        let records=if final_chunk {let mut all=inventory.seen.clone();for f in &facts{all.insert(f.backend_ref.clone(),f.clone());}all.into_values().collect()}else{facts.clone()};
+        {
             let mut c=core.lock().unwrap();
-            if !self.current_locked(&c) { return Err(RpcError::new("stale_generation","provider changed before sync publication")); }
-            c.on_adapter_event(&self.name,adapter::AdapterEvent::Snapshot(records));
+            if !self.current_locked(&c){return Err(RpcError::new("stale_generation","provider changed before sync publication"));}
+            if let Err(error)=c.upsert_resources(&self.name,records,final_chunk){if !matches!(error.kind(),"io"|"durability_unconfirmed"){return Err(error);}}
         }
+        for facts in facts {Self::record_locked(&mut inventory,facts);}
         if let Some(error)=core.lock().unwrap().provider_persistence_error(&self.name) { return Err(error); }
         if final_chunk {
             inventory.current=std::mem::take(&mut inventory.seen);
