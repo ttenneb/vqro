@@ -289,7 +289,7 @@ impl Core {
     }
 
     pub fn extension_state(&self,name:&str)->Value {
-        let mut value=self.exts.get(name).map(|r|r.to_json()).unwrap_or_else(||json!({"status":"stopped","crashes":0,"last_exit":null}));
+        let mut value=self.exts.get(name).map(|r|r.to_json()).unwrap_or_else(||json!({"status":"stopped","crashes":0,"crashes_total":0,"crash_window_seconds":crate::ext::CRASH_WINDOW.as_secs(),"last_exit":null}));
         let key=format!("extension/{name}");let spec=self.store.get(&key).map(|e|&e.value);
         let enabled=spec.is_some_and(|s|s["enabled"]!=false);
         value["enabled"]=json!(enabled);

@@ -62,6 +62,16 @@ class SettingsTests(unittest.TestCase):
         broken=next(r for r in rows if r["id"]=="extension/broken")
         self.assertIn("fixture failure",str(broken["detail_panel"]))
 
+    def test_recent_crashes_and_total_have_distinct_explicit_labels(self):
+        module=load();ext=module["ext"]
+        ext.states["broken"].update(crashes=0,crashes_total=7,crash_window_seconds=300)
+        groups=module["ext_rows"](ext.states,{"demo.configure"})
+        broken=next(row for group in groups for row in group["children"] if row["id"]=="extension/broken")
+        text=str(broken["detail_panel"])
+        self.assertIn("Recent crashes (last 300 s): 0",text)
+        self.assertIn("Total crashes this supervision: 7",text)
+        self.assertIn("fixture failure",text,"last-exit history remains available even when no recent crashes remain")
+
     def test_safe_mode_actions_use_session_allowance_not_saved_enabled(self):
         module=load();ext=module["ext"]
         ext.states["off"].update(safe_mode=True,allowed_in_safe_mode=False,display_status="off")

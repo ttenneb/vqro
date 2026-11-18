@@ -285,6 +285,10 @@ async fn crash_budget_then_replace_then_safe_mode() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert_eq!(ext_status(&p, "bad").await, "failed");
+    let failed = p.call("extension.list", Value::Null).await.unwrap();
+    assert_eq!(failed["extensions"]["bad"]["crashes"], 3);
+    assert_eq!(failed["extensions"]["bad"]["crashes_total"], 3);
+    assert_eq!(failed["extensions"]["bad"]["crash_window_seconds"], 300);
 
     // Replacing the spec is a fresh start.
     p.call("workspace.apply", json!({"ops": [{"op": "set", "key": "extension/bad", "value": {"argv": ["sleep", "30"]}}]})).await.unwrap();
@@ -295,6 +299,9 @@ async fn crash_budget_then_replace_then_safe_mode() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert_eq!(ext_status(&p, "bad").await, "running");
+    let replaced = p.call("extension.list", Value::Null).await.unwrap();
+    assert_eq!(replaced["extensions"]["bad"]["crashes"], 0, "replacement resets the budget");
+    assert_eq!(replaced["extensions"]["bad"]["crashes_total"], 3, "historical exits remain explicit");
 
     p.call("command.invoke", json!({"name": "prim.safe_mode", "args": {"on": true}})).await.unwrap();
     assert_eq!(ext_status(&p, "bad").await, "safe_mode");
@@ -302,6 +309,8 @@ async fn crash_budget_then_replace_then_safe_mode() {
     assert_eq!(ext_status(&p, "bad").await, "running");
     p.call("command.invoke", json!({"name": "prim.extension.disable", "args": {"name": "bad"}})).await.unwrap();
     assert_eq!(ext_status(&p, "bad").await, "disabled");
+    let disabled = p.call("extension.list", Value::Null).await.unwrap();
+    assert_eq!(disabled["extensions"]["bad"]["crashes_total"], 3, "intentional stops are not crashes");
 }
 
 #[tokio::test]

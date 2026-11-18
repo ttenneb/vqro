@@ -736,7 +736,7 @@ without filesystem I/O. This is not a file watcher or a registry/install mechani
 
 `extension.list` and snapshot `extensions` export `manifest` (object or null), `manifest_source` (display-only
 core-host path or null), `manifest_error`, `enabled`, raw `status`, `display_status` (`running`, `off`, `failed`,
-`starting`, `stopped-by-safe-mode`, `provider-not-connected`), `safe_mode`, `allowed_in_safe_mode`, `running`, `generation`, `spec_version`, `crashes`, and `last_exit`. Unknown
+`starting`, `stopped-by-safe-mode`, `provider-not-connected`), `safe_mode`, `allowed_in_safe_mode`, `running`, `generation`, `spec_version`, `crashes`, `crashes_total`, `crash_window_seconds`, and `last_exit`. Unknown
 statuses should display as text. `provider-not-connected` means a declared/observed provider extension's process
 is running but no provider authenticated to that extension is connected and fully synced; raw `status` remains
 `running`. A provider may register under a different name. Settings displays process and readiness separately,
@@ -744,6 +744,13 @@ and an available settings command remains usable to repair a disconnected provid
 with a core), not an execution-lifetime guarantee. Process ids stay internal. Last-exit evidence survives disabling
 or safe entry even when the display badge is off/stopped-by-safe-mode. Logs remain core-host files at
 `<state dir>/ext-<name>.log`; no generic in-app log viewer exists, so Settings reports the path and that limitation.
+
+`crashes` counts unexpected exits still in the current restart-budget window (300 seconds), excluding a budget
+cleared by explicit restart/spec replacement. It is computed when facts are serialized, so a healthy run ages
+old exits out even without another exit. `crashes_total` separately counts unexpected exits since this
+declaration's runtime was created in this core: budget resets preserve it; removing the declaration or
+restarting the core resets it. Intentional stops are not crashes. `last_exit` remains historical. A crash-budget
+`failed` state stays latched until restart/change, even when recent crashes age out; restart policy is unchanged.
 
 Settings uses these same public facts and generic panel features for every declaration, including itself; it has
 no Pi-specific child row or always-on exception. If explicitly allowed to run in safe mode, its on/off controls

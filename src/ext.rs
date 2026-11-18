@@ -14,7 +14,7 @@ use tokio::sync::oneshot;
 use crate::core::Shared;
 
 const BUDGET: usize = 3;
-const WINDOW: Duration = Duration::from_secs(300);
+pub(crate) const CRASH_WINDOW: Duration = Duration::from_secs(300);
 const RESTART_DELAY: Duration = Duration::from_millis(500);
 // Cooperative providers (prim-tmux) allow up to1s for their private backend to exit.
 // Leave a cleanup margin inside the supervisor's2s overall shutdown bound.
@@ -26,6 +26,7 @@ pub struct ExtRuntime {
     pub spec_version: u64,
     pub generation: u64,
     pub crashes: VecDeque<Instant>,
+    crashes_total: u64, // This declaration's supervised exits during this core lifetime.
     pub last_exit: Option<String>,
     pub running: bool,
     stop: Option<oneshot::Sender<()>>,
@@ -34,7 +35,16 @@ pub struct ExtRuntime {
 
 impl ExtRuntime {
     pub fn to_json(&self) -> Value {
-        json!({"status": self.status, "running":self.running, "generation":self.generation, "crashes": self.crashes.len(), "last_exit": self.last_exit, "spec_version": self.spec_version})
+        self.to_json_at(Instant::now())
+    }
+
+    fn to_json_at(&self, now: Instant) -> Value {
+        // Serialization must age the displayed count even during a healthy run
+        // with no new exit. Budget resets and the failed latch are unchanged.
+        let recent = self.crashes.iter().filter(|at| now.saturating_duration_since(**at) <= CRASH_WINDOW).count();
+        json!({"status": self.status, "running":self.running, "generation":self.generation,
+            "crashes": recent, "crashes_total": self.crashes_total, "crash_window_seconds": CRASH_WINDOW.as_secs(),
+            "last_exit": self.last_exit, "spec_version": self.spec_version})
     }
 }
 
@@ -81,6 +91,7 @@ pub fn reconcile(core: &Shared) {
             spec_version: version,
             generation: 0,
             crashes: VecDeque::new(),
+            crashes_total: 0,
             last_exit: None,
             running: false,
             stop: None,
@@ -215,8 +226,9 @@ fn on_exit(core: &Shared, name: &str, generation: u64, why: String) -> bool {
     rt.stop = None;
     rt.last_exit = Some(why);
     let now = Instant::now();
+    rt.crashes_total = rt.crashes_total.saturating_add(1);
     rt.crashes.push_back(now);
-    while rt.crashes.front().map(|t| now.duration_since(*t) > WINDOW).unwrap_or(false) {
+    while rt.crashes.front().map(|t| now.duration_since(*t) > CRASH_WINDOW).unwrap_or(false) {
         rt.crashes.pop_front();
     }
     let restart = !shutting_down && rt.crashes.len() < BUDGET;
@@ -277,6 +289,48 @@ pub(crate) fn stop_all_locked(c: &mut crate::core::Core) {
 #[cfg(test)]
 mod qa2_tests {
     use super::*;
+
+    fn runtime_with_crashes(crashes: VecDeque<Instant>) -> ExtRuntime {
+        ExtRuntime { status: "failed".into(), pid: None, spec_version: 1, generation: 7, crashes_total: crashes.len() as u64, crashes,
+            last_exit: Some("historical failure".into()), running: false, stop: None, token: String::new() }
+    }
+
+    #[test]
+    fn crash_facts_exclude_expired_budget_entries_without_losing_the_total() {
+        let start = Instant::now();
+        let now = start+CRASH_WINDOW+Duration::from_secs(1);
+        let mut rt = runtime_with_crashes(VecDeque::from([start, start+Duration::from_secs(1)]));
+        let state = rt.to_json_at(now);
+        assert_eq!(state["crashes"], 1, "healthy elapsed time must age old crashes out of displayed budget counts");
+        assert_eq!(state["crashes_total"], 2);
+        assert_eq!(state["crash_window_seconds"], 300);
+        let aged = rt.to_json_at(now+Duration::from_secs(1));
+        assert_eq!(aged["crashes"], 0);
+        assert_eq!(aged["crashes_total"], 2);
+        assert_eq!(aged["status"], "failed", "aging must not clear the crash-budget failed latch");
+        rt.crashes.clear(); // Explicit restart/spec replacement resets only the budget.
+        let reset = rt.to_json_at(now);
+        assert_eq!(reset["crashes"], 0);
+        assert_eq!(reset["crashes_total"], 2);
+        assert_eq!(reset["last_exit"], "historical failure");
+    }
+
+    #[test]
+    fn unexpected_exits_increment_total_but_only_recent_exits_exhaust_the_budget() {
+        let mut c = crate::core::Core::new(crate::store::Store::in_memory(), None, "unused".into(), false).unwrap();
+        let mut rt = runtime_with_crashes(VecDeque::new());
+        rt.crashes_total = 1; // An older, already expired crash still belongs in the total.
+        c.exts.insert("fixture".into(), rt);
+        let core = std::sync::Arc::new(std::sync::Mutex::new(c));
+        assert!(on_exit(&core, "fixture", 7, "first recent exit".into()));
+        assert!(on_exit(&core, "fixture", 7, "second recent exit".into()));
+        assert!(!on_exit(&core, "fixture", 7, "third recent exit".into()));
+        let c = core.lock().unwrap();
+        let state = c.exts["fixture"].to_json();
+        assert_eq!(state["crashes"], 3);
+        assert_eq!(state["crashes_total"], 4);
+        assert_eq!(state["status"], "failed");
+    }
     #[tokio::test]
     async fn cooperative_provider_gets_time_for_its_one_second_cleanup() {
         let root=tempfile::Builder::new().prefix("pxq").tempdir_in("/tmp").unwrap();
