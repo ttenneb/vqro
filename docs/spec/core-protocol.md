@@ -34,7 +34,10 @@ the core forwards `command.invoke` to the connection that registered the command
 | `hello` | `client?` or `extension?` (name), `extension_token?` (supervised lifetime proof) | `server`, `version`, `protocol`, `you` (author id), `epoch`, `seq`, `safe_mode` |
 | `core.shutdown` | | `outcome: "accepted"` |
 
-Every change is recorded with the connection's author (`ext:<name>`, `<client>:<n>`).
+Every change records its connection's author: `ext:<name>` only after verifying the existing managed-lifetime
+`extension_token`; otherwise `client:<connection id>`. Unverified extension/client labels cannot reserve an `ext:`
+author. Human-readable client labels remain in `client.list`. D24 invocation proofs still carry original-invoker
+attribution; this is collision hygiene, not a new workspace permission scheme (D8/D24).
 
 `core.shutdown` is implemented (D22 is confirmed; Windows transport remains implementation work). The accepted reply is locally
 written/flushed before stop begins, not a remote-read guarantee. The core stops accepting and rejects new workspace
@@ -132,8 +135,8 @@ slot stays charged through actual writing: 16 MiB entries + 8 MiB live + 32 MiB 
 metadata/headroom. A busy large slot returns `overloaded`; a reply over the envelope returns `too_large` **without
 disconnecting**. This is not a raised general backlog cap. No effect/input is replayed. The resource envelope
 is enforced for native and wire providers: 4096 resources/provider, 128 KiB whole facts, 32 MiB globally retained
-published/pending-IO resource JSON, 32 providers, 128 KiB registration metadata/provider, 128-byte names and
-256-byte instances. Global-budget errors name the offending provider. Legacy workspace/live state can still
+published/pending-IO resource JSON, 1024 providers, 128 KiB registration metadata/provider, **4 MiB aggregate
+registration metadata** (with a 1 KiB/provider accounting floor), 128-byte names and 256-byte instances. Global-budget errors name the offending provider. Legacy workspace/live state can still
 exceed other limits, so oversized recovery remains necessary.
 
 If legacy/external state exceeds the reply envelope, the TUI starts in clearly labelled **recovery-only** mode,
@@ -168,6 +171,8 @@ active. `reason: backlog_budget` requests a snapshot instead of repeatedly disco
 Client resync buffers have the same 8 MiB byte cap and restart recovery on overflow.
 
 Subscription options shape what one subscriber receives; they never change the log or other subscribers.
+A peer closing terminates its subscription immediately, including while the event stream is idle; no subsequent
+event is needed to release its receiver and buffers.
 - `types`: only events of these types arrive (unknown names are allowed; `missed` always arrives). Caches built
   from a type you don't receive go stale until the next snapshot.
 - `view_content`: restricts only `view.content` events to exact `names` or literal `prefixes` (OR). Omitted means
@@ -215,7 +220,11 @@ supports `stream:false` to reject `stream.input`; missing flags retain legacy ha
 herdr/fake and wire herdr/tmux/Python fake declare `{stream:true,effect:false}` for terminal input: literal input
 still works on attached streams, but no unsupported raw-input RPC, automatic Enter, or temporary attach is invented. `identity_persistence` separately reports
 `{state: "ok"|"failed", error?}`. `provider {name, state}` events publish registry changes. `adapters` and `adapter`
-events temporarily remain aliases so existing extensions continue to work.
+events temporarily remain aliases so existing extensions continue to work. A disconnected runtime record is reaped
+only when it has no active identities, retained resources or pending facts; `provider.removed {name,reason:"retired"}`
+(and compatibility `adapter.removed`) removes it from registry snapshots. Backend records and stale runtime facts
+remain while relevant. Host-bound resume credentials survive independently until their host retires. A core-wide
+lease counter preserves monotonic generations when a reaped name returns; old sources/routes remain fenced.
 
 A provider registration/start is connection-bound and gets a new generation. Old event sources, queued commands,
 effect replies and streams cannot act through a replacement connection. The native adapter's connection token is
@@ -247,13 +256,18 @@ The fake gets a random instance per start. Instance/incarnation changes retire o
 `reason: {reason: "closed"}`. Views/layouts are never rebound automatically. A disconnect instead keeps known facts
 with `available: false, stale: true`; the same instance and identity returns with its original id after fresh facts.
 
-Identity reservations and tombstones are durably persisted before publication. A pre-rename failure publishes no
+Identity reservations and the monotonic allocation high-water mark are durable before publication. Retired
+records are dropped, not retained as a growing tombstone table. Opening old files accounts for every saved id
+(including retired and legacy records) before pruning them, so restart cannot reuse or rebind an id. Active tuple
+lookups are indexed. A native inventory or wire sync chunk uses one candidate/identity-map write, including
+final-chunk removals, before publication; failed batches retain bounded pending facts. Host credential expiry is
+likewise batched on retirement. Storage stays on the core lock; the 600-new-inventory regression bounds the hold. A pre-rename failure publishes no
 new prim id. Because the backend spawn may already have happened, the call returns `io` with
 `data.outcome: "indeterminate"`, `backend_outcome: "observed"`, `provider`, `instance` and `resource_facts`
 (including `backend_ref`); never resend automatically. Facts are retained internally and assigned ids after an
 authoritative sync or a later successful map write. A post-rename directory-sync failure adopts the identity but
 returns `durability_unconfirmed`, like the workspace store; later success must confirm durability. Legacy two-field
-maps cannot prove an instance: their ids become tombstones, new ids are assigned from the first native inventory,
+maps cannot prove an instance: their ids are retired via the high-water mark, new ids come from the first native inventory,
 and old layouts may show gone resources until explicitly repaired/reset. No identity is guessed during migration.
 
 ## Resources (backend-owned, D14)
@@ -500,7 +514,10 @@ and sets the prefix; the active profile is `doc/keys/profile`, and the list is l
 
 - `view.publish {view, content}`: live content merged over a view's entry (e.g. `{"items": [...]}`). Not saved,
   not in history; broadcast as event `view.content`; cleared when the publishing connection disconnects, so a
-  panel falls back to its entry (typically "not running"). Snapshots include `live`.
+  panel falls back to its entry (typically "not running"). Snapshots include `live`. A different live author cannot
+  overwrite or clear the publisher (`conflict`), matching command-registration collision hygiene. Verified same-
+  extension replacement connections may take over; late old disconnects do not clear the replacement. Live encoded
+  sizes and the total are cached: each publish encodes only its candidate, not all other live content.
 - A command's reply may ask the invoking client for UI: `{"client": {"popup": {"view", "width"?}}}`,
   `{"client": {"close": true}}`, or `{"client": {"focus": {"view": "view-id"}}}`. These fields may be combined.
   Per client and temporary; clients refuse terminal views as popups. `focus` leaves zoom and focuses an already

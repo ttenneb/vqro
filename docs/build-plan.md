@@ -3,6 +3,23 @@
 D16: build prim itself, smallest complete and usable first. The north star: an agent can substantially modify its own
 workspace through reliable public primitives, without changing the host or endangering underlying processes.
 
+## Identity/connection/registry hardening (2026-11-17)
+
+Implemented active-only indexed identities with a durable monotonic high-water mark, one durable replace per
+inventory/sync chunk, and batched host credential expiry. Observed closures/replacements fence stale routes even
+when retirement persistence fails; no ids are reused or effects replayed. The registry now admits 1024 providers
+under a 4 MiB aggregate metadata budget and reclaims only empty disconnected runtime records, retaining source/
+generation fencing without a historical-name table. Idle event subscribers release on peer close; live content
+caches encoded byte charges and rejects different-author replacement. Only existing managed-lifetime proof reserves
+an `ext:name` author; SDK/D24 compatibility uses genuine private token fixtures.
+
+Before/after: 600-new-id core hold 1071→39 ms (43 ms on home btrfs); 10k idle Core RSS 16→127 MiB becomes 14.3→14.6 MiB.
+A real SDK probe admits 600 runtime providers plus a backend, then 2000 completed lifetimes: 868759-byte snapshot 189 ms,
+registration p99 16 ms, active Core RSS 88.7 MiB; registry aliases, clients, identity and credential records drain.
+600-host retirement improved 1.65 s→40 ms. These are target fixtures, not a 600-provider status-flood claim.
+Evidence, fault/restart regressions and final full-gate authority: `research/identity-hygiene.md`.
+Architecture is current; the old backend-adapter sketch is explicitly superseded by the implemented provider wire.
+
 ## Slice 1: first working prim
 
 | Component | Scope |

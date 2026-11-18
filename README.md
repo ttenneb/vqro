@@ -33,7 +33,8 @@ Protocol: `docs/spec/core-protocol.md`.
 1. `docs/vision.md`: why, principles, non-goals, risks
 2. `docs/decisions.md`: what is decided (D14 is the center; D15–D19 shape everything since)
 3. `docs/architecture.md`: how it fits together
-4. `docs/spec/`: `workspace-v0.md` (the primitives) and `backend-adapter-v0.md` (how backends plug in)
+4. `docs/spec/core-protocol.md` (living primitives) and `docs/spec/provider-v0.md` section9 (implemented providers);
+   `workspace-v0.md` / `backend-adapter-v0.md` are superseded sketches, not alternative wire APIs
 5. `docs/roadmap.md`: milestones, exit tests, kill questions
 6. `docs/test-plan.md`: what to test now and why; `docs/experiments/` for details
 7. `docs/open-questions.md`

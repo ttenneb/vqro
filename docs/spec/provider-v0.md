@@ -80,7 +80,8 @@ Prim resource ids (`r1`, ...) are never reused. Each maps to **(provider name, i
 - A change of instance or incarnation retires the old prim id (`resource.removed` with `reason: "replaced"`) and mints
   a new one. Views pointing at the old id show it as gone. Rebinding them is an extension's choice, never automatic.
 - The identity map is persisted under the store's durability rules; failures are reported as `persistence.error`
-  (`core-protocol.md`). Retired ids are tombstoned so they never come back.
+  (`core-protocol.md`). Retired records are dropped while a durable monotonic high-water mark prevents their ids
+  ever returning, including after loading/pruning older tombstone files.
 - An agent's "who am I" is its agent resource id (section 6), not a backend environment variable.
 
 ## 3. Capabilities
@@ -239,7 +240,7 @@ Public calls stay resource-centric: `resource.spawn {provider?, kind, ...}`, `re
 ## 7. Core and providers
 
 **Core** (mechanism; works with every extension broken): the provider registry and generations, the identity map and
-tombstones, routing of effects and streams, capability checks and export, deadlines and outcomes, per-connection
+monotonic id high-water mark, routing of effects and streams, capability checks and export, deadlines and outcomes, per-connection
 bounds and credit accounting, disconnect handling, and the recovery commands.
 **Providers and extensions** (backend or runtime knowledge, and opinion): every adapter and bridge, the default
 backend and per-host choices, spawning agents, delivery policies and queues, agent views, and what to do after
@@ -326,13 +327,22 @@ This section is the implementable contract; where sections 1–6 differ, this wi
 - **Admission bounds (native and wire):** 4096 retained resource references per provider; 128 KiB per whole facts
   record (including status/argv/name/cwd, in addition to the 64 KiB data bound); 32 MiB globally for published plus
   pending-IO resource JSON. Candidates reserve space before publication. Registration metadata is at most 128 KiB,
-  provider names 128 UTF-8 bytes, instances 256 bytes, and the registry holds at most 32 providers. Violations return
+  provider names 128 UTF-8 bytes and instances 256 bytes. The registry admits **1024** providers, enough for one
+  provider per agent at target scale plus backends/headroom, with **4 MiB aggregate registration metadata** including
+  a 1 KiB accounting floor per provider. These limits are shared by native/wire registration, checked before runtime
+  credential rotation. Disconnected runtime names are reclaimed once all identities/resources/pending facts are
+  gone; host-bound resume credentials do not depend on retaining an empty registry row. Core-wide lease allocation
+  keeps generations monotonic even when such a name returns. Violations return
   `overloaded` or close a notifying provider; global-budget diagnostics identify the provider that hit the bound.
   These are payload/accounting bounds, not an RSS or latency promise.
 - **Limits** (G10): `max_streams` is the provider's hard cap on concurrently open streams; the core does not open more
   and returns `overloaded` to the viewer. The effective window is `min(stream_window_bytes, 262144)` and is returned
   in the register result. The current core additionally admits at most 512 wire streams and 128 concurrent
   effect/open calls per provider; overflow is rejected, never queued without a bound.
+- **Sync durability:** each native inventory/wire chunk admits and reserves its changed facts, writes one indexed
+  identity-map candidate, then publishes. The final chunk includes authoritative removals in that same replace.
+  No id from a failed pre-rename candidate is published; post-rename uncertainty adopts/reports the complete batch.
+  Credential revocations for a retired-host batch likewise use one existing durable replace. No input is replayed.
 - **Sync** (G9, G20): a sync is one or more `provider.sync` chunks; the chunk with `final: true` ends it. Each chunk
   merges (upserts) its resources as it is applied. At the final chunk, every resource of this provider not listed in
   any chunk of this sync is removed (`reason: replaced` if its ref reappeared with another incarnation, else

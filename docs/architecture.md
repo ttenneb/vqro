@@ -1,114 +1,95 @@
 # prim: architecture
 
-Status: revised 2026-11-16. The shape below is the intended design; **much of it is now built as a working
-prototype, and fluid** (see "What exists now"). The exact, current protocol is `spec/core-protocol.md`; open items
-are in `open-questions.md`.
+Status: **implemented working prototype, and fluid**, revised 2026-11-17. This replaces the 2026-11-16
+in-process-adapter architecture. The living contracts are `spec/core-protocol.md` and the implemented wire section
+9 of `spec/provider-v0.md`. Earlier sketches are historical, not alternative APIs.
 
-prim is one lean, standardized layer of workspace primitives over any multiplexer and any agent runtime. Humans and
-agents use the same primitives to build and change the workspace; coordination (messages, interrupts, routing) is
-workspace behaviour like layout or commands. Backends own execution (D14).
+prim is one lean, standardized layer of workspace primitives over backends and agent runtimes (D14). Humans and
+agents use the same public operations. Coordination is workspace behavior composed from those primitives, not a
+second authority system. No contract is called stable before two implementations exercise it.
 
-## Layers
+## Execution and ownership
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│ Clients: render the workspace (TUI first; others later)       │
-├──────────────────────────────────────────────────────────────┤
-│ Extensions (processes): layouts, views, commands, bindings,   │
-│ routing, mailboxes, delivery strategies, notifications ...    │
-├──────────────────────────────────────────────────────────────┤
-│ prim core: the primitives · facts + change log · effects      │
-├───────────────────────────────┬──────────────────────────────┤
-│ Backend adapters (thin)       │ Agent adapters / bridges      │
-│ herdr-core, tmux, RMUX, Rex,  │ pi RPC, Claude Code, Codex,   │
-│ Zellij ...                    │ ACP agents                    │
-├───────────────────────────────┴──────────────────────────────┤
-│ Backends: processes, PTYs, persistence, remote (not prim)     │
-└──────────────────────────────────────────────────────────────┘
+```text
+Clients (Rust TUI now; other clients later)
+  render terminal streams and declarative panels; own local focus/selection/scroll
+                    |
+prim core: transactions/history/undo, commands/bindings, resource identities,
+  provider registry, bounded events/live content, capability routing and effect outcomes
+          |                                      |
+supervised extension processes           external providers over core protocol
+  tabs, panes, settings, sidebar, ...       prim-herdr, prim-tmux, runtime bridges
+                                                 |
+                                backends own terminals/programs/persistence
+                                runtime bridges use backend-owned execution
 ```
 
-Everything above the backends talks the prim core protocol. The core is a small, restartable process; it owns no
-child processes.
+The core **does supervise its own extensions** (D15): process start/stop, lifetime channel, crash budget and
+replacement on declaration changes. It does **not** host workspace terminals, agent processes or their lifetime
+guarantees. A core/provider restart reconnects to facts; it never replays agent input or invents a backend's
+capabilities. Explicit in-process adapters remain for tests/embedders, not the normal `prim serve` architecture.
 
-## What exists now (prototype, 2026-11-16)
+## What exists now
 
-| Area | Built | Where |
+| Area | Implemented | Main code |
 |---|---|---|
-| Core | JSON-RPC over a local socket; workspace store (validated transactions, history, revert, persisted); events with seq and `missed`; commands routed to owning connections; live view content (`view.publish`, not persisted); client tracking | `src/core.rs`, `src/server.rs`, `src/store.rs` |
-| Adapters | herdr-core via `hc connect` (framed attach streams, OSC 7501 status, cwd); a fake backend fixture. **In-process**, behind channels | `src/adapter/` |
-| Extensions | supervisor with crash budget, live replacement, safe mode; first-run defaults; contributions (`menu/*`, `binding/*`) with `owner` | `src/ext.rs`, `extensions/` |
-| TUI client | layouts (tabs, splits, drag resize, zoom), terminal views (vt100), panels (pages, trees, toolbar, chips, select, badges, icons, filter), menus, popups, prompt line, mouse, themes (palette tokens), keys (rebindable prefix, priority, profiles), self-restart on reinstall | `src/tui/` |
-| Bundled extensions | tabs, panes, gestures, workspaces, sidebar, themes, keys, settings | `extensions/*.py` |
+| Core transport | Owner-only opaque local endpoint, bidirectional JSON-RPC, bounded framing/queues/pending calls, protocol shutdown | `src/rpc.rs`, `src/server.rs`, `src/shutdown.rs` |
+| Workspace | Validated durable candidate-first transactions, history/revert, D24 original-invoker attribution, serialized bounded commit admission | `src/store.rs`, `src/commit.rs`, `src/invocation.rs` |
+| Providers | External backend/runtime registration, generation/source fencing, inventory chunks, capabilities, forwarded effects and credited streams | `src/provider.rs`, `src/provider_wire.rs`, `src/provider_client.rs` |
+| Identity/facts | Indexed active identity map with durable monotonic id counter; batched inventory replacement; observed availability and explicit retirement | `src/provider.rs`, `src/core.rs`, `src/resource_admission.rs` |
+| Backend implementations | `prim-herdr` over hc framing; `prim-tmux` over its separate native server; fake backend/provider fixtures | `src/bin/prim-herdr.rs`, `src/bin/prim-tmux.rs`, `src/adapter/`, `src/tmux/` |
+| Pi integration | Backend-owned bridge process driving Pi RPC; durable bootstrap/resume binding and runtime resources; fake-Pi E2Es require no model calls | `extensions/pi_bridge/`, `src/bridge_tokens.rs` |
+| Extensions | Supervised declarations, static manifests, versioned defaults, live replacement/crash diagnostics and empty-start safe-mode recovery | `src/ext.rs`, `src/manifest.rs`, `extensions/` |
+| TUI | Terminal VT rendering, layouts/tabs/splits, generic panels/list-detail, menus/popups, mouse, themes/icons/keymaps, recovery prefix and reinstall re-exec | `src/tui/` |
+| Workspace opinions | Tabs/panes/gestures/workspaces/sidebar, theme/icon/key catalogues, Settings, capability-driven agent controls, Pi launcher, tmux server controls | `extensions/*.py`, `extensions/manifests/` |
 
-Not built: headless agent bridge and agent views (agents run as terminals; status via OSC 7501), out-of-process
-adapters, a second backend, remote machines, Windows. Order: `roadmap.md`. The proposed contract that moves
-adapters and bridges out of process as providers is `spec/provider-v0.md` (D21, proposed).
+The native tmux server's lifetime is independent of its provider/core; explicit confirmed controls stop it. It is
+not the human's default tmux server. Herdr-core likewise owns its terminals. Backends declare exactly what they
+natively support; raw input, exit codes, history/repaint and capability parameters are not emulated.
 
-## The primitives
+## State and observation
 
-| Primitive | What it is |
-|---|---|
-| **Node** | an addressable thing: a `terminal` (from a backend) or an `agent` (from an agent adapter) |
-| **View** | something renderable: a terminal view (via VT), an agent view (from agent facts), an extension view |
-| **Layout** | a versioned document placing views in a tree of containers |
-| **Command** | a named, typed action registered by core, an adapter or an extension |
-| **Binding** | input in a context mapped to a command (context keys, like VS Code `when`) |
-| **Input / message** | input addressed to a node: keys and bytes to a terminal, or a message to an agent using the agent's native capabilities |
-| **State** | namespaced documents and facts, one writer per namespace |
-| **Event** | every fact change, in a cursored log: read from a cursor to poll, stream from it for push |
-| **Extension** | a declared process that registers views, commands and bindings and owns namespaces |
+- Workspace entries are authoritative prim-owned configuration/layout. Changes go through transactions, with
+  validation, persistence and undo. User-triggered extension writes carry actual writer plus proven original
+  invoker (D24); autonomous extension updates remain outside default user undo.
+- Resource facts are backend observations. Identity is `(provider, instance, ref, incarnation)`. A durable
+  monotonic `next` prevents id reuse after retirement or restart; retired records themselves are discarded.
+  Views/layouts retain their ids and are never silently rebound to a new execution lifetime.
+- An inventory/sync chunk admits its facts, writes one identity candidate, then publishes. A failed write exposes
+  no new id; a replacement/closure observation can still fence old routes. Rename-with-unconfirmed-durability is
+  adopted and reported, not replayed. Credential expiry follows the same retirement batch.
+- Live view content is derived, bounded and not in history. Per-view charges and the total are cached; a publish
+  does not re-encode every other live view. Different live authors cannot replace/clear each other's publisher;
+  replacement connections of the same verified extension retain their namespace.
+- Events use `(epoch, seq)`, count/byte-bounded replay and explicit `missed` recovery. Idle subscribers terminate
+  on peer close without needing another event. Clients resnapshot after gaps rather than synthesizing history.
 
-Spec: `spec/workspace-v0.md`. These are the standard; everything else is an adapter or an extension.
+The provider registry holds up to 1024 names under an aggregate registration-metadata budget. Disconnected runtime
+records leave when no active identities, retained resources or pending facts need them. Source tokens still fence
+late old connections; host-bound resume credentials are independent of a registry record. Backends/disconnected
+runtime resources remain visible while their facts are still relevant. See the protocol for exact limits/events.
 
-## Capabilities everywhere
+## Commands, UI and recovery
 
-prim never assumes what a backend or runtime can do. Adapters declare capabilities, the core exposes them, and
-extensions and clients use what is there.
+The core/client keep mechanism and recovery; opinions live in extensions using public primitives (D0/D17).
+Commands are connection-owned, extensions contribute menus/bindings/views, and clients render terminal or generic
+panel data. Settings' searchable list/detail is the same optional capability another extension can use; manifests
+are static descriptive data, not an installer, permission system or dependency solver (`extensions.md`).
 
-- **Backend capabilities**: `spec/backend-adapter-v0.md` (spawn, input, raw output, OSC 7501 status, labels, docs,
-  native layout, detach persistence, remote machines, event resync).
-- **Agent capabilities** (D4):
+Safe mode starts no extensions/providers automatically. The built-in chooser gives explicit session-only
+allowances; normal enabled declarations are unchanged. The prim badge/prefix still reaches commands, undo, reset,
+safe mode and quit with every extension broken. Bad key/theme settings fall back to built-ins. Core shutdown stops
+extension/provider links in order, not backend-owned terminal execution (D22).
 
-| Capability | pi RPC | Claude stream-json | Codex app-server | ACP v1 |
-|---|---|---|---|---|
-| `prompt` (idle) | `prompt` | user message | `turn/start` | `session/prompt` |
-| `inject_at_boundary` | `steer` | unverified (E1) | `turn/steer` | no (ext. only) |
-| `enqueue_after_settle` | `follow_up` | queued message | no | no |
-| `interrupt` | `abort` | interrupt | `turn/interrupt` | `session/cancel` |
-| `answer_request` | extension UI only | `--permission-prompts host` | `requestApproval` reply | `request_permission` |
-| `fork` / `resume` | yes | `--fork-session` / `--resume` | `thread/fork` / `resume` | resume; fork unstable |
+## Trust, portability and what is not built
 
-Sources: `research/agents.md`; Claude flags from local `claude --help` (2.1.325). Claude Code also has a native
-cross-session inbox socket (delivered / held / refused; `research/prior-art-tools.md`), a candidate route for E1.
+Trust is cooperative, not a security sandbox (D8/D24). Agents may change anything users can. Managed lifetime
+credentials reserve `ext:<name>` authorship; unmanaged connections have connection-scoped authors. D24 callback
+proofs bind original-invoker attribution to the receiving live command, not to caller-supplied labels. These are
+collision/attribution mechanisms, not a new grant system.
 
-## Agents
-
-An agent node is either:
-- **headless**, through an agent bridge running in an ordinary backend terminal (`spec/backend-adapter-v0.md`); prim
-  renders its UI from structured events; or
-- **PTY-backed**, the runtime's native TUI in a backend terminal; prim sees bytes and OSC 7501 status.
-
-Switching means ending one and resuming the session in the other; resume restores history, not a turn in progress (D11).
-
-## Facts, log, effects
-
-- Facts are observed, not authoritative (D6). The log is bounded; a reader that falls behind gets `missed`.
-- Effects report what the backend or runtime said happened: `dispatched`, `accepted`, `observed`, or
-  `indeterminate` (D10). prim adds no guarantees beyond what the layer below provides.
-
-## Clients and UI
-
-A client renders workspace primitives; it holds no workspace behaviour. TUI first (ratatui, D7). Terminal views use
-an embedded VT on the backend's raw output stream. Extension views: declarative, terminal program, hybrid, or a mix
-(**Open**, test S3).
-
-## Core protocol rules (candidate, `research/protocols-and-ui.md`)
-
-Generated schema with a CI compatibility gate; capabilities instead of version branching; unknown fields ignored;
-version and caller on every request; no hidden session state; side effects broadcast with seq and `missed`;
-reverse-DNS extension namespaces; stable error kinds.
-
-## Trust (D8)
-
-Cooperative authority; user-only local sockets with short paths; every effect records its caller; answering an agent's
-permission request is reserved for humans unless explicitly granted.
+The endpoint contract is platform-neutral and opaque (D12/D22); Unix transport ships today, native Windows
+transport remains unimplemented. Runtime/provider execution placement and any future remote reachability must
+stay backend-neutral (D23): the rejected herdr document relay is not an architectural dependency. Other runtime
+adapters (Claude Code, Codex, ACP), remote-machine UX, a registry/installer and broader view vocabulary remain
+roadmap/research work, not shipped guarantees. `roadmap.md` owns their order.

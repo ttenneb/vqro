@@ -1,9 +1,9 @@
 # prim backend adapter contract, v0 (draft)
 
-> **Status (2026-11-16):** Forward-looking. Today the only adapter (herdr-core) and the test fixture run **in-process** behind a channel interface (`src/adapter/`); the out-of-process protocol is roadmap step 2. prim is a working prototype, and fluid.
-> The proposed wire contract for out-of-process adapters and agent bridges (registration, identity, streams with
-> credit, effects and outcomes) is `provider-v0.md` (D21, proposed). This file stays the catalogue of what each
-> backend can do.
+> **Historical draft; superseded as a public adapter contract (2026-11-17).** External providers are implemented:
+> use `provider-v0.md` section9 and `core-protocol.md`, not the illustrative messages below. Herdr-core, tmux and
+> the Pi runtime bridge are shipped implementations; in-process channels remain test/embedder machinery.
+> This document is retained only as a capability/research catalogue; it is not the current wire schema.
 
 Status: draft (D14). A backend adapter maps one multiplexer onto prim's primitives and **declares** what that backend
 can do. prim exposes the declared capabilities and never compensates for missing ones. Adding a backend should take
