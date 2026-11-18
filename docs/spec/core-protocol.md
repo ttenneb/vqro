@@ -288,6 +288,9 @@ Spawn, kill and attach check declared capabilities and provider/resource availab
 deadline is 30000 ms, override 1–300000 ms. Expiry is `timeout` with an indeterminate outcome; connection or resource
 loss while in flight is `unavailable` with an indeterminate outcome. Pre-dispatch unavailability is rejected.
 Late replies are ignored; independent resource facts reconcile what happened. No effect is automatically resent.
+A spawn reply describes creation. If that exact `(provider, instance, ref, incarnation)` is already published,
+completion reuses its id/current facts instead of rolling a newer observation back to the creation snapshot
+(for example, a very short program may already be finished). An unknown identity follows normal durable admission.
 
 `resource.forget` releases a **finished** resource: the owning provider drops it backend-side (herdr-core
 `terminal.rm`, which deletes the terminal record and its history in herdr-core; tmux already deleted the exited
@@ -352,7 +355,7 @@ still not negotiated; slow viewers use explicit closure/repaint rather than simu
 
 Resource ids (`r1`, ...) are prim's and stay stable across core restarts while the backend keeps the resource.
 
-The in-process herdr adapter also caps native pending calls at 1024. Effect deadlines retire cancelled reply
+The shared native herdr adapter also caps native pending calls at 1024. Effect deadlines retire cancelled reply
 senders within 100 ms; cancelled commands still queued before native dispatch are skipped. Late attachment
 responses retain only bounded cleanup tokens so their returned channel is explicitly closed. At 1024 such tokens
 the native connection is closed/recovered, never replayed. Hello and initial subscription each have a five-second
@@ -360,10 +363,14 @@ startup deadline; hello framing is capped at 1 MiB. These are distinct from the 
 
 The native herdr adapter reconciles a finished `terminal.kill` reply into resource facts even when no finished
 event arrives with an attachment open. It retains unknown exit codes as null and does not replace newer-incarnation
-records with an old reply. Its `events.subscribe` DATA channel returns exact payload-byte CREDIT only after a FIFO
-consumer barrier; the native core acknowledges after applying facts, and `prim-herdr` after its bounded publisher
-accepts prior facts. Credit waiting is off the native session loop. Finite-window fixture evidence is in
-`tests/herdr_event_credit.rs`; real scale receipts are separate from this fixture claim.
+records with an old reply. Its `events.subscribe` DATA is an incremental **NDJSON byte stream**, not one JSON
+object per frame. Coalesced and split records are decoded with a 16 MiB unfinished-record bound; malformed/oversized
+records close/recover the native link rather than silently discarding observations. Subscribe/`missed` snapshot
+sequence cutoffs suppress queued older events. Exact per-frame payload-byte CREDIT follows a FIFO consumer barrier:
+the native core acknowledges after applying facts, and `prim-herdr` after its bounded publisher accepts prior facts.
+Bounded partial-record acceptance also returns credit, avoiding a record-larger-than-window deadlock. Credit waiting
+is off the native session loop. Finite-window evidence is `tests/herdr_event_credit.rs`; the separate real private
+load/pruning/forget/no-reconnect regression is `tests/e2e_herdr_drift.py`. No polling reconciler or effect replay.
 
 ## Commands
 

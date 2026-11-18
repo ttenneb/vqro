@@ -3,6 +3,19 @@
 D16: build prim itself, smallest complete and usable first. The north star: an agent can substantially modify its own
 workspace through reliable public primitives, without changing the host or endangering underlying processes.
 
+## Native herdr drift hardening (2026-11-17)
+
+Found the soak's load-dependent loss: hc event DATA coalesces NDJSON records, while the adapter parsed one JSON
+object per frame and silently dropped multi-record payloads (and credit). Bounded incremental decoding, consumed
+per-frame credit and subscribe/missed sequence cutoffs now preserve every observation. A second generic ordering
+fix prevents spawn completion from overwriting newer facts for an already-published identity.
+
+Controlled red/green: 600 one-second shells previously left 543 phantom live rows and 100 already-pruned rows;
+decoder-only immediate exits exposed 78 creation-reply rollbacks. The permanent real-hc full-gate regression runs
+three 600-terminal waves, converges to native's 500 retained finished rows each time, preserves 1800 distinct ids,
+then converges to 497 after explicit forget. Same provider generation throughout: no reconnect or polling workaround.
+Mechanism, finite-window/sequence tests and limits: `research/herdr-drift.md`.
+
 ## Identity/connection/registry hardening (2026-11-17)
 
 Implemented active-only indexed identities with a durable monotonic high-water mark, one durable replace per

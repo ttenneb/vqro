@@ -402,7 +402,9 @@ existing status consumers and partial resource events (`src/events.rs`) work unc
   An empty `argv` means the provider's default shell for its host (`$SHELL` on Unix, `%ComSpec%` or PowerShell on
   Windows); the core never picks a shell. `cwd` is a host path string in the host's own syntax.
   Result `{outcome: "observed", data: {facts}}`; the core assigns the prim id from these facts. The provider may also
-  send `resource.upsert` for it, before or after the reply; identity dedups.
+  send `resource.upsert` for it, before or after the reply; identity dedups. Creation completion does not overwrite
+  facts for that already-published exact identity: independent observations may already describe a later state
+  (including a finished short-lived terminal). The result exposes the current resource, not a promise it is live.
 - **`terminal.kill`**: `ref`, `incarnation`, `args {}`. Result `accepted` (requested) or `observed` (with
   `data.facts` in the finished state). Final facts also arrive as `resource.upsert` (`state: finished`) or
   `resource.gone`; open streams then get `stream.closed`.
