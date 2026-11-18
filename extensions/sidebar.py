@@ -352,15 +352,19 @@ def on_event(t, d):
 
 @ext.command("sidebar.toggle", "Show or hide the sidebar")
 def toggle(args):
-    lay = ext.active_layout()
-    if lay is None:
-        raise PrimError("no active layout yet", "invalid")
-    key, ver, root = lay
-    if root.get("split") == "h" and root["children"][0].get("view") == "sidebar":
-        new = root["children"][1]
-    else:
-        new = {"split": "h", "children": [{"view": "sidebar"}, root], "sizes": [1, 3]}
-    ext.apply([{"op": "set", "key": key, "value": new, "expect": ver}], "sidebar: toggle")
+    def attempt():
+        # Recomputed from the reloaded cache on each try: a compare-and-set conflict with a concurrent
+        # layout write is normal and must not surface to the user as an error.
+        lay = ext.active_layout()
+        if lay is None:
+            raise PrimError("no active layout yet", "invalid")
+        key, ver, root = lay
+        if root.get("split") == "h" and root["children"][0].get("view") == "sidebar":
+            new = root["children"][1]
+        else:
+            new = {"split": "h", "children": [{"view": "sidebar"}, root], "sizes": [1, 3]}
+        return ext.apply([{"op": "set", "key": key, "value": new, "expect": ver}], "sidebar: toggle")
+    return ext.retrying(attempt, attempts=8)
 
 
 @ext.command("sidebar.view", "Choose what the sidebar shows (opens a popup)")
