@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from prim_ext import Extension, PrimError  # noqa: E402
 from prim_display import label, key_labels
 
-ext = Extension("settings", event_types=["entries", "view.content", "extension", "safe_mode", "command"],
+ext = Extension("settings", event_types=["entries", "view.content", "extension", "provider", "safe_mode", "command"],
                 view_content={"names": ["themes", "icons", "keys"]})  # no resource events: not used here
 TUI = "doc/settings/tui"
 THEME = "doc/settings/theme"

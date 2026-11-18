@@ -11,6 +11,7 @@ from unittest import mock
 class Extension:
     def __init__(self, name, **_):
         self.name = name
+        self.event_types = _.get("event_types")
         self.entries = {"extension/"+n: {"value": {"argv": ["never-run"], "enabled": n != "off"}} for n in (name,"off","broken","third-party")}
         self.live = {}
         self.info = {"state_dir":"private-state"}
@@ -83,6 +84,7 @@ class SettingsTests(unittest.TestCase):
 
     def test_provider_connection_status_is_warned_and_refreshed_without_hiding_process_state(self):
         module=load();ext=module["ext"]
+        self.assertIn("provider",ext.event_types,"handler must actually receive provider-only changes")
         ext.states["third-party"].update(status="running",display_status="provider-not-connected")
         module["on_event"]("provider",{"name":"different-provider-name","state":{"connected":False}})
         rows=[row for group in ext.published["settings"]["pages"][0]["items"] for row in group["children"]]
