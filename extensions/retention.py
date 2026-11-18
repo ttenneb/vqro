@@ -94,6 +94,11 @@ def worker():
         dirty.wait(timeout=wait)
         time.sleep(SETTLE)
         dirty.clear()
+        if ext.degraded:
+            # Forgetting is irreversible: never on a cache known to miss events (slow core).
+            # Recovery reruns listeners with `missed`, which sets `dirty` again.
+            wait = 5.0
+            continue
         ids, wait = plan()
         for rid in ids:
             forget(rid)

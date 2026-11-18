@@ -27,7 +27,9 @@ import traceback
 def _watch_lifetime():
     """Managed stdin is a lifetime pipe, never extension input or the RPC wire."""
     try:
-        while sys.stdin.buffer.read(4096):
+        # The raw fd, not sys.stdin.buffer: a daemon thread blocked inside the buffered reader holds
+        # its lock, and interpreter shutdown then aborts ("Fatal Python error: _enter_buffered_busy").
+        while os.read(0, 4096):
             pass
     finally:
         # Exit every thread, even if startup/commands are blocked outside RPC.
@@ -37,6 +39,21 @@ def _watch_lifetime():
 
 if os.environ.get("PRIM_EXTENSION_LIFETIME") == "stdin":
     threading.Thread(target=_watch_lifetime, daemon=True, name="prim-lifetime").start()
+
+# A reply not received by then is `timeout` (outcome indeterminate). Tests shorten it; raising it
+# would only hide a slow core. Callers distinguish it from protocol/state errors (TRANSIENT).
+CALL_DEADLINE = float(os.environ.get("PRIM_EXT_DEADLINE_S") or 60)
+TRANSIENT = ("timeout", "overloaded")  # no answer yet / not admitted: retry later, never a crash
+RESEND_SAFE = {"hello", "workspace.snapshot", "command.register", "events.subscribe", "view.publish"}
+
+
+def _resend_safe(method, params):
+    """Resending cannot duplicate an effect: reads, registrations, live views, and workspace
+    writes whose every op is compare-and-set (a duplicate then fails with `conflict`)."""
+    if method in RESEND_SAFE:
+        return True
+    ops = (params or {}).get("ops") if isinstance(params, dict) else None
+    return method == "workspace.apply" and bool(ops) and all(isinstance(op, dict) and op.get("expect") is not None for op in ops)
 
 
 MAX_RECORD_BYTES = 64 * 1024 * 1024
@@ -77,6 +94,23 @@ class Prim:
             self.sock.sendall(wire)
 
     def call(self, method, params=None):
+        """One request. While `patient` (extension startup), a TRANSIENT failure of a request that is
+        safe to resend (reads, registrations, compare-and-set writes) is retried with jittered
+        backoff (0.5 s doubling, 30 s cap) instead of raising: a slow core must not burn the crash
+        budget before the extension is even up. Anything else raises as before."""
+        n = 0
+        while True:
+            try:
+                return self._call(method, params)
+            except PrimError as e:
+                if e.kind not in TRANSIENT or not getattr(self, "patient", False) or not _resend_safe(method, params):
+                    raise
+                n += 1
+                delay = min(30.0, 0.5 * 2 ** n) * (0.5 + random.random())
+                print(f"prim: {getattr(self, 'name', 'ext')}: {method}: {e.kind} (core slow); retrying in {delay:.1f}s", file=sys.stderr, flush=True)
+                time.sleep(delay)
+
+    def _call(self, method, params=None):
         proof = getattr(getattr(self, "_command_context", None), "invocation", None)
         if proof is not None and method in ("workspace.apply", "workspace.revert", "command.invoke") and (params is None or isinstance(params, dict)):
             params = dict(params or {})
@@ -90,7 +124,7 @@ class Prim:
             slot = self.waiting[i] = [ev, None]
         try:
             self._send({"jsonrpc": "2.0", "id": i, "method": method, "params": params or {}})
-            if not ev.wait(60):
+            if not ev.wait(CALL_DEADLINE):
                 raise PrimError("response deadline; outcome indeterminate, never resend automatically", "timeout")
             msg = slot[1]
             if "error" in msg:
@@ -242,6 +276,9 @@ class Extension:
         self.providers = {}
         self.cache_lock = threading.RLock()
         self.prim = Prim(os.environ["PRIM_SOCKET"], self._handle, recover_notifications=True)
+        # A slow core delays startup (until run() subscribes); it must not burn the crash budget.
+        # A dead connection still exits (the reader's EOF).
+        self.prim.name, self.prim.patient = self.name, True
         self.info = self.prim.call("hello", {"extension": self.name, "extension_token": os.environ.get("PRIM_EXTENSION_TOKEN")})
         self._load(self.prim.call("workspace.snapshot"))
 
@@ -312,7 +349,12 @@ class Extension:
             sub["types"] = list(self.event_types)
         if self.view_content is not None:
             sub["view_content"] = self.view_content
-        self.prim.call("events.subscribe", sub)
+        try:
+            self.prim.call("events.subscribe", sub)
+        except PrimError as e:
+            if e.kind != "conflict":
+                raise  # `conflict`: an earlier attempt that timed out did subscribe
+        self.prim.patient = False  # running: later calls report timeouts to their callers
         threading.Event().wait()
 
     # -- workspace helpers --------------------------------------------------------------------
@@ -392,12 +434,25 @@ class Extension:
     def _handle(self, method, params):
         if method in ("event", "missed"):
             # Only a cache failure is a failed recovery (it raises: disconnect, never diverge).
+            # A slow core is not one: keep the last cache, degrade, retry (`_degrade`).
             with self.cache_lock:
-                event = self._notification(method, params)
+                try:
+                    event = self._notification(method, params)
+                except PrimError as e:
+                    if e.kind not in TRANSIENT:
+                        raise
+                    event = None
+                    self._degrade(f"{e.kind} reloading the workspace")
+                if event is not None and event[0] == "missed" and self.__dict__.get("_degraded"):
+                    self._recovered()  # this reload already made the cache current
             # Extension code may call commands on other threads; never hold the cache lock there.
-            if event is not None:
+            # While degraded the cache is known to miss events: no reactions on stale facts.
+            if event is not None and not self.__dict__.get("_degraded"):
                 for fn in self.listeners:
                     self._listen(fn, event)
+            return None
+        if method == "prim.recover":
+            self._recover()
             return None
         if method == "prim.retry":
             # Deferred reactions rerun as `missed`: recompute from the (now current) caches.
@@ -410,6 +465,56 @@ class Extension:
                 raise PrimError(f"unknown command {params['name']}", "not_found")
             return fn(params.get("args") or {}) or {"ok": True}
         return None
+
+    def _degrade(self, reason):
+        """Keep the last cache (events still apply on top: newer full values, never regressions),
+        suppress listeners, and schedule a snapshot reload with bounded jittered backoff."""
+        if self.__dict__.get("_degraded"):
+            return
+        self._degraded = reason
+        self._recover_attempts = 0
+        print(f"prim: {getattr(self, 'name', 'ext')}: degraded: {reason}; keeping the last state and retrying", file=sys.stderr, flush=True)
+        threading.Thread(target=self._say, args=(f"{getattr(self, 'name', 'ext')}: core is slow; keeping the last state and retrying", "warn"), daemon=True).start()
+        self._schedule_recover()
+
+    def _say(self, text, style):
+        try:
+            self.notify(text, style)
+        except Exception:
+            pass  # best effort on a slow core
+
+    def _schedule_recover(self):
+        n = self._recover_attempts = self.__dict__.get("_recover_attempts", 0) + 1
+        self.prim.defer({"method": "prim.recover", "params": {}}, min(30.0, 0.5 * 2 ** n) * (0.5 + random.random()))
+
+    def _recover(self):
+        if not self.__dict__.get("_degraded"):
+            return  # another reload already recovered
+        try:
+            with self.cache_lock:
+                self._load(self.prim.call("workspace.snapshot"))
+        except PrimError as e:
+            if e.kind in TRANSIENT:
+                print(f"prim: {getattr(self, 'name', 'ext')}: still degraded ({e.kind}); retrying", file=sys.stderr, flush=True)
+                self._schedule_recover()
+                return
+            # A state/protocol error: never continue on a divergent cache; supervision restarts us.
+            print(f"prim: {getattr(self, 'name', 'ext')}: notification recovery failed ({e.kind}: {e}); disconnecting", file=sys.stderr, flush=True)
+            self.prim.sock.shutdown(socket.SHUT_RDWR)
+            return
+        self._recovered()
+        for fn in self.listeners:
+            self._listen(fn, ("missed", {"reason": "recovered"}))
+
+    def _recovered(self):
+        print(f"prim: {getattr(self, 'name', 'ext')}: recovered after: {self._degraded}", file=sys.stderr, flush=True)
+        self._degraded = None
+        self._recover_attempts = 0
+
+    @property
+    def degraded(self):
+        """None, or why the caches are known stale (a slow core); reactions resume on recovery."""
+        return self.__dict__.get("_degraded")
 
     def _listen(self, fn, event, retry=False):
         """Run one listener. Its writes are policy reacting to facts, not cache recovery: a failure
@@ -424,12 +529,14 @@ class Extension:
             if retry or event[0] == "missed":
                 deferred.pop(fn, None)  # a full recompute succeeded; other events may not redo it
         except PrimError as e:
-            if e.kind != "conflict":
+            if e.kind != "conflict" and e.kind not in TRANSIENT:
                 print(f"prim: {getattr(self, 'name', 'ext')}: listener failed: {e.kind}: {e}", file=sys.stderr, flush=True)
                 return
+            # A conflict, or no answer yet from a slow core: rerun later (writes are CAS-guarded).
             n = deferred[fn] = deferred.get(fn, 0) + 1
-            delay = min(5.0, 0.1 * 2 ** n) * (0.5 + random.random())
-            print(f"prim: {getattr(self, 'name', 'ext')}: listener write conflicted ({n}); retrying in {delay:.2f}s", file=sys.stderr, flush=True)
+            delay = min(5.0 if e.kind == "conflict" else 30.0, 0.1 * 2 ** n) * (0.5 + random.random())
+            what = "conflicted" if e.kind == "conflict" else f"got {e.kind}"
+            print(f"prim: {getattr(self, 'name', 'ext')}: listener write {what} ({n}); retrying in {delay:.2f}s", file=sys.stderr, flush=True)
             self.prim.defer({"method": "prim.retry", "params": {}}, delay)
         except Exception:
             print(f"prim: {getattr(self, 'name', 'ext')}: listener failed:\n{traceback.format_exc()}", file=sys.stderr, flush=True)
