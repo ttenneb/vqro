@@ -1078,6 +1078,7 @@ dependencies = [
  "clap",
  "crossterm",
  "getrandom 0.4.3",
+ "libc",
  "ratatui",
  "serde",
  "serde_json",

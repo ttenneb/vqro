@@ -52,6 +52,7 @@ struct StreamBinding {
 /// Open the store, bind the socket, start the adapter and extensions, and serve in the background.
 /// `defaults`: a directory with `defaults.json` listing extensions to install on first run.
 pub fn start(socket: std::path::PathBuf, state: std::path::PathBuf, safe: bool, backend: Backend, defaults: Option<std::path::PathBuf>) -> anyhow::Result<Shared> {
+    raise_nofile_limit();
     crate::store::create_dir_all_durable(&state)?;
     let mut store=crate::store::Store::open_locked(state.join("workspace.json"))?;
     if socket.exists() {
@@ -162,18 +163,79 @@ fn install_defaults(store: &mut crate::store::Store, dir: &std::path::Path) {
     }
 }
 
+pub const MAX_CONNECTIONS:usize=2048;
+
+/// Best effort, this process only: never change the inherited hard limit.
+#[cfg(unix)]
+fn raise_nofile_limit() {
+    let mut limit=libc::rlimit {rlim_cur:0,rlim_max:0};
+    // SAFETY: valid pointers to the OS resource-limit struct; no ownership crosses the call.
+    unsafe {
+        if libc::getrlimit(libc::RLIMIT_NOFILE,&mut limit)!=0 {eprintln!("prim: could not inspect nofile limit: {}",std::io::Error::last_os_error());return;}
+        if limit.rlim_cur<limit.rlim_max {
+            let old=limit.rlim_cur;limit.rlim_cur=limit.rlim_max;
+            if libc::setrlimit(libc::RLIMIT_NOFILE,&limit)==0 {eprintln!("prim: raised soft nofile limit {old} -> {} (hard limit unchanged)",limit.rlim_cur);}
+            else {eprintln!("prim: could not raise soft nofile limit: {}",std::io::Error::last_os_error());}
+        }
+    }
+}
+#[cfg(not(unix))] fn raise_nofile_limit() {}
+
+fn transient_accept_error(error:&std::io::Error)->bool {
+    matches!(error.kind(),std::io::ErrorKind::Interrupted|std::io::ErrorKind::ConnectionAborted|std::io::ErrorKind::WouldBlock)
+        || matches!(error.raw_os_error(),Some(libc::EMFILE|libc::ENFILE|libc::ENOMEM|libc::ENOBUFS))
+}
+
+#[cfg(test)]
+mod accept_tests {
+    #[test]
+    fn descriptor_and_transient_accept_failures_are_not_fatal_listener_errors() {
+        for code in [libc::EMFILE,libc::ENFILE,libc::ENOMEM,libc::ENOBUFS,libc::EINTR,libc::ECONNABORTED] {assert!(super::transient_accept_error(&std::io::Error::from_raw_os_error(code)),"{code}");}
+        assert!(!super::transient_accept_error(&std::io::Error::from_raw_os_error(libc::EBADF)));
+    }
+}
+
+async fn refuse_connection(mut stream:tokio::net::UnixStream) {
+    use tokio::io::{AsyncReadExt,AsyncBufReadExt,AsyncWriteExt};
+    // A tiny bounded handshake preserves the caller's request id, so normal clients receive
+    // the overload reason instead of an unexplained EOF. Silent clients do not hold admission.
+    let id={
+        let mut reader=tokio::io::BufReader::new(&mut stream).take(4096);let mut line=Vec::new();
+        match tokio::time::timeout(std::time::Duration::from_millis(100),reader.read_until(b'\n',&mut line)).await {
+            Ok(Ok(_))=>serde_json::from_slice::<Value>(&line).ok().and_then(|value|value.get("id").cloned()).unwrap_or(Value::Null),
+            _=>Value::Null,
+        }
+    };
+    let reply=json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":format!("core connection limit {MAX_CONNECTIONS}; connection not admitted"),"data":{"kind":"overloaded","outcome":"rejected","reason":"connection_limit","limit":MAX_CONNECTIONS}}});
+    let line=format!("{reply}\n");
+    let _=tokio::time::timeout(std::time::Duration::from_millis(100),stream.write_all(line.as_bytes())).await;
+}
+
 pub async fn serve(core: Shared, listener: UnixListener) -> anyhow::Result<()> {
     let next = AtomicU64::new(1);
     let shutdown = core.lock().unwrap().shutdown.clone();
     let mut connections = tokio::task::JoinSet::new();
     let mut peers = HashMap::new();
+    let mut last_accept_notice=None::<std::time::Instant>;
     loop {
         let (stream, _) = tokio::select! {
             biased;
             _ = shutdown.requested() => break,
             done = connections.join_next(), if !connections.is_empty() => { if let Some(Ok(id)) = done { peers.remove(&id); } continue; }
-            accepted = listener.accept() => match accepted { Ok(stream) => stream, Err(error) => { eprintln!("prim: listener failed: {error}"); break; } },
+            accepted = listener.accept() => match accepted {
+                Ok(stream)=>stream,
+                Err(error) if transient_accept_error(&error)=>{
+                    let now=std::time::Instant::now();
+                    if last_accept_notice.is_none_or(|last|now.duration_since(last)>=std::time::Duration::from_secs(5)) {
+                        eprintln!("prim: listener resource pressure ({error}); retrying, existing connections remain served");last_accept_notice=Some(now);
+                    }
+                    tokio::select! {_=shutdown.requested()=>break,_=tokio::time::sleep(std::time::Duration::from_millis(100))=>{}}
+                    continue;
+                }
+                Err(error)=>{eprintln!("prim: listener failed: {error}");break;}
+            },
         };
+        if connections.len()>=MAX_CONNECTIONS {refuse_connection(stream).await;continue;}
         // Bounded outbound: bytes in the OS send buffer can't be revoked when a slow viewer's streams
         // are closed, so keep that buffer small (the OS may round it up; Linux doubles it). Measured
         // with the scale harness: a 64 KiB/s viewer's first echo after attaching to output floods fell

@@ -12,6 +12,7 @@ getrandom = "0.4.3"
 ratatui = "0.30.2"
 serde = { version = "1.0.229", features = ["derive", "rc"] }
 serde_json = { version = "1.0.154", features = ["raw_value"] }
+libc = "0.2.191"
 socket2 = "0.6.5"
 tempfile = "3.27.0"
 tokio = { version = "1.54.1", features = ["full"] }

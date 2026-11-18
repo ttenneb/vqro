@@ -192,6 +192,16 @@ published/pending-IO resource JSON, 1024 providers, 128 KiB registration metadat
 registration metadata** (with a 1 KiB/provider accounting floor), 128-byte names and 256-byte instances. Global-budget errors name the offending provider. Legacy workspace/live state can still
 exceed other limits, so oversized recovery remains necessary.
 
+Core connection admission is capped at **2048 concurrent serving connections**, including idle and draining
+connections. Existing clients are not evicted. Above the cap, a bounded4096-byte/100ms first-request read
+correlates a small `overloaded`, `outcome: rejected`, `reason: connection_limit` refusal, then closes the
+new transport (silent/malformed clients may receive a null id). Descriptor exhaustion (`EMFILE`/`ENFILE` on
+Unix) and other transient accept-resource failures are rate-limited in logs and retried after100ms; they do
+not request core shutdown or stop existing connections. New admission resumes when descriptors/slots return.
+At Unix startup, the core best-effort raises only its own **soft nofile limit to the inherited hard limit**;
+it never raises the hard limit, changes another running process's limit, or requires administrator changes.
+Success/failure is logged; future children inherit normal OS limits. No idle timeout or backend kill is added.
+
 If legacy/external state exceeds the reply envelope, the TUI starts in clearly labelled **recovery-only** mode,
 not a partial authoritative workspace. Built-in undo, safe mode, reset, commands and quit remain reachable; CLI
 apply/delete also works. Recovery commands/state changes trigger another fenced snapshot attempt. A snapshot
