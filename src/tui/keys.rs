@@ -6,7 +6,7 @@
 //! Space F1`..`F12`. Names parse case-insensitively and compare in canonical form, so `C-space`
 //! and `C-Space` are the same key.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, KeyboardEnhancementFlags, ModifierKeyCode};
 
@@ -15,61 +15,205 @@ pub const DEFAULT_PREFIX: &str = "C-g";
 
 const NAMED: [&str; 14] = ["Up", "Down", "Left", "Right", "Home", "End", "PageUp", "PageDown", "Insert", "Delete", "Tab", "BackTab", "Enter", "Esc"];
 
-pub fn encode(key: &KeyEvent, app_cursor: bool) -> Option<Vec<u8>> {
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+/// Which extended key reporting the program in a pane asked for, as seen in its output (`KeyModes`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Extended {
+    /// Legacy xterm encoding only.
+    #[default]
+    Legacy,
+    /// xterm `modifyOtherKeys` (`CSI > 4 ; n m`, n >= 1): otherwise ambiguous keys as `CSI 27 ; mod ; code ~`.
+    ModifyOtherKeys,
+    /// Kitty keyboard protocol with "disambiguate escape codes" (flag 1): those keys as `CSI code ; mod u`.
+    Kitty,
+}
+
+/// Encode a key the way an xterm-compatible terminal does (`docs/spec/core-protocol.md`, Keys):
+/// - cursor keys, Home and End: `CSI A`..`CSI F`, or `SS3` in application cursor mode (DECCKM); with
+///   modifiers `CSI 1 ; m X` (DECCKM doesn't apply then), where m = 1 + Shift + 2·Alt + 4·Ctrl;
+/// - Insert, Delete, PageUp, PageDown, F5-F12: `CSI n ~`, with modifiers `CSI n ; m ~`; F1-F4: `SS3 P`..`S`,
+///   with modifiers `CSI 1 ; m P`..`S`;
+/// - characters: Ctrl combinations as control bytes, Alt as an ESC prefix;
+/// - Enter, Tab, Backspace, Esc and Ctrl combinations without a control byte: legacy bytes (Shift-Enter is
+///   Enter), unless the program asked for extended keys (`ext`): then `CSI 27 ; m ; code ~` for
+///   modifyOtherKeys, or `CSI code ; m u` for the kitty protocol (which also covers Alt and plain Esc).
+pub fn encode(key: &KeyEvent, app_cursor: bool, ext: Extended) -> Option<Vec<u8>> {
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
-    let mut out = match key.code {
-        KeyCode::Char(c) if ctrl => {
-            let b = match c.to_ascii_lowercase() {
-                c @ 'a'..='z' => c as u8 - b'a' + 1,
-                ' ' | '@' | '2' => 0,
-                '[' | '3' => 27,
-                '\\' | '4' => 28,
-                ']' | '5' => 29,
-                '^' | '6' => 30,
-                '_' | '7' | '/' => 31,
-                '8' => 127,
-                _ => return None,
-            };
-            vec![b]
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let m = 1 + shift as u8 + 2 * alt as u8 + 4 * ctrl as u8;
+    let extended = |code: u32, m: u8| -> Option<Vec<u8>> {
+        match ext {
+            Extended::Kitty if m == 1 => Some(format!("\x1b[{code}u").into_bytes()),
+            Extended::Kitty => Some(format!("\x1b[{code};{m}u").into_bytes()),
+            Extended::ModifyOtherKeys => Some(format!("\x1b[27;{m};{code}~").into_bytes()),
+            Extended::Legacy => None,
         }
-        KeyCode::Char(c) => c.to_string().into_bytes(),
-        KeyCode::Enter => vec![b'\r'],
-        KeyCode::Tab => vec![b'\t'],
-        KeyCode::BackTab => b"\x1b[Z".to_vec(),
-        KeyCode::Backspace => vec![0x7f],
-        KeyCode::Esc => vec![0x1b],
-        KeyCode::Up => cursor(b'A', app_cursor),
-        KeyCode::Down => cursor(b'B', app_cursor),
-        KeyCode::Right => cursor(b'C', app_cursor),
-        KeyCode::Left => cursor(b'D', app_cursor),
-        KeyCode::Home => cursor(b'H', app_cursor),
-        KeyCode::End => cursor(b'F', app_cursor),
-        KeyCode::PageUp => b"\x1b[5~".to_vec(),
-        KeyCode::PageDown => b"\x1b[6~".to_vec(),
-        KeyCode::Delete => b"\x1b[3~".to_vec(),
-        KeyCode::Insert => b"\x1b[2~".to_vec(),
-        KeyCode::F(n) => match n {
-            1 => b"\x1bOP".to_vec(),
-            2 => b"\x1bOQ".to_vec(),
-            3 => b"\x1bOR".to_vec(),
-            4 => b"\x1bOS".to_vec(),
-            5 => b"\x1b[15~".to_vec(),
-            6 => b"\x1b[17~".to_vec(),
-            7 => b"\x1b[18~".to_vec(),
-            8 => b"\x1b[19~".to_vec(),
-            9 => b"\x1b[20~".to_vec(),
-            10 => b"\x1b[21~".to_vec(),
-            11 => b"\x1b[23~".to_vec(),
-            12 => b"\x1b[24~".to_vec(),
-            _ => return None,
-        },
-        _ => return None,
     };
-    if alt {
-        out.insert(0, 0x1b);
+    let letter = |c: u8| if m > 1 { format!("\x1b[1;{m}{}", c as char).into_bytes() } else { cursor(c, app_cursor) };
+    let tilde = |n: u8| if m > 1 { format!("\x1b[{n};{m}~").into_bytes() } else { format!("\x1b[{n}~").into_bytes() };
+    let with_alt = |mut v: Vec<u8>| {
+        if alt {
+            v.insert(0, 0x1b);
+        }
+        v
+    };
+    Some(match key.code {
+        KeyCode::Up => letter(b'A'),
+        KeyCode::Down => letter(b'B'),
+        KeyCode::Right => letter(b'C'),
+        KeyCode::Left => letter(b'D'),
+        KeyCode::Home => letter(b'H'),
+        KeyCode::End => letter(b'F'),
+        KeyCode::Insert => tilde(2),
+        KeyCode::Delete => tilde(3),
+        KeyCode::PageUp => tilde(5),
+        KeyCode::PageDown => tilde(6),
+        KeyCode::F(n @ 1..=4) => {
+            let c = b"PQRS"[n as usize - 1];
+            if m > 1 { format!("\x1b[1;{m}{}", c as char).into_bytes() } else { vec![0x1b, b'O', c] }
+        }
+        KeyCode::F(n @ 5..=12) => tilde([15, 17, 18, 19, 20, 21, 23, 24][n as usize - 5]),
+        KeyCode::F(_) => return None,
+        KeyCode::BackTab => with_alt(b"\x1b[Z".to_vec()),
+        KeyCode::Enter | KeyCode::Tab | KeyCode::Backspace | KeyCode::Esc => {
+            let code = match key.code { KeyCode::Enter => 13, KeyCode::Tab => 9, KeyCode::Backspace => 127, _ => 27 };
+            // Shift or Ctrl can't be told apart in legacy bytes; Alt can (ESC prefix), except under kitty.
+            let kitty_alt = alt && ext == Extended::Kitty;
+            if shift || ctrl || kitty_alt || (code == 27 && ext == Extended::Kitty) {
+                if let Some(bytes) = extended(code, m) {
+                    return Some(bytes);
+                }
+            }
+            match key.code {
+                KeyCode::Backspace if ctrl => with_alt(vec![0x08]),
+                _ => with_alt(vec![code as u8]),
+            }
+        }
+        KeyCode::Char(c) => {
+            let base = c.to_ascii_lowercase();
+            // Ctrl/Alt combinations under kitty, and Ctrl+Shift+letter under either extended mode.
+            let ambiguous = (ext == Extended::Kitty && (ctrl || alt)) || (ctrl && shift && c.is_ascii_alphabetic());
+            if ambiguous {
+                if let Some(bytes) = extended(base as u32, m) {
+                    return Some(bytes);
+                }
+            }
+            if ctrl {
+                let b = match base {
+                    c @ 'a'..='z' => c as u8 - b'a' + 1,
+                    ' ' | '@' | '2' => 0,
+                    '[' | '3' => 27,
+                    '\\' | '4' => 28,
+                    ']' | '5' => 29,
+                    '^' | '6' => 30,
+                    '_' | '7' | '/' => 31,
+                    '8' | '?' => 127,
+                    // No control byte (Ctrl-1, Ctrl-;): only an extended encoding carries it.
+                    _ => return extended(base as u32, m),
+                };
+                with_alt(vec![b])
+            } else {
+                with_alt(c.to_string().into_bytes())
+            }
+        }
+        _ => return None,
+    })
+}
+
+/// What the program in a pane asked for, tracked from its output stream (the VT parser doesn't):
+/// the kitty keyboard protocol's flag stack (`CSI > f u` push, `CSI < n u` pop, `CSI = f ; mode u` set)
+/// and xterm's modifyOtherKeys level (`CSI > 4 ; n m`). RIS (`ESC c`) resets both. Sequences split across
+/// output chunks are completed from a short carry-over.
+#[derive(Clone, Debug, Default)]
+pub struct KeyModes {
+    kitty: Vec<u32>,
+    other: u32,
+    tail: Vec<u8>,
+}
+
+impl KeyModes {
+    pub fn extended(&self) -> Extended {
+        if self.kitty.last().is_some_and(|f| f & 1 != 0) {
+            Extended::Kitty
+        } else if self.other > 0 {
+            Extended::ModifyOtherKeys
+        } else {
+            Extended::Legacy
+        }
     }
-    Some(out)
+
+    pub fn feed(&mut self, bytes: &[u8]) {
+        let mut buf = std::mem::take(&mut self.tail);
+        buf.extend_from_slice(bytes);
+        let mut i = 0;
+        while i < buf.len() {
+            if buf[i] != 0x1b {
+                i += 1;
+                continue;
+            }
+            match buf.get(i + 1) {
+                None => {
+                    self.tail = buf[i..].to_vec();
+                    return;
+                }
+                Some(b'c') => {
+                    self.kitty.clear();
+                    self.other = 0;
+                    i += 2;
+                    continue;
+                }
+                Some(b'[') => {}
+                Some(_) => {
+                    i += 1;
+                    continue;
+                }
+            }
+            // CSI [<=>?] params final
+            let mut j = i + 2;
+            let private = buf.get(j).copied().filter(|b| matches!(b, b'<' | b'=' | b'>' | b'?'));
+            if private.is_some() {
+                j += 1;
+            }
+            let start = j;
+            while j < buf.len() && (buf[j].is_ascii_digit() || buf[j] == b';') {
+                j += 1;
+            }
+            if j >= buf.len() {
+                if buf.len() - i <= 32 {
+                    self.tail = buf[i..].to_vec();
+                    return;
+                }
+                break;
+            }
+            let params: Vec<u32> = std::str::from_utf8(&buf[start..j]).unwrap_or("").split(';').map(|p| p.parse().unwrap_or(0)).collect();
+            let first = params.first().copied().unwrap_or(0);
+            match (private, buf[j]) {
+                (Some(b'>'), b'u') => {
+                    if self.kitty.len() >= 16 {
+                        self.kitty.remove(0);
+                    }
+                    self.kitty.push(first);
+                }
+                (Some(b'<'), b'u') => {
+                    let n = if start == j { 1 } else { first.max(1) } as usize;
+                    let keep = self.kitty.len().saturating_sub(n);
+                    self.kitty.truncate(keep);
+                }
+                (Some(b'='), b'u') => {
+                    let mode = params.get(1).copied().unwrap_or(1);
+                    let top = self.kitty.last().copied().unwrap_or(0);
+                    let next = match mode { 2 => top | first, 3 => top & !first, _ => first };
+                    match self.kitty.last_mut() {
+                        Some(t) => *t = next,
+                        None => self.kitty.push(next),
+                    }
+                }
+                (Some(b'>'), b'm') if first == 4 => self.other = params.get(1).copied().unwrap_or(0),
+                _ => {}
+            }
+            i = j + 1;
+        }
+    }
 }
 
 /// The canonical name of a key event, or None for keys bindings can't name.
@@ -191,22 +335,38 @@ const ENHANCED: KeyboardEnhancementFlags = KeyboardEnhancementFlags::REPORT_ALL_
     .union(KeyboardEnhancementFlags::REPORT_EVENT_TYPES)
     .union(KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS);
 
-/// Whether we pushed `ENHANCED`; global so every exit path, panics included, can pop it.
-static PUSHED: AtomicBool = AtomicBool::new(false);
+/// What the client asks of the outer terminal's keyboard reporting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Enhance {
+    Off = 0,
+    /// The focused program asked for extended keys: "disambiguate" only, so Shift-Enter, Ctrl-Tab and
+    /// the like reach us distinctly and can be passed on. Plain typing is unchanged.
+    Disambiguate = 1,
+    /// The prefix menu is open: everything, for live modifier feedback.
+    Full = 2,
+}
 
-/// Push or pop the enhancement flags (idempotent). Only ever pops what we pushed, so a shell's or
-/// outer program's own flags are left alone. Pop before leaving the alternate screen: the
+/// Which level we pushed; global so every exit path, panics included, can pop it.
+static PUSHED: AtomicU8 = AtomicU8::new(0);
+
+/// Push, change or pop the enhancement flags (idempotent). Only ever pops what we pushed, so a shell's
+/// or outer program's own flags are left alone. Pop before leaving the alternate screen: the
 /// protocol keeps a separate stack per screen.
-pub fn enhance(on: bool) {
-    if PUSHED.swap(on, Ordering::SeqCst) == on {
+pub fn enhance(level: Enhance) {
+    let was = PUSHED.swap(level as u8, Ordering::SeqCst);
+    if was == level as u8 {
         return;
     }
     let mut out = std::io::stdout();
-    let _ = if on {
-        crossterm::execute!(out, crossterm::event::PushKeyboardEnhancementFlags(ENHANCED))
-    } else {
-        crossterm::execute!(out, crossterm::event::PopKeyboardEnhancementFlags)
+    if was != 0 {
+        let _ = crossterm::execute!(out, crossterm::event::PopKeyboardEnhancementFlags);
+    }
+    let flags = match level {
+        Enhance::Off => return,
+        Enhance::Disambiguate => KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
+        Enhance::Full => ENHANCED,
     };
+    let _ = crossterm::execute!(out, crossterm::event::PushKeyboardEnhancementFlags(flags));
 }
 
 fn compose(ctrl: bool, alt: bool, shift: bool, base: &str) -> String {
@@ -228,10 +388,115 @@ mod tests {
     #[test]
     fn basics() {
         let k = |code, m| KeyEvent::new(code, m);
-        assert_eq!(encode(&k(KeyCode::Char('c'), KeyModifiers::CONTROL), false), Some(vec![3]));
-        assert_eq!(encode(&k(KeyCode::Char('x'), KeyModifiers::ALT), false), Some(vec![0x1b, b'x']));
-        assert_eq!(encode(&k(KeyCode::Up, KeyModifiers::NONE), true), Some(b"\x1bOA".to_vec()));
-        assert_eq!(encode(&k(KeyCode::Enter, KeyModifiers::NONE), false), Some(vec![b'\r']));
+        let l = Extended::Legacy;
+        assert_eq!(encode(&k(KeyCode::Char('c'), KeyModifiers::CONTROL), false, l), Some(vec![3]));
+        assert_eq!(encode(&k(KeyCode::Char('x'), KeyModifiers::ALT), false, l), Some(vec![0x1b, b'x']));
+        assert_eq!(encode(&k(KeyCode::Up, KeyModifiers::NONE), true, l), Some(b"\x1bOA".to_vec()));
+        assert_eq!(encode(&k(KeyCode::Enter, KeyModifiers::NONE), false, l), Some(vec![b'\r']));
+    }
+
+    /// The xterm table: what each key and modifier combination sends.
+    #[test]
+    fn xterm_table() {
+        let (n, s, a, c) = (KeyModifiers::NONE, KeyModifiers::SHIFT, KeyModifiers::ALT, KeyModifiers::CONTROL);
+        let e = |code, m, app, ext| String::from_utf8(encode(&KeyEvent::new(code, m), app, ext).unwrap()).unwrap();
+        let l = Extended::Legacy;
+        let cases: &[(KeyCode, KeyModifiers, bool, &str)] = &[
+            (KeyCode::Up, n, false, "\x1b[A"),
+            (KeyCode::Up, n, true, "\x1bOA"),
+            (KeyCode::Up, s, false, "\x1b[1;2A"),
+            (KeyCode::Up, s, true, "\x1b[1;2A"), // DECCKM doesn't apply with modifiers
+            (KeyCode::Left, c, false, "\x1b[1;5D"),
+            (KeyCode::Right, a, false, "\x1b[1;3C"),
+            (KeyCode::Down, c | s, false, "\x1b[1;6B"),
+            (KeyCode::Right, c | a | s, false, "\x1b[1;8C"),
+            (KeyCode::Home, n, true, "\x1bOH"),
+            (KeyCode::Home, c, false, "\x1b[1;5H"),
+            (KeyCode::End, s, false, "\x1b[1;2F"),
+            (KeyCode::PageUp, n, false, "\x1b[5~"),
+            (KeyCode::PageDown, c, false, "\x1b[6;5~"),
+            (KeyCode::Delete, s, false, "\x1b[3;2~"),
+            (KeyCode::Insert, a, false, "\x1b[2;3~"),
+            (KeyCode::F(1), n, false, "\x1bOP"),
+            (KeyCode::F(1), s, false, "\x1b[1;2P"),
+            (KeyCode::F(4), c, false, "\x1b[1;5S"),
+            (KeyCode::F(5), n, false, "\x1b[15~"),
+            (KeyCode::F(5), c, false, "\x1b[15;5~"),
+            (KeyCode::F(12), a | s, false, "\x1b[24;4~"),
+            (KeyCode::BackTab, s, false, "\x1b[Z"),
+            (KeyCode::Tab, n, false, "\t"),
+            (KeyCode::Tab, a, false, "\x1b\t"),
+            (KeyCode::Enter, s, false, "\r"), // legacy: Shift-Enter is Enter
+            (KeyCode::Enter, a, false, "\x1b\r"),
+            (KeyCode::Backspace, n, false, "\x7f"),
+            (KeyCode::Backspace, c, false, "\x08"),
+            (KeyCode::Backspace, a, false, "\x1b\x7f"),
+            (KeyCode::Esc, n, false, "\x1b"),
+            (KeyCode::Char('a'), c, false, "\x01"),
+            (KeyCode::Char('A'), c | s, false, "\x01"),
+            (KeyCode::Char('x'), c | a, false, "\x1b\x18"),
+            (KeyCode::Char(' '), c, false, "\x00"),
+            (KeyCode::Char('?'), c, false, "\x7f"),
+            (KeyCode::Char('A'), s, false, "A"),
+            (KeyCode::Char('é'), a, false, "\x1bé"),
+        ];
+        for (code, m, app, want) in cases {
+            assert_eq!(e(*code, *m, *app, l), *want, "{code:?} {m:?} app={app}");
+        }
+        // Ctrl combinations without a control byte send nothing in legacy mode (like xterm without modifyOtherKeys).
+        assert_eq!(encode(&KeyEvent::new(KeyCode::Char('1'), c), false, l), None);
+        assert_eq!(encode(&KeyEvent::new(KeyCode::F(13), n), false, l), None);
+    }
+
+    #[test]
+    fn extended_keys_only_when_the_program_asked() {
+        let (n, s, a, c) = (KeyModifiers::NONE, KeyModifiers::SHIFT, KeyModifiers::ALT, KeyModifiers::CONTROL);
+        let e = |code, m, ext| String::from_utf8(encode(&KeyEvent::new(code, m), false, ext).unwrap()).unwrap();
+        let (k, o) = (Extended::Kitty, Extended::ModifyOtherKeys);
+        assert_eq!(e(KeyCode::Enter, s, k), "\x1b[13;2u");
+        assert_eq!(e(KeyCode::Enter, c, k), "\x1b[13;5u");
+        assert_eq!(e(KeyCode::Enter, s, o), "\x1b[27;2;13~");
+        assert_eq!(e(KeyCode::Tab, c, o), "\x1b[27;5;9~");
+        assert_eq!(e(KeyCode::Char('1'), c, o), "\x1b[27;5;49~");
+        assert_eq!(e(KeyCode::Char('A'), c | s, k), "\x1b[97;6u");
+        assert_eq!(e(KeyCode::Char('x'), a, k), "\x1b[120;3u");
+        assert_eq!(e(KeyCode::Esc, n, k), "\x1b[27u");
+        assert_eq!(e(KeyCode::Esc, n, o), "\x1b");
+        // Unambiguous keys stay legacy even when extended keys are on.
+        assert_eq!(e(KeyCode::Enter, n, k), "\r");
+        assert_eq!(e(KeyCode::Char('a'), n, k), "a");
+        assert_eq!(e(KeyCode::Char('A'), s, k), "A");
+        assert_eq!(e(KeyCode::Up, c, k), "\x1b[1;5A");
+        assert_eq!(e(KeyCode::Char('x'), a, o), "\x1bx");
+    }
+
+    #[test]
+    fn key_modes_follow_the_programs_output() {
+        let mut m = KeyModes::default();
+        assert_eq!(m.extended(), Extended::Legacy);
+        m.feed(b"hello\x1b[>1u");
+        assert_eq!(m.extended(), Extended::Kitty);
+        m.feed(b"\x1b[<u");
+        assert_eq!(m.extended(), Extended::Legacy);
+        // Split across chunks.
+        m.feed(b"text\x1b[>4");
+        assert_eq!(m.extended(), Extended::Legacy);
+        m.feed(b";2m more");
+        assert_eq!(m.extended(), Extended::ModifyOtherKeys);
+        m.feed(b"\x1b[>4m");
+        assert_eq!(m.extended(), Extended::Legacy);
+        // Flags without "disambiguate" (bit 1) are not extended keys.
+        m.feed(b"\x1b[>2u");
+        assert_eq!(m.extended(), Extended::Legacy);
+        m.feed(b"\x1b[=1;2u");
+        assert_eq!(m.extended(), Extended::Kitty);
+        m.feed(b"\x1b[=1;3u");
+        assert_eq!(m.extended(), Extended::Legacy);
+        m.feed(b"\x1b[>1u\x1b[>4;1m\x1bc");
+        assert_eq!(m.extended(), Extended::Legacy, "RIS resets both");
+        // Other CSI sequences are ignored; an unterminated long run is not kept.
+        m.feed(b"\x1b[31m\x1b[?2004h\x1b[?u");
+        assert_eq!(m.extended(), Extended::Legacy);
     }
 
     #[test]

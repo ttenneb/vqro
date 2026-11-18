@@ -76,9 +76,18 @@ struct Term {
     attaching: bool,
     closed: Option<String>,
     retry_at: Option<std::time::Instant>,
+    /// Extended key reporting the program asked for (kitty protocol, modifyOtherKeys), from its output.
+    /// Kept across reattach: the program still has it set even though a repaint doesn't repeat it.
+    modes: keys::KeyModes,
 }
 
 impl Term {
+    /// Program output: to the VT parser and the key-mode tracker.
+    fn feed(&mut self, bytes: &[u8]) {
+        self.modes.feed(bytes);
+        self.parser.process(bytes);
+    }
+
     fn close(&mut self, reason: String) {
         self.stream = None;
         self.attaching = false;
@@ -348,7 +357,7 @@ pub async fn run(socket: &Path) -> Result<()> {
     app.kbd_enhance = crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
     let restore_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        keys::enhance(false);
+        keys::enhance(keys::Enhance::Off);
         restore_hook(info)
     }));
     let (key_tx, mut keys) = mpsc::unbounded_channel();
@@ -416,10 +425,18 @@ pub async fn run(socket: &Path) -> Result<()> {
                 dirty = true;
             }
             interactive = key_input && dirty;
-            // Richer key reports only while the prefix menu is open: typing into programs is untouched.
+            // Richer key reports while the prefix menu is open; "disambiguate" only while the focused
+            // program asked for extended keys (so Shift-Enter and the like can reach it). Otherwise the
+            // outer terminal's keyboard reporting is left as it was.
             let prefix_open = matches!(app.overlay, Some(Overlay::Prefix { .. }));
             if app.kbd_enhance {
-                keys::enhance(prefix_open);
+                keys::enhance(if prefix_open {
+                    keys::Enhance::Full
+                } else if app.focused_extended() != keys::Extended::Legacy {
+                    keys::Enhance::Disambiguate
+                } else {
+                    keys::Enhance::Off
+                });
             }
             if !prefix_open {
                 app.held = KeyModifiers::NONE;
@@ -441,7 +458,7 @@ pub async fn run(socket: &Path) -> Result<()> {
         task.abort();
     }
     // Every way out (quit, error, re-exec) passes here; pop before leaving the alternate screen.
-    keys::enhance(false);
+    keys::enhance(keys::Enhance::Off);
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture, crossterm::event::DisableBracketedPaste);
     ratatui::restore();
     if reexec {
@@ -553,7 +570,7 @@ impl App {
                 let (Some(sid), Some(data)) = (params["stream"].as_u64(), params["data"].as_str()) else { return };
                 let Ok(bytes) = B64.decode(data) else { return };
                 match self.stream_view.get(&sid).and_then(|v| self.terms.get_mut(v)) {
-                    Some(t) => t.parser.process(&bytes),
+                    Some(t) => t.feed(&bytes),
                     None => {
                         if self.early_closed.contains_key(&sid) { return; }
                         if !self.terms.values().any(|t| t.attaching) { self.peer.notify("stream.close", json!({"stream":sid})); return; }
@@ -839,7 +856,7 @@ impl App {
                             t.closed = None;
                             self.stream_view.insert(sid, view);
                             for bytes in self.early.remove(&sid).unwrap_or_default() {
-                                t.parser.process(&bytes);
+                                t.feed(&bytes);
                             }
                         }
                     }
@@ -871,6 +888,11 @@ impl App {
             Event::Resize(..) => true,
             _ => false,
         }
+    }
+
+    /// Extended key reporting asked for by the program in the focused terminal (Legacy otherwise).
+    fn focused_extended(&self) -> keys::Extended {
+        self.leaves.get(self.focus).and_then(|v| self.terms.get(v)).map(|t| t.modes.extended()).unwrap_or_default()
     }
 
     fn send_to_focused(&mut self, bytes: Vec<u8>) {
@@ -990,7 +1012,7 @@ impl App {
         match self.view_kind(&view).as_str() {
             "terminal" => {
                 let Some(t) = self.terms.get(&view) else { return };
-                if let Some(bytes) = keys::encode(&k, t.parser.screen().application_cursor()) {
+                if let Some(bytes) = keys::encode(&k, t.parser.screen().application_cursor(), t.modes.extended()) {
                     self.send_to_focused(bytes);
                 }
             }
@@ -1274,8 +1296,8 @@ impl App {
         if is_prefix {
             // The prefix twice sends it to the program.
             self.overlay = None;
-            let app_cursor = self.leaves.get(self.focus).and_then(|v| self.terms.get(v)).map(|t| t.parser.screen().application_cursor()).unwrap_or(false);
-            if let Some(bytes) = keys::encode(&k, app_cursor) {
+            let (app_cursor, ext) = self.leaves.get(self.focus).and_then(|v| self.terms.get(v)).map(|t| (t.parser.screen().application_cursor(), t.modes.extended())).unwrap_or_default();
+            if let Some(bytes) = keys::encode(&k, app_cursor, ext) {
                 self.send_to_focused(bytes);
             }
             return;
@@ -1855,7 +1877,7 @@ impl App {
                         if t.parser.screen().alternate_screen() && arrows {
                             // Full-screen program without mouse support: arrows scroll it.
                             let key = KeyEvent::new(if up { KeyCode::Up } else { KeyCode::Down }, KeyModifiers::NONE);
-                            let bytes = keys::encode(&key, t.parser.screen().application_cursor()).unwrap_or_default().repeat(3);
+                            let bytes = keys::encode(&key, t.parser.screen().application_cursor(), keys::Extended::Legacy).unwrap_or_default().repeat(3);
                             if let Some(sid) = t.stream {
                                 self.send_input(sid, bytes);
                             }
@@ -2171,14 +2193,14 @@ impl App {
                     size: (inner.width, inner.height),
                     attaching: false,
                     closed: None,
-                    retry_at: None,
+                    retry_at: None, modes: Default::default(),
                 });
                 if t.resource != rid {
                     if let Some(sid) = t.stream.take() {
                         self.stream_view.remove(&sid);
                         self.peer.notify("stream.close", json!({"stream": sid}));
                     }
-                    *t = Term { resource: rid.clone(), stream: None, parser: new_parser(inner.width, inner.height), size: (inner.width, inner.height), attaching: false, closed: None, retry_at: None };
+                    *t = Term { resource: rid.clone(), stream: None, parser: new_parser(inner.width, inner.height), size: (inner.width, inner.height), attaching: false, closed: None, retry_at: None, modes: Default::default() };
                 }
                 if !available && (t.stream.is_some() || t.attaching) {
                     if let Some(stream) = t.stream.take() {
@@ -2818,7 +2840,7 @@ mod tests {
         let (mut app, _) = app();
         app.load(&snapshot(1, "x"));
         app.on_incoming(resource_event(2, json!({"id": "r1", "state": "live", "available": true, "status": null}), false));
-        app.terms.insert("view".into(), Term { resource: "r1".into(), stream: Some(9), parser: new_parser(80, 24), size: (80, 24), attaching: false, closed: None, retry_at: None });
+        app.terms.insert("view".into(), Term { resource: "r1".into(), stream: Some(9), parser: new_parser(80, 24), size: (80, 24), attaching: false, closed: None, retry_at: None, modes: Default::default() });
         app.stream_view.insert(9, "view".into());
         app.on_incoming(resource_event(3, json!({"id": "r1", "available": false, "stale": true}), true));
         assert!(app.terms["view"].stream.is_none());
@@ -2857,7 +2879,7 @@ mod tests {
     #[tokio::test]
     async fn early_attach_buffer_overflow_is_a_gap_not_retained_bytes() {
         let (mut app, _) = app();
-        app.terms.insert("view".into(), Term { resource:"r1".into(), stream:None, parser:new_parser(80,24), size:(80,24), attaching:true, closed:None, retry_at:None });
+        app.terms.insert("view".into(), Term { resource:"r1".into(), stream:None, parser:new_parser(80,24), size:(80,24), attaching:true, closed:None, retry_at:None, modes:Default::default() });
         let bytes = B64.encode(vec![b'x'; 65536]);
         for _ in 0..256 { app.on_incoming(Incoming::Notification { method:"stream.data".into(), params:json!({"stream":1,"data":bytes}) }); }
         assert!(!app.early.contains_key(&1));
@@ -2956,7 +2978,7 @@ mod tests {
         app.reconnected(peer, &snapshot(1, "current"));
         app.terms.insert("view".into(), Term {
             resource: "r1".into(), stream: None, parser: new_parser(80, 24),
-            size: (80, 24), attaching: true, closed: None, retry_at: None,
+            size: (80, 24), attaching: true, closed: None, retry_at: None, modes: Default::default(),
         });
         app.on_msg(Msg::Attached { connection: old_connection, view: "view".into(), resource: "r1".into(), result: Ok(1) });
         assert!(app.terms["view"].attaching);
@@ -2982,7 +3004,7 @@ mod tests {
         let (mut app, mut messages) = app();
         app.terms.insert("term-r1".into(), Term {
             resource: "r1".into(), stream: Some(99), parser: new_parser(80, 24),
-            size: (80, 24), attaching: false, closed: None, retry_at: None,
+            size: (80, 24), attaching: false, closed: None, retry_at: None, modes: Default::default(),
         });
         app.stream_view.insert(99, "term-r1".into());
         app.early.insert(99, vec![b"stale".to_vec()]);
@@ -3030,7 +3052,7 @@ mod tests {
         let (mut app, _) = app();
         app.terms.insert("view".into(), Term {
             resource: "r1".into(), stream: None, parser: new_parser(80, 24),
-            size: (80, 24), attaching: true, closed: None, retry_at: None,
+            size: (80, 24), attaching: true, closed: None, retry_at: None, modes: Default::default(),
         });
         app.on_incoming(Incoming::Notification { method: "stream.closed".into(), params: json!({"stream": 7, "reason": {"reason": "slow_consumer"}}) });
         app.on_msg(Msg::Attached { connection: app.connection, view: "view".into(), resource: "r1".into(), result: Ok(7) });
@@ -3043,7 +3065,7 @@ mod tests {
     fn closed_live_terminal_retries_without_a_resource_event_and_resets_parser() {
         let mut term = Term {
             resource: "r1".into(), stream: Some(1), parser: new_parser(80, 24),
-            size: (80, 24), attaching: false, closed: None, retry_at: None,
+            size: (80, 24), attaching: false, closed: None, retry_at: None, modes: Default::default(),
         };
         term.parser.process(b"old\x1b[");
         term.close("slow_consumer".into());
