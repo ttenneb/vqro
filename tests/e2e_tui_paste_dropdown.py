@@ -31,7 +31,7 @@ os.symlink(shutil.which("python3") or "/usr/bin/python3", os.path.join(R, "bin",
 ENV = {"HOME": f"{R}/home", "PATH": f"{R}/bin", "TERM": "xterm-256color", "SHELL": "/bin/sh", "PRIM_STATE_DIR": f"{R}/st",
        "PRIM_SOCKET": f"{R}/p.sock", "PRIM_EXTENSIONS_DIR": f"{R}/ext", "XDG_STATE_HOME": f"{R}/xst",
        "XDG_RUNTIME_DIR": f"{R}/run", "XDG_CONFIG_HOME": f"{R}/cfg", "HC_SESSION": "paste", "HC_SOCKET": f"{R}/hc.sock",
-       "LANG": "C.UTF-8"}
+       "LANG": "C.UTF-8", "PRIM_TUI_PROBE": f"{R}/tui-probe.json"}
 HARNESS = ["/usr/bin/tmux", "-S", f"{R}/harness.sock", "-f", "/dev/null"]
 SHELL_ENV = {"PATH": "/usr/bin:/bin", "HOME": f"{R}/home", "TERM": "xterm-256color", "LANG": "C.UTF-8", "PS1": "$ "}
 results = []
@@ -171,8 +171,10 @@ try:
         done = wait(lambda: os.path.getsize(out) >= len(big), 90)
         keys("C-d"); time.sleep(0.8)
         got = open(out, "rb").read() if os.path.exists(out) else b""
+        probe = open(f"{R}/tui-probe.json").read() if os.path.exists(f"{R}/tui-probe.json") else "{}"
         check(f"{provider}: 200 KB paste arrives complete ({len(got)} of {len(big)} bytes)",
-              bool(done) and hashlib.sha256(got).hexdigest() == want, screen()[-400:])
+              bool(done) and hashlib.sha256(got).hexdigest() == want,
+              screen()[-400:] + "\nstream closures: " + json.dumps(json.loads(probe).get("stream_closures")))
         call("resource.kill", {"resource": rid})
         time.sleep(1)
 
