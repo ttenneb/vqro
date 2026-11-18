@@ -1,4 +1,5 @@
 """Kind routing and ended-tab cleanup, using only the public extension surface."""
+import copy
 from pathlib import Path
 import runpy
 import sys
@@ -16,7 +17,10 @@ from agent_fixture import FakeCore
 class Core(FakeCore):
     def active_layout(self):
         value = self.value("layout/main")
-        return ("layout/main", self.version("layout/main"), value) if value else None
+        return ("layout/main", self.version("layout/main"), copy.deepcopy(value)) if value else None
+
+    def retrying(self, fn, attempts=3):
+        return prim_ext.Extension.retrying(self, fn, attempts)
 
     def run(self):
         pass
@@ -48,6 +52,32 @@ class ResourceViews(unittest.TestCase):
         self.assertIsNone(core.value("view/term-r2"))
         self.assertEqual(first_tabs(core.value("layout/main"))["tabs"][0]["title"], "Other agent r2 bridge")
         self.assertEqual(module["show_cmd"]({"resource": "r1"})["client"], {"focus": {"view": "term-r1"}})
+
+    def test_tabs_show_retries_transient_cas_losses_without_duplicate_tabs_or_effects(self):
+        module, core=load("tabs")
+        core.apply([{"op":"set","key":"layout/main","value":{"tabs":[{"title":"original","node":{"view":"original"}}],"active":0}}],"fixture")
+        apply=core.apply
+        count=0
+        def competing_write(ops,note):
+            nonlocal count
+            count+=1
+            if count<=4:
+                root=copy.deepcopy(core.value("layout/main"))
+                root["tabs"].append({"title":f"other-{count}","node":{"view":f"other-{count}"}})
+                apply([{"op":"set","key":"layout/main","value":root}],"concurrent writer")
+                raise PrimError("CAS lost","conflict")
+            return apply(ops,note)
+        with mock.patch.object(core,"apply",side_effect=competing_write), mock.patch("prim_ext.time.sleep"):
+            result=module["show_cmd"]({"resource":"r1"})
+        self.assertEqual(count,5)
+        tabs=core.value("layout/main")["tabs"]
+        self.assertEqual([t["title"] for t in tabs[:5]],["original","other-1","other-2","other-3","other-4"])
+        self.assertEqual(sum(t["node"].get("view")=="term-r1" for t in tabs),1)
+        self.assertEqual(result["client"],{"focus":{"view":"term-r1"}})
+        self.assertFalse(any(c[0]=="resource.spawn" for c in core.calls))
+        with mock.patch.object(core,"apply",side_effect=PrimError("unknown write outcome","timeout")) as failed:
+            with self.assertRaises(PrimError):module["show_cmd"]({"view":"other-view"})
+            self.assertEqual(failed.call_count,1,"unknown outcomes are never retried as CAS")
 
     def test_failed_agent_show_does_not_replay_as_terminal_navigation(self):
         _, core = load("tabs")

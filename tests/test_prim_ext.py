@@ -18,6 +18,38 @@ def event(seq, value):
     return {"epoch": "boot", "seq": seq, "type": "entries", "data": {"changes": [{"key": "doc/test/value", "version": seq, "value": value}]}}
 
 
+class LayoutSnapshotCoherence(unittest.TestCase):
+    def test_active_layout_cannot_mix_a_version_with_a_concurrent_delete(self):
+        ext=Extension.__new__(Extension)
+        ext.cache_lock=threading.RLock()
+        root={"tabs":[{"title":"old","node":{"view":"old"}}],"active":0}
+        reached,done=threading.Event(),threading.Event()
+        testcase=self
+        class Entries(dict):
+            def get(self,key,default=None):
+                if key=="layout/main":
+                    reached.set()
+                    if not ext.cache_lock._is_owned():
+                        testcase.assertTrue(done.wait(2))
+                return super().get(key,default)
+        ext.entries=Entries({"workspace/active":{"version":1,"value":{"layout":"main"}},
+                             "layout/main":{"version":7,"value":root}})
+        def writer():
+            if reached.wait(2):
+                with ext.cache_lock:
+                    ext.entries={}
+                done.set()
+        thread=threading.Thread(target=writer)
+        thread.start()
+        try:
+            result=ext.active_layout()
+        finally:
+            thread.join(3)
+        self.assertFalse(thread.is_alive())
+        self.assertTrue(done.is_set(),"concurrent cache replacement ran")
+        self.assertEqual(result,("layout/main",7,root),"a cache race must not return version0/None to tabs.show")
+
+
 class InvocationAttribution(unittest.TestCase):
     def prim(self, handler):
         prim = Prim.__new__(Prim)

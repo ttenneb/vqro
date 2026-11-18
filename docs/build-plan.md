@@ -241,6 +241,14 @@ written the same way was contained by the crash budget and removed with one reve
 - One formatter per language with the same JSON parity table; native render and private physical full/short/
   unknown captures verify live updates and unchanged bindings. `research/key-labels.md` records the route.
 
+## Soak-4 recovery and tab contention (2026-11-18)
+
+- Failed extensions retain frozen cause/time/count and bounded last exits beside recent/lifetime totals. Explicit
+  native badge/prefix recovery works even with Settings off; no automatic retry or safe-mode admission change.
+- tabs.show retries bounded CAS contention beyond the old three attempts; coherent SDK layout snapshots prevent
+  mixed version/deleted-value races. Regressions preserve concurrent tabs and never replay spawn/unknown effects.
+- Policy/evidence and historical-cause limitation: `research/soak4-p3.md`.
+
 ## Known gaps found while building
 
 - **History churn:** extensions that refresh views on every event (the sidebar on status changes) fill the

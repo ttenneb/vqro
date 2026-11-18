@@ -408,14 +408,20 @@ class Extension:
         return e["version"] if e else 0
 
     def active_layout(self):
-        """(key, version, deep copy of the root) of the active layout, or None."""
-        a = self.value("workspace/active")
-        if not a:
-            return None
-        key = f"layout/{a['layout']}"
-        if key not in self.entries:
-            return None
-        return key, self.version(key), json.loads(json.dumps(self.value(key)))
+        """One coherent (key, version, deep copy) of the active layout, or None.
+
+        Notifications and fresh() replace caches concurrently with command threads.
+        Never pair a new version with an old/deleted value; do not hold this lock over RPC.
+        """
+        with self.cache_lock:
+            a = self.value("workspace/active")
+            if not a:
+                return None
+            key = f"layout/{a['layout']}"
+            entry = self.entries.get(key)
+            if entry is None:
+                return None
+            return key, entry["version"], json.loads(json.dumps(entry["value"]))
 
     def log(self, *a):
         print(f"[{self.name}]", *a, file=sys.stderr, flush=True)

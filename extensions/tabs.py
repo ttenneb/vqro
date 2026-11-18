@@ -29,14 +29,14 @@ def show(view, title, view_value=None):
     def attempt():
         ops = []
         if view_value is not None and ext.value(f"view/{view}") != view_value:
-            ops.append({"op": "set", "key": f"view/{view}", "value": view_value})
+            ops.append({"op": "set", "key": f"view/{view}", "value": view_value, "expect": ext.version(f"view/{view}")})
         tab = {"title": title, "node": {"view": view}}
         mark_ended({"tabs": [tab]})
         lay = ext.active_layout()
         if lay is None:
             ops += [
-                {"op": "set", "key": "layout/main", "value": {"tabs": [tab], "active": 0}},
-                {"op": "set", "key": "workspace/active", "value": {"layout": "main"}},
+                {"op": "set", "key": "layout/main", "value": {"tabs": [tab], "active": 0}, "expect": ext.version("layout/main")},
+                {"op": "set", "key": "workspace/active", "value": {"layout": "main"}, "expect": 0},
             ]
         else:
             key, ver, root = lay
@@ -50,7 +50,9 @@ def show(view, title, view_value=None):
                 t["active"] = len(t["tabs"]) - 1
             ops.append({"op": "set", "key": key, "value": root, "expect": ver})
         return ext.apply(ops, f"tabs: show {view}")
-    result = ext.retrying(attempt)
+    # Navigation only: bounded CAS retries recompute from fresh state, never repeat spawn/input.
+    # Three attempts proved too little during concurrent layout churn (soak-4).
+    result = ext.retrying(attempt, attempts=8)
     return dict(result or {}, client={"focus": {"view": view}})
 
 
