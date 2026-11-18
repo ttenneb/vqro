@@ -45,6 +45,11 @@ Read `README.md`, then `docs/decisions.md` (D14 is the center; D15–D19 shape e
   Terminal-injected `PRIM_SOCKET` carries `PRIM_SOCKET_SOURCE=terminal`; setting `PRIM_STATE_DIR` then selects the
   scratch endpoint instead of that inherited one. Clear the marker only for an intentional explicit endpoint/state pair.
   (drop `--fake` to use herdr-core, and remove every terminal you create). `.run/` is ignored scratch space.
+  **`--fake` does not isolate you from the user's real herdr-core:** the default `herdr` provider extension still
+  starts and connects to the user's default herdr-core (and any `hc` call auto-starts one). Always also set a private
+  `XDG_RUNTIME_DIR`, `HC_SOCKET` and `HC_SESSION`, or `PRIM_HERDR='["/bin/false"]'` when you only need the fake
+  backend, e.g. `env -i HOME=$PWD/.run/home PATH=$PATH XDG_RUNTIME_DIR=$PWD/.run/xrun HC_SOCKET=$PWD/.run/h.sock
+  HC_SESSION=scratch PRIM_STATE_DIR=... PRIM_SOCKET=... PRIM_EXTENSIONS_DIR=... ./target/debug/prim serve --fake`.
 - **UI checks:** a pty harness (`.run/harness.py`, kept outside git) runs `prim tui` in a pty, sends keys and SGR
   mouse clicks, and renders the screen through tmux; search raw output bytes for exact colours and glyphs.
 - **Install for daily use:** `scripts/dev-install.sh` (release build to `~/.local/bin/prim`, extensions to
