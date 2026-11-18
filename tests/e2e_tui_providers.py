@@ -106,11 +106,11 @@ try:
         time.sleep(1)
     # Settings is an extension using the same list/detail primitives available to every panel.
     keys("C-g", ",")
-    check("Extensions page opens with static manifests", bool(wait(lambda: "14 of 14" in screen() and "Agent controls" in screen())))
+    check("Extensions page opens with static manifests", bool(wait(lambda: "15 of 15" in screen() and "Agent controls" in screen())))
     wide = screen()
     print("CAPTURE extensions-wide\n" + wide, flush=True)
     keys("/"); keys("pi", literal=True); keys("Enter")
-    check("manifest list search and count", bool(wait(lambda: "1 of 14" in screen() and "Pi launcher" in screen())))
+    check("manifest list search and count", bool(wait(lambda: "1 of 15" in screen() and "Pi launcher" in screen())))
     # Clicking a row selects details; only its checkbox or explicit keyboard activation changes state.
     row = next((i, line) for i, line in enumerate(screen().splitlines()) if "[x]" in line and "Pi launcher" in line)
     before = call("extension.list")["extensions"]["pi"]["generation"]
@@ -120,13 +120,13 @@ try:
     # Tab enters detail actions; restart is generic and keeps the list selection/filter.
     keys("Tab", "Right", "Enter")
     check("detail restart action", bool(wait(lambda: call("extension.list")["extensions"]["pi"]["generation"] > before)))
-    check("detail restart preserves list search", bool(wait(lambda: "1 of 14" in screen())))
+    check("detail restart preserves list search", bool(wait(lambda: "1 of 15" in screen())))
     wait(lambda: any(c["name"] == "pi.settings" and c.get("available") for c in call("command.list")["commands"]))
     keys("Right", "Enter")
     check("manifest settings_command opens its own settings", bool(wait(lambda: "Pi runtime argv" in screen())))
     keys("Escape"); keys("C-g", ","); keys("/"); keys("Escape")
     keys("End", "PageUp", "Home")
-    check("Home End and paging retain catalogue", bool(wait(lambda: "14 of 14" in screen())))
+    check("Home End and paging retain catalogue", bool(wait(lambda: "15 of 15" in screen())))
     keys("/"); keys("icons", literal=True); keys("Enter", "Space")
     check("keyboard turns extension off", bool(wait(lambda: call("extension.list")["extensions"]["icons"]["display_status"] == "off")))
     check("disabled extension keeps static description", bool(wait(lambda: "saved icon set remains" in screen())))
@@ -140,7 +140,7 @@ try:
     check("failed extension retains manifest and visible reason", bool(wait(lambda: "failed" in screen() and "extension program" in screen() and "prim-extension-page-test-missing" in screen() and "Publishes icon sets" in screen())))
     subprocess.run([*HARNESS, "resize-window", "-x", "72", "-y", "36"], capture_output=True)
     time.sleep(.3)
-    check("narrow list detail stacks below", bool(wait(lambda: "Icons (icons)" in screen() and "1 of 14" in screen())))
+    check("narrow list detail stacks below", bool(wait(lambda: "Icons (icons)" in screen() and "1 of 15" in screen())))
     narrow = screen(); print("CAPTURE extensions-narrow\n" + narrow, flush=True)
     if len(sys.argv) > 2:
         os.makedirs(sys.argv[2], exist_ok=True)
