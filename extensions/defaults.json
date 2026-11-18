@@ -117,7 +117,7 @@
         "retention.py"
       ],
       "since": 4,
-      "description": "Forgets finished terminals once no layout shows them (keeps the newest 64 never-shown). Off keeps every finished terminal."
+      "description": "Forgets finished terminals 60 s after no layout shows them (undo within that brings them back; keeps the newest 64 never-shown). Off keeps every finished terminal."
     }
   ]
 }

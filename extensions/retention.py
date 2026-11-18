@@ -7,7 +7,8 @@ providers only supply the mechanism, and only for providers declaring `resource.
 
 - A finished resource shown in a layout stays while any layout shows it.
 - Once it was shown and no layout shows it any more (its last view closed, `tabs.close_ended`), it
-  is forgotten.
+  is forgotten after a GRACE period. Forgetting is irreversible but closing a tab is undoable (D24):
+  `u` within the grace shows the terminal again, which cancels the pending forget.
 - Finished resources never shown in a layout (background jobs, exited before being placed) keep the
   newest KEEP for the sidebar's "ended" items; older ones are forgotten.
 
@@ -25,10 +26,14 @@ from prim_views import view_resource  # noqa: E402
 
 KEEP = 64        # never-shown finished resources kept for the sidebar's ended items
 SETTLE = 0.3     # seconds: batch bursts of events into one pass
+GRACE = 60.0     # seconds an unshown, once-shown resource waits, so undo can still bring it back
+if "--grace" in sys.argv:  # tests use a short grace
+    GRACE = float(sys.argv[sys.argv.index("--grace") + 1])
 
 ext = Extension("retention", event_types=["entries", "resource", "resource.removed", "provider"])
 dirty = threading.Event()
 was_shown = set()   # resource ids seen in a layout during this run
+unshown_at = {}     # once-shown id -> monotonic time it was first seen unshown
 refused = set()     # ids a provider refused for good (unsupported/invalid); never retried
 
 
@@ -39,8 +44,10 @@ def number(rid):
         return 0
 
 
-def plan(keep=KEEP):
-    """Ids to forget now. Pure decision over the extension's caches."""
+def plan(keep=KEEP, grace=None):
+    """(ids to forget now, seconds until the next grace expiry or None). Decides over the caches."""
+    grace = GRACE if grace is None else grace
+    now = time.monotonic()
     with ext.cache_lock:
         shown = set()
         for key, entry in ext.entries.items():
@@ -53,6 +60,11 @@ def plan(keep=KEEP):
         providers = dict(ext.providers)
     was_shown.intersection_update(resources)
     was_shown.update(shown & set(resources))
+    for rid in list(unshown_at):
+        if rid in shown or rid not in was_shown:
+            del unshown_at[rid]  # shown again (e.g. undo) or gone: no pending forget
+    for rid in was_shown - shown:
+        unshown_at.setdefault(rid, now)
 
     def forgettable(r):
         caps = (providers.get(r.get("provider")) or {}).get("capabilities") or {}
@@ -60,8 +72,10 @@ def plan(keep=KEEP):
 
     ended = [rid for rid, r in resources.items() if forgettable(r) and rid not in shown]
     closed = [rid for rid in ended if rid in was_shown]
+    due = [rid for rid in closed if now - unshown_at[rid] >= grace]
+    waits = [unshown_at[rid] + grace - now for rid in closed if rid not in due]
     never = sorted((rid for rid in ended if rid not in was_shown), key=number, reverse=True)
-    return closed + never[keep:]
+    return due + never[keep:], (min(waits) if waits else None)
 
 
 def forget(rid):
@@ -75,18 +89,22 @@ def forget(rid):
 
 
 def worker():
+    wait = None
     while True:
-        dirty.wait()
+        dirty.wait(timeout=wait)
         time.sleep(SETTLE)
         dirty.clear()
-        for rid in plan():
+        ids, wait = plan()
+        for rid in ids:
             forget(rid)
+        if wait is not None:
+            wait = max(wait, SETTLE)
 
 
 @ext.command("retention.forget_ended", "Forget every finished terminal no layout shows, now (live ones are never touched)")
 def forget_ended(args):
     ext.fresh()
-    ids = plan(keep=0)
+    ids, _ = plan(keep=0, grace=0)  # explicit request: no grace
     for rid in ids:
         forget(rid)
     return {"forgotten": len(ids)}

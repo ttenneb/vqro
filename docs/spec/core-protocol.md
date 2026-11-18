@@ -250,12 +250,14 @@ loss while in flight is `unavailable` with an indeterminate outcome. Pre-dispatc
 Late replies are ignored; independent resource facts reconcile what happened. No effect is automatically resent.
 
 `resource.forget` releases a **finished** resource: the owning provider drops it backend-side (herdr-core
-`terminal.rm`; tmux already deleted the exited pane; the fake drops it), then the core retires its id like a
-`resource.gone` (`resource.removed` event; ids are never reused, including across restarts; views showing it show
-it gone). A live resource is `invalid` (end it with `resource.kill` first); a provider without the
-`resource.forget` capability is `unsupported`; `resource.invoke` with that op is refused. When to forget is policy:
-the bundled `retention` extension forgets a finished resource once no layout shows it after one did, and keeps
-the newest 64 never-shown finished resources. Without a policy, finished resources stay until the backend drops
+`terminal.rm`, which deletes the terminal record and its history in herdr-core; tmux already deleted the exited
+pane; the fake drops it), then the core retires its id like a `resource.gone` (`resource.removed` event; ids are
+never reused, including across restarts; views showing it show it gone). **It is irreversible**: it is a backend
+effect, not a workspace transaction, so undo/revert cannot bring the resource or its output back. A live resource
+is `invalid` (end it with `resource.kill` first); a provider without the `resource.forget` capability is
+`unsupported`; `resource.invoke` with that op is refused. When to forget is policy: the bundled `retention`
+extension forgets a finished resource 60 s after no layout shows it any more (so undoing a tab or pane close within
+that grace shows it again and cancels the forget), and keeps the newest 64 never-shown finished resources. Without a policy, finished resources stay until the backend drops
 them, counted against the 4096-per-provider admission bound.
 
 Published resources include `provider`, `instance`, `incarnation`, `available`, `stale`, and opaque kind-specific

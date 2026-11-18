@@ -87,15 +87,15 @@ async fn eventually(what: &str, mut ok: impl AsyncFnMut() -> bool) {
     panic!("not reached: {what}");
 }
 
-/// The bundled retention policy: shown finished terminals stay until their last view closes;
-/// never-shown ones keep the newest 64; live ones are never touched.
+/// The bundled retention policy: shown finished terminals stay until their last view closes, plus a
+/// grace that undo can use; never-shown ones keep the newest 64; live ones are never touched.
 #[tokio::test]
 async fn retention_extension_forgets_closed_and_old_never_shown_finished_terminals() {
     let e = env();
     let defaults = e._dir.path().join("defaults");
     std::fs::create_dir_all(&defaults).unwrap();
     let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("extensions/retention.py");
-    std::fs::write(defaults.join("defaults.json"), json!({"version": 1, "extensions": [{"name": "retention", "argv": ["python3", script]}]}).to_string()).unwrap();
+    std::fs::write(defaults.join("defaults.json"), json!({"version": 1, "extensions": [{"name": "retention", "argv": ["python3", script, "--grace", "3"]}]}).to_string()).unwrap();
     let _core = start(e.socket.clone(), e.state.clone(), false, Backend::Fake, Some(defaults)).unwrap();
     let (p, _rx) = connect(&e.socket).await;
     eventually("retention running", async || p.call("extension.list", Value::Null).await.unwrap()["extensions"]["retention"]["status"] == "running").await;
@@ -114,9 +114,22 @@ async fn retention_extension_forgets_closed_and_old_never_shown_finished_termina
     let now = ids(&p).await;
     assert!(now.contains(&shown) && now.contains(&never) && now.contains(&live), "shown and recent never-shown finished stay: {now:?}");
 
-    // Closing its last view forgets the shown terminal.
-    p.call("workspace.apply", json!({"ops": [{"op": "set", "key": "layout/main", "value": {"view": "x"}}]})).await.unwrap();
-    eventually("closed view forgotten", async || !ids(&p).await.contains(&shown)).await;
+    // Closing its last view starts the grace; undo (`u`, prim.revert) within it keeps the terminal.
+    let close = json!({"ops": [{"op": "set", "key": "layout/main", "value": {"view": "x"}}]});
+    p.call("workspace.apply", close.clone()).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    p.call("command.invoke", json!({"name": "prim.revert"})).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(4500)).await;
+    assert!(ids(&p).await.contains(&shown), "undo within the grace cancelled the forget");
+    let attached = p.call("resource.attach", json!({"resource": shown, "cols": 80, "rows": 24})).await.unwrap();
+    assert_eq!(attached["outcome"], "accepted", "the restored view's terminal still works");
+    p.call("stream.close", json!({"stream": attached["stream"]})).await.unwrap();
+
+    // Closed again and left closed: forgotten after the grace, not before.
+    p.call("workspace.apply", close).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(ids(&p).await.contains(&shown), "still within the grace");
+    eventually("closed view forgotten after the grace", async || !ids(&p).await.contains(&shown)).await;
     assert!(ids(&p).await.contains(&never), "never-shown finished within the budget stays");
 
     // Over the budget, the oldest never-shown finished ones go; the live one stays.
