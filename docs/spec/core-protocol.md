@@ -62,9 +62,14 @@ disconnect uses legacy positive-pid signal fallback, never a protocol refusal. S
 | Method | Params | Result |
 |---|---|---|
 | `workspace.snapshot` | | `epoch`, `seq`, `entries` (key → `{version, value}`), `resources`, `commands`, `extensions`, `providers`, `adapters` (compatibility alias), `safe_mode` |
+| `workspace.get` | `key` | the single entry `{version, value}`, or `null` if absent |
 | `workspace.apply` | `ops: [{op: "set", key, value, expect?} \| {op: "delete", key, expect?}]`, `note?`, `on_behalf_of?` (invocation proof) | `txn`, `undoable`, `changes` |
 | `workspace.history` | `limit?` | `txns` (newest first) |
 | `workspace.revert` | `txn`, `on_behalf_of?` (invocation proof) | reverting `txn`, `undoable`, `changes` |
+
+`workspace.get` reads only the exact requested entry, not an aggregate snapshot or live content. It is available
+to clients, extensions and provider connections under the same normal entry/reply limits. A legacy oversized
+entry can still return `too_large`; callers must not assume any single entry fits their connection's record cap.
 
 Transactions are validated against the resulting state and applied all-or-nothing. `expect` is compare-and-set
 (0 = must not exist). Key namespaces and value shapes: `src/store.rs` header. Layouts may only reference
@@ -274,7 +279,7 @@ and old layouts may show gone resources until explicitly repaired/reset. No iden
 
 | Method | Params | Result |
 |---|---|---|
-| `resource.list` | | `resources` |
+| `resource.list` | `provider?`, `backend_ref?` (exact strings) | `resources` |
 | `resource.spawn` | `argv?` (default: the provider's default shell for its host), `cwd?`, `name?`, `env?`, `cols?`, `rows?`, `placement?`, `bridge?` (default false), `provider?` (`adapter` alias), `deadline_ms?` | `outcome: observed`, `effect`, `resource` |
 | `resource.kill` | `resource`, `deadline_ms?` | `outcome: accepted`, `effect`, `backend` |
 | `resource.forget` | `resource`, `deadline_ms?` | `outcome: observed`, `effect`, `data` |
@@ -283,6 +288,11 @@ and old layouts may show gone resources until explicitly repaired/reset. No iden
 | `stream.input` | `stream`, `data` (base64) or `text` | `outcome: dispatched` (also accepted as a notification) |
 | `stream.resize` | `stream`, `cols`, `rows` | |
 | `stream.close` | `stream` | |
+
+`resource.list` optionally filters by exact `provider` and/or `backend_ref` (AND), before serializing records.
+Absent filters retain the complete list. Malformed filter types are `invalid`; a nonmatching filter returns an
+empty list. These scoped reads are generic, read-only, and retain normal reply caps: a broad filtered result
+can still be too large. Runtime bridges can read their own provider/ref records instead of a full workspace.
 
 Spawn, kill and attach check declared capabilities and provider/resource availability before dispatch. Their default
 deadline is 30000 ms, override 1–300000 ms. Expiry is `timeout` with an indeterminate outcome; connection or resource

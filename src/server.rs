@@ -342,6 +342,17 @@ struct Apply {
 }
 
 #[derive(Deserialize)]
+struct WorkspaceGet {
+    key: String,
+}
+
+#[derive(Deserialize)]
+struct ResourceList {
+    provider: Option<String>,
+    backend_ref: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct Revert {
     txn: u64,
     on_behalf_of: Option<String>,
@@ -443,6 +454,10 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> Rp
             }))
         }
         "workspace.snapshot" => Ok(core.lock().unwrap().snapshot()),
+        "workspace.get" => {
+            let query: WorkspaceGet = params(p)?;
+            Ok(json!(core.lock().unwrap().store.get(&query.key)))
+        }
         "workspace.apply" => {
             let a: Apply = params(p)?;
             let context = attribution(core, conn, a.on_behalf_of)?;
@@ -458,7 +473,13 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> Rp
             revert(core, &conn.author(), context.origin, Some(revert_request.txn)).await
         }
         "events.subscribe" => subscribe(core, conn, params(p)?),
-        "resource.list" => Ok(json!({"resources": core.lock().unwrap().resources.values().map(|r| r.to_json()).collect::<Vec<_>>()})),
+        "resource.list" => {
+            let query: ResourceList = params(p)?;
+            let c = core.lock().unwrap();
+            let resources = c.resources.values().filter(|r| query.provider.as_deref().is_none_or(|name| r.adapter == name)
+                && query.backend_ref.as_deref().is_none_or(|reference| r.facts.backend_ref == reference)).map(|r| r.to_json()).collect::<Vec<_>>();
+            Ok(json!({"resources": resources}))
+        }
         "resource.spawn" => {
             spawn(core, &conn.author(), params(p)?).await
         }
