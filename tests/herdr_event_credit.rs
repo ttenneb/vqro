@@ -1,4 +1,5 @@
-//! Fixture evidence only: no claim about a real hc stall.
+//! Finite-window NDJSON split/coalescing, snapshot fencing and consumed-credit regression.
+//! Real hc under-load convergence is covered by e2e_herdr_drift.py.
 use std::time::Duration;
 use prim::server::{self,Backend};
 #[tokio::test(flavor="multi_thread",worker_threads=4)]
@@ -12,9 +13,12 @@ async fn event_credit_waits_for_core_consumption_and_advances_fixture() {
     assert!(!dir.path().join("credits").exists(),"enqueue alone must not return metadata credit");
     drop(guard);
     tokio::time::timeout(Duration::from_secs(2),async {
-        loop { if core.lock().unwrap().snapshot()["resources"][0]["state"]=="finished" { break; } tokio::time::sleep(Duration::from_millis(5)).await; }
+        while !dir.path().join("all-consumed").exists() { tokio::time::sleep(Duration::from_millis(5)).await; }
     }).await.unwrap();
     assert!(std::fs::read_to_string(dir.path().join("credits")).unwrap().lines().count()>=2);
-    assert_eq!(core.lock().unwrap().snapshot()["resources"][0]["exit"]["exit_code"],0);
+    let snapshot=core.lock().unwrap().snapshot();
+    assert_eq!(snapshot["resources"][0]["state"],"finished");
+    assert_eq!(snapshot["resources"][0]["name"],"snapshot","queued pre-snapshot created must not resurrect the terminal");
+    assert_eq!(snapshot["resources"][0]["exit"]["exit_code"],0);
     server::shutdown(&core).await;
 }

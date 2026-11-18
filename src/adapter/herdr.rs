@@ -18,6 +18,34 @@ const DATA: u8 = 0;
 const CREDIT: u8 = 1;
 const CLOSE: u8 = 2;
 const RESIZE: u8 = 3;
+const MAX_NATIVE_RECORD_BYTES: usize = 16 * 1024 * 1024;
+
+/// hc event DATA is an NDJSON byte stream: one frame may contain several records or only
+/// part of one. Bound the unfinished record independently of frame boundaries.
+#[derive(Default)]
+struct EventInput { pending: Vec<u8> }
+impl EventInput {
+    fn push(&mut self, bytes: &[u8]) -> anyhow::Result<Vec<Value>> {
+        let mut messages=Vec::new();
+        for part in bytes.split_inclusive(|byte|*byte==b'\n') {
+            if self.pending.len().saturating_add(part.len())>MAX_NATIVE_RECORD_BYTES { anyhow::bail!("herdr-core event record exceeds 16 MiB"); }
+            self.pending.extend_from_slice(part);
+            if part.last()==Some(&b'\n') {
+                messages.push(serde_json::from_slice(&self.pending).map_err(|error|anyhow::anyhow!("invalid herdr-core event record: {error}"))?);
+                self.pending.clear();
+            }
+        }
+        Ok(messages)
+    }
+}
+
+/// A subscribe/missed snapshot covers its seq. Queued older events must not undo it.
+fn fresh_notification(method: &str, params: &Value, seen: &mut u64) -> bool {
+    if !matches!(method,"event"|"missed") { return true; }
+    let Some(seq)=params["seq"].as_u64() else { return true };
+    if seq<*seen || (method=="event" && seq==*seen) { return false; }
+    *seen=seq;true
+}
 
 pub fn capabilities() -> Value {
     json!({
@@ -166,6 +194,8 @@ async fn session(
     let mut streams: HashMap<u32, crate::queue::Sender<StreamOutput>> = HashMap::new();
     let mut records: HashMap<String, Value> = HashMap::new();
     let mut events_channel: Option<u32> = None;
+    let mut event_input=EventInput::default();
+    let mut event_seq=0;
     let mut refresh_needed = false;
 
     let call = |id: &mut u64, method: &str, params: Value| -> (u64, Vec<u8>) {
@@ -249,27 +279,21 @@ async fn session(
             f = frames_in.recv() => {
                 let Some(item) = f else { break };
                 let f = item.value;
-                if f.channel == 0 || Some(f.channel) == events_channel {
+                let is_events=Some(f.channel)==events_channel;
+                if f.channel == 0 || is_events {
+                    if is_events && f.kind==CLOSE { anyhow::bail!("herdr-core event channel closed"); }
                     if f.kind != DATA { continue; }
-                    let Ok(msg) = serde_json::from_slice::<Value>(&f.payload) else { continue };
+                    let messages=if is_events { event_input.push(&f.payload)? } else { vec![serde_json::from_slice::<Value>(&f.payload)?] };
+                    for msg in messages {
                     if let Some(method) = msg.get("method").and_then(|m| m.as_str()) {
                         let params = msg.get("params").cloned().unwrap_or(Value::Null);
+                        if !fresh_notification(method,&params,&mut event_seq) { continue; }
                         if remote_notification(method, &params) {
                             // Alias-only updates cannot safely bind machine identity. Refresh the
                             // native snapshot (including Machine.id) instead of guessing/replaying.
                             refresh_needed = true;
                         } else {
                             handle_notification(name, method, params, &mut records, events);
-                        }
-                        if Some(f.channel) == events_channel {
-                            let (ack, consumed) = tokio::sync::oneshot::channel();
-                            if events.send((name.to_string(), AdapterEvent::Consumed(ack))).is_ok() {
-                                let writer = frame_tx.clone();
-                                let (channel, bytes) = (f.channel, f.payload.len() as u32);
-                                tokio::spawn(async move {
-                                    if consumed.await.is_ok() { let _ = writer.send(frame(channel, CREDIT, &bytes.to_le_bytes()), 13).await; }
-                                });
-                            }
                         }
                         continue;
                     }
@@ -295,6 +319,7 @@ async fn session(
                         Pending::Subscribe => {
                             let r = result.map_err(|e| anyhow::anyhow!("events.subscribe failed: {e}"))?;
                             events_channel = r.get("channel").and_then(|c| c.as_u64()).map(|c| c as u32);
+                            event_seq=r["seq"].as_u64().unwrap_or(0);
                             records = inventory(&r);
                             let _ = events.send((name.to_string(), AdapterEvent::Snapshot(records.values().map(facts).collect())));
                         }
@@ -358,6 +383,16 @@ async fn session(
                                 let _ = reply.send(Ok(Stream { initial: if history > 0 { "history" } else { "none" }, input: inp_tx, output: out_rx, terminal: None }));
                             }
                         },
+                    }
+                    }
+                    if is_events {
+                        // Return each frame's bytes exactly once, after every complete record was
+                        // consumed. Bounded partial records also earn credit, avoiding a window deadlock.
+                        let (ack, consumed)=tokio::sync::oneshot::channel();
+                        if events.send((name.to_string(),AdapterEvent::Consumed(ack))).is_ok() {
+                            let writer=frame_tx.clone();let(channel,bytes)=(f.channel,f.payload.len()as u32);
+                            tokio::spawn(async move {if consumed.await.is_ok(){let _=writer.send(frame(channel,CREDIT,&bytes.to_le_bytes()),13).await;}});
+                        }
                     }
                 } else if let Some(out) = streams.get(&f.channel) {
                     match f.kind {
@@ -527,6 +562,32 @@ fn send_frame(tx: &crate::queue::Sender<Vec<u8>>, bytes: Vec<u8>) -> Result<(), 
 mod qa_tests {
     use super::*;
     #[test]
+    fn event_input_accepts_coalesced_and_every_split_including_utf8() {
+        let expected=vec![json!({"method":"event","params":{"type":"title","data":{"title":"λ"}}}),json!({"method":"heartbeat","params":{}})];
+        let bytes=format!("{}\n{}\n",expected[0],expected[1]).into_bytes();
+        for split in 0..=bytes.len() {
+            let mut input=EventInput::default();let mut got=input.push(&bytes[..split]).unwrap();got.extend(input.push(&bytes[split..]).unwrap());
+            assert_eq!(got,expected,"split {split}");assert!(input.pending.is_empty());
+        }
+    }
+    #[test]
+    fn event_input_rejects_malformed_and_unbounded_partial_records() {
+        assert!(EventInput::default().push(b"not json\n").is_err());
+        let mut input=EventInput::default();assert!(input.push(&vec![b'x';MAX_NATIVE_RECORD_BYTES]).unwrap().is_empty());
+        assert!(input.push(b"x").unwrap_err().to_string().contains("exceeds 16 MiB"));
+    }
+    #[test]
+    fn snapshot_sequence_fences_queued_old_events_and_old_missed_snapshots() {
+        let mut seq=100;
+        assert!(!fresh_notification("event",&json!({"seq":99}),&mut seq));
+        assert!(fresh_notification("event",&json!({"seq":101}),&mut seq));
+        assert!(fresh_notification("missed",&json!({"seq":104}),&mut seq));
+        assert!(!fresh_notification("event",&json!({"seq":103}),&mut seq));
+        assert!(!fresh_notification("missed",&json!({"seq":102}),&mut seq));
+        assert!(fresh_notification("event",&json!({"seq":105}),&mut seq));
+        assert_eq!(seq,105);
+    }
+    #[test]
     fn expired_native_calls_retire_and_attach_ids_remain_bounded_cleanup_tokens() {
         let mut pending = HashMap::new();
         let mut late = HashSet::new();
@@ -596,7 +657,7 @@ async fn read_frames(mut r: BufReader<ChildStdout>, tx: crate::queue::Sender<Fra
         let channel = u32::from_le_bytes(head[0..4].try_into().unwrap());
         let kind = head[4];
         let len = u32::from_le_bytes(head[5..9].try_into().unwrap()) as usize;
-        if len > 16 * 1024 * 1024 {
+        if len > MAX_NATIVE_RECORD_BYTES {
             return;
         }
         let mut payload = vec![0u8; len];
