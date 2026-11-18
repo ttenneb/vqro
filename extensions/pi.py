@@ -19,7 +19,7 @@ EXTENSIONS = str(Path(__file__).resolve().parent)
 def default_bridge():
     # Resolved by the terminal host, never selected from the core host's OS.
     # Windows/other hosts configure their launcher explicitly (e.g. py -3).
-    return ["python3", "-m", "pi_bridge"]
+    return ["python3", "-I", str(Path(EXTENSIONS) / "pi_bridge" / "launch.py")]
 
 
 def valid_argv(argv):
@@ -96,9 +96,9 @@ class Pi:
         if runtime is None:
             raise PrimError("configured runtime not found", "invalid")
         launcher = runtime.get("bridge_argv", default_bridge())
-        # The local default uses this installed package. A configured host
-        # launcher/environment never inherits a core-host module path.
-        env = runtime.get("bridge_env", {} if "bridge_argv" in runtime else {"PYTHONPATH": EXTENSIONS})
+        # The local isolated launcher locates its installed package itself. Neither it nor
+        # a configured host launcher injects a module path into the agent environment.
+        env = runtime.get("bridge_env", {})
         params = {"bridge": True, "name": "pi-bridge-"+uuid.uuid4().hex[:12], "argv": [*launcher, "--", *runtime["argv"]], "env": env}
         if cwd:
             params["cwd"] = cwd

@@ -1,4 +1,7 @@
 import json
+import os
+import subprocess
+import tempfile
 from pathlib import Path
 import sys
 import unittest
@@ -34,18 +37,28 @@ class PiTests(unittest.TestCase):
         self.assertEqual((result["outcome"], result["agent"]), ("observed", "r2"))
         spawn = self.native()[0][1]
         self.assertTrue(spawn["bridge"])
-        self.assertEqual(spawn["argv"][1:4], ["-m", "pi_bridge", "--"])
-        self.assertEqual(spawn["argv"][4:], ["/node", "literal $(not-a-shell)", "--mode", "rpc"])
-        self.assertEqual(spawn["env"], {"PYTHONPATH": EXTENSIONS})
+        self.assertEqual(spawn["argv"][:3], default_bridge())
+        self.assertEqual(spawn["argv"][3:], ["--", "/node", "literal $(not-a-shell)", "--mode", "rpc"])
+        self.assertEqual(spawn["env"], {})
         self.assertEqual(spawn["cwd"], "/private/project")
         self.assertEqual(self.core.calls[-1], ("agents.show", {"resource": "r2"}))
         self.assertEqual(len(self.native()), 1)
 
     def test_default_does_not_infer_bridge_host_from_core_platform(self):
         with patch("pi.sys.platform", "win32"):
-            self.assertEqual(default_bridge(), ["python3", "-m", "pi_bridge"])
+            self.assertEqual(default_bridge(), ["python3", "-I", str(Path(EXTENSIONS)/"pi_bridge"/"launch.py")])
         value = {"runtimes": [{"name": "windows host", "argv": ["pi1"], "bridge_argv": ["py", "-3", "-m", "pi_bridge"]}]}
         self.assertEqual(runtimes(value)[0]["bridge_argv"], ["py", "-3", "-m", "pi_bridge"])
+
+    def test_default_bridge_never_imports_project_or_pythonpath_shadow_modules(self):
+        for shadow in ("uuid.py", "queue.py", "pi_bridge/__init__.py"):
+            with self.subTest(shadow=shadow), tempfile.TemporaryDirectory(prefix="bridge-import-") as project:
+                source=Path(project)/shadow;source.parent.mkdir(parents=True,exist_ok=True)
+                source.write_text("open('shadow-executed','w').write('bad')\nraise SystemExit('project module executed')\n")
+                env={"HOME":project,"PATH":os.environ.get("PATH",""),"PYTHONPATH":os.pathsep.join([project,EXTENSIONS])}
+                result=subprocess.run([sys.executable,*default_bridge()[1:],"--help"],cwd=project,env=env,capture_output=True,text=True,timeout=5)
+                self.assertEqual(result.returncode,0,result.stderr)
+                self.assertFalse((Path(project)/"shadow-executed").exists())
 
     def test_invalid_host_launcher_is_rejected_before_spawn(self):
         for extra in ({"bridge_argv": "python -m pi_bridge"}, {"bridge_env": {"PYTHONPATH": None}}):

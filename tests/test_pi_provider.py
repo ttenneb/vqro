@@ -273,9 +273,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         endpoint = str(Path(self.root.name) / "p.sock")
         server = await asyncio.start_unix_server(connection, endpoint)
         env = {"HOME": self.root.name, "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8",
-               "PYTHONPATH": str(ROOT / "extensions"), "PRIM_SOCKET": endpoint,
+               "PRIM_SOCKET": endpoint,
                "PRIM_BRIDGE_TOKEN": "bootstrap-once", "PRIM_EXTENSION_LIFETIME": "stdin"}
-        process = await asyncio.create_subprocess_exec(sys.executable, "-m", "pi_bridge", "--",
+        process = await asyncio.create_subprocess_exec(sys.executable, "-I", str(ROOT / "extensions/pi_bridge/launch.py"), "--",
             sys.executable, str(ROOT / "tests/fixtures/fake_pi.py"), cwd=self.root.name, env=env,
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
         try:

@@ -504,8 +504,8 @@ class E2E:
             self.tracked.extend(identity(int(pid)) for pid in children)
         else:
             spawned = self.call('resource.spawn', {'bridge': True, 'name': 'isolated-pi-provider',
-                    'argv': ['/usr/bin/python3', '-m', 'pi_bridge', '--', *native], 'cwd': str(self.root/'work'),
-                    'env': {'PYTHONPATH': str(REPO/'extensions'), 'PI_CODING_AGENT_DIR': str(self.root/'agent'),
+                    'argv': ['/usr/bin/python3', '-I', str(self.root/'ext/pi_bridge/launch.py'), '--', *native], 'cwd': str(self.root/'work'),
+                    'env': {'PI_CODING_AGENT_DIR': str(self.root/'agent'),
                             'PI_SKIP_VERSION_CHECK': '1'}})
         assert spawned['outcome'] == 'observed', spawned
         host = spawned['resource']['id']
