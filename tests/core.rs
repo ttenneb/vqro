@@ -59,6 +59,10 @@ async fn provider_capabilities_and_unavailable_resources_are_exported() {
     assert_eq!(resource["available"], false, "disconnect keeps stale facts without deleting identity");
     assert_eq!(snap["providers"]["fake"]["state"], "disconnected");
     assert_eq!(p.call("resource.attach", json!({"resource": id})).await.unwrap_err().kind(), "unavailable");
+    let forgotten=p.call("resource.forget_cached",json!({"resource":id})).await.unwrap();
+    assert_eq!(forgotten["outcome"],"observed");assert_eq!(forgotten["data"]["scope"],"cached_facts");
+    assert_eq!(forgotten["data"]["backend_effect"],"none");
+    assert!(!core.lock().unwrap().resources.contains_key(id.as_str().unwrap()));
 }
 
 #[tokio::test]
@@ -67,7 +71,7 @@ async fn changed_incarnation_retires_ids_instead_of_resurrecting_them() {
     let core = start(e.socket.clone(), e.state.clone(), false, Backend::Fake, None).unwrap();
     let (p, _rx) = connect(&e).await;
     let first = p.call("resource.spawn", json!({"argv": ["sh"]})).await.unwrap()["resource"]["id"].as_str().unwrap().to_string();
-    let original = core.lock().unwrap().resources[&first].facts.clone();
+    let original = core.lock().unwrap().resources[&first].facts.as_ref().clone();
     let mut changed = serde_json::to_value(&original).unwrap();
     changed["incarnation"] = json!("replacement");
     core.lock().unwrap().on_adapter_event("fake", prim::adapter::AdapterEvent::Upsert(serde_json::from_value(changed).unwrap()));
@@ -87,7 +91,7 @@ async fn new_fake_instance_cannot_reuse_a_previous_prim_id() {
     let first = old.call("resource.spawn", json!({"argv": ["sh"]})).await.unwrap()["resource"]["id"].clone();
     // A restart stops the old writer first; two live cores must not share one state directory.
     prim::server::shutdown(&_old).await;
-    let stale_facts=_old.lock().unwrap().resources.values().next().unwrap().facts.clone();
+    let stale_facts=_old.lock().unwrap().resources.values().next().unwrap().facts.as_ref().clone();
     _old.lock().unwrap().on_adapter_event("fake",prim::adapter::AdapterEvent::Removed { reference:stale_facts.backend_ref,incarnation:stale_facts.incarnation });
     assert_eq!(_old.lock().unwrap().resources.len(),1,"stopped cores ignore late backend state mutations");
     // The fake starts empty with refs f1, f2... again, but belongs to a new instance.

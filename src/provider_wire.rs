@@ -153,6 +153,8 @@ impl Connection {
         Ok(provider)
     }
     pub async fn register(&self, core: &Shared, p: Value, owner: Option<crate::ext::Owner>) -> RpcResult {
+        let gate=core.lock().unwrap().registration_slots.clone();
+        let _slot=gate.try_acquire_owned().map_err(|_|overloaded("registration concurrency limit reached; retry later"))?;
         if !self.hello.load(Ordering::Acquire) { return Err(invalid("hello must precede provider.register")); }
         if self.is_provider() { return Err(RpcError::new("conflict", "one registration per connection")); }
         if encoded_bytes(&p) > MAX_REGISTRATION_BYTES { return Err(overloaded("registration exceeds 128 KiB")); }
@@ -202,7 +204,7 @@ impl Connection {
         c.on_adapter_event(&r.name,adapter::AdapterEvent::Registered(info));
         let generation=c.providers[&r.name].generation;
         if let Some(owner) = owner { c.provider_extensions.insert(owner.name); }
-        c.provider_event(&r.name);
+        // Registered already published this exact state (including compatibility alias).
         let health = c.providers[&r.name].health.subscribe();
         let (stopped, _) = watch::channel(false);
         let provider = Arc::new(WireProvider { name: r.name, generation, source, connection: self.id,
@@ -548,6 +550,17 @@ mod qa2_tests {
         connection.register(&core,json!({"name":"qa2","role":"backend","instance":"i","software":{"name":"fixture","version":"1"},"provider_version":"0","capabilities":{"terminal.output":{"raw":true}}}),None).await.unwrap();
         let provider=connection.provider.lock().unwrap().clone().unwrap();
         (core,provider,remote,incoming)
+    }
+    #[tokio::test]
+    async fn registration_concurrency_rejects_without_consuming_identity_or_mutating_registry() {
+        let (core,_provider,remote,_incoming)=fixture().await;
+        let (a,_b)=tokio::io::duplex(4096);let(r,w)=tokio::io::split(a);let(peer,_rx)=Peer::spawn(r,w);
+        let connection=Connection::new(2,peer);connection.hello().unwrap();
+        let gate=core.lock().unwrap().registration_slots.clone();let held=gate.acquire_many_owned(8).await.unwrap();
+        let p=json!({"name":"late","role":"backend","instance":"i","software":{"name":"fixture","version":"1"},"provider_version":"0","capabilities":{}});
+        assert_eq!(connection.register(&core,p.clone(),None).await.unwrap_err().kind(),"overloaded");
+        assert!(!connection.is_provider());assert!(!core.lock().unwrap().providers.contains_key("late"));
+        drop(held);connection.register(&core,p,None).await.unwrap();remote.close();
     }
     #[tokio::test]
     async fn registration_rechecks_shutdown_before_mutating_state() {

@@ -60,7 +60,13 @@ impl Admission {
     fn remove_reference(&mut self, key: &(String, String)) {
         if let Some(count) = self.references.get_mut(key) {
             *count -= 1;
-            if *count == 0 { self.references.remove(key); if let Some(count) = self.counts.get_mut(&key.0) { *count -= 1; } }
+            if *count == 0 {
+                self.references.remove(key);
+                if let Some(count) = self.counts.get_mut(&key.0) {
+                    *count -= 1;
+                    if *count == 0 {self.counts.remove(&key.0);}
+                }
+            }
         }
     }
     pub fn resource(&mut self, id: &str, provider: &str, reference: &str, bytes: usize) {
@@ -119,5 +125,6 @@ mod tests {
         bytes.remove_pending("p", "same"); bytes.remove_resource("r1");
         assert_eq!(bytes.bytes, 0);
         assert!(bytes.references.is_empty());
+        assert!(bytes.counts.is_empty(),"retired provider names must not accumulate in the admission index");
     }
 }

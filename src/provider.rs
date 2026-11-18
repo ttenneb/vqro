@@ -188,7 +188,7 @@ pub struct IdentityMap {
     writer: crate::store::DurableWriter,
     by_identity: std::collections::HashMap<Identity,String>,
     by_reference: std::collections::HashMap<(String,String),String>,
-    by_provider:std::collections::HashMap<String,usize>,
+    by_provider:std::collections::HashMap<String,std::collections::BTreeSet<String>>,
     #[cfg(test)] writes:usize,
 }
 
@@ -239,7 +239,7 @@ impl IdentityMap {
         let needs_sync = path.is_some();
         let mut map=Self { state, path, needs_sync, writer:std::sync::Arc::new(crate::store::write_atomic), by_identity:Default::default(),by_reference:Default::default(), by_provider:Default::default(), #[cfg(test)] writes:0 };
         for (id,record) in &map.state.ids {
-            *map.by_provider.entry(record.identity.provider.clone()).or_default()+=1;
+            map.by_provider.entry(record.identity.provider.clone()).or_default().insert(id.clone());
             if map.by_identity.insert(record.identity.clone(),id.clone()).is_some() || map.by_reference.insert((record.identity.provider.clone(),record.identity.reference.clone()),id.clone()).is_some() {anyhow::bail!("duplicate active resource identity/reference");}
         }
         Ok(map)
@@ -260,13 +260,26 @@ impl IdentityMap {
         }
         self.by_identity=candidate.ids.iter().map(|(id,r)|(r.identity.clone(),id.clone())).collect();
         self.by_reference=candidate.ids.iter().map(|(id,r)|((r.identity.provider.clone(),r.identity.reference.clone()),id.clone())).collect();
-        self.by_provider.clear();for record in candidate.ids.values(){*self.by_provider.entry(record.identity.provider.clone()).or_default()+=1;}
+        self.by_provider.clear();for (id,record) in &candidate.ids{self.by_provider.entry(record.identity.provider.clone()).or_default().insert(id.clone());}
         self.state = candidate;
         self.needs_sync = uncertain.is_some();
         Ok(uncertain)
     }
 
     pub fn has_provider(&self,name:&str)->bool{self.by_provider.contains_key(name)}
+    pub fn provider_ids(&self,name:&str)->Vec<String>{self.by_provider.get(name).map(|ids|ids.iter().cloned().collect()).unwrap_or_default()}
+    pub fn reference_id(&self,name:&str,reference:&str)->Option<&str>{self.by_reference.get(&(name.into(),reference.into())).map(String::as_str)}
+    pub fn retire_provider_except(&mut self,name:&str,instance:&str)->Result<(Vec<String>,Option<RpcError>),RpcError>{
+        if !self.needs_sync && self.provider_ids(name).iter().all(|id|self.state.ids[id].identity.instance==instance){return Ok((Vec::new(),None));}
+        self.retire(|i|i.provider==name&&i.instance!=instance)
+    }
+    pub fn sync_provider(&mut self,name:&str,identities:&[Identity])->Result<IdentityBatch,RpcError>{
+        if !self.needs_sync && self.by_provider.get(name).map(|ids|ids.len()).unwrap_or(0)==identities.len() {
+            if let Some(ids)=identities.iter().map(|i|self.lookup(i).map(String::from)).collect::<Option<Vec<_>>>() {return Ok(IdentityBatch{ids,replaced:Vec::new(),removed:Vec::new(),uncertain:None});}
+        }
+        let seen=identities.iter().collect::<std::collections::HashSet<_>>();
+        self.batch(identities,|i|i.provider==name&&!seen.contains(i))
+    }
     pub fn active(&self, id: &str) -> bool { self.state.ids.contains_key(id) }
     pub fn lookup(&self,identity:&Identity)->Option<&str>{self.by_identity.get(identity).map(String::as_str)}
 

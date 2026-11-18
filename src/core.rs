@@ -28,18 +28,47 @@ pub struct Resource {
     pub available: bool,
     pub host: Option<String>,
     life: watch::Sender<bool>,
-    pub facts: ResourceFacts,
+    pub facts: Arc<ResourceFacts>,
 }
 
 impl Resource {
-    pub fn to_json(&self) -> Value {
-        json!({
-            "id": self.id, "provider": self.adapter, "adapter": self.adapter, "instance": self.instance,
-            "incarnation": self.facts.incarnation, "available": self.available, "stale": !self.available, "host": self.host,
-            "kind": self.facts.kind, "backend_ref": self.facts.backend_ref,
-            "name": self.facts.name, "title": self.facts.title, "state": self.facts.state,
-            "status": self.facts.status, "exit": self.facts.exit, "argv": self.facts.argv, "cwd": self.facts.cwd, "data": self.facts.data,
-        })
+    pub fn to_json(&self) -> Value {serde_json::to_value(self).expect("resource JSON")}
+}
+impl serde::Serialize for Resource {
+    fn serialize<S:serde::Serializer>(&self,serializer:S)->Result<S::Ok,S::Error> {
+        #[derive(serde::Serialize)] struct Wire<'a> {
+            id:&'a str,provider:&'a str,adapter:&'a str,instance:&'a str,available:bool,stale:bool,host:&'a Option<String>,
+            #[serde(flatten)] facts:&'a ResourceFacts,
+        }
+        serde::Serialize::serialize(&Wire {id:&self.id,provider:&self.adapter,adapter:&self.adapter,instance:&self.instance,available:self.available,stale:!self.available,host:&self.host,facts:&self.facts},serializer)
+    }
+}
+
+/// Immutable fence captured under the core lock; all large JSON construction happens later.
+#[derive(serde::Serialize)]
+pub struct CapturedSnapshot {
+    #[serde(flatten)] header:Value,
+    entries:Arc<crate::store::Entries>,resources:Vec<Resource>,
+    providers:BTreeMap<String,Arc<Value>>,adapters:BTreeMap<String,Arc<Value>>,live:BTreeMap<String,Arc<Value>>,
+}
+impl CapturedSnapshot {
+    pub fn into_value(mut self)->Value {
+        self.header["recovery_notice"]=json!(Store::entries_notice(&self.entries));
+        serde_json::to_value(self).expect("snapshot JSON")
+    }
+    pub fn into_value_limited(mut self,limit:usize)->Result<Value,RpcError> {
+        struct Budget(usize);
+        impl std::io::Write for Budget {
+            fn write(&mut self,bytes:&[u8])->std::io::Result<usize> {
+                if bytes.len()>self.0 {return Err(std::io::Error::other("snapshot envelope exceeded"));}
+                self.0-=bytes.len();Ok(bytes.len())
+            }
+            fn flush(&mut self)->std::io::Result<()> {Ok(())}
+        }
+        self.header["recovery_notice"]=json!(Store::entries_notice(&self.entries));
+        let mut budget=Budget(limit);
+        serde_json::to_writer(&mut budget,&self).map_err(|_|provider::rejected("too_large","snapshot exceeds this connection recovery envelope"))?;
+        Ok(serde_json::to_value(self).expect("snapshot JSON"))
     }
 }
 
@@ -82,7 +111,7 @@ pub struct Core {
     pub providers: BTreeMap<String, Provider>,
     provider_metadata_bytes:usize,
     /// Compatibility connection-state alias; authoritative declarations are in `providers`.
-    pub adapter_state: BTreeMap<String, Value>,
+    pub adapter_state: BTreeMap<String, Arc<Value>>,
     pub manifest_catalog: crate::manifest::Catalog,
     pub default_adapter: Option<String>,
     pub(crate) embedder_backend: Option<crate::adapter::Backend>,
@@ -108,7 +137,10 @@ pub struct Core {
     pub recovery_gate: Arc<tokio::sync::Mutex<()>>,
     /// Live view content (`view.publish`): derived, not persisted, not in history.
     /// view -> (content, author, connection id, encoded charge). Cleared on publisher disconnect.
-    pub live: BTreeMap<String, (Value, String, u64, usize)>,
+    pub live: BTreeMap<String, (Arc<Value>, String, u64, usize)>,
+    pub(crate) snapshot_slots:Arc<tokio::sync::Semaphore>,
+    pub(crate) provider_snapshot_slots:Arc<tokio::sync::Semaphore>,
+    pub(crate) registration_slots:Arc<tokio::sync::Semaphore>,
     pub live_bytes:usize,
     /// Connected clients by connection id: what they said in `hello` (author, client, version, build).
     pub clients: BTreeMap<u64, Value>,
@@ -159,6 +191,9 @@ impl Core {
             provider_extensions: BTreeSet::new(),
             recovery_gate: Arc::new(tokio::sync::Mutex::new(())),
             live: BTreeMap::new(),live_bytes:0,
+            snapshot_slots:Arc::new(tokio::sync::Semaphore::new(2)),
+            provider_snapshot_slots:Arc::new(tokio::sync::Semaphore::new(2)),
+            registration_slots:Arc::new(tokio::sync::Semaphore::new(8)),
             clients: BTreeMap::new(),
             socket,
             state_dir,
@@ -182,7 +217,7 @@ impl Core {
         for name in names {
             handles.push(self.providers[&name].handle.clone());
             self.on_adapter_event(&name, AdapterEvent::Connected(false, Some("stopped for safe mode".into())));
-            self.providers.get_mut(&name).unwrap().source=self.next_provider_source;
+            if let Some(provider)=self.providers.get_mut(&name) {provider.source=self.next_provider_source;}
             self.next_provider_source+=1;
         }
         handles
@@ -221,20 +256,19 @@ impl Core {
         Some(self.log.iter().filter(|(s, _, _)| *s > from).map(|(_, e, _)| e.clone()).collect())
     }
 
-    pub fn snapshot(&self) -> Value {
-        json!({
-            "epoch": self.epoch,
-            "seq": self.seq,
-            "recovery_notice": self.store.admission_notice(),
-            "entries": self.store.entries(),
-            "resources": self.resources.values().map(|r| r.to_json()).collect::<Vec<_>>(),
-            "commands": self.commands.values().map(|c| c.to_json()).collect::<Vec<_>>(),
-            "extensions": self.exts.keys().map(|n| (n.clone(), self.extension_state(n))).collect::<BTreeMap<_, _>>(),
-            "providers": self.providers.keys().map(|n| (n.clone(), self.provider_json(n))).collect::<BTreeMap<_, _>>(),
-            "adapters": self.adapter_state,
-            "backend_notice":self.backend_notice(), "safe_mode": self.safe_mode, "safe_mode_allow": self.safe_mode_allow, "provider_extensions": self.provider_extensions,
-            "live": self.live.iter().map(|(k, (v, _, _, _))| (k.clone(), v.clone())).collect::<BTreeMap<_, _>>(),
-        })
+    pub fn snapshot(&self) -> Value {self.capture_snapshot().into_value()}
+
+    pub fn capture_snapshot(&self)->CapturedSnapshot {
+        CapturedSnapshot {
+            header:json!({"epoch":self.epoch,"seq":self.seq,
+                "commands":self.commands.values().map(|c|c.to_json()).collect::<Vec<_>>(),
+                "extensions":self.exts.keys().map(|n|(n.clone(),self.extension_state(n))).collect::<BTreeMap<_,_>>(),
+                "backend_notice":self.backend_notice(),"safe_mode":self.safe_mode,"safe_mode_allow":self.safe_mode_allow,"provider_extensions":self.provider_extensions}),
+            entries:self.store.shared_entries(),resources:self.resources.values().cloned().collect(),
+            providers:self.providers.keys().map(|n|(n.clone(),self.adapter_state.get(n).cloned().unwrap_or_else(||Arc::new(self.provider_json(n))))).collect(),
+            adapters:self.adapter_state.clone(),
+            live:self.live.iter().map(|(k,(v,_,_,_))|(k.clone(),v.clone())).collect(),
+        }
     }
 
     /// Record a committed transaction as an event.
@@ -380,9 +414,27 @@ impl Core {
         }
     }
 
+    /// Forget only unavailable cached observations, never execute or kill a backend resource.
+    pub fn forget_cached_resource(&mut self,id:&str)->Result<(),RpcError> {
+        if self.shutdown.is_requested() {return Err(provider::rejected("unavailable","core stopping; cached retirement not admitted"));}
+        let resource=self.resources.get(id).ok_or_else(||provider::rejected("not_found",format!("no resource {id}")))?;
+        if resource.available {return Err(provider::rejected("invalid","available resources require native forget"));}
+        let name=resource.adapter.clone();let identity=provider::identity(&name,&resource.instance,&resource.facts);
+        let (ids,uncertain)=self.identities.retire(|i|i==&identity).map_err(|mut error| {error.data.as_mut().unwrap()["outcome"]=json!("rejected");error})?;
+        if let Some(pending)=self.pending_facts.get_mut(&name) {
+            if pending.get(&identity.reference).is_some_and(|(instance,facts)|instance==&identity.instance&&facts.incarnation==identity.incarnation) {
+                pending.remove(&identity.reference);self.admission.remove_pending(&name,&identity.reference);
+            }
+        }
+        self.retire_visible(ids,"forgotten");self.reap_runtime_provider(&name);
+        if let Some(mut error)=uncertain {error.data.as_mut().unwrap()["scope"]=json!("cached_facts");return Err(error);}
+        Ok(())
+    }
+
     fn mark_unavailable(&mut self, provider: &str) {
         let mut changes = Vec::new();
-        for resource in self.resources.values_mut().filter(|r| r.adapter == provider && r.available) {
+        for id in self.identities.provider_ids(provider) {
+            let Some(resource)=self.resources.get_mut(&id).filter(|r|r.available) else {continue};
             resource.available = false;
             resource.life.send_replace(false);
             changes.push(resource.to_json());
@@ -447,7 +499,7 @@ impl Core {
 
     pub(crate) fn provider_event(&mut self, name: &str) {
         let state = self.provider_json(name);
-        self.adapter_state.insert(name.into(), state.clone());
+        self.adapter_state.insert(name.into(), Arc::new(state.clone()));
         self.emit("provider", json!({"name": name, "state": state}));
         // Temporary compatibility event/field for existing extensions.
         self.emit("adapter", json!({"name": name, "state": state}));
@@ -481,7 +533,9 @@ impl Core {
         let seen=identities.iter().cloned().collect::<std::collections::HashSet<_>>();
         // Independent observations fence replacements/missing refs even if durability subsequently fails.
         let mut fenced=Vec::new();
-        for r in self.resources.values_mut().filter(|r|r.adapter==name&&r.available&&(authoritative||references.contains(&r.facts.backend_ref))){
+        let candidates=if authoritative {self.identities.provider_ids(name)} else {references.iter().filter_map(|reference|self.identities.reference_id(name,reference).map(String::from)).collect()};
+        for id in candidates {
+            let Some(r)=self.resources.get_mut(&id).filter(|r|r.available) else {continue};
             let identity=provider::identity(name,&r.instance,&r.facts);
             if !seen.contains(&identity) {r.available=false;r.life.send_replace(false);fenced.push(r.to_json());}
         }
@@ -491,7 +545,7 @@ impl Core {
         for (facts,identity) in list.into_iter().zip(&identities){
             let host=if facts.kind=="agent"{agent_host.clone()}else{None};
             let bytes=crate::resource_admission::charge(name,&instance,host.as_deref(),&facts);
-            let unchanged=self.identities.lookup(identity).and_then(|id|self.resources.get(id)).is_some_and(|r|r.facts==facts&&r.available);
+            let unchanged=self.identities.lookup(identity).and_then(|id|self.resources.get(id)).is_some_and(|r|r.facts.as_ref()==&facts&&r.available);
             if !unchanged {
                 if let Err(mut error)=staged.as_ref().unwrap_or(&self.admission).check(name,&facts.backend_ref,&facts,bytes){
                     let data=error.data.as_mut().unwrap();data["outcome"]=json!("indeterminate");data["backend_outcome"]=json!("observed");data["provider"]=json!(name);data["instance"]=json!(instance);data["resource_facts"]=json!(facts);
@@ -504,7 +558,7 @@ impl Core {
         }
         let newly_synced=authoritative&&!self.providers[name].synced;
         if authoritative{self.providers.get_mut(name).unwrap().synced=true;}
-        let result=if authoritative{self.identities.batch(&identities,|i|i.provider==name&&!seen.contains(i))}else{self.identities.identify_many(&identities)};
+        let result=if authoritative{self.identities.sync_provider(name,&identities)}else{self.identities.identify_many(&identities)};
         let update=match result{
             Ok(update)=>update,
             Err(mut error)=>{
@@ -518,9 +572,9 @@ impl Core {
         for ((facts,host,bytes,_),id) in prepared.into_iter().zip(&update.ids){
             self.admission.remove_pending(name,&facts.backend_ref);if let Some(pending)=self.pending_facts.get_mut(name){pending.remove(&facts.backend_ref);}
             self.admission.resource(id,name,&facts.backend_ref,bytes);
-            if self.resources.get(id).is_none_or(|r|r.facts!=facts||!r.available){
+            if self.resources.get(id).is_none_or(|r|r.facts.as_ref()!=&facts||!r.available){
                 let life=self.resources.get(id).map(|r|r.life.clone()).unwrap_or_else(||watch::channel(true).0);let available=*life.borrow();if !available{life.send_replace(true);}
-                let resource=Resource{id:id.clone(),adapter:name.into(),instance:instance.clone(),available:true,host,life,facts};self.emit("resource",resource.to_json());self.resources.insert(id.clone(),resource);
+                let resource=Resource{id:id.clone(),adapter:name.into(),instance:instance.clone(),available:true,host,life,facts:Arc::new(facts)};self.emit("resource",resource.to_json());self.resources.insert(id.clone(),resource);
             }
         }
         if newly_synced{self.provider_event(name);}
@@ -554,7 +608,7 @@ impl Core {
                 self.providers.get_mut(name).unwrap().register(info.clone());
                 if let Some(pending) = self.pending_facts.get_mut(name) { pending.retain(|_, (instance, _)| instance == &info.instance); }
                 self.refresh_pending_admission();
-                if self.identities.has_provider(name){match self.identities.retire(|i| i.provider == name && i.instance != info.instance) {
+                if self.identities.has_provider(name){match self.identities.retire_provider_except(name,&info.instance) {
                     Ok((ids, error)) => { self.retire_visible(ids, "replaced"); if let Some(error) = error { self.identity_error(name, error); } }
                     Err(error) => { self.identity_error(name, error); }
                 }}
@@ -575,7 +629,8 @@ impl Core {
             AdapterEvent::Removed { reference, incarnation } => {
                 let Some(info) = self.providers[name].info.clone() else { return };
                 let mut fenced=Vec::new();
-                for r in self.resources.values_mut().filter(|r|r.adapter==name&&r.instance==info.instance&&r.facts.backend_ref==reference&&r.facts.incarnation==incarnation&&r.available){r.available=false;r.life.send_replace(false);fenced.push(r.to_json());}
+                let id=self.identities.reference_id(name,&reference).map(String::from);
+                if let Some(r)=id.as_ref().and_then(|id|self.resources.get_mut(id)).filter(|r|r.instance==info.instance&&r.facts.incarnation==incarnation&&r.available) {r.available=false;r.life.send_replace(false);fenced.push(r.to_json());}
                 for r in fenced{self.emit("resource",r);}
                 if let Some(pending) = self.pending_facts.get_mut(name) {
                     if pending.get(&reference).is_some_and(|(instance, facts)| instance == &info.instance && facts.incarnation == incarnation) { pending.remove(&reference); self.admission.remove_pending(name, &reference); }
@@ -622,6 +677,58 @@ pub fn add_adapter(core: &Shared, handle: AdapterHandle, events: mpsc::Unbounded
         let register=|c:&mut Core|{let(tx,_rx)=mpsc::unbounded_channel();c.install_provider(AdapterHandle{name:"runtime".into(),session:None,context:None,capabilities:json!({"agent.prompt":{}}),cmds:tx},false,false).unwrap();c.on_adapter_event("runtime",AdapterEvent::Registered(crate::provider::ProviderInfo{connection:1,instance:"A".into(),role:"runtime".into(),software:json!({"name":"fixture","version":"1"})}));};
         register(&mut c);let generation=c.providers["runtime"].generation;let old=c.provider_route(Some("runtime"),"agent.prompt").unwrap();c.on_adapter_event("runtime",AdapterEvent::Connected(false,None));assert!(!c.providers.contains_key("runtime"));assert_eq!(c.provider_metadata_bytes,0);
         register(&mut c);assert!(c.providers["runtime"].generation>generation);assert!(!old.valid());assert_eq!(c.providers.len(),1);
+    }
+    #[test]
+    fn captured_snapshot_is_an_immutable_epoch_sequence_fence() {
+        let mut c=Core::new(Store::in_memory(),None,PathBuf::from("unused"),false).unwrap();
+        let(tx,_rx)=mpsc::unbounded_channel();c.install_adapter(AdapterHandle{name:"p".into(),session:None,context:None,capabilities:json!({}),cmds:tx},true).unwrap();
+        c.on_adapter_event("p",AdapterEvent::Registered(crate::provider::ProviderInfo {connection:1,instance:"i".into(),role:"backend".into(),software:json!({"name":"fixture","version":"1"})}));
+        let fact=|value|serde_json::from_value(json!({"backend_ref":"a","kind":"terminal","state":"live","data":{"value":value}})).unwrap();
+        let id=c.upsert_resource("p",fact(1)).unwrap();
+        let txn=c.store.apply("fixture",None,vec![crate::store::Op::Set{key:"doc/a".into(),value:json!(1),expect:None}]).unwrap();c.emit_txn(&txn);
+        c.live.insert("v".into(),(Arc::new(json!({"value":1})),"fixture".into(),1,10));
+        let seq=c.seq;let captured=c.capture_snapshot();
+        c.upsert_resource("p",fact(2)).unwrap();c.on_adapter_event("p",AdapterEvent::Connected(false,None));
+        c.live.insert("v".into(),(Arc::new(json!({"value":2})),"fixture".into(),1,10));
+        let txn=c.store.apply("fixture",None,vec![crate::store::Op::Set{key:"doc/a".into(),value:json!(2),expect:None}]).unwrap();c.emit_txn(&txn);
+        let snapshot=captured.into_value();assert_eq!(snapshot["seq"],seq);
+        assert_eq!(snapshot["entries"]["doc/a"]["value"],1);assert_eq!(snapshot["live"]["v"]["value"],1);
+        assert_eq!(snapshot["resources"][0]["id"],id);assert_eq!(snapshot["resources"][0]["data"]["value"],1);assert_eq!(snapshot["resources"][0]["available"],true);
+        assert_eq!(snapshot["providers"]["p"]["connected"],true);assert_eq!(snapshot["adapters"]["p"]["connected"],true);
+        assert!(c.capture_snapshot().into_value_limited(64).is_err());
+    }
+    #[test]
+    fn stale_agent_forget_reaps_resources_providers_and_never_reuses_ids() {
+        let mut c=Core::new(Store::in_memory(),None,PathBuf::from("unused"),false).unwrap();let mut previous=String::new();
+        for i in 0..200 {
+            let name=format!("agent{i}");let(tx,mut commands)=mpsc::unbounded_channel();c.install_provider(AdapterHandle{name:name.clone(),session:None,context:None,capabilities:json!({}),cmds:tx},false,false).unwrap();
+            c.on_adapter_event(&name,AdapterEvent::Registered(crate::provider::ProviderInfo{connection:1,instance:"i".into(),role:"runtime".into(),software:json!({"name":"fixture","version":"1"})}));
+            let id=c.upsert_resource(&name,serde_json::from_value(json!({"backend_ref":"a","kind":"agent","state":"live"})).unwrap()).unwrap();
+            assert_ne!(id,previous);assert_eq!(c.forget_cached_resource(&id).unwrap_err().kind(),"invalid");
+            c.on_adapter_event(&name,AdapterEvent::Connected(false,None));c.forget_cached_resource(&id).unwrap();
+            assert!(commands.try_recv().is_err(),"cache retirement never invokes the backend");
+            assert!(c.resources.is_empty());assert!(c.providers.is_empty());assert_eq!(c.provider_metadata_bytes,0);assert!(!c.identities.active(&id));previous=id;
+        }
+    }
+    #[test]
+    fn cached_retirement_preserves_identity_write_failure_semantics() {
+        for renamed in [false,true] {
+            let root=tempfile::tempdir().unwrap();let mut c=Core::new(Store::in_memory(),Some(root.path().into()),root.path().join("unused"),false).unwrap();
+            let(tx,_rx)=mpsc::unbounded_channel();c.install_provider(AdapterHandle{name:"runtime".into(),session:None,context:None,capabilities:json!({}),cmds:tx},false,false).unwrap();
+            c.on_adapter_event("runtime",AdapterEvent::Registered(crate::provider::ProviderInfo{connection:1,instance:"i".into(),role:"runtime".into(),software:json!({"name":"fixture","version":"1"})}));
+            let id=c.upsert_resource("runtime",serde_json::from_value(json!({"backend_ref":"a","kind":"agent","state":"live"})).unwrap()).unwrap();
+            c.on_adapter_event("runtime",AdapterEvent::Connected(false,None));
+            c.identities.set_writer(Arc::new(move|path,bytes| {
+                if renamed {crate::store::write_atomic(path,bytes)?;}
+                let mut error:crate::store::AtomicWriteError=std::io::Error::other("injected retirement write").into();error.renamed=renamed;Err(error)
+            }));
+            let error=c.forget_cached_resource(&id).unwrap_err();
+            assert_eq!(error.kind(),if renamed {"durability_unconfirmed"}else{"io"});
+            assert_eq!(c.resources.contains_key(&id),!renamed);assert_eq!(c.providers.contains_key("runtime"),!renamed);
+            c.identities.set_writer(Arc::new(crate::store::write_atomic));
+            if !renamed {c.forget_cached_resource(&id).unwrap();}
+            assert!(!IdentityMap::open(Some(root.path().join("resources.json"))).unwrap().active(&id));
+        }
     }
     #[test]
     fn registry_count_and_aggregate_registration_metadata_are_bounded(){

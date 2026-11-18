@@ -251,9 +251,13 @@ impl Store {
         &self.entries
     }
 
-    pub fn admission_notice(&self) -> Option<&'static str> {
-        (crate::limits::encoded_bytes(self.entries.as_ref()) > crate::limits::WORKSPACE_BYTES ||
-            self.entries.iter().any(|item| crate::limits::encoded_bytes(&item) > crate::limits::ENTRY_BYTES))
+    pub(crate) fn shared_entries(&self)->std::sync::Arc<Entries> {self.entries.clone()}
+
+    pub fn admission_notice(&self) -> Option<&'static str> {Self::entries_notice(&self.entries)}
+
+    pub(crate) fn entries_notice(entries:&Entries)->Option<&'static str> {
+        (crate::limits::encoded_bytes(entries) > crate::limits::WORKSPACE_BYTES ||
+            entries.iter().any(|item| crate::limits::encoded_bytes(&item) > crate::limits::ENTRY_BYTES))
             .then_some("Legacy workspace exceeds current size limits; it remains loaded. Revert/delete/shrink state to recover.")
     }
 

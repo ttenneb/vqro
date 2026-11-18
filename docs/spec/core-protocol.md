@@ -128,6 +128,14 @@ changes beyond that boundary remain undoable. A record whose metadata alone cann
 for legacy files, such a record and older undo history are discarded rather than undoing across an unrecorded gap.
 The D24 global selection rule still applies within this finite horizon; autonomous extension work is not selected.
 
+Workspace snapshots capture immutable entry/resource/provider/live references and their epoch/sequence fence
+under the core mutex, then construct and preflight JSON on a blocking worker outside it. Two construction slots
+are reserved for ordinary recovery clients and two for the smaller provider envelopes; a provider snapshot storm
+cannot consume the ordinary pool. Waiting for a construction slot is bounded to 250 ms, then `overloaded` is
+returned without state changes. Oversized snapshots stop limited encoding before allocating a full JSON copy.
+Cancelling a receipt does not free a slot while its blocking construction still runs. No cursor is fabricated:
+clients use the captured sequence and replay subsequent events normally.
+
 ## Size admission and recovery
 
 Writes reject growth above **1 MiB per encoded workspace entry** (key/version/value), **16 MiB total entries**,
@@ -243,6 +251,11 @@ structured `data.reason: "safe_mode"`. This identifies a temporary core admissio
 failure or permission grant. Runtime bridges may keep their backend-owned process while backing off until
 admission becomes possible; they never replay input. Other refusals do not acquire that transient meaning.
 
+Wire registration has an eight-operation global admission bound (including pending host claims); excess
+registrations return `overloaded` before consuming a credential or mutating the registry. Ordinary control and
+stream traffic do not use these slots. Provider-local resource transitions use identity/reference indexes;
+unchanged instance registration and authoritative inventories do not clone/write the whole identity map.
+
 A provider registration/start is connection-bound and gets a new generation. Old event sources, queued commands,
 effect replies and streams cannot act through a replacement connection. The native adapter's connection token is
 internal, distinct from the core-assigned public generation. `provider.register`, chunked `provider.sync`,
@@ -295,6 +308,7 @@ and old layouts may show gone resources until explicitly repaired/reset. No iden
 | `resource.spawn` | `argv?` (default: the provider's default shell for its host), `cwd?`, `name?`, `env?`, `cols?`, `rows?`, `placement?`, `bridge?` (default false), `provider?` (`adapter` alias), `deadline_ms?` | `outcome: observed`, `effect`, `resource` |
 | `resource.kill` | `resource`, `deadline_ms?` | `outcome: accepted`, `effect`, `backend` |
 | `resource.forget` | `resource`, `deadline_ms?` | `outcome: observed`, `effect`, `data` |
+| `resource.forget_cached` | `resource` | `outcome: observed`, `effect`, `data: {scope: "cached_facts", backend_effect: "none"}` |
 | `resource.attach` | `resource`, `cols`, `rows`, `history?` (backend scrollback), `deadline_ms?` | `outcome: accepted`, `effect`, `stream`, `initial` (`history`, `repaint` or `none`) |
 | `resource.invoke` | `resource`, `op`, `args?` (object), `deadline_ms?` | `outcome`, `effect`, `data?`; capability-checked generic provider operation |
 | `stream.input` | `stream`, `data` (base64) or `text` | `outcome: dispatched` (also accepted as a notification) |
@@ -324,6 +338,20 @@ is `invalid` (end it with `resource.kill` first); a provider without the `resour
 extension forgets a finished resource 60 s after no layout shows it any more (so undoing a tab or pane close within
 that grace shows it again and cancels the forget), and keeps the newest 64 never-shown finished resources. Without a policy, finished resources stay until the backend drops
 them, counted against the 4096-per-provider admission bound.
+
+`resource.forget_cached` is a separate core-owned mechanism: it retires **unavailable cached facts only**, with
+fresh durable identity bookkeeping and a `resource.removed` event. Available resources reject with `invalid`;
+a reconnect that wins the race therefore cancels cached forgetting. No backend capability is required, no native
+operation is dispatched, and the backend program/terminal is neither killed nor forgotten. Independent later
+observations may create a fresh resource id. This is not a fallback for native `resource.forget`; older cores
+reject the distinct unknown method rather than accidentally executing a native effect.
+
+The retention extension uses this mechanism after an agent has continuously remained unavailable for 60 seconds,
+even if an old pane still shows it. Reconnection cancels that grace. It does not expire unavailable live terminals.
+Disconnected runtime providers are then reaped when their last identity/resource/pending fact is gone. Retention
+also prunes unreferenced orphan bridge fallback declarations; the agents extension prunes its own orphan panels
+and their derived content. Layout-referenced views and user-owned panels stay intact. Disabling these extensions
+disables the policy; core registry/facts/workspace byte and count limits remain the mechanical backstop.
 
 Published resources include `provider`, `instance`, `incarnation`, `available`, `stale`, and opaque kind-specific
 `data` (object, at most 64 KiB); `adapter` and `backend_ref` remain for compatibility. Unknown kinds stay opaque.

@@ -142,3 +142,15 @@ pub async fn claim(core: &Shared, peer: &Peer, token: &str) -> Result<Claim, Rpc
     if !core.lock().unwrap().has_resource_identity(&host) { return Err(RpcError::new("forbidden", "runtime host was removed")); }
     Ok(Claim { host, resuming: false })
 }
+
+#[cfg(test)] mod contention_profile {
+    use super::*;
+    #[test] #[ignore="private credential rotation profile"]
+    fn rotation_400_hosts() {
+        let root=tempfile::tempdir().unwrap();let mut tokens=Tokens::open(Some(root.path().join("tokens.json"))).unwrap();
+        for i in 0..400 {for j in 0..2 {tokens.resumes.insert(format!("{i}-{j}"),Resume {host:format!("r{i}"),provider:format!("p{i}"),instance:"instance".into()});}}
+        let mut token="0-1".to_string();let mut times=Vec::new();
+        for _ in 0..100 {let t=std::time::Instant::now();token=tokens.rotate(&token,&Claim {host:"r0".into(),resuming:true},"p0","instance").unwrap();times.push(t.elapsed().as_secs_f64()*1000.);}
+        times.sort_by(f64::total_cmp);eprintln!("credential400 p50_ms={} p99_ms={} max_ms={}",times[50],times[98],times[99]);
+    }
+}

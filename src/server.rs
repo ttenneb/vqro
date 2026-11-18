@@ -455,7 +455,19 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> Rp
                 "epoch": c.epoch, "seq": c.seq, "backend_notice":c.backend_notice(), "safe_mode": c.safe_mode, "socket": c.socket, "state_dir": c.state_dir,
             }))
         }
-        "workspace.snapshot" => Ok(core.lock().unwrap().snapshot()),
+        "workspace.snapshot" => {
+            let limited=conn.wire.is_provider();
+            // Limited provider envelopes cannot consume the ordinary recovery construction pool.
+            let gate={let c=core.lock().unwrap();if limited {c.provider_snapshot_slots.clone()} else {c.snapshot_slots.clone()}};
+            let slot=tokio::time::timeout(std::time::Duration::from_millis(250),gate.acquire_owned()).await
+                .map_err(|_|provider::rejected("overloaded","snapshot construction busy; retry recovery later"))?
+                .map_err(|_|provider::rejected("unavailable","snapshot construction stopped"))?;
+            let snapshot=core.lock().unwrap().capture_snapshot();
+            tokio::task::spawn_blocking(move || {
+                let _slot=slot;
+                snapshot.into_value_limited(if limited {crate::provider_wire::MAX_RECORD_BYTES} else {crate::rpc::LARGE_REPLY_BYTES})
+            }).await.map_err(|_|provider::rejected("unavailable","snapshot construction stopped"))?
+        },
         "workspace.get" => {
             let query: WorkspaceGet = params(p)?;
             let entry = { core.lock().unwrap().store.entries().get(&query.key).cloned() };
@@ -505,6 +517,7 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> Rp
             Ok(json!({"outcome": result.outcome, "effect": effect, "backend": result.data.take()}))
         }
         "resource.forget" => forget(core, &conn.author(), p).await,
+        "resource.forget_cached" => forget_cached(core, &conn.author(), p),
         "resource.attach" => attach(core, conn, params(p)?).await,
         "resource.invoke" => invoke_resource(core, &conn.author(), p).await,
         "command.register" => {
@@ -556,11 +569,11 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> Rp
             if candidate > crate::limits::LIVE_BYTES && candidate > total {
                 return Err(crate::limits::too_large("live content", candidate, crate::limits::LIVE_BYTES));
             }
-            let unchanged = c.live.get(&view).map(|(v, _, _, _)| *v == content).unwrap_or(content.is_null());
+            let unchanged = c.live.get(&view).map(|(v, _, _, _)| v.as_ref() == &content).unwrap_or(content.is_null());
             if content.is_null() {
                 c.live.remove(&view);
             } else {
-                c.live.insert(view.clone(), (content.clone(), author, conn.id,next));
+                c.live.insert(view.clone(), (Arc::new(content.clone()), author, conn.id,next));
             }
             c.live_bytes=candidate;
             if !unchanged {
@@ -760,10 +773,20 @@ async fn invoke_resource(core: &Shared, author: &str, p: Value) -> RpcResult {
 }
 
 /// Ask the owning backend to release a finished resource, then retire its id (never reused).
+fn forget_cached(core:&Shared,author:&str,p:Value)->RpcResult {
+    let id=p["resource"].as_str().ok_or_else(||RpcError::invalid("needs `resource`"))?;
+    let mut c=core.lock().unwrap();let effect=c.effect_id();let result=c.forget_cached_resource(id);
+    let outcome=if result.is_ok(){"observed"}else{result.as_ref().err().and_then(|e|e.data.as_ref()).and_then(|d|d["outcome"].as_str()).unwrap_or("indeterminate")};
+    c.emit("effect",json!({"effect":effect,"provider":null,"generation":null,"method":"resource.forget_cached","author":author,"scope":"cached_facts","outcome":outcome,"error":result.as_ref().err()}));
+    result.map_err(|mut error| {if let Some(data)=error.data.as_mut(){data["effect"]=json!(effect);data["scope"]=json!("cached_facts");}error})?;
+    Ok(json!({"outcome":"observed","effect":effect,"data":{"scope":"cached_facts","backend_effect":"none"}}))
+}
+
 /// Live resources are refused: ending a program is `resource.kill`. Mechanism only: when to
 /// forget is extension policy (`extensions/retention.py`).
 async fn forget(core: &Shared, author: &str, p: Value) -> RpcResult {
     let id = p["resource"].as_str().ok_or_else(|| RpcError::invalid("needs `resource`"))?;
+    let deadline = provider::deadline(p.get("deadline_ms").map(|v| v.as_u64().ok_or_else(|| RpcError::invalid("deadline_ms must be an unsigned integer"))).transpose()?)?;
     let mut route = {
         let c = core.lock().unwrap();
         if c.resource(id)?.facts.state != "finished" {
@@ -776,7 +799,6 @@ async fn forget(core: &Shared, author: &str, p: Value) -> RpcResult {
     route.resource = None;
     let (reference, incarnation) = route.target.clone().unwrap();
     let (handle, operation, c) = (route.handle.clone(), route.clone(), core.clone());
-    let deadline = provider::deadline(p.get("deadline_ms").map(|v| v.as_u64().ok_or_else(|| RpcError::invalid("deadline_ms must be an unsigned integer"))).transpose()?)?;
     let (effect, result) = effect(core, author.into(), route, "resource.forget", deadline, |value: &crate::adapter::EffectResult| value.outcome, move |context| async move {
         let result = handle.for_effect(context).invoke("resource.forget".into(), reference.clone(), incarnation.clone(), json!({})).await.map_err(|e| e.rpc())?;
         if !operation.valid() { return Err(provider::indeterminate("provider changed before forget result was recorded")); }
