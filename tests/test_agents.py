@@ -22,6 +22,21 @@ class AgentsTests(unittest.TestCase):
     def native(self):
         return [(m, p) for m, p in self.core.calls if m.startswith("resource.")]
 
+    def test_orphan_owned_panels_are_pruned_only_after_layout_references_disappear(self):
+        self.core.add_agent()
+        self.agents.event("resource", {"id": "r2"})
+        self.core.apply([{"op": "set", "key": "layout/main", "value": {"tabs": [{"node": {"view": "agents-r2"}}]}}], "fixture")
+        del self.core.resources["r2"]
+        self.agents.event("resource.removed", {"id": "r2"})
+        self.assertIsNotNone(self.core.value("view/agents-r2"))
+        self.assertFalse(any(key.startswith("menu/agents.r2.") for key in self.core.entries))
+        self.core.apply([{"op": "delete", "key": "layout/main"}], "fixture")
+        self.agents.event("entries", {})
+        self.assertIsNone(self.core.value("view/agents-r2"))
+        self.core.apply([{"op": "set", "key": "view/agents-r99", "value": {"kind": "panel", "owner": "user"}}], "fixture")
+        self.agents.event("entries", {})
+        self.assertEqual(self.core.value("view/agents-r99")["owner"], "user")
+
     def test_neutral_extension_has_no_launcher_or_runtime_settings(self):
         self.assertNotIn("agents.new", self.core.handlers)
         self.assertNotIn("agents.settings", self.core.handlers)

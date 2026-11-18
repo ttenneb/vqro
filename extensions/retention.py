@@ -12,8 +12,11 @@ providers only supply the mechanism, and only for providers declaring `resource.
 - Finished resources never shown in a layout (background jobs, exited before being placed) keep the
   newest KEEP for the sidebar's "ended" items; older ones are forgotten.
 
-Live resources are never touched (that is `resource.kill`). `retention.forget_ended` forgets every
-unshown finished resource at once. Turn this extension off to keep every finished resource, as before.
+Backend execution is never touched (ending it is `resource.kill`). Disconnected agents' cached facts
+are retired after60 seconds continuously unavailable, using `resource.forget_cached`, never native forget.
+Reconnection cancels that grace; unavailable live terminals are not expired. Orphan bridge-marked panels
+are pruned only when no layout references them. `retention.forget_ended` remains finished-only.
+Turn this extension off to disable the policy; core mechanical admission limits still apply.
 """
 import os
 import sys
@@ -34,6 +37,8 @@ ext = Extension("retention", event_types=["entries", "resource", "resource.remov
 dirty = threading.Event()
 was_shown = set()   # resource ids seen in a layout during this run
 unshown_at = {}     # once-shown id -> monotonic time it was first seen unshown
+unavailable_at = {}  # disconnected agent -> continuous unavailable grace
+policy_lock = threading.RLock()
 refused = set()     # ids a provider refused for good (unsupported/invalid); never retried
 
 
@@ -44,8 +49,13 @@ def number(rid):
         return 0
 
 
-def plan(keep=KEEP, grace=None):
-    """(ids to forget now, seconds until the next grace expiry or None). Decides over the caches."""
+def plan(keep=KEEP, grace=None, include_unavailable=True, cached_due=None):
+    """(ids to forget now, seconds until the next expiry); capture each candidate's scope too."""
+    with policy_lock:
+        return _plan(keep, grace, include_unavailable, cached_due)
+
+
+def _plan(keep, grace, include_unavailable, cached_due):
     grace = GRACE if grace is None else grace
     now = time.monotonic()
     with ext.cache_lock:
@@ -66,6 +76,15 @@ def plan(keep=KEEP, grace=None):
     for rid in was_shown - shown:
         unshown_at.setdefault(rid, now)
 
+    unavailable = {rid for rid, r in resources.items() if r.get("kind") == "agent" and not r.get("available", False)}
+    for rid in list(unavailable_at):
+        if rid not in unavailable:
+            del unavailable_at[rid]
+    for rid in unavailable:
+        unavailable_at.setdefault(rid, now)
+    expired = [rid for rid in unavailable if now - unavailable_at[rid] >= grace] if include_unavailable else []
+    unavailable_waits = [unavailable_at[rid] + grace - now for rid in unavailable if rid not in expired] if include_unavailable else []
+
     def forgettable(r):
         caps = (providers.get(r.get("provider")) or {}).get("capabilities") or {}
         return r.get("state") == "finished" and r.get("available") and "resource.forget" in caps and r["id"] not in refused
@@ -73,19 +92,51 @@ def plan(keep=KEEP, grace=None):
     ended = [rid for rid, r in resources.items() if forgettable(r) and rid not in shown]
     closed = [rid for rid in ended if rid in was_shown]
     due = [rid for rid in closed if now - unshown_at[rid] >= grace]
-    waits = [unshown_at[rid] + grace - now for rid in closed if rid not in due]
+    waits = unavailable_waits + [unshown_at[rid] + grace - now for rid in closed if rid not in due]
     never = sorted((rid for rid in ended if rid not in was_shown), key=number, reverse=True)
-    return due + never[keep:], (min(waits) if waits else None)
+    if cached_due is not None:
+        cached_due.update(expired)
+    return expired + due + never[keep:], (min(waits) if waits else None)
 
 
-def forget(rid):
+def forget(rid, cached=False):
     try:
-        ext.prim.call("resource.forget", {"resource": rid})
+        # Never reinterpret a stale cached candidate as a native effect after a reconnect race.
+        ext.prim.call("resource.forget_cached" if cached else "resource.forget", {"resource": rid})
     except PrimError as error:
         if error.kind in ("unsupported", "invalid"):
             refused.add(rid)  # retried only after a new fact about it (see `changed`)
         elif error.kind != "not_found":
             print(f"retention: forget {rid}: {error.kind}: {error}", file=sys.stderr, flush=True)
+
+
+def prune_bridge_views():
+    """Only orphan bridge declarations, never user panels or any layout-referenced view."""
+    def attempt():
+        with ext.cache_lock:
+            shown = {view for key, entry in ext.entries.items() if key.startswith("layout/")
+                     for view in views_in(entry.get("value", {}))}
+            ops = []
+            for key, entry in ext.entries.items():
+                rid = key[len("view/agent-"):] if key.startswith("view/agent-") else ""
+                value = entry.get("value", {})
+                if not isinstance(value, dict):
+                    continue
+                bridge = value.get("bridge")
+                if (rid.startswith("r") and rid[1:].isascii() and rid[1:].isdigit()
+                        and rid not in ext.resources and key[5:] not in shown
+                        and value.get("kind") == "panel" and isinstance(bridge, dict)
+                        and bridge.get("ref") == "agent" and isinstance(bridge.get("instance"), str)):
+                    ops.append({"op": "delete", "key": key, "expect": ext.version(key)})
+        if ops:
+            ext.apply(ops, "retention: orphan bridge views")
+    try:
+        ext.retrying(attempt)
+    except PrimError as error:
+        if error.kind != "invalid":
+            raise
+        # A newly added layout reference can invalidate deletion after our scan. The
+        # transaction did not apply; defer cleanup until the next cache update.
 
 
 def worker():
@@ -99,9 +150,14 @@ def worker():
             # Recovery reruns listeners with `missed`, which sets `dirty` again.
             wait = 5.0
             continue
-        ids, wait = plan()
+        cached_due = set()
+        ids, wait = plan(cached_due=cached_due)
         for rid in ids:
-            forget(rid)
+            forget(rid, cached=rid in cached_due)
+        try:
+            prune_bridge_views()
+        except PrimError as error:
+            print(f"retention: view cleanup: {error.kind}: {error}", file=sys.stderr, flush=True)
         if wait is not None:
             wait = max(wait, SETTLE)
 
@@ -109,7 +165,7 @@ def worker():
 @ext.command("retention.forget_ended", "Forget every finished terminal no layout shows, now (live ones are never touched)")
 def forget_ended(args):
     ext.fresh()
-    ids, _ = plan(keep=0, grace=0)  # explicit request: no grace
+    ids, _ = plan(keep=0, grace=0, include_unavailable=False)  # explicit finished-only request
     for rid in ids:
         forget(rid)
     return {"forgotten": len(ids)}

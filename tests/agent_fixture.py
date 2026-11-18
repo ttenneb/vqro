@@ -1,5 +1,6 @@
 """Fake public extension/core surface; never starts a program or connects a socket."""
 import copy
+import threading
 from prim_ext import PrimError
 
 OPS = ("prompt", "steer", "follow_up", "abort", "clear_queue", "answer")
@@ -8,6 +9,7 @@ OPS = ("prompt", "steer", "follow_up", "abort", "clear_queue", "answer")
 class FakeCore:
     def __init__(self, name="agents"):
         self.name = name
+        self.cache_lock = threading.RLock()
         self.entries, self.resources, self.handlers, self.live = {}, {}, {}, {}
         self.providers = {"other": {"name": "other", "capabilities": {"agent."+op: {} for op in OPS}}}
         self.calls, self.notices, self.transactions = [], [], []

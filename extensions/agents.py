@@ -6,7 +6,7 @@ import sys
 import threading
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from prim_ext import Extension, PrimError
+from prim_ext import Extension, PrimError, views_in
 from prim_display import label
 from prim_views import ended
 
@@ -55,6 +55,7 @@ class Agents:
         ext.contribute(declarations)  # reconciles removed/moved launcher entries
         ext.on_event(self.event)
         self.publish_panels()
+        self.refresh(prune_views=True)
 
     def supported(self, resource, op):
         provider = self.ext.providers.get(resource.get("provider"), {})
@@ -269,19 +270,42 @@ class Agents:
                 entries["menu/agents."+rid+"."+op] = menu
         return entries
 
-    def refresh(self):
+    def refresh(self, prune_views=False):
         with self.lock:
             signature = self.current_signature()
-            if signature == self.signature:
+            changed = signature != self.signature
+            if not changed and not prune_views:
                 return
             entries = self.declarations()
             def prune():
-                stale = [key for key, entry in self.ext.entries.items() if key.startswith("menu/agents.r")
-                         and entry["value"].get("owner") == "agents" and key not in entries]
+                with self.ext.cache_lock:
+                    shown = {view for key, entry in self.ext.entries.items() if key.startswith("layout/")
+                             for view in views_in(entry.get("value", {}))}
+                    stale = []
+                    for key, entry in self.ext.entries.items():
+                        if entry["value"].get("owner") != "agents":
+                            continue
+                        rid = next((key[len(prefix):] for prefix in ("view/agents-requests-", "view/agents-")
+                                    if key.startswith(prefix)), "")
+                        orphan = rid.startswith("r") and rid[1:].isascii() and rid[1:].isdigit() and rid not in self.ext.resources
+                        if ((key.startswith("menu/agents.r") and key not in entries)
+                                or (orphan and key[5:] not in shown)):
+                            stale.append(key)
+                    ops = [{"op": "delete", "key": key, "expect": self.ext.version(key)} for key in stale]
                 if stale:
-                    self.ext.apply([{"op": "delete", "key": key, "expect": self.ext.version(key)} for key in stale], "agents: stale actions/panels")
-            self.ext.retrying(prune)
-            self.ext.contribute(entries)
+                    self.ext.apply(ops, "agents: stale actions/panels")
+                    for key in stale:
+                        if key.startswith("view/"):
+                            self.ext.publish(key[5:], None)  # release this publisher's derived cache too
+            try:
+                self.ext.retrying(prune)
+            except PrimError as error:
+                if error.kind != "invalid":
+                    raise
+                # A layout can reference a view after our scan; atomic validation refused the
+                # delete. Leave it intact and let the subsequent entries event re-evaluate.
+            if changed:
+                self.ext.contribute(entries)
             self.signature = signature
 
     def publish_panel(self, resource):
@@ -309,8 +333,10 @@ class Agents:
                     self.publish_gone(key[12:])
 
     def event(self, kind, event):
-        if kind in ("resource", "resource.removed", "provider", "missed"):
-            self.refresh()
+        if kind in ("entries", "resource", "resource.removed", "provider", "missed"):
+            self.refresh(prune_views=kind in ("entries", "resource.removed", "missed"))
+            if kind == "entries":
+                return
             changed = event.get("id") if kind in ("resource", "resource.removed") else None
             selected = [r for r in self.ext.resources.values() if r.get("kind") == "agent" and (r["id"] == changed or r.get("host") == changed)] if changed else None
             self.publish_panels(selected)
