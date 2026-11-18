@@ -680,6 +680,10 @@ default: the per-platform extensions directory, `~/.local/share/prim/extensions`
 default stays bare in stored state and resolves on each start: executable sibling of the running `prim`, then
 platform-native `PATH` search (including `.exe` on Windows). An unavailable program reports `failed` and an
 actionable diagnostic; hello/snapshot `backend_notice` and the built-in status bar expose unavailable backends.
+`entries`, `provider` (and compatibility `adapter`), and `safe_mode` event data also carry the current
+`backend_notice` (string or null). Null clears a previous notice; absent fields from older cores leave it unchanged.
+The status bar prioritizes this recovery warning over contributed status buttons, including when an alternative
+backend is connected but the configured default is unavailable.
 Only unchanged installed defaults with an old absolute program path are normalized; custom/edited entries stay intact. `defaults.json` is versioned (`version`; entries may carry
 `since`). Each entry is offered once per state dir: all on first run; later, only entries newer than the recorded
 version. This is how existing installs gain new defaults (here herdr, tmux and the split Pi launcher). An entry that exists is left as it
@@ -729,8 +733,11 @@ without filesystem I/O. This is not a file watcher or a registry/install mechani
 
 `extension.list` and snapshot `extensions` export `manifest` (object or null), `manifest_source` (display-only
 core-host path or null), `manifest_error`, `enabled`, raw `status`, `display_status` (`running`, `off`, `failed`,
-`starting`, `stopped-by-safe-mode`), `safe_mode`, `allowed_in_safe_mode`, `running`, `generation`, `spec_version`, `crashes`, and `last_exit`. Unknown
-statuses should display as text. `generation` is an ephemeral supervisor counter (changes on launch/stop, resets
+`starting`, `stopped-by-safe-mode`, `provider-not-connected`), `safe_mode`, `allowed_in_safe_mode`, `running`, `generation`, `spec_version`, `crashes`, and `last_exit`. Unknown
+statuses should display as text. `provider-not-connected` means a declared/observed provider extension's process
+is running but no provider authenticated to that extension is connected and fully synced; raw `status` remains
+`running`. A provider may register under a different name. Settings displays process and readiness separately,
+and an available settings command remains usable to repair a disconnected provider. `generation` is an ephemeral supervisor counter (changes on launch/stop, resets
 with a core), not an execution-lifetime guarantee. Process ids stay internal. Last-exit evidence survives disabling
 or safe entry even when the display badge is off/stopped-by-safe-mode. Logs remain core-host files at
 `<state dir>/ext-<name>.log`; no generic in-app log viewer exists, so Settings reports the path and that limitation.

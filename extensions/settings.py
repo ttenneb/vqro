@@ -28,7 +28,7 @@ OPTIONS = [
     ("mouse", "Capture the mouse", "off: your terminal handles the mouse and selects text", True),
     ("wheel_arrows", "Wheel scrolls full-screen programs", "sends arrow keys when a program has no mouse support", True),
 ]
-STATUS_STYLE = {"running": "ok", "failed": "error", "starting": "warn", "stopped-by-safe-mode": "warn"}
+STATUS_STYLE = {"running": "ok", "failed": "error", "starting": "warn", "stopped-by-safe-mode": "warn", "provider-not-connected": "warn"}
 
 
 def tui():
@@ -122,10 +122,11 @@ def ext_rows(states, commands=None):
         settings_command = manifest_text(manifest, "settings_command")
         if settings_command:
             actions.append({"text": "Extension settings", "command": settings_command,
-                            "disabled": status != "running" or settings_command not in commands})
+                            "disabled": status not in ("running", "provider-not-connected") or settings_command not in commands})
         details = [info_row(manifest_text(manifest, "description", value.get("description") or "No description provided.")),
                    {"type": "header", "text": "Runtime"},
                    info_row(f"Status: {status}", STATUS_STYLE.get(status)),
+                   info_row(f"Process: {state.get('status', 'stopped')}"),
                    info_row(f"Recorded crashes: {state.get('crashes', 0)}"),
                    info_row(f"Last exit: {state.get('last_exit') or 'none recorded'}"),
                    {"type": "header", "text": "About"},
@@ -289,7 +290,7 @@ def refresh(*_):
 
 @ext.on_event
 def on_event(t, d):
-    if t in ("extension", "missed", "safe_mode", "command") or (t == "view.content" and d.get("view") in ("themes", "icons", "keys")) \
+    if t in ("extension", "provider", "missed", "safe_mode", "command") or (t == "view.content" and d.get("view") in ("themes", "icons", "keys")) \
             or (t == "entries" and any(c["key"].startswith(("extension/", TUI, THEME, ICONS, "binding/")) for c in d["changes"])):
         refresh()
 

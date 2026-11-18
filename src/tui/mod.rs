@@ -234,6 +234,7 @@ struct App {
     provider_extensions: BTreeSet<String>,
     safe_selected: BTreeSet<String>,
     backends_connected: BTreeSet<String>,
+    backend_notice: Option<String>,
     terms: HashMap<String, Term>,
     stream_view: HashMap<u64, String>,
     early: HashMap<u64, Vec<Vec<u8>>>,
@@ -501,7 +502,7 @@ impl App {
             peer, tx,
             entries: BTreeMap::new(), versions: BTreeMap::new(), resources: BTreeMap::new(),
             commands: BTreeMap::new(), extensions: BTreeMap::new(), safe_mode: false,
-            safe_mode_allow: BTreeSet::new(), provider_extensions: BTreeSet::new(), safe_selected: BTreeSet::new(), backends_connected:BTreeSet::new(),
+            safe_mode_allow: BTreeSet::new(), provider_extensions: BTreeSet::new(), safe_selected: BTreeSet::new(), backends_connected:BTreeSet::new(), backend_notice:None,
             terms: HashMap::new(), stream_view: HashMap::new(), early: HashMap::new(), early_closed: HashMap::new(),
             leaves: Vec::new(), focus: 0, overlay: None, pstate: HashMap::new(),
             filtering: None, toast: None, live: HashMap::new(), panel_values: Mutex::new(HashMap::new()), hit: Hit::default(),
@@ -557,6 +558,7 @@ impl App {
         self.safe_mode = snap["safe_mode"].as_bool().unwrap_or(false);
         self.safe_mode_allow = strings(&snap["safe_mode_allow"]);
         self.provider_extensions = strings(&snap["provider_extensions"]);
+        self.backend_notice = snap["backend_notice"].as_str().filter(|s| !s.is_empty()).map(String::from);
         self.backends_connected=snap["providers"].as_object().into_iter().flatten().filter(|(_,p)|p["role"]=="backend" && p["connected"]==true).map(|(name,_)|name.clone()).collect();
         self.live = snap["live"].as_object().map(|o| o.iter().map(|(k, v)| (k.clone(), v.clone())).collect()).unwrap_or_default();
         if self.safe_mode && !was_safe { self.open_safe_chooser(); }
@@ -653,6 +655,9 @@ impl App {
         }
         self.seq = seq;
         let d = &ev["data"];
+        if d.get("backend_notice").is_some() {
+            self.backend_notice = d["backend_notice"].as_str().filter(|s| !s.is_empty()).map(String::from);
+        }
         match ev["type"].as_str().unwrap_or("") {
             "entries" => {
                 for c in d["changes"].as_array().into_iter().flatten() {
@@ -2307,6 +2312,11 @@ impl App {
         if failed > 0 {
             spans.push(Span::styled(format!(" {failed} extension(s) failed "), pal.badge(Some("error"))));
         }
+        if !self.safe_mode {
+            if let Some(notice) = &self.backend_notice {
+                spans.push(Span::styled(format!(" {notice} "), pal.style(Some("warn"))));
+            }
+        }
         // Contributed status-bar buttons.
         let mut x = area.x + spans.iter().map(|s| s.content.chars().count() as u16).sum::<u16>();
         for item in self.menu_items("status", &json!({})) {
@@ -2332,7 +2342,7 @@ impl App {
             x += w;
             spans.push(Span::styled(label, style));
         }
-        if !self.safe_mode && self.backends_connected.is_empty() {
+        if !self.safe_mode && self.backend_notice.is_none() && self.backends_connected.is_empty() {
             spans.push(Span::styled(" No backend connected; prefix ! opens recovery choices.",pal.style(Some("warn"))));
         }
         spans.push(Span::styled(format!(" {}", self.message), pal.style(Some("muted"))));
@@ -2739,6 +2749,27 @@ mod tests {
         app.options_menu(&json!({"command": "any.option", "value": "implicit value", "options": [{"label": "Custom", "input": "Value", "prefill": "explicit option"}]}), pane, None);
         app.activate_overlay();
         assert!(matches!(&app.overlay, Some(Overlay::Input { text, .. }) if text == "explicit option"));
+    }
+
+    #[tokio::test]
+    async fn backend_notice_is_drawn_even_with_an_alternative_backend_and_tracks_events() {
+        let (mut app, _) = app();
+        app.load(&json!({"epoch":"boot","seq":1,"entries":{},"providers":{
+            "alternative":{"role":"backend","connected":true}},"backend_notice":"Configured backend is unreachable"}));
+        let mut terminal=ratatui::Terminal::new(ratatui::backend::TestBackend::new(100,24)).unwrap();
+        terminal.draw(|f|app.draw(f)).unwrap();
+        let screen:String=terminal.backend().buffer().content.iter().map(|c|c.symbol()).collect();
+        assert!(screen.contains("Configured backend is unreachable"),"{screen}");
+        app.on_event_record(&json!({"epoch":"boot","seq":2,"type":"provider","data":{
+            "name":"configured","state":{"role":"backend","connected":true},"backend_notice":null}}));
+        terminal.draw(|f|app.draw(f)).unwrap();
+        let screen:String=terminal.backend().buffer().content.iter().map(|c|c.symbol()).collect();
+        assert!(!screen.contains("Configured backend is unreachable"));
+        app.on_event_record(&json!({"epoch":"boot","seq":3,"type":"entries","data":{
+            "changes":[],"backend_notice":"New default is unavailable"}}));
+        terminal.draw(|f|app.draw(f)).unwrap();
+        let screen:String=terminal.backend().buffer().content.iter().map(|c|c.symbol()).collect();
+        assert!(screen.contains("New default is unavailable"),"{screen}");
     }
 
     #[tokio::test]

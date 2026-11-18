@@ -189,7 +189,11 @@ impl Core {
     }
 
     /// Append to the event log and broadcast.
-    pub fn emit(&mut self, ty: &str, data: Value) {
+    pub fn emit(&mut self, ty: &str, mut data: Value) {
+        // Authoritative recovery notices follow readiness/default changes without a snapshot poll.
+        if matches!(ty, "entries" | "provider" | "adapter" | "safe_mode") {
+            data["backend_notice"] = json!(self.backend_notice());
+        }
         self.seq += 1;
         let ev = json!({"epoch": self.epoch, "seq": self.seq, "type": ty, "data": data});
         let bytes = crate::limits::encoded_bytes(&ev).max(64);
@@ -290,7 +294,9 @@ impl Core {
         let enabled=spec.is_some_and(|s|s["enabled"]!=false);
         value["enabled"]=json!(enabled);
         value["safe_mode"]=json!(self.safe_mode);value["allowed_in_safe_mode"]=json!(self.safe_mode_allow.contains(name));
-        value["display_status"]=json!(if !enabled && !self.safe_mode_allow.contains(name){"off"}else if self.safe_mode && !self.safe_mode_allow.contains(name){"stopped-by-safe-mode"}else{match value["status"].as_str().unwrap_or("stopped"){"failed"=>"failed","running"=>"running",_=>"starting"}});
+        let is_provider=spec.is_some_and(|s|s["kind"]=="provider") || self.provider_extensions.contains(name);
+        let ready=self.providers.values().any(|p|p.metadata["owner_extension"].as_str()==Some(name) && p.health.borrow().connected && p.synced);
+        value["display_status"]=json!(if !enabled && !self.safe_mode_allow.contains(name){"off"}else if self.safe_mode && !self.safe_mode_allow.contains(name){"stopped-by-safe-mode"}else{match value["status"].as_str().unwrap_or("stopped"){"failed"=>"failed","running" if is_provider && !ready=>"provider-not-connected","running"=>"running",_=>"starting"}});
         if let Some(facts)=self.manifest_catalog.facts(name).as_object(){for(k,v)in facts{value[k]=v.clone();}}
         value
     }

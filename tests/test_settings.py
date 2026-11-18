@@ -71,6 +71,16 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(row["args"],{"name":"off","on":True})
         self.assertIn("normal enabled declaration is unchanged",str(row["detail_panel"]))
 
+    def test_provider_connection_status_is_warned_and_refreshed_without_hiding_process_state(self):
+        module=load();ext=module["ext"]
+        ext.states["third-party"].update(status="running",display_status="provider-not-connected")
+        module["on_event"]("provider",{"name":"different-provider-name","state":{"connected":False}})
+        rows=[row for group in ext.published["settings"]["pages"][0]["items"] for row in group["children"]]
+        row=next(row for row in rows if row["id"]=="extension/third-party")
+        self.assertEqual(row["badges"],[{"text":"provider-not-connected","style":"warn"}])
+        self.assertIn("Process: running",str(row["detail_panel"]))
+        self.assertFalse(row["detail_panel"]["toolbar"][0]["chips"][-1]["disabled"],"configuration can repair an unreachable backend")
+
     def test_builtins_have_complete_readable_manifests(self):
         import json
         root=Path(__file__).resolve().parents[1]/"extensions"

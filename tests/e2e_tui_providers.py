@@ -23,7 +23,7 @@ shutil.copytree(os.path.join(REPO, "extensions", "manifests"), os.path.join(R, "
 os.symlink(shutil.which("python3") or "/usr/bin/python3", os.path.join(R, "bin", "python3"))
 ENV = {"HOME": f"{R}/home", "PATH": f"{R}/bin", "TERM": "xterm-256color", "SHELL": "/bin/sh", "PRIM_STATE_DIR": f"{R}/st",
        "PRIM_SOCKET": f"{R}/p.sock", "PRIM_EXTENSIONS_DIR": f"{R}/ext", "XDG_STATE_HOME": f"{R}/xst",
-       "XDG_RUNTIME_DIR": f"{R}/run", "XDG_CONFIG_HOME": f"{R}/cfg", "HC_SESSION": "tui", "LANG": "C.UTF-8"}
+       "XDG_RUNTIME_DIR": f"{R}/run", "XDG_CONFIG_HOME": f"{R}/cfg", "HC_SOCKET": f"{R}/hc.sock", "HC_SESSION": "tui", "LANG": "C.UTF-8"}
 HARNESS = ["/usr/bin/tmux", "-S", f"{R}/harness.sock", "-f", "/dev/null"]
 results = []
 
@@ -104,6 +104,21 @@ try:
         check(f"{name}: TUI shows the provider's terminal and typing reaches it", bool(seen), screen()[-600:])
         call("resource.kill", {"resource": rid})
         time.sleep(1)
+    # A running provider process is not proof of a reachable backend. An alternative remains connected.
+    saved_herdr = call("workspace.snapshot")["entries"]["extension/herdr"]["value"]
+    call("workspace.apply", {"ops":[{"op":"set","key":"extension/herdr","value":dict(saved_herdr,
+        argv=["/bin/cat"],kind="provider",default=True)}]})
+    check("unreachable default notice is visible despite alternative backends", bool(wait(lambda:
+        "No default backend is ready" in screen() and
+        call("extension.list")["extensions"]["herdr"]["display_status"] == "provider-not-connected")))
+    keys("C-g", ","); keys("/"); keys("herdr", literal=True); keys("Enter")
+    check("catalogue separates disconnected provider from running process", bool(wait(lambda:
+        "provider-not-connected" in screen() and "Process: running" in screen())))
+    call("workspace.apply", {"ops":[{"op":"set","key":"extension/herdr","value":saved_herdr}]})
+    check("backend notice and catalogue recover without reopening settings", bool(wait(lambda:
+        call("extension.list")["extensions"]["herdr"]["display_status"] == "running" and
+        "provider-not-connected" not in screen() and "No default backend is ready" not in screen())))
+    keys("Escape")
     # Settings is an extension using the same list/detail primitives available to every panel.
     keys("C-g", ",")
     check("Extensions page opens with static manifests", bool(wait(lambda: "15 of 15" in screen() and "Agent controls" in screen())))
