@@ -32,6 +32,16 @@ class AgentsTests(unittest.TestCase):
         self.assertNotIn("pi1", source)
         self.assertNotIn("resource.spawn", source)
 
+    def test_runtime_neutral_failure_and_retry_facts_remain_visible(self):
+        self.core.add_agent()
+        self.core.resources["r2"]["status"] = {"state": "error"}
+        self.core.resources["r2"]["data"].update(failure={"message": "Other runtime failed"},
+            retry={"active": False, "attempt": 3, "max_attempts": 3, "success": False})
+        self.agents.event("resource", {"id": "r2"})
+        rows = self.core.live["agents-r2"]["items"]
+        self.assertTrue(any(row.get("style") == "error" and "Other runtime failed" in row.get("text", "") for row in rows))
+        self.assertTrue(any("3/3" in row.get("text", "") for row in rows))
+
     def test_other_runtime_panel_and_only_declared_capabilities(self):
         self.core.add_agent()
         self.core.providers["other"]["capabilities"] = {"agent.abort": {}}

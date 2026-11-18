@@ -207,6 +207,22 @@ class Agents:
             items.append({"type": "text", "text": "Pending requests: "+(str(len(requests)) if isinstance(requests, list) else "unknown")})
             items.append({"type": "text", "text": label(json.dumps(details, ensure_ascii=False), 8192)})
             content = {"title": title, "requires": ["badges", "description"], "items": items}
+        details = data(r)
+        failure = details.get("failure")
+        if isinstance(failure, dict) and isinstance(failure.get("message"), str) and failure["message"]:
+            content["items"].insert(0, {"type": "text", "style": "error", "text": "Agent error: "+label(failure["message"], 4096)})
+        retry = details.get("retry")
+        if isinstance(retry, dict):
+            active, success = retry.get("active") is True, retry.get("success")
+            text = "Retrying" if active else "Retry succeeded" if success is True else "Retry failed" if success is False else "Retry"
+            attempt, maximum = retry.get("attempt"), retry.get("max_attempts")
+            if type(attempt) is int and attempt > 0:
+                text += f" (attempt {attempt}"
+                text += f"/{maximum}" if type(maximum) is int and maximum > 0 else ""
+                text += ")"
+            if active and type(retry.get("delay_ms")) is int and retry["delay_ms"] >= 0:
+                text += f"; reported delay {retry['delay_ms']} ms"
+            content["items"].insert(0, {"type": "text", "style": "warn" if active else "error" if success is False else "dim", "text": label(text)})
         host = self.ext.resources.get(r.get("host"))
         if host and host.get("kind") == "terminal":
             content["items"].insert(0, {"text": "Bridge terminal", "description": label(host.get("name") or host["id"]),

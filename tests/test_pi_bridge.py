@@ -44,6 +44,39 @@ class PiBridgeTests(unittest.IsolatedAsyncioTestCase):
         await self.client.invoke("abort")
         self.assertEqual(self.client.snapshot()["run"], {"active": False, "settled": True, "aborted": True})
 
+    async def test_failed_assistant_turn_stays_error_after_settlement_and_exposes_native_retries(self):
+        await self.client.invoke("prompt", {"message": "fixture-model-error"})
+        facts = await self.client.wait_for_facts(lambda f: f["run"]["settled"])
+        self.assertEqual(facts["status"], "error")
+        self.assertIn("ResourceNotFoundException", facts["failure"]["message"])
+        self.assertEqual((facts["retry"]["attempt"], facts["retry"]["max_attempts"], facts["retry"]["active"]), (4, 4, False))
+        accepted = await self.client.request("test_accepted")
+        self.assertEqual(accepted["data"]["accepted"], ["fixture-model-error"], "native retries are observed, never bridge-resubmitted")
+        await self.client.invoke("prompt", {"message": "new turn"})
+        facts = await self.client.wait_for_facts(lambda f: f["run"]["active"])
+        self.assertEqual(facts["status"], "working")
+        self.assertIsNone(facts["failure"])
+        self.assertIsNone(facts["retry"])
+
+    async def test_reported_active_retry_is_working_until_native_settlement(self):
+        await self.client.invoke("prompt", {"message": "start"})
+        await self.client.request("test_retry_start")
+        facts = self.client.snapshot()
+        self.assertEqual(facts["status"], "working")
+        self.assertEqual(facts["retry"], {"active": True, "attempt": 2, "max_attempts": 4, "delay_ms": 2000})
+        self.assertIn("Fixture overloaded", facts["failure"]["message"])
+        await self.client.request("test_settle")
+        self.assertFalse(self.client.snapshot()["retry"]["active"])
+        self.assertEqual(self.client.snapshot()["status"], "error", "settlement cannot turn an unresolved error into success")
+
+    async def test_successful_native_retry_clears_current_failure_without_inventing_a_failed_turn(self):
+        await self.client.invoke("prompt", {"message": "fixture-retry-success"})
+        facts = await self.client.wait_for_facts(lambda f: f["run"]["settled"])
+        self.assertEqual(facts["status"], "done")
+        self.assertIsNone(facts["failure"])
+        self.assertEqual(facts["retry"]["attempt"], 4)
+        self.assertTrue(facts["retry"]["success"])
+
     async def test_normal_settled_marks_done_only_after_native_settled_event(self):
         await self.client.invoke("prompt", {"message": "start"})
         await self.client.request("test_end")

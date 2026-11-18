@@ -66,6 +66,22 @@ def settle(aborted=False):
     emit({"type": "agent_settled", "aborted": aborted})
 
 
+def error_turn(message, retries=0, recovered=False):
+    for attempt in range(retries+1):
+        if attempt:
+            emit({"type": "auto_retry_start", "attempt": attempt, "maxAttempts": retries,
+                  "delayMs": 0, "errorMessage": message})
+        emit({"type": "message_end", "message": {"role": "assistant", "content": [],
+              "stopReason": "error", "errorMessage": message}})
+    if recovered:
+        emit({"type": "message_end", "message": {"role": "assistant", "content": "Recovered reply", "stopReason": "stop"}})
+    if retries:
+        emit({"type": "auto_retry_end", "attempt": retries, "success": recovered,
+              **({} if recovered else {"finalError": message})})
+    emit({"type": "agent_end", "messages": [], "willRetry": False})
+    settle()
+
+
 for line in sys.stdin.buffer:
     command = json.loads(line)
     timing("receive", command)
@@ -108,6 +124,11 @@ for line in sys.stdin.buffer:
             active = True
             emit({"type": "agent_start"})
             emit({"type": "turn_start"})
+            if message in ("fixture-model-error", "fixture-retry-success"):
+                emit({"type": "message_end", "message": {"role": "user", "content": message}})
+                error_turn("ResourceNotFoundException: Model use case details have not been submitted", 4,
+                           recovered=message == "fixture-retry-success")
+                continue
             emit({"type": "tool_execution_start", "toolCallId": "tool-1", "toolName": "fixture", "args": {}})
             if "--bridge-e2e" in sys.argv and message == "fixture-dialog":
                 emit({"type": "extension_ui_request", "id": "fixture-confirm", "method": "confirm",
@@ -139,6 +160,12 @@ for line in sys.stdin.buffer:
             emit({"type": "message_end", "message": {"role": "assistant", "content": [
                 {"type": "text", "text": "FIXTURE FINAL transcript tail"}]}})
             settle()
+    elif kind == "test_retry_start":
+        emit({"type": "auto_retry_start", "attempt": 2, "maxAttempts": 4, "delayMs": 2000, "errorMessage": "Fixture overloaded"})
+        reply(command)
+    elif kind == "test_error_turn":
+        error_turn(command.get("message", "Fixture model failed"), command.get("retries", 0), command.get("recovered", False))
+        reply(command)
     elif kind == "test_end":
         emit({"type": "tool_execution_end", "toolCallId": "tool-1", "toolName": "fixture", "result": {}, "isError": False})
         emit({"type": "turn_end", "message": {}, "toolResults": []})

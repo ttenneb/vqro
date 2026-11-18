@@ -142,6 +142,23 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(self.core.wait(lambda: self.core.run_facts().get("active") is True), .5)
         self.assertTrue(bridge.connected)
 
+    async def test_failed_turn_panel_contains_bounded_error_rows_and_failed_status(self):
+        bridge = await self.start()
+        await self.effect("prompt", {"message": "fixture-model-error"})
+        await self.core.wait(lambda: self.core.resources.get("r7", {}).get("status", {}).get("state") == "error")
+        panel = bridge.content()
+        errors = [row["text"] for row in panel["items"] if row.get("style") == "error"]
+        self.assertTrue(any("ResourceNotFoundException" in row for row in errors), panel)
+        self.assertIn("Retry 4/4", json.dumps(panel))
+        self.assertIn("Failed", json.dumps(panel))
+        self.assertEqual(self.core.resources["r7"]["data"]["retry"]["attempt"], 4)
+        await bridge.pi.request("test_error_turn", {"message": "secret-control\x1b]evil\x07"+"x"*100000})
+        await bridge.publish()
+        encoded = json.dumps(bridge.content(), ensure_ascii=False).encode()
+        self.assertLessEqual(len(encoded), 32768)
+        self.assertNotIn(b"\\u001b", encoded)
+        self.assertLessEqual(len(bridge.pi.snapshot()["failure"]["message"].encode()), 4096)
+
     async def test_readable_status_nonzero_counts_and_single_request_in_fallback(self):
         bridge = await self.start()
         content = json.dumps(bridge.content())
@@ -452,6 +469,13 @@ class DisplayTests(unittest.TestCase):
         self.assertEqual(data["incomplete"], ["queues"])
         self.assertEqual(data["requests"][0]["data"]["message"], "body")
         self.assertLess(len(json.dumps(data).encode()), 65536)
+
+    def test_empty_error_message_is_visible_and_semantically_styled(self):
+        transcript = Transcript(512)
+        transcript.feed({"type": "message_end", "message": {"role": "assistant", "content": [],
+                         "stopReason": "error", "errorMessage": "Fixture failure"}})
+        rows, _, _ = transcript.window(styled=True)
+        self.assertTrue(any(row.get("style") == "error" and "Fixture failure" in row["text"] for row in rows))
 
     def test_event_gap_discards_partial_and_authoritative_message_replaces_delta(self):
         transcript = Transcript(512)

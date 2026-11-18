@@ -199,11 +199,12 @@ class Bridge:
 
     def content(self):
         snapshot = self.pi.snapshot()
-        rows, clipped, lost = self.transcript.window()
+        rows, clipped, lost = self.transcript.window(styled=True)
         run = snapshot["run"]
         status = plain(snapshot["status"])
         style = {"working": "accent", "blocked": "warn", "done": "ok", "error": "error"}.get(status, "dim")
-        description = ("Stopped (aborted)" if run["aborted"] else "Finished" if run["settled"] else
+        description = ("Failed" if status == "error" else "Retrying" if (snapshot.get("retry") or {}).get("active") else
+                       "Stopped (aborted)" if run["aborted"] else "Finished" if run["settled"] else
                        "Running" if run["active"] else "Ready for a prompt" if run["active"] is False else "Waiting for runtime status")
         items = [{"text": "Pi", "badges": [{"text": status, "style": style}], "description": description}]
         queues = snapshot["queues"]
@@ -233,7 +234,7 @@ class Bridge:
                 break
             items.append({"type": "text", "style": "warn", "text": label})
         transcript_start = len(items)
-        items.extend({"type": "text", "text": tail(row, 2048)} for row in rows)
+        items.extend({"type": "text", **row, "text": tail(row["text"], 2048)} for row in rows)
         result = {"title": "Pi " + (self.rid or "starting"), "requires": ["badges", "description"], "items": items,
                   "truncated": clipped, "output_gap": lost}
         if len(json.dumps(result, ensure_ascii=False).encode()) > 32768:

@@ -33,7 +33,7 @@ async def inspect(argv, private_cwd, explicit_child_env):
 - `await request(command, args=None, timeout=None)`: metadata/native-command escape hatch. IDs and `type`
   are assigned by the client; callers cannot override them through args.
 - `snapshot()`: detached facts `{available, stale, status, run, queues, requests, session?, exit_code?}`.
-  `status` is `unknown | idle | working | blocked | done`. Before an observation, `run` values can be `None`;
+  `status` is `unknown | idle | working | blocked | done | error`. Failed assistant turns remain `error` after settlement; observed retry activity stays `working`. Optional `failure.message` and `retry` facts retain bounded error text and native attempt/max/delay/success observations. A successful retry or new turn clears the current failure, not transcript history. Before an observation, `run` values can be `None`;
   absence of evidence is not idle/settled. Queues use `steering` and `follow_up`; requests contain
   `{id, kind, prompt, data}` with the original UI request in `data`.
 - `events(after=cursor)`: bounded batch `{cursor, gap, events}`. Entries have a local monotonic `seq`.

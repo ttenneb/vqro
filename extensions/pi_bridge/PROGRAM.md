@@ -25,7 +25,13 @@ Pi args/dispositions. Accepted is not settled; only native agent_settled marks s
 clear queues. UI answer is dispatched, not acknowledged. Runtime deadline/exit uncertainty is a backend error,
 which the core maps to indeterminate. No prompt/input/effect is automatically resent.
 
-Facts put coarse state in status.state and run/queues/requests in data. Rich pending UI details (options and
+Facts put coarse state in status.state and run/queues/requests in data. Assistant `message_end` with
+`stopReason: error` records bounded `failure.message`, sets error status even after settlement, and adds an
+error-styled transcript row even when message content is empty. Native `auto_retry_start/end` records optional
+`retry` attempt/max/delay/success facts and readable transcript entries; the bridge never performs those retries.
+An active native retry remains working, final failure remains error, and successful retry/new turn clears the
+current failure while preserving transcript history. These Pi event mappings stay in the bridge; neutral agent
+panels render the optional failure/retry facts without runtime-specific imports. Rich pending UI details (options and
 confirmation body) remain available. Data is capped below 64 KiB: oversized fields are null with an explicit
 incomplete marker, never falsely empty. Dialogs that cannot be represented are cancelled once, with no automatic
 resend if that cancellation is uncertain. Unknown UI kinds are cancelled by the runtime client.

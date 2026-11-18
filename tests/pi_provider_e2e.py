@@ -273,6 +273,17 @@ class E2E:
         self.ui_frame('working', 'working', 'Running')
         self.ui_menu(rid, 'Abort')
         self.agent(rid, lambda r: r['data']['run']['settled'] and r['data']['run']['aborted'])
+        self.ui_menu(rid, 'Prompt')
+        self.ui('send-keys', '-t', 'ui:0.0', '-N', '100', 'BSpace')  # Clear any generic input prefill before exact fixture text.
+        self.ui('send-keys', '-t', 'ui:0.0', '-l', 'fixture-model-error')
+        self.ui('send-keys', '-t', 'ui:0.0', 'Enter')
+        failed = self.agent(rid, lambda r: r['status']['state'] == 'error' and r['data']['run']['settled'])
+        self.ui_frame('failed-turn', 'ResourceNotFoundException', 'Retry failed (attempt 4/4)', 'Failed')
+        panel = self.snapshot()['live']['agents-'+rid]
+        assert any(row.get('style') == 'error' and 'ResourceNotFoundException' in row.get('text', '') for row in panel['items'])
+        assert failed['data']['retry']['attempt'] == 4
+        assert sum(row.get('message') == 'fixture-model-error' for row in self.trace()) == 1, 'bridge replayed a model-failed prompt'
+        self.log.append({'failed_turn_ui': 'PASS', 'status': failed['status']['state'], 'native_retry_attempts': 4, 'model_calls': False})
         return {'outcome': event['outcome'], 'host': agent['host'], 'agent': rid}
 
     def ui_navigation(self, rid, host):

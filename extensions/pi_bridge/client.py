@@ -6,6 +6,8 @@ from dataclasses import dataclass
 import json
 import math
 
+from prim_display import label
+
 
 @dataclass(frozen=True)
 class Limits:
@@ -62,6 +64,7 @@ class PiRpcClient:
             "available": True, "status": "unknown", "stale": False,
             "run": {"active": None, "settled": None, "aborted": None},
             "queues": {"steering": [], "follow_up": []}, "requests": [],
+            "failure": None, "retry": None,
         }
         self._waiting = {}
         self._writer = asyncio.Lock()
@@ -261,6 +264,10 @@ class PiRpcClient:
             self._facts["status"] = "unknown"
         elif self._facts["requests"]:
             self._facts["status"] = "blocked"
+        elif (self._facts.get("retry") or {}).get("active"):
+            self._facts["status"] = "working"
+        elif self._facts.get("failure"):
+            self._facts["status"] = "error"
         elif self._facts["run"]["active"]:
             self._facts["status"] = "working"
         elif self._facts["run"]["settled"]:
@@ -329,9 +336,34 @@ class PiRpcClient:
                 self._state_response(command, record.get("data"))
             future.set_result(result)
         elif kind == "agent_start":
+            if not (self._facts.get("retry") or {}).get("active"):
+                self._facts.update(failure=None, retry=None)
             self._facts["run"] = {"active": True, "settled": False, "aborted": None}
+        elif kind == "message_end" and record.get("message", {}).get("role") == "assistant":
+            message = record["message"]
+            if message.get("stopReason") == "error":
+                self._facts["failure"] = {"message": label(message.get("errorMessage") or "Runtime reported an assistant error (no details).", 4096)}
+            elif message.get("stopReason") in ("stop", "length", "toolUse", "deferred"):
+                self._facts["failure"] = None
+        elif kind in ("auto_retry_start", "auto_retry_end"):
+            retry = dict(self._facts.get("retry") or {}, active=kind == "auto_retry_start")
+            for native, field in (("attempt", "attempt"), ("maxAttempts", "max_attempts"), ("delayMs", "delay_ms")):
+                value = record.get(native)
+                if type(value) is int and value >= (0 if native == "delayMs" else 1):
+                    retry[field] = value
+            if kind == "auto_retry_start" and record.get("errorMessage"):
+                self._facts["failure"] = {"message": label(record["errorMessage"], 4096)}
+            if kind == "auto_retry_end":
+                retry["success"] = record.get("success") if type(record.get("success")) is bool else None
+                if retry["success"] is True:
+                    self._facts["failure"] = None
+                elif retry["success"] is False:
+                    self._facts["failure"] = {"message": label(record.get("finalError") or (self._facts.get("failure") or {}).get("message") or "Runtime retry failed (no details).", 4096)}
+            self._facts["retry"] = retry
         elif kind == "agent_settled":
             self._facts["run"] = {"active": False, "settled": True, "aborted": record.get("aborted")}
+            if self._facts.get("retry"):
+                self._facts["retry"]["active"] = False
         elif kind == "queue_update":
             if not isinstance(record.get("steering"), list) or not isinstance(record.get("followUp"), list):
                 raise ValueError("invalid queue update")

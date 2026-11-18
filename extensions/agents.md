@@ -9,7 +9,11 @@
 - Prompt-like actions use input. Answer opens a pending-request picker: confirm/select choices, input/editor text, explicit cancellation. Editor uses existing single-line input, not a new multiline editor.
 - Notifications preserve native outcomes: acceptance is not settlement; dispatched answers do not invent acknowledgement. Effects are never automatically replayed.
 
-The panel uses resource/provider facts and optionally displays the provider's `agent-rN` live content read-only. Without that optional native output, it renders generic status, availability and data; arbitrary runtimes need no transcript/run/queue fields. It stays bounded to32KiB, with explicit clipping and stale/unavailable warnings. Panel output is live content, not transaction history.
+The panel uses resource/provider facts and optionally displays the provider's `agent-rN` live content read-only.
+Optional runtime-neutral `data.failure.message` and `data.retry` (`active`, `attempt`, `max_attempts`, `delay_ms`,
+`success`) facts are rendered as bounded semantic error/retry rows, including alongside native output. Only
+reported attempt counts are shown; the UI never implements retries. Providers remain responsible for mapping
+native failed-turn/settlement events into resource status; settlement alone does not imply success. Without that optional native output, it renders generic status, availability and data; arbitrary runtimes need no transcript/run/queue fields. It stays bounded to32KiB, with explicit clipping and stale/unavailable warnings. Panel output is live content, not transaction history.
 
 Native capabilities come from the public provider registry, cached by `prim_ext` from snapshots and provider events. No capability is inferred from a runtime name or mode. Menus/panels are reconciled by ownership and lifecycle/capability changes, never on every status update.
 
