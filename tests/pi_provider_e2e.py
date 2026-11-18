@@ -288,9 +288,17 @@ class E2E:
         self.wait(lambda: 'term-'+host in layout_views(), 'explicit bridge terminal tab')
         self.ui_frame('bridge-terminal', 'Pi '+rid+' bridge', 'core connected')
         self.call('command.invoke', {'name': 'sidebar.toggle'})
-        screen = self.ui_frame('sidebar-agent', 'Terminals', 'Pi '+rid+' bridge')
+        # Wait for the coalesced sidebar snapshot, not merely any older sidebar rows.
+        def current_rows():
+            rows = self.snapshot().get('live', {}).get('sidebar', {}).get('items', [])
+            return rows if any(row.get('args', {}).get('resource') == rid for row in rows) else None
+        rows = self.wait(current_rows, 'sidebar agent row')
+        def agent_screen():
+            screen = self.ui('capture-pane', '-p', '-t', 'ui:0.0')
+            return screen if any(i > 2 and 'Pi' in line[:35] and 'bridge' not in line[:35] for i, line in enumerate(screen.splitlines())) else None
+        screen = self.wait(agent_screen, 'rendered sidebar agent row')
+        (self.root/'ui-sidebar-agent.txt').write_text(screen)
         # The agent is a top-level row; its bridge is a collapsed child, not another terminal.
-        rows = self.wait(lambda: self.snapshot().get('live', {}).get('sidebar', {}).get('items'), 'sidebar rows')
         agent_row = next(row for row in rows if row.get('args', {}).get('resource') == rid)
         assert agent_row['children'][0]['args']['resource'] == host, rows
         assert not any(row.get('args', {}).get('resource') == host for row in rows), rows
