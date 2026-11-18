@@ -16,9 +16,12 @@ them while the extension is off. Everything goes through the public core protoco
 import json
 import os
 import queue
+import random
 import socket
 import sys
 import threading
+import time
+import traceback
 
 
 def _watch_lifetime():
@@ -159,6 +162,18 @@ class Prim:
         finally:
             self.handlers.release()
 
+    def defer(self, msg, delay):
+        """Queue a local notification after `delay` seconds, behind every event already queued, so
+        its handler sees caches those events updated. A recovery gap may discard it; the gap's own
+        `missed` then reruns everything."""
+        def put():
+            with self.note_lock:
+                self.note_bytes += 64
+            self.notes.put((msg, 64))
+        timer = threading.Timer(delay, put)
+        timer.daemon = True
+        timer.start()
+
     def _note(self, msg, charge):
         with self.note_lock:
             local_gap = getattr(self, "note_gap", None) is msg
@@ -240,7 +255,12 @@ class Extension:
         return deco
 
     def on_event(self, fn):
-        """Call fn(type, data) for every core event, after the caches are updated."""
+        """Call fn(type, data) for every core event, after the caches are updated.
+
+        fn must be safe to rerun: after a `missed` gap (or a write conflict) it is called as
+        fn("missed", {...}) and should recompute from the caches. A `conflict` from its writes is
+        retried that way with bounded backoff; other exceptions are logged. Neither stops other
+        listeners or the extension."""
         self.listeners.append(fn)
         return fn
 
@@ -307,13 +327,22 @@ class Extension:
             self._load(self.prim.call("workspace.snapshot"))
 
     def retrying(self, fn, attempts=3):
-        """Run fn(); on a `conflict` reload the caches and try again."""
+        """Run fn(); on a `conflict` reload the caches and try again, with a short jittered backoff.
+
+        Inside an event listener whose caches follow `entries` events, a conflict is raised at
+        once instead: the listener is rerun after the conflicting write's events arrive, which
+        costs no snapshot reload (`_listen`)."""
+        listening = getattr(self.__dict__.get("_listening"), "active", False)
+        types = getattr(self, "event_types", None)
+        if listening and (types is None or "entries" in types):
+            attempts = 1
         for i in range(attempts):
             try:
                 return fn()
             except PrimError as e:
                 if e.kind != "conflict" or i == attempts - 1:
                     raise
+                time.sleep(0.02 * 2 ** i * (0.5 + random.random()))
                 self.fresh()
 
     def publish(self, view, content):
@@ -362,12 +391,18 @@ class Extension:
 
     def _handle(self, method, params):
         if method in ("event", "missed"):
+            # Only a cache failure is a failed recovery (it raises: disconnect, never diverge).
             with self.cache_lock:
                 event = self._notification(method, params)
             # Extension code may call commands on other threads; never hold the cache lock there.
             if event is not None:
                 for fn in self.listeners:
-                    fn(*event)
+                    self._listen(fn, event)
+            return None
+        if method == "prim.retry":
+            # Deferred reactions rerun as `missed`: recompute from the (now current) caches.
+            for fn in list(getattr(self, "_deferred", {})):
+                self._listen(fn, ("missed", {"reason": "retry"}), retry=True)
             return None
         if method == "command.invoke":
             fn = self.handlers.get(params["name"])
@@ -375,6 +410,31 @@ class Extension:
                 raise PrimError(f"unknown command {params['name']}", "not_found")
             return fn(params.get("args") or {}) or {"ok": True}
         return None
+
+    def _listen(self, fn, event, retry=False):
+        """Run one listener. Its writes are policy reacting to facts, not cache recovery: a failure
+        never stops other listeners or counts as a failed recovery. A compare-and-set conflict
+        (someone else wrote first) is normal under concurrent edits: rerun it later with bounded
+        backoff, after the events of that write have updated the caches."""
+        deferred = self.__dict__.setdefault("_deferred", {})
+        local = self.__dict__.setdefault("_listening", threading.local())
+        local.active = True
+        try:
+            fn(*event)
+            if retry or event[0] == "missed":
+                deferred.pop(fn, None)  # a full recompute succeeded; other events may not redo it
+        except PrimError as e:
+            if e.kind != "conflict":
+                print(f"prim: {getattr(self, 'name', 'ext')}: listener failed: {e.kind}: {e}", file=sys.stderr, flush=True)
+                return
+            n = deferred[fn] = deferred.get(fn, 0) + 1
+            delay = min(5.0, 0.1 * 2 ** n) * (0.5 + random.random())
+            print(f"prim: {getattr(self, 'name', 'ext')}: listener write conflicted ({n}); retrying in {delay:.2f}s", file=sys.stderr, flush=True)
+            self.prim.defer({"method": "prim.retry", "params": {}}, delay)
+        except Exception:
+            print(f"prim: {getattr(self, 'name', 'ext')}: listener failed:\n{traceback.format_exc()}", file=sys.stderr, flush=True)
+        finally:
+            local.active = False
 
     def _notification(self, method, params):
         if method == "event":

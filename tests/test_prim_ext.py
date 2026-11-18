@@ -3,6 +3,7 @@ import pathlib
 import queue
 import sys
 import threading
+import time
 import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "extensions"))
@@ -379,6 +380,178 @@ class Contributions(unittest.TestCase):
         ext2.contribute({"menu/tabs.new": {"label": "New", "command": "tabs.open"}})
         self.assertEqual(set(core2.entries), {"menu/tabs.new"})
         self.assertEqual(len(core2.applied), 1, "the conflicting attempt applied nothing")
+
+
+class ListenerConflicts(unittest.TestCase):
+    """Soak 2 P1-A: a listener's compare-and-set conflict during missed-recovery marked tabs failed."""
+
+    def setup(self, conflicts):
+        prim = NotificationRecovery.prim(self)
+        class Socket:
+            closed = False
+            def shutdown(self, _): self.closed = True
+        prim.sock = Socket()
+        core = FakeCore({"layout/main": {"view": "a"}})
+        core.snapshots = 0
+        apply = core.call
+        busy = {"left": conflicts}
+        def call(method, params=None):
+            if method == "workspace.snapshot":
+                core.snapshots += 1
+            elif busy["left"] > 0:  # a concurrent writer lands just before each of our writes
+                busy["left"] -= 1
+                core.interfere = ("layout/main", {"view": "other", "n": busy["left"]})
+            return apply(method, params)
+        deferred = []
+        transport = type("Transport", (), {"call": staticmethod(call), "defer": staticmethod(lambda msg, delay: deferred.append((msg, delay)))})()
+        ext = Extension.__new__(Extension)
+        ext.name = "tabs"
+        ext.event_types = ["entries", "resource", "resource.removed"]
+        ext.cache_lock = threading.RLock()
+        ext.listeners = []
+        ext.prim = transport
+        ext._load(core.call("workspace.snapshot"))
+        prim.handler = ext._handle
+        writes = []
+        @ext.on_event
+        def mark(kind, data):
+            # Like tabs.resource_state: rewrite layout/main from the cache with compare-and-set.
+            def attempt():
+                ext.apply([{"op": "set", "key": "layout/main", "value": {"view": "marked"}, "expect": ext.version("layout/main")}], "mark")
+                writes.append(kind)
+            ext.retrying(attempt)
+        return prim, core, ext, deferred, writes
+
+    def test_conflicts_during_local_gap_recovery_defer_instead_of_disconnecting(self):
+        prim, core, ext, deferred, writes = self.setup(conflicts=5)
+        prim._queue_note({}, NOTIFICATION_BYTES)  # overflow: one local gap marker
+        marker = prim.notes.get_nowait()
+        self.assertEqual(marker[0]["method"], "missed")
+        self.assertTrue(prim._note(*marker), "a write conflict is not a failed cache recovery")
+        self.assertFalse(prim.sock.closed)
+        self.assertEqual(writes, [])
+        self.assertEqual(len(deferred), 1, "the reaction is retried later, not dropped")
+        # Later events bring the concurrent writes into the cache; the deferred retry converges.
+        for _ in range(10):
+            if writes:
+                break
+            ext._load(core.call("workspace.snapshot"))  # stands in for the entries events
+            msg, delay = deferred.pop(0)
+            self.assertLessEqual(delay, 7.5, "bounded backoff")
+            prim._queue_note(msg, 64)
+            self.assertTrue(prim._note(*prim.notes.get_nowait()))
+        self.assertEqual(writes, ["missed"])
+        self.assertEqual(core.entries["layout/main"]["value"], {"view": "marked"})
+        self.assertEqual(deferred, [], "nothing left pending once it converged")
+
+    def test_listener_conflicts_do_not_reload_the_snapshot_when_events_keep_the_cache(self):
+        prim, core, ext, deferred, writes = self.setup(conflicts=1)
+        before = core.snapshots
+        prim._queue_note({"method": "event", "params": event(2, "x")}, 64)
+        self.assertTrue(prim._note(*prim.notes.get_nowait()))
+        self.assertEqual(core.snapshots, before, "entries events, not a multi-MB snapshot, catch the cache up")
+        self.assertEqual(len(deferred), 1)
+
+    def test_other_listeners_still_run_after_one_fails(self):
+        prim, core, ext, deferred, writes = self.setup(conflicts=0)
+        seen = []
+        ext.listeners.insert(0, lambda *_: (_ for _ in ()).throw(ValueError("bug in a listener")))
+        ext.on_event(lambda kind, data: seen.append(kind))
+        prim._queue_note({"method": "event", "params": event(2, "x")}, 64)
+        self.assertTrue(prim._note(*prim.notes.get_nowait()))
+        self.assertEqual(seen, ["entries"])
+        self.assertEqual(writes, ["entries"])
+
+
+class ListenerConflictsOverASocket(unittest.TestCase):
+    """The same soak sequence with real Prim threads and timers, against a scripted core: a slow
+    listener lets 300 events overflow the queue (local gap), then the recovery's layout write
+    conflicts 4 times with a concurrent writer. The child must stay connected and converge."""
+
+    CHILD = r'''
+import sys, time
+sys.path.insert(0, sys.argv[1])
+from prim_ext import Extension
+ext = Extension("tabs", event_types=["entries"])
+slow = [True]
+@ext.on_event
+def mark(kind, data):
+    if slow[0]:
+        slow[0] = False
+        time.sleep(1.0)  # the queue overflows meanwhile
+    if kind != "missed" or ext.value("layout/main") == {"marked": True}:
+        return
+    ext.retrying(lambda: ext.apply([{"op": "set", "key": "layout/main", "value": {"marked": True}, "expect": ext.version("layout/main")}], "mark"))
+time.sleep(30)
+'''
+
+    def test_recovery_conflicts_converge_without_disconnecting(self):
+        import json, os, socket, subprocess, tempfile
+        d = tempfile.mkdtemp(prefix="pext", dir="/tmp")
+        path = os.path.join(d, "s")
+        srv = socket.socket(socket.AF_UNIX); srv.bind(path); srv.listen(1)
+        ext_dir = str(pathlib.Path(__file__).resolve().parents[1] / "extensions")
+        child = subprocess.Popen([sys.executable, "-c", self.CHILD, ext_dir], env={"PATH": os.environ.get("PATH", ""), "PRIM_SOCKET": path},
+                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        try:
+            srv.settimeout(10); conn, _ = srv.accept()
+            state = {"seq": 1, "version": 1, "value": {"tabs": []}, "conflicts": 4, "applied": None}
+            def send(obj): conn.sendall((json.dumps(obj) + "\n").encode())
+            buf = [b""]
+            def readline():
+                while b"\n" not in buf[0]:
+                    data = conn.recv(65536)
+                    if not data: return b""
+                    buf[0] += data
+                line, buf[0] = buf[0].split(b"\n", 1)
+                return line
+            def entries_event():
+                state["seq"] += 1
+                send({"jsonrpc": "2.0", "method": "event", "params": {"epoch": "E", "seq": state["seq"], "type": "entries", "data": {"changes": [
+                    {"key": "layout/main", "version": state["version"], "value": state["value"]}]}}})
+            def snap():
+                return {"epoch": "E", "seq": state["seq"], "entries": {"layout/main": {"version": state["version"], "value": state["value"]}}, "resources": []}
+            flooded = False
+            deadline = time.time() + 25
+            conn.settimeout(1)
+            while time.time() < deadline and state["applied"] is None:
+                try: line = readline()
+                except socket.timeout: continue
+                if not line: break
+                m = json.loads(line)
+                method, i = m.get("method"), m.get("id")
+                if method == "hello": send({"jsonrpc": "2.0", "id": i, "result": {"epoch": "E", "seq": 1}})
+                elif method == "workspace.snapshot":
+                    send({"jsonrpc": "2.0", "id": i, "result": snap()})
+                    if not flooded:
+                        flooded = True
+                        for _ in range(300):
+                            state["version"] += 1; state["value"] = {"tabs": [], "n": state["version"]}; entries_event()
+                elif method == "workspace.apply":
+                    op = m["params"]["ops"][0]
+                    if state["conflicts"] > 0:  # a concurrent writer lands first, its event arrives too
+                        state["conflicts"] -= 1
+                        state["version"] += 1; state["value"] = {"tabs": [], "other": state["conflicts"]}; entries_event()
+                    if op["expect"] != state["version"]:
+                        send({"jsonrpc": "2.0", "id": i, "error": {"code": -32000, "message": "layout/main moved", "data": {"kind": "conflict"}}})
+                    else:
+                        state["version"] += 1; state["value"] = op["value"]; state["applied"] = state["version"]
+                        send({"jsonrpc": "2.0", "id": i, "result": {"txn": 1, "changes": [{"key": "layout/main", "version": state["version"]}]}})
+                        entries_event()
+                elif i is not None:
+                    send({"jsonrpc": "2.0", "id": i, "result": {}})
+            time.sleep(0.3)
+            alive = child.poll() is None
+        finally:
+            child.kill(); out = child.communicate()[0].decode(errors="replace")
+            srv.close()
+            import shutil; shutil.rmtree(d, ignore_errors=True)
+        self.assertTrue(flooded)
+        self.assertNotIn("notification recovery failed", out)
+        self.assertTrue(alive, "the extension must not exit over a write conflict:\n" + out)
+        self.assertIsNotNone(state["applied"], "the deferred reaction converged:\n" + out)
+        self.assertEqual(state["value"], {"marked": True})
+        self.assertIn("listener write conflicted", out)
 
 
 class LayoutHelpers(unittest.TestCase):
