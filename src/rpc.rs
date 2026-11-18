@@ -265,6 +265,9 @@ impl Peer {
                     };
                     if in_tx.try_send(incoming, bytes).is_err() { break; }
                 } else if let Some(id) = msg.get("id").and_then(Value::as_u64) {
+                    // Leave envelope headroom when opaque provider/extension replies are audited
+                    // or forwarded; a malformed peer does not get to poison retained events.
+                    if crate::limits::json_depth(&msg,crate::limits::MESSAGE_DEPTH).is_err() {break;}
                     let Some(tx) = pend.lock().unwrap().remove(&id) else { continue };
                     let permit = if bytes > INBOUND_BYTES {
                         large_response.clone().try_acquire_owned()
@@ -304,6 +307,7 @@ impl Peer {
         }
         let _guard = PendingCall { id, pending: self.pending.clone() };
         let msg = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+        crate::limits::json_depth(&msg,crate::limits::MESSAGE_DEPTH)?;
         let line = msg.to_string();
         if line.len() + 1 > INBOUND_BYTES.min(self.record_limit.load(Ordering::Acquire)) {
             return Err(RpcError::new("too_large", "request exceeds record limit; not sent"));
@@ -353,6 +357,7 @@ impl Peer {
     }
 
     pub fn notify(&self, method: &str, params: Value) {
+        if crate::limits::json_depth(&params,crate::limits::MESSAGE_DEPTH-1).is_err() {self.close();return;}
         self.send_control(json!({"jsonrpc": "2.0", "method": method, "params": params}).to_string());
     }
 
@@ -386,6 +391,14 @@ impl Peer {
             Ok(v) => json!({"jsonrpc": "2.0", "id": id, "result": v}),
             Err(e) => json!({"jsonrpc": "2.0", "id": id, "error": e}),
         };
+        if crate::limits::json_depth(&msg,crate::limits::MESSAGE_DEPTH).is_err() {
+            // The operation may already have happened. Never turn an unpublishable backend
+            // reply into a rejected/no-effect claim, and never invite automatic replay.
+            let mut error=RpcError::new("too_large","reply JSON nesting exceeds recovery envelope; inspect state, do not replay");
+            error.data.as_mut().unwrap()["outcome"]=json!("indeterminate");
+            let id=if id.is_array()||id.is_object() {Value::Null}else{id};
+            self.send_control(json!({"jsonrpc":"2.0","id":id,"error":error}).to_string());return;
+        }
         let bytes = crate::limits::encoded_bytes(&msg).saturating_add(1);
         if bytes > self.record_limit.load(Ordering::Acquire) {
             let error = RpcError::new("too_large", "reply exceeds recovery envelope; use recovery commands to revert/delete state");
@@ -426,6 +439,24 @@ mod tests {
         peer.respond_flushed(id,Ok(json!(42))).await.unwrap();
         let mut r=BufReader::new(r);let mut line=String::new();r.read_line(&mut line).await.unwrap();
         assert_eq!(serde_json::from_str::<Value>(&line).unwrap()["result"],42);peer.close();
+    }
+
+    #[tokio::test]
+    async fn depth_fences_reject_unsent_calls_and_mark_unpublishable_replies_indeterminate() {
+        fn nested(depth:usize)->Value {(0..depth).fold(Value::Null,|value,_|json!([value]))}
+        let (a,b)=tokio::io::duplex(4096);let (r,w)=tokio::io::split(a);let(peer,_incoming)=Peer::spawn(r,w);
+        let (r,w)=tokio::io::split(b);let(remote,mut requests)=Peer::spawn(r,w);
+        let error=peer.call("too-deep",nested(crate::limits::MESSAGE_DEPTH)).await.unwrap_err();
+        assert_eq!(error.data.unwrap()["outcome"],"rejected");assert!(peer.pending.lock().unwrap().is_empty());assert!(requests.try_recv().is_err());
+        let p=peer.clone();let waiting=tokio::spawn(async move {p.call("effect",Value::Null).await});
+        let id=match requests.recv().await.unwrap() {Incoming::Request {id,..}=>id,_=>panic!("request")};
+        remote.respond(id,Ok(nested(crate::limits::MESSAGE_DEPTH)));
+        let error=waiting.await.unwrap().unwrap_err();assert_eq!(error.kind(),"too_large");assert_eq!(error.data.unwrap()["outcome"],"indeterminate");
+        let p=peer.clone();let waiting=tokio::spawn(async move {p.call("boundary",Value::Null).await});
+        let id=match requests.recv().await.unwrap() {Incoming::Request {id,..}=>id,_=>panic!("request")};
+        remote.respond(id,Ok(nested(crate::limits::MESSAGE_DEPTH-1)));
+        assert_eq!(waiting.await.unwrap().unwrap(),nested(crate::limits::MESSAGE_DEPTH-1));
+        peer.close();remote.close();
     }
 
     #[tokio::test]

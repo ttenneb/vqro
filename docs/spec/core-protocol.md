@@ -164,6 +164,25 @@ Writes reject growth above **1 MiB per encoded workspace entry** (key/version/va
 byte count and limit; state/history/sequence remain unchanged. Old oversized state still loads, and deletion,
 revert or shrinking a legacy violation remains possible. Snapshots carry `recovery_notice` for legacy entry limits.
 
+Opaque JSON in workspace entries, live content, provider facts/metadata and invoked command arguments is
+limited to **64 nested object/array containers** (scalars, including literal bracket strings and transaction
+notes, add no depth; notes retain their4096-byte bound). Depth violations return `too_large`,
+`outcome: rejected`, `unit: container_depth` before publication or a stored-state change. Emitted RPC frames
+have a **96-container** envelope; other incoming method parameters and opaque replies are bounded to96.
+Unsent over-deep calls are rejected. An unpublishable reply reports `outcome: indeterminate` because execution
+may already have happened: inspect state, never replay. An unsafe notification closes its transport rather
+than publishing a malformed/truncated value. These bounds leave headroom below the JSON decoder's128-container limit.
+
+Startup reads legacy entry/preimage JSON as syntax-validated raw values before constructing trees. An
+unsafe current declaration is quarantined; healthy entries/versions remain unchanged. Unsafe views/layouts
+get inert recovery placeholders so healthy references remain valid; other unsafe entries are omitted.
+Unsafe undo preimages become explicit `undoable:false` boundaries, not silently skipped undo targets.
+Startup does not rewrite the original. Before the first later durable write, a private, byte-identical
+`workspace.quarantine-*.json` backup must be file/directory-synced; failure rejects the write and preserves
+the original. Backup ownership is shared across discarded writer snapshots. Snapshot `recovery_notice`
+(and the existing TUI recovery message) identifies the quarantine and backup path; it survives restart.
+Quarantine archives are retained for manual repair, not automatically interpreted or replayed.
+
 The ordinary control backlog remains **4 MiB**. One separately reserved, prioritized **64 MiB maximum reply**
 slot stays charged through actual writing: 16 MiB entries + 8 MiB live + 32 MiB resource allowance + 8 MiB
 metadata/headroom. A busy large slot returns `overloaded`; a reply over the envelope returns `too_large` **without

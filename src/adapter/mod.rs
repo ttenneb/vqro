@@ -91,6 +91,7 @@ pub struct ResourceFacts {
 impl ResourceFacts {
     pub fn valid(&self) -> bool {
         !self.backend_ref.is_empty() && !self.kind.is_empty() && matches!(self.state.as_str(), "live" | "finished")
+            && [&self.data,&self.status,&self.exit].into_iter().all(|value|crate::limits::json_depth(value,crate::limits::JSON_DEPTH).is_ok())
             && self.data.is_object() && self.data.to_string().len() <= 64 * 1024
     }
 }

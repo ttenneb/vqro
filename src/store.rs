@@ -51,10 +51,20 @@ pub(crate) fn validate_note(note:Option<&str>)->Result<(),RpcError> {
 type SharedEntry = std::sync::Arc<Entry>;
 pub type Entries = BTreeMap<String, SharedEntry>;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Entry {
     pub version: u64,
     pub value: Value,
+    #[serde(skip)] depth_quarantined:bool,
+}
+impl<'de> Deserialize<'de> for Entry {
+    fn deserialize<D:serde::Deserializer<'de>>(deserializer:D)->Result<Self,D::Error> {
+        #[derive(Deserialize)] struct Wire {version:u64,value:Box<serde_json::value::RawValue>}
+        let raw=Wire::deserialize(deserializer)?;
+        let depth_quarantined=!crate::limits::raw_depth_within(raw.value.get(),crate::limits::JSON_DEPTH);
+        let value=if depth_quarantined {Value::Null} else {serde_json::from_str(raw.value.get()).map_err(serde::de::Error::custom)?};
+        Ok(Self {version:raw.version,value,depth_quarantined})
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -94,6 +104,7 @@ pub struct Txn {
     encoded_bytes: usize,
     #[serde(skip)]
     revert_bytes: usize,
+    #[serde(skip)] depth_quarantined:bool,
 }
 
 #[derive(Serialize)]
@@ -103,6 +114,10 @@ enum UndoRef<'a> {
     Delete { key:&'a str, expect:u64 },
 }
 fn retained_txn(mut txn:Txn, legacy:bool)->Result<std::sync::Arc<Txn>,RpcError> {
+    if txn.changes.iter().any(|change|change.before.as_ref().is_some_and(|entry|entry.depth_quarantined)) {
+        txn.depth_quarantined=true;txn.undoable=false;
+        for change in &mut txn.changes {change.before=None;}
+    }
     if legacy {
         if let Some(note)=&txn.note {
             if note.len()>NOTE_BYTES {
@@ -133,8 +148,8 @@ fn retained_txn(mut txn:Txn, legacy:bool)->Result<std::sync::Arc<Txn>,RpcError> 
 }
 
 #[derive(Clone)]
-struct History { txns:VecDeque<std::sync::Arc<Txn>>, bytes:usize }
-impl Default for History {fn default()->Self {Self {txns:VecDeque::new(),bytes:2}}}
+struct History { txns:VecDeque<std::sync::Arc<Txn>>, bytes:usize,depth_quarantined:usize }
+impl Default for History {fn default()->Self {Self {txns:VecDeque::new(),bytes:2,depth_quarantined:0}}}
 impl History {
     fn push(&mut self,txn:std::sync::Arc<Txn>) {
         self.bytes+=txn.encoded_bytes+usize::from(!self.txns.is_empty());
@@ -156,11 +171,12 @@ impl<'de> Deserialize<'de> for History {
             fn visit_seq<A:serde::de::SeqAccess<'de>>(self,mut seq:A)->Result<History,A::Error> {
                 let mut history=History::default();
                 while let Some(txn)=seq.next_element::<Txn>()? {
+                    let unsafe_before=txn.changes.iter().any(|change|change.before.as_ref().is_some_and(|entry|entry.depth_quarantined));
                     match retained_txn(txn,true) {
-                        Ok(txn)=>history.push(txn),
+                        Ok(txn)=>{if txn.depth_quarantined {history.depth_quarantined+=1;}history.push(txn);},
                         // An unretainable legacy metadata record is an undo boundary: never
                         // silently undo an older change across it. New writes reject it instead.
-                        Err(_)=>history=History::default(),
+                        Err(_)=>{let recovered=history.depth_quarantined+usize::from(unsafe_before);history=History::default();history.depth_quarantined=recovered;}
                     }
                 }
                 Ok(history)
@@ -185,6 +201,28 @@ struct Persisted {
     next_txn: u64,
     entries: Entries,
     history: History,
+    #[serde(default,skip_serializing_if="Option::is_none")] recovery:Option<RecoveryInfo>,
+}
+
+#[derive(Clone,Serialize,Deserialize)]
+struct RecoveryInfo {note:String,backup:Option<PathBuf>}
+struct Recovery {info:RecoveryInfo,preserve_source:bool,backup:std::sync::OnceLock<PathBuf>}
+impl Recovery {
+    fn persisted(&self)->RecoveryInfo {RecoveryInfo {note:self.info.note.clone(),backup:self.backup.get().cloned().or_else(||self.info.backup.clone())}}
+}
+
+// Back up raw source bytes, not a sanitized re-encoding. Failure never replaces the original.
+fn backup_quarantine(path:&Path)->std::io::Result<PathBuf> {
+    let parent=path.parent().filter(|p|!p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    // Same private0600/exclusive tempfile mechanism as durable workspace replacement.
+    let mut backup=tempfile::Builder::new().prefix("workspace.quarantine-").suffix(".json").tempfile_in(parent)?;
+    std::io::copy(&mut std::fs::File::open(path)?,&mut backup)?;
+    backup.as_file().sync_all()?;
+    // The exclusive final pathname already exists; keep only disarms tempfile cleanup.
+    // If the directory barrier fails, the guard removes our copy and the original is untouched.
+    std::fs::File::open(parent)?.sync_all()?;
+    let (_file,backup)=backup.keep().map_err(|error|error.error)?;
+    Ok(backup)
 }
 
 /// In-process durable writer injection for deterministic fault/latency harnesses, not a wire API.
@@ -199,21 +237,42 @@ pub struct Store {
     writer: DurableWriter,
     // Copied into dispatched writers: a late replace must fence replacement core startup.
     lifetime:Option<std::sync::Arc<std::fs::File>>,
+    recovery:Option<std::sync::Arc<Recovery>>,
 }
 
 impl Store {
     pub fn in_memory() -> Store {
-        Store { rev: 0, next_txn: 1, entries: std::sync::Arc::new(BTreeMap::new()), history: std::sync::Arc::new(History::default()), path: None, writer: std::sync::Arc::new(write_atomic), lifetime:None }
+        Store { rev: 0, next_txn: 1, entries: std::sync::Arc::new(BTreeMap::new()), history: std::sync::Arc::new(History::default()), path: None, writer: std::sync::Arc::new(write_atomic), lifetime:None,recovery:None }
     }
 
     /// Load from a file, or start empty if it does not exist.
     pub fn open(path: PathBuf) -> anyhow::Result<Store> {
-        let p: Persisted = match std::fs::File::open(&path) {
+        let mut p: Persisted = match std::fs::File::open(&path) {
             Ok(file) => serde_json::from_reader(std::io::BufReader::new(file))?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Persisted { next_txn: 1, ..Default::default() },
             Err(e) => return Err(e.into()),
         };
-        Ok(Store { rev: p.rev, next_txn: p.next_txn.max(1), entries: std::sync::Arc::new(p.entries), history: std::sync::Arc::new(p.history), path: Some(path), writer: std::sync::Arc::new(write_atomic), lifetime:None })
+        let quarantined=p.entries.iter().filter(|(_,entry)|entry.depth_quarantined).map(|(key,_)|key.clone()).collect::<Vec<_>>();
+        let panel=json!({"kind":"panel","title":"Quarantined view","items":[{"type":"text","style":"warn","text":"Unsafe legacy JSON quarantined. Use recovery commands to repair this view/layout; original data is preserved."}]});
+        let mut recovery_view=String::from("prim-depth-quarantine");
+        if quarantined.iter().any(|key|key.starts_with("layout/")) {
+            while p.entries.contains_key(&format!("view/{recovery_view}")) {recovery_view.push('-');}
+            p.entries.insert(format!("view/{recovery_view}"),std::sync::Arc::new(Entry {version:p.rev.max(1),value:panel.clone(),depth_quarantined:false}));
+        }
+        for key in &quarantined {
+            // Keep dependent healthy layouts/active selections valid, without interpreting an
+            // unsafe tree. Only the quarantined declaration becomes a recovery placeholder.
+            let replacement=if key.starts_with("view/") {Some(panel.clone())} else if key.starts_with("layout/") {Some(json!({"view":recovery_view}))} else {None};
+            if let Some(value)=replacement {let version=p.entries[key].version;p.entries.insert(key.clone(),std::sync::Arc::new(Entry {version,value,depth_quarantined:false}));} else {p.entries.remove(key);}
+        }
+        let unsafe_history=p.history.depth_quarantined;
+        let recovery=if !quarantined.is_empty() || unsafe_history>0 {
+            let keys=quarantined.iter().take(5).map(|key|key.chars().take(120).collect::<String>()).collect::<Vec<_>>().join(", ");
+            let note=format!("Recovered over-deep JSON: {} entries quarantined ({keys}); {unsafe_history} unsafe undo records disabled. Other entries are unchanged. Repair affected layouts with recovery commands if necessary.",quarantined.len());
+            eprintln!("prim: {note}");
+            Some(std::sync::Arc::new(Recovery {info:RecoveryInfo {note,backup:None},preserve_source:true,backup:Default::default()}))
+        } else {p.recovery.map(|info|std::sync::Arc::new(Recovery {info,preserve_source:false,backup:Default::default()}))};
+        Ok(Store { rev: p.rev, next_txn: p.next_txn.max(1), entries: std::sync::Arc::new(p.entries), history: std::sync::Arc::new(p.history), path: Some(path), writer: std::sync::Arc::new(write_atomic), lifetime:None,recovery })
     }
 
     /// Acquire before reading state; blocking writers retain the same process-held lock.
@@ -236,7 +295,7 @@ impl Store {
 
     /// O(1) immutable committed-state copy. Only the serialized committer may persist it.
     pub(crate) fn committed_copy(&self) -> Self {
-        Self { rev:self.rev, next_txn:self.next_txn, entries:self.entries.clone(), history:self.history.clone(), path:self.path.clone(), writer:self.writer.clone(), lifetime:self.lifetime.clone() }
+        Self { rev:self.rev, next_txn:self.next_txn, entries:self.entries.clone(), history:self.history.clone(), path:self.path.clone(), writer:self.writer.clone(), lifetime:self.lifetime.clone(),recovery:self.recovery.clone() }
     }
 
     pub(crate) fn transaction(&self, id:u64) -> Option<&Txn> { self.history.txns.iter().find(|t| t.id == id).map(|txn|txn.as_ref()) }
@@ -254,6 +313,9 @@ impl Store {
     pub(crate) fn shared_entries(&self)->std::sync::Arc<Entries> {self.entries.clone()}
 
     pub fn admission_notice(&self) -> Option<&'static str> {Self::entries_notice(&self.entries)}
+    pub(crate) fn recovery_notice(&self)->Option<String> {self.recovery.as_ref().map(|recovery| {
+        let info=recovery.persisted();match info.backup {Some(path)=>format!("{} Raw source backup: {}",info.note,path.display()),None=>format!("{} Original workspace retained; a raw quarantine backup is required before the next write.",info.note)}
+    })}
 
     pub(crate) fn entries_notice(entries:&Entries)->Option<&'static str> {
         (crate::limits::encoded_bytes(entries) > crate::limits::WORKSPACE_BYTES ||
@@ -310,7 +372,7 @@ impl Store {
                 Op::Set { value, .. } => {
                     validate_entry(&key, &value)?;
                     rev += 1;
-                    next.insert(key, std::sync::Arc::new(Entry { version: rev, value }));
+                    next.insert(key, std::sync::Arc::new(Entry { version: rev, value,depth_quarantined:false }));
                 }
                 Op::Delete { .. } => {
                     next.remove(&key);
@@ -337,8 +399,17 @@ impl Store {
             .map(|(key, before)| Change { after_version: next.get(&key).map(|entry|entry.version), key, before })
             .filter(|change| change.before.as_ref().map(|entry|entry.version) != change.after_version)
             .collect();
-        let txn = retained_txn(Txn { id: self.next_txn, author: author.to_string(), on_behalf_of:on_behalf_of.map(String::from), at_ms: now_ms(), note, reverts, changes, undoable:true, encoded_bytes:0, revert_bytes:0 },false)?;
-        let mut candidate = Persisted { rev, next_txn: self.next_txn + 1, entries: next, history: self.history.as_ref().clone() };
+        let txn = retained_txn(Txn { id: self.next_txn, author: author.to_string(), on_behalf_of:on_behalf_of.map(String::from), at_ms: now_ms(), note, reverts, changes, undoable:true, encoded_bytes:0, revert_bytes:0,depth_quarantined:false },false)?;
+        if let (Some(recovery),Some(path))=(&self.recovery,&self.path) {
+            if recovery.preserve_source && recovery.backup.get().is_none() {
+                let backup=backup_quarantine(path).map_err(|error| {
+                    let mut error=RpcError::new("io",format!("quarantine backup failed; original workspace retained, write not applied: {error}"));
+                    error.data.as_mut().unwrap()["outcome"]=json!("rejected");error
+                })?;
+                let _=recovery.backup.set(backup);
+            }
+        }
+        let mut candidate = Persisted { rev, next_txn: self.next_txn + 1, entries: next, history: self.history.as_ref().clone(),recovery:self.recovery.as_ref().map(|r|r.persisted()) };
         candidate.history.push(txn.clone());
         let mut uncertain = None;
         if let Some(path) = &self.path {
@@ -464,6 +535,7 @@ fn invalid(key: &str, why: &str) -> RpcError {
 }
 
 fn validate_entry(key: &str, v: &Value) -> Result<(), RpcError> {
+    crate::limits::json_depth(v,crate::limits::JSON_DEPTH)?;
     let (ns, name) = key.split_once('/').ok_or_else(|| invalid(key, "keys look like <namespace>/<name>"))?;
     if name.is_empty() {
         return Err(invalid(key, "empty name"));
@@ -615,6 +687,24 @@ mod tests {
 
     fn set(key: &str, value: Value) -> Op {
         Op::Set { key: key.into(), value, expect: None }
+    }
+
+    #[test]
+    fn recovery_backup_precedes_write_and_survives_a_discarded_writer_snapshot() {
+        let root=tempfile::tempdir().unwrap();let path=root.path().join("workspace.json");
+        let original=format!(r#"{{"rev":2,"next_txn":2,"entries":{{"doc/deep":{{"version":2,"value":{}0{}}}}},"history":[]}}"#,"[".repeat(123),"]".repeat(123));
+        std::fs::write(&path,&original).unwrap();let mut store=Store::open(path.clone()).unwrap();
+        let mut no_backup=store.committed_copy();no_backup.path=Some(root.path().join("missing/workspace.json"));
+        no_backup.writer=std::sync::Arc::new(|_,_|panic!("writer reached without raw source backup"));
+        let error=no_backup.apply("user",None,vec![set("doc/new",json!(1))]).unwrap_err();assert_eq!(error.data.unwrap()["outcome"],"rejected");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(),original);
+        let mut failed=store.committed_copy();
+        failed.writer=std::sync::Arc::new(|_,_|Err(AtomicWriteError {renamed:false,source:std::io::Error::other("injected pre-rename failure")}));
+        assert!(failed.apply("user",None,vec![set("doc/new",json!(1))]).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(),original);drop(failed);
+        store.apply("user",None,vec![set("doc/new",json!(2))]).unwrap();
+        let backups=std::fs::read_dir(root.path()).unwrap().filter_map(|entry|{let path=entry.unwrap().path();path.file_name().unwrap().to_string_lossy().starts_with("workspace.quarantine-").then_some(path)}).collect::<Vec<_>>();
+        assert_eq!(backups.len(),1,"discarded commits do not recopy the same raw original");assert_eq!(std::fs::read_to_string(&backups[0]).unwrap(),original);
     }
 
     #[test]

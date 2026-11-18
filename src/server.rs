@@ -425,6 +425,7 @@ fn attribution(core: &Shared, conn: &Conn, proof: Option<String>) -> Result<crat
 }
 
 async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> RpcResult {
+    crate::limits::json_depth(&p,crate::limits::MESSAGE_DEPTH)?;
     if conn.peer.is_closed() { return Err(provider::rejected("disconnected", "connection closed before dispatch")); }
     if core.lock().unwrap().shutdown.is_requested() && method != "core.shutdown" && !(method == "command.invoke" && p["name"] == "prim.shutdown") {
         return Err(provider::rejected("unavailable", "core is shutting down; not dispatched"));
@@ -564,6 +565,7 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> Rp
         "ui.notify" => {
             // A transient message for every client (toast). Not state.
             let text = p.get("text").and_then(|t| t.as_str()).ok_or_else(|| RpcError::invalid("needs `text`"))?.to_string();
+            if let Some(style)=p.get("style") {crate::limits::json_depth(style,crate::limits::JSON_DEPTH)?;}
             let mut c = core.lock().unwrap();
             c.emit("notify", json!({"text": text, "style": p.get("style"), "author": conn.author()}));
             Ok(json!({"outcome": "dispatched"}))
@@ -574,6 +576,7 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> Rp
             if !content.is_null() && !content.is_object() {
                 return Err(RpcError::invalid("`content` is an object, or null to clear"));
             }
+            crate::limits::json_depth(&content,crate::limits::JSON_DEPTH)?;
             let next = if content.is_null() { 0 } else { crate::limits::encoded_bytes(&(&view, &content)) };
             let author=conn.author();
             let mut c = core.lock().unwrap();
@@ -947,6 +950,7 @@ pub async fn invoke(core: &Shared, author: &str, name: &str, args: Value) -> Rpc
 }
 
 async fn invoke_deadline(core: &Shared, author: &str, context: crate::invocation::Context, name: &str, args: Value, deadline_ms: Option<u64>) -> RpcResult {
+    crate::limits::json_depth(&args,crate::limits::JSON_DEPTH)?;
     let deadline = provider::deadline(deadline_ms)?;
     let arg = |k: &str| args.get(k).cloned().unwrap_or(Value::Null);
     match name {

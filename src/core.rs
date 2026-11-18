@@ -52,8 +52,13 @@ pub struct CapturedSnapshot {
     providers:BTreeMap<String,Arc<Value>>,adapters:BTreeMap<String,Arc<Value>>,live:BTreeMap<String,Arc<Value>>,
 }
 impl CapturedSnapshot {
+    fn add_entry_notice(&mut self) {
+        if let Some(notice)=Store::entries_notice(&self.entries) {
+            self.header["recovery_notice"]=json!(match self.header["recovery_notice"].as_str() {Some(existing)=>format!("{existing}; {notice}"),None=>notice.to_string()});
+        }
+    }
     pub fn into_value(mut self)->Value {
-        self.header["recovery_notice"]=json!(Store::entries_notice(&self.entries));
+        self.add_entry_notice();
         serde_json::to_value(self).expect("snapshot JSON")
     }
     pub fn into_value_limited(mut self,limit:usize)->Result<Value,RpcError> {
@@ -65,7 +70,7 @@ impl CapturedSnapshot {
             }
             fn flush(&mut self)->std::io::Result<()> {Ok(())}
         }
-        self.header["recovery_notice"]=json!(Store::entries_notice(&self.entries));
+        self.add_entry_notice();
         let mut budget=Budget(limit);
         serde_json::to_writer(&mut budget,&self).map_err(|_|provider::rejected("too_large","snapshot exceeds this connection recovery envelope"))?;
         Ok(serde_json::to_value(self).expect("snapshot JSON"))
@@ -260,7 +265,7 @@ impl Core {
 
     pub fn capture_snapshot(&self)->CapturedSnapshot {
         CapturedSnapshot {
-            header:json!({"epoch":self.epoch,"seq":self.seq,
+            header:json!({"epoch":self.epoch,"seq":self.seq,"recovery_notice":self.store.recovery_notice(),
                 "commands":self.commands.values().map(|c|c.to_json()).collect::<Vec<_>>(),
                 "extensions":self.exts.keys().map(|n|(n.clone(),self.extension_state(n))).collect::<BTreeMap<_,_>>(),
                 "backend_notice":self.backend_notice(),"safe_mode":self.safe_mode,"safe_mode_allow":self.safe_mode_allow,"provider_extensions":self.provider_extensions}),
@@ -476,6 +481,7 @@ impl Core {
 
     pub fn install_provider(&mut self, handle: AdapterHandle, default: bool, may_default: bool) -> Result<u64, RpcError> {
         let name = handle.name.clone();
+        crate::limits::json_depth(&handle.capabilities,crate::limits::JSON_DEPTH)?;
         if name.is_empty() || name.len() > 128 || crate::resource_admission::encoded_bytes(&handle.capabilities) > 128 * 1024 {
             return Err(provider::rejected("overloaded", format!("provider {name}: name/registration metadata exceeds admission limits")));
         }
@@ -592,7 +598,8 @@ impl Core {
             AdapterEvent::Consumed(ack) => { let _ = ack.send(()); }
             AdapterEvent::Registered(info) => {
                 let capabilities = &self.providers[name].handle.capabilities;
-                if info.connection == 0 || info.instance.is_empty() || info.instance.len() > 256
+                if crate::limits::json_depth(&info.software,crate::limits::JSON_DEPTH).is_err()
+                    || info.connection == 0 || info.instance.is_empty() || info.instance.len() > 256
                     || crate::resource_admission::encoded_bytes(&json!({"name":name,"instance":info.instance,"software":info.software,"capabilities":capabilities})) > 128 * 1024
                     || !matches!(info.role.as_str(), "backend" | "runtime")
                     || !info.software["name"].is_string() || !info.software["version"].is_string()

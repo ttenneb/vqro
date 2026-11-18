@@ -27,6 +27,7 @@ const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STA
 fn invalid(message: impl Into<String>) -> RpcError { RpcError::invalid(message) }
 fn overloaded(message: impl Into<String>) -> RpcError { provider::rejected("overloaded", message) }
 fn reason(value: &Value) -> Result<Value, RpcError> {
+    crate::limits::json_depth(value,crate::limits::JSON_DEPTH)?;
     if value.is_object() && value["reason"].is_string() { Ok(value.clone()) } else { Err(invalid("reason must be an object with a string reason")) }
 }
 
@@ -65,6 +66,7 @@ struct WireFacts {
 }
 fn empty_object() -> Value { json!({}) }
 pub fn parse_facts(value: Value) -> Result<ResourceFacts, RpcError> {
+    crate::limits::json_depth(&value,crate::limits::JSON_DEPTH)?;
     if encoded_bytes(&value) > MAX_FACT_BYTES { return Err(overloaded("whole facts record exceeds 128 KiB")); }
     let f: WireFacts = params(value)?;
     let facts = ResourceFacts { backend_ref: f.reference, incarnation: f.incarnation, kind: f.kind, state: f.state,
@@ -157,6 +159,7 @@ impl Connection {
         let _slot=gate.try_acquire_owned().map_err(|_|overloaded("registration concurrency limit reached; retry later"))?;
         if !self.hello.load(Ordering::Acquire) { return Err(invalid("hello must precede provider.register")); }
         if self.is_provider() { return Err(RpcError::new("conflict", "one registration per connection")); }
+        crate::limits::json_depth(&p,crate::limits::JSON_DEPTH)?;
         if encoded_bytes(&p) > MAX_REGISTRATION_BYTES { return Err(overloaded("registration exceeds 128 KiB")); }
         let r: Registration = params(p)?;
         if r.name.is_empty() || r.name.len() > 128 || r.instance.is_empty() || r.instance.len() > 256
@@ -223,6 +226,7 @@ impl Connection {
         provider.sync(core, p)
     }
     pub fn notification(&self, core: &Shared, method: &str, p: Value) -> Result<(), RpcError> {
+        crate::limits::json_depth(&p,crate::limits::MESSAGE_DEPTH)?;
         let provider = if method == "resource.gone" {
             // Peer EOF can disable execution routes before connection() drains
             // complete accepted records. Retirement is monotonic, but must still
@@ -358,6 +362,7 @@ impl WireProvider {
                 self.end(id, method == "stream.gap", why, false);
             }
             "stream.error" => {
+                crate::limits::json_depth(&p["error"],crate::limits::JSON_DEPTH)?;
                 if p["outcome"] != "rejected" || !p["error"]["kind"].is_string() || !p["error"]["message"].is_string() { return Err(invalid("stream.error requires rejected and error kind/message")); }
                 let streams = self.streams.lock().unwrap();
                 let Some(stream) = streams.get(&id) else { return Ok(()) };
