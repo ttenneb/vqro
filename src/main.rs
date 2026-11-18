@@ -54,12 +54,12 @@ async fn run() -> Result<()> {
         }
         Cmd::Stop => stop().await,
         Cmd::Status => {
-            match client::connect(&paths::socket_path()?, "cli").await {
+            match connect_cli().await {
                 Ok((peer, _, hello)) => {
                     writeln!(std::io::stdout(), "running: {hello}")?;
                     let mine = client::build_stamp();
-                    if let Ok(list) = peer.call("client.list", serde_json::Value::Null).await {
-                        for c in list["clients"].as_array().into_iter().flatten() {
+                    match peer.call_with_timeout("client.list", Value::Null, std::time::Duration::from_secs(2)).await {
+                        Ok(list) => for c in list["clients"].as_array().into_iter().flatten() {
                             if c["client"] == "cli" {
                                 continue;
                             }
@@ -69,9 +69,11 @@ async fn run() -> Result<()> {
                                 _ => "",
                             };
                             writeln!(std::io::stdout(), "client: {} {}{}", c["author"].as_str().unwrap_or("?"), c["version"].as_str().unwrap_or(""), stale)?;
-                        }
+                        },
+                        Err(e) => writeln!(std::io::stderr(), "client list unavailable: {e}")?,
                     }
                 }
+                Err(e) if e.downcast_ref::<prim::rpc::RpcError>().is_some() => writeln!(std::io::stdout(), "core status unavailable ({e})")?,
                 Err(e) => writeln!(std::io::stdout(), "not running ({e})")?,
             }
             Ok(())
@@ -87,9 +89,18 @@ async fn run() -> Result<()> {
     }
 }
 
+async fn connect_cli() -> Result<(prim::rpc::Peer, prim::rpc::IncomingReceiver, Value)> {
+    let socket = paths::socket_path()?;
+    tokio::time::timeout(std::time::Duration::from_secs(2), client::connect(&socket, "cli")).await
+        .map_err(|_| prim::rpc::RpcError::new("timeout", "core hello deadline expired"))?
+}
+
 async fn call(method: &str, params: Value) -> Result<()> {
-    let (peer, _incoming, _) = client::connect(&paths::socket_path()?, "cli").await?;
-    match peer.call(method, params).await {
+    let (peer, _incoming, _) = connect_cli().await?;
+    // Snapshot recovery is read-only and should report promptly. Keep the existing
+    // deadline for arbitrary commands/effects; never replay an uncertain request.
+    let deadline = if method == "workspace.snapshot" { std::time::Duration::from_secs(5) } else { prim::rpc::DEFAULT_CALL_TIMEOUT };
+    match peer.call_with_timeout(method, params, deadline).await {
         Ok(v) => {
             writeln!(std::io::stdout(), "{}", serde_json::to_string_pretty(&v)?)?;
             Ok(())

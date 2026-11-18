@@ -136,6 +136,21 @@ returned without state changes. Oversized snapshots stop limited encoding before
 Cancelling a receipt does not free a slot while its blocking construction still runs. No cursor is fabricated:
 clients use the captured sequence and replay subsequent events normally.
 
+The TUI treats snapshot `overloaded`, `unavailable`, and `timeout` as temporary, including startup, reconnect and
+post-install re-exec. Each snapshot attempt has a 5 s local deadline. On refusal, startup opens the built-in recovery
+surface; an existing UI retains its last good workspace and terminal streams instead of disconnecting/reattaching.
+A persistent `core busy` badge remains through bounded, jittered exponential backoff (0.5–3 s), until a snapshot
+succeeds or the user quits. This is a cap on each delay, not a finite retry count that eventually exits the TUI.
+Only read-only snapshots retry; terminal input, commands and effects are never replayed. Events while waiting are
+subsumed by the next snapshot; in-flight deltas still use the captured epoch/sequence fence. Retry deadlines cannot
+be postponed by incoming event traffic, and keys/recovery remain responsive. `too_large` keeps its separate explicit
+recovery path; other failures still use normal error/disconnection handling.
+
+CLI diagnostics do not silently retry refusals. `prim status`/`call` allow 2 s for connection/hello; status allows
+2 s for its optional client list and reports its failure rather than swallowing it. `prim call workspace.snapshot`
+has a 5 s request deadline; arbitrary calls/commands retain the existing 60 s request deadline. A timeout reports
+what is known, never permission to replay a command/effect.
+
 ## Size admission and recovery
 
 Writes reject growth above **1 MiB per encoded workspace entry** (key/version/value), **16 MiB total entries**,

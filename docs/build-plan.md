@@ -260,6 +260,15 @@ written the same way was contained by the crash budget and removed with one reve
   mixed version/deleted-value races. Regressions preserve concurrent tabs and never replay spawn/unknown effects.
 - Policy/evidence and historical-cause limitation: `research/soak4-p3.md`.
 
+## Snapshot admission must not close recovery UI (2026-11-18)
+
+- Startup/reconnect/post-install re-exec now open responsive built-in recovery on temporary snapshot refusal.
+  Read-only snapshot retries use a5s attempt deadline and capped jittered backoff with a persistent core-busy badge.
+- Resync keeps the peer, terminal streams and last workspace; events remain fenced, and event traffic cannot
+  starve the retry deadline. CLI diagnostics report refusals/deadlines without replaying requests.
+- Red/green, real3MB/6-caller startup repro and physical private replacement/re-exec evidence:
+  `research/tui-startup-busy.md`.
+
 ## Known gaps found while building
 
 - **History churn:** extensions that refresh views on every event (the sidebar on status changes) fill the
