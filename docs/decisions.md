@@ -360,3 +360,18 @@ cooperative coordination, every effect records its caller.
 intent, not the writer process, decides whose change it is. The human wants agents to drive the workspace fully.
 **Consequences.** Command invocations carry who started them through to the extension's writes, so history can
 attribute them; the mechanism is generic (any extension). Open question 6 (workspace authority) is answered.
+
+## D25. Apache-2.0 for original prim material; DCO contributions (2026-11-18, CONFIRMED)
+
+**Decision.** The core, bundled extensions, SDKs and protocol specifications, like all original prim material,
+use Apache-2.0. Contributions use DCO 1.1 sign-off, not a CLA. The project distinguishes itself through its
+name/branding, official builds and maintained extension repository, not copyright restrictions beyond Apache-2.0.
+No trademark licence, registered-mark claim or invented distribution/repository URL is implied.
+**Why.** The human chose a single permissive licence for the whole project and low-friction, accountable
+contributions. Nothing is being published by this change.
+**Consequences.** Root LICENSE is the approved standard text (byte-identical to herdr's LICENSE); NOTICE identifies
+Bennett Garcia. Bundled manifests/Cargo declare the established author/licence. Third-party terms remain their
+own: an offline SPDX policy check covers all Cargo metadata packages; generated notices cover normal/build
+packages for the five installed Linux/macOS/Windows check targets. Original notices are retained; missing archive
+texts use clearly labelled standard text with actual declared metadata, never invented copyright holders.
+The explicit dependency allowlist is documented in CONTRIBUTING.md; changes require maintainer approval.

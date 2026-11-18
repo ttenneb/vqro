@@ -1,5 +1,5 @@
 {
-  "name":"agents", "title":"Agent controls", "version":"0.1.0", "kind":"interface",
+  "name":"agents", "title":"Agent controls", "version":"0.1.0", "license":"Apache-2.0", "author":"Bennett Garcia", "kind":"interface",
   "summary":"Inspect agents and use the operations their runtimes expose.",
   "description":"Builds agent lists and live panels for prompts, steering, queues, requests and transcripts, using each runtime's advertised capabilities. It does not launch Pi itself. Turn it off to lose these controls and panels; backend-owned agents and their bridges keep running.",
   "requires":{"protocol":1,"client_features":["items","chips","input","menu"]},

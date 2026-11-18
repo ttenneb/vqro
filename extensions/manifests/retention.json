@@ -2,6 +2,8 @@
  "name": "retention",
  "title": "Finished resource retention",
  "version": "0.1.0",
+ "license": "Apache-2.0",
+ "author": "Bennett Garcia",
  "kind": "management",
  "summary": "Forgets finished terminals once no layout shows them, so ended programs don't accumulate.",
  "description": "A finished terminal stays while a layout shows it. When its last view closes (or Close ended tabs runs) it is forgotten 60 seconds later, unless undo shows it again first: the backend releases it and its id is retired, irreversibly. Finished terminals that were never shown keep the newest 64 for the sidebar's ended items; older ones are forgotten. Live programs are never touched. Only for backends declaring resource.forget (herdr, tmux). retention.forget_ended forgets every unshown finished terminal at once. Turn it off to keep every finished terminal.",

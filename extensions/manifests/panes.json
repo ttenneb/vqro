@@ -1,5 +1,5 @@
 {
-  "name":"panes", "title":"Panes", "version":"0.1.0", "kind":"interface",
+  "name":"panes", "title":"Panes", "version":"0.1.0", "license":"Apache-2.0", "author":"Bennett Garcia", "kind":"interface",
   "summary":"Split, rename and close panes, or choose what they show.",
   "description":"Adds pane layout commands and menus, including splitting with a new shell and showing another resource. Closing a pane leaves its program running; Kill program is a separate action. Turn this off to lose these pane commands and shortcuts, not the programs or the built-in recovery controls.",
   "requires":{"protocol":1},

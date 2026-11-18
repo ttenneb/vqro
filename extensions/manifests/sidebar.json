@@ -1,5 +1,5 @@
 {
-  "name":"sidebar", "title":"Sidebar", "version":"0.1.0", "kind":"interface",
+  "name":"sidebar", "title":"Sidebar", "version":"0.1.0", "license":"Apache-2.0", "author":"Bennett Garcia", "kind":"interface",
   "summary":"Browse terminals, agents and workspace activity.",
   "description":"Publishes the live sidebar, resource status, workspace groups and filtering controls. It can show a resource in a tab or explicitly kill a terminal program. Turn it off to lose live sidebar content and its controls; saved layouts and backend-owned programs remain.",
   "requires":{"protocol":1,"client_features":["items","tree","chips","menu"]},

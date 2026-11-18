@@ -1,5 +1,5 @@
 {
-  "name":"settings", "title":"Settings", "version":"0.1.0", "kind":"interface",
+  "name":"settings", "title":"Settings", "version":"0.1.0", "license":"Apache-2.0", "author":"Bennett Garcia", "kind":"interface",
   "summary":"Browse extensions and configure the workspace interface.",
   "description":"Provides the Settings page for extensions, interface options, themes, icons and keys. Turning it off also stops this page; use the prim badge or command palette to enable it again. Built-in recovery remains available with every extension disabled.",
   "requires":{"protocol":1,"client_features":["items","pages","menu","input","tree"]},

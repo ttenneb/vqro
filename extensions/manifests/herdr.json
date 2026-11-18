@@ -1,5 +1,5 @@
 {
-  "name":"herdr", "title":"herdr-core backend", "version":"0.1.0", "kind":"provider",
+  "name":"herdr", "title":"herdr-core backend", "version":"0.1.0", "license":"Apache-2.0", "author":"Bennett Garcia", "kind":"provider",
   "summary":"Connect prim to terminals owned by herdr-core.",
   "description":"Runs prim-herdr, the default backend provider, using configured HC arguments or hc connect. It inventories terminals and forwards supported operations and streams. Turn it off to disconnect these resources from prim; their programs remain owned by herdr-core. Another backend must be selected explicitly for new unnamed spawns if this is the declared default.",
   "requires":{"protocol":1},

@@ -1,5 +1,5 @@
 {
-  "name":"icons", "title":"Icons", "version":"0.1.0", "kind":"interface",
+  "name":"icons", "title":"Icons", "version":"0.1.0", "license":"Apache-2.0", "author":"Bennett Garcia", "kind":"interface",
   "summary":"Choose named icon sets for workspace chrome.",
   "description":"Publishes icon sets and saves the chosen name-to-glyph map for clients to render. Turn it off to lose the icon catalogue and apply command; the saved icon set remains. Font support and glyph width are client concerns, and safe mode ignores the set.",
   "requires":{"protocol":1},

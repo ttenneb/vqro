@@ -1,5 +1,5 @@
 {
-  "name":"tmux", "title":"tmux backend", "version":"0.1.0", "kind":"provider",
+  "name":"tmux", "title":"tmux backend", "version":"0.1.0", "license":"Apache-2.0", "author":"Bennett Garcia", "kind":"provider",
   "summary":"Use a separate prim-owned tmux server as a terminal backend.",
   "description":"Runs prim-tmux and exposes its terminals as resources. It is off by default and never attaches to your ordinary tmux server unless explicitly configured. Turning it off disconnects the provider, not the owned server or its programs. Use the separate confirmed server-stop action to end that server and its terminals.",
   "requires":{"protocol":1},

@@ -1,5 +1,5 @@
 {
-  "name":"keys", "title":"Keymap profiles", "version":"0.1.0", "kind":"interface",
+  "name":"keys", "title":"Keymap profiles", "version":"0.1.0", "license":"Apache-2.0", "author":"Bennett Garcia", "kind":"interface",
   "summary":"Apply prim, tmux-style or screen-style prefix bindings.",
   "description":"Contributes profile bindings that override extension shortcuts and can change the saved prefix. Turn it off to stop applying its bindings; the saved prefix and other extensions' bindings remain. The prim badge and built-in recovery actions do not depend on this extension.",
   "requires":{"protocol":1},

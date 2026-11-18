@@ -1,5 +1,5 @@
 {
-  "name":"tabs", "title":"Tabs", "version":"0.1.0", "kind":"interface",
+  "name":"tabs", "title":"Tabs", "version":"0.1.0", "license":"Apache-2.0", "author":"Bennett Garcia", "kind":"interface",
   "summary":"Open, rename and close tabs without ending their programs.",
   "description":"Adds shell tabs and lets you show an existing resource or view in a tab. Closing a tab only changes the layout: its programs keep running. Turn this off to remove these tab commands, menus and shortcuts; existing layouts and terminals remain.",
   "requires":{"protocol":1},

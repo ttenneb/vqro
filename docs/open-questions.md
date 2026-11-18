@@ -23,8 +23,9 @@ Close a question by linking the decision, commit or experiment that answered it.
     concern; core IDs must support it.
 12. **Glyph widths.** Nerd Font and emoji widths vary by terminal and font; icon sets declare a width, but some
     terminals may still draw wider.
-13. **Licensing and terms** (human considering, 2026-11-17; nothing pushed), for Legal Counsel: pi_agent_rust's rider, Rex third-party-client terms, automating
-    Claude Code, and prim's own licence before publishing.
+13. **External runtime/backend terms** (not changed by D25), for Legal Counsel: pi_agent_rust's rider,
+    Rex third-party-client terms and automating Claude Code. Prim's own original-material licence is decided:
+    Apache-2.0 with DCO sign-off/no CLA (D25); this does not relicense third parties. Nothing is published here.
 16. **Unit of configuration for hosts.** One provider extension entry per host (`herdr@rohan`), as proposed, or one
     provider managing several hosts?
 
@@ -35,6 +36,7 @@ Close a question by linking the decision, commit or experiment that answered it.
   protocol change (input still accepted on a stream closed for slow output) is backlogged.
 
 ## Answered (kept for the record)
+- **Prim's own licence/contributions:** Apache-2.0 throughout original material; DCO sign-off, no CLA (D25).
 - **Undo of extension-made changes:** user-started extension writes count as the user's (D24).
 - **Workspace authority:** agents may change anything; cooperative, no grants for now (D24, D8).
 - **Second backend:** tmux, built as `prim-tmux` (provider-v0, private prim-owned server).

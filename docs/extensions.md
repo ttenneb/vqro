@@ -61,7 +61,9 @@ Example:
 Only `name` is required; it must match the declaration's name. All other fields are optional, unknown fields are
 preserved for future clients and ignored by the current catalogue. Use accurate plain language, a one-line
 summary, and a short description that explains the consequences of disabling it. Do not invent authors, licenses
-or versions. Bundled manifests use the package version; author/license/homepage are omitted where not established.
+or versions. Bundled manifests use the package version and the established author `Bennett Garcia` and licence
+`Apache-2.0`; no homepage/repository URL is invented. Other extension authors declare their own actual metadata.
+The bundled extension code and SDKs share the root Apache-2.0 licence; third-party extensions retain their own terms.
 Kinds are open text categories (`provider`, `runtime`, `interface`, `management`, ...), not permissions.
 
 `requires` and `contributes` are descriptive metadata today, **not** dependency solving, capability authority or

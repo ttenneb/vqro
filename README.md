@@ -7,6 +7,14 @@ the same primitives to build and change their agent workspace; coordination is w
 Status: **a working prototype, and fluid.** It is usable daily over herdr-core, but protocols, extension APIs and
 UI will keep changing as we learn (`docs/roadmap.md` for direction, `docs/build-plan.md` for the build log).
 
+## Licence and contributions
+
+All original prim material—core, bundled extensions, SDKs, documentation and protocol specifications—is licensed
+under **Apache-2.0**. See [LICENSE](LICENSE) and [NOTICE](NOTICE). Dependencies and other third-party material keep
+their own terms; [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) is the offline-generated Cargo notice inventory.
+Contributions use [DCO sign-off, no CLA](CONTRIBUTING.md). Apache-2.0 grants no trademark rights: the prim
+name/branding, official builds and maintained extension repository identify the project, not every modified build.
+
 ## Install and run
 
 ```sh

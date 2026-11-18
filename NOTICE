@@ -1,0 +1,8 @@
+prim
+Copyright 2026 Bennett Garcia
+
+Original prim material is licensed under the Apache License, Version 2.0.
+Third-party material retains its own terms. See THIRD_PARTY_LICENSES.md for
+resolved Cargo dependency licence declarations, original notices and labelled
+standard-text fallbacks. The DCO certificate in CONTRIBUTING.md retains its
+verbatim-copy terms.
