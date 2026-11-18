@@ -114,6 +114,22 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(ext.entries,before,"formatting never rewrites settings/bindings")
         self.assertEqual(module["norm_key"]("Ctrl-Shift-Left"),"C-S-Left")
 
+    def test_failed_budget_keeps_cause_time_total_and_explicit_restart(self):
+        module=load();ext=module["ext"]
+        at=1760000000000
+        ext.states["broken"].update(status="failed",crashes=0,crashes_total=3,crash_window_seconds=300,
+            failure={"kind":"crash_budget","at_ms":at,"reason":"3 exits in 300 seconds","crashes":3,"window_seconds":300},
+            last_exits=[{"at_ms":at-i*1000,"reason":f"exit-{i}"} for i in range(3)])
+        groups=module["ext_rows"](ext.states,set())
+        row=next(r for group in groups for r in group["children"] if r["id"]=="extension/broken")
+        details=str(row["detail_panel"])
+        for text in ("Recent crashes (last 300 s): 0","Total crashes this supervision: 3","At failure: 3 exits",
+                     module["time_text"](at),"exit-2","Stopped until explicitly restarted","built-in failed/recover"):
+            self.assertIn(text,details)
+        action=next(c for c in row["detail_panel"]["toolbar"][0]["chips"] if c["command"]=="prim.extension.restart")
+        self.assertEqual(action["args"],{"name":"broken"})
+        self.assertFalse(action["disabled"])
+
     def test_builtins_have_complete_readable_manifests(self):
         import json
         root=Path(__file__).resolve().parents[1]/"extensions"

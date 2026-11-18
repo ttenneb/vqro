@@ -13,6 +13,7 @@ same static manifest and runtime facts; built-in recovery can enable settings ag
 """
 import os
 import sys
+import time
 import unicodedata
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -99,6 +100,15 @@ def info_row(text, style=None):
     return {"type": "text", "text": label(text, 8192), "wrap": True, "focusable": True, "style": style}
 
 
+def time_text(at_ms):
+    if at_ms is None:
+        return "unknown time"
+    try:
+        return time.strftime("%Y-%m-%d %H:%M:%S %Z", time.localtime(at_ms / 1000))
+    except (TypeError, ValueError, OverflowError, OSError):
+        return str(at_ms)
+
+
 def ext_rows(states, commands=None):
     """All declarations follow the same manifest-driven list/detail contract, including this extension."""
     commands = commands or set()
@@ -130,8 +140,16 @@ def ext_rows(states, commands=None):
                    info_row(f"Recent crashes (last {state.get('crash_window_seconds', 300)} s): {state.get('crashes', 0)}"),
                    info_row(f"Total crashes this supervision: {state.get('crashes_total', 'unavailable')}"),
                    info_row("Total is for this declaration in this core; removal or core restart resets it.", "dim"),
-                   info_row(f"Last exit: {state.get('last_exit') or 'none recorded'}"),
-                   {"type": "header", "text": "About"},
+                   info_row(f"Last exit: {state.get('last_exit') or 'none recorded'}")]
+        failure = state.get("failure") or {}
+        if failure:
+            details += [info_row(f"Failure at {time_text(failure.get('at_ms'))}: {failure.get('reason', 'unknown reason')}", "error"),
+                        info_row(f"At failure: {failure.get('crashes', 0)} exits in {failure.get('window_seconds', 300)} s.")]
+        if state.get("status") == "failed":
+            details.append(info_row("Stopped until explicitly restarted or changed. Use Restart here, or the built-in failed/recover badge and prefix menu; safe mode still controls admission.", "warn"))
+        for exit in state.get("last_exits") or []:
+            details.append(info_row(f"Exit {time_text(exit.get('at_ms'))}: {exit.get('reason', 'unknown')}", "dim"))
+        details += [{"type": "header", "text": "About"},
                    info_row(f"Kind: {kind}"),
                    info_row(f"Version: {manifest_text(manifest, 'version', 'not provided')}"),
                    info_row(f"Source: {state.get('manifest_source') or 'manifest not provided'}")]

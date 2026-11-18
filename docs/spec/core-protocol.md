@@ -818,7 +818,7 @@ without filesystem I/O. This is not a file watcher or a registry/install mechani
 
 `extension.list` and snapshot `extensions` export `manifest` (object or null), `manifest_source` (display-only
 core-host path or null), `manifest_error`, `enabled`, raw `status`, `display_status` (`running`, `off`, `failed`,
-`starting`, `stopped-by-safe-mode`, `provider-not-connected`), `safe_mode`, `allowed_in_safe_mode`, `running`, `generation`, `spec_version`, `crashes`, `crashes_total`, `crash_window_seconds`, and `last_exit`. Unknown
+`starting`, `stopped-by-safe-mode`, `provider-not-connected`), `safe_mode`, `allowed_in_safe_mode`, `running`, `generation`, `spec_version`, `crashes`, `crashes_total`, `crash_window_seconds`, `last_exit`, `last_exits`, and `failure`. Unknown
 statuses should display as text. `provider-not-connected` means a declared/observed provider extension's process
 is running but no provider authenticated to that extension is connected and fully synced; raw `status` remains
 `running`. A provider may register under a different name. Settings displays process and readiness separately,
@@ -832,7 +832,17 @@ cleared by explicit restart/spec replacement. It is computed when facts are seri
 old exits out even without another exit. `crashes_total` separately counts unexpected exits since this
 declaration's runtime was created in this core: budget resets preserve it; removing the declaration or
 restarting the core resets it. Intentional stops are not crashes. `last_exit` remains historical. A crash-budget
-`failed` state stays latched until restart/change, even when recent crashes age out; restart policy is unchanged.
+`failed` state stays latched until restart/change, even when recent crashes age out; there is no automatic
+cool-down retry. `failure` is null or `{kind, reason, at_ms, crashes, window_seconds}`: the frozen cause/time and
+recent count at failure (`kind`: `crash_budget`, `startup`, `shutdown`; unknown kinds remain displayable).
+`last_exits` retains at most three `{at_ms, reason}` records independently of the budget window; timestamps are
+epoch milliseconds. Explicit restart/spec replacement clears the current `failure` and recent budget, not the
+historical exit list/total. Removing the declaration/core lifetime ends these ephemeral facts.
+
+Settings shows local failure/exit times, frozen failure counts and recovery instructions beside the existing
+Restart action. The native failed-status badge opens built-in recovery; its prefix menu contains explicit restart
+rows even if Settings is broken/off. Disabled or safe-mode-disallowed entries are labelled as clearing failure
+while remaining stopped; restarting never enables a declaration or bypasses safe-mode admission.
 
 Settings uses these same public facts and generic panel features for every declaration, including itself; it has
 no Pi-specific child row or always-on exception. If explicitly allowed to run in safe mode, its on/off controls

@@ -28,12 +28,22 @@ pub struct ExtRuntime {
     pub crashes: VecDeque<Instant>,
     crashes_total: u64, // This declaration's supervised exits during this core lifetime.
     pub last_exit: Option<String>,
+    failure: Option<Value>,
+    last_exits: VecDeque<Value>, // Last three exits survive budget aging/reset, bounded independently.
     pub running: bool,
     stop: Option<oneshot::Sender<()>>,
     token: String,
 }
 
 impl ExtRuntime {
+    fn fail(&mut self, kind: &str, reason: String) {
+        self.status="failed".into();
+        let now=Instant::now();
+        let crashes=self.crashes.iter().filter(|at|now.saturating_duration_since(**at)<=CRASH_WINDOW).count();
+        self.failure=Some(json!({"kind":kind,"reason":reason,"at_ms":crate::store::now_ms(),
+            "crashes":crashes,"window_seconds":CRASH_WINDOW.as_secs()}));
+    }
+
     pub fn to_json(&self) -> Value {
         self.to_json_at(Instant::now())
     }
@@ -44,7 +54,7 @@ impl ExtRuntime {
         let recent = self.crashes.iter().filter(|at| now.saturating_duration_since(**at) <= CRASH_WINDOW).count();
         json!({"status": self.status, "running":self.running, "generation":self.generation,
             "crashes": recent, "crashes_total": self.crashes_total, "crash_window_seconds": CRASH_WINDOW.as_secs(),
-            "last_exit": self.last_exit, "spec_version": self.spec_version})
+            "last_exit": self.last_exit, "last_exits":self.last_exits, "failure":self.failure, "spec_version": self.spec_version})
     }
 }
 
@@ -93,6 +103,8 @@ pub fn reconcile(core: &Shared) {
             crashes: VecDeque::new(),
             crashes_total: 0,
             last_exit: None,
+            failure: None,
+            last_exits: VecDeque::new(),
             running: false,
             stop: None,
             token: String::new(),
@@ -102,6 +114,7 @@ pub fn reconcile(core: &Shared) {
             // A new spec is a fresh start: live replacement, crash budget reset.
             rt.spec_version = version;
             rt.crashes.clear();
+            rt.failure=None;
             if rt.status == "failed" {
                 rt.status = "stopped".into();
             }
@@ -134,11 +147,14 @@ pub fn reconcile(core: &Shared) {
         rt.generation += 1;
         let generation = rt.generation;
         let mut secret=[0u8;32];
-        if let Err(error)=getrandom::fill(&mut secret) { rt.status="failed".into();rt.last_exit=Some(format!("supervision credential: {error}"));continue; }
+        if let Err(error)=getrandom::fill(&mut secret) {
+            let why=format!("supervision credential: {error}");rt.last_exit=Some(why.clone());rt.fail("startup",why);
+            let state=rt.to_json();c.emit("extension",json!({"name":name,"state":state}));continue;
+        }
         rt.token=secret.iter().map(|b|format!("{b:02x}")).collect();
         let program=match crate::program::resolve_provider(&argv[0]) {
             Ok(program)=>program,
-            Err(error)=>{ rt.status="failed".into();rt.last_exit=Some(error);let state=rt.to_json();c.emit("extension",json!({"name":name,"state":state}));continue; }
+            Err(error)=>{ rt.last_exit=Some(error.clone());rt.fail("startup",error);let state=rt.to_json();c.emit("extension",json!({"name":name,"state":state}));continue; }
         };
         let mut cmd = Command::new(program);
         cmd.args(&argv[1..])
@@ -164,8 +180,9 @@ pub fn reconcile(core: &Shared) {
         }
         match cmd.spawn() {
             Err(e) => {
-                rt.status = "failed".into();
-                rt.last_exit = Some(format!("could not start: {e}"));
+                let why=format!("could not start: {e}");
+                rt.last_exit = Some(why.clone());
+                rt.fail("startup",why);
                 let j = rt.to_json();
                 c.emit("extension", json!({"name": name, "state": j}));
             }
@@ -224,7 +241,9 @@ fn on_exit(core: &Shared, name: &str, generation: u64, why: String) -> bool {
     rt.running = false;
     rt.pid = None;
     rt.stop = None;
-    rt.last_exit = Some(why);
+    rt.last_exit = Some(why.clone());
+    rt.last_exits.push_back(json!({"at_ms":crate::store::now_ms(),"reason":why}));
+    while rt.last_exits.len()>BUDGET {rt.last_exits.pop_front();}
     let now = Instant::now();
     rt.crashes_total = rt.crashes_total.saturating_add(1);
     rt.crashes.push_back(now);
@@ -232,7 +251,9 @@ fn on_exit(core: &Shared, name: &str, generation: u64, why: String) -> bool {
         rt.crashes.pop_front();
     }
     let restart = !shutting_down && rt.crashes.len() < BUDGET;
-    rt.status = if restart { "restarting".into() } else { "failed".into() };
+    if restart {rt.status="restarting".into();}
+    else if rt.crashes.len()>=BUDGET {rt.fail("crash_budget",format!("{} exits in {} seconds; stopped until explicit restart",rt.crashes.len(),CRASH_WINDOW.as_secs()));}
+    else {rt.fail("shutdown","core stopping; exit was not retried".into());}
     let j = rt.to_json();
     c.emit("extension", json!({"name": name, "state": j}));
     restart
@@ -244,6 +265,7 @@ pub fn restart(core: &Shared, name: &str) -> Result<(), crate::rpc::RpcError> {
         let mut c = core.lock().unwrap();
         let rt = c.exts.get_mut(name).ok_or_else(|| crate::rpc::RpcError::new("not_found", format!("no extension {name}")))?;
         rt.crashes.clear();
+        rt.failure=None;
         if let Some(stop) = rt.stop.take() {
             let _ = stop.send(());
         }
@@ -292,7 +314,7 @@ mod qa2_tests {
 
     fn runtime_with_crashes(crashes: VecDeque<Instant>) -> ExtRuntime {
         ExtRuntime { status: "failed".into(), pid: None, spec_version: 1, generation: 7, crashes_total: crashes.len() as u64, crashes,
-            last_exit: Some("historical failure".into()), running: false, stop: None, token: String::new() }
+            last_exit: Some("historical failure".into()), failure:None, last_exits:VecDeque::new(), running: false, stop: None, token: String::new() }
     }
 
     #[test]
@@ -330,7 +352,45 @@ mod qa2_tests {
         assert_eq!(state["crashes"], 3);
         assert_eq!(state["crashes_total"], 4);
         assert_eq!(state["status"], "failed");
+        assert_eq!(state["failure"]["kind"],"crash_budget");
+        assert_eq!(state["failure"]["crashes"],3);
+        assert!(state["failure"]["at_ms"].as_u64().unwrap()>0);
+        assert_eq!(state["last_exits"].as_array().unwrap().len(),3);
+        let aged=c.exts["fixture"].to_json_at(Instant::now()+Duration::from_secs(3600));
+        assert_eq!(aged["crashes"],0);
+        assert_eq!(aged["crashes_total"],4);
+        assert_eq!(aged["failure"],state["failure"],"aging does not erase why/when the failed latch was set");
+        assert_eq!(aged["last_exits"],state["last_exits"]);
     }
+    #[tokio::test]
+    async fn aged_failure_stays_latched_and_explicit_restart_preserves_history_and_safe_mode() {
+        let mut store=crate::store::Store::in_memory();
+        store.apply("test",None,vec![crate::store::Op::Set {key:"extension/fixture".into(),value:json!({"argv":["/bin/cat"]}),expect:None}]).unwrap();
+        let mut c=crate::core::Core::new(store,None,"unused".into(),false).unwrap();
+        let old=Instant::now()-CRASH_WINDOW-Duration::from_secs(1);
+        let mut rt=runtime_with_crashes(VecDeque::from([old,old,old]));
+        rt.last_exits.push_back(json!({"at_ms":1234,"reason":"third exit"}));
+        rt.fail("crash_budget","3 exits in 300 seconds".into());
+        c.exts.insert("fixture".into(),rt);
+        let core=std::sync::Arc::new(std::sync::Mutex::new(c));
+        reconcile(&core);
+        {
+            let mut c=core.lock().unwrap();
+            let state=c.exts["fixture"].to_json();
+            assert_eq!(state["crashes"],0);
+            assert_eq!(state["status"],"failed");
+            assert_eq!(state["running"],false,"cool-down does not silently restart a failed extension");
+            c.safe_mode=true;
+        }
+        restart(&core,"fixture").unwrap();
+        let c=core.lock().unwrap();let state=c.exts["fixture"].to_json();
+        assert!(c.safe_mode);
+        assert_eq!(state["running"],false,"restart cannot bypass safe-mode admission");
+        assert_eq!(state["crashes_total"],3);
+        assert_eq!(state["last_exits"][0]["reason"],"third exit");
+        assert!(state["failure"].is_null());
+    }
+
     #[tokio::test]
     async fn cooperative_provider_gets_time_for_its_one_second_cleanup() {
         let root=tempfile::Builder::new().prefix("pxq").tempdir_in("/tmp").unwrap();

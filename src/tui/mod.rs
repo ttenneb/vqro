@@ -735,7 +735,7 @@ impl App {
                 if let Some(n) = d["name"].as_str() {
                     let st = d["state"].clone();
                     if st["status"] == "failed" {
-                        self.message = format!("extension {n} failed: {}", st["last_exit"].as_str().unwrap_or("?"));
+                        self.message = format!("extension {n} failed: {}", st["failure"]["reason"].as_str().or_else(||st["last_exit"].as_str()).unwrap_or("?"));
                     }
                     self.extensions.insert(n.to_string(), st);
                 }
@@ -1323,6 +1323,13 @@ impl App {
                 (winners.get(&key) == Some(&i) && b["command"] != "client.none" && b["hidden"] != true).then(|| PrefixRow { key: Some(self.key_labels(&key)), label: self.binding_label(b), binding: b.clone() })
             })
             .collect();
+        // Non-replaceable recovery: failed Settings/other extensions cannot hide their restart.
+        let failed=self.extensions.iter().filter(|(_,state)|state["status"]=="failed").map(|(name,_)| {
+            let allowed=if self.safe_mode {self.safe_mode_allow.contains(name)} else {self.entries.get(&format!("extension/{name}")).is_some_and(|v|v["enabled"]!=false)};
+            let label=if allowed {format!("restart {name} (failed)")} else {format!("clear failure: {name} (stays stopped)")};
+            PrefixRow {key:None,label,binding:json!({"command":"prim.extension.restart","args":{"name":name}})}
+        }).collect::<Vec<_>>();
+        let at=rows.len().min(1);rows.splice(at..at,failed);
         for b in builtin_bindings().into_iter().filter(|b| b["recovery"] == true) {
             if !rows.iter().any(|r| r.binding["command"] == b["command"]) {
                 rows.push(PrefixRow { key: None, label: self.binding_label(&b), binding: b });
@@ -2352,7 +2359,11 @@ impl App {
         }
         let failed = self.extensions.values().filter(|e| e["status"] == "failed").count();
         if failed > 0 {
-            spans.push(Span::styled(format!(" {failed} extension(s) failed "), pal.badge(Some("error"))));
+            let label=format!(" {failed} extension(s) failed · recover ");
+            let x=area.x+spans.iter().map(|s|s.content.chars().count() as u16).sum::<u16>();
+            let width=(label.chars().count() as u16).min(area.right().saturating_sub(x));
+            if width>0 {self.hit.buttons.push((Rect{x,y:area.y,width,height:1},Item::from_entry(&json!({"label":"Recover failed extensions","command":"client.prefix"})),json!({})));}
+            spans.push(Span::styled(label, pal.badge(Some("error"))));
         }
         if !self.safe_mode {
             if let Some(notice) = &self.backend_notice {
@@ -2836,6 +2847,24 @@ mod tests {
         app.entries.insert("doc/settings/tui".into(),json!({"key_labels":"full"}));
         app.message="backend C-g unavailable".into();
         assert_eq!(app.message_label(),"backend C-g unavailable","identifiers in arbitrary messages are not key hints");
+    }
+
+    #[tokio::test]
+    async fn failed_extensions_have_builtin_restart_recovery_without_settings() {
+        let (mut app,_)=app();
+        app.load(&json!({"epoch":"boot","seq":1,"entries":{"extension/pi":{"version":1,"value":{"argv":["missing"],"enabled":true}}},
+            "extensions":{"pi":{"status":"failed","crashes":0,"crashes_total":3,"last_exit":"signal9",
+                "failure":{"kind":"crash_budget","at_ms":1234,"crashes":3,"window_seconds":300}}}}));
+        let rows=app.prefix_items();
+        let restart=rows.iter().find(|r|r.binding["command"]=="prim.extension.restart" && r.binding["args"]["name"]=="pi").expect("built-in recovery restart row");
+        assert!(restart.label.contains("restart pi"));
+        let mut terminal=ratatui::Terminal::new(ratatui::backend::TestBackend::new(100,24)).unwrap();
+        terminal.draw(|f|app.draw(f)).unwrap();
+        let badge=app.hit.buttons.iter().find(|(_,item,_)|item.command=="client.prefix").expect("failed recovery badge").0;
+        app.on_mouse(MouseEvent {kind:MouseEventKind::Down(MouseButton::Left),column:badge.x,row:badge.y,modifiers:KeyModifiers::NONE});
+        assert!(matches!(app.overlay,Some(Overlay::Prefix{..})),"failed badge opens built-in recovery without an extension");
+        app.safe_mode=true;
+        assert!(app.prefix_items().iter().any(|r|r.binding["command"]=="prim.extension.restart"),"recovery remains reachable; core still controls safe-mode admission");
     }
 
     #[tokio::test]

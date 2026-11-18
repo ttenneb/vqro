@@ -163,7 +163,26 @@ try:
         os.makedirs(sys.argv[2], exist_ok=True)
         for name, content in (("extensions-wide.txt", wide), ("extensions-narrow.txt", narrow)):
             with open(os.path.join(sys.argv[2], name), "w") as f: f.write(content)
-    keys("Escape"); keys("C-g")
+    # Restore only our private missing executable, without changing the failed declaration.
+    wrapper=f"{R}/bin/prim-extension-page-test-missing"
+    with open(wrapper,"w") as output:
+        output.write(f"#!/bin/sh\nexec /usr/bin/python3 '{R}/ext/icons.py'\n")
+    os.chmod(wrapper,0o700)
+    keys("Escape")  # clear the list filter, then close the popup after its frame arrives
+    check("recovery setup clears catalogue filter", bool(wait(lambda:not any(line.strip(" │")=="/icons" for line in screen().splitlines()))))
+    keys("Escape")
+    check("failed status badge offers recovery", bool(wait(lambda:"failed · recover" in screen() and "Settings ─" not in screen())),screen())
+    call("command.invoke",{"name":"prim.extension.disable","args":{"name":"settings"}})
+    check("recovery does not require the Settings extension",call("extension.list")["extensions"]["settings"]["enabled"] is False)
+    status=screen().splitlines()
+    y=next(i for i,line in enumerate(status) if "failed · recover" in line)
+    x=status[y].index("failed")+1
+    keys(f"\x1b[<0;{x};{y+1}M\x1b[<0;{x};{y+1}m",literal=True)
+    check("failed badge opens built-in restart even without Settings", bool(wait(lambda:"restart icons (failed)" in screen())),screen())
+    keys("Down","Enter")
+    check("built-in restart recovers failed extension", bool(wait(lambda:call("extension.list")["extensions"]["icons"]["status"]=="running" and
+        call("extension.list")["extensions"]["icons"].get("failure") is None)))
+    keys("C-g")
     time.sleep(0.4)
     keys("q")
     gone = wait(lambda: subprocess.run([*HARNESS, "list-sessions"], capture_output=True).returncode != 0, 10)
