@@ -111,6 +111,10 @@ scale_harness() {
     cargo test --release --test scale -- --ignored --exact scale_load --nocapture
 }
 
+history_budget() {
+  "${CARGO[@]}" cargo test --release --test history_budget -- --include-ignored --test-threads=1 --nocapture
+}
+
 tui_scale_probe() {
   "${CARGO[@]}" cargo build --release --bin prim || return 1
   "${CLEAN[@]}" python3 tests/e2e_tui_scale.py "$TARGET" --receipt "$LOGS/tui-scale-receipt.json"
@@ -160,6 +164,7 @@ if [ "$MODE" = full ]; then
   for suite in tmux tmux_timeout tmux_provider herdr_provider provider_wire provider_errors undo_attribution; do
     step "opt-in:$suite" opt_in "$suite"
   done
+  step history-budget history_budget
   step e2e-providers "${CLEAN[@]}" python3 tests/e2e_providers.py "$TARGET"
   step e2e-tui-providers "${CLEAN[@]}" python3 tests/e2e_tui_providers.py "$TARGET"
   step e2e-tui-paste-dropdown "${CLEAN[@]}" python3 tests/e2e_tui_paste_dropdown.py "$TARGET"

@@ -222,11 +222,13 @@ async fn clean_failure_is_invisible_but_post_rename_failure_is_adopted_once() {
 }
 
 #[tokio::test]
-async fn commit_admission_counts_escaped_note_bytes_not_only_raw_text() {
+async fn commit_admission_counts_escaped_author_bytes_not_only_raw_text() {
     let f = Fixture::new().await;
     let (a, _) = f.peer().await; let (b, _) = f.peer().await; let (c, _) = f.peer().await;
-    // Each note occupies about3MiB on the wire but only500KiB as a Rust string.
-    let input = || { let mut p = set(1, 0); p["note"] = "\0".repeat(500*1024).into(); p };
+    // Notes now have a separate small cap. Keep testing escaped metadata accounting via
+    // caller labels: about3MiB encoded but only500KiB as a Rust string per admitted write.
+    for peer in [&a,&b,&c] {peer.call("hello",json!({"client":"\0".repeat(500*1024)})).await.unwrap();}
+    let input = || set(1,0);
     let first_input = input(); let second_input = input();
     let first = tokio::spawn(async move { a.call("workspace.apply", first_input).await });
     tokio::time::timeout(Duration::from_secs(2), f.gate.entered.notified()).await.unwrap();
@@ -240,6 +242,59 @@ async fn commit_admission_counts_escaped_note_bytes_not_only_raw_text() {
     assert_eq!(first.await.unwrap().unwrap()["txn"], 1);
     assert_eq!(second.await.unwrap().unwrap_err().kind(), "conflict");
     f.pending(0).await;
+}
+
+#[tokio::test]
+async fn revert_admission_charges_undo_payload_not_the_tiny_request() {
+    let f=Fixture::new().await;f.gate.armed.store(false,Ordering::SeqCst);
+    let (seed,_)=f.peer().await;
+    let input=|value:&str|json!({"ops":(0..3).map(|i|json!({"op":"set","key":format!("doc/big{i}"),"value":value.repeat(1000*1024)})).collect::<Vec<_>>()});
+    seed.call("workspace.apply",input("a")).await.unwrap();
+    let changed=seed.call("workspace.apply",input("b")).await.unwrap()["txn"].clone();
+    f.gate.armed.store(true,Ordering::SeqCst);
+    let (a,_)=f.peer().await;let (b,_)=f.peer().await;let (c,_)=f.peer().await;
+    let txn=changed.clone();let first=tokio::spawn(async move {a.call("workspace.revert",json!({"txn":txn})).await});
+    tokio::time::timeout(Duration::from_secs(2),f.gate.entered.notified()).await.unwrap();
+    let txn=changed.clone();let second=tokio::spawn(async move {b.call("workspace.revert",json!({"txn":txn})).await});
+    f.pending(2).await;
+    let rejected=c.call("workspace.revert",json!({"txn":changed})).await.unwrap_err();
+    f.gate.release();
+    assert_eq!(rejected.kind(),"overloaded");assert_eq!(rejected.data.unwrap()["outcome"],"rejected");
+    first.await.unwrap().unwrap();assert_eq!(second.await.unwrap().unwrap_err().kind(),"conflict");
+    f.pending(0).await;
+}
+
+#[tokio::test]
+async fn default_undo_reaccounts_a_changed_target_before_copying_its_payload() {
+    let f=Fixture::new().await;f.gate.armed.store(false,Ordering::SeqCst);
+    let (seed,_)=f.peer().await;
+    let big=||json!({"ops":(0..3).map(|i|json!({"op":"set","key":format!("doc/big{i}"),"value":"x".repeat(1000*1024)})).collect::<Vec<_>>()});
+    seed.call("workspace.apply",big()).await.unwrap();
+    f.gate.armed.store(true,Ordering::SeqCst);
+    let (a,_)=f.peer().await;let (undo,_)=f.peer().await;let (b,_)=f.peer().await;let (c,_)=f.peer().await;
+    let deleting=tokio::spawn(async move {a.call("workspace.apply",json!({"ops":(0..3).map(|i|json!({"op":"delete","key":format!("doc/big{i}")})).collect::<Vec<_>>()})).await});
+    tokio::time::timeout(Duration::from_secs(2),f.gate.entered.notified()).await.unwrap();
+    // Admission sees the old create (tiny undo); queue head sees deletion (3MiB undo).
+    let undo=tokio::spawn(async move {undo.call("command.invoke",json!({"name":"prim.revert"})).await});
+    f.pending(2).await;
+    let input=big();let next=tokio::spawn(async move {b.call("workspace.apply",input).await});
+    let input=big();let last=tokio::spawn(async move {c.call("workspace.apply",input).await});
+    f.pending(4).await;f.gate.release();deleting.await.unwrap().unwrap();
+    let error=undo.await.unwrap().unwrap_err();
+    assert_eq!(error.kind(),"overloaded");assert_eq!(error.data.unwrap()["outcome"],"rejected");
+    next.await.unwrap().unwrap();last.await.unwrap().unwrap();f.pending(0).await;
+}
+
+#[tokio::test]
+async fn default_undo_stops_at_an_oversized_record_instead_of_skipping_to_older_work() {
+    let f=Fixture::new().await;f.gate.armed.store(false,Ordering::SeqCst);
+    let (peer,_)=f.peer().await;
+    for i in 0..10 {peer.call("workspace.apply",json!({"ops":[{"op":"set","key":format!("doc/large{i}"),"value":"x".repeat(900*1024)}]})).await.unwrap();}
+    let deleted=peer.call("workspace.apply",json!({"ops":(0..10).map(|i|json!({"op":"delete","key":format!("doc/large{i}")})).collect::<Vec<_>>()})).await.unwrap();
+    assert_eq!(deleted["undoable"],false);
+    let error=peer.call("command.invoke",json!({"name":"prim.revert"})).await.unwrap_err();
+    assert_eq!(error.kind(),"unavailable");assert!(error.message.contains("undo history byte horizon"));
+    assert_eq!(peer.call("workspace.history",json!({"limit":1})).await.unwrap()["txns"][0]["id"],deleted["txn"]);
 }
 
 #[tokio::test]
