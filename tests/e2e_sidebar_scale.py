@@ -27,6 +27,7 @@ class Client:
         self.writer = self.sock.makefile('wb', buffering=0)
         self.lock, self.cv = threading.Lock(), threading.Condition()
         self.ident, self.replies, self.counts, self.bytes, self.last = 0, {}, Counter(), Counter(), {}
+        self.sidebar_event = self.previous_sidebar_event = None
         self.thread = threading.Thread(target=self.read, daemon=True)
         self.thread.start()
         self.call('hello', {'client': 'sidebar-scale'})
@@ -38,11 +39,26 @@ class Client:
                 if 'method' not in row:
                     self.replies[row['id']] = row
                 elif row['method'] == 'event' and row['params']['type'] == 'view.content':
-                    value = row['params']['data']; view = value['view']
-                    self.counts[view] += 1
-                    self.bytes[view] += len(wire)
-                    self.last[view] = value['content']
+                    self.view_event(row['params'], len(wire))
                 self.cv.notify_all()
+
+    def view_event(self, params, wire_bytes):
+        """Called under cv; retain two sidebar frames, not an unbounded event journal."""
+        value = params['data']; view = value['view']
+        self.counts[view] += 1
+        self.bytes[view] += wire_bytes
+        self.last[view] = value['content']
+        if view == 'sidebar':
+            self.previous_sidebar_event = self.sidebar_event
+            self.sidebar_event = {'seq': params['seq'], 'bytes': wire_bytes, 'content': value['content']}
+
+    def wait_workspace(self, path, name, after=0):
+        def contains(rows):
+            return any((row.get('id') == 'ws:'+path and row.get('text') == name) or contains(row.get('children', [])) for row in rows)
+        with self.cv:
+            assert self.cv.wait_for(lambda: self.sidebar_event and self.sidebar_event['seq'] > after and
+                contains((self.sidebar_event['content'] or {}).get('items', [])), 30), ('sidebar fence', name)
+            return dict(self.counts), dict(self.bytes), self.sidebar_event, self.previous_sidebar_event
 
     def call(self, method, params=None):
         with self.lock:
@@ -79,6 +95,51 @@ def wait(predicate, timeout=30):
             return value
         time.sleep(.05)
     raise AssertionError('private sidebar load did not converge')
+
+
+def normalized_sidebar(content, path, name):
+    """Undo only the fence label, preserving every resource/detail field for comparison."""
+    if content is None:
+        return None
+    def rows(items):
+        result = []
+        for row in items:
+            kept = dict(row)
+            if row.get('id') == 'ws:'+path:
+                kept['text'] = name
+            if 'children' in row:
+                kept['children'] = rows(row['children'])
+            result.append(kept)
+        return result
+    return dict(content, items=rows(content.get('items', [])))
+
+
+def sidebar_fence(control, observer, workspaces, purpose):
+    """A public visible change and restore acknowledge both derivation and delivery.
+
+    A snapshot on another connection is not a notification-delivery fence. A
+    nonempty sidebar also need not reflect the complete startup inventory yet.
+    Only these two explicit label changes may be excluded from load traffic;
+    if either frame coalesces a real detail change, count that entire frame.
+    """
+    started = time.monotonic()
+    before_counts, before_bytes = observer.stats()
+    path, original = workspaces[0]['path'], workspaces[0]['name']
+    marker = 'Measurement fence: '+purpose
+    marked = [dict(row, name=marker) if row['path'] == path else row for row in workspaces]
+    control.call('view.publish', {'view': 'workspaces', 'content': {'data': marked}})
+    _, _, changed, previous = observer.wait_workspace(path, marker)
+    changed_normal = normalized_sidebar(changed['content'], path, original)
+    marker_only = changed_normal == normalized_sidebar(previous['content'] if previous else None, path, original)
+    control.call('view.publish', {'view': 'workspaces', 'content': {'data': workspaces}})
+    counts, sizes, restored, previous = observer.wait_workspace(path, original, after=changed['seq'])
+    restore_only = restored['content'] == normalized_sidebar(previous['content'] if previous else None, path, original)
+    natural_count = counts.get('sidebar', 0)-before_counts.get('sidebar', 0)-int(marker_only)-int(restore_only)
+    natural_bytes = sizes.get('sidebar', 0)-before_bytes.get('sidebar', 0)-(changed['bytes'] if marker_only else 0)-(restored['bytes'] if restore_only else 0)
+    return {'counts': counts, 'bytes': sizes, 'content': restored['content'], 'receipt': {
+        'seconds': time.monotonic()-started, 'marker_seq': changed['seq'], 'restored_seq': restored['seq'],
+        'natural_publications': natural_count, 'natural_bytes': natural_bytes,
+        'marker_coalesced_detail': not marker_only, 'restore_coalesced_detail': not restore_only}}
 
 
 def run(args, root):
@@ -126,11 +187,16 @@ def run(args, root):
             panels = [name for name in snap.get('live', {}) if name.startswith('agents-r')]
             return snap if len(snap['resources']) == 800 and len(panels) == 200 and snap.get('live', {}).get('sidebar', {}).get('items') else None
         snap = wait(ready)
-        initial = snap['live']['sidebar']
+        fence = sidebar_fence(control, observer, workspaces, 'startup')
+        initial = fence['content']
+        receipt['startup_fence'] = fence['receipt']
         receipt['initial_sidebar_bytes'] = len(json.dumps(initial).encode())
         receipt['pages'] = initial.get('page')
+        if not args.baseline_sidebar:
+            assert initial.get('page', {}).get('rows') == 1151, 'startup fence must include all 800 resources and 350 folders'
         for phase, fact in [('off_page', facts[150]), ('on_page', facts[0])]:
-            before_count, before_bytes = observer.stats()
+            before_count, before_bytes = fence['counts'], fence['bytes']
+            before_content = fence['content']
             started = time.monotonic()
             iterations = int(args.seconds*20)
             for tick in range(iterations):
@@ -140,12 +206,16 @@ def run(args, root):
                     agent = next(r for r in snap['resources'] if r.get('backend_ref') == 'a150')
                     provider.call('view.publish', {'generation': generation, 'view': 'agent-'+agent['id'], 'content': {'items': [{'text': f'transcript {phase} {tick}'}]}})
                 time.sleep(max(0, started+(tick+1)/20-time.monotonic()))
-            time.sleep(.8)  # finish the bounded coalescing window
+            time.sleep(.8)  # Sample-window drain; the fence below also accounts for any trailing publication.
             counts, sizes = observer.stats()
             elapsed = time.monotonic()-started
-            receipt[phase] = {'seconds': elapsed, 'updates': iterations,
-                'sidebar_publications': counts.get('sidebar', 0)-before_count.get('sidebar', 0),
-                'sidebar_bytes': sizes.get('sidebar', 0)-before_bytes.get('sidebar', 0)}
+            fence = sidebar_fence(control, observer, workspaces, phase)
+            settling = fence['receipt']
+            receipt[phase] = {'seconds': elapsed, 'updates': iterations, 'settling': settling,
+                'sidebar_publications': counts.get('sidebar', 0)-before_count.get('sidebar', 0)+settling['natural_publications'],
+                'sidebar_bytes': sizes.get('sidebar', 0)-before_bytes.get('sidebar', 0)+settling['natural_bytes']}
+            if phase == 'off_page' and not args.baseline_sidebar:
+                assert fence['content'] == before_content, 'an off-page change altered visible sidebar content, even across the fence'
         assert filtered.counts.get('sidebar', 0) == 0, 'view allowlist must exclude the large sidebar before delivery'
         assert filtered.counts.get('agent-'+agent['id'], 0) > 0, 'matching native agent views must still arrive'
         final = control.call('workspace.snapshot')
