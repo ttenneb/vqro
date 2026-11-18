@@ -159,8 +159,15 @@ and pending calls at 128. `Extension` opts into overflow recovery: discard only 
 queue one local `missed {reason: "notification_backlog"}`, then snapshot/fence before applying subsequent
 notifications. Arrivals during snapshot acquisition are buffered; another overflow schedules another gap. A
 64-byte gap-marker reservation stays inside the byte cap, and the active callback remains charged. Commands,
-RPC replies and effects are never dropped or replayed by this mechanism. If the recovery snapshot fails, the
-transport closes rather than continuing with a divergent cache. Raw `Prim` users must explicitly opt in with a
+RPC replies and effects are never dropped or replayed by this mechanism. If the recovery snapshot fails with a
+protocol/state error, the transport closes rather than continuing with a divergent cache. If it only gets no answer
+in time (`timeout`, 60 s) or is `overloaded`, the extension is **degraded** instead: it keeps its last cache
+(subsequent events still apply), runs no listeners on that known-stale cache, logs and notifies once, and retries
+the snapshot with jittered backoff (0.5 s doubling, 30 s cap); on success listeners rerun as `missed`. Until `run()`
+has subscribed, requests safe to resend (reads, registrations, `view.publish`, workspace writes whose every op has
+`expect`) wait out a slow core the same way; other requests report `timeout` and are never resent. A listener whose
+write gets `conflict` or `timeout` is rerun later as `missed`. A closed connection still exits the process, so
+supervision restarts it. Raw `Prim` users must explicitly opt in with a
 snapshot-capable missed handler; otherwise overflow retains the explicit disconnect/restart behavior. These encoded/queue bounds exclude allocator overhead, framing/serialization copies
 and a consumer-held record.
 
