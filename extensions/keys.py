@@ -18,6 +18,8 @@ import threading
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from prim_ext import Extension, PrimError  # noqa: E402
 
+from prim_display import key_labels
+
 ext = Extension("keys", event_types=["entries"])  # no resource events: not used here
 STATE = "doc/keys/profile"
 TUI = "doc/settings/tui"
@@ -114,8 +116,10 @@ def binding_ops(name):
 
 
 def publish():
+    mode = (ext.value(TUI) or {}).get("key_labels")
     ext.publish("keys", {"profile": current(),
-                         "profiles": [{"label": p["label"], "value": n} for n, p in PROFILES.items()]})
+                         "profiles": [{"label": p["label"].replace(p["prefix"], key_labels(p["prefix"], mode)), "value": n}
+                                      for n, p in PROFILES.items()]})
 
 
 def sync():
@@ -133,6 +137,8 @@ def sync():
 def on_event(t, d):
     if t == "missed" or (t == "entries" and any(c["key"] == STATE for c in d["changes"])):
         sync()
+    elif t == "entries" and any(c["key"] == TUI for c in d["changes"]):
+        publish()  # display change only: never reconcile/rewrite bindings for a label preference
 
 
 @ext.command("keys.profile", "Apply a keymap profile (args: value = prim | tmux | screen)")
@@ -151,7 +157,8 @@ def apply_profile(args):
     with lock:
         ext.retrying(attempt)
     publish()
-    ext.notify(f"keys: {PROFILES[name]['label']}", "ok")
+    profile = PROFILES[name]
+    ext.notify("keys: " + profile["label"].replace(profile["prefix"], key_labels(profile["prefix"], (ext.value(TUI) or {}).get("key_labels"))), "ok")
 
 
 sync()

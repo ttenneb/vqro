@@ -91,6 +91,27 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("Process: running",str(row["detail_panel"]))
         self.assertFalse(row["detail_panel"]["toolbar"][0]["chips"][-1]["disabled"],"configuration can repair an unreachable backend")
 
+    def test_key_label_option_and_keys_page_keep_configured_ids_unchanged(self):
+        module=load();ext=module["ext"]
+        ext.entries["binding/modified"]={"value":{"key":"C-S-Left","command":"demo.configure","label":"modified"}}
+        for mode,shown in (("full","Ctrl-g"),("short","C-g"),("unknown","Ctrl-g")):
+            ext.entries["doc/settings/tui"]={"value":{"prefix":"C-g","key_labels":mode}}
+            before=copy.deepcopy(ext.entries)
+            module["refresh"]()
+            pages=ext.published["settings"]["pages"]
+            option=next(r for p in pages if p["title"]=="Interface" for r in p["items"] if r["text"]=="Key labels")
+            self.assertEqual(option["command"],"settings.set")
+            self.assertEqual(option["args"],{"tui":"key_labels"})
+            self.assertEqual(option["value"],"short" if mode=="short" else "full")
+            rows=next(p["items"] for p in pages if p["title"]=="Keys")
+            prefix=next(r for r in rows if r.get("text")=="Prefix")
+            self.assertEqual(prefix["options"][0]["label"],shown)
+            self.assertEqual(prefix["options"][0]["value"],"C-g")
+            self.assertIn("Keys after "+shown,str(rows))
+            self.assertIn("C-S-Left" if mode=="short" else "Ctrl-Shift-Left",str(rows))
+            self.assertEqual(ext.entries,before,"formatting never rewrites settings/bindings")
+        self.assertEqual(module["norm_key"]("Ctrl-Shift-Left"),"C-S-Left")
+
     def test_builtins_have_complete_readable_manifests(self):
         import json
         root=Path(__file__).resolve().parents[1]/"extensions"

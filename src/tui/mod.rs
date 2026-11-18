@@ -273,6 +273,8 @@ struct App {
     /// Modifiers held after the prefix (reported only with keyboard enhancement), shown live.
     held: KeyModifiers,
     message: String,
+    /// A native hint template; only its key ids are formatted, never arbitrary message text.
+    key_hint: Option<(String, String, String)>,
     quit: bool,
     connected: bool,
     connection: u64,
@@ -353,7 +355,8 @@ pub async fn run(socket: &Path) -> Result<()> {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut app = App::new(peer.clone(), tx);
     app.load(&snap);
-    app.message = snap["recovery_notice"].as_str().map(String::from).unwrap_or_else(|| format!("click prim or press {} for the menu", app.prefix()));
+    if let Some(notice)=snap["recovery_notice"].as_str() {app.message=notice.into();}
+    else {app.set_key_hint("click prim or press ", &app.prefix(), " for the menu");}
     peer.call("events.subscribe", json!({"from": seq, "epoch": snap["epoch"], "partial_resources": true})).await?;
 
     let mut terminal = ratatui::init();
@@ -511,7 +514,7 @@ impl App {
             filtering: None, toast: None, live: HashMap::new(), panel_values: Mutex::new(HashMap::new()), hit: Hit::default(),
             drag: None, overrides: HashMap::new(), mouse_owner: None, mouse_on: true,
             under: None, input_queues: HashMap::new(), view_streams: Arc::default(), zoomed: None, pending_focus: None, kbd_enhance: false,
-            held: KeyModifiers::NONE, message: "click prim or press Ctrl-g for the menu".into(),
+            held: KeyModifiers::NONE, message: String::new(), key_hint: None,
             quit: false, connected: true, connection: 0, epoch: String::new(), seq: 0,
             generation: 0, resyncing: false, buffered: Vec::new(), buffered_bytes: 0, recovery_only: false, retry_snapshot: None,
         }
@@ -1259,6 +1262,24 @@ impl App {
         }
     }
 
+    fn set_key_hint(&mut self, before: &str, keys: &str, after: &str) {
+        self.message=format!("{before}{keys}{after}");
+        self.key_hint=Some((before.into(),keys.into(),after.into()));
+    }
+
+    fn message_label(&self) -> String {
+        if let Some((before,keys,after))=&self.key_hint {
+            if self.message==format!("{before}{keys}{after}") {
+                return format!("{before}{}{after}",self.key_labels(keys));
+            }
+        }
+        self.message.clone()
+    }
+
+    fn key_labels(&self, text: &str) -> String {
+        keys::display_labels(text, self.entries.get("doc/settings/tui").and_then(|s|s["key_labels"].as_str()))
+    }
+
     /// The prefix key in canonical form; Ctrl-g if the setting is missing or unusable.
     fn prefix(&self) -> String {
         keys::prefix(self.entries.get("doc/settings/tui").and_then(|s| s["prefix"].as_str()))
@@ -1293,7 +1314,7 @@ impl App {
             .enumerate()
             .filter_map(|(i, (_, b))| {
                 let key = keys::normalize(b["key"].as_str()?)?;
-                (winners.get(&key) == Some(&i) && b["command"] != "client.none" && b["hidden"] != true).then(|| PrefixRow { key: Some(key), label: self.binding_label(b), binding: b.clone() })
+                (winners.get(&key) == Some(&i) && b["command"] != "client.none" && b["hidden"] != true).then(|| PrefixRow { key: Some(self.key_labels(&key)), label: self.binding_label(b), binding: b.clone() })
             })
             .collect();
         for b in builtin_bindings().into_iter().filter(|b| b["recovery"] == true) {
@@ -1329,7 +1350,7 @@ impl App {
             self.run_binding(&b);
             // Echo what ran, unless the binding opened a prompt that owns the status line.
             if self.overlay.is_none() {
-                self.message = format!("{} {n} → {}", self.prefix(), self.binding_label(&b));
+                self.set_key_hint("", &format!("{} {n}",self.prefix()), &format!(" → {}",self.binding_label(&b)));
             }
             return;
         }
@@ -1344,7 +1365,7 @@ impl App {
         }
         self.overlay = None;
         if let Some(name) = name.filter(|n| n != "Esc") {
-            self.message = format!("no binding for {} {name}", self.prefix());
+            self.set_key_hint("no binding for ", &format!("{} {name}",self.prefix()), "");
         }
     }
 
@@ -2140,7 +2161,7 @@ impl App {
                 }
             }
             None => {
-                let text = format!("No layout yet.\n\nClick prim (bottom left) or press {} for the menu:\n  n  open a shell\n  R  one tab per terminal\n  :  all commands", self.prefix());
+                let text = format!("No layout yet.\n\nClick prim (bottom left) or press {} for the menu:\n  n  open a shell\n  R  one tab per terminal\n  :  all commands", self.key_labels(&self.prefix()));
                 f.render_widget(Paragraph::new(text).style(pal.style(None)).block(Block::bordered().title(" prim ").border_style(pal.border(true))), main);
             }
         }
@@ -2275,7 +2296,7 @@ impl App {
                 let inner = block.inner(rect);
                 f.render_widget(block, rect);
                 let mut st = self.pstate.remove(view).unwrap_or_default();
-                let hits = panel::render(f.buffer_mut(), inner, &v, &mut st, focused, pal, icons);
+                let hits = panel::render(f.buffer_mut(), inner, &v, &mut st, focused, pal, icons, self.entries.get("doc/settings/tui").and_then(|s|s["key_labels"].as_str()));
                 self.pstate.insert(view.to_string(), st);
                 self.hit.panels.insert(view.to_string(), hits);
                 None
@@ -2293,7 +2314,7 @@ impl App {
         let filtering = self.filtering.as_ref().map(|k| self.pstate.get(k).map(|s| s.filter.clone()).unwrap_or_default());
         let prompt = match &self.overlay {
             _ if filtering.is_some() => Some(("/".to_string(), filtering.clone().unwrap_or_default())),
-            Some(Overlay::Prefix { .. }) => Some((self.prefix(), keys::held_words(self.held))),
+            Some(Overlay::Prefix { .. }) => Some((self.key_labels(&self.prefix()), self.key_labels(&keys::held_words(self.held)))),
             Some(Overlay::Palette { query, .. }) => Some((":".to_string(), query.clone())),
             Some(Overlay::Input { prompt, text, .. }) => Some((format!("{prompt}:"), text.clone())),
             _ => None,
@@ -2360,7 +2381,7 @@ impl App {
         if !self.safe_mode && self.backend_notice.is_none() && self.backends_connected.is_empty() {
             spans.push(Span::styled(" No backend connected; prefix ! opens recovery choices.",pal.style(Some("warn"))));
         }
-        spans.push(Span::styled(format!(" {}", self.message), pal.style(Some("muted"))));
+        spans.push(Span::styled(format!(" {}", self.message_label()), pal.style(Some("muted"))));
         f.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 
@@ -2417,14 +2438,14 @@ impl App {
                 .border_type(ratatui::widgets::BorderType::Rounded)
                 .title(Span::styled(format!(" {title} "), pal.style(Some("accent")).add_modifier(Modifier::BOLD)))
                 .title_bottom(Line::from(Span::styled(
-                    if panel::list_detail(&v,&st) {" ↑↓ list · Tab details · [ ] pages · / search · Esc close "}else if panel::page_titles(&v).is_empty() { " ↑↓ move · enter select · / filter · esc close " } else { " ↑↓ move · tab page · enter select · / filter · esc close " },
+                    self.key_labels(if panel::list_detail(&v,&st) {" ↑↓ list · Tab details · [ ] pages · / search · Esc close "}else if panel::page_titles(&v).is_empty() { " ↑↓ move · Enter select · / filter · Esc close " } else { " ↑↓ move · Tab page · Enter select · / filter · Esc close " }),
                     pal.style(Some("dim")),
                 )).right_aligned())
                 .border_style(pal.border(true));
             let inner = block.inner(rect);
             f.render_widget(block, rect);
             let body = Rect { x: inner.x + 1, y: inner.y + 1, width: inner.width.saturating_sub(2), height: inner.height.saturating_sub(1) };
-            let hits = panel::render(f.buffer_mut(), body, &v, &mut st, true, pal, icons);
+            let hits = panel::render(f.buffer_mut(), body, &v, &mut st, true, pal, icons, self.entries.get("doc/settings/tui").and_then(|s|s["key_labels"].as_str()));
             self.pstate.insert("@popup".into(), st);
             self.hit.panels.insert("@popup".into(), hits);
             self.hit.overlay = Some((rect, Rect::default(), 0));
@@ -2785,6 +2806,30 @@ mod tests {
         terminal.draw(|f|app.draw(f)).unwrap();
         let screen:String=terminal.backend().buffer().content.iter().map(|c|c.symbol()).collect();
         assert!(screen.contains("New default is unavailable"),"{screen}");
+    }
+
+    #[tokio::test]
+    async fn key_labels_default_full_short_and_unknown_work_without_extensions() {
+        let (mut app,_)=app();
+        app.safe_mode=true;
+        app.entries.insert("binding/modified".into(),json!({"key":"C-S-Left","command":"client.focus","label":"modified"}));
+        app.on_key(KeyEvent::new(KeyCode::Char('g'),KeyModifiers::CONTROL));
+        let mut terminal=ratatui::Terminal::new(ratatui::backend::TestBackend::new(100,24)).unwrap();
+        for (setting,prefix,modified) in [(None,"Ctrl-g","Ctrl-Shift-Left"),(Some("short"),"C-g","C-S-Left"),(Some("unknown"),"Ctrl-g","Ctrl-Shift-Left")] {
+            if let Some(setting)=setting {app.entries.insert("doc/settings/tui".into(),json!({"key_labels":setting}));}
+            terminal.draw(|f|app.draw(f)).unwrap();
+            let screen:String=terminal.backend().buffer().content.iter().map(|c|c.symbol()).collect();
+            assert!(screen.contains(prefix),"{screen}");
+            assert!(screen.contains(modified),"{screen}");
+        }
+        assert_eq!(app.prefix(),"C-g","matching/storage remains canonical");
+        app.set_key_hint("", "C-g ,", " → settings");
+        assert_eq!(app.message_label(),"Ctrl-g , → settings");
+        app.entries.insert("doc/settings/tui".into(),json!({"key_labels":"short"}));
+        assert_eq!(app.message_label(),"C-g , → settings","cached hints follow the current choice");
+        app.entries.insert("doc/settings/tui".into(),json!({"key_labels":"full"}));
+        app.message="backend C-g unavailable".into();
+        assert_eq!(app.message_label(),"backend C-g unavailable","identifiers in arbitrary messages are not key hints");
     }
 
     #[tokio::test]

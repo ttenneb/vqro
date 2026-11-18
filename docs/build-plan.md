@@ -233,6 +233,14 @@ written the same way was contained by the crash budget and removed with one reve
 - Red/green native layout and kernel PTY assertions, core/TUI/settings regressions, and physical provider/TUI E2Es.
   Native resize timers are observed, not mistaken for settled delivery; `research/tmux-size-notice.md`.
 
+## Full key labels (2026-11-17)
+
+- Native `key_labels` display option defaults to full Ctrl-/Alt-/Shift- names; short restores compact labels.
+  Prefix/menu/status/help/panel hints and extension Settings/profile labels follow the shared choice, without
+  changing stored bindings or terminal input. Built-in fallback works in safe mode/with extensions off.
+- One formatter per language with the same JSON parity table; native render and private physical full/short/
+  unknown captures verify live updates and unchanged bindings. `research/key-labels.md` records the route.
+
 ## Known gaps found while building
 
 - **History churn:** extensions that refresh views on every event (the sidebar on status changes) fill the

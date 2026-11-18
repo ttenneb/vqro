@@ -297,6 +297,35 @@ pub fn normalize(s: &str) -> Option<String> {
     Some(compose(ctrl, alt, shift, &base))
 }
 
+/// Display only: canonical key ids and whitespace-separated hints keep their input syntax.
+/// Unknown label settings use full names; unknown/future key tokens stay untouched.
+/// Shared parity cases: tests/fixtures/key_labels.json (also checked by Python prim_display).
+pub fn display_labels(text: &str, setting: Option<&str>) -> String {
+    let short = setting == Some("short");
+    text.split_inclusive(char::is_whitespace).map(|part| {
+        let token = part.trim_end_matches(char::is_whitespace);
+        let whitespace = &part[token.len()..];
+        let mut rest = token;
+        let mut prefix = String::new();
+        loop {
+            let found = [("C-", "C-", "Ctrl-"), ("Ctrl-", "C-", "Ctrl-"),
+                ("M-", "M-", "Alt-"), ("Alt-", "M-", "Alt-"),
+                ("S-", "S-", "Shift-"), ("Shift-", "S-", "Shift-")]
+                .into_iter().find(|(input, _, _)| rest.starts_with(input));
+            let Some((input, compact, full)) = found else { break };
+            prefix.push_str(if short { compact } else { full });
+            rest = &rest[input.len()..];
+        }
+        let valid = rest.chars().count() == 1 || NAMED.contains(&rest) || matches!(rest, "Space" | "Backspace" | "PgUp/PgDn")
+            || rest.strip_prefix('F').filter(|n|n.bytes().all(|b|b.is_ascii_digit())).and_then(|n| n.parse::<u8>().ok()).is_some_and(|n| (1..=12).contains(&n))
+            || (rest.is_empty() && !prefix.is_empty()); // held modifiers after prefix
+        let label = if !valid { token.to_string() } else {
+            format!("{prefix}{}", match (short, rest) { (false, "BackTab") => "Shift-Tab", (false, "Esc") => "Escape", (false, "PgUp/PgDn") => "PageUp/PageDown", _ => rest })
+        };
+        format!("{label}{whitespace}")
+    }).collect()
+}
+
 /// The prefix key from the client setting, falling back to Ctrl-g if it is missing, unparsable, or
 /// a key you'd type (a prefix needs Ctrl or Alt, or is a function key).
 pub fn prefix(setting: Option<&str>) -> String {
@@ -384,6 +413,18 @@ fn cursor(c: u8, app: bool) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_labels_match_the_shared_extension_table() {
+        let cases: serde_json::Value = serde_json::from_str(include_str!("../../tests/fixtures/key_labels.json")).unwrap();
+        for case in cases.as_array().unwrap() {
+            let input=case["input"].as_str().unwrap();
+            for mode in [None,Some("full"),Some("unknown"),Some("short")] {
+                let expected=case[if mode==Some("short") {"short"} else {"full"}].as_str().unwrap();
+                assert_eq!(display_labels(input,mode),expected,"{input:?} {mode:?}");
+            }
+        }
+    }
 
     #[test]
     fn basics() {

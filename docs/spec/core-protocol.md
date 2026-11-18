@@ -492,6 +492,17 @@ reconcile later with their full set (`exclusive=True`). Other runtimes should fo
   already carries Shift: `O`, `%`), in any order, then a character or one of `Up Down Left Right Home End PageUp
   PageDown Insert Delete Tab BackTab Enter Esc Backspace Space F1`..`F12`. Matching is case-insensitive for names
   and modifiers (`C-space` = `C-Space`), exact for characters. A key that doesn't parse never matches.
+- **Display labels.** `doc/settings/tui.key_labels` is `"full"` (default) or `"short"`; missing, non-string or
+  unknown values use full names. The native TUI formats `C-g`, `M-x`, `S-Tab`, `C-S-Left` as `Ctrl-g`, `Alt-x`,
+  `Shift-Tab`, `Ctrl-Shift-Left` by default, including the prefix prompt/menu, status hints, help and panel key
+  hints. Short mode restores compact notation. `BackTab` displays as `Shift-Tab`, `Esc` as `Escape`, and paging
+  hints use `PageUp/PageDown` in full mode. This works with all extensions off and in safe mode; it does not
+  change stored keys, matching or bytes sent to programs. Editable configuration values retain their syntax.
+  Settings exposes the choice through the generic `settings.set` Interface select. Extensions embedding key ids
+  in text read this same workspace option and use `prim_display.key_labels(text, setting)`; Settings' Keys page
+  and key-profile labels do this without new RPC or rich-text fields. Native and Python formatters share the
+  test table `tests/fixtures/key_labels.json`. Unknown/future key tokens stay literal; formatting never writes
+  bindings or profile state. Other clients may retain their own presentation, ignoring this native TUI option.
 - **Precedence.** When several visible bindings share a key (or a gesture and `where`), the highest `priority`
   wins (an integer, default 0), then the client's own defaults, then the lowest entry id. A winning binding to
   `client.none` unbinds the key, so a profile can remove a key without deleting another extension's entry.
@@ -502,7 +513,8 @@ reconcile later with their full set (`exclusive=True`). Other runtimes should fo
   that no key reaches any more, without a key. Safe mode hides every extension's bindings.
 - **Live feedback.** While the prefix menu is open a client may ask the terminal for richer key reports (the TUI
   uses the kitty keyboard protocol when supported) to show held modifiers in the prompt; after a key runs it
-  echoes it (`C-g z → zoom pane`). Held modifiers display as dimmed words (`Shift-`, `Ctrl-`, `Alt-`); key names
+  echoes it (`Ctrl-g z → zoom pane` by default). Held modifiers use dimmed full words (`Shift-`, `Ctrl-`, `Alt-`)
+  or compact labels according to the display choice; key names
   also accept these long forms (`Ctrl-a`, `Shift-Tab`).
 - **Keys sent to programs** are encoded like an xterm (`src/tui/keys.rs`, `encode`): cursor keys, Home and End as
   `CSI A`..`F` (`SS3` in application cursor mode, DECCKM), with modifiers `CSI 1;m X` where m = 1 + Shift + 2·Alt +

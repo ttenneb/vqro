@@ -17,7 +17,7 @@ import unicodedata
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from prim_ext import Extension, PrimError  # noqa: E402
-from prim_display import label
+from prim_display import label, key_labels
 
 ext = Extension("settings", event_types=["entries", "view.content", "extension", "safe_mode", "command"],
                 view_content={"names": ["themes", "icons", "keys"]})  # no resource events: not used here
@@ -181,7 +181,8 @@ BUILTIN = [(":", "all commands"), ("o", "next pane"), ("O", "previous pane"), ("
 
 def norm_key(s):
     """Canonical key name (`C-space` -> `C-Space`), or None if it isn't one."""
-    mods, rest = set(), s
+    # Full modifier labels are already accepted by the native key parser; keep stored ids canonical.
+    mods, rest = set(), key_labels(s, "short")
     while len(rest) > 2 and rest[1] == "-" and rest[0].upper() in "CMS":
         mods.add(rest[0].upper())
         rest = rest[2:]
@@ -220,19 +221,20 @@ def key_rows():
         titles = {c["name"]: c["title"] for c in ext.prim.call("command.list")["commands"] if c.get("available")}
     except Exception:
         pass
-    prefix = prefix_key()
+    mode = tui().get("key_labels")
+    prefix = key_labels(prefix_key(), mode)
     rows = []
     live = ext.live.get("keys") or {}
     if live.get("profiles"):
         rows.append({"type": "select", "text": "Profile", "value": live.get("profile"), "options": live["profiles"],
                      "command": "keys.profile", "description": "a keymap; its keys override extensions' own"})
     current = tui().get("prefix") or "C-g"
-    options = [{"label": p, "value": p} for p in PREFIXES]
+    options = [{"label": key_labels(p, mode), "value": p} for p in PREFIXES]
     if current not in PREFIXES:
-        options.append({"label": current, "value": current})
-    options.append({"label": "custom…", "input": "Prefix key (e.g. C-a, M-Space, F12)", "prefill": current})
+        options.append({"label": key_labels(current, mode), "value": current})
+    options.append({"label": "custom…", "input": f"Prefix key (e.g. {key_labels('C-a', mode)}, {key_labels('M-Space', mode)}, F12)", "prefill": current})
     rows.append({"type": "select", "text": "Prefix", "value": current, "options": options, "command": "settings.prefix",
-                 "description": "falls back to C-g if unusable; press it twice to send it to the program"})
+                 "description": f"falls back to {key_labels('C-g', mode)} if unusable; press it twice to send it to the program"})
     rows += [{"type": "separator"}, {"type": "header", "text": f"Keys after {prefix} (first wins)"}]
 
     groups = {}
@@ -254,7 +256,7 @@ def key_rows():
             if group.startswith("mouse."):
                 shown = group.replace("mouse.", "").replace(" on ", "-click on ")
             else:
-                shown = f"{prefix} {group}"
+                shown = f"{prefix} {key_labels(group, mode)}"
             row = {"text": shown if n == 0 else "  ↳ " + shown, "detail": bv.get("owner") or "workspace", "description": what}
             if not on:
                 row.update(style="dim", detail=f"{row['detail']} · off")
@@ -272,6 +274,10 @@ def refresh(*_):
     t = tui()
     interface = [{"type": "toggle", "text": label, "description": desc, "checked": bool(t[k]),
                   "command": "settings.toggle", "args": {"tui": k}} for k, label, desc, _ in OPTIONS]
+    interface.append({"type":"select", "text":"Key labels", "value":"short" if t.get("key_labels")=="short" else "full",
+                      "options":[{"label":"Full (Ctrl-g, Alt-x)","value":"full"},{"label":"Short (C-g, M-x)","value":"short"}],
+                      "command":"settings.set", "args":{"tui":"key_labels"},
+                      "description":"Display names only; configured key syntax stays unchanged."})
     info = ext.info
     about = [
         {"text": "prim", "detail": f"{info.get('server')} {info.get('version')} · protocol {info.get('protocol')}", "disabled": True, "style": "plain"},
@@ -324,12 +330,12 @@ def toggle(args):
         ext.apply([{"op": "set", "key": TUI, "value": t, "expect": ext.version(TUI)}], "settings: interface")
 
 
-@ext.command("settings.prefix", "Set the client prefix key (args: value or text, e.g. C-a)")
+@ext.command("settings.prefix", "Set the client prefix key (args: value or text)")
 def set_prefix(args):
     want = (args.get("value") or args.get("text") or "").strip()
     key = norm_key(want)
     if not key or not (key[:2] in ("C-", "M-") or (key[0] == "F" and len(key) > 1)):
-        raise PrimError(f"{want!r} can't be a prefix: use Ctrl or Alt with a key (C-a, M-Space) or F1-F12", "invalid")
+        raise PrimError(f"{want!r} can't be a prefix: use {key_labels('C-a or M-Space', tui().get('key_labels'))} or F1-F12", "invalid")
     t = dict(ext.value(TUI) or {}, prefix=key)
     ext.apply([{"op": "set", "key": TUI, "value": t, "expect": ext.version(TUI)}], "settings: prefix")
 

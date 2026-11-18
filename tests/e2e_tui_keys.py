@@ -141,6 +141,17 @@ try:
           got[:4] == ["1b5b31333b3275", "1b5b3132303b3375", "1b5b313b3544", "0d"], f"got {got}")
     keys("C-g")
     check("prefix menu still opens while that program is focused", bool(wait(lambda: "press a key or click" in screen(), 5)), screen())
+    check("prefix uses full key names by default", bool(wait(lambda:"Ctrl-g" in screen(),5)), screen())
+    print("CAPTURE key-labels-full\n"+screen(),flush=True)
+    current=call("workspace.snapshot")["entries"].get("doc/settings/tui",{}).get("value",{})
+    bindings={k:v for k,v in call("workspace.snapshot")["entries"].items() if k.startswith("binding/")}
+    call("workspace.apply",{"ops":[{"op":"set","key":"doc/settings/tui","value":dict(current,key_labels="short")}]})
+    check("open prefix switches to short key names", bool(wait(lambda:"C-g" in screen() and "Ctrl-g" not in screen(),5)), screen())
+    print("CAPTURE key-labels-short\n"+screen(),flush=True)
+    call("workspace.apply",{"ops":[{"op":"set","key":"doc/settings/tui","value":dict(current,key_labels="unknown")}]})
+    check("unknown label preference falls back to full", bool(wait(lambda:"Ctrl-g" in screen(),5)), screen())
+    check("label changes preserve stored bindings and prefix", bindings=={k:v for k,v in call("workspace.snapshot")["entries"].items() if k.startswith("binding/")} and
+          call("workspace.snapshot")["entries"]["doc/settings/tui"]["value"].get("prefix","C-g")==current.get("prefix","C-g"))
     keys("Escape")
     call("resource.kill", {"resource": rid})
     time.sleep(1)

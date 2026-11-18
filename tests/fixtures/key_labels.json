@@ -1,0 +1,20 @@
+[
+  {"input":"C-g","full":"Ctrl-g","short":"C-g"},
+  {"input":"M-x","full":"Alt-x","short":"M-x"},
+  {"input":"S-Tab","full":"Shift-Tab","short":"S-Tab"},
+  {"input":"BackTab","full":"Shift-Tab","short":"BackTab"},
+  {"input":"C-S-Left","full":"Ctrl-Shift-Left","short":"C-S-Left"},
+  {"input":"C-M-S-F5","full":"Ctrl-Alt-Shift-F5","short":"C-M-S-F5"},
+  {"input":"C--","full":"Ctrl--","short":"C--"},
+  {"input":"C-É","full":"Ctrl-É","short":"C-É"},
+  {"input":"Ctrl-Shift-Left","full":"Ctrl-Shift-Left","short":"C-S-Left"},
+  {"input":"Ctrl-Shift-","full":"Ctrl-Shift-","short":"C-S-"},
+  {"input":"C-Alt-","full":"Ctrl-Alt-","short":"C-M-"},
+  {"input":"Esc","full":"Escape","short":"Esc"},
+  {"input":"PgUp/PgDn","full":"PageUp/PageDown","short":"PgUp/PgDn"},
+  {"input":"F12 Space Enter A","full":"F12 Space Enter A","short":"F12 Space Enter A"},
+  {"input":"C-g , → settings","full":"Ctrl-g , → settings","short":"C-g , → settings"},
+  {"input":"C-g\tM-x\nS-Tab","full":"Ctrl-g\tAlt-x\nShift-Tab","short":"C-g\tM-x\nS-Tab"},
+  {"input":"Hyper-x C-gene S-Unknown F13","full":"Hyper-x C-gene S-Unknown F13","short":"Hyper-x C-gene S-Unknown F13"},
+  {"input":"","full":"","short":""}
+]

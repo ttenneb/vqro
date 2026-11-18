@@ -298,7 +298,7 @@ fn badge_style(b: &Value, pal: &Palette) -> Style {
 }
 
 /// Draw the panel into `area`. Keeps the selection visible and returns hit areas.
-pub fn render(buf: &mut Buffer, area: Rect, v: &Arc<Value>, st: &mut State, focused: bool, pal: &Palette, icons: &Icons) -> Hits {
+pub fn render(buf: &mut Buffer, area: Rect, v: &Arc<Value>, st: &mut State, focused: bool, pal: &Palette, icons: &Icons, key_labels: Option<&str>) -> Hits {
     let mut hits = Hits::default();
     if area.width < 6 || area.height == 0 {
         return hits;
@@ -346,7 +346,7 @@ pub fn render(buf: &mut Buffer, area: Rect, v: &Arc<Value>, st: &mut State, focu
         let wide=area.width>=96;
         let (list,detail)=if wide {let w=(area.width*2/5).max(36);(Rect{width:w,..area},Rect{x:area.x+w+1,width:area.width.saturating_sub(w+1),..area})}
             else {let wanted=all.rows.iter().fold(1u16,|h,r|h.saturating_add(lines(&r.item,area.width,icons)));let h=(area.height/2).max(1).min(area.height).min(wanted);(Rect{height:h,..area},Rect{y:area.y+h+1,height:area.height.saturating_sub(h+1),..area})};
-        render_list(buf,list,v,st,focused&&!st.detail_focus,pal,icons,&mut hits,true);
+        render_list(buf,list,v,st,focused&&!st.detail_focus,pal,icons,&mut hits,true,key_labels);
         if detail.height>1 {
             if wide {for y in area.y..area.bottom(){buf.set_string(detail.x-1,y,"│",pal.border(false));}}
             else if detail.y>area.y {buf.set_string(area.x,detail.y-1,"─".repeat(area.width as usize),pal.border(false));}
@@ -356,16 +356,16 @@ pub fn render(buf: &mut Buffer, area: Rect, v: &Arc<Value>, st: &mut State, focu
                 buf.set_string(detail.x,detail.y,truncate(title,detail.width as usize),pal.style(Some("accent")).add_modifier(Modifier::BOLD));
                 let body=Rect{y:detail.y+1,height:detail.height-1,..detail};
                 let mut child=st.detail.take().unwrap_or_default();
-                hits.detail=Some(Box::new(render(buf,body,&Arc::new(value),&mut child,focused&&st.detail_focus,pal,icons)));
+                hits.detail=Some(Box::new(render(buf,body,&Arc::new(value),&mut child,focused&&st.detail_focus,pal,icons,key_labels)));
                 st.detail=Some(child);hits.detail_area=Some(detail);
             }else{buf.set_string(detail.x,detail.y,"Select an item for details",pal.style(Some("dim")));}
         }
-    } else { render_list(buf,area,v,st,focused,pal,icons,&mut hits,false); }
+    } else { render_list(buf,area,v,st,focused,pal,icons,&mut hits,false,key_labels); }
     hits
 }
 
 #[allow(clippy::too_many_arguments)]
-fn render_list(buf:&mut Buffer,mut area:Rect,v:&Arc<Value>,st:&mut State,focused:bool,pal:&Palette,icons:&Icons,hits:&mut Hits,indicator:bool) {
+fn render_list(buf:&mut Buffer,mut area:Rect,v:&Arc<Value>,st:&mut State,focused:bool,pal:&Palette,icons:&Icons,hits:&mut Hits,indicator:bool,key_labels:Option<&str>) {
     if area.width<2 || area.height==0{return;}
     let prepared = st.prepare(v);
     let rows = &prepared.rows;
@@ -373,7 +373,7 @@ fn render_list(buf:&mut Buffer,mut area:Rect,v:&Arc<Value>,st:&mut State,focused
     if indicator && area.height>1 {
         let n=rows.iter().filter(|r|selectable(&r.item)).count();
         let total=prepared.total;
-        let text=format!("{n} of {total} · PgUp/PgDn · Tab: details");
+        let text=super::keys::display_labels(&format!("{n} of {total} · PgUp/PgDn · Tab: details"),key_labels);
         buf.set_string(area.x,area.bottom()-1,truncate(&text,area.width as usize),pal.style(Some("dim")));
         area.height-=1;
     }
@@ -470,7 +470,7 @@ fn render_list(buf:&mut Buffer,mut area:Rect,v:&Arc<Value>,st:&mut State,focused
         let total=prepared.total;
         let start=rows[..*first].iter().filter(|r|selectable(&r.item)).count()+1;let end=rows[..=*last].iter().filter(|r|selectable(&r.item)).count();
         buf.set_string(area.x,y," ".repeat(area.width as usize),pal.style(Some("dim")));
-        buf.set_string(area.x,y,truncate(&format!("{n} of {total} · {start}-{end} · PgUp/PgDn · Tab"),area.width as usize),pal.style(Some("dim")));
+        buf.set_string(area.x,y,truncate(&super::keys::display_labels(&format!("{n} of {total} · {start}-{end} · PgUp/PgDn · Tab"),key_labels),area.width as usize),pal.style(Some("dim")));
     }
 }
 
@@ -656,7 +656,7 @@ mod tests {
     fn draw(v: &Value, icons: &Icons, width: u16) -> Vec<String> {
         let area = Rect::new(0, 0, width, 6);
         let mut buf = Buffer::empty(area);
-        render(&mut buf, area, &Arc::new(v.clone()), &mut State::default(), false, &Palette::default(), icons);
+        render(&mut buf, area, &Arc::new(v.clone()), &mut State::default(), false, &Palette::default(), icons, None);
         let line = |y| {
             let mut s = String::new();
             let mut x = 0;
@@ -677,12 +677,12 @@ mod tests {
             {"text":"Two","detail_panel":{"title":"Two detail","items":[]}}
         ]}]}));
         for width in [120,60] {let area=Rect::new(0,0,width,24);let mut buf=Buffer::empty(area);let mut st=State::default();
-            let hits=render(&mut buf,area,&value,&mut st,true,&Palette::default(),&Icons::new(None,false));let detail=hits.detail_area.unwrap();
+            let hits=render(&mut buf,area,&value,&mut st,true,&Palette::default(),&Icons::new(None,false),None);let detail=hits.detail_area.unwrap();
             if width==120{assert!(detail.x>0);assert_eq!(detail.y,0);}else{assert_eq!(detail.x,0);assert!(detail.y>0);}
             assert!(!hits.rows.is_empty());assert!(hits.detail.is_some());assert!(st.page_step>0);
         }
         let mut st=State{filter:"search-tag".into(),..Default::default()};let found=super::rows(&value,&st);assert_eq!(found.len(),2);assert_eq!(found[0].item["text"],"Tools");
-        let area=Rect::new(0,0,120,24);let mut buf=Buffer::empty(area);render(&mut buf,area,&value,&mut st,true,&Palette::default(),&Icons::new(None,false));
+        let area=Rect::new(0,0,120,24);let mut buf=Buffer::empty(area);render(&mut buf,area,&value,&mut st,true,&Palette::default(),&Icons::new(None,false),None);
         let text=(0..24).map(|y|(0..120).map(|x|buf[(x,y)].symbol()).collect::<String>()).collect::<Vec<_>>().join("\n");assert!(text.contains("1 of 2"));assert!(text.contains("One detail"));
         let mut plain=(*value).clone();plain.as_object_mut().unwrap().remove("list_detail");assert!(missing(&plain).is_empty());assert_eq!(super::rows(&plain,&State::default()).len(),3);
     }
@@ -692,7 +692,7 @@ mod tests {
         let children=|prefix:&str,n:usize|(0..n).map(|i|json!({"text":format!("{prefix}{i}")})).collect::<Vec<_>>();
         let value=Arc::new(json!({"list_detail":{"requires":["list_detail"]},"items":[{"type":"header","text":"Alpha","expanded":true,"children":children("a",5)},{"type":"header","text":"Beta","expanded":true,"children":children("b",8)}]}));
         let area=Rect::new(0,0,120,8);let mut buffer=Buffer::empty(area);let mut state=State{sel:14,..Default::default()};let palette=Palette::default();
-        render(&mut buffer,area,&value,&mut state,true,&palette,&Icons::new(None,false));
+        render(&mut buffer,area,&value,&mut state,true,&palette,&Icons::new(None,false),None);
         assert_eq!(buffer[(0,0)].symbol(),"B");assert_eq!(buffer[(0,0)].fg,palette.accent);assert!(buffer[(0,0)].modifier.contains(Modifier::BOLD));
         let unsupported=json!({"list_detail":{"requires":["future-widget"]},"items":[{"text":"fallback"}]});
         assert!(!list_detail(&unsupported,&State::default()));assert!(missing(&unsupported).is_empty());
@@ -702,7 +702,7 @@ mod tests {
     fn partial_wrapped_rows_scroll_without_underflow_or_losing_text() {
         let value=Arc::new(json!({"items":[{"type":"text","focusable":true,"wrap":true,"text":"one two three four five six seven eight nine ten"}]}));
         let mut st=State{top:2,manual_scroll:true,..Default::default()};let area=Rect::new(0,0,12,3);let mut buf=Buffer::empty(area);
-        render(&mut buf,area,&value,&mut st,true,&Palette::default(),&Icons::new(None,false));assert!(st.top>0);assert!(buf[(0,0)].symbol()!=" ");
+        render(&mut buf,area,&value,&mut st,true,&Palette::default(),&Icons::new(None,false),None);assert!(st.top>0);assert!(buf[(0,0)].symbol()!=" ");
     }
 
     #[test]
