@@ -58,6 +58,49 @@ class SidebarTests(unittest.TestCase):
         with mock.patch.object(ext, "value", return_value={"hide_ended": True}):
             self.assertFalse(any(row.get("args", {}).get("resource") == "r3" for row in module["build"]()))
 
+    def scale_resources(self):
+        resources = {f"r{i}": {"id": f"r{i}", "kind": "terminal", "argv": ["sh"], "state": "live",
+                               "status": {"state": "idle"}} for i in range(600)}
+        resources.update({f"r{600+i}": {"id": f"r{600+i}", "kind": "agent", "name": "Agent", "host": f"r{400+i}",
+                                       "state": "live", "status": {"state": "idle"}} for i in range(200)})
+        return resources
+
+    def test_scale_sidebar_is_bounded_and_off_page_changes_do_not_republish_it(self):
+        import json
+        module = load(); ext = module["ext"]
+        ext.resources = self.scale_resources()
+        ext.published.clear(); module["refresh"]()
+        content = next(value for name, value in ext.published if name == "sidebar")
+        self.assertLess(len(json.dumps(content).encode()), 65536, "one status change must not broadcast every resource")
+        ext.published.clear()
+        ext.resources["r300"]["status"] = {"state": "error"}
+        module["refresh"]()
+        self.assertFalse(any(name == "sidebar" for name, _ in ext.published), "off-page detail does not invalidate the visible page")
+
+    def test_pagination_keeps_every_resource_and_bridge_reachable_with_ancestor_context(self):
+        module = load()
+        kids = [{"id": f"term:r{i}", "text": f"resource {i}"} for i in range(150)]
+        kids[70]["children"] = [{"id": "term:bridge", "text": "Bridge terminal"}]
+        rows = [{"type": "header", "text": "Workspaces"}, {"id": "ws:root", "text": "Root", "children": kids}]
+        found = set()
+        for page in range(3):
+            result, selected, pages, total = module["paginate"](rows, page)
+            self.assertEqual((selected, pages, total), (page, 3, 151))
+            self.assertEqual(result[0]["text"], "Workspaces")
+            self.assertEqual(result[1]["id"], "ws:root")
+            for row in result[1]["children"]:
+                found.add(row["id"])
+                found.update(child["id"] for child in row.get("children", []))
+        self.assertEqual(found, {f"term:r{i}" for i in range(150)} | {"term:bridge"})
+        self.assertEqual(module["paginate"](rows[:1], 99)[1:3], (0, 1), "shrinking inventory clamps the page")
+
+    def test_off_page_blocked_state_still_updates_the_global_status_segment(self):
+        module = load(); ext = module["ext"]
+        ext.resources = self.scale_resources(); module["refresh"](); ext.published.clear()
+        ext.resources["r300"]["status"] = {"state": "blocked"}
+        module["refresh"]()
+        self.assertEqual(ext.published, [("sidebar.status", {"label": "1 blocked", "icon": module["ICON"]["blocked"], "style": "warn"})])
+
     def test_status_burst_only_schedules_one_latest_publish(self):
         module = load(); ext = module["ext"]; ext.published.clear()
         for _ in range(500):

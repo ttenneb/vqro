@@ -11,7 +11,9 @@ stray). The sidebar's pinned toolbar is one line so it fits a narrow sidebar: a 
 naming what is shown, and `/` to filter. The chip opens the `sidebar.view` popup: show toggles,
 presets, and rarely used actions (refresh git state, add workspace). The popup is live content too,
 so its checks update in place while it is open.
-Rows are live content (`view.publish`): not saved, not in history.
+Rows are live content (`view.publish`): not saved, not in history. Large trees use shared, bounded
+64-row pages, keeping folder ancestors and each agent/bridge group together. The page chips browse all
+rows; filtering is page-local and the view popup also offers the complete resource chooser.
 """
 import os
 import sys
@@ -55,7 +57,9 @@ ICON = {
 }
 last = [None, None, None]  # what was last published: sidebar, status segment, view popup
 refresh_pending = threading.Event()
-PUBLISH_INTERVAL = 0.1  # Opinion: collapse status bursts into at most ten sidebar updates/second.
+PUBLISH_INTERVAL = 0.5  # Coalesce status bursts into at most two sidebar updates/second.
+PAGE_SIZE = 64  # Bound each full live publication, including off-screen tree detail.
+page_state = [0, 1]  # Shared sidebar page and current page count; derived, never history.
 
 
 def show():
@@ -223,13 +227,57 @@ def build():
     return items
 
 
+def paginate(items, page, size=PAGE_SIZE):
+    """Slice logical tree rows, retaining ancestor context and grouped bridge children.
+
+    A resource and its one bridge child are a unit. Folder ancestors can repeat
+    across pages; no resource is omitted, and per-page filtering is explicit.
+    """
+    def children(row):
+        return [] if row.get("id", "").startswith("term:") else row.get("children", [])
+    def count(rows):
+        return sum((0 if row.get("type") == "header" else 1) + count(children(row)) for row in rows)
+    total = count(items)
+    pages = max(1, (total + size - 1) // size)
+    page = max(0, min(page, pages-1))
+    start, end = page*size, (page+1)*size
+    index = 0
+    def window(rows):
+        nonlocal index
+        selected, header = [], None
+        for row in rows:
+            if row.get("type") == "header":
+                header = row
+                continue
+            own = start <= index < end
+            index += 1
+            kids = window(children(row))
+            if own or kids:
+                if header is not None:
+                    selected.append(header)
+                    header = None
+                kept = dict(row)
+                if "children" in row and not row.get("id", "").startswith("term:"):
+                    kept["children"] = kids
+                selected.append(kept)
+        return selected
+    return window(items), page, pages, total
+
+
 def toolbar():
     """One line: what is shown (opens the view popup) and the filter."""
     short = SHORT.get(current_preset(), "custom")
-    return [{"type": "chips", "chips": [
+    rows = [{"type": "chips", "chips": [
         {"text": f"Show: {short} ▾", "command": "sidebar.view"},
         {"text": "", "icon": ICON["filter"], "command": "client.panel", "args": {"action": "filter"}},
     ]}]
+    if page_state[1] > 1:
+        rows.append({"type": "chips", "chips": [
+            {"text": "‹", "command": "sidebar.page", "args": {"delta": -1}},
+            {"text": f"{page_state[0]+1}/{page_state[1]}", "command": "sidebar.page", "input": "Sidebar page number"},
+            {"text": "›", "command": "sidebar.page", "args": {"delta": 1}},
+        ]})
+    return rows
 
 
 def view_panel():
@@ -251,6 +299,8 @@ def view_panel():
     rows += [{"text": ("● " if name == current else "○ ") + name, "style": "accent" if name == current else None,
               "command": "sidebar.preset", "args": {"preset": name}} for name in PRESETS]
     rows += [{"type": "separator"},
+             {"text": "Choose any resource…", "command": "sidebar.show", "pick": "resource"},
+             {"type": "text", "text": "Filter applies to this page; the resource chooser lists all resources."},
              {"text": "Close/hide ended items", "command": "sidebar.close_ended"},
              {"text": "Show ended items", "command": "sidebar.show_ended"}]
     if have_ws:
@@ -264,10 +314,12 @@ def view_panel():
 def refresh(*_):
     # The worker reads a coherent cache, but never holds its lock across RPC/publication.
     with ext.cache_lock:
-        items = build()
-        content = {"requires": ["tree", "badges", "menu", "toolbar", "chips", "icon", "icon_names"], "toolbar": toolbar(), "items": items}
+        all_items = build()
+        items, page_state[0], page_state[1], total = paginate(all_items, page_state[0])
+        content = {"requires": ["tree", "badges", "menu", "toolbar", "chips", "icon", "icon_names"], "toolbar": toolbar(), "items": items,
+                   "page": {"number": page_state[0]+1, "count": page_state[1], "rows": total}}
         view = view_panel()
-        c = counts_of(items)
+        c = counts_of(all_items)
         seg = {"label": f"{c['blocked']} blocked", "icon": ICON["blocked"], "style": "warn"} if c.get("blocked") else {"label": ""}
     for index, name, value in ((0, "sidebar", content), (2, "sidebar.view", view), (1, "sidebar.status", seg)):
         if value != last[index]:
@@ -316,9 +368,20 @@ def view_cmd(args):
     return {"client": {"popup": {"view": "sidebar.view", "width": 52}}}
 
 
-@ext.command("sidebar.show", "Show a terminal in a tab (args: resource)")
+@ext.command("sidebar.page", "Choose a sidebar page (args: delta, or text page number)")
+def page_cmd(args):
+    with ext.cache_lock:
+        try:
+            selected = int(args["text"])-1 if "text" in args else page_state[0]+int(args.get("delta", 0))
+        except (ValueError, TypeError):
+            raise PrimError("enter a sidebar page number", "invalid")
+        page_state[0] = max(0, min(selected, page_state[1]-1))
+    refresh_pending.set()
+
+
+@ext.command("sidebar.show", "Show a resource in a tab (args: resource, or picked)")
 def show_cmd(args):
-    return ext.invoke("tabs.show", {"resource": args["resource"]})
+    return ext.invoke("tabs.show", {"resource": args.get("resource") or args.get("picked")})
 
 
 @ext.command("sidebar.close_ended", "Close ended tabs and hide ended sidebar items (nothing is killed)")

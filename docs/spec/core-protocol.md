@@ -512,7 +512,9 @@ and keyboard input takes priority over queued background work. Total fps can the
 All resource events and terminal bytes are still consumed in order: drawing is coalesced, not protocol data.
 Merged panel values and flattened rows are reused while content and page/filter/expansion remain unchanged;
 entry/live/snapshot updates invalidate caches. Selection/scroll, current geometry, theme and icons stay fresh.
-The default sidebar separately batches derived publications at most ten times/second in the extension, not core.
+The default sidebar separately batches derived publications at most twice/second in the extension, not core,
+and publishes one bounded tree page rather than every off-screen resource. Page choice is shared extension
+state (not history); filtering applies to that page, while its popup resource chooser lists the full inventory.
 See `research/tui-scale.md` for the opt-in private probe, measured floor and non-enforced placeholder budgets.
 
 ## Themes
