@@ -5,7 +5,7 @@ Usage: tests/e2e_providers.py TARGET_DIR   (debug binaries: TARGET_DIR/debug/{pr
 Everything lives under a short /tmp root; PATH is empty for the core, providers, hc and tmux.
 Stops only what it started. Prints PASS/FAIL lines and exits non-zero on failure.
 """
-import base64, json, os, queue, shutil, socket, subprocess, sys, tempfile, threading, time
+import base64, fcntl, json, os, queue, shutil, socket, struct, subprocess, sys, tempfile, termios, threading, time
 
 TARGET = sys.argv[1]
 PRIM, PHERDR, PTMUX = (os.path.join(TARGET, "debug", b) for b in ("prim", "prim-herdr", "prim-tmux"))
@@ -17,7 +17,7 @@ for d in ("home", "st", "xst", "run", "cfg", "ext"):
 os.chmod(os.path.join(R, "run"), 0o700)
 ENV = {"HOME": f"{R}/home", "PATH": "", "TERM": "xterm-256color", "SHELL": "/bin/sh", "PRIM_STATE_DIR": f"{R}/st",
        "PRIM_SOCKET": f"{R}/p.sock", "PRIM_EXTENSIONS_DIR": f"{R}/ext", "XDG_STATE_HOME": f"{R}/xst",
-       "XDG_RUNTIME_DIR": f"{R}/run", "XDG_CONFIG_HOME": f"{R}/cfg", "HC_SESSION": "e2e"}
+       "XDG_RUNTIME_DIR": f"{R}/run", "XDG_CONFIG_HOME": f"{R}/cfg", "HC_SOCKET": f"{R}/hc.sock", "HC_SESSION": "e2e"}
 TSOCK = f"{R}/t.sock"
 results = []
 
@@ -31,6 +31,17 @@ def check(name, ok, detail=""):
 def tmux(*args, start=False):
     flags = [] if start else ["-N"]
     return subprocess.run([TMUX, *flags, "-S", TSOCK, "-f", "/dev/null", *args], env=ENV, capture_output=True, text=True)
+
+
+def tmux_pty_size(ref):
+    """Observe the owned native PTY; tmux 3.7b coalesces SIGWINCH with a resize timer."""
+    tty = tmux("display-message", "-p", "-t", ref, "#{pane_tty}").stdout.strip()
+    fd = os.open(tty, os.O_RDONLY | os.O_NOCTTY)
+    try:
+        rows, cols, _, _ = struct.unpack("HHHH", fcntl.ioctl(fd, termios.TIOCGWINSZ, b"\0" * 8))
+        return rows, cols
+    finally:
+        os.close(fd)
 
 
 def hc(*args):
@@ -154,7 +165,11 @@ try:
             c.notify("stream.input", {"stream": sid, "text": "echo e2e-$((6*7))-$E2E\r"})
             found, tail, _ = c.stream_until(sid, f"e2e-42-{name}")
             check(f"{name}: input reaches the program (env too) and output comes back", found, tail[-200:].decode(errors="replace"))
-            c.call("stream.resize", {"stream": sid, "cols": 100, "rows": 30})
+            resized = c.call("stream.resize", {"stream": sid, "cols": 100, "rows": 30})
+            assert resized["outcome"] == "dispatched", resized
+            if name == "tmux":
+                # Dispatch is not settlement. Observe native PTY application before asking the shell once.
+                check("tmux: native PTY resize settles", bool(wait(lambda: tmux_pty_size(r["resource"]["backend_ref"]) == (30, 100), 3, .02)))
             c.notify("stream.input", {"stream": sid, "text": "/usr/bin/stty size\r"})
             found, tail, _ = c.stream_until(sid, "30 100")
             check(f"{name}: resize applies", found, tail[-200:].decode(errors="replace"))

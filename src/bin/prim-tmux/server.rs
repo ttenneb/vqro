@@ -34,7 +34,7 @@ pub fn ensure(bin: &PathBuf, socket: &PathBuf) -> Result<(), String> {
     // A control client needs a session. Keep a marked, exited native pane, never a login shell.
     // One tmux command queue installs remain-on-exit and the marker before child exit is handled.
     // Existing unmarked panes are user work and are never retroactively hidden or killed.
-    match super::tmux_run(bin, socket, &[], &["new-session", "-d", "-s", "prim", "-n", "prim-bootstrap", "true", "prim-bootstrap",
+    match super::tmux_run(bin, socket, &[], &["new-session", "-d", "-s", "prim", "-n", "prim-bootstrap", "/usr/bin/true", "prim-bootstrap",
         ";", "set-option", "-w", "-t", "prim:", "remain-on-exit", "on",
         ";", "set-option", "-p", "-t", "prim:", "@prim_bootstrap", "1"]) {
         Ok(_) => Ok(()),

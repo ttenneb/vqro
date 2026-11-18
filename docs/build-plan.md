@@ -211,6 +211,15 @@ written the same way was contained by the crash budget and removed with one reve
   contention, then 6/6 pass. Full gate 18/18 passes, zero warnings/no leftovers; live prim not touched.
 - Evidence and bounds: `research/agent-exit-flake.md`.
 
+## tmux sizes and backend readiness (2026-11-17)
+
+- Spawn/open/resize submit native window and layout-constrained pane sizes; new owned servers keep only a marked,
+  exited internal bootstrap pane rather than a login shell/resource. Existing native work remains untouched.
+- TUI renders authoritative live backend notices even with an alternative backend. Provider display readiness is
+  separate from supervisor process status; Settings refreshes and keeps configuration recovery available.
+- Red/green native layout and kernel PTY assertions, core/TUI/settings regressions, and physical provider/TUI E2Es.
+  Native resize timers are observed, not mistaken for settled delivery; `research/tmux-size-notice.md`.
+
 ## Known gaps found while building
 
 - **History churn:** extensions that refresh views on every event (the sidebar on status changes) fill the

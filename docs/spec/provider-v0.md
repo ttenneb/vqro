@@ -418,13 +418,14 @@ existing status consumers and partial resource events (`src/events.rs`) work unc
 
 ### 9.5 Streams (G6, G7, G8, G13, G14)
 
-`prim-tmux` applies requested dimensions on spawn (80×24 when omitted), before the observed spawn reply,
+`prim-tmux` submits requested native dimensions on spawn (80×24 when omitted), before the observed spawn reply,
 and on stream open before repaint, as well as subsequent resize notifications. It declares
 `terminal.resize {owner: "latest_viewer", scope: "window", pane: "native_layout_constraints"}`: native
 `resize-window` manually sizes the containing window, then `resize-pane` requests the pane size. Native split
 minimums may constrain the pane; other native clients may resize the same window. Closing a viewer does not
 restore an older size. Spawn uses native `new-window` followed by resizing, so a program can initially start at
-tmux's creation size and receive SIGWINCH; this does not promise a pre-exec PTY size. Unknown capability
+tmux's creation size and receive SIGWINCH; this does not promise a pre-exec PTY size. tmux coalesces kernel PTY
+resizes on its own timer, so native layout command completion is not a PTY-settlement acknowledgement. Unknown capability
 parameters remain ignorable; this adds no core sizing arbitration.
 
 | Method | Dir | Kind | Params | Result |

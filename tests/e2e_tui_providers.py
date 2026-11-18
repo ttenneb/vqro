@@ -111,7 +111,9 @@ try:
     check("unreachable default notice is visible despite alternative backends", bool(wait(lambda:
         "No default backend is ready" in screen() and
         call("extension.list")["extensions"]["herdr"]["display_status"] == "provider-not-connected")))
-    keys("C-g", ","); keys("/"); keys("herdr", literal=True); keys("Enter")
+    keys("C-g", ",")
+    check("catalogue opens before typing its search", bool(wait(lambda:"14 of 14" in screen() and "Agent controls" in screen())))
+    keys("/"); keys("herdr", literal=True); keys("Enter")
     check("catalogue separates disconnected provider from running process", bool(wait(lambda:
         "provider-not-connected" in screen() and "Process: running" in screen())))
     call("workspace.apply", {"ops":[{"op":"set","key":"extension/herdr","value":saved_herdr}]})

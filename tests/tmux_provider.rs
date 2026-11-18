@@ -48,6 +48,17 @@ impl Tmux {
         t.pid = String::from_utf8_lossy(&t.cli(&["display-message", "-p", "#{pid}"]).stdout).trim().parse().ok();
         t
     }
+    async fn pty_size(&self, pane: &str, cols: u16, rows: u16) {
+        let tty=self.cli(&["display-message","-p","-t",pane,"#{pane_tty}"]);
+        let tty=String::from_utf8(tty.stdout).unwrap();
+        let deadline=tokio::time::Instant::now()+Duration::from_secs(3);
+        loop {
+            let size=Command::new("/usr/bin/stty").env_clear().args(["-F",tty.trim(),"size"]).output().unwrap();
+            if size.status.success() && String::from_utf8_lossy(&size.stdout).trim()==format!("{rows} {cols}") {break;}
+            assert!(tokio::time::Instant::now()<deadline,"native PTY size did not settle: {}",String::from_utf8_lossy(&size.stdout));
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
     fn cli(&self, args: &[&str]) -> std::process::Output {
         Command::new("/usr/bin/tmux")
             .args(["-N", "-S"])
@@ -191,6 +202,7 @@ async fn registers_syncs_spawns_streams_status_and_kills_on_real_tmux() {
     let pane = facts["ref"].as_str().unwrap().to_string();
     assert_eq!((facts["name"].as_str(), facts["argv"][0].as_str()), (Some("spawned"), Some("/bin/sh")));
     assert_eq!(String::from_utf8_lossy(&tmux.cli(&["display-message", "-p", "-t", &pane, "#{pane_width}x#{pane_height}"]).stdout).trim(), "110x33", "spawn size must reach the native pane");
+    tmux.pty_size(&pane,110,33).await;
     core.until(|m| m["method"] == "resource.upsert" && m["params"]["facts"]["ref"] == pane.as_str()).await;
     // Same effect id again: conflict, not a second window.
     core.send(json!({"jsonrpc": "2.0", "id": 11, "method": "effect.invoke", "params": {"generation": 3, "effect": "e1",
@@ -262,6 +274,7 @@ async fn open_and_resize_apply_native_sizes_with_latest_viewer_winning() {
         assert_eq!(core.until(|m|m["id"]==request).await["result"]["initial"],"repaint");
         let size = tmux.cli(&["display-message","-p","-t",&pane,"#{pane_width}x#{pane_height}"]);
         assert_eq!(String::from_utf8_lossy(&size.stdout).trim(), format!("{cols}x{rows}"), "stream.open size before repaint");
+        tmux.pty_size(&pane,cols,rows).await;
     }
     core.send(json!({"jsonrpc":"2.0","method":"stream.resize","params":{"generation":1,"stream":1,"cols":140,"rows":42}})).await;
     let deadline = tokio::time::Instant::now()+Duration::from_secs(3);
@@ -271,6 +284,7 @@ async fn open_and_resize_apply_native_sizes_with_latest_viewer_winning() {
         assert!(tokio::time::Instant::now()<deadline,"stream.resize ignored: {}",String::from_utf8_lossy(&size.stdout));
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+    tmux.pty_size(&pane,140,42).await;
     // A native split constrains pane size; do not claim each pane is the whole window.
     let split=tmux.cli(&["split-window","-h","-d","-t",&pane,"/bin/sh"]);
     assert!(split.status.success(),"{}",String::from_utf8_lossy(&split.stderr));
