@@ -3,11 +3,13 @@ import asyncio
 from copy import deepcopy
 import json
 import os
+import random
 from pathlib import Path
 import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "extensions"))
@@ -53,7 +55,19 @@ class BridgeCore(Core):
             for facts in params["resources"]:
                 self.upsert(facts)
         elif method == "workspace.snapshot":
-            return {"resources": list(self.resources.values()), "entries": deepcopy(self.entries)}
+            snapshot = {"resources": list(self.resources.values()), "entries": deepcopy(self.entries)}
+            if len(json.dumps(snapshot).encode()) > 1048576:
+                raise ProviderError("too_large", "reply exceeds recovery envelope")
+            return snapshot
+        elif method == "resource.list":
+            return {"resources": [deepcopy(r) for r in self.resources.values()
+                if (params.get("provider") is None or r.get("provider") == params["provider"])
+                and (params.get("backend_ref") is None or r.get("backend_ref") == params["backend_ref"])]}
+        elif method == "workspace.get":
+            entry = deepcopy(self.entries.get(params["key"]))
+            if len(json.dumps(entry).encode()) > 1048576:
+                raise ProviderError("too_large", "reply exceeds recovery envelope")
+            return entry
         elif method == "workspace.apply":
             for op in params["ops"]:
                 if op.get("expect") == 0 and op["key"] in self.entries:
@@ -134,6 +148,51 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.effects += 1
         return await self.core.call("effect.invoke", {"effect": f"e{self.effects}", "op": "agent." + op,
             "ref": "agent", "incarnation": "", "args": args or {}, "deadline_ms": 1000})
+
+    async def test_startup_uses_scoped_reads_when_the_full_workspace_exceeds_provider_cap(self):
+        for key in ("doc/unrelated/one", "doc/unrelated/two"):
+            self.core.entries[key] = {"version": 1, "value": "x"*650000}
+        self.core.resources["r99"] = {"id": "r99", "provider": "unrelated", "backend_ref": "agent", "kind": "agent"}
+        bridge = await self.start()
+        self.assertTrue(bridge.connected)
+        self.assertEqual(bridge.rid, "r7")
+        self.assertFalse(self.core.notes("workspace.snapshot"), "the provider wire must never need an aggregate snapshot")
+        query = self.core.notes("resource.list")[0]["params"]
+        self.assertEqual((query["provider"], query["backend_ref"]), ("pi-test", "agent"))
+        self.assertEqual(self.core.notes("workspace.get")[0]["params"]["key"], "view/agent-r7")
+        self.assertIsNone(bridge.pi.process.returncode)
+
+    async def test_oversized_foreign_view_is_reported_without_register_sync_retry_storm(self):
+        self.core.entries["view/agent-r7"] = {"version": 1, "value": {"kind": "panel", "items": [{"text": "x"*1100000}]}}
+        bridge = await self.start()
+        self.assertIsNone(bridge.view)
+        self.assertIn("too_large", bridge.view_problem)
+        self.assertEqual(len(self.core.notes("provider.register")), 1)
+        self.assertEqual(len(self.core.notes("provider.sync")), 1)
+        self.assertFalse(self.core.notes("view.publish"))
+        await self.core.wait(lambda: "view_error" in self.core.resources["r7"]["data"])
+        self.assertIn("view_error", self.core.resources["r7"]["data"])
+        self.assertIsNone(bridge.pi.process.returncode)
+
+    async def test_view_declaration_race_rechecks_only_that_entry_without_reregistering(self):
+        original_entry = {"version": 1, "value": {"kind": "panel", "title": "Foreign", "items": []}}
+        self.core.entries["view/agent-r7"] = deepcopy(original_entry)
+        original_result = self.core.result
+        reads = 0
+        async def race(row):
+            nonlocal reads
+            if row["method"] == "workspace.get":
+                reads += 1
+                if reads == 1:
+                    return None  # It appeared immediately after the first read.
+            return await original_result(row)
+        self.core.result = race
+        bridge = await self.start()
+        self.assertEqual(reads, 2)
+        self.assertIsNone(bridge.view)
+        self.assertEqual(self.core.entries["view/agent-r7"], original_entry)
+        self.assertEqual(len(self.core.notes("provider.register")), 1)
+        self.assertFalse(self.core.notes("view.publish"))
 
     async def test_user_effect_wakes_publication_without_waiting_for_sampling_timer(self):
         bridge = await self.start(interval=10)
@@ -355,16 +414,41 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         async def offline(provider):
             attempts.append(asyncio.get_running_loop().time())
             raise ConnectionError("offline")
-        bridge = await self.start(ready=False, connector=offline)
-        async def retries():
-            while len(attempts) < 3:
-                await asyncio.sleep(.01)
-        await asyncio.wait_for(retries(), 1)
+        with mock.patch("pi_bridge.program.random.uniform", side_effect=lambda low, high: high):
+            bridge = await self.start(ready=False, connector=offline)
+            async def retries():
+                while len(attempts) < 3:
+                    await asyncio.sleep(.01)
+            await asyncio.wait_for(retries(), 1)
         self.assertGreaterEqual(attempts[1] - attempts[0], .045)
         self.assertGreaterEqual(attempts[2] - attempts[1], .09)
         self.assertIsNone(bridge.pi.process.returncode)
         self.stop.set()
         await asyncio.wait_for(self.task, 2)
+
+    async def test_briefly_accepted_flapping_links_do_not_reset_reconnect_backoff(self):
+        others = [BridgeCore(self.core.state, generation=g) for g in (8, 9)]
+        sockets = [self.sock]
+        for core in others:
+            sock = await core.start()
+            self.extra_cores.append(core); self.extra_sockets.append(sock); sockets.append(sock)
+        attempted = []
+        async def connector(provider):
+            attempted.append(asyncio.get_running_loop().time())
+            await provider.connect(sock=sockets.pop(0))
+        with mock.patch("pi_bridge.program.random.uniform", side_effect=lambda low, high: high):
+            bridge = await self.start(connector=connector)
+            delays = []
+            for previous, following in zip([self.core, *others], others):
+                closed = asyncio.get_running_loop().time()
+                previous.writer.close()
+                await asyncio.wait_for(following.registered.wait(), 2)
+                await asyncio.wait_for(bridge.ready.wait(), 2)
+                delays.append(attempted[-1]-closed)
+            self.assertGreaterEqual(delays[0], .045)
+            self.assertGreaterEqual(delays[1], .09, "a short successful registration must not restart the fast retry loop")
+            self.assertEqual(bridge.connections, 3)
+            self.assertIsNone(bridge.pi.process.returncode)
 
     async def test_lifetime_stdin_eof_closes_child_and_publishes_gone(self):
         from pi_bridge.__main__ import watch_stdin
@@ -461,6 +545,15 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
 
 class DisplayTests(unittest.TestCase):
+    def test_retry_jitter_retains_a_floor_spread_and_strict_cap(self):
+        bridge = Bridge(["unused"], cwd="unused", env={}, token="test", fallback=Frames())
+        self.assertEqual(bridge.retry_max, 30)
+        rng = random.Random(123)
+        with mock.patch("pi_bridge.program.random.uniform", side_effect=rng.uniform):
+            values = [bridge._retry_delay(bridge.retry_max) for _ in range(100)]
+        self.assertTrue(all(15 <= value <= 30 for value in values))
+        self.assertGreater(max(values)-min(values), 5, "capped retries must still have jitter")
+
     def test_projection_marks_unrepresentable_fields_unknown(self):
         snapshot = {"run": {"active": True, "settled": False}, "queues": {"steering": ["x" * 100000], "follow_up": []},
                     "requests": [{"id": "q", "kind": "confirm", "prompt": "question", "data": {"message": "body"}}]}

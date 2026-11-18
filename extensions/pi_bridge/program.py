@@ -3,6 +3,7 @@ import asyncio
 import json
 import math
 import re
+import random
 import uuid
 
 from prim_provider import Provider, ProviderError
@@ -23,7 +24,7 @@ CAPABILITIES = {
 class Bridge:
     def __init__(self, argv, *, cwd, env, token, endpoint=None, sock=None,
                  provider=None, fallback=None, interval=.2, transcript_bytes=16384,
-                 pi_limits=None, connector=None, retry_initial=.25, retry_max=5):
+                 pi_limits=None, connector=None, retry_initial=.25, retry_max=30):
         if not argv:
             raise ValueError("Pi argv is required; no installed runtime is selected implicitly")
         if not isinstance(token, str) or not token:
@@ -123,26 +124,44 @@ class Bridge:
         self.view_problem = None
         initial = self.facts()
         await provider.full_sync([initial])
-        snapshot = await provider.call("workspace.snapshot", {})
-        resources = [r for r in snapshot.get("resources", [])
-                     if r.get("provider") == provider.name and r.get("backend_ref") == "agent"]
+        scoped = await provider.call("resource.list", {"provider": provider.name, "backend_ref": "agent"})
+        resources = [r for r in scoped.get("resources", [])
+                     if r.get("provider") == provider.name and r.get("backend_ref") == "agent" and r.get("kind") == "agent"]
         if len(resources) != 1 or not isinstance(resources[0].get("id"), str) or not re.fullmatch(r"r[0-9]+", resources[0]["id"]):
             raise ProviderError("backend", "acknowledged sync did not publish exactly one agent resource")
         self.rid = resources[0]["id"]
         view = "agent-" + self.rid
         marker = {"instance": provider.instance, "ref": "agent"}
-        entry = snapshot.get("entries", {}).get("view/" + view)
-        if entry is None:
-            await provider.call("workspace.apply", {"note": "Declare Pi agent fallback view", "ops": [{
-                "op": "set", "key": "view/" + view, "expect": 0,
-                "value": {"kind": "panel", "title": "Pi " + self.rid, "bridge": marker,
-                          "items": [{"type": "text", "text": "Pi bridge not connected; use its backend terminal."}]}}]})
-            self.view = view
-        elif entry.get("value", {}).get("kind") == "panel" and entry["value"].get("bridge") == marker:
-            self.view = view
-        else:
-            self.view = None
-            self.view_problem = "Agent view belongs to someone else; not overwritten or published."
+        self.view = None
+        try:
+            # A provider has a 1 MiB wire cap. Never fetch the whole workspace
+            # just to locate one resource and inspect its one owned view.
+            entry = await provider.call("workspace.get", {"key": "view/" + view})
+            if entry is None:
+                try:
+                    await provider.call("workspace.apply", {"note": "Declare Pi agent fallback view", "ops": [{
+                        "op": "set", "key": "view/" + view, "expect": 0,
+                        "value": {"kind": "panel", "title": "Pi " + self.rid, "bridge": marker,
+                                  "items": [{"type": "text", "text": "Pi bridge not connected; use its backend terminal."}]}}]})
+                    self.view = view
+                except ProviderError as error:
+                    if error.kind != "conflict":
+                        raise
+                    entry = await provider.call("workspace.get", {"key": "view/" + view})
+            if entry is not None:
+                value = entry.get("value") if isinstance(entry, dict) else None
+                if isinstance(value, dict) and value.get("kind") == "panel" and value.get("bridge") == marker:
+                    self.view = view
+                else:
+                    self.view_problem = "Agent view belongs to someone else; not overwritten or published."
+            elif self.view is None:
+                self.view_problem = "Agent view changed during declaration; not overwritten or published."
+        except ProviderError as error:
+            if error.kind not in ("too_large", "forbidden", "unknown_method", "unsupported"):
+                raise
+            # An oversized/foreign view is not a reason to reconnect and sync
+            # repeatedly. Resource controls and the backend terminal still work.
+            self.view_problem = "Agent view unavailable (" + str(error.kind) + "): " + tail(plain(error), 512)
         async with self._publish_lock:
             self._facts, self._content = initial, None
             self.connected = True
@@ -153,6 +172,10 @@ class Bridge:
             raise ProviderError("unavailable", "control disconnected during initial publication")
         self.ready.set()
 
+    def _retry_delay(self, backoff):
+        # Equal jitter retains a nonzero floor and spreads even capped retries.
+        return random.uniform(backoff / 2, backoff)
+
     async def _control(self):
         provider = self.provider
         backoff = self.retry_initial
@@ -160,9 +183,10 @@ class Bridge:
             self.provider = provider
             self.connected = False
             self.ready.clear()
+            connected_at = None
             try:
                 await self._connect(provider)
-                backoff = self.retry_initial
+                connected_at = asyncio.get_running_loop().time()
                 await provider.wait_closed()
             except asyncio.CancelledError:
                 raise
@@ -181,9 +205,12 @@ class Bridge:
                 await provider.close()
             if self._credential is None:
                 raise ProviderError("forbidden", "registration returned no resume credential; stopping runtime rather than keeping an unreachable Pi")
+            # A briefly accepted, flapping connection must not reset the backoff.
+            if connected_at is not None and asyncio.get_running_loop().time() - connected_at >= 30:
+                backoff = self.retry_initial
             # Only a transport gap retries the last observed credential;
             # registration's grace/rotation contract resolves a lost reply.
-            await asyncio.sleep(backoff)
+            await asyncio.sleep(self._retry_delay(backoff))
             backoff = min(self.retry_max, backoff * 2)
             provider = Provider(**self._template, token=self._credential)
             for effect in EFFECTS:

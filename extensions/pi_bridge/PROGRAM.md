@@ -49,12 +49,18 @@ and fallback and reports a view_error. An owned marker permits reuse after recon
 
 ## Core restart and authentication
 
-Core loss **does not stop Pi**. The bridge retries the same endpoint with bounded exponential backoff
-(0.25 seconds to 5 seconds), keeping the same provider name/instance/ref and the same child process.
+Core loss **does not stop Pi**. The bridge retries the same endpoint with capped exponential equal-jitter
+windows (initial 0.125–0.25 seconds, maximum 15–30 seconds), keeping the same provider name/instance/ref and
+child process. A connection must stay healthy at least 30 seconds before it resets the backoff; briefly flapping
+successful registrations cannot restart a rapid retry loop.
 Registration result.resume_token replaces the credential used in the next registration's existing params.token.
 The core owns durable token storage, host binding and current/previous-token recovery after a lost reply; the
-bridge only remembers credentials it actually observed. After registration it full-syncs current facts and
-reuses its agent view. No stream/effect/prompt replay. Native pending work continues, even if the caller's old
+bridge only remembers credentials it actually observed. After registration it full-syncs current facts, reads
+only its exact provider/ref via `resource.list` and its one view via `workspace.get`, then reuses its owned view.
+It never needs `workspace.snapshot` over the 1 MiB provider wire. An oversized/foreign/unreadable view is
+reported as `view_error` while resource controls and the backend terminal remain available, not used as a reason
+to repeat registration/sync. A declaration CAS conflict is resolved by reading the one entry again, never blindly
+overwriting it. No stream/effect/prompt replay. Native pending work continues, even if the caller's old
 core request became indeterminate.
 
 SDK reconnection remains explicit: each attempt creates a fresh Provider, never reuses an old generation.
@@ -69,7 +75,8 @@ rather than letting the generic extension watcher's os._exit bypass child/resour
 `tests/test_pi_provider.py` uses the SDK socket-pair fake core plus fake Pi, including token registration,
 acceptance vs settled, steering, abort/clear behavior, dispatched answers, bounded/coalesced/sanitized views,
 child crash/gone, EOF cleanup, stalled fallback, auth rejection, resumed core with unchanged Pi PID, current facts,
-owned-view reuse, lost registration reply and bounded reconnect backoff. A CLI subprocess check uses a private
+owned-view reuse, lost registration reply, >1 MiB workspace startup, oversized foreign views, and capped jittered
+reconnect/flapping-link backoff. A CLI subprocess check uses a private
 in-test Unix-socket fake core and fake Pi; it confirms module argv and graceful managed-stdin EOF cleanup.
 
 Run with `env -i HOME="$HOME" PATH=/usr/bin:/bin python3 -W error -m unittest discover -s tests -p 'test_*.py' -v`.
