@@ -317,7 +317,7 @@ pub fn display_labels(text: &str, setting: Option<&str>) -> String {
             rest = &rest[input.len()..];
         }
         let valid = rest.chars().count() == 1 || NAMED.contains(&rest) || matches!(rest, "Space" | "Backspace" | "PgUp/PgDn")
-            || rest.strip_prefix('F').filter(|n|n.bytes().all(|b|b.is_ascii_digit())).and_then(|n| n.parse::<u8>().ok()).is_some_and(|n| (1..=12).contains(&n))
+            || matches!(rest, "F1" | "F2" | "F3" | "F4" | "F5" | "F6" | "F7" | "F8" | "F9" | "F10" | "F11" | "F12")
             || (rest.is_empty() && !prefix.is_empty()); // held modifiers after prefix
         let label = if !valid { token.to_string() } else {
             format!("{prefix}{}", match (short, rest) { (false, "BackTab") => "Shift-Tab", (false, "Esc") => "Escape", (false, "PgUp/PgDn") => "PageUp/PageDown", _ => rest })

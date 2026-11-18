@@ -10,6 +10,7 @@ def key_labels(text, setting=None):
     import re
     named = {"Up", "Down", "Left", "Right", "Home", "End", "PageUp", "PageDown", "Insert", "Delete",
              "Tab", "BackTab", "Enter", "Esc", "Space", "Backspace", "PgUp/PgDn"}
+    named.update(f"F{n}" for n in range(1, 13))
     short = setting == "short"
     def token_label(match):
         token = rest = match.group()
@@ -24,8 +25,7 @@ def key_labels(text, setting=None):
             original, compact, full = found
             prefix += compact if short else full
             rest = rest[len(original):]
-        function = rest.startswith("F") and rest[1:].isascii() and rest[1:].isdigit() and 1 <= int(rest[1:]) <= 12
-        if not (len(rest) == 1 or rest in named or function or not rest and prefix):
+        if not (len(rest) == 1 or rest in named or not rest and prefix):
             return token
         if not short:
             rest = {"BackTab": "Shift-Tab", "Esc": "Escape", "PgUp/PgDn": "PageUp/PageDown"}.get(rest, rest)

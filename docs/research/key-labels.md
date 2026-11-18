@@ -5,7 +5,7 @@ Human request; display only. Baseline6f28c53, branch key-labels.
 `doc/settings/tui.key_labels` is `full` (default/fallback) or `short`. Native rendering uses one formatter in
 `tui/keys.rs`; extensions embedding hints read the same option and use `prim_display.key_labels`. This lean
 cross-language route was parent-approved; no new RPC or rich-text protocol. Both implementations consume the
-same18-case JSON table, testing default/full/unknown/short modes.
+same19-case JSON table, testing default/full/unknown/short modes.
 
 - Prefix prompt, menu, held modifiers, native help and panel paging hints use full names by default.
 - Native status-hint templates keep canonical keys and reformat live; arbitrary messages/identifiers are not

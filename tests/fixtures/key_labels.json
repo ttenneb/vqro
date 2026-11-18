@@ -16,5 +16,6 @@
   {"input":"C-g , → settings","full":"Ctrl-g , → settings","short":"C-g , → settings"},
   {"input":"C-g\tM-x\nS-Tab","full":"Ctrl-g\tAlt-x\nShift-Tab","short":"C-g\tM-x\nS-Tab"},
   {"input":"Hyper-x C-gene S-Unknown F13","full":"Hyper-x C-gene S-Unknown F13","short":"Hyper-x C-gene S-Unknown F13"},
+  {"input":"C-F01 C-F+1 C-F9999999999999999999999999","full":"C-F01 C-F+1 C-F9999999999999999999999999","short":"C-F01 C-F+1 C-F9999999999999999999999999"},
   {"input":"","full":"","short":""}
 ]
