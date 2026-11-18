@@ -432,10 +432,26 @@ reconcile later with their full set (`exclusive=True`). Other runtimes should fo
 - **Recovery survives any keymap.** The prefix menu (prefix key, the clickable `prim` badge, or `client.prefix`)
   lists the winning binding of each key, then any recovery action (commands, undo, reset layout, safe mode, quit)
   that no key reaches any more, without a key. Safe mode hides every extension's bindings.
-- **Live feedback.** While the prefix menu is open, and only then, a client may ask the terminal for richer key
-  reports (the TUI uses the kitty keyboard protocol when supported) to show held modifiers in the prompt; after
-  a key runs it echoes it (`C-g z → zoom pane`). Held modifiers display as dimmed words (`Shift-`, `Ctrl-`,
-  `Alt-`); key names also accept these long forms (`Ctrl-a`, `Shift-Tab`).
+- **Live feedback.** While the prefix menu is open a client may ask the terminal for richer key reports (the TUI
+  uses the kitty keyboard protocol when supported) to show held modifiers in the prompt; after a key runs it
+  echoes it (`C-g z → zoom pane`). Held modifiers display as dimmed words (`Shift-`, `Ctrl-`, `Alt-`); key names
+  also accept these long forms (`Ctrl-a`, `Shift-Tab`).
+- **Keys sent to programs** are encoded like an xterm (`src/tui/keys.rs`, `encode`): cursor keys, Home and End as
+  `CSI A`..`F` (`SS3` in application cursor mode, DECCKM), with modifiers `CSI 1;m X` where m = 1 + Shift + 2·Alt +
+  4·Ctrl; Insert, Delete, PageUp/Down and F5–F12 as `CSI n~` / `CSI n;m~`; F1–F4 as `SS3 P`..`S` / `CSI 1;m P`..`S`;
+  Ctrl combinations as control bytes and Alt as an ESC prefix. Keys legacy bytes can't distinguish (Shift- or
+  Ctrl-Enter, -Tab, -Backspace, Ctrl-Shift-letter, Ctrl-1, Ctrl-;) are sent the legacy way (Shift-Enter is Enter;
+  Ctrl-1 nothing), **unless the focused program asked for extended keys** in its output: xterm modifyOtherKeys
+  (`CSI > 4;n m`, n ≥ 1) gives `CSI 27;m;code~`; the kitty keyboard protocol with its "disambiguate" flag
+  (`CSI > 1 u`, also `CSI = … u`, popped with `CSI < u`) gives `CSI code;m u`, also for Alt combinations and Esc.
+  The client tracks these requests from each terminal's output (kept across a reattach repaint; RIS resets them).
+  While the focused program has asked, the TUI asks the outer terminal for "disambiguate" reports so such keys
+  reach it at all; this needs an outer terminal with the kitty keyboard protocol (Ghostty, kitty, WezTerm, foot,
+  recent iTerm2); with others Shift-Enter stays Enter. Only "disambiguate" is emulated: other kitty flags (event
+  types, alternate keys, all keys as escape codes) are not, and the client does not answer the kitty query
+  `CSI ? u`, so programs that probe before enabling keep their legacy behaviour. Programs inside the prim-owned
+  tmux server talk to tmux, which consumes their mode requests: there extended keys depend on tmux and arrive
+  the legacy way. The prefix key always works and is never sent on unless pressed twice.
 
 The bundled `keys` extension owns keymap profiles (`prim`, `tmux`, `screen`; tables and gaps in
 `extensions/keys.py`). Applying one with `keys.profile {value}` replaces its `binding/keys.*` entries (priority 10)

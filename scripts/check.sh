@@ -52,7 +52,7 @@ cd "$REPO" || exit 2
 snapshot() {
   python3 - "$RUN" <<'PY'
 import os, sys
-roots = [b"/tmp/pt", b"/tmp/pe2", b"/tmp/ppd", b"/tmp/phc", b"/tmp/pft", b"/tmp/ppe", b"/tmp/pev", b"/tmp/pscale", b"/tmp/prim-tmux",
+roots = [b"/tmp/pt", b"/tmp/pe2", b"/tmp/ppd", b"/tmp/pke", b"/tmp/phc", b"/tmp/pft", b"/tmp/ppe", b"/tmp/pev", b"/tmp/pscale", b"/tmp/prim-tmux",
          b"/tmp/pnf", sys.argv[1].encode()]
 socks = {}
 for line in open("/proc/net/unix").read().splitlines()[1:]:
@@ -163,6 +163,7 @@ if [ "$MODE" = full ]; then
   step e2e-providers "${CLEAN[@]}" python3 tests/e2e_providers.py "$TARGET"
   step e2e-tui-providers "${CLEAN[@]}" python3 tests/e2e_tui_providers.py "$TARGET"
   step e2e-tui-paste-dropdown "${CLEAN[@]}" python3 tests/e2e_tui_paste_dropdown.py "$TARGET"
+  step e2e-tui-keys "${CLEAN[@]}" python3 tests/e2e_tui_keys.py "$TARGET"
   step e2e-scale-herdr scale_probe
   step e2e-tui-smoke "${CLEAN[@]}" bash tests/e2e_tui_smoke.sh "$TARGET/debug/prim"
   step e2e-pi-provider "${CLEAN[@]}" python3 tests/pi_provider_e2e.py --run --probe-terminal-invoke --prim "$TARGET/debug/prim" --hc "$HOME/.local/bin/herdr-core"
