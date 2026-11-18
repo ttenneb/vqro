@@ -453,13 +453,13 @@ class E2E:
         self.log.append({'started_hc': self.hc_process, 'image_sha256': hashlib.sha256(
             Path(f'/proc/{started["pid"]}/exe').read_bytes()).hexdigest()})
         assert self.hc_process and not self.hc('ls', '--all')['terminals']
-        if self.args.agents_extension:
-            # Stage the installed-directory layout, not just source imports.
-            for helper in (REPO/'extensions').glob('*.py'):
-                shutil.copy2(helper, self.root/'ext'/helper.name)
-            shutil.copytree(REPO/'extensions/pi_bridge', self.root/'ext/pi_bridge', ignore=shutil.ignore_patterns('__pycache__'))
-            if self.args.bridge_program:
-                shutil.copy2(self.args.bridge_program, self.root/'ext/pi_bridge/program.py')
+        # Both direct and extension launches use the installed-directory layout, not source-path
+        # imports. Private defaults still enable only herdr until UI extensions are requested.
+        for helper in (REPO/'extensions').glob('*.py'):
+            shutil.copy2(helper, self.root/'ext'/helper.name)
+        shutil.copytree(REPO/'extensions/pi_bridge', self.root/'ext/pi_bridge', ignore=shutil.ignore_patterns('__pycache__'))
+        if self.args.bridge_program:
+            shutil.copy2(self.args.bridge_program, self.root/'ext/pi_bridge/program.py')
         self.start()
         if self.args.large_workspace:
             # A normal public RPC connection avoids OS per-argument limits; the
