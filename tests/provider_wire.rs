@@ -184,6 +184,11 @@ async fn bridge_tokens_wait_rotate_recover_lost_reply_and_survive_core_restart()
     runtime.call("provider.sync", json!({"generation":first["generation"],"resources":[agent.clone()],"final":true})).await.unwrap();
     let agent_id = e.core.lock().unwrap().resources.values().find(|r| r.adapter == "runtime").unwrap().id.clone();
     assert_eq!(e.core.lock().unwrap().resources[&agent_id].to_json()["host"], host_id);
+    let scoped=viewer.call("resource.list",json!({"host":host_id})).await.unwrap();
+    assert_eq!(scoped["resources"].as_array().unwrap().len(),1);assert_eq!(scoped["resources"][0]["id"],agent_id);
+    assert!(viewer.call("resource.list",json!({"host":"r-missing"})).await.unwrap()["resources"].as_array().unwrap().is_empty());
+    assert_eq!(viewer.call("resource.list",json!({"id":host_id})).await.unwrap()["resources"].as_array().unwrap().len(),1);
+    assert!(viewer.call("resource.list",json!({"id":host_id,"host":host_id})).await.unwrap()["resources"].as_array().unwrap().is_empty());
     // Pretend the first reply was lost: the bootstrap is now the previous, identity-bound credential.
     let (retry, _rx) = peer(&e).await;
     let second = retry.call("provider.register", reg.clone()).await.unwrap();

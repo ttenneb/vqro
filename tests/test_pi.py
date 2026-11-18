@@ -22,7 +22,7 @@ class PiTests(unittest.TestCase):
         return self.core.handlers["pi."+name](args)
 
     def native(self):
-        return [(m, p) for m, p in self.core.calls if m.startswith("resource.")]
+        return [(m, p) for m, p in self.core.calls if m == "resource.spawn"]
 
     def test_defaults_and_owned_launcher_only(self):
         self.assertEqual(self.core.value(SETTINGS), DEFAULTS)
@@ -43,6 +43,47 @@ class PiTests(unittest.TestCase):
         self.assertEqual(spawn["cwd"], "/private/project")
         self.assertEqual(self.core.calls[-1], ("agents.show", {"resource": "r2"}))
         self.assertEqual(len(self.native()), 1)
+
+    def test_new_uses_only_scoped_reads_even_for_source_cwd(self):
+        self.core.resources["r88"]={"id":"r88","cwd":"/private/source"}
+        with patch.object(self.core,"fresh",side_effect=AssertionError("full snapshot is not a scoped launch read")):
+            self.command("new",context={"resource":"r88"})
+        self.assertIn(("workspace.get",{"key":SETTINGS}),self.core.calls)
+        self.assertIn(("resource.list",{"id":"r88"}),self.core.calls)
+        self.assertIn(("resource.list",{"host":"r1"}),self.core.calls)
+        self.assertEqual(self.native()[0][1]["cwd"],"/private/source")
+
+    def test_transient_agent_lookup_retries_only_the_read_not_spawn(self):
+        original=self.core.call;reads=[]
+        def call(method,params):
+            if method=="resource.list" and "host" in params:
+                reads.append(params)
+                if len(reads)==1:raise PrimError("busy","overloaded")
+            return original(method,params)
+        with patch.object(self.core,"call",side_effect=call),patch("pi.time.sleep"):
+            result=self.command("new")
+        self.assertEqual(result["agent"],"r2");self.assertEqual(len(reads),2);self.assertEqual(len(self.native()),1)
+
+    def test_agent_lookup_failure_reports_already_observed_host_without_retrying_spawn(self):
+        original=self.core.call
+        def call(method,params):
+            if method=="resource.list" and "host" in params:raise PrimError("busy","overloaded")
+            return original(method,params)
+        with patch.object(self.core,"call",side_effect=call),patch("pi.time.monotonic",side_effect=[0,13]):
+            result=self.command("new")
+        self.assertEqual((result["outcome"],result["host"],result["ready"]),("observed","r1",False))
+        self.assertEqual(len(self.native()),1)
+        self.assertTrue(any("Do not blindly retry" in text and "spawned" in text for text,_ in self.core.notices))
+
+    def test_post_spawn_ui_failure_preserves_host_and_agent_result(self):
+        original=self.core.invoke
+        def invoke(name,args=None):
+            if name=="agents.show":raise PrimError("busy","overloaded")
+            return original(name,args)
+        with patch.object(self.core,"invoke",side_effect=invoke):
+            result=self.command("new")
+        self.assertEqual((result["outcome"],result["host"],result["agent"]),("observed","r1","r2"))
+        self.assertIn(("tabs.show",{"resource":"r1"}),self.core.calls);self.assertEqual(len(self.native()),1)
 
     def test_default_does_not_infer_bridge_host_from_core_platform(self):
         with patch("pi.sys.platform", "win32"):

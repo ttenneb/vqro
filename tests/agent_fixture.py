@@ -80,6 +80,12 @@ class FakeCore:
 
     def call(self, method, params):
         self.calls.append((method, copy.deepcopy(params)))
+        if method == "workspace.get":
+            return copy.deepcopy(self.entries.get(params["key"]))
+        if method == "resource.list":
+            return {"resources":[copy.deepcopy(r) for r in self.resources.values()
+                if all(params.get(key) is None or r.get(field)==params[key]
+                       for key,field in (("id","id"),("host","host"),("provider","provider"),("backend_ref","backend_ref")))]}
         if method == "resource.spawn":
             if self.make_agent:
                 self.add_agent()

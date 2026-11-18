@@ -50,7 +50,7 @@ async fn malformed_scoped_read_params_are_rejected_without_effects() {
     let socket = dir.path().join("s.sock");
     let core = start(socket.clone(), dir.path().join("state"), false, Backend::Fake, None).unwrap();
     let (peer, _, _) = client::connect(&socket, "query-test").await.unwrap();
-    for params in [json!({"provider": 7}), json!({"backend_ref": []})] {
+    for params in [json!({"provider": 7}), json!({"backend_ref": []}),json!({"id":false}),json!({"host":7})] {
         assert_eq!(peer.call("resource.list", params).await.unwrap_err().kind(), "invalid");
     }
     for params in [json!({}), json!({"key": true})] {

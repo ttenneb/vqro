@@ -358,6 +358,8 @@ struct WorkspaceGet {
 struct ResourceList {
     provider: Option<String>,
     backend_ref: Option<String>,
+    id: Option<String>,
+    host: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -501,7 +503,9 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> Rp
             let resources = {
                 let c = core.lock().unwrap();
                 c.resources.values().filter(|r| query.provider.as_deref().is_none_or(|name| r.adapter == name)
-                    && query.backend_ref.as_deref().is_none_or(|reference| r.facts.backend_ref == reference)).cloned().collect::<Vec<_>>()
+                    && query.backend_ref.as_deref().is_none_or(|reference| r.facts.backend_ref == reference)
+                    && query.id.as_deref().is_none_or(|id|r.id==id)
+                    && query.host.as_deref().is_none_or(|host|r.host.as_deref()==Some(host))).cloned().collect::<Vec<_>>()
             };
             Ok(json!({"resources": resources.iter().map(|r| r.to_json()).collect::<Vec<_>>()}))
         }

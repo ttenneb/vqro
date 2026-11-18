@@ -78,15 +78,19 @@ class Pi:
         return command
 
     def new(self, args):
-        self.ext.fresh()
-        options = runtimes(self.ext.value(SETTINGS, DEFAULTS))
+        entry=self.ext.prim.call("workspace.get",{"key":SETTINGS})
+        options = runtimes(entry["value"] if entry else DEFAULTS)
         selected = args.get("runtime") or args.get("value")
         context = args.get("context") or {}
         source_id = context.get("resource")
         for prefix in ("agents-", "agent-"):
             if not source_id and str(context.get("view", "")).startswith(prefix):
                 source_id = context["view"][len(prefix):]
-        cwd = args.get("cwd") or self.ext.resources.get(source_id, {}).get("cwd")
+        cwd = args.get("cwd")
+        if not cwd and source_id:
+            scoped=self.ext.prim.call("resource.list",{"id":source_id})
+            source=next((r for r in scoped.get("resources",[]) if r.get("id")==source_id),{})
+            cwd=source.get("cwd")
         if selected is None and len(options) > 1:
             self.ext.publish("pi-runtimes", {"title": "New Pi agent: runtime", "requires": ["menu"], "items": [
                 {"text": label(r["name"]), "description": label(" ".join(r["argv"])), "command": "pi.new",
@@ -105,9 +109,18 @@ class Pi:
         result = self.ext.prim.call("resource.spawn", params)  # exactly once, never retried
         host = result["resource"]["id"]
         end = time.monotonic() + 12
+        lookup_problem=None
         while True:
-            self.ext.fresh()
-            found = [r for r in self.ext.resources.values() if r.get("kind") == "agent" and r.get("host") == host and r.get("available")]
+            try:
+                scoped=self.ext.prim.call("resource.list",{"host":host})
+                rows=scoped.get("resources",[])
+                lookup_problem=None
+            except PrimError as error:
+                lookup_problem=label(f"{error} ({error.kind})",256)
+                rows=[]
+                if error.kind not in ("timeout","overloaded","unavailable","disconnected"):
+                    break
+            found = [r for r in rows if r.get("kind") == "agent" and r.get("host") == host and r.get("available")]
             if found:
                 resource = found[0]
                 # Agents is optional: its disable must never kill or hide the
@@ -115,16 +128,20 @@ class Pi:
                 try:
                     shown = self.ext.invoke("agents.show", {"resource": resource["id"]})
                 except PrimError as error:
+                    # Showing a view is not part of the already-observed spawn. Never turn
+                    # a UI/read failure into an apparent failed launch that invites a retry.
                     if error.kind not in ("unavailable", "not_found"):
-                        raise
+                        self.ext.notify("Pi agent "+resource["id"]+" exists; view unavailable ("+error.kind+").", "warn")
                     shown = self.terminal(host)
                 self.ext.notify("Pi agent "+resource["id"]+" created (observed); no prompt sent.", "ok")
                 return {"outcome": result["outcome"], "host": host, "agent": resource["id"], "client": dict((shown or {}).get("client") or {}, close=True)}
             if time.monotonic() >= end:
-                self.ext.notify("Terminal "+host+" spawned; Pi agent not ready. Do not blindly retry.", "warn")
-                shown = self.terminal(host)
-                return {"outcome": result["outcome"], "host": host, "ready": False, "client": (shown or {}).get("client", {})}
+                break
             time.sleep(.1)
+        detail=" Status unavailable: "+lookup_problem+"." if lookup_problem else ""
+        self.ext.notify("Terminal "+host+" spawned; Pi agent not ready."+detail+" Do not blindly retry.", "warn")
+        shown = self.terminal(host)
+        return {"outcome": result["outcome"], "host": host, "ready": False, "client": (shown or {}).get("client", {})}
 
     def terminal(self, host):
         try:
