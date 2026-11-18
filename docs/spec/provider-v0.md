@@ -94,7 +94,7 @@ ignored. Backend-specific extras are namespaced (`dev.herdr.machines`).
 | `terminal.spawn` | `{env, cwd, placement?}` | yes; `terminal.run` takes `env` and `on` (0.1.21 schema) | yes |
 | `terminal.input` | `{stream, effect}` | stream only; no raw-input RPC | stream only, `send-keys -H` (rec tmux-check item 1) |
 | `terminal.output` | `{raw, history, repaint: "screen"\|"none", lossy_when_paused}` | raw, history | raw; repaint via `capture-pane`; lossy when paused |
-| `terminal.resize` | `{owner: "latest_viewer"\|"per_client"\|"none"}` | latest viewer (open question 7) | control client sets window size via `refresh-client -C` (rec item 6); arbitration between clients untested |
+| `terminal.resize` | `{owner: "latest_viewer"\|"per_client"\|"none"}` | latest viewer (open question 7) | native `resize-window`, then `resize-pane` within layout constraints; latest viewer request sizes the window |
 | `terminal.kill`, `terminal.exit` | | yes | yes |
 | `status.osc7501` | `{stored, lossy}` | stored | parsed from the stream by the provider, not stored, lost after a pause (rec item 3) |
 | `events.resync` | absent: the provider may miss changes it can't report | yes (`missed`) | absent; re-list to resynchronise (rec item 4) |
@@ -417,6 +417,15 @@ existing status consumers and partial resource events (`src/events.rs`) work unc
   `data.disposition` (Pi: `started` | `queued` | `handled`).
 
 ### 9.5 Streams (G6, G7, G8, G13, G14)
+
+`prim-tmux` applies requested dimensions on spawn (80×24 when omitted), before the observed spawn reply,
+and on stream open before repaint, as well as subsequent resize notifications. It declares
+`terminal.resize {owner: "latest_viewer", scope: "window", pane: "native_layout_constraints"}`: native
+`resize-window` manually sizes the containing window, then `resize-pane` requests the pane size. Native split
+minimums may constrain the pane; other native clients may resize the same window. Closing a viewer does not
+restore an older size. Spawn uses native `new-window` followed by resizing, so a program can initially start at
+tmux's creation size and receive SIGWINCH; this does not promise a pre-exec PTY size. Unknown capability
+parameters remain ignorable; this adds no core sizing arbitration.
 
 | Method | Dir | Kind | Params | Result |
 |---|---|---|---|---|

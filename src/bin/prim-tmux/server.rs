@@ -31,7 +31,12 @@ pub fn ensure(bin: &PathBuf, socket: &PathBuf) -> Result<(), String> {
     }
     std::fs::create_dir_all(socket.parent().ok_or("missing state directory")?).map_err(|e| e.to_string())?;
     // tmux owns creation and stale-socket handling. Never remove a live server's socket ourselves.
-    match super::tmux_run(bin, socket, &[], &["new-session", "-d", "-s", "prim"]) {
+    // A control client needs a session. Keep a marked, exited native pane, never a login shell.
+    // One tmux command queue installs remain-on-exit and the marker before child exit is handled.
+    // Existing unmarked panes are user work and are never retroactively hidden or killed.
+    match super::tmux_run(bin, socket, &[], &["new-session", "-d", "-s", "prim", "-n", "prim-bootstrap", "true", "prim-bootstrap",
+        ";", "set-option", "-w", "-t", "prim:", "remain-on-exit", "on",
+        ";", "set-option", "-p", "-t", "prim:", "@prim_bootstrap", "1"]) {
         Ok(_) => Ok(()),
         Err(error) => {
             // Another provider may have won startup. Reuse its server, never kill/recreate it.
@@ -58,7 +63,7 @@ fn status(bin: &PathBuf, socket: &PathBuf) -> Result<Value, String> {
     }
     // One native connection: identity and pane inventory cannot come from different servers.
     let output = super::tmux_cli(bin, socket, &["display-message", "-p", "#{pid}:#{start_time}:#{@prim_control_instance}",
-        ";", "list-panes", "-a", "-F", "#{pane_id}"])?;
+        ";", "list-panes", "-a", "-F", "#{?@prim_bootstrap,,#{pane_id}}"])?;
     let mut lines = output.lines();
     let instance = lines.next().ok_or("missing server identity")?;
     if instance.rsplit(':').next().is_none_or(|n| n.len() != 32 || !n.bytes().all(|b| b.is_ascii_hexdigit())) {

@@ -30,7 +30,7 @@ mod owned_server;
 /// tmux replaces control characters (tabs too) and, without a UTF-8 locale, non-ASCII bytes in format
 /// output, so fields are split on a printable ASCII token that names and titles are unlikely to contain.
 const SEP: &str = "|@prim@|";
-const PANE_FORMAT: &str = "#{pane_id}|@prim@|#{session_name}|@prim@|#{window_id}|@prim@|#{window_name}|@prim@|#{pane_title}|@prim@|#{pane_current_path}|@prim@|#{pane_current_command}|@prim@|#{pane_pid}";
+const PANE_FORMAT: &str = "#{pane_id}|@prim@|#{session_name}|@prim@|#{window_id}|@prim@|#{window_name}|@prim@|#{pane_title}|@prim@|#{pane_current_path}|@prim@|#{pane_current_command}|@prim@|#{pane_pid}|@prim@|#{@prim_bootstrap}";
 const RECONCILE_EVERY: Duration = Duration::from_secs(3);
 /// Clears and homes the viewer's screen before a repaint (a screen snapshot, not replay).
 const REPAINT_PREFIX: &[u8] = b"\x1b[H\x1b[2J";
@@ -267,8 +267,8 @@ impl App {
         let mut seen: BTreeMap<String, (String, String, Value)> = BTreeMap::new();
         for line in lines {
             let line = String::from_utf8_lossy(&line).into_owned();
-            let f: Vec<&str> = line.splitn(8, SEP).collect();
-            if f.len() < 8 || seen.contains_key(f[0]) {
+            let f: Vec<&str> = line.splitn(9, SEP).collect();
+            if f.len() < 9 || f[8] == "1" || seen.contains_key(f[0]) {
                 continue;
             }
             let argv = self.state.lock().unwrap().argv.get(f[0]).cloned().unwrap_or_default();
@@ -400,7 +400,22 @@ impl App {
         e.respond(result);
     }
 
+    /// A viewer sizes the containing native window, then its pane within tmux's layout constraints.
+    /// resize-window makes this window manually sized; other native clients may still resize it.
+    async fn resize_view(client: &Client, pane: &PaneId, window: &str, cols: u16, rows: u16) -> Result<(), tmux::Error> {
+        client.command(&["resize-window", "-t", window, "-x", &cols.to_string(), "-y", &rows.to_string()]).await?;
+        client.resize_pane(pane, cols, rows).await
+    }
+
     async fn spawn(self: &Arc<Self>, args: &Value) -> Result<Outcome, ProviderError> {
+        let dimension = |key: &str, fallback: u16| -> Result<u16, ProviderError> {
+            match args.get(key) {
+                None | Some(Value::Null) => Ok(fallback),
+                Some(value) => value.as_u64().and_then(|n| u16::try_from(n).ok()).filter(|n| (1..=9999).contains(n))
+                    .ok_or_else(|| ProviderError::new("invalid", format!("{key} must be 1..9999"))),
+            }
+        };
+        let (cols, rows) = (dimension("cols", 80)?, dimension("rows", 24)?);
         let argv: Vec<String> = match &args["argv"] {
             Value::Null => vec![],
             Value::Array(a) if a.iter().all(Value::is_string) => a.iter().map(|v| v.as_str().unwrap().to_string()).collect(),
@@ -408,7 +423,7 @@ impl App {
         };
         let client = self.state.lock().unwrap().clients.get(&self.spawn_session).cloned().ok_or_else(|| ProviderError::new("backend", "spawn session is gone"))?;
         let target = format!("{}:", self.spawn_session);
-        let mut cmd: Vec<String> = ["new-window", "-d", "-P", "-F", "#{pane_id}", "-t", &target].iter().map(|s| s.to_string()).collect();
+        let mut cmd: Vec<String> = ["new-window", "-d", "-P", "-F", "#{pane_id}:#{window_id}", "-t", &target].iter().map(|s| s.to_string()).collect();
         if let Some(name) = args["name"].as_str() {
             cmd.extend(["-n".into(), name.into()]);
         }
@@ -439,9 +454,12 @@ impl App {
             Err(tmux::Error::Invalid(m)) => return Err(ProviderError::new("invalid", m)),
             Err(e) => return Err(unknown(e)),
         };
-        if PaneId::parse(&pane).is_err() {
-            return Err(ProviderError::new("backend", format!("outcome unknown: tmux returned {pane:?}")));
+        let (pane, window) = pane.split_once(':').ok_or_else(|| ProviderError::new("backend", format!("outcome unknown: tmux returned {pane:?}")))?;
+        let id = PaneId::parse(pane).map_err(|_| ProviderError::new("backend", format!("outcome unknown: tmux returned {pane:?}")))?;
+        if let Err(error) = Self::resize_view(&client, &id, window, cols, rows).await {
+            return Err(ProviderError::new("backend", format!("pane {pane} spawned, but sizing outcome is unknown: {error}; do not replay spawn")));
         }
+        let pane = pane.to_string();
         self.state.lock().unwrap().argv.insert(pane.clone(), argv);
         // Publish it now, so the core can map the reply's facts.
         if let Err(e) = self.reconcile(false).await {
@@ -499,6 +517,10 @@ impl App {
             return;
         };
         let id = PaneId::parse(&pane).expect("known panes have valid ids");
+        if let Err(error) = Self::resize_view(&client, &id, &window, open.cols, open.rows).await {
+            open.respond(Err(unknown(error)));
+            return;
+        }
         let mut events = match client.watch(id.clone()) {
             Ok(e) => e,
             Err(e) => {
@@ -598,7 +620,7 @@ impl App {
                         }
                     }
                     Some(StreamCommand::Resize(cols, rows)) => {
-                        if let Err(e) = client.resize_window(&window, cols, rows).await {
+                        if let Err(e) = Self::resize_view(&client, &id, &window, cols, rows).await {
                             let _ = stream.error(&ProviderError::new("backend", e.to_string())).await;
                         }
                     }
@@ -645,7 +667,7 @@ fn capabilities() -> Map<String, Value> {
         "terminal.spawn": {"env": true, "cwd": true, "name": true},
         "terminal.input": {"stream": true, "effect": false},
         "terminal.output": {"raw": true, "history": false, "repaint": "screen", "lossy_when_paused": true},
-        "terminal.resize": {"owner": "latest_viewer"},
+        "terminal.resize": {"owner": "latest_viewer", "scope": "window", "pane": "native_layout_constraints"},
         "terminal.kill": {},
         "resource.forget": {},
         "terminal.exit": {"exit_code": false},

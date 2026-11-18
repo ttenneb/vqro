@@ -95,6 +95,17 @@ async fn resource(peer: &Peer) -> Value {
         tokio::time::sleep(Duration::from_millis(30)).await;
     }
 }
+async fn spawn_resource(peer: &Peer) -> Value {
+    let deadline=Instant::now()+Duration::from_secs(5);
+    loop {
+        let snap=peer.call("workspace.snapshot",json!({})).await.unwrap();
+        if snap["providers"]["tmux-lifetime"]["synced"]==true {break;}
+        assert!(Instant::now()<deadline,"tmux provider did not sync");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    peer.call("resource.spawn",json!({"provider":"tmux-lifetime","argv":["/bin/sh"]})).await.unwrap();
+    resource(peer).await
+}
 fn live(pid: u64) -> bool {
     std::fs::read_to_string(format!("/proc/{pid}/stat")).ok().and_then(|s| s.rsplit_once(')').map(|(_, tail)| !tail.trim_start().starts_with('Z'))).unwrap_or(false)
 }
@@ -110,6 +121,20 @@ async fn owned_server_survives_disable_safe_mode_crash_and_reinstall_like_restar
     let peer = running.peer().await;
     peer.call("workspace.apply", json!({"ops":[{"op":"set", "key":"extension/tmux", "expect":0,
         "value":{"enabled":true,"kind":"provider","argv":[env!("CARGO_BIN_EXE_prim-tmux"),"--tmux","/usr/bin/tmux","--name","tmux-lifetime"]}}]})).await.unwrap();
+    let deadline = Instant::now()+Duration::from_secs(5);
+    loop {
+        let snap=peer.call("workspace.snapshot",json!({})).await.unwrap();
+        if snap["providers"]["tmux-lifetime"]["synced"]==true {break;}
+        assert!(Instant::now()<deadline,"tmux provider did not sync");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let inventory=peer.call("resource.list",json!({})).await.unwrap();
+    assert!(!inventory["resources"].as_array().unwrap().iter().any(|r|r["provider"]=="tmux-lifetime"),"bootstrap must not become a shell/tab: {inventory}");
+    assert_eq!(status(&state)["terminals"],0,"bootstrap is not a user terminal");
+    let bootstrap=Command::new("/usr/bin/tmux").env_clear().args(["-N","-S"]).arg(state.join("tmux.sock"))
+        .args(["list-panes","-a","-F","#{pane_dead}:#{@prim_bootstrap}"]).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&bootstrap.stdout).trim(),"1:1","internal pane has no running shell");
+    peer.call("resource.spawn",json!({"provider":"tmux-lifetime","argv":["/bin/sh"]})).await.unwrap();
     let first = resource(&peer).await;
     let pane_pid = first["data"]["pid"].as_u64().unwrap();
     let initial = status(&state);
@@ -166,7 +191,7 @@ async fn owned_server_survives_disable_safe_mode_crash_and_reinstall_like_restar
     assert_eq!(status(&state)["running"], false, "provider silently recreated a stopped server");
     command(&peer, "prim.extension.disable", json!({"name":"tmux"})).await;
     command(&peer, "prim.extension.enable", json!({"name":"tmux"})).await;
-    let fresh = resource(&peer).await;
+    let fresh = spawn_resource(&peer).await;
     assert_ne!(fresh["id"], first["id"], "new server reused an old terminal identity");
     let replaced = helper(&state, &["stop", "--expect-instance", initial["instance"].as_str().unwrap(), "--confirm-terminals", "1"]);
     assert!(!replaced.status.success(), "old confirmation killed a replacement server");
@@ -190,8 +215,8 @@ async fn independent_controls_stop_offline_provider_and_persist_enabled_provider
         {"op":"set","key":"extension/tmux-server","expect":0,"value":{"enabled":true,
             "argv":["/usr/bin/python3",Path::new(env!("CARGO_MANIFEST_DIR")).join("extensions/tmux_server.py")]}}
     ]})).await.unwrap();
-    let initial = resource(&peer).await;
-    command(&peer, "prim.extension.disable", json!({"name":"tmux"})).await;
+    let initial = spawn_resource(&peer).await;
+    command(&peer, "prim.extension.disable",  json!({"name":"tmux"})).await;
     tokio::time::sleep(Duration::from_secs(2)).await;
     let observed = command(&peer, "tmux.server.status", json!({})).await;
     assert_eq!(observed["running"], true, "status required a connected provider");
@@ -205,7 +230,7 @@ async fn independent_controls_stop_offline_provider_and_persist_enabled_provider
     wait_stopped(&state);
     assert_eq!(command(&peer,"tmux.server.status",json!({})).await["running"], false);
     command(&peer, "prim.extension.enable", json!({"name":"tmux"})).await;
-    resource(&peer).await;
+    spawn_resource(&peer).await;
     let fresh = command(&peer, "tmux.server.status", json!({})).await;
     assert_ne!(fresh["instance"], observed["instance"]);
     assert_eq!(command(&peer,"tmux.server.stop",json!({"instance":fresh["instance"],"terminals":1,"text":"STOP 1"})).await["outcome"],"accepted");

@@ -6,7 +6,11 @@ tmux terminals. No private-server destructor or watchdog remains. Configured `--
 
 ## Location and identity
 
-Without `--tmux-socket`, prim-tmux creates or reuses `<prim state directory>/tmux.sock`. It never uses the default tmux
+Without `--tmux-socket`, prim-tmux creates or reuses `<prim state directory>/tmux.sock`. New servers retain a
+marked, exited `true` pane solely to keep the native control session alive; no login shell is started. That internal
+pane is excluded from resources and terminal-count confirmations. Existing unmarked panes (including an older
+bootstrap shell that may now contain user work) are never retroactively hidden or killed.
+It never uses the default tmux
 server. The actual core root comes from `hello.state_dir` when `PRIM_STATE_DIR` is not explicitly set. It must be an
 absolute, short root: the native socket path is under100 bytes; an unsuitable root is rejected, not silently replaced
 with an ephemeral path. This is native backend implementation, not a new endpoint format in the core contract (D22).

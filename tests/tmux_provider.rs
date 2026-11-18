@@ -176,14 +176,21 @@ async fn registers_syncs_spawns_streams_status_and_kills_on_real_tmux() {
     assert_eq!(panes[0]["data"]["session"], "work");
     core.reply(&sync, json!({})).await;
 
+    // Bad dimensions are rejected before creating a window.
+    core.send(json!({"jsonrpc":"2.0","id":9,"method":"effect.invoke","params":{"generation":3,"effect":"invalid-size",
+        "op":"terminal.spawn","args":{"argv":["/bin/sh"],"cols":0,"rows":24},"deadline_ms":10000}})).await;
+    assert_eq!(core.until(|m|m["id"]==9).await["error"]["data"]["kind"],"invalid");
+    assert_eq!(String::from_utf8_lossy(&tmux.cli(&["list-panes","-a","-F","#{pane_id}"]).stdout).lines().count(),1);
+
     // Spawn: observed, with facts the core can map; the pane is also upserted.
     core.send(json!({"jsonrpc": "2.0", "id": 10, "method": "effect.invoke", "params": {"generation": 3, "effect": "e1",
-        "op": "terminal.spawn", "args": {"argv": ["/bin/sh"], "name": "spawned", "env": {"PRIM_TEST": "yes"}}, "deadline_ms": 10000}})).await;
+        "op": "terminal.spawn", "args": {"argv": ["/bin/sh"], "name": "spawned", "env": {"PRIM_TEST": "yes"}, "cols": 110, "rows": 33}, "deadline_ms": 10000}})).await;
     let r = core.until(|m| m["id"] == 10).await;
     assert_eq!(r["result"]["outcome"], "observed", "{r}");
     let facts = &r["result"]["data"]["facts"];
     let pane = facts["ref"].as_str().unwrap().to_string();
     assert_eq!((facts["name"].as_str(), facts["argv"][0].as_str()), (Some("spawned"), Some("/bin/sh")));
+    assert_eq!(String::from_utf8_lossy(&tmux.cli(&["display-message", "-p", "-t", &pane, "#{pane_width}x#{pane_height}"]).stdout).trim(), "110x33", "spawn size must reach the native pane");
     core.until(|m| m["method"] == "resource.upsert" && m["params"]["facts"]["ref"] == pane.as_str()).await;
     // Same effect id again: conflict, not a second window.
     core.send(json!({"jsonrpc": "2.0", "id": 11, "method": "effect.invoke", "params": {"generation": 3, "effect": "e1",
@@ -237,6 +244,44 @@ async fn registers_syncs_spawns_streams_status_and_kills_on_real_tmux() {
     core.send(json!({"jsonrpc": "2.0", "id": 40, "method": "stream.open", "params": {"generation": 3, "stream": 2, "ref": pane,
         "incarnation": "", "cols": 80, "rows": 24, "history_lines": 0, "window_bytes": 65536}})).await;
     assert_eq!(core.until(|m| m["id"] == 40).await["error"]["data"]["kind"], "not_found");
+}
+
+#[tokio::test]
+#[ignore]
+async fn open_and_resize_apply_native_sizes_with_latest_viewer_winning() {
+    let tmux = Tmux::start();
+    let (mut core, _provider) = start(&tmux).await;
+    let reg = core.read().await;
+    core.reply(&reg, json!({"provider":"tmux@test", "generation":1, "limits":{"stream_window_bytes":65536,"max_record_bytes":1048576}})).await;
+    let sync = core.read().await;
+    let pane = sync["params"]["resources"][0]["ref"].as_str().unwrap().to_string();
+    core.reply(&sync, json!({})).await;
+    for (request, stream, cols, rows) in [(90, 1, 120, 35), (91, 2, 95, 27)] {
+        core.send(json!({"jsonrpc":"2.0","id":request,"method":"stream.open","params":{
+            "generation":1,"stream":stream,"ref":pane,"incarnation":"","cols":cols,"rows":rows,"history_lines":0,"window_bytes":65536}})).await;
+        assert_eq!(core.until(|m|m["id"]==request).await["result"]["initial"],"repaint");
+        let size = tmux.cli(&["display-message","-p","-t",&pane,"#{pane_width}x#{pane_height}"]);
+        assert_eq!(String::from_utf8_lossy(&size.stdout).trim(), format!("{cols}x{rows}"), "stream.open size before repaint");
+    }
+    core.send(json!({"jsonrpc":"2.0","method":"stream.resize","params":{"generation":1,"stream":1,"cols":140,"rows":42}})).await;
+    let deadline = tokio::time::Instant::now()+Duration::from_secs(3);
+    loop {
+        let size = tmux.cli(&["display-message","-p","-t",&pane,"#{pane_width}x#{pane_height}"]);
+        if String::from_utf8_lossy(&size.stdout).trim()=="140x42" {break;}
+        assert!(tokio::time::Instant::now()<deadline,"stream.resize ignored: {}",String::from_utf8_lossy(&size.stdout));
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // A native split constrains pane size; do not claim each pane is the whole window.
+    let split=tmux.cli(&["split-window","-h","-d","-t",&pane,"/bin/sh"]);
+    assert!(split.status.success(),"{}",String::from_utf8_lossy(&split.stderr));
+    core.send(json!({"jsonrpc":"2.0","id":92,"method":"stream.open","params":{
+        "generation":1,"stream":3,"ref":pane,"incarnation":"","cols":100,"rows":30,"history_lines":0,"window_bytes":65536}})).await;
+    assert_eq!(core.until(|m|m["id"]==92).await["result"]["initial"],"repaint");
+    let size=tmux.cli(&["display-message","-p","-t",&pane,"#{window_width}:#{pane_width}"]);
+    let text=String::from_utf8(size.stdout).unwrap();
+    let (window,pane)=text.trim().split_once(':').unwrap();
+    assert_eq!(window,"100");
+    assert!(pane.parse::<u16>().unwrap()<100,"native split minimums must remain in force: {text}");
 }
 
 #[tokio::test]
@@ -360,9 +405,12 @@ async fn private_server_survives_when_the_core_goes() {
     let reg = core.read().await;
     core.reply(&reg, json!({"provider": "tmux", "generation": 1, "limits": {"stream_window_bytes": 65536, "max_record_bytes": 1048576}})).await;
     let sync = core.read().await;
-    let pane = &sync["params"]["resources"][0];
-    assert_eq!(pane["data"]["session"], "prim");
+    assert_eq!(sync["params"]["resources"],json!([]),"no bootstrap shell in the inventory");
     core.reply(&sync, json!({})).await;
+    core.send(json!({"jsonrpc":"2.0","id":10,"method":"effect.invoke","params":{
+        "generation":1,"effect":"owned-shell","op":"terminal.spawn","args":{"argv":["/bin/sh"]},"deadline_ms":10000}})).await;
+    let spawned=core.until(|m|m["id"]==10).await;
+    assert_eq!(spawned["result"]["data"]["facts"]["data"]["session"],"prim");
     // Find only the server at this test's owned state root.
     let servers = || -> Vec<String> {
         let out = Command::new("pgrep").args(["-f", "-a", "tmux"]).output().unwrap();
