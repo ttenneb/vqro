@@ -373,7 +373,7 @@ impl Peer {
     /// A small reply with a completion barrier, used before the caller can tear down this peer.
     /// Completion means local write/flush only, not that the other process read it.
     pub async fn respond_flushed(&self, id: Value, result: RpcResult) -> Result<(), RpcError> {
-        let message = match result { Ok(value) => json!({"jsonrpc":"2.0","id":id,"result":value}), Err(error) => json!({"jsonrpc":"2.0","id":id,"error":error}) };
+        let message=Self::reply_message(&id,result);
         let line = serde_json::to_string(&message).map_err(|_| RpcError::invalid("reply encoding failed"))?;
         let bytes = line.len() + 1;
         let (done, flushed) = oneshot::channel();
@@ -386,19 +386,20 @@ impl Peer {
         }
     }
 
+    fn reply_message(id:&Value,result:RpcResult)->Value {
+        let msg=match result {Ok(value)=>json!({"jsonrpc":"2.0","id":id,"result":value}),Err(error)=>json!({"jsonrpc":"2.0","id":id,"error":error})};
+        if crate::limits::json_depth(&msg,crate::limits::MESSAGE_DEPTH).is_ok() {return msg;}
+        // Execution may already have happened. Preserve that uncertainty on both ordinary
+        // and completion-barrier replies, including malformed over-deep request ids.
+        let mut error=RpcError::new("too_large","reply JSON nesting exceeds recovery envelope; inspect state, do not replay");
+        error.data.as_mut().unwrap()["outcome"]=json!("indeterminate");
+        let id=if id.is_array()||id.is_object() {Value::Null}else{id.clone()};
+        json!({"jsonrpc":"2.0","id":id,"error":error})
+    }
+
     pub fn respond(&self, id: Value, result: RpcResult) {
-        let msg = match result {
-            Ok(v) => json!({"jsonrpc": "2.0", "id": id, "result": v}),
-            Err(e) => json!({"jsonrpc": "2.0", "id": id, "error": e}),
-        };
-        if crate::limits::json_depth(&msg,crate::limits::MESSAGE_DEPTH).is_err() {
-            // The operation may already have happened. Never turn an unpublishable backend
-            // reply into a rejected/no-effect claim, and never invite automatic replay.
-            let mut error=RpcError::new("too_large","reply JSON nesting exceeds recovery envelope; inspect state, do not replay");
-            error.data.as_mut().unwrap()["outcome"]=json!("indeterminate");
-            let id=if id.is_array()||id.is_object() {Value::Null}else{id};
-            self.send_control(json!({"jsonrpc":"2.0","id":id,"error":error}).to_string());return;
-        }
+        let msg=Self::reply_message(&id,result);
+        let id=&msg["id"];
         let bytes = crate::limits::encoded_bytes(&msg).saturating_add(1);
         if bytes > self.record_limit.load(Ordering::Acquire) {
             let error = RpcError::new("too_large", "reply exceeds recovery envelope; use recovery commands to revert/delete state");
@@ -456,6 +457,10 @@ mod tests {
         let id=match requests.recv().await.unwrap() {Incoming::Request {id,..}=>id,_=>panic!("request")};
         remote.respond(id,Ok(nested(crate::limits::MESSAGE_DEPTH-1)));
         assert_eq!(waiting.await.unwrap().unwrap(),nested(crate::limits::MESSAGE_DEPTH-1));
+        let p=peer.clone();let waiting=tokio::spawn(async move {p.call("flushed-depth",Value::Null).await});
+        let id=match requests.recv().await.unwrap() {Incoming::Request {id,..}=>id,_=>panic!("request")};
+        remote.respond_flushed(id,Ok(nested(crate::limits::MESSAGE_DEPTH))).await.unwrap();
+        let error=waiting.await.unwrap().unwrap_err();assert_eq!(error.data.unwrap()["outcome"],"indeterminate");
         peer.close();remote.close();
     }
 

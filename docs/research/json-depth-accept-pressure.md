@@ -54,7 +54,7 @@ Private binaries/receipts are under `~/.local/share/herdr/scratch/prim-final-sto
 - `store::tests::recovery_backup_precedes_write_and_survives_a_discarded_writer_snapshot`: failed backup never
   reaches the writer; pre-rename failure retains source; the next snapshot reuses its completed backup.
 - `rpc::tests::depth_fences_reject_unsent_calls_and_mark_unpublishable_replies_indeterminate`: pending cleanup,
-  honest reply uncertainty and a still-usable boundary-depth connection.
+  honest reply uncertainty (ordinary and completion-barrier replies) and a still-usable boundary-depth connection.
 - `server::accept_tests::descriptor_and_transient_accept_failures_are_not_fatal_listener_errors`: ENFILE and
   related error classification (not a claim of genuine host-wide ENFILE induction).
 
