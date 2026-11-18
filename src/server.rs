@@ -948,7 +948,11 @@ async fn invoke_deadline(core: &Shared, author: &str, context: crate::invocation
     match name {
         "prim.shutdown" => Ok(json!({"outcome":"accepted"})),
         "prim.layout.reset" => layout_reset(core, author, context.origin.clone()).await,
-        "prim.revert" => revert(core, author, context.origin.clone(), arg("txn").as_u64()).await,
+        "prim.revert" => {
+            if !args.is_null() && !args.is_object() {return Err(RpcError::invalid("revert args must be an object"));}
+            let txn=match args.get("txn") {None=>None,Some(value)=>Some(value.as_u64().ok_or_else(||RpcError::invalid("txn must be an unsigned integer when supplied"))?)};
+            revert(core, author, context.origin.clone(), txn).await
+        },
         "prim.safe_mode" => {
             let gate=core.lock().unwrap().recovery_gate.clone(); let _guard=gate.lock().await;
             let (on,handles,restart)={
