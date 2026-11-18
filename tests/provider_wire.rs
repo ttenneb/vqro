@@ -25,6 +25,23 @@ fn registration(name: &str) -> Value {
 fn facts(reference: &str) -> Value { json!({"ref":reference,"kind":"terminal","state":"live","argv":[],"data":{"opaque":[1,2]}}) }
 
 #[tokio::test]
+async fn spawn_completion_does_not_roll_back_newer_published_facts() {
+    let e=env().await;let(provider,mut incoming)=peer(&e).await;let(viewer,_)=peer(&e).await;
+    let generation=provider.call("provider.register",registration("wire")).await.unwrap()["generation"].clone();
+    provider.call("provider.sync",json!({"generation":generation,"resources":[],"final":true})).await.unwrap();
+    for (i,state) in ["finished","live"].into_iter().enumerate() {
+        let caller=viewer.clone();let spawn=tokio::spawn(async move{caller.call("resource.spawn",json!({"provider":"wire"})).await});
+        let request=loop{if let Some(Incoming::Request{id,method,..})=incoming.recv().await{assert_eq!(method,"effect.invoke");break id;}};
+        let mut initial=facts(&format!("t{i}"));initial["name"]=json!("creation snapshot");
+        let mut latest=initial.clone();latest["state"]=json!(state);latest["name"]=json!("newer observation");
+        provider.notify("resource.upsert",json!({"generation":generation,"facts":latest}));
+        until(||e.core.lock().unwrap().resources.values().any(|r|r.adapter=="wire"&&r.facts.backend_ref==format!("t{i}")&&r.facts.name.as_deref()==Some("newer observation"))).await;
+        provider.respond(request,Ok(json!({"outcome":"observed","data":{"facts":initial}})));
+        let result=spawn.await.unwrap().unwrap();assert_eq!(result["resource"]["state"],state);assert_eq!(result["resource"]["name"],"newer observation");
+    }
+}
+
+#[tokio::test]
 async fn wire_registration_chunks_and_generation_fences() {
     let e = env().await;
     let (p, _rx) = peer(&e).await;

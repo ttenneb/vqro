@@ -453,6 +453,16 @@ impl Core {
         self.emit("adapter", json!({"name": name, "state": state}));
     }
 
+    /// A spawn reply describes creation, not a new observation after every concurrent event.
+    /// Reuse an already-published identity without rolling its newer facts back to that snapshot.
+    pub(crate) fn record_spawn(&mut self,name:&str,facts:ResourceFacts)->Result<String,RpcError>{
+        if let Some(info)=self.providers.get(name).filter(|p|facts.valid()&&p.health.borrow().connected).and_then(|p|p.info.as_ref()) {
+            if let Some(id)=self.identities.lookup(&provider::identity(name,&info.instance,&facts)) {
+                if self.resources.contains_key(id) {return Ok(id.to_string());}
+            }
+        }
+        self.upsert_resource(name,facts)
+    }
     pub fn upsert_resource(&mut self,name:&str,facts:ResourceFacts)->Result<String,RpcError>{
         self.upsert_resources(name,vec![facts],false).map(|mut ids|ids.remove(0))
     }

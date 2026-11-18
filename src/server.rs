@@ -702,7 +702,7 @@ async fn spawn(core: &Shared, author: &str, s: Spawn) -> RpcResult {
         let id = {
             let mut c = c.lock().unwrap();
             if !operation.valid() { return Err(provider::indeterminate("provider changed before spawn result was recorded")); }
-            c.upsert_resource(&operation.handle.name, facts)?
+            c.record_spawn(&operation.handle.name, facts)?
         };
         if let Some(reservation) = reservation { reservation.bind(&id)?; }
         Ok(id)
