@@ -107,8 +107,9 @@ pub struct Core {
     pub provider_extensions: BTreeSet<String>,
     pub recovery_gate: Arc<tokio::sync::Mutex<()>>,
     /// Live view content (`view.publish`): derived, not persisted, not in history.
-    /// view -> (content, author, connection id). Cleared when its publisher disconnects.
-    pub live: BTreeMap<String, (Value, String, u64)>,
+    /// view -> (content, author, connection id, encoded charge). Cleared on publisher disconnect.
+    pub live: BTreeMap<String, (Value, String, u64, usize)>,
+    pub live_bytes:usize,
     /// Connected clients by connection id: what they said in `hello` (author, client, version, build).
     pub clients: BTreeMap<u64, Value>,
     pub socket: PathBuf,
@@ -157,7 +158,7 @@ impl Core {
             safe_mode_allow: BTreeSet::new(),
             provider_extensions: BTreeSet::new(),
             recovery_gate: Arc::new(tokio::sync::Mutex::new(())),
-            live: BTreeMap::new(),
+            live: BTreeMap::new(),live_bytes:0,
             clients: BTreeMap::new(),
             socket,
             state_dir,
@@ -228,7 +229,7 @@ impl Core {
             "providers": self.providers.keys().map(|n| (n.clone(), self.provider_json(n))).collect::<BTreeMap<_, _>>(),
             "adapters": self.adapter_state,
             "backend_notice":self.backend_notice(), "safe_mode": self.safe_mode, "safe_mode_allow": self.safe_mode_allow, "provider_extensions": self.provider_extensions,
-            "live": self.live.iter().map(|(k, (v, _, _))| (k.clone(), v.clone())).collect::<BTreeMap<_, _>>(),
+            "live": self.live.iter().map(|(k, (v, _, _, _))| (k.clone(), v.clone())).collect::<BTreeMap<_, _>>(),
         })
     }
 

@@ -308,9 +308,9 @@ async fn connection(core: Shared, conn: Arc<Conn>, mut incoming: crate::rpc::Inc
     }
     let mut c = core.lock().unwrap();
     c.clients.remove(&conn.id);
-    let gone: Vec<String> = c.live.iter().filter(|(_, (_, _, id))| *id == conn.id).map(|(k, _)| k.clone()).collect();
+    let gone: Vec<String> = c.live.iter().filter(|(_, (_, _, id, _))| *id == conn.id).map(|(k, _)| k.clone()).collect();
     for view in gone {
-        c.live.remove(&view);
+        if let Some((_,_,_,bytes))=c.live.remove(&view){c.live_bytes=c.live_bytes.saturating_sub(bytes);}
         c.emit("view.content", json!({"view": view, "content": null}));
     }
     let names: Vec<String> = c.commands.values().filter(|cmd| cmd.connection == Some(conn.id) && cmd.available).map(|cmd| cmd.name.clone()).collect();
@@ -425,13 +425,14 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> Rp
                 (Some(name),Some(token))=>Some(ext::authenticate(&core.lock().unwrap(),name,token).ok_or_else(||RpcError::new("forbidden","invalid or expired supervised extension identity"))?),
                 _=>None,
             };
-            *conn.supervised.lock().unwrap()=supervised;
+            *conn.supervised.lock().unwrap()=supervised.clone();
             conn.wire.hello()?;
-            if let Some(ext) = h.extension.clone() {
-                *conn.author.lock().unwrap() = format!("ext:{ext}");
-                *conn.extension.lock().unwrap() = Some(ext);
-            } else if let Some(client) = h.client.clone() {
-                *conn.author.lock().unwrap() = format!("{client}:{}", conn.id);
+            if let Some(owner)=supervised {
+                *conn.author.lock().unwrap()=format!("ext:{}",owner.name);
+                *conn.extension.lock().unwrap()=Some(owner.name);
+            } else {
+                *conn.author.lock().unwrap()=format!("client:{}",conn.id);
+                *conn.extension.lock().unwrap()=None;
             }
             let mut c = core.lock().unwrap();
             let me = json!({"id": conn.id, "author": conn.author(), "client": h.client, "version": h.version, "build": h.build});
@@ -516,23 +517,26 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> Rp
             if !content.is_null() && !content.is_object() {
                 return Err(RpcError::invalid("`content` is an object, or null to clear"));
             }
-            let mut c = core.lock().unwrap();
-            let old = c.live.get(&view).map(|(v, _, _)| crate::limits::encoded_bytes(&(&view, v))).unwrap_or(0);
             let next = if content.is_null() { 0 } else { crate::limits::encoded_bytes(&(&view, &content)) };
+            let author=conn.author();
+            let mut c = core.lock().unwrap();
+            if let Some((_,owner,connection,_))=c.live.get(&view){if owner!=&author && c.clients.contains_key(connection){return Err(RpcError::new("conflict",format!("view {view} is owned by {owner}")));}}
+            let old=c.live.get(&view).map(|(_,_,_,bytes)|*bytes).unwrap_or(0);
             if next > crate::limits::LIVE_VALUE_BYTES && next > old {
                 return Err(crate::limits::too_large("live view", next, crate::limits::LIVE_VALUE_BYTES));
             }
-            let total: usize = c.live.iter().map(|(key, (value, _, _))| crate::limits::encoded_bytes(&(key, value))).sum();
+            let total=c.live_bytes;
             let candidate = total.saturating_sub(old).saturating_add(next);
             if candidate > crate::limits::LIVE_BYTES && candidate > total {
                 return Err(crate::limits::too_large("live content", candidate, crate::limits::LIVE_BYTES));
             }
-            let unchanged = c.live.get(&view).map(|(v, _, _)| *v == content).unwrap_or(content.is_null());
+            let unchanged = c.live.get(&view).map(|(v, _, _, _)| *v == content).unwrap_or(content.is_null());
             if content.is_null() {
                 c.live.remove(&view);
             } else {
-                c.live.insert(view.clone(), (content.clone(), conn.author(), conn.id));
+                c.live.insert(view.clone(), (content.clone(), author, conn.id,next));
             }
+            c.live_bytes=candidate;
             if !unchanged {
                 c.emit("view.content", json!({"view": view, "content": content, "author": conn.author()}));
             }
@@ -624,7 +628,8 @@ fn subscribe(core: &Shared, conn: &Arc<Conn>, opts: crate::events::SubscribeOpti
     let response = json!({"epoch": epoch, "seq": seq});
     tokio::spawn(async move {
         loop {
-            match rx.recv().await {
+            let received=tokio::select! {biased; _=peer.closed()=>break, received=rx.recv()=>received};
+            match received {
                 // The receiver was created under the same lock as `seq`, so everything here is newer.
                 Ok((_, ev)) => {
                     if let Some(ev) = filter.shape(ev) {

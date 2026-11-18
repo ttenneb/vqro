@@ -8,6 +8,7 @@ use prim::client;
 use prim::rpc::{Incoming, Peer};
 use prim::server::{start, Backend};
 use serde_json::{json, Value};
+#[path="support/managed.rs"] mod managed;
 
 struct Env {
     _dir: tempfile::TempDir,
@@ -154,7 +155,7 @@ async fn commands_route_to_their_owner_and_go_unavailable() {
 
     let (p, _rx) = connect(&e).await;
     let r = p.call("command.invoke", json!({"name": "greet"})).await.unwrap();
-    assert!(r["hi"].as_str().unwrap().starts_with("test:"));
+    assert!(r["hi"].as_str().unwrap().starts_with("client:"));
 
     // Only the core owns `prim.*`, and names can't be stolen from a live owner.
     assert_eq!(p.call("command.register", json!({"name": "prim.revert"})).await.unwrap_err().kind(), "forbidden");
@@ -237,13 +238,16 @@ async fn old_extension_disconnect_does_not_disable_replacement() {
     let e = env();
     let core = start(e.socket.clone(), e.state.clone(), false, Backend::Fake, None).unwrap();
     let (old, old_rx) = connect(&e).await;
-    old.call("hello", json!({"extension": "greeter"})).await.unwrap();
+    let token_file=e._dir.path().join("greeter.token");
+    old.call("workspace.apply",json!({"ops":[{"op":"set","key":"extension/greeter","value":managed::spec(&token_file)}]})).await.unwrap();
+    let token=managed::token(&token_file).await;
+    old.call("hello", json!({"extension": "greeter","extension_token":token})).await.unwrap();
     old.call("command.register", json!({"name": "greet"})).await.unwrap();
     old.call("command.register", json!({"name": "old-only"})).await.unwrap();
     old.call("view.publish", json!({"view": "greeting", "content": {"label": "old"}})).await.unwrap();
 
     let (new, mut new_rx) = connect(&e).await;
-    new.call("hello", json!({"extension": "greeter"})).await.unwrap();
+    new.call("hello", json!({"extension": "greeter","extension_token":token})).await.unwrap();
     new.call("command.register", json!({"name": "greet"})).await.unwrap();
     new.call("view.publish", json!({"view": "greeting", "content": {"label": "new"}})).await.unwrap();
     drop(old_rx);

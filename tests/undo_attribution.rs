@@ -4,6 +4,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 use prim::{client, rpc::{Incoming, IncomingReceiver, Peer}};
 use serde_json::{json, Value};
+#[path="support/managed.rs"] mod managed;
 
 struct Fixture { child:Option<Child>, root:tempfile::TempDir }
 impl Fixture {
@@ -11,12 +12,19 @@ impl Fixture {
         let root = tempfile::Builder::new().prefix("pundo").tempdir_in("/tmp").unwrap();
         std::fs::create_dir(root.path().join("extensions")).unwrap();
         std::fs::create_dir(root.path().join("run")).unwrap();
+        std::fs::create_dir(root.path().join("st")).unwrap();
+        // Offline fixture declarations precede the user scenario; only genuine supervised lifetimes
+        // can supply ext: writers now. This is not a wire authentication bypass.
+        let mut store=prim::store::Store::open(root.path().join("st/workspace.json")).unwrap();
+        let ops=["seed","themes","writer","slow","background","worker","outer","inner"].into_iter().map(|name|prim::store::Op::Set{key:format!("extension/{name}"),value:managed::spec(&root.path().join(format!("{name}.token"))),expect:None}).collect();
+        store.apply("ext:fixture-bootstrap",None,ops).unwrap();
         let mut fixture = Self { child:None, root };
         fixture.start();
         fixture.peer("ready").await;
         fixture
     }
     fn start(&mut self) {
+        for entry in std::fs::read_dir(self.root.path()).unwrap().flatten(){if entry.path().extension().is_some_and(|s|s=="token"){std::fs::remove_file(entry.path()).unwrap();}}
         let binary = std::env::var_os("UNDO_CORE_BIN").map(PathBuf::from).unwrap_or_else(|| env!("CARGO_BIN_EXE_prim").into());
         self.child = Some(Command::new(binary).env_clear().args(["serve","--fake"])
             .env("HOME",self.root.path()).env("PATH","/usr/bin:/bin")
@@ -38,7 +46,8 @@ impl Fixture {
     }
     async fn extension(&self, name:&str) -> (Peer,IncomingReceiver) {
         let (peer,rx,_) = self.peer("extension").await;
-        peer.call("hello",json!({"extension":name})).await.unwrap();
+        let token=managed::token(&self.root.path().join(format!("{name}.token"))).await;
+        peer.call("hello",json!({"extension":name,"extension_token":token})).await.unwrap();
         (peer,rx)
     }
     async fn stop(&mut self, peer:&Peer) {
