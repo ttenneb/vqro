@@ -34,10 +34,16 @@ async fn spawn_completion_does_not_roll_back_newer_published_facts() {
         let request=loop{if let Some(Incoming::Request{id,method,..})=incoming.recv().await{assert_eq!(method,"effect.invoke");break id;}};
         let mut initial=facts(&format!("t{i}"));initial["name"]=json!("creation snapshot");
         let mut latest=initial.clone();latest["state"]=json!(state);latest["name"]=json!("newer observation");
-        provider.notify("resource.upsert",json!({"generation":generation,"facts":latest}));
+        if i==0 {provider.notify("resource.upsert",json!({"generation":generation,"facts":latest}));}
+        else {provider.call("provider.sync",json!({"generation":generation,"resources":[latest],"final":false})).await.unwrap();}
         until(||e.core.lock().unwrap().resources.values().any(|r|r.adapter=="wire"&&r.facts.backend_ref==format!("t{i}")&&r.facts.name.as_deref()==Some("newer observation"))).await;
         provider.respond(request,Ok(json!({"outcome":"observed","data":{"facts":initial}})));
         let result=spawn.await.unwrap().unwrap();assert_eq!(result["resource"]["state"],state);assert_eq!(result["resource"]["name"],"newer observation");
+        if i==1 {
+            provider.call("provider.sync",json!({"generation":generation,"resources":[],"final":true})).await.unwrap();
+            let current=e.core.lock().unwrap().resource(result["resource"]["id"].as_str().unwrap()).unwrap().to_json();
+            assert_eq!(current["name"],"newer observation","creation replies must not roll back the in-progress sync cache either");
+        }
     }
 }
 

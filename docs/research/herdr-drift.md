@@ -38,7 +38,9 @@ complete in either order.
 `Core::record_spawn` now reuses an already-published exact `(provider, instance, ref, incarnation)` and its current
 facts; only an unknown identity follows ordinary durable admission. This is generic creation-result dedup, not
 "finished wins" policy: the wire regression also preserves newer metadata on a still-live resource. Different
-incarnations do not match. Normal resource updates, kill observations and effect outcome semantics are unchanged.
+incarnations do not match. The wire adapter's current/partial-sync cache observes the same rule, so a late creation
+reply cannot replay stale metadata at the final chunk. A deterministic interleaved-sync regression catches that
+second cache path too. Normal resource updates, kill observations and effect outcome semantics are unchanged.
 
 ## Red/green tests and target load
 
@@ -50,7 +52,7 @@ incarnations do not match. Normal resource updates, kill observations and effect
   plus snapshot/old-event sequence fencing.
 - `spawn_completion_does_not_roll_back_newer_published_facts` in `tests/provider_wire.rs` publishes newer facts
   before answering spawn with creation facts. Baseline returns live instead of finished; fixed behavior preserves
-  finished state and newer live metadata.
+  finished state and newer live metadata, including after an interleaved final sync chunk.
 - `tests/e2e_herdr_drift.py` is a permanent **full gate** against real private hc and the actual prim-herdr binary.
   Three waves of 600 terminals (`sleep 1`, `sleep .01`, immediate exit) compare hc and prim inventory/facts, exercise
   native automatic pruning, verify 1800 distinct prim ids, then explicitly forget three finished resources.

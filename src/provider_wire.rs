@@ -247,8 +247,11 @@ impl WireProvider {
         inventory.current.insert(facts.backend_ref.clone(),facts.clone());
         if inventory.syncing { inventory.seen.insert(facts.backend_ref.clone(),facts); }
     }
-    fn record(&self, facts: ResourceFacts) -> Result<(), RpcError> {
+    fn record(&self, facts: ResourceFacts, creation:bool) -> Result<(), RpcError> {
         let mut inventory = self.inventory.lock().unwrap();
+        // Creation is not a newer publication. In particular it must not replace an already-seen
+        // sync row, or the final chunk would roll Core back after record_spawn preserved its facts.
+        if creation && inventory.current.get(&facts.backend_ref).is_some_and(|current|current.incarnation==facts.incarnation) {return Ok(());}
         Self::check_capacity(&inventory,std::slice::from_ref(&facts))?;
         Self::record_locked(&mut inventory,facts);
         Ok(())
@@ -454,7 +457,7 @@ impl WireProvider {
         let data = r.get("data").cloned().unwrap_or(Value::Null);
         let facts = if matches!(op, "terminal.spawn" | "terminal.kill") {
             match data.get("facts") {
-                Some(facts) => { let facts = parse_facts(facts.clone()).map_err(|e| AdapterError::Backend(e.to_string()))?; self.record(facts.clone()).map_err(|e| AdapterError::Backend(e.to_string()))?; Some(facts) }
+                Some(facts) => { let facts = parse_facts(facts.clone()).map_err(|e| AdapterError::Backend(e.to_string()))?; self.record(facts.clone(),op=="terminal.spawn").map_err(|e| AdapterError::Backend(e.to_string()))?; Some(facts) }
                 None => None,
             }
         } else { None };
