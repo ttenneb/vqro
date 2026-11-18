@@ -166,7 +166,11 @@ try:
         check(f"{provider}: the pasted lines run on Enter", bool(ran), screen())
         # 3. 200 KB paste arrives complete (cat: raw, no bracketed paste).
         out = f"{R}/out/{provider}.txt"
-        keys(f"clear; cat > {out}", literal=True); keys("Enter"); time.sleep(0.8)
+        # Paste only once the TUI has seen cat start: the shell turns bracketed paste off before cat runs,
+        # and a TUI that is behind on output would still bracket the paste for the shell (correctly, for
+        # what it has seen). The marker comes after that mode change in the output.
+        keys(f"clear; echo cat-ready-$((6*7)); cat > {out}", literal=True); keys("Enter")
+        wait(lambda: "cat-ready-42" in screen(), 30); time.sleep(0.3)
         paste(f"{R}/big.txt")
         done = wait(lambda: os.path.getsize(out) >= len(big), 90)
         keys("C-d"); time.sleep(0.8)
