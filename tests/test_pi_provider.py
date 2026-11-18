@@ -394,6 +394,21 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_explicit_unavailable_reply_is_not_mistaken_for_a_transport_gap(self):
         await self.refused_bridge_stops_owned_runtime("unavailable")
 
+    async def test_missing_resume_credential_cannot_leave_an_unreachable_runtime_alive(self):
+        original = self.core.result
+        async def omit_resume(row):
+            result = await original(row)
+            if row["method"] == "provider.register":
+                result.pop("resume_token", None)
+            return result
+        self.core.result = omit_resume
+        bridge = await self.start(ready=False)
+        result = await asyncio.wait_for(asyncio.gather(self.task, return_exceptions=True), 2)
+        self.assertIsInstance(result[0], ProviderError)
+        self.assertIsNotNone(bridge.pi.process.returncode)
+        self.assertEqual(len(self.core.notes("provider.register")), 1)
+        self.assertIn("no resume credential", str(result[0]))
+
     async def test_view_collision_is_not_overwritten_or_published(self):
         original = {"value": {"kind": "panel", "title": "unrelated"}, "version": 1}
         self.core.entries["view/agent-r7"] = deepcopy(original)
