@@ -759,7 +759,8 @@ impl App {
             }
             "command" => {
                 if let Some(n) = d["name"].as_str() {
-                    self.commands.insert(n.to_string(), d.clone());
+                    if d["available"]==false {self.commands.remove(n);}
+                    else {self.commands.insert(n.to_string(), d.clone());}
                 }
             }
             "extension" => {
@@ -2809,6 +2810,15 @@ mod tests {
         let (peer, _) = Peer::spawn(tokio::io::empty(), tokio::io::sink());
         let (tx, rx) = mpsc::unbounded_channel();
         (App::new(peer, tx), rx)
+    }
+
+    #[tokio::test]
+    async fn disconnected_command_events_drop_cached_names() {
+        let(mut app,_)=app();let epoch=app.epoch.clone();
+        app.on_event_record(&json!({"epoch":epoch,"seq":1,"type":"command","data":{"name":"temporary","available":true}}));
+        assert!(app.commands.contains_key("temporary"));
+        app.on_event_record(&json!({"epoch":epoch,"seq":2,"type":"command","data":{"name":"temporary","available":false}}));
+        assert!(!app.commands.contains_key("temporary"));
     }
 
     #[tokio::test]

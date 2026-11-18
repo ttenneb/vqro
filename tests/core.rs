@@ -141,7 +141,7 @@ async fn open_attach_and_type() {
 }
 
 #[tokio::test]
-async fn commands_route_to_their_owner_and_go_unavailable() {
+async fn commands_route_to_their_owner_and_are_removed_on_disconnect() {
     let e = env();
     let _core = start(e.socket.clone(), e.state.clone(), false, Backend::Fake, None).unwrap();
     let (owner, mut owner_rx, _) = client::connect(&e.socket, "x").await.unwrap();
@@ -172,12 +172,12 @@ async fn commands_route_to_their_owner_and_go_unavailable() {
     let mut kind = String::new();
     for _ in 0..40 {
         kind = p.call("command.invoke", json!({"name": "greet"})).await.map(|_| String::new()).unwrap_or_else(|e| e.kind().to_string());
-        if kind == "unavailable" || kind == "disconnected" {
+        if kind == "not_found" || kind == "disconnected" {
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert!(kind == "unavailable" || kind == "disconnected", "got {kind}");
+    assert!(kind == "not_found" || kind == "disconnected", "got {kind}");
 }
 
 #[tokio::test]
@@ -257,7 +257,7 @@ async fn old_extension_disconnect_does_not_disable_replacement() {
     drop(old_rx);
     drop(old);
     // The old-only command is our barrier: cleanup has run while holding the core lock.
-    until(|| !core.lock().unwrap().commands["old-only"].available).await;
+    until(|| !core.lock().unwrap().commands.contains_key("old-only")).await;
     assert!(core.lock().unwrap().commands["greet"].available);
     assert_eq!(core.lock().unwrap().live["greeting"].0["label"], "new");
 

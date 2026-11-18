@@ -4,6 +4,8 @@ pub const ENTRY_BYTES: usize = MIB;
 pub const WORKSPACE_BYTES: usize = 16 * MIB;
 pub const LIVE_VALUE_BYTES: usize = MIB;
 pub const LIVE_BYTES: usize = 8 * MIB;
+/// Ephemeral command rows, including encoded names/titles/owners and array separators.
+pub const COMMAND_BYTES: usize = MIB;
 /// Enforced for canonical and unpublished IO-recovery resource JSON by provider admission.
 pub const RESOURCE_ALLOWANCE: usize = crate::resource_admission::MAX_RESOURCE_BYTES;
 pub const SNAPSHOT_BYTES: usize = WORKSPACE_BYTES + LIVE_BYTES + RESOURCE_ALLOWANCE + 8 * MIB;

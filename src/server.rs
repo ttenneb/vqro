@@ -321,9 +321,9 @@ async fn connection(core: Shared, conn: Arc<Conn>, mut incoming: crate::rpc::Inc
         if let Some((_,_,_,bytes))=c.live.remove(&view){c.live_bytes=c.live_bytes.saturating_sub(bytes);}
         c.emit("view.content", json!({"view": view, "content": null}));
     }
-    let names: Vec<String> = c.commands.values().filter(|cmd| cmd.connection == Some(conn.id) && cmd.available).map(|cmd| cmd.name.clone()).collect();
+    let names: Vec<String> = c.commands.values().filter(|cmd| cmd.connection == Some(conn.id)).map(|cmd| cmd.name.clone()).collect();
     for name in names {
-        if let Some(cmd) = c.commands.get_mut(&name) {
+        if let Some(mut cmd) = c.commands.remove(&name) {
             cmd.available = false;
             cmd.peer = None;
             let j = cmd.to_json();
@@ -541,6 +541,12 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> Rp
             }
             let info = CommandInfo { name: r.name.clone(), title: r.title.unwrap_or_else(|| r.name.clone()), owner: conn.author(), connection: Some(conn.id), available: true, peer: Some(conn.peer.clone()) };
             let j = info.to_json();
+            let bytes=crate::limits::encoded_bytes(&j);
+            if bytes.saturating_add(2)>crate::limits::COMMAND_BYTES {return Err(crate::limits::too_large("command metadata",bytes.saturating_add(2),crate::limits::COMMAND_BYTES));}
+            // Registration is infrequent; count the bounded live registry rather than maintain a
+            // second mutable index. Replacing this name releases its old encoded charge atomically.
+            let retained=c.commands.values().filter(|cmd|cmd.name!=info.name).fold(2usize,|sum,cmd|sum.saturating_add(crate::limits::encoded_bytes(&cmd.to_json())).saturating_add(1));
+            if retained.saturating_add(bytes)>crate::limits::COMMAND_BYTES {return Err(provider::rejected("overloaded","command metadata budget is full; registration not applied"));}
             c.commands.insert(r.name, info);
             c.emit("command", j.clone());
             Ok(j)
