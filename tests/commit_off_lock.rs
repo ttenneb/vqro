@@ -222,13 +222,21 @@ async fn clean_failure_is_invisible_but_post_rename_failure_is_adopted_once() {
 }
 
 #[tokio::test]
-async fn commit_admission_counts_escaped_author_bytes_not_only_raw_text() {
+async fn commit_admission_counts_escaped_note_bytes_not_only_raw_text() {
     let f = Fixture::new().await;
     let (a, _) = f.peer().await; let (b, _) = f.peer().await; let (c, _) = f.peer().await;
-    // Notes now have a separate small cap. Keep testing escaped metadata accounting via
-    // caller labels: about3MiB encoded but only500KiB as a Rust string per admitted write.
-    for peer in [&a,&b,&c] {peer.call("hello",json!({"client":"\0".repeat(500*1024)})).await.unwrap();}
-    let input = || set(1,0);
+    let mut authors=Vec::new();
+    for peer in [&a,&b,&c] {authors.push(peer.call("hello",json!({"client":"commit-budget"})).await.unwrap()["you"].as_str().unwrap().to_owned());}
+    // Use real retained metadata, within the note cap. Three operation payloads leave room for
+    // raw notes, but not their six-byte JSON escapes. Descriptive client labels are not authors.
+    let budget=8*1024*1024;
+    let note="\0".repeat(store::NOTE_BYTES);
+    let input=||json!({"note":note,"ops":(0..3).map(|i|json!({"op":"set","key":format!("doc/escaped-{i}"),"value":"x".repeat(budget/9-store::NOTE_BYTES),"expect":0})).collect::<Vec<_>>()});
+    let ops:Vec<store::Op>=serde_json::from_value(input()["ops"].clone()).unwrap();
+    let payload=prim::limits::encoded_bytes(&ops);
+    let raw=3*payload+authors.iter().map(|author|author.len()+note.len()).sum::<usize>();
+    let encoded=3*payload+authors.iter().map(|author|prim::limits::encoded_bytes(&(author,None::<&str>,Some(&note)))).sum::<usize>();
+    assert!(raw<budget && encoded>budget,"raw {raw}, encoded {encoded}, budget {budget}");
     let first_input = input(); let second_input = input();
     let first = tokio::spawn(async move { a.call("workspace.apply", first_input).await });
     tokio::time::timeout(Duration::from_secs(2), f.gate.entered.notified()).await.unwrap();
@@ -242,6 +250,25 @@ async fn commit_admission_counts_escaped_author_bytes_not_only_raw_text() {
     assert_eq!(first.await.unwrap().unwrap()["txn"], 1);
     assert_eq!(second.await.unwrap().unwrap_err().kind(), "conflict");
     f.pending(0).await;
+}
+
+#[tokio::test]
+async fn descriptive_client_labels_are_not_duplicated_into_commit_metadata() {
+    let f=Fixture::new().await;
+    let (a,_)=f.peer().await;let (b,_)=f.peer().await;let (c,_)=f.peer().await;
+    let label="\0".repeat(500*1024);
+    let mut authors=Vec::new();
+    for peer in [&a,&b,&c] {authors.push(peer.call("hello",json!({"client":label})).await.unwrap()["you"].as_str().unwrap().to_owned());}
+    assert!(authors.iter().all(|author|author.starts_with("client:")&&author.len()<64));
+    let first=tokio::spawn(async move{a.call("workspace.apply",set(1,0)).await});
+    tokio::time::timeout(Duration::from_secs(2),f.gate.entered.notified()).await.unwrap();
+    let second=tokio::spawn(async move{b.call("workspace.apply",set(2,0)).await});f.pending(2).await;
+    let reader=c.clone();let third=tokio::spawn(async move{c.call("workspace.apply",set(3,0)).await});f.pending(3).await;
+    f.gate.release();assert_eq!(first.await.unwrap().unwrap()["txn"],1);
+    assert_eq!(second.await.unwrap().unwrap_err().kind(),"conflict");assert_eq!(third.await.unwrap().unwrap_err().kind(),"conflict");f.pending(0).await;
+    let history=reader.call("workspace.history",json!({"limit":10})).await.unwrap();
+    assert_eq!(history["txns"][0]["author"],authors[0]);
+    assert!(prim::limits::encoded_bytes(&history)<4096,"client labels must not be retained per transaction");
 }
 
 #[tokio::test]

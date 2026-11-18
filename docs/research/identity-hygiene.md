@@ -73,6 +73,21 @@ Agents UI timed out opening the requests popup; an identical isolated retry pass
 failure. Failure receipt `ep-kf4ghhyl/receipt.json` and retry `ep-4mr7d7h5/receipt.json` are retained in scratch. No
 gate was skipped or relaxed: use the final full receipt for merge acceptance, not the standalone retry.
 
+## Integration: escaped commit metadata
+
+After integration with the history-byte budget, the old escaped-author admission fixture timed out: it set
+`hello.client` to 500 KiB of NULs and assumed that label became the transaction author. It no longer does.
+`src/server.rs::apply_prepared` charges encoded `(author, on_behalf_of, note)` plus operations; the committer
+reaccounts the same actual metadata at preparation. `hello.client` stays descriptive connected-client state and is
+not captured/copied into each write or history record. Charging it per write would charge the wrong value.
+
+The corrected `tests/commit_off_lock.rs` probe uses valid 4096-byte NUL notes and operation payloads near the 8 MiB
+queue limit. It asserts raw metadata fits while encoded metadata does not, admits two writes and rejects the third
+as overloaded. A temporary raw-note admission mutant (not shipped) fails with timeout; restoring actual encoded
+charging passes. A separate test admits three small writes despite huge descriptive labels and verifies compact
+connection-scoped authors in history. No product accounting or authentication was weakened. Evidence:
+`admission-metadata-before.log`, `admission-metadata-negative-control.log`, `admission-metadata-green.log`.
+
 Other local evidence: `identity-hygiene-before.log`, `identity-commit{1,2}.log`, `identity-btrfs600.log`,
 `provider-registry-scale-final.{log,json}`. Tests create and clean their own processes, private state/sockets,
 empty extension declarations and hc guards; no live prim/hc/tmux, installation, publication or model calls.
