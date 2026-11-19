@@ -24,7 +24,7 @@ mod probe;
 mod frame_budget;
 mod theme;
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -42,6 +42,8 @@ use tokio::sync::mpsc;
 
 use crate::client;
 use crate::rpc::{Incoming, Peer};
+use crate::ui_model::recovery::{self, PrefixRow, SAFE_MODE_VIEW};
+use crate::ui_model::workspace::{Change, Workspace};
 use icons::Icons;
 use theme::Palette;
 
@@ -152,13 +154,6 @@ struct Item {
     prefill: Value,
 }
 
-/// A row of the prefix menu: the key that runs it (None for a recovery action whose key now does
-/// something else), its label, and the binding it runs.
-struct PrefixRow {
-    key: Option<String>,
-    label: String,
-    binding: Value,
-}
 
 impl Item {
     fn from_entry(v: &Value) -> Item {
@@ -226,17 +221,10 @@ struct Drag {
 struct App {
     peer: Peer,
     tx: mpsc::UnboundedSender<Msg>,
-    entries: BTreeMap<String, Value>,
-    versions: BTreeMap<String, u64>,
-    resources: BTreeMap<String, Value>,
-    commands: BTreeMap<String, Value>,
-    extensions: BTreeMap<String, Value>,
-    safe_mode: bool,
-    safe_mode_allow: BTreeSet<String>,
-    provider_extensions: BTreeSet<String>,
+    /// The renderer-independent model: the workspace cache and its contributions.
+    ws: Workspace,
+    /// Safe-mode chooser choices not applied yet (this client's UI state).
     safe_selected: BTreeSet<String>,
-    backends_connected: BTreeSet<String>,
-    backend_notice: Option<String>,
     terms: HashMap<String, Term>,
     stream_view: HashMap<u64, String>,
     early: HashMap<u64, Vec<Vec<u8>>>,
@@ -250,8 +238,6 @@ struct App {
     filtering: Option<String>,
     /// A transient notification: text, style, until.
     toast: Option<(String, Option<String>, std::time::Instant)>,
-    /// Live view content from `view.publish`, merged over the view entry.
-    live: HashMap<String, Value>,
     /// Merged immutable panel values; invalidate only on this view's entry/live update or snapshot.
     panel_values: Mutex<HashMap<String, Arc<Value>>>,
     panel_dependencies: Mutex<HashMap<String, HashSet<String>>>,
@@ -281,8 +267,6 @@ struct App {
     quit: bool,
     connected: bool,
     connection: u64,
-    epoch: String,
-    seq: u64,
     /// Incremented on snapshot requests and disconnects to fence late replies.
     generation: u64,
     resyncing: bool,
@@ -294,22 +278,6 @@ struct App {
 }
 
 /// The installed binary's identity, to notice a reinstall.
-fn strings(value: &Value) -> BTreeSet<String> { value.as_array().into_iter().flatten().filter_map(Value::as_str).map(String::from).collect() }
-
-/// Who an extension's non-UI needs name, from the core's dependency facts (D29): `tabs, herdr or tmux`.
-/// Needs the core itself provides are left out. Display only.
-fn needs_text(dependencies: &Value) -> String {
-    let mut out: Vec<String> = Vec::new();
-    for need in dependencies["needs"].as_array().into_iter().flatten() {
-        if need["cap"].as_str().is_none_or(|c| c.starts_with("ui/")) { continue; }
-        let who: Vec<&str> = need["providers"].as_array().into_iter().flatten().filter_map(|p| p["name"].as_str()).collect();
-        if who.contains(&"vqro") { continue; }
-        let text = if who.is_empty() { need["suggest"].as_str().or(need["cap"].as_str()).unwrap_or("?").to_string() } else { who.join(" or ") };
-        if !out.contains(&text) { out.push(text); }
-    }
-    out.join(", ").chars().take(120).collect()
-}
-
 fn exe_stamp() -> Option<(std::path::PathBuf, std::time::SystemTime)> {
     let exe = client::executable_path().ok()?;
     let modified = std::fs::metadata(&exe).ok()?.modified().ok()?;
@@ -386,10 +354,15 @@ async fn snapshot_for_client(peer: &Peer, hello: &Value) -> Result<Value> {
     }
 }
 
+/// This client's `hello`: name, build, profiles and the panel features it renders (D29).
+fn hello_params() -> Value {
+    crate::ui_model::hello("tui", client::build_stamp(), crate::ui_model::PROFILES, panel::SUPPORTED)
+}
+
 pub async fn run(socket: &Path) -> Result<()> {
     let started_as = exe_stamp();
     let mut reexec = false;
-    let (peer, mut incoming, hello) = client::connect(socket, "tui").await?;
+    let (peer, mut incoming, hello) = client::connect_with(socket, hello_params()).await?;
     let snap = snapshot_for_client(&peer, &hello).await?;
     let seq = snap["seq"].as_u64().unwrap_or(0);
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -527,7 +500,7 @@ async fn reconnect(socket: std::path::PathBuf, tx: mpsc::UnboundedSender<Msg>) -
     loop {
         let attempt: Result<_> = async {
             client::ensure_core().await?;
-            let (peer, incoming, hello) = client::connect(&socket, "tui").await?;
+            let (peer, incoming, hello) = client::connect_with(&socket, hello_params()).await?;
             let snap = snapshot_for_client(&peer, &hello).await?;
             peer.call("events.subscribe", json!({"from": snap["seq"], "epoch": snap["epoch"], "partial_resources": true})).await?;
             Ok((peer, incoming, snap))
@@ -545,17 +518,14 @@ async fn reconnect(socket: std::path::PathBuf, tx: mpsc::UnboundedSender<Msg>) -
 impl App {
     fn new(peer: Peer, tx: mpsc::UnboundedSender<Msg>) -> Self {
         Self {
-            peer, tx,
-            entries: BTreeMap::new(), versions: BTreeMap::new(), resources: BTreeMap::new(),
-            commands: BTreeMap::new(), extensions: BTreeMap::new(), safe_mode: false,
-            safe_mode_allow: BTreeSet::new(), provider_extensions: BTreeSet::new(), safe_selected: BTreeSet::new(), backends_connected:BTreeSet::new(), backend_notice:None,
+            peer, tx, ws: Workspace::default(), safe_selected: BTreeSet::new(),
             terms: HashMap::new(), stream_view: HashMap::new(), early: HashMap::new(), early_closed: HashMap::new(),
             leaves: Vec::new(), focus: 0, overlay: None, pstate: HashMap::new(),
-            filtering: None, toast: None, live: HashMap::new(), panel_values: Mutex::new(HashMap::new()), panel_dependencies: Mutex::new(HashMap::new()), hit: Hit::default(),
+            filtering: None, toast: None, panel_values: Mutex::new(HashMap::new()), panel_dependencies: Mutex::new(HashMap::new()), hit: Hit::default(),
             drag: None, overrides: HashMap::new(), mouse_owner: None, mouse_on: true,
             under: None, input_queues: HashMap::new(), view_streams: Arc::default(), zoomed: None, pending_focus: None, kbd_enhance: false,
             held: KeyModifiers::NONE, message: String::new(), key_hint: None,
-            quit: false, connected: true, connection: 0, epoch: String::new(), seq: 0,
+            quit: false, connected: true, connection: 0,
             generation: 0, resyncing: false, buffered: Vec::new(), buffered_bytes: 0, recovery_only: false, retry_snapshot: None, snapshot_retries: 0,
         }
     }
@@ -587,31 +557,17 @@ impl App {
         self.recovery_only = snap["recovery_only"].as_bool().unwrap_or(false);
         self.snapshot_retries = u32::from(snap["retry_snapshot"] == true);
         self.retry_snapshot = (self.snapshot_retries > 0).then(|| std::time::Instant::now() + snapshot_retry_delay(self.snapshot_retries));
-        self.epoch = snap["epoch"].as_str().unwrap_or("").to_string();
-        self.seq = snap["seq"].as_u64().unwrap_or(0);
         self.panel_values.lock().unwrap().clear();
         self.panel_dependencies.lock().unwrap().clear();
         for state in self.pstate.values_mut() { state.prepared = None; }
-        self.entries.clear();
-        self.versions.clear();
-        if let Some(es) = snap["entries"].as_object() {
-            for (k, e) in es {
-                self.entries.insert(k.clone(), e["value"].clone());
-                self.versions.insert(k.clone(), e["version"].as_u64().unwrap_or(0));
-            }
-        }
-        self.resources = snap["resources"].as_array().into_iter().flatten().filter_map(|r| Some((r["id"].as_str()?.to_string(), r.clone()))).collect();
-        self.commands = snap["commands"].as_array().into_iter().flatten().filter_map(|c| Some((c["name"].as_str()?.to_string(), c.clone()))).collect();
-        self.extensions = snap["extensions"].as_object().map(|o| o.iter().map(|(k, v)| (k.clone(), v.clone())).collect()).unwrap_or_default();
-        let was_safe=self.safe_mode;
-        self.safe_mode = snap["safe_mode"].as_bool().unwrap_or(false);
-        self.safe_mode_allow = strings(&snap["safe_mode_allow"]);
-        self.provider_extensions = strings(&snap["provider_extensions"]);
-        self.backend_notice = snap["backend_notice"].as_str().filter(|s| !s.is_empty()).map(String::from);
-        self.backends_connected=snap["providers"].as_object().into_iter().flatten().filter(|(_,p)|p["role"]=="backend" && p["connected"]==true).map(|(name,_)|name.clone()).collect();
-        self.live = snap["live"].as_object().map(|o| o.iter().map(|(k, v)| (k.clone(), v.clone())).collect()).unwrap_or_default();
-        if self.safe_mode && !was_safe { self.open_safe_chooser(); }
-        if !self.safe_mode && matches!(&self.overlay,Some(Overlay::Popup{view,..}) if view=="@vqro-safe-mode") { self.overlay=None; }
+        let was_safe = self.ws.load(snap);
+        self.safe_mode_changed(self.ws.safe_mode, was_safe);
+    }
+
+    /// Entering safe mode opens the built-in chooser; leaving it closes the chooser.
+    fn safe_mode_changed(&mut self, on: bool, was: bool) {
+        if on && !was { self.open_safe_chooser(); }
+        if !on && matches!(&self.overlay,Some(Overlay::Popup{view,..}) if view==SAFE_MODE_VIEW) { self.overlay=None; }
     }
 
     fn on_incoming(&mut self, m: Incoming) {
@@ -700,58 +656,21 @@ impl App {
     }
 
     fn on_event_record(&mut self, ev: &Value) {
-        if ev["epoch"].as_str() != Some(self.epoch.as_str()) {
-            self.resync();
-            return;
-        }
-        let seq = ev["seq"].as_u64().unwrap_or(0);
-        if seq <= self.seq {
-            return;
-        }
-        self.seq = seq;
-        let d = &ev["data"];
-        if d.get("backend_notice").is_some() {
-            self.backend_notice = d["backend_notice"].as_str().filter(|s| !s.is_empty()).map(String::from);
-        }
-        match ev["type"].as_str().unwrap_or("") {
-            "entries" => {
-                for c in d["changes"].as_array().into_iter().flatten() {
-                    let Some(k) = c["key"].as_str() else { continue };
-                    if let Some(view) = k.strip_prefix("view/") {
-                        self.invalidate_panel(view);
-                        for state in self.pstate.values_mut() { state.prepared = None; }
-                    }
-                    if k.starts_with("layout/") {
-                        // The committed layout replaces any local drag preview.
-                        self.overrides.clear();
-                    }
-                    if c["value"].is_null() {
-                        self.entries.remove(k);
-                        self.versions.remove(k);
-                    } else {
-                        self.entries.insert(k.to_string(), c["value"].clone());
-                        self.versions.insert(k.to_string(), c["version"].as_u64().unwrap_or(0));
+        for change in self.ws.apply(ev) {
+            match change {
+                Change::Resync => return self.resync(),
+                Change::View(view) => {
+                    self.invalidate_panel(&view);
+                    for state in self.pstate.values_mut() { state.prepared = None; }
+                }
+                // The committed layout replaces any local drag preview.
+                Change::Layout => self.overrides.clear(),
+                Change::ChangedBy { author, txn } => {
+                    if !author.starts_with("tui:") && !author.starts_with("ext:") {
+                        self.message = format!("workspace changed by {author} (txn {txn})");
                     }
                 }
-                let who = d["author"].as_str().unwrap_or("?");
-                if !who.starts_with("tui:") && !who.starts_with("ext:") {
-                    self.message = format!("workspace changed by {who} (txn {})", d["txn"]);
-                }
-            }
-            "resource" => {
-                if let Some(id) = d["id"].as_str() {
-                    // Merge the complete record before evaluating availability: partial status
-                    // events must not accidentally make a stale resource available again.
-                    let record = if ev["partial"] == true {
-                        let Some(mut base) = self.resources.get(id).cloned() else {
-                            self.resync();
-                            return;
-                        };
-                        for (key, value) in d.as_object().into_iter().flatten() { base[key] = value.clone(); }
-                        base
-                    } else { d.clone() };
-                    let available = record["available"].as_bool().unwrap_or(true);
-                    let restored = available && self.resources.get(id).is_some_and(|old| old["available"] == false);
+                Change::Resource { id, available, live, restored } => {
                     for term in self.terms.values_mut().filter(|t| t.resource == id) {
                         if !available {
                             if let Some(stream) = term.stream.take() {
@@ -759,64 +678,17 @@ impl App {
                                 self.peer.notify("stream.close", json!({"stream": stream}));
                             }
                             term.close("resource unavailable".into());
-                        } else if record["state"] == "live" {
+                        } else if live {
                             term.closed = None;
                             if restored { term.retry_at = Some(std::time::Instant::now()); }
                         }
                     }
-                    self.resources.insert(id.to_string(), record);
                 }
+                Change::ExtensionFailed { name, reason } => self.message = format!("extension {name} failed: {reason}"),
+                Change::SafeMode { on, was } => self.safe_mode_changed(on, was),
+                Change::Notify { text, style } => self.toast = Some((text, style, std::time::Instant::now() + std::time::Duration::from_secs(4))),
+                Change::BackendDisconnected { name, error } => self.message = format!("backend {} disconnected: {error}", json!(name)),
             }
-            "resource.removed" => {
-                if let Some(id) = d["id"].as_str() {
-                    self.resources.remove(id);
-                }
-            }
-            "command" => {
-                if let Some(n) = d["name"].as_str() {
-                    if d["available"]==false {self.commands.remove(n);}
-                    else {self.commands.insert(n.to_string(), d.clone());}
-                }
-            }
-            "extension" => {
-                if let Some(n) = d["name"].as_str() {
-                    let mut st = d["state"].clone();
-                    // Events carry runtime facts only; keep the snapshot's static dependency facts (D29).
-                    if st["dependencies"].is_null() { if let Some(old)=self.extensions.get(n) { st["dependencies"]=old["dependencies"].clone(); } }
-                    if st["status"] == "failed" {
-                        self.message = format!("extension {n} failed: {}", st["failure"]["reason"].as_str().or_else(||st["last_exit"].as_str()).unwrap_or("?"));
-                    }
-                    self.extensions.insert(n.to_string(), st);
-                }
-            }
-            "safe_mode" => {
-                let was=self.safe_mode; self.safe_mode=d["on"].as_bool().unwrap_or(false);
-                self.safe_mode_allow=strings(&d["allow"]); self.provider_extensions=strings(&d["provider_extensions"]);
-                if self.safe_mode && !was { self.open_safe_chooser(); }
-                if !self.safe_mode && matches!(&self.overlay,Some(Overlay::Popup{view,..}) if view=="@vqro-safe-mode") { self.overlay=None; }
-            }
-            "notify" => {
-                let text = d["text"].as_str().unwrap_or("").to_string();
-                self.toast = Some((text, d["style"].as_str().map(String::from), std::time::Instant::now() + std::time::Duration::from_secs(4)));
-            }
-            "view.content" => {
-                if let Some(v) = d["view"].as_str() {
-                    self.invalidate_panel(v);
-                    for state in self.pstate.values_mut() { state.prepared = None; }
-                    if d["content"].is_null() {
-                        self.live.remove(v);
-                    } else {
-                        self.live.insert(v.to_string(), d["content"].clone());
-                    }
-                }
-            }
-            "adapter" | "provider" => {
-                if let Some(name)=d["name"].as_str() { if d["state"]["role"]=="backend" && d["state"]["connected"]==true {self.backends_connected.insert(name.into());} else {self.backends_connected.remove(name);} }
-                if d["state"]["connected"] == false {
-                    self.message = format!("backend {} disconnected: {}", d["name"], d["state"]["error"].as_str().unwrap_or(""));
-                }
-            }
-            _ => {}
         }
     }
 
@@ -841,7 +713,7 @@ impl App {
                         self.resyncing = false;
                         self.buffered_bytes = 0;
                         for ev in std::mem::take(&mut self.buffered) {
-                            if ev["epoch"].as_str() == Some(self.epoch.as_str()) {
+                            if ev["epoch"].as_str() == Some(self.ws.epoch.as_str()) {
                                 self.on_event_record(&ev);
                             }
                         }
@@ -1110,48 +982,25 @@ impl App {
     }
 
     fn view_kind(&self, view: &str) -> String {
-        self.entries.get(&format!("view/{view}")).and_then(|v| v["kind"].as_str()).unwrap_or("").to_string()
+        self.ws.entries.get(&format!("view/{view}")).and_then(|v| v["kind"].as_str()).unwrap_or("").to_string()
     }
 
     fn open_safe_chooser(&mut self) {
-        self.safe_selected=self.safe_mode_allow.clone();
+        self.safe_selected=self.ws.safe_mode_allow.clone();
         self.pstate.remove("@popup");
-        self.overlay=Some(Overlay::Popup { view:"@vqro-safe-mode".into(),width:76,ctx:json!({}) });
+        self.overlay=Some(Overlay::Popup { view:SAFE_MODE_VIEW.into(),width:76,ctx:json!({}) });
     }
 
-    /// Recovery UI is generated in Rust, never published or supplied by an extension.
+    /// Recovery UI is the shared model's content (`ui_model::recovery`), never published or supplied by an extension.
     fn safe_chooser_value(&self) -> Value {
-        let mut declared:Vec<_>=self.entries.iter().filter_map(|(key,value)|key.strip_prefix("extension/").map(|name|(name,value))).collect();
-        declared.sort_by_key(|(name,_)|*name);
-        let mut items=vec![json!({"type":"text","text":"Nothing starts automatically. Choose this session's recovery set; saved enabled settings are unchanged."})];
-        for (provider,title) in [(true,"Providers / backends"),(false,"UI extensions")] {
-            items.push(json!({"type":"header","text":title}));
-            let mut count=0;
-            for (name,value) in &declared {
-                if (value["kind"]=="provider" || self.provider_extensions.contains(*name)) != provider { continue; }
-                let check=if self.safe_selected.contains(*name) { "[x]" } else { "[ ]" };
-                let mut description=value["description"].as_str().or_else(||value["argv"][0].as_str()).unwrap_or("Declared extension").chars().take(160).collect::<String>();
-                if let Some(state)=self.extensions.get(*name) {
-                    if state["status"]=="failed" {description.push_str(&format!(" -- failed: {}",state["last_exit"].as_str().unwrap_or("unknown failure")));}
-                    // D29: the chooser only names what an extension needs; it offers nothing and selects nothing.
-                    let needs=needs_text(&state["dependencies"]);
-                    if !needs.is_empty() {description.push_str(&format!(" -- needs {needs}"));}
-                }
-                items.push(json!({"id":format!("safe/{name}"),"text":format!("{check} {name}"),"description":description,"command":"client.safe_mode.toggle","args":{"name":name}}));count+=1;
-            }
-            if count==0 { items.push(json!({"type":"text","text":"(none declared)"})); }
-        }
-        items.push(json!({"type":"separator"}));
-        items.push(json!({"id":"safe/apply","text":"Enable selected","command":"client.safe_mode.apply"}));
-        items.push(json!({"id":"safe/leave","text":"Leave safe mode","command":"client.safe_mode.leave"}));
-        json!({"title":"Safe mode recovery","items":items})
+        recovery::safe_chooser(&self.ws, &self.safe_selected)
     }
 
     /// A panel's value: the view entry with its live content merged over it.
     fn panel_value(&self, view: &str) -> Arc<Value> {
-        if view=="@vqro-safe-mode" { return Arc::new(self.safe_chooser_value()); }
+        if view==SAFE_MODE_VIEW { return Arc::new(self.safe_chooser_value()); }
         if let Some(value) = self.panel_values.lock().unwrap().get(view).cloned() { return value; }
-        let (v, deps) = compose::resolve(view, &self.entries, &self.live);
+        let (v, deps) = compose::resolve(view, &self.ws.entries, &self.ws.live);
         self.panel_dependencies.lock().unwrap().insert(view.into(), deps);
         let v = Arc::new(v);
         self.panel_values.lock().unwrap().insert(view.to_string(), v.clone());
@@ -1347,80 +1196,26 @@ impl App {
     }
 
     fn key_labels(&self, text: &str) -> String {
-        keys::display_labels(text, self.entries.get("doc/settings/tui").and_then(|s|s["key_labels"].as_str()))
+        keys::display_labels(text, self.ws.entries.get("doc/settings/tui").and_then(|s|s["key_labels"].as_str()))
     }
 
     /// The prefix key in canonical form; Ctrl-g if the setting is missing or unusable.
     fn prefix(&self) -> String {
-        keys::prefix(self.entries.get("doc/settings/tui").and_then(|s| s["prefix"].as_str()))
+        keys::prefix(self.ws.entries.get("doc/settings/tui").and_then(|s| s["prefix"].as_str()))
     }
 
-    /// Every keyboard binding with its id that applies in `ctx` (the focused pane's context): the
-    /// client's defaults, then visible `binding/*` entries whose `when` holds, exactly as for menu
-    /// items. A binding whose `when` does not hold is no candidate, so the key falls through to the
-    /// next binding for it (or to none).
-    fn key_candidates(&self, ctx: &Value) -> Vec<(String, Value)> {
-        let mut found: Vec<(String, Value)> = builtin_bindings().into_iter().map(|b| (format!("{BUILTIN}{}", b["key"].as_str().unwrap_or("")), b)).collect();
-        found.extend(
-            self.entries
-                .iter()
-                .filter(|(k, v)| k.starts_with("binding/") && !v["key"].as_str().unwrap_or("").starts_with("mouse.") && self.visible(v) && when_holds(v, ctx))
-                .map(|(k, v)| (k.clone(), v.clone())),
-        );
-        found
-    }
-
-    /// The binding a key (canonical name) runs on the focused pane, if any; `client.none` leaves
-    /// the key unbound.
-    fn binding_for(&self, key: &str, ctx: &Value) -> Option<Value> {
-        let cands = self.key_candidates(ctx);
-        let (_, b) = &cands[*resolve(&cands).get(key)?];
-        (b["command"] != "client.none").then(|| b.clone())
-    }
+    /// The binding a key (canonical name) runs on the focused pane, if any (`ui_model::workspace`).
+    fn binding_for(&self, key: &str, ctx: &Value) -> Option<Value> { self.ws.binding_for(key, ctx) }
 
     /// A binding for this key that applies only on other panes (its `when` does not hold here).
-    fn bound_elsewhere(&self, key: &str, ctx: &Value) -> Option<Value> {
-        self.entries.iter()
-            .filter(|(k, v)| k.starts_with("binding/") && self.visible(v) && !when_holds(v, ctx))
-            .find(|(_, v)| v["key"].as_str().and_then(keys::normalize).as_deref() == Some(key))
-            .map(|(_, v)| v.clone())
-    }
+    fn bound_elsewhere(&self, key: &str, ctx: &Value) -> Option<Value> { self.ws.bound_elsewhere(key, ctx) }
 
-    /// The prefix menu: the winning binding of every key (defaults first), then any recovery
-    /// action no key reaches any more, so recovery survives every keymap.
+    /// The prefix menu, including recovery whatever the keymap: the shared model's content.
     fn prefix_items(&self) -> Vec<PrefixRow> {
-        let cands = self.key_candidates(&self.ctx_leaf(self.focus));
-        let winners = resolve(&cands);
-        let mut rows: Vec<PrefixRow> = cands
-            .iter()
-            .enumerate()
-            .filter_map(|(i, (_, b))| {
-                let key = keys::normalize(b["key"].as_str()?)?;
-                (winners.get(&key) == Some(&i) && b["command"] != "client.none" && b["hidden"] != true).then(|| PrefixRow { key: Some(self.key_labels(&key)), label: self.binding_label(b), binding: b.clone() })
-            })
-            .collect();
-        // Non-replaceable recovery: failed Settings/other extensions cannot hide their restart.
-        let failed=self.extensions.iter().filter(|(_,state)|state["status"]=="failed").map(|(name,_)| {
-            let allowed=if self.safe_mode {self.safe_mode_allow.contains(name)} else {self.entries.get(&format!("extension/{name}")).is_some_and(|v|v["enabled"]!=false)};
-            let label=if allowed {format!("restart {name} (failed)")} else {format!("clear failure: {name} (stays stopped)")};
-            PrefixRow {key:None,label,binding:json!({"command":"vqro.extension.restart","args":{"name":name}})}
-        }).collect::<Vec<_>>();
-        let at=rows.len().min(1);rows.splice(at..at,failed);
-        for b in builtin_bindings().into_iter().filter(|b| b["recovery"] == true) {
-            if !rows.iter().any(|r| r.binding["command"] == b["command"]) {
-                rows.push(PrefixRow { key: None, label: self.binding_label(&b), binding: b });
-            }
-        }
-        rows
+        recovery::prefix_rows(&self.ws, &self.ctx_leaf(self.focus), &|key| self.key_labels(key))
     }
 
-    fn binding_label(&self, b: &Value) -> String {
-        let cmd = b["command"].as_str().unwrap_or("");
-        if cmd == "vqro.safe_mode" && self.safe_mode {
-            return "leave safe mode".into();
-        }
-        b["label"].as_str().or_else(|| self.commands.get(cmd).and_then(|c| c["title"].as_str())).unwrap_or(cmd).to_string()
-    }
+    fn binding_label(&self, b: &Value) -> String { self.ws.binding_label(b) }
 
     fn on_prefix_key(&mut self, k: KeyEvent, is_prefix: bool) {
         if is_prefix {
@@ -1481,7 +1276,7 @@ impl App {
 
     /// One line per resource offered by the resource picker, in `resources` order.
     fn pick_lines(&self) -> Vec<String> {
-        self.resources
+        self.ws.resources
             .values()
             .map(|r| format!("{}  {}  {}", r["id"].as_str().unwrap_or(""), r["name"].as_str().or_else(|| r["argv"][0].as_str()).unwrap_or(""), r["state"].as_str().unwrap_or("")))
             .collect()
@@ -1522,7 +1317,7 @@ impl App {
 
     fn activate_overlay(&mut self) {
         let palette = self.palette_items();
-        let resources: Vec<String> = self.resources.keys().cloned().collect();
+        let resources: Vec<String> = self.ws.resources.keys().cloned().collect();
         let prefix = self.prefix_items();
         // `sel` of a menu or picker counts the rows its query keeps.
         let matches = self.pick_matches();
@@ -1537,7 +1332,7 @@ impl App {
                     Some((n, r)) => (n.to_string(), r.trim().to_string()),
                     None => (query.trim().to_string(), String::new()),
                 };
-                let name = if self.commands.contains_key(&typed) { Some(typed) } else { palette.get(sel).cloned() };
+                let name = if self.ws.commands.contains_key(&typed) { Some(typed) } else { palette.get(sel).cloned() };
                 let Some(name) = name else { return };
                 let ctx = self.ctx_leaf(self.focus);
                 if !rest.is_empty() {
@@ -1553,7 +1348,7 @@ impl App {
                     return self.run_command(&name, args, ctx, None);
                 }
                 // A command with a menu entry asks for what it needs (prompt, pick) like the menu does.
-                let item = self.entries.iter().filter(|(k, v)| k.starts_with("menu/") && v["command"] == name.as_str() && self.visible(v)).map(|(_, v)| Item::from_entry(v)).next();
+                let item = self.ws.entries.iter().filter(|(k, v)| k.starts_with("menu/") && v["command"] == name.as_str() && self.visible(v)).map(|(_, v)| Item::from_entry(v)).next();
                 match item {
                     Some(item) => self.activate_item(item, ctx, None),
                     None => self.run_command(&name, Value::Null, ctx, None),
@@ -1650,49 +1445,26 @@ impl App {
 
     // ---- contributions: menus, bindings, context ---------------------------------------------
 
-    /// Whether a contributed entry is live: its owner extension is on (and not in safe mode),
-    /// and its command exists. Contributions of a disabled or removed extension disappear.
-    fn visible(&self, e: &Value) -> bool {
-        if let Some(owner) = e["owner"].as_str() {
-            let on = self.entries.get(&format!("extension/{owner}")).map(|x| x["enabled"].as_bool().unwrap_or(true)).unwrap_or(false);
-            if if self.safe_mode { !self.safe_mode_allow.contains(owner) } else { !on } { return false; }
-        }
-        let cmd = e["command"].as_str().unwrap_or("");
-        cmd.starts_with("client.") || self.commands.get(cmd).map(|c| c["available"] == true).unwrap_or(false)
-    }
+    /// Whether a contributed entry is live (`ui_model::workspace`).
+    fn visible(&self, e: &Value) -> bool { self.ws.visible(e) }
 
-    /// The binding a gesture runs in a place: the same precedence as keys (see `rank`).
-    fn gesture(&self, key: &str, place: &str) -> Option<Value> {
-        self.entries
-            .iter()
-            .filter(|(k, b)| k.starts_with("binding/") && b["key"] == key && b["where"].as_str().unwrap_or("pane") == place && self.visible(b))
-            .min_by_key(|(k, b)| rank(k, b))
-            .map(|(_, b)| b.clone())
-            .filter(|b| b["command"] != "client.none")
-    }
+    /// The binding a gesture runs in a place: the same precedence as keys.
+    fn gesture(&self, key: &str, place: &str) -> Option<Value> { self.ws.gesture(key, place) }
 
     /// Menu items for a place, filtered by `when` against the context, in `order`.
     fn menu_items(&self, place: &str, ctx: &Value) -> Vec<Item> {
-        let mut found: Vec<(i64, String, Item)> = self
-            .entries
-            .iter()
-            .filter(|(k, v)| k.starts_with("menu/") && v["where"] == place && self.visible(v))
-            .filter(|(_, v)| when_holds(v, ctx))
-            .map(|(k, v)| (v["order"].as_i64().unwrap_or(50), k.clone(), Item::from_entry(v)))
-            .collect();
-        found.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
-        found.into_iter().map(|(_, _, i)| i).collect()
+        self.ws.menu_entries(place, ctx).iter().map(Item::from_entry).collect()
     }
 
     /// Context for a pane: what commands invoked on it are told.
     fn ctx_leaf(&self, idx: usize) -> Value {
         let Some((view, _, _)) = self.hit.leaves.get(idx) else { return json!({}) };
         let (layout, version) = self.active_layout_key();
-        let v = self.entries.get(&format!("view/{view}")).cloned().unwrap_or(Value::Null);
+        let v = self.ws.entries.get(&format!("view/{view}")).cloned().unwrap_or(Value::Null);
         let resource = v["resource"].as_str();
-        let live = resource.and_then(|r| self.resources.get(r)).map(|r| r["state"] == "live").unwrap_or(false);
+        let live = resource.and_then(|r| self.ws.resources.get(r)).map(|r| r["state"] == "live").unwrap_or(false);
         // Lets `when` select by what the pane shows, e.g. {"resource_kind": "agent"}.
-        let resource_kind = resource.and_then(|r| self.resources.get(r)).map(|r| r["kind"].clone()).unwrap_or(Value::Null);
+        let resource_kind = resource.and_then(|r| self.ws.resources.get(r)).map(|r| r["kind"].clone()).unwrap_or(Value::Null);
         let path = self.hit.leaf_paths.get(idx).cloned().unwrap_or_default();
         let mut ctx = json!({
             "layout": layout, "layout_version": version, "path": path,
@@ -1720,17 +1492,17 @@ impl App {
     }
 
     fn active_layout_key(&self) -> (Option<String>, Option<u64>) {
-        let name = self.entries.get("workspace/active").and_then(|a| a["layout"].as_str()).map(String::from);
-        let version = name.as_ref().and_then(|n| self.versions.get(&format!("layout/{n}")).copied());
+        let name = self.ws.entries.get("workspace/active").and_then(|a| a["layout"].as_str()).map(String::from);
+        let version = name.as_ref().and_then(|n| self.ws.versions.get(&format!("layout/{n}")).copied());
         (name, version)
     }
 
     fn view_title(&self, view: &str) -> String {
-        let v = self.entries.get(&format!("view/{view}")).cloned().unwrap_or(Value::Null);
+        let v = self.ws.entries.get(&format!("view/{view}")).cloned().unwrap_or(Value::Null);
         if let Some(t) = v["title"].as_str() {
             return t.to_string();
         }
-        let r = v["resource"].as_str().and_then(|r| self.resources.get(r));
+        let r = v["resource"].as_str().and_then(|r| self.ws.resources.get(r));
         r.and_then(|r| r["name"].as_str().or_else(|| r["argv"][0].as_str()).map(String::from)).unwrap_or_else(|| view.to_string())
     }
 
@@ -1798,13 +1570,13 @@ impl App {
             "client.focus" => self.focus_to(args["dir"].as_str().unwrap_or("next")),
             "client.tab" => self.tab_to(&args["to"], &ctx),
             "client.safe_mode" => {
-                if self.safe_mode { self.open_safe_chooser(); } else { self.invoke("vqro.safe_mode",json!({"on":true})); }
+                if self.ws.safe_mode { self.open_safe_chooser(); } else { self.invoke("vqro.safe_mode",json!({"on":true})); }
             }
             "client.safe_mode.toggle" => {
                 if let Some(name)=args["name"].as_str() { if !self.safe_selected.remove(name) { self.safe_selected.insert(name.to_string()); } }
             }
             "client.safe_mode.apply" => {
-                let selected=self.safe_selected.clone(); let names:Vec<_>=self.entries.keys().filter_map(|key|key.strip_prefix("extension/").map(String::from)).collect();
+                let selected=self.safe_selected.clone(); let names:Vec<_>=self.ws.entries.keys().filter_map(|key|key.strip_prefix("extension/").map(String::from)).collect();
                 let(peer,tx)=(self.peer.clone(),self.tx.clone());
                 tokio::spawn(async move {
                     for name in names {
@@ -1897,7 +1669,7 @@ impl App {
     /// a terminal, so `auto` trusts terminals that bundle the Nerd Font symbols (Ghostty, WezTerm), or
     /// `VQRO_NERD_FONT=1`.
     fn nerd_icons(&self) -> bool {
-        match self.entries.get("doc/settings/tui").and_then(|s| s["icons"].as_str()) {
+        match self.ws.entries.get("doc/settings/tui").and_then(|s| s["icons"].as_str()) {
             Some("nerd") => true,
             Some("text") => false,
             _ => {
@@ -1908,7 +1680,7 @@ impl App {
     }
 
     fn setting(&self, key: &str) -> bool {
-        self.entries.get("doc/settings/tui").and_then(|s| s[key].as_bool()).unwrap_or(true)
+        self.ws.entries.get("doc/settings/tui").and_then(|s| s[key].as_bool()).unwrap_or(true)
     }
 
     // ---- mouse ---    // ---- mouse -------------------------------------------------------------------------------
@@ -2071,7 +1843,7 @@ impl App {
                             return false;
                         }
                         let Some(t) = self.terms.get_mut(&view) else { return false };
-                        let arrows = self.entries.get("doc/settings/tui").and_then(|s| s["wheel_arrows"].as_bool()).unwrap_or(true);
+                        let arrows = self.ws.entries.get("doc/settings/tui").and_then(|s| s["wheel_arrows"].as_bool()).unwrap_or(true);
                         if t.parser.screen().alternate_screen() && arrows {
                             // Full-screen program without mouse support: arrows scroll it.
                             let key = KeyEvent::new(if up { KeyCode::Up } else { KeyCode::Down }, KeyModifiers::NONE);
@@ -2202,7 +1974,7 @@ impl App {
         let Some(node) = node_at_mut(&mut root, &d.div.path) else { return };
         node["sizes"] = json!(d.sizes);
         let key = format!("layout/{name}");
-        let expect = self.versions.get(&key).copied();
+        let expect = self.ws.versions.get(&key).copied();
         self.apply("resize", json!([{"op": "set", "key": key, "value": root, "expect": expect}]));
     }
 
@@ -2213,7 +1985,7 @@ impl App {
             Some(Overlay::Palette { query, .. }) => query.split_whitespace().next().unwrap_or("").to_lowercase(),
             _ => String::new(),
         };
-        self.commands
+        self.ws.commands
             .values()
             .filter(|c| c["available"] == true)
             .filter(|c| q.is_empty() || c["name"].as_str().unwrap_or("").to_lowercase().contains(&q) || c["title"].as_str().unwrap_or("").to_lowercase().contains(&q))
@@ -2260,8 +2032,8 @@ impl App {
     }
 
     fn active_layout(&self) -> Option<(String, Value)> {
-        let name = self.entries.get("workspace/active")?["layout"].as_str()?.to_string();
-        let v = self.entries.get(&format!("layout/{name}"))?.clone();
+        let name = self.ws.entries.get("workspace/active")?["layout"].as_str()?.to_string();
+        let v = self.ws.entries.get(&format!("layout/{name}"))?.clone();
         Some((name, v))
     }
 
@@ -2274,7 +2046,7 @@ impl App {
         }
         tabs["active"] = json!(i);
         let key = format!("layout/{name}");
-        let expect = self.versions.get(&key).copied();
+        let expect = self.ws.versions.get(&key).copied();
         self.apply("select tab", json!([{"op": "set", "key": key, "value": root, "expect": expect}]));
     }
 
@@ -2283,8 +2055,8 @@ impl App {
     fn draw(&mut self, f: &mut Frame) {
         // Resolved every frame, so a theme or icon set change shows on the next redraw. Safe mode uses
         // the built-in palette and no icon set, so neither can lock anyone out.
-        let pal = if self.safe_mode { Palette::default() } else { Palette::from_theme(self.entries.get(theme::ENTRY)) };
-        let icons = Icons::new(if self.safe_mode { None } else { self.entries.get(icons::ENTRY) }, self.nerd_icons());
+        let pal = if self.ws.safe_mode { Palette::default() } else { Palette::from_theme(self.ws.entries.get(theme::ENTRY)) };
+        let icons = Icons::new(if self.ws.safe_mode { None } else { self.ws.entries.get(icons::ENTRY) }, self.nerd_icons());
         let [main, status] = Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(f.area());
         let mut hit = Hit::default();
         match self.active_layout() {
@@ -2356,14 +2128,14 @@ impl App {
 
     fn draw_view(&mut self, f: &mut Frame, view: &str, rect: Rect, focused: bool, pal: &Palette, icons: &Icons) -> Option<(u16, u16)> {
         let border = pal.border(focused);
-        let Some(v) = self.entries.get(&format!("view/{view}")).cloned() else {
+        let Some(v) = self.ws.entries.get(&format!("view/{view}")).cloned() else {
             f.render_widget(Paragraph::new(format!("view {view} is missing")).block(Block::bordered().border_style(border)), rect);
             return None;
         };
         match v["kind"].as_str().unwrap_or("") {
             "terminal" => {
                 let rid = v["resource"].as_str().unwrap_or("").to_string();
-                let res = self.resources.get(&rid).cloned();
+                let res = self.ws.resources.get(&rid).cloned();
                 let scroll = self.terms.get(view).map(|t| t.parser.screen().scrollback()).unwrap_or(0);
                 let title = match &res {
                     Some(r) => {
@@ -2450,7 +2222,7 @@ impl App {
                 let inner = block.inner(rect);
                 f.render_widget(block, rect);
                 let mut st = self.pstate.remove(view).unwrap_or_default();
-                let hits = panel::render(f.buffer_mut(), inner, &v, &mut st, focused, pal, icons, self.entries.get("doc/settings/tui").and_then(|s|s["key_labels"].as_str()));
+                let hits = panel::render(f.buffer_mut(), inner, &v, &mut st, focused, pal, icons, self.ws.entries.get("doc/settings/tui").and_then(|s|s["key_labels"].as_str()));
                 self.pstate.insert(view.to_string(), st);
                 self.hit.panels.insert(view.to_string(), hits);
                 None
@@ -2493,13 +2265,13 @@ impl App {
             f.set_cursor_position((x.min(area.right().saturating_sub(1)), area.y));
             return;
         }
-        if self.safe_mode {
+        if self.ws.safe_mode {
             spans.push(Span::styled(" SAFE MODE ", pal.badge(Some("warn"))));
         }
         if self.zoomed.is_some() {
             spans.push(Span::styled(" ZOOM ", pal.badge(Some("accent"))));
         }
-        let failed = self.extensions.values().filter(|e| e["status"] == "failed").count();
+        let failed = self.ws.extensions.values().filter(|e| e["status"] == "failed").count();
         if failed > 0 {
             let label=format!(" {failed} extension(s) failed · recover ");
             let x=area.x+spans.iter().map(|s|s.content.chars().count() as u16).sum::<u16>();
@@ -2507,8 +2279,8 @@ impl App {
             if width>0 {self.hit.buttons.push((Rect{x,y:area.y,width,height:1},Item::from_entry(&json!({"label":"Recover failed extensions","command":"client.prefix"})),json!({})));}
             spans.push(Span::styled(label, pal.badge(Some("error"))));
         }
-        if !self.safe_mode {
-            if let Some(notice) = &self.backend_notice {
+        if !self.ws.safe_mode {
+            if let Some(notice) = &self.ws.backend_notice {
                 spans.push(Span::styled(format!(" {notice} "), pal.style(Some("warn"))));
             }
         }
@@ -2517,7 +2289,7 @@ impl App {
         for item in self.menu_items("status", &json!({})) {
             // Live segments take their label, icon and style from a view's live content. An empty
             // label hides a live segment (nothing to report), whatever its icon.
-            let (text, style) = match item.view.as_deref().and_then(|v| self.live.get(v)) {
+            let (text, style) = match item.view.as_deref().and_then(|v| self.ws.live.get(v)) {
                 Some(l) => match l["label"].as_str().unwrap_or(&item.label) {
                     "" => continue,
                     t => (icons.label(if l["icon"].is_null() { &item.icon } else { &l["icon"] }, t), pal.style(Some(l["style"].as_str().unwrap_or("accent")))),
@@ -2537,7 +2309,7 @@ impl App {
             x += w;
             spans.push(Span::styled(label, style));
         }
-        if !self.safe_mode && self.backend_notice.is_none() && self.backends_connected.is_empty() {
+        if !self.ws.safe_mode && self.ws.backend_notice.is_none() && self.ws.backends_connected.is_empty() {
             spans.push(Span::styled(" No backend connected; prefix ! opens recovery choices.",pal.style(Some("warn"))));
         }
         spans.push(Span::styled(format!(" {}", self.message_label()), pal.style(Some("muted"))));
@@ -2604,7 +2376,7 @@ impl App {
             let inner = block.inner(rect);
             f.render_widget(block, rect);
             let body = Rect { x: inner.x + 1, y: inner.y + 1, width: inner.width.saturating_sub(2), height: inner.height.saturating_sub(1) };
-            let hits = panel::render(f.buffer_mut(), body, &v, &mut st, true, pal, icons, self.entries.get("doc/settings/tui").and_then(|s|s["key_labels"].as_str()));
+            let hits = panel::render(f.buffer_mut(), body, &v, &mut st, true, pal, icons, self.ws.entries.get("doc/settings/tui").and_then(|s|s["key_labels"].as_str()));
             self.pstate.insert("@popup".into(), st);
             self.hit.panels.insert("@popup".into(), hits);
             self.hit.overlay = Some((rect, Rect::default(), 0));
@@ -2628,7 +2400,7 @@ impl App {
                 (" vqro (press a key or click) ".to_string(), items.clone(), *sel, None::<String>, items)
             }
             Some(Overlay::Palette { query, sel }) => {
-                let items: Vec<String> = self.palette_items().into_iter().map(|n| format!("{n}  {}", self.commands[&n]["title"].as_str().unwrap_or(""))).collect();
+                let items: Vec<String> = self.palette_items().into_iter().map(|n| format!("{n}  {}", self.ws.commands[&n]["title"].as_str().unwrap_or(""))).collect();
                 let _ = query;
                 (" commands (type to filter) ".to_string(), items.clone(), *sel, None, items)
             }
@@ -2685,50 +2457,6 @@ impl App {
         f.render_stateful_widget(list, list_area, &mut state);
         self.hit.overlay = Some((rect, list_area, state.offset()));
     }
-}
-
-/// Ids of the client's default bindings, which win ties (see `rank`).
-const BUILTIN: &str = "builtin:";
-
-/// The client's default prefix keys, as bindings. `recovery` ones stay in the prefix menu even
-/// when a binding takes their key; `hidden` ones work but stay out of the menu.
-fn builtin_bindings() -> Vec<Value> {
-    let mut b = vec![
-        json!({"key": ":", "command": "client.palette", "label": "all commands", "recovery": true}),
-        json!({"key": "o", "command": "client.focus", "args": {"dir": "next"}, "label": "next pane"}),
-        json!({"key": "O", "command": "client.focus", "args": {"dir": "prev"}, "label": "previous pane", "hidden": true}),
-        json!({"key": "u", "command": "vqro.revert", "label": "undo last change", "recovery": true}),
-        json!({"key": "R", "command": "vqro.layout.reset", "label": "reset layout", "recovery": true}),
-        json!({"key": "!", "command": "client.safe_mode", "label": "safe mode / recovery choices", "recovery": true}),
-        json!({"key": "q", "command": "client.quit", "label": "quit this UI", "recovery": true}),
-    ];
-    b.extend((1..=9).map(|n| json!({"key": n.to_string(), "command": "client.tab", "args": {"to": n}, "label": format!("tab {n}"), "hidden": true})));
-    b
-}
-
-/// Whether an entry's `when` holds in a context: every field equal. No `when` always holds.
-fn when_holds(v: &Value, ctx: &Value) -> bool {
-    v["when"].as_object().map(|w| w.iter().all(|(k, want)| ctx[k] == *want)).unwrap_or(true)
-}
-
-/// Which of several bindings for one key wins (smallest rank): the highest `priority` (default 0),
-/// then the client's defaults, then the lowest id, so the outcome never depends on load order.
-fn rank(id: &str, b: &Value) -> (std::cmp::Reverse<i64>, bool, String) {
-    (std::cmp::Reverse(b["priority"].as_i64().unwrap_or(0)), !id.starts_with(BUILTIN), id.to_string())
-}
-
-/// For each key (canonical name), the index of the binding that wins it. Keys that don't parse
-/// are ignored, so a binding from a newer protocol can't break the keymap.
-fn resolve(cands: &[(String, Value)]) -> HashMap<String, usize> {
-    let mut won: HashMap<String, usize> = HashMap::new();
-    for (i, (id, b)) in cands.iter().enumerate() {
-        let Some(key) = b["key"].as_str().and_then(keys::normalize) else { continue };
-        let better = won.get(&key).map(|&j| rank(id, b) < rank(&cands[j].0, &cands[j].1)).unwrap_or(true);
-        if better {
-            won.insert(key, i);
-        }
-    }
-    won
 }
 
 /// The pane next to `from` in a direction: among panes on that side that overlap it across the
@@ -2936,6 +2664,7 @@ fn render_screen(buf: &mut Buffer, area: Rect, screen: &vt100::Screen) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui_model::workspace::{builtin_bindings, resolve, BUILTIN};
 
     fn app() -> (App, mpsc::UnboundedReceiver<Msg>) {
         let (peer, _) = Peer::spawn(tokio::io::empty(), tokio::io::sink());
@@ -2945,19 +2674,19 @@ mod tests {
 
     #[tokio::test]
     async fn disconnected_command_events_drop_cached_names() {
-        let(mut app,_)=app();let epoch=app.epoch.clone();
+        let(mut app,_)=app();let epoch=app.ws.epoch.clone();
         app.on_event_record(&json!({"epoch":epoch,"seq":1,"type":"command","data":{"name":"temporary","available":true}}));
-        assert!(app.commands.contains_key("temporary"));
+        assert!(app.ws.commands.contains_key("temporary"));
         app.on_event_record(&json!({"epoch":epoch,"seq":2,"type":"command","data":{"name":"temporary","available":false}}));
-        assert!(!app.commands.contains_key("temporary"));
+        assert!(!app.ws.commands.contains_key("temporary"));
     }
 
     #[tokio::test]
     async fn text_inputs_require_explicit_prefill_and_preserve_rename_context() {
         let (mut app, _) = app();
-        app.entries.insert("workspace/active".into(), json!({"layout": "main"}));
-        app.entries.insert("layout/main".into(), json!({"tabs": [{"title": "Named tab", "node": {"view": "form"}}], "active": 0}));
-        app.entries.insert("view/form".into(), json!({"kind": "panel", "title": "Agent r8", "items": []}));
+        app.ws.entries.insert("workspace/active".into(), json!({"layout": "main"}));
+        app.ws.entries.insert("layout/main".into(), json!({"tabs": [{"title": "Named tab", "node": {"view": "form"}}], "active": 0}));
+        app.ws.entries.insert("view/form".into(), json!({"kind": "panel", "title": "Agent r8", "items": []}));
         let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
         let pane = app.ctx_leaf(0);
@@ -2976,7 +2705,7 @@ mod tests {
         assert_eq!(pane["tab_title"], "Named tab");
         app.activate_item(Item::from_entry(&json!({"command": "any.rename", "input": "Name", "prefill": {"context": "tab_title"}})), tab, None);
         assert!(matches!(&app.overlay, Some(Overlay::Input { text, .. }) if text == "Named tab"));
-        app.entries.insert("view/row-form".into(), json!({"kind": "panel", "items": [{"text": "Edit", "command": "any.edit", "input": "Value", "prefill": "row initial value"}]}));
+        app.ws.entries.insert("view/row-form".into(), json!({"kind": "panel", "items": [{"text": "Edit", "command": "any.edit", "input": "Value", "prefill": "row initial value"}]}));
         app.panel_key("row-form", "row-form", KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), pane.clone());
         assert!(matches!(&app.overlay, Some(Overlay::Input { text, .. }) if text == "row initial value"));
         app.options_menu(&json!({"command": "any.option", "value": "implicit value", "options": [{"label": "Custom", "input": "Value"}]}), pane.clone(), None);
@@ -3011,12 +2740,12 @@ mod tests {
     #[tokio::test]
     async fn key_labels_default_full_short_and_unknown_work_without_extensions() {
         let (mut app,_)=app();
-        app.safe_mode=true;
-        app.entries.insert("binding/modified".into(),json!({"key":"C-S-Left","command":"client.focus","label":"modified"}));
+        app.ws.safe_mode=true;
+        app.ws.entries.insert("binding/modified".into(),json!({"key":"C-S-Left","command":"client.focus","label":"modified"}));
         app.on_key(KeyEvent::new(KeyCode::Char('g'),KeyModifiers::CONTROL));
         let mut terminal=ratatui::Terminal::new(ratatui::backend::TestBackend::new(100,24)).unwrap();
         for (setting,prefix,modified) in [(None,"Ctrl-g","Ctrl-Shift-Left"),(Some("short"),"C-g","C-S-Left"),(Some("unknown"),"Ctrl-g","Ctrl-Shift-Left")] {
-            if let Some(setting)=setting {app.entries.insert("doc/settings/tui".into(),json!({"key_labels":setting}));}
+            if let Some(setting)=setting {app.ws.entries.insert("doc/settings/tui".into(),json!({"key_labels":setting}));}
             terminal.draw(|f|app.draw(f)).unwrap();
             let screen:String=terminal.backend().buffer().content.iter().map(|c|c.symbol()).collect();
             assert!(screen.contains(prefix),"{screen}");
@@ -3025,9 +2754,9 @@ mod tests {
         assert_eq!(app.prefix(),"C-g","matching/storage remains canonical");
         app.set_key_hint("", "C-g ,", " → settings");
         assert_eq!(app.message_label(),"Ctrl-g , → settings");
-        app.entries.insert("doc/settings/tui".into(),json!({"key_labels":"short"}));
+        app.ws.entries.insert("doc/settings/tui".into(),json!({"key_labels":"short"}));
         assert_eq!(app.message_label(),"C-g , → settings","cached hints follow the current choice");
-        app.entries.insert("doc/settings/tui".into(),json!({"key_labels":"full"}));
+        app.ws.entries.insert("doc/settings/tui".into(),json!({"key_labels":"full"}));
         app.message="backend C-g unavailable".into();
         assert_eq!(app.message_label(),"backend C-g unavailable","identifiers in arbitrary messages are not key hints");
     }
@@ -3046,17 +2775,17 @@ mod tests {
         let badge=app.hit.buttons.iter().find(|(_,item,_)|item.command=="client.prefix").expect("failed recovery badge").0;
         app.on_mouse(MouseEvent {kind:MouseEventKind::Down(MouseButton::Left),column:badge.x,row:badge.y,modifiers:KeyModifiers::NONE});
         assert!(matches!(app.overlay,Some(Overlay::Prefix{..})),"failed badge opens built-in recovery without an extension");
-        app.safe_mode=true;
+        app.ws.safe_mode=true;
         assert!(app.prefix_items().iter().any(|r|r.binding["command"]=="vqro.extension.restart"),"recovery remains reachable; core still controls safe-mode admission");
     }
 
     #[tokio::test]
     async fn command_focus_targets_a_visible_view_without_kind_policy() {
         let (mut app, _) = app();
-        app.entries.insert("workspace/active".into(), json!({"layout": "test"}));
-        app.entries.insert("layout/test".into(), json!({"split": "h", "children": [{"view": "list"}, {"view": "detail"}]}));
+        app.ws.entries.insert("workspace/active".into(), json!({"layout": "test"}));
+        app.ws.entries.insert("layout/test".into(), json!({"split": "h", "children": [{"view": "list"}, {"view": "detail"}]}));
         for view in ["list", "detail"] {
-            app.entries.insert(format!("view/{view}"), json!({"kind": "panel", "items": []}));
+            app.ws.entries.insert(format!("view/{view}"), json!({"kind": "panel", "items": []}));
         }
         let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
         app.on_msg(Msg::FocusView("detail".into()));
@@ -3091,7 +2820,7 @@ mod tests {
     async fn generic_details_keep_chip_keys_paging_and_prefix_recovery() {
         let(mut app,_)=app();
         let items=(0..10).map(|i|json!({"id":format!("row{i}"),"text":format!("Row {i}"),"detail_panel":{"items":[],"toolbar":[{"type":"chips","chips":[{"text":"one","command":"client.quit"},{"text":"two"}]}]}})).collect::<Vec<_>>();
-        app.entries.insert("view/test".into(),json!({"kind":"panel","list_detail":{"requires":["list_detail"]},"items":items}));
+        app.ws.entries.insert("view/test".into(),json!({"kind":"panel","list_detail":{"requires":["list_detail"]},"items":items}));
         app.pstate.entry("test".into()).or_default().page_step=3;
         app.panel_key("test","test",KeyEvent::new(KeyCode::PageDown,KeyModifiers::NONE),json!({}));assert_eq!(app.pstate["test"].sel,3);
         app.panel_key("test","test",KeyEvent::new(KeyCode::Tab,KeyModifiers::NONE),json!({}));assert!(app.pstate["test"].detail_focus);
@@ -3145,8 +2874,8 @@ mod tests {
         assert!(at("UI extensions")<at("[x] ui"));
         assert!(app.visible(&json!({"owner":"ui","command":"client.none"})),"explicit safe allowance overrides saved disabled without changing it");
         app.run_command("client.safe_mode.toggle",json!({"name":"herdr"}),Value::Null,None);
-        assert!(app.safe_selected.contains("herdr"));assert!(!app.safe_mode_allow.contains("herdr"));
-        assert_eq!(app.entries["extension/herdr"]["enabled"],false);
+        assert!(app.safe_selected.contains("herdr"));assert!(!app.ws.safe_mode_allow.contains("herdr"));
+        assert_eq!(app.ws.entries["extension/herdr"]["enabled"],false);
         app.on_key(KeyEvent::new(KeyCode::Char('g'),KeyModifiers::CONTROL));
         assert!(matches!(app.overlay,Some(Overlay::Prefix{..})),"prefix recovery remains reachable inside chooser");
         assert!(app.prefix_items().iter().any(|r|r.binding["command"]=="client.safe_mode"));
@@ -3207,11 +2936,11 @@ mod tests {
         app.load(&snapshot(1, "x"));
         app.on_incoming(resource_event(2, json!({"id": "r1", "argv": ["pi"], "state": "live", "status": {"state": "idle"}}), false));
         app.on_incoming(resource_event(3, json!({"id": "r1", "status": {"state": "working"}}), true));
-        assert_eq!(app.resources["r1"]["status"]["state"], "working");
-        assert_eq!(app.resources["r1"]["argv"][0], "pi", "unchanged fields are kept");
+        assert_eq!(app.ws.resources["r1"]["status"]["state"], "working");
+        assert_eq!(app.ws.resources["r1"]["argv"][0], "pi", "unchanged fields are kept");
         let before = app.generation;
         app.on_incoming(resource_event(4, json!({"id": "r9", "status": null}), true));
-        assert!(!app.resources.contains_key("r9"));
+        assert!(!app.ws.resources.contains_key("r9"));
         assert!(app.resyncing && app.generation > before, "a partial event without a base forces a resync");
     }
 
@@ -3226,7 +2955,7 @@ mod tests {
         assert!(app.terms["view"].stream.is_none());
         assert!(app.terms["view"].closed.is_some());
         app.on_incoming(resource_event(4, json!({"id": "r1", "status": {"state": "working"}}), true));
-        assert_eq!(app.resources["r1"]["available"], false);
+        assert_eq!(app.ws.resources["r1"]["available"], false);
         assert!(app.terms["view"].closed.is_some(), "partial live status must not clear unavailability");
         app.on_incoming(resource_event(5, json!({"id": "r1", "available": true, "stale": false}), true));
         assert!(app.terms["view"].closed.is_none());
@@ -3319,7 +3048,7 @@ mod tests {
             assert!(!app.peer.is_closed(),"{kind} must not reconnect/reattach terminals");
             assert!(app.retry_snapshot.is_some());
             app.on_incoming(delta(2,"discard-until-snapshot"));
-            assert_eq!(app.entries["doc/test/value"],"old","retry wait must remain fenced");
+            assert_eq!(app.ws.entries["doc/test/value"],"old","retry wait must remain fenced");
             let before=app.generation;
             app.on_incoming(Incoming::Notification{method:"missed".into(),params:Value::Null});
             assert_eq!(app.generation,before,"events must not bypass backoff");
@@ -3327,7 +3056,7 @@ mod tests {
             assert!(app.resyncing&&app.generation>before);
             app.on_incoming(delta(4,"new"));
             app.on_msg(Msg::Snapshot{generation:app.generation,result:Ok(snapshot(3,"base"))});
-            assert_eq!(app.entries["doc/test/value"],"new");assert_eq!(app.seq,4);
+            assert_eq!(app.ws.entries["doc/test/value"],"new");assert_eq!(app.ws.seq,4);
             assert!(app.retry_snapshot.is_none());assert!(!app.resyncing);
             assert!(!app.message.contains("core busy"),"busy notice clears once a fresh snapshot arrives");
         }
@@ -3339,12 +3068,12 @@ mod tests {
         app.load(&snapshot(1, "old"));
         app.on_incoming(Incoming::Notification { method: "missed".into(), params: Value::Null });
         app.on_incoming(delta(2, "new"));
-        assert_eq!(app.entries["doc/test/value"], "old", "deltas are fenced while snapshot is in flight");
+        assert_eq!(app.ws.entries["doc/test/value"], "old", "deltas are fenced while snapshot is in flight");
         app.on_msg(Msg::Snapshot { generation: app.generation, result: Ok(snapshot(1, "old")) });
-        assert_eq!(app.entries["doc/test/value"], "new");
-        assert_eq!(app.seq, 2);
+        assert_eq!(app.ws.entries["doc/test/value"], "new");
+        assert_eq!(app.ws.seq, 2);
         app.on_incoming(delta(1, "stale"));
-        assert_eq!(app.entries["doc/test/value"], "new", "pre-snapshot events cannot regress state");
+        assert_eq!(app.ws.entries["doc/test/value"], "new", "pre-snapshot events cannot regress state");
     }
 
     #[tokio::test]
@@ -3358,10 +3087,10 @@ mod tests {
         app.on_msg(Msg::Snapshot { generation: first, result: Ok(snapshot(1, "stale")) });
         assert!(app.resyncing);
         app.on_msg(Msg::Snapshot { generation: app.generation, result: Ok(snapshot(3, "current")) });
-        assert_eq!(app.entries["doc/test/value"], "current");
+        assert_eq!(app.ws.entries["doc/test/value"], "current");
         app.disconnected();
         app.on_msg(Msg::Snapshot { generation: first, result: Ok(snapshot(1, "stale")) });
-        assert_eq!(app.entries["doc/test/value"], "current");
+        assert_eq!(app.ws.entries["doc/test/value"], "current");
     }
 
     #[tokio::test]
@@ -3517,15 +3246,15 @@ mod tests {
     #[tokio::test]
     async fn bindings_honour_when_and_fall_through_while_profiles_keep_winning() {
         let (mut app, _) = app();
-        app.entries.insert("workspace/active".into(), json!({"layout": "main"}));
-        app.entries.insert("layout/main".into(), json!({"split": "h", "children": [{"view": "agents-r8"}, {"view": "t1"}]}));
-        app.entries.insert("view/agents-r8".into(), json!({"kind": "panel", "title": "Agent r8", "resource": "r8", "items": []}));
-        app.entries.insert("view/t1".into(), json!({"kind": "terminal", "resource": "r1"}));
-        app.resources.insert("r8".into(), json!({"id": "r8", "kind": "agent", "state": "live", "available": true}));
-        app.resources.insert("r1".into(), json!({"id": "r1", "kind": "terminal", "state": "live", "available": true}));
-        app.entries.insert("binding/agents.prompt".into(), json!({"key": "p", "command": "agents.prompt", "input": "Prompt agent", "label": "prompt agent", "when": {"resource_kind": "agent"}}));
+        app.ws.entries.insert("workspace/active".into(), json!({"layout": "main"}));
+        app.ws.entries.insert("layout/main".into(), json!({"split": "h", "children": [{"view": "agents-r8"}, {"view": "t1"}]}));
+        app.ws.entries.insert("view/agents-r8".into(), json!({"kind": "panel", "title": "Agent r8", "resource": "r8", "items": []}));
+        app.ws.entries.insert("view/t1".into(), json!({"kind": "terminal", "resource": "r1"}));
+        app.ws.resources.insert("r8".into(), json!({"id": "r8", "kind": "agent", "state": "live", "available": true}));
+        app.ws.resources.insert("r1".into(), json!({"id": "r1", "kind": "terminal", "state": "live", "available": true}));
+        app.ws.entries.insert("binding/agents.prompt".into(), json!({"key": "p", "command": "agents.prompt", "input": "Prompt agent", "label": "prompt agent", "when": {"resource_kind": "agent"}}));
         for name in ["agents.prompt", "x.paste"] {
-            app.commands.insert(name.into(), json!({"name": name, "available": true}));
+            app.ws.commands.insert(name.into(), json!({"name": name, "available": true}));
         }
         let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 24)).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
@@ -3551,17 +3280,17 @@ mod tests {
         app.overlay = None;
 
         // Fall-through: an unconditional binding for the same key serves panes where `when` fails.
-        app.entries.insert("binding/z.p".into(), json!({"key": "p", "command": "x.paste"}));
+        app.ws.entries.insert("binding/z.p".into(), json!({"key": "p", "command": "x.paste"}));
         assert_eq!(on(&app, agent).as_deref(), Some("agents.prompt"), "same priority: lowest id");
         assert_eq!(on(&app, shell).as_deref(), Some("x.paste"));
         // A selected keymap profile (priority 10, no `when`) keeps winning everywhere.
-        app.entries.insert("binding/keys.p".into(), json!({"key": "p", "command": "client.tab", "args": {"to": "prev"}, "priority": 10, "owner": "keys"}));
-        app.entries.insert("extension/keys".into(), json!({"argv": ["x"]}));
+        app.ws.entries.insert("binding/keys.p".into(), json!({"key": "p", "command": "client.tab", "args": {"to": "prev"}, "priority": 10, "owner": "keys"}));
+        app.ws.entries.insert("extension/keys".into(), json!({"argv": ["x"]}));
         assert_eq!(on(&app, agent).as_deref(), Some("client.tab"));
         assert_eq!(on(&app, shell).as_deref(), Some("client.tab"));
         // Shift-p is its own key: P opens Agent settings on agent panes while a profile owns p.
-        app.entries.insert("binding/agents.config".into(), json!({"key": "P", "command": "agents.config", "label": "agent settings", "when": {"resource_kind": "agent"}}));
-        app.commands.insert("agents.config".into(), json!({"name": "agents.config", "available": true}));
+        app.ws.entries.insert("binding/agents.config".into(), json!({"key": "P", "command": "agents.config", "label": "agent settings", "when": {"resource_kind": "agent"}}));
+        app.ws.commands.insert("agents.config".into(), json!({"name": "agents.config", "available": true}));
         let shift_p = KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT);
         assert_eq!(keys::name(&shift_p).as_deref(), Some("P"));
         assert_eq!(app.binding_for("P", &app.ctx_leaf(agent)).map(|b| b["command"].clone()), Some(json!("agents.config")));
@@ -3677,13 +3406,13 @@ mod tests {
         assert_eq!(app.overlay_len(), 2);
         app.overlay = None;
         for i in 1..=12 {
-            app.resources.insert(format!("r{i}"), json!({"id": format!("r{i}"), "name": format!("shell {i}"), "state": "live"}));
+            app.ws.resources.insert(format!("r{i}"), json!({"id": format!("r{i}"), "name": format!("shell {i}"), "state": "live"}));
         }
         app.activate_item(Item::from_entry(&json!({"command": "x.show", "pick": "resource"})), json!({}), None);
         for c in "shell 12".chars() {
             app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
         }
-        let keys: Vec<&String> = app.resources.keys().collect();
+        let keys: Vec<&String> = app.ws.resources.keys().collect();
         assert_eq!(app.pick_matches().iter().map(|&i| keys[i].as_str()).collect::<Vec<_>>(), vec!["r12"]);
         // Ctrl/Alt chords are not typed into the query.
         app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT));
@@ -3693,7 +3422,7 @@ mod tests {
     #[tokio::test]
     async fn a_dropdown_is_drawn_over_its_popup_and_the_prefix_reaches_recovery_from_it() {
         let (mut app, _) = app();
-        app.entries.insert("view/pop".into(), json!({"kind": "panel", "title": "Popup Title", "items": [
+        app.ws.entries.insert("view/pop".into(), json!({"kind": "panel", "title": "Popup Title", "items": [
             {"type": "select", "text": "Choice", "value": "a", "command": "x.pick", "options": [{"label": "Alpha", "value": "a"}, {"label": "Beta", "value": "b"}]}]}));
         app.overlay = Some(Overlay::Popup { view: "pop".into(), width: 60, ctx: json!({}) });
         let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();

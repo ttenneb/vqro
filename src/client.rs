@@ -9,12 +9,17 @@ use tokio::net::UnixStream;
 use crate::rpc::{IncomingReceiver, Peer};
 
 pub async fn connect(socket: &Path, client: &str) -> Result<(Peer, IncomingReceiver, Value)> {
+    connect_with(socket, json!({"client": client, "version": env!("CARGO_PKG_VERSION"), "build": build_stamp()})).await
+}
+
+/// Connect with explicit `hello` parameters (a rendering client adds its profiles and UI features, D29).
+pub async fn connect_with(socket: &Path, hello: Value) -> Result<(Peer, IncomingReceiver, Value)> {
     let stream = UnixStream::connect(socket)
         .await
         .with_context(|| format!("cannot reach vqro at {} (is `vqro serve` running?)", socket.display()))?;
     let (r, w) = stream.into_split();
     let (peer, incoming) = Peer::spawn(r, w);
-    let hello = peer.call("hello", json!({"client": client, "version": env!("CARGO_PKG_VERSION"), "build": build_stamp()})).await?;
+    let hello = peer.call("hello", hello).await?;
     Ok((peer, incoming, hello))
 }
 
