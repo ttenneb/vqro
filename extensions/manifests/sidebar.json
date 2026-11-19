@@ -9,6 +9,8 @@
   "works_with":[{"cap":"data/workspaces","suggest":"workspaces","without":"Terminals are listed without workspace and worktree groups"},
                 "command/workspaces.open","command/workspaces.add","command/workspaces.remove","command/workspaces.worktree","command/workspaces.refresh",
                 {"cap":"command/agents.config","suggest":"agents","without":"No Agent settings action on agent rows"},
+                {"cap":"command/agents.stop","suggest":"agents","without":"No Stop agent action on agent rows"},
+                {"cap":"command/agents.forget","suggest":"agents","without":"No Forget agent action on unavailable agent rows"},
                 {"cap":"command/tabs.close_ended","suggest":"tabs","without":"Close ended items only hides them"}],
   "settings_command":"sidebar.view",
   "contributes":{"commands":["sidebar.toggle","sidebar.view","sidebar.show","sidebar.kill","sidebar.preset","sidebar.page","sidebar.close_ended","sidebar.show_ended"],"keys":["Prefix s: toggle sidebar"],"menu_items":["Sidebar status controls"],"panels":["Sidebar","Sidebar view"],"settings":["doc/settings/sidebar"]}
