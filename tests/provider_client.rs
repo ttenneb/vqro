@@ -65,11 +65,84 @@ async fn registered() -> (Provider, UnboundedReceiver<Request>, Core) {
     let (p, rx) = connect.await.unwrap().unwrap();
     assert_eq!(p.generation(), 7);
     assert_eq!(p.window(), 10);
+    assert_eq!(p.registration()["generation"], 7);
+    assert_eq!(p.resume_token(), None);
     (p, rx, core)
 }
 
 fn facts(r: &str) -> Value {
     json!({"ref": r, "incarnation": "", "kind": "terminal", "state": "live", "argv": ["sh"]})
+}
+
+#[tokio::test]
+async fn runtime_registration_retains_opaque_resume_metadata_through_later_setup_failure() {
+    let (a, b) = tokio::io::duplex(1 << 20);
+    let (r, w) = tokio::io::split(b);
+    let mut core = Core { r: BufReader::new(r), w };
+    let mut config = Config::new("runtime@test", "runtime-1", caps());
+    config.role = "runtime".into();
+    config.token = Some("bootstrap-opaque".into());
+    config.extension = Some("runtime@test".into());
+    let connect = tokio::spawn(Provider::connect(a, config));
+    let hello = core.recv().await;
+    core.reply(&hello, json!({"server":"vqro"})).await;
+    let register = core.recv().await;
+    assert_eq!(register["params"]["token"], "bootstrap-opaque");
+    assert_eq!(register["params"]["role"], "runtime");
+    let reply = json!({"provider":"runtime@test", "generation":9, "resume_token":"opaque:rotated credential",
+        "future":{"version":7}, "limits":{"stream_window_bytes":42,"max_record_bytes":1048576}});
+    core.reply(&register, reply.clone()).await;
+    let (provider, _rx) = connect.await.unwrap().unwrap();
+    assert_eq!(provider.registration(), &reply);
+    assert_eq!(provider.resume_token(), Some("opaque:rotated credential"));
+    assert_eq!(provider.clone().registration(), &reply);
+    let p = provider.clone();
+    let sync = tokio::spawn(async move { p.full_sync(vec![facts("agent")]).await });
+    let request = core.recv().await;
+    core.send(json!({"jsonrpc":"2.0", "id":request["id"], "error":{"code":-32000,"message":"temporary refusal",
+        "data":{"kind":"forbidden","reason":"safe_mode","outcome":"rejected","future":{"n":3}}}})).await;
+    let error = sync.await.unwrap().unwrap_err();
+    assert!(error.remote);
+    assert_eq!(error.data["reason"], "safe_mode");
+    assert_eq!(error.data["future"]["n"], 3);
+    assert_eq!(provider.resume_token(), Some("opaque:rotated credential"), "later setup failure must not lose observed rotation");
+}
+
+#[tokio::test]
+async fn structured_remote_errors_differ_from_local_transport_failures() {
+    let (provider, _rx, mut core) = registered().await;
+    let p = provider.clone();
+    let call = tokio::spawn(async move { p.call("probe", json!({})).await });
+    let request = core.recv().await;
+    let data = json!({"kind":"timeout", "outcome":"indeterminate", "reason":"native_deadline", "extra":[1,2]});
+    core.send(json!({"jsonrpc":"2.0", "id":request["id"], "error":{"code":-32000,"message":"reported by core","data":data}})).await;
+    let remote = call.await.unwrap().unwrap_err();
+    assert_eq!(remote.kind, "timeout");
+    assert!(remote.remote);
+    assert_eq!(remote.data, data);
+    provider.close();
+    let local = provider.call("probe", json!({})).await.unwrap_err();
+    assert_eq!(local.kind, "unavailable");
+    assert!(!local.remote);
+    assert_eq!(local.data, json!({}));
+}
+
+#[tokio::test]
+async fn dispatched_is_a_single_truthful_outcome_and_error_data_roundtrips() {
+    let (_provider, mut rx, mut core) = registered().await;
+    core.send(json!({"jsonrpc":"2.0","id":1,"method":"effect.invoke","params":{"generation":7,
+        "effect":"one","op":"terminal.spawn","args":{},"deadline_ms":1000}})).await;
+    let Some(Request::Effect(effect)) = rx.recv().await else { panic!("effect"); };
+    effect.respond(Ok(Outcome::Dispatched(Some(json!({"receipt":{"stage":"dispatched"}})))));
+    let reply = core.recv().await;
+    assert_eq!(reply["result"], json!({"outcome":"dispatched","data":{"receipt":{"stage":"dispatched"}}}));
+    core.nothing().await;
+    core.send(json!({"jsonrpc":"2.0","id":2,"method":"effect.invoke","params":{"generation":7,
+        "effect":"two","op":"terminal.spawn","args":{},"deadline_ms":1000}})).await;
+    let Some(Request::Effect(effect)) = rx.recv().await else { panic!("effect"); };
+    effect.respond(Err(ProviderError::new("invalid", "bad input").with_data(json!({"reason":"fixture", "kind":"not-authoritative"}))));
+    let reply = core.recv().await;
+    assert_eq!(reply["error"]["data"], json!({"kind":"invalid", "reason":"fixture"}));
 }
 
 #[tokio::test]

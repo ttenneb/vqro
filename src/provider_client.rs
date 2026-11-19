@@ -35,11 +35,19 @@ const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STA
 pub struct ProviderError {
     pub kind: String,
     pub message: String,
+    /// True only for an explicit core error reply, never a local deadline/transport failure.
+    pub remote: bool,
+    /// Original structured error data, including refusal reasons/outcomes and future fields.
+    pub data: Value,
 }
 
 impl ProviderError {
     pub fn new(kind: &str, message: impl Into<String>) -> Self {
-        ProviderError { kind: kind.into(), message: message.into() }
+        ProviderError { kind: kind.into(), message: message.into(), remote: false, data: json!({}) }
+    }
+    pub fn with_data(mut self, data: Value) -> Self {
+        self.data = data;
+        self
     }
     fn to_json(&self) -> Value {
         let code = match self.kind.as_str() {
@@ -47,7 +55,9 @@ impl ProviderError {
             "invalid" => -32602,
             _ => -32000,
         };
-        json!({"code": code, "message": self.message, "data": {"kind": self.kind}})
+        let mut data = self.data.as_object().cloned().unwrap_or_default();
+        data.insert("kind".into(), json!(self.kind));
+        json!({"code": code, "message": self.message, "data": data})
     }
 }
 
@@ -120,6 +130,8 @@ pub enum Request {
 /// The result of an effect the provider knows (9.4). `Rejected` means no effect.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Outcome {
+    /// Handed to the native layer without an acknowledgement (for example a UI answer).
+    Dispatched(Option<Value>),
     Accepted(Option<Value>),
     Observed(Option<Value>),
     Rejected { kind: String, message: String },
@@ -128,8 +140,9 @@ pub enum Outcome {
 impl Outcome {
     fn to_json(&self) -> Value {
         match self {
-            Outcome::Accepted(d) | Outcome::Observed(d) => {
-                let mut v = json!({"outcome": if matches!(self, Outcome::Accepted(_)) { "accepted" } else { "observed" }});
+            Outcome::Dispatched(d) | Outcome::Accepted(d) | Outcome::Observed(d) => {
+                let name = match self { Outcome::Dispatched(_) => "dispatched", Outcome::Accepted(_) => "accepted", _ => "observed" };
+                let mut v = json!({"outcome": name});
                 if let Some(d) = d {
                     v["data"] = d.clone();
                 }
@@ -520,6 +533,7 @@ pub struct Provider {
     shared: Arc<Shared>,
     config: Arc<Config>,
     window: u64,
+    registration: Arc<Value>,
 }
 
 impl Provider {
@@ -556,7 +570,7 @@ impl Provider {
         tokio::spawn(write_lines(writer, out_rx, shared.clone()));
         let config = Arc::new(config);
         tokio::spawn(read_lines(reader, shared.clone(), config.clone(), requests));
-        let mut provider = Provider { shared, config: config.clone(), window: config.stream_window_bytes.min(MAX_WINDOW) };
+        let mut provider = Provider { shared, config: config.clone(), window: config.stream_window_bytes.min(MAX_WINDOW), registration: Arc::new(Value::Null) };
         let result = provider.handshake().await;
         if let Err(e) = result {
             provider.shared.disconnect(&format!("registration failed: {e}"));
@@ -578,6 +592,7 @@ impl Provider {
             params["token"] = json!(t);
         }
         let r = self.call("provider.register", params).await?;
+        self.registration = Arc::new(r.clone());
         let generation = r["generation"].as_u64().filter(|g| *g >= 1).ok_or_else(|| ProviderError::new("invalid", "register: bad generation"))?;
         if let Some(w) = r["limits"]["stream_window_bytes"].as_u64() {
             self.window = w.clamp(1, self.window);
@@ -587,6 +602,17 @@ impl Provider {
         }
         self.shared.generation.store(generation, Ordering::Relaxed);
         Ok(())
+    }
+
+    /// The acknowledged registration, including opaque runtime resume credentials and future metadata.
+    /// Contains credentials: callers must not log it. Clones share this immutable reply.
+    pub fn registration(&self) -> &Value {
+        &self.registration
+    }
+
+    /// Last observed runtime credential. Observing it does not retry or resend anything.
+    pub fn resume_token(&self) -> Option<&str> {
+        self.registration["resume_token"].as_str().filter(|token| !token.is_empty())
     }
 
     pub fn generation(&self) -> u64 {
@@ -824,7 +850,12 @@ fn handle(msg: &Value, shared: &Arc<Shared>, config: &Arc<Config>, requests: &mp
         let Some(id) = msg.get("id").and_then(Value::as_str) else { return Ok(()) };
         if let Some(tx) = shared.pending.lock().unwrap().remove(id) {
             let result = match msg.get("error") {
-                Some(e) => Err(ProviderError::new(e["data"]["kind"].as_str().unwrap_or("backend"), e["message"].as_str().unwrap_or("core error"))),
+                Some(e) => {
+                    let mut error = ProviderError::new(e["data"]["kind"].as_str().unwrap_or("backend"), e["message"].as_str().unwrap_or("core error"))
+                        .with_data(e.get("data").cloned().unwrap_or(Value::Null));
+                    error.remote = true;
+                    Err(error)
+                }
                 None => Ok(msg.get("result").cloned().unwrap_or(Value::Null)),
             };
             let _ = tx.send(result);

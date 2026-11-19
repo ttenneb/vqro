@@ -320,6 +320,11 @@ This section is the implementable contract; where sections 1–6 differ, this wi
   (a bound is full; nothing was done), `timeout` (core-side deadline; `data.outcome: "indeterminate"`),
   `unavailable` (provider disconnected), `backend` (the layer below failed in a way not covered by `rejected`).
   `unsupported` and `stale_generation` are new kinds; `core-protocol.md` lists them once the core implements them.
+  SDKs preserve structured remote error data (including refusal reasons, outcome and future fields), distinct
+  from local transport/deadline failures. Rust `ProviderError` exposes `remote` and `data`; `with_data` also
+  preserves extra object fields when responding, while the error's `kind` remains authoritative. A remote error
+  does not itself prove no effect: its kind/outcome still determines that. Rust `Outcome::Dispatched` represents
+  native handoff without acknowledgement, not accepted or observed.
 - **Reasons** are always objects `{"reason": <string>, "message"?: <string>, ...}` (G11), matching `stream.closed` on
   `main`. Minimum reason strings: `provider_disconnected`, `slow_consumer`, `gap`, `exited`, `killed`, `replaced`,
   `closed`.
@@ -371,6 +376,12 @@ This section is the implementable contract; where sections 1–6 differ, this wi
   until listed. The first sync must start before any `resource.upsert`; upserts during a sync count as listed.
 - `upsert`/`gone` are notifications: ordered with everything else on the connection, no acknowledgement. An SDK may
   expose an awaitable "written to socket", never "applied by core".
+
+The Rust SDK's `Provider::registration()` exposes the acknowledged register result, including unknown metadata;
+`resume_token()` exposes a nonempty opaque runtime credential when present (§9.6). Clones share that immutable
+reply, and a later sync/setup failure does not erase the observed credential. Backend replies without one return
+`None`. This is access to evidence already received, not persistence, retry or replay; callers must not log the
+credential-bearing reply.
 
 ### 9.3 Facts (G1)
 
