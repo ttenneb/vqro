@@ -85,6 +85,7 @@ pub struct CommandInfo {
     pub connection: Option<u64>,
     pub available: bool,
     pub peer: Option<Peer>,
+    pub lifetime: Option<crate::ext::Owner>,
 }
 
 impl CommandInfo {
@@ -162,7 +163,7 @@ impl Core {
         let (events, _) = broadcast::channel(4096);
         let mut commands = BTreeMap::new();
         for (name, title) in BUILTINS {
-            commands.insert(name.to_string(), CommandInfo { name: name.to_string(), title: title.to_string(), owner: "core".into(), connection: None, available: true, peer: None });
+            commands.insert(name.to_string(), CommandInfo { name: name.to_string(), title: title.to_string(), owner: "core".into(), connection: None, available: true, peer: None, lifetime:None });
         }
         Ok(Core {
             store,
@@ -226,6 +227,18 @@ impl Core {
             self.next_provider_source+=1;
         }
         handles
+    }
+
+    /// Retirement invalidates provider routes immediately, not after child cleanup/EOF.
+    pub(crate) fn fence_retired_extensions(&mut self) {
+        let names:Vec<_>=self.providers.iter().filter(|(_,p)|p.owner.as_ref().is_some_and(|o|!o.is_live()) && p.health.borrow().connected).map(|(name,_)|name.clone()).collect();
+        for name in names { self.on_adapter_event(&name,AdapterEvent::Connected(false,Some("supervised extension lifetime ended".into()))); }
+        let mut commands=Vec::new();
+        for cmd in self.commands.values_mut().filter(|cmd|cmd.available && cmd.lifetime.as_ref().is_some_and(|o|!o.is_live())) {
+            cmd.available=false;
+            commands.push(cmd.to_json());
+        }
+        for command in commands { self.emit("command",command); }
     }
 
     /// Append to the event log and broadcast.

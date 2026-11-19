@@ -155,6 +155,8 @@ pub struct EffectContext {
     pub effect: String,
     pub deadline: Instant,
     pub target: Option<(String, String)>,
+    /// Rechecked at the adapter's native dispatch seam, not just RPC admission.
+    pub caller: Option<crate::ext::Owner>,
 }
 
 #[derive(Debug)]
@@ -203,7 +205,8 @@ pub(crate) fn reject_command(command: AdapterCmd, why: &str) {
 pub fn command_for(mut command: AdapterCmd, current: u64) -> Option<AdapterCmd> {
     loop {
         match command {
-            AdapterCmd::Bound { connection, command: inner, .. } => {
+            AdapterCmd::Bound { connection, context, command: inner } => {
+                if context.as_ref().and_then(|c|c.caller.as_ref()).is_some_and(|o|!o.is_live()) { reject_command(*inner,"supervised caller retired before dispatch"); return None; }
                 if connection != current { reject_command(*inner, "provider connection changed before dispatch"); return None; }
                 command = *inner;
             }

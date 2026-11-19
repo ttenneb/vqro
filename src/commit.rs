@@ -15,6 +15,7 @@ pub(crate) enum Action {
 }
 pub(crate) struct Plan {
     pub action: Action,
+    pub owner:Option<crate::ext::Owner>,
     /// Policy stays with the caller; the worker owns adoption hooks so receipt cancellation
     /// cannot suppress necessary runtime reconciliation after a durable state change.
     pub after_adopt: Option<fn(&Shared)>,
@@ -128,13 +129,20 @@ async fn run(core:Weak<Mutex<Core>>, queue:Receiver,cancel:Arc<AtomicBool>) {
         let after_adopt = plan.after_adopt;
         // Candidate cloning, CAS/validation, size accounting, encoding and all filesystem
         // operations run on a blocking thread without the core mutex or an async worker.
-        let written = tokio::task::spawn_blocking(move || {
-            let result = match plan.action {
-                Action::Apply { author, on_behalf_of, note, ops } => store.apply_attributed(&author, on_behalf_of.as_deref(), note, ops),
-                Action::Revert { author, on_behalf_of, txn } => store.revert_attributed(&author, on_behalf_of.as_deref(), txn),
-            };
-            (store, result)
-        }).await;
+        let writer = {
+            let c=core.lock().unwrap();
+            if let Err(error)=crate::ext::check_owner(&c,plan.owner.as_ref()) { let _=receipt.send(Err(error)); continue; }
+            // Irreversible writer admission and lifetime retirement share this mutex. After
+            // this point the candidate MUST be adopted/reported normally, even if its owner exits.
+            tokio::task::spawn_blocking(move || {
+                let result = match plan.action {
+                    Action::Apply { author, on_behalf_of, note, ops } => store.apply_attributed(&author, on_behalf_of.as_deref(), note, ops),
+                    Action::Revert { author, on_behalf_of, txn } => store.revert_attributed(&author, on_behalf_of.as_deref(), txn),
+                };
+                (store, result)
+            })
+        };
+        let written=writer.await;
         let (mut store, result) = match written {
             Ok(written) => written,
             Err(err) => {
@@ -170,7 +178,7 @@ mod tests {
         Arc::new(Mutex::new(Core::new(crate::store::Store::in_memory(), None, "unused".into(), false).unwrap()))
     }
     fn prepare() -> Prepare {
-        Box::new(|_| Ok(Plan { action:Action::Apply { author:"test".into(), on_behalf_of:None, note:None, ops:Vec::new() }, after_adopt:None }))
+        Box::new(|_| Ok(Plan { owner:None, action:Action::Apply { author:"test".into(), on_behalf_of:None, note:None, ops:Vec::new() }, after_adopt:None }))
     }
     #[test]
     fn cancelled_receipts_and_dequeued_work_keep_the_byte_budget_until_completion() {
@@ -210,7 +218,7 @@ mod tests {
             let _keep=&root;entered.notify_one();let mut open=gate.0.lock().unwrap();while !*open {open=gate.1.wait(open).unwrap();}crate::store::write_atomic(path,bytes)
         }})).unwrap();
         fn hook(core:&Shared) { core.lock().unwrap().safe_mode=true; }
-        let plan=||Box::new(|_:&Core|Ok(Plan { action:Action::Apply { author:"test".into(),on_behalf_of:None,note:None,ops:vec![Op::Set {key:"doc/queued".into(),value:serde_json::json!(1),expect:None}] },after_adopt:Some(hook) })) as Prepare;
+        let plan=||Box::new(|_:&Core|Ok(Plan { owner:None, action:Action::Apply { author:"test".into(),on_behalf_of:None,note:None,ops:vec![Op::Set {key:"doc/queued".into(),value:serde_json::json!(1),expect:None}] },after_adopt:Some(hook) })) as Prepare;
         let first=core.lock().unwrap().committer.enqueue(&core,256,plan()).unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(2),entered.notified()).await.unwrap();
         let second=core.lock().unwrap().committer.enqueue(&core,256,plan()).unwrap();

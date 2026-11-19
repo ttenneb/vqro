@@ -204,6 +204,7 @@ impl Connection {
         let preferred = backend && c.store.get(&format!("extension/{}", r.name)).is_some_and(|e| e.value["default"] == true);
         let source = c.install_provider(handle, preferred, backend)?;
         c.providers.get_mut(&r.name).unwrap().metadata=metadata;
+        c.providers.get_mut(&r.name).unwrap().owner=owner.clone();
         c.on_adapter_event(&r.name,adapter::AdapterEvent::Registered(info));
         let generation=c.providers[&r.name].generation;
         if let Some(owner) = owner { c.provider_extensions.insert(owner.name); }
@@ -246,7 +247,7 @@ impl Connection {
 }
 
 impl WireProvider {
-    fn current_locked(&self, core:&Core) -> bool { core.providers.get(&self.name).is_some_and(|p| p.source == self.source && p.generation == self.generation && p.health.borrow().connected) }
+    fn current_locked(&self, core:&Core) -> bool { core.providers.get(&self.name).is_some_and(|p| p.source == self.source && p.generation == self.generation && p.health.borrow().connected && p.owner.as_ref().is_none_or(|o|crate::ext::owner_valid(core,o))) }
     fn current(&self, core: &Shared) -> bool { self.current_locked(&core.lock().unwrap()) }
     fn check_capacity(inventory:&Inventory, facts:&[ResourceFacts]) -> Result<(),RpcError> {
         let additional:BTreeSet<_>=facts.iter().filter(|f| !inventory.current.contains_key(&f.backend_ref)).map(|f|f.backend_ref.as_str()).collect();
@@ -319,7 +320,7 @@ impl WireProvider {
                     if inventory.seen.get(&reference).is_some_and(|f| f.incarnation == incarnation) { inventory.seen.remove(&reference); }
                 }
                 let mut c = core.lock().unwrap();
-                if !c.providers.get(&self.name).is_some_and(|p| p.source == self.source && p.generation == self.generation) {
+                if !c.providers.get(&self.name).is_some_and(|p| p.source == self.source && p.generation == self.generation && p.owner.as_ref().is_none_or(|o|crate::ext::owner_valid(&c,o))) {
                     return Err(RpcError::new("stale_generation", "provider changed before retirement publication"));
                 }
                 c.on_adapter_event(&self.name, adapter::AdapterEvent::Removed { reference, incarnation });
@@ -408,6 +409,7 @@ impl WireProvider {
                 stale => { adapter::reject_command(stale, "wire provider connection changed"); continue; }
             };
             let Some(context) = context else { adapter::reject_command(cmd, "wire effects require a core context"); continue };
+            if context.caller.as_ref().is_some_and(|o|!o.is_live()) { adapter::reject_command(cmd,"supervised caller retired before dispatch"); continue; }
             let Some(cmd) = adapter::command_for(cmd, self.connection) else { continue };
             let Ok(slot) = self.inflight.clone().try_acquire_owned() else { adapter::reject_command(cmd, "provider in-flight effect limit reached"); continue };
             let provider = self.clone();
@@ -453,6 +455,7 @@ impl WireProvider {
         let remaining=context.deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() { return Err(AdapterError::RejectedKind { kind:"timeout".into(),message:"effect deadline expired before provider dispatch".into() }); }
         p["deadline_ms"]=json!(remaining.as_millis().clamp(1,300000) as u64);
+        self.check_dispatch(context)?;
         let response = self.peer.call_with_timeout("effect.invoke", p, remaining).await;
         if Instant::now() >= context.deadline { return Err(AdapterError::Timeout("provider effect deadline expired; outcome indeterminate".into())); }
         let r = response.map_err(provider_error)?;
@@ -474,6 +477,12 @@ impl WireProvider {
         } else { None };
         Ok(EffectResult { outcome, data, facts })
     }
+    fn check_dispatch(&self,context:&EffectContext)->Result<(),AdapterError> {
+        if context.caller.as_ref().is_some_and(|o|!o.is_live()) || self.core.upgrade().is_none_or(|c|!self.current(&c)) {
+            return Err(AdapterError::RejectedKind {kind:"stale_generation".into(),message:"supervised lifetime or provider retired before native dispatch".into()});
+        }
+        Ok(())
+    }
     async fn open(self: &Arc<Self>, context: &EffectContext, reference: String, cols: u16, rows: u16, history: u32) -> Result<Stream, AdapterError> {
         let slot = self.stream_slots.clone().try_acquire_owned().map_err(|_| AdapterError::RejectedKind { kind: "overloaded".into(), message: "provider max_streams reached".into() })?;
         let id = self.next_stream.fetch_add(1, Ordering::Relaxed);
@@ -484,6 +493,7 @@ impl WireProvider {
         self.streams.lock().unwrap().insert(id, WireStream { output, terminal: Some(terminal), credit: credit.clone(), _slot: slot });
         let mut opening = Opening { provider: Arc::downgrade(self), id, armed: true };
         let remaining = context.deadline.saturating_duration_since(Instant::now());
+        self.check_dispatch(context)?;
         let result = self.peer.call_with_timeout("stream.open", json!({"generation": self.generation, "stream": id, "ref": reference,
             "incarnation": context.target.as_ref().map(|t| t.1.as_str()).unwrap_or(""), "cols": cols, "rows": rows,
             "history_lines": history, "window_bytes": self.window}), remaining).await;
@@ -586,7 +596,7 @@ mod qa2_tests {
     #[tokio::test]
     async fn expired_before_dispatch_is_definitely_rejected_and_sends_nothing() {
         let (_core,provider,remote,mut incoming)=fixture().await;
-        let context=EffectContext { effect:"expired".into(),deadline:Instant::now()-std::time::Duration::from_millis(1),target:None };
+        let context=EffectContext { effect:"expired".into(),deadline:Instant::now()-std::time::Duration::from_millis(1),target:None,caller:None };
         let error=provider.invoke(&context,"fixture",None,json!({})).await.unwrap_err().rpc();
         assert!(incoming.try_recv().is_err(),"expired effect must never reach provider");
         assert_eq!(error.kind(),"timeout");
@@ -613,7 +623,7 @@ mod qa2_tests {
     #[tokio::test]
     async fn duplicate_active_and_recent_effect_ids_never_dispatch_twice() {
         let (_core,provider,remote,mut incoming)=fixture().await;
-        let context=EffectContext { effect:"same".into(),deadline:Instant::now()+std::time::Duration::from_secs(2),target:None };
+        let context=EffectContext { effect:"same".into(),deadline:Instant::now()+std::time::Duration::from_secs(2),target:None,caller:None };
         let call=tokio::spawn({let provider=provider.clone();let context=context.clone();async move { provider.invoke(&context,"fixture",None,json!({})).await }});
         let Some(crate::rpc::Incoming::Request { id,method,.. })=incoming.recv().await else { panic!("missing effect"); };
         assert_eq!(method,"effect.invoke");

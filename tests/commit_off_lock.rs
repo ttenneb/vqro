@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use base64::Engine;
 use vqro::{client, core::Shared, rpc::{Incoming, Peer}, server::{self, Backend}, store};
 use serde_json::{json, Value};
+#[path="support/managed.rs"] mod managed;
 
 struct Gate {
     entered: tokio::sync::Notify,
@@ -76,6 +77,38 @@ impl Drop for Fixture {
     }
 }
 fn set(value: i64, expect: u64) -> Value { json!({"ops":[{"op":"set","key":"doc/value","value":value,"expect":expect}]}) }
+
+#[tokio::test]
+async fn retirement_rejects_queued_writes_but_adopts_an_already_dispatched_write() {
+    let f=Fixture::new().await;
+    f.gate.armed.store(false,Ordering::SeqCst);
+    let (control,_)=f.peer().await;
+    let token_file=f._dir.path().join("managed.token");
+    let seed=control.call("workspace.apply",json!({"ops":[{"op":"set","key":"extension/managed","value":managed::spec(&token_file)}]})).await.unwrap();
+    let (old,_old_rx)=f.peer().await;
+    old.call("hello",json!({"extension":"managed","extension_token":managed::token(&token_file).await})).await.unwrap();
+    f.gate.armed.store(true,Ordering::SeqCst);
+    let active=tokio::spawn({let old=old.clone();async move {old.call("workspace.apply",set(1,0)).await}});
+    tokio::time::timeout(Duration::from_secs(2),f.gate.entered.notified()).await.unwrap();
+    let queued=tokio::spawn({let old=old.clone();async move {old.call("workspace.apply",set(2,0)).await}});
+    f.pending(2).await;
+    let revert=tokio::spawn({let old=old.clone();async move {old.call("workspace.revert",json!({"txn":seed["txn"]})).await}});
+    f.pending(3).await;
+    // Restart is not a workspace commit and must fence work already waiting in its queue.
+    vqro::ext::restart(&f.core,"managed").unwrap();
+    f.gate.release();
+    let applied=active.await.unwrap().expect("dispatched durable work is not retrospectively rejected");
+    assert!(applied["txn"].as_u64().is_some());
+    for result in [queued.await.unwrap(),revert.await.unwrap()] {
+        let error=result.unwrap_err();
+        assert_eq!(error.kind(),"stale_generation");
+        assert_eq!(error.data.unwrap()["outcome"],"rejected");
+    }
+    assert_eq!(control.call("workspace.get",json!({"key":"doc/value"})).await.unwrap()["value"],1);
+    let disk=store::Store::open(f._dir.path().join("state/workspace.json")).unwrap();
+    assert_eq!(disk.entries()["doc/value"].value,json!(1));
+    control.call("core.shutdown",json!({})).await.unwrap();
+}
 
 #[tokio::test]
 async fn slow_durable_write_does_not_block_snapshots_or_echo_and_stays_invisible() {

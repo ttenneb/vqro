@@ -5,6 +5,7 @@
 //! belong to backends.
 
 use std::collections::VecDeque;
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -33,6 +34,7 @@ pub struct ExtRuntime {
     pub running: bool,
     stop: Option<oneshot::Sender<()>>,
     token: String,
+    live: Arc<AtomicBool>,
 }
 
 impl ExtRuntime {
@@ -58,12 +60,19 @@ impl ExtRuntime {
     }
 }
 
-#[derive(Clone)]
-pub struct Owner { pub name:String, pub generation:u64 }
-pub fn authenticate(core:&crate::core::Core, name:&str, token:&str)->Option<Owner> {
-    core.exts.get(name).filter(|r|r.running && !r.token.is_empty() && r.token==token).map(|r|Owner{name:name.into(),generation:r.generation})
+#[derive(Clone, Debug)]
+pub struct Owner { pub name:String, pub generation:u64, live:Arc<AtomicBool> }
+impl Owner {
+    pub fn is_live(&self)->bool { self.live.load(Ordering::Acquire) }
 }
-pub fn owner_valid(core:&crate::core::Core, owner:&Owner)->bool { core.exts.get(&owner.name).is_some_and(|r|r.running && r.generation==owner.generation) }
+pub fn authenticate(core:&crate::core::Core, name:&str, token:&str)->Option<Owner> {
+    core.exts.get(name).filter(|r|r.running && !r.token.is_empty() && r.token==token).map(|r|Owner{name:name.into(),generation:r.generation,live:r.live.clone()})
+}
+pub fn owner_valid(core:&crate::core::Core, owner:&Owner)->bool { owner.is_live() && core.exts.get(&owner.name).is_some_and(|r|r.running && r.generation==owner.generation) }
+pub(crate) fn check_owner(core:&crate::core::Core, owner:Option<&Owner>)->Result<(),crate::rpc::RpcError> {
+    if owner.is_some_and(|o|!owner_valid(core,o)) { return Err(crate::provider::rejected("stale_generation","supervised extension lifetime ended; not dispatched")); }
+    Ok(())
+}
 
 /// Bring running extensions in line with the workspace entries and safe mode.
 pub fn reconcile(core: &Shared) {
@@ -83,6 +92,7 @@ pub fn reconcile(core: &Shared) {
     for name in names {
         if !specs.iter().any(|(n, _, _)| *n == name) {
             if let Some(mut rt) = c.exts.remove(&name) {
+                rt.live.store(false,Ordering::Release);
                 if let Some(stop) = rt.stop.take() {
                     let _ = stop.send(());
                 }
@@ -108,6 +118,7 @@ pub fn reconcile(core: &Shared) {
             running: false,
             stop: None,
             token: String::new(),
+            live:Arc::new(AtomicBool::new(false)),
         });
         let replaced = rt.spec_version != version;
         if replaced {
@@ -120,6 +131,7 @@ pub fn reconcile(core: &Shared) {
             }
         }
         if rt.running && (!want || replaced) {
+            rt.live.store(false,Ordering::Release);
             if let Some(stop) = rt.stop.take() {
                 let _ = stop.send(());
             }
@@ -146,6 +158,7 @@ pub fn reconcile(core: &Shared) {
         let rt = c.exts.get_mut(&name).unwrap();
         rt.generation += 1;
         let generation = rt.generation;
+        rt.live=Arc::new(AtomicBool::new(true));
         let mut secret=[0u8;32];
         if let Err(error)=getrandom::fill(&mut secret) {
             let why=format!("supervision credential: {error}");rt.last_exit=Some(why.clone());rt.fail("startup",why);
@@ -228,6 +241,7 @@ pub fn reconcile(core: &Shared) {
             }
         }
     }
+    c.fence_retired_extensions();
 }
 
 /// An extension exited on its own. Returns whether to restart it.
@@ -238,6 +252,7 @@ fn on_exit(core: &Shared, name: &str, generation: u64, why: String) -> bool {
     if rt.generation != generation {
         return false; // already replaced or stopped
     }
+    rt.live.store(false,Ordering::Release);
     rt.running = false;
     rt.pid = None;
     rt.stop = None;
@@ -256,22 +271,27 @@ fn on_exit(core: &Shared, name: &str, generation: u64, why: String) -> bool {
     else {rt.fail("shutdown","core stopping; exit was not retried".into());}
     let j = rt.to_json();
     c.emit("extension", json!({"name": name, "state": j}));
+    c.fence_retired_extensions();
     restart
 }
 
 /// Explicit restart: clears the crash budget.
-pub fn restart(core: &Shared, name: &str) -> Result<(), crate::rpc::RpcError> {
+pub fn restart(core: &Shared, name: &str) -> Result<(), crate::rpc::RpcError> { restart_owned(core,name,None) }
+pub(crate) fn restart_owned(core:&Shared,name:&str,owner:Option<&Owner>)->Result<(),crate::rpc::RpcError> {
     {
         let mut c = core.lock().unwrap();
+        check_owner(&c,owner)?;
         let rt = c.exts.get_mut(name).ok_or_else(|| crate::rpc::RpcError::new("not_found", format!("no extension {name}")))?;
         rt.crashes.clear();
         rt.failure=None;
         if let Some(stop) = rt.stop.take() {
             let _ = stop.send(());
         }
+        rt.live.store(false,Ordering::Release);
         rt.running = false;
         rt.generation += 1;
         rt.status = "stopped".into();
+        c.fence_retired_extensions();
     }
     reconcile(core);
     Ok(())
@@ -300,12 +320,14 @@ pub fn stop_all(core: &Shared) {
 
 pub(crate) fn stop_all_locked(c: &mut crate::core::Core) {
     for rt in c.exts.values_mut() {
+        rt.live.store(false,Ordering::Release);
         if let Some(stop) = rt.stop.take() {
             let _ = stop.send(());
         }
         rt.running = false;
         rt.generation += 1;
     }
+    c.fence_retired_extensions();
 }
 
 #[cfg(test)]
@@ -314,7 +336,7 @@ mod qa2_tests {
 
     fn runtime_with_crashes(crashes: VecDeque<Instant>) -> ExtRuntime {
         ExtRuntime { status: "failed".into(), pid: None, spec_version: 1, generation: 7, crashes_total: crashes.len() as u64, crashes,
-            last_exit: Some("historical failure".into()), failure:None, last_exits:VecDeque::new(), running: false, stop: None, token: String::new() }
+            last_exit: Some("historical failure".into()), failure:None, last_exits:VecDeque::new(), running: false, stop: None, token: String::new(), live:Arc::new(AtomicBool::new(false)) }
     }
 
     #[test]

@@ -49,6 +49,14 @@ mean `vqro.items`). They are reported for diagnostics and dependency facts, neve
 content carries its own fallback. D24 invocation proofs still carry original-invoker
 attribution; this is collision hygiene, not a new workspace permission scheme (D8/D24).
 
+A supervised connection is bound to its exact extension lifetime, not merely `ext:<name>`. Disable, restart,
+replacement, removal or child exit immediately fences its RPC mutations, provider publications/routes and command
+handlers. Validation repeats at publication, queued commit preparation and irreversible writer admission, and at
+adapter dispatch. Reusing the author name never revives an old connection. Stale, unstarted work is rejected with
+`stale_generation` (or a closed provider transport), with no mutation. A durable writer already dispatched before
+retirement still completes, adopts and reports its real result; retirement never discards a persisted candidate or
+pretends that native work already dispatched was recalled. No uncertain effect is replayed.
+
 `core.shutdown` is implemented (D22 is confirmed; Windows transport remains implementation work). The accepted reply is locally
 written/flushed before stop begins, not a remote-read guarantee. The core stops accepting and rejects new workspace
 commits, then gives admitted commits3s to persist, publish and run adoption hooks. At expiry queued/unstarted

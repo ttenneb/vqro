@@ -42,7 +42,16 @@ impl Conn {
     fn author(&self) -> String {
         self.author.lock().unwrap().clone()
     }
+    fn caller(&self)->Caller { Caller { author:self.author(), owner:self.supervised.lock().unwrap().clone() } }
 }
+
+/// Immutable request attribution. A shared author name is not a lifetime credential.
+#[derive(Clone, serde::Serialize)]
+#[serde(transparent)]
+struct Caller { author:String, #[serde(skip)] owner:Option<ext::Owner> }
+impl std::ops::Deref for Caller { type Target=str; fn deref(&self)->&str { &self.author } }
+impl From<&Caller> for Caller { fn from(caller:&Caller)->Self { caller.clone() } }
+impl Caller { fn check(&self,c:&Core)->Result<(),RpcError> { ext::check_owner(c,self.owner.as_ref()) } }
 
 struct StreamBinding {
     input: crate::queue::Sender<StreamInput>,
@@ -328,12 +337,12 @@ async fn connection(core: Shared, conn: Arc<Conn>, mut incoming: crate::rpc::Inc
             Incoming::Request { id, method, params } if method.starts_with("stream.") => {
                 let result = if conn.wire.is_provider() {
                     conn.wire.validate(&core, &params).and_then(|_| Err(RpcError::method_not_found(&method)))
-                } else { stream_op(&conn, &method, params) };
+                } else { stream_op(&core, &conn, &method, params) };
                 conn.peer.respond(id, result);
             }
             Incoming::Notification { method, params } if method.starts_with("stream.") => {
                 let sid = params["stream"].clone();
-                if let Err(error) = stream_op(&conn, &method, params) {
+                if let Err(error) = stream_op(&core, &conn, &method, params) {
                     conn.peer.notify("stream.error", json!({"stream": sid, "error": error, "outcome": "rejected"}));
                 }
             }
@@ -495,6 +504,8 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> Rp
     if core.lock().unwrap().shutdown.is_requested() && method != "core.shutdown" && !(method == "command.invoke" && p["name"] == "vqro.shutdown") {
         return Err(provider::rejected("unavailable", "core is shutting down; not dispatched"));
     }
+    let caller=conn.caller();
+    if method != "hello" { caller.check(&core.lock().unwrap())?; }
     if method != "provider.register" && conn.wire.is_provider() { conn.wire.validate(core, &p)?; }
     match method {
         "core.shutdown" => Ok(json!({"outcome":"accepted"})),
@@ -555,7 +566,7 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> Rp
         "workspace.apply" => {
             let a: Apply = params(p)?;
             let context = attribution(core, conn, a.on_behalf_of)?;
-            apply(core, &conn.author(), context.origin, a.note, a.ops).await
+            apply(core, &caller, context.origin, a.note, a.ops).await
         }
         "workspace.history" => {
             let limit = p.get("limit").and_then(|l| l.as_u64()).unwrap_or(20) as usize;
@@ -564,7 +575,7 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> Rp
         "workspace.revert" => {
             let revert_request: Revert = params(p)?;
             let context = attribution(core, conn, revert_request.on_behalf_of)?;
-            revert(core, &conn.author(), context.origin, Some(revert_request.txn)).await
+            revert(core, &caller, context.origin, Some(revert_request.txn)).await
         }
         "events.subscribe" => subscribe(core, conn, params(p)?),
         "resource.list" => {
@@ -579,7 +590,7 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> Rp
             Ok(json!({"resources": resources.iter().map(|r| r.to_json()).collect::<Vec<_>>()}))
         }
         "resource.spawn" => {
-            spawn(core, &conn.author(), params(p)?).await
+            spawn(core, &caller, params(p)?).await
         }
         "resource.kill" => {
             let id = p.get("resource").and_then(|r| r.as_str()).ok_or_else(|| RpcError::invalid("needs `resource`"))?;
@@ -589,7 +600,7 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> Rp
             };
             let (handle, operation, c) = (route.handle.clone(), route.clone(), core.clone());
             let deadline = provider::deadline(p.get("deadline_ms").map(|v| v.as_u64().ok_or_else(|| RpcError::invalid("deadline_ms must be an unsigned integer"))).transpose()?)?;
-            let (effect, mut result) = effect(core, conn.author(), route, "resource.kill", deadline, |value: &crate::adapter::EffectResult| value.outcome, move |context| async move {
+            let (effect, mut result) = effect(core, caller.clone(), route, "resource.kill", deadline, |value: &crate::adapter::EffectResult| value.outcome, move |context| async move {
                 let mut result = handle.for_effect(context).kill(reference).await.map_err(|e| e.rpc())?;
                 if !operation.valid() { return Err(provider::indeterminate("provider changed before kill result was recorded")); }
                 if let Some(facts) = result.facts.take() { c.lock().unwrap().upsert_resource(&operation.handle.name, facts)?; }
@@ -597,22 +608,23 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> Rp
             }).await?;
             Ok(json!({"outcome": result.outcome, "effect": effect, "backend": result.data.take()}))
         }
-        "resource.forget" => forget(core, &conn.author(), p).await,
-        "resource.forget_cached" => forget_cached(core, &conn.author(), p),
+        "resource.forget" => forget(core, &caller, p).await,
+        "resource.forget_cached" => forget_cached(core, &caller, p),
         "resource.attach" => attach(core, conn, params(p)?).await,
-        "resource.invoke" => invoke_resource(core, &conn.author(), p).await,
+        "resource.invoke" => invoke_resource(core, &caller, p).await,
         "command.register" => {
             let r: Register = params(p)?;
             if r.name.starts_with("vqro.") {
                 return Err(RpcError::new("forbidden", "`vqro.` commands belong to the core"));
             }
             let mut c = core.lock().unwrap();
+            caller.check(&c)?;
             if let Some(existing) = c.commands.get(&r.name) {
                 if existing.available && existing.owner != conn.author() {
                     return Err(RpcError::new("conflict", format!("{} is owned by {}", r.name, existing.owner)));
                 }
             }
-            let info = CommandInfo { name: r.name.clone(), title: r.title.unwrap_or_else(|| r.name.clone()), owner: conn.author(), connection: Some(conn.id), available: true, peer: Some(conn.peer.clone()) };
+            let info = CommandInfo { name: r.name.clone(), title: r.title.unwrap_or_else(|| r.name.clone()), owner: conn.author(), connection: Some(conn.id), available: true, peer: Some(conn.peer.clone()), lifetime:caller.owner.clone() };
             let j = info.to_json();
             let bytes=crate::limits::encoded_bytes(&j);
             if bytes.saturating_add(2)>crate::limits::COMMAND_BYTES {return Err(crate::limits::too_large("command metadata",bytes.saturating_add(2),crate::limits::COMMAND_BYTES));}
@@ -628,14 +640,15 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> Rp
         "command.invoke" => {
             let i: Invoke = params(p)?;
             let context = attribution(core, conn, i.on_behalf_of)?;
-            invoke_deadline(core, &conn.author(), context, &i.name, i.args, i.deadline_ms).await
+            invoke_deadline(core, &caller, context, &i.name, i.args, i.deadline_ms).await
         }
         "ui.notify" => {
             // A transient message for every client (toast). Not state.
             let text = p.get("text").and_then(|t| t.as_str()).ok_or_else(|| RpcError::invalid("needs `text`"))?.to_string();
             if let Some(style)=p.get("style") {crate::limits::json_depth(style,crate::limits::JSON_DEPTH)?;}
             let mut c = core.lock().unwrap();
-            c.emit("notify", json!({"text": text, "style": p.get("style"), "author": conn.author()}));
+            caller.check(&c)?;
+            c.emit("notify", json!({"text": text, "style": p.get("style"), "author": caller}));
             Ok(json!({"outcome": "dispatched"}))
         }
         "view.publish" => {
@@ -648,6 +661,7 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> Rp
             let next = if content.is_null() { 0 } else { crate::limits::encoded_bytes(&(&view, &content)) };
             let author=conn.author();
             let mut c = core.lock().unwrap();
+            caller.check(&c)?;
             if let Some((_,owner,connection,_))=c.live.get(&view){if owner!=&author && c.clients.contains_key(connection){return Err(RpcError::new("conflict",format!("view {view} is owned by {owner}")));}}
             let old=c.live.get(&view).map(|(_,_,_,bytes)|*bytes).unwrap_or(0);
             if next > crate::limits::LIVE_VALUE_BYTES && next > old {
@@ -681,7 +695,9 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> Rp
     }
 }
 
-fn stream_op(conn: &Arc<Conn>, method: &str, p: Value) -> RpcResult {
+fn stream_op(core:&Shared, conn: &Arc<Conn>, method: &str, p: Value) -> RpcResult {
+    let c=core.lock().unwrap();
+    conn.caller().check(&c)?;
     let s: StreamParams = params(p)?;
     let streams = conn.streams.lock().unwrap();
     let binding = streams.get(&s.stream).ok_or_else(|| RpcError::new("not_found", format!("no stream {}", s.stream)))?;
@@ -782,13 +798,13 @@ fn subscribe(core: &Shared, conn: &Arc<Conn>, opts: crate::events::SubscribeOpti
 /// Audit the caller's observed outcome. A timeout drops the reply receiver, never the backend
 /// effect or its independent fact feed. Late replies are ignored, as pinned provider v0 requires.
 async fn effect<T: Send + 'static, F>(
-    core: &Shared, author: String, route: Route, method: &'static str, deadline: std::time::Duration, success: fn(&T) -> &'static str,
+    core: &Shared, author: Caller, route: Route, method: &'static str, deadline: std::time::Duration, success: fn(&T) -> &'static str,
     work: impl FnOnce(crate::adapter::EffectContext) -> F,
 ) -> Result<(String, T), RpcError>
 where F: std::future::Future<Output = Result<T, RpcError>> + Send + 'static {
     if !route.valid() { return Err(provider::rejected("unavailable", "provider changed before dispatch")); }
-    let id = core.lock().unwrap().effect_id();
-    let context = crate::adapter::EffectContext { effect: id.clone(), deadline: std::time::Instant::now() + deadline, target: route.target.clone() };
+    let id = { let mut c=core.lock().unwrap(); author.check(&c)?; c.effect_id() };
+    let context = crate::adapter::EffectContext { effect: id.clone(), deadline: std::time::Instant::now() + deadline, target: route.target.clone(), caller:author.owner.clone() };
     let result = crate::rpc::with_deadline(method, deadline, route.guard(work(context))).await;
     let outcome = match &result {
         Ok(value) => success(value),
@@ -801,7 +817,7 @@ where F: std::future::Future<Output = Result<T, RpcError>> + Send + 'static {
     })
 }
 
-async fn spawn(core: &Shared, author: &str, s: Spawn) -> RpcResult {
+async fn spawn(core: &Shared, author: &Caller, s: Spawn) -> RpcResult {
     let deadline = provider::deadline(s.deadline_ms)?;
     let route = core.lock().unwrap().provider_route(s.provider.as_deref(), "terminal.spawn")?;
     let argv = s.argv.unwrap_or_default();
@@ -838,7 +854,7 @@ async fn spawn(core: &Shared, author: &str, s: Spawn) -> RpcResult {
     Ok(json!({"outcome": "observed", "effect": effect, "resource": core.lock().unwrap().resource(&id)?.to_json()}))
 }
 
-async fn invoke_resource(core: &Shared, author: &str, p: Value) -> RpcResult {
+async fn invoke_resource(core: &Shared, author: &Caller, p: Value) -> RpcResult {
     let id = p["resource"].as_str().ok_or_else(|| RpcError::invalid("needs resource"))?;
     let op = p["op"].as_str().ok_or_else(|| RpcError::invalid("needs op"))?.to_string();
     if op == "terminal.spawn" { return Err(provider::rejected("invalid", "terminal.spawn has no target; use resource.spawn")); }
@@ -862,9 +878,9 @@ async fn invoke_resource(core: &Shared, author: &str, p: Value) -> RpcResult {
 }
 
 /// Ask the owning backend to release a finished resource, then retire its id (never reused).
-fn forget_cached(core:&Shared,author:&str,p:Value)->RpcResult {
+fn forget_cached(core:&Shared,author:&Caller,p:Value)->RpcResult {
     let id=p["resource"].as_str().ok_or_else(||RpcError::invalid("needs `resource`"))?;
-    let mut c=core.lock().unwrap();let effect=c.effect_id();let result=c.forget_cached_resource(id);
+    let mut c=core.lock().unwrap();author.check(&c)?;let effect=c.effect_id();let result=c.forget_cached_resource(id);
     let outcome=if result.is_ok(){"observed"}else{result.as_ref().err().and_then(|e|e.data.as_ref()).and_then(|d|d["outcome"].as_str()).unwrap_or("indeterminate")};
     c.emit("effect",json!({"effect":effect,"provider":null,"generation":null,"method":"resource.forget_cached","author":author,"scope":"cached_facts","outcome":outcome,"error":result.as_ref().err()}));
     result.map_err(|mut error| {if let Some(data)=error.data.as_mut(){data["effect"]=json!(effect);data["scope"]=json!("cached_facts");}error})?;
@@ -873,7 +889,7 @@ fn forget_cached(core:&Shared,author:&str,p:Value)->RpcResult {
 
 /// Live resources are refused: ending a program is `resource.kill`. Mechanism only: when to
 /// forget is extension policy (`extensions/retention.py`).
-async fn forget(core: &Shared, author: &str, p: Value) -> RpcResult {
+async fn forget(core: &Shared, author: &Caller, p: Value) -> RpcResult {
     let id = p["resource"].as_str().ok_or_else(|| RpcError::invalid("needs `resource`"))?;
     let deadline = provider::deadline(p.get("deadline_ms").map(|v| v.as_u64().ok_or_else(|| RpcError::invalid("deadline_ms must be an unsigned integer"))).transpose()?)?;
     let mut route = {
@@ -907,7 +923,7 @@ async fn attach(core: &Shared, conn: &Arc<Conn>, a: Attach) -> RpcResult {
         (c.resource_route(&a.resource, "terminal.output")?, c.resource(&a.resource)?.facts.backend_ref.clone())
     };
     let handle = route.handle.clone();
-    let (effect, mut stream) = effect(core, conn.author(), route.clone(), "resource.attach", provider::deadline(a.deadline_ms)?, |_| "accepted", move |context| async move {
+    let (effect, mut stream) = effect(core, conn.caller(), route.clone(), "resource.attach", provider::deadline(a.deadline_ms)?, |_| "accepted", move |context| async move {
         handle.for_effect(context).attach(reference, cols, rows, a.history.unwrap_or(0)).await.map_err(|e| e.rpc())
     }).await?;
     if !route.valid() { return Err(provider::indeterminate("provider changed before stream registration")); }
@@ -977,49 +993,54 @@ async fn attach(core: &Shared, conn: &Arc<Conn>, a: Attach) -> RpcResult {
 fn undo_target(core:&Core,txn:Option<u64>)->Option<u64> {
     txn.or_else(||core.store.latest_txn_matching(|txn|!txn.author.starts_with("ext:") || txn.on_behalf_of.as_ref().is_some_and(|origin|!origin.starts_with("ext:"))))
 }
-async fn revert(core: &Shared, author: &str, on_behalf_of: Option<Arc<str>>, txn: Option<u64>) -> RpcResult {
+async fn revert(core: &Shared, author: &Caller, on_behalf_of: Option<Arc<str>>, txn: Option<u64>) -> RpcResult {
+    let owner=author.owner.clone();
     let author = author.to_string();
     // Reserve the currently known undo payload, without cloning it. A preceding queued
     // commit may change default undo; the worker re-resolves and re-accounts before dispatch.
     let known_bytes={let core=core.lock().unwrap();undo_target(&core,txn).and_then(|id|core.store.revert_bytes(id)).unwrap_or(0)};
     let bytes = known_bytes.saturating_add(crate::limits::encoded_bytes(&(&author, on_behalf_of.as_deref()))).saturating_add(128);
     crate::commit::submit(core, bytes, move |c| {
+        ext::check_owner(c,owner.as_ref())?;
         // Preserve global undo: clients and client-started extension writes, never autonomous extensions.
         // Select only after preceding queued commits have been adopted.
         let id = undo_target(c,txn)
             .ok_or_else(|| RpcError::new("not_found", "no transactions to revert"))?;
         let touched_ext = c.store.transaction(id).is_some_and(|t| t.changes.iter().any(|ch| ch.key.starts_with("extension/")));
-        Ok(crate::commit::Plan { action:crate::commit::Action::Revert { author, on_behalf_of, txn:id }, after_adopt:if touched_ext { Some(ext::reconcile) } else { None } })
+        Ok(crate::commit::Plan { owner, action:crate::commit::Action::Revert { author, on_behalf_of, txn:id }, after_adopt:if touched_ext { Some(ext::reconcile) } else { None } })
     }).await
 }
 
 async fn apply_prepared(
-    core:&Shared, author:&str, on_behalf_of:Option<Arc<str>>, note:Option<String>, bytes:usize,
+    core:&Shared, author:&Caller, on_behalf_of:Option<Arc<str>>, note:Option<String>, bytes:usize,
     ops:impl FnOnce(&Core)->Result<Vec<Op>,RpcError> + Send + 'static,
 ) -> RpcResult {
     crate::store::validate_note(note.as_deref())?;
     let bytes = bytes.saturating_add(crate::limits::encoded_bytes(&(author, on_behalf_of.as_deref(), &note)));
+    let owner=author.owner.clone();
     let author = author.to_string();
     crate::commit::submit(core, bytes, move |c| {
+        ext::check_owner(c,owner.as_ref())?;
         let ops = ops(c)?;
         let touched_ext = ops.iter().any(|o| op_key(o).starts_with("extension/"));
-        Ok(crate::commit::Plan { action:crate::commit::Action::Apply { author, on_behalf_of, note, ops }, after_adopt:if touched_ext { Some(ext::reconcile) } else { None } })
+        Ok(crate::commit::Plan { owner, action:crate::commit::Action::Apply { author, on_behalf_of, note, ops }, after_adopt:if touched_ext { Some(ext::reconcile) } else { None } })
     }).await
 }
 
-async fn apply(core:&Shared, author:&str, on_behalf_of:Option<Arc<str>>, note:Option<String>, ops:Vec<Op>) -> RpcResult {
+async fn apply(core:&Shared, author:&Caller, on_behalf_of:Option<Arc<str>>, note:Option<String>, ops:Vec<Op>) -> RpcResult {
     let bytes = crate::limits::encoded_bytes(&ops);
     apply_prepared(core, author, on_behalf_of, note, bytes, move |_| Ok(ops)).await
 }
 
 /// Run a command: built-ins here, everything else forwarded to the connection that owns it.
 pub async fn invoke(core: &Shared, author: &str, name: &str, args: Value) -> RpcResult {
-    invoke_deadline(core, author, crate::invocation::Context::default(), name, args, None).await
+    invoke_deadline(core, &Caller {author:author.into(),owner:None}, crate::invocation::Context::default(), name, args, None).await
 }
 
-async fn invoke_deadline(core: &Shared, author: &str, context: crate::invocation::Context, name: &str, args: Value, deadline_ms: Option<u64>) -> RpcResult {
+async fn invoke_deadline(core: &Shared, author: &Caller, context: crate::invocation::Context, name: &str, args: Value, deadline_ms: Option<u64>) -> RpcResult {
     crate::limits::json_depth(&args,crate::limits::JSON_DEPTH)?;
     let deadline = provider::deadline(deadline_ms)?;
+    author.check(&core.lock().unwrap())?;
     let arg = |k: &str| args.get(k).cloned().unwrap_or(Value::Null);
     match name {
         "vqro.shutdown" => Ok(json!({"outcome":"accepted"})),
@@ -1033,6 +1054,7 @@ async fn invoke_deadline(core: &Shared, author: &str, context: crate::invocation
             let gate=core.lock().unwrap().recovery_gate.clone(); let _guard=gate.lock().await;
             let (on,handles,restart)={
                 let mut c=core.lock().unwrap();
+                author.check(&c)?;
                 let on=arg("on").as_bool().unwrap_or(!c.safe_mode);
                 let restart=if c.safe_mode && !on { c.embedder_backend.clone() } else { None };
                 c.safe_mode=on; c.safe_mode_allow.clear();
@@ -1051,6 +1073,7 @@ async fn invoke_deadline(core: &Shared, author: &str, context: crate::invocation
             let on=arg("on").as_bool().ok_or_else(|| RpcError::invalid("needs boolean on"))?;
             let handles={
                 let mut c=core.lock().unwrap();
+                author.check(&c)?;
                 if !c.safe_mode { return Err(RpcError::new("conflict","safe mode is not on")); }
                 if c.store.get(&format!("extension/{ext_name}")).is_none() { return Err(RpcError::new("not_found","no declared extension")); }
                 if on {
@@ -1094,21 +1117,26 @@ async fn invoke_deadline(core: &Shared, author: &str, context: crate::invocation
         }
         "vqro.extension.restart" => {
             let ext_name = arg("name").as_str().map(String::from).or_else(|| arg("text").as_str().map(String::from)).ok_or_else(|| RpcError::invalid("needs `name`"))?;
-            ext::restart(core, &ext_name)?;
+            ext::restart_owned(core, &ext_name, author.owner.as_ref())?;
             Ok(json!({"restarted": ext_name}))
         }
         _ => {
-            let (peer, connection, invocations) = {
+            let (peer, connection, invocations, lifetime) = {
                 let c = core.lock().unwrap();
                 let cmd = c.commands.get(name).ok_or_else(|| RpcError::new("not_found", format!("no command {name}")))?;
+                author.check(&c)?;
+                ext::check_owner(&c,cmd.lifetime.as_ref())?;
                 if !cmd.available {
                     return Err(RpcError::new("unavailable", format!("{name} is unavailable: {} is not connected", cmd.owner)));
                 }
                 (cmd.peer.clone().ok_or_else(|| RpcError::new("unavailable", format!("{name} has no handler")))?,
-                 cmd.connection.ok_or_else(|| RpcError::new("unavailable", "command has no owning connection"))?, c.invocations.clone())
+                 cmd.connection.ok_or_else(|| RpcError::new("unavailable", "command has no owning connection"))?, c.invocations.clone(), cmd.lifetime.clone())
             };
             let scope = crate::invocation::enter(&invocations, connection, author, &context, deadline)?;
             let origin = context.origin.as_deref().unwrap_or(author);
+            if lifetime.as_ref().is_some_and(|o|!o.is_live()) || author.owner.as_ref().is_some_and(|o|!o.is_live()) {
+                return Err(provider::rejected("stale_generation","command owner or caller retired before dispatch"));
+            }
             let result = peer.call_with_timeout("command.invoke", json!({"name": name, "args": args, "caller": author,
                 "on_behalf_of":origin, "invocation":scope.token()}), deadline).await;
             drop(scope);
@@ -1118,7 +1146,7 @@ async fn invoke_deadline(core: &Shared, author: &str, context: crate::invocation
 }
 
 /// One tab per live terminal. The recovery path when a layout is broken or confusing.
-async fn layout_reset(core: &Shared, author: &str, on_behalf_of:Option<Arc<str>>) -> RpcResult {
+async fn layout_reset(core: &Shared, author: &Caller, on_behalf_of:Option<Arc<str>>) -> RpcResult {
     apply_prepared(core, author, on_behalf_of, Some("vqro.layout.reset".into()), 128, |c| {
         let mut ops = Vec::new();
         let mut tabs = Vec::new();

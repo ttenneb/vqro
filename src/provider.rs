@@ -45,13 +45,14 @@ pub struct Provider {
     pub synced: bool,
     /// Additional validated wire registration metadata (version, effective limits, runtime host).
     pub metadata: Value,
+    pub owner: Option<crate::ext::Owner>,
     pub health: watch::Sender<Health>,
 }
 
 impl Provider {
     pub fn new(handle: AdapterHandle, source: u64, generation: u64) -> Self {
         let (health, _) = watch::channel(Health { connected: false, generation, instance: String::new() });
-        Self { registration_bytes:0,handle, info: None, source, generation, since: crate::store::now_ms(), error: None, synced: false, metadata: json!({}), health }
+        Self { registration_bytes:0,handle, info: None, source, generation, since: crate::store::now_ms(), error: None, synced: false, metadata: json!({}), owner:None, health }
     }
 
     pub fn register(&mut self, info: ProviderInfo) {
@@ -87,13 +88,13 @@ impl Provider {
     }
 
     pub fn route(&self, capability: &str) -> Result<Route, RpcError> {
-        if !self.health.borrow().connected {
+        if !self.health.borrow().connected || self.owner.as_ref().is_some_and(|o|!o.is_live()) {
             return Err(rejected("unavailable", format!("provider {} is disconnected", self.handle.name)));
         }
         if !self.handle.capabilities.get(capability).is_some_and(Value::is_object) {
             return Err(rejected("unsupported", format!("provider {} does not declare {capability}", self.handle.name)));
         }
-        Ok(Route { handle: self.handle.clone(), health: self.health.subscribe(), generation: self.generation, instance: self.health.borrow().instance.clone(), resource: None, target: None })
+        Ok(Route { handle: self.handle.clone(), health: self.health.subscribe(), generation: self.generation, instance: self.health.borrow().instance.clone(), resource: None, target: None, owner:self.owner.clone() })
     }
 }
 
@@ -105,12 +106,13 @@ pub struct Route {
     pub health: watch::Receiver<Health>,
     pub resource: Option<watch::Receiver<bool>>,
     pub target: Option<(String, String)>,
+    pub owner: Option<crate::ext::Owner>,
 }
 
 impl Route {
     pub fn valid(&self) -> bool {
         let health = self.health.borrow();
-        health.connected && health.generation == self.generation && health.instance == self.instance
+        self.owner.as_ref().is_none_or(|o|o.is_live()) && health.connected && health.generation == self.generation && health.instance == self.instance
             && self.resource.as_ref().is_none_or(|r| *r.borrow())
     }
 
