@@ -93,6 +93,18 @@ Transactions are validated against the resulting state and applied all-or-nothin
 (0 = must not exist). Key namespaces and value shapes: `src/store.rs` header. Layouts may only reference
 existing views; `workspace/active` must name an existing layout.
 
+**Several layouts; layout settings.** A workspace may hold any number of `layout/<name>` trees; the one
+named by `workspace/active` is shown, and switching is a write of that entry (shared by every client
+for now). A layout's optional settings live beside it, in `doc/layout/<name>` = `{cwd?, title?}`: `cwd`
+is the folder new things start in (bundled `tabs.open`, `panes.split` and `pi.new` use it when not
+given one; the Python helper's `layout_folder(args)` reads the invoking context's layout, else the
+active one), `title` a display name. They are separate from the tree so that writers which replace a
+layout's root node (wrapping it in a split, `vqro.layout.reset`) can't drop them; whoever deletes a layout
+deletes its settings in the same transaction. The core does not interpret them. The bundled
+`workspaces` extension gives each workspace folder its own layout `ws-<id>` (id from the folder's real
+path) and `main` holds the rest; `vqro.layout.reset` rebuilds `main` with every live terminal and
+selects it.
+
 A successful apply or revert has persisted the candidate through a unique temporary file in the same directory,
 then the platform's **durable replace**: on Unix file sync, rename, then directory sync (implemented); on Windows file
 flush, then a write-through replace (`MoveFileExW` with `MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH`; not

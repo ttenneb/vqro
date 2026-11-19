@@ -60,9 +60,11 @@ def title_of(r):
     return title(r, ext.resources)
 
 
-@ext.command("tabs.open", "New tab with a shell (args: argv, cwd, name)")
+@ext.command("tabs.open", "New tab with a shell (args: argv, cwd, name; cwd defaults to the layout's folder)")
 def open_tab(args):
     spawn = {k: args[k] for k in ("argv", "cwd", "name") if k in args}
+    if "cwd" not in spawn and ext.layout_folder(args):
+        spawn["cwd"] = ext.layout_folder(args)
     r = ext.vqro.call("resource.spawn", spawn)["resource"]
     return show(f"term-{r['id']}", title_of(r), {"kind": "terminal", "resource": r["id"]})
 

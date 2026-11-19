@@ -1,7 +1,7 @@
 """Fake public extension/core surface; never starts a program or connects a socket."""
 import copy
 import threading
-from vqro_ext import VqroError
+from vqro_ext import Extension, VqroError
 
 OPS = ("prompt", "steer", "follow_up", "abort", "clear_queue", "answer")
 
@@ -20,6 +20,10 @@ class FakeCore:
 
     def fresh(self):
         pass
+
+    # The real cache readers: they use only value().
+    layout_settings = Extension.layout_settings
+    layout_folder = Extension.layout_folder
 
     def version(self, key):
         return self.entries.get(key, {}).get("version", 0)

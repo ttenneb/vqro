@@ -26,10 +26,11 @@ def target(args):
     return ctx, key, ctx.get("layout_version"), root
 
 
-@ext.command("panes.split", "Split a pane with a new shell (args: dir = right | down)")
+@ext.command("panes.split", "Split a pane with a new shell in the layout's folder (args: dir = right | down)")
 def split(args):
     ctx, key, ver, root = target(args)
-    r = ext.vqro.call("resource.spawn", {})["resource"]
+    folder = ext.layout_folder(args)  # the pane's layout's starting folder, if it names one
+    r = ext.vqro.call("resource.spawn", {"cwd": folder} if folder else {})["resource"]
     view = f"term-{r['id']}"
     old = node_at(root, ctx["path"])
     new = {"split": "v" if args.get("dir") == "down" else "h", "children": [old, {"view": view}], "sizes": [1, 1]}

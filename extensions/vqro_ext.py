@@ -423,6 +423,23 @@ class Extension:
                 return None
             return key, entry["version"], json.loads(json.dumps(entry["value"]))
 
+    def layout_settings(self, layout=None):
+        """A layout's optional settings, `doc/layout/<name>` = {cwd?, title?} ({} when unset).
+
+        `layout` is a layout name; without one, the active layout's. Kept beside the layout, not in
+        its tree, so writers that replace a layout's root node can't drop them."""
+        if layout is None:
+            layout = (self.value("workspace/active") or {}).get("layout")
+        value = self.value(f"doc/layout/{layout}") if isinstance(layout, str) and layout else None
+        return value if isinstance(value, dict) else {}
+
+    def layout_folder(self, args=None):
+        """The starting folder for something new: the layout the command came from (its
+        `args.context.layout`), else the active layout; None when that layout names none."""
+        ctx = (args or {}).get("context") or {}
+        cwd = self.layout_settings(ctx.get("layout") if isinstance(ctx, dict) else None).get("cwd")
+        return cwd if isinstance(cwd, str) and cwd else None
+
     def log(self, *a):
         print(f"[{self.name}]", *a, file=sys.stderr, flush=True)
 

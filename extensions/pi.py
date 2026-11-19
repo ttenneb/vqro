@@ -91,6 +91,8 @@ class Pi:
             scoped=self.ext.vqro.call("resource.list",{"id":source_id})
             source=next((r for r in scoped.get("resources",[]) if r.get("id")==source_id),{})
             cwd=source.get("cwd")
+        if not cwd:
+            cwd = self.ext.layout_folder(args)  # the layout's starting folder, if it names one
         if selected is None and len(options) > 1:
             self.ext.publish("pi-runtimes", {"title": "New Pi agent: runtime", "requires": ["menu"], "items": [
                 {"text": label(r["name"]), "description": label(" ".join(r["argv"])), "command": "pi.new",
