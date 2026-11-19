@@ -191,7 +191,7 @@ async fn provider_loss_closes_an_idle_stream_and_keeps_its_facts() {
     let Some(AdapterCmd::Attach { reply, .. }) = native(&mut commands).await else { panic!("expected attach") };
     let (input, mut native_input) = vqro::queue::channel(256 * 1024);
     let (_output, output) = vqro::queue::channel(256 * 1024);
-    assert!(reply.send(Ok(Stream { initial: "none", input, output, terminal: None })).is_ok());
+    assert!(reply.send(Ok(Stream { initial: "none", epoch: None, input, output, terminal: None })).is_ok());
     assert_eq!(attach.await.unwrap().unwrap()["outcome"], "accepted");
     events.send(("fixture".into(), AdapterEvent::Connected(false, None))).unwrap();
     let reason = tokio::time::timeout(Duration::from_secs(1), async {

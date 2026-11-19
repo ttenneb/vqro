@@ -44,7 +44,7 @@ async fn idle_attach_returned_after_viewer_disconnect_is_closed_immediately() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     let (input, mut input_rx) = queue::channel(256*1024);
     let (_output_tx, output) = queue::channel(256*1024);
-    assert!(reply.send(Ok(Stream { initial:"repaint", input, output, terminal:None })).is_ok());
+    assert!(reply.send(Ok(Stream { initial:"repaint", epoch:None, input, output, terminal:None })).is_ok());
     let closed = tokio::time::timeout(Duration::from_millis(300), input_rx.recv()).await.expect("late silent stream must close without waiting for backend output");
     assert!(closed.is_none_or(|item| matches!(item.value, StreamInput::Close)));
 }
