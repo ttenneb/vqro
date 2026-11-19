@@ -62,9 +62,17 @@ pub struct Flat {
 pub const SUPPORTED: &[&str] = &["items", "pages", "tree", "badges", "menu", "input", "description", "filter", "toolbar", "chips", "select", "options", "badge_color", "icon", "icon_names", "list_detail", "wrap", "embedded_views"];
 
 /// Features a panel needs that this client lacks.
-pub fn missing(v: &Value) -> Vec<String> {
-    v["requires"].as_array().into_iter().flatten().filter_map(|x| x.as_str()).filter(|f| !SUPPORTED.contains(f)).map(String::from).collect()
+pub fn missing(v: &Value) -> Vec<String> { missing_for(v, SUPPORTED) }
+
+/// Features a panel needs that a client rendering `features` lacks (bare names and `vqro.` ids are the same).
+pub fn missing_for(v: &Value, features: &[&str]) -> Vec<String> {
+    v["requires"].as_array().into_iter().flatten().filter_map(|x| x.as_str())
+        .filter(|f| !features.iter().any(|have| have == f || f.strip_prefix("vqro.") == Some(have)))
+        .map(String::from).collect()
 }
+
+/// Panel features every `base` client renders (D29). Others are optional and need a fallback in content.
+pub const BASE_FEATURES: &[&str] = &["items", "pages", "tree", "toolbar", "badges", "description", "menu", "input", "options", "select", "chips", "icon", "wrap"];
 
 pub fn kind(item: &Value) -> &str {
     item["type"].as_str().unwrap_or("item")
