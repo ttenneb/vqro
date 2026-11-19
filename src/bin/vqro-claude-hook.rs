@@ -227,6 +227,7 @@ mod unix {
                             s.set("stop_continuations", json!(continued + 1));
                             s.set("busy", json!(true));
                         });
+                        status(ctx, &mut core, "working", &event); // the turn continues with the message
                         emit(&json!({"hookSpecificOutput": {"hookEventName": "Stop", "additionalContext": text}}));
                     }
                     None => {
