@@ -118,11 +118,14 @@ class SettingsTests(unittest.TestCase):
     def test_keys_page_shows_conditional_keys_with_the_full_key_name(self):
         module=load();ext=module["ext"]
         ext.entries["binding/agents.prompt"]={"value":{"key":"p","command":"demo.configure","label":"prompt agent","when":{"resource_kind":"agent"}}}
+        ext.entries["binding/agents.config"]={"value":{"key":"P","command":"demo.configure","label":"agent settings","when":{"resource_kind":"agent"}}}
         ext.entries["doc/settings/tui"]={"value":{"prefix":"C-g"}}
         module["refresh"]()
         rows=next(p["items"] for p in ext.published["settings"]["pages"] if p["title"]=="Keys")
         row=next(r for r in rows if r.get("text")=="Ctrl-g p")
         self.assertEqual(row["description"],"prompt agent (only where resource kind is agent)")
+        shift=next(r for r in rows if r.get("text")=="Ctrl-g P")
+        self.assertEqual(shift["description"],"agent settings (only where resource kind is agent)")
 
     def test_failed_budget_keeps_cause_time_total_and_explicit_restart(self):
         module=load();ext=module["ext"]

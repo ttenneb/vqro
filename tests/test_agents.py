@@ -279,6 +279,14 @@ class AgentsTests(unittest.TestCase):
             run({"resource": "r2", "name": "rm"})
         self.assertEqual(len(self.native()), 4, "undeclared requests send nothing")
 
+    def test_prefix_shift_p_opens_agent_settings_on_agent_panes(self):
+        binding = self.core.value("binding/agents.config")
+        self.assertEqual((binding["key"], binding["command"], binding["when"]), ("P", "agents.config", {"resource_kind": "agent"}))
+        self.declare_settings()
+        # What the client sends for the binding on an agent pane: the pane context.
+        popup = self.core.handlers["agents.config"]({"context": {"view": "agents-r2", "resource": "r2", "resource_kind": "agent"}})
+        self.assertEqual(popup["client"]["popup"]["view"], "agents-settings-r2")
+
     def test_agents_without_declarations_show_no_settings(self):
         self.core.add_agent()
         self.agents.event("resource", {"id": "r2"})

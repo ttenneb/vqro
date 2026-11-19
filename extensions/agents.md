@@ -13,6 +13,7 @@
   (model, thinking level, …) and command rows; `agents.configure {id, value, rev}` / `agents.command {name, text?}` send
   only declared values (a choice from an outdated popup is rejected as stale) and report the outcome honestly (`observed` vs not yet confirmed). Agents without
   declarations show nothing.
+- Prefix `P` (Shift-p) opens Agent settings for the agent in the focused pane (`binding/agents.config`, same `when`).
 - Prefix `p` prompts the agent in the focused pane (`binding/agents.prompt`, `when: {"resource_kind": "agent"}`): on any other pane the key does nothing and says so, before asking for text. A keymap profile's `p` still wins when selected.
 - Prompt-like actions use input. Answer opens a pending-request picker: confirm/select choices, input/editor text, explicit cancellation. Editor uses existing single-line input, not a new multiline editor.
 - Notifications preserve native outcomes: acceptance is not settlement; dispatched answers do not invent acknowledgement. Effects are never automatically replayed.

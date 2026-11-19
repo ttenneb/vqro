@@ -8,5 +8,5 @@
               "command/agents.answer","command/agents.stop","command/agents.forget","view/agents-*"],
   "needs":[{"cap":"ability/vqro.agents","suggest":"pi","why":"Agents come from a runtime integration such as the Pi launcher"},
            {"cap":"command/tabs.show","suggest":"tabs","why":"Agent panels open in a tab"}],
-  "contributes":{"commands":["agents.*: capability-driven controls"],"keys":["Prefix p: prompt the focused agent"],"menu_items":["Agents","Per-agent actions"],"panels":["Agent list","Agent details","Pending requests","Agent settings (declared model, thinking, commands)","Stop agent confirmation"]}
+  "contributes":{"commands":["agents.*: capability-driven controls"],"keys":["Prefix p: prompt the focused agent","Prefix P: agent settings for the focused agent"],"menu_items":["Agents","Per-agent actions"],"panels":["Agent list","Agent details","Pending requests","Agent settings (declared model, thinking, commands)","Stop agent confirmation"]}
 }

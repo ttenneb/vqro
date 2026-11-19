@@ -3559,6 +3559,15 @@ mod tests {
         app.entries.insert("extension/keys".into(), json!({"argv": ["x"]}));
         assert_eq!(on(&app, agent).as_deref(), Some("client.tab"));
         assert_eq!(on(&app, shell).as_deref(), Some("client.tab"));
+        // Shift-p is its own key: P opens Agent settings on agent panes while a profile owns p.
+        app.entries.insert("binding/agents.config".into(), json!({"key": "P", "command": "agents.config", "label": "agent settings", "when": {"resource_kind": "agent"}}));
+        app.commands.insert("agents.config".into(), json!({"name": "agents.config", "available": true}));
+        let shift_p = KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT);
+        assert_eq!(keys::name(&shift_p).as_deref(), Some("P"));
+        assert_eq!(app.binding_for("P", &app.ctx_leaf(agent)).map(|b| b["command"].clone()), Some(json!("agents.config")));
+        assert_eq!(app.binding_for("P", &app.ctx_leaf(shell)), None);
+        app.focus = agent;
+        assert!(app.prefix_items().iter().any(|r| r.binding["command"] == "agents.config" && r.key.as_deref() == Some("P")));
     }
 
     fn winner(cands: &[(String, Value)], key: &str) -> String {

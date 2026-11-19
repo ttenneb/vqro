@@ -79,7 +79,10 @@ class Agents:
                         # Prefix p: prompt the agent in the focused pane. `when` keeps it off other
                         # panes (the key falls through there), so no text is typed only to fail.
                         "binding/agents.prompt": {"key": "p", "command": "agents.prompt", "input": "Prompt agent",
-                                                  "label": "prompt agent", "when": {"resource_kind": "agent"}}}
+                                                  "label": "prompt agent", "when": {"resource_kind": "agent"}},
+                        # Prefix P (Shift-p): Agent settings for the agent in the focused pane.
+                        "binding/agents.config": {"key": "P", "command": "agents.config", "label": "agent settings",
+                                                  "when": {"resource_kind": "agent"}}}
         declarations.update(self.declarations())
         # Provider inventory may not be restored yet. Referenced panels must
         # remain valid across extension disable/re-enable and core restart.
