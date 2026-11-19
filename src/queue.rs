@@ -25,6 +25,11 @@ pub(crate) struct Charge {
     bytes: usize,
 }
 impl Charge {
+    pub(crate) fn reserve(budget:Arc<Semaphore>,cap:usize,bytes:usize)->Result<Self,QueueError> {
+        let wanted=bytes.max(MIN_CHARGE);if wanted>cap {return Err(QueueError::Oversized);}
+        let permit=budget.clone().try_acquire_many_owned(wanted as u32).map_err(|error|match error {tokio::sync::TryAcquireError::Closed=>QueueError::Closed,tokio::sync::TryAcquireError::NoPermits=>QueueError::Full})?;
+        Ok(Self {permit,budget,cap,bytes})
+    }
     /// Re-account expanded work before copying/dispatch. Never wait behind queued work that
     /// this consumer itself must drain: rejection is definite and leaves the old lease intact.
     pub(crate) fn try_resize(&mut self, bytes:usize)->Result<(),QueueError> {

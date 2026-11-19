@@ -110,6 +110,7 @@ pub struct Core {
     // Runtime mutations must go through the serialized, cancellation-independent committer.
     pub(crate) store: Store,
     pub(crate) committer: crate::commit::Committer,
+    pub(crate) operational:crate::operational::Registry,
     pub resources: BTreeMap<String, Resource>,
     identities: IdentityMap,
     admission: crate::resource_admission::Admission,
@@ -165,8 +166,10 @@ impl Core {
         for (name, title) in BUILTINS {
             commands.insert(name.to_string(), CommandInfo { name: name.to_string(), title: title.to_string(), owner: "core".into(), connection: None, available: true, peer: None, lifetime:None });
         }
+        let operational=crate::operational::Registry::open(state_dir.as_deref(),&store);
         Ok(Core {
             store,
+            operational,
             committer: crate::commit::Committer::new(),
             resources: BTreeMap::new(),
             identities,
@@ -213,7 +216,13 @@ impl Core {
         Ok(())
     }
 
-    /// Admitted workspace mutations, including the active writer (in-process harness metric).
+    /// Configure the operational writer before serving mutations (embedding/fault harness).
+    pub fn configure_operational_writer(&mut self,writer:crate::store::DurableWriter)->Result<(),RpcError> {
+        if self.committer.started() {return Err(RpcError::new("conflict","operational writer cannot change after admission"));}
+        self.operational.set_writer(writer);Ok(())
+    }
+
+    /// Admitted durable mutations across domains, including the active writer (harness metric).
     pub fn workspace_pending_commits(&self) -> usize { self.committer.pending() }
 
     /// Invalidate old sources immediately; stopping transport workers never kills backend terminals.
@@ -278,7 +287,7 @@ impl Core {
 
     pub fn capture_snapshot(&self)->CapturedSnapshot {
         CapturedSnapshot {
-            header:json!({"epoch":self.epoch,"seq":self.seq,"recovery_notice":self.store.recovery_notice(),
+            header:json!({"epoch":self.epoch,"seq":self.seq,"operational":self.operational.summaries(),"recovery_notice":self.store.recovery_notice(),
                 "commands":self.commands.values().map(|c|c.to_json()).collect::<Vec<_>>(),
                 "extensions":self.extension_states(),
                 "backend_notice":self.backend_notice(),"safe_mode":self.safe_mode,"safe_mode_allow":self.safe_mode_allow,"provider_extensions":self.provider_extensions}),
@@ -312,6 +321,19 @@ impl Core {
             Err(_) => {}
         }
         result
+    }
+
+    pub(crate) fn finish_operational(&mut self,domain:crate::operational::Domain,mut result:Result<Arc<crate::operational::Transaction>,RpcError>,registration:bool)->(crate::rpc::RpcResult,Option<crate::operational::Domain>) {
+        let adopted=result.is_ok()||result.as_ref().is_err_and(|error|error.kind()=="durability_unconfirmed");
+        if !adopted {return (result.map(|_|Value::Null),None);}
+        let transaction=domain.last.as_ref().expect("adopted operational audit").clone();
+        let changes=transaction.changes.iter().map(|change|json!({"key":change.key,"version":change.version,"value":domain.entries.get(&change.key).map(|entry|&entry.value)})).collect::<Vec<_>>();
+        self.emit("operational",json!({"domain":domain.name,"owner":domain.owner,"txn":transaction.id,"author":transaction.attribution.author,"on_behalf_of":transaction.attribution.on_behalf_of,"writer_epoch":transaction.attribution.epoch,"generation":transaction.attribution.generation,"operation":if registration {"register"}else{"apply"},"bytes":domain.max_bytes,"records_limit":domain.max_records,"capacity_request":domain.metadata()["capacity_request"],"undoable":false,"durability_unconfirmed":result.is_err(),"changes":changes}));
+        let mut metadata=domain.metadata();metadata["epoch"]=json!(self.epoch);metadata["seq"]=json!(self.seq);metadata["txn"]=json!(transaction.id);metadata["undoable"]=json!(false);
+        metadata["changes"]=json!(transaction.changes);
+        if let Err(error)=&mut result {let data=error.data.as_mut().unwrap();data["epoch"]=json!(self.epoch);data["seq"]=json!(self.seq);}
+        let retired=self.operational.adopt(domain);
+        (result.map(|_|metadata),retired)
     }
 
     pub fn txn_summary(txn: &Txn) -> Value {

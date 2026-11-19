@@ -57,6 +57,10 @@ pub struct Entry {
     pub value: Value,
     #[serde(skip)] depth_quarantined:bool,
 }
+impl Entry {
+    pub(crate) fn new(version:u64,value:Value)->Self {Self {version,value,depth_quarantined:false}}
+    pub(crate) fn quarantined(&self)->bool {self.depth_quarantined}
+}
 impl<'de> Deserialize<'de> for Entry {
     fn deserialize<D:serde::Deserializer<'de>>(deserializer:D)->Result<Self,D::Error> {
         #[derive(Deserialize)] struct Wire {version:u64,value:Box<serde_json::value::RawValue>}
@@ -290,6 +294,7 @@ impl Store {
     }
 
     pub(crate) fn release_state(&mut self) { self.lifetime=None; }
+    pub(crate) fn durable_context(&self)->(DurableWriter,Option<std::sync::Arc<std::fs::File>>) {(self.writer.clone(),self.lifetime.clone())}
 
     pub(crate) fn set_writer(&mut self, writer: DurableWriter) { self.writer = writer; }
 
@@ -361,6 +366,7 @@ impl Store {
             let (key, expect) = match &op {
                 Op::Set { key, expect, .. } | Op::Delete { key, expect } => (key.clone(), *expect),
             };
+            if crate::operational::protected_key(&key) {return Err(RpcError::new("forbidden","protected operational keys cannot be changed by workspace writes or reverts"));}
             let current = next.get(&key).map(|e| e.version).unwrap_or(0);
             if let Some(want) = expect {
                 if want != current {

@@ -119,9 +119,13 @@ extension changes are reconciled too. The file now names the candidate, but a cr
 state. **Do not automatically replay**: inspect snapshot/history using the transaction id instead. This exception
 reports uncertainty about crash durability, not partial application of operations.
 
-All running workspace mutations (including built-in undo/reset/extension changes) share one serialized
-committer. Its FIFO admission is bounded by **128 requests and 8 MiB encoded work**, including the active
-write; each request has a 256-byte metadata floor. Revert reserves its currently known serialized undo operations,
+All running durable mutations (including built-in undo/reset/extension changes and protected operational
+state) share one serialized committer. Its normal FIFO admission remains bounded by **128 requests and8MiB
+encoded work**, including the active write; each request has a256-byte metadata floor. Operational-normal
+work is additionally capped at80 requests/4MiB inside that lane, retaining workspace headroom. A separate
+**16-request/1MiB control lane** uses the same worker: at most four ready controls precede a ready normal
+request; control can overtake normal work, not an already dispatched filesystem call. Normal workspace FIFO
+and queue-head CAS remain intact. Operational control requests also have separate connection admission. Revert reserves its currently known serialized undo operations,
 not just its small request. At queue head the ordered target and expanded work are rechecked before copying undo
 values or dispatching a writer. If growth cannot be reserved immediately, it returns `overloaded` with
 `outcome: rejected` and no effect; it never waits for later queued work to release its budget. Full admission returns `overloaded` with `outcome: rejected`
@@ -134,6 +138,44 @@ starts. Pending candidates are not visible in snapshot/history. A cancelled rece
 does not cancel admitted work or its extension reconciliation: inspect state/history, never replay automatically.
 An unexpected writer-task failure returns `indeterminate` and stops further commits until restart; it is not a
 clean persistence failure or a promise that replacement did not happen. Unadmitted requests remain rejected.
+
+### Protected operational domains
+
+Generic non-undo state uses its own persisted file and the same durable writer/committer, not workspace history.
+No agent/inbox schema is interpreted by core. Only its current supervised owning extension may register/write;
+ordinary clients may read. Ownership comes from the existing verified extension lifetime, never a body label.
+The existing generation fence is checked at dispatch and irreversible writer admission. Already dispatched writes
+complete/adopt normally after owner retirement; they are not replayed. Reopening by a new generation of the same
+extension preserves state. A stale connection never revives when the author/name is reused.
+
+- `operational.register {name,bytes?,on_behalf_of?}`: one extension-chosen domain per owner; default2MiB/1024
+  records, minimum128KiB, maximum8MiB/4096 records (record cap scales proportionally). Sixteen domains and32MiB
+  total DECLARED capacity. Growth is atomic within those limits. Shrink retains the larger current capacity and
+  reports `capacity_request:{requested,applied,outcome:"shrink_refused"}`. Omitted bytes retains the declaration.
+  Register/reopen explicitly confirms the complete file and advances its revision; reads never trigger writes.
+- `operational.apply {domain,ops,control?:false,note?,on_behalf_of?}`: standard set/delete/CAS,1..64 distinct keys,
+  ≤256KiB request, depth64; full keys `operational/<domain>/<nonempty suffix>` (≤512 UTF-8 bytes). Mixed domains
+  or workspace keys reject whole. Normal growth cannot consume the last10% of bytes/records; control/recovery
+  may use it. A fixed64KiB header/audit reservation inside the budget prevents audit growth blocking deletion.
+  Record key+entry≤258048 bytes. Current immutable encoded records are cached; unchanged values are not re-encoded.
+- `operational.get {domain,key,revision?}` returns metadata/fence and entry (`{version,value}` or null).
+- `operational.list {domain,after?,limit?:64,revision?}` returns ≤64 `{key,entry}` items/256KiB and `next` cursor.
+  A changed requested revision returns conflict; discard partial pages. Without domain it returns a bounded catalogue.
+- `operational.snapshot {domain}` captures immutable entries/audit plus global epoch/seq and independent domain
+  revision under the core mutex, then materializes off-lock. Its reply is bounded by declared capacity + metadata.
+
+Replies identify domain/owner/revision, charged bytes/count, limits, global epoch/seq. Mutations return txn,
+undoable:false and changed key versions. Only `operational` events are published, never workspace entries/history;
+those events share global sequence/cursor recovery and contain the actual adopted transaction, attribution and
+changed values. `durability_unconfirmed` includes domain/txn/epoch/seq, adopts/publishes actual state and is never
+permission to invoke/replay an effect. Other clean failures adopt nothing. Domain audit retains only the last
+transaction metadata (no preimages/undo), including writer epoch and supervised generation.
+
+Ordinary apply, delete, explicit revert and import cannot change/resurrect operational keys, including legacy
+absent-version ABA; raw workspace `history:false` is forbidden. Domain registration/capacity is not ordinary
+undoable state. Corrupt/unknown authority files remain untouched and fail closed, while core read-only recovery
+and diagnostics remain available. No implicit migration/import from ordinary docs creates authority. No native
+effects, dispatch policy, grants, message scheduling or automatic retries are supplied by this mechanism.
 
 ### Undo horizon and history storage
 

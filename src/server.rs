@@ -22,6 +22,7 @@ pub use crate::adapter::Backend;
 pub const PROTOCOL: u64 = 1;
 /// Requested OS send buffer per client connection (see `serve`).
 pub const CONNECTION_SEND_BUFFER: usize = 16 * 1024;
+const MUTATION_SLOTS:usize=crate::rpc::MAX_PENDING_CALLS+crate::commit::CONTROL_REQUESTS;
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
 struct Conn {
@@ -34,6 +35,7 @@ struct Conn {
     next_stream: AtomicU64,
     subscribed: Mutex<bool>,
     requests: Arc<tokio::sync::Semaphore>,
+    control_requests:Arc<tokio::sync::Semaphore>,
     mutations:Arc<tokio::sync::Semaphore>,
     wire: crate::provider_wire::Connection,
 }
@@ -254,7 +256,7 @@ pub async fn serve(core: Shared, listener: UnixListener) -> anyhow::Result<()> {
         let id = next.fetch_add(1, Ordering::Relaxed);
         let (r, w) = stream.into_split();
         let (peer, incoming) = Peer::spawn_serving(r, w);
-        let mutations=Arc::new(tokio::sync::Semaphore::new(crate::rpc::MAX_PENDING_CALLS));
+        let mutations=Arc::new(tokio::sync::Semaphore::new(MUTATION_SLOTS));
         peers.insert(id,(peer.clone(),mutations.clone()));
         let conn = Arc::new(Conn {
             id,
@@ -267,6 +269,7 @@ pub async fn serve(core: Shared, listener: UnixListener) -> anyhow::Result<()> {
             next_stream: AtomicU64::new(1),
             subscribed: Mutex::new(false),
             requests: Arc::new(tokio::sync::Semaphore::new(crate::rpc::MAX_PENDING_CALLS)),
+            control_requests:Arc::new(tokio::sync::Semaphore::new(crate::commit::CONTROL_REQUESTS)),
             mutations,
         });
         let c = core.clone();
@@ -282,7 +285,7 @@ pub async fn serve(core: Shared, listener: UnixListener) -> anyhow::Result<()> {
     let replies=tokio::time::timeout(std::time::Duration::from_secs(1),async {
         let mut held=Vec::new();
         for (_,mutations) in peers.values() {
-            held.push(mutations.clone().acquire_many_owned(crate::rpc::MAX_PENDING_CALLS as u32).await.map_err(|_|())?);
+            held.push(mutations.clone().acquire_many_owned(MUTATION_SLOTS as u32).await.map_err(|_|())?);
         }
         Ok::<_,()>(held)
     }).await;
@@ -303,7 +306,7 @@ pub async fn serve(core: Shared, listener: UnixListener) -> anyhow::Result<()> {
     let socket = core.lock().unwrap().socket.clone();
     let _ = std::fs::remove_file(socket);
     drop(listener);
-    { let mut c=core.lock().unwrap();c.store.release_state();shutdown.finish(); }
+    { let mut c=core.lock().unwrap();c.operational.release_state();c.store.release_state();shutdown.finish(); }
     Ok(())
 }
 
@@ -347,7 +350,9 @@ async fn connection(core: Shared, conn: Arc<Conn>, mut incoming: crate::rpc::Inc
                 }
             }
             Incoming::Request { id, method, params } => {
-                let Ok(permit) = conn.requests.clone().try_acquire_owned() else {
+                let control=method=="operational.register"||(method=="operational.apply"&&params["control"]==true)||method=="core.shutdown"||(method=="command.invoke"&&matches!(params["name"].as_str(),Some("vqro.shutdown"|"vqro.safe_mode"|"vqro.layout.reset"|"vqro.revert")));
+                let requests=if control {conn.control_requests.clone()}else{conn.requests.clone()};
+                let Ok(permit) = requests.try_acquire_owned() else {
                     conn.peer.respond(id, Err(provider::rejected("overloaded", "connection request limit; not dispatched")));
                     continue;
                 };
@@ -355,7 +360,7 @@ async fn connection(core: Shared, conn: Arc<Conn>, mut incoming: crate::rpc::Inc
                 tasks.spawn(async move {
                     let _permit = permit;
                     let stopping = method == "core.shutdown" || (method == "command.invoke" && params["name"] == "vqro.shutdown");
-                    let mutation=matches!(method.as_str(),"workspace.apply"|"workspace.revert") || (method=="command.invoke" && matches!(params["name"].as_str(),Some("vqro.revert"|"vqro.layout.reset"|"vqro.extension.enable"|"vqro.extension.disable")));
+                    let mutation=matches!(method.as_str(),"workspace.apply"|"workspace.revert"|"operational.register"|"operational.apply") || (method=="command.invoke" && matches!(params["name"].as_str(),Some("vqro.revert"|"vqro.layout.reset"|"vqro.extension.enable"|"vqro.extension.disable")));
                     let _mutation=if mutation {
                         if core.lock().unwrap().shutdown.is_requested() { conn.peer.respond(id,Err(provider::rejected("unavailable","core shutting down; commit not admitted"))); return; }
                         match conn.mutations.clone().try_acquire_owned() { Ok(permit)=>Some(permit),Err(_)=>{conn.peer.respond(id,Err(provider::rejected("unavailable","core shutting down; commit not admitted")));return;} }
@@ -418,6 +423,7 @@ struct Hello {
 
 #[derive(Deserialize)]
 struct Apply {
+    #[serde(default)] history:Option<bool>,
     ops: Vec<Op>,
     note: Option<String>,
     on_behalf_of: Option<String>,
@@ -563,8 +569,10 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> Rp
             let entry = { core.lock().unwrap().store.entries().get(&query.key).cloned() };
             Ok(json!(entry))
         }
+        "operational.register" | "operational.get" | "operational.list" | "operational.snapshot" | "operational.apply" => operational(core,conn,&caller,method,p).await,
         "workspace.apply" => {
             let a: Apply = params(p)?;
+            if a.history==Some(false) {return Err(provider::rejected("forbidden","history:false is not a raw workspace bypass; use the owning protected operational domain"));}
             let context = attribution(core, conn, a.on_behalf_of)?;
             apply(core, &caller, context.origin, a.note, a.ops).await
         }
@@ -1017,6 +1025,66 @@ async fn revert(core: &Shared, author: &Caller, on_behalf_of: Option<Arc<str>>, 
         let touched_ext = c.store.transaction(id).is_some_and(|t| t.changes.iter().any(|ch| ch.key.starts_with("extension/")));
         Ok(crate::commit::Plan { owner, action:crate::commit::Action::Revert { author, on_behalf_of, txn:id }, after_adopt:if touched_ext { Some(ext::reconcile) } else { None } })
     }).await
+}
+
+#[derive(Deserialize)]
+struct OperationalRegister {name:String,bytes:Option<usize>,on_behalf_of:Option<String>}
+#[derive(Deserialize)]
+struct OperationalApply {domain:String,ops:Vec<Op>,note:Option<String>,on_behalf_of:Option<String>,#[serde(default)] control:bool}
+#[derive(Deserialize)]
+struct OperationalQuery {domain:Option<String>,key:Option<String>,after:Option<String>,limit:Option<usize>,revision:Option<u64>}
+
+async fn operational(core:&Shared,conn:&Arc<Conn>,caller:&Caller,method:&str,p:Value)->RpcResult {
+    use crate::operational as op;
+    if matches!(method,"operational.register"|"operational.apply") {
+        if crate::limits::encoded_bytes(&p)>op::PAGE_BYTES {return Err(crate::limits::too_large("operational request",crate::limits::encoded_bytes(&p),op::PAGE_BYTES));}
+        let owner=caller.owner.clone().ok_or_else(||provider::rejected("forbidden","operational writes require a current supervised extension owner"))?;
+        let(name,ops,note,proof,control,declared_bytes)=if method=="operational.register" {
+            let r:OperationalRegister=params(p)?;(r.name,None,None,r.on_behalf_of,true,r.bytes)
+        } else {let r:OperationalApply=params(p)?;(r.domain,Some(r.ops),r.note,r.on_behalf_of,r.control,None)};
+        let context=attribution(core,conn,proof)?;
+        let author=caller.author.clone();let origin=context.origin;
+        let bytes=crate::limits::encoded_bytes(&ops).saturating_add(crate::limits::encoded_bytes(&(&author,&origin,&note,&name)));
+        let prepare=move|c:&Core| {
+            if ops.is_some() {c.operational.get(&name)?;}
+            let domain=c.operational.prepare(&name,&owner.name,declared_bytes)?;
+            Ok(crate::commit::Plan {owner:Some(owner),action:crate::commit::Action::Operational {domain:Box::new(domain),author,on_behalf_of:origin,note,ops,control},after_adopt:None})
+        };
+        return crate::commit::submit_operational(core,bytes,control,prepare).await;
+    }
+    let q:OperationalQuery=params(p)?;
+    if q.domain.as_ref().is_some_and(|name|!op::valid_name(name))||q.key.as_ref().is_some_and(|key|key.len()>512)||q.after.as_ref().is_some_and(|key|key.len()>512) {return Err(RpcError::invalid("operational read name/key/cursor exceeds its bound"));}
+    let(mut metadata,entries,last,slots)={
+    let c=core.lock().unwrap();
+    if method=="operational.list"&&q.domain.is_none() {let mut reply=c.operational.summaries();reply["epoch"]=json!(c.epoch);reply["seq"]=json!(c.seq);return Ok(reply);}
+    let name=q.domain.ok_or_else(||RpcError::invalid("needs domain"))?;let domain=c.operational.get(&name)?;
+    if q.revision.is_some_and(|revision|revision!=domain.revision) {return Err(provider::rejected("conflict","operational read fence changed; discard partial pages"));}
+    let mut metadata=domain.metadata();metadata["epoch"]=json!(c.epoch);metadata["seq"]=json!(c.seq);
+    if method=="operational.get" {
+        let key=q.key.ok_or_else(||RpcError::invalid("needs key"))?;
+        if !key.starts_with(&op::prefix(&name)) {return Err(provider::rejected("forbidden","key is outside the operational domain"));}
+        let entry=domain.entries.get(&key).cloned();drop(c);metadata["key"]=json!(key);metadata["entry"]=json!(entry);return Ok(metadata);
+    }
+    (metadata,domain.entries.clone(),domain.last.clone(),c.snapshot_slots.clone())
+    };
+    let slot=tokio::time::timeout(std::time::Duration::from_millis(250),slots.acquire_owned()).await.map_err(|_|provider::rejected("overloaded","operational snapshot construction busy"))?.map_err(|_|provider::rejected("unavailable","snapshot construction stopped"))?;
+    let snapshot=method=="operational.snapshot";
+    tokio::task::spawn_blocking(move|| {
+        let _slot=slot;
+        if snapshot {metadata["entries"]=json!(entries);metadata["last"]=json!(last);return Ok(metadata);}
+        let limit=q.limit.unwrap_or(op::PAGE_ITEMS);
+        if limit==0||limit>op::PAGE_ITEMS {return Err(RpcError::invalid("operational page limit is1..64"));}
+        let mut page=Vec::new();let mut bytes=0usize;let mut more=false;let after=q.after.unwrap_or_default();
+        for(key,entry)in entries.range(after.clone()..) {
+            if key<=&after {continue;}
+            let size=crate::limits::encoded_bytes(&(key,entry));
+            if page.len()>=limit||bytes+size>op::PAGE_BYTES-4096 {more=true;break;}
+            bytes+=size;page.push((key.clone(),entry.clone()));
+        }
+        metadata["next"]=if more {page.last().map(|(key,_)|json!(key)).unwrap_or(Value::Null)}else{Value::Null};metadata["entries"]=json!(page.into_iter().map(|(key,entry)|json!({"key":key,"entry":entry})).collect::<Vec<_>>());
+        if crate::limits::encoded_bytes(&metadata)>op::PAGE_BYTES {return Err(provider::rejected("too_large","operational page exceeds its bounded reply"));}
+        Ok(metadata)
+    }).await.map_err(|_|provider::rejected("unavailable","operational snapshot construction failed"))?
 }
 
 async fn apply_prepared(
