@@ -6,12 +6,20 @@ use tokio::process::{Child, Command};
 use vqro::rpc::{Incoming, IncomingReceiver, Peer};
 
 async fn fixture(hold: bool) -> (tempfile::TempDir, Child, Peer, IncomingReceiver) {
+    fixture_delay(hold, 0).await
+}
+
+async fn fixture_delay(
+    hold: bool,
+    delay_ms: u64,
+) -> (tempfile::TempDir, Child, Peer, IncomingReceiver) {
     let root = tempfile::tempdir().unwrap();
     let mut child = Command::new("python3")
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("HOME", root.path())
         .env("CODEX_FAKE_HOLD", if hold { "1" } else { "0" })
+        .env("CODEX_FAKE_REPLY_DELAY_MS", delay_ms.to_string())
         .env("AGENT_CONFORMANCE_LEDGER", root.path().join("ledger.jsonl"))
         .arg(format!(
             "{}/tests/fixtures/fake_codex.py",
@@ -126,4 +134,208 @@ async fn lost_native_reply_is_one_write_and_control_remains_available() {
         1
     );
     cleanup(child, peer).await;
+}
+
+fn deadline() -> tokio::time::Instant {
+    tokio::time::Instant::now() + Duration::from_secs(2)
+}
+
+async fn open_runtime(
+    peer: Peer,
+    mut incoming: IncomingReceiver,
+    slots: usize,
+) -> (
+    std::sync::Arc<vqro::codex::runtime::Runtime>,
+    tokio::task::JoinHandle<()>,
+) {
+    let runtime = vqro::codex::runtime::Runtime::new(peer, slots, "inc".into(), None);
+    let reader = runtime.clone();
+    let drain = tokio::spawn(async move {
+        while let Some(message) = incoming.recv().await {
+            reader.incoming(message);
+        }
+    });
+    (runtime, drain)
+}
+
+#[tokio::test]
+async fn runtime_slots_share_host_and_switch_sessions_without_changing_ref() {
+    use vqro::provider_client::Outcome;
+    let (_root, child, peer, incoming) = fixture(false).await;
+    let (runtime, drain) = open_runtime(peer.clone(), incoming, 3).await;
+    for i in 1..=3 {
+        let outcome = runtime
+            .invoke(
+                &format!("endpoint-{i}"),
+                "inc",
+                "agent.session",
+                json!({"v":0,"action":"new"}),
+                deadline(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(outcome, Outcome::Observed(_)));
+    }
+    let before = runtime.facts();
+    assert_ne!(
+        before[0]["data"]["agent"]["session"],
+        before[1]["data"]["agent"]["session"]
+    );
+    assert_eq!(
+        before[0]["data"]["agent"]["host"],
+        before[2]["data"]["agent"]["host"]
+    );
+    runtime
+        .invoke(
+            "endpoint-1",
+            "inc",
+            "agent.session",
+            json!({"v":0,"action":"new"}),
+            deadline(),
+        )
+        .await
+        .unwrap();
+    let after = runtime.facts();
+    assert_eq!(before[0]["ref"], after[0]["ref"]);
+    assert_ne!(
+        before[0]["data"]["agent"]["session"],
+        after[0]["data"]["agent"]["session"]
+    );
+    assert_ne!(
+        before[0]["data"]["agent"]["epoch"],
+        after[0]["data"]["agent"]["epoch"]
+    );
+    cleanup(child, peer).await;
+    drain.await.unwrap();
+}
+
+#[tokio::test]
+async fn provider_deadline_dispatches_once_then_native_receipt_arrives_later() {
+    use vqro::provider_client::Outcome;
+    let (root, child, peer, incoming) = fixture_delay(false, 200).await;
+    let (runtime, drain) = open_runtime(peer.clone(), incoming, 1).await;
+    runtime
+        .invoke(
+            "endpoint-1",
+            "inc",
+            "agent.session",
+            json!({"v":0,"action":"new"}),
+            deadline(),
+        )
+        .await
+        .unwrap();
+    let args = json!({"v":0,"mode":"admit","delivery":"delivery-1","content":[{"type":"text","text":"hello"}],"origin":{"principal":"p:test","actor":"actor:test","kind":"tool"}});
+    let result = runtime
+        .invoke(
+            "endpoint-1",
+            "inc",
+            "agent.send",
+            args.clone(),
+            tokio::time::Instant::now() + Duration::from_millis(50),
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(result,Outcome::Dispatched(Some(ref data)) if data["receipt"]["delivery"]=="delivery-1")
+    );
+    let mut second_args = args.clone();
+    second_args["delivery"] = json!("delivery-2");
+    let second = runtime
+        .invoke("endpoint-1", "inc", "agent.send", second_args, deadline())
+        .await
+        .unwrap();
+    assert!(matches!(second,Outcome::Rejected{ref kind,..} if kind=="overloaded"));
+    let mut changed = runtime.changes();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let receipt = runtime
+                .invoke(
+                    "endpoint-1",
+                    "inc",
+                    "agent.receipt",
+                    json!({"v":0,"delivery":"delivery-1"}),
+                    deadline(),
+                )
+                .await
+                .unwrap();
+            if matches!(receipt,Outcome::Observed(Some(ref r)) if r["stage"]=="admitted") {
+                break;
+            }
+            changed.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    let ledger = std::fs::read_to_string(root.path().join("ledger.jsonl")).unwrap();
+    assert_eq!(
+        ledger
+            .lines()
+            .filter(|line| serde_json::from_str::<Value>(line).unwrap()["method"] == "turn/start")
+            .count(),
+        1
+    );
+    cleanup(child, peer).await;
+    drain.await.unwrap();
+}
+
+#[tokio::test]
+async fn two_concurrent_valid_answers_write_exactly_one_native_response() {
+    use vqro::provider_client::Outcome;
+    let (root, child, peer, incoming) = fixture(false).await;
+    let (runtime, drain) = open_runtime(peer.clone(), incoming, 1).await;
+    runtime
+        .invoke(
+            "endpoint-1",
+            "inc",
+            "agent.session",
+            json!({"v":0,"action":"new"}),
+            deadline(),
+        )
+        .await
+        .unwrap();
+    let session = runtime.facts()[0]["data"]["agent"]["session"]["id"].clone();
+    runtime.incoming(Incoming::Request{id:json!(700),method:"item/commandExecution/requestApproval".into(),params:json!({"threadId":session,"turnId":"turn-question","itemId":"tool-question","command":"printf ok"})});
+    let facts = runtime.facts();
+    let agent = &facts[0]["data"]["agent"];
+    let args = json!({"v":0,"epoch":agent["epoch"],"request":agent["requests"][0]["request"],"revision":1,"response":{"choice":"accept"}});
+    let (a, b) = tokio::join!(
+        runtime.invoke(
+            "endpoint-1",
+            "inc",
+            "agent.respond",
+            args.clone(),
+            deadline()
+        ),
+        runtime.invoke("endpoint-1", "inc", "agent.respond", args, deadline())
+    );
+    let outcomes = [a.unwrap(), b.unwrap()];
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|o| matches!(o, Outcome::Dispatched(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|o| matches!(o,Outcome::Rejected{kind,..} if kind=="stale"))
+            .count(),
+        1
+    );
+    // A following native RPC response is a barrier after the flushed answer, not an answer ACK.
+    peer.call("thread/list", json!({"limit":64})).await.unwrap();
+    let ledger = std::fs::read_to_string(root.path().join("ledger.jsonl")).unwrap();
+    assert_eq!(
+        ledger
+            .lines()
+            .filter(|l| {
+                let v: Value = serde_json::from_str(l).unwrap();
+                v["id"] == 700 && v.get("method").is_none()
+            })
+            .count(),
+        1
+    );
+    cleanup(child, peer).await;
+    drain.await.unwrap();
 }

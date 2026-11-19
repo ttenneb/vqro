@@ -5,6 +5,7 @@ AGENT_CONFORMANCE_LEDGER: private JSONL ledger path.
 CODEX_FAKE_REPLY_DELAY_MS / CODEX_FAKE_HOLD: bounded admission-race fixtures.
 The wire contains only native methods; there are no production test-effect operations.
 """
+import argparse
 import json
 import os
 import sys
@@ -15,7 +16,13 @@ lock = threading.Lock()
 threads = {}
 turns = {}
 sequence = 0
-ledger = os.environ.get("AGENT_CONFORMANCE_LEDGER")
+parser = argparse.ArgumentParser()
+parser.add_argument("--ledger", default=os.environ.get("AGENT_CONFORMANCE_LEDGER"))
+parser.add_argument("--reply-delay-ms", type=int, default=int(os.environ.get("CODEX_FAKE_REPLY_DELAY_MS", "0")))
+parser.add_argument("--hold", action="store_true", default=os.environ.get("CODEX_FAKE_HOLD") == "1")
+parser.add_argument("--exit-after-init", action="store_true")
+args = parser.parse_args()
+ledger = args.ledger
 
 
 def write(message):
@@ -71,6 +78,8 @@ def handle(request):
     record(request)
     if method == "initialize":
         reply(request, {"userAgent": "fake-codex/fixture-1", "platformFamily": "test", "platformOs": "test"})
+        if args.exit_after_init:
+            sys.exit(0)
     elif method == "thread/start":
         sequence += 1
         thread_id = "thread-" + str(sequence)
@@ -101,9 +110,9 @@ def handle(request):
             threads[thread_id]["status"] = {"type": "active", "activeFlags": []}
             event("turn/started", {"threadId": thread_id, "turn": {"id": turns[thread_id], "status": "inProgress"}})
         turn_id = turns[thread_id]
-        if os.environ.get("CODEX_FAKE_HOLD") == "1":
+        if args.hold:
             return
-        delay = min(float(os.environ.get("CODEX_FAKE_REPLY_DELAY_MS", "0")) / 1000, 2)
+        delay = min(max(args.reply_delay_ms, 0) / 1000, 2)
         time.sleep(delay)
         result = {"turnId": turn_id} if method == "turn/steer" else {"turn": {"id": turn_id, "status": "inProgress", "items": []}}
         reply(request, result)

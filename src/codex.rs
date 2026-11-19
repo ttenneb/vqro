@@ -2,6 +2,8 @@
 //!
 //! Protocol evidence/declarations: docs/research/codex-adapter.md. The native JSONL transport is
 //! the existing bounded `rpc::Peer`; this module only validates and reduces native observations.
+pub mod runtime;
+
 use crate::rpc::{RpcError, RpcResult};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, VecDeque};
@@ -85,6 +87,8 @@ pub struct Endpoint {
     pub reference: String,
     pub incarnation: String,
     pub host: String,
+    pub host_provider: String,
+    pub host_instance: String,
     pub epoch: String,
     pub session: Option<String>,
     pub title: Option<String>,
@@ -102,7 +106,10 @@ pub struct Endpoint {
 
 impl Endpoint {
     pub fn new(reference: String, incarnation: String, host: String, epoch: String) -> Self {
+        let host_instance = incarnation.clone();
         Self {
+            host_provider: "codex".into(),
+            host_instance,
             reference,
             incarnation,
             host,
@@ -150,7 +157,8 @@ impl Endpoint {
             "state":if self.lifecycle == "ended" {"finished"} else {"live"},
             "name":self.reference,"title":self.title,"cwd":self.cwd,"status":{"state":status,"app":"codex"},
             "data":{"agent":{"v":0,"state":self.state,"run":self.run,"lifecycle":self.lifecycle,
-                "host":{"id":self.host,"kind":"app_server","owns_lifecycle":true},
+                "host":{"id":self.host,"provider":self.host_provider,"instance":self.host_instance,
+                    "incarnation":self.incarnation,"kind":"server","owns_lifecycle":true},
                 "completion":self.completion,"session":self.session.as_ref().map(|id| json!({"id":id,"title":self.title})),
                 "epoch":self.epoch,"caps":caps,"queue":null,"requests":requests,"background":null,
                 "config":[],"commands":[],"usage":null,"incomplete":[],
@@ -195,9 +203,25 @@ impl Endpoint {
                 }
             }
         }
-        for field in ["cause", "correlation"] {
-            if args.get(field).is_some_and(|v| !small(v, 512)) {
-                return Err(rejected("invalid", "causality metadata exceeds 512 bytes"));
+        optional_id(args, "correlation")?;
+        if let Some(cause) = args.get("cause").filter(|v| !v.is_null()) {
+            if !cause.is_object() || !small(cause, 1024) {
+                return Err(rejected("invalid", "cause must be a bounded object"));
+            }
+            let kind = id(cause, "kind")?;
+            id(cause, "id")?;
+            if cause["provenance"] != "asserted" {
+                return Err(rejected(
+                    "unsupported",
+                    "caller causality must remain asserted; native evidence is not inferred",
+                ));
+            }
+            if matches!(kind.as_str(), "entity" | "request") {
+                id(cause, "endpoint")?;
+                id(cause, "epoch")?;
+            }
+            if kind == "effect" {
+                id(cause, "boot")?;
             }
         }
         Ok(())
@@ -229,7 +253,11 @@ impl Endpoint {
             .as_ref()
             .ok_or_else(|| rejected("invalid", "create or resume a session first"))?;
         let principal = id(&args["origin"], "principal")?;
-        if principal.chars().any(char::is_control) {
+        let actor = id(&args["origin"], "actor")?;
+        if !small(&args["origin"], 1024) {
+            return Err(rejected("invalid", "origin exceeds 1024-byte bound"));
+        }
+        if principal.chars().any(char::is_control) || actor.chars().any(char::is_control) {
             return Err(rejected(
                 "invalid",
                 "origin principal contains control characters",
@@ -240,6 +268,37 @@ impl Endpoint {
             return Err(rejected("unsupported", "unknown origin rendering"));
         }
         optional_id(&args["origin"], "agent")?;
+        if let Some(render) = args.get("render").filter(|v| !v.is_null()) {
+            let render = render
+                .as_array()
+                .filter(|a| !a.is_empty() && a.len() <= 16)
+                .ok_or_else(|| rejected("invalid", "render must be a bounded nonempty array"))?;
+            if render.iter().any(|v| v.as_str().is_none()) {
+                return Err(rejected("invalid", "render entries must be names"));
+            }
+            if !render.iter().any(|v| v == "attributed_user") {
+                return Err(rejected(
+                    "unsupported",
+                    "no permitted rendering matches the declared attributed-user role",
+                ));
+            }
+        }
+        let quoted = args.get("quoted").filter(|v| !v.is_null());
+        if let Some(quoted) = quoted {
+            if !quoted.is_object()
+                || !small(quoted, 1024)
+                || quoted["label"]
+                    .as_str()
+                    .is_none_or(|s| s.is_empty() || s.len() > 512)
+            {
+                return Err(rejected(
+                    "invalid",
+                    "quoted provenance requires a bounded label",
+                ));
+            }
+            optional_id(quoted, "principal")?;
+            optional_id(quoted, "kind")?;
+        }
         let content = args["content"]
             .as_array()
             .filter(|c| !c.is_empty())
@@ -254,6 +313,9 @@ impl Endpoint {
         let mut input = vec![
             json!({"type":"text","text":format!("[vqro sender: {}]",args["origin"]),"text_elements":[]}),
         ];
+        if let Some(quoted) = quoted {
+            input.push(json!({"type":"text","text":format!("[vqro forwarded-author claim, not the sender: {quoted}]"),"text_elements":[]}));
+        }
         for block in content {
             if block["type"] != "text" {
                 return Err(rejected("unsupported", "only text content is declared"));
@@ -342,6 +404,12 @@ impl Endpoint {
 
     /// Apply a successful metadata/session response before publishing the provider result.
     pub fn set_session(&mut self, thread: &Value, epoch: String) -> Result<Vec<Change>, RpcError> {
+        if self.lifecycle == "ended" {
+            return Err(rejected(
+                "stale",
+                "a late native reply cannot revive an ended endpoint",
+            ));
+        }
         let session = id(thread, "id")?;
         self.session = Some(session);
         self.epoch = epoch;
@@ -437,22 +505,18 @@ impl Endpoint {
                     return Vec::new();
                 };
                 // A late old-turn completion must not mark a newer turn idle.
-                let reason = match turn["status"].as_str() {
-                    Some("completed") => "end_turn",
-                    Some("interrupted") => "cancelled",
-                    Some("failed") => "error",
-                    _ => "unknown",
+                let (reason, known) = match turn["status"].as_str() {
+                    Some("completed") => ("end_turn", true),
+                    Some("interrupted") => ("cancelled", true),
+                    Some("failed") => ("error", true),
+                    Some(other) => (other, false),
+                    None => ("unknown", false),
                 };
                 let completion =
                     json!({"id":run,"reason":reason,"error":bounded_error(&turn["error"])});
                 if self.run.as_deref() == Some(run) {
                     self.run = None;
-                    self.state = if reason == "unknown" {
-                        "unknown"
-                    } else {
-                        "idle"
-                    }
-                    .into();
+                    self.state = if !known { "unknown" } else { "idle" }.into();
                     self.completion = Some(completion);
                 }
                 vec![self.state_entity()]

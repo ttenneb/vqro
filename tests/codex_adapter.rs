@@ -17,7 +17,7 @@ fn endpoint() -> Endpoint {
     e
 }
 fn send() -> Value {
-    json!({"v":0,"mode":"admit","delivery":"d1","content":[{"type":"text","text":"/not-a-command\n\u{1b}[31m literal"}],"origin":{"principal":"p:worker","kind":"agent","agent":"r7"}})
+    json!({"v":0,"mode":"admit","delivery":"d1","content":[{"type":"text","text":"/not-a-command\n\u{1b}[31m literal"}],"origin":{"principal":"p:worker","actor":"actor:worker","kind":"agent","agent":"r7"}})
 }
 fn active(e: &mut Endpoint, run: &str) {
     e.notification(
