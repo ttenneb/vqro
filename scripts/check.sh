@@ -163,7 +163,7 @@ step cargo-test "${CARGO[@]}" cargo test
 step python-unittest "${CLEAN[@]}" python3 -m unittest discover -s tests -p 'test_*.py'
 if [ "$MODE" = full ]; then
   "${CARGO[@]}" cargo build --bins >/dev/null 2>&1
-  for suite in tmux tmux_timeout tmux_provider herdr_provider provider_wire provider_errors undo_attribution core_storm fd_lifecycle accept_limits; do
+  for suite in tmux tmux_timeout tmux_provider herdr_provider provider_wire provider_errors undo_attribution core_storm fd_lifecycle accept_limits operational_crash; do
     step "opt-in:$suite" opt_in "$suite"
   done
   step history-budget history_budget

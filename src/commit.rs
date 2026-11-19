@@ -263,6 +263,38 @@ mod tests {
         let c=core.lock().unwrap();let mut authors=c.store.history(20).iter().map(|txn|txn.author.clone()).collect::<Vec<_>>();authors.reverse();
         assert_eq!(authors,["c0","c1","c2","c3","n0","c4","c5","c6","c7","n1"]);
     }
+    #[tokio::test]
+    async fn operational_owner_retires_at_the_existing_writer_dispatch_linearization() {
+        for dispatched in [false,true] {
+            let root=Arc::new(tempfile::tempdir().unwrap());let token_path=root.path().join("owner.token");
+            let mut store=crate::store::Store::open_locked(root.path().join("workspace.json")).unwrap();
+            store.apply("fixture",None,vec![Op::Set {key:"extension/owner".into(),value:serde_json::json!({"enabled":true,"argv":["/usr/bin/python3",std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/managed_identity.py"),token_path]}),expect:None}]).unwrap();
+            let core=Arc::new(Mutex::new(Core::new(store,Some(root.path().into()),root.path().join("p"),false).unwrap()));
+            let gate=Arc::new((Mutex::new(false),std::sync::Condvar::new()));
+            struct Release(Arc<(Mutex<bool>,std::sync::Condvar)>);impl Drop for Release{fn drop(&mut self){*self.0.0.lock().unwrap()=true;self.0.1.notify_all();}}
+            let _release=Release(gate.clone());let entered=Arc::new(tokio::sync::Notify::new());
+            let writer:crate::store::DurableWriter=Arc::new({let gate=gate.clone();let entered=entered.clone();let root=root.clone();move|path,bytes| {
+                let _keep=&root;let value:serde_json::Value=serde_json::from_slice(bytes).unwrap();
+                let block=if dispatched {value["last"]["note"]=="claim"}else{value["entries"].get("doc/block").is_some()};
+                if block {entered.notify_one();let mut open=gate.0.lock().unwrap();while !*open {open=gate.1.wait(open).unwrap();}}
+                crate::store::write_atomic(path,bytes)
+            }});
+            if dispatched {core.lock().unwrap().configure_operational_writer(writer).unwrap();}else{core.lock().unwrap().configure_workspace_writer(writer).unwrap();}
+            core.lock().unwrap().manifest_catalog.root=root.path().join("empty");crate::ext::reconcile(&core);
+            let until=std::time::Instant::now()+std::time::Duration::from_secs(5);
+            let owner=loop {if let Ok(token)=std::fs::read_to_string(&token_path) {if let Some(owner)=crate::ext::authenticate(&core.lock().unwrap(),"owner",&token){break owner;}}assert!(std::time::Instant::now()<until);tokio::time::sleep(std::time::Duration::from_millis(5)).await;};
+            let registration_owner=owner.clone();submit_operational(&core,256,true,move|c|Ok(Plan {owner:Some(registration_owner.clone()),action:Action::Operational {domain:Box::new(c.operational.prepare("state",&registration_owner.name,None)?),author:"ext:owner".into(),on_behalf_of:None,note:None,ops:None,control:true},after_adopt:None})).await.unwrap();
+            let blocker=if !dispatched {let c=core.lock().unwrap();Some(c.committer.enqueue(&core,512,Box::new(|_|Ok(Plan {owner:None,action:Action::Apply {author:"fixture".into(),on_behalf_of:None,note:None,ops:vec![Op::Set {key:"doc/block".into(),value:serde_json::json!(1),expect:None}]},after_adopt:None}))).unwrap())}else{None};
+            if !dispatched {tokio::time::timeout(std::time::Duration::from_secs(2),entered.notified()).await.unwrap();}
+            let c=core.clone();let owner2=owner.clone();let request=tokio::spawn(async move {submit_operational(&c,512,true,move|c|Ok(Plan {owner:Some(owner2.clone()),action:Action::Operational {domain:Box::new(c.operational.prepare("state",&owner2.name,None)?),author:"ext:owner".into(),on_behalf_of:None,note:Some("claim".into()),ops:Some(vec![Op::Set {key:"operational/state/a".into(),value:serde_json::json!({"phase":"claimed"}),expect:Some(0)}]),control:true},after_adopt:None})).await});
+            if dispatched {tokio::time::timeout(std::time::Duration::from_secs(2),entered.notified()).await.unwrap();}else{let until=std::time::Instant::now()+std::time::Duration::from_secs(2);while core.lock().unwrap().committer.pending()<2 {assert!(std::time::Instant::now()<until,"operational request not queued");tokio::task::yield_now().await;}}
+            crate::ext::stop_all(&core);assert!(!owner.is_live());*gate.0.lock().unwrap()=true;gate.1.notify_all();
+            if let Some(blocker)=blocker {blocker.await.unwrap().unwrap();}
+            let result=request.await.unwrap();if dispatched {result.unwrap();}else{assert_eq!(result.unwrap_err().kind(),"stale_generation");}
+            assert_eq!(core.lock().unwrap().operational.get("state").unwrap().entries.contains_key("operational/state/a"),dispatched);
+            crate::ext::shutdown(&core).await;
+        }
+    }
     #[test]
     fn cancelled_receipts_and_dequeued_work_keep_the_byte_budget_until_completion() {
         let core = core(); let c = core.lock().unwrap();
