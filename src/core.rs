@@ -267,7 +267,7 @@ impl Core {
         CapturedSnapshot {
             header:json!({"epoch":self.epoch,"seq":self.seq,"recovery_notice":self.store.recovery_notice(),
                 "commands":self.commands.values().map(|c|c.to_json()).collect::<Vec<_>>(),
-                "extensions":self.exts.keys().map(|n|(n.clone(),self.extension_state(n))).collect::<BTreeMap<_,_>>(),
+                "extensions":self.extension_states(),
                 "backend_notice":self.backend_notice(),"safe_mode":self.safe_mode,"safe_mode_allow":self.safe_mode_allow,"provider_extensions":self.provider_extensions}),
             entries:self.store.shared_entries(),resources:self.resources.values().cloned().collect(),
             providers:self.providers.keys().map(|n|(n.clone(),self.adapter_state.get(n).cloned().unwrap_or_else(||Arc::new(self.provider_json(n))))).collect(),
@@ -325,6 +325,16 @@ impl Core {
         route.resource = Some(resource.life.subscribe());
         route.target = Some((resource.facts.backend_ref.clone(), resource.facts.incarnation.clone()));
         Ok(route)
+    }
+
+    /// Every declaration's facts plus its resolved `dependencies` (reported, never acted on).
+    pub fn extension_states(&self)->BTreeMap<String,Value> {
+        let mut states:BTreeMap<String,Value>=self.exts.keys().map(|n|(n.clone(),self.extension_state(n))).collect();
+        let status=states.iter().map(|(n,v)|(n.clone(),v["display_status"].as_str().unwrap_or("").to_string())).collect();
+        let clients:Vec<Value>=self.clients.values().cloned().collect();
+        let mut deps=self.manifest_catalog.dependencies(&status,&clients);
+        for (name,state) in states.iter_mut() {state["dependencies"]=deps.remove(name).unwrap_or(Value::Null);}
+        states
     }
 
     pub fn extension_state(&self,name:&str)->Value {

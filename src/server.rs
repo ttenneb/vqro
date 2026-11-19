@@ -402,6 +402,9 @@ struct Hello {
     version: Option<String>,
     /// Build identity (e.g. the binary's modification time), to spot out-of-date clients.
     build: Option<u64>,
+    /// Client profiles (`base`, `terminal`, `keys`) and UI feature ids it renders; reported in `client.list`.
+    features: Option<Vec<String>>,
+    profiles: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -507,6 +510,9 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> Rp
         "provider.sync" => conn.wire.sync(core, p),
         "hello" => {
             let h: Hello = params(p)?;
+            for list in [&h.features,&h.profiles].into_iter().flatten() {
+                if list.len()>256 || list.iter().any(|f|f.is_empty() || f.len()>128) {return Err(RpcError::invalid("hello features/profiles: at most 256 names of 1-128 bytes"));}
+            }
             let supervised=match (h.extension.as_deref(),h.extension_token.as_deref()) {
                 (Some(name),Some(token))=>Some(ext::authenticate(&core.lock().unwrap(),name,token).ok_or_else(||RpcError::new("forbidden","invalid or expired supervised extension identity"))?),
                 _=>None,
@@ -521,7 +527,7 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> Rp
                 *conn.extension.lock().unwrap()=None;
             }
             let mut c = core.lock().unwrap();
-            let me = json!({"id": conn.id, "author": conn.author(), "client": h.client, "version": h.version, "build": h.build});
+            let me = json!({"id": conn.id, "author": conn.author(), "client": h.client, "version": h.version, "build": h.build, "features": h.features, "profiles": h.profiles});
             c.clients.insert(conn.id, me);
             Ok(json!({
                 "server": "vqro", "version": env!("CARGO_PKG_VERSION"), "protocol": PROTOCOL, "you": conn.author(),
@@ -669,7 +675,7 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> Rp
             let mut c = core.lock().unwrap();
             let specs=c.store.entries().iter().filter_map(|(key,e)|Some((key.strip_prefix("extension/")?.to_string(),e.version,json!({"manifest":e.value["manifest"]})))).collect::<Vec<_>>();
             c.manifest_catalog.refresh(&specs);
-            Ok(json!({"extensions": c.exts.keys().map(|n| (n.clone(), c.extension_state(n))).collect::<serde_json::Map<_, _>>()}))
+            Ok(json!({"extensions": c.extension_states()}))
         }
         _ => Err(RpcError::method_not_found(method)),
     }
@@ -1062,12 +1068,29 @@ async fn invoke_deadline(core: &Shared, author: &str, context: crate::invocation
         "vqro.extension.disable" | "vqro.extension.enable" => {
             let ext_name = arg("name").as_str().map(String::from).or_else(|| arg("text").as_str().map(String::from)).ok_or_else(|| RpcError::invalid("needs `name`"))?;
             let enabled = name == "vqro.extension.enable";
-            apply_prepared(core, author, context.origin.clone(), Some(name.into()), crate::limits::encoded_bytes(&ext_name).saturating_add(128), move |c| {
+            let target=ext_name.clone();
+            let mut reply=apply_prepared(core, author, context.origin.clone(), Some(name.into()), crate::limits::encoded_bytes(&ext_name).saturating_add(128), move |c| {
                 let key = format!("extension/{ext_name}");
                 let mut value = c.store.get(&key).map(|e| e.value.clone()).ok_or_else(|| RpcError::new("not_found", format!("no extension {ext_name}")))?;
                 value["enabled"] = json!(enabled);
                 Ok(vec![Op::Set { key, value, expect:None }])
-            }).await
+            }).await?;
+            // Report what the change leaves unmet; never cascade (the caller decides what else to switch).
+            if let Some(obj)=reply.as_object_mut() {
+                let states=core.lock().unwrap().extension_states();
+                let deps=&states.get(&target).map(|s|s["dependencies"].clone()).unwrap_or(Value::Null);
+                if enabled {
+                    let unmet:Vec<Value>=deps["needs"].as_array().into_iter().flatten().filter(|n|matches!(n["status"].as_str(),Some("off"|"missing"|"version"))).cloned().collect();
+                    obj.insert("needs_unmet".into(),Value::Array(unmet));
+                } else {
+                    // Users whose need on this extension's capability is no longer satisfied by anyone running.
+                    let breaks:Vec<Value>=deps["used_by"].as_array().into_iter().flatten().filter(|u|u["hard"]==true && u["display_status"]!="off").filter(|u|{
+                        states.get(u["name"].as_str().unwrap_or("")).is_some_and(|s|s["dependencies"]["needs"].as_array().into_iter().flatten().any(|n|n["cap"]==u["cap"] && n["status"]!="satisfied"))
+                    }).map(|u|json!({"name":u["name"],"cap":u["cap"]})).collect();
+                    obj.insert("breaks".into(),Value::Array(breaks));
+                }
+            }
+            Ok(reply)
         }
         "vqro.extension.restart" => {
             let ext_name = arg("name").as_str().map(String::from).or_else(|| arg("text").as_str().map(String::from)).ok_or_else(|| RpcError::invalid("needs `name`"))?;
