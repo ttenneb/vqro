@@ -62,11 +62,12 @@ def rename(args):
     ext.apply(ops, "panes: rename")
 
 
-def new_shell(key, ver):
-    """Spawn the shell that replaces the only pane or last tab (once; only after the layout check)."""
+def new_shell(key, ver, cwd=None):
+    """Spawn the shell that replaces the only pane or last tab (once; only after the layout check), in the
+    layout's folder when it names one."""
     if ver is not None and ext.version(key) != ver:
         raise VqroError("the layout changed meanwhile; nothing closed, try again", "conflict")
-    r = ext.vqro.call("resource.spawn", {})["resource"]
+    r = ext.vqro.call("resource.spawn", {"cwd": cwd} if cwd else {})["resource"]
     return r, f"term-{r['id']}"
 
 
@@ -79,7 +80,7 @@ def close(args):
     i = path[-1] if path else None
     if not path or ("tabs" in parent and len(parent["tabs"]) <= 1):
         # The only pane (or the last tab's whole content): replace it with a new shell, as tabs.open would.
-        shell, view_id = new_shell(key, ver)
+        shell, view_id = new_shell(key, ver, ext.layout_folder(args))
         if not path:
             root = {"view": view_id}
         else:

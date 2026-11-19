@@ -174,6 +174,16 @@ class WorkspaceTabs(unittest.TestCase):
         self.assertEqual(active(self.core), "main")
         self.assertEqual(len(self.spawns()), 2)
 
+    def test_closing_a_workspace_last_tab_or_only_pane_opens_the_new_shell_in_its_folder(self):
+        self.core.handlers["workspaces.open"]({"path": self.a})
+        la = self.ws["layout_name"](self.a)
+        ctx = {"layout": la, "layout_version": self.core.version(f"layout/{la}"), "tab_path": [1], "tab_index": 0}
+        self.core.handlers["tabs.close"]({"context": ctx})
+        self.assertEqual(self.spawns()[-1], {"cwd": self.a})
+        ctx = {"layout": la, "layout_version": self.core.version(f"layout/{la}"), "path": [1, 0]}
+        self.core.handlers["panes.close"]({"context": ctx})
+        self.assertEqual(self.spawns()[-1], {"cwd": self.a})
+
     def test_main_is_created_with_a_shell_when_missing(self):
         self.core.handlers["workspaces.open"]({"path": self.a})
         self.core.apply([{"op": "delete", "key": "layout/main"}], "drop main")

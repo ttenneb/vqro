@@ -126,9 +126,10 @@ class Shell:
     def __init__(self):
         self.resource = None
 
-    def tab(self):
+    def tab(self, cwd=None):
+        """A tab showing the new shell, started in `cwd` (the layout's folder) when it is spawned here."""
         if self.resource is None:
-            self.resource = ext.vqro.call("resource.spawn", {})["resource"]
+            self.resource = ext.vqro.call("resource.spawn", {"cwd": cwd} if cwd else {})["resource"]
         return {"title": title_of(self.resource), "node": {"view": self.view()}}
 
     def view(self):
@@ -156,7 +157,7 @@ def close_tab(args):
     if not tabs["tabs"]:
         if ver is not None and ext.version(key) != ver:
             raise VqroError("the layout changed meanwhile; nothing closed, try again", "conflict")  # before spawning
-        tabs["tabs"], tabs["active"] = [shell.tab()], 0  # replace the last tab, as `tabs.open` would
+        tabs["tabs"], tabs["active"] = [shell.tab(ext.layout_folder(args))], 0  # replace the last tab, as `tabs.open` would
     else:
         a = tabs.get("active", 0)
         tabs["active"] = min(a - 1 if a >= i and a > 0 else a, len(tabs["tabs"]) - 1)
@@ -182,20 +183,21 @@ def rename_tab(args):
     ext.apply([{"op": "set", "key": key, "value": root, "expect": ver}], "tabs: rename")
 
 
-def prune_ended(node, shell):
-    """Close wholly ended tabs, preserving mixed tabs. A group left with no tab gets a new shell tab."""
+def prune_ended(node, shell, cwd=None):
+    """Close wholly ended tabs, preserving mixed tabs. A group left with no tab gets a new shell tab
+    (started in `cwd`, the layout's folder)."""
     for child in node.get("children", []):
-        prune_ended(child, shell)
+        prune_ended(child, shell, cwd)
     tabs = node.get("tabs", [])
     for tab in tabs:
-        prune_ended(tab["node"], shell)
+        prune_ended(tab["node"], shell, cwd)
     if not tabs:
         return
     active = tabs[min(node.get("active", 0), len(tabs)-1)]
     def dead(tab):
         resources = [view_resource(ext, view) for view in views_in(tab["node"])]
         return bool(resources) and all(rid and ended(ext.resources.get(rid)) for rid in resources)
-    kept = [tab for tab in tabs if not dead(tab)] or [shell.tab()]
+    kept = [tab for tab in tabs if not dead(tab)] or [shell.tab(cwd)]
     node["tabs"] = kept
     node["active"] = next((i for i, tab in enumerate(kept) if tab is active), 0)
 
@@ -209,7 +211,7 @@ def close_ended(args):
         for key, entry in list(ext.entries.items()):
             if key.startswith("layout/"):
                 root = copy.deepcopy(entry["value"])
-                prune_ended(root, shell)
+                prune_ended(root, shell, ext.layout_settings(key[len("layout/"):]).get("cwd"))
                 if root != entry["value"]:
                     ops.append({"op": "set", "key": key, "value": root, "expect": entry["version"]})
                     removed.update(set(views_in(entry["value"]))-set(views_in(root)))
