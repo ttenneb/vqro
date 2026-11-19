@@ -439,7 +439,8 @@ class Agents:
                  "menu": [{"label": "Show", "command": "agents.show", "args": {"resource": r["id"]}},
                           *([{"label": "Agent settings…", "command": "agents.config", "args": {"resource": r["id"]}}]
                             if self.has_settings(r) and r.get("available") else []),
-                          {"label": "Stop agent…", "command": "agents.stop", "args": {"resource": r["id"]}},
+                          *([{"label": "Stop agent…", "command": "agents.stop", "args": {"resource": r["id"]}}]
+                            if host_of(self.ext.resources, r) is not None and not ended(r) else []),
                           *([{"label": "Forget agent", "command": "agents.forget", "args": {"resource": r["id"]}}]
                             if not r.get("available") and not ended(r) else [])]}
                 for r in self.ext.resources.values() if r.get("kind") == "agent"]

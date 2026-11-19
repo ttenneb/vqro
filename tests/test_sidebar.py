@@ -82,6 +82,10 @@ class SidebarTests(unittest.TestCase):
         ext.providers = {}
         agent = next(row for row in module["build"]() if row.get("args", {}).get("resource") == "r2")
         self.assertEqual(agent["badges"], [{"text": "unknown", "style": "warn"}])
+        del ext.resources["r2"]["host"]  # hostless: no Stop, Forget remains
+        agent = next(row for row in module["build"]() if row.get("args", {}).get("resource") == "r2")
+        self.assertEqual([item["label"] for item in agent["menu"]], ["Show", "Forget agent"])
+        ext.resources["r2"]["host"] = "r1"
         ext.resources["r1"]["state"] = "finished"
         agent = next(row for row in module["build"]() if row.get("args", {}).get("resource") == "r2")
         self.assertEqual(agent["badges"], [{"text": "ended", "style": "dim"}])

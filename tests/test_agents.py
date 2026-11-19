@@ -350,6 +350,10 @@ class AgentsTests(unittest.TestCase):
         row = next(row for row in self.core.live["agents-list"]["items"] if row.get("args") == {"resource": "r2"})
         self.assertIn({"label": "Forget agent", "command": "agents.forget", "args": {"resource": "r2"}}, row["menu"])
         self.assertEqual(row["badges"], [{"text": "unknown", "style": "warn"}])
+        del self.core.resources["r2"]["host"]  # no bridge terminal: Stop is not offered, Forget still is
+        self.command("list")
+        row = next(row for row in self.core.live["agents-list"]["items"] if row.get("args") == {"resource": "r2"})
+        self.assertEqual([item["label"] for item in row["menu"]], ["Show", "Forget agent"])
 
     def test_disconnected_agents_say_unknown_since_or_that_their_bridge_is_dead(self):
         self.stoppable()
