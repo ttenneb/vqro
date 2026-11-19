@@ -13,6 +13,7 @@ pub mod paths;
 pub mod principal;
 pub mod causality;
 pub mod provider_client;
+pub mod codex;
 pub mod queue;
 pub mod limits;
 pub mod manifest;

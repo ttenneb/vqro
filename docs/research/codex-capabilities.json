@@ -1,0 +1,23 @@
+{
+  "agent": {
+    "v": 0,
+    "modules": {"interaction": {}, "observation": {}, "requests": {}, "sessions": {}},
+    "items": {"retain_bytes": 131072, "entity_bytes": 65536, "coverage": "tail"}
+  },
+  "items.stream": {},
+  "agent.send": {
+    "modes": {"admit": {}},
+    "content": ["text"],
+    "correlation": "acceptance",
+    "handled": "none",
+    "literal": "always",
+    "origin": ["attributed_user"],
+    "keys": null,
+    "guards": {"session": "adapter", "run": "runtime"},
+    "receipts": {"retain": 256}
+  },
+  "agent.interrupt": {"pending": "unknown", "scope": "foreground", "waits": "none"},
+  "agent.receipt": {},
+  "agent.respond": {"methods": ["permission", "form"], "ack": "dispatched"},
+  "agent.session": {"actions": ["new", "resume", "list"]}
+}
