@@ -21,6 +21,13 @@ mode. A missing/bad manifest affects information, not whether the program is per
 - Turning Settings itself off stops that page. The vqro badge/prefix still reaches commands and recovery,
   including enabling it again. The prefix remains available inside the popup and while searching.
 - There is no in-app log viewer yet. The detail reports the core-host log path for external inspection.
+- Dependencies (D29): the detail lists **Needs**, **Works with**, **Used by** and **Provides**, each with its status;
+  a list badge says `needs Tabs (off)` (or `not installed`). Turning on an extension whose needs are off opens one
+  confirmation: turn on both (default), turn on this one only, or cancel. A provider that is not installed is named
+  with its suggested extension; the extension can still be turned on. Turning off an extension that enabled
+  extensions need warns once with what breaks (and what is merely limited) before switching. If only optional users
+  remain, it switches directly. vqro never switches anything by itself; the built-in safe-mode chooser only shows
+  the `needs` text.
 
 Wide windows put details beside the list; narrow windows put them below. Settings uses the generic `list_detail`
 panel enhancement in `spec/core-protocol.md`; other extensions can use exactly the same primitive.
@@ -47,6 +54,9 @@ Example:
   "license": "MIT",
   "homepage": "https://example.org/example-extension",
   "requires": {"protocol": 1, "client_features": ["items", "menu"]},
+  "provides": ["command/example.inspect", "command/example.settings"],
+  "needs": [{"cap": "command/tabs.show", "suggest": "tabs", "why": "Inspected resources open in a tab"}],
+  "works_with": [{"cap": "data/themes", "suggest": "themes", "without": "Previews use the default palette"}],
   "contributes": {
     "commands": ["example.inspect"],
     "keys": ["Prefix e: inspect examples"],
@@ -65,6 +75,12 @@ or versions. Bundled manifests use the package version and the established autho
 `Apache-2.0`; no homepage/repository URL is invented. Other extension authors declare their own actual metadata.
 The bundled extension code and SDKs share the root Apache-2.0 licence; third-party extensions retain their own terms.
 Kinds are open text categories (`provider`, `runtime`, `interface`, `management`, ...), not permissions.
+
+`provides`, `needs` and `works_with` declare capabilities (`kind/name[@major]`: commands, views, live data, workspace
+documents, abilities, client UI features; see the protocol, Static manifests). Declare every other extension's
+command, view, live data or document you use: in `needs` when your main purpose fails without it, otherwise in
+`works_with` with a `without` line. Bundled manifests are checked by `scripts/check_manifest_deps.py` (part of
+`scripts/check.sh`). The core reports resolution; it does not solve, install or enable anything.
 
 `requires` and `contributes` are descriptive metadata today, **not** dependency solving, capability authority or
 registration. Actual commands/contributions still use the public protocol. A string `settings_command` names its

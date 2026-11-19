@@ -37,12 +37,16 @@ the core forwards `command.invoke` to the connection that registered the command
 
 | Method | Params | Result |
 |---|---|---|
-| `hello` | `client?` or `extension?` (name), `extension_token?` (supervised lifetime proof) | `server`, `version`, `protocol`, `you` (author id), `epoch`, `seq`, `safe_mode` |
+| `hello` | `client?` or `extension?` (name), `extension_token?` (supervised lifetime proof), `profiles?`, `features?` (rendering clients, D29; at most 256 names of 1-128 bytes each) | `server`, `version`, `protocol`, `you` (author id), `epoch`, `seq`, `safe_mode` |
 | `core.shutdown` | | `outcome: "accepted"` |
 
 Every change records its connection's author: `ext:<name>` only after verifying the existing managed-lifetime
 `extension_token`; otherwise `client:<connection id>`. Unverified extension/client labels cannot reserve an `ext:`
-author. Human-readable client labels remain in `client.list`. D24 invocation proofs still carry original-invoker
+author. Human-readable client labels remain in `client.list`, with each client's declared `profiles` and `features`
+(null when not declared; older cores ignore them). A rendering client declares the profiles it implements (`base`,
+which includes recovery; `terminal`; `keys`) and the optional UI feature ids it renders (bare names such as `items`
+mean `vqro.items`). They are reported for diagnostics and dependency facts, never used to tailor shared content:
+content carries its own fallback. D24 invocation proofs still carry original-invoker
 attribution; this is collision hygiene, not a new workspace permission scheme (D8/D24).
 
 `core.shutdown` is implemented (D22 is confirmed; Windows transport remains implementation work). The accepted reply is locally
@@ -891,7 +895,16 @@ Fields:
 - `title`, `summary` (one line), `description` (short plain-language paragraph: purpose and what turning it off loses),
   `version`, `kind` (open names such as `provider`, `runtime`, `interface`, `management`), `author`, `license`, `homepage`.
 - `requires: {protocol?: integer, client_features?: [string]}`: informational compatibility requirements, not an
-  authorization grant or an automatic dependency resolver.
+  authorization grant or an automatic dependency resolver. `client_features` are UI needs (`ui/vqro.<feature>`).
+- `provides: [capability]`, `needs: [capability | {cap, suggest?, why?}]`, `works_with: [capability | {cap, suggest?,
+  without?}]` (D29): what the extension offers, what its main purpose requires, and what it merely works better with.
+  A capability is `kind/name[@major]` (major defaults to 1): `command/<command>`, `view/<view>` (a trailing `*` names a
+  view family, `view/agent-*`), `data/<live data name>`, `doc/<workspace key>`, `ability/<name>` (`vqro.terminals`,
+  `vqro.agents`, `vqro.resource.forget`; third parties use their own namespace) and `ui/<client feature>`. `suggest`
+  names a provider to offer for enabling or installing; any provider of the capability satisfies the need. The core
+  provides `command/vqro.*` and the spec-defined shared settings `doc/settings/tui`, `doc/settings/theme` and
+  `doc/settings/icons` (their readers always have a fallback). Declarations are static: actual commands and live data
+  stay authoritative. `scripts/check_manifest_deps.py` checks the bundled ones against their source.
 - `contributes: {commands?: [string], keys?: [string], menu_items?: [string], panels?: [string], settings?: [string]}`:
   human-readable summaries, not registrations. Actual commands/capabilities remain authoritative.
 - `settings_command?: string`: its own settings command, enabled in the catalogue only while running and available.
@@ -901,6 +914,18 @@ Files must be regular files and at most **32 KiB**; cached manifest records (inc
 blocks normal extension execution. No program is run to discover a version. File stamps are checked during
 reconciliation and `extension.list`; unchanged parsed values are reused. Snapshots contain the last observed cache
 without filesystem I/O. This is not a file watcher or a registry/install mechanism.
+
+**Dependency facts (D29).** `extension.list` and snapshot `extensions` also carry `dependencies` (null without a
+manifest): `{status: "ok"|"degraded"|"missing", needs: [row], works_with: [row], used_by: [{name, cap, hard,
+display_status}]}`. A row is the declared entry plus `status`: `satisfied` (a provider is running, or the core provides
+it), `off` (providers are declared but none runs; `providers: [{name, display_status}]`), `missing` (no declared
+provider; show `suggest`), `version` (only another major is provided) or `invalid`. `ui/*` rows resolve against
+connected rendering clients' `hello.features` instead: `satisfied`, `lacking` (`lacking_in: [client]`) or `unknown`
+(`unknown_in`: clients that declared no features); they never affect `status`. `status` is `missing` when a non-UI
+need is unmet, `degraded` when only `works_with` rows are. Events do not carry these facts: refresh with
+`extension.list`. Resolution only reports. `vqro.extension.enable|disable` never cascade; their replies add
+`needs_unmet: [row]` (enable) or `breaks: [{name, cap}]` (disable: enabled users whose need no running provider meets
+any more) so the caller can tell the user. Safe mode, the recovery chooser and built-in commands ignore dependencies.
 
 `extension.list` and snapshot `extensions` export `manifest` (object or null), `manifest_source` (display-only
 core-host path or null), `manifest_error`, `enabled`, raw `status`, `display_status` (`running`, `off`, `failed`,

@@ -416,3 +416,26 @@ names; the runtime has no long-term old-name aliases. Earlier decision/research 
 **Why.** The human chose the final name while nothing is published.
 **Consequences.** Brand identifies the project, official builds and maintained extension repository under D25;
 Apache-2.0/DCO terms do not change. No registered-mark claim or public repository/distribution URL is implied.
+
+## D29. One declaration model for extension dependencies and client UI features (2026-11-19, CONFIRMED)
+
+> Numbered D29 because D28 is the agent standard on its own branch; renumber at merge if needed.
+
+**Decision.**
+- Extensions and clients declare what they **provide** and what they **need** or merely **work with**, as
+  capabilities `kind/name[@major]`: commands, views, live data, workspace documents, abilities ("hosts terminals")
+  and client UI features. Dependencies name **what is provided**, with a suggested provider for enabling or
+  installing; any provider satisfies them. Shared data counts as a dependency. Command dependencies are **per
+  command** (`command/tabs.show`), not per group.
+- The core resolves and **reports** (satisfied, off, missing, other version; reverse users). It never enables or
+  disables anything by itself; enable/disable replies say what stays unmet or breaks.
+- Turning an extension on **offers to enable** its off needs in one confirmation. A need with no installed provider
+  is a warning, not a refusal. Turning off a depended-on extension **warns what breaks** first; whoever may disable
+  extensions may do it (everyone today, D24; with the agent standard's grants, whoever holds that grant).
+- Clients declare **profiles** (`base`, including recovery, `terminal`, `keys`) and optional namespaced **features** in
+  `hello`. Optional UI features need an in-content fallback; recovery never depends on any of this. The built-in
+  safe-mode chooser only shows "needs X" text; the offer lives in Settings.
+**Why.** The human asked for one "declare what you provide/need, with fallbacks" model for dependencies and UI
+features (2026-11-19), and chose per-command granularity, allow-with-warning and the minimal chooser.
+**Consequences.** Manifests gain `provides`/`needs`/`works_with`; `extension.list` gains `dependencies`; a release
+check (`scripts/check_manifest_deps.py`) keeps bundled manifests honest. Design: `research/declarations-and-ui-clients.md`.

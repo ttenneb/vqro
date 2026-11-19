@@ -1,6 +1,6 @@
 # One declaration model: extension dependencies and client UI features — 2026-11-19
 
-Status: design note, not yet a decision. Builds on `<private-notes>
+Status: design note; the human confirmed the three open choices below (option a each), recorded as D29. Builds on `<private-notes>
 ui-architecture/report.md` (UI clients research) and the human's decisions of 2026-11-19: one "declare what you
 provide / need, with fallbacks" model for both extension dependencies and client UI features; depend on what is
 provided, not on who; turning on offers to enable missing needs (one confirmation); shared data is a declared
@@ -76,8 +76,9 @@ their runtime status and core built-ins. `extension.list` and snapshot `extensio
 - **Turn on** with unmet needs whose providers are declared: one popup, "Agents needs Tabs (off). Turn on both?"
   with [Turn on both] (default), [Turn on Agents only], [Cancel]. Missing providers are listed with the suggested
   name ("not installed"); the extension can still be turned on.
-- **Turn off** an extension that enabled extensions need: "Turning off Tabs breaks: Agents (opening agent panels),
-  Pi (showing new agents). Turn off anyway?" [Turn off] [Cancel]. `works_with` users are listed as "loses: …".
+- **Turn off** an extension that enabled extensions need: "Turn off Tabs: breaks Agents, Sidebar; limits Keys"
+  [Turn off] [Cancel]. When only `works_with` users remain it switches directly; they are listed under Used by.
+  (Implemented as a pick-one `options` menu over the Settings popup, an existing base primitive.)
 - Both flows use existing primitives: `menu`-style popup rows and `vqro.extension.enable|disable` per extension.
   In safe mode the same offer uses `vqro.safe_mode.allow` session choices. The built-in Rust recovery chooser shows
   the `needs …` text only (no offer flow), so recovery depends on no resolution logic.
@@ -134,7 +135,7 @@ agents needs `command/tabs.show`; pi needs `ability/vqro.terminals`, works with 
 commands they bind; retention needs `ability/vqro.resource.forget`, works with `view/agent-*`; herdr and tmux provide
 `ability/vqro.terminals` and `ability/vqro.resource.forget`; tabs and panes work with `ability/vqro.terminals`.
 
-## Open decisions for the human
+## Decisions (confirmed by the human 2026-11-19: option a for each)
 
 1. **Granularity of command dependencies.** (a) per command, `command/tabs.show` (recommended: names already exist,
    the lint can check them exactly); (b) per group, `ability/tabs`.
