@@ -24,5 +24,6 @@ pub mod server;
 pub mod shutdown;
 pub mod store;
 pub mod tui;
+pub mod ui_launch;
 pub mod ui_model;
 pub mod tmux;

@@ -649,6 +649,37 @@ reconcile later with their full set (`exclusive=True`). Other runtimes should fo
   holding the focused pane), `client.quit` (this UI only), `client.none` (does nothing: binds a key to nothing). A
   client answers an unknown `client.*` command with a message and never sends it to the core.
 
+## Clients and profiles (D29)
+
+A client is any process that renders the workspace over this protocol; it is not a supervised extension. It says
+what it renders in `hello {client, version, build?, profiles, features}`:
+
+- **`base`** (every interactive client): the snapshot/event cache with resync fencing; the layout tree (splits,
+  tabs, the active layout); `panel` views with the base panel features (`items`, `pages`, `tree`, `toolbar`,
+  `badges`, `description`, `menu`, `input`, `options`, `select`, `chips`, `icon`, `wrap`); unknown row types as plain
+  items; `menu/*` entries; prompts (`input`, `prefill`) and pick-one `options`; command invocation with
+  `args.context` and the reply hints `popup`, `close`, `focus`; `ui.notify`; semantic styles over a built-in palette;
+  a labelled placeholder for a view kind it does not render; and **recovery**: an always-visible entry point (the
+  badge), the shared recovery content (prefix recovery rows reachable whatever the keymap, restart rows for failed
+  extensions, the safe-mode chooser), themes and icon sets ignored in safe mode.
+- **`terminal`**: terminal views (attach, credit, repaint on gap, ordered input and paste rules, key encoding,
+  resize per the provider's owner rule). A viewer sends no query responses.
+- **`keys`**: the prefix key with the `C-g` fallback, binding precedence and `client.*` commands.
+- **Optional features** are the other ids (`badge_color`, `icon_names`, `list_detail`, `embedded_views`, `filter`,
+  or a third party's `x.<owner>.<name>@<major>`). Content using one must keep a fallback: scope it inside the
+  enhancement (as `list_detail` does) so the plain content remains, or accept that clients without it show the
+  panel's "missing" notice. Clients never tailor shared content per client: several clients view one workspace.
+
+The shared definitions are executable fixtures: `tests/fixtures/client/panels.json` (flattening, `requires`),
+`contributions.json` (menus, key and gesture precedence) and `recovery.json` (prefix recovery rows, safe-mode
+chooser). The Rust model (`src/ui_model`) and every bundled client are checked against them.
+
+`vqro ui [<client>]` starts a client (the core too, if needed). Without a name, or with `tui`, it runs the built-in
+terminal client, which is always present so recovery never depends on an optional client. Other clients are
+described by `<extensions dir>/clients/<name>.json` = `{name, kind: "client", title?, summary?, argv, profiles?,
+features?}`; a relative program in `argv` is resolved in that directory, and the client gets `VQRO_SOCKET`.
+`vqro ui --list` lists them. Bundled: `text`, a plain Python base client for scripts, agents and screen readers.
+
 ## Keys
 
 - **Prefix.** `doc/settings/tui.prefix` names the prefix key (default `C-g`). It must have Ctrl or Alt, or be a

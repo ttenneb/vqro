@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 use serde_json::Value;
 use std::io::Write;
 
-use vqro::{client, paths, server, tui};
+use vqro::{client, paths, server, tui, ui_launch};
 
 #[derive(Parser)]
 #[command(name = "vqro", version, about = "Workspace primitives over any multiplexer")]
@@ -24,8 +24,20 @@ enum Cmd {
         #[arg(long)]
         fake: bool,
     },
-    /// Open the terminal UI (starts the core in the background if it isn't running).
+    /// Open the terminal UI (starts the core in the background if it isn't running). Same as `vqro ui`.
     Tui,
+    /// Open a UI client: the built-in terminal UI by default (always available for recovery), or a client
+    /// described by `<extensions dir>/clients/<name>.json`. Starts the core if it isn't running.
+    Ui {
+        /// Client name (`tui` is the built-in one).
+        client: Option<String>,
+        /// List the available clients.
+        #[arg(long)]
+        list: bool,
+        /// Extra arguments for the client.
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
     /// Stop a background core.
     Stop,
     /// Show whether the core is running.
@@ -52,6 +64,7 @@ async fn run() -> Result<()> {
             client::ensure_core().await?;
             tui::run(&paths::socket_path()?).await
         }
+        Cmd::Ui { client: name, list, args } => ui(name, list, args).await,
         Cmd::Stop => stop().await,
         Cmd::Status => {
             match connect_cli().await {
@@ -87,6 +100,29 @@ async fn run() -> Result<()> {
             call("command.invoke", serde_json::json!({"name": name, "args": args})).await
         }
     }
+}
+
+async fn ui(name: Option<String>, list: bool, args: Vec<String>) -> Result<()> {
+    let dir = paths::extensions_dir();
+    if list {
+        for c in ui_launch::list(&dir) {
+            writeln!(std::io::stdout(), "{}\t{}\t{}", c["name"].as_str().unwrap_or(""), c["title"].as_str().unwrap_or(""), c["summary"].as_str().unwrap_or(""))?;
+        }
+        return Ok(());
+    }
+    let name = name.unwrap_or_else(|| "tui".into());
+    if ui_launch::BUILTIN.contains(&name.as_str()) {
+        client::ensure_core().await?;
+        return tui::run(&paths::socket_path()?).await;
+    }
+    let manifest = ui_launch::find(&dir, &name)?;
+    client::ensure_core().await?;
+    let status = ui_launch::command(&dir, &manifest, &paths::socket_path()?, &args).status()
+        .map_err(|e| anyhow::anyhow!("cannot start client {name}: {e}; `vqro ui` runs the built-in one"))?;
+    if !status.success() {
+        bail!("client {name} exited with {status}; `vqro ui` runs the built-in one");
+    }
+    Ok(())
 }
 
 async fn connect_cli() -> Result<(vqro::rpc::Peer, vqro::rpc::IncomingReceiver, Value)> {
