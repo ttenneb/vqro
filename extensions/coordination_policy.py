@@ -128,7 +128,8 @@ def record_charge(record, limits=None):
     """Reserve metadata plus the eventual outcome before any claim is admitted."""
     limits = limits or QuotaLimits()
     content = len(encoded(record.get("content", [])))
-    return max(len(encoded(record)), content + limits.metadata_bytes + limits.outcome_bytes)
+    steps = _integer(record.get("outcome_steps", 1), "outcome_steps", 1, 3)
+    return max(len(encoded(record)), content + limits.metadata_bytes + steps * limits.outcome_bytes)
 
 
 class Policy:
@@ -722,16 +723,19 @@ def bounded_page(items, page=None, *, key=lambda row: row["delivery"], limit=64,
 
 
 def check_admission(records, principal, target, content, *, reserved_bytes=0,
-                    reserved_records=0, replaces=None, limits=None):
+                    reserved_records=0, replaces=None, limits=None, outcome_steps=1):
     """Pure reservation preflight for the engine; never authorizes a dispatch.
 
     `reserved_*` is total captured store occupancy, including existing messages
     (gates, summaries, op results, plans included). Stored message bytes are
     subtracted before adding their outstanding outcome reservations, avoiding a
-    double charge. A successful return is a reservation, not a store commit.
+    double charge. One to three compact outcome steps are reserved per record;
+    a recipe explicitly requests three. A successful return is a reservation,
+    not a store commit.
     """
+    _integer(outcome_steps, "outcome_steps", 1, 3)
     candidate = {"from": {"principal": principal}, "to": {"agent": target},
-                 "content": content, "state": "recorded"}
+                 "content": content, "state": "recorded", "outcome_steps": outcome_steps}
     if replaces is not None:
         candidate["supersedes"] = replaces
     policy = Policy({}, {}, now_ms=0, limits=limits)

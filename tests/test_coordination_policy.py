@@ -310,6 +310,18 @@ class Admission(Fixture):
         self.rejects("quota", p.check_quota, [], candidate, reserved_records=p.limits.normal_records)
         self.assertGreaterEqual(charge, len(encoded(candidate["content"])) + 3072)
 
+    def test_recipe_reserves_one_compact_outcome_per_step(self):
+        content = [{"type": "text", "text": "recipe"}]
+        one = check_admission([], "p:a", "r1", content)
+        three = check_admission([], "p:a", "r1", content, outcome_steps=3)
+        self.assertEqual(three["bytes"] - one["bytes"], 2048)
+        self.assertEqual(record_charge(mail(outcome_steps=3)) - record_charge(mail()), 2048)
+        for steps in (0, 4, True, 1.5):
+            self.rejects("invalid", check_admission, [], "p:a", "r1", content, outcome_steps=steps)
+        limits = QuotaLimits(domain_bytes=6000)
+        self.rejects("quota", check_admission, [], "p:a", "r1", content,
+                     outcome_steps=3, reserved_bytes=1000, limits=limits)
+
     def test_admission_total_occupancy_does_not_double_charge_records(self):
         rows = [mail()]
         limits = QuotaLimits(domain_bytes=10000)
