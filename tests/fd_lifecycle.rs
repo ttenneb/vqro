@@ -275,7 +275,7 @@ async fn socket_fds_return_after_clients_streams_and_provider_cycles() {
             if let Incoming::Request { id, method, params } = message {
                 assert_eq!(method, "stream.open");
                 actor.respond(id, Ok(json!({"initial":"none"})));
-                actor.notify("stream.gap",json!({"generation":generation,"stream":params["stream"],"offset":0,"reason":{"reason":"gap","gap":"fixture"}}));
+                actor.notify("stream.gap",json!({"generation":generation,"stream":params["stream"],"offset":0,"reason":{"reason":"gap","gap":"paused"}}));
             }
         }
     });
