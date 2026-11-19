@@ -191,7 +191,9 @@ async fn main() {
                 let now = Instant::now();
                 let due: Vec<String> = retry.iter().filter(|(t, _)| *t <= now).map(|(_, r)| r.clone()).collect();
                 retry.retain(|(t, _)| *t > now);
-                for res in due {
+                queue.extend(due);
+                while pending.len() < 64 {
+                    let Some(res) = queue.pop_front() else { break };
                     let v = &views[&res];
                     let after = v.epoch.as_ref().map(|e| json!({"after": {"epoch": e, "seq": v.seq}})).unwrap_or(json!({}));
                     let id = send("resource.attach", json!({"resource": res, "items": after}), &mut wbuf);
@@ -204,9 +206,6 @@ async fn main() {
         if n == 0 { eprintln!("{name}: core closed"); break; }
         let m: Value = match serde_json::from_str(&line) { Ok(m) => m, Err(_) => { c.bad_json += 1; continue } };
         if let Some(id) = m["id"].as_u64() {
-            if pending.contains_key(&id) {
-                if let Some(a) = queue.pop_front() { let nid = send("resource.attach", json!({"resource": a, "items": {}}), &mut wbuf); pending.insert(nid, a); }
-            }
             if let Some(res) = pending.remove(&id) {
                 if let Some(sid) = m["result"]["stream"].as_u64() {
                     match m["result"]["initial"].as_str() { Some("reset") => c.opens_reset += 1, _ => c.opens_continue += 1 }
@@ -216,7 +215,7 @@ async fn main() {
                     for d in early.remove(&sid).unwrap_or_default() { v.feed(&d, &mut c, &mut lat); }
                 } else {
                     c.attach_errors += 1;
-                    if c.attach_errors <= 5 || c.attach_errors % 500 == 0 { eprintln!("{name}: attach {res}: {}", m["error"]); }
+                    if c.attach_errors <= 5 || c.attach_errors % 500 == 0 { eprintln!("{name}: attach {res}: {} (in flight {}, attached {})", m["error"], pending.len(), by_stream.len()); }
                     retry.push((Instant::now() + Duration::from_millis(500), res));
                 }
             }
@@ -239,17 +238,24 @@ async fn main() {
                         v.buf.clear();
                         v.stream = None;
                         v.pending = None; // an unfinished snapshot is never installed; continue from the last installed cut
-                        let after = v.epoch.as_ref().map(|e| json!({"after": {"epoch": e, "seq": v.seq}})).unwrap_or(json!({}));
                         c.reattach += 1;
-                        let id = send("resource.attach", json!({"resource": res, "items": after}), &mut wbuf);
-                        pending.insert(id, res);
+                        queue.push_back(res); // windowed like every attach: never a burst past the request limit
                     }
                 }
                 _ => {}
             }
         }
+        // At most 64 attaches in flight (the core admits 128 requests per connection); reattach from the
+        // last installed cursor, or from nothing.
+        while pending.len() < 64 {
+            let Some(res) = queue.pop_front() else { break };
+            let v = &views[&res];
+            let after = v.epoch.as_ref().map(|e| json!({"after": {"epoch": e, "seq": v.seq}})).unwrap_or(json!({}));
+            let id = send("resource.attach", json!({"resource": res, "items": after}), &mut wbuf);
+            pending.insert(id, res);
+        }
         if !wbuf.is_empty() { wr.write_all(&wbuf).await.unwrap(); wbuf.clear(); }
-        if stall && queue.is_empty() && pending.is_empty() {
+        if stall && by_stream.len() == agents.len() {
             // Every stream is attached: from now on never read the socket (a stalled viewer).
             eprintln!("{name}: attached {} item streams; now never reading", by_stream.len());
             drop(lines);
