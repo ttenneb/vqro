@@ -295,6 +295,20 @@ struct App {
 /// The installed binary's identity, to notice a reinstall.
 fn strings(value: &Value) -> BTreeSet<String> { value.as_array().into_iter().flatten().filter_map(Value::as_str).map(String::from).collect() }
 
+/// Who an extension's non-UI needs name, from the core's dependency facts (D29): `tabs, herdr or tmux`.
+/// Needs the core itself provides are left out. Display only.
+fn needs_text(dependencies: &Value) -> String {
+    let mut out: Vec<String> = Vec::new();
+    for need in dependencies["needs"].as_array().into_iter().flatten() {
+        if need["cap"].as_str().is_none_or(|c| c.starts_with("ui/")) { continue; }
+        let who: Vec<&str> = need["providers"].as_array().into_iter().flatten().filter_map(|p| p["name"].as_str()).collect();
+        if who.contains(&"vqro") { continue; }
+        let text = if who.is_empty() { need["suggest"].as_str().or(need["cap"].as_str()).unwrap_or("?").to_string() } else { who.join(" or ") };
+        if !out.contains(&text) { out.push(text); }
+    }
+    out.join(", ").chars().take(120).collect()
+}
+
 fn exe_stamp() -> Option<(std::path::PathBuf, std::time::SystemTime)> {
     let exe = client::executable_path().ok()?;
     let modified = std::fs::metadata(&exe).ok()?.modified().ok()?;
@@ -765,7 +779,9 @@ impl App {
             }
             "extension" => {
                 if let Some(n) = d["name"].as_str() {
-                    let st = d["state"].clone();
+                    let mut st = d["state"].clone();
+                    // Events carry runtime facts only; keep the snapshot's static dependency facts (D29).
+                    if st["dependencies"].is_null() { if let Some(old)=self.extensions.get(n) { st["dependencies"]=old["dependencies"].clone(); } }
                     if st["status"] == "failed" {
                         self.message = format!("extension {n} failed: {}", st["failure"]["reason"].as_str().or_else(||st["last_exit"].as_str()).unwrap_or("?"));
                     }
@@ -1114,7 +1130,12 @@ impl App {
                 if (value["kind"]=="provider" || self.provider_extensions.contains(*name)) != provider { continue; }
                 let check=if self.safe_selected.contains(*name) { "[x]" } else { "[ ]" };
                 let mut description=value["description"].as_str().or_else(||value["argv"][0].as_str()).unwrap_or("Declared extension").chars().take(160).collect::<String>();
-                if let Some(state)=self.extensions.get(*name) { if state["status"]=="failed" {description.push_str(&format!(" -- failed: {}",state["last_exit"].as_str().unwrap_or("unknown failure")));} }
+                if let Some(state)=self.extensions.get(*name) {
+                    if state["status"]=="failed" {description.push_str(&format!(" -- failed: {}",state["last_exit"].as_str().unwrap_or("unknown failure")));}
+                    // D29: the chooser only names what an extension needs; it offers nothing and selects nothing.
+                    let needs=needs_text(&state["dependencies"]);
+                    if !needs.is_empty() {description.push_str(&format!(" -- needs {needs}"));}
+                }
                 items.push(json!({"id":format!("safe/{name}"),"text":format!("{check} {name}"),"description":description,"command":"client.safe_mode.toggle","args":{"name":name}}));count+=1;
             }
             if count==0 { items.push(json!({"type":"text","text":"(none declared)"})); }
@@ -3004,6 +3025,20 @@ mod tests {
         assert!(app.safe_selected.contains("draft"));
         app.overlay=None;let mut later=snap.clone();later["epoch"]=json!("two");
         app.reconnected(app.peer.clone(),&later);assert!(app.overlay.is_none(),"reconnect must not steal focus");assert!(app.safe_selected.contains("draft"));
+    }
+
+    #[tokio::test]
+    async fn safe_chooser_names_needs_and_keeps_them_across_runtime_events() {
+        let (mut app,_) = app();
+        let deps=json!({"needs":[{"cap":"command/tabs.show","providers":[{"name":"tabs"}]},{"cap":"ability/vqro.terminals","providers":[{"name":"herdr"},{"name":"tmux"}]},
+            {"cap":"ability/x.gpu","suggest":"gpu","providers":[]},{"cap":"command/vqro.revert","providers":[{"name":"vqro"}]},{"cap":"ui/vqro.items"}]});
+        app.load(&json!({"epoch":"boot","seq":1,"safe_mode":true,"safe_mode_allow":[],"entries":{"extension/agents":{"value":{"description":"Agent controls","argv":["false"]}}},
+            "extensions":{"agents":{"status":"stopped","dependencies":deps}}}));
+        let row=|app:&App|app.panel_value("@vqro-safe-mode")["items"].as_array().unwrap().iter().find(|r|r["text"]=="[ ] agents").cloned().unwrap();
+        assert_eq!(row(&app)["description"],"Agent controls -- needs tabs, herdr or tmux, gpu");
+        app.on_event_record(&json!({"epoch":"boot","seq":2,"type":"extension","data":{"name":"agents","state":{"status":"stopped"}}}));
+        assert!(row(&app)["description"].as_str().unwrap().ends_with("needs tabs, herdr or tmux, gpu"),"runtime events keep static dependency facts");
+        assert!(app.safe_selected.is_empty(),"naming needs selects nothing");
     }
 
     #[tokio::test]
