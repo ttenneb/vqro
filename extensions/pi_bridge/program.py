@@ -21,9 +21,9 @@ CAPABILITIES = {
     "agent.clear_queue": {"returns": "texts"},
     "agent.answer": {"kinds": sorted(DIALOGS)},
     "agent.correlation": {"per_input": False},
-    # Interim agent contract: what each resource supports is in data.commands / data.config.
-    "agent.command": {"declared_in": "data.commands"},
-    "agent.configure": {"declared_in": "data.config", "observed": "get_state"},
+    # Agent standard v0 section 6.3: what each resource supports is in data.agent.commands / .config.
+    "agent.command": {"v": 0, "declared_in": "data.agent.commands", "args": "string"},
+    "agent.configure": {"v": 0, "declared_in": "data.agent.config", "observed": "get_state"},
 }
 OPS = sorted(EFFECTS | {"command", "configure"})
 
@@ -91,7 +91,7 @@ class Bridge:
         self._tasks = set()
         self.failure = None
         self._cancel_attempts = set()
-        self.config = None  # unknown until Pi answers get_state
+        self.declared = control.Declarations()  # agent v0 6.3 config/commands; unknown until Pi answers
         for effect in OPS:
             self.provider.effect("agent." + effect)(self._effect)
 
@@ -105,7 +105,8 @@ class Bridge:
         return {"ref": "agent", "incarnation": "", "kind": "agent", "state": "live",
                 "name": "Pi", "title": "Pi RPC", "cwd": str(self.cwd),
                 "status": {"state": snapshot["status"]}, "data": {**agent_data(snapshot),
-                    "commands": control.COMMANDS, "config": self.config,
+                    # Agent standard v0 section 6.3 lists (the rest of data.agent is not adopted yet).
+                    "agent": self.declared.facts(),
                     "views": [view for view in (self.status_view, self.view) if view is not None],
                     **({"view_error": self.view_problem} if self.view_problem else {})}}
 
@@ -122,6 +123,10 @@ class Bridge:
                 return await self._settings_effect(op, args, effect.remaining)
             finally:
                 self._publish_now.set()
+        if op in ("prompt", "steer", "follow_up") and isinstance(args, dict) and self.declared.expands(args.get("message")):
+            # Pi expands /templates, /skill:… and extension commands inside sends; a send stays literal (6.3).
+            return {"outcome": "rejected", "error": {"kind": "unsupported",
+                    "message": "Pi would run this text as a command; nothing sent. Use agent.command for advertised commands."}}
         try:
             result = await self.pi.invoke(op, args, timeout=effect.remaining)
         finally:
@@ -143,13 +148,9 @@ class Bridge:
         """agent.command / agent.configure: only declared names and values, sent once; then
         re-read Pi's state so facts show what Pi reports (observed), never what was asked."""
         args = args if isinstance(args, dict) else {}
-        if op == "configure":
-            mapped = control.configure(self.config, args.get("id"), args.get("value"))
-        else:
-            mapped = control.command(args.get("name"), args.get("args"))
-        if isinstance(mapped, str):
-            return {"outcome": "rejected", "error": {"kind": "unsupported" if "not declared" in mapped else "invalid", "message": mapped}}
-        native, native_args = mapped
+        native, native_args = self.declared.configure(args) if op == "configure" else self.declared.command(args)
+        if native in ("unsupported", "stale"):
+            return {"outcome": "rejected", "error": {"kind": native, "message": native_args}}
         result = await self.pi.request(native, native_args, timeout=remaining)
         if result["outcome"] == "indeterminate":
             raise ProviderError("backend", result.get("reason", "runtime outcome unknown"))
@@ -158,22 +159,21 @@ class Bridge:
         data = result.get("data") if isinstance(result.get("data"), dict) else {}
         if native == "new_session" and data.get("cancelled") is True:
             return {"outcome": "rejected", "error": {"kind": "backend", "message": "a Pi extension cancelled the new session"}}
-        refreshed = await control.read(self.pi)
-        if refreshed is not None:
-            self.config = refreshed
-        if op == "configure" and refreshed is not None and control.current(refreshed, args["id"]) == args["value"]:
+        options, commands = await control.read(self.pi)
+        self.declared.update(options, commands)
+        if op == "configure" and options is not None and self.declared.current(args["id"]) == args["value"]:
             return {"outcome": "observed", "data": {"id": args["id"], "value": args["value"]}}
         if native == "compact":
             data = {k: data[k] for k in ("tokensBefore", "estimatedTokensAfter") if k in data}
         elif native in ("set_model", "cycle_model"):
-            data = {"model": control.current(self.config, "model")}
+            data = {"model": self.declared.current("model")}
+        elif native == "prompt":
+            data = {k: data[k] for k in ("disposition",) if k in data}
         return {"outcome": "accepted", **({"data": data} if data else {})}
 
     async def _read_config(self):
-        config = await control.read(self.pi)
-        if config is not None:
-            self.config = config
-            self._publish_now.set()
+        self.declared.update(*await control.read(self.pi))
+        self._publish_now.set()
 
     def _remember(self, provider):
         registration = provider.registration

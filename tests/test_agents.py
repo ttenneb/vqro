@@ -239,11 +239,11 @@ class AgentsTests(unittest.TestCase):
     def declare_settings(self):
         self.core.add_agent()
         self.core.providers["other"]["capabilities"].update({"agent.command": {}, "agent.configure": {}})
-        self.core.resources["r2"]["data"].update(
-            config=[{"id": "model", "label": "Model", "type": "select", "value": "p/a",
-                     "choices": [{"value": "p/a", "label": "A"}, {"value": "p/b", "label": "B"}]},
-                    {"id": "auto", "label": "Auto", "type": "boolean", "value": True}],
-            commands=[{"name": "compact", "label": "Compact", "input": {"hint": "Instructions"}}, {"name": "new_session", "label": "New session"}])
+        self.core.resources["r2"]["data"]["agent"] = {"v": 0,
+            "config": [{"id": "model", "label": "Model", "category": "model", "type": "select", "value": "p/a", "rev": 3,
+                        "choices": [{"value": "p/a", "label": "A"}, {"value": "p/b", "label": "B"}]},
+                       {"id": "auto", "label": "Auto", "type": "boolean", "value": True, "rev": 1}],
+            "commands": [{"name": "compact", "description": "Compact it", "input": {"hint": "Instructions"}}, {"name": "new_session"}]}
         self.agents.event("resource", {"id": "r2"})
 
     def test_agent_settings_popup_configure_and_command_use_only_declared_rows(self):
@@ -258,8 +258,8 @@ class AgentsTests(unittest.TestCase):
         panel = self.core.live[popup["client"]["popup"]["view"]]
         model = next(r for r in panel["items"] if r.get("type") == "select" and r["text"] == "Model")
         self.assertEqual((model["value"], [o["value"] for o in model["options"]]), ("p/a", ["p/a", "p/b"]))
-        self.assertEqual(model["args"], {"resource": "r2", "id": "model"})
-        compact = next(r for r in panel["items"] if r.get("text") == "Compact")
+        self.assertEqual(model["args"], {"resource": "r2", "id": "model", "rev": 3}, "a stale popup choice is rejected, not applied")
+        compact = next(r for r in panel["items"] if r.get("text") == "/compact")
         self.assertEqual((compact["command"], compact["input"]), ("agents.command", "Instructions"))
 
         self.command("configure", **model["args"], value="p/b")
@@ -268,8 +268,8 @@ class AgentsTests(unittest.TestCase):
         run({"resource": "r2", "name": "compact", "text": "keep tests"})
         run({"resource": "r2", "name": "new_session", "text": "ignored: no input declared"})
         self.assertEqual([p["args"] for _, p in self.native()], [
-            {"id": "model", "value": "p/b"}, {"id": "auto", "value": False},
-            {"name": "compact", "args": {"text": "keep tests"}}, {"name": "new_session"}])
+            {"v": 0, "id": "model", "value": "p/b", "rev": 3}, {"v": 0, "id": "auto", "value": False},
+            {"v": 0, "name": "compact", "args": "keep tests"}, {"v": 0, "name": "new_session"}])
         self.assertIn("has not confirmed", self.core.notices[-3][0], "accepted is not reported as applied")
 
         for args in ({"id": "model", "value": "p/zzz"}, {"id": "temperature", "value": 1}, {"id": "auto", "value": "yes"}):
@@ -287,7 +287,7 @@ class AgentsTests(unittest.TestCase):
         with self.assertRaises(VqroError):
             self.command("config", resource="r2")
         # Declared rows without the provider capability are not offered either.
-        self.core.resources["r2"]["data"]["commands"] = [{"name": "x", "label": "X"}]
+        self.core.resources["r2"]["data"]["agent"] = {"v": 0, "commands": [{"name": "x"}]}
         self.agents.event("resource", {"id": "r2"})
         self.assertIsNone(self.core.value("menu/agents.r2.settings"))
 

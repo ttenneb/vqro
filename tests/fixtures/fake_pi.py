@@ -132,7 +132,11 @@ for line in sys.stdin.buffer:
         reply(command, {"cancelled": False})
     elif kind == "compact":
         reply(command, {"summary": "fixture summary", "tokensBefore": 10, "estimatedTokensAfter": 2})
-    elif kind in {"get_messages", "get_commands", "get_session_stats"}:
+    elif kind == "get_commands":
+        # Pi runs these as prompt text "/name args" (templates, skills, extension commands).
+        reply(command, {"commands": [{"name": "fixture-template", "description": "Fixture prompt template", "source": "prompt"},
+                                     {"name": "skill:fixture", "description": "Fixture skill", "source": "skill"}]})
+    elif kind in {"get_messages", "get_session_stats"}:
         reply(command, {"messages": [], "commands": [], "tokens": {"total": 0}, "cost": 0})
     elif kind == "prompt":
         message = command.get("message")

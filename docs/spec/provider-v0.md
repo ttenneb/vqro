@@ -224,27 +224,31 @@ Public calls stay resource-centric: `resource.spawn {provider?, kind, ...}`, `re
   | `agent.clear_queue` | `{returns: "texts"}` |
   | `agent.answer` | `{kinds: ["select", "confirm", "input", "editor"]}` |
   | `agent.correlation` | `{per_input: false}` (events carry no originating input id) |
-  | `agent.command` | `{declared_in: "data.commands"}` |
-  | `agent.configure` | `{declared_in: "data.config", observed: "get_state"}` |
+  | `agent.command` | `{v: 0, declared_in: "data.agent.commands", args: "string"}` |
+  | `agent.configure` | `{v: 0, declared_in: "data.agent.config", observed: "get_state"}` |
 
   Claude Code declares its own set later. There is no shared `deliver(mode)`.
 - **Accepted is not settled.** `resource.invoke` returns `accepted` with the runtime's disposition. Completion is a
   fact and an event (`agent.settled {aborted}`) at the level of a run; the contract never promises that a given input
   completed.
-- **Commands and configuration (interim contract).** A runtime that has explicit commands or session settings
-  declares the capabilities `agent.command` / `agent.configure` and lists, in its facts, exactly what this resource
-  supports, republished whenever it changes:
-  - `data.commands: [{name, label, description?, input?: {hint}}]` (the shape of ACP's `available_commands_update`);
-    `agent.command {name, args?: {text}}` runs one (`text` only when `input` is declared).
-  - `data.config: [{id, label, type: "select"|"boolean", value, choices?: [{value, label}]}]`;
-    `agent.configure {id, value}` sets one. Result `observed` once the runtime reports the new value, else `accepted`.
-  The adapter rejects (`unsupported`/`invalid`) an undeclared name or id, or a value outside `choices`, before any
-  native write; nothing is retried or emulated. This is the agent standard's "commands and configuration" module
-  (`session.config`, `agent.configure`, `agent.command`, agent-v0 section 6.3) in today's provider-v0 facts; it moves to
-  `data.agent.session.config` when the bridge adopts that standard. Pi: commands `new_session`, `compact` (input:
-  custom instructions), `cycle_model`; config `model` (`provider/modelId`, choices from `get_available_models`),
-  `thinking_level`, `steering_mode`, `follow_up_mode` (`one-at-a-time`/`all`), `auto_compaction` (boolean), all read
-  back with `get_state`. Clients show them generically (the agents extension's Agent settings popup).
+- **Config options and commands: agent standard v0 section 6.3, adopted ahead of the rest of `data.agent`.** A
+  runtime that has them declares `agent.configure` / `agent.command` and publishes, republished whenever they change:
+  - `data.agent.config: [{id, label, description?, category?, type: select|boolean|string|number, value,
+    choices?: [{value, label, description?}], rev}]` (`category` open: `model | mode | thought_level | _…`);
+    `agent.configure {v, id, value, rev?}`. A stale `rev`, an undeclared id or a value outside `choices` rejects
+    (`stale` / `unsupported`) before any native write. The outcome is `observed` only once the runtime reports the
+    new value, else `accepted` or `dispatched`.
+  - `data.agent.commands: [{name, description?, input?: {hint}}]`; `agent.command {v, name, args?}` with `args` a
+    string runs only an advertised name. Slash text inside a plain send is never executed.
+  `data.agent` carries only `v`, `config` and `commands` until the bridge adopts the rest of the standard; the other
+  top-level facts are unchanged. Pi: commands `new_session`, `compact` (args: custom instructions), `cycle_model`, plus
+  Pi's own `get_commands` entries (templates, skills, extension commands), which `agent.command` sends as the prompt
+  `/name args`. Because Pi expands such text in any prompt, a plain `agent.prompt`/`steer`/`follow_up` that starts
+  with an advertised `/name` (or `/skill:`) is rejected `unsupported`, nothing sent. Config: `model` (category
+  `model`, value `provider/modelId`, choices from `get_available_models`), `thinking_level` (`thought_level`),
+  `steering_mode` / `follow_up_mode` (`_queue`: `one-at-a-time` | `all`), `auto_compaction` (`_compaction`,
+  boolean); every value is read back with `get_state`. Not yet: `caps.rev` bumps for queue-mode changes (the bridge
+  does not publish `data.agent.caps`). Clients show both generically (the agents extension's Agent settings popup).
 - **Dialogs.** Pending runtime requests are `requests` facts, answered with `agent.answer`. A bridge cancels the kinds
   it can't surface instead of leaving the runtime waiting.
 - **View content.** The bridge publishes a bounded transcript window and status with `view.publish` on

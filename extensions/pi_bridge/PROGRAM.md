@@ -30,7 +30,8 @@ registers, syncs one agent (`ref: agent`), finds its assigned rN through scoped 
 ## Native effects and facts
 
 Capabilities: agent.prompt, steer, follow_up, abort, clear_queue, answer, correlation, command and configure
-(`control.py`: declared `data.commands`/`data.config`, read back with `get_state`; see provider-v0 section 6). Effects carry native
+(`control.py`: agent v0 6.3 `data.agent.config`/`.commands`, read back with `get_state`; provider-v0 section 6).
+A plain send starting with an advertised `/command` is rejected: Pi would expand it. Effects carry native
 Pi args/dispositions. Accepted is not settled; only native agent_settled marks settlement. Abort does not silently
 clear queues. UI answer is dispatched, not acknowledged. Runtime deadline/exit uncertainty is a backend error,
 which the core maps to indeterminate. No prompt/input/effect is automatically resent.

@@ -293,15 +293,16 @@ class E2E:
         self.agent(rid, lambda r: r['data']['run']['settled'] and r['data']['run']['aborted'])
         self.log.append({'prefix_p_prompt': 'PASS', 'received': sent[prompts:]})
         # Agent settings: the bridge declares Pi's model choices; picking one sends exactly set_model.
-        self.wait(lambda: any(c.get('id') == 'model' for c in (self.resource(rid).get('data') or {}).get('config') or []), 'declared agent config')
+        options = lambda: {c['id']: c for c in ((self.resource(rid).get('data') or {}).get('agent') or {}).get('config') or []}
+        self.wait(lambda: 'model' in options(), 'declared agent config (data.agent.config)')
         self.ui_menu(rid, 'Agent settings…')
-        self.ui_frame('agent-settings', 'Agent settings', 'Model', 'Fake Small', 'Compact context')
+        self.ui_frame('agent-settings', 'Agent settings', 'Model', 'Fake Small', '/compact', '/fixture-template')
         self.ui('send-keys', '-t', 'ui:0.0', 'Enter')
         self.ui_frame('model-options', '● Fake Small', 'Fake Large')  # pick-one opens on the current value
         self.ui('send-keys', '-t', 'ui:0.0', 'Down', 'Enter')
         changed = self.wait(lambda: [row for row in self.trace() if row.get('type') == 'set_model'] or None, 'set_model reached fake Pi')
         assert [{k: row[k] for k in ('provider', 'modelId')} for row in changed] == [{'provider': 'fixture', 'modelId': 'fake-large'}], changed
-        self.wait(lambda: next((c['value'] for c in self.resource(rid)['data']['config'] if c['id'] == 'model'), None) == 'fixture/fake-large', 'model observed in facts')
+        self.wait(lambda: options()['model']['value'] == 'fixture/fake-large', 'model observed in facts')
         self.ui_frame('model-changed', 'Model', 'Fake Large')
         self.ui('send-keys', '-t', 'ui:0.0', 'Escape')
         self.log.append({'agent_settings_model': 'PASS', 'set_model': changed})

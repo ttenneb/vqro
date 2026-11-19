@@ -61,7 +61,7 @@ class SidebarTests(unittest.TestCase):
     def test_agent_rows_offer_settings_only_when_the_agent_declares_them(self):
         module = load()
         plain = {"id": "r2", "kind": "agent", "name": "A", "state": "live", "data": {}}
-        declared = dict(plain, data={"config": [{"id": "model", "type": "select", "value": "x"}]})
+        declared = dict(plain, data={"agent": {"v": 0, "config": [{"id": "model", "type": "select", "value": "x", "rev": 1}], "commands": []}})
         menu = lambda r: [m["command"] for m in module["term_row"]("r2", r)["menu"]]
         self.assertNotIn("agents.config", menu(plain))
         self.assertIn("agents.config", menu(declared))

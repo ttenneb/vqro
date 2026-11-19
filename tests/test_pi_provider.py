@@ -355,37 +355,57 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         await self.core.wait(lambda: self.core.run_facts().get("settled") is True)
         self.assertEqual(self.core.resources["r7"]["status"]["state"], "done")
 
-    async def test_commands_and_config_are_declared_observed_and_validated_before_any_native_write(self):
+    async def test_commands_and_config_follow_agent_v0_section_6_3(self):
         bridge = await self.start()
-        await self.core.wait(lambda: self.core.resources.get("r7", {}).get("data", {}).get("config"))
-        data = self.core.resources["r7"]["data"]
-        self.assertEqual([c["name"] for c in data["commands"]], ["new_session", "compact", "cycle_model"])
-        config = {c["id"]: c for c in data["config"]}
-        self.assertEqual(config["model"]["value"], "fixture/fake-small")
-        self.assertEqual([c["value"] for c in config["model"]["choices"]], ["fixture/fake-small", "fixture/fake-large"])
-        self.assertEqual(config["thinking_level"]["choices"], [{"value": "off", "label": "off"}])
-        self.assertEqual((config["auto_compaction"]["type"], config["auto_compaction"]["value"]), ("boolean", True))
-        self.assertEqual(config["steering_mode"]["value"], "one-at-a-time")
+        agent = lambda: self.core.resources.get("r7", {}).get("data", {}).get("agent") or {}
+        options = lambda: {c["id"]: c for c in agent().get("config") or []}
+        await self.core.wait(lambda: options() and len(agent()["commands"]) > 3)
+        self.assertEqual(agent()["v"], 0)
+        self.assertNotIn("config", self.core.resources["r7"]["data"], "the lists live under data.agent only")
+        self.assertEqual([c["name"] for c in agent()["commands"]], ["new_session", "compact", "cycle_model", "fixture-template", "skill:fixture"])
+        self.assertTrue(all(set(c) <= {"name", "description", "input"} for c in agent()["commands"]))
+        model = options()["model"]
+        self.assertEqual((model["category"], model["type"], model["value"], model["rev"]), ("model", "select", "fixture/fake-small", 1))
+        self.assertEqual([c["value"] for c in model["choices"]], ["fixture/fake-small", "fixture/fake-large"])
+        self.assertEqual(options()["thinking_level"]["category"], "thought_level")
+        self.assertEqual((options()["auto_compaction"]["type"], options()["auto_compaction"]["value"]), ("boolean", True))
 
-        result = (await self.effect("configure", {"id": "model", "value": "fixture/fake-large"}))["result"]
-        self.assertEqual(result, {"outcome": "observed", "data": {"id": "model", "value": "fixture/fake-large"}})
-        await self.core.wait(lambda: {c["id"]: c for c in self.core.resources["r7"]["data"]["config"]}["model"]["value"] == "fixture/fake-large")
-        levels = {c["id"]: c for c in self.core.resources["r7"]["data"]["config"]}["thinking_level"]["choices"]
-        self.assertEqual([c["value"] for c in levels], ["off", "low", "high"], "choices follow the new model")
-        self.assertEqual((await self.effect("configure", {"id": "auto_compaction", "value": False}))["result"]["outcome"], "observed")
-        self.assertEqual((await self.effect("configure", {"id": "follow_up_mode", "value": "all"}))["result"]["outcome"], "observed")
-
-        # Outside the declarations: rejected by the adapter (control.configure/command), never sent to Pi.
-        for args, kind in (({"id": "model", "value": "nobody/unknown"}, "invalid"), ({"id": "temperature", "value": 1}, "unsupported"),
-                           ({"id": "auto_compaction", "value": "yes"}, "invalid")):
+        # Stale rev or a value outside the choices: rejected before any native write.
+        for args, kind in (({"v": 0, "id": "model", "value": "fixture/fake-large", "rev": 0}, "stale"),
+                           ({"v": 0, "id": "model", "value": "nobody/unknown"}, "unsupported"),
+                           ({"v": 0, "id": "temperature", "value": 1}, "unsupported"),
+                           ({"v": 0, "id": "auto_compaction", "value": "yes"}, "unsupported"),
+                           ({"v": 1, "id": "auto_compaction", "value": False}, "unsupported")):
             result = (await self.effect("configure", args))["result"]
             self.assertEqual((result["outcome"], result["error"]["kind"]), ("rejected", kind), args)
-        result = (await self.effect("command", {"name": "rm_rf"}))["result"]
-        self.assertEqual((result["outcome"], result["error"]["kind"]), ("rejected", "unsupported"))
+        self.assertEqual(options()["model"]["value"], "fixture/fake-small", "nothing changed")
 
-        self.assertEqual((await self.effect("command", {"name": "compact", "args": {"text": "keep the plan"}}))["result"]["outcome"], "accepted")
-        self.assertEqual((await self.effect("command", {"name": "new_session"}))["result"]["outcome"], "accepted")
-        self.assertEqual((await self.effect("command", {"name": "cycle_model"}))["result"], {"outcome": "accepted", "data": {"model": "fixture/fake-small"}})
+        result = (await self.effect("configure", {"v": 0, "id": "model", "value": "fixture/fake-large", "rev": 1}))["result"]
+        self.assertEqual(result, {"outcome": "observed", "data": {"id": "model", "value": "fixture/fake-large"}})
+        await self.core.wait(lambda: options()["model"]["value"] == "fixture/fake-large")
+        self.assertEqual(options()["model"]["rev"], 2, "rev bumps when the value changes")
+        self.assertEqual([c["value"] for c in options()["thinking_level"]["choices"]], ["off", "low", "high"], "choices follow the model")
+        stale = (await self.effect("configure", {"v": 0, "id": "model", "value": "fixture/fake-small", "rev": 1}))["result"]
+        self.assertEqual(stale["error"]["kind"], "stale")
+        self.assertEqual((await self.effect("configure", {"v": 0, "id": "auto_compaction", "value": False}))["result"]["outcome"], "observed")
+
+        result = (await self.effect("command", {"v": 0, "name": "rm_rf"}))["result"]
+        self.assertEqual((result["outcome"], result["error"]["kind"]), ("rejected", "unsupported"))
+        result = (await self.effect("command", {"v": 0, "name": "compact", "args": {"not": "a string"}}))["result"]
+        self.assertEqual(result["error"]["kind"], "unsupported", "args is a string")
+        self.assertEqual((await self.effect("command", {"v": 0, "name": "compact", "args": "keep the plan"}))["result"]["outcome"], "accepted")
+        self.assertEqual((await self.effect("command", {"v": 0, "name": "cycle_model"}))["result"], {"outcome": "accepted", "data": {"model": "fixture/fake-small"}})
+        # Pi's own commands run as prompt text only through agent.command; a plain send stays literal.
+        self.assertEqual((await self.effect("command", {"v": 0, "name": "fixture-template", "args": "for tests"}))["result"]["outcome"], "accepted")
+        accepted = (await bridge.pi.request("test_accepted"))["data"]["accepted"]
+        self.assertEqual(accepted[-1], "/fixture-template for tests")
+        await bridge.pi.request("test_settle")
+        for message in ("/fixture-template sneaky", "/skill:anything"):
+            result = (await self.effect("prompt", {"message": message}))["result"]
+            self.assertEqual((result["outcome"], result["error"]["kind"]), ("rejected", "unsupported"), message)
+        self.assertEqual((await bridge.pi.request("test_accepted"))["data"]["accepted"], accepted, "nothing sent")
+        self.assertEqual((await self.effect("prompt", {"message": "/usr/bin/env is a path, not a command"}))["result"]["outcome"], "accepted")
+        self.assertEqual((await self.effect("command", {"v": 0, "name": "new_session"}))["result"]["outcome"], "accepted")
 
     async def test_dialog_answer_is_dispatched_and_requests_are_complete(self):
         bridge = await self.start()

@@ -29,8 +29,9 @@ def view(rid):
 
 
 def advertised(resource, field):
-    """Interim agent contract: a resource's declared `data.commands` / `data.config` rows (or [])."""
-    rows = data(resource).get(field)
+    """Agent standard v0 section 6.3: the resource's `data.agent.commands` / `data.agent.config` (or [])."""
+    agent = data(resource).get("agent")
+    rows = agent.get(field) if isinstance(agent, dict) else None
     key = "name" if field == "commands" else "id"
     return [row for row in rows if isinstance(row, dict) and isinstance(row.get(key), str)] if isinstance(rows, list) else []
 
@@ -215,18 +216,20 @@ class Agents:
             else:
                 options = [{"label": label(str(c.get("label") or c.get("value")), 120), "value": c.get("value")}
                            for c in entry.get("choices") or [] if isinstance(c, dict)]
+            # `rev` makes a choice made on an outdated popup fail as stale instead of overriding a newer value.
             items.append({"type": "select", "text": label(entry.get("label") or entry["id"], 80), "value": entry.get("value"),
-                          "options": options, "command": "agents.configure", "args": {"resource": rid, "id": entry["id"]},
-                          "description": self.shown_value(entry)})
+                          "options": options, "command": "agents.configure",
+                          "args": {"resource": rid, "id": entry["id"], **({"rev": entry["rev"]} if "rev" in entry else {})},
+                          "description": label(entry.get("description") or self.shown_value(entry), 300)})
         if commands:
             items.append({"type": "header", "text": "Commands"})
         for entry in commands:
-            row = {"text": label(entry.get("label") or entry["name"], 80), "command": "agents.command",
+            row = {"text": label("/"+entry["name"] if not entry.get("label") else entry["label"], 80), "command": "agents.command",
                    "args": {"resource": rid, "name": entry["name"]}}
             if entry.get("description"):
                 row["description"] = label(entry["description"], 300)
             if isinstance(entry.get("input"), dict):
-                row["input"] = label(entry["input"].get("hint") or entry.get("label") or entry["name"], 120)
+                row["input"] = label(entry["input"].get("hint") or entry["name"], 120)
             items.append(row)
         if not items:
             items = [{"type": "text", "text": "This agent declares no settings or commands."}]
@@ -256,7 +259,8 @@ class Agents:
             isinstance(c, dict) and c.get("value") == value for c in entry.get("choices") or [])
         if not valid:
             raise VqroError("choose one of the declared values; nothing sent", "invalid")
-        result = self.ext.vqro.call("resource.invoke", {"resource": r["id"], "op": "agent.configure", "args": {"id": entry["id"], "value": value}})
+        native = {"v": 0, "id": entry["id"], "value": value, **({"rev": args["rev"]} if isinstance(args.get("rev"), int) else {})}
+        result = self.ext.vqro.call("resource.invoke", {"resource": r["id"], "op": "agent.configure", "args": native})
         outcome = result.get("outcome", "unknown")
         shown = self.shown_value(dict(entry, value=value))
         self.ext.notify(label(f"{entry.get('label') or entry['id']}: {shown} ({outcome}"
@@ -270,12 +274,12 @@ class Agents:
         entry = next((c for c in advertised(r, "commands") if c["name"] == args.get("name")), None)
         if entry is None:
             raise VqroError("this agent does not declare that command; nothing sent", "unsupported")
-        native = {"name": entry["name"]}
+        native = {"v": 0, "name": entry["name"]}
         if isinstance(entry.get("input"), dict) and isinstance(args.get("text"), str) and args["text"].strip():
-            native["args"] = {"text": args["text"]}
+            native["args"] = args["text"]  # a string (agent v0 6.3)
         result = self.ext.vqro.call("resource.invoke", {"resource": r["id"], "op": "agent.command", "args": native})
         outcome = result.get("outcome", "unknown")
-        self.ext.notify(label(f"{entry.get('label') or entry['name']}: {outcome}"
+        self.ext.notify(label(f"/{entry['name']}: {outcome}"
                               + ("; acceptance is not completion: watch agent status" if outcome == "accepted" else "")),
                         "ok" if outcome in ("accepted", "observed") else "warn")
         return {**result, "client": {"close": True}}

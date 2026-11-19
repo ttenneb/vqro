@@ -117,10 +117,10 @@ def term_row(rid, r, where=False):
             {"label": "Show", "command": "sidebar.show", "args": {"resource": rid}},
             *([{"label": "Kill program", "command": "sidebar.kill", "args": {"resource": rid}}]
               if r.get("kind", "terminal") == "terminal" and live else []),
-            # Agents that declare settings/commands (interim agent contract); the agents extension owns the popup.
+            # Agents declaring data.agent config/commands (agent v0 6.3); the agents extension owns the popup.
             *([{"label": "Agent settings…", "command": "agents.config", "args": {"resource": rid}}]
-              if r.get("kind") == "agent" and live and isinstance(r.get("data"), dict)
-              and (r["data"].get("config") or r["data"].get("commands")) else []),
+              if r.get("kind") == "agent" and live and isinstance((r.get("data") or {}).get("agent"), dict)
+              and (r["data"]["agent"].get("config") or r["data"]["agent"].get("commands")) else []),
         ],
     }
 
