@@ -890,7 +890,13 @@ registration order must never route them to a different backend. Other `argv[0]`
 launcher (`PATH` on Unix; `CreateProcess` search on Windows, where a `.py` file is not directly executable and
 `python3` is often absent). The bundled `defaults.json` names `python3`, which is Unix-only for now; Windows defaults
 need a portable interpreter choice such as the `py -3` launcher (`build-plan.md`, Windows work). Started with `VQRO_SOCKET`,
-`VQRO_EXTENSION`, `VQRO_EXTENSION_TOKEN`, and `VQRO_EXTENSION_LIFETIME=stdin`; output goes to `<state>/ext-<name>.log`.
+`VQRO_EXTENSION`, `VQRO_EXTENSION_TOKEN`, and `VQRO_EXTENSION_LIFETIME=stdin`. Stdout/stderr are drained through
+bounded pipes into `<state>/ext-<name>.log`, with one `.log.1` backup, each at most 1 MiB. Rotation works during a
+single long-lived generation and across overlapping replacement cleanup; there are no child-held log file descriptors.
+All log filesystem work runs off the core mutex on blocking workers, with one bounded chunk per pump and no
+unbounded output queue. A log failure discards diagnostics but continues draining the child; logs are not durable
+evidence. Shutdown drains briefly, then abandons pipes a descendant keeps open. Removed extension names' files are
+retained for manual diagnosis; the per-name bound is not a global disk quota.
 Crash budget: 3 exits in 5 minutes, then `failed` until the entry changes or `vqro.extension.restart`.
 
 ### Static manifests and observed facts

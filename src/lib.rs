@@ -8,6 +8,7 @@ mod invocation;
 pub mod core;
 pub mod events;
 pub mod ext;
+mod ext_log;
 pub mod paths;
 pub mod provider_client;
 pub mod queue;

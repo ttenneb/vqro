@@ -73,3 +73,31 @@ async fn retired_connections_cannot_mutate_even_when_author_name_is_reused() {
     control.call("core.shutdown",json!({})).await.unwrap();
     assert!(accepted.is_empty(),"retired operations accepted: {accepted:?}");
 }
+
+#[tokio::test]
+async fn noisy_extension_rotates_without_restart_and_broken_logging_still_drains() {
+    let fixture=Fixture::new().await;
+    let (control,_)=fixture.peer().await;
+    // A log-open error must discard output, not stop draining and wedge the child.
+    std::fs::create_dir(fixture.root.path().join("state/ext-bad.log")).unwrap();
+    for name in ["noisy","bad"] {
+        let done=fixture.root.path().join(format!("{name}.done"));
+        let code="import os,pathlib,sys; [(os.write(1,b'a'*16384),os.write(2,b'b'*16384)) for _ in range(200)]; pathlib.Path(sys.argv[1]).write_text('done'); sys.stdin.buffer.read()";
+        control.call("workspace.apply",json!({"ops":[{"op":"set","key":format!("extension/{name}"),
+            "value":{"argv":["/usr/bin/python3","-c",code,done],"enabled":true}}]})).await.unwrap();
+        let until=Instant::now()+Duration::from_secs(8);
+        while !done.exists() {
+            control.call_with_timeout("workspace.snapshot",json!({}),Duration::from_millis(500)).await.expect("logging must not hold the core mutex");
+            assert!(Instant::now()<until,"bounded log pump stopped draining {name}");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let state=control.call("extension.list",json!({})).await.unwrap();
+        assert_eq!(state["extensions"][name]["generation"],1);
+        assert_eq!(state["extensions"][name]["running"],true);
+    }
+    for suffix in ["log","log.1"] {
+        let bytes=std::fs::metadata(fixture.root.path().join(format!("state/ext-noisy.{suffix}"))).unwrap().len();
+        assert!(bytes>0 && bytes<=1024*1024,"log bound: {bytes}");
+    }
+    control.call("core.shutdown",json!({})).await.unwrap();
+}

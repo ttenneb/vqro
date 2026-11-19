@@ -181,16 +181,7 @@ pub fn reconcile(core: &Shared) {
         if let Some(cwd) = cwd {
             cmd.current_dir(cwd);
         }
-        match log.and_then(|p| std::fs::OpenOptions::new().create(true).append(true).open(p).ok()) {
-            Some(f) => {
-                let f2 = f.try_clone().ok();
-                cmd.stdout(f);
-                cmd.stderr(f2.map(std::process::Stdio::from).unwrap_or_else(std::process::Stdio::null));
-            }
-            None => {
-                cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
-            }
-        }
+        cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
         match cmd.spawn() {
             Err(e) => {
                 let why=format!("could not start: {e}");
@@ -203,6 +194,8 @@ pub fn reconcile(core: &Shared) {
                 // The core alone holds the writer. Kernel pipe closure on core
                 // death reaches extensions even when no Rust cleanup can run.
                 let mut lifetime = child.stdin.take();
+                let stdout=child.stdout.take().unwrap();
+                let stderr=child.stderr.take().unwrap();
                 let (stop_tx, stop_rx) = oneshot::channel();
                 rt.stop = Some(stop_tx);
                 rt.running = true;
@@ -213,6 +206,10 @@ pub fn reconcile(core: &Shared) {
                 let core = core.clone();
                 let name = name.clone();
                 c.extension_tasks.push(tokio::spawn(async move {
+                    // JoinSet aborts the pump on supervisor cancellation too; descendants cannot
+                    // keep an abandoned reader alive forever by retaining stdout/stderr.
+                    let mut logging=tokio::task::JoinSet::new();
+                    logging.spawn(crate::ext_log::drain(stdout,stderr,log));
                     tokio::select! {
                         _ = stop_rx => {
                             // Cooperative extensions see EOF and can close owned private backends.
@@ -237,6 +234,7 @@ pub fn reconcile(core: &Shared) {
                         }
                     }
                     drop(lifetime); // retain the writer across the whole child lifetime
+                    let _=tokio::time::timeout(Duration::from_millis(100),logging.join_next()).await;
                 }));
             }
         }
