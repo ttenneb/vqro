@@ -21,11 +21,22 @@ pub const MAX_REGISTRATION_BYTES: usize = 128 * 1024;
 pub use crate::resource_admission::{encoded_bytes, MAX_FACT_BYTES, MAX_RESOURCES};
 const RECENT_EFFECTS: usize = 256;
 const MAX_INFLIGHT: usize = 128;
+/// Concurrent stream opens per provider, a budget separate from effects (agent-v0 §9.2): first
+/// paint and reattach after a restart open agents × viewers streams at once.
+const MAX_OPENS: usize = 1024;
+/// Core cap on one provider's item streams (separate from the 512 terminal streams): at least
+/// agents × max viewers (target 200 × 4 = 800).
+pub const MAX_ITEM_STREAMS: usize = 8192;
 const CONTROL_BYTES: usize = 4 * 1024 * 1024;
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
 fn invalid(message: impl Into<String>) -> RpcError { RpcError::invalid(message) }
 fn overloaded(message: impl Into<String>) -> RpcError { provider::rejected("overloaded", message) }
+/// Gap reasons of provider-v0 9.5 plus `retention` (an item stream fell out of the journal).
+fn gap_reason_known(why: &Value) -> bool {
+    why["reason"] != "gap" || matches!(why["gap"].as_str(), Some("backend_dropped" | "paused" | "viewer_slow" | "retention"))
+}
+
 fn reason(value: &Value) -> Result<Value, RpcError> {
     crate::limits::json_depth(value,crate::limits::JSON_DEPTH)?;
     if value.is_object() && value["reason"].is_string() { Ok(value.clone()) } else { Err(invalid("reason must be an object with a string reason")) }
@@ -46,11 +57,13 @@ struct Registration {
 #[derive(Deserialize)]
 struct Limits {
     #[serde(default = "default_streams")] max_streams: usize,
+    #[serde(default = "default_item_streams")] max_item_streams: usize,
     #[serde(default = "default_window")] stream_window_bytes: usize,
 }
 fn default_streams() -> usize { 512 }
+fn default_item_streams() -> usize { 1024 }
 fn default_window() -> usize { adapter::STREAM_BUFFER_BYTES }
-impl Default for Limits { fn default() -> Self { Self { max_streams: default_streams(), stream_window_bytes: default_window() } } }
+impl Default for Limits { fn default() -> Self { Self { max_streams: default_streams(), max_item_streams: default_item_streams(), stream_window_bytes: default_window() } } }
 
 #[derive(Deserialize)]
 struct WireFacts {
@@ -127,6 +140,10 @@ pub struct WireProvider {
     window: usize,
     streams: Mutex<HashMap<u64, WireStream>>,
     stream_slots: Arc<Semaphore>,
+    /// Item streams: their own budget, so agents × viewers never competes with terminal streams.
+    item_slots: Arc<Semaphore>,
+    /// Concurrent stream opens: outside the effect in-flight limit.
+    opens: Arc<Semaphore>,
     control: Arc<Semaphore>,
     inflight: Arc<Semaphore>,
     next_stream: AtomicU64,
@@ -190,7 +207,7 @@ impl Connection {
             return Err(RpcError::new("conflict", "provider name already has a live connection"));
         }
         let window=r.limits.stream_window_bytes.min(default_window());
-        let metadata=json!({"provider_version":r.provider_version,"limits":{"max_streams":r.limits.max_streams.min(512),"stream_window_bytes":window,"max_record_bytes":MAX_RECORD_BYTES},"host":host,"owner_extension":owner.as_ref().map(|o|&o.name)});
+        let metadata=json!({"provider_version":r.provider_version,"limits":{"max_streams":r.limits.max_streams.min(512),"max_item_streams":r.limits.max_item_streams.min(MAX_ITEM_STREAMS),"stream_window_bytes":window,"max_record_bytes":MAX_RECORD_BYTES},"host":host,"owner_extension":owner.as_ref().map(|o|&o.name)});
         let info=ProviderInfo{connection:self.id,instance:r.instance.clone(),role:r.role.clone(),software:json!(r.software)};
         let charge=provider::registration_charge(&r.name,&json!(r.capabilities),Some(&info),&metadata);c.admit_provider_registration(&r.name,charge)?;
         let resume_token = if let Some(claim) = &claim {
@@ -213,7 +230,9 @@ impl Connection {
         let (stopped, _) = watch::channel(false);
         let provider = Arc::new(WireProvider { name: r.name, generation, source, connection: self.id,
             peer: self.peer.clone(), core: Arc::downgrade(core), window, streams: Mutex::new(HashMap::new()),
-            stream_slots: Arc::new(Semaphore::new(r.limits.max_streams.min(512))), control: Arc::new(Semaphore::new(CONTROL_BYTES)),
+            stream_slots: Arc::new(Semaphore::new(r.limits.max_streams.min(512))),
+            item_slots: Arc::new(Semaphore::new(r.limits.max_item_streams.min(MAX_ITEM_STREAMS))),
+            opens: Arc::new(Semaphore::new(MAX_OPENS)), control: Arc::new(Semaphore::new(CONTROL_BYTES)),
             inflight: Arc::new(Semaphore::new(MAX_INFLIGHT)), next_stream: AtomicU64::new(1),
             inventory: Mutex::new(Inventory { started: false, syncing: false, seen: BTreeMap::new(), current: BTreeMap::new(), effects: BTreeSet::new(), recent_effects:VecDeque::new() }), stopped, health });
         *self.provider.lock().unwrap() = Some(provider.clone());
@@ -355,7 +374,14 @@ impl WireProvider {
                 if failed { self.end(id, false, json!({"reason": "slow_consumer"}), true); }
             }
             "stream.closed" | "stream.gap" => {
-                let why = reason(&p["reason"])?;
+                // A malformed or unknown reason is a protocol error that still ends the stream (agent-v0 §4).
+                let why = match reason(&p["reason"]) {
+                    Ok(why) if method != "stream.gap" || gap_reason_known(&why) => why,
+                    Ok(_) | Err(_) => {
+                        self.end(id, false, json!({"reason": "invalid", "message": format!("{method} with an unknown or malformed reason")}), true);
+                        return Err(invalid(format!("{method} reason must be an object with a known reason")));
+                    }
+                };
                 if method == "stream.gap" {
                     let expected = self.streams.lock().unwrap().get(&id).map(|s| s.credit.lock().unwrap().offset);
                     if p["offset"].as_u64() != expected { self.end(id, false, json!({"reason": "invalid", "message": "gap offset mismatch"}), true); return Ok(()); }
@@ -391,6 +417,8 @@ impl WireProvider {
     fn disconnect(&self, core: &Shared) {
         self.stopped.send_replace(true);
         self.stream_slots.close();
+        self.item_slots.close();
+        self.opens.close();
         self.inflight.close();
         self.streams.lock().unwrap().clear();
         let mut c = core.lock().unwrap();
@@ -411,7 +439,9 @@ impl WireProvider {
             let Some(context) = context else { adapter::reject_command(cmd, "wire effects require a core context"); continue };
             if context.caller.as_ref().is_some_and(|o|!o.is_live()) { adapter::reject_command(cmd,"supervised caller retired before dispatch"); continue; }
             let Some(cmd) = adapter::command_for(cmd, self.connection) else { continue };
-            let Ok(slot) = self.inflight.clone().try_acquire_owned() else { adapter::reject_command(cmd, "provider in-flight effect limit reached"); continue };
+            // Stream opens have their own concurrency budget; effects keep the in-flight limit.
+            let budget = if matches!(cmd, AdapterCmd::Attach { .. }) { (&self.opens, "provider stream-open limit reached") } else { (&self.inflight, "provider in-flight effect limit reached") };
+            let Ok(slot) = budget.0.clone().try_acquire_owned() else { adapter::reject_command(cmd, budget.1); continue };
             let provider = self.clone();
             tokio::spawn(async move { let _slot = slot; provider.command(context, cmd).await; });
         }
@@ -484,7 +514,10 @@ impl WireProvider {
         Ok(())
     }
     async fn open(self: &Arc<Self>, context: &EffectContext, reference: String, cols: u16, rows: u16, history: u32, items: Option<Value>) -> Result<Stream, AdapterError> {
-        let slot = self.stream_slots.clone().try_acquire_owned().map_err(|_| AdapterError::RejectedKind { kind: "overloaded".into(), message: "provider max_streams reached".into() })?;
+        let slot = match &items {
+            Some(_) => self.item_slots.clone().try_acquire_owned().map_err(|_| AdapterError::RejectedKind { kind: "overloaded".into(), message: "provider max_item_streams reached".into() })?,
+            None => self.stream_slots.clone().try_acquire_owned().map_err(|_| AdapterError::RejectedKind { kind: "overloaded".into(), message: "provider max_streams reached".into() })?,
+        };
         let id = self.next_stream.fetch_add(1, Ordering::Relaxed);
         let (output, receiver) = crate::queue::channel(adapter::STREAM_BUFFER_BYTES);
         let (input, mut incoming) = crate::queue::channel(adapter::STREAM_BUFFER_BYTES);
@@ -497,10 +530,14 @@ impl WireProvider {
         let incarnation = context.target.as_ref().map(|t| t.1.as_str()).unwrap_or("");
         // Item streams carry no dimensions; the provider answers `continue`/`reset` and its epoch.
         let open = match &items {
-            Some(items) => json!({"generation": self.generation, "stream": id, "ref": reference, "incarnation": incarnation, "items": items, "window_bytes": self.window}),
+            Some(items) => {
+                let mut open = json!({"generation": self.generation, "stream": id, "ref": reference, "incarnation": incarnation, "channel": "items", "window_bytes": self.window});
+                if let Some(after) = items.get("after").filter(|a| !a.is_null()) { open["after"] = after.clone(); }
+                open
+            }
             None => json!({"generation": self.generation, "stream": id, "ref": reference, "incarnation": incarnation, "cols": cols, "rows": rows, "history_lines": history, "window_bytes": self.window}),
         };
-        let result = self.peer.call_with_timeout("stream.open", open, remaining).await;
+        let result = self.peer.call_reserved("stream.open", open, remaining).await;
         if Instant::now() >= context.deadline { return Err(AdapterError::Timeout("provider stream.open deadline expired; outcome indeterminate".into())); }
         let epoch = if items.is_some() { result.as_ref().ok().and_then(|r| r["epoch"].as_str()).filter(|e| !e.is_empty() && e.len() <= 256).map(String::from) } else { None };
         let initial = match (items.is_some(), result.as_ref().ok().and_then(|r| r["initial"].as_str())) {

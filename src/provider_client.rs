@@ -122,6 +122,8 @@ pub struct Config {
     /// Capability name -> parameter object (absent means unsupported; never `false`).
     pub capabilities: Map<String, Value>,
     pub max_streams: usize,
+    /// Concurrent item streams (`items.stream`), a separate budget: at least agents × max viewers.
+    pub max_item_streams: usize,
     pub stream_window_bytes: u64,
     /// Runtime bridges only.
     pub token: Option<String>,
@@ -158,6 +160,7 @@ impl Config {
             provider_version: env!("CARGO_PKG_VERSION").into(),
             capabilities,
             max_streams: 512,
+            max_item_streams: 1024,
             stream_window_bytes: MAX_WINDOW,
             token: None,
             extension: None,
@@ -224,19 +227,21 @@ struct Responder {
     id: Value,
     done: bool,
     effect:Option<String>,
+    /// Counted against `max_in_flight` (effects). Stream opens have their own budget (agent-v0 §9.2).
+    counted: bool,
 }
 
 impl Responder {
     fn send(mut self, result: Result<Value, ProviderError>) {
         self.done = true;
-        self.shared.reply(&self.id, result);
+        self.shared.reply(&self.id, result, self.counted);
     }
 }
 
 impl Drop for Responder {
     fn drop(&mut self) {
         if !self.done {
-            self.shared.reply(&self.id, Err(ProviderError::new("backend", "handler dropped the request; outcome unknown")));
+            self.shared.reply(&self.id, Err(ProviderError::new("backend", "handler dropped the request; outcome unknown")), self.counted);
         }
         if let Some(effect)=&self.effect { self.shared.effect_ids.lock().unwrap().finish(effect); }
     }
@@ -340,6 +345,8 @@ struct StreamState {
 }
 
 struct StreamInner {
+    /// An item stream (counted against `max_item_streams`, not `max_streams`).
+    items: bool,
     state: Mutex<StreamState>,
     changed: Notify,
     /// Orders data, gap and close lines of this stream on the wire.
@@ -434,7 +441,9 @@ impl ProviderStream {
 
     /// End the stream with a gap (`backend_dropped`, `paused` or `viewer_slow`) at the current offset.
     pub async fn gap(&self, gap: &str) -> Result<(), ProviderError> {
-        if !matches!(gap, "backend_dropped" | "paused" | "viewer_slow") {
+        if !matches!(gap, "backend_dropped" | "paused" | "viewer_slow" | "retention") {
+            // An unknown reason still ends the stream (as invalid), never leaves it silently open.
+            let _ = self.end("stream.closed", json!({"reason": {"reason": "invalid", "message": format!("unknown gap kind {gap}")}})).await;
             return Err(ProviderError::new("invalid", "unknown gap kind"));
         }
         self.end("stream.gap", json!({"reason": {"reason": "gap", "gap": gap}})).await
@@ -578,8 +587,8 @@ impl Shared {
         }
         self.out.send((line, Some(permit))).map_err(|_| ProviderError::new("unavailable", "connection closed"))
     }
-    fn reply(&self, id: &Value, result: Result<Value, ProviderError>) {
-        self.in_flight.fetch_sub(1, Ordering::Relaxed);
+    fn reply(&self, id: &Value, result: Result<Value, ProviderError>, counted: bool) {
+        if counted { self.in_flight.fetch_sub(1, Ordering::Relaxed); }
         let line = match result {
             Ok(v) => json!({"jsonrpc": "2.0", "id": id, "result": v}),
             Err(e) => json!({"jsonrpc": "2.0", "id": id, "error": e.to_json()}),
@@ -650,7 +659,7 @@ impl Provider {
             "name": self.config.name, "role": self.config.role, "instance": self.config.instance,
             "software": self.config.software, "provider_version": self.config.provider_version,
             "capabilities": self.config.capabilities,
-            "limits": {"max_streams": self.config.max_streams, "stream_window_bytes": self.window},
+            "limits": {"max_streams": self.config.max_streams, "max_item_streams": self.config.max_item_streams, "stream_window_bytes": self.window},
         });
         if let Some(t) = &self.config.token {
             params["token"] = json!(t);
@@ -940,7 +949,7 @@ fn handle(msg: &Value, shared: &Arc<Shared>, config: &Arc<Config>, requests: &mp
         shared.reply_now(&id, ProviderError::new("stale_generation", "wrong provider generation"));
         return Ok(());
     }
-    if shared.in_flight.load(Ordering::Relaxed) as usize >= config.max_in_flight {
+    if method != "stream.open" && shared.in_flight.load(Ordering::Relaxed) as usize >= config.max_in_flight {
         shared.reply_now(&id, ProviderError::new("overloaded", "too many requests in flight; not started"));
         return Ok(());
     }
@@ -963,7 +972,12 @@ fn handle(msg: &Value, shared: &Arc<Shared>, config: &Arc<Config>, requests: &mp
 
 fn responder(shared: &Arc<Shared>, id: &Value) -> Responder {
     shared.in_flight.fetch_add(1, Ordering::Relaxed);
-    Responder { shared: shared.clone(), id: id.clone(), done: false, effect:None }
+    Responder { shared: shared.clone(), id: id.clone(), done: false, effect:None, counted: true }
+}
+
+/// Stream opens are bounded by `max_streams` / `max_item_streams`, not by the effect in-flight limit.
+fn open_responder(shared: &Arc<Shared>, id: &Value) -> Responder {
+    Responder { shared: shared.clone(), id: id.clone(), done: false, effect:None, counted: false }
 }
 
 fn effect_request(id: &Value, p: &Value, shared: &Arc<Shared>, config: &Arc<Config>) -> Result<Request, ProviderError> {
@@ -990,7 +1004,12 @@ fn effect_request(id: &Value, p: &Value, shared: &Arc<Shared>, config: &Arc<Conf
 }
 
 fn open_request(id: &Value, p: &Value, shared: &Arc<Shared>, config: &Arc<Config>) -> Result<Request, ProviderError> {
-    let items = p.get("items").filter(|v| !v.is_null()).cloned();
+    // Item channel (agent-v0 §4): `channel: "items"`, optional exact cursor `after`, no dimensions.
+    let items = match p["channel"].as_str() {
+        None | Some("terminal") => None,
+        Some("items") => Some(json!({"after": p.get("after").cloned().unwrap_or(Value::Null)})),
+        Some(other) => return Err(ProviderError::new("unsupported", format!("unknown stream channel {other}"))),
+    };
     let needed = if items.is_some() { "items.stream" } else { "terminal.output" };
     if !config.capabilities.contains_key(needed) {
         return Err(ProviderError::new("unsupported", format!("{needed} is not declared")));
@@ -1003,12 +1022,16 @@ fn open_request(id: &Value, p: &Value, shared: &Arc<Shared>, config: &Arc<Config
     let (Some(r), Some(inc)) = (p["ref"].as_str(), p["incarnation"].as_str()) else {
         return Err(ProviderError::new("invalid", "ref and incarnation required"));
     };
-    if shared.streams.lock().unwrap().len() >= config.max_streams {
-        return Err(ProviderError::new("overloaded", "max_streams open"));
+    {
+        let streams = shared.streams.lock().unwrap();
+        let open = streams.values().filter(|s| s.items == items.is_some()).count();
+        if items.is_some() && open >= config.max_item_streams { return Err(ProviderError::new("overloaded", "max_item_streams open")); }
+        if items.is_none() && open >= config.max_streams { return Err(ProviderError::new("overloaded", "max_streams open")); }
     }
-    shared.stream_ids.lock().unwrap().begin(stream,config.max_streams.saturating_add(256))?;
+    shared.stream_ids.lock().unwrap().begin(stream,config.max_streams.saturating_add(config.max_item_streams).saturating_add(256))?;
     let (tx, rx) = mpsc::unbounded_channel();
     let inner = Arc::new(StreamInner {
+        items: items.is_some(),
         state: Mutex::new(StreamState { ready: false, closed: false, close_requested: false, credit: window, outstanding: 0, offset: 0, queued: 0 }),
         changed: Notify::new(),
         wire: tokio::sync::Mutex::new(()),
@@ -1021,7 +1044,7 @@ fn open_request(id: &Value, p: &Value, shared: &Arc<Shared>, config: &Arc<Config
         rows,
         history_lines,
         items,
-        responder: responder(shared, id),
+        responder: open_responder(shared, id),
     }))
 }
 
@@ -1125,9 +1148,55 @@ mod qa2_tests {
             assert!(shared.effect_ids.lock().unwrap().active.is_empty());
         }
     }
+    fn item_open(shared: &Arc<Shared>, config: &Arc<Config>, n: u64) -> Result<Request, ProviderError> {
+        open_request(&json!(n), &json!({"stream": n, "ref": "r", "incarnation": "i", "channel": "items", "window_bytes": 1024}), shared, config)
+    }
+    #[test]
+    fn item_streams_have_their_own_budget_and_opens_are_outside_the_effect_limit() {
+        let shared = shared();
+        let mut config = Config::new("test", "i", json!({"terminal.output": {}, "items.stream": {}, "fixture": {}}).as_object().unwrap().clone());
+        config.max_streams = 1; config.max_item_streams = 2; config.max_in_flight = 1;
+        let config = Arc::new(config);
+        // One effect in flight fills max_in_flight; opens are not counted against it (agent-v0 §9.2).
+        let _effect = effect_request(&json!("e"), &json!({"effect": "e1", "op": "fixture", "args": {}, "deadline_ms": 1000}), &shared, &config).unwrap();
+        assert_eq!(shared.in_flight.load(Ordering::Relaxed), 1);
+        let mut kept = Vec::new();
+        let Ok(Request::Open(t)) = open_request(&json!(10), &json!({"stream": 10, "ref": "r", "incarnation": "i", "cols": 80, "rows": 24, "history_lines": 0, "window_bytes": 1024}), &shared, &config) else { panic!("terminal open") };
+        assert!(t.items.is_none());
+        kept.push(t.respond(Ok(Initial::None)).unwrap());
+        for n in 0..2 {
+            let Ok(Request::Open(o)) = item_open(&shared, &config, n) else { panic!("item open {n}") };
+            assert_eq!(o.items, Some(json!({"after": null})));
+            kept.push(o.respond_items(true, "e1").unwrap());
+        }
+        assert_eq!(shared.in_flight.load(Ordering::Relaxed), 1, "opens must not count as in-flight effects");
+        // Each budget is full independently: a terminal stream did not consume an item slot.
+        assert_eq!(item_open(&shared, &config, 5).err().unwrap().kind, "overloaded");
+        assert_eq!(open_request(&json!(11), &json!({"stream": 11, "ref": "r", "incarnation": "i", "cols": 80, "rows": 24, "history_lines": 0, "window_bytes": 1024}), &shared, &config).err().unwrap().kind, "overloaded");
+        assert_eq!(open_request(&json!(12), &json!({"stream": 12, "ref": "r", "incarnation": "i", "channel": "video", "window_bytes": 1024}), &shared, &config).err().unwrap().kind, "unsupported");
+    }
+    #[tokio::test]
+    async fn retention_is_a_gap_reason_and_an_unknown_reason_still_ends_the_stream() {
+        let (out, mut rx) = mpsc::unbounded_channel(); let (closed_tx, _) = watch::channel(false);
+        let shared = Arc::new(Shared { out,budget:Arc::new(Semaphore::new(1024*1024)),outgoing_bytes:1024*1024,generation:AtomicU64::new(1),pending:Mutex::new(HashMap::new()),next_id:AtomicU64::new(1),closed:AtomicBool::new(false),closed_tx,failure:Mutex::new(None),streams:Mutex::new(HashMap::new()),stream_ids:Mutex::new(IdLedger::default()),effect_ids:Mutex::new(IdLedger::default()),in_flight:AtomicU64::new(0),sync_started:AtomicBool::new(false),max_record:AtomicU64::new(MAX_RECORD as u64) });
+        let config = Arc::new(Config::new("test", "i", json!({"items.stream": {}}).as_object().unwrap().clone()));
+        let Ok(Request::Open(a)) = item_open(&shared, &config, 1) else { panic!() };
+        let Ok(Request::Open(b)) = item_open(&shared, &config, 2) else { panic!() };
+        let (a, b) = (a.respond_items(false, "e").unwrap(), b.respond_items(false, "e").unwrap());
+        a.gap("retention").await.unwrap();
+        assert_eq!(b.gap("exploded").await.unwrap_err().kind, "invalid");
+        let mut lines = Vec::new();
+        while let Ok((line, _)) = rx.try_recv() { lines.push(serde_json::from_str::<Value>(&line).unwrap()); }
+        let gap = lines.iter().find(|l| l["params"]["stream"] == 1 && l["method"] == "stream.gap").expect("retention gap sent");
+        assert_eq!(gap["params"]["reason"]["gap"], "retention");
+        let closed = lines.iter().find(|l| l["params"]["stream"] == 2).expect("unknown reason must still end the stream");
+        assert_eq!(closed["method"], "stream.closed");
+        assert_eq!(closed["params"]["reason"]["reason"], "invalid");
+        assert!(b.is_closed());
+    }
     #[test]
     fn sdk_stream_ids_are_bounded_across_repeated_rejected_opens() {
-        let shared=shared();let mut config=Config::new("test","i",json!({"terminal.output":{"raw":true}}).as_object().unwrap().clone());config.max_streams=1;let config=Arc::new(config);
+        let shared=shared();let mut config=Config::new("test","i",json!({"terminal.output":{"raw":true}}).as_object().unwrap().clone());config.max_streams=1;config.max_item_streams=0;let config=Arc::new(config);
         for n in 0..300u64 {
             let request=open_request(&json!(n),&json!({"stream":n,"ref":"r","incarnation":"i","cols":80,"rows":24,"history_lines":0,"window_bytes":1024}),&shared,&config).unwrap();
             if let Request::Open(open)=request { open.respond(Err(ProviderError::new("unsupported","fixture rejects open"))); }
