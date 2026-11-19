@@ -5,6 +5,7 @@
   "requires":{"protocol":1},
   "provides":["command/keys.profile","data/keys","doc/keys/profile"],
   "works_with":[{"cap":"command/tabs.open","suggest":"tabs","without":"Profile tab keys do nothing"},"command/tabs.show","command/tabs.rename","command/tabs.close",
-                {"cap":"command/panes.split","suggest":"panes","without":"Profile pane keys do nothing"},"command/panes.close","command/panes.kill"],
+                {"cap":"command/panes.split","suggest":"panes","without":"Profile pane keys do nothing"},"command/panes.close","command/panes.kill",
+                {"cap":"command/workspaces.switch","suggest":"workspaces","without":"The tmux profile's s (sessions) does nothing"}],
   "contributes":{"commands":["keys.profile"],"keys":["Selected profile bindings at priority 10"],"settings":["doc/keys/profile","doc/settings/tui.prefix"]}
 }

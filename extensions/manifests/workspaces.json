@@ -6,6 +6,7 @@
   "provides":["command/workspaces.add","command/workspaces.remove","command/workspaces.open","command/workspaces.shell",
               "command/workspaces.main","command/workspaces.switch","command/workspaces.worktree","command/workspaces.refresh",
               "data/workspaces","data/workspaces.switch","data/workspaces.current","view/workspaces.switch","doc/workspaces/list"],
-  "works_with":[{"cap":"command/tabs.open","suggest":"tabs","without":"Open shell here can't add a tab to a workspace that already has tabs"}],
+  "works_with":[{"cap":"ability/vqro.terminals","suggest":"herdr","without":"A workspace opened for the first time cannot start its shell"},
+                {"cap":"command/tabs.open","suggest":"tabs","without":"Open shell here can't add a tab to a workspace that already has tabs"}],
   "contributes":{"commands":["workspaces.add","workspaces.remove","workspaces.open","workspaces.shell","workspaces.main","workspaces.switch","workspaces.worktree","workspaces.refresh"],"keys":["Prefix w: switch workspace"],"menu_items":["Switch workspace","Current workspace (status bar)"],"panels":["Workspace data used by the sidebar","Switch workspace"],"settings":["doc/workspaces/list","layout/ws-*","doc/layout/ws-*"]}
 }

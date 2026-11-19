@@ -23,6 +23,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EXT = os.path.join(ROOT, "extensions")
 CAP = re.compile(r"^[A-Za-z0-9._*-]+/[A-Za-z0-9._/*-]+(@[1-9][0-9]*)?$")
 CORE_DOCS = {"doc/settings/tui", "doc/settings/theme", "doc/settings/icons"}
+# Shared conventions documented in core-protocol.md that any extension may read and write.
+CORE_DOC_PREFIXES = ("doc/layout/",)  # layout settings `doc/layout/<name>` = {cwd?, title?}
 ABILITY_METHODS = {"resource.spawn": "ability/vqro.terminals", "resource.forget": "ability/vqro.resource.forget"}
 # Programs that are part of an extension beyond its argv: the Pi launcher starts the bridge in a terminal.
 EXTRA_SOURCES = {"pi": ["pi_bridge"]}
@@ -133,7 +135,7 @@ def main(argv=None):
                 provided.setdefault(cap_key(cap), []).append(name)
 
     def owner_of(cap):
-        if cap in CORE_DOCS or cap.startswith("command/vqro."):
+        if cap in CORE_DOCS or cap.startswith(("command/vqro.",) + CORE_DOC_PREFIXES):
             return ["vqro"]
         if cap in provided:
             return provided[cap]
