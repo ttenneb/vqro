@@ -298,6 +298,65 @@ class AgentsTests(unittest.TestCase):
         Agents(core)
         self.assertEqual(core.value("view/agents-r2")["resource"], "r2")
 
+    def stoppable(self):
+        self.core.add_agent()
+        self.core.resources["r1"] = {"id": "r1", "kind": "terminal", "name": "Other bridge", "state": "live",
+                                     "argv": ["python3", "launch.py"]}
+        self.agents.event("resource", {"id": "r2"})
+
+    def test_stop_asks_first_then_kills_only_the_host_terminal_and_reports_the_outcome(self):
+        self.stoppable()
+        self.assertEqual(self.core.value("menu/agents.r2.stop")["when"], {"view": "agents-r2"})
+        self.assertIsNotNone(self.core.value("view/agents-stop-r2"), "popup declared with the agent, not on click")
+        before = len(self.core.transactions)
+        popup = self.command("stop", context={"view": "agents-r2"})
+        self.assertEqual(popup["client"]["popup"]["view"], "agents-stop-r2")
+        self.assertEqual(self.native(), [], "nothing killed before confirmation")
+        self.assertEqual(len(self.core.transactions), before, "asking writes no workspace state")
+        content = json.dumps(self.core.live["agents-stop-r2"])
+        self.assertIn("terminal r1", content)
+        self.assertIn("runtime process", content)
+        confirm = next(row for row in self.core.live["agents-stop-r2"]["items"] if row.get("command") == "agents.stop")
+        result = self.command("stop", **confirm["args"])
+        self.assertEqual(self.native(), [("resource.kill", {"resource": "r1"})])
+        self.assertEqual(result["client"], {"close": True})
+        self.assertIn("kill accepted", self.core.notices[-1][0])
+
+    def test_stop_refuses_a_changed_or_ended_host_and_explains_hostless_agents(self):
+        self.stoppable()
+        with self.assertRaises(VqroError) as caught:
+            self.command("stop", resource="r2", host="r9", confirm=True)
+        self.assertEqual(caught.exception.kind, "conflict")
+        self.core.resources["r1"]["state"] = "finished"
+        with self.assertRaises(VqroError) as caught:
+            self.command("stop", resource="r2", host="r1", confirm=True)
+        self.assertIn("already ended", str(caught.exception))
+        del self.core.resources["r2"]["host"]
+        with self.assertRaises(VqroError) as caught:
+            self.command("stop", resource="r2")
+        self.assertEqual(caught.exception.kind, "unsupported")
+        self.assertIn("can't be stopped from vqro", str(caught.exception))
+        self.assertIn("(", self.core.notices[-1][0])
+        self.assertEqual(self.native(), [])
+
+    def test_agents_list_rows_offer_stop(self):
+        self.stoppable()
+        self.command("list")
+        row = next(row for row in self.core.live["agents-list"]["items"] if row.get("args") == {"resource": "r2"})
+        self.assertIn({"label": "Stop agent…", "command": "agents.stop", "args": {"resource": "r2"}}, row["menu"])
+
+    def test_disconnected_agents_say_whether_their_bridge_is_dead_or_awaited(self):
+        self.stoppable()
+        self.core.resources["r2"]["available"] = False
+        self.core.live["retention.agents"] = {"data": {"r2": {"forget_at": 1_800_000_000}}}
+        self.agents.event("view.content", {"view": "retention.agents"})
+        text = self.core.live["agents-r2"]["items"][0]["text"]
+        self.assertIn("Waiting for its bridge (terminal r1) to reconnect", text)
+        self.assertIn("forgets it at ", text)
+        self.core.resources["r1"]["state"] = "finished"
+        self.agents.event("resource", {"id": "r1"})
+        self.assertIn("can't reconnect", self.core.live["agents-r2"]["items"][0]["text"])
+
     def test_palette_template_targets_focused_agent(self):
         self.core.add_agent()
         self.core.resources["r4"] = dict(self.core.resources["r2"], id="r4")

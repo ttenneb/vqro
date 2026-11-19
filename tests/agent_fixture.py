@@ -15,6 +15,7 @@ class FakeCore:
         self.calls, self.notices, self.transactions = [], [], []
         self.vqro = self
         self.fail_agents, self.fail_tabs, self.fail_effect, self.make_agent = False, False, None, True
+        self.shells = []  # ids for plain shell spawns (resource.spawn without argv), consumed in order
         self.contributed = False
 
     def fresh(self):
@@ -86,6 +87,12 @@ class FakeCore:
             return {"resources":[copy.deepcopy(r) for r in self.resources.values()
                 if all(params.get(key) is None or r.get(field)==params[key]
                        for key,field in (("id","id"),("host","host"),("provider","provider"),("backend_ref","backend_ref")))]}
+        if method == "resource.spawn" and self.shells:
+            rid = self.shells.pop(0)
+            self.resources[rid] = {"id": rid, "kind": "terminal", "state": "live", "available": True, "argv": ["/bin/sh"]}
+            return {"outcome": "observed", "resource": copy.deepcopy(self.resources[rid])}
+        if method == "resource.kill":
+            return {"outcome": "accepted", "effect": "e2", "backend": None}
         if method == "resource.spawn":
             if self.make_agent:
                 self.add_agent()

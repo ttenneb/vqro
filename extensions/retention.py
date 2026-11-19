@@ -14,7 +14,11 @@ providers only supply the mechanism, and only for providers declaring `resource.
 
 Backend execution is never touched (ending it is `resource.kill`). Disconnected agents' cached facts
 are retired after60 seconds continuously unavailable, using `resource.forget_cached`, never native forget.
-Reconnection cancels that grace; unavailable live terminals are not expired. Orphan bridge-marked panels
+Reconnection cancels that grace; unavailable live terminals are not expired. An agent whose bridge
+(host) terminal has finished, or was removed after this run saw it, cannot reconnect: it is retired at
+once. A host merely not reported yet (e.g. right after a core restart) keeps the grace. The pending
+retirement times are published as live data `retention.agents` ({data: {id: {forget_at}}}, wall-clock
+seconds) so agent UIs can say when a disconnected agent will go; nothing else depends on it. Orphan bridge-marked panels
 are pruned only when no layout references them. `retention.forget_ended` remains finished-only.
 Turn this extension off to disable the policy; core mechanical admission limits still apply.
 """
@@ -38,6 +42,10 @@ dirty = threading.Event()
 was_shown = set()   # resource ids seen in a layout during this run
 unshown_at = {}     # once-shown id -> monotonic time it was first seen unshown
 unavailable_at = {}  # disconnected agent -> continuous unavailable grace
+forget_wall = {}  # same grace as a wall-clock deadline, fixed when it starts (for display only)
+hosts_seen = set()  # host terminal ids observed during this run (removal after that is evidence)
+published = [None]  # last `retention.agents` data, to publish only changes
+RETENTION = "retention.agents"
 policy_lock = threading.RLock()
 refused = set()     # ids a provider refused for good (unsupported/invalid); never retried
 
@@ -76,14 +84,23 @@ def _plan(keep, grace, include_unavailable, cached_due):
     for rid in was_shown - shown:
         unshown_at.setdefault(rid, now)
 
-    unavailable = {rid for rid, r in resources.items() if r.get("kind") == "agent" and not r.get("available", False)}
+    agents = {rid: r for rid, r in resources.items() if r.get("kind") == "agent"}
+    hosts_seen.update(r["host"] for r in agents.values() if r.get("host") in resources)
+    unavailable = {rid for rid, r in agents.items() if not r.get("available", False)}
     for rid in list(unavailable_at):
         if rid not in unavailable:
             del unavailable_at[rid]
+            forget_wall.pop(rid, None)
     for rid in unavailable:
-        unavailable_at.setdefault(rid, now)
-    expired = [rid for rid in unavailable if now - unavailable_at[rid] >= grace] if include_unavailable else []
+        if rid not in unavailable_at:
+            unavailable_at[rid] = now
+            forget_wall[rid] = round(time.time() + grace)
+    dead = {rid for rid in unavailable if host_dead(agents[rid].get("host"), resources)}
+    expired = [rid for rid in unavailable if rid in dead or now - unavailable_at[rid] >= grace] if include_unavailable else []
     unavailable_waits = [unavailable_at[rid] + grace - now for rid in unavailable if rid not in expired] if include_unavailable else []
+    if include_unavailable:
+        pending = {rid: {"forget_at": forget_wall[rid]} for rid in unavailable if rid not in expired}
+        hosts_seen.intersection_update(set(resources) | {r.get("host") for r in agents.values()})
 
     def forgettable(r):
         caps = (providers.get(r.get("provider")) or {}).get("capabilities") or {}
@@ -96,7 +113,33 @@ def _plan(keep, grace, include_unavailable, cached_due):
     never = sorted((rid for rid in ended if rid not in was_shown), key=number, reverse=True)
     if cached_due is not None:
         cached_due.update(expired)
+    if include_unavailable:
+        publish_pending(pending)
     return expired + due + never[keep:], (min(waits) if waits else None)
+
+
+def host_dead(host, resources):
+    """The bridge terminal has finished, or was removed after we saw it: the bridge can't come back.
+
+    Absent without having been seen (inventory not synced yet after a restart) is not evidence.
+    """
+    if not host:
+        return False
+    r = resources.get(host)
+    if r is None:
+        return host in hosts_seen
+    return r.get("kind") == "terminal" and r.get("state") == "finished"
+
+
+def publish_pending(pending):
+    """Derived live data only (never history); rounded so an unchanged grace republishes nothing."""
+    if pending == published[0]:
+        return
+    try:
+        ext.publish(RETENTION, {"data": pending})
+        published[0] = pending
+    except VqroError as error:
+        print(f"retention: publish pending: {error.kind}: {error}", file=sys.stderr, flush=True)
 
 
 def forget(rid, cached=False):

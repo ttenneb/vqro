@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import sys
 import threading
+import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from vqro_ext import Extension, VqroError, views_in
@@ -40,6 +41,25 @@ def panel_key(key):
     return key.startswith("view/agents-r") and key[len("view/agents-r"):].isdigit()
 
 
+# Owned per-agent derived views, longest prefix first ("agents-" would also match the others).
+OWNED_PREFIXES = ("view/agents-requests-", "view/agents-settings-", "view/agents-stop-", "view/agents-")
+# Live data the retention extension publishes about agents it is about to forget (optional).
+RETENTION = "retention.agents"
+
+
+def host_of(resources, r):
+    """The agent's bridge terminal resource, or None when it has none vqro knows."""
+    host = resources.get(r.get("host")) if r.get("host") else None
+    return host if host and host.get("kind") == "terminal" else None
+
+
+def removal_note(live, rid):
+    """When retention says it will forget this disconnected agent, as local clock time."""
+    pending = ((live.get(RETENTION) or {}).get("data") or {}).get(rid)
+    at = pending.get("forget_at") if isinstance(pending, dict) else None
+    return time.strftime("%H:%M:%S", time.localtime(at)) if isinstance(at, (int, float)) else None
+
+
 class Agents:
     def __init__(self, ext):
         self.ext, self.lock = ext, threading.RLock()
@@ -50,7 +70,8 @@ class Agents:
         for name, fn, title in [("list", self.list_agents, "Show agents"), ("show", self.show, "Show an agent in a tab"),
                                 ("config", self.settings, "Agent settings and commands (popup)"),
                                 ("configure", self.configure, "Change an agent setting (args: id, value)"),
-                                ("command", self.command, "Run an agent command (args: name, text?)")]:
+                                ("command", self.command, "Run an agent command (args: name, text?)"),
+                                ("stop", self.stop, "Stop an agent: kill its bridge terminal and the runtime in it (asks first)")]:
             ext.command("agents."+name, title)(self.guarded(fn))
         for op, title in EFFECTS.items():
             fn = self.answer if op == "answer" else lambda args, op=op: self.effect(op, args)
@@ -115,6 +136,41 @@ class Agents:
         self.publish_panel(r)
         result = self.ext.invoke("tabs.show", {"view": view(r["id"]), "title": label(r.get("name") or "Agent")+" "+r["id"]})
         return {"resource": r["id"], "view": view(r["id"]), "tab": result, "client": {"close": True, "focus": {"view": view(r["id"])}}}
+
+    def stop(self, args):
+        """Runtime-neutral: end the agent by killing its host (bridge) terminal, after confirmation.
+
+        The agent's own process lives inside that terminal, so killing it ends the runtime too.
+        An agent without a host terminal known to vqro is not stopped here (nothing is sent).
+        """
+        self.ext.fresh()
+        r = self.agent(args, inspect=True)
+        rid, name = r["id"], label(r.get("name") or "Agent")
+        host = host_of(self.ext.resources, r)
+        if host is None:
+            why = ("its provider ("+label(str(r.get("provider")))+") runs it outside any vqro terminal" if not r.get("host")
+                   else "its bridge terminal "+label(str(r["host"]))+" is not known to vqro right now")
+            raise VqroError(f"{name} {rid} can't be stopped from vqro: {why}. Stop it where it runs; nothing sent.", "unsupported")
+        hid = host["id"]
+        if ended(host):
+            raise VqroError(f"{name} {rid}: its bridge terminal {hid} has already ended; nothing to stop", "invalid")
+        if args.get("confirm") is not True:
+            program = label(" ".join(str(a) for a in (host.get("argv") or [])[:3]) or host.get("name") or hid, 200)
+            self.ext.publish("agents-stop-"+rid, {"title": "Stop "+name+" "+rid+"?", "items": [
+                {"type": "text", "text": f"This kills terminal {hid} ({program}), the agent's bridge."},
+                {"type": "text", "text": "The agent's runtime process runs inside it and ends too; work in progress is interrupted."},
+                {"type": "text", "style": "warn", "text": "Undo can't bring it back, and nothing is resent. Esc cancels."},
+                {"text": "Stop agent "+rid, "style": "error", "command": "agents.stop",
+                 "args": {"resource": rid, "host": hid, "confirm": True}}]})
+            return {"client": {"popup": {"view": "agents-stop-"+rid, "width": 76}}}
+        if args.get("host") != hid:
+            raise VqroError(f"{name} {rid}: its bridge terminal changed since you confirmed; confirm again. Nothing sent.", "conflict")
+        result = self.ext.vqro.call("resource.kill", {"resource": hid})
+        outcome = result.get("outcome", "unknown")
+        what = {"accepted": "kill accepted; the agent is removed once its terminal ends",
+                "observed": "terminal ended"}.get(outcome, outcome+"; watch the agent's status")
+        self.ext.notify(label(f"Stop {name} {rid}: terminal {hid} {what}"), "ok" if outcome in ("accepted", "observed") else "warn")
+        return {**result, "client": {"close": True}}
 
     def effect(self, op, args):
         self.ext.fresh()
@@ -338,12 +394,23 @@ class Agents:
         if ended(r):
             content["items"].insert(0, {"type": "text", "style": "warn", "text": "Agent ended; no operation will be sent. Close this tab or use Close ended tabs."})
         elif not r.get("available"):
-            content["items"].insert(0, {"type": "text", "style": "warn", "text": "Agent unavailable; displayed facts may be stale."})
+            content["items"].insert(0, {"type": "text", "style": "warn", "text": self.disconnected(r)})
         if len(json.dumps(content, ensure_ascii=False).encode()) > 32768:
             content["items"].insert(0, {"type": "text", "style": "warn", "text": "Bounded agent panel: some provider output omitted."})
             while len(json.dumps(content, ensure_ascii=False).encode()) > 32768 and len(content["items"]) > 1:
                 del content["items"][1]
         return content
+
+    def disconnected(self, r):
+        """Honest wording for an unavailable agent: dead bridge, or waiting for a reconnect."""
+        host = host_of(self.ext.resources, r)
+        if host is not None and ended(host):
+            return f"Agent ended: its bridge terminal {host['id']} has finished, so it can't reconnect. Removing it."
+        at = removal_note(self.ext.live, r["id"])
+        source = f"its bridge (terminal {host['id']})" if host is not None else "its provider"
+        text = f"Agent unavailable: disconnected; displayed facts may be stale. Waiting for {source} to reconnect"
+        text += f" (vqro forgets it at {at} if it doesn't; the process is not touched)." if at else "."
+        return text
 
     def list_agents(self, args):
         self.ext.fresh()
@@ -353,16 +420,20 @@ class Agents:
 
     def publish_list(self):
         rows = [{"text": label(r.get("name") or "Agent")+" "+r["id"], "description": status(r),
-                 "command": "agents.show", "args": {"resource": r["id"]}, "badges": [{"text": "ended", "style": "dim"}] if ended(r) else [],
-                 **({"menu": [{"label": "Show", "command": "agents.show", "args": {"resource": r["id"]}},
-                              {"label": "Agent settings…", "command": "agents.config", "args": {"resource": r["id"]}}]}
-                    if self.has_settings(r) and r.get("available") else {})}
+                 "command": "agents.show", "args": {"resource": r["id"]},
+                 "badges": [{"text": "ended", "style": "dim"}] if ended(r) else
+                           [] if r.get("available") else [{"text": "disconnected", "style": "warn"}],
+                 "menu": [{"label": "Show", "command": "agents.show", "args": {"resource": r["id"]}},
+                          *([{"label": "Agent settings…", "command": "agents.config", "args": {"resource": r["id"]}}]
+                            if self.has_settings(r) and r.get("available") else []),
+                          {"label": "Stop agent…", "command": "agents.stop", "args": {"resource": r["id"]}}]}
                 for r in self.ext.resources.values() if r.get("kind") == "agent"]
         count = len(rows)
         rows = rows[:128]
         if count > 128:
             rows.append({"type": "text", "style": "warn", "text": f"Showing 128 of {count} agents; existing agent panes remain usable."})
-        self.ext.publish("agents-list", {"title": "Agents", "items": rows or [{"type": "text", "text": "No agents observed."}]})
+        self.ext.publish("agents-list", {"title": "Agents", "requires": ["menu"],
+                                         "items": rows or [{"type": "text", "text": "No agents observed."}]})
 
     def declarations(self, resources=None):
         entries = {}
@@ -372,6 +443,10 @@ class Agents:
             rid = r["id"]
             # `resource` names the agent this pane shows: context.resource / resource_kind for keys and menus.
             entries["view/"+view(rid)] = {"kind": "panel", "title": "Agent "+rid, "resource": rid, "items": [{"type": "text", "text": "Agents extension is not running."}]}
+            # Declared with the agent, not on click: confirming a stop writes no workspace state.
+            entries["view/agents-stop-"+rid] = {"kind": "panel", "title": "Stop agent "+rid, "items": [{"type": "text", "text": "Agents extension is not running."}]}
+            entries["menu/agents."+rid+".stop"] = {"where": "pane", "label": "Stop agent…", "command": "agents.stop",
+                                                  "when": {"view": view(rid)}, "order": 190}
             for i, (op, title) in enumerate(EFFECTS.items()):
                 if not self.supported(r, op):
                     continue
@@ -399,8 +474,7 @@ class Agents:
                     for key, entry in self.ext.entries.items():
                         if not isinstance(entry.get("value"), dict) or entry["value"].get("owner") != "agents":
                             continue
-                        rid = next((key[len(prefix):] for prefix in ("view/agents-requests-", "view/agents-settings-", "view/agents-")
-                                    if key.startswith(prefix)), "")
+                        rid = next((key[len(prefix):] for prefix in OWNED_PREFIXES if key.startswith(prefix)), "")
                         orphan = rid.startswith("r") and rid[1:].isascii() and rid[1:].isdigit() and rid not in self.ext.resources
                         if ((key.startswith("menu/agents.r") and key not in entries)
                                 or (orphan and key[5:] not in shown)):
@@ -478,11 +552,13 @@ class Agents:
             r = self.ext.resources.get(event["view"][6:])
             if r and r.get("kind") == "agent":
                 self.publish_panel(r)
+        elif kind == "view.content" and event.get("view") == RETENTION:
+            self.publish_panels([r for r in self.ext.resources.values() if r.get("kind") == "agent" and not r.get("available")])
 
 
 def main():
     ext = Extension("agents", event_types=["entries", "resource", "resource.removed", "provider", "view.content"],
-                    view_content={"prefixes": ["agent-"]})
+                    view_content={"prefixes": ["agent-"], "names": [RETENTION]})
     Agents(ext)
     ext.run()
 

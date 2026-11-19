@@ -60,6 +60,44 @@ class RetentionTests(unittest.TestCase):
         self.module["forget"]("r1", cached="r1" in cached)
         call.assert_called_once_with("resource.forget_cached", {"resource": "r1"})
 
+    def test_agent_with_finished_or_removed_host_is_forgotten_at_once(self):
+        self.core.resources["r1"] = {"id": "r1", "kind": "terminal", "state": "live", "available": True}
+        self.core.resources["r2"] = {"id": "r2", "kind": "agent", "state": "live", "available": True, "host": "r1"}
+        self.core.resources["r3"] = {"id": "r3", "kind": "terminal", "state": "live", "available": True}
+        self.core.resources["r4"] = {"id": "r4", "kind": "agent", "state": "live", "available": True, "host": "r3"}
+        self.plan(0)
+        self.core.resources["r2"]["available"] = self.core.resources["r4"]["available"] = False
+        self.core.resources["r1"]["state"] = "finished"  # Stop agent: the bridge terminal ended
+        del self.core.resources["r3"]                     # seen earlier, now removed (e.g. tmux pane gone)
+        cached = set()
+        ids, _ = self.plan(1, cached_due=cached)
+        self.assertEqual(sorted(ids), ["r2", "r4"])
+        self.assertEqual(cached, {"r2", "r4"}, "retired as cached facts, never a native forget")
+
+    def test_unexplained_disconnect_and_unreported_host_keep_the_grace(self):
+        # Host live (bridge may reconnect), or never reported in this run (inventory not synced after restart).
+        self.core.resources["r1"] = {"id": "r1", "kind": "terminal", "state": "live", "available": False}
+        self.core.resources["r2"] = {"id": "r2", "kind": "agent", "state": "live", "available": False, "host": "r1"}
+        self.core.resources["r4"] = {"id": "r4", "kind": "agent", "state": "live", "available": False, "host": "r3"}
+        self.core.resources["r5"] = {"id": "r5", "kind": "agent", "state": "live", "available": False}
+        self.assertEqual(self.plan(0), ([], 60))
+        self.assertEqual(self.plan(59)[0], [])
+        self.assertEqual(sorted(self.plan(60)[0]), ["r2", "r4", "r5"])
+
+    def test_pending_forget_times_are_published_only_when_they_change(self):
+        self.core.resources["r2"] = {"id": "r2", "kind": "agent", "state": "live", "available": False}
+        with mock.patch.object(self.module["time"], "time", return_value=1000.0):
+            self.plan(0)
+            self.plan(5)
+        self.assertEqual(self.core.live["retention.agents"], {"data": {"r2": {"forget_at": 1060}}})
+        publishes = []
+        self.core.publish = lambda view, content: publishes.append((view, content))
+        self.plan(10)
+        self.assertEqual(publishes, [], "an unchanged grace republishes nothing")
+        self.core.resources["r2"]["available"] = True
+        self.plan(11)
+        self.assertEqual(publishes, [("retention.agents", {"data": {}})])
+
     def test_bridge_cleanup_preserves_live_referenced_and_user_views(self):
         for i in range(1, 5):
             self.core.entries[f"view/agent-r{i}"] = {"version": 1, "value": {"kind": "panel", "bridge": {"instance": "i", "ref": "agent"}}}

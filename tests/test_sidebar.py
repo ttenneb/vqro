@@ -67,6 +67,20 @@ class SidebarTests(unittest.TestCase):
         self.assertIn("agents.config", menu(declared))
         self.assertNotIn("agents.config", menu(dict(declared, state="finished")))
 
+    def test_agent_rows_offer_stop_and_say_why_they_are_unavailable(self):
+        module = load(); ext = module["ext"]
+        ext.resources = {
+            "r1": {"id": "r1", "kind": "terminal", "argv": ["python3"], "state": "live"},
+            "r2": {"id": "r2", "kind": "agent", "name": "Other", "host": "r1", "state": "live", "available": False}}
+        ext.live["retention.agents"] = {"data": {"r2": {"forget_at": 1_800_000_000}}}
+        agent = next(row for row in module["build"]() if row.get("args", {}).get("resource") == "r2")
+        self.assertIn({"label": "Stop agent…", "command": "agents.stop", "args": {"resource": "r2"}}, agent["menu"])
+        self.assertEqual(agent["badges"][0], {"text": "disconnected", "style": "warn"})
+        self.assertTrue(agent["badges"][1]["text"].startswith("removing at "))
+        ext.resources["r1"]["state"] = "finished"
+        agent = next(row for row in module["build"]() if row.get("args", {}).get("resource") == "r2")
+        self.assertEqual(agent["badges"], [{"text": "ended", "style": "dim"}])
+
     def scale_resources(self):
         resources = {f"r{i}": {"id": f"r{i}", "kind": "terminal", "argv": ["sh"], "state": "live",
                                "status": {"state": "idle"}} for i in range(600)}
