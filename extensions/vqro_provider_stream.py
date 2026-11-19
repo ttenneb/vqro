@@ -54,7 +54,9 @@ class Stream:
                 "error": {"kind": error.kind, "message": str(error)}, "outcome": "rejected"})
 
     async def gap(self, gap):
-        if gap not in ("backend_dropped", "paused", "viewer_slow"):
+        if gap not in ("backend_dropped", "paused", "viewer_slow", "retention"):
+            # An unknown reason still ends the stream (as invalid), never leaves it silently open.
+            await self._end("stream.closed", {"reason": {"reason": "invalid", "message": f"unknown gap kind {gap}"}})
             raise ProviderError("invalid", "unknown gap kind")
         await self._end("stream.gap", {"reason": {"reason": "gap", "gap": gap}})
 
