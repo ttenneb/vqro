@@ -225,6 +225,24 @@ class AgentsTests(unittest.TestCase):
         with self.assertRaises(VqroError):
             self.command("prompt", resource="r2", text="not sent")
 
+    def test_prefix_p_prompts_the_focused_agent_pane_only(self):
+        binding = self.core.value("binding/agents.prompt")
+        self.assertEqual((binding["key"], binding["command"], binding["when"]), ("p", "agents.prompt", {"resource_kind": "agent"}))
+        self.assertTrue(binding["input"], "asks for the text first")
+        self.core.add_agent()
+        self.agents.event("resource", {"id": "r2"})
+        self.assertEqual(self.core.value("view/agents-r2")["resource"], "r2", "the pane names its agent, so resource_kind is agent")
+        # What the client sends for the binding: the pane context plus the typed text.
+        self.command("prompt", context={"view": "agents-r2", "resource": "r2", "resource_kind": "agent"}, text="exactly this")
+        self.assertEqual(self.native()[-1][1], {"resource": "r2", "op": "agent.prompt", "args": {"message": "exactly this"}})
+
+    def test_activation_names_the_agent_of_kept_panels(self):
+        core = FakeCore()
+        core.entries["view/agents-r2"] = {"version": 1, "value": {"owner": "agents", "kind": "panel", "items": []}}
+        core.entries["layout/main"] = {"version": 1, "value": {"view": "agents-r2"}}
+        Agents(core)
+        self.assertEqual(core.value("view/agents-r2")["resource"], "r2")
+
     def test_palette_template_targets_focused_agent(self):
         self.core.add_agent()
         self.core.resources["r4"] = dict(self.core.resources["r2"], id="r4")

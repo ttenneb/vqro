@@ -271,6 +271,9 @@ def key_rows():
             what = bv.get("label") or titles.get(cmd, cmd)
             if cmd == "client.none":
                 what = "unbound"
+            if isinstance(bv.get("when"), dict) and bv["when"]:
+                # Conditional keys apply only on matching panes; elsewhere the key falls through.
+                what += " (only where " + ", ".join(f"{k.replace('_', ' ')} is {v}" for k, v in bv["when"].items()) + ")"
             if group.startswith("mouse."):
                 shown = group.replace("mouse.", "").replace(" on ", "-click on ")
             else:

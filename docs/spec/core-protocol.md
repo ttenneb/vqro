@@ -580,16 +580,24 @@ reconcile later with their full set (`exclusive=True`). Other runtimes should fo
 - `menu/<id>`: `{where: "pane"|"tab"|"tabbar"|"status", label, icon?, command, args?, input?, prefill?, pick?: "resource", when?,
   order?}`. `icon` (see Icons) is drawn before the label; an empty label shows the icon alone. `input` makes the client prompt for text (passed as `args.text`); `pick` makes it offer a choice (`args.picked`);
   `when` is matched field by field against the invocation context.
-- `binding/<id>`: `{key, command, args?, where?, label?, priority?, input?, prefill?, pick?, hidden?}`. `key` is a prefix key
+- `binding/<id>`: `{key, command, args?, where?, label?, priority?, input?, prefill?, pick?, hidden?, when?}`. `key` is a prefix key
   (`"n"`, `"Left"`, see Keys) or a gesture (`"mouse.right"`, `"mouse.middle"`) with `where` = `"pane"` or `"tab"`.
   `input`, `prefill` and `pick` work as for menu items; `hidden` keeps a key out of the prefix menu (it still works).
+  `when` (prefix keys) is matched against the focused pane's context exactly like a menu item's: a binding whose
+  `when` does not hold is not a candidate there, so the key falls through to the next binding for it by the usual
+  rank (priority, then defaults, then id), or does nothing and says so. It is checked before any `input` prompt, so a
+  pane-specific key never asks for text it cannot use. The prefix menu lists what each key does on the focused pane.
+  Example: the agents extension binds `p` to `agents.prompt` with `when: {"resource_kind": "agent"}`; a keymap
+  profile's `p` (priority 10, no `when`) still wins everywhere when selected.
 - `prefill` explicitly supplies an input's initial text: a string, or `{"context": "field"}` to read a string
   from invocation context. Without it, inputs start empty; pane/tab titles and option `value` never implicitly
   become input text. Missing/unknown context fields or unsupported values produce empty input. Options may
   override their parent row's explicit prefill. For example pane rename asks for `{"context":"title"}`, while
   tab rename uses `{"context":"tab_title"}`; ordinary agent prompts provide none.
-- Clients add `args.context` when invoking from a place: `{layout, layout_version, path, view, kind, resource, live,
-  title, tab_title?}` for a pane, `{layout, layout_version, tab_path, tab_index, tab_title}` for a tab.
+- Clients add `args.context` when invoking from a place: `{layout, layout_version, path, view, kind, resource,
+  resource_kind, live, title, tab_title?}` for a pane (`resource` is the view's `resource` field, for terminal views
+  and any other view that names the resource it shows, such as agent panels; `resource_kind` is that resource's
+  `kind`, or null), `{layout, layout_version, tab_path, tab_index, tab_title}` for a tab.
   `tab_title` is the current/innermost tab's title, or null when none exists. Use `layout_version` as `expect`.
 - Client-side commands (mechanism, never sent to the core): `client.menu {where}`, `client.prefix`, `client.palette`,
   `client.zoom` (toggle: the focused pane fills this window; per window, not workspace state; moving focus leaves it).

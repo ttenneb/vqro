@@ -3,5 +3,5 @@
   "summary":"Inspect agents and use the operations their runtimes expose.",
   "description":"Builds agent lists and live panels for prompts, steering, queues, requests and transcripts, using each runtime's advertised capabilities. It does not launch Pi itself. Turn it off to lose these controls and panels; backend-owned agents and their bridges keep running.",
   "requires":{"protocol":1,"client_features":["items","chips","input","menu"]},
-  "contributes":{"commands":["agents.*: capability-driven controls"],"menu_items":["Agents","Per-agent actions"],"panels":["Agent list","Agent details","Pending requests"]}
+  "contributes":{"commands":["agents.*: capability-driven controls"],"keys":["Prefix p: prompt the focused agent"],"menu_items":["Agents","Per-agent actions"],"panels":["Agent list","Agent details","Pending requests"]}
 }

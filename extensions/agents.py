@@ -45,13 +45,17 @@ class Agents:
             ext.command("agents."+op, title)(self.guarded(fn))
         self.signature = self.current_signature()
         declarations = {"menu/agents.list": {"where": "tabbar", "label": "Agents", "command": "agents.list", "order": 6},
-                        "view/agents-list": {"kind": "panel", "title": "Agents", "items": []}}
+                        "view/agents-list": {"kind": "panel", "title": "Agents", "items": []},
+                        # Prefix p: prompt the agent in the focused pane. `when` keeps it off other
+                        # panes (the key falls through there), so no text is typed only to fail.
+                        "binding/agents.prompt": {"key": "p", "command": "agents.prompt", "input": "Prompt agent",
+                                                  "label": "prompt agent", "when": {"resource_kind": "agent"}}}
         declarations.update(self.declarations())
         # Provider inventory may not be restored yet. Referenced panels must
         # remain valid across extension disable/re-enable and core restart.
         for key, entry in ext.entries.items():
             if panel_key(key) and entry["value"].get("owner") == "agents":
-                declarations.setdefault(key, entry["value"])
+                declarations.setdefault(key, {k: v for k, v in entry["value"].items() if k != "owner"} | {"resource": key[len("view/agents-"):]})
         ext.contribute(declarations)  # reconciles removed/moved launcher entries
         ext.on_event(self.event)
         self.publish_panels()
@@ -255,7 +259,8 @@ class Agents:
             if r.get("kind") != "agent":
                 continue
             rid = r["id"]
-            entries["view/"+view(rid)] = {"kind": "panel", "title": "Agent "+rid, "items": [{"type": "text", "text": "Agents extension is not running."}]}
+            # `resource` names the agent this pane shows: context.resource / resource_kind for keys and menus.
+            entries["view/"+view(rid)] = {"kind": "panel", "title": "Agent "+rid, "resource": rid, "items": [{"type": "text", "text": "Agents extension is not running."}]}
             for i, (op, title) in enumerate(EFFECTS.items()):
                 if not self.supported(r, op):
                     continue

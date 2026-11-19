@@ -95,7 +95,8 @@ def close(args):
 @ext.command("panes.kill", "Kill the program in a pane")
 def kill(args):
     ctx = args.get("context") or {}
-    if not ctx.get("resource"):
+    # Panels may name the resource they show (agent panels); only a terminal pane's program is killed.
+    if not ctx.get("resource") or ctx.get("kind") != "terminal":
         raise VqroError("no program here", "invalid")
     return ext.vqro.call("resource.kill", {"resource": ctx["resource"]})
 
@@ -121,7 +122,7 @@ ext.contribute({
     "menu/panes.split-down": {"where": "pane", "label": "Split down (new shell)", "command": "panes.split", "args": {"dir": "down"}, "order": 21},
     "menu/panes.show": {"where": "pane", "label": "Show another resource", "command": "panes.show", "pick": "resource", "when": {"kind": "terminal"}, "order": 30},
     "menu/panes.close": {"where": "pane", "label": "Close pane (program keeps running)", "command": "panes.close", "order": 40},
-    "menu/panes.kill": {"where": "pane", "label": "Kill program", "command": "panes.kill", "when": {"live": True}, "order": 50},
+    "menu/panes.kill": {"where": "pane", "label": "Kill program", "command": "panes.kill", "when": {"live": True, "kind": "terminal"}, "order": 50},
     "binding/panes.menu": {"key": "m", "command": "client.menu", "args": {"where": "pane"}, "label": "pane menu"},
     # h/v follow the layout's split names: "h" puts panes side by side, "v" stacks them.
     "binding/panes.split-h": {"key": "h", "command": "panes.split", "args": {"dir": "right"}, "label": "split side by side"},

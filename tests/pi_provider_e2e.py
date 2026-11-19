@@ -246,7 +246,7 @@ class E2E:
         self.ui_frame('prefix-menu', 'pane menu')
         self.ui('send-keys', '-t', 'ui:0.0', 'm')
         self.ui_frame('pane-menu', title)
-        context = {'view': 'agents-'+rid, 'kind': 'panel', 'resource': None, 'live': False}
+        context = {'view': 'agents-'+rid, 'kind': 'panel', 'resource': rid, 'resource_kind': 'agent', 'live': True}
         rows = [(v['value'].get('order', 0), k, v['value']) for k, v in self.snapshot()['entries'].items()
                 if k.startswith('menu/') and v['value'].get('where') == 'pane'
                 and all(context.get(field) == value for field, value in v['value'].get('when', {}).items())]
@@ -280,6 +280,18 @@ class E2E:
         assert next(row for row in reversed(self.trace()) if row.get('type') == 'prompt')['message'] == 'ui-typed-prompt', 'agent input was implicitly prefilled'
         self.ui_menu(rid, 'Abort')
         self.agent(rid, lambda r: r['data']['run']['settled'] and r['data']['run']['aborted'])
+        # Prefix p on the focused agent pane: asks for the text, then the agent receives exactly it.
+        prompts = sum(row.get('type') == 'prompt' for row in self.trace())
+        self.ui('send-keys', '-t', 'ui:0.0', 'C-g', 'p')
+        self.ui_frame('prefix-p-input', 'Prompt agent')
+        self.ui('send-keys', '-t', 'ui:0.0', '-l', 'prefix p: exact text')
+        self.ui('send-keys', '-t', 'ui:0.0', 'Enter')
+        self.agent(rid, lambda r: r['data']['run']['active'])
+        sent = [row['message'] for row in self.trace() if row.get('type') == 'prompt']
+        assert sent[prompts:] == ['prefix p: exact text'], sent
+        self.ui_menu(rid, 'Abort')
+        self.agent(rid, lambda r: r['data']['run']['settled'] and r['data']['run']['aborted'])
+        self.log.append({'prefix_p_prompt': 'PASS', 'received': sent[prompts:]})
         self.ui_menu(rid, 'Prompt')
         self.ui('send-keys', '-t', 'ui:0.0', '-l', 'fixture-model-error')
         self.ui('send-keys', '-t', 'ui:0.0', 'Enter')
@@ -304,6 +316,13 @@ class E2E:
         self.ui('send-keys', '-t', 'ui:0.0', 'Home', 'Enter')
         self.wait(lambda: 'term-'+host in layout_views(), 'explicit bridge terminal tab')
         self.ui_frame('bridge-terminal', 'Pi '+rid+' bridge', 'core connected')
+        # Prefix p on a terminal pane: no prompt, nothing sent or typed into the program; it says so.
+        prompts = sum(row.get('type') == 'prompt' for row in self.trace())
+        self.ui('send-keys', '-t', 'ui:0.0', 'C-g', 'p')
+        self.ui_frame('prefix-p-elsewhere', 'nothing for', 'on this pane')
+        assert 'Prompt agent' not in self.ui('capture-pane', '-p', '-t', 'ui:0.0')
+        assert sum(row.get('type') == 'prompt' for row in self.trace()) == prompts
+        self.log.append({'prefix_p_on_terminal': 'PASS'})
         self.call('command.invoke', {'name': 'sidebar.toggle'})
         # Wait for the coalesced sidebar snapshot, not merely any older sidebar rows.
         def current_rows():

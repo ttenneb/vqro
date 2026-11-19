@@ -1333,29 +1333,41 @@ impl App {
         keys::prefix(self.entries.get("doc/settings/tui").and_then(|s| s["prefix"].as_str()))
     }
 
-    /// Every keyboard binding with its id: the client's defaults, then visible `binding/*` entries.
-    fn key_candidates(&self) -> Vec<(String, Value)> {
+    /// Every keyboard binding with its id that applies in `ctx` (the focused pane's context): the
+    /// client's defaults, then visible `binding/*` entries whose `when` holds, exactly as for menu
+    /// items. A binding whose `when` does not hold is no candidate, so the key falls through to the
+    /// next binding for it (or to none).
+    fn key_candidates(&self, ctx: &Value) -> Vec<(String, Value)> {
         let mut found: Vec<(String, Value)> = builtin_bindings().into_iter().map(|b| (format!("{BUILTIN}{}", b["key"].as_str().unwrap_or("")), b)).collect();
         found.extend(
             self.entries
                 .iter()
-                .filter(|(k, v)| k.starts_with("binding/") && !v["key"].as_str().unwrap_or("").starts_with("mouse.") && self.visible(v))
+                .filter(|(k, v)| k.starts_with("binding/") && !v["key"].as_str().unwrap_or("").starts_with("mouse.") && self.visible(v) && when_holds(v, ctx))
                 .map(|(k, v)| (k.clone(), v.clone())),
         );
         found
     }
 
-    /// The binding a key (canonical name) runs, if any; `client.none` leaves the key unbound.
-    fn binding_for(&self, key: &str) -> Option<Value> {
-        let cands = self.key_candidates();
+    /// The binding a key (canonical name) runs on the focused pane, if any; `client.none` leaves
+    /// the key unbound.
+    fn binding_for(&self, key: &str, ctx: &Value) -> Option<Value> {
+        let cands = self.key_candidates(ctx);
         let (_, b) = &cands[*resolve(&cands).get(key)?];
         (b["command"] != "client.none").then(|| b.clone())
+    }
+
+    /// A binding for this key that applies only on other panes (its `when` does not hold here).
+    fn bound_elsewhere(&self, key: &str, ctx: &Value) -> Option<Value> {
+        self.entries.iter()
+            .filter(|(k, v)| k.starts_with("binding/") && self.visible(v) && !when_holds(v, ctx))
+            .find(|(_, v)| v["key"].as_str().and_then(keys::normalize).as_deref() == Some(key))
+            .map(|(_, v)| v.clone())
     }
 
     /// The prefix menu: the winning binding of every key (defaults first), then any recovery
     /// action no key reaches any more, so recovery survives every keymap.
     fn prefix_items(&self) -> Vec<PrefixRow> {
-        let cands = self.key_candidates();
+        let cands = self.key_candidates(&self.ctx_leaf(self.focus));
         let winners = resolve(&cands);
         let mut rows: Vec<PrefixRow> = cands
             .iter()
@@ -1399,8 +1411,9 @@ impl App {
             return;
         }
         let name = keys::name(&k);
+        let ctx = self.ctx_leaf(self.focus);
         // A bound key runs; otherwise arrows and Enter work the menu.
-        if let Some((n, b)) = name.as_deref().and_then(|n| Some((n, self.binding_for(n)?))) {
+        if let Some((n, b)) = name.as_deref().and_then(|n| Some((n, self.binding_for(n, &ctx)?))) {
             self.overlay = None;
             self.run_binding(&b);
             // Echo what ran, unless the binding opened a prompt that owns the status line.
@@ -1420,7 +1433,11 @@ impl App {
         }
         self.overlay = None;
         if let Some(name) = name.filter(|n| n != "Esc") {
-            self.set_key_hint("no binding for ", &format!("{} {name}",self.prefix()), "");
+            // Say so before anything prompts: a pane-specific key does nothing here, harmlessly.
+            match self.bound_elsewhere(&name, &ctx) {
+                Some(b) => self.set_key_hint("nothing for ", &format!("{} {name}",self.prefix()), &format!(" on this pane ({} works on other panes)",self.binding_label(&b))),
+                None => self.set_key_hint("no binding for ", &format!("{} {name}",self.prefix()), ""),
+            }
         }
     }
 
@@ -1580,7 +1597,7 @@ impl App {
             .entries
             .iter()
             .filter(|(k, v)| k.starts_with("menu/") && v["where"] == place && self.visible(v))
-            .filter(|(_, v)| v["when"].as_object().map(|w| w.iter().all(|(k, want)| ctx[k] == *want)).unwrap_or(true))
+            .filter(|(_, v)| when_holds(v, ctx))
             .map(|(k, v)| (v["order"].as_i64().unwrap_or(50), k.clone(), Item::from_entry(v)))
             .collect();
         found.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
@@ -1594,10 +1611,12 @@ impl App {
         let v = self.entries.get(&format!("view/{view}")).cloned().unwrap_or(Value::Null);
         let resource = v["resource"].as_str();
         let live = resource.and_then(|r| self.resources.get(r)).map(|r| r["state"] == "live").unwrap_or(false);
+        // Lets `when` select by what the pane shows, e.g. {"resource_kind": "agent"}.
+        let resource_kind = resource.and_then(|r| self.resources.get(r)).map(|r| r["kind"].clone()).unwrap_or(Value::Null);
         let path = self.hit.leaf_paths.get(idx).cloned().unwrap_or_default();
         let mut ctx = json!({
             "layout": layout, "layout_version": version, "path": path,
-            "view": view, "kind": v["kind"], "resource": resource, "live": live, "title": self.view_title(view),
+            "view": view, "kind": v["kind"], "resource": resource, "resource_kind": resource_kind, "live": live, "title": self.view_title(view),
         });
         // The innermost tab holding this pane, so tab commands work from the keyboard too.
         if let Some((_, mut root)) = self.active_layout() {
@@ -2601,6 +2620,11 @@ fn builtin_bindings() -> Vec<Value> {
     b
 }
 
+/// Whether an entry's `when` holds in a context: every field equal. No `when` always holds.
+fn when_holds(v: &Value, ctx: &Value) -> bool {
+    v["when"].as_object().map(|w| w.iter().all(|(k, want)| ctx[k] == *want)).unwrap_or(true)
+}
+
 /// Which of several bindings for one key wins (smallest rank): the highest `priority` (default 0),
 /// then the client's defaults, then the lowest id, so the outcome never depends on load order.
 fn rank(id: &str, b: &Value) -> (std::cmp::Reverse<i64>, bool, String) {
@@ -3367,6 +3391,53 @@ mod tests {
         assert!(term.closed.is_none());
         term.parser.process(b"repaint");
         assert_eq!(term.parser.screen().contents(), "repaint", "fresh attach cannot reuse old VT state");
+    }
+
+    #[tokio::test]
+    async fn bindings_honour_when_and_fall_through_while_profiles_keep_winning() {
+        let (mut app, _) = app();
+        app.entries.insert("workspace/active".into(), json!({"layout": "main"}));
+        app.entries.insert("layout/main".into(), json!({"split": "h", "children": [{"view": "agents-r8"}, {"view": "t1"}]}));
+        app.entries.insert("view/agents-r8".into(), json!({"kind": "panel", "title": "Agent r8", "resource": "r8", "items": []}));
+        app.entries.insert("view/t1".into(), json!({"kind": "terminal", "resource": "r1"}));
+        app.resources.insert("r8".into(), json!({"id": "r8", "kind": "agent", "state": "live", "available": true}));
+        app.resources.insert("r1".into(), json!({"id": "r1", "kind": "terminal", "state": "live", "available": true}));
+        app.entries.insert("binding/agents.prompt".into(), json!({"key": "p", "command": "agents.prompt", "input": "Prompt agent", "label": "prompt agent", "when": {"resource_kind": "agent"}}));
+        for name in ["agents.prompt", "x.paste"] {
+            app.commands.insert(name.into(), json!({"name": name, "available": true}));
+        }
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 24)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let (agent, shell) = (app.hit.leaves.iter().position(|l| l.0 == "agents-r8").unwrap(), app.hit.leaves.iter().position(|l| l.0 == "t1").unwrap());
+        let p = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE);
+        let on = |app: &App, pane: usize| app.binding_for("p", &app.ctx_leaf(pane)).map(|b| b["command"].as_str().unwrap().to_string());
+        let listed = |app: &mut App, pane: usize| { app.focus = pane; app.prefix_items().iter().any(|r| r.binding["command"] == "agents.prompt") };
+
+        assert_eq!(app.ctx_leaf(agent)["resource_kind"], "agent");
+        assert_eq!(app.ctx_leaf(shell)["resource_kind"], "terminal");
+        assert_eq!(on(&app, agent).as_deref(), Some("agents.prompt"));
+        assert_eq!(on(&app, shell), None, "a binding whose `when` fails is no candidate");
+        assert!(listed(&mut app, agent) && !listed(&mut app, shell), "the prefix menu shows what the key does here");
+
+        // On a shell pane, p neither prompts nor runs anything; it says why.
+        app.focus = shell;
+        app.on_prefix_key(p, false);
+        assert!(app.overlay.is_none(), "no prompt that would only fail after typing");
+        // On the agent pane, p asks for the text first.
+        app.focus = agent;
+        app.on_prefix_key(p, false);
+        assert!(matches!(&app.overlay, Some(Overlay::Input { prompt, item, .. }) if prompt == "Prompt agent" && item.command == "agents.prompt"));
+        app.overlay = None;
+
+        // Fall-through: an unconditional binding for the same key serves panes where `when` fails.
+        app.entries.insert("binding/z.p".into(), json!({"key": "p", "command": "x.paste"}));
+        assert_eq!(on(&app, agent).as_deref(), Some("agents.prompt"), "same priority: lowest id");
+        assert_eq!(on(&app, shell).as_deref(), Some("x.paste"));
+        // A selected keymap profile (priority 10, no `when`) keeps winning everywhere.
+        app.entries.insert("binding/keys.p".into(), json!({"key": "p", "command": "client.tab", "args": {"to": "prev"}, "priority": 10, "owner": "keys"}));
+        app.entries.insert("extension/keys".into(), json!({"argv": ["x"]}));
+        assert_eq!(on(&app, agent).as_deref(), Some("client.tab"));
+        assert_eq!(on(&app, shell).as_deref(), Some("client.tab"));
     }
 
     fn winner(cands: &[(String, Value)], key: &str) -> String {
