@@ -42,6 +42,14 @@ impl Core {
                             "provider.register" => {
                                 assert_eq!(params["role"], "runtime");
                                 assert_eq!(params["token"], expected_token);
+                                assert_eq!(
+                                    params["capabilities"]["host"]["kind"],
+                                    json!(["server"])
+                                );
+                                assert_eq!(
+                                    params["capabilities"]["agent.send"]["correlation"],
+                                    json!(["acceptance"])
+                                );
                                 // Intermediate builds must not claim missing item observation.
                                 assert!(params["capabilities"].get("items.stream").is_none());
                                 json!({"provider":params["name"],"generation":generation,"resume_token":"resume-native",
@@ -174,6 +182,18 @@ async fn binary_registers_three_endpoints_and_rejects_undeclared_modes_before_na
     let mut core = Core::accept(&listener, 1, "bootstrap").await;
     core.wait(|facts| facts.len() == 3).await;
     let initial = core.facts.lock().unwrap().clone();
+    assert_eq!(
+        initial["endpoint-1"]["data"]["agent"]["caps"]["host"]["kind"],
+        "server"
+    );
+    assert_eq!(
+        initial["endpoint-1"]["data"]["agent"]["host"]["provider"],
+        "codex-test"
+    );
+    assert_eq!(
+        initial["endpoint-1"]["data"]["agent"]["host"]["incarnation"],
+        initial["endpoint-1"]["incarnation"]
+    );
     assert_eq!(
         initial["endpoint-1"]["data"]["agent"]["host"],
         initial["endpoint-3"]["data"]["agent"]["host"]

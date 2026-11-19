@@ -18,6 +18,30 @@ pub fn capabilities() -> Map<String, Value> {
         .expect("checked declaration")
 }
 
+/// Registration is a superset descriptor, not a second copy of a resource's selected values.
+/// Collections (types/methods/renderings) stay collections; enum fields inside objects are sets.
+pub fn provider_capabilities() -> Map<String, Value> {
+    fn bound(value: Value) -> Value {
+        match value {
+            Value::String(value) => json!([value]),
+            Value::Object(object) => {
+                Value::Object(object.into_iter().map(|(k, v)| (k, bound(v))).collect())
+            }
+            Value::Array(values) => Value::Array(
+                values
+                    .into_iter()
+                    .map(|v| if v.is_object() { bound(v) } else { v })
+                    .collect(),
+            ),
+            other => other,
+        }
+    }
+    bound(Value::Object(capabilities()))
+        .as_object()
+        .unwrap()
+        .clone()
+}
+
 fn rejected(kind: &str, message: &str) -> RpcError {
     RpcError::new(kind, message)
 }

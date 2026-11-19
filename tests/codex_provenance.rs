@@ -1,5 +1,5 @@
 use serde_json::{Value, json};
-use vqro::codex::{Endpoint, capabilities};
+use vqro::codex::{Endpoint, capabilities, provider_capabilities};
 
 fn endpoint() -> Endpoint {
     let mut e = Endpoint::new("slot".into(), "inc".into(), "server".into(), "e".into());
@@ -15,6 +15,15 @@ fn send() -> Value {
 #[test]
 fn declared_topology_request_scopes_and_ordered_content_select_the_right_cases() {
     let c = capabilities();
+    let provider = provider_capabilities();
+    assert_eq!(provider["host"]["kind"], json!(["server"]));
+    assert_eq!(
+        provider["agent.send"]["content"]["shape"],
+        json!(["ordered"])
+    );
+    assert_eq!(provider["agent.send"]["content"]["types"], json!(["text"]));
+    assert_eq!(provider["agent.send"]["origin"][0]["role"], json!(["user"]));
+    assert_eq!(provider["agent.send"]["receipts"]["retain"], 256);
     assert_eq!(c["host"], json!({"kind":"server","endpoints":"many"}));
     assert_eq!(c["agent.respond"]["scopes"], json!(["session", "run"]));
     assert_eq!(c["agent.respond"]["background_requests"], true);

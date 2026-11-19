@@ -1,6 +1,6 @@
 //! Provider-facing orchestration. Native event draining and controls never wait on an admission.
 //! The shared SDK item producer is supplied as a callback; no second item reducer lives here.
-use super::{Change, Endpoint, capabilities};
+use super::{Change, Endpoint, provider_capabilities};
 use crate::provider_client::{Outcome, ProviderError};
 use crate::rpc::{Incoming, Peer, RpcError};
 use serde_json::{Map, Value, json};
@@ -99,7 +99,7 @@ impl Runtime {
     }
 
     pub fn capabilities(&self) -> Map<String, Value> {
-        let mut caps = capabilities();
+        let mut caps = provider_capabilities();
         // An intermediate build without C3 is deliberately not an observed/conformant adapter.
         // Do not advertise an item channel until a real bounded producer has been attached.
         if self.observer.is_none() {
