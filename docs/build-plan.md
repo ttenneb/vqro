@@ -303,6 +303,20 @@ written the same way was contained by the crash budget and removed with one reve
   Quick/full gates reject disallowed declarations or stale notices. No speculative dependency-feature trim.
 - Policy, sources, target scope and evidence: `research/licensing.md`.
 
+## Declarations and UI clients, step 1 (2026-11-19, D29)
+
+- Manifests declare `provides`/`needs`/`works_with`; the core reports `dependencies` (and reverse `used_by`) in
+  `extension.list`/snapshots and in enable/disable replies, never acting itself. Settings > Extensions shows them,
+  offers needed extensions on turn-on and warns what breaks on turn-off; the safe-mode chooser names needs.
+  `scripts/check_manifest_deps.py` keeps the 15 bundled manifests honest.
+- `src/ui_model`: the renderer-independent client model (cache and event application, contributions, panel
+  flattening, key names, shared recovery content). The ratatui TUI renders over it and declares `hello` profiles
+  and features. Base-profile conformance fixtures: `tests/fixtures/client/`.
+- `vqro ui [<client>]` (built-in TUI by default; client manifests in `<extensions dir>/clients/`). Second
+  implementation: `extensions/clients/text.py` (stdlib Python, base profile; `vqro_client_model.py` passes the
+  same fixtures). Next: element/view-kind `fallback`, an unfamiliar real extension (review P2), OpenTUI spike
+  (needs a runtime install decision). Design: `research/declarations-and-ui-clients.md`.
+
 ## Known gaps found while building
 
 - **History churn:** extensions that refresh views on every event (the sidebar on status changes) fill the
