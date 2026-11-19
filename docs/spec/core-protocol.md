@@ -445,7 +445,7 @@ and old layouts may show gone resources until explicitly repaired/reset. No iden
 | `resource.kill` | `resource`, `deadline_ms?` | `outcome: accepted`, `effect`, `backend` |
 | `resource.forget` | `resource`, `deadline_ms?` | `outcome: observed`, `effect`, `data` |
 | `resource.forget_cached` | `resource` | `outcome: observed`, `effect`, `data: {scope: "cached_facts", backend_effect: "none"}` |
-| `resource.attach` | `resource`, `cols`, `rows`, `history?` (lines of backend scrollback, an integer), `deadline_ms?` | `outcome: accepted`, `effect`, `stream`, `initial` (`history`, `repaint` or `none`) |
+| `resource.attach` | `resource`, `cols`, `rows`, `history?` (lines of backend scrollback, an integer), `items?` (`{after?: {epoch, seq}}`: an item stream instead of terminal output), `deadline_ms?` | `outcome: accepted`, `effect`, `stream`, `initial` (`history`, `repaint` or `none`; item streams `continue` or `reset`), `epoch` (item streams) |
 | `resource.invoke` | `resource`, `op`, `args?` (object), `deadline_ms?` | `outcome`, `effect`, `data?`; capability-checked generic provider operation |
 | `stream.input` | `stream`, `data` (base64) or `text` | `outcome: dispatched` (also accepted as a notification) |
 | `stream.resize` | `stream`, `cols`, `rows` | |
@@ -536,8 +536,19 @@ Control has priority over queued stream data; an in-flight JSON line must finish
 These are payload/queue bounds, not a promise about allocator overhead, operating-system socket buffers or latency.
 The herdr adapter also bounds its frame queues (1 MiB outbound, 32 MiB inbound; individual frames at most 16 MiB).
 
-When a viewer cannot keep up, its affected stream closes with `reason: {reason: "slow_consumer"}`. Queued data for
-that stream may be discarded; closure is an explicit gap, not a complete-output claim. Other streams/connections
+**Item streams** (agent-v0 §4): `resource.attach {resource, items: {after?: {epoch, seq}}}` needs the provider's
+`items.stream` capability and no dimensions. The stream carries UTF-8 JSON Lines (a line may span `stream.data`
+frames); the core does not parse them. The reply adds `epoch` and `initial: continue` (records start at `after.seq + 1`)
+or `reset` (an in-stream snapshot, then records after its cut). Credit, window, closure and gap rules are the
+terminal stream's. A gap reason `retention` means the viewer fell out of the adapter's journal: reattach with
+`after`. Item streams have their own per-provider budget (`limits.max_item_streams`, at least agents × viewers),
+separate from terminal streams, and stream opens do not count against the provider's effect in-flight limit.
+
+When a viewer cannot keep up, its affected stream closes with `reason: {reason: "slow_consumer"}`. The unit is the
+connection: once a connection's shared stream-data budget overflows, **every** stream of that connection (terminal and
+item) closes `slow_consumer` together, including idle ones; streams attached afterwards are unaffected. The viewer
+reattaches each stream (item streams from their last applied `{epoch, seq}`). Queued data for
+that stream may be discarded; closure is an explicit gap, not a complete-output claim. Other connections
 continue. A normal backend closure follows accepted output in order; if its closing marker cannot fit, it becomes
 `slow_consumer` rather than silently dropping final output. Control queue overflow disconnects the connection:
 reconnect and recover events using the epoch cursor/snapshot mechanism, never resend input.

@@ -36,7 +36,7 @@ the program of a backend-owned terminal (section 6); vqro does not supervise or 
   "instance": "<opaque, see Identity>",
   "software": {"name": "herdr-core", "version": "0.1.21"}, "provider_version": "0.1.0",
   "capabilities": { },                   // section 3
-  "limits": {"max_streams": 512, "stream_window_bytes": 262144}
+  "limits": {"max_streams": 512, "max_item_streams": 1024, "stream_window_bytes": 262144}
 }}
 // → {"provider": "herdr@local", "generation": 7}
 // generation: core-assigned, increases on every registration of this name. (The core's event cursor
@@ -339,7 +339,7 @@ This section is the implementable contract; where sections 1–6 differ, this wi
 
 | Method | Dir | Kind | Params | Result |
 |---|---|---|---|---|
-| `provider.register` | P→C | request | `name`, `role` (`backend`\|`runtime`), `instance` (string), `software {name, version}`, `provider_version`, `capabilities` (object), `limits? {max_streams?, stream_window_bytes?}`, `token?` (required for `runtime`) | `{provider, generation, limits: {stream_window_bytes, max_record_bytes}}` |
+| `provider.register` | P→C | request | `name`, `role` (`backend`\|`runtime`), `instance` (string), `software {name, version}`, `provider_version`, `capabilities` (object), `limits? {max_streams?, max_item_streams?, stream_window_bytes?}`, `token?` (required for `runtime`) | `{provider, generation, limits: {stream_window_bytes, max_record_bytes}}` |
 | `provider.sync` | P→C | request | `generation`, `resources: [Facts]`, `final` (bool) | `{}` once applied |
 | `resource.upsert` | P→C | notification | `generation`, `facts: Facts` | — |
 | `resource.gone` | P→C | notification | `generation`, `ref`, `incarnation`, `reason` | — |
@@ -366,10 +366,13 @@ This section is the implementable contract; where sections 1–6 differ, this wi
   keeps generations monotonic even when such a name returns. Violations return
   `overloaded` or close a notifying provider; global-budget diagnostics identify the provider that hit the bound.
   These are payload/accounting bounds, not an RSS or latency promise.
-- **Limits** (G10): `max_streams` is the provider's hard cap on concurrently open streams; the core does not open more
-  and returns `overloaded` to the viewer. The effective window is `min(stream_window_bytes, 262144)` and is returned
-  in the register result. The current core additionally admits at most 512 wire streams and 128 concurrent
-  effect/open calls per provider; overflow is rejected, never queued without a bound.
+- **Limits** (G10): `max_streams` is the provider's hard cap on concurrently open terminal streams and
+  `max_item_streams` (default 1024) on item streams, separate budgets; the core does not open more and returns
+  `overloaded` to the viewer. The effective window is `min(stream_window_bytes, 262144)` and is returned in the
+  register result. The current core additionally admits at most 512 terminal streams and 8192 item streams per
+  provider (item streams need at least agents × viewers, target 200 × 4 = 800), 128 concurrent effect calls and,
+  separately, 1024 concurrent `stream.open` calls per provider; overflow is rejected, never queued without a bound.
+  Stream opens are not effects: they never count against the effect limits (core or SDK `max_in_flight`).
 - **Sync durability:** each native inventory/wire chunk admits and reserves its changed facts, writes one indexed
   identity-map candidate, then publishes. The final chunk includes authoritative removals in that same replace.
   No id from a failed pre-rename candidate is published; post-rename uncertainty adopts/reports the complete batch.
@@ -475,9 +478,9 @@ parameters remain ignorable; this adds no core sizing arbitration.
 
 | Method | Dir | Kind | Params | Result |
 |---|---|---|---|---|
-| `stream.open` | C→P | request | `generation`, `stream` (u64), `ref`, `incarnation`, `cols`, `rows`, `history_lines` (0 = none), `window_bytes` | `{initial: "history"\|"repaint"\|"none"}` |
+| `stream.open` | C→P | request | `generation`, `stream` (u64), `ref`, `incarnation`, `cols`, `rows`, `history_lines` (0 = none), `window_bytes`; item streams instead: `channel: "items"`, `after?` `{epoch, seq}`, `window_bytes` (no dimensions) | `{initial: "history"\|"repaint"\|"none"}`; item streams `{initial: "continue"\|"reset", epoch}` |
 | `stream.data` | P→C | notification | `generation`, `stream`, `offset` (u64), `data` (base64) | — |
-| `stream.gap` | P→C | notification | `generation`, `stream`, `offset`, `reason` (`{reason: "gap", gap: "backend_dropped"\|"paused"\|"viewer_slow"}`) | — |
+| `stream.gap` | P→C | notification | `generation`, `stream`, `offset`, `reason` (`{reason: "gap", gap: "backend_dropped"\|"paused"\|"viewer_slow"\|"retention"}`) | — |
 | `stream.closed` | P→C | notification | `generation`, `stream`, `reason` | — |
 | `stream.error` | P→C | notification | `generation`, `stream`, `error {kind, message}`, `outcome: "rejected"` | — |
 | `stream.credit` | C→P | notification | `generation`, `stream`, `bytes` (u32 > 0) | — |
@@ -485,6 +488,13 @@ parameters remain ignorable; this adds no core sizing arbitration.
 | `stream.resize` | C→P | notification | `generation`, `stream`, `cols`, `rows` (1–9999) | — |
 | `stream.close` | C→P | notification | `generation`, `stream` | — |
 
+- **Item channel** (agent-v0 §4). A provider declaring `items.stream` gets `stream.open {channel: "items", after?}`
+  and replies `continue` only if `after.epoch` is its current epoch and `after.seq + 1` is still retained (records
+  follow from there), otherwise `reset` (an in-stream snapshot fence, then records after its cut), always with the
+  current `epoch`. The payload is UTF-8 JSON Lines; the core forwards bytes unparsed. A viewer that falls out of
+  retention while attached gets `stream.gap` with gap `retention`. A gap with an unknown or malformed reason is a
+  protocol error that still ends the stream (`reason: invalid`); the Rust SDK's `gap()` ends the stream as
+  `invalid` too, never leaving it open.
 - **Stream ids** are chosen by the core, unique for the life of the provider connection, never reused. Messages for
   a stream that is closed or unknown are ignored by the provider (`stream.credit`, `stream.input` after close) and
   dropped by the core; neither is an error.
