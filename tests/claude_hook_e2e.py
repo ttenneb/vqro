@@ -21,6 +21,18 @@ env = {"HOME": os.path.join(root, "home"), "PATH": os.environ["PATH"], "XDG_RUNT
 for d in ("home", "xrun", "st", "noext"):
     os.makedirs(os.path.join(root, d))
 procs = []
+
+
+def _cleanup(*_):
+    for p in procs:
+        if p.poll() is None:
+            p.kill()
+    sys.exit(1)
+
+
+import atexit, signal  # noqa: E402
+atexit.register(lambda: [p.kill() for p in procs if p.poll() is None])
+signal.signal(signal.SIGTERM, _cleanup)
 fails = []
 
 

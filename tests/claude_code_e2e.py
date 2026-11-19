@@ -36,6 +36,18 @@ base = {"HOME": P["home"], "PATH": os.environ["PATH"], "XDG_RUNTIME_DIR": P["xru
 procs, results, fails = [], {}, []
 
 
+def _cleanup(*_):
+    for p in procs:
+        if p.poll() is None:
+            p.kill()
+    sys.exit(1)
+
+
+import atexit, signal  # noqa: E402
+atexit.register(lambda: [p.kill() for p in procs if p.poll() is None])
+signal.signal(signal.SIGTERM, _cleanup)
+
+
 def check(name, ok, detail=""):
     print(("PASS " if ok else "FAIL ") + name + ("" if ok else f"  ({detail})"), flush=True)
     results[name] = {"ok": bool(ok), "detail": detail if not ok else None}
