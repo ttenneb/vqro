@@ -109,6 +109,124 @@ def time_text(at_ms):
         return str(at_ms)
 
 
+# Dependencies (docs/research/declarations-and-ui-clients.md): the core resolves and reports them in
+# `extension.list`; this page shows them and asks once before switching. Nothing is switched silently.
+NEED_TEXT = {"satisfied": "ok", "off": "off", "missing": "not installed", "version": "other version installed",
+             "invalid": "invalid name", "lacking": "some clients lack it", "unknown": "client support unknown"}
+NEED_STYLE = {"satisfied": "ok", "off": "warn", "missing": "warn", "version": "warn", "invalid": "error", "lacking": "warn"}
+SWITCHABLE = ("off", "stopped-by-safe-mode")  # providers that turning on would start
+
+
+def ext_title(states, name):
+    manifest = (states.get(name) or {}).get("manifest") or {}
+    return manifest_text(manifest, "title", name) or name
+
+
+def need_who(states, need):
+    """Who could provide a need: declared providers by title, else the suggested name, else the capability."""
+    names = [p.get("name") for p in need.get("providers") or [] if isinstance(p, dict) and p.get("name") != "vqro"]
+    if names:
+        return " or ".join(ext_title(states, n) for n in names)
+    return label(need.get("suggest") or need.get("cap") or "?")
+
+
+def unmet(deps, field="needs"):
+    return [n for n in (deps or {}).get(field) or [] if isinstance(n, dict) and not str(n.get("cap", "")).startswith("ui/")
+            and n.get("status") != "satisfied"]
+
+
+def to_enable(states, deps):
+    """Providers to turn on with an extension: per unmet need the suggested provider if declared, else the first."""
+    names = []
+    for need in unmet(deps):
+        offered = [p.get("name") for p in need.get("providers") or [] if (states.get(p.get("name")) or {}).get("display_status") in SWITCHABLE]
+        pick = need.get("suggest") if need.get("suggest") in offered else (offered or [None])[0]
+        if pick and pick not in names:
+            names.append(pick)
+    return names
+
+
+def breaks(states, name, deps):
+    """(broken, limited) extension names if `name` stops: enabled users of its capabilities with no other running provider."""
+    broken, limited = [], []
+    for use in (deps or {}).get("used_by") or []:
+        user = use.get("name")
+        if (states.get(user) or {}).get("display_status") in (None, "off", "stopped-by-safe-mode"):
+            continue
+        user_deps = (states.get(user) or {}).get("dependencies") or {}
+        rows = [n for f in ("needs", "works_with") for n in user_deps.get(f) or [] if n.get("cap") == use.get("cap")]
+        others = [p for r in rows for p in r.get("providers") or [] if p.get("name") not in (name,) and p.get("display_status") in ("running", "core")]
+        if others:
+            continue
+        target = broken if use.get("hard") else limited
+        if user not in target:
+            target.append(user)
+    return broken, [u for u in limited if u not in broken]
+
+
+def switch_options(states, name, on, deps):
+    """One pick-one confirmation when switching has dependency consequences, else None (switch directly)."""
+    title = ext_title(states, name)
+    if not on:
+        needs = unmet(deps)
+        if not needs:
+            return None
+        enable = to_enable(states, deps)
+        rest = [need_who(states, n) + " (" + NEED_TEXT.get(n.get("status"), "unavailable") + ")" for n in needs
+                if not set(p.get("name") for p in n.get("providers") or []) & set(enable)]
+        options = []
+        if enable:
+            options.append({"label": f"Turn on {title} and {', '.join(ext_title(states, n) for n in enable)}", "value": "with"})
+        only = f"Turn on {title} only" if enable else f"Turn on {title} anyway"
+        if rest:
+            only += "; still needs " + ", ".join(rest)
+        return options + [{"label": only, "value": "only"}, {"label": "Cancel", "value": "cancel"}]
+    broken, limited = breaks(states, name, deps)
+    if not broken:  # optional users only lose extras (listed under Used by): no confirmation
+        return None
+    what = []
+    if broken:
+        what.append("breaks " + ", ".join(ext_title(states, n) for n in broken))
+    if limited:
+        what.append("limits " + ", ".join(ext_title(states, n) for n in limited))
+    return [{"label": f"Turn off {title}: " + "; ".join(what), "value": "off"}, {"label": "Cancel", "value": "cancel"}]
+
+
+def dependency_details(states, name, deps):
+    """Needs / Works with / Used by / Provides sections for the detail panel."""
+    rows = []
+    if not isinstance(deps, dict):
+        return rows
+    for field, heading in (("needs", "Needs"), ("works_with", "Works with")):
+        items = [n for n in deps.get(field) or [] if isinstance(n, dict) and not str(n.get("cap", "")).startswith("ui/")]
+        if not items:
+            continue
+        rows.append({"type": "header", "text": heading})
+        for n in items:
+            status = n.get("status")
+            text = f"{need_who(states, n)}: {label(n.get('cap', '?'))} ({NEED_TEXT.get(status, label(status or '?'))})"
+            note = n.get("why") or (n.get("without") and "without it: " + n["without"])
+            rows.append(info_row(text + (" · " + label(note, 512) if note else ""), NEED_STYLE.get(status)))
+    ui = [n for n in deps.get("needs") or [] if isinstance(n, dict) and str(n.get("cap", "")).startswith("ui/")]
+    lacking = sorted({c for n in ui for c in n.get("lacking_in") or []})
+    if lacking:
+        rows.append(info_row("Client features missing in: " + ", ".join(label(c) for c in lacking) + " (they show a fallback)", "warn"))
+    users = deps.get("used_by") or []
+    if users:
+        rows.append({"type": "header", "text": "Used by"})
+        grouped = {}  # one row per user and kind of use, in first-seen order
+        for u in users:
+            grouped.setdefault((u.get("name"), bool(u.get("hard")), u.get("display_status")), []).append(label(u.get("cap", "?")))
+        for (user, hard, status), caps in grouped.items():
+            kind = "needs" if hard else "works with"
+            rows.append(info_row(f"{ext_title(states, user)} {kind} {', '.join(caps)} ({status or 'unknown'})"))
+    provides = ((states.get(name) or {}).get("manifest") or {}).get("provides")
+    if isinstance(provides, list) and provides:
+        rows += [{"type": "header", "text": "Provides"},
+                 info_row(", ".join(label(p) for p in provides if isinstance(p, str)))]
+    return rows
+
+
 def ext_rows(states, commands=None):
     """All declarations follow the same manifest-driven list/detail contract, including this extension."""
     commands = commands or set()
@@ -127,7 +245,12 @@ def ext_rows(states, commands=None):
         status = state.get("display_status") or ("off" if not on else {"running": "running", "failed": "failed", "safe_mode": "stopped-by-safe-mode", "disabled": "off"}.get(state.get("status"), "starting"))
         switch = "vqro.safe_mode.allow" if safe else "vqro.extension.disable" if on else "vqro.extension.enable"
         switch_args = {"name": name, "on": not on} if safe else {"name": name}
-        actions = [{"text": "Turn off" if on else "Turn on", "command": switch, "args": switch_args},
+        deps = state.get("dependencies")
+        confirm = switch_options(states, name, on, deps)
+        switch_row = {"command": switch, "args": switch_args}
+        if confirm:  # one confirmation, drawn over the popup; Esc cancels
+            switch_row = {"command": "settings.switch", "args": {"name": name, "on": not on}, "options": confirm}
+        actions = [{"text": "Turn off" if on else "Turn on", **switch_row},
                    {"text": "Restart", "command": "vqro.extension.restart", "args": {"name": name}, "disabled": not on}]
         settings_command = manifest_text(manifest, "settings_command")
         if settings_command:
@@ -153,6 +276,7 @@ def ext_rows(states, commands=None):
                    info_row(f"Kind: {kind}"),
                    info_row(f"Version: {manifest_text(manifest, 'version', 'not provided')}"),
                    info_row(f"Source: {state.get('manifest_source') or 'manifest not provided'}")]
+        details[1:1] = dependency_details(states, name, deps)
         if safe:
             details.insert(1, info_row("Safe-mode session choice only; the normal enabled declaration is unchanged.", "warn"))
         if state.get("manifest_error"):
@@ -177,9 +301,12 @@ def ext_rows(states, commands=None):
         details.append(info_row(f"Log: {os.path.join(log_root, 'ext-'+name+'.log')} (open externally; no in-app log viewer)" if log_root else "No in-app log viewer; log location unavailable."))
         groups.setdefault(kind, []).append({"id": "extension/"+name, "type": "toggle", "text": shown,
             "checked": on, "description": summary, "tags": [name, kind, summary],
-            "badges": [{"text": status, "style": STATUS_STYLE.get(status, "dim")}],
-            "command": switch, "args": switch_args,
-            "menu": [{"label": a["text"], "command": a["command"], "args": a.get("args", {})} for a in actions if not a.get("disabled")],
+            "badges": [{"text": status, "style": STATUS_STYLE.get(status, "dim")}] + [
+                {"text": f"needs {need_who(states, n)} ({NEED_TEXT.get(n.get('status'), 'unavailable')})", "style": "warn"}
+                for n in unmet(deps)[:2]],
+            **switch_row,
+            "menu": [{"label": a["text"], "command": a["command"], "args": a.get("args", {})} for a in actions
+                     if not a.get("disabled") and not a.get("options")],
             "detail_panel": {"title": shown, "requires": ["items", "chips", "wrap"],
                              "toolbar": [{"type": "chips", "chips": actions}], "items": details}})
     return [{"type": "header", "id": "kind/"+kind, "text": kind.replace("-", " ").title(),
@@ -337,6 +464,28 @@ def set_option(args):
         raise VqroError("needs `tui`", "invalid")
     t = dict(ext.value(TUI) or {}, **{key: value})
     ext.apply([{"op": "set", "key": TUI, "value": t, "expect": ext.version(TUI)}], f"settings: {key}")
+
+
+@ext.command("settings.switch", "Turn an extension on or off after its dependency confirmation (args: name, on, value)")
+def switch(args):
+    """`value` is the confirmed choice: `with` also turns on needed providers, `only`/`off` switches just this one,
+    `cancel` does nothing. Each extension is switched by the core's own command (or the safe-mode allowance)."""
+    name, on, choice = args.get("name"), bool(args.get("on")), args.get("value")
+    if not name or choice not in ("with", "only", "off", "cancel"):
+        raise VqroError("needs `name` and a confirmed `value`", "invalid")
+    if choice == "cancel":
+        return {"cancelled": True}
+    states = ext.vqro.call("extension.list")["extensions"]
+    safe = bool((states.get(name) or {}).get("safe_mode"))
+    names = (to_enable(states, (states.get(name) or {}).get("dependencies")) if on and choice == "with" else []) + [name]
+    done = []
+    for n in names:
+        if safe:
+            ext.invoke("vqro.safe_mode.allow", {"name": n, "on": on})
+        else:
+            ext.invoke("vqro.extension.enable" if on else "vqro.extension.disable", {"name": n})
+        done.append(n)
+    return {"switched": done, "on": on}
 
 
 @ext.command("settings.toggle", "Toggle an extension (args: extension) or a client option (args: tui)")

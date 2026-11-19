@@ -28,6 +28,7 @@ class Extension:
         raise AssertionError(method)
     def value(self,key): return self.entries.get(key,{}).get("value")
     def command(self,*_): return lambda f:f
+    def invoke(self,name,args): self.invoked=getattr(self,"invoked",[])+[(name,args)]; return {}
     def on_event(self,f): return f
     def contribute(self,*_): pass
     def publish(self,name,value): self.published[name] = copy.deepcopy(value)
@@ -138,6 +139,66 @@ class SettingsTests(unittest.TestCase):
         action=next(c for c in row["detail_panel"]["toolbar"][0]["chips"] if c["command"]=="vqro.extension.restart")
         self.assertEqual(action["args"],{"name":"broken"})
         self.assertFalse(action["disabled"])
+
+    def dependency_fixture(self):
+        module=load();ext=module["ext"]
+        ext.entries["extension/tabs"]={"value":{"argv":["never-run"],"enabled":False}}
+        ext.states["tabs"]={"display_status":"off","manifest":{"name":"tabs","title":"Tabs","provides":["command/tabs.show"]},
+            "dependencies":{"status":"ok","needs":[],"works_with":[],"used_by":[
+                {"name":"off","cap":"command/tabs.show","hard":True,"display_status":"off"},
+                {"name":"third-party","cap":"command/tabs.show","hard":True,"display_status":"running"},
+                {"name":"settings","cap":"command/tabs.show","hard":False,"display_status":"running"}]}}
+        need={"cap":"command/tabs.show","status":"off","suggest":"tabs","why":"opens panels","providers":[{"name":"tabs","display_status":"off"}]}
+        ext.states["off"]["dependencies"]={"status":"missing","needs":[need,{"cap":"ability/x.gpu","status":"missing","suggest":"gpu","providers":[]},
+            {"cap":"ui/vqro.items","status":"lacking","lacking_in":["text"]}],"works_with":[],"used_by":[]}
+        for user in ("third-party","settings"):
+            ext.states[user]["dependencies"]={"status":"ok","needs":[],"works_with":[],"used_by":[]}
+            ext.states[user]["dependencies"]["needs" if user=="third-party" else "works_with"]=[dict(need,status="satisfied")]
+        rows={r["id"]:r for g in module["ext_rows"](ext.states,set()) for r in g["children"]}
+        return module,ext,rows
+
+    def test_turning_on_offers_needed_providers_in_one_confirmation(self):
+        module,ext,rows=self.dependency_fixture()
+        row=rows["extension/off"]
+        self.assertEqual(row["command"],"settings.switch");self.assertEqual(row["args"],{"name":"off","on":True})
+        self.assertEqual([o["value"] for o in row["options"]],["with","only","cancel"])
+        self.assertEqual(row["options"][0]["label"],"Turn on Off and Tabs")
+        self.assertIn("still needs gpu (not installed)",row["options"][1]["label"])
+        self.assertIn({"text":"needs Tabs (off)","style":"warn"},row["badges"])
+        detail=str(row["detail_panel"])
+        for text in ("'Needs'","Tabs: command/tabs.show (off) · opens panels","gpu: ability/x.gpu (not installed)","Client features missing in: text"):
+            self.assertIn(text,detail)
+        chip=row["detail_panel"]["toolbar"][0]["chips"][0]
+        self.assertEqual((chip["command"],chip["options"]),("settings.switch",row["options"]))
+        # Choosing `with` turns on the provider, then the extension; nothing else is switched.
+        ext.states["off"]["safe_mode"]=False
+        self.assertEqual(module["switch"]({"name":"off","on":True,"value":"with"}),{"switched":["tabs","off"],"on":True})
+        self.assertEqual(ext.invoked,[("vqro.extension.enable",{"name":"tabs"}),("vqro.extension.enable",{"name":"off"})])
+        ext.invoked=[]
+        module["switch"]({"name":"off","on":True,"value":"only"});self.assertEqual(ext.invoked,[("vqro.extension.enable",{"name":"off"})])
+        ext.invoked=[]
+        self.assertEqual(module["switch"]({"name":"off","on":True,"value":"cancel"}),{"cancelled":True});self.assertEqual(ext.invoked,[])
+        ext.states["off"]["safe_mode"]=True
+        module["switch"]({"name":"off","on":True,"value":"with"})
+        self.assertEqual(ext.invoked,[("vqro.safe_mode.allow",{"name":"tabs","on":True}),("vqro.safe_mode.allow",{"name":"off","on":True})])
+
+    def test_turning_off_warns_what_breaks_and_extensions_without_dependencies_switch_directly(self):
+        module,ext,rows=self.dependency_fixture()
+        ext.states["tabs"]["display_status"]="running";ext.entries["extension/tabs"]["value"]["enabled"]=True
+        rows={r["id"]:r for g in module["ext_rows"](ext.states,set()) for r in g["children"]}
+        row=rows["extension/tabs"]
+        self.assertEqual(row["options"],[{"label":"Turn off Tabs: breaks Third-Party; limits Settings","value":"off"},{"label":"Cancel","value":"cancel"}])
+        self.assertIn("Third-Party needs command/tabs.show (running)",str(row["detail_panel"]))
+        self.assertIn("command/tabs.show",str(row["detail_panel"]).split("'Provides'")[1])
+        module["switch"]({"name":"tabs","on":False,"value":"off"})
+        self.assertEqual(ext.invoked,[("vqro.extension.disable",{"name":"tabs"})])
+        self.assertEqual(rows["extension/broken"]["command"],"vqro.extension.disable")
+        self.assertNotIn("options",rows["extension/broken"])
+        # Only optional users left: they lose extras (shown under Used by), so no confirmation.
+        ext.states["third-party"]["display_status"]="off"
+        rows={r["id"]:r for g in module["ext_rows"](ext.states,set()) for r in g["children"]}
+        self.assertEqual(rows["extension/tabs"]["command"],"vqro.extension.disable")
+        self.assertNotIn("options",rows["extension/tabs"])
 
     def test_builtins_have_complete_readable_manifests(self):
         import json
