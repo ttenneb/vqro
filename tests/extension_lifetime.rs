@@ -75,6 +75,28 @@ async fn retired_connections_cannot_mutate_even_when_author_name_is_reused() {
 }
 
 #[tokio::test]
+async fn retirement_does_not_hide_the_known_result_of_native_work_already_dispatched() {
+    let fixture=Fixture::new().await;
+    let (control,_)=fixture.peer().await;
+    let (provider,mut incoming)=fixture.peer().await;
+    let generation=provider.call("provider.register",json!({"name":"native","role":"backend","instance":"fixture",
+        "software":{"name":"fixture","version":"0"},"provider_version":"0","capabilities":{"terminal.kill":{}},
+        "limits":{"max_streams":1,"stream_window_bytes":1024}})).await.unwrap()["generation"].clone();
+    let facts=json!({"ref":"t1","kind":"terminal","state":"live","incarnation":"","argv":[]});
+    provider.call("provider.sync",json!({"generation":generation,"resources":[facts],"final":true})).await.unwrap();
+    let id=control.call("resource.list",json!({"provider":"native"})).await.unwrap()["resources"][0]["id"].clone();
+    let (old,_old_rx)=fixture.extension("ordinary").await;
+    let work=tokio::spawn({let id=id.clone();async move {old.call("resource.kill",json!({"resource":id})).await}});
+    let request=loop {if let Some(vqro::rpc::Incoming::Request {id,method,..})=incoming.recv().await {assert_eq!(method,"effect.invoke");break id;}};
+    control.call("command.invoke",json!({"name":"vqro.extension.disable","args":{"name":"ordinary"}})).await.unwrap();
+    let mut finished=facts;finished["state"]=json!("finished");
+    provider.respond(request,Ok(json!({"outcome":"observed","data":{"facts":finished}})));
+    assert_eq!(work.await.unwrap().unwrap()["outcome"],"observed");
+    assert_eq!(control.call("resource.list",json!({"id":id})).await.unwrap()["resources"][0]["state"],"finished");
+    control.call("core.shutdown",json!({})).await.unwrap();
+}
+
+#[tokio::test]
 async fn noisy_extension_rotates_without_restart_and_broken_logging_still_drains() {
     let fixture=Fixture::new().await;
     let (control,_)=fixture.peer().await;

@@ -602,8 +602,9 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> Rp
             let deadline = provider::deadline(p.get("deadline_ms").map(|v| v.as_u64().ok_or_else(|| RpcError::invalid("deadline_ms must be an unsigned integer"))).transpose()?)?;
             let (effect, mut result) = effect(core, caller.clone(), route, "resource.kill", json!({"resource":id,"op":"terminal.kill"}), deadline, |value: &crate::adapter::EffectResult| value.outcome, move |context| async move {
                 let mut result = handle.for_effect(context).kill(reference).await.map_err(|e| e.rpc())?;
+                let mut c=c.lock().unwrap();
                 if !operation.valid() { return Err(provider::indeterminate("provider changed before kill result was recorded")); }
-                if let Some(facts) = result.facts.take() { c.lock().unwrap().upsert_resource(&operation.handle.name, facts)?; }
+                if let Some(facts) = result.facts.take() { c.upsert_resource(&operation.handle.name, facts)?; }
                 Ok(result)
             }).await?;
             Ok(json!({"outcome": result.outcome, "effect": effect, "backend": result.data.take()}))
@@ -870,8 +871,9 @@ async fn invoke_resource(core: &Shared, author: &Caller, p: Value) -> RpcResult 
     let deadline = provider::deadline(p.get("deadline_ms").map(|v| v.as_u64().ok_or_else(|| RpcError::invalid("deadline_ms must be an unsigned integer"))).transpose()?)?;
     let (effect, result) = effect(core, author.into(), route, "resource.invoke", json!({"resource":id,"op":op}), deadline, |value: &crate::adapter::EffectResult| value.outcome, move |context| async move {
         let mut result = handle.for_effect(context).invoke(op, reference, incarnation, args).await.map_err(|e| e.rpc())?;
+        let mut c=c.lock().unwrap();
         if !operation.valid() { return Err(provider::indeterminate("provider changed before effect result was recorded")); }
-        if let Some(facts) = result.facts.take() { c.lock().unwrap().upsert_resource(&operation.handle.name, facts)?; }
+        if let Some(facts) = result.facts.take() { c.upsert_resource(&operation.handle.name, facts)?; }
         Ok(result)
     }).await?;
     Ok(json!({"outcome": result.outcome, "effect": effect, "data": result.data}))
@@ -906,9 +908,10 @@ async fn forget(core: &Shared, author: &Caller, p: Value) -> RpcResult {
     let (handle, operation, c) = (route.handle.clone(), route.clone(), core.clone());
     let (effect, result) = effect(core, author.into(), route, "resource.forget", json!({"resource":id,"op":"resource.forget"}), deadline, |value: &crate::adapter::EffectResult| value.outcome, move |context| async move {
         let result = handle.for_effect(context).invoke("resource.forget".into(), reference.clone(), incarnation.clone(), json!({})).await.map_err(|e| e.rpc())?;
+        let mut c=c.lock().unwrap();
         if !operation.valid() { return Err(provider::indeterminate("provider changed before forget result was recorded")); }
         if result.outcome == "observed" {
-            c.lock().unwrap().on_adapter_event(&operation.handle.name, crate::adapter::AdapterEvent::Removed { reference, incarnation, reason:json!({"reason":"forgotten"}) });
+            c.on_adapter_event(&operation.handle.name, crate::adapter::AdapterEvent::Removed { reference, incarnation, reason:json!({"reason":"forgotten"}) });
         }
         Ok(result)
     }).await?;
@@ -930,6 +933,11 @@ async fn attach(core: &Shared, conn: &Arc<Conn>, a: Attach) -> RpcResult {
     let initial = stream.initial;
     let sid = conn.next_stream.fetch_add(1, Ordering::Relaxed);
     {
+        let c=core.lock().unwrap();
+        if !route.valid() || conn.caller().check(&c).is_err() {
+            let _=StreamInput::Close.send(&stream.input);
+            return Err(provider::indeterminate("provider or supervised caller retired before stream registration"));
+        }
         let mut streams = conn.streams.lock().unwrap();
         // Publish under the same lock as disconnect cleanup. A late idle attachment must never
         // become invisible to cleanup, nor wait for backend output before noticing the viewer died.
