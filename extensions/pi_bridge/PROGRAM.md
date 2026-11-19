@@ -36,6 +36,15 @@ Pi args/dispositions. Accepted is not settled; only native agent_settled marks s
 clear queues. UI answer is dispatched, not acknowledged. Runtime deadline/exit uncertainty is a backend error,
 which the core maps to indeterminate. No prompt/input/effect is automatically resent.
 
+Start gate (stopgap for Pi0.87, P4 report): Pi has no atomic start guard; two prompts in overlapping start
+preflight can both ACK success while only one reaches the model, and the loser emits a spurious agent_settled.
+The client therefore sends one `prompt` at a time: the next is sent only after the previous one shows agent_start
+(or answered handled/queued/rejected, or `Limits.start_confirm`, 30 s, passes; journaled `start_unconfirmed`).
+Waiting prompts keep their order and send nothing while waiting: a deadline or an abort before dispatch rejects them
+as not sent. While a start is unresolved, status is `working` and `start_pending` is true even if Pi reports idle or
+settled. Abort reports `start_unresolved: true` when a sent prompt's preflight had not resolved: Pi0.87 still starts
+it afterwards.
+
 Facts put coarse state in status.state and run/queues/requests in data. Assistant `message_end` with
 `stopReason: error` records bounded `failure.message`, sets error status even after settlement, and adds an
 error-styled transcript row even when message content is empty. Native `auto_retry_start/end` records optional

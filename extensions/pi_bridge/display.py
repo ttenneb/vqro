@@ -116,6 +116,7 @@ def agent_data(snapshot, budget=60000):
     """Keep native facts when they fit; mark omitted fields unknown, never empty."""
     data = {key: snapshot[key] for key in ("run", "queues", "requests")}
     data.update(runtime_available=snapshot.get("available"), stale=snapshot.get("stale"),
+                start_pending=snapshot.get("start_pending", False),
                 failure=snapshot.get("failure"), retry=snapshot.get("retry"))
     # Preserve IDs, titles, options and confirmation bodies when representable.
     # If a field cannot fit, null plus an explicit marker means unknown, not empty.

@@ -176,10 +176,51 @@ class PiBridgeTests(unittest.IsolatedAsyncioTestCase):
         accepted = await self.client.request("test_accepted")
         self.assertEqual(accepted["data"]["accepted"], ["hang"])
 
+    async def held_preflight(self):
+        """Prompt A sits in Pi's start preflight (P4): ACK pending, Pi reports not streaming."""
+        a = asyncio.create_task(self.client.invoke("prompt", {"message": "preflight:A"}))
+        for _ in range(200):
+            if (await self.client.request("test_accepted"))["data"]["preflight_held"]:
+                return a
+            await asyncio.sleep(.01)
+        self.fail("preflight never held")
+
+    async def test_overlapping_prompts_are_serialized_so_none_is_silently_lost(self):
+        a = await self.held_preflight()
+        state = await self.client.request("get_state")
+        self.assertFalse(state["data"]["isStreaming"], "Pi looks idle during preflight")
+        self.assertEqual(self.client.snapshot()["status"], "working", "an unresolved start is not idle")
+        self.assertTrue(self.client.snapshot()["start_pending"])
+        b = asyncio.create_task(self.client.invoke("prompt", {"message": "B", "streamingBehavior": "followUp"}))
+        await asyncio.sleep(.3)
+        self.assertFalse(b.done(), "B waits for A to start")
+        self.assertEqual((await self.client.request("test_accepted"))["data"]["accepted"], [], "B not sent yet")
+        await self.client.request("test_release_preflight")
+        self.assertEqual((await asyncio.wait_for(a, 2))["data"]["disposition"], "started")
+        self.assertEqual((await asyncio.wait_for(b, 2))["data"]["disposition"], "queued", "sent after A started: queued, in order")
+        seen = (await self.client.request("test_accepted"))["data"]
+        self.assertEqual((seen["accepted"], seen["lost"]), (["preflight:A", "B"], []), "no prompt silently lost")
+        self.assertFalse(self.client.snapshot()["start_pending"])
+
+    async def test_abort_rejects_unsent_prompts_and_reports_an_unresolved_preflight(self):
+        a = await self.held_preflight()
+        c = asyncio.create_task(self.client.invoke("prompt", {"message": "C"}))
+        late = asyncio.create_task(self.client.invoke("prompt", {"message": "D"}, timeout=.3))
+        self.assertEqual((await asyncio.wait_for(late, 2))["reason"], "an earlier prompt has not started yet; not sent")
+        abort = await self.client.invoke("abort")
+        self.assertEqual((abort["outcome"], abort["data"]["start_unresolved"]), ("accepted", True), "abort says A may still start")
+        await self.client.request("test_release_preflight")
+        self.assertEqual((await asyncio.wait_for(a, 2))["data"]["disposition"], "started", "Pi0.87: abort does not cancel preflight")
+        rejected = await asyncio.wait_for(c, 2)
+        self.assertEqual((rejected["outcome"], rejected["reason"]), ("rejected", "aborted before dispatch; not sent"))
+        seen = (await self.client.request("test_accepted"))["data"]
+        self.assertEqual((seen["accepted"], seen["lost"]), (["preflight:A"], []), "C and D were never sent")
+
     async def test_crash_unblocks_pending_as_indeterminate(self):
         held = asyncio.create_task(self.client.invoke("prompt", {"message": "hang"}))
         await self.barrier()
-        crash = await self.client.invoke("prompt", {"message": "crash"})
+        # Fixture trigger, sent raw: invoke("prompt") would (correctly) wait behind the held start.
+        crash = await self.client.request("prompt", {"message": "crash"})
         self.assertEqual(crash["outcome"], "indeterminate")
         self.assertEqual((await held)["outcome"], "indeterminate")
         await asyncio.wait_for(self.client.wait_closed(), 2)
@@ -201,7 +242,7 @@ class PiBridgeTests(unittest.IsolatedAsyncioTestCase):
         client = await self.start(limits=Limits(drain=.2), **kwargs)
         held = asyncio.create_task(client.invoke("prompt", {"message": "hang"}))
         await asyncio.sleep(0)
-        exit_result = await client.invoke("prompt", {"message": "linger"}, timeout=2)
+        exit_result = await client.request("prompt", {"message": "linger"}, timeout=2)  # raw: past the start gate
         # The fake Pi wrote the descendant's pid before exiting. Read it now: asyncTearDown removes the
         # root before cleanups run, so a cleanup that reads the file later finds nothing (and leaks it).
         pidfile = Path(self.root.name) / "linger.pid"

@@ -21,12 +21,15 @@ class Limits:
     # After the owned child exits, how long stdout/stderr may keep draining. A descendant that
     # inherited them can hold them open forever; past this, the pipes are abandoned.
     drain: float = 1.0
+    # How long a started prompt may take to show agent_start before the start gate opens anyway
+    # (journaled as start_unconfirmed). Pi0.87 loses one of two overlapping start preflights.
+    start_confirm: float = 30.0
 
     def __post_init__(self):
         for name in ("record_bytes", "pending", "event_bytes", "event_rows", "stderr_bytes", "requests"):
             if not isinstance(getattr(self, name), int) or getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be positive")
-        for name in ("deadline", "drain"):
+        for name in ("deadline", "drain", "start_confirm"):
             value = getattr(self, name)
             if not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be finite and positive")
@@ -101,6 +104,13 @@ class PiRpcClient:
         self._closing = False
         self._failure = None
         self._abandon = asyncio.Event()  # close() gave up waiting for inherited pipes
+        # Start gate (P4): Pi has no atomic start guard; two overlapping prompt preflights can both
+        # ACK success while only one reaches the model, with a spurious settle. One prompt at a time
+        # until Pi shows it started (or answered handled/queued/rejected); later ones wait in order.
+        self._start_gate = asyncio.Lock()  # FIFO for waiters
+        self._starts = 0           # agent_start events seen
+        self._start_pending = False  # a prompt is in native preflight or not yet confirmed
+        self._aborts = 0
 
     def snapshot(self):
         """Detached current facts. Unknown/stale is not silently called idle."""
@@ -242,7 +252,81 @@ class PiRpcClient:
             return {"outcome": "rejected", "reason": "unsupported effect"}
         if op == "answer":
             return await self.answer(args or {}, timeout=timeout)
+        if op == "prompt":
+            return await self.prompt(args, timeout=timeout)
+        if op == "abort":
+            self._aborts += 1  # unsent queued prompts see it and are not sent
+            unresolved = self._start_pending
+            result = await self.request(op, args, timeout=timeout)
+            if unresolved and result.get("outcome") == "accepted":
+                # Measured on Pi0.87: abort does not cancel an unresolved earlier prompt preflight.
+                result["data"] = {**(result.get("data") or {}), "start_unresolved": True}
+            return result
         return await self.request(op, args, timeout=timeout)
+
+    async def prompt(self, args, *, timeout=None):
+        """`prompt` through the start gate: sent only after the previous prompt is confirmed.
+
+        Waiting here sends nothing: if the deadline passes or an abort arrives first, the outcome is
+        rejected (not sent), never indeterminate. Once sent, the result is Pi's own ACK.
+        """
+        try:
+            deadline = self._timeout(timeout)
+        except ValueError as error:
+            return {"outcome": "rejected", "reason": str(error)}
+        aborts = self._aborts
+        loop = asyncio.get_running_loop()
+        try:
+            await asyncio.wait_for(self._start_gate.acquire(), max(0, deadline - loop.time()))
+        except TimeoutError:
+            return {"outcome": "rejected", "reason": "an earlier prompt has not started yet; not sent"}
+        released = False
+        try:
+            if self._aborts != aborts:
+                return {"outcome": "rejected", "reason": "aborted before dispatch; not sent"}
+            if deadline - loop.time() <= 0:
+                return {"outcome": "rejected", "reason": "deadline before dispatch; not sent"}
+            starts = self._starts
+            self._start_pending = True
+            self._status()
+            self._poke()
+            result = await self.request("prompt", args, timeout=max(0.001, deadline - loop.time()))
+            disposition = (result.get("data") or {}).get("disposition") if isinstance(result.get("data"), dict) else None
+            if result.get("outcome") == "rejected" or disposition in ("handled", "queued") or self._starts > starts:
+                return result  # nothing more to wait for
+            # Started (or unknown): hold the gate, not the caller, until Pi shows agent_start.
+            task = asyncio.create_task(self._confirm_start(starts))
+            self._ui_tasks.add(task)
+            task.add_done_callback(self._ui_tasks.discard)
+            released = True
+            return result
+        finally:
+            if not released:
+                self._start_pending = False
+                self._status()
+                self._start_gate.release()
+                self._poke()
+
+    async def _confirm_start(self, starts):
+        try:
+            await asyncio.wait_for(self._wait_started(starts), self.limits.start_confirm)
+        except TimeoutError:
+            self._publish({"type": "start_unconfirmed", "reason": "no agent_start after a successful prompt ACK"})
+        finally:
+            self._start_pending = False
+            self._status()
+            self._start_gate.release()
+            self._poke()
+
+    def _poke(self):
+        """Wake fact waiters (status changed without a journal row)."""
+        self._changed.set()
+        self._changed = asyncio.Event()
+
+    async def _wait_started(self, starts):
+        while self._starts == starts and self._facts["available"]:
+            changed = self._changed
+            await changed.wait()
 
     async def answer(self, args, *, timeout=None):
         """Pi has no answer acknowledgment: successful pipe write is dispatched."""
@@ -289,8 +373,12 @@ class PiRpcClient:
         self._publish({"type": "dialog_timeout", "id": ident})
 
     def _status(self):
+        self._facts["start_pending"] = getattr(self, "_start_pending", False)
         if not self._facts["available"]:
             self._facts["status"] = "unknown"
+        elif self._facts["start_pending"] and not self._facts["requests"]:
+            # A prompt in native preflight: Pi may still report idle/settled, but it is not (P4).
+            self._facts["status"] = "working"
         elif self._facts["requests"]:
             self._facts["status"] = "blocked"
         elif (self._facts.get("retry") or {}).get("active"):
@@ -365,6 +453,7 @@ class PiRpcClient:
                 self._state_response(command, record.get("data"))
             future.set_result(result)
         elif kind == "agent_start":
+            self._starts += 1
             if not (self._facts.get("retry") or {}).get("active"):
                 self._facts.update(failure=None, retry=None)
             self._facts["run"] = {"active": True, "settled": False, "aborted": None}

@@ -30,9 +30,10 @@ async def inspect(argv, private_cwd, explicit_child_env):
   Spawn errors raise normally: no effect has been sent. Runtime selection/configuration belong to the caller.
 - `await invoke(op, args=None, timeout=None)`: native `prompt`, `steer`, `follow_up`, `abort`, `clear_queue`,
   `answer`. Arguments retain Pi's native field names, e.g. `streamingBehavior: "followUp"`.
+  `prompt` goes through a start gate: one at a time until Pi shows the previous one started (PROGRAM.md).
 - `await request(command, args=None, timeout=None)`: metadata/native-command escape hatch. IDs and `type`
   are assigned by the client; callers cannot override them through args.
-- `snapshot()`: detached facts `{available, stale, status, run, queues, requests, session?, exit_code?}`.
+- `snapshot()`: detached facts `{available, stale, status, run, queues, requests, start_pending, session?, exit_code?}`.
   `status` is `unknown | idle | working | blocked | done | error`. Failed assistant turns remain `error` after settlement; observed retry activity stays `working`. Optional `failure.message` and `retry` facts retain bounded error text and native attempt/max/delay/success observations. A successful retry or new turn clears the current failure, not transcript history. Before an observation, `run` values can be `None`;
   absence of evidence is not idle/settled. Queues use `steering` and `follow_up`; requests contain
   `{id, kind, prompt, data}` with the original UI request in `data`.

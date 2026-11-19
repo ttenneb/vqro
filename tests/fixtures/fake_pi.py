@@ -18,6 +18,11 @@ session = 1
 steering = []
 follow = []
 held = []
+# Pi0.87 start-preflight race (P4): a prompt whose before-agent-start preflight is still running
+# reports not streaming; a second prompt meanwhile starts, and the first then ACKs success but is
+# lost, with a spurious agent_settled. "preflight:" prompts hold until test_release_preflight.
+preflight = None
+lost = []
 accepted = []
 trace_path = sys.argv[sys.argv.index("--trace-file") + 1] if "--trace-file" in sys.argv else None
 timing_path = sys.argv[sys.argv.index("--timing-file") + 1] if "--timing-file" in sys.argv else None
@@ -155,6 +160,11 @@ for line in sys.stdin.buffer:
             accepted.append(message)
             held.append(command)
             continue
+        if isinstance(message, str) and message.startswith("preflight:"):
+            preflight = {"command": command, "lost": False}
+            continue
+        if preflight is not None and not preflight["lost"]:
+            preflight["lost"] = True  # the race: this prompt wins, the held one will be lost
         if message == "reject" or (active and "streamingBehavior" not in command):
             reply(command, {"reason": "rejected before acceptance"}, False)
             continue
@@ -232,6 +242,19 @@ for line in sys.stdin.buffer:
               "message": command.get("message", ""), "options": command.get("options", ["one", "two"]),
               "timeout": command.get("timeout", 0)})
         reply(command)
+    elif kind == "test_release_preflight":
+        if preflight is not None:
+            held_prompt, preflight = preflight, None
+            if held_prompt["lost"]:
+                lost.append(held_prompt["command"]["message"])
+                reply(held_prompt["command"], {"disposition": "started"})  # success, yet never inserted
+                emit({"type": "agent_settled", "aborted": False})          # spurious, while the winner runs
+            else:
+                accepted.append(held_prompt["command"]["message"])
+                active = True
+                reply(held_prompt["command"], {"disposition": "started"})
+                emit({"type": "agent_start"})
+        reply(command)
     elif kind == "test_release":
         for old in reversed(held):
             reply(old, {"disposition": "started", "echo": old.get("message")})
@@ -249,7 +272,7 @@ for line in sys.stdin.buffer:
                 {"type": "text", "text": command["final"]}]}})
         reply(command)
     elif kind == "test_accepted":
-        reply(command, {"accepted": accepted})
+        reply(command, {"accepted": accepted, "lost": lost, "preflight_held": preflight is not None})
     elif kind == "test_unicode":
         wire = json.dumps({"type": "fixture_text", "text": "before\u2028middle\u2029after"}, ensure_ascii=False).encode() + b"\n"
         split = wire.index(b"\xe2") + 1
