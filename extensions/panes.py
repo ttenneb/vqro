@@ -10,7 +10,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from vqro_ext import Extension, VqroError, node_at, replace_at, views_in  # noqa: E402
 
-from vqro_views import terminal_target
+from vqro_views import terminal_target, title
 
 ext = Extension("panes", event_types=["entries", "resource", "resource.removed"])
 
@@ -61,27 +61,41 @@ def rename(args):
     ext.apply(ops, "panes: rename")
 
 
-@ext.command("panes.close", "Close a pane (its program keeps running)")
+def new_shell(key, ver):
+    """Spawn the shell that replaces the only pane or last tab (once; only after the layout check)."""
+    if ver is not None and ext.version(key) != ver:
+        raise VqroError("the layout changed meanwhile; nothing closed, try again", "conflict")
+    r = ext.vqro.call("resource.spawn", {})["resource"]
+    return r, f"term-{r['id']}"
+
+
+@ext.command("panes.close", "Close a pane (its program keeps running; closing the only pane opens a new shell)")
 def close(args):
     ctx, key, ver, root = target(args)
     path = ctx["path"]
-    if not path:
-        raise VqroError("this is the only pane", "invalid")
-    parent = node_at(root, path[:-1])
-    i = path[-1]
-    if "children" in parent:
+    shell = None
+    parent = node_at(root, path[:-1]) if path else None
+    i = path[-1] if path else None
+    if not path or ("tabs" in parent and len(parent["tabs"]) <= 1):
+        # The only pane (or the last tab's whole content): replace it with a new shell, as tabs.open would.
+        shell, view_id = new_shell(key, ver)
+        if not path:
+            root = {"view": view_id}
+        else:
+            parent["tabs"][i] = {"title": title(shell, ext.resources), "node": {"view": view_id}}
+    elif "children" in parent:
         parent["children"].pop(i)
         if "sizes" in parent and i < len(parent["sizes"]):
             parent["sizes"].pop(i)
         if len(parent["children"]) == 1:
             root = replace_at(root, path[:-1], parent["children"][0])
     else:
-        if len(parent["tabs"]) <= 1:
-            raise VqroError("can't close the last tab", "invalid")
         parent["tabs"].pop(i)
         a = parent.get("active", 0)
         parent["active"] = min(a - 1 if a >= i and a > 0 else a, len(parent["tabs"]) - 1)
     ops = [{"op": "set", "key": key, "value": root, "expect": ver}]
+    if shell:
+        ops.insert(0, {"op": "set", "key": f"view/{view_id}", "value": {"kind": "terminal", "resource": shell["id"]}})
     view = ctx.get("view")
     used = set(views_in(root))
     for k, e in ext.entries.items():
@@ -89,7 +103,14 @@ def close(args):
             used.update(views_in(e["value"]))
     if view and view not in used:
         ops.append({"op": "delete", "key": f"view/{view}"})
-    ext.apply(ops, "panes: close")
+    try:
+        ext.apply(ops, "panes: close")
+    except VqroError as error:
+        if shell:
+            ext.notify(f"New shell {shell['id']} started but not shown ({error.kind}); open it from the sidebar", "warn")
+        raise
+    if shell:
+        return {"client": {"focus": {"view": view_id}}}
 
 
 @ext.command("panes.kill", "Kill the program in a pane")

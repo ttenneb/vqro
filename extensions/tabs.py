@@ -114,17 +114,60 @@ def orphan_view_deletes(candidates, layouts):
             for view in sorted(candidates-used) if "view/"+view in ext.entries]
 
 
-@ext.command("tabs.close", "Close a tab (its programs keep running)")
+class Shell:
+    """At most one new shell per command, spawned only when a close would leave no tab.
+
+    The spawn is a backend effect (never repeated by CAS retries); the layout change that shows it
+    is one transaction with the close. If that transaction finally fails, the shell keeps running
+    unshown and the user is told where it is.
+    """
+    def __init__(self):
+        self.resource = None
+
+    def tab(self):
+        if self.resource is None:
+            self.resource = ext.vqro.call("resource.spawn", {})["resource"]
+        return {"title": title_of(self.resource), "node": {"view": self.view()}}
+
+    def view(self):
+        return None if self.resource is None else f"term-{self.resource['id']}"
+
+    def ops(self, layouts):
+        """Declare the new shell's view if a resulting layout shows it (a retry may no longer need it)."""
+        if self.resource is None or not any(self.view() in views_in(root) for root in layouts):
+            return []
+        key = f"view/{self.view()}"
+        return [{"op": "set", "key": key, "value": {"kind": "terminal", "resource": self.resource["id"]}, "expect": ext.version(key)}]
+
+    def orphaned(self, error):
+        if self.resource is not None:
+            ext.notify(f"New shell {self.resource['id']} started but not shown ({error.kind}); open it from the sidebar", "warn")
+
+
+@ext.command("tabs.close", "Close a tab (its programs keep running; closing the last tab opens a new shell)")
 def close_tab(args):
     key, ver, root, tabs, i = tab_target(args)
-    if len(tabs["tabs"]) <= 1:
-        raise VqroError("can't close the last tab", "invalid")
+    if not 0 <= i < len(tabs["tabs"]):
+        raise VqroError("that tab is gone", "conflict")
+    shell = Shell()
     removed = views_in(tabs["tabs"].pop(i)["node"])
-    a = tabs.get("active", 0)
-    tabs["active"] = min(a - 1 if a >= i and a > 0 else a, len(tabs["tabs"]) - 1)
-    ops = [{"op": "set", "key": key, "value": root, "expect": ver}]
+    if not tabs["tabs"]:
+        if ver is not None and ext.version(key) != ver:
+            raise VqroError("the layout changed meanwhile; nothing closed, try again", "conflict")  # before spawning
+        tabs["tabs"], tabs["active"] = [shell.tab()], 0  # replace the last tab, as `tabs.open` would
+    else:
+        a = tabs.get("active", 0)
+        tabs["active"] = min(a - 1 if a >= i and a > 0 else a, len(tabs["tabs"]) - 1)
+    ops = shell.ops([root]) + [{"op": "set", "key": key, "value": root, "expect": ver}]
     ops += orphan_view_deletes(removed, {key: root})
-    ext.apply(ops, "tabs: close")
+    try:
+        result = ext.apply(ops, "tabs: close")
+    except VqroError as error:
+        shell.orphaned(error)
+        raise
+    if shell.resource is not None:
+        return dict(result or {}, client={"focus": {"view": f"term-{shell.resource['id']}"}})
+    return result
 
 
 @ext.command("tabs.rename", "Rename a tab (args: text)")
@@ -137,40 +180,48 @@ def rename_tab(args):
     ext.apply([{"op": "set", "key": key, "value": root, "expect": ver}], "tabs: rename")
 
 
-def prune_ended(node):
-    """Close wholly ended tabs, preserving mixed tabs and the last tab."""
+def prune_ended(node, shell):
+    """Close wholly ended tabs, preserving mixed tabs. A group left with no tab gets a new shell tab."""
     for child in node.get("children", []):
-        prune_ended(child)
+        prune_ended(child, shell)
     tabs = node.get("tabs", [])
     for tab in tabs:
-        prune_ended(tab["node"])
-    if len(tabs) < 2:
+        prune_ended(tab["node"], shell)
+    if not tabs:
         return
     active = tabs[min(node.get("active", 0), len(tabs)-1)]
     def dead(tab):
         resources = [view_resource(ext, view) for view in views_in(tab["node"])]
         return bool(resources) and all(rid and ended(ext.resources.get(rid)) for rid in resources)
-    kept = [tab for tab in tabs if not dead(tab)] or [active]
+    kept = [tab for tab in tabs if not dead(tab)] or [shell.tab()]
     node["tabs"] = kept
     node["active"] = next((i for i, tab in enumerate(kept) if tab is active), 0)
 
 
-@ext.command("tabs.close_ended", "Close ended/gone resource tabs (programs are never killed)")
+@ext.command("tabs.close_ended", "Close ended/gone resource tabs (programs are never killed; a closed last tab becomes a new shell)")
 def close_ended(args):
+    shell = Shell()  # shared by retries and layouts: one new shell at most, reused if it is needed again
     def attempt():
         ext.fresh()
         ops, removed, layouts = [], set(), {}
         for key, entry in list(ext.entries.items()):
             if key.startswith("layout/"):
                 root = copy.deepcopy(entry["value"])
-                prune_ended(root)
+                prune_ended(root, shell)
                 if root != entry["value"]:
                     ops.append({"op": "set", "key": key, "value": root, "expect": entry["version"]})
                     removed.update(set(views_in(entry["value"]))-set(views_in(root)))
                     layouts[key] = root
-        ops += orphan_view_deletes(removed, layouts)
-        return ext.apply(ops, "tabs: close ended") if ops else {}
-    return ext.retrying(attempt)
+        ops = shell.ops(layouts.values()) + ops + orphan_view_deletes(removed, layouts)
+        result = ext.apply(ops, "tabs: close ended") if ops else {}
+        if shell.resource is not None and not any(shell.view() in views_in(root) for root in layouts.values()):
+            shell.orphaned(VqroError("no longer needed after a concurrent change", "conflict"))
+        return result
+    try:
+        return ext.retrying(attempt)
+    except VqroError as error:
+        shell.orphaned(error)
+        raise
 
 
 def mark_ended(node):

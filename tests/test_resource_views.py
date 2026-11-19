@@ -187,10 +187,79 @@ class ResourceViews(unittest.TestCase):
         core.apply([{"op": "set", "key": "layout/main", "value": root}], "fixture")
         module["close_ended"]({})
         self.assertEqual([t["title"] for t in core.value("layout/main")["tabs"]], ["mixed"])
+        self.assertFalse(any(method == "resource.spawn" for method, _ in core.calls), "no shell while a tab remains")
         core.resources.clear()
+        core.shells = ["r7"]
         module["close_ended"]({})
-        self.assertEqual(len(core.value("layout/main")["tabs"]), 1)
+        # The last (dead) tab becomes one new shell tab, declared in the same transaction.
+        self.assertEqual(core.value("layout/main")["tabs"], [{"title": "sh", "node": {"view": "term-r7"}}])
+        self.assertEqual(core.value("view/term-r7"), {"kind": "terminal", "resource": "r7"})
+        self.assertIn("view/term-r7", [op["key"] for op in core.transactions[-1]])
+        self.assertEqual(sum(method == "resource.spawn" for method, _ in core.calls), 1)
         self.assertFalse(any(method == "resource.kill" for method, _ in core.calls))
+
+    def test_close_ended_spawns_once_across_cas_retries_and_reports_an_unneeded_shell(self):
+        module, core = load("tabs")
+        core.resources["r3"] = {"id": "r3", "kind": "terminal", "state": "finished"}
+        core.apply([{"op": "set", "key": "view/term-r3", "value": {"kind": "terminal", "resource": "r3"}},
+                    {"op": "set", "key": "layout/main", "value": {"tabs": [{"title": "ended", "node": {"view": "term-r3"}}], "active": 0}}], "fixture")
+        core.shells = ["r7", "r8"]
+        apply, calls = core.apply, []
+        def racing(ops, note):
+            calls.append(ops)
+            if len(calls) == 1:  # a concurrent writer adds a live tab: the retry needs no shell
+                apply([{"op": "set", "key": "layout/main", "value": {"tabs": [{"title": "ended", "node": {"view": "term-r3"}},
+                       {"title": "live", "node": {"view": "agents-r2"}}], "active": 0}}], "concurrent")
+            return apply(ops, note)
+        with mock.patch.object(core, "apply", side_effect=racing):
+            module["close_ended"]({})
+        self.assertEqual([t["title"] for t in core.value("layout/main")["tabs"]], ["live"])
+        self.assertEqual(sum(method == "resource.spawn" for method, _ in core.calls), 1, "spawn never repeated by retries")
+        self.assertIsNone(core.value("view/term-r7"))
+        self.assertTrue(any("r7" in text and "not shown" in text for text, _ in core.notices))
+
+    def test_closing_the_last_tab_replaces_it_with_one_new_shell_in_one_transaction(self):
+        module, core = load("tabs")
+        core.apply([{"op": "set", "key": "view/old", "value": {"kind": "panel", "items": []}},
+                    {"op": "set", "key": "layout/main", "value": {"tabs": [{"title": "only", "node": {"view": "old"}}], "active": 0}}], "fixture")
+        core.shells = ["r7"]
+        before = len(core.transactions)
+        result = module["close_tab"]({"context": {"layout": "main", "layout_version": core.version("layout/main"), "tab_path": [], "tab_index": 0}})
+        self.assertEqual(core.value("layout/main"), {"tabs": [{"title": "sh", "node": {"view": "term-r7"}}], "active": 0})
+        self.assertEqual(core.value("view/term-r7")["resource"], "r7")
+        self.assertIsNone(core.value("view/old"))
+        self.assertEqual(len(core.transactions), before+1)
+        self.assertEqual(result["client"], {"focus": {"view": "term-r7"}})
+
+    def test_closing_the_last_tab_of_a_changed_layout_spawns_nothing(self):
+        module, core = load("tabs")
+        core.apply([{"op": "set", "key": "layout/main", "value": {"tabs": [{"title": "only", "node": {"view": "old"}}], "active": 0}}], "fixture")
+        core.shells = ["r7"]
+        with self.assertRaises(VqroError) as caught:
+            module["close_tab"]({"context": {"layout": "main", "layout_version": core.version("layout/main")-1, "tab_path": [], "tab_index": 0}})
+        self.assertEqual(caught.exception.kind, "conflict")
+        self.assertFalse(any(method == "resource.spawn" for method, _ in core.calls))
+
+    def test_closing_the_only_pane_or_last_tab_pane_opens_a_new_shell(self):
+        module, core = load("panes")
+        core.apply([{"op": "set", "key": "view/term-r1", "value": {"kind": "terminal", "resource": "r1"}},
+                    {"op": "set", "key": "layout/main", "value": {"view": "term-r1"}}], "fixture")
+        core.shells = ["r7", "r8"]
+        result = module["close"]({"context": {"layout": "main", "layout_version": core.version("layout/main"), "path": [], "view": "term-r1"}})
+        self.assertEqual(core.value("layout/main"), {"view": "term-r7"})
+        self.assertIsNone(core.value("view/term-r1"))
+        self.assertEqual(result["client"], {"focus": {"view": "term-r7"}})
+        core.apply([{"op": "set", "key": "layout/main", "value": {"tabs": [{"title": "t", "node": {"view": "term-r7"}}], "active": 0}}], "fixture")
+        module["close"]({"context": {"layout": "main", "layout_version": core.version("layout/main"), "path": [0], "view": "term-r7"}})
+        self.assertEqual(core.value("layout/main"), {"tabs": [{"title": "sh", "node": {"view": "term-r8"}}], "active": 0})
+        self.assertEqual(core.value("view/term-r8")["resource"], "r8")
+        self.assertFalse(any(method == "resource.kill" for method, _ in core.calls), "closing never kills the old program")
+        # An ordinary close (two tabs) spawns nothing.
+        core.apply([{"op": "set", "key": "layout/main", "value": {"tabs": [{"title": "a", "node": {"view": "term-r8"}},
+                    {"title": "b", "node": {"view": "term-r1"}}], "active": 0}}], "fixture")
+        module["close"]({"context": {"layout": "main", "layout_version": core.version("layout/main"), "path": [1], "view": "term-r1"}})
+        self.assertEqual([t["title"] for t in core.value("layout/main")["tabs"]], ["a"])
+        self.assertEqual(sum(method == "resource.spawn" for method, _ in core.calls), 2)
 
 
 if __name__ == "__main__":
