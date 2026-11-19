@@ -157,6 +157,7 @@ if [ -n "${VQRO_CHECK_INJECT_LEAK:-}" ]; then
 fi
 echo "vqro check ($MODE) at $(git describe --always --dirty 2>/dev/null); logs $LOGS"
 step licenses "${CARGO[@]}" python3 scripts/license_check.py --check
+step manifest-deps "${CLEAN[@]}" python3 scripts/check_manifest_deps.py
 step build-zero-warnings no_warnings
 step cargo-test "${CARGO[@]}" cargo test
 step python-unittest "${CLEAN[@]}" python3 -m unittest discover -s tests -p 'test_*.py'

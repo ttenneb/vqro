@@ -3,5 +3,6 @@
   "summary":"Choose named icon sets for workspace chrome.",
   "description":"Publishes icon sets and saves the chosen name-to-glyph map for clients to render. Turn it off to lose the icon catalogue and apply command; the saved icon set remains. Font support and glyph width are client concerns, and safe mode ignores the set.",
   "requires":{"protocol":1},
+  "provides":["command/icons.apply","data/icons"],
   "contributes":{"commands":["icons.apply"],"panels":["Icon choices consumed by Settings"],"settings":["doc/settings/icons"]}
 }

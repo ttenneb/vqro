@@ -3,6 +3,13 @@
   "summary":"Browse terminals, agents and workspace activity.",
   "description":"Publishes the live sidebar, resource status, workspace groups and filtering controls. It can show a resource in a tab or explicitly kill a terminal program. Turn it off to lose live sidebar content and its controls; saved layouts and backend-owned programs remain.",
   "requires":{"protocol":1,"client_features":["items","tree","chips","menu"]},
+  "provides":["command/sidebar.toggle","command/sidebar.view","command/sidebar.show","command/sidebar.kill","command/sidebar.preset","command/sidebar.page",
+              "command/sidebar.close_ended","command/sidebar.show_ended","view/sidebar","view/sidebar.view","doc/settings/sidebar"],
+  "needs":[{"cap":"command/tabs.show","suggest":"tabs","why":"Show opens a terminal or agent in a tab"}],
+  "works_with":[{"cap":"data/workspaces","suggest":"workspaces","without":"Terminals are listed without workspace and worktree groups"},
+                "command/workspaces.open","command/workspaces.add","command/workspaces.remove","command/workspaces.worktree","command/workspaces.refresh",
+                {"cap":"command/agents.config","suggest":"agents","without":"No Agent settings action on agent rows"},
+                {"cap":"command/tabs.close_ended","suggest":"tabs","without":"Close ended items only hides them"}],
   "settings_command":"sidebar.view",
   "contributes":{"commands":["sidebar.toggle","sidebar.view","sidebar.show","sidebar.kill","sidebar.preset","sidebar.page","sidebar.close_ended","sidebar.show_ended"],"keys":["Prefix s: toggle sidebar"],"menu_items":["Sidebar status controls"],"panels":["Sidebar","Sidebar view"],"settings":["doc/settings/sidebar"]}
 }

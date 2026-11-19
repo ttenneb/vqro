@@ -3,5 +3,6 @@
   "summary":"Right-click menus and middle-click tab closing.",
   "description":"Contributes mouse bindings for pane and tab menus, plus middle-click to close a tab. It uses the normal pane and tab commands rather than owning programs. Turn it off to remove these gestures; keyboard commands and the vqro recovery badge remain.",
   "requires":{"protocol":1},
+  "works_with":[{"cap":"command/tabs.close","suggest":"tabs","without":"Middle-click does not close tabs"}],
   "contributes":{"keys":["Right-click pane: pane menu","Right-click tab: tab menu","Middle-click tab: close tab"]}
 }

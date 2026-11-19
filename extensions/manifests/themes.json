@@ -3,5 +3,6 @@
   "summary":"Choose a palette and, where offered, an accent.",
   "description":"Publishes theme choices for Settings and writes the selected palette as workspace data. Turn it off to lose the theme catalogue and apply commands; the client's current palette stays in effect. Safe mode always uses the built-in palette.",
   "requires":{"protocol":1},
+  "provides":["command/themes.apply","command/themes.accent","data/themes"],
   "contributes":{"commands":["themes.apply","themes.accent"],"panels":["Theme choices consumed by Settings"],"settings":["doc/settings/theme"]}
 }

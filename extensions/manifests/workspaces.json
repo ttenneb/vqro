@@ -3,5 +3,8 @@
   "summary":"Track folders, Git repositories and their worktrees.",
   "description":"Keeps a workspace folder list, reads Git/worktree state, opens shells in folders and can create a Git worktree when asked. The sidebar consumes its published workspace data. Turn it off to stop scanning and remove these commands; folders, worktrees and running shells are not deleted.",
   "requires":{"protocol":1},
+  "provides":["command/workspaces.add","command/workspaces.remove","command/workspaces.open","command/workspaces.worktree","command/workspaces.refresh",
+              "data/workspaces","doc/workspaces/list"],
+  "needs":[{"cap":"command/tabs.open","suggest":"tabs","why":"Opens a shell in a folder as a new tab"}],
   "contributes":{"commands":["workspaces.add","workspaces.remove","workspaces.open","workspaces.worktree","workspaces.refresh"],"panels":["Workspace data used by the sidebar"],"settings":["doc/workspaces/list"]}
 }

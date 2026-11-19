@@ -10,6 +10,9 @@
  "requires": {
   "protocol": 1
  },
+ "provides": ["command/retention.forget_ended"],
+ "needs": [{"cap": "ability/vqro.resource.forget", "suggest": "herdr", "why": "Only backends that can forget finished terminals are affected"}],
+ "works_with": [{"cap": "view/agent-*", "suggest": "pi", "without": "Orphaned agent panels are not pruned"}],
  "contributes": {
   "commands": [
    "retention.forget_ended"
