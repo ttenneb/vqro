@@ -544,10 +544,10 @@ terminal stream's. A gap reason `retention` means the viewer fell out of the ada
 `after`. Item streams have their own per-provider budget (`limits.max_item_streams`, at least agents × viewers),
 separate from terminal streams, and stream opens do not count against the provider's effect in-flight limit.
 
-When a viewer cannot keep up, its affected stream closes with `reason: {reason: "slow_consumer"}`. The unit is the
-connection: once a connection's shared stream-data budget overflows, **every** stream of that connection (terminal and
-item) closes `slow_consumer` together, including idle ones; streams attached afterwards are unaffected. The viewer
-reattaches each stream (item streams from their last applied `{epoch, seq}`). Queued data for
+When a viewer cannot keep up, its affected stream closes with `reason: {reason: "slow_consumer"}`. All streams of a
+connection share one stream-data budget, so a viewer that stops reading loses every stream that writes while the
+budget is full (often all of them at once, as agent-v0 §4 allows); a stream with nothing to send keeps working.
+The viewer reattaches each closed stream (item streams from their last applied `{epoch, seq}`). Queued data for
 that stream may be discarded; closure is an explicit gap, not a complete-output claim. Other connections
 continue. A normal backend closure follows accepted output in order; if its closing marker cannot fit, it becomes
 `slow_consumer` rather than silently dropping final output. Control queue overflow disconnects the connection:

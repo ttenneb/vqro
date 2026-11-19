@@ -987,8 +987,6 @@ async fn attach(core: &Shared, conn: &Arc<Conn>, a: Attach) -> RpcResult {
                 biased;
                 _ = peer.closed() => { reason = json!({"reason": "viewer_disconnected"}); break; }
                 _ = route.ended() => { reason = json!({"reason": "provider_disconnected"}); break; }
-                // Another stream of this connection overflowed the shared budget: close this one too.
-                _ = writer.overflowed() => break,
                 out = stream.output.recv() => out,
             };
             let Some(out) = out else {

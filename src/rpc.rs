@@ -108,9 +108,6 @@ pub struct Peer {
     next_id: Arc<AtomicU64>,
     /// Calls admitted by their own caller-held budget (stream opens), not by MAX_PENDING_CALLS.
     reserved: Arc<AtomicUsize>,
-    /// Bumped when the shared stream-data budget overflows: every stream of the connection then
-    /// closes `slow_consumer` together (agent-v0 §4: slow-consumer closure is per connection).
-    stream_overflow: Arc<watch::Sender<u64>>,
 }
 
 struct Outbound {
@@ -128,28 +125,12 @@ pub struct StreamWriter {
     peer: Peer,
     id: u64,
     active: Arc<AtomicBool>,
-    /// The connection's overflow generation when this stream started; any later overflow ends it.
-    overflow: u64,
 }
 
 impl StreamWriter {
     pub fn send(&self, data: String) -> bool {
-        if *self.peer.stream_overflow.borrow() != self.overflow { self.active.store(false, Ordering::Relaxed); return false; }
         if self.peer.enqueue_stream(self.id, data, self.active.clone()) { true }
-        else {
-            self.active.store(false, Ordering::Relaxed);
-            // The connection's shared stream budget is full: close all of its streams, not just this one.
-            if !self.peer.is_closed() { self.peer.stream_overflow.send_modify(|g| { if *g == self.overflow { *g += 1; } }); }
-            false
-        }
-    }
-
-    /// Resolves when the connection's stream budget overflowed after this stream started.
-    pub async fn overflowed(&self) {
-        let mut rx = self.peer.stream_overflow.subscribe();
-        while *rx.borrow_and_update() == self.overflow {
-            if rx.changed().await.is_err() { std::future::pending::<()>().await; }
-        }
+        else { self.active.store(false, Ordering::Relaxed); false }
     }
 
     pub fn close(&self, reason: Value) {
@@ -315,7 +296,7 @@ impl Peer {
         });
 
         let incoming = IncomingReceiver { rx: in_rx, limit: record_limit.clone(), shutdown: shutdown.clone(), closed: false };
-        (Peer { control, data, large, large_bytes, record_limit, read_ended, shutdown, pending, next_id: Arc::new(AtomicU64::new(1)), reserved: Arc::new(AtomicUsize::new(0)), stream_overflow: Arc::new(watch::channel(0).0) }, incoming)
+        (Peer { control, data, large, large_bytes, record_limit, read_ended, shutdown, pending, next_id: Arc::new(AtomicU64::new(1)), reserved: Arc::new(AtomicUsize::new(0)) }, incoming)
     }
 
     pub async fn call(&self, method: &str, params: Value) -> RpcResult {
@@ -369,7 +350,7 @@ impl Peer {
     }
 
     pub fn stream_writer(&self, id: u64) -> StreamWriter {
-        StreamWriter { peer: self.clone(), id, active: Arc::new(AtomicBool::new(true)), overflow: *self.stream_overflow.borrow() }
+        StreamWriter { peer: self.clone(), id, active: Arc::new(AtomicBool::new(true)) }
     }
 
     fn enqueue_stream(&self, stream: u64, data: String, active: Arc<AtomicBool>) -> bool {
@@ -632,24 +613,6 @@ mod tests {
         for task in opens.into_iter().chain(calls) { task.abort(); let _ = task.await; }
         assert!(peer.pending.lock().unwrap().is_empty());
         assert_eq!(peer.reserved.load(Ordering::Acquire), 0);
-    }
-
-    #[tokio::test]
-    async fn a_stream_budget_overflow_closes_every_stream_of_the_connection() {
-        // Nobody reads the socket: the shared 1 MiB stream-data budget fills.
-        let (socket, _client) = tokio::io::duplex(64);
-        let (r, w) = tokio::io::split(socket);
-        let (peer, _incoming) = Peer::spawn(r, w);
-        let (busy, idle) = (peer.stream_writer(1), peer.stream_writer(2));
-        let chunk = "A".repeat(64 * 1024);
-        let mut sent = 0;
-        while busy.send(chunk.clone()) { sent += 1; assert!(sent < 64, "budget never filled"); }
-        // The idle stream sent nothing, yet ends with the connection's overflow (agent-v0 §4).
-        tokio::time::timeout(Duration::from_secs(1), idle.overflowed()).await.expect("idle stream not told");
-        assert!(!idle.send("YQ==".into()));
-        // A stream attached after the overflow is not affected by it.
-        let later = peer.stream_writer(3);
-        assert!(tokio::time::timeout(Duration::from_millis(50), later.overflowed()).await.is_err());
     }
 
     #[tokio::test]
