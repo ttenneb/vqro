@@ -46,8 +46,9 @@ PROFILES = {
     # tmux's default prefix key table (`tmux list-keys -T prefix`), mapped onto vqro commands.
     # Gaps (no vqro command): ! break-pane, ; last pane, l last window, { } swap panes, [ ] copy and
     # paste, q display-panes (vqro's q quit stays), space/M-1..5 layouts, C-arrows resize, C-o
-    # rotate, s/$ sessions, . move window, f find, t clock, i info, ~ messages, D/L clients.
-    # Differences: x and & close without asking and keep the programs running; d quits this UI,
+    # rotate, $ ( ) rename/cycle sessions, . move window, f find, t clock, i info, ~ messages, D/L clients.
+    # Differences: x and & close without asking and keep the programs running; s switches workspace (a
+    # tmux session), so the sidebar's own s is shadowed here (its status-bar button remains); d quits this UI,
     # which is close to detaching because terminals live in the backend.
     "tmux": {"label": "tmux (C-b)", "prefix": "C-b", "keys": {
         "split-h": b("%", "panes.split", "split side by side", args=SPLIT_SIDE),
@@ -63,6 +64,8 @@ PROFILES = {
         "rename-tab": b(",", "tabs.rename", "rename tab", input="Tab name", prefill={"context": "tab_title"}),
         "close-tab": b("&", "tabs.close", "close tab (programs keep running)"),
         "choose": b("w", "tabs.show", "choose a terminal", **PICK_TAB),
+        # tmux sessions are the closest thing to vqro workspaces (each has its own windows/tabs).
+        "sessions": b("s", "workspaces.switch", "switch workspace"),
         "detach": b("d", "client.quit", "detach (quit this UI)"),
         "commands": b(":", "client.palette", "all commands"),
         "keys": b("?", "client.prefix", "list keys"),

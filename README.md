@@ -26,7 +26,8 @@ vqro stop                       # stop the core; terminals keep running in herdr
 ```
 
 In the UI, everything starts from the prefix (Ctrl-g by default, rebindable) or by clicking the `vqro` badge:
-`n` new tab, `h`/`v` split, `x` close pane, `z` zoom, `s` sidebar, `,` settings, `:` all commands, `u` undo,
+`n` new tab, `h`/`v` split, `x` close pane, `z` zoom, `s` sidebar, `w` switch workspace (each has its own
+tabs), `,` settings, `:` all commands, `u` undo,
 `!` safe mode, `q` quit. Settings has pages for extensions, interface, themes, keys (profiles: vqro, tmux,
 screen) and more. The [Extensions guide](docs/extensions.md) covers the searchable catalogue, detail/actions and static manifests.
 Agents and scripts drive the same primitives with `vqro call <method> '<json>'` and

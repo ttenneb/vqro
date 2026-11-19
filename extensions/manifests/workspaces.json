@@ -1,10 +1,11 @@
 {
   "name":"workspaces", "title":"Workspaces", "version":"0.1.0", "license":"Apache-2.0", "author":"Bennett Garcia", "kind":"interface",
-  "summary":"Track folders, Git repositories and their worktrees.",
-  "description":"Keeps a workspace folder list, reads Git/worktree state, opens shells in folders and can create a Git worktree when asked. The sidebar consumes its published workspace data. Turn it off to stop scanning and remove these commands; folders, worktrees and running shells are not deleted.",
+  "summary":"Track folders, Git repositories and worktrees, each with its own tabs.",
+  "description":"Keeps a workspace folder list and reads Git/worktree state. Each workspace and worktree has its own tabs (its own layout, started in its folder); switching makes them the shown tabs, creating them with a shell the first time. Removing a workspace removes its tabs, never its running programs. The sidebar consumes its published workspace data. Turn it off to stop scanning and remove these commands; layouts, folders, worktrees and running shells are not deleted.",
   "requires":{"protocol":1},
-  "provides":["command/workspaces.add","command/workspaces.remove","command/workspaces.open","command/workspaces.worktree","command/workspaces.refresh",
-              "data/workspaces","doc/workspaces/list"],
-  "needs":[{"cap":"command/tabs.open","suggest":"tabs","why":"Opens a shell in a folder as a new tab"}],
-  "contributes":{"commands":["workspaces.add","workspaces.remove","workspaces.open","workspaces.worktree","workspaces.refresh"],"panels":["Workspace data used by the sidebar"],"settings":["doc/workspaces/list"]}
+  "provides":["command/workspaces.add","command/workspaces.remove","command/workspaces.open","command/workspaces.shell",
+              "command/workspaces.main","command/workspaces.switch","command/workspaces.worktree","command/workspaces.refresh",
+              "data/workspaces","data/workspaces.switch","data/workspaces.current","view/workspaces.switch","doc/workspaces/list"],
+  "works_with":[{"cap":"command/tabs.open","suggest":"tabs","without":"Open shell here can't add a tab to a workspace that already has tabs"}],
+  "contributes":{"commands":["workspaces.add","workspaces.remove","workspaces.open","workspaces.shell","workspaces.main","workspaces.switch","workspaces.worktree","workspaces.refresh"],"keys":["Prefix w: switch workspace"],"menu_items":["Switch workspace","Current workspace (status bar)"],"panels":["Workspace data used by the sidebar","Switch workspace"],"settings":["doc/workspaces/list","layout/ws-*","doc/layout/ws-*"]}
 }
