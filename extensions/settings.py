@@ -236,7 +236,8 @@ def ext_rows(states, commands=None):
         value = ext.value(key) or {}
         state = states.get(name, {})
         safe = bool(state.get("safe_mode"))
-        on = bool(state.get("allowed_in_safe_mode")) if safe else value.get("enabled", True)
+        # The core's facts and this cache can briefly disagree; use the facts (same source as the status badge).
+        on = bool(state.get("allowed_in_safe_mode")) if safe else state.get("enabled", value.get("enabled", True))
         manifest = state.get("manifest") or {}
         kind = manifest_text(manifest, "kind", value.get("kind", "other"))
         title = manifest_text(manifest, "title", name)
