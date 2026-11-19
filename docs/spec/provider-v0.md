@@ -321,10 +321,12 @@ This section is the implementable contract; where sections 1–6 differ, this wi
   `unavailable` (provider disconnected), `backend` (the layer below failed in a way not covered by `rejected`).
   `unsupported` and `stale_generation` are new kinds; `core-protocol.md` lists them once the core implements them.
   SDKs preserve structured remote error data (including refusal reasons, outcome and future fields), distinct
-  from local transport/deadline failures. Rust `ProviderError` exposes `remote` and `data`; `with_data` also
-  preserves extra object fields when responding, while the error's `kind` remains authoritative. A remote error
-  does not itself prove no effect: its kind/outcome still determines that. Rust `Outcome::Dispatched` represents
-  native handoff without acknowledgement, not accepted or observed.
+  from local transport/deadline failures. Rust `ProviderError` exposes `remote` and `data`; `with_data` serializes
+  extra object fields in a provider reply while keeping its `kind` authoritative, but the core's effect-error
+  mapping currently drops that extra data. A remote error does not itself prove no effect: its kind/outcome still
+  determines that. Adapter refusals, including agent-v0 `busy`/`stale`, must use `Ok(Outcome::Rejected { .. })`, not
+  an error that the core could report as indeterminate (§9.4). Rust `Outcome::Dispatched` represents native handoff
+  without acknowledgement, not accepted or observed.
 - **Reasons** are always objects `{"reason": <string>, "message"?: <string>, ...}` (G11), matching `stream.closed` on
   `main`. Minimum reason strings: `provider_disconnected`, `slow_consumer`, `gap`, `exited`, `killed`, `replaced`,
   `closed`.
@@ -415,9 +417,13 @@ existing status consumers and partial resource events (`src/events.rs`) work unc
   below without an acknowledgement; the core passes it through unchanged and never resends. `rejected` carries
   `error: {kind, message}` and guarantees no effect. Protocol problems are JSON-RPC errors instead. If the provider
   cannot know whether an effect happened (lost reply, backend dropped mid-call), it returns a JSON-RPC error with
-  `data.kind: backend` or `unavailable`, never a fabricated `rejected` result. The core conservatively maps every
-  provider error and deadline expiry to caller `outcome: indeterminate`, without resend. Core-side pre-dispatch
-  validation/admission remains a definite rejection. Providers never send an `indeterminate` result.
+  `data.kind: backend` or `unavailable`, never a fabricated `rejected` result. The core maps only these protocol
+  error kinds to definite rejection: `invalid`, `unknown_method`, `unsupported`, `not_found`, `stale_generation`,
+  `conflict`, `forbidden`, `overloaded`, `too_large`. All other provider errors and deadline expiry become caller
+  `outcome: indeterminate`, without resend; unknown kinds (including `busy` and `stale`) become `backend` errors.
+  Adapter refusals must therefore use the `rejected` **result**, preserving their kind and certainty. Extra
+  provider error data is not forwarded to the caller. Core-side pre-dispatch validation/admission remains a
+  definite rejection. Providers never send an `indeterminate` result.
 - **One response per request.** The provider replies once, when it knows, even after the deadline; the core ignores
   a reply that arrives after it timed out (as forwarded commands on `main`). No invented late `effect.outcome`
   event: independent native facts reconcile what happened; late original replies are ignored.

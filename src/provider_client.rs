@@ -206,7 +206,10 @@ pub struct EffectRequest {
 }
 
 impl EffectRequest {
-    /// Reply with a known outcome, or a protocol error (no effect; or `backend` for unknown).
+    /// Reply with a D10 outcome. Adapter refusals (including `busy`/`stale`) must use
+    /// `Ok(Outcome::Rejected { .. })`: an arbitrary error does NOT establish no effect.
+    /// The core rejects only its fixed protocol-error kinds; other errors become indeterminate.
+    /// Extra error data is serialized here but not forwarded by the core. Never resend.
     pub fn respond(self, result: Result<Outcome, ProviderError>) {
         self.responder.send(result.map(|o| o.to_json()));
     }
