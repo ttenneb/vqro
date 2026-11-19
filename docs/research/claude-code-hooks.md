@@ -1,4 +1,4 @@
-# Claude Code as a tier-1 agent: hooks pull at safe points (A3, 2026-11-19)
+# Tier-1 pull plugins: Claude Code hooks and Pi (A3, 2026-11-19)
 
 Claude Code 2.1.329 (I0 install), measured with the real CLI against a fake Anthropic endpoint in a private network
 namespace. No model calls.
@@ -73,6 +73,39 @@ from the binary's own help text.
 
 Pull keeps the message editable in vqro until the safe point. The socket is a declared, weaker `admit` route with
 better framing.
+
+## Pi plugin (`integrations/pi/vqro-pull.ts`)
+
+The P5 prototype, productised on the coordination-v0 surface. It declares
+`pull {points: [turn, settle, idle], insert: user, evidence: entry}` and runs inside Pi, holding one core connection.
+- **Points:** `turn_end` (turn) and `agent_before_settle` (settle) return `custom_message` drafts with
+  `continue: true`. Idle uses a counts-only wake, then `sendMessage(triggerTurn, followUp)`.
+- **Stages:**
+  - `inserted` from the `context` hook (the entry is in the conversation about to be sent; boundary drafts emit no
+    `message_end`);
+  - `read` only after an assistant message that finished normally.
+- **Reconcile:** on every `session_start`, from the session's `custom_message` entries carrying the delivery id.
+- **Content:** text, image (as Pi `ImageContent`) and resource_link (as a text line). Audio stays held
+  `unsupported_content`.
+
+`tests/pi_pull_e2e.py` (RPC) and `tests/pi_pull_tui.py` (PTY) pass on Pi 0.87.0 and 1.5.2:
+
+| Scenario | Measured |
+|---|---|
+| boundary | in request 2, right after tool 1 |
+| settle | only in the continuation |
+| edit while held | reaches the model; after take it is `too_late` |
+| idle start | wakes Pi |
+| image | arrives as `image_url` |
+| crash after take | `unknown`, never sent |
+| lost report | reconciled `inserted` with the entry id |
+| abort after take | inserted but unsent, `read` only after the next answered request |
+| human draft | byte-identical |
+
+17 take calls in the whole RPC run: none without mail.
+
+**The core drops an unchanged `view.publish`** (`src/server.rs`, live view `unchanged`). A wake whose pending count
+did not change (an edit of a held record) would then never arrive. The wake content carries a revision counter.
 
 ## Open
 - **Real-model smoke:** this needs a native Claude Code login (I0 helper), a cheap model and coordinator approval.
