@@ -3,6 +3,7 @@ import copy
 from pathlib import Path
 import sys
 import threading
+import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "extensions"))
@@ -350,6 +351,107 @@ class EngineTests(unittest.TestCase):
         replay = self.engine.control(args, OWNER)
         self.assertTrue(replay["native"]["incomplete"])
         self.assertNotIn("large", str(replay["native"]))
+
+    def test_pinned_session_switch_at_claim_is_held_not_retargeted(self):
+        sent = self.send()
+        self.resume()
+        calls = 0
+        def switching():
+            nonlocal calls
+            calls += 1
+            facts = copy.deepcopy(self.resources)
+            if calls >= 3:
+                facts["r1"]["data"]["agent"]["session"]["id"] = "s2"
+            return facts
+        self.engine.resources = switching
+        self.engine.dispatch_one()
+        self.assertEqual(self.ledger, [])
+        self.assertEqual(self.engine.get(sent["delivery"])["to"]["session"], "s1")
+        self.assertEqual(self.engine.get(sent["delivery"])["reason"], "session_changed")
+
+    def test_take_without_a_safe_point_is_rejected(self):
+        self.setup_pull()
+        sent = self.send("boundary")
+        for at in (None, "not-a-point"):
+            with self.assertRaises(PolicyError) as caught:
+                self.engine.take({"op": self.op(), "agent": "r1", "consumer": "c1", "at": at}, OWNER)
+            self.assertEqual(caught.exception.kind, "invalid")
+        self.assertEqual(self.engine.get(sent["delivery"])["state"], "held")
+
+    def test_growth_edits_cannot_bypass_sender_target_quota(self):
+        from coordination_policy import record_charge
+        deliveries = [self.send(send_new=True)["delivery"] for _ in range(5)]
+        refused = 0
+        for delivery in deliveries:
+            row = self.engine.get(delivery)
+            try:
+                self.engine.edit({"op": self.op(), "delivery": delivery, "expect": row["revision"],
+                                  "content": [{"type": "text", "text": "x" * 30000}]}, OWNER)
+            except PolicyError as error:
+                self.assertEqual(error.kind, "quota")
+                refused += 1
+        self.assertGreater(refused, 0)
+        self.assertLessEqual(sum(record_charge(record) for record in self.engine.records()), 128 * 1024)
+
+    def test_pull_round_robins_senders_not_global_fifo(self):
+        self.setup_pull()
+        self.config["doc/agents/grants/worker"] = {"version": 1, "value": {"who": WORKER["principal"], "can": ["send:boundary"], "on": "agent:r1"}}
+        self.send("boundary")
+        self.send("boundary", send_new=True)
+        op = self.op()
+        self.engine.send({"op": op, "submission": op, "to": "r1", "mode": "boundary", "content": [{"type": "text", "text": "worker"}]}, WORKER)
+        selected = []
+        for _ in range(2):
+            row = self.engine.take({"op": self.op(), "agent": "r1", "consumer": "c1", "at": "turn", "limit": 1}, OWNER)["records"][0]
+            selected.append(row["from"]["principal"])
+            self.engine.report({"op": self.op(), "delivery": row["delivery"], "claim": row["claim"], "stage": "inserted"}, OWNER)
+        self.assertEqual(set(selected), {OWNER["principal"], WORKER["principal"]})
+
+    def test_clean_failed_pause_does_not_change_live_or_durable_gates(self):
+        self.resume()
+        before = copy.deepcopy(self.store.get("control"))
+        self.store.fault = "before"
+        with self.assertRaises(StoreError) as caught:
+            self.resume(action="pause")
+        self.assertEqual(caught.exception.kind, "io")
+        self.assertEqual(self.engine.permits, {"r1"})
+        self.assertEqual(self.store.get("control"), before)
+        self.store.fault = "after"
+        with self.assertRaises(StoreError):
+            self.resume(action="pause")
+        self.assertEqual(self.engine.permits, set())
+
+    def test_archive_verified_export_then_free_returns_locator_without_redelivery(self):
+        op = self.op()
+        args = {"op": op, "submission": op, "to": "r1", "mode": "start", "content": [{"type": "text", "text": "archive evidence"}]}
+        sent = self.engine.send(args, OWNER)
+        with tempfile.TemporaryDirectory(prefix="coord-archive-") as directory:
+            plan = self.engine.archive({"op": self.op(), "agents": ["r1"], "destination": directory}, OWNER)
+            archive = plan["archive"]
+            self.engine.archive({"op": self.op(), "action": "export", "archive": archive}, OWNER)
+            self.engine.archive({"op": self.op(), "action": "free", "archive": archive}, OWNER)
+            lookup = self.engine.get(sent["delivery"])
+            self.assertEqual(lookup["state"], "archived")
+            repeated = self.engine.send(dict(args, op=self.op()), OWNER)
+            self.assertEqual(repeated["delivery"], sent["delivery"])
+            self.assertEqual(self.engine.records(), [])
+            Path(lookup["locator"]).unlink()
+            self.assertEqual(self.engine.get(sent["delivery"])["state"], "unknown")
+        self.assertEqual(self.ledger, [])
+
+    def test_archive_late_evidence_change_keeps_original_record(self):
+        sent = self.send()
+        with tempfile.TemporaryDirectory(prefix="coord-archive-") as directory:
+            archive = self.engine.archive({"op": self.op(), "agents": ["r1"], "destination": directory}, OWNER)["archive"]
+            self.engine.archive({"op": self.op(), "action": "export", "archive": archive}, OWNER)
+            key = "message/" + sent["delivery"]
+            row = self.store.get(key)
+            changed = dict(row["value"], reason="new evidence arrived")
+            self.store.apply([{"op": "set", "key": key, "value": changed, "expect": row["version"]}], control=True)
+            result = self.engine.archive({"op": self.op(), "action": "free", "archive": archive}, OWNER)
+            self.assertEqual(result["state"], "partial")
+            self.assertEqual(result["changed"], [key])
+            self.assertIsNotNone(self.store.get(key))
 
     def test_silence_becomes_unavailable_never_ended(self):
         self.send()

@@ -136,7 +136,7 @@ class Coordinator:
             result = copy.deepcopy(saved["result"])
             if "result_ref" in result:
                 row = self.store.get(result["result_ref"])
-                result = row["value"] if row else {"state": "unknown"}
+                result = row["value"] if row else self.archive_locator(result["result_ref"]) or {"state": "unknown"}
             # Take replays return claim history, NEVER the content to insert again.
             result["window"] = self.window()
             result["historical"] = True
@@ -167,6 +167,8 @@ class Coordinator:
             result = fn(work, self.policy())
             first = result.pop("_first", None)
             after = result.pop("_after", None)
+            uncertain = result.pop("_uncertain", None)
+            write_control = result.pop("_control", control)
             bucket_key = self._bucket(principal, op)
             bucket = {key: value for key, value in work.get(bucket_key, {}).items()
                       if value.get("window") == meta["window_epoch"]}
@@ -184,7 +186,12 @@ class Coordinator:
             if meta["window_count"] >= WINDOW:
                 meta["window_epoch"], meta["window_count"] = nonce("w:"), 0
             work.put("meta", meta)
-            work.commit(control=control)
+            try:
+                work.commit(control=write_control)
+            except StoreError as error:
+                if uncertain and error.kind in ("durability_unconfirmed", "indeterminate", "timeout"):
+                    uncertain()
+                raise
             if after:
                 after()
             if first:
@@ -204,6 +211,8 @@ class Coordinator:
         return row
 
     def _pending_access(self, record, policy, principal):
+        if self._archive_frozen("message/" + record["delivery"]):
+            raise CoordinationError("conflict", "delivery is frozen for explicit archive")
         if principal != record["from"]["principal"]:
             policy.require(principal, "inbox.edit_any", record["to"]["agent"])
         if record["state"] not in PENDING:
@@ -227,6 +236,14 @@ class Coordinator:
             submission = args.get("submission")
             if not isinstance(submission, str) or len(submission.encode()) > 256:
                 raise CoordinationError("invalid", "submission must be a bounded caller-chosen id")
+            submissions = work.get("submissions", {})
+            submission_key = digest([principal, submission])
+            submitted = submissions.get(submission_key)
+            if submitted:
+                if submitted["intent"] != digest({key: value for key, value in args.items() if key != "op"}):
+                    raise CoordinationError("conflict", "submission id reused for different intent")
+                saved = work.get("message/" + submitted["delivery"])
+                return {"state": saved["state"] if saved else "unknown", "delivery": submitted["delivery"]}
             prior = next((r for r in self.records() if r["from"]["principal"] == principal and r["submission"] == submission), None)
             if prior:
                 if prior.get("intent") != digest({key: value for key, value in args.items() if key != "op"}):
@@ -250,7 +267,8 @@ class Coordinator:
             waiting = [r for r in records if r["state"] in PENDING and r["from"]["principal"] == principal and r["to"]["agent"] == agent and r["delivery"] != supersedes]
             if waiting and not args.get("send_new", False):
                 raise CoordinationError("pending_exists", "update waiting message or explicitly send another", deliveries=[r["delivery"] for r in waiting[:16]])
-            check_admission(records, principal, agent, normalized["content"], reserved_bytes=encoded(work.rows), reserved_records=len(work.rows), replaces=supersedes)
+            outcome_steps = 3 if args.get("strategy") == "interrupt_then_start" else 1
+            check_admission(records, principal, agent, normalized["content"], reserved_bytes=encoded(work.rows), reserved_records=len(work.rows), replaces=supersedes, outcome_steps=outcome_steps)
             resource = self.resources().get(agent, {})
             native = (resource.get("data") or {}).get("agent") or {}
             session = native.get("session") or {}
@@ -278,6 +296,7 @@ class Coordinator:
             for key in ("guard", "quoted", "render", "strategy", "follow_current_session", "reply_to", "thread", "retry_of", "supersedes", "key", "correlation"):
                 record[key] = copy.deepcopy(args.get(key))
             record["follow_current_session"] = args.get("follow_current_session", False)
+            record["outcome_steps"] = outcome_steps
             cause = copy.deepcopy(args.get("cause"))
             if cause:
                 cause["provenance"] = "asserted"
@@ -290,6 +309,10 @@ class Coordinator:
                 previous.update(state="superseded", reason="replaced_before_claim")
                 work.put("message/" + previous["delivery"], previous)
             work.put("message/" + delivery, record)
+            epoch = work.get("meta")["window_epoch"]
+            submissions = {key: value for key, value in submissions.items() if value["epoch"] == epoch}
+            submissions[submission_key] = {"delivery": delivery, "intent": record["intent"], "epoch": epoch}
+            work.put("submissions", submissions)
             return {"state": "recorded", "delivery": delivery, "_after": lambda: self._wake(agent)}
         return self._mutate("inbox.send", args, context, admit)
 
@@ -297,6 +320,7 @@ class Coordinator:
         def change(work, policy):
             record = self._record(work, args.get("delivery"))
             self._pending_access(record, policy, context["principal"])
+            before = copy.deepcopy(record)
             key = "message/" + record["delivery"]
             if args.get("expect") != work.version(key):
                 raise CoordinationError("conflict", "message revision changed")
@@ -307,16 +331,26 @@ class Coordinator:
                 if any(key not in allowed | {"op", "delivery", "expect"} for key in args):
                     raise CoordinationError("invalid", "edit changes only pending input fields")
                 updated = dict(record, **{key: value for key, value in args.items() if key in allowed})
-                record.update(policy.validate_send(updated))
+                request = {key: updated[key] for key in ("mode", "content", "expires_at_ms", "strategy", "guard", "render", "quoted", "follow_current_session") if key in updated}
+                record.update(policy.validate_send(request))
                 for key in ("guard", "render", "quoted"):
                     if key in args:
                         record[key] = copy.deepcopy(args[key])
                 policy.require(context["principal"], "send:" + record["mode"], record["to"]["agent"])
+                if encoded(record) > encoded(before):
+                    check_admission(self.records(), record["from"]["principal"], record["to"]["agent"], record["content"],
+                                    reserved_bytes=encoded(work.rows), reserved_records=len(work.rows),
+                                    replaces=record["delivery"], outcome_steps=record.get("outcome_steps", 1))
             work.put("message/" + record["delivery"], record)
-            return {"state": record["state"], "delivery": record["delivery"], "_after": lambda: self._wake(record["to"]["agent"])}
+            return {"state": record["state"], "delivery": record["delivery"], "_after": lambda: self._wake(record["to"]["agent"]),
+                    "_control": withdraw or encoded(record) <= encoded(before)}
         return self._mutate("inbox.withdraw" if withdraw else "inbox.edit", args, context, change, control=True)
 
     def get(self, delivery):
+        if self.store.get("message/" + str(delivery)) is None:
+            archived = self.archive_locator("message/" + str(delivery))
+            if archived:
+                return dict(archived, delivery=delivery)
         work = Working(self)
         record = self._record(work, delivery)
         return dict(record, revision=work.version("message/" + delivery))
@@ -350,15 +384,16 @@ class Coordinator:
                 control["gates"][agent] = action == "resume"
             control["revision"] += 1
             work.put("control", control)
-            if action == "pause":
-                self.permits.difference_update(targets)
             def release():
                 if action == "resume":
                     self.permits.update(targets)
                     for agent in targets:
                         self._wake(agent)
+                else:
+                    self.permits.difference_update(targets)
             return {"state": "accepted", "action": action, "targets": targets, "control_revision": control["revision"],
-                    "execution": "not_asserted", "_after": release}
+                    "execution": "not_asserted", "_after": release,
+                    "_uncertain": lambda: self.permits.difference_update(targets) if action == "pause" else None}
         return self._mutate("inbox.scope", args, context, apply, control=True)
 
     def scope_preview(self, scope):
@@ -384,6 +419,8 @@ class Coordinator:
 
     def _eligibility(self, record, policy, *, at=None):
         agent = record["to"]["agent"]
+        if self._archive_frozen("message/" + record["delivery"]):
+            return "archive_pending"
         if record.get("handover_plan"):
             return "handover_pending"
         if agent not in self.permits or not self.current:
@@ -458,9 +495,15 @@ class Coordinator:
 
     def _claim(self, work, record, *, consumer=None, at=None):
         agent = record["to"]["agent"]
-        _, native = self._facts(agent)
+        resource, native = self._facts(agent)
+        observed_session = (native.get("session") or {}).get("id")
+        effective_session = observed_session if record.get("follow_current_session") else record["to"]["session"]
+        if observed_session != effective_session or resource is None or resource.get("incarnation", "") != record["to"]["incarnation"]:
+            record.update(state="held", reason="session_changed" if observed_session != effective_session else "awaiting_route")
+            work.put("message/" + record["delivery"], record)
+            return None
         attempt = {"id": nonce("a:"), "strategy": record.get("strategy") or record["mode"],
-                   "session": (native.get("session") or {}).get("id"), "control_epoch": self.control_epoch,
+                   "session": effective_session, "control_epoch": self.control_epoch,
                    "claimant": consumer or "dispatcher", "consumer": consumer, "at": at,
                    "claim": nonce("claim:"), "steps": [], "started_ms": self.clock()}
         record.update(state="claimed", reason=None, attempt=attempt)
@@ -497,7 +540,10 @@ class Coordinator:
                 return None
             work = Working(self)
             selected = self._record(work, selected["delivery"])
-            self._claim(work, selected)
+            claimed = self._claim(work, selected)
+            if claimed is None:
+                work.commit(control=True)
+                return None
             try:
                 work.commit()
             except StoreError as error:
@@ -644,6 +690,8 @@ class Coordinator:
             if type(limit) is not int or not 1 <= limit <= 16:
                 raise CoordinationError("invalid", "take limit is 1..16")
             consumer, at = args.get("consumer"), args.get("at")
+            if at not in ("turn", "settle", "idle", "tool"):
+                raise CoordinationError("invalid", "take must name a declared safe point")
             if not isinstance(consumer, str) or not consumer or len(consumer.encode()) > 128:
                 raise CoordinationError("invalid", "bounded consumer incarnation required")
             control = work.get("control")
@@ -655,10 +703,15 @@ class Coordinator:
             if any(r["to"]["agent"] == agent and r["state"] == "claimed" for r in records):
                 return {"state": "held", "records": [], "held": "claim_in_flight"}
             eligible = [r for r in records if r["to"]["agent"] == agent and r["state"] in PENDING and self._eligibility(r, policy, at=at) is None]
-            eligible.sort(key=lambda r: (r["order"], r["delivery"]))
             supplied, claims = [], []
-            for record in eligible[:limit]:
+            for _ in range(limit):
+                record = self.fair.pick(eligible)
+                if record is None:
+                    break
+                eligible.remove(record)
                 claimed = self._claim(work, record, consumer=consumer, at=at)
+                if claimed is None:
+                    continue
                 row = {key: claimed.get(key) for key in ("delivery", "from", "origin", "quoted", "render", "mode", "content")}
                 row["claim"] = claimed["attempt"]["claim"]
                 if encoded(supplied + [row]) > 250 * 1024:
@@ -760,7 +813,10 @@ class Coordinator:
             work.put(key, {"state": "claimed", "command": command, "intent": intent,
                            "principal": context["principal"], "control_epoch": self.control_epoch,
                            "attempt": {"id": nonce("a:"), "steps": []}})
-            return {"state": "claimed", "result_ref": key}
+            def close():
+                if intent.get("close_gate"):
+                    self.permits.discard(intent["close_gate"])
+            return {"state": "claimed", "result_ref": key, "_after": close, "_uncertain": close}
         result = self._mutate(command, args, context, begin, control=True)
         if result.get("historical"):
             return result
@@ -821,7 +877,6 @@ class Coordinator:
                 raise CoordinationError("unavailable", "target is absent")
             self._ensure_agent(work, agent, policy)
             if action in ("stop", "retire"):
-                self.permits.discard(agent)
                 control = work.get("control")
                 control["gates"][agent] = False
                 control["revision"] += 1
@@ -845,7 +900,8 @@ class Coordinator:
                 method, target, native_args = "terminal.kill", host["resource"], {}
             elif operation is not None and operation not in caps:
                 raise CoordinationError("unsupported", "native control is undeclared")
-            return {"agent": agent, "target": target, "incarnation": resource.get("incarnation"), "op": method, "args": native_args}
+            return {"agent": agent, "target": target, "incarnation": resource.get("incarnation"), "op": method, "args": native_args,
+                    "close_gate": agent if action in ("stop", "retire") else None}
         def execute(intent):
             if intent["op"] is None:
                 return {"outcome": "accepted", "data": {"administrative": "retired", "execution": "unknown"}}
@@ -919,14 +975,19 @@ class Coordinator:
                 record["to"].update(agent=destination["agent"], incarnation=destination["incarnation"])
                 record.update(state="held", reason="handover_pending", handover_plan=plan_id)
                 work.put("message/" + delivery, record)
-            self.permits.discard(source["agent"])
+            control = work.get("control")
+            control["gates"][source["agent"]] = False
+            control["revision"] += 1
+            work.put("control", control)
             self._ensure_agent(work, destination["agent"], policy)
             plan = {"state": "pending", "from": source, "to": destination, "deliveries": deliveries, "stages": stages,
                     "principal": context["principal"], "created_ms": self.clock()}
             if encoded(plan) > 4096:
                 raise CoordinationError("too_large", "handover plan exceeds 4 KiB; inspect a smaller plan")
             work.put("plan/" + plan_id, plan)
-            return {"state": "held", "reason": "handover_pending", "plan": plan_id}
+            return {"state": "held", "reason": "handover_pending", "plan": plan_id,
+                    "_after": lambda: self.permits.discard(source["agent"]),
+                    "_uncertain": lambda: self.permits.discard(source["agent"])}
         return self._mutate("coord.handover", args, context, transfer, control=True)
 
     def _handover_stage(self, args, context):
@@ -1001,3 +1062,123 @@ class Coordinator:
             for agent, incarnation in forgotten:
                 forget(agent, incarnation)
         return forgotten
+
+    def _archive_frozen(self, key):
+        return any(key in row["value"].get("frozen", {}) for name, row in self.store.snapshot().items()
+                   if name.startswith("archive/") and row["value"].get("state") in ("frozen", "exporting", "exported", "partial"))
+
+    def archive(self, args, context):
+        action = args.get("action", "freeze")
+        archive_id = args.get("archive")
+        if action == "inspect":
+            plan = self.store.get("archive/" + str(archive_id))
+            return plan["value"] if plan else {"state": "unknown"}
+        if action == "export":
+            def prepare(work, policy):
+                plan = work.get("archive/" + str(archive_id))
+                if not plan:
+                    raise CoordinationError("not_found", "unknown archive plan")
+                for agent in plan["agents"]:
+                    policy.require(context["principal"], "recover", agent)
+                if plan["state"] not in ("frozen", "exporting", "exported"):
+                    raise CoordinationError("conflict", "archive is not exportable")
+                return {"archive": archive_id}
+            def execute(intent):
+                with self.lock:
+                    plan = self.store.get("archive/" + archive_id)["value"]
+                    records = []
+                    for key, version in plan["frozen"].items():
+                        row = self.store.get(key)
+                        if not row or row["version"] != version:
+                            return {"outcome": "rejected", "error": {"kind": "conflict", "message": "frozen evidence changed; retained in place"}}
+                        records.append({"delivery": key, "version": version, "record": row["value"]})
+                exported = export_archive(plan["destination"], archive_id, records)
+                with self.lock:
+                    work = Working(self)
+                    current = work.get("archive/" + archive_id)
+                    current.update(exported, state="exported")
+                    work.put("archive/" + archive_id, current)
+                    work.commit(control=True)
+                return {"outcome": "accepted", "data": exported}
+            return self._external("coord.inbox.archive.export", args, context, prepare, execute)
+        def mutate(work, policy):
+            if action == "freeze":
+                agents = args.get("agents")
+                if not isinstance(agents, list) or not agents or len(agents) > 64 or len(set(agents)) != len(agents):
+                    raise CoordinationError("invalid", "archive needs an exact bounded agent list")
+                for agent in agents:
+                    policy.require(context["principal"], "recover", agent)
+                destination = args.get("destination")
+                if not isinstance(destination, str) or len(destination.encode()) > 1024:
+                    raise CoordinationError("invalid", "archive destination must be an explicit bounded locator")
+                chosen = {}
+                inspected = args.get("deliveries")
+                if inspected is not None and (not isinstance(inspected, list) or len(inspected) > 48):
+                    raise CoordinationError("too_large", "archive inspected delivery list exceeds atomic bound")
+                for key, row in work.rows.items():
+                    value = row["value"]
+                    if key.startswith("message/") and value["to"]["agent"] in agents:
+                        if inspected is None or value["delivery"] in inspected:
+                            chosen[key] = row["version"]
+                    elif inspected is None and key.startswith("external/") and value.get("intent", {}).get("agent") in agents:
+                        chosen[key] = row["version"]
+                if any(work.rows[key]["value"].get("state") == "claimed" for key in chosen):
+                    raise CoordinationError("conflict", "an in-flight claim must settle or become unknown before archive")
+                if len(chosen) > 48:
+                    raise CoordinationError("too_large", "archive capacity is 48 records; inspect an explicit smaller delivery set")
+                if any(self._archive_frozen(key) for key in chosen):
+                    raise CoordinationError("conflict", "another archive already froze this evidence")
+                open_archives = sum(key.startswith("archive/") and row["value"].get("state") != "completed" for key, row in work.rows.items())
+                if open_archives >= 4:
+                    raise CoordinationError("quota", "four pending archives already use the reserved plan capacity")
+                archive = uuid.uuid4().hex
+                work.put("archive/" + archive, {"state": "frozen", "agents": agents, "frozen": chosen,
+                                               "destination": destination, "principal": context["principal"], "created_ms": self.clock()})
+                return {"state": "frozen", "archive": archive, "records": len(chosen)}
+            if action == "free":
+                plan = work.get("archive/" + str(archive_id))
+                if not plan or plan["state"] != "exported" or not plan.get("manifest_hash"):
+                    raise CoordinationError("conflict", "archive export must be durably verified before freeing")
+                for agent in plan["agents"]:
+                    policy.require(context["principal"], "recover", agent)
+                # A missing or changed export cannot authorize source deletion.
+                with open(plan["locator"], "rb") as source:
+                    data = source.read(9 * 1024 * 1024 + 1)
+                if len(data) > 9 * 1024 * 1024 or hashlib.sha256(data).hexdigest() != plan["manifest_hash"]:
+                    raise CoordinationError("conflict", "archive readback changed; retain all source evidence")
+                index = work.get("archive-index", {})
+                freed, changed = [], []
+                for key, version in plan["frozen"].items():
+                    if work.version(key) != version:
+                        changed.append(key)
+                        continue
+                    index[key] = archive_id
+                    work.delete(key)
+                    freed.append(key)
+                if encoded(index) > 200 * 1024:
+                    raise CoordinationError("quota", "archive locator index full; no evidence freed")
+                work.put("archive-index", index)
+                plan.update(state="partial" if changed else "completed", changed=changed,
+                            frozen={key: version for key, version in plan["frozen"].items() if key in changed})
+                work.put("archive/" + archive_id, plan)
+                return {"state": plan["state"], "archive": archive_id, "freed": freed, "changed": changed,
+                        "locator": plan["locator"], "manifest_hash": plan["manifest_hash"]}
+            raise CoordinationError("invalid", "archive action must be freeze, export, free or inspect")
+        return self._mutate("coord.inbox.archive", args, context, mutate, control=True)
+
+    def archive_locator(self, key):
+        index = self.store.get("archive-index")
+        archive = (index or {}).get("value", {}).get(key)
+        plan = self.store.get("archive/" + archive) if archive else None
+        if not plan:
+            return None
+        value = plan["value"]
+        result = {"state": "archived", "archive": archive, "locator": value.get("locator"), "manifest_hash": value.get("manifest_hash")}
+        try:
+            with open(result["locator"], "rb") as source:
+                data = source.read(9 * 1024 * 1024 + 1)
+            if len(data) > 9 * 1024 * 1024 or hashlib.sha256(data).hexdigest() != result["manifest_hash"]:
+                result["state"] = "unknown"
+        except (OSError, TypeError):
+            result["state"] = "unknown"
+        return result
