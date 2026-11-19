@@ -24,6 +24,10 @@ port = 18810
 base = {"HOME": P["home"], "PATH": os.environ["PATH"], "XDG_RUNTIME_DIR": P["xrun"], "VQRO_STATE_DIR": P["st"],
         "VQRO_SOCKET": sock, "VQRO_EXTENSIONS_DIR": P["noext"], "VQRO_HERDR": '["/bin/false"]',
         "HC_SOCKET": os.path.join(root, "h.sock"), "HC_SESSION": "a3"}
+def txt(s):
+    return [{"type": "text", "text": s}]
+
+
 procs, results, fails = [], {}, []
 
 
@@ -161,7 +165,7 @@ DRAFT = "HUMAN DRAFT keep me 42"
 typed(DRAFT)
 pump(0.5)
 n_before = len(requests())
-d1 = c.cmd("inbox.send", to="r7", mode="start", content="MSG-WAKE-I1: a teammate says the build is green")["delivery"]
+d1 = c.cmd("inbox.send", to="r7", mode="start", content=txt("MSG-WAKE-I1: a teammate says the build is green"))["delivery"]
 woke = wait_for(lambda: first_request_with("MSG-WAKE-I1") is not None, 40)
 nreq = first_request_with("MSG-WAKE-I1")
 check("I1 a start message wakes the idle TUI session and reaches the model", woke and nreq == n_before + 1, {"n_before": n_before, "first": nreq})
@@ -195,7 +199,7 @@ typed("steps:1 sleep:3 second task"); os.write(fd, b"\r")
 # Claude Code ran UserPromptSubmit for this prompt.
 wait_for(lambda: sum(1 for e in hooklog() if e["event"] == "hook" and e["detail"].get("hook") == "UserPromptSubmit") > prompts, 15)
 wait_for(lambda: any(e["event"] == "waiter_retired" for e in hooklog()), 15)
-d2 = c.cmd("inbox.send", to="r7", mode="start", content="MSG-BUSY-I3")["delivery"]
+d2 = c.cmd("inbox.send", to="r7", mode="start", content=txt("MSG-BUSY-I3"))["delivery"]
 pump(1.0)
 state_busy = c.cmd("inbox.get", delivery=d2)["state"]
 check("I3 a new prompt retires the waiter; a start message stays held while busy", state_busy == "held"

@@ -44,6 +44,8 @@ mod unix {
 
     const MARK: &str = "vqro message ";
     const TAKE_LIMIT: u64 = 16;
+    /// Content block types this plugin inserts without loss (`additionalContext` is a string).
+    const CONTENT: &[&str] = &["text", "resource_link"];
     const CALL_MS: u64 = 3000;
     const MAX_CONTEXT: usize = 9000; // Claude Code moves >10,000 characters out to a file
 
@@ -277,7 +279,9 @@ mod unix {
     fn take(ctx: &Ctx, core: &mut Core, at: &str) -> Option<String> {
         let consumer = ctx.with_state(|s| s.get("consumer").as_str().map(String::from))?;
         let op = format!("{consumer}:take:{}", random_hex());
-        let reply = match core.inbox("inbox.take", json!({"op": op, "agent": ctx.agent, "consumer": consumer, "at": at, "limit": TAKE_LIMIT})) {
+        // Context insertion is text only: records with other block types stay held (`unsupported_content`) rather
+        // than being flattened or dropped.
+        let reply = match core.inbox("inbox.take", json!({"op": op, "agent": ctx.agent, "consumer": consumer, "at": at, "limit": TAKE_LIMIT, "content": CONTENT})) {
             Ok(r) => r,
             Err(e) => {
                 ctx.log("take_failed", json!({"at": at, "op": op, "error": e}));
@@ -482,17 +486,21 @@ mod unix {
         });
     }
 
+    /// Content is always an array of typed blocks; only `CONTENT` types are ever taken.
     fn content_text(content: Option<&Value>) -> String {
-        match content {
-            Some(Value::String(s)) => s.clone(),
-            Some(Value::Array(blocks)) => blocks
-                .iter()
-                .map(|b| b.get("text").and_then(Value::as_str).map(String::from).unwrap_or_else(|| format!("[{} content omitted]", b.get("type").and_then(Value::as_str).unwrap_or("non-text"))))
-                .collect::<Vec<_>>()
-                .join("\n"),
-            Some(other) => other.to_string(),
-            None => String::new(),
-        }
+        let blocks = content.and_then(Value::as_array).cloned().unwrap_or_default();
+        blocks
+            .iter()
+            .map(|b| match b.get("type").and_then(Value::as_str) {
+                Some("text") => b.get("text").and_then(Value::as_str).unwrap_or("").to_string(),
+                Some("resource_link") => {
+                    let uri = b.get("uri").and_then(Value::as_str).unwrap_or("");
+                    format!("[link: {} <{uri}>]", b.get("name").and_then(Value::as_str).unwrap_or(uri))
+                }
+                other => format!("[unsupported {} block]", other.unwrap_or("?")), // not taken: see CONTENT
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// The Claude Code `hooks` settings block for this plugin (merge into a settings file).

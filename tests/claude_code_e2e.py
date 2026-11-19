@@ -33,6 +33,10 @@ port = 18800
 base = {"HOME": P["home"], "PATH": os.environ["PATH"], "XDG_RUNTIME_DIR": P["xrun"], "VQRO_STATE_DIR": P["st"],
         "VQRO_SOCKET": sock, "VQRO_EXTENSIONS_DIR": P["noext"], "VQRO_HERDR": '["/bin/false"]',
         "HC_SOCKET": os.path.join(root, "h.sock"), "HC_SESSION": "a3"}
+def txt(s):
+    return [{"type": "text", "text": s}]
+
+
 procs, results, fails = [], {}, []
 
 
@@ -143,8 +147,8 @@ run = spawn(base_argv + ["-p", "steps:3 sleep:2 begin"], cwd=P["work"], env=cenv
             stderr=open(os.path.join(root, "runAB.err"), "w"))
 wait_for(lambda: any(s.get("source") == "PreToolUse" for s in inbox_events("status")), 60)
 sent_after = len(requests()) - n0
-b1 = c.cmd("inbox.send", to="r7", mode="boundary", content="MSG-BOUNDARY-A: the linux build is green")["delivery"]
-s1 = c.cmd("inbox.send", to="r7", mode="settle", content="MSG-SETTLE-B: also summarise the result")["delivery"]
+b1 = c.cmd("inbox.send", to="r7", mode="boundary", content=txt("MSG-BOUNDARY-A: the linux build is green"))["delivery"]
+s1 = c.cmd("inbox.send", to="r7", mode="settle", content=txt("MSG-SETTLE-B: also summarise the result"))["delivery"]
 run.wait(180)
 reqs = requests()[n0:]
 nb, ns = first_request_with("MSG-BOUNDARY-A"), first_request_with("MSG-SETTLE-B")
@@ -171,7 +175,7 @@ if not a.skip_idle:
     wait_for(lambda: any(s.get("source") == "Stop" for s in inbox_events("status")[-3:]), 30)
     time.sleep(1.5)  # idle; the waiter is armed
     n2 = len(requests())
-    st = c.cmd("inbox.send", to="r7", mode="start", content="MSG-START-C: please say hello")["delivery"]
+    st = c.cmd("inbox.send", to="r7", mode="start", content=txt("MSG-START-C: please say hello"))["delivery"]
     woke = wait_for(lambda: first_request_with("MSG-START-C") is not None, 30)
     results["C_idle"] = {"requests_before": n2, "first_request_with_msg": first_request_with("MSG-START-C"), "record": get(st),
                          "hook_log_tail": open(os.path.join(P["hookstate"], "hook.log")).read().splitlines()[-6:]}
@@ -188,7 +192,7 @@ if not a.skip_idle:
 sessions = sorted(glob.glob(os.path.join(P["cfg"], "projects", "*", "*.jsonl")), key=os.path.getmtime)
 session_id = os.path.basename(sessions[0])[:-6] if sessions else None
 # a claim taken by an earlier consumer that never reached the transcript (simulated crash after take)
-d1 = c.cmd("inbox.send", to="r7", mode="boundary", content="MSG-LOST-D")["delivery"]
+d1 = c.cmd("inbox.send", to="r7", mode="boundary", content=txt("MSG-LOST-D"))["delivery"]
 cons = json.load(open(glob.glob(os.path.join(P["hookstate"], f"{session_id}.json"))[0]))["consumer"] if session_id else None
 c.cmd("inbox.take", op="sim-crash-take", agent="r7", consumer=cons, at="turn", limit=1)
 n3 = len(requests())

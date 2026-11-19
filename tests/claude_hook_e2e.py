@@ -20,6 +20,10 @@ env = {"HOME": os.path.join(root, "home"), "PATH": os.environ["PATH"], "XDG_RUNT
        "VQRO_HERDR": '["/bin/false"]', "HC_SOCKET": os.path.join(root, "h.sock"), "HC_SESSION": "a3"}
 for d in ("home", "xrun", "st", "noext"):
     os.makedirs(os.path.join(root, d))
+def txt(s):
+    return [{"type": "text", "text": s}]
+
+
 procs = []
 
 
@@ -112,16 +116,27 @@ def transcript_add(*rows):
 rc, out, err = hook("SessionStart", {"source": "startup"})
 check("session start exit 0, no output", rc == 0 and out == "", err)
 # 2. turn point serves boundary only, in order, as one batch
-b1 = c.cmd("inbox.send", to="r7", mode="boundary", content=[{"type": "text", "text": "B1 first"}])["delivery"]
-s1 = c.cmd("inbox.send", to="r7", mode="settle", content="S1 settle")["delivery"]
-st1 = c.cmd("inbox.send", to="r7", mode="start", content="ST1 start")["delivery"]
-b2 = c.cmd("inbox.send", to="r7", mode="boundary", content="B2 second")["delivery"]
+b1 = c.cmd("inbox.send", to="r7", mode="boundary", content=txt("B1 first"))["delivery"]
+s1 = c.cmd("inbox.send", to="r7", mode="settle", content=txt("S1 settle"))["delivery"]
+st1 = c.cmd("inbox.send", to="r7", mode="start", content=txt("ST1 start"))["delivery"]
+b2 = c.cmd("inbox.send", to="r7", mode="boundary", content=txt("B2 second"))["delivery"]
 rc, out, _ = hook("PreToolUse", {"tool_name": "Bash", "tool_input": {"command": "true"}})
 rc, out, _ = hook("PostToolBatch", {"tool_calls": [{"tool_name": "Bash", "tool_input": {}, "tool_use_id": "t1", "tool_response": "ok"}]})
 ctx = context(out)
 check("turn take returns boundary records in order", ctx.find(f"vqro message {b1} ") >= 0 and ctx.find(f"vqro message {b2} ") > ctx.find(f"vqro message {b1} "), ctx)
 check("turn take never returns settle/start", s1 not in ctx and st1 not in ctx and get(s1)["state"] == "held" and get(st1)["state"] == "held")
 check("hand-off reported supplied (insert: context)", get(b1).get("stage") == "supplied" and get(b2).get("stage") == "supplied", get(b1))
+# 2b. content is typed blocks; a block the hook cannot insert as context keeps the record held, never flattened
+im = c.cmd("inbox.send", to="r7", mode="boundary", content=[{"type": "text", "text": "IMG"}, {"type": "image", "mime": "image/png", "data": "iVBORw0KGgo="}])["delivery"]
+try:
+    c.cmd("inbox.send", to="r7", mode="boundary", content="bare string")
+    bare = "accepted (BAD)"
+except RuntimeError as e:
+    bare = str(e)
+check("bare-string content is rejected by the inbox", "invalid" in bare, bare)
+rc, out, _ = hook("PostToolBatch", {"tool_calls": []})
+check("image record is not taken by a text-only plugin (unsupported_content)", im not in out and get(im)["state"] == "held" and get(im).get("reason") == "unsupported_content", get(im))
+c.cmd("inbox.edit", delivery=im, content=txt("IMG removed"))
 # 3. subagent hooks are ignored entirely
 rc, out, _ = hook("PostToolBatch", {"agent_id": "sub1", "agent_type": "Explore", "tool_calls": []})
 check("subagent PostToolBatch takes nothing", out == "" and get(s1)["state"] == "held")
@@ -161,7 +176,7 @@ w2 = hook("Stop", None, mode="wait", wait=False)
 time.sleep(1.0)
 check("armed waiter with nothing eligible keeps waiting", w2.poll() is None)
 t0 = time.time()
-st2 = c.cmd("inbox.send", to="r7", mode="start", content="ST2 later")["delivery"]
+st2 = c.cmd("inbox.send", to="r7", mode="start", content=txt("ST2 later"))["delivery"]
 try:
     w2.wait(10)
 except subprocess.TimeoutExpired:
@@ -173,14 +188,14 @@ hook("Notification", {"notification_type": "idle_prompt", "message": "idle"})
 w3 = hook("Stop", None, mode="wait", wait=False)
 time.sleep(0.8)
 hook("UserPromptSubmit", {"prompt": "human typed this"})
-st3 = c.cmd("inbox.send", to="r7", mode="start", content="ST3 while busy")["delivery"]
+st3 = c.cmd("inbox.send", to="r7", mode="start", content=txt("ST3 while busy"))["delivery"]
 try:
     w3.wait(40)
 except subprocess.TimeoutExpired:
     pass
 check("new turn retires the waiter (exit 0) and nothing is taken while busy", w3.returncode == 0 and get(st3)["state"] == "held", f"rc={w3.returncode} state={get(st3)['state']}")
 # 9. restart: a claim handed over but never in the transcript becomes unknown; one in the transcript inserted
-b3 = c.cmd("inbox.send", to="r7", mode="boundary", content="B3 lost")["delivery"]
+b3 = c.cmd("inbox.send", to="r7", mode="boundary", content=txt("B3 lost"))["delivery"]
 rc, out, _ = hook("PostToolBatch", {"tool_calls": []})
 check("b3 supplied", b3 in context(out) and get(b3).get("stage") == "supplied")
 rc, out, _ = hook("SessionStart", {"source": "resume"})

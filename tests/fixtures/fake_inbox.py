@@ -42,8 +42,24 @@ def once(args, fn):
     return result
 
 
+BLOCKS = {"text": ("text",), "image": ("mime", "data"), "audio": ("mime", "data"), "resource_link": ("uri",), "resource": ("uri",)}
+
+
+def valid_content(content):
+    """agent.send content is always an array of typed blocks (coordination decision 2026-11-19)."""
+    if not isinstance(content, list) or not content:
+        raise VqroError("content must be a non-empty array of typed blocks", "invalid")
+    for b in content:
+        if not isinstance(b, dict) or b.get("type") not in BLOCKS or any(k not in b for k in BLOCKS[b["type"]]):
+            raise VqroError(f"invalid content block {b!r:.80}", "invalid")
+        if b["type"] == "resource" and not ("text" in b or "data" in b):
+            raise VqroError("resource needs text or data", "invalid")
+    return content
+
+
 @ext.command("inbox.send", "test: admit a message")
 def send(args):
+    valid_content(args.get("content"))
     with lock:
         seq[0] += 1
         d = f"d{seq[0]}"
@@ -57,6 +73,7 @@ def send(args):
 @ext.command("inbox.edit", "test: edit while held")
 def edit(args):
     with lock:
+        valid_content(args.get("content"))
         r = records[args["delivery"]]
         if r["state"] != "held":
             raise VqroError(f"too_late: {r['state']}", "conflict")
@@ -89,6 +106,10 @@ def take(args):
                 if len(out) >= min(int(args.get("limit", 16)), 16):
                     break
                 if r["to"] == agent and r["state"] == "held" and r["mode"] in ELIGIBLE[at]:
+                    accepts = args.get("content")  # block types the plugin can insert without flattening
+                    if accepts is not None and any(b["type"] not in accepts for b in r["content"]):
+                        r["reason"] = "unsupported_content"
+                        continue
                     claim = f"c{r['delivery']}.{len(r.get('attempts', [])) + 1}"
                     r.update(state="claimed", claim=claim, consumer=args["consumer"], at=at, stage=None)
                     r.setdefault("attempts", []).append({"claim": claim, "at": at, "t": time.time()})
