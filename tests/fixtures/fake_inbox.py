@@ -16,7 +16,7 @@ LOG = sys.argv[1] if len(sys.argv) > 1 else os.devnull
 ext = Extension("inbox")
 lock = threading.RLock()
 records, ops, consumers, statuses = {}, {}, {}, []
-seq = [0]
+seq = [0, 0]  # admission order, wake revision
 
 
 def log(event, **kw):
@@ -25,9 +25,12 @@ def log(event, **kw):
 
 
 def wake(agent):
+    # The core drops a view.publish whose content is unchanged, so every wake carries a change counter: an edit
+    # of a held record (same pending count) must still wake the plugin.
     pending = sum(1 for r in records.values() if r["to"] == agent and r["state"] == "held")
+    seq[1] += 1
     try:
-        ext.vqro.call("view.publish", {"view": f"inbox-wake-{agent}", "content": {"pending": pending, "items": []}})
+        ext.vqro.call("view.publish", {"view": f"inbox-wake-{agent}", "content": {"pending": pending, "rev": seq[1], "items": []}})
     except VqroError as e:
         log("wake_failed", error=str(e))
 
@@ -77,8 +80,9 @@ def edit(args):
         r = records[args["delivery"]]
         if r["state"] != "held":
             raise VqroError(f"too_late: {r['state']}", "conflict")
-        r.update(content=args["content"], rev=r["rev"] + 1)
+        r.update(content=args["content"], rev=r["rev"] + 1, reason=None)
         log("edited", delivery=r["delivery"])
+        wake(r["to"])  # coordination-v0 §7: wake on admission, edit, resume and handover
         return {"state": "held", "rev": r["rev"]}
 
 
