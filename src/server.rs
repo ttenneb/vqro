@@ -936,7 +936,13 @@ async fn forget(core: &Shared, author: &Caller, p: Value) -> RpcResult {
 async fn attach(core: &Shared, conn: &Arc<Conn>, a: Attach) -> RpcResult {
     let (cols, rows) = (a.cols.unwrap_or(80), a.rows.unwrap_or(24));
     if a.items.is_none() && (!(1..=9999).contains(&cols) || !(1..=9999).contains(&rows)) { return Err(provider::rejected("invalid", "stream dimensions must be between 1 and 9999")); }
-    if a.items.as_ref().is_some_and(|i| !i.is_object() || crate::limits::encoded_bytes(i) > 4096) { return Err(provider::rejected("invalid", "items must be an object of at most 4 KiB")); }
+    if let Some(items) = &a.items {
+        // `{after?: {epoch, seq}}`: an exact cursor or nothing (agent-v0 §4).
+        let after = &items["after"];
+        let ok = items.is_object() && items.as_object().unwrap().keys().all(|k| k == "after")
+            && (after.is_null() || (after["epoch"].as_str().is_some_and(|e| !e.is_empty() && e.len() <= 256) && after["seq"].is_u64() && after.as_object().unwrap().len() == 2));
+        if !ok { return Err(provider::rejected("invalid", "items must be {after?: {epoch, seq}}")); }
+    }
     let capability = if a.items.is_some() { "items.stream" } else { "terminal.output" };
     let (route, reference) = {
         let c = core.lock().unwrap();
@@ -981,6 +987,8 @@ async fn attach(core: &Shared, conn: &Arc<Conn>, a: Attach) -> RpcResult {
                 biased;
                 _ = peer.closed() => { reason = json!({"reason": "viewer_disconnected"}); break; }
                 _ = route.ended() => { reason = json!({"reason": "provider_disconnected"}); break; }
+                // Another stream of this connection overflowed the shared budget: close this one too.
+                _ = writer.overflowed() => break,
                 out = stream.output.recv() => out,
             };
             let Some(out) = out else {

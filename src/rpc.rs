@@ -106,6 +106,11 @@ pub struct Peer {
     shutdown: watch::Sender<bool>,
     pending: Pending,
     next_id: Arc<AtomicU64>,
+    /// Calls admitted by their own caller-held budget (stream opens), not by MAX_PENDING_CALLS.
+    reserved: Arc<AtomicUsize>,
+    /// Bumped when the shared stream-data budget overflows: every stream of the connection then
+    /// closes `slow_consumer` together (agent-v0 §4: slow-consumer closure is per connection).
+    stream_overflow: Arc<watch::Sender<u64>>,
 }
 
 struct Outbound {
@@ -123,12 +128,28 @@ pub struct StreamWriter {
     peer: Peer,
     id: u64,
     active: Arc<AtomicBool>,
+    /// The connection's overflow generation when this stream started; any later overflow ends it.
+    overflow: u64,
 }
 
 impl StreamWriter {
     pub fn send(&self, data: String) -> bool {
+        if *self.peer.stream_overflow.borrow() != self.overflow { self.active.store(false, Ordering::Relaxed); return false; }
         if self.peer.enqueue_stream(self.id, data, self.active.clone()) { true }
-        else { self.active.store(false, Ordering::Relaxed); false }
+        else {
+            self.active.store(false, Ordering::Relaxed);
+            // The connection's shared stream budget is full: close all of its streams, not just this one.
+            if !self.peer.is_closed() { self.peer.stream_overflow.send_modify(|g| { if *g == self.overflow { *g += 1; } }); }
+            false
+        }
+    }
+
+    /// Resolves when the connection's stream budget overflowed after this stream started.
+    pub async fn overflowed(&self) {
+        let mut rx = self.peer.stream_overflow.subscribe();
+        while *rx.borrow_and_update() == self.overflow {
+            if rx.changed().await.is_err() { std::future::pending::<()>().await; }
+        }
     }
 
     pub fn close(&self, reason: Value) {
@@ -152,6 +173,11 @@ impl StreamWriter {
             self.close(json!({"reason": "slow_consumer"}));
         }
     }
+}
+
+struct ReservedCall(Arc<AtomicUsize>);
+impl Drop for ReservedCall {
+    fn drop(&mut self) { self.0.fetch_sub(1, Ordering::AcqRel); }
 }
 
 // Cancellation, timeout and late replies must not leave an ever-growing pending-call map.
@@ -289,7 +315,7 @@ impl Peer {
         });
 
         let incoming = IncomingReceiver { rx: in_rx, limit: record_limit.clone(), shutdown: shutdown.clone(), closed: false };
-        (Peer { control, data, large, large_bytes, record_limit, read_ended, shutdown, pending, next_id: Arc::new(AtomicU64::new(1)) }, incoming)
+        (Peer { control, data, large, large_bytes, record_limit, read_ended, shutdown, pending, next_id: Arc::new(AtomicU64::new(1)), reserved: Arc::new(AtomicUsize::new(0)), stream_overflow: Arc::new(watch::channel(0).0) }, incoming)
     }
 
     pub async fn call(&self, method: &str, params: Value) -> RpcResult {
@@ -297,14 +323,26 @@ impl Peer {
     }
 
     pub async fn call_with_timeout(&self, method: &str, params: Value, deadline: Duration) -> RpcResult {
+        self.call_admitted(method, params, deadline, false).await
+    }
+
+    /// A call admitted by the caller's own bounded budget (stream opens): it neither counts against
+    /// nor is refused by MAX_PENDING_CALLS, so a burst of opens cannot starve effects or vice versa.
+    pub async fn call_reserved(&self, method: &str, params: Value, deadline: Duration) -> RpcResult {
+        self.call_admitted(method, params, deadline, true).await
+    }
+
+    async fn call_admitted(&self, method: &str, params: Value, deadline: Duration, reserved: bool) -> RpcResult {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         {
             let mut pending = self.pending.lock().unwrap();
             if self.read_ended.load(Ordering::Acquire) {return Err(RpcError::new("disconnected","request input ended; peer cannot answer a new call"));}
-            if pending.len() >= MAX_PENDING_CALLS { return Err(RpcError::new("overloaded", "pending call limit; request not sent")); }
+            if !reserved && pending.len().saturating_sub(self.reserved.load(Ordering::Acquire)) >= MAX_PENDING_CALLS { return Err(RpcError::new("overloaded", "pending call limit; request not sent")); }
+            if reserved { self.reserved.fetch_add(1, Ordering::AcqRel); }
             pending.insert(id, tx);
         }
+        let _reserved = reserved.then(|| ReservedCall(self.reserved.clone()));
         let _guard = PendingCall { id, pending: self.pending.clone() };
         let msg = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
         crate::limits::json_depth(&msg,crate::limits::MESSAGE_DEPTH)?;
@@ -331,7 +369,7 @@ impl Peer {
     }
 
     pub fn stream_writer(&self, id: u64) -> StreamWriter {
-        StreamWriter { peer: self.clone(), id, active: Arc::new(AtomicBool::new(true)) }
+        StreamWriter { peer: self.clone(), id, active: Arc::new(AtomicBool::new(true)), overflow: *self.stream_overflow.borrow() }
     }
 
     fn enqueue_stream(&self, stream: u64, data: String, active: Arc<AtomicBool>) -> bool {
@@ -570,6 +608,48 @@ mod tests {
         assert_eq!(peer.call("not_sent", Value::Null).await.unwrap_err().kind(), "overloaded");
         for task in tasks { task.abort(); let _ = task.await; }
         assert!(peer.pending.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn reserved_calls_neither_count_against_nor_are_refused_by_the_pending_limit() {
+        let (reader, _hold) = tokio::io::duplex(64);
+        let (peer, _) = Peer::spawn(reader, tokio::io::sink());
+        // More reserved calls (stream opens) than MAX_PENDING_CALLS are admitted...
+        let opens: Vec<_> = (0..MAX_PENDING_CALLS + 72).map(|_| {
+            let p = peer.clone(); tokio::spawn(async move { p.call_reserved("stream.open", Value::Null, Duration::from_secs(30)).await })
+        }).collect();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while peer.pending.lock().unwrap().len() != MAX_PENDING_CALLS + 72 { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        // ...and ordinary calls still get all MAX_PENDING_CALLS slots of their own.
+        let calls: Vec<_> = (0..MAX_PENDING_CALLS).map(|_| {
+            let p = peer.clone(); tokio::spawn(async move { p.call("held", Value::Null).await })
+        }).collect();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while peer.pending.lock().unwrap().len() != 2 * MAX_PENDING_CALLS + 72 { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        assert_eq!(peer.call("not_sent", Value::Null).await.unwrap_err().kind(), "overloaded");
+        for task in opens.into_iter().chain(calls) { task.abort(); let _ = task.await; }
+        assert!(peer.pending.lock().unwrap().is_empty());
+        assert_eq!(peer.reserved.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn a_stream_budget_overflow_closes_every_stream_of_the_connection() {
+        // Nobody reads the socket: the shared 1 MiB stream-data budget fills.
+        let (socket, _client) = tokio::io::duplex(64);
+        let (r, w) = tokio::io::split(socket);
+        let (peer, _incoming) = Peer::spawn(r, w);
+        let (busy, idle) = (peer.stream_writer(1), peer.stream_writer(2));
+        let chunk = "A".repeat(64 * 1024);
+        let mut sent = 0;
+        while busy.send(chunk.clone()) { sent += 1; assert!(sent < 64, "budget never filled"); }
+        // The idle stream sent nothing, yet ends with the connection's overflow (agent-v0 §4).
+        tokio::time::timeout(Duration::from_secs(1), idle.overflowed()).await.expect("idle stream not told");
+        assert!(!idle.send("YQ==".into()));
+        // A stream attached after the overflow is not affected by it.
+        let later = peer.stream_writer(3);
+        assert!(tokio::time::timeout(Duration::from_millis(50), later.overflowed()).await.is_err());
     }
 
     #[tokio::test]
