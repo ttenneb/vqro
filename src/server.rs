@@ -476,6 +476,8 @@ struct Attach {
     rows: Option<u16>,
     /// Scrollback lines to replay first, if the backend can.
     history: Option<u32>,
+    /// A non-terminal item stream instead of terminal output: `{after?: {epoch, seq}}`.
+    items: Option<Value>,
     deadline_ms: Option<u64>,
 }
 
@@ -933,15 +935,22 @@ async fn forget(core: &Shared, author: &Caller, p: Value) -> RpcResult {
 
 async fn attach(core: &Shared, conn: &Arc<Conn>, a: Attach) -> RpcResult {
     let (cols, rows) = (a.cols.unwrap_or(80), a.rows.unwrap_or(24));
-    if !(1..=9999).contains(&cols) || !(1..=9999).contains(&rows) { return Err(provider::rejected("invalid", "stream dimensions must be between 1 and 9999")); }
+    if a.items.is_none() && (!(1..=9999).contains(&cols) || !(1..=9999).contains(&rows)) { return Err(provider::rejected("invalid", "stream dimensions must be between 1 and 9999")); }
+    if a.items.as_ref().is_some_and(|i| !i.is_object() || crate::limits::encoded_bytes(i) > 4096) { return Err(provider::rejected("invalid", "items must be an object of at most 4 KiB")); }
+    let capability = if a.items.is_some() { "items.stream" } else { "terminal.output" };
     let (route, reference) = {
         let c = core.lock().unwrap();
-        (c.resource_route(&a.resource, "terminal.output")?, c.resource(&a.resource)?.facts.backend_ref.clone())
+        (c.resource_route(&a.resource, capability)?, c.resource(&a.resource)?.facts.backend_ref.clone())
     };
     let handle = route.handle.clone();
-    let (effect, mut stream) = effect(core, conn.caller(), route.clone(), "resource.attach", json!({"resource":a.resource,"op":"terminal.output"}), provider::deadline(a.deadline_ms)?, |_| "accepted", move |context| async move {
-        handle.for_effect(context).attach(reference, cols, rows, a.history.unwrap_or(0)).await.map_err(|e| e.rpc())
+    let items = a.items.clone();
+    let (effect, mut stream) = effect(core, conn.caller(), route.clone(), "resource.attach", json!({"resource":a.resource,"op":capability}), provider::deadline(a.deadline_ms)?, |_| "accepted", move |context| async move {
+        match items {
+            Some(items) => handle.for_effect(context).attach_items(reference, items).await.map_err(|e| e.rpc()),
+            None => handle.for_effect(context).attach(reference, cols, rows, a.history.unwrap_or(0)).await.map_err(|e| e.rpc()),
+        }
     }).await?;
+    let epoch = stream.epoch.take();
     if !route.valid() { return Err(provider::indeterminate("provider changed before stream registration")); }
     let initial = stream.initial;
     let sid = conn.next_stream.fetch_add(1, Ordering::Relaxed);
@@ -1008,7 +1017,9 @@ async fn attach(core: &Shared, conn: &Arc<Conn>, a: Attach) -> RpcResult {
         } else { writer.close(reason); }
         conn2.streams.lock().unwrap().remove(&sid);
     });
-    Ok(json!({"outcome": "accepted", "effect": effect, "initial": initial, "stream": sid, "resource": a.resource}))
+    let mut reply = json!({"outcome": "accepted", "effect": effect, "initial": initial, "stream": sid, "resource": a.resource});
+    if let Some(epoch) = epoch { reply["epoch"] = json!(epoch); }
+    Ok(reply)
 }
 
 fn undo_target(core:&Core,txn:Option<u64>)->Option<u64> {

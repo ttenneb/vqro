@@ -268,7 +268,7 @@ async fn session(
                         pending.insert(id, Pending::Kill(reply));
                         send_frame(&frame_tx, bytes)?;
                     }
-                    AdapterCmd::Attach { backend_ref, cols, rows, history, reply } => {
+                    AdapterCmd::Attach { backend_ref, cols, rows, history, reply, .. } => {
                         if remote_effect(&backend_ref) { let _ = reply.send(Err(remote_unsupported())); continue; }
                         let (id, bytes) = call(&mut next_id, "terminal.attach", json!({"terminal": backend_ref, "cols": cols, "rows": rows, "history": history}));
                         pending.insert(id, Pending::Attach { reply, history });
@@ -380,7 +380,7 @@ async fn session(
                                     let close = frame(ch, CLOSE, &[]);
                                     let _ = ftx.send(close, 9).await;
                                 });
-                                let _ = reply.send(Ok(Stream { initial: if history > 0 { "history" } else { "none" }, input: inp_tx, output: out_rx, terminal: None }));
+                                let _ = reply.send(Ok(Stream { initial: if history > 0 { "history" } else { "none" }, epoch: None, input: inp_tx, output: out_rx, terminal: None }));
                             }
                         },
                     }

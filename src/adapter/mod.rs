@@ -137,6 +137,8 @@ pub enum StreamOutput {
 
 pub struct Stream {
     pub initial: &'static str,
+    /// Item streams only: the provider's open reply (`epoch`), passed to the viewer unchanged.
+    pub epoch: Option<String>,
     pub input: crate::queue::Sender<StreamInput>,
     pub output: crate::queue::Receiver<StreamOutput>,
     /// Wire termination is separate from data so a full data window cannot lose its end marker.
@@ -189,7 +191,7 @@ pub enum AdapterCmd {
     Spawn(SpawnRequest, Reply<ResourceFacts>),
     Kill(String, Reply<EffectResult>),
     Invoke { op: String, reference: String, incarnation: String, args: Value, reply: Reply<EffectResult> },
-    Attach { backend_ref: String, cols: u16, rows: u16, history: u32, reply: Reply<Stream> },
+    Attach { backend_ref: String, cols: u16, rows: u16, history: u32, items: Option<Value>, reply: Reply<Stream> },
 }
 
 pub(crate) fn reject_command(command: AdapterCmd, why: &str) {
@@ -273,7 +275,13 @@ impl AdapterHandle {
 
     pub async fn attach(&self, backend_ref: String, cols: u16, rows: u16, history: u32) -> Result<Stream, AdapterError> {
         let (tx, rx) = oneshot::channel();
-        self.cmds.send(self.bind(AdapterCmd::Attach { backend_ref, cols, rows, history, reply: tx })).map_err(|_| AdapterError::Rejected("provider stopped before dispatch".into()))?;
+        self.cmds.send(self.bind(AdapterCmd::Attach { backend_ref, cols, rows, history, items: None, reply: tx })).map_err(|_| AdapterError::Rejected("provider stopped before dispatch".into()))?;
+        rx.await.map_err(|_| AdapterError::Indeterminate("provider stopped before replying".into()))?
+    }
+    /// A non-terminal item stream (JSONL records, no dimensions): same credit, window and closure rules.
+    pub async fn attach_items(&self, backend_ref: String, items: Value) -> Result<Stream, AdapterError> {
+        let (tx, rx) = oneshot::channel();
+        self.cmds.send(self.bind(AdapterCmd::Attach { backend_ref, cols: 0, rows: 0, history: 0, items: Some(items), reply: tx })).map_err(|_| AdapterError::Rejected("provider stopped before dispatch".into()))?;
         rx.await.map_err(|_| AdapterError::Indeterminate("provider stopped before replying".into()))?
     }
 }

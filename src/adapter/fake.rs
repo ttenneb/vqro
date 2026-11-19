@@ -166,7 +166,7 @@ pub fn start_with_instance(name: String, instance: String, events: mpsc::Unbound
                             }
                         }
                     });
-                    let _ = reply.send(Ok(Stream { initial: "none", input: in_tx, output: out_rx, terminal: None }));
+                    let _ = reply.send(Ok(Stream { initial: "none", epoch: None, input: in_tx, output: out_rx, terminal: None }));
                 }
             }
         }

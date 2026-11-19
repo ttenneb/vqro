@@ -287,10 +287,20 @@ pub struct OpenRequest {
     pub cols: u16,
     pub rows: u16,
     pub history_lines: u64,
+    /// Item streams (`items.stream`): the viewer's `{after?: {epoch, seq}}`; no dimensions.
+    pub items: Option<Value>,
     responder: Responder,
 }
 
 impl OpenRequest {
+    /// Reply to an item-stream open: `continue` (records strictly after the viewer's cursor follow)
+    /// or `reset` (a `reset` record and a snapshot follow in-stream), with the current epoch.
+    pub fn respond_items(self, reset: bool, epoch: &str) -> Option<ProviderStream> {
+        let OpenRequest { stream, responder, .. } = self;
+        responder.send(Ok(json!({"initial": if reset { "reset" } else { "continue" }, "epoch": epoch})));
+        stream.inner.set_ready();
+        Some(stream)
+    }
     /// Reply. On success the stream becomes ready; data sent before this waits for it.
     /// On error the stream is finished and the error replied.
     pub fn respond(self, result: Result<Initial, ProviderError>) -> Option<ProviderStream> {
@@ -980,13 +990,15 @@ fn effect_request(id: &Value, p: &Value, shared: &Arc<Shared>, config: &Arc<Conf
 }
 
 fn open_request(id: &Value, p: &Value, shared: &Arc<Shared>, config: &Arc<Config>) -> Result<Request, ProviderError> {
-    if !config.capabilities.contains_key("terminal.output") {
-        return Err(ProviderError::new("unsupported", "terminal.output is not declared"));
+    let items = p.get("items").filter(|v| !v.is_null()).cloned();
+    let needed = if items.is_some() { "items.stream" } else { "terminal.output" };
+    if !config.capabilities.contains_key(needed) {
+        return Err(ProviderError::new("unsupported", format!("{needed} is not declared")));
     }
     let stream = p["stream"].as_u64().ok_or_else(|| ProviderError::new("invalid", "stream id required"))?;
     let dim = |k: &str| p[k].as_u64().filter(|v| (1..=9999).contains(v)).map(|v| v as u16).ok_or_else(|| ProviderError::new("invalid", format!("{k} must be 1-9999")));
-    let (cols, rows) = (dim("cols")?, dim("rows")?);
-    let history_lines = p["history_lines"].as_u64().ok_or_else(|| ProviderError::new("invalid", "history_lines required"))?;
+    let (cols, rows) = if items.is_some() { (0, 0) } else { (dim("cols")?, dim("rows")?) };
+    let history_lines = if items.is_some() { 0 } else { p["history_lines"].as_u64().ok_or_else(|| ProviderError::new("invalid", "history_lines required"))? };
     let window = p["window_bytes"].as_u64().filter(|w| *w >= 1).ok_or_else(|| ProviderError::new("invalid", "window_bytes required"))?.min(MAX_WINDOW);
     let (Some(r), Some(inc)) = (p["ref"].as_str(), p["incarnation"].as_str()) else {
         return Err(ProviderError::new("invalid", "ref and incarnation required"));
@@ -1008,6 +1020,7 @@ fn open_request(id: &Value, p: &Value, shared: &Arc<Shared>, config: &Arc<Config
         cols,
         rows,
         history_lines,
+        items,
         responder: responder(shared, id),
     }))
 }

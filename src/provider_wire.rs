@@ -435,7 +435,7 @@ impl WireProvider {
             }
             AdapterCmd::Kill(reference, reply) => { let _ = reply.send(self.invoke(&context, "terminal.kill", Some((reference, context.target.as_ref().map(|t| t.1.clone()).unwrap_or_default())), json!({})).await); }
             AdapterCmd::Invoke { op, reference, incarnation, args, reply } => { let _ = reply.send(self.invoke(&context, &op, Some((reference, incarnation)), args).await); }
-            AdapterCmd::Attach { backend_ref, cols, rows, history, reply } => { let _ = reply.send(self.open(&context, backend_ref, cols, rows, history).await); }
+            AdapterCmd::Attach { backend_ref, cols, rows, history, items, reply } => { let _ = reply.send(self.open(&context, backend_ref, cols, rows, history, items).await); }
             AdapterCmd::Bound { .. } => adapter::reject_command(cmd, "nested provider binding"),
         }
     }
@@ -483,7 +483,7 @@ impl WireProvider {
         }
         Ok(())
     }
-    async fn open(self: &Arc<Self>, context: &EffectContext, reference: String, cols: u16, rows: u16, history: u32) -> Result<Stream, AdapterError> {
+    async fn open(self: &Arc<Self>, context: &EffectContext, reference: String, cols: u16, rows: u16, history: u32, items: Option<Value>) -> Result<Stream, AdapterError> {
         let slot = self.stream_slots.clone().try_acquire_owned().map_err(|_| AdapterError::RejectedKind { kind: "overloaded".into(), message: "provider max_streams reached".into() })?;
         let id = self.next_stream.fetch_add(1, Ordering::Relaxed);
         let (output, receiver) = crate::queue::channel(adapter::STREAM_BUFFER_BYTES);
@@ -494,11 +494,18 @@ impl WireProvider {
         let mut opening = Opening { provider: Arc::downgrade(self), id, armed: true };
         let remaining = context.deadline.saturating_duration_since(Instant::now());
         self.check_dispatch(context)?;
-        let result = self.peer.call_with_timeout("stream.open", json!({"generation": self.generation, "stream": id, "ref": reference,
-            "incarnation": context.target.as_ref().map(|t| t.1.as_str()).unwrap_or(""), "cols": cols, "rows": rows,
-            "history_lines": history, "window_bytes": self.window}), remaining).await;
+        let incarnation = context.target.as_ref().map(|t| t.1.as_str()).unwrap_or("");
+        // Item streams carry no dimensions; the provider answers `continue`/`reset` and its epoch.
+        let open = match &items {
+            Some(items) => json!({"generation": self.generation, "stream": id, "ref": reference, "incarnation": incarnation, "items": items, "window_bytes": self.window}),
+            None => json!({"generation": self.generation, "stream": id, "ref": reference, "incarnation": incarnation, "cols": cols, "rows": rows, "history_lines": history, "window_bytes": self.window}),
+        };
+        let result = self.peer.call_with_timeout("stream.open", open, remaining).await;
         if Instant::now() >= context.deadline { return Err(AdapterError::Timeout("provider stream.open deadline expired; outcome indeterminate".into())); }
-        let initial = match result.as_ref().ok().and_then(|r| r["initial"].as_str()) { Some("history") => "history", Some("repaint") => "repaint", Some("none") => "none", _ => {
+        let epoch = if items.is_some() { result.as_ref().ok().and_then(|r| r["epoch"].as_str()).filter(|e| !e.is_empty() && e.len() <= 256).map(String::from) } else { None };
+        let initial = match (items.is_some(), result.as_ref().ok().and_then(|r| r["initial"].as_str())) {
+            (false, Some("history")) => "history", (false, Some("repaint")) => "repaint", (false, Some("none")) => "none",
+            (true, Some("continue")) if epoch.is_some() => "continue", (true, Some("reset")) if epoch.is_some() => "reset", _ => {
             self.end(id, false, json!({"reason": "closed"}), true);
             return Err(result.err().map(provider_error).unwrap_or_else(|| AdapterError::Backend("stream.open returned invalid initial".into())));
         }};
@@ -529,7 +536,7 @@ impl WireProvider {
             }
         });
         opening.armed = false;
-        Ok(Stream { initial, input, output: receiver, terminal: Some(end) })
+        Ok(Stream { initial, epoch, input, output: receiver, terminal: Some(end) })
     }
 }
 
