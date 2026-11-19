@@ -53,7 +53,7 @@ snapshot() {
   python3 - "$RUN" <<'PY'
 import os, sys
 roots = [b"/tmp/pt", b"/tmp/pe2", b"/tmp/ppd", b"/tmp/pps", b"/tmp/pke", b"/tmp/phc", b"/tmp/pft", b"/tmp/ppe", b"/tmp/pev", b"/tmp/pscale", b"/tmp/vqro-tmux",
-         b"/tmp/pnf", sys.argv[1].encode()]
+         b"/tmp/pnf", b"/tmp/pws", sys.argv[1].encode()]
 socks = {}
 for line in open("/proc/net/unix").read().splitlines()[1:]:
     f = line.split()
@@ -172,6 +172,7 @@ if [ "$MODE" = full ]; then
   step e2e-tui-paste-dropdown "${CLEAN[@]}" python3 tests/e2e_tui_paste_dropdown.py "$TARGET"
   step e2e-tui-pick-search "${CLEAN[@]}" python3 tests/e2e_tui_pick_search.py "$TARGET"
   step e2e-tui-keys "${CLEAN[@]}" python3 tests/e2e_tui_keys.py "$TARGET"
+  step e2e-workspace-tabs "${CLEAN[@]}" python3 tests/e2e_workspace_tabs.py "$TARGET"
   step e2e-herdr-drift "${CLEAN[@]}" python3 tests/e2e_herdr_drift.py "$TARGET" --receipt "$LOGS/herdr-drift-receipt.json"
   step e2e-scale-herdr scale_probe
   step e2e-tui-smoke "${CLEAN[@]}" bash tests/e2e_tui_smoke.sh "$TARGET/debug/vqro"

@@ -449,3 +449,17 @@ Human decisions: adapters run as extensions; tmux only as a private server; ever
 - Regressions: `tests/extension_lifetime.rs` (red on the old main), `tests/commit_off_lock.rs` (queued versus active
   writer retirement), `tests/provider_wire.rs` (reason fidelity, all effect outcomes, administrative forget), and
   `src/ext_log.rs` (bounded rotation across overlapping writers). All tests use private fixtures, no model calls.
+
+## Workspaces own their tabs (2026-11-19)
+
+Human decision: each workspace has its own tabs; one shared current workspace across windows for now.
+- Each workspace folder (and each git worktree) has its own layout `layout/ws-<id>` (id from the folder's real
+  path), created on first open with one shell there and selected through `workspace/active`. `main` keeps
+  terminals not in a workspace. Removing a workspace removes its layouts and their terminal views, never programs.
+- Generic layout settings `doc/layout/<name>` = `{cwd?, title?}` (`core-protocol.md`, Workspace): `tabs.open`,
+  `panes.split` and `pi.new` start in the layout's folder; they never read the workspaces extension.
+- New layouts keep the active layout's panels around the tabs (the sidebar); `sidebar.toggle` applies to every
+  layout. The sidebar lists each workspace's tabs, and other layouts (all of them with workspaces off); a click
+  switches. Prefix `w` (tmux profile `s`), a tab-bar menu item and a status-bar segment open the switcher.
+- Tests: `tests/test_workspace_tabs.py`, private e2e `tests/e2e_workspace_tabs.py` (in `check.sh full`).
+- Per-window active workspace (later): see the report; switching goes through one function per extension.
