@@ -297,7 +297,7 @@ have no chooser checkbox. Open: the exact `provider.relay` mapping.
 ## D22. The core endpoint is opaque and owner-only; stopping the core is a protocol request (2026-11-17, CONFIRMED)
 
 > **Confirmed by the human, 2026-11-17; binding.** Applies D12 to two contract points found in the
-> portability audit (`~/.local/share/herdr/scratch/prim-independent-review/portability-audit.md`, static, main 267a45a).
+> portability audit (`<private-notes>`, static, main 267a45a).
 
 **Decision.**
 - **Endpoint.** `PRIM_SOCKET` names an opaque local endpoint: an ordered byte stream per connection, reachable only by
@@ -377,6 +377,36 @@ own: offline SPDX policy and generated notices cover every Cargo metadata packag
 unbuilt optional, build, dev and target-specific packages (not a claim that all are shipped). Original notices are retained; missing archive
 texts use clearly labelled standard text with actual declared metadata, never invented copyright holders.
 The explicit dependency allowlist is documented in CONTRIBUTING.md; changes require maintainer approval.
+
+## D26. Two agent tiers; backends keep agents alive, integration is optional (2026-11-18, CONFIRMED)
+
+**Decision.**
+1. **Terminal agents (default, every CLI agent).** A CLI agent runs in a backend terminal as standard, with its own
+   interactive UI in the pane; the backend keeps it alive (D14). vqro needs no per-agent process for it. Integration is
+   optional and comes from extensions on either side: a vqro-side extension using public primitives (status from
+   OSC 7501 carried by the backend, `terminal.input` for actions) and/or a plugin/hooks inside the agent (e.g. a Pi
+   extension, Claude Code hooks) that reports structured state using the existing runtime-token contract.
+2. **Headless agents (opt-in, deeper).** For runtimes with an open protocol that can run headless (Pi / Pi durable and
+   similar), vqro provides the interface (prompt, steer, abort, queues, requests). Not every agent needs this tier.
+   Because nearly all headless protocols are stdio, a small co-located integration process is still required; it runs
+   in the agent's terminal on the agent's host (so it survives vqro restarts and works remotely) and stays out of the
+   core.
+3. **Language of headless bridges.** Native (Rust, on `src/provider_client.rs`, like `vqro-herdr`/`vqro-tmux`), not
+   Python, for memory/CPU at scale and platform reach. The Python provider SDK stays for extension authors and as the
+   second implementation of the provider contract. No generic multi-runtime bridge until a second headless runtime.
+
+**Why.** Lifecycle is already the backend's job; the bridge exists only for integration. Measured (bridge review,
+2026-11-18): RPC through the backend PTY breaks (echo, CRLF, ~4 KiB line truncation, stderr mixing, ConPTY
+re-rendering); at 200 agents Python bridges use ~2.6 GB private memory (Rust sketch ~57 MB); idle CPU was fixable
+(114% -> 0% after event-driven idle). herdr already ships the tier-1 pattern (agent-side state reporting).
+
+**Consequences.**
+- Now: Python bridge hardened (isolated imports, no PYTHONPATH/supervision leak into the agent, event-driven idle).
+- After hardening: tier-1 MVP as extensions (OSC 7501 status, optional in-agent plugin); reachability for agent-side
+  plugins on other hosts/WSL follows D23 (neutral, no backend-specific transport).
+- With the platform work: Rust `vqro-bridge-pi` replacing the Python bridge (~6-8 h); bring the Rust provider SDK to
+  parity (resume token, error data, dispatched).
+- Evidence: the bridge language review (2026-11-18, scratch), `docs/research/bridge-p2.md`.
 
 ## D27. Project name: vqro (2026-11-18, CONFIRMED)
 
