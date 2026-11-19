@@ -12,6 +12,7 @@ import time
 import uuid
 
 from coordination_store import StoreError, encoded
+from coordination_archive import export as export_archive
 from coordination_policy import Policy, PolicyError, QuotaLimits, check_admission, bounded_page, FairQueue
 
 OPEN = {"recorded", "held", "claimed", "unknown"}
@@ -63,10 +64,11 @@ class Working:
 
 class Coordinator:
     def __init__(self, store, *, config=None, resources=None, invoke=None, config_apply=None,
-                 clock=None, core_epoch="fixture-core", owner_incarnation=None, wake=None):
+                 clock=None, core_epoch="fixture-core", owner_incarnation=None, wake=None, providers=None):
         self.store = store
         self.config = config or (lambda: {})
         self.resources = resources or (lambda: {})
+        self.providers = providers or (lambda: {})
         self.invoke = invoke or (lambda target, op, args, deadline_ms: {"outcome": "indeterminate", "error": {"kind": "unavailable"}})
         self.config_apply = config_apply
         self.clock = clock or (lambda: int(time.time() * 1000))
@@ -74,6 +76,7 @@ class Coordinator:
         self.control_epoch = core_epoch + ":" + (owner_incarnation or nonce("owner:"))
         self.lock = threading.RLock()
         self.permits = set()
+        self.attention = {}
         self.current = True
         self.fair = FairQueue()
         self._boot()
@@ -85,7 +88,11 @@ class Coordinator:
         return {key[6:]: row["value"] for key, row in self.store.snapshot().items() if key.startswith("agent/")}
 
     def records(self):
-        return [row["value"] for key, row in self.store.snapshot().items() if key.startswith("message/")]
+        records = [row["value"] for key, row in self.store.snapshot().items() if key.startswith("message/")]
+        for record in records:
+            if record["delivery"] in self.attention:
+                record.update(state="unknown", reason=self.attention[record["delivery"]])
+        return records
 
     def _boot(self):
         # Read old state before changing it. A failed recovery write leaves service unavailable.
@@ -93,7 +100,7 @@ class Coordinator:
         for offset in range(0, len(state), 60):
             work = Working(self)
             for key, row in list(state.items())[offset:offset + 60]:
-                if key.startswith("message/") and row["value"].get("state") == "claimed":
+                if key.startswith(("message/", "external/")) and row["value"].get("state") == "claimed":
                     record = row["value"]
                     record.update(state="unknown", reason="owner_restarted")
                     work.put(key, record)
@@ -192,6 +199,8 @@ class Coordinator:
             if archived:
                 raise CoordinationError("archived", "delivery is archived", **archived)
             raise CoordinationError("not_found", "unknown delivery; absence is not proof of no effect")
+        if delivery in self.attention:
+            row.update(state="unknown", reason=self.attention[delivery])
         return row
 
     def _pending_access(self, record, policy, principal):
@@ -214,11 +223,7 @@ class Coordinator:
 
     def send(self, args, context):
         def admit(work, policy):
-            normalized = policy.validate_send(args)
             principal = context["principal"]
-            address = args.get("to")
-            agent = policy.resolve_target(address if isinstance(address, str) else address.get("agent"))
-            policy.require(principal, "send:" + (args.get("strategy") or normalized["mode"]), agent)
             submission = args.get("submission")
             if not isinstance(submission, str) or len(submission.encode()) > 256:
                 raise CoordinationError("invalid", "submission must be a bounded caller-chosen id")
@@ -227,6 +232,12 @@ class Coordinator:
                 if prior.get("intent") != digest({key: value for key, value in args.items() if key != "op"}):
                     raise CoordinationError("conflict", "submission id reused for different intent")
                 return {"state": prior["state"], "delivery": prior["delivery"]}
+            normalized = policy.validate_send(args)
+            address = args.get("to")
+            if not isinstance(address, (str, dict)):
+                raise CoordinationError("invalid", "send needs an exact address or readable handle")
+            agent = policy.resolve_target(address if isinstance(address, str) else address.get("agent"))
+            policy.require(principal, "send:" + (args.get("strategy") or normalized["mode"]), agent)
             if not submission.startswith(work.get("meta")["window_epoch"] + ":"):
                 raise CoordinationError("expired_operation", "submission outside current operation window")
             records = self.records()
@@ -239,8 +250,7 @@ class Coordinator:
             waiting = [r for r in records if r["state"] in PENDING and r["from"]["principal"] == principal and r["to"]["agent"] == agent and r["delivery"] != supersedes]
             if waiting and not args.get("send_new", False):
                 raise CoordinationError("pending_exists", "update waiting message or explicitly send another", deliveries=[r["delivery"] for r in waiting[:16]])
-            occupancy = {key: row for key, row in work.rows.items() if not key.startswith("message/")}
-            check_admission(records, principal, agent, normalized["content"], reserved_bytes=encoded(occupancy), reserved_records=len(occupancy), replaces=supersedes)
+            check_admission(records, principal, agent, normalized["content"], reserved_bytes=encoded(work.rows), reserved_records=len(work.rows), replaces=supersedes)
             resource = self.resources().get(agent, {})
             native = (resource.get("data") or {}).get("agent") or {}
             session = native.get("session") or {}
@@ -261,7 +271,8 @@ class Coordinator:
             origin = {"principal": principal, "actor": context.get("actor", principal), "kind": context.get("kind", "tool")}
             if context.get("agent"):
                 origin["agent"] = context["agent"]
-            record = dict(normalized, v=0, delivery=delivery, submission=submission, to=target, **{"from": sender}, origin=origin,
+            payload = {key: normalized[key] for key in ("mode", "content", "expires_at_ms") if key in normalized}
+            record = dict(payload, v=0, delivery=delivery, submission=submission, to=target, **{"from": sender}, origin=origin,
                           state="held", reason="paused", held_by="vqro", order=meta["order"], attempt=None, result=None,
                           intent=digest({key: value for key, value in args.items() if key != "op"}), created_ms=self.clock(), failures=0, handed_over_from=None)
             for key in ("guard", "quoted", "render", "strategy", "follow_current_session", "reply_to", "thread", "retry_of", "supersedes", "key", "correlation"):
@@ -400,6 +411,10 @@ class Coordinator:
             return "stale_guard"
         if guard.get("run") is not None and guard["run"] != native.get("run"):
             return "stale_guard"
+        if any(prior["state"] == "unknown" and prior["to"]["agent"] == agent
+               and prior["from"]["principal"] == record["from"]["principal"]
+               and prior["mode"] == record["mode"] and prior["order"] < record["order"] for prior in self.records()):
+            return "ordering_unknown"
         right = "send:" + (record.get("strategy") or record["mode"])
         if not policy.allowed(record["from"]["principal"], right, agent):
             return "no_grant"
@@ -542,7 +557,7 @@ class Coordinator:
                 # Persist each composition step before issuing it. A restart never runs a tail.
                 work = Working(self)
                 now = self._record(work, record["delivery"])
-                now["attempt"]["steps"] = copy.deepcopy(outcomes) + [{"op": op, "outcome": "unknown"}]
+                now["attempt"]["steps"] = self._compact_steps(outcomes) + [{"op": op, "outcome": "unknown"}]
                 work.put("message/" + record["delivery"], now)
                 work.commit(control=True)
             try:
@@ -565,6 +580,22 @@ class Coordinator:
                 "key": record.get("key"), "guard": dict(record.get("guard") or {}, session=record["attempt"]["session"]),
                 "cause": record.get("cause"), "correlation": record.get("correlation")}
 
+    @staticmethod
+    def _compact(native, operation=None):
+        data = native.get("data") or {}
+        receipt = data.get("receipt", native.get("receipt", {})) if isinstance(data, dict) else {}
+        error = native.get("error") or {}
+        compact = {"outcome": native.get("outcome", "indeterminate"), "stage": receipt.get("stage") if isinstance(receipt, dict) else None,
+                   "error_kind": error.get("kind") if isinstance(error, dict) else None, "native_op": operation,
+                   "bytes": encoded(native), "sha256": digest(native), "incomplete": True}
+        if encoded(compact) > 1024:
+            raise CoordinationError("too_large", "compact outcome exceeds its 1 KiB reservation")
+        return compact
+
+    def _compact_steps(self, steps):
+        return [{"op": step["op"], "outcome": step["outcome"], "native": self._compact(step["native"], step["op"])}
+                for step in steps]
+
     def _finish_attempt(self, original, outcomes, native, *, partial):
         with self.lock:
             if not self.current:
@@ -575,11 +606,10 @@ class Coordinator:
                 return {"state": "unknown", "reason": "attempt_replaced"}
             result = {"state": "partial" if partial else native.get("outcome", "unknown"),
                       "attempt": {"id": record["attempt"]["id"], "steps": outcomes}, "native": native}
-            if encoded(result) > MAX_NATIVE_RESULT:
-                # Keep the durable claim; no outcome can be invented from an overlarge reply.
-                raise CoordinationError("too_large", "native result exceeds reserved evidence bound; inspect claimed attempt")
-            record["attempt"]["steps"] = copy.deepcopy(outcomes)
-            record["result"] = result
+            compact_steps = self._compact_steps(outcomes)
+            record["attempt"]["steps"] = compact_steps
+            record["result"] = dict(result, native=self._compact(native, outcomes[-1]["op"] if outcomes else None),
+                                    attempt={"id": record["attempt"]["id"], "steps": compact_steps})
             outcome = native.get("outcome")
             kind = (native.get("error") or {}).get("kind")
             if outcome == "indeterminate" or partial:
@@ -597,7 +627,13 @@ class Coordinator:
             else:
                 record.update(state=outcome, reason=None)
             work.put("message/" + record["delivery"], record)
-            work.commit(control=True)
+            try:
+                work.commit(control=True)
+            except StoreError:
+                self.attention[record["delivery"]] = "outcome_persistence_failed"
+                self.permits.discard(record["to"]["agent"])
+                raise
+            self.attention.pop(record["delivery"], None)
             return copy.deepcopy(result)
 
     def take(self, args, context):
@@ -674,7 +710,9 @@ class Coordinator:
             attempt = record.get("attempt") or {}
             consumer = args.get("consumer", attempt.get("consumer"))
             control = work.get("control")
-            if (args.get("claim") != attempt.get("claim") or consumer != attempt.get("consumer")
+            if (not isinstance(attempt.get("consumer"), str) or not attempt["consumer"]
+                    or attempt.get("at") not in ("turn", "settle", "idle", "tool")
+                    or args.get("claim") != attempt.get("claim") or consumer != attempt.get("consumer")
                     or control["consumers"].get(agent) != consumer or attempt.get("control_epoch") != self.control_epoch):
                 raise CoordinationError("conflict", "stale claim or consumer")
             stage = args.get("stage")
@@ -713,3 +751,253 @@ class Coordinator:
             work.put("message/" + record["delivery"], record)
             return {"state": "resolved", "delivery": record["delivery"], "native": "not_invoked"}
         return self._mutate("inbox.resolve", args, context, judge, control=True)
+
+    def _external(self, command, args, context, prepare, execute):
+        """Write one effect intent before external I/O; replay observes, never invokes."""
+        key = "external/" + digest([context["principal"], args.get("op")])
+        def begin(work, policy):
+            intent = prepare(work, policy)
+            work.put(key, {"state": "claimed", "command": command, "intent": intent,
+                           "principal": context["principal"], "control_epoch": self.control_epoch,
+                           "attempt": {"id": nonce("a:"), "steps": []}})
+            return {"state": "claimed", "result_ref": key}
+        result = self._mutate(command, args, context, begin, control=True)
+        if result.get("historical"):
+            return result
+        with self.lock:
+            row = self.store.get(key)
+            if not self.current or row["value"]["control_epoch"] != self.control_epoch:
+                return {"state": "unknown", "reason": "owner_replaced", "window": self.window()}
+            intent = row["value"]["intent"]
+        try:
+            native = execute(intent)
+        except Exception as error:
+            native = {"outcome": "indeterminate", "error": {"kind": getattr(error, "kind", "transport"), "message": str(error)[:1024]}}
+        with self.lock:
+            if not self.current:
+                return {"state": "unknown", "reason": "owner_replaced"}
+            work = Working(self)
+            record = work.get(key)
+            outcome = native.get("outcome", "accepted")
+            record.update(state="unknown" if outcome == "indeterminate" else outcome, native=self._compact(native, command))
+            record["attempt"]["steps"] = [{"op": command, "outcome": outcome}]
+            work.put(key, record)
+            work.commit(control=True)
+            return dict(record, native=native, window=self.window())
+
+    def config_action(self, command, args, context):
+        def prepare(work, policy):
+            principal = context["principal"]
+            if command == "names":
+                ops = policy.names_ops(principal, args.get("handle"), args.get("agent"), expect=args.get("expect"), endpoint_principal=args.get("endpoint_principal"))
+            elif command == "membership":
+                ops = policy.membership_ops(principal, args.get("agent"), args.get("project"), args.get("reports_to"), expect=args.get("expect"))
+            elif command == "grants":
+                ops = policy.grant_ops(principal, args.get("id"), args.get("value"), expect=args.get("expect"))
+            else:
+                raise CoordinationError("invalid", "unknown configuration operation")
+            return {"ops": ops}
+        def execute(intent):
+            if self.config_apply is None:
+                return {"outcome": "rejected", "error": {"kind": "unsupported"}}
+            result = self.config_apply(intent["ops"], context)
+            return {"outcome": "accepted", "data": result}
+        return self._external("coord." + command, args, context, prepare, execute)
+
+    def control(self, args, context):
+        action = args.get("action")
+        actions = {"interrupt": ("interrupt", "agent.interrupt"), "respond": ("answer", "agent.respond"),
+                   "queue": ("queue", "agent.queue"), "session": ("session", "agent.session"),
+                   "configure": ("configure", "agent.configure"), "command": ("command", "agent.command"),
+                   "object": ("command", "agent.object"), "stop": ("stop", "agent.stop"), "retire": ("stop", None)}
+        if action not in actions:
+            raise CoordinationError("invalid", "unknown control action")
+        right, operation = actions[action]
+        def prepare(work, policy):
+            agent = policy.resolve_target(args.get("target"))
+            policy.require(context["principal"], right, agent)
+            resource, native = self._facts(agent)
+            if not resource:
+                raise CoordinationError("unavailable", "target is absent")
+            self._ensure_agent(work, agent, policy)
+            if action in ("stop", "retire"):
+                self.permits.discard(agent)
+                control = work.get("control")
+                control["gates"][agent] = False
+                control["revision"] += 1
+                work.put("control", control)
+            if action == "retire":
+                stone = work.get("agent/" + agent)
+                stone.update(lifecycle="retired", retired={"by": context["principal"], "reason": (args.get("args") or {}).get("reason")})
+                work.put("agent/" + agent, stone)
+            method, target = operation, agent
+            native_args = dict(args.get("args") or {}, v=0)
+            caps = self._caps(resource, native)
+            if action == "stop" and native_args.pop("how", "graceful") == "host_kill":
+                host = native.get("host") or {}
+                host_resource = self.resources().get(host.get("resource"))
+                host_caps = self.providers().get((host_resource or {}).get("provider"), {}).get("capabilities", {})
+                if (not host_resource or host_resource.get("incarnation") != host.get("incarnation")
+                        or "terminal.kill" not in host_caps):
+                    raise CoordinationError("unsupported", "no declared exact host termination route; never escalate silently")
+                if args.get("confirm_host") != host.get("resource"):
+                    raise CoordinationError("conflict", "inspect and explicitly confirm every endpoint served by this host")
+                method, target, native_args = "terminal.kill", host["resource"], {}
+            elif operation is not None and operation not in caps:
+                raise CoordinationError("unsupported", "native control is undeclared")
+            return {"agent": agent, "target": target, "incarnation": resource.get("incarnation"), "op": method, "args": native_args}
+        def execute(intent):
+            if intent["op"] is None:
+                return {"outcome": "accepted", "data": {"administrative": "retired", "execution": "unknown"}}
+            resource, _ = self._facts(intent["agent"])
+            if not resource or resource.get("incarnation") != intent["incarnation"]:
+                return {"outcome": "rejected", "error": {"kind": "stale"}}
+            return self.invoke(intent["target"], intent["op"], intent["args"], 5000)
+        return self._external("coord.control", args, context, prepare, execute)
+
+    def handover(self, args, context):
+        if args.get("action") == "stage":
+            return self._handover_stage(args, context)
+        def transfer(work, policy):
+            if args.get("action") == "complete":
+                plan = work.get("plan/" + str(args.get("plan")))
+                if not plan:
+                    raise CoordinationError("not_found", "unknown handover plan")
+                destination = plan["to"]
+                policy.require(context["principal"], "handover", destination["agent"])
+                resource, native = self._facts(destination["agent"])
+                if not resource or resource.get("incarnation", "") != destination["incarnation"] or native.get("lifecycle") == "ended":
+                    raise CoordinationError("conflict", "successor changed or ended")
+                if any(stage["state"] != "accepted" for stage in plan["stages"]):
+                    raise CoordinationError("conflict", "handover still has unfinished or uncertain ordinary stages")
+                for delivery in plan["deliveries"]:
+                    record = self._record(work, delivery)
+                    if record.get("handover_plan") != args["plan"] or record["state"] not in PENDING:
+                        raise CoordinationError("conflict", "handover record changed")
+                    record.pop("handover_plan")
+                    record["reason"] = "paused" if destination["agent"] not in self.permits else "awaiting_route"
+                    work.put("message/" + delivery, record)
+                plan["state"] = "completed"
+                work.put("plan/" + args["plan"], plan)
+                return {"state": "completed", "plan": args["plan"], "_after": lambda: self._wake(destination["agent"])}
+            source, destination = args.get("from"), args.get("to")
+            if not isinstance(source, dict) or not isinstance(destination, dict):
+                raise CoordinationError("invalid", "handover needs exact predecessor and successor")
+            for target in (source, destination):
+                if not isinstance(target.get("agent"), str) or "incarnation" not in target:
+                    raise CoordinationError("invalid", "handover must pin exact agent and incarnation")
+                policy.require(context["principal"], "handover", target["agent"])
+            resource, native = self._facts(source["agent"])
+            stone = work.get("agent/" + source["agent"], {})
+            replaced = resource is not None and resource.get("incarnation", "") != source["incarnation"]
+            if not replaced and native.get("lifecycle") != "ended" and stone.get("lifecycle") not in ("retired", "ended"):
+                raise CoordinationError("conflict", "predecessor must be ended, retired or demonstrably replaced")
+            successor, _ = self._facts(destination["agent"])
+            if not successor or successor.get("incarnation", "") != destination["incarnation"]:
+                raise CoordinationError("conflict", "successor identity changed")
+            deliveries = args.get("deliveries")
+            if not isinstance(deliveries, list) or len(deliveries) > 58 or len(set(deliveries)) != len(deliveries):
+                raise CoordinationError("too_large", "handover exact list has a 58-record atomic bound")
+            stages = []
+            for kind in ("bind", "membership", "grants"):
+                supplied = args.get(kind) or []
+                if isinstance(supplied, dict):
+                    supplied = [supplied]
+                if not isinstance(supplied, list) or len(supplied) > 16:
+                    raise CoordinationError("too_large", "handover stage list exceeds bound")
+                for stage in supplied:
+                    stages.append({"kind": {"bind": "names", "membership": "membership", "grants": "grants"}[kind],
+                                   "args": copy.deepcopy(stage), "state": "pending"})
+            if len(stages) > 16:
+                raise CoordinationError("too_large", "handover has too many ordinary stages")
+            plan_id = nonce("handover:")
+            for delivery in deliveries:
+                record = self._record(work, delivery)
+                if record["state"] not in PENDING or record["to"]["agent"] != source["agent"] or record["to"]["incarnation"] != source["incarnation"]:
+                    raise CoordinationError("too_late", "handover can move only listed exact pending intent")
+                record["handed_over_from"] = copy.deepcopy(record["to"])
+                record["to"].update(agent=destination["agent"], incarnation=destination["incarnation"])
+                record.update(state="held", reason="handover_pending", handover_plan=plan_id)
+                work.put("message/" + delivery, record)
+            self.permits.discard(source["agent"])
+            self._ensure_agent(work, destination["agent"], policy)
+            plan = {"state": "pending", "from": source, "to": destination, "deliveries": deliveries, "stages": stages,
+                    "principal": context["principal"], "created_ms": self.clock()}
+            if encoded(plan) > 4096:
+                raise CoordinationError("too_large", "handover plan exceeds 4 KiB; inspect a smaller plan")
+            work.put("plan/" + plan_id, plan)
+            return {"state": "held", "reason": "handover_pending", "plan": plan_id}
+        return self._mutate("coord.handover", args, context, transfer, control=True)
+
+    def _handover_stage(self, args, context):
+        index = args.get("stage")
+        with self.lock:
+            plan_row = self.store.get("plan/" + str(args.get("plan")))
+            if not plan_row or type(index) is not int or not 0 <= index < len(plan_row["value"]["stages"]):
+                raise CoordinationError("invalid", "inspect the handover stage first")
+            plan = plan_row["value"]
+            self.policy().require(context["principal"], "handover", plan["to"]["agent"])
+            stage = plan["stages"][index]
+            if any(before["state"] != "accepted" for before in plan["stages"][:index]):
+                raise CoordinationError("conflict", "previous handover stage unfinished")
+            if stage["state"] == "accepted":
+                return {"state": "accepted", "plan": args["plan"], "stage": index, "historical": True}
+        # config_action persists its own attempt before the ordinary write. The same
+        # caller op inspects it after loss; it cannot overwrite a newer CAS binding.
+        result = self.config_action(stage["kind"], dict(stage["args"], op=args["op"]), context)
+        with self.lock:
+            work = Working(self)
+            current = work.get("plan/" + args["plan"])
+            current["stages"][index]["state"] = result["state"]
+            work.put("plan/" + args["plan"], current)
+            work.commit(control=True)
+        return result
+
+    def lifecycle_sweep(self, *, forget=None, grace_ms=60000):
+        """Observe native evidence; silence creates unavailable, never ended."""
+        forgotten = []
+        with self.lock:
+            for agent, old in list(self.tombstones().items()):
+                resource, native = self._facts(agent)
+                stone = copy.deepcopy(old)
+                if stone.get("lifecycle") == "retired":
+                    continue
+                if native.get("lifecycle") == "ended":
+                    stone.update(lifecycle="ended", last_evidence="native_ended")
+                    self.permits.discard(agent)
+                elif not resource or resource.get("available") is False:
+                    since = stone.setdefault("disconnected_since_ms", self.clock())
+                    stone["lifecycle"] = "unavailable" if self.clock() - since >= grace_ms else "disconnected"
+                    if resource and stone["lifecycle"] == "unavailable":
+                        forgotten.append((agent, resource.get("incarnation")))
+                else:
+                    stone.pop("disconnected_since_ms", None)
+                    stone["lifecycle"] = native.get("lifecycle", "live")
+                linked = [r for r in self.records() if r["to"]["agent"] == agent]
+                stone["held"] = sum(r["state"] in PENDING for r in linked)
+                stone["unknown"] = sum(r["state"] in ("unknown", "claimed", "partial") for r in linked)
+                member = self.config().get("doc/agents/members/" + agent)
+                stone["membership_ref"] = {"rN": agent, "revision": member["version"]} if member else None
+                stone["handles"] = sorted(key[len("doc/agents/names/"):] for key, row in self.config().items()
+                                          if key.startswith("doc/agents/names/") and row["value"].get("agent") == agent)[:4]
+                if stone != old:
+                    work = Working(self)
+                    work.put("agent/" + agent, stone)
+                    work.commit(control=True)
+            # Only evidence-free, unreferenced tombstones are eligible for pruning.
+            candidates = sorted((row for row in self.tombstones().values() if row["lifecycle"] in ("unavailable", "ended")
+                                 and not row["held"] and not row["unknown"] and not row["membership_ref"]),
+                                key=lambda row: row["last_seen_ms"])
+            plans = [row["value"] for key, row in self.store.snapshot().items() if key.startswith("plan/") and row["value"]["state"] != "completed"]
+            for stone in candidates:
+                if any(stone["agent"] in (plan["from"]["agent"], plan["to"]["agent"]) for plan in plans):
+                    continue
+                # Keep a useful bounded tail; pressure never drops protected evidence.
+                if len(self.tombstones()) <= 256:
+                    break
+                row = self.store.get("agent/" + stone["agent"])
+                self.store.apply([{"op": "delete", "key": "agent/" + stone["agent"], "expect": row["version"]}], control=True)
+        if forget:
+            for agent, incarnation in forgotten:
+                forget(agent, incarnation)
+        return forgotten

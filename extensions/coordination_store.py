@@ -8,7 +8,7 @@ import copy
 import json
 import threading
 
-DOMAIN = "coordination"
+DOMAIN = "coord"
 DOMAIN_BYTES = 8 * 1024 * 1024  # C1 must qualify this allocation; never shard owners.
 DOMAIN_RECORDS = 1024
 CONTROL_RESERVE = 0.10
@@ -98,7 +98,7 @@ class OperationalStore:
             raise StoreError(kind, str(error)) from error
 
     def register(self):
-        result = self._call("operational.register", {"name": self.domain})
+        result = self._call("operational.register", {"name": self.domain, "bytes": DOMAIN_BYTES})
         # Size negotiation is intentionally isolated here while C1 pins the API.
         self.snapshot()
         return result

@@ -244,6 +244,123 @@ class EngineTests(unittest.TestCase):
         self.assertIsNone(self.engine.dispatch_one())
         self.assertEqual(self.ledger, [])
 
+    def test_expired_submission_lookup_precedes_dynamic_validation(self):
+        op = self.op()
+        args = {"op": op, "submission": op, "to": "r1", "mode": "boundary", "expires_at_ms": 2000,
+                "content": [{"type": "text", "text": "once"}]}
+        sent = self.engine.send(args, OWNER)
+        self.now = 3000
+        repeated = self.engine.send(dict(args, op=self.op()), OWNER)
+        self.assertEqual(repeated["delivery"], sent["delivery"])
+        self.assertEqual(len(self.engine.records()), 1)
+
+    def test_control_is_available_while_inbox_is_paused_and_replay_never_invokes(self):
+        self.send()
+        args = {"op": self.op(), "target": "r1", "action": "interrupt", "args": {}}
+        result = self.engine.control(args, OWNER)
+        self.assertEqual(result["state"], "accepted")
+        self.assertEqual(len(self.ledger), 1)
+        self.engine.control(args, OWNER)
+        self.assertEqual(len(self.ledger), 1)
+        self.assertEqual(self.engine.permits, set())
+
+    def test_retire_is_administrative_not_end_evidence(self):
+        sent = self.send()
+        self.resume()
+        self.engine.control({"op": self.op(), "target": "r1", "action": "retire", "args": {"reason": "manual"}}, OWNER)
+        self.assertEqual(self.ledger, [])
+        self.assertEqual(self.engine.tombstones()["r1"]["lifecycle"], "retired")
+        self.assertEqual(self.resources["r1"]["data"]["agent"]["lifecycle"], "live")
+        self.assertEqual(self.engine.get(sent["delivery"])["state"], "held")
+
+    def test_handover_pending_cannot_dispatch_until_complete_and_never_opens_gate(self):
+        sent = self.send()
+        self.resources["r1"]["data"]["agent"]["lifecycle"] = "ended"
+        self.resources["r2"] = resource("r2")
+        self.resume()
+        transferred = self.engine.handover({"op": self.op(), "from": {"agent": "r1", "incarnation": "i1"},
+                                            "to": {"agent": "r2", "incarnation": "i1"}, "deliveries": [sent["delivery"]]}, OWNER)
+        self.assertEqual(self.engine.get(sent["delivery"])["reason"], "handover_pending")
+        self.engine.dispatch_one("r2")
+        self.assertEqual(self.ledger, [])
+        self.engine.handover({"op": self.op(), "action": "complete", "plan": transferred["plan"]}, OWNER)
+        self.engine.dispatch_one("r2")
+        self.assertEqual(len(self.ledger), 1)
+        self.assertEqual(self.ledger[0][0], "r2")
+        self.assertEqual(self.engine.get(sent["delivery"])["handed_over_from"]["agent"], "r1")
+
+    def test_live_agent_cannot_be_silently_handed_over(self):
+        sent = self.send()
+        self.resources["r2"] = resource("r2")
+        with self.assertRaises(PolicyError):
+            self.engine.handover({"op": self.op(), "from": {"agent": "r1", "incarnation": "i1"},
+                                  "to": {"agent": "r2", "incarnation": "i1"}, "deliveries": [sent["delivery"]]}, OWNER)
+        self.assertEqual(self.engine.get(sent["delivery"])["to"]["agent"], "r1")
+
+    def test_native_claim_cannot_be_released_by_null_consumer(self):
+        sent = self.send()
+        self.resume()
+        def try_release(target, op, args, deadline):
+            self.ledger.append((target, op, args))
+            claim = self.engine.get(sent["delivery"])["attempt"]["claim"]
+            with self.assertRaises(PolicyError) as caught:
+                self.engine.report({"op": self.op(), "delivery": sent["delivery"], "claim": claim, "stage": "released"}, OWNER)
+            self.assertEqual(caught.exception.kind, "conflict")
+            return {"outcome": "accepted", "data": {"receipt": {"stage": "admitted"}}}
+        self.engine.invoke = try_release
+        self.engine.dispatch_one()
+        self.engine.dispatch_one()
+        self.assertEqual(len(self.ledger), 1)
+
+    def test_unknown_predecessor_blocks_only_same_sender_target_lane(self):
+        first = self.send("start")
+        second = self.send("start", send_new=True)
+        boundary = self.send("boundary", send_new=True)
+        row = self.store.get("message/" + first["delivery"])
+        value = row["value"]
+        value["state"] = "unknown"
+        self.store.apply([{"op": "set", "key": "message/" + first["delivery"], "value": value, "expect": row["version"]}])
+        self.resume()
+        self.engine.dispatch_one()
+        self.assertEqual(self.ledger[0][2]["delivery"], boundary["delivery"])
+        self.engine.dispatch_one()
+        self.assertEqual(len(self.ledger), 1)
+        self.assertEqual(self.engine.get(second["delivery"])["reason"], "ordering_unknown")
+
+    def test_large_native_result_is_live_unchanged_but_only_compact_evidence_persists(self):
+        sent = self.send()
+        self.resume()
+        native = {"outcome": "accepted", "data": {"receipt": {"stage": "admitted"}, "large": "x" * 100000}}
+        self.engine.invoke = lambda *args: copy.deepcopy(native)
+        reply = self.engine.dispatch_one()
+        self.assertEqual(reply["native"], native)
+        persisted = self.engine.get(sent["delivery"])
+        self.assertTrue(persisted["result"]["native"]["incomplete"])
+        self.assertEqual(persisted["result"]["native"]["bytes"], __import__("coordination_store").encoded(native))
+        self.assertNotIn("large", str(persisted["result"]))
+        self.assertLess(__import__("coordination_store").encoded(persisted["result"]["native"]), 1024)
+        self.assertEqual(len(persisted["result"]["native"]["sha256"]), 64)
+
+    def test_control_large_native_result_replay_is_explicitly_compact(self):
+        native = {"outcome": "accepted", "data": {"large": "q" * 50000}}
+        self.engine.invoke = lambda *args: copy.deepcopy(native)
+        args = {"op": self.op(), "target": "r1", "action": "interrupt", "args": {}}
+        first = self.engine.control(args, OWNER)
+        self.assertEqual(first["native"], native)
+        replay = self.engine.control(args, OWNER)
+        self.assertTrue(replay["native"]["incomplete"])
+        self.assertNotIn("large", str(replay["native"]))
+
+    def test_silence_becomes_unavailable_never_ended(self):
+        self.send()
+        self.resources["r1"]["available"] = False
+        self.engine.lifecycle_sweep()
+        self.assertEqual(self.engine.tombstones()["r1"]["lifecycle"], "disconnected")
+        self.now += 60001
+        forgotten = self.engine.lifecycle_sweep()
+        self.assertEqual(forgotten, [("r1", "i1")])
+        self.assertEqual(self.engine.tombstones()["r1"]["lifecycle"], "unavailable")
+
 
 if __name__ == "__main__":
     unittest.main()
