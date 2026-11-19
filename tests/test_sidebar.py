@@ -17,7 +17,7 @@ class CacheLock:
 
 class Extension:
     def __init__(self, *_, **__):
-        self.entries, self.live = {}, {}
+        self.entries, self.live, self.providers = {}, {}, {}
         self.resources = {"r1": {"argv": ["sh"], "state": "live", "status": {"state": "idle"}}}
         self.cache_lock, self.published, self.logs = CacheLock(), [], []
         self.hook, self.fail = None, False
@@ -71,12 +71,17 @@ class SidebarTests(unittest.TestCase):
         module = load(); ext = module["ext"]
         ext.resources = {
             "r1": {"id": "r1", "kind": "terminal", "argv": ["python3"], "state": "live"},
-            "r2": {"id": "r2", "kind": "agent", "name": "Other", "host": "r1", "state": "live", "available": False}}
-        ext.live["retention.agents"] = {"data": {"r2": {"forget_at": 1_800_000_000}}}
+            "r2": {"id": "r2", "kind": "agent", "name": "Other", "host": "r1", "state": "live", "available": False,
+                   "provider": "pi-1"}}
+        ext.providers = {"pi-1": {"connected": False, "since": 1_800_000_000_000}}
         agent = next(row for row in module["build"]() if row.get("args", {}).get("resource") == "r2")
         self.assertIn({"label": "Stop agent…", "command": "agents.stop", "args": {"resource": "r2"}}, agent["menu"])
-        self.assertEqual(agent["badges"][0], {"text": "disconnected", "style": "warn"})
-        self.assertTrue(agent["badges"][1]["text"].startswith("removing at "))
+        self.assertIn({"label": "Forget agent", "command": "agents.forget", "args": {"resource": "r2"}}, agent["menu"])
+        self.assertEqual(len(agent["badges"]), 1)
+        self.assertTrue(agent["badges"][0]["text"].startswith("unknown since "), agent["badges"])
+        ext.providers = {}
+        agent = next(row for row in module["build"]() if row.get("args", {}).get("resource") == "r2")
+        self.assertEqual(agent["badges"], [{"text": "unknown", "style": "warn"}])
         ext.resources["r1"]["state"] = "finished"
         agent = next(row for row in module["build"]() if row.get("args", {}).get("resource") == "r2")
         self.assertEqual(agent["badges"], [{"text": "ended", "style": "dim"}])

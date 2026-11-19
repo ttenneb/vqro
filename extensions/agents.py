@@ -4,12 +4,11 @@ import json
 from pathlib import Path
 import sys
 import threading
-import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from vqro_ext import Extension, VqroError, views_in
 from vqro_display import label
-from vqro_views import ended
+from vqro_views import ended, unknown_since
 
 EFFECTS = {"prompt": "Prompt", "steer": "Steer", "follow_up": "Follow-up", "abort": "Abort",
            "clear_queue": "Clear queue", "answer": "Answer pending request"}
@@ -43,8 +42,6 @@ def panel_key(key):
 
 # Owned per-agent derived views, longest prefix first ("agents-" would also match the others).
 OWNED_PREFIXES = ("view/agents-requests-", "view/agents-settings-", "view/agents-stop-", "view/agents-")
-# Live data the retention extension publishes about agents it is about to forget (optional).
-RETENTION = "retention.agents"
 
 
 def host_of(resources, r):
@@ -53,11 +50,10 @@ def host_of(resources, r):
     return host if host and host.get("kind") == "terminal" else None
 
 
-def removal_note(live, rid):
-    """When retention says it will forget this disconnected agent, as local clock time."""
-    pending = ((live.get(RETENTION) or {}).get("data") or {}).get(rid)
-    at = pending.get("forget_at") if isinstance(pending, dict) else None
-    return time.strftime("%H:%M:%S", time.localtime(at)) if isinstance(at, (int, float)) else None
+def unknown_badge(ext, r):
+    """Badge for an unavailable agent: "unknown since HH:MM" when the core says when it lost it."""
+    since = unknown_since(ext, r)
+    return {"text": "unknown since "+since if since else "unknown", "style": "warn"}
 
 
 class Agents:
@@ -71,7 +67,8 @@ class Agents:
                                 ("config", self.settings, "Agent settings and commands (popup)"),
                                 ("configure", self.configure, "Change an agent setting (args: id, value)"),
                                 ("command", self.command, "Run an agent command (args: name, text?)"),
-                                ("stop", self.stop, "Stop an agent: kill its bridge terminal and the runtime in it (asks first)")]:
+                                ("stop", self.stop, "Stop an agent: kill its bridge terminal and the runtime in it (asks first)"),
+                                ("forget", self.forget, "Forget an unavailable agent's cached facts (its process is not touched)")]:
             ext.command("agents."+name, title)(self.guarded(fn))
         for op, title in EFFECTS.items():
             fn = self.answer if op == "answer" else lambda args, op=op: self.effect(op, args)
@@ -170,6 +167,21 @@ class Agents:
         what = {"accepted": "kill accepted; the agent is removed once its terminal ends",
                 "observed": "terminal ended"}.get(outcome, outcome+"; watch the agent's status")
         self.ext.notify(label(f"Stop {name} {rid}: terminal {hid} {what}"), "ok" if outcome in ("accepted", "observed") else "warn")
+        return {**result, "client": {"close": True}}
+
+    def forget(self, args):
+        """Explicit request only: drop an unavailable agent's cached facts (core resource.forget_cached).
+
+        Nothing is sent to the runtime. If its bridge is alive and reconnects later, the agent shows up
+        again (possibly under a new id). The core rejects the call if the agent reconnected meanwhile.
+        """
+        self.ext.fresh()
+        r = self.agent(args, inspect=True)
+        rid, name = r["id"], label(r.get("name") or "Agent")
+        if r.get("available"):
+            raise VqroError(f"{name} {rid} is connected; Forget is only for unavailable agents (Stop ends a running one). Nothing changed.", "invalid")
+        result = self.ext.vqro.call("resource.forget_cached", {"resource": rid})
+        self.ext.notify(label(f"Forgot {name} {rid}: cached facts removed; nothing was sent to its runtime"), "ok")
         return {**result, "client": {"close": True}}
 
     def effect(self, op, args):
@@ -406,11 +418,12 @@ class Agents:
         host = host_of(self.ext.resources, r)
         if host is not None and ended(host):
             return f"Agent ended: its bridge terminal {host['id']} has finished, so it can't reconnect. Removing it."
-        at = removal_note(self.ext.live, r["id"])
-        source = f"its bridge (terminal {host['id']})" if host is not None else "its provider"
-        text = f"Agent unavailable: disconnected; displayed facts may be stale. Waiting for {source} to reconnect"
-        text += f" (vqro forgets it at {at} if it doesn't; the process is not touched)." if at else "."
-        return text
+        since = unknown_since(self.ext, r)
+        source = f"its bridge (terminal {host['id']}, still running)" if host is not None else "its provider"
+        when = f" since {since}" if since else ""
+        stop = f"Stop ends terminal {host['id']}; " if host is not None else ""
+        return (f"Agent unavailable: state unknown{when}; {source} disconnected and displayed facts may be stale. "
+                f"vqro keeps it until it reconnects. {stop}Forget removes only these facts (pane menu).")
 
     def list_agents(self, args):
         self.ext.fresh()
@@ -422,11 +435,13 @@ class Agents:
         rows = [{"text": label(r.get("name") or "Agent")+" "+r["id"], "description": status(r),
                  "command": "agents.show", "args": {"resource": r["id"]},
                  "badges": [{"text": "ended", "style": "dim"}] if ended(r) else
-                           [] if r.get("available") else [{"text": "disconnected", "style": "warn"}],
+                           [] if r.get("available") else [unknown_badge(self.ext, r)],
                  "menu": [{"label": "Show", "command": "agents.show", "args": {"resource": r["id"]}},
                           *([{"label": "Agent settings…", "command": "agents.config", "args": {"resource": r["id"]}}]
                             if self.has_settings(r) and r.get("available") else []),
-                          {"label": "Stop agent…", "command": "agents.stop", "args": {"resource": r["id"]}}]}
+                          {"label": "Stop agent…", "command": "agents.stop", "args": {"resource": r["id"]}},
+                          *([{"label": "Forget agent", "command": "agents.forget", "args": {"resource": r["id"]}}]
+                            if not r.get("available") and not ended(r) else [])]}
                 for r in self.ext.resources.values() if r.get("kind") == "agent"]
         count = len(rows)
         rows = rows[:128]
@@ -447,6 +462,9 @@ class Agents:
             entries["view/agents-stop-"+rid] = {"kind": "panel", "title": "Stop agent "+rid, "items": [{"type": "text", "text": "Agents extension is not running."}]}
             entries["menu/agents."+rid+".stop"] = {"where": "pane", "label": "Stop agent…", "command": "agents.stop",
                                                   "when": {"view": view(rid)}, "order": 190}
+            # Static (menus are workspace entries; no churn per disconnect): the command refuses connected agents.
+            entries["menu/agents."+rid+".forget"] = {"where": "pane", "label": "Forget agent (if unavailable)", "command": "agents.forget",
+                                                    "when": {"view": view(rid)}, "order": 191}
             for i, (op, title) in enumerate(EFFECTS.items()):
                 if not self.supported(r, op):
                     continue
@@ -552,13 +570,11 @@ class Agents:
             r = self.ext.resources.get(event["view"][6:])
             if r and r.get("kind") == "agent":
                 self.publish_panel(r)
-        elif kind == "view.content" and event.get("view") == RETENTION:
-            self.publish_panels([r for r in self.ext.resources.values() if r.get("kind") == "agent" and not r.get("available")])
 
 
 def main():
     ext = Extension("agents", event_types=["entries", "resource", "resource.removed", "provider", "view.content"],
-                    view_content={"prefixes": ["agent-"], "names": [RETENTION]})
+                    view_content={"prefixes": ["agent-"]})
     Agents(ext)
     ext.run()
 

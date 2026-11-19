@@ -1,9 +1,10 @@
-"""Opt-in private E2E: Stop agent, prompt removal of dead agents, closing the last tab or only pane.
+"""Opt-in private E2E: Stop agent, prompt removal of dead agents, unknown agents kept until Forget,
+closing the last tab or only pane.
 
 python3 tests/e2e_agent_stop.py --run --vqro /absolute/vqro --hc /absolute/herdr-core
 Reuses tests/pi_provider_e2e.py isolation: new user/network namespace, empty PATH, private HOME, state,
 sockets and herdr-core. Fake Pi and a fake non-Pi provider only; no model calls. Retention runs with a
-short grace (GRACE seconds) so "dead now" and "still waiting" are told apart by time.
+short grace (GRACE seconds): a stopped agent must go well inside it, an unknown one must outlive it.
 """
 import argparse
 import json
@@ -97,18 +98,31 @@ class StopE2E(base.E2E):
         rid = other['id']
         refused = self.call('command.invoke', {'name': 'agents.stop', 'args': {'resource': rid}}, allow_error=True)
         assert refused.returncode and "can't be stopped from vqro" in refused.stdout+refused.stderr, refused
+        connected = self.call('command.invoke', {'name': 'agents.forget', 'args': {'resource': rid}}, allow_error=True)
+        assert connected.returncode and 'is connected' in connected.stdout+connected.stderr, connected
         self.call('command.invoke', {'name': 'vqro.extension.disable', 'args': {'name': 'other-agent'}})
         start = time.monotonic()
         self.wait(lambda: self.resource(rid) and not self.resource(rid).get('available'), 'other agent disconnected')
-        pending = self.wait(lambda: self.snapshot()['live'].get('retention.agents', {}).get('data', {}).get(rid), 'retention deadline published')
-        panel = self.wait(lambda: 'forgets it at' in json.dumps(self.snapshot()['live'].get('agents-'+rid, {})) or None, 'panel names the deadline')
-        time.sleep(max(0, GRACE/2-(time.monotonic()-start)))
-        assert self.resource(rid) is not None, 'unexplained disconnect must keep its grace'
-        self.wait(lambda: self.resource(rid) is None, 'removed after the grace', timeout=GRACE+5)
-        waited = time.monotonic()-start
-        assert waited >= GRACE-1, waited
-        self.log.append({'unexplained_disconnect': 'PASS', 'agent': rid, 'forget_at': pending['forget_at'],
-                         'removed_after_s': round(waited, 2), 'grace_s': GRACE, 'panel_deadline': bool(panel)})
+        self.wait(lambda: 'state unknown since' in json.dumps(self.snapshot()['live'].get('agents-'+rid, {})) or None, 'panel: unknown since')
+        def sidebar_badge():
+            rows, stack = [], list(self.snapshot()['live'].get('sidebar', {}).get('items', []))
+            while stack:
+                row = stack.pop()
+                rows.append(row)
+                stack.extend(row.get('children', []))
+            row = next((row for row in rows if row.get('args', {}).get('resource') == rid), None)
+            return row and any(b['text'].startswith('unknown since') for b in row.get('badges', [])) and row
+        row = self.wait(sidebar_badge, 'sidebar: unknown since')
+        assert any(item.get('command') == 'agents.forget' for item in row['menu']), row
+        # Retention's grace (GRACE) no longer forgets agents by time: still here well after it.
+        time.sleep(max(0, GRACE+2-(time.monotonic()-start)))
+        assert self.resource(rid) is not None, 'unexplained disconnect must not be forgotten by time'
+        forgot = time.monotonic()
+        result = self.call('command.invoke', {'name': 'agents.forget', 'args': {'resource': rid}})
+        assert result['outcome'] == 'observed', result
+        self.wait(lambda: self.resource(rid) is None, 'explicit Forget removes it', timeout=3)
+        self.log.append({'unexplained_disconnect': 'PASS', 'agent': rid, 'kept_for_s': round(forgot-start, 2),
+                         'grace_s': GRACE, 'explicit_forget_s': round(time.monotonic()-forgot, 2)})
 
     def close_last(self):
         name, _, root = self.layout()

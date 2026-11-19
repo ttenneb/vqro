@@ -22,11 +22,11 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from vqro_ext import Extension, VqroError  # noqa: E402
-from vqro_views import ended, title
+from vqro_views import ended, title, unknown_since
 
-RETENTION = "retention.agents"  # optional live data: when retention forgets disconnected agents
-ext = Extension("sidebar", event_types=["entries", "resource", "resource.removed", "view.content"],
-                view_content={"names": ["workspaces", RETENTION]})
+# `provider` keeps the registry cache current: an unavailable agent shows when its provider disconnected.
+ext = Extension("sidebar", event_types=["entries", "resource", "resource.removed", "provider", "view.content"],
+                view_content={"names": ["workspaces"]})
 PREFS = "doc/settings/sidebar"
 SHOW_DEFAULT = {"workspaces": True, "worktrees": True, "terminals": True, "stray": True}
 PRESETS = {
@@ -127,21 +127,20 @@ def term_row(rid, r, where=False):
             # The agents extension explains agents it can't stop (no bridge terminal) and asks first.
             *([{"label": "Stop agent…", "command": "agents.stop", "args": {"resource": rid}}]
               if r.get("kind") == "agent" and not ended(r) else []),
+            # Explicit only: retention never forgets an agent by time.
+            *([{"label": "Forget agent", "command": "agents.forget", "args": {"resource": rid}}]
+              if r.get("kind") == "agent" and not ended(r) and not r.get("available", True) else []),
         ],
     }
 
 
 def disconnected_badges(r):
-    """An unavailable agent: its bridge terminal finished (being removed), or waiting for a reconnect."""
+    """An unavailable agent: its bridge terminal finished (being removed), or state unknown since when."""
     host = ext.resources.get(r.get("host")) if r.get("host") else None
     if host and host.get("kind") == "terminal" and ended(host):
         return [{"text": "ended", "style": "dim"}]
-    badges = [{"text": "disconnected", "style": "warn"}]
-    pending = ((ext.live.get(RETENTION) or {}).get("data") or {}).get(r.get("id"))
-    at = pending.get("forget_at") if isinstance(pending, dict) else None
-    if isinstance(at, (int, float)):
-        badges.append({"text": "removing at " + time.strftime("%H:%M:%S", time.localtime(at)), "style": "dim"})
-    return badges
+    since = unknown_since(ext, r)
+    return [{"text": "unknown since " + since if since else "unknown", "style": "warn"}]
 
 
 def counts_of(rows):
@@ -368,7 +367,7 @@ def refresh_worker():
 
 @ext.on_event
 def on_event(t, d):
-    if t in ("resource", "resource.removed", "missed") or (t == "view.content" and d.get("view") in ("workspaces", RETENTION)) \
+    if t in ("resource", "resource.removed", "provider", "missed") or (t == "view.content" and d.get("view") == "workspaces") \
             or (t == "entries" and any(c["key"] == PREFS for c in d["changes"])):
         refresh_pending.set()
 

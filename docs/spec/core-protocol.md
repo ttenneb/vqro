@@ -411,11 +411,11 @@ operation is dispatched, and the backend program/terminal is neither killed nor 
 observations may create a fresh resource id. This is not a fallback for native `resource.forget`; older cores
 reject the distinct unknown method rather than accidentally executing a native effect.
 
-The retention extension uses this mechanism after an agent has continuously remained unavailable for 60 seconds,
-even if an old pane still shows it. Reconnection cancels that grace. An agent whose host (bridge) terminal has
-finished, or was removed after retention saw it, cannot reconnect and is retired at once; a host not reported yet
-(an inventory still syncing after a restart) keeps the grace. Pending retirements are published as live data
-`retention.agents` so agent UIs can show when. It does not expire unavailable live terminals.
+The retention extension uses this mechanism only on an observed end: an unavailable agent whose host (bridge)
+terminal has finished, or was removed after retention saw it, cannot reconnect and is retired at once. A host not
+reported yet (an inventory still syncing after a restart) is not evidence. Time alone retires nothing: an agent
+that disconnected for unknown reasons stays visible as unknown until it reconnects or a user explicitly forgets
+it (`agents.forget`). It does not expire unavailable live terminals.
 Disconnected runtime providers are then reaped when their last identity/resource/pending fact is gone. Retention
 also prunes unreferenced orphan bridge fallback declarations; the agents extension prunes its own orphan panels
 and their derived content. Layout-referenced views and user-owned panels stay intact. Disabling these extensions

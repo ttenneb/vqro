@@ -12,14 +12,13 @@ providers only supply the mechanism, and only for providers declaring `resource.
 - Finished resources never shown in a layout (background jobs, exited before being placed) keep the
   newest KEEP for the sidebar's "ended" items; older ones are forgotten.
 
-Backend execution is never touched (ending it is `resource.kill`). Disconnected agents' cached facts
-are retired after60 seconds continuously unavailable, using `resource.forget_cached`, never native forget.
-Reconnection cancels that grace; unavailable live terminals are not expired. An agent whose bridge
-(host) terminal has finished, or was removed after this run saw it, cannot reconnect: it is retired at
-once. A host merely not reported yet (e.g. right after a core restart) keeps the grace. The pending
-retirement times are published as live data `retention.agents` ({data: {id: {forget_at}}}, wall-clock
-seconds) so agent UIs can say when a disconnected agent will go; nothing else depends on it. Orphan bridge-marked panels
-are pruned only when no layout references them. `retention.forget_ended` remains finished-only.
+Backend execution is never touched (ending it is `resource.kill`). An unavailable agent is retired
+(`resource.forget_cached`, never native forget) only on an observed end: its bridge (host) terminal has
+finished, or was removed after this run saw it, so the bridge cannot reconnect. Time alone never retires
+an agent: an unexplained disconnect stays visible as unknown until it reconnects or someone stops or
+forgets it (agents extension). A host merely not reported yet (e.g. right after a core restart) is not
+evidence. Unavailable live terminals are not expired. Stopgap until bounded tombstones arrive with the
+agent standard. Orphan bridge-marked panels are pruned only when no layout references them. `retention.forget_ended` remains finished-only.
 Turn this extension off to disable the policy; core mechanical admission limits still apply.
 """
 import os
@@ -41,11 +40,7 @@ ext = Extension("retention", event_types=["entries", "resource", "resource.remov
 dirty = threading.Event()
 was_shown = set()   # resource ids seen in a layout during this run
 unshown_at = {}     # once-shown id -> monotonic time it was first seen unshown
-unavailable_at = {}  # disconnected agent -> continuous unavailable grace
-forget_wall = {}  # same grace as a wall-clock deadline, fixed when it starts (for display only)
 hosts_seen = set()  # host terminal ids observed during this run (removal after that is evidence)
-published = [None]  # last `retention.agents` data, to publish only changes
-RETENTION = "retention.agents"
 policy_lock = threading.RLock()
 refused = set()     # ids a provider refused for good (unsupported/invalid); never retried
 
@@ -86,21 +81,10 @@ def _plan(keep, grace, include_unavailable, cached_due):
 
     agents = {rid: r for rid, r in resources.items() if r.get("kind") == "agent"}
     hosts_seen.update(r["host"] for r in agents.values() if r.get("host") in resources)
-    unavailable = {rid for rid, r in agents.items() if not r.get("available", False)}
-    for rid in list(unavailable_at):
-        if rid not in unavailable:
-            del unavailable_at[rid]
-            forget_wall.pop(rid, None)
-    for rid in unavailable:
-        if rid not in unavailable_at:
-            unavailable_at[rid] = now
-            forget_wall[rid] = round(time.time() + grace)
-    dead = {rid for rid in unavailable if host_dead(agents[rid].get("host"), resources)}
-    expired = [rid for rid in unavailable if rid in dead or now - unavailable_at[rid] >= grace] if include_unavailable else []
-    unavailable_waits = [unavailable_at[rid] + grace - now for rid in unavailable if rid not in expired] if include_unavailable else []
-    if include_unavailable:
-        pending = {rid: {"forget_at": forget_wall[rid]} for rid in unavailable if rid not in expired}
-        hosts_seen.intersection_update(set(resources) | {r.get("host") for r in agents.values()})
+    hosts_seen.intersection_update(set(resources) | {r.get("host") for r in agents.values()})
+    # Observed end only; no timer (an unexplained disconnect is shown as unknown, not forgotten).
+    expired = [rid for rid, r in agents.items() if not r.get("available", False)
+               and host_dead(r.get("host"), resources)] if include_unavailable else []
 
     def forgettable(r):
         caps = (providers.get(r.get("provider")) or {}).get("capabilities") or {}
@@ -109,12 +93,10 @@ def _plan(keep, grace, include_unavailable, cached_due):
     ended = [rid for rid, r in resources.items() if forgettable(r) and rid not in shown]
     closed = [rid for rid in ended if rid in was_shown]
     due = [rid for rid in closed if now - unshown_at[rid] >= grace]
-    waits = unavailable_waits + [unshown_at[rid] + grace - now for rid in closed if rid not in due]
+    waits = [unshown_at[rid] + grace - now for rid in closed if rid not in due]
     never = sorted((rid for rid in ended if rid not in was_shown), key=number, reverse=True)
     if cached_due is not None:
         cached_due.update(expired)
-    if include_unavailable:
-        publish_pending(pending)
     return expired + due + never[keep:], (min(waits) if waits else None)
 
 
@@ -129,17 +111,6 @@ def host_dead(host, resources):
     if r is None:
         return host in hosts_seen
     return r.get("kind") == "terminal" and r.get("state") == "finished"
-
-
-def publish_pending(pending):
-    """Derived live data only (never history); rounded so an unchanged grace republishes nothing."""
-    if pending == published[0]:
-        return
-    try:
-        ext.publish(RETENTION, {"data": pending})
-        published[0] = pending
-    except VqroError as error:
-        print(f"retention: publish pending: {error.kind}: {error}", file=sys.stderr, flush=True)
 
 
 def forget(rid, cached=False):

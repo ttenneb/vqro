@@ -26,34 +26,27 @@ class RetentionTests(unittest.TestCase):
         with mock.patch.object(self.module["time"], "monotonic", return_value=now):
             return self.module["plan"](**kwargs)
 
-    def test_unavailable_live_agent_expires_after_continuous_grace_even_if_shown(self):
-        self.core.resources["r1"] = {"id": "r1", "kind": "agent", "state": "live", "available": False}
-        self.core.entries["layout/main"] = {"version": 1, "value": {"tabs": [{"node": {"view": "agents-r1"}}]}}
-        self.assertEqual(self.plan(0), ([], 60))
-        self.assertEqual(self.plan(59), ([], 1))
-        self.assertEqual(self.plan(60)[0], ["r1"])
+    def test_unavailable_agents_and_terminals_are_never_forgotten_by_time(self):
+        # Host live (bridge may reconnect), host never reported in this run (inventory not synced after a
+        # restart), no host at all, shown or not: an unexplained disconnect stays visible as unknown.
+        self.core.resources["r1"] = {"id": "r1", "kind": "terminal", "state": "live", "available": False}
+        self.core.resources["r2"] = {"id": "r2", "kind": "agent", "state": "live", "available": False, "host": "r1"}
+        self.core.resources["r4"] = {"id": "r4", "kind": "agent", "state": "live", "available": False, "host": "r3"}
+        self.core.resources["r5"] = {"id": "r5", "kind": "agent", "state": "live", "available": False}
+        self.core.entries["layout/main"] = {"version": 1, "value": {"tabs": [{"node": {"view": "agents-r5"}}]}}
+        for now in (0, 60, 3600, 10**6):
+            self.assertEqual(self.plan(now), ([], None))
 
-    def test_reconnect_cancels_old_grace_and_live_terminals_are_not_expired(self):
-        self.core.resources["r1"] = {"id": "r1", "kind": "agent", "state": "live", "available": False}
-        self.core.resources["r2"] = {"id": "r2", "kind": "terminal", "state": "live", "available": False}
-        self.plan(0)
-        self.core.resources["r1"]["available"] = True
-        self.assertEqual(self.plan(30)[0], [])
-        self.core.resources["r1"]["available"] = False
-        self.plan(40)
-        self.assertEqual(self.plan(99)[0], [])
-        self.assertEqual(self.plan(100)[0], ["r1"])
-
-    def test_explicit_finished_only_command_does_not_bypass_agent_grace(self):
+    def test_explicit_finished_only_command_never_forgets_agents(self):
         self.core.resources["r1"] = {"id": "r1", "kind": "agent", "state": "live", "available": False}
         self.assertEqual(self.module["forget_ended"]({}), {"forgotten": 0})
         self.assertEqual(self.core.calls, [])
 
     def test_reconnect_race_never_promotes_cached_candidate_into_native_forget(self):
-        self.core.resources["r1"] = {"id": "r1", "kind": "agent", "state": "live", "available": False}
-        self.plan(0)
+        self.core.resources["r9"] = {"id": "r9", "kind": "terminal", "state": "finished", "available": True}
+        self.core.resources["r1"] = {"id": "r1", "kind": "agent", "state": "live", "available": False, "host": "r9"}
         cached = set()
-        self.assertEqual(self.plan(60, cached_due=cached)[0], ["r1"])
+        self.assertEqual(self.plan(0, cached_due=cached)[0], ["r1"])
         self.core.resources["r1"].update(available=True, state="finished")
         call = mock.Mock(return_value={"outcome": "observed"})
         self.core.vqro = types.SimpleNamespace(call=call)
@@ -73,30 +66,6 @@ class RetentionTests(unittest.TestCase):
         ids, _ = self.plan(1, cached_due=cached)
         self.assertEqual(sorted(ids), ["r2", "r4"])
         self.assertEqual(cached, {"r2", "r4"}, "retired as cached facts, never a native forget")
-
-    def test_unexplained_disconnect_and_unreported_host_keep_the_grace(self):
-        # Host live (bridge may reconnect), or never reported in this run (inventory not synced after restart).
-        self.core.resources["r1"] = {"id": "r1", "kind": "terminal", "state": "live", "available": False}
-        self.core.resources["r2"] = {"id": "r2", "kind": "agent", "state": "live", "available": False, "host": "r1"}
-        self.core.resources["r4"] = {"id": "r4", "kind": "agent", "state": "live", "available": False, "host": "r3"}
-        self.core.resources["r5"] = {"id": "r5", "kind": "agent", "state": "live", "available": False}
-        self.assertEqual(self.plan(0), ([], 60))
-        self.assertEqual(self.plan(59)[0], [])
-        self.assertEqual(sorted(self.plan(60)[0]), ["r2", "r4", "r5"])
-
-    def test_pending_forget_times_are_published_only_when_they_change(self):
-        self.core.resources["r2"] = {"id": "r2", "kind": "agent", "state": "live", "available": False}
-        with mock.patch.object(self.module["time"], "time", return_value=1000.0):
-            self.plan(0)
-            self.plan(5)
-        self.assertEqual(self.core.live["retention.agents"], {"data": {"r2": {"forget_at": 1060}}})
-        publishes = []
-        self.core.publish = lambda view, content: publishes.append((view, content))
-        self.plan(10)
-        self.assertEqual(publishes, [], "an unchanged grace republishes nothing")
-        self.core.resources["r2"]["available"] = True
-        self.plan(11)
-        self.assertEqual(publishes, [("retention.agents", {"data": {}})])
 
     def test_bridge_cleanup_preserves_live_referenced_and_user_views(self):
         for i in range(1, 5):

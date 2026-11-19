@@ -93,6 +93,8 @@ class FakeCore:
             return {"outcome": "observed", "resource": copy.deepcopy(self.resources[rid])}
         if method == "resource.kill":
             return {"outcome": "accepted", "effect": "e2", "backend": None}
+        if method == "resource.forget_cached":
+            return {"outcome": "observed", "effect": "e3", "data": {"scope": "cached_facts", "backend_effect": "none"}}
         if method == "resource.spawn":
             if self.make_agent:
                 self.add_agent()

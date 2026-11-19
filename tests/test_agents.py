@@ -339,23 +339,43 @@ class AgentsTests(unittest.TestCase):
         self.assertIn("(", self.core.notices[-1][0])
         self.assertEqual(self.native(), [])
 
-    def test_agents_list_rows_offer_stop(self):
+    def test_agents_list_rows_offer_stop_and_forget_only_when_unavailable(self):
         self.stoppable()
         self.command("list")
         row = next(row for row in self.core.live["agents-list"]["items"] if row.get("args") == {"resource": "r2"})
         self.assertIn({"label": "Stop agent…", "command": "agents.stop", "args": {"resource": "r2"}}, row["menu"])
+        self.assertNotIn("agents.forget", json.dumps(row["menu"]))
+        self.core.resources["r2"]["available"] = False
+        self.command("list")
+        row = next(row for row in self.core.live["agents-list"]["items"] if row.get("args") == {"resource": "r2"})
+        self.assertIn({"label": "Forget agent", "command": "agents.forget", "args": {"resource": "r2"}}, row["menu"])
+        self.assertEqual(row["badges"], [{"text": "unknown", "style": "warn"}])
 
-    def test_disconnected_agents_say_whether_their_bridge_is_dead_or_awaited(self):
+    def test_disconnected_agents_say_unknown_since_or_that_their_bridge_is_dead(self):
         self.stoppable()
         self.core.resources["r2"]["available"] = False
-        self.core.live["retention.agents"] = {"data": {"r2": {"forget_at": 1_800_000_000}}}
-        self.agents.event("view.content", {"view": "retention.agents"})
+        self.core.providers["other"].update(connected=False, since=1_800_000_000_000)
+        self.agents.event("provider", {"name": "other"})
         text = self.core.live["agents-r2"]["items"][0]["text"]
-        self.assertIn("Waiting for its bridge (terminal r1) to reconnect", text)
-        self.assertIn("forgets it at ", text)
+        self.assertIn("state unknown since ", text)
+        self.assertIn("its bridge (terminal r1, still running) disconnected", text)
+        self.assertIn("keeps it until it reconnects", text)
+        self.assertEqual(self.core.value("menu/agents.r2.forget")["command"], "agents.forget")
         self.core.resources["r1"]["state"] = "finished"
         self.agents.event("resource", {"id": "r1"})
         self.assertIn("can't reconnect", self.core.live["agents-r2"]["items"][0]["text"])
+
+    def test_forget_is_explicit_and_only_for_unavailable_agents(self):
+        self.stoppable()
+        with self.assertRaises(VqroError) as caught:
+            self.command("forget", resource="r2")
+        self.assertIn("is connected", str(caught.exception))
+        self.assertEqual(self.native(), [])
+        self.core.resources["r2"]["available"] = False
+        result = self.command("forget", context={"view": "agents-r2"})
+        self.assertEqual(self.native(), [("resource.forget_cached", {"resource": "r2"})])
+        self.assertEqual(result["client"], {"close": True})
+        self.assertIn("nothing was sent", self.core.notices[-1][0])
 
     def test_palette_template_targets_focused_agent(self):
         self.core.add_agent()

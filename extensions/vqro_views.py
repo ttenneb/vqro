@@ -1,4 +1,6 @@
 """Resource-kind navigation policy shared by workspace extensions (not core)."""
+import time
+
 from vqro_ext import VqroError
 from vqro_display import label
 
@@ -45,4 +47,16 @@ def view_resource(ext, view):
     for prefix in ("agents-", "agent-"):
         if view.startswith(prefix) and view[len(prefix):].startswith("r") and view[len(prefix)+1:].isdigit():
             return view[len(prefix):]
+    return None
+
+
+def unknown_since(ext, resource):
+    """Local "HH:MM" when the resource's provider disconnected (core registry `since`), else None.
+
+    Only a disconnected provider gives a time: that is when vqro stopped knowing the resource's state.
+    """
+    provider = ext.providers.get(resource.get("provider")) or {}
+    since = provider.get("since")
+    if provider.get("connected") is False and isinstance(since, (int, float)) and since > 0:
+        return time.strftime("%H:%M", time.localtime(since / 1000))
     return None
