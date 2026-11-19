@@ -37,7 +37,9 @@ class Extension:
 
 
 def load():
-    fake = types.SimpleNamespace(Extension=Extension, VqroError=RuntimeError)
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "extensions"))
+    from vqro_ext import views_in
+    fake = types.SimpleNamespace(Extension=Extension, VqroError=RuntimeError, views_in=views_in)
     with mock.patch.dict(sys.modules, {"vqro_ext": fake}), mock.patch.object(threading, "Thread"):
         return runpy.run_path(str(Path(__file__).resolve().parents[1] / "extensions/sidebar.py"))
 

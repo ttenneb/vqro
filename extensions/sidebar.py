@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
-"""vqro extension: the sidebar, one tree of workspaces → worktrees → terminals.
+"""vqro extension: the sidebar, one tree of workspaces → tabs, worktrees → terminals.
 
 Data comes from public sources only: resources (with their current folder) from the core, and the
 `workspaces` extension's live data. A terminal sits under the deepest workspace or worktree folder it is
 working in; terminals outside all of them are "other terminals". Status badges come from each
 terminal's OSC 7501 report and roll up to its parents.
+
+Tabs come from the layouts (`layout/*`): each workspace shows its layout's tabs (the `layout` named in
+the workspaces data), and layouts no workspace claims (`main`, or every layout when the workspaces
+extension is off) are listed under "Layouts", titled by their settings (`doc/layout/<name>`.title).
+Clicking a tab or layout makes that layout active (`workspace/active`) and selects the tab. The current
+layout is marked. Showing/hiding the sidebar applies to every layout, so switching keeps it.
 
 What to show is a preference in `doc/settings/sidebar` (`show`: workspaces, worktrees, terminals,
 stray). The sidebar's pinned toolbar is one line so it fits a narrow sidebar: a `Show: <preset> ▾` chip
@@ -15,19 +21,21 @@ Rows are live content (`view.publish`): not saved, not in history. Large trees u
 64-row pages, keeping folder ancestors and each agent/bridge group together. The page chips browse all
 rows; filtering is page-local and the view popup also offers the complete resource chooser.
 """
+import copy
 import os
 import sys
 import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from vqro_ext import Extension, VqroError  # noqa: E402
+from vqro_ext import Extension, VqroError, views_in  # noqa: E402
 from vqro_views import ended, title, unknown_since
 
 # `provider` keeps the registry cache current: an unavailable agent shows when its provider disconnected.
 ext = Extension("sidebar", event_types=["entries", "resource", "resource.removed", "provider", "view.content"],
                 view_content={"names": ["workspaces"]})
 PREFS = "doc/settings/sidebar"
+LAYOUT_KEYS = ("layout/", "doc/layout/")  # tabs and their layouts' titles
 SHOW_DEFAULT = {"workspaces": True, "worktrees": True, "terminals": True, "stray": True}
 PRESETS = {
     "everything": {"workspaces": True, "worktrees": True, "terminals": True, "stray": True},
@@ -178,6 +186,55 @@ def git_badges(w):
     return b
 
 
+def first_tabs_path(node, path=()):
+    """(path, node) of a layout's first tabs node (where new tabs go and digits select), or None."""
+    if "tabs" in node:
+        return list(path), node
+    for i, child in enumerate(node.get("children", [])):
+        found = first_tabs_path(child, (*path, i))
+        if found:
+            return found
+    return None
+
+
+def active_layout_name():
+    return (ext.value("workspace/active") or {}).get("layout")
+
+
+def tab_rows(name):
+    """One row per tab of layout `name`; the shown tab of the active layout is marked."""
+    root = ext.value(f"layout/{name}")
+    found = first_tabs_path(root) if isinstance(root, dict) else None
+    if not found:
+        return []
+    path, tabs = found
+    current = active_layout_name() == name
+    rows = []
+    for i, tab in enumerate(tabs.get("tabs", [])):
+        shown = current and i == tabs.get("active", 0)
+        rows.append({"id": f"tab:{name}:{i}", "text": tab.get("title") or f"tab {i+1}",
+                     "style": "accent" if shown else None, "icon": "●" if shown else "○", "icon_style": "accent" if shown else "dim",
+                     "command": "sidebar.tab", "args": {"layout": name, "path": path, "tab": i}})
+    return rows
+
+
+def current_badge(name):
+    return [{"text": "current", "style": "accent"}] if name and name == active_layout_name() else []
+
+
+def layout_rows(claimed):
+    """Layouts no workspace claims (`main`, ...), each with its tabs."""
+    names = sorted(k[len("layout/"):] for k in ext.entries if k.startswith("layout/") and k[len("layout/"):] not in claimed)
+    rows = []
+    for name in names:
+        settings = ext.value(f"doc/layout/{name}") or {}
+        rows.append({"id": f"layout:{name}", "text": settings.get("title") or name, "expanded": True,
+                     "icon": ICON["folder"], "icon_style": "accent" if name == active_layout_name() else "muted",
+                     "badges": current_badge(name), "children": tab_rows(name),
+                     "command": "sidebar.layout", "args": {"layout": name}})
+    return rows
+
+
 def build():
     sh = show()
     data = (ext.live.get("workspaces") or {}).get("data")
@@ -220,11 +277,14 @@ def build():
                     kids.append({
                         "id": f"wt:{t['path']}", "text": os.path.basename(t["path"].rstrip("/")), "expanded": True,
                         "icon": ICON["worktree"], "icon_style": "warn" if t.get("dirty") else "accent",
-                        "badges": git_badges(t) + rollup(tt), "children": tt,
+                        "badges": current_badge(t.get("layout")) + git_badges(t) + rollup(tt),
+                        "children": (tab_rows(t["layout"]) if t.get("layout") else []) + tt,
                         "command": "workspaces.open", "args": {"path": t["path"]},
-                        "menu": [{"label": "Open shell here", "command": "workspaces.open", "args": {"path": t["path"]}}],
+                        "menu": [{"label": "Switch to its tabs", "command": "workspaces.open", "args": {"path": t["path"]}},
+                                 {"label": "Open shell here", "command": "workspaces.shell", "args": {"path": t["path"]}}],
                     })
-            menu = [{"label": "Open shell here", "command": "workspaces.open", "args": {"path": w["path"]}}]
+            menu = [{"label": "Switch to its tabs", "command": "workspaces.open", "args": {"path": w["path"]}},
+                    {"label": "Open shell here", "command": "workspaces.shell", "args": {"path": w["path"]}}]
             if w.get("git"):
                 menu.append({"label": "New worktree…", "command": "workspaces.worktree", "args": {"repo": w["path"]}, "input": "Branch name"})
             menu += [{"label": "Refresh git state", "command": "workspaces.refresh"},
@@ -234,17 +294,29 @@ def build():
                 "icon": ICON["repo" if w.get("git") else "folder"],
                 "icon_style": "error" if w.get("missing") else ("warn" if w.get("dirty") else "accent") if w.get("git") else "muted",
                 "style": "error" if w.get("missing") else "bold",
-                "badges": ([{"text": "missing", "style": "error"}] if w.get("missing") else git_badges(w)) + rollup(kids),
-                "children": kids, "command": "workspaces.open", "args": {"path": w["path"]}, "menu": menu,
+                "badges": current_badge(w.get("layout")) + ([{"text": "missing", "style": "error"}] if w.get("missing") else git_badges(w)) + rollup(kids),
+                "children": (tab_rows(w["layout"]) if w.get("layout") else []) + kids,
+                "command": "workspaces.open", "args": {"path": w["path"]}, "menu": menu,
             })
         items.append({"id": "add", "text": "add workspace…", "style": "dim", "icon": ICON["add"], "icon_style": "dim",
                       "command": "workspaces.add", "input": "Folder path"})
+        claimed = {w.get("layout") for w in data} | {t.get("layout") for w in data for t in w.get("worktrees", [])}
+        layouts = layout_rows(claimed)
+        if layouts:
+            items.append({"type": "header", "text": "Layouts"})
+            items += layouts
         if sh["stray"] and stray:
             items.append({"type": "header", "text": "Other terminals"})
             items += stray
-    elif sh["terminals"] or sh["stray"]:
-        items.append({"type": "header", "text": "Terminals"})
-        items += stray or [{"type": "text", "text": "no terminals"}]
+    else:
+        # Without workspace data (extension off), every layout and its tabs, so switching still works.
+        layouts = layout_rows(set()) if sh["workspaces"] else []
+        if layouts:
+            items.append({"type": "header", "text": "Layouts"})
+            items += layouts
+        if sh["terminals"] or sh["stray"]:
+            items.append({"type": "header", "text": "Terminals"})
+            items += stray or [{"type": "text", "text": "no terminals"}]
     if not items:
         items = [{"type": "text", "text": "nothing to show"}]
     return items
@@ -369,11 +441,27 @@ def refresh_worker():
 @ext.on_event
 def on_event(t, d):
     if t in ("resource", "resource.removed", "provider", "missed") or (t == "view.content" and d.get("view") == "workspaces") \
-            or (t == "entries" and any(c["key"] == PREFS for c in d["changes"])):
+            or (t == "entries" and any(c["key"] in (PREFS, "workspace/active") or c["key"].startswith(LAYOUT_KEYS)
+                                       for c in d["changes"])):
         refresh_pending.set()
 
 
-@ext.command("sidebar.toggle", "Show or hide the sidebar")
+def has_sidebar(root):
+    return root.get("split") == "h" and bool(root.get("children")) and root["children"][0].get("view") == "sidebar"
+
+
+def without_sidebar(root):
+    """The layout with its leading sidebar removed (a two-way split collapses to the other child)."""
+    rest = root["children"][1:]
+    if len(rest) == 1:
+        return rest[0]
+    out = dict(root, children=rest)
+    if isinstance(root.get("sizes"), list) and len(root["sizes"]) == len(root["children"]):
+        out["sizes"] = root["sizes"][1:]
+    return out
+
+
+@ext.command("sidebar.toggle", "Show or hide the sidebar (in every layout, so switching keeps it)")
 def toggle(args):
     def attempt():
         # Recomputed from the reloaded cache on each try: a compare-and-set conflict with a concurrent
@@ -381,13 +469,59 @@ def toggle(args):
         lay = ext.active_layout()
         if lay is None:
             raise VqroError("no active layout yet", "invalid")
-        key, ver, root = lay
-        if root.get("split") == "h" and root["children"][0].get("view") == "sidebar":
-            new = root["children"][1]
-        else:
-            new = {"split": "h", "children": [{"view": "sidebar"}, root], "sizes": [1, 3]}
-        return ext.apply([{"op": "set", "key": key, "value": new, "expect": ver}], "sidebar: toggle")
+        want = not has_sidebar(lay[2])
+        ops = []
+        with ext.cache_lock:
+            layouts = [(k, e["version"], e["value"]) for k, e in ext.entries.items() if k.startswith("layout/")]
+        for key, ver, root in layouts:
+            if not isinstance(root, dict) or has_sidebar(root) == want:
+                continue
+            new = {"split": "h", "children": [{"view": "sidebar"}, root], "sizes": [1, 3]} if want else without_sidebar(root)
+            ops.append({"op": "set", "key": key, "value": new, "expect": ver})
+        return ext.apply(ops, "sidebar: toggle") if ops else {}
     return ext.retrying(attempt, attempts=8)
+
+
+def select_ops(layout, path=None, tab=None):
+    """Make `layout` active and, given a tabs path and index, show that tab. Only changed entries."""
+    key = f"layout/{layout}"
+    root = copy.deepcopy(ext.value(key))  # the cache's own value is never mutated
+    if root is None:
+        raise VqroError("that layout is gone", "conflict")
+    ops = []
+    if active_layout_name() != layout:
+        ops.append({"op": "set", "key": "workspace/active", "value": {"layout": layout}, "expect": ext.version("workspace/active")})
+    if tab is not None:
+        found = first_tabs_path(root)
+        if not found or found[0] != list(path or []) or not 0 <= tab < len(found[1]["tabs"]):
+            raise VqroError("that tab moved", "conflict")
+        if found[1].get("active", 0) != tab:
+            found[1]["active"] = tab
+            ops.append({"op": "set", "key": key, "value": root, "expect": ext.version(key)})
+    return ops
+
+
+def switch(note, *target):
+    def attempt():
+        ops = select_ops(*target)
+        return ext.apply(ops, note) if ops else {}
+    return ext.retrying(attempt, attempts=8)
+
+
+@ext.command("sidebar.layout", "Switch to a layout (args: layout)")
+def layout_cmd(args):
+    return switch("sidebar: switch layout", args.get("layout"))
+
+
+@ext.command("sidebar.tab", "Switch to a layout's tab and focus it (args: layout, path, tab)")
+def tab_cmd(args):
+    result = switch("sidebar: switch tab", args.get("layout"), args.get("path"), args.get("tab"))
+    # Like clicking a resource row: the chosen tab gets the focus, not the sidebar.
+    found = first_tabs_path(ext.value(f"layout/{args.get('layout')}") or {})
+    tabs = found[1].get("tabs", []) if found else []
+    tab = args.get("tab")
+    views = views_in(tabs[tab]["node"]) if isinstance(tab, int) and 0 <= tab < len(tabs) else []
+    return dict(result or {}, client={"focus": {"view": views[0]}}) if views else result
 
 
 @ext.command("sidebar.view", "Choose what the sidebar shows (opens a popup)")

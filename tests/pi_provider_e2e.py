@@ -343,16 +343,19 @@ class E2E:
             rows = self.snapshot().get('live', {}).get('sidebar', {}).get('items', [])
             return rows if any(row.get('args', {}).get('resource') == rid for row in rows) else None
         rows = self.wait(current_rows, 'sidebar agent row')
+        def agent_line(i, line):
+            # The agent's resource row, not a tab row (○/●) of a layout listing the same title.
+            return i > 2 and 'Pi' in line[:35] and 'bridge' not in line[:35] and not any(m in line[:35] for m in '○●')
         def agent_screen():
             screen = self.ui('capture-pane', '-p', '-t', 'ui:0.0')
-            return screen if any(i > 2 and 'Pi' in line[:35] and 'bridge' not in line[:35] for i, line in enumerate(screen.splitlines())) else None
+            return screen if any(agent_line(i, line) for i, line in enumerate(screen.splitlines())) else None
         screen = self.wait(agent_screen, 'rendered sidebar agent row')
         (self.root/'ui-sidebar-agent.txt').write_text(screen)
         # The agent is a top-level row; its bridge is a collapsed child, not another terminal.
         agent_row = next(row for row in rows if row.get('args', {}).get('resource') == rid)
         assert agent_row['children'][0]['args']['resource'] == host, rows
         assert not any(row.get('args', {}).get('resource') == host for row in rows), rows
-        line = next(i for i, line in enumerate(screen.splitlines()) if i > 2 and 'Pi' in line[:35] and 'bridge' not in line[:35])
+        line = next(i for i, line in enumerate(screen.splitlines()) if agent_line(i, line))
         click = f'\x1b[<0;6;{line+1}M\x1b[<0;6;{line+1}m'.encode()
         self.ui('send-keys', '-t', 'ui:0.0', '-H', *[f'{byte:02x}' for byte in click])
         self.ui_frame('sidebar-focused-agent', 'Ready for a prompt', 'Bridge terminal')

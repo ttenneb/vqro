@@ -1,7 +1,7 @@
 {
   "name":"sidebar", "title":"Sidebar", "version":"0.1.0", "license":"Apache-2.0", "author":"Bennett Garcia", "kind":"interface",
   "summary":"Browse terminals, agents and workspace activity.",
-  "description":"Publishes the live sidebar, resource status, workspace groups and filtering controls. It can show a resource in a tab or explicitly kill a terminal program. Turn it off to lose live sidebar content and its controls; saved layouts and backend-owned programs remain.",
+  "description":"Publishes the live sidebar: workspaces with their tabs, other layouts, resource status and filtering controls; clicking a tab switches to it. It can show a resource in a tab or explicitly kill a terminal program. Turn it off to lose live sidebar content and its controls; saved layouts and backend-owned programs remain.",
   "requires":{"protocol":1,"client_features":["items","tree","chips","menu"]},
   "provides":["command/sidebar.toggle","command/sidebar.view","command/sidebar.show","command/sidebar.kill","command/sidebar.preset","command/sidebar.page",
               "command/sidebar.close_ended","command/sidebar.show_ended","view/sidebar","view/sidebar.view","doc/settings/sidebar"],
@@ -13,5 +13,5 @@
                 {"cap":"command/agents.forget","suggest":"agents","without":"No Forget agent action on unavailable agent rows"},
                 {"cap":"command/tabs.close_ended","suggest":"tabs","without":"Close ended items only hides them"}],
   "settings_command":"sidebar.view",
-  "contributes":{"commands":["sidebar.toggle","sidebar.view","sidebar.show","sidebar.kill","sidebar.preset","sidebar.page","sidebar.close_ended","sidebar.show_ended"],"keys":["Prefix s: toggle sidebar"],"menu_items":["Sidebar status controls"],"panels":["Sidebar","Sidebar view"],"settings":["doc/settings/sidebar"]}
+  "contributes":{"commands":["sidebar.toggle","sidebar.view","sidebar.show","sidebar.layout","sidebar.tab","sidebar.kill","sidebar.preset","sidebar.page","sidebar.close_ended","sidebar.show_ended"],"keys":["Prefix s: toggle sidebar"],"menu_items":["Sidebar status controls"],"panels":["Sidebar","Sidebar view"],"settings":["doc/settings/sidebar"]}
 }
