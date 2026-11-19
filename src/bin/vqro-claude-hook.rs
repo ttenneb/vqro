@@ -5,13 +5,14 @@
 //!
 //! | Hook | Point | What it does |
 //! |---|---|---|
-//! | `SessionStart` | — | new consumer; `inbox.reconcile` open claims against the transcript; status idle |
+//! | `SessionStart` | — | new consumer; `inbox.reconcile` open claims against the transcript; status unknown |
 //! | `UserPromptSubmit`, `PreToolUse` | — | status working; marks the session busy and retires an armed idle waiter |
 //! | `PermissionRequest` | — | status blocked |
 //! | `PostToolBatch` | `turn` | `inbox.take {at: turn}` → `additionalContext` before the next model call |
 //! | `Stop` | `settle` | `inbox.take {at: settle}` → `additionalContext` (the turn continues once) |
-//! | `Stop`, `SessionStart` (`wait`, `asyncRewake`) | `idle` | waits for the inbox wake, takes, exits 2 → Claude wakes |
+//! | `Stop`, `Notification` `idle_prompt` (`wait`, `asyncRewake`, interactive only) | `idle` | waits for the inbox wake, takes, exits 2 → Claude wakes |
 //! | `StopFailure`, `Notification` (`idle_prompt`) | — | status error / idle |
+//! | `SessionEnd` | — | last chance to turn transcript evidence into `inserted` / `read` |
 //!
 //! Insertion is `insert: context` (a system reminder), so a hand-off is reported `supplied`. When the transcript
 //! later shows the entry carrying the delivery id it is reported `inserted`, and `read` once a later assistant
@@ -192,7 +193,7 @@ mod unix {
         match event.as_str() {
             "SessionStart" => {
                 session_start(ctx, &mut core);
-                status(ctx, &mut core, "idle", &event);
+                status(ctx, &mut core, "unknown", &event);
             }
             "UserPromptSubmit" | "PreToolUse" => {
                 retire_waiter(ctx);
@@ -261,7 +262,7 @@ mod unix {
         }
         ctx.with_state(|s| {
             s.set("consumer", json!(consumer));
-            s.set("busy", json!(false));
+            s.set("busy", json!(true)); // not idle evidence: only Stop and the idle_prompt notification are
             s.set("open", json!([]));
             s.set("stop_continuations", json!(0));
         });
@@ -346,24 +347,54 @@ mod unix {
         ctx.with_state(|s| s.set("open", json!(still)));
     }
 
-    /// (delivery, entry uuid, read) for every transcript entry carrying our marker.
+    /// Transcript entry types that put hook context into the conversation (measured on 2.1.329). The entries that
+    /// merely record a hook's stdout/stderr (`hook_success`, `hook_non_blocking_error`) are not evidence: an
+    /// asyncRewake exit 2 from a `SessionStart` hook is recorded as `hook_non_blocking_error` and never reaches the
+    /// model.
+    const INSERTED: &[&str] = &["hook_additional_context", "async_hook_response", "hook_async_rewake"];
+
+    /// (delivery, entry uuid, read) for every delivery id in a model-visible transcript entry. `read`: a later
+    /// `api-request-blob` (the request payload Claude Code sent) contains it and a later assistant entry finished
+    /// without error.
     fn evidence(transcript: &Path) -> Vec<(String, Value, bool)> {
         let Ok(text) = fs::read_to_string(transcript) else { return Vec::new() };
         let lines: Vec<Value> = text.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
-        let mut out: Vec<(String, Value, bool)> = Vec::new();
-        for (i, row) in lines.iter().enumerate() {
+        let ids = |row: &Value| -> Vec<String> {
             let s = row.to_string();
             let mut rest = s.as_str();
+            let mut out = Vec::new();
             while let Some(p) = rest.find(MARK) {
                 let tail = &rest[p + MARK.len()..];
                 let id: String = tail.chars().take_while(|c| c.is_ascii_alphanumeric() || "-_:.".contains(*c)).collect();
                 rest = &tail[id.len()..];
-                if id.is_empty() || out.iter().any(|(d, _, _)| *d == id) {
+                if !id.is_empty() && !out.contains(&id) {
+                    out.push(id);
+                }
+            }
+            out
+        };
+        fn kind(row: &Value) -> &str {
+            match row.get("type").and_then(Value::as_str) {
+                Some("attachment") => row.pointer("/attachment/type").and_then(Value::as_str).unwrap_or(""),
+                Some(t) => t,
+                None => "",
+            }
+        }
+        let mut out: Vec<(String, Value, bool)> = Vec::new();
+        for (i, row) in lines.iter().enumerate() {
+            let k = kind(row);
+            let model_visible = INSERTED.contains(&k) || (k == "user" && row.get("isMeta").is_none_or(|m| m != true));
+            if !model_visible {
+                continue;
+            }
+            for id in ids(row) {
+                if out.iter().any(|(d, _, _)| *d == id) {
                     continue;
                 }
-                let read = lines[i + 1..].iter().any(|r| {
-                    r.get("type").and_then(Value::as_str) == Some("assistant")
-                        && r.pointer("/message/stop_reason").and_then(Value::as_str).is_some_and(|s| s != "error")
+                let read = lines[i + 1..].iter().position(|r| kind(r) == "api-request-blob" && ids(r).contains(&id)).is_some_and(|j| {
+                    lines[i + 1 + j..].iter().any(|r| {
+                        kind(r) == "assistant" && r.pointer("/message/stop_reason").and_then(Value::as_str).is_some_and(|s| s != "error")
+                    })
                 });
                 out.push((id, row.get("uuid").cloned().unwrap_or(json!(i)), read));
             }
@@ -381,6 +412,11 @@ mod unix {
     /// `asyncRewake` waiter for the `idle` point: arm, take once, else wait for the inbox wake (counts only),
     /// then take at `idle`. Exit 2 with the text on stderr wakes Claude Code; exit 0 does nothing.
     fn wait(ctx: &Ctx) -> i32 {
+        // Non-interactive sessions (`-p`, SDK) wait for a running asyncRewake hook before they exit (measured with
+        // 2.1.329), and their idle is the end of the process: there is no idle point to serve.
+        if std::env::var("CLAUDE_CODE_ENTRYPOINT").as_deref() != Ok("cli") {
+            return 0;
+        }
         let me = std::process::id() as u64;
         ctx.with_state(|s| s.set("waiter", json!(me)));
         ctx.log("waiter_armed", json!({}));
@@ -397,6 +433,7 @@ mod unix {
             return 0;
         }
         let deadline = std::time::Instant::now() + Duration::from_secs(23 * 3600);
+        let mut woken = true; // take once when armed, then only after a wake event: never poll
         loop {
             // Only an idle, current waiter may take: a new turn or a newer waiter retires this one.
             let (busy, current) = ctx.with_state(|s| (s.get("busy").as_bool().unwrap_or(false), s.get("waiter").as_u64() == Some(me)));
@@ -404,7 +441,8 @@ mod unix {
                 ctx.log("waiter_retired", json!({}));
                 return 0;
             }
-            if !busy {
+            if !busy && woken {
+                woken = false;
                 core.events.clear();
                 if let Some(text) = take(ctx, &mut core, "idle") {
                     ctx.with_state(|s| s.set("busy", json!(true)));
@@ -414,11 +452,13 @@ mod unix {
                 }
             }
             // Wait for the next wake event; a short timeout re-checks retirement (no content is read).
-            if core.events.is_empty() {
+            if !core.events.is_empty() {
+                woken = true;
+            } else {
                 match core.read() {
                     Ok(row) => {
                         if row.get("method").and_then(Value::as_str) == Some("event") {
-                            core.events.push(row);
+                            woken = true;
                         }
                     }
                     Err(e) if e == "timeout" => {}
@@ -457,14 +497,15 @@ mod unix {
         let wait = json!({"type": "command", "command": bin, "args": ["wait"], "asyncRewake": true, "timeout": 86400});
         let one = |hooks: Vec<Value>| json!([{"hooks": hooks}]);
         json!({"hooks": {
-            "SessionStart": one(vec![h(), wait.clone()]),
+            "SessionStart": one(vec![h()]),
             "UserPromptSubmit": one(vec![h()]),
             "PreToolUse": one(vec![h()]),
             "PermissionRequest": one(vec![h()]),
             "PostToolBatch": one(vec![h()]),
-            "Stop": one(vec![h(), wait]),
+            "Stop": one(vec![h(), wait.clone()]),
             "StopFailure": one(vec![h()]),
-            "Notification": one(vec![h()]),
+            "Notification": json!([{"matcher": "idle_prompt", "hooks": [h(), wait.clone()]}]),
+            "SessionEnd": one(vec![h()]),
         }})
     }
 

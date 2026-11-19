@@ -68,7 +68,7 @@ for _ in range(100):
     time.sleep(0.1)
 transcript = os.path.join(root, "transcript.jsonl")
 open(transcript, "w").close()
-hook_env = dict(env, VQRO_AGENT="r7", VQRO_CLAUDE_STATE=os.path.join(root, "hookstate"))
+hook_env = dict(env, VQRO_AGENT="r7", VQRO_CLAUDE_STATE=os.path.join(root, "hookstate"), CLAUDE_CODE_ENTRYPOINT="cli")
 
 
 def hook(event, extra=None, mode="hook", wait=True):
@@ -114,10 +114,19 @@ check("hand-off reported supplied (insert: context)", get(b1).get("stage") == "s
 rc, out, _ = hook("PostToolBatch", {"agent_id": "sub1", "agent_type": "Explore", "tool_calls": []})
 check("subagent PostToolBatch takes nothing", out == "" and get(s1)["state"] == "held")
 # 4. transcript evidence: entry -> inserted; later assistant message -> read
-transcript_add({"type": "user", "uuid": "u-ctx", "message": {"role": "user", "content": f"<system-reminder>{ctx}</system-reminder>"}})
+# Shapes measured on Claude Code 2.1.329: hook_success only records stdout (not evidence); hook_additional_context is
+# the conversation entry; api-request-blob is the request payload sent.
+transcript_add({"type": "attachment", "uuid": "h-out", "attachment": {"type": "hook_success", "hookEvent": "PostToolBatch", "stdout": ctx}})
+hook("PreToolUse", {"tool_name": "Bash", "tool_input": {}})
+check("hook stdout record is not insertion evidence", get(b1).get("stage") == "supplied", get(b1))
+transcript_add({"type": "attachment", "uuid": "u-ctx", "attachment": {"type": "hook_additional_context", "content": [ctx], "hookEvent": "PostToolBatch"}})
 hook("PreToolUse", {"tool_name": "Bash", "tool_input": {}})
 check("entry in transcript -> inserted", get(b1).get("stage") == "inserted", get(b1))
-transcript_add({"type": "assistant", "uuid": "a1", "message": {"role": "assistant", "stop_reason": "end_turn", "content": [{"type": "text", "text": "ok"}]}})
+transcript_add({"type": "assistant", "uuid": "a0", "message": {"role": "assistant", "stop_reason": "end_turn", "content": []}})
+hook("PreToolUse", {"tool_name": "Bash", "tool_input": {}})
+check("an assistant entry without a request carrying it is not read evidence", get(b1).get("stage") == "inserted", get(b1))
+transcript_add({"type": "api-request-blob", "message": {"role": "user", "content": [{"type": "text", "text": f"<system-reminder>{ctx}</system-reminder>"}]}},
+               {"type": "assistant", "uuid": "a1", "message": {"role": "assistant", "stop_reason": "end_turn", "content": [{"type": "text", "text": "ok"}]}})
 # 5. Stop serves settle (boundary + settle), continues once
 rc, out, _ = hook("Stop", {"stop_hook_active": False, "last_assistant_message": "ok"})
 ctx2 = context(out)
@@ -175,8 +184,8 @@ check("old consumer's late report after reconcile is rejected", "stale" in late,
 # 10. status reports
 statuses = [json.loads(l) for l in open(inbox_log) if '"status"' in l]
 seen = {(s["source"], s["state"]) for s in statuses}
-check("status: SessionStart idle, UserPromptSubmit working, Stop idle",
-      {("SessionStart", "idle"), ("UserPromptSubmit", "working"), ("Stop", "idle")} <= seen, seen)
+check("status: SessionStart unknown, UserPromptSubmit working, Stop idle",
+      {("SessionStart", "unknown"), ("UserPromptSubmit", "working"), ("Stop", "idle")} <= seen, seen)
 # 11. hook latency (no mail): what every tool batch costs
 t = time.time()
 for _ in range(10):
