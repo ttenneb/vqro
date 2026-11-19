@@ -115,6 +115,11 @@ history_budget() {
   "${CARGO[@]}" cargo test --release --test history_budget -- --include-ignored --test-threads=1 --nocapture
 }
 
+item_streams() {  # agent-v0 §4 regression gate (P3): 200 agents x 3 viewers + stalled, restart, session switch
+  "${CARGO[@]}" cargo build --release --bin vqro --bin vqro-fake-items --bin vqro-items-viewer || return 1
+  "${CLEAN[@]}" CARGO_TARGET_DIR="$TARGET" python3 tests/e2e_item_streams.py "$LOGS/item-streams" --agents 200 --rate 2 --timescale 0.25
+}
+
 tui_scale_probe() {
   "${CARGO[@]}" cargo build --release --bin vqro || return 1
   "${CLEAN[@]}" python3 tests/e2e_tui_scale.py "$TARGET" --receipt "$LOGS/tui-scale-receipt.json"
@@ -190,6 +195,7 @@ if [ "$MODE" = full ]; then
   step pi-bridge-memory "${CLEAN[@]}" python3 tests/pi_bridge_memory.py --report "$LOGS/pi-memory-receipt.json"
   step e2e-sidebar-scale "${CLEAN[@]}" python3 tests/e2e_sidebar_scale.py "$TARGET/debug/vqro" --receipt "$LOGS/sidebar-scale-receipt.json"
   step e2e-tui-scale-budgets tui_scale_probe
+  step e2e-item-streams item_streams
   step scale-harness scale_harness
 fi
 sleep 2

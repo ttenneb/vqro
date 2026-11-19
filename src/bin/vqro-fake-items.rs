@@ -83,9 +83,9 @@ impl Agent {
         };
         if self.entities.len() > 24 {
             let id = self.entities.keys().next().unwrap().clone();
-            self.entities.remove(&id);
+            let rev = self.entities.remove(&id).unwrap().rev + 1;
             if self.current.as_deref() == Some(&id) { self.current = None; }
-            self.push(json!({"op": "remove", "kind": "message", "id": id}), retain);
+            self.push(json!({"type": "remove", "kind": "message", "id": id, "rev": rev}), retain);
         } else if self.current.is_none() || n % 8 == 0 {
             self.next_id += 1;
             let id = format!("m{}", self.next_id);
@@ -93,7 +93,7 @@ impl Agent {
             let h = fnv(&value);
             self.entities.insert(id.clone(), Entity { rev: 1, value: value.clone() });
             self.current = Some(id.clone());
-            self.push(json!({"op": "put", "kind": "message", "id": id, "rev": 1, "value": value, "h": h}), retain);
+            self.push(json!({"type": "put", "kind": "message", "id": id, "rev": 1, "value": value, "h": h}), retain);
         } else {
             let id = self.current.clone().unwrap();
             let text = chunk(n);
@@ -105,10 +105,10 @@ impl Agent {
             if e.value.len() > 4096 {
                 e.value = text.clone();
                 let (rev, h) = (e.rev, fnv(&e.value));
-                self.push(json!({"op": "put", "kind": "message", "id": id, "rev": rev, "value": text, "h": h}), retain);
+                self.push(json!({"type": "put", "kind": "message", "id": id, "rev": rev, "value": text, "h": h}), retain);
             } else {
                 let (rev, h) = (e.rev, fnv(&e.value));
-                self.push(json!({"op": "append", "kind": "message", "id": id, "base": base, "rev": rev, "field": "value", "text": text, "h": h}), retain);
+                self.push(json!({"type": "append", "kind": "message", "id": id, "base": base, "rev": rev, "field": "/value", "text": text, "h": h}), retain);
             }
         }
     }
@@ -116,12 +116,12 @@ impl Agent {
     fn snapshot(&self) -> Vec<u8> {
         let mut out = Vec::new();
         let mut line = |v: Value| { out.extend(serde_json::to_vec(&v).unwrap()); out.push(b'\n'); };
-        line(json!({"op": "reset", "epoch": self.epoch, "cut": self.seq,
+        line(json!({"type": "snapshot", "phase": "begin", "epoch": self.epoch,
             "coverage": {"entities": self.entities.len(), "retained_from": self.first_retained()}}));
         for (id, e) in &self.entities {
-            line(json!({"op": "put", "kind": "message", "id": id, "rev": e.rev, "value": e.value, "h": fnv(&e.value)}));
+            line(json!({"type": "put", "kind": "message", "id": id, "rev": e.rev, "value": e.value, "h": fnv(&e.value)}));
         }
-        line(json!({"op": "snapshot_end", "cut": self.seq}));
+        line(json!({"type": "snapshot", "phase": "end", "seq": self.seq}));
         out
     }
     fn digest(&self) -> String {
@@ -183,10 +183,10 @@ async fn main() {
         retain, paused: AtomicBool::new(false), instance: boot.clone(), stats: Stats::default(),
     });
     let mut caps = Map::new();
-    caps.insert("items.stream".into(), json!({"retain_bytes": retain, "records": ["put", "append", "remove", "reset", "snapshot_end"]}));
+    caps.insert("items.stream".into(), json!({"retain_bytes": retain, "records": ["put", "append", "remove", "snapshot"]}));
     for op in ["agent.session.switch", "items.pause", "items.digest"] { caps.insert(op.into(), json!({})); }
     let mut config = Config::new(name, instance.clone(), caps);
-    config.max_streams = arg("--max-streams", "512").parse().unwrap();
+    config.max_item_streams = arg("--max-item-streams", "1024").parse().unwrap();
     let endpoint = std::env::var("VQRO_SOCKET").expect("VQRO_SOCKET");
     let sock = tokio::net::UnixStream::connect(&endpoint).await.expect("core");
     let (provider, mut requests) = Provider::connect(sock, config).await.expect("register");
@@ -326,8 +326,7 @@ async fn viewer(shared: Arc<Shared>, i: usize, mut stream: ProviderStream, mut e
             match batch {
                 None => {
                     shared.stats.gaps.fetch_add(1, Ordering::Relaxed);
-                    // The SDK gap vocabulary has no retention reason; `viewer_slow` is the closest (P3 finding).
-                    stream.gap("viewer_slow").await?;
+                    stream.gap("retention").await?;
                     return Ok(());
                 }
                 Some(b) if !b.is_empty() => { send_split(&stream, &b, salt.wrapping_add(cursor), sent).await?; continue; }

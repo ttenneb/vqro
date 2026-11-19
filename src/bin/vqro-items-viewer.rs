@@ -30,7 +30,8 @@ fn arg(name: &str, default: &str) -> String {
 struct View {
     epoch: Option<String>,
     seq: u64,
-    in_snapshot: bool,
+    /// Puts of a snapshot being received; installed only at `snapshot end` (agent-v0 §4).
+    pending: Option<(String, BTreeMap<String, (u64, String)>)>,
     entities: BTreeMap<String, (u64, String)>,
     buf: Vec<u8>,
     stream: Option<u64>,
@@ -64,26 +65,34 @@ impl View {
         }
     }
     fn apply(&mut self, r: &Value, c: &mut Counters, lat: &mut Vec<u32>) {
-        let op = r["op"].as_str().unwrap_or("");
-        match op {
-            "reset" => {
-                // Opening snapshot or a session switch: a new epoch and a complete replacement at `cut`.
-                if self.epoch.is_some() && self.epoch.as_deref() != r["epoch"].as_str() { c.in_stream_resets += 1; }
-                self.epoch = r["epoch"].as_str().map(String::from);
-                self.entities.clear();
-                self.in_snapshot = true;
-                self.seq = r["cut"].as_u64().unwrap_or(0);
-                return;
-            }
-            "snapshot_end" => {
-                if !self.in_snapshot || r["cut"].as_u64() != Some(self.seq) { c.out_of_snapshot += 1; }
-                self.in_snapshot = false;
-                return;
-            }
-            _ => {}
-        }
+        let op = r["type"].as_str().unwrap_or("");
         let id = r["id"].as_str().unwrap_or("").to_string();
-        if !self.in_snapshot {
+        if op == "snapshot" {
+            match r["phase"].as_str() {
+                Some("begin") => self.pending = Some((r["epoch"].as_str().unwrap_or("").to_string(), BTreeMap::new())),
+                Some("end") => match self.pending.take() {
+                    // Install only now: the new epoch, every entity and the cut's `seq`.
+                    Some((epoch, entities)) => {
+                        if self.epoch.is_some() && self.epoch.as_deref() != Some(epoch.as_str()) { c.in_stream_resets += 1; }
+                        self.epoch = Some(epoch);
+                        self.entities = entities;
+                        self.seq = r["seq"].as_u64().unwrap_or(0);
+                    }
+                    None => c.out_of_snapshot += 1,
+                },
+                _ => c.out_of_snapshot += 1,
+            }
+            return;
+        }
+        if let Some((_, entities)) = self.pending.as_mut() {
+            // Snapshot puts carry no seq; anything else inside a snapshot is a protocol error.
+            if op != "put" || r.get("seq").is_some() { c.out_of_snapshot += 1; return; }
+            let v = r["value"].as_str().unwrap_or("").to_string();
+            if r["h"].as_str() != Some(&fnv(&v)) { c.hash_mismatch += 1; }
+            entities.insert(id, (r["rev"].as_u64().unwrap_or(0), v));
+            return;
+        }
+        {
             let seq = r["seq"].as_u64().unwrap_or(0);
             if seq <= self.seq { c.duplicate += 1; return; }
             if seq != self.seq + 1 { c.missing += 1; if c.missing <= 5 { eprintln!("MISSING stream {:?} expected {} got {}", self.stream, self.seq + 1, seq); } }
@@ -154,14 +163,11 @@ async fn main() {
     let mut pending: HashMap<u64, String> = HashMap::new(); // request id -> resource
     let mut by_stream: HashMap<u64, String> = HashMap::new();
     let mut early: HashMap<u64, Vec<Vec<u8>>> = HashMap::new();
-    for a in &agents { let id = send("resource.attach", json!({"resource": a, "items": {}}), &mut wbuf); pending.insert(id, a.clone()); }
+    // At most 64 attaches in flight: the core admits 128 requests per connection (server.rs).
+    let mut queue: std::collections::VecDeque<String> = agents.iter().cloned().collect();
+    while pending.len() < 64 { let Some(a) = queue.pop_front() else { break }; let id = send("resource.attach", json!({"resource": a, "items": {}}), &mut wbuf); pending.insert(id, a); }
     wr.write_all(&wbuf).await.unwrap(); wbuf.clear();
     let t0 = Instant::now();
-    if stall {
-        eprintln!("{name}: attached {} item streams; now never reading", agents.len());
-        tokio::time::sleep(Duration::from_secs(seconds)).await;
-        return;
-    }
     let mut c = Counters::default();
     let mut lat: Vec<u32> = Vec::new();
     let mut report = Instant::now();
@@ -198,6 +204,9 @@ async fn main() {
         if n == 0 { eprintln!("{name}: core closed"); break; }
         let m: Value = match serde_json::from_str(&line) { Ok(m) => m, Err(_) => { c.bad_json += 1; continue } };
         if let Some(id) = m["id"].as_u64() {
+            if pending.contains_key(&id) {
+                if let Some(a) = queue.pop_front() { let nid = send("resource.attach", json!({"resource": a, "items": {}}), &mut wbuf); pending.insert(nid, a); }
+            }
             if let Some(res) = pending.remove(&id) {
                 if let Some(sid) = m["result"]["stream"].as_u64() {
                     match m["result"]["initial"].as_str() { Some("reset") => c.opens_reset += 1, _ => c.opens_continue += 1 }
@@ -229,7 +238,7 @@ async fn main() {
                         // A partial line from the old stream is never stitched onto a new one.
                         v.buf.clear();
                         v.stream = None;
-                        if v.in_snapshot { v.epoch = None; } // an unfinished snapshot is not a cut to continue from
+                        v.pending = None; // an unfinished snapshot is never installed; continue from the last installed cut
                         let after = v.epoch.as_ref().map(|e| json!({"after": {"epoch": e, "seq": v.seq}})).unwrap_or(json!({}));
                         c.reattach += 1;
                         let id = send("resource.attach", json!({"resource": res, "items": after}), &mut wbuf);
@@ -240,6 +249,13 @@ async fn main() {
             }
         }
         if !wbuf.is_empty() { wr.write_all(&wbuf).await.unwrap(); wbuf.clear(); }
+        if stall && queue.is_empty() && pending.is_empty() {
+            // Every stream is attached: from now on never read the socket (a stalled viewer).
+            eprintln!("{name}: attached {} item streams; now never reading", by_stream.len());
+            drop(lines);
+            tokio::time::sleep_until(deadline.into()).await;
+            return;
+        }
         if report.elapsed() >= Duration::from_secs(10) {
             report = Instant::now();
             let (p50, p99, mx) = (pct(&mut lat, 0.5), pct(&mut lat, 0.99), lat.iter().copied().max().unwrap_or(0));
