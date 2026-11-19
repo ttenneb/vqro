@@ -734,7 +734,10 @@ and sets the prefix; the active profile is `doc/keys/profile`, and the list is l
   rows (`{type: "chips", chips: [{text, icon?, checked?, style?, command, args?, input?, prefill?, options?}]}`, wrapping; a
   chip with an icon and empty text is the icon alone) and `select` rows (`{type: "select", text, value, options: [{label, value}], command}`);
   anything with `options` opens a pick-one menu and adds `value` to its args; an option with `input` (e.g.
-  "custom…") prompts for text instead, passed as `text`. `toolbar: [row]` pins rows above the
+  "custom…") prompts for text instead, passed as `text`. The TUI makes every pick-one list with more than 10
+  rows (option menus, row/pane menus, the resource picker) searchable: typing filters it (case-insensitive
+  substring), the title shows "n of m", arrows/Enter/clicks act on the kept rows, Esc clears the text before
+  closing. Client-only; extensions need nothing new. `toolbar: [row]` pins rows above the
   list. Clients handle `client.panel {action: expand_all|collapse_all|filter|clear_filter}` for the panel it came
   from. Panels list needed features in `requires`. Unknown types render as plain items. Selection, expansion, page, filter and scroll are client
   state. Styles are semantic names resolved through the theme (below): `bold`, `dim`, `muted`, `warn`, `error`, `ok`,

@@ -113,11 +113,12 @@ enum Overlay {
     Prefix { sel: usize },
     Palette { query: String, sel: usize },
     /// A menu built from `menu/*` entries for a place (pane, tab, ...), at the pointer.
-    Menu { items: Vec<Item>, ctx: Value, sel: usize, at: Position },
+    /// `query` filters it once it is long (see `SEARCHABLE`); `sel` indexes the filtered rows.
+    Menu { items: Vec<Item>, ctx: Value, sel: usize, at: Position, query: String },
     /// One line of text for an item that declared `input`.
     Input { prompt: String, text: String, item: Item, ctx: Value },
-    /// Choose a resource for an item that declared `pick: "resource"`.
-    Pick { sel: usize, item: Item, ctx: Value },
+    /// Choose a resource for an item that declared `pick: "resource"`. Filtered like `Menu`.
+    Pick { sel: usize, item: Item, ctx: Value, query: String },
     /// An extension's view shown on top, at its request (never a terminal).
     Popup { view: String, width: u16, ctx: Value },
 }
@@ -1280,7 +1281,7 @@ impl App {
             return;
         }
         let at = at.unwrap_or_default();
-        self.open_over(Overlay::Menu { items, ctx, sel: 0, at });
+        self.open_over(Overlay::Menu { items, ctx, sel: 0, at, query: String::new() });
     }
 
     /// A row's own actions (`menu`), shown like any other menu.
@@ -1290,7 +1291,7 @@ impl App {
             return;
         }
         let at = at.or_else(|| self.hit.leaves.get(self.focus).map(|(_, o, _)| Position { x: o.x + 2, y: o.y + 2 })).unwrap_or_default();
-        self.open_over(Overlay::Menu { items, ctx, sel: 0, at });
+        self.open_over(Overlay::Menu { items, ctx, sel: 0, at, query: String::new() });
     }
 
     fn on_filter_key(&mut self, k: KeyEvent) {
@@ -1473,9 +1474,42 @@ impl App {
         match &self.overlay {
             Some(Overlay::Prefix { .. }) => self.prefix_items().len(),
             Some(Overlay::Palette { .. }) => self.palette_items().len(),
-            Some(Overlay::Pick { .. }) => self.resources.len(),
-            Some(Overlay::Menu { items, .. }) => items.len(),
+            Some(Overlay::Pick { .. }) | Some(Overlay::Menu { .. }) => self.pick_matches().len(),
             Some(Overlay::Input { .. }) | Some(Overlay::Popup { .. }) | None => 0,
+        }
+    }
+
+    /// One line per resource offered by the resource picker, in `resources` order.
+    fn pick_lines(&self) -> Vec<String> {
+        self.resources
+            .values()
+            .map(|r| format!("{}  {}  {}", r["id"].as_str().unwrap_or(""), r["name"].as_str().or_else(|| r["argv"][0].as_str()).unwrap_or(""), r["state"].as_str().unwrap_or("")))
+            .collect()
+    }
+
+    /// The open pick-one list (menu or resource picker): every row's text and the current query.
+    fn pick_list(&self) -> Option<(Vec<String>, &str)> {
+        match &self.overlay {
+            Some(Overlay::Menu { items, query, .. }) => Some((items.iter().map(|i| i.label.clone()).collect(), query)),
+            Some(Overlay::Pick { query, .. }) => Some((self.pick_lines(), query)),
+            _ => None,
+        }
+    }
+
+    /// Indices of the rows the query keeps (all of them for a short list or an empty query).
+    fn pick_matches(&self) -> Vec<usize> {
+        self.pick_list().map(|(rows, query)| filter_rows(&rows, query)).unwrap_or_default()
+    }
+
+    /// Whether the open pick-one list is long enough to type into.
+    fn pick_searchable(&self) -> bool {
+        self.pick_list().is_some_and(|(rows, _)| rows.len() > SEARCHABLE)
+    }
+
+    fn pick_query(&mut self) -> Option<&mut String> {
+        match self.overlay.as_mut()? {
+            Overlay::Menu { query, .. } | Overlay::Pick { query, .. } => Some(query),
+            _ => None,
         }
     }
 
@@ -1490,6 +1524,8 @@ impl App {
         let palette = self.palette_items();
         let resources: Vec<String> = self.resources.keys().cloned().collect();
         let prefix = self.prefix_items();
+        // `sel` of a menu or picker counts the rows its query keeps.
+        let matches = self.pick_matches();
         match self.overlay.take() {
             Some(Overlay::Prefix { sel }) => {
                 if let Some(row) = prefix.get(sel) {
@@ -1523,8 +1559,8 @@ impl App {
                     None => self.run_command(&name, Value::Null, ctx, None),
                 }
             }
-            Some(Overlay::Menu { items, sel, ctx, at }) => {
-                if let Some(item) = items.get(sel).cloned() {
+            Some(Overlay::Menu { items, sel, ctx, at, .. }) => {
+                if let Some(item) = matches.get(sel).and_then(|&i| items.get(i)).cloned() {
                     self.activate_item(item, ctx, Some(at));
                 }
             }
@@ -1533,8 +1569,8 @@ impl App {
                 self.run_command(&item.command, args, ctx, None);
             }
             Some(Overlay::Popup { .. }) => {}
-            Some(Overlay::Pick { sel, item, ctx }) => {
-                if let Some(r) = resources.get(sel) {
+            Some(Overlay::Pick { sel, item, ctx, .. }) => {
+                if let Some(r) = matches.get(sel).and_then(|&i| resources.get(i)) {
                     let args = with_arg(&item.args, "picked", json!(r));
                     self.run_command(&item.command, args, ctx, None);
                 }
@@ -1544,6 +1580,29 @@ impl App {
     }
 
     fn on_overlay_key(&mut self, k: KeyEvent) {
+        // A long menu or picker: typing filters it, Backspace edits, Esc clears the query first.
+        if self.pick_list().is_some() {
+            let searchable = self.pick_searchable();
+            let plain = !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+            let edit = match k.code {
+                KeyCode::Esc => self.pick_query().is_some_and(|q| !q.is_empty()).then(String::new),
+                KeyCode::Backspace if searchable => self.pick_query().map(|q| { let mut q = q.clone(); q.pop(); q }),
+                KeyCode::Char(c) if searchable && plain => self.pick_query().map(|q| format!("{q}{c}")),
+                _ => None,
+            };
+            if let Some(text) = edit {
+                if let Some(q) = self.pick_query() {
+                    *q = text;
+                }
+                if let Some(sel) = self.overlay_sel() {
+                    *sel = 0;
+                }
+                return;
+            }
+            if k.code == KeyCode::Enter && self.overlay_len() == 0 && self.pick_query().is_some_and(|q| !q.is_empty()) {
+                return; // nothing matches: keep the menu and the text, so it can be corrected
+            }
+        }
         let n = self.overlay_len();
         match k.code {
             KeyCode::Esc => self.overlay = None,
@@ -1682,7 +1741,7 @@ impl App {
             let text = item.prefill.as_str().or_else(|| item.prefill["context"].as_str().and_then(|field| ctx[field].as_str())).unwrap_or_default().to_string();
             self.open_over(Overlay::Input { prompt, text, item, ctx });
         } else if item.pick.as_deref() == Some("resource") {
-            self.open_over(Overlay::Pick { sel: 0, item, ctx });
+            self.open_over(Overlay::Pick { sel: 0, item, ctx, query: String::new() });
         } else {
             self.run_command(&item.command, item.args.clone(), ctx, at);
         }
@@ -1706,7 +1765,7 @@ impl App {
                     return;
                 }
                 let at = at.or_else(|| self.hit.leaves.get(self.focus).map(|(_, o, _)| Position { x: o.x + 1, y: o.y + 1 })).unwrap_or_default();
-                self.open_over(Overlay::Menu { items, ctx, sel: 0, at });
+                self.open_over(Overlay::Menu { items, ctx, sel: 0, at, query: String::new() });
             }
             "client.prefix" => self.overlay = Some(Overlay::Prefix { sel: 0 }),
             "client.zoom" => {
@@ -2554,7 +2613,8 @@ impl App {
 
     /// Menus, prompts, pickers, the prefix menu and the palette (everything but popups).
     fn draw_menu_overlay(&mut self, f: &mut Frame, area: Rect, pal: &Palette, icons: &Icons) {
-        let (title, items, sel, query) = match &self.overlay {
+        // `all`: every row of a filtered list, so its size doesn't jump while typing.
+        let (title, items, sel, query, all) = match &self.overlay {
             Some(Overlay::Popup { .. }) => return,
             None => {
                 self.hit.overlay = None;
@@ -2564,23 +2624,28 @@ impl App {
                 // Recovery actions that lost their key show `·`: click or Enter runs them.
                 let rows = self.prefix_items();
                 let w = rows.iter().filter_map(|r| r.key.as_ref()).map(|k| k.chars().count()).max().unwrap_or(1).max(2);
-                let items = rows.into_iter().map(|r| format!(" {:>w$}  {}", r.key.unwrap_or_else(|| "·".into()), r.label)).collect();
-                (" vqro (press a key or click) ", items, *sel, None::<String>)
+                let items: Vec<String> = rows.into_iter().map(|r| format!(" {:>w$}  {}", r.key.unwrap_or_else(|| "·".into()), r.label)).collect();
+                (" vqro (press a key or click) ".to_string(), items.clone(), *sel, None::<String>, items)
             }
             Some(Overlay::Palette { query, sel }) => {
-                let items = self.palette_items().into_iter().map(|n| format!("{n}  {}", self.commands[&n]["title"].as_str().unwrap_or(""))).collect();
+                let items: Vec<String> = self.palette_items().into_iter().map(|n| format!("{n}  {}", self.commands[&n]["title"].as_str().unwrap_or(""))).collect();
                 let _ = query;
-                (" commands (type to filter) ", items, *sel, None)
+                (" commands (type to filter) ".to_string(), items.clone(), *sel, None, items)
             }
-            Some(Overlay::Pick { sel, .. }) => {
-                let items = self
-                    .resources
-                    .values()
-                    .map(|r| format!("{}  {}  {}", r["id"].as_str().unwrap_or(""), r["name"].as_str().or_else(|| r["argv"][0].as_str()).unwrap_or(""), r["state"].as_str().unwrap_or("")))
-                    .collect::<Vec<_>>();
-                (" pick a terminal ", items, *sel, None)
+            Some(Overlay::Pick { sel, query, .. }) => {
+                let rows = self.pick_lines();
+                let keep = filter_rows(&rows, query);
+                let (title, query) = pick_title(" pick a terminal ", keep.len(), rows.len(), query);
+                (title, keep.into_iter().map(|i| rows[i].clone()).collect(), *sel, query, rows)
             }
-            Some(Overlay::Menu { items, sel, .. }) => (" ", menu_lines(items, icons), *sel, None),
+            Some(Overlay::Menu { items, sel, query, .. }) => {
+                // Filter on the labels; draw menu_lines (icons, padding).
+                let rows = menu_lines(items, icons);
+                let labels: Vec<String> = items.iter().map(|i| i.label.clone()).collect();
+                let keep = filter_rows(&labels, query);
+                let (title, query) = pick_title(" ", keep.len(), labels.len(), query);
+                (title, keep.into_iter().filter_map(|i| rows.get(i).cloned()).collect(), *sel, query, rows)
+            }
             Some(Overlay::Input { .. }) => {
                 // Typed in the status bar; clicking anywhere else cancels.
                 self.hit.overlay = Some((self.hit.status, Rect::default(), 0));
@@ -2589,14 +2654,14 @@ impl App {
         };
         let items: Vec<String> = items;
         let w = area.width.min(64);
-        let h = (items.len() as u16 + 2 + query.is_some() as u16).min(area.height).max(3);
+        let h = (all.len().max(items.len()) as u16 + 2 + query.is_some() as u16).min(area.height).max(3);
         let rect = if matches!(self.overlay, Some(Overlay::Prefix { .. }) | Some(Overlay::Palette { .. })) {
             // Anchored above the prompt line it belongs to.
             let w = if matches!(self.overlay, Some(Overlay::Prefix { .. })) { w.min(44) } else { w };
             Rect { x: area.x, y: area.bottom().saturating_sub(h), width: w, height: h }
         } else if let Some(Overlay::Menu { at, .. }) = &self.overlay {
             // At the pointer, kept on screen.
-            let w = (items.iter().map(|i| icons::width(i)).max().unwrap_or(10) + 4).min(area.width);
+            let w = (all.iter().map(|i| icons::width(i)).max().unwrap_or(10).max(icons::width(&title)) + 4).min(area.width);
             let x = at.x.min(area.right().saturating_sub(w));
             let y = at.y.min(area.bottom().saturating_sub(h));
             Rect { x, y, width: w, height: h }
@@ -2784,6 +2849,27 @@ fn walk(node: &Value, area: Rect, path: &mut Vec<usize>, overrides: &HashMap<Vec
 }
 
 /// A menu's lines. When any item has an icon, every label starts after one shared icon column.
+/// Pick-one lists (menus, option drop-downs, the resource picker) with more rows than this can be
+/// filtered by typing. Shorter ones keep plain arrows/Enter, so typing never hides a short menu.
+const SEARCHABLE: usize = 10;
+
+/// Indices of `rows` containing `query` (case-insensitive); all rows for an empty query.
+fn filter_rows(rows: &[String], query: &str) -> Vec<usize> {
+    let query = query.to_lowercase();
+    rows.iter().enumerate().filter(|(_, row)| query.is_empty() || row.to_lowercase().contains(&query)).map(|(i, _)| i).collect()
+}
+
+/// Title and query line of a pick-one list: long lists say "n of m" and show what was typed.
+fn pick_title(title: &str, kept: usize, total: usize, query: &str) -> (String, Option<String>) {
+    if total <= SEARCHABLE {
+        return (title.to_string(), None);
+    }
+    let hint = if query.is_empty() { "type to filter" } else { "Esc clears" };
+    let name = title.trim();
+    let name = if name.is_empty() { String::new() } else { format!("{name} · ") };
+    (format!(" {name}{kept} of {total} · {hint} "), Some(query.to_string()))
+}
+
 fn menu_lines(items: &[Item], icons: &Icons) -> Vec<String> {
     let glyphs: Vec<Option<&str>> = items.iter().map(|i| icons.resolve(&i.icon)).collect();
     let column = glyphs.iter().flatten().map(|g| icons.cell(g).1).max();
@@ -3523,6 +3609,76 @@ mod tests {
         assert_eq!(paste_bytes("a\nb\n", true), b"\x1b[200~a\nb\n\x1b[201~".to_vec());
         // A paste that contains the end marker must not end the bracket and run the rest as typed input.
         assert_eq!(paste_bytes("x\x1b[201~rm -rf ~\n", true), b"\x1b[200~xrm -rf ~\n\x1b[201~".to_vec());
+    }
+
+    #[test]
+    fn pick_filter_rows_and_titles() {
+        let rows: Vec<String> = ["Alpha", "beta", "GAMMA", "alphabet"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(filter_rows(&rows, ""), vec![0, 1, 2, 3]);
+        assert_eq!(filter_rows(&rows, "ALPHA"), vec![0, 3], "case-insensitive substring");
+        assert_eq!(filter_rows(&rows, "zz"), Vec::<usize>::new());
+        assert_eq!(pick_title(" ", 3, 3, ""), (" ".to_string(), None), "short lists stay plain");
+        assert_eq!(pick_title(" ", 11, 11, ""), (" 11 of 11 · type to filter ".to_string(), Some(String::new())));
+        assert_eq!(pick_title(" pick a terminal ", 2, 40, "r1"), (" pick a terminal · 2 of 40 · Esc clears ".to_string(), Some("r1".into())));
+    }
+
+    #[tokio::test]
+    async fn long_option_menus_filter_as_you_type_and_esc_clears_before_closing() {
+        let (mut app, _) = app();
+        let options: Vec<Value> = (0..24).map(|i| json!({"label": format!("Model {i:02}"), "value": format!("m{i:02}"), "input": format!("chosen m{i:02}")})).collect();
+        app.options_menu(&json!({"command": "x.model", "value": "m03", "options": options}), json!({}), None);
+        let key = |c| KeyEvent::new(c, KeyModifiers::NONE);
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 40)).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        let screen: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
+        assert!(screen.contains("24 of 24") && screen.contains("type to filter"), "{screen}");
+        for c in ['1', '7'] {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(app.overlay_len(), 1);
+        terminal.draw(|f| app.draw(f)).unwrap();
+        let screen: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
+        assert!(screen.contains("1 of 24") && screen.contains("> 17") && screen.contains("Model 17") && !screen.contains("Model 16"), "{screen}");
+        // Backspace widens again; arrows move within the kept rows.
+        app.on_key(key(KeyCode::Backspace));
+        assert_eq!(app.overlay_len(), 12, "\"1\": 01, 10-19 and 21");
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Enter));
+        assert!(matches!(&app.overlay, Some(Overlay::Input { prompt, .. }) if prompt == "chosen m10"), "Enter runs the selected kept row");
+        // Esc clears the query first, then closes.
+        app.overlay = None;
+        app.options_menu(&json!({"command": "x.model", "options": (0..24).map(|i| json!({"label": format!("Model {i:02}"), "value": i})).collect::<Vec<_>>()}), json!({}), None);
+        app.on_key(key(KeyCode::Char('z')));
+        assert_eq!(app.overlay_len(), 0);
+        app.on_key(key(KeyCode::Enter));
+        assert!(matches!(&app.overlay, Some(Overlay::Menu { query, .. }) if query == "z"), "Enter with no match runs nothing and keeps the text");
+        app.on_key(key(KeyCode::Esc));
+        assert!(matches!(&app.overlay, Some(Overlay::Menu { query, .. }) if query.is_empty()));
+        assert_eq!(app.overlay_len(), 24);
+        app.on_key(key(KeyCode::Esc));
+        assert!(app.overlay.is_none());
+    }
+
+    #[tokio::test]
+    async fn short_menus_ignore_typing_and_the_resource_picker_filters_too() {
+        let (mut app, _) = app();
+        app.options_menu(&json!({"command": "x.pick", "options": [{"label": "Alpha", "value": "a"}, {"label": "Beta", "value": "b"}]}), json!({}), None);
+        app.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
+        assert!(matches!(&app.overlay, Some(Overlay::Menu { query, .. }) if query.is_empty()));
+        assert_eq!(app.overlay_len(), 2);
+        app.overlay = None;
+        for i in 1..=12 {
+            app.resources.insert(format!("r{i}"), json!({"id": format!("r{i}"), "name": format!("shell {i}"), "state": "live"}));
+        }
+        app.activate_item(Item::from_entry(&json!({"command": "x.show", "pick": "resource"})), json!({}), None);
+        for c in "shell 12".chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        let keys: Vec<&String> = app.resources.keys().collect();
+        assert_eq!(app.pick_matches().iter().map(|&i| keys[i].as_str()).collect::<Vec<_>>(), vec!["r12"]);
+        // Ctrl/Alt chords are not typed into the query.
+        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT));
+        assert!(matches!(&app.overlay, Some(Overlay::Pick { query, .. }) if query == "shell 12"));
     }
 
     #[tokio::test]
