@@ -191,6 +191,48 @@ check("I3 a new prompt retires the waiter; a start message stays held while busy
 wait_for(lambda: first_request_with("MSG-BUSY-I3") is not None, 40)
 check("I3 the held start message is delivered once the session is idle again", first_request_with("MSG-BUSY-I3") is not None)
 
+# --- I4/I5: Claude Code's native per-session inbox socket as an `admit` route (wire format from the 2.1.329 binary:
+# an optional auth line, then {"type":"user","message":{...}}). vqro cannot edit or withdraw after posting. ---
+wait_for(lambda: len([e for e in hooklog() if e["event"] == "waiter_armed"]) >= 4, 40)
+pump(1.0)
+socks = [e["detail"].get("messaging_socket") for e in hooklog() if e["event"] == "session" and e["detail"].get("messaging_socket")]
+results["native_socket"] = socks[-1] if socks else None
+
+
+def post(text):
+    s = socket.socket(socket.AF_UNIX); s.connect(socks[-1]); s.settimeout(3)
+    s.sendall((json.dumps({"type": "user", "message": {"role": "user", "content": text}}) + "\n").encode())
+    try:
+        reply = s.recv(4096).decode()
+    except OSError as e:
+        reply = f"<{e}>"
+    s.close()
+    return reply
+
+
+if socks:
+    n_idle = len(requests())
+    results["I4_reply"] = post("MSG-NATIVE-IDLE: posted to the session socket")
+    wait_for(lambda: first_request_with("MSG-NATIVE-IDLE") is not None, 30)
+    results["I4_first_request"] = first_request_with("MSG-NATIVE-IDLE")
+    r = next((x for x in requests() if x["n"] == results["I4_first_request"]), None)
+    results["I4_block"] = r and next((b["text"] for m in r["messages"] for b in m["blocks"] if "MSG-NATIVE-IDLE" in b["text"]), None)[:500]
+    check("I4 native socket while idle starts a turn (admit route)", results["I4_first_request"] == n_idle + 1, results.get("I4_reply"))
+    pump(3)
+    typed("steps:2 sleep:3 third task"); os.write(fd, b"\r")
+    wait_for(lambda: any("third task" in b["text"] for r in requests() for m in r["messages"] for b in m["blocks"]), 30)
+    n_busy = len(requests())
+    results["I5_reply"] = post("MSG-NATIVE-BUSY: posted while a tool runs")
+    wait_for(lambda: first_request_with("MSG-NATIVE-BUSY") is not None, 40)
+    results["I5_first_request"] = first_request_with("MSG-NATIVE-BUSY")
+    results["I5_requests_when_posted"] = n_busy
+    r = next((x for x in requests() if x["n"] == results["I5_first_request"]), None)
+    results["I5_block"] = r and next((b["type"] + ": " + b["text"] for m in r["messages"] for b in m["blocks"] if "MSG-NATIVE-BUSY" in b["text"]), None)[:500]
+    check("I5 native socket while busy is read at the next request (between tool calls)", results["I5_first_request"] == n_busy + 1, results)
+    tx = sorted(glob.glob(os.path.join(P["cfg"], "projects", "*", "*.jsonl")), key=os.path.getmtime)
+    rows = [json.loads(l) for l in open(tx[-1])] if tx else []
+    results["I4_I5_transcript_kinds"] = [(x.get("type"), (x.get("attachment") or {}).get("type"), x.get("operation")) for x in rows if "MSG-NATIVE" in json.dumps(x)]
+
 results["hook_log"] = [f"{e['event']} {json.dumps(e['detail'])[:120]}" for e in hooklog()][-40:]
 results["screen_tail"] = plain()[-1500:]
 json.dump(results, open(os.path.join(root, "tui-results.json"), "w"), indent=1)

@@ -257,6 +257,9 @@ mod unix {
             .map(|(delivery, entry, _)| json!({"delivery": delivery, "entry": entry}))
             .collect();
         let op = format!("{consumer}:reconcile");
+        // Claude Code's native per-session inbox (an `admit` route, evaluated separately); recorded for diagnosis.
+        ctx.log("session", json!({"consumer": consumer, "messaging_socket": std::env::var("CLAUDE_CODE_MESSAGING_SOCKET").ok(),
+            "entrypoint": std::env::var("CLAUDE_CODE_ENTRYPOINT").ok()}));
         match core.inbox("inbox.reconcile", json!({"op": op, "agent": ctx.agent, "consumer": consumer, "records": records})) {
             Ok(r) => ctx.log("reconciled", r),
             Err(e) => ctx.log("reconcile_failed", json!(e)),
