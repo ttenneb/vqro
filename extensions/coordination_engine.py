@@ -13,7 +13,7 @@ import uuid
 
 from coordination_store import StoreError, encoded
 from coordination_archive import export as export_archive
-from coordination_policy import Policy, PolicyError, QuotaLimits, check_admission, bounded_page, FairQueue
+from coordination_policy import Policy, PolicyError, QuotaLimits, check_admission, bounded_page, FairQueue, record_charge
 
 OPEN = {"recorded", "held", "claimed", "unknown"}
 PENDING = {"recorded", "held"}
@@ -59,6 +59,13 @@ class Working:
         ops = [{"op": "set", "key": key, "value": row["value"], "expect": self.version(key)} if row else
                {"op": "delete", "key": key, "expect": self.version(key)} for key, row in self.changes.items()]
         if ops:
+            prospective = copy.deepcopy(self.rows)
+            for key, row in self.changes.items():
+                if row:
+                    prospective[key] = {"version": max((r["version"] for r in self.rows.values()), default=0) + 1, "value": row["value"]}
+                else:
+                    prospective.pop(key, None)
+            self.engine._preflight_reservations(prospective, self.rows, control=control)
             return self.engine.store.apply(ops, control=control)
 
 
@@ -82,7 +89,32 @@ class Coordinator:
         self._boot()
 
     def policy(self):
-        return Policy(self.config(), self.resources(), now_ms=self.clock(), tombstones=self.tombstones())
+        limits = QuotaLimits(domain_bytes=self.store.byte_limit, domain_records=min(self.store.record_limit, 1024), scope_capacity=SCOPE_CAPACITY)
+        return Policy(self.config(), self.resources(), now_ms=self.clock(), tombstones=self.tombstones(), limits=limits)
+
+    def _reservation(self, rows):
+        charge = self.store.charge(rows)
+        records = len(rows)
+        for key, row in rows.items():
+            value = row["value"]
+            if key.startswith("message/") and value.get("state") in OPEN:
+                charge += max(0, record_charge(value) - encoded(value))
+            elif key.startswith("external/") and value.get("state") == "claimed":
+                charge += 1024
+        gates = rows.get("control", {}).get("value", {}).get("gates", {})
+        for agent in gates:
+            if "agent/" + agent not in rows:
+                charge += 2048
+                records += 1
+        return charge, records
+
+    def _preflight_reservations(self, rows, before, *, control):
+        charge, count = self._reservation(rows)
+        old_charge, old_count = self._reservation(before)
+        byte_limit = self.store.byte_limit if control else self.store.byte_limit - (self.store.byte_limit + 9) // 10
+        count_limit = self.store.record_limit if control else self.store.record_limit - (self.store.record_limit + 9) // 10
+        if ((charge > byte_limit and charge > old_charge) or (count > count_limit and count > old_count)):
+            raise CoordinationError("quota", "outcome/tombstone reservations preserve recovery capacity")
 
     def tombstones(self):
         return {key[6:]: row["value"] for key, row in self.store.snapshot().items() if key.startswith("agent/")}
@@ -268,7 +300,7 @@ class Coordinator:
             if waiting and not args.get("send_new", False):
                 raise CoordinationError("pending_exists", "update waiting message or explicitly send another", deliveries=[r["delivery"] for r in waiting[:16]])
             outcome_steps = 3 if args.get("strategy") == "interrupt_then_start" else 1
-            check_admission(records, principal, agent, normalized["content"], reserved_bytes=encoded(work.rows), reserved_records=len(work.rows), replaces=supersedes, outcome_steps=outcome_steps)
+            check_admission(records, principal, agent, normalized["content"], reserved_bytes=self.store.charge(work.rows), reserved_records=len(work.rows), replaces=supersedes, outcome_steps=outcome_steps, limits=policy.limits)
             resource = self.resources().get(agent, {})
             native = (resource.get("data") or {}).get("agent") or {}
             session = native.get("session") or {}
@@ -339,8 +371,8 @@ class Coordinator:
                 policy.require(context["principal"], "send:" + record["mode"], record["to"]["agent"])
                 if encoded(record) > encoded(before):
                     check_admission(self.records(), record["from"]["principal"], record["to"]["agent"], record["content"],
-                                    reserved_bytes=encoded(work.rows), reserved_records=len(work.rows),
-                                    replaces=record["delivery"], outcome_steps=record.get("outcome_steps", 1))
+                                    reserved_bytes=self.store.charge(work.rows), reserved_records=len(work.rows),
+                                    replaces=record["delivery"], outcome_steps=record.get("outcome_steps", 1), limits=policy.limits)
             work.put("message/" + record["delivery"], record)
             return {"state": record["state"], "delivery": record["delivery"], "_after": lambda: self._wake(record["to"]["agent"]),
                     "_control": withdraw or encoded(record) <= encoded(before)}
@@ -367,6 +399,12 @@ class Coordinator:
         revision = digest([(r["delivery"], self.store.get("message/" + r["delivery"])["version"]) for r in rows])
         return bounded_page(rows, page=args.get("page"), revision=revision, key=lambda r: (r["order"], r["delivery"]))
 
+    @staticmethod
+    def _membership_cut(policy):
+        # Workspace selection includes newly discovered, unassigned endpoints too.
+        # A resource addition must invalidate a preview even before its first member row.
+        return digest([policy.membership_revision, sorted(policy.agents)])
+
     def scope(self, args, context):
         def apply(work, policy):
             action = args.get("action")
@@ -375,7 +413,7 @@ class Coordinator:
             control = work.get("control")
             expect = args.get("expect") or {}
             if (expect.get("control_epoch") != self.control_epoch or expect.get("control_revision") != control["revision"]
-                    or expect.get("membership_revision") != policy.membership_revision):
+                    or expect.get("membership_revision") != self._membership_cut(policy)):
                 raise CoordinationError("conflict", "scope preview is stale")
             targets = policy.scope(args.get("scope"))
             for agent in targets:
@@ -386,12 +424,21 @@ class Coordinator:
             work.put("control", control)
             def release():
                 if action == "resume":
-                    self.permits.update(targets)
                     for agent in targets:
+                        self.permits.add(agent)
                         self._wake(agent)
                 else:
                     self.permits.difference_update(targets)
-            return {"state": "accepted", "action": action, "targets": targets, "control_revision": control["revision"],
+            receipt = digest([context["principal"], args["op"]])
+            retained = sorted((key for key in work.rows if key.startswith("scope/")),
+                              key=lambda key: work.rows[key]["value"]["control_revision"])
+            for key in retained[:-15] if len(retained) >= 16 else []:
+                work.delete(key)
+            work.put("scope/" + receipt, {"targets": targets, "control_revision": control["revision"], "membership_revision": self._membership_cut(policy)})
+            page = bounded_page([{"agent": agent, "order": order} for order, agent in enumerate(targets)],
+                                revision=receipt, key=lambda row: row["order"])
+            return {"state": "accepted", "action": action, "targets": [row["agent"] for row in page["items"]],
+                    "selected": len(targets), "receipt": receipt, "next": page["next"], "control_revision": control["revision"],
                     "execution": "not_asserted", "_after": release,
                     "_uncertain": lambda: self.permits.difference_update(targets) if action == "pause" else None}
         return self._mutate("inbox.scope", args, context, apply, control=True)
@@ -401,7 +448,17 @@ class Coordinator:
         control = self.store.get("control")["value"]
         return {"targets": policy.scope(scope), "expect": {
             "control_epoch": self.control_epoch, "control_revision": control["revision"],
-            "membership_revision": policy.membership_revision}}
+            "membership_revision": self._membership_cut(policy)}}
+
+    def scope_result(self, receipt, page=None):
+        row = self.store.get("scope/" + str(receipt))
+        if not row:
+            return {"state": "unknown", "receipt": receipt}
+        targets = row["value"]["targets"]
+        result = bounded_page([{"agent": agent, "order": order} for order, agent in enumerate(targets)],
+                              page=page, revision=receipt, key=lambda item: item["order"])
+        return {"state": "accepted", "receipt": receipt, "targets": [item["agent"] for item in result["items"]],
+                "selected": len(targets), "next": result["next"]}
 
     def _wake(self, agent):
         if agent in self.permits and self.current:
@@ -631,8 +688,10 @@ class Coordinator:
         data = native.get("data") or {}
         receipt = data.get("receipt", native.get("receipt", {})) if isinstance(data, dict) else {}
         error = native.get("error") or {}
-        compact = {"outcome": native.get("outcome", "indeterminate"), "stage": receipt.get("stage") if isinstance(receipt, dict) else None,
-                   "error_kind": error.get("kind") if isinstance(error, dict) else None, "native_op": operation,
+        def tag(value):
+            return value if value is None or isinstance(value, str) and len(value.encode()) <= 128 else "_oversize"
+        compact = {"outcome": tag(native.get("outcome", "indeterminate")), "stage": tag(receipt.get("stage")) if isinstance(receipt, dict) else None,
+                   "error_kind": tag(error.get("kind")) if isinstance(error, dict) else None, "native_op": tag(operation),
                    "bytes": encoded(native), "sha256": digest(native), "incomplete": True}
         if encoded(compact) > 1024:
             raise CoordinationError("too_large", "compact outcome exceeds its 1 KiB reservation")
@@ -1021,11 +1080,11 @@ class Coordinator:
             for agent, old in list(self.tombstones().items()):
                 resource, native = self._facts(agent)
                 stone = copy.deepcopy(old)
-                if stone.get("lifecycle") == "retired":
-                    continue
                 if native.get("lifecycle") == "ended":
                     stone.update(lifecycle="ended", last_evidence="native_ended")
                     self.permits.discard(agent)
+                elif stone.get("lifecycle") == "retired":
+                    continue
                 elif not resource or resource.get("available") is False:
                     since = stone.setdefault("disconnected_since_ms", self.clock())
                     stone["lifecycle"] = "unavailable" if self.clock() - since >= grace_ms else "disconnected"

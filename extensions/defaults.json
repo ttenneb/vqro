@@ -73,6 +73,12 @@
       ]
     },
     {
+      "name": "coord",
+      "since": 5,
+      "argv": ["python3", "coordination.py"],
+      "description": "Default coordination-v0 inbox, grants and scope controls. Requires protected operational state and resolved principals; missing support is visible and fails closed. No terminal typing or replay."
+    },
+    {
       "name": "settings",
       "argv": [
         "python3",

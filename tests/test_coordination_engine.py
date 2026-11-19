@@ -290,6 +290,14 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(self.ledger[0][0], "r2")
         self.assertEqual(self.engine.get(sent["delivery"])["handed_over_from"]["agent"], "r1")
 
+    def test_native_end_evidence_supersedes_an_administrative_retirement(self):
+        self.send()
+        self.engine.control({"op": self.op(), "target": "r1", "action": "retire", "args": {}}, OWNER)
+        self.resources["r1"]["data"]["agent"]["lifecycle"] = "ended"
+        self.engine.lifecycle_sweep()
+        self.assertEqual(self.engine.tombstones()["r1"]["lifecycle"], "ended")
+        self.assertEqual(self.engine.tombstones()["r1"]["last_evidence"], "native_ended")
+
     def test_live_agent_cannot_be_silently_handed_over(self):
         sent = self.send()
         self.resources["r2"] = resource("r2")
@@ -452,6 +460,32 @@ class EngineTests(unittest.TestCase):
             self.assertEqual(result["state"], "partial")
             self.assertEqual(result["changed"], [key])
             self.assertIsNotNone(self.store.get(key))
+
+    def test_200_member_scope_is_atomic_with_frozen_paged_results(self):
+        self.resources = {"r" + str(n): resource("r" + str(n)) for n in range(1, 201)}
+        result = self.resume()
+        self.assertEqual(result["selected"], 200)
+        self.assertEqual(len(result["targets"]), 64)
+        self.assertEqual(len(self.engine.permits), 200)
+        all_targets = list(result["targets"])
+        cursor = result["next"]
+        self.resources["r999"] = resource("r999")
+        while cursor:
+            page = self.engine.scope_result(result["receipt"], cursor)
+            self.assertLessEqual(len(page["targets"]), 64)
+            all_targets += page["targets"]
+            cursor = page["next"]
+        self.assertEqual(len(set(all_targets)), 200)
+        self.assertNotIn("r999", all_targets)
+        self.assertNotIn("r999", self.engine.permits)
+
+    def test_unassigned_endpoint_added_after_preview_invalidates_scope_cut(self):
+        args = {"op": self.op(), "action": "resume", "scope": "workspace", "expect": self.engine.scope_preview("workspace")["expect"]}
+        self.resources["r2"] = resource("r2")
+        with self.assertRaises(PolicyError) as caught:
+            self.engine.scope(args, OWNER)
+        self.assertEqual(caught.exception.kind, "conflict")
+        self.assertEqual(self.engine.permits, set())
 
     def test_silence_becomes_unavailable_never_ended(self):
         self.send()

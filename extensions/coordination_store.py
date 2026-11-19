@@ -36,6 +36,9 @@ class MemoryStore:
         self.fault = None
         self.writes = []
 
+    def charge(self, rows):
+        return encoded({"operational/coord/" + key: row for key, row in rows.items()}) + 65536
+
     def snapshot(self):
         with self.lock:
             return copy.deepcopy(self.entries)
@@ -71,8 +74,8 @@ class MemoryStore:
                     raise StoreError("invalid", "unknown operational operation")
             fraction = 1 if control else 1 - CONTROL_RESERVE
             if ((len(candidate) > int(self.record_limit * fraction) and len(candidate) > len(self.entries))
-                    or (encoded(candidate) > int(self.byte_limit * fraction)
-                        and encoded(candidate) > encoded(self.entries))):
+                    or (self.charge(candidate) > int(self.byte_limit * fraction)
+                        and self.charge(candidate) > self.charge(self.entries))):
                 raise StoreError("quota", "protected domain full; recovery reserve retained")
             self.entries, self.revision = candidate, revision
             result = {"id": revision, "changes": [{"key": op["key"], "version": revision if op["op"] == "set" else None} for op in ops]}
@@ -89,6 +92,9 @@ class OperationalStore:
         self.call, self.domain = call, domain
         self.prefix = f"operational/{domain}/"
         self.byte_limit, self.record_limit = DOMAIN_BYTES, DOMAIN_RECORDS
+
+    def charge(self, rows):
+        return encoded({self.prefix + key: row for key, row in rows.items()}) + 65536
 
     def _call(self, method, params):
         try:

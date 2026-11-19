@@ -1,0 +1,17 @@
+{
+  "name": "coord", "title": "Agent coordination", "version": "0.1.0", "license": "Apache-2.0", "author": "Bennett Garcia", "kind": "interface",
+  "summary": "Durable attributed inboxes, safe-point pull, grants and explicit scope resume.",
+  "description": "The replaceable coordination-v0 policy over the core protected operational domain. Restart closes inbox admission, never suspends backend processes or replays uncertain input. Turning it off leaves native terminals and recovery available; saved evidence stays in its protected domain.",
+  "requires": {"protocol": 1},
+  "provides": ["command/coord.inbox.window", "command/coord.inbox.send", "command/coord.inbox.edit", "command/coord.inbox.withdraw",
+    "command/coord.inbox.take", "command/coord.inbox.report", "command/coord.inbox.reconcile", "command/coord.inbox.peek",
+    "command/coord.inbox.resolve", "command/coord.inbox.list", "command/coord.inbox.get", "command/coord.inbox.op",
+    "command/coord.inbox.archive", "command/coord.handover", "command/coord.scope", "command/coord.control",
+    "command/coord.names", "command/coord.grants", "command/coord.membership.set", "command/coord.status",
+    "doc/agents/names/*", "doc/agents/members/*", "doc/agents/grants/*", "doc/agents/terminals/*", "view/coord-status"],
+  "needs": [{"cap": "ability/vqro.operational", "why": "Requires the generic protected, separately persisted operational domain; unavailable cores fail closed."},
+            {"cap": "ability/vqro.principals", "why": "Requires core-resolved callback principals; undeclared calls never gain coordination rights."}],
+  "works_with": [{"cap": "ability/vqro.agents", "suggest": "pi", "why": "Native agent endpoints supply declared delivery and control operations."},
+                 {"cap": "command/agents.show", "suggest": "agents", "why": "Optional agent UI displays the inbox and scope state."}],
+  "contributes": {"commands": ["coord.*: standard coordination operations"], "panels": ["Coordination count-only wake and status data"]}
+}
