@@ -92,7 +92,7 @@ async fn new_fake_instance_cannot_reuse_a_previous_vqro_id() {
     // A restart stops the old writer first; two live cores must not share one state directory.
     vqro::server::shutdown(&_old).await;
     let stale_facts=_old.lock().unwrap().resources.values().next().unwrap().facts.as_ref().clone();
-    _old.lock().unwrap().on_adapter_event("fake",vqro::adapter::AdapterEvent::Removed { reference:stale_facts.backend_ref,incarnation:stale_facts.incarnation });
+    _old.lock().unwrap().on_adapter_event("fake",vqro::adapter::AdapterEvent::Removed { reference:stale_facts.backend_ref,incarnation:stale_facts.incarnation,reason:json!({"reason":"exited"}) });
     assert_eq!(_old.lock().unwrap().resources.len(),1,"stopped cores ignore late backend state mutations");
     // The fake starts empty with refs f1, f2... again, but belongs to a new instance.
     let socket = e._dir.path().join("new.sock");

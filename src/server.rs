@@ -600,7 +600,7 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> Rp
             };
             let (handle, operation, c) = (route.handle.clone(), route.clone(), core.clone());
             let deadline = provider::deadline(p.get("deadline_ms").map(|v| v.as_u64().ok_or_else(|| RpcError::invalid("deadline_ms must be an unsigned integer"))).transpose()?)?;
-            let (effect, mut result) = effect(core, caller.clone(), route, "resource.kill", deadline, |value: &crate::adapter::EffectResult| value.outcome, move |context| async move {
+            let (effect, mut result) = effect(core, caller.clone(), route, "resource.kill", json!({"resource":id,"op":"terminal.kill"}), deadline, |value: &crate::adapter::EffectResult| value.outcome, move |context| async move {
                 let mut result = handle.for_effect(context).kill(reference).await.map_err(|e| e.rpc())?;
                 if !operation.valid() { return Err(provider::indeterminate("provider changed before kill result was recorded")); }
                 if let Some(facts) = result.facts.take() { c.lock().unwrap().upsert_resource(&operation.handle.name, facts)?; }
@@ -798,7 +798,7 @@ fn subscribe(core: &Shared, conn: &Arc<Conn>, opts: crate::events::SubscribeOpti
 /// Audit the caller's observed outcome. A timeout drops the reply receiver, never the backend
 /// effect or its independent fact feed. Late replies are ignored, as pinned provider v0 requires.
 async fn effect<T: Send + 'static, F>(
-    core: &Shared, author: Caller, route: Route, method: &'static str, deadline: std::time::Duration, success: fn(&T) -> &'static str,
+    core: &Shared, author: Caller, route: Route, method: &'static str, detail:Value, deadline: std::time::Duration, success: fn(&T) -> &'static str,
     work: impl FnOnce(crate::adapter::EffectContext) -> F,
 ) -> Result<(String, T), RpcError>
 where F: std::future::Future<Output = Result<T, RpcError>> + Send + 'static {
@@ -810,7 +810,7 @@ where F: std::future::Future<Output = Result<T, RpcError>> + Send + 'static {
         Ok(value) => success(value),
         Err(error) => error.data.as_ref().and_then(|d| d["outcome"].as_str()).unwrap_or("indeterminate"),
     };
-    core.lock().unwrap().emit("effect", json!({"effect": id, "provider": route.handle.name, "generation": route.generation, "method": method, "author": author, "outcome": outcome, "error": result.as_ref().err()}));
+    core.lock().unwrap().emit("effect", json!({"effect": id, "provider": route.handle.name, "generation": route.generation, "method": method, "author": author, "resource":detail["resource"], "op":detail["op"], "target":route.target.as_ref().map(|(reference,incarnation)|json!({"ref":reference,"incarnation":incarnation})), "outcome": outcome, "error": result.as_ref().err()}));
     result.map(|value| (id.clone(), value)).map_err(|mut error| {
         if let Some(data) = error.data.as_mut() { data["effect"] = json!(id); }
         error
@@ -841,7 +841,7 @@ async fn spawn(core: &Shared, author: &Caller, s: Spawn) -> RpcResult {
         if !(1..=9999).contains(&dimension) { return Err(provider::rejected("invalid", "spawn dimensions must be between 1 and 9999")); }
     }
     let (c, operation) = (core.clone(), route.clone());
-    let (effect, id) = effect(core, author.into(), route, "resource.spawn", deadline, |_| "observed", move |context| async move {
+    let (effect, id) = effect(core, author.into(), route, "resource.spawn", json!({"op":"terminal.spawn"}), deadline, |_| "observed", move |context| async move {
         let facts = operation.handle.for_effect(context).spawn(SpawnRequest { argv, cwd: s.cwd, name: s.name, env, cols: s.cols, rows: s.rows, placement: s.placement }).await.map_err(|e| e.rpc())?;
         let id = {
             let mut c = c.lock().unwrap();
@@ -868,7 +868,7 @@ async fn invoke_resource(core: &Shared, author: &Caller, p: Value) -> RpcResult 
     let (reference, incarnation) = route.target.clone().unwrap();
     let (handle, operation, c) = (route.handle.clone(), route.clone(), core.clone());
     let deadline = provider::deadline(p.get("deadline_ms").map(|v| v.as_u64().ok_or_else(|| RpcError::invalid("deadline_ms must be an unsigned integer"))).transpose()?)?;
-    let (effect, result) = effect(core, author.into(), route, "resource.invoke", deadline, |value: &crate::adapter::EffectResult| value.outcome, move |context| async move {
+    let (effect, result) = effect(core, author.into(), route, "resource.invoke", json!({"resource":id,"op":op}), deadline, |value: &crate::adapter::EffectResult| value.outcome, move |context| async move {
         let mut result = handle.for_effect(context).invoke(op, reference, incarnation, args).await.map_err(|e| e.rpc())?;
         if !operation.valid() { return Err(provider::indeterminate("provider changed before effect result was recorded")); }
         if let Some(facts) = result.facts.take() { c.lock().unwrap().upsert_resource(&operation.handle.name, facts)?; }
@@ -882,7 +882,7 @@ fn forget_cached(core:&Shared,author:&Caller,p:Value)->RpcResult {
     let id=p["resource"].as_str().ok_or_else(||RpcError::invalid("needs `resource`"))?;
     let mut c=core.lock().unwrap();author.check(&c)?;let effect=c.effect_id();let result=c.forget_cached_resource(id);
     let outcome=if result.is_ok(){"observed"}else{result.as_ref().err().and_then(|e|e.data.as_ref()).and_then(|d|d["outcome"].as_str()).unwrap_or("indeterminate")};
-    c.emit("effect",json!({"effect":effect,"provider":null,"generation":null,"method":"resource.forget_cached","author":author,"scope":"cached_facts","outcome":outcome,"error":result.as_ref().err()}));
+    c.emit("effect",json!({"effect":effect,"provider":null,"generation":null,"method":"resource.forget_cached","resource":id,"op":"resource.forget_cached","author":author,"scope":"cached_facts","outcome":outcome,"error":result.as_ref().err()}));
     result.map_err(|mut error| {if let Some(data)=error.data.as_mut(){data["effect"]=json!(effect);data["scope"]=json!("cached_facts");}error})?;
     Ok(json!({"outcome":"observed","effect":effect,"data":{"scope":"cached_facts","backend_effect":"none"}}))
 }
@@ -904,11 +904,11 @@ async fn forget(core: &Shared, author: &Caller, p: Value) -> RpcResult {
     route.resource = None;
     let (reference, incarnation) = route.target.clone().unwrap();
     let (handle, operation, c) = (route.handle.clone(), route.clone(), core.clone());
-    let (effect, result) = effect(core, author.into(), route, "resource.forget", deadline, |value: &crate::adapter::EffectResult| value.outcome, move |context| async move {
+    let (effect, result) = effect(core, author.into(), route, "resource.forget", json!({"resource":id,"op":"resource.forget"}), deadline, |value: &crate::adapter::EffectResult| value.outcome, move |context| async move {
         let result = handle.for_effect(context).invoke("resource.forget".into(), reference.clone(), incarnation.clone(), json!({})).await.map_err(|e| e.rpc())?;
         if !operation.valid() { return Err(provider::indeterminate("provider changed before forget result was recorded")); }
         if result.outcome == "observed" {
-            c.lock().unwrap().on_adapter_event(&operation.handle.name, crate::adapter::AdapterEvent::Removed { reference, incarnation });
+            c.lock().unwrap().on_adapter_event(&operation.handle.name, crate::adapter::AdapterEvent::Removed { reference, incarnation, reason:json!({"reason":"forgotten"}) });
         }
         Ok(result)
     }).await?;
@@ -923,7 +923,7 @@ async fn attach(core: &Shared, conn: &Arc<Conn>, a: Attach) -> RpcResult {
         (c.resource_route(&a.resource, "terminal.output")?, c.resource(&a.resource)?.facts.backend_ref.clone())
     };
     let handle = route.handle.clone();
-    let (effect, mut stream) = effect(core, conn.caller(), route.clone(), "resource.attach", provider::deadline(a.deadline_ms)?, |_| "accepted", move |context| async move {
+    let (effect, mut stream) = effect(core, conn.caller(), route.clone(), "resource.attach", json!({"resource":a.resource,"op":"terminal.output"}), provider::deadline(a.deadline_ms)?, |_| "accepted", move |context| async move {
         handle.for_effect(context).attach(reference, cols, rows, a.history.unwrap_or(0)).await.map_err(|e| e.rpc())
     }).await?;
     if !route.valid() { return Err(provider::indeterminate("provider changed before stream registration")); }

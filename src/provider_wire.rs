@@ -313,7 +313,7 @@ impl WireProvider {
             "resource.gone" => {
                 let reference = p["ref"].as_str().ok_or_else(|| invalid("gone requires ref"))?.to_string();
                 let incarnation = p["incarnation"].as_str().ok_or_else(|| invalid("gone requires incarnation"))?.to_string();
-                reason(&p["reason"])?;
+                let reason=reason(&p["reason"])?;
                 {
                     let mut inventory = self.inventory.lock().unwrap();
                     if inventory.current.get(&reference).is_some_and(|f| f.incarnation == incarnation) { inventory.current.remove(&reference); }
@@ -323,7 +323,7 @@ impl WireProvider {
                 if !c.providers.get(&self.name).is_some_and(|p| p.source == self.source && p.generation == self.generation && p.owner.as_ref().is_none_or(|o|crate::ext::owner_valid(&c,o))) {
                     return Err(RpcError::new("stale_generation", "provider changed before retirement publication"));
                 }
-                c.on_adapter_event(&self.name, adapter::AdapterEvent::Removed { reference, incarnation });
+                c.on_adapter_event(&self.name, adapter::AdapterEvent::Removed { reference, incarnation, reason });
             }
             "stream.data" | "stream.closed" | "stream.gap" | "stream.error" => self.stream_message(method, p)?,
             _ => return Err(RpcError::method_not_found(method)),

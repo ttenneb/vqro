@@ -436,3 +436,16 @@ Human decisions: adapters run as extensions; tmux only as a private server; ever
 - `VQRO_SOCKET` goes into every spawned terminal's environment; the bridge token stays opt-in.
 - Resource ids carry over from the in-process herdr adapter to vqro-herdr (same provider name, instance, ref and
   incarnation): `tests/herdr_provider.rs` switches a state dir and keeps ids and tabs.
+
+## Audit correctness fixes (2026-11-19)
+
+- Supervised lifetime credentials now fence ordinary mutation/publication, provider facts/routes, command handlers,
+  queued commits and native dispatch. Shared author names do not revive retired connections. Irreversible writer
+  admission is ordered with retirement; an already-dispatched candidate is still adopted and reported honestly.
+- Extension diagnostics are pipe-drained off the core mutex into a 1 MiB active log plus one 1 MiB backup,
+  including within a single generation and overlapping cleanup. Failed logging discards output while draining.
+- Resource-removal events preserve provider-reported reasons separately from mechanical retirement; effect events
+  identify the addressed resource, native operation and exact native target without retaining input content.
+- Regressions: `tests/extension_lifetime.rs` (red on the old main), `tests/commit_off_lock.rs` (queued versus active
+  writer retirement), `tests/provider_wire.rs` (reason fidelity, all effect outcomes, administrative forget), and
+  `src/ext_log.rs` (bounded rotation across overlapping writers). All tests use private fixtures, no model calls.

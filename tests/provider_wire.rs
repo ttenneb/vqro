@@ -24,6 +24,56 @@ fn registration(name: &str) -> Value {
 }
 fn facts(reference: &str) -> Value { json!({"ref":reference,"kind":"terminal","state":"live","argv":[],"data":{"opaque":[1,2]}}) }
 
+async fn event_matching(rx:&mut IncomingReceiver,ty:&str,key:&str,value:&Value)->Value {
+    tokio::time::timeout(Duration::from_secs(2),async {
+        loop {if let Some(Incoming::Notification {method,params})=rx.recv().await {
+            if method=="event" && params["type"]==ty && params["data"][key]==*value {return params["data"].clone();}
+        }}
+    }).await.unwrap()
+}
+
+#[tokio::test]
+async fn native_removal_reasons_and_effect_addresses_survive_the_public_event_path() {
+    let e=env().await;let(provider,mut incoming)=peer(&e).await;let(control,mut events)=peer(&e).await;
+    let generation=provider.call("provider.register",registration("evidence")).await.unwrap()["generation"].clone();
+    let refs=["exited","killed","closed","_unknown","cached"];
+    provider.call("provider.sync",json!({"generation":generation,"resources":refs.map(facts),"final":true})).await.unwrap();
+    control.call("events.subscribe",json!({"types":["effect","resource.removed"]})).await.unwrap();
+    let id=e.core.lock().unwrap().resources.values().find(|r|r.adapter=="evidence"&&r.facts.backend_ref=="exited").unwrap().id.clone();
+    for outcome in ["accepted","rejected","indeterminate"] {
+        let work=tokio::spawn({let control=control.clone();let id=id.clone();async move {
+            control.call("resource.invoke",json!({"resource":id,"op":"fixture.dispatch","args":{}})).await
+        }});
+        let request=loop {if let Some(Incoming::Request {id,method,params})=incoming.recv().await {
+            assert_eq!(method,"effect.invoke");assert_eq!(params["op"],"fixture.dispatch");break id;
+        }};
+        match outcome {
+            "indeterminate"=>provider.respond(request,Err(vqro::rpc::RpcError::new("backend","lost native result"))),
+            "rejected"=>provider.respond(request,Ok(json!({"outcome":"rejected","error":{"kind":"invalid","message":"no write"}}))),
+            _=>provider.respond(request,Ok(json!({"outcome":"accepted"}))),
+        }
+        let result=work.await.unwrap();
+        let effect=match result {Ok(r)=>r["effect"].clone(),Err(e)=>e.data.unwrap()["effect"].clone()};
+        let event=event_matching(&mut events,"effect","effect",&effect).await;
+        assert_eq!(event["resource"],id);assert_eq!(event["op"],"fixture.dispatch");
+        assert_eq!(event["target"],json!({"ref":"exited","incarnation":""}));
+        assert_eq!(event["outcome"],outcome);
+    }
+    for reference in refs.into_iter().take(4) {
+        let id=e.core.lock().unwrap().resources.values().find(|r|r.adapter=="evidence"&&r.facts.backend_ref==reference).unwrap().id.clone();
+        let reason=json!({"reason":reference,"message":"unaltered native evidence","exit_code":42});
+        provider.notify("resource.gone",json!({"generation":generation,"ref":reference,"incarnation":"","reason":reason}));
+        let event=event_matching(&mut events,"resource.removed","id",&json!(id)).await;
+        assert_eq!(event["native_reason"],reason);assert_eq!(event["provider"],"evidence");
+        assert_eq!(event["reason"]["reason"],"closed","mechanical cause stays separate from native evidence");
+    }
+    let cached=e.core.lock().unwrap().resources.values().find(|r|r.adapter=="evidence").unwrap().id.clone();
+    provider.close();until(||!e.core.lock().unwrap().resources[&cached].available).await;
+    control.call("resource.forget_cached",json!({"resource":cached})).await.unwrap();
+    let event=event_matching(&mut events,"resource.removed","id",&json!(cached)).await;
+    assert_eq!(event["reason"]["reason"],"forgotten");assert!(event.get("native_reason").is_none());
+}
+
 #[tokio::test]
 async fn spawn_completion_does_not_roll_back_newer_published_facts() {
     let e=env().await;let(provider,mut incoming)=peer(&e).await;let(viewer,_)=peer(&e).await;

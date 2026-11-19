@@ -358,9 +358,9 @@ async fn serve(
                         known.lock().unwrap().insert(f.backend_ref.clone(), row.clone());
                         provider.upsert(row).await
                     }
-                    AdapterEvent::Removed { reference, incarnation } if synced => {
+                    AdapterEvent::Removed { reference, incarnation, reason } if synced => {
                         known.lock().unwrap().remove(&reference);
-                        provider.gone(&reference, &incarnation, json!({"reason": "closed"})).await
+                        provider.gone(&reference, &incarnation, reason).await
                     }
                     AdapterEvent::Connected(false, _) => return Ended::Backend,
                     // A new herdr-core connection (maybe a new instance): register again.

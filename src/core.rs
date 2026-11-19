@@ -431,14 +431,18 @@ impl Core {
         }
     }
 
-    fn retire_visible(&mut self, ids: Vec<String>, reason: &str) {
+    fn retire_visible(&mut self, ids: Vec<String>, reason: &str) { self.retire_visible_reported(ids,reason,None); }
+
+    fn retire_visible_reported(&mut self, ids: Vec<String>, reason: &str, reported:Option<(&str,Value)>) {
         if ids.is_empty(){return;}
         let hosts=ids.iter().map(String::as_str).collect::<std::collections::HashSet<_>>();
         if let Err(error)=self.bridge_tokens.expire_hosts(&hosts){eprintln!("vqro: runtime credential revocation persistence failed: {error}");self.emit("persistence.error",json!({"scope":"runtime_tokens","message":error.message}));}
         for id in ids {
             self.admission.remove_resource(&id);
             if let Some(resource) = self.resources.remove(&id) { resource.life.send_replace(false); }
-            self.emit("resource.removed", json!({"id": id, "reason": {"reason": reason}}));
+            let mut event=json!({"id": id, "reason": {"reason": reason}});
+            if let Some((provider,native_reason))=&reported {event["provider"]=json!(provider);event["native_reason"]=native_reason.clone();}
+            self.emit("resource.removed",event);
         }
     }
 
@@ -656,7 +660,7 @@ impl Core {
             }
             AdapterEvent::Snapshot(list) => {let _=self.upsert_resources(name,list,true);}
             AdapterEvent::Upsert(facts) => { let _ = self.upsert_resource(name, facts); }
-            AdapterEvent::Removed { reference, incarnation } => {
+            AdapterEvent::Removed { reference, incarnation, reason } => {
                 let Some(info) = self.providers[name].info.clone() else { return };
                 let mut fenced=Vec::new();
                 let id=self.identities.reference_id(name,&reference).map(String::from);
@@ -666,7 +670,7 @@ impl Core {
                     if pending.get(&reference).is_some_and(|(instance, facts)| instance == &info.instance && facts.incarnation == incarnation) { pending.remove(&reference); self.admission.remove_pending(name, &reference); }
                 }
                 match self.identities.retire(|i| i.provider == name && i.instance == info.instance && i.reference == reference && i.incarnation == incarnation) {
-                    Ok((ids, error)) => { self.retire_visible(ids, "closed"); if let Some(error) = error { self.identity_error(name, error); } }
+                    Ok((ids, error)) => { self.retire_visible_reported(ids, "closed",Some((name,reason))); if let Some(error) = error { self.identity_error(name, error); } }
                     Err(error) => { self.identity_error(name, error); }
                 }
                 self.reap_runtime_provider(name);

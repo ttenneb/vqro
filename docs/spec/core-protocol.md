@@ -283,9 +283,18 @@ connection. A bounded recovery buffer may discard its batch and request a newer 
 
 Then notifications `event {epoch, seq, type, data}` with types `entries`, `resource`, `resource.removed`, `command`,
 `extension`, `provider`, `adapter` (compatibility alias), `safe_mode`, `effect`, `persistence.error`, `persistence.recovered`; or `missed` when the bounded log can't serve the cursor
-(re-snapshot). `effect {effect, provider, generation, method, author, outcome, error?}` audits the result observed by
-the caller, including an indeterminate timeout; it is not a late-reply notification. Late original replies are
-ignored, with no invented `effect.outcome` event; independent resource facts reconcile the backend.
+(re-snapshot). `effect {effect, provider, generation, method, author, resource?, op?, target?, outcome, error?}` audits
+the result observed by the caller, including an indeterminate timeout; it is not a late-reply notification. `resource`
+is the addressed core id, `op` the actual provider operation (e.g. `agent.send`), and `target` the exact native
+`{ref, incarnation}`. Spawn has no pre-existing target; cached retirement has no native target. These fields never
+include input content. Late original replies are ignored, with no invented `effect.outcome` event; independent
+resource facts reconcile the backend.
+
+`resource.removed` keeps its mechanical `reason` (closed, replaced, forgotten, etc.). When a provider explicitly
+reports removal it also carries `provider` and the unchanged `native_reason` object, including unknown future
+reason strings. Administrative cached forgetting/replacement does not invent native end evidence. Consumers must
+not equate a generic removal, unknown native reason, or viewer/bridge closure with agent-process exit; the relevant
+provider's lifetime relationship and evidence determine that interpretation.
 
 `persistence.error {scope: "resources", provider, message, error}` reports a resource-identity map failure and is
 logged once per affected provider until recovery. Repeated resource/status events are coalesced, not logged as a

@@ -457,7 +457,7 @@ fn handle_notification(
                 }
                 "removed" => {
                     let incarnation = records.remove(&t).map(|record| facts(&record).incarnation).unwrap_or_default();
-                    send(AdapterEvent::Removed { reference: t, incarnation });
+                    send(AdapterEvent::Removed { reference: t, incarnation, reason:json!({"reason":"removed","backend":data}) });
                     return;
                 }
                 _ => {

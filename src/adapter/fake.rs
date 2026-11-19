@@ -121,7 +121,7 @@ pub fn start_with_instance(name: String, instance: String, events: mpsc::Unbound
                     // Unknown counts as already forgotten: the outcome the caller asked for holds.
                     _ => {
                         terms.remove(&reference);
-                        let _ = events.send((name.clone(), AdapterEvent::Removed { reference, incarnation: String::new() }));
+                        let _ = events.send((name.clone(), AdapterEvent::Removed { reference, incarnation: String::new(), reason:json!({"reason":"forgotten"}) }));
                         let _ = reply.send(Ok(EffectResult { outcome: "observed", data: json!({}), facts: None }));
                     }
                 },

@@ -105,7 +105,7 @@ pub enum AdapterEvent {
     /// Full current list; resources not in it are gone. Sent on connect and after a resync.
     Snapshot(Vec<ResourceFacts>),
     Upsert(ResourceFacts),
-    Removed { reference: String, incarnation: String },
+    Removed { reference: String, incarnation: String, reason:Value },
     /// The adapter lost or regained its backend.
     Connected(bool, Option<String>),
 }
