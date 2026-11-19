@@ -383,7 +383,9 @@ The Rust SDK's `Provider::registration()` exposes the acknowledged register resu
 `resume_token()` exposes a nonempty opaque runtime credential when present (§9.6). Clones share that immutable
 reply, and a later sync/setup failure does not erase the observed credential. Backend replies without one return
 `None`. This is access to evidence already received, not persistence, retry or replay; callers must not log the
-credential-bearing reply.
+credential-bearing reply. `ProviderError` diagnostics redact known token fields recursively (and known token
+values echoed in messages); `Config` diagnostics redact its bootstrap token. Explicit `data`/registration/token
+access still returns the original sensitive evidence and must not be logged.
 
 ### 9.3 Facts (G1)
 

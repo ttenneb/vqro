@@ -31,13 +31,14 @@ pub const MAX_WINDOW: u64 = 262_144;
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
 /// A protocol-level failure: becomes a JSON-RPC error with `data.kind` (9.1).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ProviderError {
     pub kind: String,
     pub message: String,
     /// True only for an explicit core error reply, never a local deadline/transport failure.
     pub remote: bool,
     /// Original structured error data, including refusal reasons/outcomes and future fields.
+    /// May contain credentials. Debug/Display redact known token fields; explicit data access is still secret.
     pub data: Value,
 }
 
@@ -61,16 +62,56 @@ impl ProviderError {
     }
 }
 
+// Credentials remain available as evidence, but must not leak through routine diagnostics.
+fn diagnostic_data(value: &Value, secrets: &mut Vec<String>) -> Value {
+    match value {
+        Value::Object(object) => Value::Object(object.iter().map(|(key, value)| {
+            let value = if matches!(key.as_str(), "resume_token" | "token" | "extension_token" | "bridge_token") {
+                if let Some(secret) = value.as_str().filter(|s| !s.is_empty()) { secrets.push(secret.into()); }
+                json!("[redacted]")
+            } else { diagnostic_data(value, secrets) };
+            (key.clone(), value)
+        }).collect()),
+        Value::Array(array) => Value::Array(array.iter().map(|value| diagnostic_data(value, secrets)).collect()),
+        _ => value.clone(),
+    }
+}
+fn diagnostic_text(text: &str, secrets: &[String]) -> String {
+    secrets.iter().fold(text.to_string(), |text, secret| text.replace(secret, "[redacted]"))
+}
+fn redact_echoes(value: &mut Value, secrets: &[String]) {
+    match value {
+        Value::String(text) => *text = diagnostic_text(text, secrets),
+        Value::Object(object) => { for value in object.values_mut() { redact_echoes(value, secrets); } }
+        Value::Array(array) => { for value in array { redact_echoes(value, secrets); } }
+        _ => {}
+    }
+}
+impl std::fmt::Debug for ProviderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut secrets = Vec::new();
+        let mut data = diagnostic_data(&self.data, &mut secrets);
+        secrets.sort_by_key(|s| std::cmp::Reverse(s.len()));
+        // Replace raw strings before formatting, including escaped/Unicode credentials.
+        redact_echoes(&mut data, &secrets);
+        f.debug_struct("ProviderError").field("kind", &diagnostic_text(&self.kind, &secrets))
+            .field("message", &diagnostic_text(&self.message, &secrets)).field("remote", &self.remote)
+            .field("data", &data).finish()
+    }
+}
 impl std::fmt::Display for ProviderError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} ({})", self.message, self.kind)
+        let mut secrets = Vec::new();
+        let _ = diagnostic_data(&self.data, &mut secrets);
+        secrets.sort_by_key(|s| std::cmp::Reverse(s.len()));
+        write!(f, "{} ({})", diagnostic_text(&self.message, &secrets), diagnostic_text(&self.kind, &secrets))
     }
 }
 
 impl std::error::Error for ProviderError {}
 
 /// What a provider declares at registration, plus local bounds.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Config {
     pub name: String,
     /// "backend" or "runtime".
@@ -96,6 +137,14 @@ pub struct Config {
     pub outgoing_bytes: usize,
     /// Queued input/resize/close commands per stream; beyond this, `stream.error` overloaded.
     pub stream_commands: usize,
+}
+
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config").field("name", &self.name).field("role", &self.role)
+            .field("instance", &self.instance).field("token", &self.token.as_ref().map(|_| "[redacted]"))
+            .finish_non_exhaustive()
+    }
 }
 
 impl Config {

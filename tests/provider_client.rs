@@ -74,6 +74,32 @@ fn facts(r: &str) -> Value {
     json!({"ref": r, "incarnation": "", "kind": "terminal", "state": "live", "argv": ["sh"]})
 }
 
+#[test]
+fn credential_diagnostics_redact_nested_tokens_without_mutating_evidence() {
+    let mut error = ProviderError::new("backend", "resume-secret bootstrap-secret extension-secret").with_data(json!({
+        "reason":"durability_unconfirmed", "resume_token":"resume-secret",
+        "nested":[{"token":"bootstrap-secret","extension_token":"extension-secret"}],
+        "echo":"resume-secret"
+    }));
+    error.remote = true;
+    for diagnostic in [format!("{error:?}"), format!("{error:#?}"), error.to_string()] {
+        for secret in ["resume-secret", "bootstrap-secret", "extension-secret"] {
+            assert!(!diagnostic.contains(secret), "credential leaked in diagnostic");
+        }
+        assert!(diagnostic.contains("[redacted]"));
+    }
+    assert_eq!(error.data["resume_token"], "resume-secret", "redaction must not erase recoverable evidence");
+    assert_eq!(error.data["nested"][0]["token"], "bootstrap-secret");
+    let opaque = "opaque-credential\n\"雪";
+    let escaped = ProviderError::new("backend", opaque).with_data(json!({"resume_token":opaque,"echo":opaque}));
+    assert!(!format!("{escaped:?}").contains("opaque-credential"));
+    assert!(!escaped.to_string().contains("opaque-credential"));
+    let mut config = Config::new("runtime@test", "instance", caps());
+    config.token = Some("bootstrap-secret".into());
+    assert!(!format!("{config:?}").contains("bootstrap-secret"));
+    assert!(format!("{config:?}").contains("runtime@test"));
+}
+
 #[tokio::test]
 async fn runtime_registration_retains_opaque_resume_metadata_through_later_setup_failure() {
     let (a, b) = tokio::io::duplex(1 << 20);
