@@ -355,6 +355,25 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         await self.core.wait(lambda: self.core.run_facts().get("settled") is True)
         self.assertEqual(self.core.resources["r7"]["status"]["state"], "done")
 
+    async def test_real_pi_metadata_sizes_keep_the_runtime_alive(self):
+        """Regression (real pi1 1.5.2): get_available_models is ~300 KB with a real configuration. A 256 KiB
+        record cap made the client treat it as a protocol error and terminate Pi (exit 143) 0.5 s after start."""
+        recorded = ROOT / "tests/fixtures/pi_metadata_1.5.2.json"
+        models = json.loads(recorded.read_text())["get_available_models"]
+        self.assertGreater(len(json.dumps({"type": "response", "data": models}).encode()), 262144, "the fixture must exercise a >256 KiB record")
+        bridge = await self.start(fixture_args=("--metadata", str(recorded)))
+        agent = lambda: self.core.resources.get("r7", {}).get("data", {}).get("agent") or {}
+        await self.core.wait(lambda: agent().get("config"))
+        options = {c["id"]: c for c in agent()["config"]}
+        self.assertEqual(options["model"]["value"], "openai-codex/gpt-6-luna")
+        self.assertEqual(len(options["model"]["choices"]), 64, "bounded choices from the full list")
+        self.assertEqual(len(options["thinking_level"]["choices"]), 7)
+        self.assertGreater(len(agent()["commands"]), 10, "Pi's own commands are advertised")
+        self.assertTrue(bridge.pi.snapshot()["available"], bridge.pi.diagnostics()["failure"])
+        self.assertIsNone(bridge.pi.process.returncode, "Pi must not be terminated by metadata")
+        self.assertLess(len(json.dumps(self.core.resources["r7"]["data"]).encode()), 65536, "facts stay within the 64 KiB data bound")
+        self.assertEqual((await self.effect("prompt", {"message": "still works"}))["result"]["outcome"], "accepted")
+
     async def test_commands_and_config_follow_agent_v0_section_6_3(self):
         bridge = await self.start()
         agent = lambda: self.core.resources.get("r7", {}).get("data", {}).get("agent") or {}

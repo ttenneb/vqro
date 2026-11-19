@@ -330,10 +330,11 @@ class PiBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(client.events()["gap"])
 
     async def test_oversized_record_fails_closed_without_unbounded_read(self):
-        result = await self.client.request("test_oversize")
+        client = await self.start(limits=Limits(response_bytes=65536))  # the fixture writes 1 MiB, no newline
+        result = await client.request("test_oversize")
         self.assertEqual(result["outcome"], "indeterminate")
-        await asyncio.wait_for(self.client.wait_closed(), 2)
-        self.assertIn("protocol error", self.client.diagnostics()["failure"])
+        await asyncio.wait_for(client.wait_closed(), 2)
+        self.assertIn("protocol error", client.diagnostics()["failure"])
 
     async def test_truncated_record_and_mismatched_response_are_indeterminate(self):
         for command in ["test_truncated", "test_bad_response"]:

@@ -78,7 +78,8 @@ Native successful command response:
 
 ## Bounds and framing
 
-Defaults (`Limits`): 256 KiB per incoming/outgoing record, 32 pending commands, 512 KiB retained serialized
+Defaults (`Limits`): 256 KiB per outgoing command record, 4 MiB per incoming record (real Pi 1.5.2's
+`get_available_models` is ~300 KB with a real configuration; `tests/fixtures/pi_metadata_1.5.2.json` records it), 32 pending commands, 512 KiB retained serialized
 events **and at most 512 event objects**, 64 KiB stderr tail, 32 outstanding dialogs, 5-second effect deadline. Python object overhead and
 asyncio/kernel pipe buffers are additional bounded overhead, not included in the retained-byte counters.
 

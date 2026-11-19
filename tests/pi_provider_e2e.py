@@ -512,7 +512,7 @@ class E2E:
             assert size > 1048576, size
             self.log.append({'large_workspace_bytes': size, 'provider_record_cap': 1048576})
         if self.args.real_pi_metadata:
-            assert json.loads((PACKAGE/'package.json').read_text())['version'] == '1.5.0'
+            assert json.loads((PACKAGE/'package.json').read_text())['version'].startswith('1.5.'), 'installed pi1 is not 1.5.x'
             native = ['/usr/bin/node', str(PACKAGE/'dist/bundle/cli.js'), '--mode', 'rpc', '--no-session',
                       '--session-dir', str(self.root/'sessions'), '--no-extensions', '--no-skills',
                       '--no-prompt-templates', '--no-themes', '--no-tools']
@@ -553,6 +553,11 @@ class E2E:
         assert view['value']['kind'] == 'panel'
         live_view = self.wait(lambda: self.snapshot().get('live', {}).get('agent-'+rid), 'live agent panel')
         assert len(json.dumps(live_view).encode()) < 32768
+        # Startup metadata (get_state, models, thinking levels, commands) is read and published without
+        # disturbing the runtime: with real Pi a too-small record cap once terminated it here (exit 143).
+        declared = self.wait(lambda: ((self.resource(rid).get('data') or {}).get('agent') or {}).get('config'), 'declared agent config')
+        assert self.resource(rid).get('available') and self.hc('get', spawned['resource']['backend_ref'])['state'] == 'live'
+        self.log.append({'startup_metadata': [c['id'] for c in declared]})
         self.log.append({'host': host, 'agent': rid, 'provider': provider, 'view': view_key})
         terminal = self.hc('get', spawned['resource']['backend_ref'])
         bridge_process = identity(terminal['pid'])

@@ -15,6 +15,15 @@ MODELS = [{"id": "fake-small", "name": "Fake Small", "provider": "fixture", "rea
 config = {"model": MODELS[0], "thinkingLevel": "off", "steeringMode": "one-at-a-time",
           "followUpMode": "one-at-a-time", "autoCompactionEnabled": True}
 session = 1
+# --metadata FILE: answer Pi's metadata requests with responses recorded from a real Pi
+# (tests/fixtures/pi_metadata_1.5.2.json): real sizes and shapes, e.g. a model list over 256 KiB.
+recorded = None
+if "--metadata" in sys.argv:
+    with open(sys.argv[sys.argv.index("--metadata") + 1]) as source:
+        recorded = json.load(source)
+    MODELS = recorded["get_available_models"]["models"]
+    state = recorded["get_state"]
+    config = {k: state[k] for k in ("model", "thinkingLevel", "steeringMode", "followUpMode", "autoCompactionEnabled") if k in state}
 steering = []
 follow = []
 held = []
@@ -122,6 +131,9 @@ for line in sys.stdin.buffer:
         config["model"] = MODELS[(MODELS.index(config["model"]) + 1) % len(MODELS)]
         reply(command, {"model": config["model"], "thinkingLevel": config["thinkingLevel"], "isScoped": False})
     elif kind == "get_available_thinking_levels":
+        if recorded is not None:
+            reply(command, recorded["get_available_thinking_levels"])
+            continue
         reply(command, {"levels": ["off", "low", "high"] if config["model"]["reasoning"] else ["off"]})
     elif kind == "set_thinking_level":
         config["thinkingLevel"] = command["level"]
@@ -137,6 +149,8 @@ for line in sys.stdin.buffer:
         reply(command, {"cancelled": False})
     elif kind == "compact":
         reply(command, {"summary": "fixture summary", "tokensBefore": 10, "estimatedTokensAfter": 2})
+    elif kind == "get_commands" and recorded is not None:
+        reply(command, recorded["get_commands"])
     elif kind == "get_commands":
         # Pi runs these as prompt text "/name args" (templates, skills, extension commands).
         reply(command, {"commands": [{"name": "fixture-template", "description": "Fixture prompt template", "source": "prompt"},

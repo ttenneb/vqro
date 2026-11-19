@@ -11,7 +11,11 @@ from vqro_display import label
 
 @dataclass(frozen=True)
 class Limits:
-    record_bytes: int = 262144
+    record_bytes: int = 262144      # one command record sent to Pi
+    # One record read from Pi. Real Pi metadata is large: with a real configuration Pi 1.5.2's
+    # get_available_models response is ~300 KB (450+ models) and grows with configured providers; a
+    # 256 KiB cap made the client terminate Pi at startup. 4 MiB still bounds a runaway record.
+    response_bytes: int = 4194304
     pending: int = 32
     event_bytes: int = 524288
     event_rows: int = 512  # Wire bytes alone undercount Python dictionaries/strings for tiny events.
@@ -26,7 +30,7 @@ class Limits:
     start_confirm: float = 30.0
 
     def __post_init__(self):
-        for name in ("record_bytes", "pending", "event_bytes", "event_rows", "stderr_bytes", "requests"):
+        for name in ("record_bytes", "response_bytes", "pending", "event_bytes", "event_rows", "stderr_bytes", "requests"):
             if not isinstance(getattr(self, name), int) or getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be positive")
         for name in ("deadline", "drain", "start_confirm"):
@@ -68,7 +72,7 @@ class PiRpcClient:
         self = cls(limits or Limits(), supported_dialogs)
         loop=asyncio.get_running_loop()
         transport,protocol=await loop.subprocess_exec(
-            lambda: _ExitProtocol(self.limits.record_bytes+1,loop),
+            lambda: _ExitProtocol(self.limits.response_bytes+1,loop),
             *argv, cwd=cwd, env=dict(env), stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
@@ -411,7 +415,7 @@ class PiRpcClient:
             while True:
                 # Only LF is a boundary; U+2028/U+2029 are ordinary UTF-8 bytes.
                 wire = await self.process.stdout.readuntil(b"\n")
-                if len(wire) > self.limits.record_bytes:
+                if len(wire) > self.limits.response_bytes:
                     raise ValueError("Pi record exceeds byte limit")
                 record = json.loads(wire, parse_constant=lambda x: (_ for _ in ()).throw(ValueError(x)))
                 if not isinstance(record, dict) or not isinstance(record.get("type"), str):
