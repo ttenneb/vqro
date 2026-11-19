@@ -58,6 +58,15 @@ class SidebarTests(unittest.TestCase):
         with mock.patch.object(ext, "value", return_value={"hide_ended": True}):
             self.assertFalse(any(row.get("args", {}).get("resource") == "r3" for row in module["build"]()))
 
+    def test_agent_rows_offer_settings_only_when_the_agent_declares_them(self):
+        module = load()
+        plain = {"id": "r2", "kind": "agent", "name": "A", "state": "live", "data": {}}
+        declared = dict(plain, data={"config": [{"id": "model", "type": "select", "value": "x"}]})
+        menu = lambda r: [m["command"] for m in module["term_row"]("r2", r)["menu"]]
+        self.assertNotIn("agents.config", menu(plain))
+        self.assertIn("agents.config", menu(declared))
+        self.assertNotIn("agents.config", menu(dict(declared, state="finished")))
+
     def scale_resources(self):
         resources = {f"r{i}": {"id": f"r{i}", "kind": "terminal", "argv": ["sh"], "state": "live",
                                "status": {"state": "idle"}} for i in range(600)}

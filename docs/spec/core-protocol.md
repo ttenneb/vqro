@@ -393,6 +393,12 @@ extension forgets a finished resource 60 s after no layout shows it any more (so
 that grace shows it again and cancels the forget), and keeps the newest 64 never-shown finished resources. Without a policy, finished resources stay until the backend drops
 them, counted against the 4096-per-provider admission bound.
 
+Agent commands and configuration use the generic path: `resource.invoke {resource, op: "agent.command"|"agent.configure", args}`.
+The core checks only the declared capability; the agent resource's `data.commands` / `data.config` say what this
+agent supports, and its adapter rejects anything else before a native write (interim agent contract, provider-v0
+section 6, to be folded into the agent standard's commands and configuration module). The bundled agents extension
+wraps them as `agents.config` (popup), `agents.configure {id, value}` and `agents.command {name, text?}`.
+
 `resource.forget_cached` is a separate core-owned mechanism: it retires **unavailable cached facts only**, with
 fresh durable identity bookkeeping and a `resource.removed` event. Available resources reject with `invalid`;
 a reconnect that wins the race therefore cancels cached forgetting. No backend capability is required, no native

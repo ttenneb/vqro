@@ -28,6 +28,13 @@ def view(rid):
     return "agents-"+rid
 
 
+def advertised(resource, field):
+    """Interim agent contract: a resource's declared `data.commands` / `data.config` rows (or [])."""
+    rows = data(resource).get(field)
+    key = "name" if field == "commands" else "id"
+    return [row for row in rows if isinstance(row, dict) and isinstance(row.get(key), str)] if isinstance(rows, list) else []
+
+
 def panel_key(key):
     return key.startswith("view/agents-r") and key[len("view/agents-r"):].isdigit()
 
@@ -36,9 +43,13 @@ class Agents:
     def __init__(self, ext):
         self.ext, self.lock = ext, threading.RLock()
         self.open_requests = set()
+        self.open_settings = set()
         self.published = {}  # Only current agents; suppress unchanged derived panel RPCs.
         self.list_open = False
-        for name, fn, title in [("list", self.list_agents, "Show agents"), ("show", self.show, "Show an agent in a tab")]:
+        for name, fn, title in [("list", self.list_agents, "Show agents"), ("show", self.show, "Show an agent in a tab"),
+                                ("config", self.settings, "Agent settings and commands (popup)"),
+                                ("configure", self.configure, "Change an agent setting (args: id, value)"),
+                                ("command", self.command, "Run an agent command (args: name, text?)")]:
             ext.command("agents."+name, title)(self.guarded(fn))
         for op, title in EFFECTS.items():
             fn = self.answer if op == "answer" else lambda args, op=op: self.effect(op, args)
@@ -66,8 +77,11 @@ class Agents:
         return isinstance(provider.get("capabilities", {}).get("agent."+op), dict)
 
     def current_signature(self):
-        return tuple(sorted((r["id"], tuple(op for op in EFFECTS if self.supported(r, op)))
+        return tuple(sorted((r["id"], tuple(op for op in EFFECTS if self.supported(r, op)), self.has_settings(r))
                             for r in self.ext.resources.values() if r.get("kind") == "agent"))
+
+    def has_settings(self, r):
+        return bool((self.supported(r, "configure") and advertised(r, "config")) or (self.supported(r, "command") and advertised(r, "commands")))
 
     def guarded(self, fn):
         def command(args):
@@ -180,6 +194,92 @@ class Agents:
         self.outcome("answer", result)
         return {**result, "client": {"close": True}}
 
+    @staticmethod
+    def shown_value(entry):
+        value = entry.get("value")
+        if entry.get("type") == "boolean":
+            return "on" if value is True else "off" if value is False else "unknown"
+        choice = next((c for c in entry.get("choices") or [] if isinstance(c, dict) and c.get("value") == value), None)
+        return label(str((choice or {}).get("label") or value if value is not None else "unknown"), 120)
+
+    def settings_panel(self, r):
+        """Generic rows from the agent's own declarations; nothing is assumed about a runtime."""
+        rid, items = r["id"], []
+        config = advertised(r, "config") if self.supported(r, "configure") else []
+        commands = advertised(r, "commands") if self.supported(r, "command") else []
+        if config:
+            items.append({"type": "header", "text": "Settings"})
+        for entry in config:
+            if entry.get("type") == "boolean":
+                options = [{"label": "On", "value": True}, {"label": "Off", "value": False}]
+            else:
+                options = [{"label": label(str(c.get("label") or c.get("value")), 120), "value": c.get("value")}
+                           for c in entry.get("choices") or [] if isinstance(c, dict)]
+            items.append({"type": "select", "text": label(entry.get("label") or entry["id"], 80), "value": entry.get("value"),
+                          "options": options, "command": "agents.configure", "args": {"resource": rid, "id": entry["id"]},
+                          "description": self.shown_value(entry)})
+        if commands:
+            items.append({"type": "header", "text": "Commands"})
+        for entry in commands:
+            row = {"text": label(entry.get("label") or entry["name"], 80), "command": "agents.command",
+                   "args": {"resource": rid, "name": entry["name"]}}
+            if entry.get("description"):
+                row["description"] = label(entry["description"], 300)
+            if isinstance(entry.get("input"), dict):
+                row["input"] = label(entry["input"].get("hint") or entry.get("label") or entry["name"], 120)
+            items.append(row)
+        if not items:
+            items = [{"type": "text", "text": "This agent declares no settings or commands."}]
+        if not r.get("available") or ended(r):
+            items.insert(0, {"type": "text", "style": "warn", "text": "Agent unavailable; nothing will be sent."})
+        return {"title": "Agent settings: "+label(r.get("name") or "Agent")+" "+rid, "requires": ["menu", "input"], "items": items}
+
+    def settings(self, args):
+        self.ext.fresh()
+        r = self.agent(args, inspect=True)
+        if not self.has_settings(r):
+            raise VqroError("this agent declares no settings or commands", "unsupported")
+        target = "agents-settings-"+r["id"]
+        self.ext.contribute({"view/"+target: {"kind": "panel", "title": "Agent settings", "items": []}})
+        self.open_settings.add(r["id"])
+        self.ext.publish(target, self.settings_panel(r))
+        return {"client": {"popup": {"view": target, "width": 76}}}
+
+    def configure(self, args):
+        self.ext.fresh()
+        r = self.agent(args, "configure")
+        entry = next((c for c in advertised(r, "config") if c["id"] == args.get("id")), None)
+        value = args.get("value")
+        if entry is None:
+            raise VqroError("this agent does not declare that setting; nothing sent", "unsupported")
+        valid = isinstance(value, bool) if entry.get("type") == "boolean" else any(
+            isinstance(c, dict) and c.get("value") == value for c in entry.get("choices") or [])
+        if not valid:
+            raise VqroError("choose one of the declared values; nothing sent", "invalid")
+        result = self.ext.vqro.call("resource.invoke", {"resource": r["id"], "op": "agent.configure", "args": {"id": entry["id"], "value": value}})
+        outcome = result.get("outcome", "unknown")
+        shown = self.shown_value(dict(entry, value=value))
+        self.ext.notify(label(f"{entry.get('label') or entry['id']}: {shown} ({outcome}"
+                              + ("; the agent has not confirmed it yet" if outcome != "observed" else "") + ")"),
+                        "ok" if outcome == "observed" else "warn")
+        return result
+
+    def command(self, args):
+        self.ext.fresh()
+        r = self.agent(args, "command")
+        entry = next((c for c in advertised(r, "commands") if c["name"] == args.get("name")), None)
+        if entry is None:
+            raise VqroError("this agent does not declare that command; nothing sent", "unsupported")
+        native = {"name": entry["name"]}
+        if isinstance(entry.get("input"), dict) and isinstance(args.get("text"), str) and args["text"].strip():
+            native["args"] = {"text": args["text"]}
+        result = self.ext.vqro.call("resource.invoke", {"resource": r["id"], "op": "agent.command", "args": native})
+        outcome = result.get("outcome", "unknown")
+        self.ext.notify(label(f"{entry.get('label') or entry['name']}: {outcome}"
+                              + ("; acceptance is not completion: watch agent status" if outcome == "accepted" else "")),
+                        "ok" if outcome in ("accepted", "observed") else "warn")
+        return {**result, "client": {"close": True}}
+
     def panel(self, r):
         title = label(r.get("name") or r.get("title") or "Agent")+" "+r["id"]
         declared = data(r).get("views")
@@ -223,6 +323,10 @@ class Agents:
             if active and type(retry.get("delay_ms")) is int and retry["delay_ms"] >= 0:
                 text += f"; reported delay {retry['delay_ms']} ms"
             content["items"].insert(0, {"type": "text", "style": "warn" if active else "error" if success is False else "dim", "text": label(text)})
+        if self.has_settings(r) and r.get("available"):
+            content["items"].insert(0, {"text": "Agent settings…", "description": label(", ".join(
+                f"{c.get('label') or c['id']}: {self.shown_value(c)}" for c in advertised(r, "config")[:4]), 300),
+                "command": "agents.config", "args": {"resource": r["id"]}})
         host = self.ext.resources.get(r.get("host"))
         if host and host.get("kind") == "terminal":
             content["items"].insert(0, {"text": "Bridge terminal", "description": label(host.get("name") or host["id"]),
@@ -245,7 +349,10 @@ class Agents:
 
     def publish_list(self):
         rows = [{"text": label(r.get("name") or "Agent")+" "+r["id"], "description": status(r),
-                 "command": "agents.show", "args": {"resource": r["id"]}, "badges": [{"text": "ended", "style": "dim"}] if ended(r) else []}
+                 "command": "agents.show", "args": {"resource": r["id"]}, "badges": [{"text": "ended", "style": "dim"}] if ended(r) else [],
+                 **({"menu": [{"label": "Show", "command": "agents.show", "args": {"resource": r["id"]}},
+                              {"label": "Agent settings…", "command": "agents.config", "args": {"resource": r["id"]}}]}
+                    if self.has_settings(r) and r.get("available") else {})}
                 for r in self.ext.resources.values() if r.get("kind") == "agent"]
         count = len(rows)
         rows = rows[:128]
@@ -268,6 +375,9 @@ class Agents:
                 if op in ("prompt", "steer", "follow_up"):
                     menu["input"] = title
                 entries["menu/agents."+rid+"."+op] = menu
+            if self.has_settings(r):
+                entries["menu/agents."+rid+".settings"] = {"where": "pane", "label": "Agent settings…", "command": "agents.config",
+                                                           "when": {"view": view(rid)}, "order": 99}
         return entries
 
     def refresh(self, prune_views=False):
@@ -285,7 +395,7 @@ class Agents:
                     for key, entry in self.ext.entries.items():
                         if not isinstance(entry.get("value"), dict) or entry["value"].get("owner") != "agents":
                             continue
-                        rid = next((key[len(prefix):] for prefix in ("view/agents-requests-", "view/agents-")
+                        rid = next((key[len(prefix):] for prefix in ("view/agents-requests-", "view/agents-settings-", "view/agents-")
                                     if key.startswith(prefix)), "")
                         orphan = rid.startswith("r") and rid[1:].isascii() and rid[1:].isdigit() and rid not in self.ext.resources
                         if ((key.startswith("menu/agents.r") and key not in entries)
@@ -344,6 +454,13 @@ class Agents:
                 self.publish_gone(changed)
             if self.list_open and (not changed or self.ext.resources.get(changed, {}).get("kind") == "agent" or kind == "resource.removed"):
                 self.publish_list()
+            for rid in tuple(self.open_settings):
+                if changed and rid != changed:
+                    continue
+                r = self.ext.resources.get(rid)
+                self.ext.publish("agents-settings-"+rid, self.settings_panel(r) if r else {"items": [{"type": "text", "text": "Agent is gone; nothing sent."}]})
+                if not r:
+                    self.open_settings.discard(rid)
             for rid in tuple(self.open_requests):
                 if changed and rid != changed:
                     continue

@@ -9,6 +9,7 @@ import random
 import uuid
 
 from vqro_provider import Limits as ProviderLimits, Provider, ProviderError
+from . import control
 from .client import DIALOGS, EFFECTS, PiRpcClient
 from .display import Fallback, Transcript, agent_data, plain, tail
 
@@ -20,7 +21,11 @@ CAPABILITIES = {
     "agent.clear_queue": {"returns": "texts"},
     "agent.answer": {"kinds": sorted(DIALOGS)},
     "agent.correlation": {"per_input": False},
+    # Interim agent contract: what each resource supports is in data.commands / data.config.
+    "agent.command": {"declared_in": "data.commands"},
+    "agent.configure": {"declared_in": "data.config", "observed": "get_state"},
 }
+OPS = sorted(EFFECTS | {"command", "configure"})
 
 
 class Bridge:
@@ -86,7 +91,8 @@ class Bridge:
         self._tasks = set()
         self.failure = None
         self._cancel_attempts = set()
-        for effect in EFFECTS:
+        self.config = None  # unknown until Pi answers get_state
+        for effect in OPS:
             self.provider.effect("agent." + effect)(self._effect)
 
     def _task(self, coroutine):
@@ -99,6 +105,7 @@ class Bridge:
         return {"ref": "agent", "incarnation": "", "kind": "agent", "state": "live",
                 "name": "Pi", "title": "Pi RPC", "cwd": str(self.cwd),
                 "status": {"state": snapshot["status"]}, "data": {**agent_data(snapshot),
+                    "commands": control.COMMANDS, "config": self.config,
                     "views": [view for view in (self.status_view, self.view) if view is not None],
                     **({"view_error": self.view_problem} if self.view_problem else {})}}
 
@@ -110,6 +117,11 @@ class Bridge:
         if effect.remaining <= 0:
             raise ProviderError("backend", "deadline expired before runtime dispatch")
         op = effect.op.removeprefix("agent.")
+        if op in ("command", "configure"):
+            try:
+                return await self._settings_effect(op, args, effect.remaining)
+            finally:
+                self._publish_now.set()
         try:
             result = await self.pi.invoke(op, args, timeout=effect.remaining)
         finally:
@@ -126,6 +138,42 @@ class Bridge:
         if "data" in result:
             reply["data"] = result["data"]
         return reply
+
+    async def _settings_effect(self, op, args, remaining):
+        """agent.command / agent.configure: only declared names and values, sent once; then
+        re-read Pi's state so facts show what Pi reports (observed), never what was asked."""
+        args = args if isinstance(args, dict) else {}
+        if op == "configure":
+            mapped = control.configure(self.config, args.get("id"), args.get("value"))
+        else:
+            mapped = control.command(args.get("name"), args.get("args"))
+        if isinstance(mapped, str):
+            return {"outcome": "rejected", "error": {"kind": "unsupported" if "not declared" in mapped else "invalid", "message": mapped}}
+        native, native_args = mapped
+        result = await self.pi.request(native, native_args, timeout=remaining)
+        if result["outcome"] == "indeterminate":
+            raise ProviderError("backend", result.get("reason", "runtime outcome unknown"))
+        if result["outcome"] == "rejected":
+            return {"outcome": "rejected", "error": {"kind": "backend", "message": str(result.get("error", result.get("reason", "Pi rejected the command")))}}
+        data = result.get("data") if isinstance(result.get("data"), dict) else {}
+        if native == "new_session" and data.get("cancelled") is True:
+            return {"outcome": "rejected", "error": {"kind": "backend", "message": "a Pi extension cancelled the new session"}}
+        refreshed = await control.read(self.pi)
+        if refreshed is not None:
+            self.config = refreshed
+        if op == "configure" and refreshed is not None and control.current(refreshed, args["id"]) == args["value"]:
+            return {"outcome": "observed", "data": {"id": args["id"], "value": args["value"]}}
+        if native == "compact":
+            data = {k: data[k] for k in ("tokensBefore", "estimatedTokensAfter") if k in data}
+        elif native in ("set_model", "cycle_model"):
+            data = {"model": control.current(self.config, "model")}
+        return {"outcome": "accepted", **({"data": data} if data else {})}
+
+    async def _read_config(self):
+        config = await control.read(self.pi)
+        if config is not None:
+            self.config = config
+            self._publish_now.set()
 
     def _remember(self, provider):
         registration = provider.registration
@@ -241,7 +289,7 @@ class Bridge:
             await asyncio.sleep(self._retry_delay(backoff))
             backoff = min(self.retry_max, backoff * 2)
             provider = Provider(**self._template, token=self._credential)
-            for effect in EFFECTS:
+            for effect in OPS:
                 provider.effect("agent." + effect)(self._effect)
 
     def _events(self):
@@ -392,6 +440,7 @@ class Bridge:
                 state = await metadata
                 if state["outcome"] != "accepted":
                     raise ProviderError("backend", "Pi did not accept startup metadata request")
+                self._task(self._read_config())  # registration never waits for model lists
                 self._control_task = self._task(self._control())
                 publishing = self._task(self._publish_loop())
                 done, _ = await asyncio.wait({publishing, self._control_task, ended, stopping}, return_when=asyncio.FIRST_COMPLETED)

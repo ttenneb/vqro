@@ -6,6 +6,11 @@
 - An agent with a terminal host has a **Bridge terminal** action. The sidebar groups that terminal as a collapsed child of the agent instead of showing it as an unrelated terminal.
 - Ended resources and gone agent tabs are visibly marked. **Close ended tabs** removes wholly ended tabs (retaining the last tab and mixed/live panes); **Sidebar view → Close/hide ended items** also hides ended sidebar resources. **Show ended items** restores them. These actions never kill programs or erase backend data. Disconnected/stale resources are unavailable, not falsely called gone.
 - On that panel, the pane menu (normally prefix `m`) offers only native operations declared by that resource's provider: prompt, steer, follow-up, abort, clear queue and answer. Direct commands also reject undeclared operations before sending anything.
+- Agent settings…: for agents that declare `data.config` / `data.commands` (and the matching `agent.configure` /
+  `agent.command` capability), the pane menu, a row on the agent panel and `agents.config` open a popup of select rows
+  (model, thinking level, …) and command rows; `agents.configure {id, value}` / `agents.command {name, text?}` send
+  only declared values and report the outcome honestly (`observed` vs not yet confirmed). Agents without
+  declarations show nothing.
 - Prefix `p` prompts the agent in the focused pane (`binding/agents.prompt`, `when: {"resource_kind": "agent"}`): on any other pane the key does nothing and says so, before asking for text. A keymap profile's `p` still wins when selected.
 - Prompt-like actions use input. Answer opens a pending-request picker: confirm/select choices, input/editor text, explicit cancellation. Editor uses existing single-line input, not a new multiline editor.
 - Notifications preserve native outcomes: acceptance is not settlement; dispatched answers do not invent acknowledgement. Effects are never automatically replayed.

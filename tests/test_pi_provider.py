@@ -355,6 +355,38 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         await self.core.wait(lambda: self.core.run_facts().get("settled") is True)
         self.assertEqual(self.core.resources["r7"]["status"]["state"], "done")
 
+    async def test_commands_and_config_are_declared_observed_and_validated_before_any_native_write(self):
+        bridge = await self.start()
+        await self.core.wait(lambda: self.core.resources.get("r7", {}).get("data", {}).get("config"))
+        data = self.core.resources["r7"]["data"]
+        self.assertEqual([c["name"] for c in data["commands"]], ["new_session", "compact", "cycle_model"])
+        config = {c["id"]: c for c in data["config"]}
+        self.assertEqual(config["model"]["value"], "fixture/fake-small")
+        self.assertEqual([c["value"] for c in config["model"]["choices"]], ["fixture/fake-small", "fixture/fake-large"])
+        self.assertEqual(config["thinking_level"]["choices"], [{"value": "off", "label": "off"}])
+        self.assertEqual((config["auto_compaction"]["type"], config["auto_compaction"]["value"]), ("boolean", True))
+        self.assertEqual(config["steering_mode"]["value"], "one-at-a-time")
+
+        result = (await self.effect("configure", {"id": "model", "value": "fixture/fake-large"}))["result"]
+        self.assertEqual(result, {"outcome": "observed", "data": {"id": "model", "value": "fixture/fake-large"}})
+        await self.core.wait(lambda: {c["id"]: c for c in self.core.resources["r7"]["data"]["config"]}["model"]["value"] == "fixture/fake-large")
+        levels = {c["id"]: c for c in self.core.resources["r7"]["data"]["config"]}["thinking_level"]["choices"]
+        self.assertEqual([c["value"] for c in levels], ["off", "low", "high"], "choices follow the new model")
+        self.assertEqual((await self.effect("configure", {"id": "auto_compaction", "value": False}))["result"]["outcome"], "observed")
+        self.assertEqual((await self.effect("configure", {"id": "follow_up_mode", "value": "all"}))["result"]["outcome"], "observed")
+
+        # Outside the declarations: rejected by the adapter (control.configure/command), never sent to Pi.
+        for args, kind in (({"id": "model", "value": "nobody/unknown"}, "invalid"), ({"id": "temperature", "value": 1}, "unsupported"),
+                           ({"id": "auto_compaction", "value": "yes"}, "invalid")):
+            result = (await self.effect("configure", args))["result"]
+            self.assertEqual((result["outcome"], result["error"]["kind"]), ("rejected", kind), args)
+        result = (await self.effect("command", {"name": "rm_rf"}))["result"]
+        self.assertEqual((result["outcome"], result["error"]["kind"]), ("rejected", "unsupported"))
+
+        self.assertEqual((await self.effect("command", {"name": "compact", "args": {"text": "keep the plan"}}))["result"]["outcome"], "accepted")
+        self.assertEqual((await self.effect("command", {"name": "new_session"}))["result"]["outcome"], "accepted")
+        self.assertEqual((await self.effect("command", {"name": "cycle_model"}))["result"], {"outcome": "accepted", "data": {"model": "fixture/fake-small"}})
+
     async def test_dialog_answer_is_dispatched_and_requests_are_complete(self):
         bridge = await self.start()
         await bridge.pi.request("test_dialog", {"dialog_id": "dialog", "method": "confirm", "message": "Full confirmation body"})

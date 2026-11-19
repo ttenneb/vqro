@@ -236,6 +236,61 @@ class AgentsTests(unittest.TestCase):
         self.command("prompt", context={"view": "agents-r2", "resource": "r2", "resource_kind": "agent"}, text="exactly this")
         self.assertEqual(self.native()[-1][1], {"resource": "r2", "op": "agent.prompt", "args": {"message": "exactly this"}})
 
+    def declare_settings(self):
+        self.core.add_agent()
+        self.core.providers["other"]["capabilities"].update({"agent.command": {}, "agent.configure": {}})
+        self.core.resources["r2"]["data"].update(
+            config=[{"id": "model", "label": "Model", "type": "select", "value": "p/a",
+                     "choices": [{"value": "p/a", "label": "A"}, {"value": "p/b", "label": "B"}]},
+                    {"id": "auto", "label": "Auto", "type": "boolean", "value": True}],
+            commands=[{"name": "compact", "label": "Compact", "input": {"hint": "Instructions"}}, {"name": "new_session", "label": "New session"}])
+        self.agents.event("resource", {"id": "r2"})
+
+    def test_agent_settings_popup_configure_and_command_use_only_declared_rows(self):
+        self.declare_settings()
+        menu = self.core.value("menu/agents.r2.settings")
+        self.assertEqual((menu["command"], menu["when"]), ("agents.config", {"view": "agents-r2"}))
+        self.assertEqual(self.core.live["agents-r2"]["items"][0]["command"], "agents.config", "panel row opens it too")
+        self.command("list")
+        row = self.core.live["agents-list"]["items"][0]
+        self.assertIn({"label": "Agent settings…", "command": "agents.config", "args": {"resource": "r2"}}, row["menu"])
+        popup = self.command("config", context={"view": "agents-r2"})
+        panel = self.core.live[popup["client"]["popup"]["view"]]
+        model = next(r for r in panel["items"] if r.get("type") == "select" and r["text"] == "Model")
+        self.assertEqual((model["value"], [o["value"] for o in model["options"]]), ("p/a", ["p/a", "p/b"]))
+        self.assertEqual(model["args"], {"resource": "r2", "id": "model"})
+        compact = next(r for r in panel["items"] if r.get("text") == "Compact")
+        self.assertEqual((compact["command"], compact["input"]), ("agents.command", "Instructions"))
+
+        self.command("configure", **model["args"], value="p/b")
+        self.command("configure", resource="r2", id="auto", value=False)
+        run = self.core.handlers["agents.command"]
+        run({"resource": "r2", "name": "compact", "text": "keep tests"})
+        run({"resource": "r2", "name": "new_session", "text": "ignored: no input declared"})
+        self.assertEqual([p["args"] for _, p in self.native()], [
+            {"id": "model", "value": "p/b"}, {"id": "auto", "value": False},
+            {"name": "compact", "args": {"text": "keep tests"}}, {"name": "new_session"}])
+        self.assertIn("has not confirmed", self.core.notices[-3][0], "accepted is not reported as applied")
+
+        for args in ({"id": "model", "value": "p/zzz"}, {"id": "temperature", "value": 1}, {"id": "auto", "value": "yes"}):
+            with self.assertRaises(VqroError):
+                self.command("configure", resource="r2", **args)
+        with self.assertRaises(VqroError):
+            run({"resource": "r2", "name": "rm"})
+        self.assertEqual(len(self.native()), 4, "undeclared requests send nothing")
+
+    def test_agents_without_declarations_show_no_settings(self):
+        self.core.add_agent()
+        self.agents.event("resource", {"id": "r2"})
+        self.assertIsNone(self.core.value("menu/agents.r2.settings"))
+        self.assertNotIn("agents.config", json.dumps(self.core.live["agents-r2"]))
+        with self.assertRaises(VqroError):
+            self.command("config", resource="r2")
+        # Declared rows without the provider capability are not offered either.
+        self.core.resources["r2"]["data"]["commands"] = [{"name": "x", "label": "X"}]
+        self.agents.event("resource", {"id": "r2"})
+        self.assertIsNone(self.core.value("menu/agents.r2.settings"))
+
     def test_activation_names_the_agent_of_kept_panels(self):
         core = FakeCore()
         core.entries["view/agents-r2"] = {"version": 1, "value": {"owner": "agents", "kind": "panel", "items": []}}

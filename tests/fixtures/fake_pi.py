@@ -9,6 +9,12 @@ import sys
 import time
 
 active = False
+# Pi-shaped configuration (get_state / set_* commands); fake models, never a model call.
+MODELS = [{"id": "fake-small", "name": "Fake Small", "provider": "fixture", "reasoning": False},
+          {"id": "fake-large", "name": "Fake Large", "provider": "fixture", "reasoning": True}]
+config = {"model": MODELS[0], "thinkingLevel": "off", "steeringMode": "one-at-a-time",
+          "followUpMode": "one-at-a-time", "autoCompactionEnabled": True}
+session = 1
 steering = []
 follow = []
 held = []
@@ -94,8 +100,38 @@ for line in sys.stdin.buffer:
     trace(command)
     kind = command["type"]
     if kind == "get_state":
-        reply(command, {"isStreaming": active, "isCompacting": False,
+        reply(command, {"isStreaming": active, "isCompacting": False, **config, "sessionId": f"fixture-{session}",
                         "messageCount": len(accepted), "pendingMessageCount": len(steering) + len(follow)})
+    elif kind == "get_available_models":
+        reply(command, {"models": MODELS})
+    elif kind == "set_model":
+        model = next((m for m in MODELS if m["provider"] == command.get("provider") and m["id"] == command.get("modelId")), None)
+        if model is None:
+            reply(command, None, False)
+        else:
+            config["model"] = model
+            if not model["reasoning"]:
+                config["thinkingLevel"] = "off"
+            reply(command, model)
+    elif kind == "cycle_model":
+        config["model"] = MODELS[(MODELS.index(config["model"]) + 1) % len(MODELS)]
+        reply(command, {"model": config["model"], "thinkingLevel": config["thinkingLevel"], "isScoped": False})
+    elif kind == "get_available_thinking_levels":
+        reply(command, {"levels": ["off", "low", "high"] if config["model"]["reasoning"] else ["off"]})
+    elif kind == "set_thinking_level":
+        config["thinkingLevel"] = command["level"]
+        reply(command)
+    elif kind in ("set_steering_mode", "set_follow_up_mode"):
+        config["steeringMode" if kind == "set_steering_mode" else "followUpMode"] = command["mode"]
+        reply(command)
+    elif kind == "set_auto_compaction":
+        config["autoCompactionEnabled"] = command["enabled"]
+        reply(command)
+    elif kind == "new_session":
+        session += 1
+        reply(command, {"cancelled": False})
+    elif kind == "compact":
+        reply(command, {"summary": "fixture summary", "tokensBefore": 10, "estimatedTokensAfter": 2})
     elif kind in {"get_messages", "get_commands", "get_session_stats"}:
         reply(command, {"messages": [], "commands": [], "tokens": {"total": 0}, "cost": 0})
     elif kind == "prompt":
