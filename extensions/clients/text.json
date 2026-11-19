@@ -1,0 +1,12 @@
+{
+  "name": "text",
+  "kind": "client",
+  "title": "Text client",
+  "summary": "A plain line-based client for scripts, agents and screen readers: layout outline, panels as numbered rows, menus and recovery.",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "author": "Bennett Garcia",
+  "argv": ["python3", "text.py"],
+  "profiles": ["base"],
+  "features": ["items", "pages", "tree", "toolbar", "badges", "description", "menu", "input", "options", "select", "chips", "icon", "wrap", "icon_names"]
+}

@@ -1,0 +1,539 @@
+#!/usr/bin/env python3
+"""vqro text client: a plain, line-based client of the `base` profile (D29), stdlib only.
+
+It renders the workspace as text: an outline of the active layout, panels as numbered rows, menus, the command
+palette and the shared recovery content (prefix menu, safe-mode chooser). It is meant for scripts, agents and
+screen readers, and it is the second, independent implementation of the client contract (the model is
+`vqro_client_model.py`, checked against `tests/fixtures/client/*.json`). It does not show terminal contents (no
+`terminal` profile) and never answers terminal queries.
+
+    vqro ui text                      interactive: type `help`
+    vqro ui text -- --once 'show; p'  run commands, print, exit
+"""
+import json
+import os
+import sys
+import threading
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+sys.path.insert(1, os.path.dirname(HERE))  # vqro_ext.py beside the bundled extensions
+import vqro_client_model as model  # noqa: E402
+from vqro_ext import Vqro, VqroError  # noqa: E402
+
+FEATURES = model.BASE_FEATURES + ["icon_names"]
+HELP = """commands (numbers refer to the last listing):
+  show                    the active layout: tabs and numbered panes (* = focused)
+  focus <pane>            focus a pane; `view` then shows it
+  view [<pane>|<view id>] a pane's content: panel rows numbered; terminals are named only
+  do <row>[.<chip>] [<value or text>]   activate a row (or chip) of the shown panel
+  page <n> | filter <text> | expand <row> | collapse <row>     panel display state
+  menu <pane|tab|tabbar|status> [<n>]  contributed menu items for the focused pane, or run one
+  p [<n>]                 the prefix menu: key bindings and recovery (always available); run row n
+  commands [<filter>]     the command palette; run <name> [<json args>]
+  safe [toggle <name> | apply | leave]  the safe-mode recovery chooser
+  help | quit"""
+
+
+def text_of(value):
+    return value if isinstance(value, str) else ""
+
+
+class TextClient:
+    def __init__(self, socket_path, out=sys.stdout):
+        self.out = out
+        self.lock = threading.RLock()
+        self.ws = model.Workspace()
+        self.focus = 0
+        self.shown = None          # the view whose rows were listed last (a pane's view or a popup)
+        self.popup = None          # a view a command asked to show (reply hint), until closed
+        self.state = {}            # per view: {page, filter, open}
+        self.listed = []           # the last numbered rows of `self.shown`
+        self.menu = []             # the last listed menu/prefix rows: (label, binding)
+        self.safe_selected = set()
+        self.vqro = Vqro(socket_path, self.on_message, recover_notifications=True)
+        self.info = self.vqro.call("hello", model_hello())
+        self.resync()
+
+    # ---- protocol -------------------------------------------------------------------------------------------
+
+    def resync(self):
+        snap = self.vqro.call("workspace.snapshot")
+        with self.lock:
+            was = self.ws.load(snap)
+            self.safe_mode_changed(self.ws.safe_mode, was)
+        try:
+            self.vqro.call("events.subscribe", {"from": snap["seq"], "epoch": snap["epoch"], "partial_resources": True})
+        except VqroError as e:
+            if e.kind != "conflict":  # already subscribed on this connection
+                raise
+
+    def on_message(self, method, params):
+        if method == "missed":
+            self.resync()
+            return None
+        if method != "event":
+            return None
+        with self.lock:
+            changes = self.ws.apply(params)
+        for change, data in changes:
+            if change == "resync":
+                self.resync()
+            elif change == "notify":
+                self.say(("! " if data.get("style") in ("warn", "error") else "* ") + text_of(data.get("text")))
+            elif change == "failed":
+                self.say(f"! extension {data} failed (p lists its restart)")
+            elif change == "safe_mode":
+                self.safe_mode_changed(*data)
+        return None
+
+    def safe_mode_changed(self, on, was):
+        if on and not was:
+            self.safe_selected = set(self.ws.safe_mode_allow)
+            self.say("! safe mode: nothing starts automatically. `safe` shows the recovery choices.")
+        elif was and not on:
+            self.say("* safe mode left")
+
+    def say(self, line):
+        with self.lock:
+            print(line, file=self.out, flush=True)
+
+    # ---- layout ---------------------------------------------------------------------------------------------
+
+    def active_layout(self):
+        active = self.ws.entries.get("workspace/active") or {}
+        name = active.get("layout") if isinstance(active, dict) else None
+        return name, self.ws.entries.get(f"layout/{name}") if name else None
+
+    def leaves(self):
+        """(view id, path, depth, tab info) for each pane of the active layout, in order; active tabs only."""
+        out = []
+
+        def walk(node, path, depth, tab):
+            if not isinstance(node, dict):
+                return
+            if isinstance(node.get("view"), str):
+                out.append((node["view"], list(path), depth, tab))
+            elif isinstance(node.get("children"), list):
+                for i, child in enumerate(node["children"]):
+                    walk(child, path + [i], depth + 1, tab)
+            elif isinstance(node.get("tabs"), list) and node["tabs"]:
+                active = min(node.get("active", 0) if isinstance(node.get("active"), int) else 0, len(node["tabs"]) - 1)
+                walk((node["tabs"][active] or {}).get("node"), path + [active], depth + 1, (list(path), active, node["tabs"]))
+        walk(self.active_layout()[1], [], 0, None)
+        return out
+
+    def view_title(self, view):
+        v = self.ws.entries.get(f"view/{view}") or {}
+        if isinstance(v.get("title"), str):
+            return v["title"]
+        r = self.ws.resources.get(v.get("resource")) or {}
+        return text_of(r.get("name")) or text_of((r.get("argv") or [""])[0]) or view
+
+    def ctx(self, index=None):
+        """`args.context` for a pane, as every client sends it."""
+        leaves = self.leaves()
+        index = self.focus if index is None else index
+        if not leaves:
+            return {}
+        view, path, _, tab = leaves[min(index, len(leaves) - 1)]
+        name, _ = self.active_layout()
+        v = self.ws.entries.get(f"view/{view}") or {}
+        resource = v.get("resource") if isinstance(v.get("resource"), str) else None
+        r = self.ws.resources.get(resource) or {}
+        ctx = {"layout": name, "layout_version": self.ws.versions.get(f"layout/{name}"), "path": path, "view": view,
+               "kind": v.get("kind"), "resource": resource, "resource_kind": r.get("kind"), "live": r.get("state") == "live",
+               "title": self.view_title(view), "tab_title": None}
+        if tab:
+            tab_path, tab_index, tabs = tab
+            ctx.update(tab_path=tab_path, tab_index=tab_index, tab_title=(tabs[tab_index] or {}).get("title"))
+        return ctx
+
+    def show(self):
+        name, root = self.active_layout()
+        if root is None:
+            return ["no active layout (try `p` and reset layout)"]
+        lines = [f"layout {name}"]
+
+        def tabs_line(node, depth):
+            tabs = node["tabs"]
+            active = node.get("active", 0) if isinstance(node.get("active"), int) else 0
+            return "  " * depth + "tabs: " + "  ".join(f"[{i + 1}:{text_of((t or {}).get('title')) or 'tab'}{'*' if i == active else ''}]" for i, t in enumerate(tabs))
+
+        def walk(node, depth):
+            if not isinstance(node, dict):
+                return
+            if isinstance(node.get("view"), str):
+                n = len(numbered)
+                numbered.append(node["view"])
+                mark = "*" if n == self.focus else " "
+                lines.append("  " * depth + f"{mark}pane {n + 1}: {self.view_title(node['view'])} ({self.kind_of(node['view'])})")
+            elif isinstance(node.get("children"), list):
+                lines.append("  " * depth + ("split side by side" if node.get("split") != "v" else "split stacked"))
+                for child in node["children"]:
+                    walk(child, depth + 1)
+            elif isinstance(node.get("tabs"), list) and node["tabs"]:
+                lines.append(tabs_line(node, depth))
+                active = min(node.get("active", 0) if isinstance(node.get("active"), int) else 0, len(node["tabs"]) - 1)
+                walk((node["tabs"][active] or {}).get("node"), depth + 1)
+        numbered = []
+        walk(root, 1)
+        if self.ws.safe_mode:
+            lines.append("! safe mode is on: `safe` shows the recovery choices")
+        return lines
+
+    def kind_of(self, view):
+        if view == model.SAFE_MODE_VIEW:
+            return "panel"
+        return text_of((self.ws.entries.get(f"view/{view}") or {}).get("kind")) or "missing view"
+
+    # ---- panels ---------------------------------------------------------------------------------------------
+
+    def panel_value(self, view):
+        if view == model.SAFE_MODE_VIEW:
+            return model.safe_chooser(self.ws, self.safe_selected)
+        value = dict(self.ws.entries.get(f"view/{view}") or {})
+        live = self.ws.live.get(view)
+        if isinstance(live, dict):
+            value.update(live)
+        return value
+
+    def icon(self, icon):
+        """A row's icon as text: the active icon set's glyph for its names (feature icon_names), else its own text."""
+        if isinstance(icon, str):
+            return icon
+        if not isinstance(icon, dict) or self.ws.safe_mode:
+            return text_of((icon or {}).get("text")) if isinstance(icon, dict) else ""
+        glyphs = (self.ws.entries.get("doc/settings/icons") or {}).get("glyphs") or {}
+        names = icon.get("name") if isinstance(icon.get("name"), list) else [icon.get("name")]
+        for n in names:
+            g = glyphs.get(n) if isinstance(n, str) else None
+            if isinstance(g, str) and g and g.isprintable() and len(g) <= 2:
+                return g
+        return text_of(icon.get("text"))
+
+    def view_lines(self, view):
+        kind = self.kind_of(view)
+        self.shown, self.listed = view, []
+        title = self.view_title(view) if view != model.SAFE_MODE_VIEW else "Safe mode recovery"
+        if kind == "terminal":
+            r = self.ws.resources.get((self.ws.entries.get(f"view/{view}") or {}).get("resource")) or {}
+            return [f"{title}: terminal {text_of(r.get('id'))} ({text_of(r.get('state')) or 'unknown'}); this client does not show terminal contents"]
+        if kind != "panel":
+            return [f"{title}: view kind `{kind}` is not supported by this client"]
+        value = self.panel_value(view)
+        st = self.state.setdefault(view, {"page": 0, "filter": "", "open": {}})
+        lines = [f"== {text_of(value.get('title')) or title}"]
+        missing = model.missing_for(value, FEATURES)
+        if missing:
+            return lines + [f"(missing: {', '.join(missing)}) this client cannot show this panel"]
+        pages = value.get("pages") if isinstance(value.get("pages"), list) else []
+        if pages:
+            lines.append("pages: " + "  ".join(f"[{i + 1}:{text_of(p.get('title'))}{'*' if i == min(st['page'], len(pages) - 1) else ''}]" for i, p in enumerate(pages)))
+        if st["filter"]:
+            lines.append(f"filter: {st['filter']}")
+        for r in model.rows(value, st["page"], st["filter"], st["open"]):
+            # Only rows you can act on get a number.
+            if model.selectable(r["item"]):
+                self.listed.append(r)
+            lines.append(self.row_line(len(self.listed), r))
+        return lines
+
+    def row_line(self, n, r):
+        item, pad = r["item"], "  " * r["depth"]
+        k = model.kind(item)
+        if k == "separator":
+            return f"{pad}    ---"
+        icon = self.icon(item.get("icon"))
+        text = (icon + " " if icon else "") + text_of(item.get("text"))
+        if k == "header":
+            return f"{pad}    ## {text}"
+        if k == "chips":
+            chips = "  ".join(f"[{i + 1}:{'x ' if c.get('checked') else ''}{self.icon(c.get('icon'))}{text_of(c.get('text'))}]" for i, c in enumerate(item.get("chips") or []))
+            return f"{pad}{n:>3}. {chips}"
+        if k == "toggle":
+            text = ("[x] " if item.get("checked") else "[ ] ") + text
+        if k == "select":
+            text += f": {item.get('value')}"
+        if r["has_children"]:
+            text = ("- " if r["expanded"] else "+ ") + text
+        extra = [text_of(item.get("detail"))] + [text_of(b.get("text")) for b in item.get("badges") or [] if isinstance(b, dict)]
+        line = f"{pad}{n:>3}. {text}" if model.selectable(item) else f"{pad}     {text}"
+        line += "".join(f"  [{e}]" for e in extra if e)
+        if isinstance(item.get("options"), list):
+            line += "  (options: " + "; ".join(f"{i + 1}) " + (text_of(o.get("label")) or str(o.get("value"))) for i, o in enumerate(item["options"]) if isinstance(o, dict)) + ")"
+        if item.get("input"):
+            line += f"  (asks: {text_of(item['input'])})"
+        if item.get("disabled"):
+            line += "  (disabled)"
+        if text_of(item.get("description")):
+            line += "\n" + pad + "       " + item["description"]
+        return line
+
+    # ---- running things -------------------------------------------------------------------------------------
+
+    def invoke(self, name, args, ctx):
+        """Run a command: client.* here, others through the core with `args.context`; then follow reply hints."""
+        if name.startswith("client."):
+            return self.client_command(name, args or {}, ctx)
+        args = dict(args) if isinstance(args, dict) else {}
+        args["context"] = ctx
+        try:
+            reply = self.vqro.call("command.invoke", {"name": name, "args": args})
+        except VqroError as e:
+            return [f"{name}: {e} ({e.kind})"]
+        out = [f"{name}: done"]
+        hints = (reply or {}).get("client") if isinstance(reply, dict) else None
+        if isinstance(hints, dict):
+            if hints.get("close"):
+                self.popup = None
+            popup = (hints.get("popup") or {}).get("view") if isinstance(hints.get("popup"), dict) else None
+            if isinstance(popup, str):
+                if self.kind_of(popup) == "terminal":
+                    out.append("popup refused: terminals never pop up")
+                else:
+                    self.popup = popup
+                    out += self.view_lines(popup)
+            focus = (hints.get("focus") or {}).get("view") if isinstance(hints.get("focus"), dict) else None
+            if isinstance(focus, str):
+                for i, leaf in enumerate(self.leaves()):
+                    if leaf[0] == focus:
+                        self.focus = i
+        return out
+
+    def client_command(self, name, args, ctx):
+        if name == "client.quit":
+            raise SystemExit(0)
+        if name == "client.palette":
+            return self.commands("")
+        if name in ("client.prefix", "client.menu"):
+            return self.prefix() if name == "client.prefix" else self.menu_lines(args.get("where", "pane"))
+        if name == "client.focus":
+            n = len(self.leaves()) or 1
+            self.focus = (self.focus + (1 if args.get("dir") != "prev" else -1)) % n
+            return self.show()
+        if name == "client.safe_mode":
+            if self.ws.safe_mode:
+                return self.safe([])
+            return self.invoke("vqro.safe_mode", {"on": True}, ctx)
+        if name == "client.safe_mode.toggle":
+            self.safe_selected ^= {args.get("name")}
+            return self.view_lines(model.SAFE_MODE_VIEW)
+        if name == "client.safe_mode.apply":
+            names = [k[len("extension/"):] for k in self.ws.entries if k.startswith("extension/")]
+            for n in names:
+                try:
+                    self.vqro.call("command.invoke", {"name": "vqro.safe_mode.allow", "args": {"name": n, "on": n in self.safe_selected}})
+                except VqroError as e:
+                    return [f"vqro.safe_mode.allow {n}: {e}"]
+            return ["Safe-mode choices applied; enabled declarations were not changed"]
+        if name == "client.safe_mode.leave":
+            return self.invoke("vqro.safe_mode", {"on": False}, ctx)
+        if name == "client.none":
+            return []
+        return [f"{name}: not supported by this client"]
+
+    def activate(self, spec, rest):
+        if not self.listed:
+            return ["nothing listed: `view` a panel first"]
+        row, _, chip = spec.partition(".")
+        try:
+            r = self.listed[int(row) - 1]
+        except (ValueError, IndexError):
+            return [f"no row {spec}"]
+        item = r["item"]
+        if chip:
+            try:
+                item = (item.get("chips") or [])[int(chip) - 1]
+            except (ValueError, IndexError):
+                return [f"no chip {spec}"]
+        elif not model.selectable(item):
+            return [f"row {row} is not selectable"]
+        if not isinstance(item.get("command"), str):
+            if r["has_children"] and not chip:
+                self.state[self.shown]["open"][r["id"]] = not r["expanded"]
+                return self.view_lines(self.shown)
+            return [f"row {spec} does nothing"]
+        if item.get("disabled"):
+            return [f"row {spec} is disabled"]
+        args = dict(item.get("args") or {}) if isinstance(item.get("args"), dict) else {}
+        options = item.get("options") if isinstance(item.get("options"), list) else None
+        if options is not None:
+            # By number, label or value.
+            option = options[int(rest) - 1] if rest.isdigit() and 0 < int(rest) <= len(options) else \
+                next((o for o in options if isinstance(o, dict) and rest and (rest == text_of(o.get("label")) or rest == str(o.get("value")))), None)
+            if not isinstance(option, dict):
+                return ["choose one (number, label or value): " + "; ".join(f"{i + 1}) " + (text_of(o.get("label")) or str(o.get("value"))) for i, o in enumerate(options) if isinstance(o, dict))]
+            args["value"] = option.get("value")
+            if option.get("input"):
+                return [f"this option asks for text: use `run {item['command']} {json.dumps(dict(args, text='...'))}`"]
+        elif item.get("input"):
+            if not rest:
+                return [f"asks: {item['input']} (give it after the row number)"]
+            args["text"] = rest
+        elif item.get("pick") == "resource":
+            if rest not in self.ws.resources:
+                return ["pick a resource id: " + ", ".join(sorted(self.ws.resources))]
+            args["picked"] = rest
+        ctx = self.ctx()
+        if self.shown and self.shown == self.popup:
+            ctx = dict(ctx, panel=self.shown, panel_view=self.shown)
+        return self.invoke(item["command"], args, ctx)
+
+    def menu_lines(self, place, run=None):
+        ctx = self.ctx()
+        entries = self.ws.menu_entries(place, ctx)
+        self.menu = [(text_of(e.get("label")) or text_of((e.get("icon") or {}).get("text") if isinstance(e.get("icon"), dict) else e.get("icon")), e) for e in entries]
+        if run is not None:
+            return self.run_listed(run, ctx)
+        if not self.menu:
+            return [f"no {place} menu items (are their extensions on?)"]
+        return [f"{i + 1:>3}. {label}" for i, (label, _) in enumerate(self.menu)]
+
+    def prefix(self, run=None):
+        ctx = self.ctx()
+        rows = model.prefix_rows(self.ws, ctx)
+        self.menu = [(label, b) for _, label, b in rows]
+        if run is not None:
+            return self.run_listed(run, ctx)
+        lines = ["prefix menu (keys are for keyboard clients; run a row with `p <n>`):"]
+        lines += [f"{i + 1:>3}. {key or '-':<8} {label}" for i, (key, label, _) in enumerate(rows)]
+        return lines
+
+    def run_listed(self, spec, ctx):
+        parts = spec.split(None, 1)
+        try:
+            label, b = self.menu[int(parts[0]) - 1]
+        except (ValueError, IndexError):
+            return [f"no row {spec}"]
+        args = dict(b.get("args") or {}) if isinstance(b.get("args"), dict) else {}
+        if b.get("input"):
+            if len(parts) < 2:
+                return [f"asks: {b['input']} (give it after the row number)"]
+            args["text"] = parts[1]
+        if b.get("pick") == "resource":
+            if len(parts) < 2 or parts[1] not in self.ws.resources:
+                return ["pick a resource id: " + ", ".join(sorted(self.ws.resources))]
+            args["picked"] = parts[1]
+        return self.invoke(b.get("command") or "", args, ctx)
+
+    def commands(self, query):
+        q = query.lower()
+        rows = sorted((n, text_of(c.get("title"))) for n, c in self.ws.commands.items() if c.get("available") is True and (q in n.lower() or q in text_of(c.get("title")).lower()))
+        return [f"  {n}  {t}" for n, t in rows] or ["no commands match"]
+
+    def safe(self, args):
+        if args[:1] == ["toggle"] and len(args) > 1:
+            return self.client_command("client.safe_mode.toggle", {"name": args[1]}, {})
+        if args[:1] in (["apply"], ["leave"]):
+            return self.client_command("client.safe_mode." + args[0], {}, {})
+        if not self.ws.safe_mode:
+            return ["safe mode is off (`p` lists `safe mode / recovery choices`)"]
+        self.popup = model.SAFE_MODE_VIEW
+        return self.view_lines(model.SAFE_MODE_VIEW)
+
+    # ---- the command line -----------------------------------------------------------------------------------
+
+    def handle(self, line):
+        words = line.strip().split(None, 1)
+        if not words:
+            return []
+        cmd, rest = words[0], (words[1] if len(words) > 1 else "")
+        with self.lock:
+            if cmd in ("help", "?"):
+                return HELP.split("\n")
+            if cmd in ("quit", "exit", "q"):
+                raise SystemExit(0)
+            if cmd in ("show", "s"):
+                return self.show()
+            if cmd == "focus":
+                n = len(self.leaves())
+                if not rest.isdigit() or not 1 <= int(rest) <= n:
+                    return [f"focus 1-{n}"]
+                self.focus, self.popup = int(rest) - 1, None
+                return self.show()
+            if cmd in ("view", "v"):
+                leaves = self.leaves()
+                if not rest:
+                    if self.popup:
+                        return self.view_lines(self.popup)
+                    if not leaves:
+                        return ["no panes"]
+                    return self.view_lines(leaves[min(self.focus, len(leaves) - 1)][0])
+                if rest.isdigit():
+                    if not 1 <= int(rest) <= len(leaves):
+                        return [f"no pane {rest} ({len(leaves)} shown by `show`)"]
+                    self.focus, self.popup = int(rest) - 1, None
+                    return self.view_lines(leaves[self.focus][0])
+                self.popup = rest
+                return self.view_lines(rest)
+            if cmd == "close":
+                self.popup = None
+                return ["popup closed"]
+            if cmd == "do":
+                spec, _, arg = rest.partition(" ")
+                return self.activate(spec, arg.strip())
+            if cmd in ("page", "filter", "expand", "collapse"):
+                if not self.shown:
+                    return ["`view` a panel first"]
+                st = self.state.setdefault(self.shown, {"page": 0, "filter": "", "open": {}})
+                if cmd == "page" and rest.isdigit():
+                    st["page"] = max(0, int(rest) - 1)
+                elif cmd == "filter":
+                    st["filter"] = rest
+                elif cmd in ("expand", "collapse") and rest.isdigit() and 0 < int(rest) <= len(self.listed):
+                    st["open"][self.listed[int(rest) - 1]["id"]] = cmd == "expand"
+                return self.view_lines(self.shown)
+            if cmd == "menu":
+                place, _, n = rest.partition(" ")
+                return self.menu_lines(place or "pane", n.strip() or None)
+            if cmd == "p":
+                return self.prefix(rest or None)
+            if cmd == "commands":
+                return self.commands(rest)
+            if cmd == "run":
+                name, _, raw = rest.partition(" ")
+                try:
+                    args = json.loads(raw) if raw.strip() else {}
+                except ValueError as e:
+                    return [f"args must be JSON: {e}"]
+                return self.invoke(name, args, self.ctx())
+            if cmd == "safe":
+                return self.safe(rest.split())
+            return [f"unknown command {cmd!r}; `help` lists them"]
+
+
+def model_hello():
+    return {"client": "text", "version": "0.1.0", "profiles": ["base"], "features": FEATURES}
+
+
+def main(argv):
+    socket_path = os.environ.get("VQRO_SOCKET")
+    if not socket_path:
+        print("VQRO_SOCKET is not set: start this client with `vqro ui text`", file=sys.stderr)
+        return 2
+    client = TextClient(socket_path)
+    if argv[:1] == ["--once"]:
+        for command in " ".join(argv[1:]).split(";"):
+            for line in client.handle(command):
+                client.say(line)
+        return 0
+    interactive = sys.stdin.isatty()
+    client.say(f"vqro text client · {client.info.get('server')} {client.info.get('version')} · `help` for commands, `p` for recovery")
+    for line in client.show():
+        client.say(line)
+    while True:
+        if interactive:
+            print("vqro> ", end="", flush=True)
+        line = sys.stdin.readline()
+        if not line:
+            return 0
+        try:
+            for out in client.handle(line):
+                client.say(out)
+        except SystemExit:
+            return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

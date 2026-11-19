@@ -175,6 +175,7 @@ if [ "$MODE" = full ]; then
   step e2e-workspace-tabs "${CLEAN[@]}" python3 tests/e2e_workspace_tabs.py "$TARGET"
   step e2e-herdr-drift "${CLEAN[@]}" python3 tests/e2e_herdr_drift.py "$TARGET" --receipt "$LOGS/herdr-drift-receipt.json"
   step e2e-scale-herdr scale_probe
+  step e2e-text-client "${CLEAN[@]}" python3 tests/e2e_text_client.py "$TARGET"
   step e2e-tui-smoke "${CLEAN[@]}" bash tests/e2e_tui_smoke.sh "$TARGET/debug/vqro"
   step e2e-pi-provider "${CLEAN[@]}" python3 tests/pi_provider_e2e.py --run --large-workspace --probe-terminal-invoke --vqro "$TARGET/debug/vqro" --hc "$HOME/.local/bin/herdr-core"
   step e2e-agents-ui "${CLEAN[@]}" python3 tests/pi_provider_e2e.py --run --agents-ui --large-workspace --probe-terminal-invoke --vqro "$TARGET/debug/vqro" --hc "$HOME/.local/bin/herdr-core"
