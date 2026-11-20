@@ -310,6 +310,7 @@ class Native:
         if verb == "state": return {"agents": self.agents, "ledger_seq": self.serial,
             "registration": {k: v for k, v in self.provider.registration.items() if "token" not in k}}
         if verb == "add": return await self.add(request["ref"], **request.get("fields", {}))
+        if verb == "streams": return {"open": len(self.provider.streams)}  # read-only: item streams open at the provider
         if verb == "add-many":
             count=request["count"];prefix=request.get("prefix","a")
             if type(count) is not int or not 1<=count<=2048: raise ValueError("fake endpoint bound")

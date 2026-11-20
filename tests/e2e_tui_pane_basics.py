@@ -173,15 +173,22 @@ try:
     check("the active (live) tab chip is bold", "\x1b[1m" in chip or ";1m" in chip or "[1;" in chip, repr(chip))
 
     # Marks on other tabs (opt-in): this tab's program reports working, then blocked, then done (OSC 7501)
-    # while the first tab is shown.
+    # while the first tab is shown. Each next state waits for the test to release it (a file), after the test
+    # observed the previous one: no timed windows that load could miss (testing audit item 5).
     call("command.invoke", {"name": "tabs.set", "args": {"field": "marks", "value": True}})
-    keys("printf '\\033]7501;state=working:app=e2e\\007'; /usr/bin/sleep 2; printf '\\033]7501;state=blocked:app=e2e\\007';"
-         " /usr/bin/sleep 3; printf '\\033]7501;state=done:app=e2e\\007'", literal=True)
+    gate = f"{R}/home/release"
+    keys("printf '\\033]7501;state=working:app=e2e\\007';"
+         f" until [ -e {gate}-blocked ]; do /usr/bin/sleep 0.1; done; printf '\\033]7501;state=blocked:app=e2e\\007';"
+         f" until [ -e {gate}-done ]; do /usr/bin/sleep 0.1; done; printf '\\033]7501;state=done:app=e2e\\007'", literal=True)
     keys("Enter")
-    time.sleep(0.6)
+    resource = lambda view: call("workspace.snapshot")["entries"][f"view/{view}"]["value"]["resource"]
+    status = lambda: next(r.get("status") or {} for r in call("workspace.snapshot")["resources"] if r["id"] == resource(second))
+    check("the core sees the agent working", wait(lambda: status().get("state") == "working", 10), status())
     prefix("1")
+    open(f"{gate}-blocked", "w").close()
     check("a background agent that waits for you marks its tab ⚠", wait(lambda: "MYTITLE₂ ⚠" in bar(), 10), bar())
     print("CAPTURE mark-blocked\n" + bar(), flush=True)
+    open(f"{gate}-done", "w").close()
     check("one that finished since you looked marks it ✓", wait(lambda: "MYTITLE₂ ✓" in bar(), 10),
           bar() + "\n" + str([{k: r.get(k) for k in ("id", "state", "status", "available", "stale")} for r in call("workspace.snapshot")["resources"]]))
     prefix("2")

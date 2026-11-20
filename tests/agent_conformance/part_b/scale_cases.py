@@ -567,8 +567,13 @@ async def combined_scale_gate(ctx):
             terminals.append((await ctx.peer.call("resource.spawn", {"argv": ["sh"]}))["resource"]["id"])
         for start in range(0, 600, 50): await asyncio.gather(*(spawn(index) for index in range(start, start + 50)))
         ctx.check(len(terminals) == 600, "600 terminals spawned", terminals=len(terminals))
+        before = (await ctx.native.call("streams"))["open"]
         stalled = [await stalled_viewer(ctx, agents[:100]), await stalled_viewer(ctx, agents[100:])]
-        await asyncio.sleep(2)  # the stalled viewer's opens settle first; the burst below is one 200-attach burst
+        # The stalled viewer's opens settle first (observed at the provider, not assumed after a sleep), so the burst
+        # below is one 200-attach burst of its own.
+        async def stalled_open():
+            return (await ctx.native.call("streams"))["open"] >= before + 200
+        await ctx.wait(stalled_open, label="the stalled viewer's 200 item streams are open at the provider", timeout=60)
         # Phase 1: one viewer per agent, opened as one 200-attach burst.
         viewers = [await ctx.connect("owner") for _ in range(3)]
         window = asyncio.Semaphore(64)  # viewers window attaches under the 128-request connection limit
