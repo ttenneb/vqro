@@ -186,12 +186,18 @@ async def staged_successor_handover(ctx):
     await ctx.scope("resume", "agent:" + other["id"])
     await ctx.wait(lambda: invocations(ctx, delivery=claimed["delivery"]), label="actual claimed native barrier")
     retired = await ctx.command("control", {"op": await ctx.operation("i13-retire"), "target": other["id"], "action": "retire", "args": {}})
-    ctx.check(retired.get("state") in ("accepted", "observed"), "predecessor routing is actually retired", reply=retired)
+    ctx.check(retired.get("state") == "retired" and retired.get("execution") == "unknown" and retired.get("native") is None,
+        "predecessor routing is actually retired without inventing native end", reply=retired)
     try:
         await refusal_preserves(ctx, other, destination, [sibling["delivery"], claimed["delivery"]], "claimed")
     finally:
         await ctx.native.call("release", barrier="i13-claimed")
     unknown = await ctx.wait_command("inbox.get", lambda row: row.get("state") == "unknown", args={"delivery": claimed["delivery"]})
+    # Lost native reply disconnects the shared host. Observe an available successor
+    # again, so unknown refusal cannot pass merely because the destination is absent.
+    await ctx.wait_agents(3)
+    ctx.check(all(any(row["id"] == old["id"] and row["incarnation"] == old["incarnation"] for row in ctx.agents)
+        for old in (source, destination, other)), "host reconnect retains the exact inspected endpoint identities")
     await refusal_preserves(ctx, other, destination, [sibling["delivery"], claimed["delivery"]], "unknown")
     ctx.check(len(invocations(ctx, delivery=claimed["delivery"])) == 1 and not invocations(ctx, delivery=sibling["delivery"]),
         "claimed/unknown handover refusal never replays input or dispatches its pending sibling", unknown=unknown)
