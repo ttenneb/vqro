@@ -450,6 +450,7 @@ class AgentPane(unittest.TestCase):
         self.assertEqual((composer["pin"], composer["autofocus"], composer["submit"], composer["args"]),
                          ("bottom", True, "Enter", {"resource": "r2", "caps_rev": 2}))
         self.assertEqual((composer["controls"][0]["type"], composer["controls"][0]["value"]), ("select", "auto"), "one input-settings button")
+        self.assertIs(composer["send_button"], False, "no Send button: Enter sends")
         self.assertEqual([c["value"] for c in composer["controls"][0]["options"]], ["auto", "boundary", "settle"], "steer before follow-up")
         self.core.handlers["agents.send"](dict(composer["args"], mode="settle", text="later"))  # declared modes still send
         self.assertEqual(composer["fallback"]["multiline"], True)

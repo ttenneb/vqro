@@ -650,7 +650,7 @@ class Agents:
             rows.append({"type": "composer", "id": "compose", "pin": "bottom", "text": "Message " + name,
                          "command": "agents.send", "args": {"resource": rid, "caps_rev": caps(r).get("rev")},
                          "placeholder": f"Write a message to {name}…", "rows": COMPOSER_ROWS, "max_bytes": 65536, "submit": "Enter",
-                         "autofocus": True, "requires": ["composer"],
+                         "autofocus": True, "requires": ["composer"], "send_button": False,  # Enter sends (the human, relay-11)
                          # One input-settings button (the human, relay-11): the delivery mode now, more input options later.
                          "controls": [{"type": "select", "arg": "mode", "text": "Input", "value": "auto", "options": options}],
                          "fallback": {"text": f"Message {name}…", "command": "agents.send",
