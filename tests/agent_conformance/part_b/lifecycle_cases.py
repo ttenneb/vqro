@@ -87,7 +87,6 @@ class Backend:
             self.peer = None
 
 
-@case("L7")
 def within_declared_n(count, cache):
     """L7: None when the extension declares no integer identity-cache N (that gap is graded separately); otherwise
     whether the actual cache count is at most N."""
@@ -97,6 +96,7 @@ def within_declared_n(count, cache):
     return count <= declared
 
 
+@case("L7")
 async def identity_cache_and_tombstones(ctx):
     """~900 unavailable agents per hour: K2-driven forgetting stays within the cache; durable evidence is kept;
     evidence-free tombstones are pruned oldest first; maximum legal identities and summaries fit; a large native
@@ -106,7 +106,7 @@ async def identity_cache_and_tombstones(ctx):
     cache = limits.get("identity_cache")
     summary_bound = limits.get("identity_summary_bytes")
     # 1. Declaration: L7 needs the extension's identity-cache size N.
-    if not isinstance(cache, dict) or not isinstance(cache.get("capacity"), int) or cache.get("incomplete"):
+    if not isinstance(cache, dict) or type(cache.get("capacity")) is not int or cache.get("incomplete"):
         gaps.append({"subclause": "identity cache size N declared by the extension",
                      "declared": cache, "component": "coordination"})
     core = await reservations(ctx)

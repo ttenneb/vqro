@@ -414,7 +414,9 @@ class IdentityCacheCheckerRegressions(unittest.TestCase):
     """L7: the actual cache count is graded against the extension-declared N, not only the core bound."""
 
     def test_count_over_declared_n_fails(self):
-        from agent_conformance.part_b.lifecycle_cases import within_declared_n
+        from agent_conformance.part_b.lifecycle_cases import within_declared_n, identity_cache_and_tombstones
+        from agent_conformance.part_b.cases import HANDLERS
+        self.assertIs(HANDLERS["L7"], identity_cache_and_tombstones, "the asynchronous witness, not its predicate, must own L7")
         self.assertTrue(within_declared_n(100, {"capacity": 128}))
         self.assertFalse(within_declared_n(4096, {"capacity": 128}), "a core-bounded count above the declared N")
         self.assertIsNone(within_declared_n(4096, {"capacity": None, "incomplete": True}), "undeclared N is a separate gap")
