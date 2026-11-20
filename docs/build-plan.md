@@ -477,3 +477,16 @@ Human decision: each workspace has its own tabs; one shared current workspace ac
   switches. Prefix `w` (tmux profile `s`), a tab-bar menu item and a status-bar segment open the switcher.
 - Tests: `tests/test_workspace_tabs.py`, private e2e `tests/e2e_workspace_tabs.py` (in `check.sh full`).
 - Per-window active workspace (later): see the report; switching goes through one function per extension.
+
+## Each window has its own workspace (2026-11-19)
+
+Human decisions: new windows open on the workspace last switched to; prefix R resets only that window.
+- The TUI keeps the layout it shows as window state (like zoom), starting from `workspace/active`. It moves
+  only on its own switches: a reply's `{"client": {"layout"}}`, `client.layout {name?}`, its own
+  `vqro.layout.reset`, or its layout being deleted (fallback to the default). Re-exec keeps it.
+- Switching still writes `workspace/active` (the default for new windows; agents/CLI and older clients).
+- Every invocation carries `args.context.layout`; `vqro_ext` passes it to nested commands and offers
+  `context_layout(args)`. tabs, sidebar.toggle and new workspace layouts act on the invoking window's layout.
+- Per-window marks with generic fields: rows `current_when {layout}`, status items `label_context`.
+- Tests: TUI unit tests, `tests/test_workspace_tabs.py`, `tests/test_vqro_ext.py`, two-window pty e2e
+  `tests/e2e_tui_workspaces.py` (in `check.sh full`).
