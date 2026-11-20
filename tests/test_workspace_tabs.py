@@ -286,5 +286,46 @@ class WorkspaceTabs(unittest.TestCase):
         self.assertIn("tabs.open", mods["tabs"]["ext"].handlers)
 
 
+class LaggingCore(Core):
+    """A core whose extension cache sees writes only when reloaded (fresh), as between a write and its entries
+    event; compare-and-set is checked against the store. Uses the real `retrying` (reload on conflict)."""
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.store = {}
+
+    retrying = vqro_ext.Extension.retrying
+
+    def apply(self, ops, note):
+        cache, self.entries = self.entries, self.store
+        try:
+            result = Core.apply(self, ops, note)
+            self.store = self.entries
+        finally:
+            self.entries = cache
+        return result
+
+    def fresh(self):
+        self.entries = copy.deepcopy(self.store)
+
+
+class StaleCache(unittest.TestCase):
+    def test_two_adds_in_a_row_both_land_though_the_cache_lags(self):
+        """Gate flake 20261120-093925 (e2e_workspace_tabs.py:134): the second add read a cache without the first
+        and wrote with expect 0; the core refused it (conflict) and add gave up. It must reload and retry."""
+        with tempfile.TemporaryDirectory() as d:
+            a, b = os.path.join(d, "a"), os.path.join(d, "b")
+            os.mkdir(a); os.mkdir(b)
+            core = LaggingCore()
+            load(core, "workspaces")
+            core.handlers["workspaces.add"]({"text": a})
+            self.assertNotIn("doc/workspaces/list", core.entries, "the cache has not seen the first add yet")
+            core.handlers["workspaces.add"]({"text": b})
+            self.assertEqual([i["path"] for i in core.store["doc/workspaces/list"]["value"]["items"]], [a, b])
+            with self.assertRaises(VqroError) as e:
+                core.handlers["workspaces.add"]({"text": a})
+            self.assertEqual((e.exception.kind, str(e.exception)), ("conflict", "already added"))
+
+
 if __name__ == "__main__":
     unittest.main()

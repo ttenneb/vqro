@@ -246,11 +246,18 @@ def add(args):
     path = norm(raw)
     if not os.path.isdir(path):
         raise VqroError(f"not a folder: {path}", "invalid")
-    items = entries()
-    if any(norm(i["path"]) == path for i in items):
+
+    def attempt():
+        # From the cache, which may not have seen a write that just happened (two adds in a row): a conflict
+        # reloads it and tries again, so the list is never written without an entry it already has.
+        items = entries()
+        if any(norm(i["path"]) == path for i in items):
+            return False
+        items.append({"path": path})
+        save(items, "workspaces: add")
+        return True
+    if not ext.retrying(attempt):
         raise VqroError("already added", "conflict")
-    items.append({"path": path})
-    save(items, "workspaces: add")
     ext.notify(f"added {os.path.basename(path)}", "ok")
 
 
