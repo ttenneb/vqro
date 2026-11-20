@@ -328,6 +328,19 @@ class AgentsTests(unittest.TestCase):
         self.core.providers["herdr"] = {"name": "herdr", "capabilities": {"terminal.kill": {}}}
         self.agents.event("resource", {"id": "r2"})
 
+    def test_every_popup_view_exists_before_the_click_and_opening_it_writes_nothing(self):
+        """The e2e-agents-ui flake (vqro-lead's gate on 27c477e): the requests popup's view used to be written by the
+        click itself, and a client that read the reply before that entry's event dropped the popup ("popup: no view")."""
+        self.core.add_agent()
+        self.core.resources["r2"]["data"]["requests"] = [{"id": "q1", "kind": "confirm", "prompt": "Run it?", "data": {}}]
+        self.agents.event("resource", {"id": "r2"})
+        for popup in ("stop", "requests", "settings", "send"):
+            self.assertIsNotNone(self.core.value(f"view/agents-{popup}-r2"), popup)
+        before = len(self.core.transactions)
+        reply = self.command("answer", resource="r2")
+        self.assertEqual(reply["client"]["popup"]["view"], "agents-requests-r2")
+        self.assertEqual(len(self.core.transactions), before, "opening the popup writes no workspace state")
+
     def test_stop_asks_first_then_kills_only_the_host_terminal_and_reports_the_outcome(self):
         self.stoppable()
         self.assertEqual(self.core.value("menu/agents.r2.stop")["when"], {"view": "agents-r2"})

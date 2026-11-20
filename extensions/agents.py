@@ -798,7 +798,6 @@ class Agents:
             if mode == "start" and busy(r) and descriptor.get("busy") == "reject":
                 row["description"] = "the agent is busy: the runtime will refuse this"
             items.append(row)
-        self.ext.contribute({"view/"+target: {"kind": "panel", "title": "Send to agent", "items": []}})
         self.ext.publish(target, {"title": "Send to "+label(r.get("name") or "Agent")+" "+rid, "requires": ["menu", "input"],
                                   "items": items})
         return {"client": {"popup": {"view": target, "width": 76}}}
@@ -1027,7 +1026,6 @@ class Agents:
         rid = r["id"]
         if "request" not in args:
             target = "agents-requests-"+rid
-            self.ext.contribute({"view/"+target: {"kind": "panel", "title": "Pending requests", "items": []}})
             self.open_requests.add(rid)
             self.ext.publish(target, self.requests_panel(r))
             return {"client": {"popup": {"view": target, "width": 80}}}
@@ -1103,7 +1101,6 @@ class Agents:
         if not self.has_settings(r):
             raise VqroError("this agent declares no settings or commands", "unsupported")
         target = "agents-settings-"+r["id"]
-        self.ext.contribute({"view/"+target: {"kind": "panel", "title": "Agent settings", "items": []}})
         self.open_settings.add(r["id"])
         self.ext.publish(target, self.settings_panel(r))
         return {"client": {"popup": {"view": target, "width": 76}}}
@@ -1267,8 +1264,13 @@ class Agents:
             rid = r["id"]
             # `resource` names the agent this pane shows: context.resource / resource_kind for keys and menus.
             entries["view/"+view(rid)] = {"kind": "panel", "title": "Agent "+rid, "resource": rid, "items": [{"type": "text", "text": "Agents extension is not running."}]}
-            # Declared with the agent, not on click: confirming a stop writes no workspace state.
-            entries["view/agents-stop-"+rid] = {"kind": "panel", "title": "Stop agent "+rid, "items": [{"type": "text", "text": "Agents extension is not running."}]}
+            # Every popup this agent can open is declared with the agent, not on click. A popup reply names a view the
+            # client must already know: a view written by the same click can reach a client after the reply, and the
+            # popup is then dropped ("popup: no view"). Opening a popup writes no workspace state.
+            for popup, title in (("stop", "Stop agent"), ("requests", "Pending requests"), ("settings", "Agent settings"),
+                                 ("send", "Send to agent")):
+                entries[f"view/agents-{popup}-{rid}"] = {"kind": "panel", "title": f"{title} {rid}",
+                                                         "items": [{"type": "text", "text": "Agents extension is not running."}]}
             entries["menu/agents."+rid+".stop"] = {"where": "pane", "label": "Stop agent…", "command": "agents.stop",
                                                   "when": {"view": view(rid)}, "order": 190}
             # Static (menus are workspace entries; no churn per disconnect): the command refuses connected agents.
