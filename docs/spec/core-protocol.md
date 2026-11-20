@@ -509,7 +509,9 @@ identity and rN are stored in oldest-forgotten-first order with the existing `re
 using ONE existing atomic durable replacement. Reservations survive core restarts; oldest entries are evicted only
 at the bound. An oversized hint is not retained but never refuses registration/forget. Eviction or a different
 provider/instance/ref/incarnation produces a fresh monotonic rN inheriting no old identity. Native forget, native
-inventory removals and replacement retirements NEVER create reservations. Only cached-forget does. A clean
+inventory removals and replacement retirements NEVER create reservations, and invalidate any matching existing
+hints in the SAME candidate/write even when no active facts remain. Authoritative/instance fast paths account for
+reserved identities too: a definitely ended/replaced identity cannot reclaim its old rN after restart. Only cached-forget creates hints. A clean
 write failure changes neither active mappings nor reservations; uncertain post-rename adoption updates both and
 requires the existing durability confirmation, never replay. Reappearance consumes its hint only after actual
 adoption. Old files without the optional reservations array load unchanged; malformed/duplicate/reserved-active

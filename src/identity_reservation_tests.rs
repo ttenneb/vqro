@@ -2,10 +2,12 @@ use super::*;
 fn identity(n:usize)->Identity {Identity {provider:"runtime".into(),instance:"host".into(),reference:format!("endpoint{n}"),incarnation:"session".into()}}
 #[test]
 fn cached_retirement_reuses_only_the_exact_identity_and_native_retirement_does_not() {
- let mut map=IdentityMap::open(None).unwrap();let original=identity(0);let id=map.identify(original.clone()).unwrap().id;
- map.forget_cached(&original).unwrap();assert!(!map.active(&id));assert!(map.lookup(&original).is_none());
- for field in 0..4 {let mut other=original.clone();match field {0=>other.provider.push('x'),1=>other.instance.push('x'),2=>other.reference.push('x'),_=>other.incarnation.push('x')};assert_ne!(map.identify(other).unwrap().id,id);}
- assert_eq!(map.identify(original.clone()).unwrap().id,id);assert_eq!(map.state.reservations.identities.len(),0);
+ let original=identity(0);
+ for field in 0..4 {let mut map=IdentityMap::open(None).unwrap();let id=map.identify(original.clone()).unwrap().id;map.forget_cached(&original).unwrap();assert!(!map.active(&id));assert!(map.lookup(&original).is_none());
+  let mut other=original.clone();match field {0=>other.provider.push('x'),1=>other.instance.push('x'),2=>other.reference.push('x'),_=>other.incarnation.push('x')};assert_ne!(map.identify(other).unwrap().id,id);
+  let returned=map.identify(original.clone()).unwrap().id;if field==1||field==3 {assert_ne!(returned,id,"same reference with changed host/lineage permanently replaces the hint");}else{assert_eq!(returned,id);}
+ }
+ let mut map=IdentityMap::open(None).unwrap();let id=map.identify(original.clone()).unwrap().id;map.forget_cached(&original).unwrap();assert_eq!(map.identify(original.clone()).unwrap().id,id);
  map.retire(|i|i==&original).unwrap();assert_ne!(map.identify(original).unwrap().id,id);
 }
 #[test]

@@ -4,7 +4,7 @@ AS4 chose keep mail + identity for disappeared agents. Core supplies only the ge
 
 ## Storage and lifetime
 
-`IdentityMap::forget_cached` uses the existing identity candidate and atomic durable writer. It removes unavailable active facts and reserves the exact identity; a return consumes that reservation only when the candidate is actually adopted. Native forget, authoritative removal and replacement retirements never create reservations. Different full identities get new monotonic IDs, never a reserved ID belonging to somebody else.
+`IdentityMap::forget_cached` uses the existing identity candidate and atomic durable writer. It removes unavailable active facts and reserves the exact identity; a return consumes that reservation only when the candidate is actually adopted. Native forget, authoritative removal and replacement retirements never create reservations; they invalidate matching OLD hints in the SAME candidate/write, including when no active facts remain. Reserved identities participate in provider-instance/authoritative fast-path decisions. Different full identities get new monotonic IDs, never a reserved ID belonging to somebody else.
 
 The set is bounded to4096 entries of≤2KiB encoded each (≤8MiB logical record bytes, not RSS or total file size). It evicts oldest-forgotten first; full identity allocations are shared by its lookup/order indexes. Oversized hints are not cached but never refuse registration/cached-forget. Counter wrap renumbers order without evicting. Snapshot metadata exposes count/encoded bytes/limits/persistent:true, not message/effect authority.
 
@@ -13,6 +13,8 @@ The coordinator explicitly required persistence rather than the initially propos
 A clean write failure adopts neither active retirement/reappearance nor cache changes. An uncertain post-rename write adopts BOTH, reports durability_unconfirmed and must later confirm via the existing identity writer; it is not permission to replay an effect. Cached facts/provider metadata still reap; an identity hint does not count as an active provider/resource or keep a process alive. No pause/configuration/grants/mail fields are fabricated or modified.
 
 ## Evidence and limits
+
+The reserved review reproduced a P1 in the first implementation: native end after cached-forget left the old hint reusable, including across restart. The repair invalidates matching hints atomically and makes the four independent probes permanent, plus instance-fast-path and clean/uncertain hint-only retirement checks in `src/identity_retirement_tests.rs`.185 library tests pass after that repair; its full gate/delta review are separately recorded in the handoff. Original passing36/36 does NOT by itself close this safety finding.
 
 `src/identity_reservation_tests.rs` covers every identity component, native retirement, capacity/oldest eviction, fresh high-water after eviction, restart/order restoration, old-file loading, malformed/colliding hints, oversized-hint non-refusal and clean/uncertain writes during both retirement and re-adoption (with independent disk reopen checks). `src/core.rs` checks provider/resource cleanup, zero backend commands, original rN on fresh provider observations and unchanged ordinary paused configuration.
 

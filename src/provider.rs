@@ -187,6 +187,9 @@ struct Persisted {
 #[cfg(test)]
 #[path="identity_reservation_tests.rs"]
 mod identity_reservation_tests;
+#[cfg(test)]
+#[path="identity_retirement_tests.rs"]
+mod identity_retirement_tests;
 
 pub const IDENTITY_RESERVATIONS:usize=4096;
 const RESERVATION_BYTES:usize=2048;
@@ -200,7 +203,12 @@ struct Reservations {
 }
 impl Reservations {
     fn get(&self,identity:&Identity)->Option<&str>{self.identities.get(identity).map(|row|row.0.as_str())}
-    fn remove(&mut self,identity:&Identity){if let Some((_,order,bytes))=self.identities.remove(identity){self.oldest.remove(&order);self.bytes-=bytes;}}
+    fn remove(&mut self,identity:&Identity)->Option<String>{let(id,order,bytes)=self.identities.remove(identity)?;self.oldest.remove(&order);self.bytes-=bytes;Some(id)}
+    fn invalidate(&mut self,mut predicate:impl FnMut(&Identity)->bool)->Vec<String>{
+        let keys=self.oldest.values().filter(|identity|predicate(identity)).cloned().collect::<Vec<_>>();
+        keys.into_iter().filter_map(|identity|self.remove(&identity)).collect()
+    }
+    fn has_provider(&self,name:&str)->bool{self.identities.keys().any(|identity|identity.provider==name)}
     fn remember(&mut self,identity:Identity,id:String){
         self.remove(&identity);
         let bytes=crate::limits::encoded_bytes(&serde_json::json!({"identity":identity,"id":id}));
@@ -340,11 +348,11 @@ impl IdentityMap {
     pub fn provider_ids(&self,name:&str)->Vec<String>{self.by_provider.get(name).map(|ids|ids.iter().cloned().collect()).unwrap_or_default()}
     pub fn reference_id(&self,name:&str,reference:&str)->Option<&str>{self.by_reference.get(&(name.into(),reference.into())).map(String::as_str)}
     pub fn retire_provider_except(&mut self,name:&str,instance:&str)->Result<(Vec<String>,Option<RpcError>),RpcError>{
-        if !self.needs_sync && self.provider_ids(name).iter().all(|id|self.state.ids[id].identity.instance==instance){return Ok((Vec::new(),None));}
+        if !self.needs_sync && !self.state.reservations.has_provider(name) && self.provider_ids(name).iter().all(|id|self.state.ids[id].identity.instance==instance){return Ok((Vec::new(),None));}
         self.retire(|i|i.provider==name&&i.instance!=instance)
     }
     pub fn sync_provider(&mut self,name:&str,identities:&[Identity])->Result<IdentityBatch,RpcError>{
-        if !self.needs_sync && self.by_provider.get(name).map(|ids|ids.len()).unwrap_or(0)==identities.len() {
+        if !self.needs_sync && !self.state.reservations.has_provider(name) && self.by_provider.get(name).map(|ids|ids.len()).unwrap_or(0)==identities.len() {
             if let Some(ids)=identities.iter().map(|i|self.lookup(i).map(String::from)).collect::<Option<Vec<_>>>() {return Ok(IdentityBatch{ids,replaced:Vec::new(),removed:Vec::new(),uncertain:None});}
         }
         let seen=identities.iter().collect::<std::collections::HashSet<_>>();
@@ -360,6 +368,9 @@ impl IdentityMap {
         let mut result=IdentityBatch{ids:Vec::with_capacity(identities.len()),replaced:Vec::new(),removed:Vec::new(),uncertain:None};
         let mut changed=false;
         for identity in identities {
+            // A definite replacement retires previously forgotten hints too, in this SAME candidate.
+            let replaced=candidate.reservations.invalidate(|old|old.provider==identity.provider&&old.reference==identity.reference&&old!=identity);
+            changed|=!replaced.is_empty();result.replaced.extend(replaced);
             if let Some(id)=exact.get(identity){result.ids.push(id.clone());continue;}
             let reference=(identity.provider.clone(),identity.reference.clone());
             if let Some(old)=references.remove(&reference) {if let Some(record)=candidate.ids.remove(&old){exact.remove(&record.identity);}result.replaced.push(old);}
@@ -371,6 +382,7 @@ impl IdentityMap {
         }
         let reservations=&mut candidate.reservations;
         candidate.ids.retain(|id,record|{if remove(&record.identity){if reserve_removed {reservations.remember(record.identity.clone(),id.clone());}result.removed.push(id.clone());changed=true;false}else{true}});
+        if !reserve_removed {let removed=candidate.reservations.invalidate(remove);changed|=!removed.is_empty();result.removed.extend(removed);}
         if changed || self.needs_sync {result.uncertain=self.commit(candidate)?;}
         Ok(result)
     }
