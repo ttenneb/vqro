@@ -567,6 +567,14 @@ class NativeFixtureTests(unittest.IsolatedAsyncioTestCase):
             await self.control("nonexistent")
         self.assertEqual((await self.control("state"))["wire"], "pi")
 
+    async def test_semantic_drop_reply_does_not_drop_or_repeat_native_input(self):
+        await self.control("drop_reply", operation="send")
+        await self.send_native({"type": "prompt", "message": "one uncertain native input"})
+        await self.wait_ledger(lambda rows: any(row["kind"] == "inserted" for row in rows))
+        self.assertEqual(len(self.records("reply_dropped")), 1)
+        self.assertEqual(len(self.records("input_received")), 1)
+        self.assertFalse(self.records("native_reply"))
+
     async def test_controlled_native_exit_has_no_synthetic_settled_event(self):
         await self.control("exit", code=23)
         self.assertEqual(await asyncio.wait_for(self.process.wait(), 2), 23)

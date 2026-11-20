@@ -93,8 +93,9 @@ class Runtime:
                         loop.remove_writer(1)
 
     async def reply(self, command, data=None, success=True):
-        if command["type"] in self.drop:
-            self.record("reply_dropped", command=command["type"], request=command.get("id"))
+        operation = OPERATIONS.get(command["type"], "query" if command["type"] in READS else "configure" if command["type"].startswith("set_") else "unknown")
+        if command["type"] in self.drop or operation in self.drop:
+            self.record("reply_dropped", command=command["type"], operation=operation, request=command.get("id"))
             return
         row = {"type": "response", "id": command.get("id"), "command": command["type"], "success": success}
         if data is not None:
@@ -326,8 +327,11 @@ class Runtime:
                 self.barriers.pop(key).set()
             return {"released": [list(key) for key in keys]}
         if verb == "drop_reply":
-            self.drop.add(row["command"])
-            return {"drop_reply": row["command"]}
+            operation = row.get("operation", row.get("command"))
+            if not isinstance(operation, str):
+                raise ValueError("drop_reply needs a semantic operation")
+            self.drop.add(operation)
+            return {"drop_reply": operation}
         if verb == "turn":
             state = row["state"]
             if state == "start" and self.native_turn:
