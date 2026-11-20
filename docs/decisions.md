@@ -510,6 +510,8 @@ replaced when the Pi bridge is ported.
   traffic, with no aging in v0. This refines the earlier unconditional per-sender FIFO/fairness promise.
 - Pull `max_bytes` is a per-record consumer budget; oversized mail stays held `too_large_for_consumer` for the agent,
   like unsupported content, without claim/release churn or truncation. Aggregate batch bounds still apply.
+- Slow-viewer memory accounting includes journal `retain_bytes + snapshot_buffer_bytes`, old shared entity
+  versions pinned by snapshots, current entities and other overhead; journal retention alone is not the bound.
 
 **Human answers (2026-11-19, CONFIRMED).**
 - **AS1, pause:** "vqro stops delivery": paused means vqro sends, hands out and wakes nothing until resumed; an agent

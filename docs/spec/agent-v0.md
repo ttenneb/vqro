@@ -441,8 +441,9 @@ Every read is bounded by count, bytes and work. Stream numbers are P3's measurem
 stalled and a slow viewer, at 400, 4,000 and 10,000 records/s, with a session switch on 50 agents and an adapter
 SIGKILL: identical reconstruction, 0 errors; one run each on a shared 8-core set):
 
-- retention 128 KiB per agent: the retained log plateaued at exactly 200 × 128 KiB = 26.2 MB (about 580 records,
-  12–290 s depending on rate); nothing grew after that;
+- retention 128 KiB per agent: the prototype's retained log plateaued at exactly 200 × 128 KiB = 26.2 MB (about
+  580 records, 12–290 s depending on rate); this is a journal measurement, not the shared producer's full
+  slow-viewer memory bound;
 - while one viewer was slow or stalled, the other viewers' p99 latency stayed 3–11 ms;
 - core RSS ≤ 62 MB with 600–678 streams; runtime RSS ≤ 98 MB; core CPU ≤ 44% of one core at 10,000 records/s;
 - untested: the provider-side `retention` gap while attached, and a stalled viewer holding more than 78 streams.
@@ -451,9 +452,15 @@ SIGKILL: identical reconstruction, 0 errors; one run each on a shared 8-core set
 |---|---|---|
 | Ids | 128 B | — |
 | Facts `data.agent` | 64 KiB | provider-v0 resource budget |
-| Stream record / entity | 64 KiB / 64 KiB | per endpoint, declared in `items`: journal `retain_bytes` (default 128 KiB), retained entities `entities` and `entity_bytes` in aggregate (defaults 512 and 512 KiB), receipts and request maps; per provider: snapshot buffers and readers. The adapter's steady memory is the sum of all of these plus indexes, not the journal alone (P3's 26.2 MB is the journal). Item streams ≥ agents × max viewers per provider (`limits.max_item_streams`, §9.2); per-viewer connection stream budget 1 MiB |
+| Stream record / entity | 64 KiB / 64 KiB | per endpoint, declared in `items`: journal `retain_bytes` (default 128 KiB), retained entities `entities` and `entity_bytes` in aggregate (defaults 512 and 512 KiB), receipts and request maps. During slow snapshots, journal payload may reach `retain_bytes + snapshot_buffer_bytes` (shared producer default buffer 1 MiB), **plus old shared entity versions** held by snapshot cuts; also charge current entities, indexes, cursors and readers. P3's 26.2 MB is the journal alone, not this sum. Item streams ≥ agents × max viewers per provider (`limits.max_item_streams`, §9.2); per-viewer connection stream budget 1 MiB |
 | Receipts | — | ≥ 256 per endpoint |
 | Pages (history, session list) | ≤ 64 items, ≤ 256 KiB | — |
+
+The shared producer's post-cut journal buffer is per endpoint, shared by its snapshot cursors, not a full copy
+per viewer. Copy-on-write snapshots can retain old entity versions beyond the current `entity_bytes`; account for
+those separately across active snapshot cuts. The encoded payload accounting is **journal retention + post-cut
+buffer + old shared versions**, in addition to current entities and other adapter/transport overhead. A slow viewer
+must not make any of these grow without the declared entity, cursor, journal and connection bounds.
 
 ## 9. Core additions (generic)
 

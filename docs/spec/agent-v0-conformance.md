@@ -116,8 +116,10 @@ new epoch precedes any new-epoch record (or the stream closes); a viewer at old 
 duplicates. O6 two viewers attaching at different times show the same timeline order (by `position`). O7 three
 viewers, one stalled: only its connection closes; native draining continues; it resumes from its last applied record.
 O8 JSONL lines split across frames and UTF-8 boundaries. O9 coverage `tail`/`state_only` never shown as complete;
-current state and pending requests survive pruning. O10 retained memory stays within the declared bounds (P3: 200 ×
-128 KiB = 26.2 MB plateau). O11 (untested) a viewer draining steadily but slower than generation gets gap reason
+current state and pending requests survive pruning. O10 retained memory stays within the declared bounds: measure
+journal retention plus `snapshot_buffer_bytes` and old shared entity versions held by active snapshot cuts, current
+entities and adapter/transport overhead separately. Check ordinary retention again after snapshot pins release.
+P3's measured journal plateau of 200 × 128 KiB = 26.2 MB is not an all-in slow-viewer cap. O11 (untested) a viewer draining steadily but slower than generation gets gap reason
 `retention`; a stalled viewer holding all 200 of its streams loses them together and harms nobody; an unknown gap
 reason ends the stream. O12 producer append bounds: a small append whose resulting whole snapshot `put` exceeds
 the record bound returns `too_large`, leaving entity, revision and `seq` unchanged; both text and decoded-byte
