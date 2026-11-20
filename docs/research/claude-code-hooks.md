@@ -5,12 +5,23 @@ namespace. No model calls.
 - Plugin: `src/bin/vqro-claude-hook.rs`.
 - Tests: `tests/claude_hook_e2e.py` (full gate; no Claude Code needed), `tests/claude_code_e2e.py` (`-p`) and
   `tests/claude_code_tui.py` (interactive PTY).
-- Fixtures: `tests/fixtures/fake_inbox.py` (the pull surface of `coordination-v0.md` §7 as core commands) and
-  `fake_anthropic.py`, whose request log is the oracle.
+- Fixtures:
+  - `tests/coord_harness.py` with `--inbox fake|k2`;
+  - `tests/fixtures/coord_k2.py` runs the default coordination extension (K2, branch coord-ext) unchanged on a
+    real core. It stands in for the two core pieces not yet on main: K2's MemoryStore for C1, and principal by
+    connection author for C2;
+  - `fake_inbox.py` is the same `coord.*` dialect, minimal;
+  - `fake_anthropic.py` and `fake_openai.py` are fake models whose request logs are the oracle.
+
+Both plugins speak `coord.inbox.window/reconcile/take/report` through `command.invoke`. Every mutation's `op`
+carries the window epoch, retried once after `expired_operation`. The wake is the `coord-status` live view's
+`wake.pending[<rN>]`. The launcher writes the endpoint's declaration in `doc/agents/terminals/<rN>` and grants the
+plugin's principal `receive`. A new coordination owner starts with the gate closed; the harness resumes it.
 
 ## Result
 
-The plugin declares `pull {points: [turn, settle, idle], insert: context, evidence: entry}`.
+The declaration is `pull {points: [turn, settle, idle], insert: context, evidence: none}`. Senders must accept
+`render: ["context"]`.
 
 | Point | Hook | Measured |
 |---|---|---|
@@ -18,7 +29,7 @@ The plugin declares `pull {points: [turn, settle, idle], insert: context, eviden
 | `settle` | `Stop` → `additionalContext` | The message appears only in the one continuation after the final answer, as a separate user text block, `<system-reminder>Stop hook additional context: …` |
 | `idle` | `asyncRewake` waiter armed at `Stop` and `Notification` `idle_prompt` | It wakes an idle TUI in the next request. Claude Code frames the message as `[SYSTEM NOTIFICATION - NOT USER INPUT] … background-task event` |
 
-The waiter is a hook process blocked on the inbox's counts-only wake (`inbox-wake-<rN>` live view):
+The waiter is a hook process blocked on the counts-only wake:
 - wake latency is 5-6 ms;
 - a hook without mail costs about 2 ms (debug build, including process start);
 - nothing polls.
@@ -30,15 +41,17 @@ armed waiter; a message sent while busy stays held until the next idle.
 
 | Entry | Meaning | Use |
 |---|---|---|
-| `attachment.type: hook_additional_context` | the context entry in the conversation | `inserted` |
-| `type: user` (not `isMeta`) carrying the id | a rewake or peer message | `inserted` |
+| `attachment.type: hook_additional_context` | the context entry in the conversation | located (not reported) |
+| `type: user` (not `isMeta`) carrying the id | a rewake or peer message | located (not reported) |
 | `api-request-blob` carrying the id, then an `assistant` entry with a non-error `stop_reason` | the request payload that was sent, and a finished answer | `read` |
 | `attachment.type: hook_success` / `hook_non_blocking_error` | a record of hook stdout/stderr | **not evidence** |
 
-The hand-off itself is reported `supplied`. A later hook upgrades it from the transcript. Because the transcript is
-written asynchronously, evidence usually arrives one hook later. A new consumer (`SessionStart`) runs
-`inbox.reconcile`: an open claim with no model-visible entry becomes `unknown` and is never taken again (checked
-with `--resume`).
+The hand-off is reported `supplied` (context, no durable entry at that moment). `supplied` and `inserted` are
+separate evidence branches in K2, so the transcript only upgrades a hand-off to `read`. Because the transcript is
+written asynchronously, that usually happens one hook later. A new consumer (`SessionStart`) runs
+`coord.inbox.reconcile` with no entries: a claim taken but never handed over (a crash between take and hand-off)
+becomes `unknown`, is never taken again, and blocks the sender's later same-mode input until `coord.inbox.resolve`.
+Checked with `--resume` against K2.
 
 ## Behaviour the docs do not state
 
@@ -78,6 +91,8 @@ better framing.
 
 The P5 prototype, productised on the coordination-v0 surface. It declares
 `pull {points: [turn, settle, idle], insert: user, evidence: entry}` and runs inside Pi, holding one core connection.
+Its tests pass against K2 and the fake. K2 has no take content filter, so a record with a block Pi cannot insert is
+released uninserted. K2 then offers it again at each safe point until it is edited; it is never flattened.
 - **Points:** `turn_end` (turn) and `agent_before_settle` (settle) return `custom_message` drafts with
   `continue: true`. Idle uses a counts-only wake, then `sendMessage(triggerTurn, followUp)`.
 - **Stages:**
