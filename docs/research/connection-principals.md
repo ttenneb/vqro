@@ -7,7 +7,9 @@ not authentication, a human/agent split, or a stable/frozen contract. The generi
 ## The small mechanism
 
 - `hello.identity` is explicit launcher configuration: `{kind:"principal",principal:"…"}` or `{kind:"owner"}`.
-  Binding is immutable for that connection; display names and request labels cannot replace it. Same-user code
+  Binding is immutable for that connection; display names and request labels cannot replace it. Core-derived
+  `extension:*`, `host:*`, `system` and `system:*` cannot be asserted by a caller; invalid attempts emit bounded
+  `identity.rejected` diagnostics without logging supplied identities or secrets. Same-user code
   can deliberately configure another identity, just as it can bypass the cooperative workspace.
 - CLI/provider SDKs use configured `VQRO_PRINCIPAL`, otherwise undeclared. TUI explicitly defaults to the owner;
   an explicit launcher environment can select another principal. Verified extensions resolve to themselves.
@@ -21,7 +23,9 @@ not authentication, a human/agent split, or a stable/frozen contract. The generi
 - Standing representation uses exact `{from,to,until_ms?,note?}` rows under `doc/principals/delegations/`.
   The connection actor must be `to`; it may represent `from`. No transitive lookup, wildcard match, per-right scope,
   deny rule or coordination permission query exists in core. A delegation does not recall accepted native work.
-- Generic owner/delegation writes, deletes and explicit reverts are checked at serialized commit prepare. A row
+- Generic owner/delegation writes, deletes and explicit reverts use the connection ACTOR, never the effective
+  principal, at serialized commit prepare. Delegates therefore cannot mint chains, remove their own expiry or take
+  over the owner. A row
   replacement checks both existing and replacement `from`; mixed transactions fail atomically. Queued work sees
   preceding adopted changes, including owner transfer and delegation revocation.
 - Bounds: principal/label 256 bytes; delegation note 4096 bytes; table 1024 rows / 128 KiB encoded JSON. These are
@@ -47,12 +51,34 @@ retains this non-secret value for tools/reconnects while stripping supervision t
 A multi-endpoint runtime must inject an evidenced endpoint identity into tools, or its host identity; nothing in
 core guesses endpoint identity from timing, process ancestry, names or pane placement.
 
+## Upgrade and review notes
+
+Old prototype SDKs must move live proofs from `on_behalf_of` to `invocation`; there is intentionally no ambiguous
+fallback. Old free claims are not backfilled: explicit revert by id remains available, but default u excludes them.
+Owner hellos resolve once; open TUIs reconnect after an owner transfer. Generic shells inherit the spawner's
+principal, and hand-started agents share it unless a launcher injects a distinct principal.
+
+Private native regression reproduced `VQRO_PRINCIPAL=extension:herdr@test` in a terminal started directly by hc,
+not vqro. Herdr backend startup now removes it alongside existing supervision credentials. The tmux client already
+uses an env-clear service boundary (`src/tmux/client.rs`); no new tmux workaround is introduced.
+
+Ordinary calls with neither proof nor target no longer acquire the extra attribution core lock: immutable actor
+plus diagnostic label need no core state. Live proofs and standing delegation still resolve/revalidate against
+current state. This is a source-level justification, not an invented performance measurement.
+
+Accepted separate follow-ups after C2 merges: full stream-open attribution/SDK exposure, and a visible owner-unset
+recovery flow for missing/invalid owner (no guessed owner or coordination grants). Current oversized malformed
+legacy-owner state may prevent an owner TUI hello; this delta does not claim that edge fixed.
+
 ## Evidence
 
 - `tests/principal_binding_regression.rs`: unchanged regression on baseline `5139203` records Bob for a connection
   configured as Alice (red); C2 records Alice and keeps Bob only as label (green).
 - `tests/principal_undo.rs`: immutable binding, raw/forged fields, owner bootstrap, exact/expired/non-chained
-  delegation, old/new row grantors, mixed-write atomicity, encoded bounds, legacy claims, restart and CAS.
+  delegation, old/new row grantors, actor-only chain/expiry/owner-takeover negatives, reserved-identity rejection
+  and audit diagnostics, mixed-write atomicity, encoded bounds, legacy claims, restart and CAS.
+- `tests/herdr_provider.rs::backend_autostart_does_not_inherit_supervisor_identity`: real private backend service,
+  then a terminal created directly by its user; no supervisor identity/credentials in that terminal's environment.
 - `tests/commit_off_lock.rs`: queued owner transfer and delegation revocation are observed at prepare; prior
   candidate-first adoption, cancellation, shutdown and admission-bound tests still pass. Fixtures now explicitly
   configure their actor and derive transaction/version expectations relative to the system bootstrap.

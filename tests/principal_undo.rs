@@ -39,6 +39,19 @@ async fn labels_cannot_rebind_connection_or_select_somebody_elses_undo() {
     server::shutdown(&e.core).await;
 }
 #[tokio::test]
+async fn core_derived_names_cannot_be_asserted_at_hello_and_rejections_are_recorded() {
+    let e=Env::new();
+    for id in ["extension:plugin","host:native","system","system:future"] {
+        let error=client::connect_as(&e.socket,"reserved-principal-probe",id).await.err().expect("caller cannot assert a core-derived identity");
+        assert_eq!(error.downcast_ref::<vqro::rpc::RpcError>().unwrap().kind(),"invalid");
+    }
+    let recorded=e.core.lock().unwrap().events_since(0).unwrap().into_iter().filter(|event|event["type"]=="identity.rejected").collect::<Vec<_>>();
+    assert_eq!(recorded.len(),4);assert!(recorded.iter().all(|event|event["data"]["outcome"]=="invalid" && event["data"]["actor"]=="undeclared"));
+    assert!(recorded.iter().all(|event|event["data"].get("identity").is_none()));
+    assert!(client::connect_as(&e.socket,"ordinary","systematic").await.is_ok());
+    server::shutdown(&e.core).await;
+}
+#[tokio::test]
 async fn raw_labels_and_spoofed_record_fields_never_become_owner() {
     let e=Env::new();let unknown=e.raw().await;
     let hello=unknown.call("hello",json!({"client":"owner","label":"owner"})).await.unwrap();assert_eq!(hello["actor"],"undeclared");
@@ -81,6 +94,27 @@ async fn delegation_is_explicit_exact_unexpired_and_never_chained() {
     assert_eq!(alice.call("workspace.get",json!({"key":"doc/x","on_behalf_of":"bob"})).await.unwrap_err().kind(),"forbidden");
     assert!(alice.call("workspace.get",json!({"key":"doc/x"})).await.is_ok());assert_eq!(history(&alice).await[0]["principal"],"owner");server::shutdown(&e.core).await;
 }
+async fn delegate_cannot_change_principal_configuration(case:usize) {
+    let e=Env::new();let owner=e.known("owner").await;let alice=e.known("alice").await;
+    grant(&owner,"b-a","bob","alice",Some(vqro::store::now_ms()+60_000)).await;
+    grant(&owner,"o-a","owner","alice",None).await;
+    let(target,key,value)=match case {
+        0=>("bob","doc/principals/delegations/b-c",json!({"from":"bob","to":"carol"})),
+        1=>("bob","doc/principals/delegations/b-a",json!({"from":"bob","to":"alice"})),
+        _=>("owner","doc/principals/owner",json!("alice")),
+    };
+    let before=get(&owner,key).await;let count=history(&owner).await.len();
+    let result=alice.call("workspace.apply",json!({"on_behalf_of":target,"ops":[{"op":"set","key":key,"value":value}]})).await;
+    assert_eq!(result.unwrap_err().kind(),"forbidden","principal configuration is governed by the connection actor, never its represented principal");
+    assert_eq!(get(&owner,key).await,before);assert_eq!(history(&owner).await.len(),count);
+    server::shutdown(&e.core).await;
+}
+#[tokio::test]
+async fn delegate_cannot_mint_a_chain_as_its_grantor(){delegate_cannot_change_principal_configuration(0).await}
+#[tokio::test]
+async fn delegate_cannot_remove_its_expiry_as_its_grantor(){delegate_cannot_change_principal_configuration(1).await}
+#[tokio::test]
+async fn owner_delegate_cannot_take_over_workspace_owner(){delegate_cannot_change_principal_configuration(2).await}
 #[tokio::test]
 async fn delegation_replacement_requires_existing_and_new_grantor_and_guards_revert_delete() {
     let e=Env::new();let owner=e.known("owner").await;let alice=e.known("alice").await;let bob=e.known("bob").await;
@@ -149,12 +183,12 @@ async fn bound_principal_survives_restart_but_actual_connection_does_not() {
 async fn delegated_callback_carries_effective_and_original_initiator_separately() {
     let e=Env::new();let owner=e.known("owner").await;let alice=e.known("alice").await;let bob=e.known("bob").await;grant(&owner,"b-a","bob","alice",None).await;
     let stream=tokio::net::UnixStream::connect(&e.socket).await.unwrap();let(r,w)=stream.into_split();let(extension,mut incoming)=Peer::spawn(r,w);
-    extension.call("hello",json!({"identity":{"kind":"principal","principal":"extension:worker"}})).await.unwrap();extension.call("command.register",json!({"name":"worker.run"})).await.unwrap();
+    extension.call("hello",json!({"identity":{"kind":"principal","principal":"callback-worker"}})).await.unwrap();extension.call("command.register",json!({"name":"worker.run"})).await.unwrap();
     let caller=alice.clone();let invoked=tokio::spawn(async move{caller.call("command.invoke",json!({"name":"worker.run","on_behalf_of":"bob"})).await});
     let(id,p)=loop{match incoming.recv().await.unwrap(){Incoming::Request{id,method,params}if method=="command.invoke"=>break(id,params),_=>{}}};
     assert_eq!(p["principal"],"bob");assert_eq!(p["initiator"],"alice");assert_eq!(p["actor"],"alice");
     let changed=extension.call("workspace.apply",json!({"invocation":p["invocation"],"ops":[{"op":"set","key":"doc/callback","value":1}]})).await.unwrap();
-    let rows=history(&alice).await;assert_eq!(rows[0]["principal"],"bob");assert_eq!(rows[0]["initiator"],"alice");assert_eq!(rows[0]["actor"],"extension:worker");
+    let rows=history(&alice).await;assert_eq!(rows[0]["principal"],"bob");assert_eq!(rows[0]["initiator"],"alice");assert_eq!(rows[0]["actor"],"callback-worker");
     assert!(!serde_json::to_string(&rows).unwrap().contains(p["invocation"].as_str().unwrap()),"opaque proof is never retained in history");
     extension.respond(id,Ok(json!({})));invoked.await.unwrap().unwrap();
     assert_eq!(extension.call("workspace.apply",json!({"invocation":p["invocation"],"ops":[{"op":"set","key":"doc/late","value":1}]})).await.unwrap_err().kind(),"forbidden");

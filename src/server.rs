@@ -519,6 +519,8 @@ fn attribution(core:&Shared,conn:&Conn,params:&mut Value)->Result<crate::invocat
     let string=|key:&str|params.get(key).map(|value|value.as_str().map(String::from).ok_or_else(||RpcError::invalid(format!("{key} must be a string")))).transpose();
     let proof=string("invocation")?;let target=string("on_behalf_of")?;
     if let Some(object)=params.as_object_mut(){object.remove("invocation");object.remove("on_behalf_of");}
+    // An immutable connection identity needs no core state; only live proofs/standing delegation do.
+    if proof.is_none() && target.is_none(){return Ok(crate::invocation::Context{attribution:base,..Default::default()})}
     principal::resolve(&core.lock().unwrap(),conn.id,base,proof,target)
 }
 
@@ -557,7 +559,17 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, mut p: Value) -
                 (Some(name),Some(token))=>Some(ext::authenticate(&core.lock().unwrap(),name,token).ok_or_else(||RpcError::new("forbidden","invalid or expired supervised extension identity"))?),
                 _=>None,
             };
-            let actor=principal::identity(&core.lock().unwrap().store,h.identity.as_ref(),supervised.as_ref().map(|owner|owner.name.as_str()))?;
+            let actor={
+                let mut c=core.lock().unwrap();
+                match principal::identity(&c.store,h.identity.as_ref(),supervised.as_ref().map(|owner|owner.name.as_str())) {
+                    Ok(actor)=>actor,
+                    Err(error)=>{
+                        // Bounded diagnostics only: no asserted identity, token or proof is logged.
+                        c.emit("identity.rejected",json!({"author":conn.actual_author,"actor":conn.actor(),"outcome":error.kind(),"error":error.message}));
+                        return Err(error)
+                    }
+                }
+            };
             conn.bind_actor(actor)?;
             if conn.supervised.lock().unwrap().is_some() && supervised.is_none(){return Err(RpcError::new("conflict","a supervised connection cannot drop its lifetime identity"));}
             *conn.supervised.lock().unwrap()=supervised.clone();

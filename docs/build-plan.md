@@ -7,13 +7,17 @@ workspace through reliable public primitives, without changing the host or endan
 
 AS6 binds identity at hello from explicit launcher/TUI/extension/host context, with undeclared raw fallback and no
 implicit owner for unknown clients. Labels cannot change it. Generic exact delegation rows and owner/config write
-ownership are enforced at commit prepare, including old/new grantors, deletes, reverts and queued revocations.
+ownership are enforced against the connection actor (never a represented principal) at commit prepare, including
+old/new grantors, deletes, reverts and queued revocations. Core-derived principal namespaces are not caller-assertable;
+backend service startup scrubs supervision identity before it can reach ordinary user terminals.
 Flat actual/actor/effective/initiator/label metadata reaches both SDKs; scoped callbacks preserve effective and
 initiator separately without standing grants. Default u follows the effective principal; legacy free claims are
 not backfilled. Startup owner bootstrap is audited system work, not owner-u history. Pi's launcher assigns each new
 agent its own opaque principal. Core has no coordination-grants stand-in or agent policy.
 Focused core, native-ledger, Python and real private pane/TUI tests pass; release-gate/current-main integration is
-recorded in the C2 handoff. See `research/connection-principals.md` for the exact boundary and evidence.
+recorded in the C2 handoff. Breaking prototype upgrade: live proofs use `invocation`, not `on_behalf_of`; old
+free claims are not backfilled into default u history. No-proof/no-target attribution takes no extra core lock.
+See `research/connection-principals.md` for review regressions, upgrade notes and accepted separate follow-ups.
 
 ## Historical P2 prototype: principal / effect author / presser undo (2026-11-19; superseded by C2)
 

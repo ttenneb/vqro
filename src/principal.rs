@@ -70,7 +70,16 @@ pub fn owner(store:&Store)->Result<String,RpcError> {
 }
 pub fn identity(store:&Store,identity:Option<&Identity>,extension:Option<&str>)->Result<String,RpcError> {
     let resolved=if let Some(extension)=extension {format!("extension:{extension}")} else {
-        match identity {None=>return Ok(UNDECLARED.into()),Some(Identity::Owner)=>owner(store)?,Some(Identity::Principal {principal})=>principal.clone()}
+        match identity {
+            None=>return Ok(UNDECLARED.into()),Some(Identity::Owner)=>owner(store)?,
+            Some(Identity::Principal {principal})=>{
+                validate(principal)?;
+                if principal=="system" || ["extension:","host:","system:"].iter().any(|prefix|principal.starts_with(*prefix)) {
+                    return Err(RpcError::invalid("extension:, host: and system principals are core-derived, not caller-assertable"));
+                }
+                principal.clone()
+            }
+        }
     };
     validate(&resolved)?;Ok(resolved)
 }
@@ -118,7 +127,8 @@ pub fn protected(key:&str)->bool {key==OWNER_KEY || key.starts_with(DELEGATIONS)
 pub fn validate_writes(store:&Store,attribution:&Attribution,ops:&[Op])->Result<(),RpcError> {
     let keys=ops.iter().filter(|op|protected(match op{Op::Set{key,..}|Op::Delete{key,..}=>key})).collect::<Vec<_>>();
     if keys.is_empty(){return Ok(())}
-    let actor=attribution.effective().ok_or_else(||crate::provider::rejected("forbidden","principal configuration needs a connection-known principal"))?;
+    // Standing authority cannot be minted, extended or transferred through representation.
+    let actor=attribution.actor().ok_or_else(||crate::provider::rejected("forbidden","principal configuration needs a connection-known actor"))?;
     let owner=owner(store)?;let is_owner=actor==owner;
     let mut staged=std::collections::BTreeMap::<String,Option<Value>>::new();
     for op in keys {

@@ -29,7 +29,7 @@ async fn native_ledger_separates_actual_actor_effective_initiator_and_labels() {
     owner.call("workspace.apply",json!({"ops":[{"op":"set","key":"doc/principals/delegations/b-a","value":{"from":"bob","to":"alice","until_ms":null}}]})).await.unwrap();
     alice.call("resource.invoke",params.clone()).await.unwrap();
     assert_eq!(ledger.lock().unwrap()[1]["actor"],"alice");assert_eq!(ledger.lock().unwrap()[1]["principal"],"bob");assert_eq!(ledger.lock().unwrap()[1]["initiator"],"alice");
-    let(extension,mut callbacks,plugin_hello)=client::connect_as(&socket,"plugin","extension:plugin").await.unwrap();
+    let(extension,mut callbacks,plugin_hello)=client::connect_as(&socket,"plugin","plugin-callback").await.unwrap();
     extension.call("command.register",json!({"name":"probe.effect"})).await.unwrap();
     let mut native=params.clone();native.as_object_mut().unwrap().remove("on_behalf_of");
     let callback=tokio::spawn(async move {
@@ -41,7 +41,7 @@ async fn native_ledger_separates_actual_actor_effective_initiator_and_labels() {
         assert_eq!(extension.call("resource.invoke",native).await.unwrap_err().kind(),"forbidden","callback proof grants no standing delegation");
     });
     alice.call("command.invoke",json!({"name":"probe.effect","on_behalf_of":"bob"})).await.unwrap();callback.await.unwrap();
-    assert_eq!(ledger.lock().unwrap()[2]["actor"],"extension:plugin");assert_eq!(ledger.lock().unwrap()[2]["principal"],"bob");assert_eq!(ledger.lock().unwrap()[2]["initiator"],"alice");assert_eq!(ledger.lock().unwrap()[2]["author"],plugin_hello["actual_author"]);
+    assert_eq!(ledger.lock().unwrap()[2]["actor"],"plugin-callback");assert_eq!(ledger.lock().unwrap()[2]["principal"],"bob");assert_eq!(ledger.lock().unwrap()[2]["initiator"],"alice");assert_eq!(ledger.lock().unwrap()[2]["author"],plugin_hello["actual_author"]);
     owner.call("workspace.apply",json!({"ops":[{"op":"delete","key":"doc/principals/delegations/b-a"}]})).await.unwrap();
     assert_eq!(alice.call("resource.invoke",params.clone()).await.unwrap_err().kind(),"forbidden");assert_eq!(ledger.lock().unwrap().len(),3);
     let stream=tokio::net::UnixStream::connect(&socket).await.unwrap();let(r,w)=stream.into_split();let(unknown,_)=Peer::spawn(r,w);

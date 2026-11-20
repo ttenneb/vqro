@@ -60,7 +60,10 @@ A launcher configures identity once in `hello.identity`: `{kind:"principal", pri
 `{kind:"owner"}` to resolve `doc/principals/owner` (default `"owner"`). Rust/Python SDKs send configured
 `VQRO_PRINCIPAL` in that typed hello field, never as a per-call assertion. Ordinary CLI/provider clients without
 it are `undeclared`; the TUI explicitly defaults to owner unless its launcher configures another principal.
-Verified supervised extensions resolve to `extension:<name>`. A runtime registration without a configured actor
+Verified supervised extensions resolve to `extension:<name>`. Callers cannot assert `extension:*`, `host:*`,
+`system` or `system:*` in `hello.identity`: these are core-derived; rejection is `invalid` and emits bounded
+`identity.rejected {author,actor,outcome,error}` diagnostics (no claimed identity, token or proof is logged).
+A runtime registration without a configured actor
 resolves to `host:<host resource id>` from its existing bootstrap claim; the reply supplies `host` and `actor`.
 Multi-endpoint runtimes must inject an evidenced endpoint principal into each tool's environment, or use their
 host principal: neither core nor SDK guesses from the last message, pane, pid or placement. A bound connection
@@ -82,8 +85,10 @@ ordinary 4096-byte note bound. Standing delegation always matches the connection
 represented principal. It does not revoke previously accepted native work.
 
 Owner/delegation rows are ordinary attributed configuration. Core initializes/migrates the owner with an audited
-system transaction, not an owner-u target. Owner changes require the current effective owner; delegation creates,
-replacements and deletes require the owner or each old/new row's `from`, including explicit reverts. Checks run
+system transaction, not an owner-u target. Owner changes require the connection **actor** to be the current owner;
+delegation creates, replacements and deletes require that actor to be the owner or each old/new row's `from`,
+including explicit reverts. Effective/delegated identities and callback proofs cannot mint, extend or transfer
+standing authority. Checks run
 at serialized commit prepare after preceding adopted commits; mixed writes reject atomically. Raw recovery on
 other keys is unaffected. Core never reads coordination grants (`doc/agents/grants`); there is no core
 `grants.check` or `coordination.invoke` stand-in.
@@ -91,7 +96,10 @@ other keys is unaffected. Core never reads coordination grants (`doc/agents/gran
 Generic spawn exports its effective principal through `VQRO_PRINCIPAL` when native environment passing is
 available, unless the launcher explicitly supplies one. The bundled Pi launcher chooses a fresh opaque principal
 for each new agent instead of inheriting the launching TUI's undo scope. These non-secret values survive the
-Pi child environment sanitizer; supervisor tokens and other internal configuration do not.
+Pi child environment sanitizer; supervisor tokens and other internal configuration do not. Backend service
+startup strips supervision identity as well as credentials, so terminals created outside vqro do not inherit an
+extension's principal. Generic spawned shells still inherit the spawner's effective principal by design; a
+hand-started agent shares that scope unless its launcher explicitly injects another principal.
 
 A supervised connection is bound to its exact extension lifetime, not merely `ext:<name>`. Disable, restart,
 replacement, removal or child exit immediately fences its RPC mutations, provider publications/routes and command
@@ -700,6 +708,8 @@ A forwarded command receives flat `command.invoke {name,args,caller,author,actor
 `invocation` is an opaque live callback proof. Extensions read context from this core envelope, never `args`.
 They return the proof in the **`invocation`** request field on workspace writes/reverts, nested commands and
 resource effects. `on_behalf_of` is exclusively a target principal; it is never interpreted as a proof.
+Breaking prototype change: an old `on_behalf_of:<proof>` is checked only as a literal target principal and normally
+returns `forbidden` (no exact delegation). Upgrade callers to `invocation`; core never retries it as a proof.
 
 A valid proof propagates the invoking call's **effective principal** and **original initiator separately**, only
 inside that live callback. If A represents B, the extension's write records its own actor, effective B, initiator A.
