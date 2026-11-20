@@ -62,7 +62,7 @@ pub fn bind_origin(args:&Value,attribution:&vqro::principal::Attribution)->Resul
     let origin=args.get_mut("origin").and_then(Value::as_object_mut).ok_or_else(||invalid("effective origin is required"))?;
     for (field,recorded) in [("principal",attribution.principal.as_deref()),("actor",attribution.actor.as_deref())]{
         let actual=recorded.unwrap_or(vqro::principal::UNDECLARED);
-        let supplied=match origin.get(field){None=>vqro::principal::UNDECLARED,Some(value)=>value.as_str().ok_or_else(||invalid("origin identity must be a string"))?};
+        let supplied=match origin.get(field){None=>actual,Some(value)=>value.as_str().ok_or_else(||invalid("origin identity must be a string"))?};
         if supplied!=actual{return Err(reject("forbidden","origin does not match the core-recorded caller"));}
         origin.insert(field.into(),json!(actual));
     }
@@ -139,7 +139,11 @@ pub fn send(args:&Value,context:&Context<'_>)->Result<Send,Refusal> {
         }
     }
     let body=text.unwrap_or("");
-    let mut message=if rendering=="attributed_user" {format!("Effective sender (user authority; principal/actor recorded by core; claimed fields are asserted): {origin}\n\n{body}")} else {body.to_string()};
+    let mut message=if rendering=="attributed_user" {
+        let sender=origin.get("sender").unwrap_or(&origin["principal"]);
+        let provenance=if origin.get("sender").is_some(){"sender is coordination-asserted inbox provenance, not core-proven"}else{"effective principal recorded by core"};
+        format!("Effective sender (user authority): from {sender} via {} ({provenance})\nOrigin (principal/actor recorded by core; claimed fields are asserted): {origin}\n\n{body}",origin["actor"])
+    } else {body.to_string()};
     if let Some(quoted)=&quoted {message=format!("Quoted provenance (asserted, not the effective sender): {quoted}\n{message}");}
     let mut native=json!({"message":message});
     if !images.is_empty() {native["images"]=json!(images);}

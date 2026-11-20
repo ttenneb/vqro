@@ -120,14 +120,16 @@ terminal cannot block the native reader or process shutdown; it is never joined 
 
 ## Effective input origin (C2)
 Before admission or any native write, `agent.send` binds `origin.principal` to the core's effective principal
-(including exact delegation) and `origin.actor` to its recorded transport actor. Missing identities mean
-`undeclared`; a supplied mismatch is `forbidden`, not a relabelled/replayed input. Core `initiator` is retained
+(including exact delegation) and `origin.actor` to its recorded transport actor. Omitted caller identity fields
+are filled from that core record; missing core identities mean `undeclared`. A supplied mismatch is
+`forbidden`, not a relabelled/replayed input. Core `initiator` is retained
 separately as `origin.initiator`; a supplied conflicting initiator also refuses before write. Identity fields
 accept C2's256-byte bound. Caller-classified `kind`/`agent` remain unchanged and are explicitly listed in
 `origin.claimed`; native framing calls these asserted claims, never authority inferred from names/prefixes.
 On dispatched inbox mail, `origin.sender` retains coordination's original `from` with `provenance:"inbox-record"`
 and is also explicitly claimed. It is not equated with transport actor/initiator and is not end-to-end core
-proof of that original sender; this asynchronous provenance gap remains explicit. Quoted provenance remains
+proof of that original sender; this asynchronous provenance gap remains explicit. Native prose renders
+`from <sender> via <actor>` and labels that inbox sender coordination-asserted, not core-proven. Quoted provenance remains
 asserted and unchanged. Plain user rendering remains unsupported without verified
 owner evidence. Receipts retain the same bound origin; neither ACK nor identity binding proves insertion or
 handling. Private SDK/native tests prove spoofed principal/actor/initiator write nothing, and one delegated

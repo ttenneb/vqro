@@ -59,7 +59,7 @@ async fn c2_effect_identity_mismatch_is_forbidden_before_any_native_write(){
     let root=tempfile::tempdir().unwrap();let (shared,provider,mut core)=fixture(root.path(),true).await;
     for (index,field) in [Some("principal"),Some("actor"),Some("initiator"),None].into_iter().enumerate(){
         let mut args=json!({"v":0,"mode":"start","delivery":format!("d{index}"),"content":[{"type":"text","text":"exact literal"}],"origin":{"principal":"p:sender","actor":"extension:coord","kind":"agent","agent":"r99"},"quoted":{"label":"asserted source"}});
-        if let Some(field)=field{args["origin"][field]=json!("owner");}
+        if let Some(field)=field{args["origin"][field]=json!("owner");}else{args["origin"].as_object_mut().unwrap().remove("principal");args["origin"].as_object_mut().unwrap().remove("actor");}
         let wire=json!({"jsonrpc":"2.0","id":index,"method":"effect.invoke","params":{"generation":1,"effect":format!("e{index}"),"op":"agent.send","ref":"agent","incarnation":"","args":args,"deadline_ms":2000,"principal":"p:sender","actor":"extension:coord","initiator":"p:original"}});
         core.w.write_all(format!("{wire}\n").as_bytes()).await.unwrap();let request=core.requests.as_mut().unwrap().recv().await.unwrap();let Request::Effect(effect)=request else{panic!("not an effect")};
         let result=invoke(&shared,&provider,&effect).await.unwrap();
