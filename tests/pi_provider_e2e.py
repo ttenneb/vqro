@@ -155,28 +155,70 @@ class E2E:
                 self.core.kill()
                 self.core.wait(timeout=3)
 
+    # How long audit_error waits for the core in total (connect, hello, subscribe and the event). Generous because
+    # a disk-starved machine can pause the core for seconds; nothing is retried or replayed meanwhile.
+    AUDIT_TIMEOUT = 10
+
     def audit_error(self, cursor, outcome, event_method='resource.invoke'):
         # Observe exact public audits, including CLI errors and physical UI
         # effects. Never repeat an effect merely to discover its outcome.
+        # Every row read is kept with its time, so a failure says what arrived and which reply never did.
+        started = time.monotonic()
+        rows, phase = [], 'connect'
+
+        def fail(why):
+            record = {'audit_failed': why, 'phase': phase, 'cursor': cursor, 'event_method': event_method,
+                      'outcome': outcome, 'rows': rows}
+            self.log.append(record)
+            raise AssertionError(json.dumps(record))
+
+        def note(row):
+            params = row.get('params') if isinstance(row.get('params'), dict) else {}
+            data = params.get('data') if isinstance(params.get('data'), dict) else {}
+            rows.append({'ms': round((time.monotonic() - started) * 1000), 'phase': phase, 'id': row.get('id'),
+                         'method': row.get('method'), 'type': params.get('type'), 'seq': params.get('seq'),
+                         'event_method': data.get('method'), 'outcome': data.get('outcome'),
+                         'error': row.get('error'), 'result': row.get('result') if row.get('id') else None,
+                         'missed': params if row.get('method') == 'missed' else None})
+
         with socket.socket(socket.AF_UNIX) as sock:
-            sock.settimeout(4)
-            sock.connect(self.env['VQRO_SOCKET'])
-            with sock.makefile('rwb', buffering=0) as wire:
-                for ident, method, params in [(1, 'hello', {'client': 'e2e-audit'}),
-                        (2, 'events.subscribe', {'from': cursor['seq'], 'epoch': cursor['epoch'], 'types': ['effect']})]:
-                    wire.write((json.dumps({'jsonrpc': '2.0', 'id': ident, 'method': method, 'params': params})+'\n').encode())
-                    while True:
-                        row = json.loads(wire.readline())
-                        if row.get('method') == 'event' and row['params']['type'] == 'effect':
-                            event = row['params']['data']
-                            if event['method'] == event_method:
-                                assert event['outcome'] == outcome, event
-                                self.log.append({'audited_effect': event})
-                                return event
-                        if row.get('id') == ident:
-                            assert 'error' not in row, row
-                            if ident == 1:
-                                break
+            try:
+                sock.settimeout(self.AUDIT_TIMEOUT)
+                sock.connect(self.env['VQRO_SOCKET'])
+                with sock.makefile('rwb', buffering=0) as wire:
+                    for ident, method, params in [(1, 'hello', {'client': 'e2e-audit'}),
+                            (2, 'events.subscribe', {'from': cursor['seq'], 'epoch': cursor['epoch'], 'types': ['effect']})]:
+                        phase = method
+                        wire.write((json.dumps({'jsonrpc': '2.0', 'id': ident, 'method': method, 'params': params})+'\n').encode())
+                        while True:
+                            left = self.AUDIT_TIMEOUT - (time.monotonic() - started)
+                            if left <= 0:
+                                raise TimeoutError
+                            sock.settimeout(left)
+                            line = wire.readline()
+                            if not line:
+                                fail('the core closed the connection')
+                            row = json.loads(line)
+                            note(row)
+                            if row.get('method') == 'missed':
+                                # The cursor's events are gone: the audit can't be observed, so say so now.
+                                fail('the core answered the subscription with missed')
+                            if row.get('method') == 'event' and row['params']['type'] == 'effect':
+                                event = row['params']['data']
+                                if event['method'] == event_method:
+                                    assert event['outcome'] == outcome, event
+                                    self.log.append({'audited_effect': event, 'audit_ms': rows[-1]['ms']})
+                                    return event
+                            if row.get('id') == ident:
+                                if 'error' in row:
+                                    fail(f'{method} was refused')
+                                if ident == 1:
+                                    break
+                                phase = 'event'
+            except (TimeoutError, socket.timeout):
+                waiting = {'connect': 'the connection', 'hello': 'the hello reply', 'events.subscribe': 'the subscribe reply',
+                           'event': f'the {event_method} effect event'}[phase]
+                fail(f'no {waiting} within {self.AUDIT_TIMEOUT} s')
 
     def invoke(self, rid, op, args=None, outcome='accepted'):
         params = {'resource': rid, 'op': 'agent.'+op, 'args': args or {}}
