@@ -14,8 +14,8 @@ pub struct Causality {
 }
 fn string<'a>(value:&'a Value,field:&str)->Result<&'a str,RpcError> {
     match value.as_str() {
-        Some(text) if !text.is_empty() && text.len()<=STRING_BYTES && !text.chars().any(char::is_control)=>Ok(text),
-        _=>Err(RpcError::invalid(format!("{field} must be a string of 1..=256 bytes without control characters"))),
+        Some(text) if !text.is_empty() && text.len()<=STRING_BYTES && !crate::limits::text_controls(text)=>Ok(text),
+        _=>Err(RpcError::invalid(format!("{field} must be a string of 1..=256 bytes without control/format characters"))),
     }
 }
 impl Causality {

@@ -94,11 +94,20 @@ class Effect:
         return self.remaining == 0
 
 
+# Unicode16 General_Category=Cf from Python unicodedata16.0.0, pinned with Rust by
+# tests/fixtures/text_controls.json. Keep this SDK self-contained and independent of host UCD version.
+_FORMAT_RANGES = ((173,173),(1536,1541),(1564,1564),(1757,1757),(1807,1807),(2192,2193),(2274,2274),(6158,6158),(8203,8207),(8234,8238),(8288,8292),(8294,8303),(65279,65279),(65529,65531),(69821,69821),(69837,69837),(78896,78911),(113824,113827),(119155,119162),(917505,917505),(917536,917631))
+
+
+def _text_controls(value):
+    return any(unicodedata.category(char) == "Cc" or (ord(char) >= 173 and any(first <= ord(char) <= last for first, last in _FORMAT_RANGES)) for char in value)
+
+
 def causal_links(params):
     """Same generic shape bounds as core; preserve links and provenance without inferring evidence."""
     def text(value, field):
         try:
-            valid = isinstance(value, str) and 1 <= len(value.encode("utf-8")) <= 256 and not any(unicodedata.category(char) == "Cc" for char in value)
+            valid = isinstance(value, str) and 1 <= len(value.encode("utf-8")) <= 256 and not _text_controls(value)
         except UnicodeError:
             valid = False
         if not valid:
@@ -473,6 +482,14 @@ class Provider:
         provenance = [params.get(key) for key in ("author", "actor", "principal", "initiator", "label")]
         if any(value is not None and not isinstance(value, str) for value in provenance):
             raise ProviderError("invalid", "effect provenance fields must be strings")
+        label = params.get("label")
+        if label is not None:
+            try:
+                valid = len(label.encode("utf-8")) <= 256 and not _text_controls(label)
+            except UnicodeError:
+                valid = False
+            if not valid:
+                raise ProviderError("invalid", "label must be a bounded string without control/format characters")
         cause, correlation = causal_links(params)
         ctx = Effect(ident, op, params.get("ref"), params.get("incarnation", ""),
                      asyncio.get_running_loop().time() + duration / 1000, *provenance, cause, correlation)

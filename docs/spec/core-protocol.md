@@ -81,7 +81,8 @@ Human-opened shells never inherit that token. Without verified context or anothe
 clients remain `undeclared`. This shared-host route does not claim per-endpoint tool attribution (G11).
 A bound connection cannot be retagged by another hello; open a new connection to deliberately change configured identity.
 
-Requests may declare diagnostic `label` (at most 256 bytes, no controls); it never changes identity or rights.
+Requests may declare diagnostic `label` (at most 256 UTF-8 bytes, no Unicode Cc controls or Unicode16 Cf
+format characters, including bidi/zero-width controls); it never changes identity or rights.
 Record fields `author`, `actor`, `principal`, `initiator`, and `label` are core supplied except the diagnostic label:
 `author` is the actual boot-scoped connection; `actor` its bound identity; `principal` the effective identity;
 `initiator` the original invoker for forwarded/delegated work. Free request `principal`/`actor`/`author` fields are
@@ -559,8 +560,8 @@ changing `args`, upgrading provenance or inferring anything from text/timing.
   `epoch` are required, and for `effect`, string `boot`. Qualifiers are checked for presence/type only, not resolved
   as evidence or authority. Unknown enums and extra bounded fields pass unchanged.
 - Bounds: cause ≤ 4 KiB encoded, known strings (`kind`, `id`, `provenance`, `endpoint`, `epoch`, `boot`) are non-empty and ≤ 256 bytes,
-  depth ≤ 64; `correlation` is a non-empty string ≤ 256 bytes. Known strings/correlation reject control characters
-  as diagnostic labels do; extra bounded JSON remains opaque. Invalid types, missing required fields and excess
+  depth ≤ 64; `correlation` is a non-empty string ≤ 256 bytes. Known strings/correlation reject Unicode Cc controls and the pinned Unicode16 Cf format profile
+  exactly as diagnostic labels do (same Rust/Python rule, independent of the Python host UCD version); extra bounded JSON remains opaque. Invalid types, missing required fields and excess
   bounds are `invalid`; provenance is preserved exactly, including unknown values. The outer wire's independent
   size/depth admission can reject first.
 - Root metadata is accepted only by `resource.spawn`/`kill`/`attach`/`invoke`/`forget`/`forget_cached`,

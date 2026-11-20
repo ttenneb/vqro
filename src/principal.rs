@@ -38,8 +38,8 @@ impl Attribution {
     pub fn for_actor(actor:&str,params:&mut Value)->Result<Self,RpcError> {
         let label=match params.get("label") {
             None=>None,
-            Some(Value::String(label)) if label.len()<=ID_BYTES && !label.chars().any(char::is_control)=>Some(label.clone()),
-            Some(_)=>return Err(RpcError::invalid("label must be a bounded string without control characters")),
+            Some(Value::String(label)) if label.len()<=ID_BYTES && !crate::limits::text_controls(label)=>Some(label.clone()),
+            Some(_)=>return Err(RpcError::invalid("label must be a bounded string without control/format characters")),
         };
         if let Some(object)=params.as_object_mut(){object.remove("label");}
         Ok(Self {actor:Some(actor.into()),principal:Some(actor.into()),initiator:None,label,causality:crate::causality::Causality::take(params)?,authority:None})

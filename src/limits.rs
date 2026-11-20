@@ -1,5 +1,18 @@
 //! Mechanism limits shared by admission and transport recovery. No workspace policy.
 pub const MIB: usize = 1024 * 1024;
+// Unicode16 General_Category=Cf, sourced from Python unicodedata16.0.0; shared vectors
+// in tests/fixtures/text_controls.json pin the same profile in the self-contained Python SDK.
+const FORMAT_RANGES:&[(u32,u32)]=&[(173,173),(1536,1541),(1564,1564),(1757,1757),(1807,1807),(2192,2193),(2274,2274),(6158,6158),(8203,8207),(8234,8238),(8288,8292),(8294,8303),(65279,65279),(65529,65531),(69821,69821),(69837,69837),(78896,78911),(113824,113827),(119155,119162),(917505,917505),(917536,917631)];
+pub fn text_controls(text:&str)->bool {
+    text.chars().any(|c|c.is_control() || ((c as u32)>=173 && FORMAT_RANGES.iter().any(|(first,last)|(*first..=*last).contains(&(c as u32)))))
+}
+#[cfg(test)]
+#[test]
+fn format_table_matches_shared_profile() {
+    let fixture:serde_json::Value=serde_json::from_str(include_str!("../tests/fixtures/text_controls.json")).unwrap();
+    let expected:Vec<(u32,u32)>=fixture["format_ranges"].as_array().unwrap().iter().map(|pair|(pair[0].as_u64().unwrap() as u32,pair[1].as_u64().unwrap() as u32)).collect();
+    assert_eq!(FORMAT_RANGES,expected);
+}
 pub const ENTRY_BYTES: usize = MIB;
 pub const WORKSPACE_BYTES: usize = 16 * MIB;
 pub const LIVE_VALUE_BYTES: usize = MIB;

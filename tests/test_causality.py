@@ -4,7 +4,7 @@ from pathlib import Path
 import sys
 import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "extensions"))
-from vqro_provider import Provider, ProviderError, causal_links
+from vqro_provider import Provider, ProviderError, causal_links, _FORMAT_RANGES
 
 
 def link():
@@ -31,6 +31,22 @@ class CausalShapes(unittest.TestCase):
                 causal_links({"correlation": value})
             self.assertEqual(caught.exception.kind, "invalid")
 
+    def test_unicode_format_vectors_rejected_in_known_links_only(self):
+        vectors = json.loads((Path(__file__).parent / "fixtures/text_controls.json").read_text())
+        self.assertEqual([list(pair) for pair in _FORMAT_RANGES], vectors["format_ranges"])
+        count = 0
+        for first, last in vectors["format_ranges"]:
+            for point in range(first, last + 1):
+                text = chr(point)
+                count += 1
+                with self.assertRaises(ProviderError):
+                    causal_links({"correlation": text})
+                for field in ("kind", "id", "provenance", "endpoint", "epoch", "boot"):
+                    with self.assertRaises(ProviderError):
+                        causal_links({"cause": dict(link(), **{field: text})})
+                self.assertEqual(causal_links({"cause": dict(link(), opaque=text)})[0]["opaque"], text)
+        self.assertEqual(count, 170)
+
     def test_exact_bytes_and_container_depth(self):
         cause = dict(link(), padding="")
         base = len(json.dumps(cause, ensure_ascii=False, separators=(",", ":")).encode())
@@ -52,6 +68,22 @@ class CausalShapes(unittest.TestCase):
 
 
 class CausalSdk(unittest.IsolatedAsyncioTestCase):
+    async def test_all_format_labels_refused_before_id_or_handler_admission(self):
+        provider = Provider("formats", "fixed", {"future.op": {}})
+        ledger = []
+        async def effect(ctx, args):
+            ledger.append(ctx.label)
+            return {"outcome": "observed"}
+        provider.effects["future.op"] = effect
+        params = {"effect": "same-id", "op": "future.op", "args": {}, "deadline_ms": 30000}
+        for first, last in _FORMAT_RANGES:
+            for point in range(first, last + 1):
+                with self.assertRaises(ProviderError):
+                    await provider._effect(dict(params, label=chr(point)))
+        self.assertEqual(ledger, [])
+        await provider._effect(dict(params, label="safe"))
+        self.assertEqual(ledger, ["safe"], "refusals never consume the effect id")
+
     async def test_native_handler_gets_exact_links_and_invalid_metadata_never_dispatches(self):
         provider = Provider("causal", "fixed", {"future.op": {}})
         ledger = []
@@ -60,7 +92,7 @@ class CausalSdk(unittest.IsolatedAsyncioTestCase):
             return {"outcome": "observed", "data": {"cause": ctx.cause, "correlation": ctx.correlation}}
         provider.effects["future.op"] = effect
         params = {"effect": "e1", "op": "future.op", "args": {"opaque": True}, "deadline_ms": 30000}
-        for invalid in [{"cause": None}, {"cause": {"kind": "effect", "id": "unqualified", "provenance": "asserted"}}, {"correlation": False}]:
+        for invalid in [{"label": chr(8203)}, {"label": chr(8238)}, {"cause": None}, {"cause": {"kind": "effect", "id": "unqualified", "provenance": "asserted"}}, {"correlation": False}]:
             with self.assertRaises(ProviderError):
                 await provider._effect(dict(params, **invalid))
         self.assertEqual(ledger, [])
