@@ -346,10 +346,24 @@ class E2E:
         def agent_line(i, line):
             # The agent's resource row, not a tab row (○/●) of a layout listing the same title.
             return i > 2 and 'Pi' in line[:35] and 'bridge' not in line[:35] and not any(m in line[:35] for m in '○●')
-        def agent_screen():
-            screen = self.ui('capture-pane', '-p', '-t', 'ui:0.0')
-            return screen if any(agent_line(i, line) for i, line in enumerate(screen.splitlines())) else None
-        screen = self.wait(agent_screen, 'rendered sidebar agent row')
+        def settled_agent_screen():
+            # Measure the click target only on a current, settled sidebar. It publishes coalesced (at most
+            # twice a second), so under load it may still list the layout before the bridge tab opened and
+            # then insert that tab's row, moving the agent row down after it was measured (the click then
+            # lands on another row: gate flake "sidebar-focused-agent").
+            def measure():
+                screen = self.ui('capture-pane', '-p', '-t', 'ui:0.0')
+                lines = screen.splitlines()
+                current = any('Pi '+rid+' bridge' in line[:38] and any(m in line[:38] for m in '○●') for line in lines)
+                at = next((i for i, line in enumerate(lines) if agent_line(i, line)), None)
+                return (at, screen) if current and at is not None else None
+            first = measure()
+            if first is None:
+                return None
+            time.sleep(.7)  # longer than one sidebar publication interval
+            second = measure()
+            return second[1] if second and second[0] == first[0] else None
+        screen = self.wait(settled_agent_screen, 'rendered, settled sidebar agent row')
         (self.root/'ui-sidebar-agent.txt').write_text(screen)
         # The agent is a top-level row; its bridge is a collapsed child, not another terminal.
         agent_row = next(row for row in rows if row.get('args', {}).get('resource') == rid)
