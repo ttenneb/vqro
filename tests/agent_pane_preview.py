@@ -6,7 +6,7 @@ and mailbox messages from other agents) to item-stream entities the way the Pi b
 extensions/agent_transcript.py, and publishes the rows as a live panel, so `vqro tui` (or the tmux harness) shows the
 screen the human would see. For screen-by-screen checks against the redesign mockup. Never touches the user's core.
 
-  python3 tests/agent_pane_preview.py SESSION.jsonl --from 172 --to 188 --socket /private/v.sock [--hold 600]
+  python3 tests/agent_pane_preview.py SESSION.jsonl --from 172 --to 188 --socket /private/v.sock [--hold 600] [--cwd DIR]
 """
 import argparse
 import json
@@ -85,10 +85,11 @@ def main():
     ap.add_argument("--socket", required=True)
     ap.add_argument("--name", default="Pi")
     ap.add_argument("--hold", type=float, default=600)
+    ap.add_argument("--cwd", default=None, help="the agent's reported folder (relative tool paths resolve against it)")
     a = ap.parse_args()
     rows = [json.loads(line) for line in open(a.session) if line.strip()][a.start:a.end]
     names = agent_transcript.Names({"r7": {"name": a.name}}, "r7")
-    items = agent_transcript.rows(entities(rows), names, "all_retained")
+    items = agent_transcript.rows(entities(rows), names, "all_retained", None, a.cwd)
     s = socket.socket(socket.AF_UNIX)
     s.connect(a.socket)
     f = s.makefile("rb")

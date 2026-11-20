@@ -128,6 +128,20 @@ class TranscriptRows(unittest.TestCase):
         self.assertEqual(texts[-1], "… 18 more lines", "output cut at 12 lines")
         self.assertEqual(len(test["children"][-1]["children"]), 18)
 
+    def test_a_file_a_tool_names_opens_in_an_editor_only_from_its_menu(self):
+        """Step 5 without row actions yet: the tool row's menu offers links.open for the files it names (AS10e)."""
+        read = agent_transcript.tool_row("r", {"title": "read", "status": "completed", "input": {"path": "src/a.rs", "offset": 40, "limit": 10},
+                                               "locations": [{"path": "/w/b.rs", "line": 4}]}, cwd="/w")
+        self.assertEqual([m["args"]["link"] for m in read["menu"]],
+                         [{"kind": "path", "text": "/w/b.rs", "line": 4}, {"kind": "path", "text": "/w/src/a.rs", "line": 40}])
+        self.assertEqual({m["command"] for m in read["menu"]}, {"links.open"})
+        self.assertEqual(read["menu"][1]["label"], "Open a.rs:40 in editor")
+        self.assertNotIn("menu", agent_transcript.tool_row("r", {"title": "read", "input": {"path": "src/a.rs"}}),
+                         "a relative path with no reported folder is never guessed")
+        self.assertNotIn("menu", agent_transcript.tool_row("r", {"title": "write", "input": {"path": "/w/x\nevil"}}, cwd="/w"))
+        many = agent_transcript.tool_row("r", {"title": "edit", "locations": [{"path": f"/w/{i}"} for i in range(9)]})
+        self.assertEqual(len(many["menu"]), agent_transcript.OPEN_ITEMS)
+
     def test_another_senders_message_folds_after_4_lines_and_blocks_are_spaced(self):
         long = {("message", "a"): {"position": 1, "role": "user", "final": True, "origin": {"kind": "agent", "agent": "r7", "principal": "p:lead"},
                                    "content": text("\n".join(f"point {i}" for i in range(9)))},

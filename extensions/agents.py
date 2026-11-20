@@ -645,7 +645,9 @@ class Agents:
                               "if it sends that much, the conversation stops updating and says so."})
             if c.view.epoch is None:
                 return notes + [{"type": "text", "style": "dim", "text": "Loading the conversation…"}]
-            out = notes + agent_transcript.rows(c.view.entities, names, c.view.coverage, self.view_of(r["id"]))
+            session = agent_facts(r).get("session") if isinstance(agent_facts(r).get("session"), dict) else {}
+            out = notes + agent_transcript.rows(c.view.entities, names, c.view.coverage, self.view_of(r["id"]),
+                                                session.get("cwd") if isinstance(session.get("cwd"), str) else None)
         if c.stream is None and r.get("available") is not False:
             out.append({"type": "text", "style": "dim", "text": "Reconnecting to the conversation…"})
         return out or [{"type": "text", "style": "dim", "text": "No messages yet."}]  # complete coverage only: rows() discloses others

@@ -277,6 +277,35 @@ def primary_argument(name, args):
     return clip(plain(text.split("\n")[0]), 200), used
 
 
+FILE_ARGS = ("path", "file_path", "file", "filename")
+OPEN_ITEMS = 4  # "Open … in editor" entries per tool call
+
+
+def files_of(name, args, locations, cwd):
+    """The files a tool call names, as (absolute path, line or None): its locations, then a path argument. Relative
+    paths resolve against the agent's reported folder (`session.cwd`); without one they are left out."""
+    found = []
+    for loc in locations if isinstance(locations, list) else []:
+        if isinstance(loc, dict) and isinstance(loc.get("path"), str):
+            found.append((loc["path"], loc.get("line") if type(loc.get("line")) is int and loc["line"] > 0 else None))
+    if isinstance(args, dict):
+        key = next((k for k in FILE_ARGS if isinstance(args.get(k), str) and args[k].strip()), None)
+        if key:
+            first = args.get("offset") if str(name).lower() == "read" and type(args.get("offset")) is int and args["offset"] > 0 else None
+            found.append((args[key].strip(), first))
+    out = []
+    for path, line in found:
+        if "\n" in path or "\0" in path or len(path) > 4096:
+            continue
+        if not path.startswith(("/", "~")) and not (len(path) > 2 and path[1] == ":" and path[2] in "\\/"):  # relative
+            if not isinstance(cwd, str) or not cwd:
+                continue
+            path = cwd.rstrip("/\\") + "/" + path
+        if all(path != p for p, _ in out):
+            out.append((path, line))
+    return out[:OPEN_ITEMS]
+
+
 def output_rows(text, limit=TOOL_LINES):
     """A tool's output as wrapped rows: short one-word lines packed several to a row; the first `limit` rows, then
     "… N more lines" with the rest one expand away."""
@@ -299,7 +328,7 @@ def output_rows(text, limit=TOOL_LINES):
     return rows
 
 
-def tool_row(eid, value):
+def tool_row(eid, value, cwd=None):
     """One line per tool call (redesign): icon, name, its main argument; size and time on the right. Opening it shows
     the other arguments as "name value" lines and the output, wrapped and cut."""
     status = value.get("status") if isinstance(value.get("status"), str) else "unknown"
@@ -326,20 +355,24 @@ def tool_row(eid, value):
     raw_input = args if isinstance(args, str) else json.dumps(args, ensure_ascii=False, indent=1) if "input" in value else None
     copy = copyable(ANSI.sub("", output) or raw_input) if (output or raw_input) else None
     badges = [b for b in (f"{count} lines" if count > 1 else None, took) if b]
-    return {"id": "t:" + eid, "text": f"{TOOL_ICON.get(status, '?')} {clip(name, 40)}" + (f"   {main}" if main else ""),
+    # Open a file it names in an editor beside the pane: links.open (links extension), only on the human's click (AS10e).
+    menu = [{"label": "Open " + clip(plain(path.rsplit("/", 1)[-1]), 80) + (f":{line}" if line else "") + " in editor",
+             "command": "links.open", "args": {"link": {"kind": "path", "text": path, **({"line": line} if line else {})}}}
+            for path, line in files_of(name, args, value.get("locations"), cwd)]
+    return {"id": "t:" + eid, **({"menu": menu} if menu else {}), "text": f"{TOOL_ICON.get(status, '?')} {clip(name, 40)}" + (f"   {main}" if main else ""),
             "style": "error" if status == "failed" else None, **({"copy": copy} if copy else {}),
             **({"badges": [{"text": b, "style": "dim"} for b in badges]} if badges else {}),
             **({"description": "failed"} if status == "failed" else {}),
             **({"children": children} if children else {}), "expanded": False}
 
 
-def group_row(steps):
+def group_row(steps, cwd=None):
     """A run of tool calls as one Activity line (Pi style, collapsed): count, total time, failures; each tool with its
     status on the right. The agent's thinking between its calls (steps with no text of their own) sits inside, in order."""
     tools = [(eid, value) for eid, value in steps if "__thought__" not in value]
     children = [{"id": "th:" + eid, "style": "dim", "expanded": False, "text": "┊ " + clip(plain(value["__thought__"].strip().split("\n")[0]), 300),
                  "children": thought_rows(eid, value["__thought__"], limit=10 ** 6)[1:]} if "__thought__" in value
-                else tool_row(eid, value) for eid, value in steps]
+                else tool_row(eid, value, cwd) for eid, value in steps]
     for child in children:  # a one-line thought has nothing to open
         if not child.get("children", True):
             del child["children"]
@@ -438,9 +471,10 @@ def summary_text(title, values, fields, tools=None):
     return " · ".join(parts)  # a row with children: clients draw its ▸/▾
 
 
-def rows(entities, names, coverage=None, view=None):
+def rows(entities, names, coverage=None, view=None, cwd=None):
     """Panel rows for an agent's conversation, oldest first, bounded to BUDGET encoded bytes (newest kept).
-    `entities` maps (kind, id) to (rev, value) as in vqro_items.ItemView; `view` is view_settings()."""
+    `entities` maps (kind, id) to (rev, value) as in vqro_items.ItemView; `view` is view_settings(); `cwd` is the
+    agent's reported folder (relative file paths in tool calls resolve against it)."""
     view = view or view_settings()
     compact = view["density"] == "compact"
     receipts = {eid: v.get("stage") for (kind, eid), (_, v) in entities.items()
@@ -483,7 +517,7 @@ def rows(entities, names, coverage=None, view=None):
             hidden["tools"] = hidden.get("tools", 0) + sum(1 for _, v in tools if "__thought__" not in v)
         else:
             flush_hidden()
-            group = group_row(tools)  # collapsed by default (the human's choice, reply-13)
+            group = group_row(tools, cwd)  # collapsed by default (the human's choice, reply-13)
             if mode == "summary":
                 real = [v for _, v in tools if "__thought__" not in v]
                 group["text"], group["style"] = summary_text("Activity", real, view["summary"], len(real)), "dim"
