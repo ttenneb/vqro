@@ -49,6 +49,19 @@ fn message_deltas_are_append_records_and_materialize_identically() {
 }
 
 #[test]
+fn two_incremental_snapshot_cuts_keep_overlapping_native_updates() {
+    let mut a=make();for _ in 0..64 {message(&mut a,&"x".repeat(1800),"stop");}
+    let mut one=a.journal.open(None);let mut two=a.journal.open(None);
+    let mut v1=ItemView::new();let mut v2=ItemView::new();
+    let Next::Data(first)=one.next(&mut a.journal,4096) else{panic!("snapshot piece");};v1.feed(&first);
+    for _ in 0..40 {message(&mut a,"post-cut native update","stop");}
+    for (cursor,view) in [(&mut one,&mut v1),(&mut two,&mut v2)] {
+        for _ in 0..256 {match cursor.next(&mut a.journal,4096){Next::Data(bytes)=>{let _=view.feed(&bytes);},Next::Idle=>break,Next::Gap(reason)=>panic!("unexpected {reason}")}}
+        assert_eq!(view.errors.total(),0);assert_eq!(view.digest(),a.journal.digest());
+    }
+}
+
+#[test]
 fn errors_unknown_reasons_and_native_end_are_not_fabricated_success() {
     let mut a=make();event(&mut a,json!({"type":"agent_start"}));
     event(&mut a,json!({"type":"message_end","message":{"role":"assistant","content":[],"stopReason":"error","errorMessage":"native failure"}}));
