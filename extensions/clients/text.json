@@ -8,5 +8,5 @@
   "author": "Bennett Garcia",
   "argv": ["python3", "text.py"],
   "profiles": ["base"],
-  "features": ["items", "pages", "tree", "toolbar", "badges", "description", "menu", "input", "options", "select", "chips", "icon", "wrap", "icon_names", "current_when"]
+  "features": ["items", "pages", "tree", "toolbar", "badges", "description", "menu", "input", "options", "select", "chips", "icon", "wrap", "icon_names", "current_when", "facets", "sort", "columns"]
 }

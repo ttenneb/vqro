@@ -21,7 +21,7 @@ sys.path.insert(1, os.path.dirname(HERE))  # vqro_ext.py beside the bundled exte
 import vqro_client_model as model  # noqa: E402
 from vqro_ext import Vqro, VqroError  # noqa: E402
 
-FEATURES = model.BASE_FEATURES + ["icon_names", "current_when", "markdown", "pin", "composer", "multiline"]
+FEATURES = model.BASE_FEATURES + ["icon_names", "current_when", "markdown", "pin", "composer", "multiline", "facets", "sort", "columns"]
 WIDTH = 100  # formatted text is laid out at this width
 HELP = """commands (numbers refer to the last listing):
   show                    this client's layout (workspace): tabs and numbered panes (* = focused)
@@ -31,6 +31,7 @@ HELP = """commands (numbers refer to the last listing):
                           (`\\n` is a new line in composers and multi-line prompts)
   set <row> <arg> <value> choose a composer control's value (kept here until sent)
   page <n> | filter <text> | expand <row> | collapse <row>     panel display state
+  facet <key> <value|all> | sort [<n>|given]   the shown panel's Show choices and sort (where it offers them)
   menu <pane|tab|tabbar|status> [<n>]  contributed menu items for the focused pane, or run one
   p [<n>]                 the prefix menu: key bindings and recovery (always available); run row n
   commands [<filter>]     the command palette; run <name> [<json args>]
@@ -261,6 +262,8 @@ class TextClient:
             return [f"{title}: view kind `{kind}` is not supported by this client"]
         value = self.panel_value(view)
         st = self.state.setdefault(view, {"page": 0, "filter": "", "open": {}})
+        st.setdefault("facets", {})
+        st.setdefault("sort", None)
         lines = [f"== {text_of(value.get('title')) or title}"]
         missing = model.missing_for(value, FEATURES)
         if missing:
@@ -270,8 +273,23 @@ class TextClient:
             lines.append("pages: " + "  ".join(f"[{i + 1}:{text_of(p.get('title'))}{'*' if i == min(st['page'], len(pages) - 1) else ''}]" for i, p in enumerate(pages)))
         if st["filter"]:
             lines.append(f"filter: {st['filter']}")
+        for c in model.facet_counts(value, st["page"], st["filter"], st["facets"], FEATURES):
+            chips = [("all", "All", c["all"], c["chosen"] is None)] + [(v["value"], v["label"], v["count"], c["chosen"] == v["value"]) for v in c["values"]]
+            lines.append(f"{text_of(c['label'])} ({c['key']}): " + "  ".join(f"[{l} {n}]" + ("*" if on else "") for _, l, n, on in chips)
+                         + f"   (facet {c['key']} <value|all>)")
+        sorts = model.declared(value, st["page"], "sorts")
+        if sorts:
+            options = ["given"] + [text_of(s.get("label") or s.get("key")) for s in sorts if isinstance(s, dict)]
+            chosen = 0 if st["sort"] is None else st["sort"] + 1
+            lines.append("sort: " + "  ".join(f"[{i}:{o}]" + ("*" if i == chosen else "") for i, o in enumerate(options)) + "   (sort <n>)")
+        shown_rows = model.rows(value, st["page"], st["filter"], st["open"], FEATURES, st["facets"], st["sort"])
+        spec = model.declared(value, st["page"], "columns")
+        self.widths = model.column_widths(spec, shown_rows, WIDTH - 20) if spec else None
+        self.aligns = [isinstance(c, dict) and c.get("align") == "right" for c in spec or []]
+        if self.widths and any(isinstance(c, dict) and c.get("label") for c in spec):
+            lines.append("       " + self.cells([text_of(c.get("label")) if isinstance(c, dict) else "" for c in spec]))
         bottom = False
-        for r in model.rows(value, st["page"], st["filter"], st["open"], FEATURES):
+        for r in shown_rows:
             if r.get("bottom") and not bottom:  # pin: "bottom" rows, below the list
                 lines.append("    ===")
                 bottom = True
@@ -281,8 +299,19 @@ class TextClient:
             lines.append(self.row_line(len(self.listed), r))
         return lines
 
+    def cells(self, cells):
+        """Cells padded (or cut with …) to this panel's column widths, one space apart (feature columns)."""
+        out = []
+        for i, w in enumerate(self.widths or []):
+            c = cells[i] if i < len(cells) else ""
+            c = c if len(c) <= w else c[:max(w - 1, 0)] + "…"
+            out.append(c.rjust(w) if i < len(self.aligns) and self.aligns[i] else c.ljust(w))
+        return " ".join(out).rstrip()
+
     def row_line(self, n, r):
         item, pad = r["item"], "  " * r["depth"]
+        if getattr(self, "widths", None) and isinstance(item.get("columns"), list):
+            item = dict(item, text=self.cells([text_of(c) for c in item["columns"]]))
         k = model.kind(item)
         if k == "separator":
             return f"{pad}    ---"
@@ -577,6 +606,30 @@ class TextClient:
                 if model.kind(r["item"]) != "composer":
                     return [f"row {parts[0]} is not a composer"]
                 self.composer(r)["values"][parts[1]] = parts[2]
+                return self.view_lines(self.shown)
+            if cmd in ("facet", "sort"):
+                if not self.shown:
+                    return ["`view` a panel first"]
+                st = self.state.setdefault(self.shown, {"page": 0, "filter": "", "open": {}})
+                st.setdefault("facets", {})
+                value = self.panel_value(self.shown)
+                if cmd == "facet":
+                    key, _, want = rest.partition(" ")
+                    keys = [f.get("key") for f in model.declared(value, st["page"], "facets") or [] if isinstance(f, dict)]
+                    if key not in keys:
+                        return [f"facets here: {', '.join(keys) or 'none'}"]
+                    if want.strip() in ("", "all"):
+                        st["facets"].pop(key, None)
+                    else:
+                        st["facets"][key] = want.strip()
+                else:
+                    sorts = model.declared(value, st["page"], "sorts") or []
+                    if rest in ("", "given", "0"):
+                        st["sort"] = None
+                    elif rest.isdigit() and 1 <= int(rest) <= len(sorts):
+                        st["sort"] = int(rest) - 1
+                    else:
+                        return [f"sort 0-{len(sorts)} (0: given order)"]
                 return self.view_lines(self.shown)
             if cmd in ("page", "filter", "expand", "collapse"):
                 if not self.shown:

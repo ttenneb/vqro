@@ -6,13 +6,13 @@ import { Peer, RpcError, type Json } from "./rpc";
 import { Palette } from "./theme";
 import { Terminals } from "./terminal";
 
-export const FEATURES = [...m.BASE_FEATURES, "icon_names", "current_when", "follow", "list_detail", "embedded_views", "markdown", "pin", "composer", "multiline", "search"];
+export const FEATURES = [...m.BASE_FEATURES, "icon_names", "current_when", "follow", "list_detail", "embedded_views", "markdown", "pin", "composer", "multiline", "search", "facets", "sort", "columns"];
 export const PROFILES = ["base", "keys", "terminal"];
 const KINDS = ["panel", "terminal"];
 
 export interface Rect { x: number; y: number; w: number; h: number }
 interface Leaf { view: string; rect: Rect; inner: Rect; path: number[] }
-interface PState { sel: number; top: number; page: number; filter: string; open: Record<string, boolean>; chip: number; followEnd: number | null; manual: boolean; detailFocus: boolean; detailFor: string; composers: Map<string, m.Composer>; editing: string | null; search: string; searchHit: number }
+interface PState { sel: number; top: number; page: number; filter: string; open: Record<string, boolean>; chip: number; followEnd: number | null; manual: boolean; detailFocus: boolean; detailFor: string; composers: Map<string, m.Composer>; editing: string | null; search: string; searchHit: number; facets: Record<string, string>; sort: number | null }
 type Overlay =
   | { kind: "prefix"; sel: number }
   | { kind: "palette"; query: string; sel: number }
@@ -299,18 +299,25 @@ export class App {
       })(); break;
       case "client.safe_mode.leave": void this.run("vqro.safe_mode", { on: false }, ctx); break;
       case "client.panel": {
-        const key = ctx.panel;
-        if (!key) break;
-        const st = this.state(key);
+        const outerKey = ctx.panel;
+        if (!outerKey) break;
+        const outer = this.state(outerKey);
+        // `pane`: "list" or "detail"; by default the focused one.
+        let value = this.panelValue(ctx.panel_view ?? outerKey), key = outerKey, st = outer;
+        const wantDetail = args.pane === "detail" || (args.pane !== "list" && outer.detailFocus);
+        const det = wantDetail && listDetailOn(value, outer.page) ? this.selectedDetail(outerKey, value) : null;
+        if (det) { key = `${outerKey}#detail`; st = this.state(key); value = det.value; }
         if (args.action === "filter") this.overlay = { kind: "filter", key };
         else if (args.action === "search") { st.search = ""; st.searchHit = 0; this.overlay = { kind: "filter", key, search: ctx.panel_view ?? key }; }
         else if (args.action === "search_next" || args.action === "search_prev") this.searchStep(key, ctx.panel_view ?? key, args.action === "search_next" ? 1 : -1);
         else if (args.action === "clear_filter") st.filter = "";
+        else if (args.action === "facet") { if (typeof args.key === "string") chooseFacet(value, st, args.key, typeof args.value === "string" ? args.value : null); }
+        else if (args.action === "sort") { const i = (m.declared(value, st.page, "sorts") ?? []).findIndex((s: Json) => s?.key === args.key); st.sort = i >= 0 ? i : null; }
         else if (args.action === "expand_all" || args.action === "collapse_all") {
-          for (const r of m.rows(this.panelValue(ctx.panel_view ?? key), st.page, "", {}, FEATURES)) if (r.has_children) st.open[r.id] = args.action === "expand_all";
-        } else if (args.action === "activate") this.panelKey(key, ctx.panel_view ?? key, "Enter", ctx);
+          for (const r of m.rows(value, st.page, "", {}, FEATURES)) if (r.has_children) st.open[r.id] = args.action === "expand_all";
+        } else if (args.action === "activate") this.panelKey(outerKey, ctx.panel_view ?? outerKey, "Enter", ctx);
         else {  // navigation for pane-scoped keys: down/up/first/last/end, next/prev matching row, toggle
-          const rows = m.rows(this.panelValue(ctx.panel_view ?? key), st.page, st.filter, st.open, FEATURES);
+          const rows = rowsOf(value, st);
           const sel = rows.map((r, i) => (m.selectable(r.item) ? i : -1)).filter((i) => i >= 0);
           st.manual = false;
           switch (args.action) {
@@ -335,7 +342,7 @@ export class App {
         if (t === null) {
           const key = ctx.panel ?? this.leaves[this.focus]?.view;
           const st = key ? this.pstate.get(key) : undefined;
-          const item = key && st ? m.rows(this.panelValue(ctx.panel_view ?? key), st.page, st.filter, st.open, FEATURES)[st.sel]?.item : undefined;
+          const item = key && st ? rowsOf(this.panelValue(ctx.panel_view ?? key), st)[st.sel]?.item : undefined;
           t = str(item?.copy) ? item.copy : str(item?.text) ? item.text : null;
         }
         if (t === null) { this.message = "copy: nothing selected"; break; }
@@ -499,7 +506,7 @@ export class App {
 
   state(key: string): PState {
     let st = this.pstate.get(key);
-    if (!st) { st = { sel: 0, top: 0, page: 0, filter: "", open: {}, chip: 0, followEnd: null, manual: false, detailFocus: false, detailFor: "", composers: new Map(), editing: null, search: "", searchHit: 0 }; this.pstate.set(key, st); }
+    if (!st) { st = { sel: 0, top: 0, page: 0, filter: "", open: {}, chip: 0, followEnd: null, manual: false, detailFocus: false, detailFor: "", composers: new Map(), editing: null, search: "", searchHit: 0, facets: {}, sort: null }; this.pstate.set(key, st); }
     return st;
   }
 
@@ -509,7 +516,9 @@ export class App {
     // list_detail (core-protocol.md, Optional list with detail): Tab switches list/detail; keys go to the focused one.
     const detail = listDetailOn(value, st.page) ? this.selectedDetail(key, value) : null;
     if (!st.editing && listDetailOn(value, st.page) && (name === "Tab" || name === "BackTab")) { st.detailFocus = !st.detailFocus && detail !== null; return; }
-    if (detail && st.detailFocus && !st.editing && !["[", "]", "/"].includes(name)) { this.valueKey(`${key}#detail`, detail.value, name, ctx); return; }
+    // The focused pane is a full panel: its own pages (the list's when the detail has none), filter, facets, sort.
+    const detailPages = Array.isArray(detail?.value?.pages) && detail.value.pages.length > 0;
+    if (detail && st.detailFocus && !st.editing && !((name === "[" || name === "]") && !detailPages)) { this.valueKey(`${key}#detail`, detail.value, name, ctx); return; }
     if (!detail) st.detailFocus = false;
     this.valueKey(key, value, name, ctx);
   }
@@ -519,19 +528,19 @@ export class App {
   /** Show search match `searchHit + delta` (wrapping): open the rows around it and select it. */
   searchStep(key: string, view: string, delta: number, value: Json = this.panelValue(view)) {
     const st = this.state(key);
-    const hits = m.search(value, st.search, st.page, st.filter, FEATURES);
+    const hits = m.search(value, st.search, st.page, st.filter, FEATURES, st.facets, st.sort);
     if (!hits.length) { this.message = st.search ? `/${st.search}: no match` : ""; return; }
     st.searchHit = (((st.searchHit + delta) % hits.length) + hits.length) % hits.length;
     const [id, open] = hits[st.searchHit];
     for (const a of open) st.open[a] = true;
-    const at = m.rows(value, st.page, st.filter, st.open, FEATURES).findIndex((r) => r.id === id);
+    const at = rowsOf(value, st).findIndex((r) => r.id === id);
     if (at >= 0) { st.sel = at; st.manual = false; }
     this.message = `/${st.search}  ${st.searchHit + 1} of ${hits.length}  n/N  Esc`;
   }
 
   selectedDetail(key: string, value: Json): { id: string; value: Json } | null {
     const st = this.state(key);
-    const rows = m.rows(value, st.page, st.filter, st.open, FEATURES);
+    const rows = rowsOf(value, st);
     const at = rows[st.sel] && m.selectable(rows[st.sel].item) ? st.sel : rows.findIndex((r) => m.selectable(r.item));
     const row = rows[at];
     if (!row || !isObj(row.item.detail_panel)) return null;
@@ -558,7 +567,7 @@ export class App {
     if (!key) return;
     const view = ctx.panel_view ?? (key === "@popup" && this.overlay?.kind === "popup" ? this.overlay.view : key);
     const st = this.state(key);
-    const rows = m.rows(this.panelValue(view), st.page, st.filter, st.open, FEATURES);
+    const rows = rowsOf(this.panelValue(view), st);
     const at = rows.findIndex((r) => m.kind(r.item) === "composer" && (args.row == null || args.row === r.id));
     if (at < 0) { this.message = "no composer here"; return; }
     const c = this.composerOf(st, rows[at]);
@@ -576,14 +585,14 @@ export class App {
     this.autofocused = view;
     if (this.viewKind(view) !== "panel") return;
     const st = this.state(view);
-    const rows = m.rows(this.panelValue(view), st.page, st.filter, st.open, FEATURES);
+    const rows = rowsOf(this.panelValue(view), st);
     const at = rows.findIndex((r) => m.kind(r.item) === "composer" && r.item.autofocus === true);
     if (at >= 0) { st.sel = at; st.editing = rows[at].id; }
   }
 
   valueKey(key: string, value: Json, name: string, ctx: Json) {
     const st = this.state(key);
-    const rows = m.rows(value, st.page, st.filter, st.open, FEATURES);
+    const rows = rowsOf(value, st);
     const sel = (i: number) => rows.findIndex((r, j) => j >= i && m.selectable(r.item));
     const step = (delta: number) => {
       let i = st.sel;
@@ -654,6 +663,8 @@ export class App {
         if (value.search === true) { st.search = ""; st.searchHit = 0; this.openOver({ kind: "filter", key, search: ctx.panel_view ?? key }); }
         else this.openOver({ kind: "filter", key });
         break;
+      case "f": if (m.declared(value, st.page, "facets")?.length) cycleFacet(value, st); break;
+      case "s": if (m.declared(value, st.page, "sorts")?.length) st.sort = cycleSort(value, st); break;
       case "m": if (row && Array.isArray(row.item.menu)) this.openOver({ kind: "menu", title: row.item.text ?? "", items: row.item.menu, ctx, sel: 0 }); break;
       case "Enter": case "Space": {
         if (!row || !m.selectable(row.item)) break;
@@ -908,7 +919,7 @@ export class Screen extends Renderable {
       if (o.kind === "popup") {
         const value = a.panelValue(o.view);
         const w = Math.min(Math.max(30, o.width), W - 4);
-        const n = m.rows(value, a.state("@popup").page, a.state("@popup").filter, a.state("@popup").open, FEATURES).length + (value.pages ? 2 : 0) + 3;
+        const n = rowsOf(value, a.state("@popup")).length + (value.pages ? 2 : 0) + 3;
         const h = Math.min(Math.max(6, n), H - 3);
         const r = { x: Math.floor((W - w) / 2), y: Math.max(1, Math.floor((H - 1 - h) / 2)), w, h };
         box(buf, r, a.pal.color("border_focus"), a.pal.bg);
@@ -994,6 +1005,9 @@ function drawPanel(a: App, buf: OptimizedBuffer, area: Rect, key: string, view: 
   drawValue(a, buf, area, key, a.panelValue(view), focused);
 }
 
+/** A pane's rows with its own page, filter, expansion, facets and sort. */
+const rowsOf = (value: Json, st: PState) => m.rows(value, st.page, st.filter, st.open, FEATURES, st.facets, st.sort);
+
 const listDetailOn = (value: Json, page: number): boolean => {
   const pg = Array.isArray(value.pages) && value.pages.length ? value.pages[Math.min(page, value.pages.length - 1)] : value;
   const cfg = pg?.list_detail ?? value.list_detail;
@@ -1028,7 +1042,7 @@ function drawValue(a: App, buf: OptimizedBuffer, area: Rect, key: string, value:
   if (body.h <= 0) return;
   if (!listDetailOn(value, st.page)) { drawList(a, buf, body, key, value, focused, false); a.listed.delete(`${key}#detail`); return; }
   const wide = body.w >= 96;
-  const rows = m.rows(value, st.page, st.filter, st.open, FEATURES);
+  const rows = rowsOf(value, st);
   const listH = Math.max(1, Math.min(Math.floor(body.h / 2), rows.reduce((h, r) => h + rowHeight(r, body.w), 1)));
   const lw = Math.max(36, Math.floor((body.w * 2) / 5));
   const list: Rect = wide ? { ...body, w: lw } : { ...body, h: listH };
@@ -1053,13 +1067,14 @@ function drawList(a: App, buf: OptimizedBuffer, area: Rect, key: string, value: 
   let y = area.y;
   let bottom = area.y + area.h;
   if (indicator && area.h > 1) {
-    const rowsAll = m.rows(value, st.page, st.filter, st.open, FEATURES);
+    const rowsAll = rowsOf(value, st);
     const n = rowsAll.filter((r) => m.selectable(r.item) && !r.pinned).length;
-    const total = st.filter ? m.rows(value, st.page, "", st.open, FEATURES).filter((r) => m.selectable(r.item) && !r.pinned).length : n;
+    const total = st.filter || Object.keys(st.facets).length ? m.rows(value, st.page, "", st.open, FEATURES).filter((r) => m.selectable(r.item) && !r.pinned).length : n;
     bottom -= 1;
-    text(buf, area.x, bottom, fit(`${n} of ${total} · PgUp/PgDn · Tab: details`, area.w), p.color("dim"));
+    const extra = (m.declared(value, st.page, "facets")?.length ? " · f show" : "") + (m.declared(value, st.page, "sorts")?.length ? " · s sort" : "");
+    text(buf, area.x, bottom, fit(`${n} of ${total} · PgUp/PgDn${extra} · Tab: details`, area.w), p.color("dim"));
   }
-  const rows = m.rows(value, st.page, st.filter, st.open, FEATURES);
+  const rows = rowsOf(value, st);
   const listed = { rows, hits: [] as { y: number; x: number; w: number; i: number; chip?: number }[], area };
   a.listed.set(key, listed);
   if (!rows.length) { text(buf, area.x, y, st.filter ? "(no matches)" : "(empty)", p.color("dim")); return; }
@@ -1088,7 +1103,25 @@ function drawList(a: App, buf: OptimizedBuffer, area: Rect, key: string, value: 
     return drawRow(a, buf, { x: area.x, y: yy, w: area.w, h: limit - yy }, r, focused && i === st.sel, st.chip, (x, w, chip) => listed.hits.push({ y: yy, x, w, i, chip }), comp);
   };
   for (let i = 0; i < pinned && y < bottom; i++) y += line(i, y, bottom);
-  if (pinned && y < bottom) { text(buf, area.x, y, "─".repeat(area.w), p.color("border")); y += 1; }
+  const lineH = y < bottom ? facetLine(a, buf, area, y, value, st) : 0;
+  y += lineH;
+  const spec = m.declared(value, st.page, "columns");
+  let header = false;
+  if (spec?.length) {
+    // One layout for every row: cells start after the widest prefix and leave room for badges and detail.
+    const data = rows.filter((r) => Array.isArray(r.item.columns));
+    const prefix = (r: m.Row) => r.depth * 2 + 2 + (m.kind(r.item) === "toggle" ? 4 : 0) + (r.item.icon ? 3 : 0);
+    const suffix = (r: m.Row) => (typeof r.item.detail === "string" ? width(r.item.detail) + 1 : 0) + (Array.isArray(r.item.badges) ? r.item.badges.reduce((s: number, b: Json) => s + width(String(b?.text ?? "")) + 3, 0) : 0) + 1;
+    const start = Math.max(1, ...data.map(prefix)), reserve = Math.max(1, ...data.map(suffix));
+    const widths = m.columnWidths(spec, data, Math.max(1, area.w - 1 - start - reserve));
+    const aligns = spec.map((c: Json) => c?.align === "right");
+    for (const r of data) r.item = { ...r.item, text: " ".repeat(Math.max(0, start - prefix(r))) + columnText(r.item.columns, widths, aligns) };
+    if (spec.some((c: Json) => typeof c?.label === "string") && y < bottom) {
+      text(buf, area.x + start, y, fit(columnText(spec.map((c: Json) => c?.label ?? ""), widths, aligns), Math.max(0, area.w - start)), p.color("muted"), undefined, TextAttributes.BOLD);
+      y += 1; header = true;
+    }
+  }
+  if ((pinned || lineH || header) && y < bottom) { text(buf, area.x, y, "─".repeat(area.w), p.color("border")); y += 1; }
   const heights = rows.map((r) => rowHeight(r, area.w));
   // pin: "bottom" rows (feature pin): below the list, never scrolled, at most half of what is left.
   let end = rows.findIndex((r) => r.bottom);
@@ -1118,6 +1151,65 @@ function drawList(a: App, buf: OptimizedBuffer, area: Rect, key: string, value: 
     const thumb = Math.floor((st.top / Math.max(1, n)) * visible);
     for (let yy = 0; yy < visible; yy++) text(buf, area.x + area.w - 1, bottom - visible + yy, yy === thumb ? "┃" : "│", yy === thumb ? p.color("accent") : p.color("border"));
   }
+}
+
+/** `client.panel {action: "facet"}`: choose a declared facet's value (null: All). */
+function chooseFacet(value: Json, st: PState, key: string, v: string | null) {
+  if (!(m.declared(value, st.page, "facets") ?? []).some((f: Json) => f?.key === key)) return;
+  if (v === null) delete st.facets[key]; else st.facets[key] = v;
+  st.sel = 0; st.top = 0;
+}
+
+/** `f`: the first facet cycles All -> each value -> All. */
+function cycleFacet(value: Json, st: PState) {
+  const first = m.facetCounts(value, st.page, st.filter, st.facets, FEATURES)[0];
+  if (!first) return;
+  const at = first.chosen === null ? -1 : first.values.findIndex((v) => v.value === first.chosen);
+  chooseFacet(value, st, first.key, first.values[at + 1]?.value ?? null);
+}
+
+/** `s`: given order -> each sort -> given order. */
+function cycleSort(value: Json, st: PState): number | null {
+  const n = m.declared(value, st.page, "sorts")?.length ?? 0;
+  return st.sort === null ? (n > 0 ? 0 : null) : st.sort + 1 < n ? st.sort + 1 : null;
+}
+
+/** The facet/sort line (features facets, sort): `Show: All n · value n …  Sort: label ▾`, clickable. Returns its height. */
+function facetLine(a: App, buf: OptimizedBuffer, area: Rect, y: number, value: Json, st: PState): number {
+  const p = a.pal;
+  const counts = m.facetCounts(value, st.page, st.filter, st.facets, FEATURES);
+  const label = m.sortLabel(value, st.page, st.sort);
+  if (!counts.length && label === null) return 0;
+  let x = area.x;
+  const put = (s: string, fg: RGBA, bg?: RGBA, act?: () => void) => {
+    const w = width(s);
+    if (x + w > area.x + area.w) return false;
+    text(buf, x, y, s, fg, bg);
+    if (act) a.hits.push({ rect: { x, y, w, h: 1 }, act });
+    x += w;
+    return true;
+  };
+  for (const c of counts) {
+    put(`${clean(c.label)}: `, p.color("muted"));
+    const chips: [string | null, string, number][] = [[null, "All", c.all], ...c.values.map((v): [string | null, string, number] => [v.value, v.label, v.count])];
+    chips.forEach(([v, l, n], i) => {
+      if (i > 0) put("·", p.color("dim"));
+      const on = v === c.chosen;
+      put(` ${clean(l)} ${n} `, on ? p.color("badge_text") : n === 0 ? p.color("dim") : p.color("text"), on ? p.color("accent") : undefined, () => chooseFacet(value, st, c.key, v));
+    });
+    put("  ", p.color("text"));
+  }
+  if (label !== null) { put("Sort: ", p.color("muted")); put(` ${clean(label)} ▾ `, p.color("accent"), p.color("surface"), () => { st.sort = cycleSort(value, st); }); }
+  return 1;
+}
+
+/** Columns (feature columns): the cells padded to one layout for the pane, starting after the widest row prefix. */
+function columnText(cells: Json[], widths: number[], aligns: boolean[]): string {
+  return widths.map((w, i) => {
+    const c = fit(clean(cells[i] ?? ""), w);
+    const pad = " ".repeat(Math.max(0, w - width(c)));
+    return aligns[i] ? pad + c : c + pad;
+  }).join(" ").trimEnd();
 }
 
 const rowHeight = (r: m.Row, w: number) =>
