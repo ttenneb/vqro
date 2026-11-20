@@ -14,7 +14,7 @@ import time
 
 from .cases import case, invocations, settled
 from ..results import CheckFailed
-from ..wire import Peer
+from ..wire import Peer, RpcError
 
 
 def encoded(value):
@@ -96,6 +96,40 @@ def within_declared_n(count, cache):
     return count <= declared
 
 
+async def observed_scope_inventory(ctx, agents):
+    """Observe every requested ID and a stable opaque global cut before mutation.
+
+    A core publication is not an extension-cache acknowledgement. Read individual
+    scopes (workspace may exceed its declared capacity), inside one bounded wait.
+    """
+    expected = set(agents)
+    seen = set()
+    async def visible():
+        pending = sorted(expected - seen)
+        for offset in range(0, len(pending), 16):
+            async def inspect(agent):
+                try:
+                    row = await ctx.command("scope", {"action": "inspect", "scope": "agent:" + agent})
+                except RpcError as error:
+                    if error.kind == "not_found": return
+                    raise
+                if agent in row.get("targets", []): seen.add(agent)
+            await asyncio.gather(*(inspect(agent) for agent in pending[offset:offset + 16]))
+        if not expected <= seen: return False
+        if not expected: return True
+        scope = "agent:" + min(expected)
+        first = await ctx.command("scope", {"action": "inspect", "scope": scope})
+        second = await ctx.command("scope", {"action": "inspect", "scope": scope})
+        return first.get("expect") is not None and first["expect"] == second.get("expect")
+    try:
+        await ctx.wait(visible, label="K2 observes the complete requested inventory and stable cut", timeout=60)
+    except BaseException:
+        ctx.evidence.append({"kind": "scope_inventory_incomplete", "expected_count": len(expected),
+                             "seen_count": len(seen), "missing": sorted(expected - seen)[:16]})
+        raise
+    ctx.evidence.append({"kind": "scope_inventory_observed", "expected": sorted(expected), "seen": sorted(seen)})
+
+
 @case("L7")
 async def identity_cache_and_tombstones(ctx):
     """~900 unavailable agents per hour: K2-driven forgetting stays within the cache; durable evidence is kept;
@@ -119,6 +153,7 @@ async def identity_cache_and_tombstones(ctx):
     refs_old = [f"old{i:03d}" for i in range(150)]
     refs_new = [f"new{i:03d}" for i in range(150)]
     rows = await churn.connect([agent_fact(ref) for ref in refs_old + refs_new])
+    await observed_scope_inventory(ctx, [row["id"] for row in rows.values()])
     for wave in (refs_old, refs_new):
         for ref in wave:
             await ctx.scope("pause", "agent:" + rows[ref]["id"])
@@ -146,6 +181,9 @@ async def identity_cache_and_tombstones(ctx):
         floods.append((backend, refs, rows_by_ref))
         if first is None:
             first = rows_by_ref[refs[0]]
+            # Only this endpoint is selected for a tombstone. The full flood
+            # population is still graded by the core-cache pressure clauses.
+            await observed_scope_inventory(ctx, [first["id"]])
             await ctx.scope("pause", "agent:" + first["id"])
             first_mail = (await ctx.send(target=first["id"], text="evidence before eviction", send_new=True))["delivery"]
         await backend.disconnect()
@@ -202,6 +240,7 @@ async def identity_cache_and_tombstones(ctx):
     # NEW agent, and its old mail stays with the old rN (never rerouted to the new agent).
     back = Backend(ctx, "part-b-l7-churn", "l7-instance")
     returned = await back.connect([agent_fact(refs_new[-1])])
+    await observed_scope_inventory(ctx, [returned[refs_new[-1]]["id"]])
     ctx.check(returned[refs_new[-1]]["id"] == rows[refs_new[-1]]["id"],
               "a forgotten identity still in the cache returns as the same agent (rN)",
               before=rows[refs_new[-1]]["id"], after=returned[refs_new[-1]]["id"])
@@ -210,6 +249,7 @@ async def identity_cache_and_tombstones(ctx):
         backend, refs, _ = floods[0]
         again = Backend(ctx, backend.name, backend.instance)
         reborn = (await again.connect([agent_fact(refs[0])]))[refs[0]]
+        await observed_scope_inventory(ctx, [reborn["id"]])
         ctx.evidence.append({"kind": "evicted_return", "old": first["id"], "new": reborn["id"]})
         ctx.check(reborn["id"] != first["id"], "an evicted identity returns as a new agent (fresh rN)", old=first["id"], new=reborn["id"])
         old_mail = await ctx.get(first_mail)
@@ -226,6 +266,7 @@ async def identity_cache_and_tombstones(ctx):
     # 4. Maximum legal identity (256 control characters in the instance) with four maximum handles.
     big = Backend(ctx, "p" * 120 + "-l7max", "\x01" * 256)
     maxrow = (await big.connect([agent_fact("r" * 128, incarnation="n" * 128)]))["r" * 128]
+    await observed_scope_inventory(ctx, [maxrow["id"]])
     for index in range(4):
         handle = "@" + "/".join((f"{index}" + "h" * 31, "s" * 32, "t" * 32))
         await ctx.command("names", {"op": await ctx.operation("name"), "handle": handle, "agent": maxrow["id"], "expect": 0})

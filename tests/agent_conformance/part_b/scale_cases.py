@@ -175,17 +175,17 @@ async def sub_coordination(ctx, name, agents):
     return sub
 
 
-async def saturate_domain(ctx, sub, targets, *, senders=16, size=30000):
+async def saturate_domain(ctx, sub, targets, *, senders=16, size=30000, prefix="sat"):
     """Fill the normal budget with open records from many senders over many targets; returns accepted deliveries
     per target and the proof refusal: a fresh sender's 1-byte send to the least-loaded target refused `quota`."""
     # Grants are normal configuration writes: prepare the unused probe before
     # saturating, but do not send its first input until the existing checkpoint.
-    await sub.grant("sat-probe", "sat-probe", ["send:admit"], "*")
-    probe = await sub.connect("sat-probe")
+    await sub.grant(prefix + "-probe", prefix + "-probe", ["send:admit"], "*")
+    probe = await sub.connect(prefix + "-probe")
     peers = []
     for index in range(senders):
-        name = f"sat-s{index}"
-        await sub.grant("sat-" + name, name, ["send:admit"], "*")
+        name = f"{prefix}-s{index}"
+        await sub.grant(prefix + "-" + name, name, ["send:admit"], "*")
         peers.append(await sub.connect(name))
     accepted = {row["id"]: [] for row in targets}
     refusals = {}
@@ -196,7 +196,9 @@ async def saturate_domain(ctx, sub, targets, *, senders=16, size=30000):
                 try: accepted[row["id"]].append((await sub.send(peer=peer, target=row["id"], mode="admit",
                                                                  send_new=True, text="s" * chunk))["delivery"])
                 except RpcError as error:
-                    if error.kind not in ("quota", "busy"): raise
+                    if error.kind not in ("quota", "busy", "expired_operation"): raise
+                    # A stale-window refusal occurs before evaluation. Record it,
+                    # then the next distinct fill intent fetches its current op.
                     refusals[error.kind] = refusals.get(error.kind, 0) + 1
                     break
     lightest = min(targets, key=lambda row: len(accepted[row["id"]]))
@@ -276,10 +278,7 @@ async def full_durable_budget(ctx):
             alias = "accepted"
         except RpcError as error: alias = error.kind
         sub.evidence.append({"kind": "alias_growth_at_budget", "result": alias})
-        try:
-            await sub.send(peer=probe, target=sub.agents[1]["id"], mode="admit", text="p", send_new=True)
-            ctx.check(False, "still refused after the window rolled")
-        except RpcError as error: after_roll = {"kind": error.kind, "message": str(error)}
+        after_roll = await refill_after_window_roll(ctx, sub, fill_targets, probe)
         # New sends at the budget from a never-used sender, rotating targets so per-pair quotas never mask the budget
         # (prim-final-review): count only refusals that name the budget; every one must be quota.
         at_budget = []
@@ -356,6 +355,17 @@ async def full_durable_budget(ctx):
         await sub.close()
 
 
+
+
+async def refill_after_window_roll(ctx, sub, targets, probe):
+    """Window GC can free real bytes: refill, then retain the original refusal check."""
+    admitted, _, fence = await saturate_domain(ctx, sub, targets, prefix="sat-after-roll")
+    ctx.evidence.append({"kind": "post_roll_budget_refilled", "admitted": admitted, "fence": fence})
+    try:
+        await sub.send(peer=probe, target=sub.agents[1]["id"], mode="admit", text="p", send_new=True)
+        ctx.check(False, "still refused after the window rolled")
+    except RpcError as error:
+        return {"kind": error.kind, "message": str(error)}
 
 
 async def scope(ctx, action, scope_name):
