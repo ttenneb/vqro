@@ -1070,6 +1070,20 @@ async fn attach(core: &Shared, conn: &Arc<Conn>, a: Attach, attribution:Attribut
     Ok(reply)
 }
 
+#[cfg(test)]
+#[tokio::test]
+async fn actual_system_authors_are_never_default_undo_targets() {
+    let root=tempfile::Builder::new().prefix("sys-u").tempdir().unwrap();
+    let shared=start(root.path().join("s"),root.path().join("st"),false,Backend::Fake,None).unwrap();
+    {
+        let mut core=shared.lock().unwrap();let context=Attribution::for_actor("system",&mut json!({})).unwrap();
+        core.store.apply_context("system:fixture",None,context.clone(),None,vec![Op::Set{key:"doc/system".into(),value:json!(1),expect:None}]).unwrap();
+        assert_eq!(undo_target(&core,None,Some("system")),None);
+        let user=core.store.apply_context("c:fixture",None,context,None,vec![Op::Set{key:"doc/user".into(),value:json!(1),expect:None}]).unwrap();
+        assert_eq!(undo_target(&core,None,Some("system")),Some(user.id));
+    }
+    shutdown(&shared).await;
+}
 fn undo_target(core:&Core,txn:Option<u64>,principal:Option<&str>)->Option<u64> {
     // Actual system authors are core-generated, never a connection label/identity. Even an explicitly
     // system-named workspace owner must not make bootstrap a default-u target; explicit revert stays raw.
@@ -1184,7 +1198,7 @@ async fn apply(core:&Shared, author:&Caller, on_behalf_of:Option<Arc<str>>, note
 /// Explicit recovery only: no existing owner can be replaced through this primitive.
 async fn bootstrap_owner(core:&Shared,caller:&Caller,p:Value,attribution:Attribution)->RpcResult {
     #[derive(Deserialize)] struct Bootstrap {principal:String}
-    let request:Bootstrap=params(p)?;principal::validate(&request.principal)?;
+    let request:Bootstrap=params(p)?;principal::validate_assertable(&request.principal)?;
     let(system_author,system_context)=principal::system_attribution()?;
     let requester=caller.to_string();let owner=caller.owner.clone();
     let bytes=crate::limits::encoded_bytes(&(&request.principal,&attribution,&requester)).saturating_add(512);

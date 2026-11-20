@@ -68,19 +68,24 @@ pub fn validate(id:&str)->Result<(),RpcError> {
     }
     Ok(())
 }
+/// Caller-assertable principal names are also the valid workspace-owner configuration domain.
+pub fn validate_assertable(principal:&str)->Result<(),RpcError> {
+    validate(principal)?;
+    if principal=="system" || ["extension:","host:","system:"].iter().any(|prefix|principal.starts_with(*prefix)) {
+        return Err(RpcError::invalid("extension:, host: and system principals are core-derived, not caller-assertable"));
+    }
+    Ok(())
+}
 pub fn owner(store:&Store)->Result<String,RpcError> {
     let principal=store.get(OWNER_KEY).and_then(|entry|entry.value.as_str()).ok_or_else(||RpcError::invalid("workspace owner is unset; explicit bootstrap required"))?;
-    validate(principal)?;Ok(principal.into())
+    validate_assertable(principal)?;Ok(principal.into())
 }
 pub fn identity(store:&Store,identity:Option<&Identity>,extension:Option<&str>)->Result<String,RpcError> {
     let resolved=if let Some(extension)=extension {format!("extension:{extension}")} else {
         match identity {
             None=>return Ok(UNDECLARED.into()),Some(Identity::Owner)=>return Ok(owner(store).unwrap_or_else(|_|OWNER_UNSET.into())),
             Some(Identity::Principal {principal})=>{
-                validate(principal)?;
-                if principal=="system" || ["extension:","host:","system:"].iter().any(|prefix|principal.starts_with(*prefix)) {
-                    return Err(RpcError::invalid("extension:, host: and system principals are core-derived, not caller-assertable"));
-                }
+                validate_assertable(principal)?;
                 principal.clone()
             }
         }
@@ -140,7 +145,7 @@ pub fn validate_writes(store:&Store,attribution:&Attribution,ops:&[Op])->Result<
         let previous=staged.get(key).map(|value|value.as_ref()).unwrap_or_else(||store.get(key).map(|entry|&entry.value));
         if key==OWNER_KEY {
             if !is_owner{return Err(crate::provider::rejected("forbidden","only the workspace owner may change its principal"));}
-            if let Some(value)=next {validate(value.as_str().ok_or_else(||RpcError::invalid("workspace owner must be a principal string"))?)?;}
+            if let Some(value)=next {validate_assertable(value.as_str().ok_or_else(||RpcError::invalid("workspace owner must be a principal string"))?)?;}
         } else {
             if key.len()==DELEGATIONS.len(){return Err(RpcError::invalid("delegation key needs an id"));}
             if !is_owner {
@@ -180,7 +185,9 @@ pub(crate) fn system_attribution()->Result<(String,Attribution),RpcError> {
 }
 /// Called with the startup state lock held; system work is visible but not an owner-u target.
 pub fn bootstrap(store:&mut Store)->Result<(),RpcError> {
-    if owner(store).is_ok(){return Ok(())}
+    // Only a pristine workspace gets the documented initial default. Existing invalid or removed
+    // ownership is recovery state; replacing it at restart would guess identity.
+    if !store.is_pristine(){return Ok(())}
     let(author,attribution)=system_attribution()?;
     match store.apply_context(&author,None,attribution,Some("initialize workspace owner (prior value retained in history)".into()),vec![Op::Set{key:OWNER_KEY.into(),value:json!(OWNER),expect:None}]) {
         Ok(_)=>Ok(()),

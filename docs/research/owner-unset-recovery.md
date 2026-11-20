@@ -1,6 +1,6 @@
 # Owner-unset recovery and explicit bootstrap (2026-11-20)
 
-First coherent post-C2 group. Keep existing audited startup bootstrap; do not turn a missing/invalid owner into
+First coherent post-C2 group. Keep audited startup bootstrap only for a pristine workspace; do not turn an existing missing/invalid owner into
 an unaudited guessed identity. A typed owner hello now resolves such state to the core-only owner-unset marker.
 It has no effective known principal, so callbacks/native metadata remain undeclared and no implicit coordination
 grants/default u arise. Raw workspace/resource/recovery stays usable. The marker itself is not caller-assertable.
@@ -29,6 +29,11 @@ notice; focused and release-gate results are reported in the handoff, not promis
 Post-green edge: the existing owner schema permits an explicitly system-named owner. A real RPC regression
 showed principal-only default-u selection could then undo bootstrap. Default selection now excludes actual
 core-generated system authors (not labels/claims); ordinary connection work and undo/redo still operate, and
-explicit raw revert is unchanged. This fixes system-work classification without inventing target-name policy.
+explicit raw revert is unchanged. Review also requires the SAME existing caller-assertion reservation at bootstrap,
+protected owner writes and owner resolution, so reserved system/extension/host owners are invalid rather than an
+alternate path to asserting a core identity. No new reservation is invented. Startup now defaults only a pristine
+empty store; existing invalid or removed ownership is preserved until explicit recovery, never guessed at restart.
+Agents should not call workspace.owner.bootstrap: the first explicit call wins; human recovery supplies the target.
+The final vectors preserve both review negatives and a direct internal system-author default-selection test.
 
 No new coordination policy, native execution guarantee, input replay, install, merge, push or live-state mutation.

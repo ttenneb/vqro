@@ -337,6 +337,8 @@ impl Store {
         self.history.txns.iter().rev().find(|txn| predicate(txn)).map(|txn| txn.id)
     }
 
+    pub(crate) fn is_pristine(&self)->bool {self.rev==0 && self.next_txn==1 && self.entries.is_empty() && self.history.txns.is_empty()}
+
     pub fn entries(&self) -> &Entries {
         &self.entries
     }
