@@ -515,6 +515,11 @@ replaced when the Pi bridge is ported.
 - Slow-viewer memory accounting includes journal `retain_bytes + snapshot_buffer_bytes`, old shared entity
   versions pinned by snapshots, current entities and other overhead; journal retention alone is not the bound.
 
+**Further implementation rulings (2026-11-19, spec batch 3).**
+- Optional usage on a run or native thought message uses the facts usage shape, only when the runtime reports it;
+  absent means unknown. A reported context window alone is `{window}`, not invented occupancy: `used` may be
+  absent and is never derived from last-turn token totals.
+
 **Human answers (2026-11-19, CONFIRMED).**
 - **AS1, pause:** "vqro stops delivery": paused means vqro sends, hands out and wakes nothing until resumed; an agent
   still working shows as working; a runtime with a real pause may offer it as an extra capability. Physical

@@ -112,9 +112,11 @@ Adapters publish only what the runtime reports, including estimates labelled as 
 - `session.cwd?`: string, as reported by the runtime, not the viewer's or bridge process's working directory.
 - `session.model? {id, label?, effort?}`: read-only facts. Changing it still uses `agent.configure` on an advertised
   config option with `category: "model"`; a fact is not a write interface.
-- `usage? {context?: {used, window, limit?}, tokens?: {input, output, cache_read?, cache_write?},
+- `usage? {context?: {used?, window, limit?}, tokens?: {input, output, cache_read?, cache_write?},
   cost?: {amount, currency, basis: "reported" | "estimated", plan?}, at_ms?}`. Unavailable sections are omitted;
-  consumers preserve the currency and basis and never invent cost from token counts or pricing tables.
+  consumers preserve the currency and basis and never invent cost from token counts or pricing tables. A runtime
+  reporting only the context window publishes `context: {window}` with `used` absent: occupancy stays unknown,
+  never derived from last-turn token totals.
 
 ### 2.4 Capabilities, versioning, common arguments
 
@@ -325,10 +327,13 @@ reasoning the runtime exposes for display):
 - `message`: `position`, `role: user|assistant|thought|coordination|system`, `content`, `final`, `delivery?`, `origin?`,
   `at_ms?`, `cause?`, `participants? {sender_session, recipient_session, sender_message?, recipient_message?}` (native
   inter-session messages: observation only). `system` is for runtime/vqro notices, distinct from `coordination`;
-  this observation role never authorizes a sender to inject system-role input (§3.2).
+  this observation role never authorizes a sender to inject system-role input (§3.2). A native `thought` message
+  may carry optional `usage` in the same shape as `data.agent.usage`, only when reported by the runtime; absent is
+  unknown, never apportioned or inferred from other usage.
 - `tool`: `position`, `title`, `status: pending|running|completed|failed|cancelled`, `input?`, `content?`,
   `locations?`, `diff?`, `terminal?` (a display-terminal id, §6.6), `started_ms?`, `ended_ms?`.
-- `run`: id is the run referenced by `state.run`; `started_ms?`, `ended_ms?`. Run/tool times and message `at_ms`
+- `run`: id is the run referenced by `state.run`; `started_ms?`, `ended_ms?`, optional runtime-reported `usage`
+  (same shape as `data.agent.usage`; absent means unknown). Run/tool times and message `at_ms`
   are optional, evidenced timestamps; absence is unknown, never inferred from arrival time or completion order.
 - `terminal` (display terminal): `output` (a bytes field: base64 in a `put`, decoded-byte `append` with `bytes`),
   `exit? {code?, reason?}`,

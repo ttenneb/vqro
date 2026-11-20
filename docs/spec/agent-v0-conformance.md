@@ -78,7 +78,10 @@ restart stay distinct through their `endpoint`/`epoch` and `boot` qualifiers. C1
 `caps.host.endpoints`: with `"many"`, one server host with three endpoints shows one `host.id` for all three and each
 endpoint keeps its own `rN`; with `"one"` the multi-endpoint scenario is not-applicable. Session switch keeping `rN`
 is tested in M2. C11 optional view facts: runtime-reported usage preserves context, token/cache counts, currency,
-cost basis and plan; absent sections stay unknown, never zero or locally priced estimates. Session cwd/model/effort
+cost basis and plan; absent sections stay unknown, never zero or locally priced estimates. A window-only runtime
+reports `context: {window}` with no `used`; last-turn token totals never become context occupancy. Optional run and
+native thought-message usage preserve that same shape and only native reports; absent values are not apportioned
+from other usage. Session cwd/model/effort
 match native reports, never the bridge/viewer's cwd or a guessed model. Model changes still go through the
 advertised model-category config option, not a facts write.
 
