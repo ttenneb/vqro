@@ -95,7 +95,7 @@ fn entity_retention_is_bounded_and_receipts_survive_pruning() {
 fn session_switch_changes_epoch_not_endpoint_or_receipt_lookup() {
     let mut a=make();let old=a.epoch().to_string();let endpoint=a.facts("pi","private")["ref"].clone();
     a.receipt("d1",json!({"stage":"admitted"}));message(&mut a,"old session","stop");
-    metadata(&mut a,"s2","all");
+    metadata(&mut a,"s2","all");let cut=a.epoch().to_string();a.ensure_session_epoch(&old);assert_eq!(a.epoch(),cut,"explicit session fence must not advance an already observed cut twice");
     assert_ne!(a.epoch(),old);assert_eq!(a.facts("pi","private")["ref"],endpoint);
     let begin:Value=serde_json::from_str(String::from_utf8(a.journal.snapshot()).unwrap().lines().next().unwrap()).unwrap();
     assert_eq!(begin["coverage"],"tail");

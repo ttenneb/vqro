@@ -175,7 +175,7 @@ async fn invoke(shared:&Arc<Shared>,provider:&Provider,effect:&EffectRequest)->R
     let args=&effect.args;
     {
         let agent=shared.agent.lock().unwrap();let current=agent.signals.current();
-        let context=contract::Context {caps_rev:agent.caps()["rev"].as_u64().unwrap(),epoch:agent.epoch(),session:current.metadata["sessionId"].as_str(),owner_proven:false,
+        let context=contract::Context {caps_rev:agent.caps()["rev"].as_u64().unwrap(),epoch:agent.epoch(),session:if agent.session_pending{None}else{current.metadata["sessionId"].as_str()},owner_proven:false,
             images:agent.caps()["agent.send"]["content"]["types"].as_array().is_some_and(|types|types.iter().any(|kind|kind=="image")),literal:true};
         if let Err(error)=contract::common(args,&context){return rejected(error.kind,error.message);}
     }
@@ -188,6 +188,7 @@ async fn invoke(shared:&Arc<Shared>,provider:&Provider,effect:&EffectRequest)->R
         "agent.queue"=>queue_op(shared,args,effect.deadline).await,
         "agent.respond"=>respond(shared,args,effect.deadline).await,
         "agent.configure"=>configure(shared,provider,args,effect.deadline).await,
+        "agent.session"=>session_new(shared,provider,args,effect.deadline).await,
         "agent.interrupt"=>{
             if shared.agent.lock().unwrap().signals.current().idle(){return Ok(Outcome::Observed(Some(json!({"noop":true}))));}
             let result=shared.native.get().unwrap().call("abort",json!({}),effect.deadline.saturating_duration_since(Instant::now())).await;
@@ -246,12 +247,18 @@ async fn publish_fenced(shared:&Shared,provider:&Provider)->Result<(),ProviderEr
     provider.upsert(shared.facts(&shared.provider_name)).await?;
     provider.call("resource.list",json!({"provider":shared.provider_name,"backend_ref":"agent"})).await?;Ok(())
 }
-async fn finish_configuration(shared:Arc<Shared>,provider:Provider,change:configuration::Change,reply:Result<native::Reply,native::Error>)->Result<Outcome,ProviderError>{
-    let reply=match reply{Ok(reply)=>reply,Err(error) if !error.may_have_acted=>{shared.agent.lock().unwrap().configuration_pending(false);shared.wake();return rejected(error.kind,error.message);},Err(error)=>{shared.agent.lock().unwrap().incomplete.insert("config".into());shared.wake();return Err(ProviderError::new("backend",format!("native configuration outcome unknown: {error}")));}};
+enum Mutation {Configure(configuration::Change),NewSession {before:Option<String>,epoch:String,guard:Option<tokio::sync::OwnedMutexGuard<()>>}}
+impl Mutation {
+    fn request(&self)->(&str,Value){match self{Self::Configure(change)=>(change.command,change.args.clone()),Self::NewSession{..}=>("new_session",json!({}))}}
+    fn id(&self)->&str{match self{Self::Configure(change)=>&change.id,Self::NewSession{..}=>"session.new"}}
+    fn release_guard(&mut self){if let Self::NewSession{guard,..}=self{guard.take();}}
+}
+async fn finish_mutation(shared:Arc<Shared>,provider:Provider,mut change:Mutation,reply:Result<native::Reply,native::Error>)->Result<Outcome,ProviderError>{
+    let reply=match reply{Ok(reply)=>reply,Err(error) if !error.may_have_acted=>{let mut agent=shared.agent.lock().unwrap();change.release_guard();agent.configuration_pending(false);drop(agent);shared.wake();return rejected(error.kind,error.message);},Err(error)=>{shared.agent.lock().unwrap().incomplete.insert("config".into());shared.wake();return Err(ProviderError::new("backend",format!("native mutation outcome unknown: {error}")));}};
     // An ACK is not the reported value. Keep this one bounded workflow alive after the caller deadline,
     // including a late native reply; never retry the setter and never expose stale model/batch semantics.
     let native=shared.native.get().unwrap();
-    if change.command=="set_model"{
+    if matches!(&change,Mutation::Configure(change) if change.command=="set_model"){
         let levels=match native.submit("get_available_thinking_levels",json!({}),Instant::now()+Duration::from_secs(3)){Ok(mut ticket)=>ticket.reply().await,Err(error)=>Err(error)};
         if !matches!(levels,Ok(ref reply) if reply.success){shared.agent.lock().unwrap().configuration.observe_levels(&Value::Null);}
     }
@@ -261,13 +268,22 @@ async fn finish_configuration(shared:Arc<Shared>,provider:Provider,change:config
     };
     if !matches!(read,Ok(ref value) if value.success && value.data.is_object()){
         shared.agent.lock().unwrap().incomplete.insert("config".into());shared.wake();
-        return if reply.success{Ok(Outcome::Accepted(Some(json!({"id":change.id,"value_evidence":"unknown"}))))}else{Err(ProviderError::new("backend","native setter failed; current configuration unverified"))};
+        return if reply.success{Ok(Outcome::Accepted(Some(json!({"id":change.id(),"value_evidence":"unknown"}))))}else{Err(ProviderError::new("backend","native mutation failed; current state unverified"))};
     }
-    let observed={let mut agent=shared.agent.lock().unwrap();agent.configuration_pending(false);agent.configuration.matches(&change)};shared.wake();
-    publish_fenced(&shared,&provider).await.map_err(|_|ProviderError::new("backend","native configuration changed; facts publication not confirmed"))?;
+    let (observed,data)={let mut agent=shared.agent.lock().unwrap();change.release_guard();agent.configuration_pending(false);
+        match &change{
+            Mutation::Configure(change)=>{let observed=agent.configuration.matches(change);(observed,json!({"id":change.id,"value":change.value,"value_evidence":if observed{"reported"}else{"not_matched"}}))},
+            Mutation::NewSession{before,epoch,..}=>{
+                let current=agent.session.as_ref().and_then(|session|session["id"].as_str());
+                let changed=current.is_some() && current!=before.as_deref() && reply.data["cancelled"]!=true;
+                if reply.success && changed{agent.ensure_session_epoch(epoch);}
+                (changed,json!({"session":agent.session,"cancelled":reply.data.get("cancelled")}))
+            }
+        }
+    };shared.wake();drive_ui_cancels(&shared);
+    publish_fenced(&shared,&provider).await.map_err(|_|ProviderError::new("backend","native state changed; facts publication not confirmed"))?;
     if !reply.success{return Err(ProviderError::new("backend",native_message(&reply)));}
-    let data=Some(json!({"id":change.id,"value":change.value,"value_evidence":if observed{"reported"}else{"not_matched"}}));
-    if observed{Ok(Outcome::Observed(data))}else{Ok(Outcome::Accepted(data))}
+    if observed{Ok(Outcome::Observed(Some(data)))}else{Ok(Outcome::Accepted(Some(data)))}
 }
 async fn configure(shared:&Arc<Shared>,provider:&Provider,args:&Value,deadline:Instant)->Result<Outcome,ProviderError>{
     if Instant::now()>=deadline{return rejected("timeout","configuration deadline elapsed before write");}
@@ -278,20 +294,34 @@ async fn configure(shared:&Arc<Shared>,provider:&Provider,args:&Value,deadline:I
         let change=match agent.configuration.prepare(id,&args["value"],args.get("rev"),&agent.signals.current().metadata){Ok(change)=>change,Err(error)=>return rejected(error.kind,error.message)};
         agent.configuration_pending(true);change
     };shared.wake();
+    dispatch_mutation(shared,provider,Mutation::Configure(change),deadline).await
+}
+async fn session_new(shared:&Arc<Shared>,provider:&Provider,args:&Value,deadline:Instant)->Result<Outcome,ProviderError>{
+    if args["action"]!="new"{return rejected("unsupported","session action is not declared");}
+    if args.as_object().unwrap().keys().any(|key|!["v","caps_rev","epoch","guard","cause","correlation","action"].contains(&key.as_str())){return rejected("unsupported","native new session does not support these arguments");}
+    if Instant::now()>=deadline{return rejected("timeout","session deadline elapsed before write");}
+    let guard=match shared.starts.get().unwrap().session_guard(){Ok(guard)=>guard,Err(error)=>return rejected(error.kind,error.message)};
+    let change={let mut agent=shared.agent.lock().unwrap();
+        if agent.configuration.pending || agent.signals.current().preflights>0{return rejected("busy","a native mutation/start preflight is unresolved");}
+        let change=Mutation::NewSession {before:agent.session.as_ref().and_then(|session|session["id"].as_str()).map(str::to_string),epoch:agent.epoch().into(),guard:Some(guard)};agent.session_pending=true;agent.configuration_pending(true);change
+    };shared.wake();dispatch_mutation(shared,provider,change,deadline).await
+}
+async fn dispatch_mutation(shared:&Arc<Shared>,provider:&Provider,mut change:Mutation,deadline:Instant)->Result<Outcome,ProviderError>{
+    let id=change.id().to_string();let (command,args)=change.request();
     let native=shared.native.get().unwrap();
-    let mut ticket=match native.submit(change.command,change.args.clone(),deadline){Ok(ticket)=>ticket,Err(error)=>{shared.agent.lock().unwrap().configuration_pending(false);shared.wake();return native_failure(error);}};
+    let mut ticket=match native.submit(command,args,deadline){Ok(ticket)=>ticket,Err(error)=>{let mut agent=shared.agent.lock().unwrap();change.release_guard();agent.configuration_pending(false);drop(agent);shared.wake();return native_failure(error);}};
     let reply=tokio::select!{biased;reply=ticket.reply()=>Some(reply),_=tokio::time::sleep_until(deadline)=>None};
-    if reply.is_none() && ticket.cancel_before_write(){shared.agent.lock().unwrap().configuration_pending(false);shared.wake();return rejected("timeout","configuration deadline elapsed before write");}
-    if let Some(Err(error))=&reply{if !error.may_have_acted{shared.agent.lock().unwrap().configuration_pending(false);shared.wake();return rejected(error.kind,error.message.clone());}}
+    if reply.is_none() && ticket.cancel_before_write(){let mut agent=shared.agent.lock().unwrap();change.release_guard();agent.configuration_pending(false);drop(agent);shared.wake();return rejected("timeout","native mutation deadline elapsed before write");}
+    if let Some(Err(error))=&reply{if !error.may_have_acted{let mut agent=shared.agent.lock().unwrap();change.release_guard();agent.configuration_pending(false);drop(agent);shared.wake();return rejected(error.kind,error.message.clone());}}
     let written=ticket.written();let acknowledged=reply.as_ref().is_some_and(|reply|matches!(reply,Ok(reply) if reply.success));
     let (s,p)=(shared.clone(),provider.clone());let result=tokio::spawn(async move{
-        let reply=match reply{Some(reply)=>reply,None=>ticket.reply().await};finish_configuration(s,p,change,reply).await
+        let reply=match reply{Some(reply)=>reply,None=>ticket.reply().await};finish_mutation(s,p,change,reply).await
     });
     match tokio::time::timeout_at(deadline,result).await{
-        Ok(Ok(result))=>result,Ok(Err(_))=>Err(ProviderError::new("backend","configuration workflow failed; outcome unknown")),
+        Ok(Ok(result))=>result,Ok(Err(_))=>Err(ProviderError::new("backend","native mutation workflow failed; outcome unknown")),
         Err(_) if acknowledged=>Ok(Outcome::Accepted(Some(json!({"id":id,"value_evidence":"unknown"})))),
         Err(_) if written=>Ok(Outcome::Dispatched(Some(json!({"id":id,"value_evidence":"unknown"})))),
-        Err(_)=>Err(ProviderError::new("backend","configuration write incomplete at deadline; outcome unknown")),
+        Err(_)=>Err(ProviderError::new("backend","native mutation write incomplete at deadline; outcome unknown")),
     }
 }
 async fn ui_fence(shared:Arc<Shared>,native:Native,id:String) {

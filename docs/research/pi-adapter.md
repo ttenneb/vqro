@@ -69,6 +69,18 @@ Private native subprocess/SDK tests cover a late ACK past the caller deadline, n
 setter refusal, fresh facts/fence delivery, and successful ACK with mismatching readback remaining only accepted.
 Pure tests cover actual metadata containers/arrays, native model IDs, revisions, allowed values and catalog cuts.
 
+## Sessions in the initial declaration
+`agent.session:new` preserves the Python bridge's native new_session control. It neither prompts nor changes the
+endpoint/owning host. The current session and one new epoch are read back and fenced into core facts before an
+observed reply; prior receipt lookup survives. With no prior known session, the explicit new-session cut is still
+advanced exactly once. A session change shares the prompt preflight guard (ordinary controls still bypass it), so
+an unresolved prompt cannot accidentally land in the new conversation. While the switch is unverified, current
+session facts are null and a session guard cannot be claimed enforceable.
+
+Native CLI resume arguments remain available at launch. Optional resume/fork/list/close/delete actions and native
+history paging are not declared here: the native RPC does not expose bounded all-session/history discovery or a
+proven paginated cut. No filesystem discovery or guessed session/entry IDs is substituted.
+
 ## Partial verification —1874677
 Native dialog normalizer/state and stop-coverage regressions pass; warning-free bridge build. Public
 C1/C2/D6/D13/R1/R3/R5/M1/L1 pass. L2 coverage/end checks passed, but its final effect-event count failed once;

@@ -28,11 +28,12 @@ for line in sys.stdin:
  if row['type']=='set_steering_mode':
   while not (root/'go').exists():time.sleep(.002)
   if {apply}:state['steeringMode']=row['mode']
+ if row['type']=='new_session':state['sessionId']='fixture-next'
  data=state if row['type']=='get_state' else {{}}
  print(json.dumps({{'type':'response','id':row['id'],'command':row['type'],'success':True,'data':data}}),flush=True)
 "#,root=json!(root.to_string_lossy()),apply=if apply{"True"}else{"False"});
     let weak=Arc::downgrade(&shared);
-    let native=Native::spawn(&["/usr/bin/python3".into(),"-c".into(),script],root,&HashMap::new(),Arc::new(move|event|{if let Some(shared)=weak.upgrade(){let mut agent=shared.agent.lock().unwrap();agent.signals.observe(&event);agent.observe(&event);drop(agent);shared.wake();}})).await.unwrap();shared.native.set(native).ok().unwrap();
+    let native=Native::spawn(&["/usr/bin/python3".into(),"-c".into(),script],root,&HashMap::new(),Arc::new(move|event|{if let Some(shared)=weak.upgrade(){let mut agent=shared.agent.lock().unwrap();agent.signals.observe(&event);agent.observe(&event);drop(agent);shared.wake();}})).await.unwrap();shared.starts.set(Starts::new(native.clone(),shared.agent.lock().unwrap().signals.clone())).ok().unwrap();shared.native.set(native).ok().unwrap();
     let (a,b)=tokio::io::duplex(65536);let (r,w)=tokio::io::split(b);let mut core=Core {r:BufReader::new(r),w};
     let config=Config::new("pi-test","instance",shared.agent.lock().unwrap().provider_capabilities());let connect=tokio::spawn(Provider::connect(a,config));
     let hello=core.recv().await;core.reply(&hello,json!({"server":"fixture"})).await;let register=core.recv().await;core.reply(&register,json!({"generation":1})).await;
@@ -52,6 +53,24 @@ async fn late_configuration_ack_is_not_replayed_and_fresh_facts_are_fenced(){
     let fence=core.recv().await;assert_eq!(fence["method"],"resource.list");core.reply(&fence,json!({"resources":[]})).await;
     let ledger=std::fs::read_to_string(root.path().join("ledger")).unwrap();let rows:Vec<Value>=ledger.lines().map(|line|serde_json::from_str(line).unwrap()).collect();assert_eq!(rows.iter().filter(|row|row["type"]=="set_steering_mode").count(),1);assert_eq!(rows.iter().filter(|row|row["type"]=="get_state").count(),1);
     assert!(!shared.agent.lock().unwrap().configuration.pending);dispose(&shared,&provider).await;
+}
+#[tokio::test]
+async fn new_session_keeps_endpoint_and_host_and_fences_one_new_epoch_before_reply(){
+    for known_prior in [true,false]{
+        let root=tempfile::tempdir().unwrap();let (shared,provider,mut core)=fixture(root.path(),true).await;
+        {let mut agent=shared.agent.lock().unwrap();if !known_prior{agent.session=None;}agent.journal.put("message","old",json!({"content":[]})).unwrap();agent.receipt("prior-delivery",json!({"stage":"admitted"}));}
+        let before=shared.agent.lock().unwrap().epoch().to_string();let host=shared.facts("pi-test")["data"]["agent"]["host"].clone();
+        let guard=shared.starts.get().unwrap().session_guard().unwrap();
+        assert!(matches!(session_new(&shared,&provider,&json!({"action":"new"}),Instant::now()+Duration::from_secs(1)).await.unwrap(),Outcome::Rejected{kind,..} if kind=="busy"));
+        assert!(!root.path().join("ledger").exists(),"an unresolved preflight must reject session changes before write");drop(guard);
+        let (s,p)=(shared.clone(),provider.clone());let task=tokio::spawn(async move{session_new(&s,&p,&json!({"action":"new"}),Instant::now()+Duration::from_secs(3)).await});
+        let facts=core.recv().await;let published=&facts["params"]["facts"];assert_eq!(published["ref"],"agent");assert_eq!(published["data"]["agent"]["host"],host);
+        assert_eq!(published["data"]["agent"]["session"]["id"],"fixture-next");assert_ne!(published["data"]["agent"]["epoch"],before);assert!(published["data"]["agent"]["epoch"].as_str().unwrap().ends_with(".e2"));
+        let fence=core.recv().await;assert_eq!(fence["method"],"resource.list");assert!(!task.is_finished());core.reply(&fence,json!({"resources":[]})).await;
+        assert!(matches!(task.await.unwrap().unwrap(),Outcome::Observed(Some(data)) if data["session"]["id"]=="fixture-next"));
+        {let agent=shared.agent.lock().unwrap();assert!(agent.journal.entity("message","old").is_none());assert!(agent.journal.entity("session","current").is_some());assert!(agent.receipts.contains_key("prior-delivery"));}
+        dispose(&shared,&provider).await;
+    }
 }
 #[tokio::test]
 async fn setter_ack_without_matching_readback_is_only_accepted_and_waits_for_core_fence(){

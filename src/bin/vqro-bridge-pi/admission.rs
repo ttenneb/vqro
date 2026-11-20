@@ -80,6 +80,8 @@ impl Drop for Flight {
 pub struct Starts { native:Native,signals:Arc<Signals>,gate:Arc<tokio::sync::Mutex<()>> }
 impl Starts {
     pub fn new(native:Native,signals:Arc<Signals>) -> Self { Self { native,signals,gate:Arc::new(tokio::sync::Mutex::new(())) } }
+    /// A session switch cannot overlap a prompt preflight; ordinary controls never take this guard.
+    pub fn session_guard(&self)->Result<tokio::sync::OwnedMutexGuard<()>,Refusal>{self.gate.clone().try_lock_owned().map_err(|_|Refusal {kind:"busy",message:"a native prompt preflight is unresolved".into()})}
     pub async fn start(&self,args:Value,deadline:Instant,receipt:Receipt) -> Admission { self.prompt(args,deadline,receipt,false).await }
     pub async fn admit(&self,args:Value,deadline:Instant,receipt:Receipt) -> Admission { self.prompt(args,deadline,receipt,true).await }
     async fn prompt(&self,args:Value,deadline:Instant,receipt:Receipt,allow_busy:bool) -> Admission {

@@ -22,7 +22,7 @@ pub struct Agent {
     tools:HashMap<String,String>,
     current_message:Option<String>,
     position:u64,serial:u64,epoch_number:u64,instance:String,boot:String,
-    pub session:Option<Value>,pub run:Option<String>,pub completion:Option<Value>,
+    pub session:Option<Value>,pub session_pending:bool,pub run:Option<String>,pub completion:Option<Value>,
     reason:String,error:Option<String>,exit:Option<Exit>,caps:Value,
 }
 impl Agent {
@@ -32,7 +32,7 @@ impl Agent {
         let mut journal=ItemJournal::new(format!("{boot}.e1"),JournalConfig {max_entities:ENTITY_COUNT,max_entity_bytes:ENTITY_TOTAL,snapshot_buffer_bytes:1024*1024,..Default::default()});
         journal.set_coverage(Coverage::Tail);
         let mut agent=Self {journal,signals,incomplete:BTreeSet::new(),receipts:BTreeMap::new(),queue:None,queue_version:0,configuration:Default::default(),requests:Default::default(),ui_cancels:Vec::new(),ui_unconfirmed:BTreeSet::new(),ui_overflow:false,receipt_order:VecDeque::new(),history:VecDeque::new(),tools:HashMap::new(),current_message:None,
-            position:0,serial:0,epoch_number:1,instance,boot,session:None,run:None,completion:None,reason:"unknown".into(),error:None,exit:None,caps:Value::Null};
+            position:0,serial:0,epoch_number:1,instance,boot,session:None,session_pending:false,run:None,completion:None,reason:"unknown".into(),error:None,exit:None,caps:Value::Null};
         agent.refresh();agent
     }
     fn next(&mut self,prefix:&str)->String {self.serial+=1;format!("{prefix}{}",self.serial)}
@@ -56,13 +56,13 @@ impl Agent {
                 modes[mode]=json!({"point":point,"batch":batch,"batch_at":"consume","idle":"park"});
             }
         }
-        json!({"agent":{"v":0,"modules":{"queue":{"v":0},"stop":{"v":0},"config":{"v":0}}},"host":{"kind":"process","endpoints":"one"},
+        json!({"agent":{"v":0,"modules":{"queue":{"v":0},"stop":{"v":0},"config":{"v":0},"sessions":{"v":0}}},"host":{"kind":"process","endpoints":"one"},
             "agent.send":{"modes":modes,"content":{"types":if images {vec!["text","image"]} else {vec!["text"]},"shape":"text_then_media","max_bytes":super::contract::input_bytes()},
                 "literal":"controlled_launch","origin":[{"as":"attributed_user","role":"user","frame":"sender_header"}],
                 "correlation":"none","handled":"none","keys":null,"guards":{"session":"adapter","run":"none"},"receipts":{"retain":256}},
             "agent.interrupt":{"pending":"unknown","scope":"foreground","waits":"none"},"agent.receipt":{},
             "agent.respond":{"ack":"dispatched","methods":["choice","confirm","text"],"scopes":["operation"],"background_requests":false,"native_timeout":"unrepresentable_positive","max_pending":super::requests::MAX_PENDING,"request_bytes":super::requests::MAX_REQUEST_BYTES},
-            "agent.configure":{},
+            "agent.configure":{},"agent.session":{"actions":["new"]},
             "agent.stop":{"covers":["foreground","queued"],"waits":"exit"},
             "agent.queue":{"actions":["list","clear"],"ids":"none","removed":{"content":["text"],"media":"unknown"}},
             "items.stream":{"retain_bytes":131072,"entities":ENTITY_COUNT,"entity_bytes":ENTITY_TOTAL,"snapshot_buffer_bytes":1048576,"max_viewers":4}})
@@ -86,7 +86,7 @@ impl Agent {
             "status":{"state":phase},
             "data":{"agent":{"v":0,"state":self.state(),"lifecycle":if self.exit.is_some(){"ended"}else{"live"},
                 "host":{"id":format!("{}.child",self.boot),"provider":provider,"instance":self.instance,"incarnation":"","kind":"process","owns_lifecycle":true},
-                "session":self.session,"epoch":self.epoch(),"caps":self.caps,"completion":self.completion,"queue":self.queue,"requests":self.request_summaries(),"background":null,
+                "session":if self.session_pending {None}else{self.session.as_ref()},"epoch":self.epoch(),"caps":self.caps,"completion":self.completion,"queue":self.queue,"requests":self.request_summaries(),"background":null,
                 "config":self.configuration.options(),"commands":[],"usage":null,"incomplete":self.incomplete,
                 "items":{"retain_bytes":131072,"entities":ENTITY_COUNT,"entity_bytes":ENTITY_TOTAL,"snapshot_buffer_bytes":1048576,"coverage":"tail"}}}});
         if self.configuration.incomplete {facts["data"]["agent"]["incomplete"].as_array_mut().unwrap().push(json!("config.models_or_levels"));}
@@ -94,13 +94,17 @@ impl Agent {
         for field in ["commands","config"]{if vqro::limits::encoded_bytes(&facts["data"])>60*1024{facts["data"]["agent"][field]=json!([]);facts["data"]["agent"]["incomplete"].as_array_mut().unwrap().push(json!(field));}}
         facts
     }
-    pub fn configuration_pending(&mut self,pending:bool){self.configuration.pending=pending;self.configuration.rebuild(&self.signals.current().metadata);self.refresh();}
+    pub fn new_session_epoch(&mut self){
+        self.cancel_requests("epoch_changed");self.epoch_number+=1;self.journal.new_epoch(format!("{}.e{}",self.boot,self.epoch_number));self.journal.set_coverage(Coverage::Tail);self.history.clear();self.tools.clear();self.current_message=None;self.run=None;self.completion=None;
+    }
+    pub fn ensure_session_epoch(&mut self,prior:&str){if self.epoch()==prior{self.new_session_epoch();if let Some(session)=self.session.clone(){self.store("session","current",session,false);}self.refresh();}}
+    pub fn configuration_pending(&mut self,pending:bool){self.configuration.pending=pending;if !pending{self.session_pending=false;}self.configuration.rebuild(&self.signals.current().metadata);self.refresh();}
     pub fn refresh(&mut self) {
         let mut caps=self.declarations();
         let rev=self.caps["rev"].as_u64().unwrap_or(0);
         let mut prior=self.caps.clone();if let Some(object)=prior.as_object_mut(){object.remove("rev");}
         caps["rev"]=json!(if prior==caps {rev}else{rev+1});self.caps=caps;
-        let value=json!({"state":self.state(),"run":self.run,"completion":self.completion,"background":null});
+        let value=json!({"state":self.state(),"run":self.run,"completion":self.completion,"background":null,"_session_pending":self.session_pending});
         self.store("state","current",value,false);
     }
     pub fn receipt(&mut self,delivery:&str,mut value:Value) {
@@ -260,7 +264,7 @@ impl Agent {
                     }
                     if let Some(id)=record["data"]["sessionId"].as_str().filter(|id|!id.is_empty() && id.len()<=128) {
                         if self.session.as_ref().is_some_and(|session|session["id"]!=id) {
-                            self.cancel_requests("epoch_changed");self.epoch_number+=1;self.journal.new_epoch(format!("{}.e{}",self.boot,self.epoch_number));self.journal.set_coverage(Coverage::Tail);self.history.clear();self.tools.clear();self.current_message=None;self.run=None;self.completion=None;
+                            self.new_session_epoch();
                         }
                         let mut session=json!({"id":id});
                         if let Some(title)=record["data"]["sessionName"].as_str().filter(|s|s.len()<=512){session["title"]=json!(title);}
