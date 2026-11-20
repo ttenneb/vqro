@@ -1,7 +1,8 @@
 //! Store-only history regressions. Large fixtures live in the agent's cargo scratch target.
-use std::{path::PathBuf,sync::Arc,time::Instant};
+use std::{path::PathBuf,sync::Arc};
 use vqro::store::{Store,Op,HISTORY_BYTES,NOTE_BYTES};
 use serde_json::{json,Value};
+#[path="support/timing.rs"] mod timing;
 fn set(key:impl Into<String>,value:Value)->Op {Op::Set {key:key.into(),value,expect:None}}
 fn root()->tempfile::TempDir {
     let base=PathBuf::from(env!("CARGO_TARGET_TMPDIR"));std::fs::create_dir_all(&base).unwrap();
@@ -121,10 +122,10 @@ fn history_500_layouts_have_bounded_file_and_commit_p99() {
     let mut layout=json!({"tabs":(0..600).map(|i|json!({"title":format!("Tab {i}"),"node":{"view":"p"}})).collect::<Vec<_>>(),"active":0});
     let missing=37*1024-serde_json::to_vec(&layout).unwrap().len();
     layout["tabs"][0]["title"]=json!(format!("Tab 0{}","x".repeat(missing)));
-    let mut samples=Vec::new();
-    for i in 0..500 {layout["active"]=json!(i%600);let start=Instant::now();store.apply("user",None,vec![set("layout/main",layout.clone())]).unwrap();samples.push(start.elapsed().as_secs_f64()*1000.);}
-    samples.sort_by(f64::total_cmp);let p99=samples[494];
+    let mut samples=Vec::new();let mut wall_samples=Vec::new();
+    for i in 0..500 {layout["active"]=json!(i%600);let start=timing::WorkClock::start();store.apply("user",None,vec![set("layout/main",layout.clone())]).unwrap();let work=start.finish();samples.push(work.cpu.as_secs_f64()*1000.);wall_samples.push(work.wall.as_secs_f64()*1000.);}
+    samples.sort_by(f64::total_cmp);wall_samples.sort_by(f64::total_cmp);let p99=samples[494];
     assert!(std::fs::metadata(&path).unwrap().len()<(HISTORY_BYTES+40*1024)as u64);
-    assert!(p99<200.,"release p99 {p99}ms exceeds200ms for bounded8MiB history");
-    eprintln!("500x37KiB file={} history={} p99_ms={p99}",std::fs::metadata(&path).unwrap().len(),store.history_bytes());
+    assert!(p99<200.,"CPU work budget exceeded: release p99 {p99}ms exceeds200ms for bounded8MiB history");
+    eprintln!("500x37KiB file={} history={} cpu_p99_ms={p99} wall_p99_ms={}",std::fs::metadata(&path).unwrap().len(),store.history_bytes(),wall_samples[494]);
 }

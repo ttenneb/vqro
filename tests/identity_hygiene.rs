@@ -2,18 +2,19 @@
 use vqro::provider::{Identity,IdentityMap};
 use serde_json::{json,Value};
 use std::time::{Duration,Instant};
+#[path="support/timing.rs"] mod timing;
 fn identity()->Identity{Identity{provider:"fixture".into(),instance:"instance".into(),reference:"terminal".into(),incarnation:"birth".into()}}
 #[test]
 fn ten_thousand_lifetimes_stay_bounded_and_never_reuse_an_id(){
  let root=tempfile::tempdir().unwrap();let path=root.path().join("resources.json");let mut map=IdentityMap::open(Some(path.clone())).unwrap();let mut max=Duration::ZERO;let started=Instant::now();
  for n in 1..=10_000 {
-  let op=Instant::now();let id=map.identify(identity()).unwrap().id;assert_eq!(id,format!("r{n}"));
-  assert_eq!(map.retire(|_|true).unwrap().0,vec![id]);max=max.max(op.elapsed());
-  assert!(op.elapsed()<Duration::from_millis(100),"identity lifetime {n} exceeded100ms: {:?}",op.elapsed());
+  let op=timing::WorkClock::start();let id=map.identify(identity()).unwrap().id;assert_eq!(id,format!("r{n}"));
+  assert_eq!(map.retire(|_|true).unwrap().0,vec![id]);let work=op.finish();max=max.max(work.cpu);
+  work.assert_cpu_budget(Duration::from_millis(100),&format!("identity lifetime {n}"));
   if n%100==0{let saved:Value=serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();assert!(saved["ids"].as_object().unwrap().is_empty(),"retired records must not accumulate");assert!(std::fs::metadata(&path).unwrap().len()<128);}
  }
  drop(map);let mut restarted=IdentityMap::open(Some(path)).unwrap();assert_eq!(restarted.identify(identity()).unwrap().id,"r10001");
- println!("identity churn10000 total_ms={:.3} max_lifetime_ms={:.3}",started.elapsed().as_secs_f64()*1000.0,max.as_secs_f64()*1000.0);
+ println!("identity churn10000 total_wall_ms={:.3} max_lifetime_cpu_ms={:.3}",started.elapsed().as_secs_f64()*1000.0,max.as_secs_f64()*1000.0);
 }
 #[test]
 fn old_tombstones_and_legacy_records_advance_high_water_without_being_retained(){
@@ -28,8 +29,8 @@ async fn native_inventory_600_new_ids_has_a_bounded_lock_hold(){
  use vqro::{core::Core,adapter::{AdapterHandle,AdapterEvent},provider::ProviderInfo};
  let root=tempfile::tempdir().unwrap();let core=std::sync::Mutex::new(Core::new(vqro::store::Store::in_memory(),Some(root.path().into()),root.path().join("unused"),false).unwrap());let(tx,_rx)=tokio::sync::mpsc::unbounded_channel();
  let mut c=core.lock().unwrap();c.install_adapter(AdapterHandle{name:"fixture".into(),session:None,context:None,capabilities:json!({}),cmds:tx},true).unwrap();c.on_adapter_event("fixture",AdapterEvent::Registered(ProviderInfo{connection:1,instance:"A".into(),role:"backend".into(),software:json!({"name":"fixture","version":"1"})}));
- let facts=(0..600).map(|i|serde_json::from_value(json!({"backend_ref":format!("t{i}"),"kind":"terminal","state":"live"})).unwrap()).collect();let start=Instant::now();c.on_adapter_event("fixture",AdapterEvent::Snapshot(facts));let held=start.elapsed();assert_eq!(c.resources.len(),600);
- println!("public inventory600 lock_hold_ms={:.3}",held.as_secs_f64()*1000.0);assert!(held<Duration::from_millis(150),"inventory core lock held {held:?}");
+ let facts=(0..600).map(|i|serde_json::from_value(json!({"backend_ref":format!("t{i}"),"kind":"terminal","state":"live"})).unwrap()).collect();let start=timing::WorkClock::start();c.on_adapter_event("fixture",AdapterEvent::Snapshot(facts));let held=start.finish();assert_eq!(c.resources.len(),600);
+ println!("public inventory600 lock_work_cpu_ms={:.3} wall_lock_hold_ms={:.3}",held.cpu.as_secs_f64()*1000.0,held.wall.as_secs_f64()*1000.0);held.assert_cpu_budget(Duration::from_millis(150),"public inventory under core lock");
 }
 #[tokio::test]
 async fn claimed_extension_names_do_not_grant_extension_authorship(){

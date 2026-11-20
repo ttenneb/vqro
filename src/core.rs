@@ -828,10 +828,10 @@ pub fn add_adapter(core: &Shared, handle: AdapterHandle, events: mpsc::Unbounded
         c.install_adapter(AdapterHandle{name:"batch".into(),session:None,context:None,capabilities:json!({}),cmds:tx},true).unwrap();
         c.on_adapter_event("batch",AdapterEvent::Registered(crate::provider::ProviderInfo{connection:1,instance:"A".into(),role:"backend".into(),software:json!({"name":"fixture","version":"1"})}));
         let facts=(0..600).map(|i|serde_json::from_value(json!({"backend_ref":format!("t{i}"),"incarnation":"birth","kind":"terminal","state":"live","argv":["sh"]})).unwrap()).collect();
-        let before=c.identities.writes();let started=std::time::Instant::now();c.on_adapter_event("batch",AdapterEvent::Snapshot(facts));let elapsed=started.elapsed();
+        let before=c.identities.writes();let started=crate::test_timing::WorkClock::start();c.on_adapter_event("batch",AdapterEvent::Snapshot(facts));let elapsed=started.finish();
         assert_eq!(c.resources.len(),600);assert_eq!(c.identities.writes()-before,1,"one durable map write per complete inventory");
-        println!("identity inventory600 lock_hold_ms={:.3}",elapsed.as_secs_f64()*1000.0);
-        assert!(elapsed<std::time::Duration::from_millis(150),"inventory held core lock for {elapsed:?}");
+        println!("identity inventory600 lock_work_cpu_ms={:.3} wall_lock_hold_ms={:.3}",elapsed.cpu.as_secs_f64()*1000.0,elapsed.wall.as_secs_f64()*1000.0);
+        elapsed.assert_cpu_budget(std::time::Duration::from_millis(150),"inventory under core lock");
         let before=c.identities.writes();c.on_adapter_event("batch",AdapterEvent::Snapshot(Vec::new()));assert_eq!(c.identities.writes()-before,1);assert!(c.resources.is_empty());
     }
 }

@@ -308,12 +308,18 @@ impl Store {
     }
 
     pub(crate) fn lock_state_within(path:&Path, wait:std::time::Duration) -> anyhow::Result<std::sync::Arc<std::fs::File>> {
+        Self::lock_state_within_using(path,wait,std::time::Instant::now,std::thread::sleep)
+    }
+
+    // Keep retry/deadline policy testable without a scheduler-dependent stopwatch. Like
+    // write_atomic_with_sync, this is private injection, not a new runtime/wire capability.
+    fn lock_state_within_using(path:&Path, wait:std::time::Duration, now:impl Fn()->std::time::Instant, mut pause:impl FnMut(std::time::Duration)) -> anyhow::Result<std::sync::Arc<std::fs::File>> {
         let lock=std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(path.with_file_name(".workspace.lock"))?;
-        let deadline=std::time::Instant::now()+wait;
+        let deadline=now()+wait;
         loop {
             match lock.try_lock() {
                 Ok(()) => return Ok(std::sync::Arc::new(lock)),
-                Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now()<deadline => std::thread::sleep(std::time::Duration::from_millis(10)),
+                Err(std::fs::TryLockError::WouldBlock) if now()<deadline => pause(std::time::Duration::from_millis(10)),
                 Err(error) => return Err(anyhow::anyhow!("workspace state still in use (possibly a late durable write); wait for the previous core to finish, do not replay: {error}")),
             }
         }
@@ -767,21 +773,26 @@ mod tests {
         // shares the lock until its exec; the replacement must wait for it, not fail at once.
         let root=tempfile::tempdir().unwrap();let path=root.path().join("workspace.json");
         let old=Store::open_locked(path.clone()).unwrap();
-        let shared=old.lifetime.clone().unwrap();  // stands in for the forked child's copy of the fd
+        let mut shared=Some(old.lifetime.clone().unwrap()); // forked child's copy of the fd
         drop(old);
-        let release=std::thread::spawn(move||{std::thread::sleep(std::time::Duration::from_millis(300));drop(shared);});
-        let started=std::time::Instant::now();
-        let replacement=Store::open_locked(path.clone());
-        assert!(replacement.is_ok(),"{:?}",replacement.as_ref().err());
-        assert!(started.elapsed()>=std::time::Duration::from_millis(250),"it waited for the release");
-        release.join().unwrap();
-        // Still a real fence: a lock held past the bound fails, and the TUI's probe never waits.
-        let started=std::time::Instant::now();
-        assert!(Store::open_locked_within(path.clone(),std::time::Duration::from_millis(200)).is_err());
-        assert!(started.elapsed()<std::time::Duration::from_secs(2));
+        let mut retries=0;
+        let replacement=Store::lock_state_within_using(&path,STATE_LOCK_WAIT,std::time::Instant::now,|delay| {
+            retries+=1;
+            // Release only after a real failed lock attempt. No sleep can stand in for this order.
+            if shared.is_some() { drop(shared.take()); } else { std::thread::sleep(delay); }
+        }).unwrap();
+        assert!(retries>=1,"startup must retry a held lock instead of reporting success or failing immediately");
+        // A held lock expires by its configured deadline, not a loaded host's wall-clock pace.
+        let base=std::time::Instant::now();let elapsed=std::cell::Cell::new(std::time::Duration::ZERO);let pauses=std::cell::Cell::new(0);
+        assert!(Store::lock_state_within_using(&path,std::time::Duration::from_millis(200),||base+elapsed.get(),|delay| {
+            pauses.set(pauses.get()+1);assert!(pauses.get()<=20,"lock retry work exceeded the deadline");elapsed.set(elapsed.get()+delay);
+        }).is_err());
+        assert_eq!(elapsed.get(),std::time::Duration::from_millis(200));assert_eq!(pauses.get(),20);
+        assert!(Store::lock_state_within_using(&path,std::time::Duration::ZERO,std::time::Instant::now,|_|panic!("zero-wait probe must never pause")).is_err());
         assert!(Store::lock_state(&path).is_err());
         drop(replacement);
-        assert!(Store::lock_state(&path).is_ok());
+        // Concurrent test forks can briefly inherit the fd until exec; use the real startup retry.
+        Store::open_locked(path).expect("released lock permits replacement startup");
     }
 
     #[test]

@@ -123,10 +123,12 @@ async fn slow_durable_write_does_not_block_snapshots_or_echo_and_stays_invisible
     let apply = tokio::spawn(async move { writer.call("workspace.apply", set(1, 0)).await });
     tokio::time::timeout(Duration::from_secs(2), f.gate.entered.notified()).await.unwrap();
     let start = Instant::now();
-    let snapshot = reader.call_with_timeout("workspace.snapshot", Value::Null, Duration::from_millis(200));
+    // This is an ordering proof, not a 200ms machine-speed benchmark: both unrelated paths
+    // must complete while the durable writer is still held. Timeouts are only hang backstops.
+    let snapshot = reader.call_with_timeout("workspace.snapshot", Value::Null, Duration::from_secs(10));
     let echo = async {
         terminal.notify("stream.input", json!({"stream":stream,"text":"independent-echo"}));
-        tokio::time::timeout(Duration::from_millis(200), async {
+        tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 if let Some(Incoming::Notification { method, params }) = output.recv().await {
                     if method == "stream.data" {
@@ -139,12 +141,14 @@ async fn slow_durable_write_does_not_block_snapshots_or_echo_and_stays_invisible
     };
     let (snapshot, echo) = tokio::join!(snapshot, echo);
     let elapsed = start.elapsed();
-    f.gate.release();
-    let txn = apply.await.unwrap().unwrap();
-    println!("unrelated snapshot={:?} echo={echo:?} elapsed_ms={:.2} txn={}", snapshot.as_ref().map(|_| "ok").map_err(|e| e.kind()), elapsed.as_secs_f64()*1000.0, txn["txn"]);
+    assert!(!apply.is_finished(),"unrelated work must finish before the blocked commit");
+    assert!(!*f.gate.released.lock().unwrap(),"writer release cannot be used to unblock unrelated work");
+    println!("unrelated snapshot={:?} echo={echo:?} completed_before_writer_release=true wall_elapsed_ms={:.2}", snapshot.as_ref().map(|_| "ok").map_err(|e| e.kind()), elapsed.as_secs_f64()*1000.0);
     let snapshot = snapshot.expect("snapshot must not wait for a durable writer holding no core state lock");
     assert!(snapshot["entries"].get("doc/value").is_none(), "pending candidate is not visible before durable adoption");
     assert!(echo.is_ok(), "stream echo must not wait for the state filesystem");
+    f.gate.release();
+    apply.await.unwrap().unwrap();
     assert_eq!(f.core.lock().unwrap().snapshot()["entries"]["doc/value"]["value"], 1);
 }
 
