@@ -177,6 +177,24 @@ class ItemViewTests(unittest.TestCase):
         self.assertEqual((notices, view.entities), ([{"text": "compacting"}], {}))
 
 
+class SharedVectors(unittest.TestCase):
+    """tests/fixtures/items-vectors.jsonl: the same cases the Rust ItemView runs (P3-5, prim-opus-review)."""
+
+    def test_every_vector(self):
+        path = pathlib.Path(__file__).resolve().parent / "fixtures" / "items-vectors.jsonl"
+        cases = [json.loads(l) for l in path.read_text().splitlines() if l.strip()]
+        cases = [c for c in cases if "name" in c]
+        self.assertGreaterEqual(len(cases), 20)
+        for case in cases:
+            with self.subTest(case["name"]):
+                view = ItemView()
+                view.feed(b"".join(line(r) for r in case["snapshot"]))
+                view.feed(b"".join(line(r) for r in case["records"]))
+                got = {"seq": view.seq, "records": view.records, "broken": view.broken,
+                       "errors": {k: v for k, v in view.errors.items() if v}}
+                self.assertEqual(got, case["expect"])
+
+
 class Sink:
     def __init__(self):
         self.got = []
@@ -195,7 +213,8 @@ class StreamRouting(unittest.TestCase):
     def vqro(self):
         v = Vqro.__new__(Vqro)
         v.lock, v.waiting, v.streams = threading.Lock(), {}, {}
-        v.early, v.early_bytes = {}, 0
+        v.early, v.early_bytes, v.evicted, v.next, v.sent = {}, 0, set(), 100, []
+        v._send = v.sent.append
         v.closed, v.closed_lock = __import__("collections").deque(maxlen=256), threading.Lock()
         return v
 
@@ -226,6 +245,27 @@ class StreamRouting(unittest.TestCase):
         v._line(self.note("stream.data", stream=7, data="A" * (300 * 1024)), 50)
         self.assertNotIn(7, v.early, "one oversized note is never buffered")
         self.assertLessEqual(v.early_bytes, 256 * 1024)
+
+    def test_a_stream_that_lost_early_notes_registers_with_a_gap(self):
+        """Review P3-2: a dropped stream.closed or snapshot begin must not leave a stuck view."""
+        v, sink = self.vqro(), Sink()
+        v._line(self.note("stream.data", stream=1, data="eA=="), 50)
+        for n in range(2, 70):  # push stream 1 out of the early buffer
+            v._line(self.note("stream.data", stream=n, data="eA=="), 50)
+        self.assertNotIn(1, v.early)
+        v._line(self.note("stream.closed", stream=1, reason={"reason": "x"}), 50)  # not kept: already lost notes
+        v.register_stream(1, sink)
+        self.assertEqual(sink.got, [("gap", {"reason": "early_overflow"})])
+        self.assertNotIn(1, v.streams)
+
+    def test_a_late_attach_reply_is_closed_not_leaked(self):
+        """Review P3-3: the caller timed out, the core attached anyway: close the stream."""
+        v = self.vqro()
+        v._line({"jsonrpc": "2.0", "id": 77, "result": {"stream": 9, "initial": "reset", "epoch": "e"}}, 50)
+        self.assertEqual(v.sent, [{"jsonrpc": "2.0", "id": 100, "method": "stream.close", "params": {"stream": 9}}])
+        self.assertIn(9, v.closed)
+        v._line({"jsonrpc": "2.0", "id": 78, "result": {"ok": True}}, 50)
+        self.assertEqual(len(v.sent), 1, "other orphan replies are ignored")
 
 
 if __name__ == "__main__":

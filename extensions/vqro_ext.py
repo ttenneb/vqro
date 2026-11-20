@@ -91,6 +91,7 @@ class Vqro:
         # not block or call the core (the reply would wait behind them).
         self.streams = {}
         self.early, self.early_bytes = {}, 0  # notes for a stream whose attach reply is not read yet (bounded)
+        self.evicted = set()  # streams whose early notes were dropped: reported as a gap when they register
         self.closed = collections.deque(maxlen=256)  # streams closed here: late notes are dropped
         self.closed_lock = threading.Lock()  # never self.lock: the reader must not wait behind a blocked send
         threading.Thread(target=self._read, daemon=True).start()
@@ -223,6 +224,15 @@ class Vqro:
             return True
         with self.lock:
             slot = self.waiting.get(msg.get("id"))
+        result = msg.get("result")
+        if slot is None and isinstance(result, dict) and type(result.get("stream")) is int and "initial" in result:
+            # A stream attach whose caller already gave up (timeout): close it rather than leak it in the core.
+            with self.closed_lock:
+                self.closed.append(result["stream"])
+            with self.lock:
+                i, self.next = self.next, self.next + 1  # nobody waits for this reply
+            self._send({"jsonrpc": "2.0", "id": i, "method": "stream.close", "params": {"stream": result["stream"]}})
+            return True
         if slot is not None:
             if slot[2] is not None and isinstance(msg.get("result"), dict):
                 try:
@@ -237,6 +247,11 @@ class Vqro:
         """Route a stream's notes to `sink`, first replaying any that arrived before its attach reply. Runs on the
         reader thread (from an `on_result` hook), so nothing can interleave."""
         self.streams[stream] = sink
+        if stream in self.evicted:  # some of its early notes were dropped: tell the sink, which reattaches
+            self.evicted.discard(stream)
+            self.early_bytes -= sum(len(p.get("data") or "") for _, p in self.early.pop(stream, ()))
+            self._stream_note("stream.gap", {"stream": stream, "reason": {"reason": "early_overflow"}})
+            return
         for method, params in self.early.pop(stream, ()):
             self.early_bytes -= len(params.get("data") or "")
             self._stream_note(method, params)
@@ -249,11 +264,20 @@ class Vqro:
             stream, size = params.get("stream"), len(params.get("data") or "")
             with self.closed_lock:
                 closed = stream in self.closed
-            if closed or size > 256 * 1024:
+            if closed:
                 return
+            if size > 256 * 1024:
+                self.evicted.add(stream)
+                return
+            if stream in self.evicted:
+                return  # already lost notes: its registration reports a gap
             while self.early and (self.early_bytes + size > 256 * 1024 or len(self.early) >= 64):
-                for _, old in self.early.pop(next(iter(self.early))):  # evict the oldest stream's notes
+                oldest = next(iter(self.early))  # evict the oldest stream's notes, and remember it lost some
+                for _, old in self.early.pop(oldest):
                     self.early_bytes -= len(old.get("data") or "")
+                self.evicted.add(oldest)
+                while len(self.evicted) > 256:
+                    self.evicted.pop()
             self.early.setdefault(stream, []).append((method, params))
             self.early_bytes += size
             return

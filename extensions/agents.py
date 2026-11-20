@@ -224,6 +224,12 @@ def unknown_badge(ext, r):
     return {"text": "unknown since "+since if since else "unknown", "style": "warn"}
 
 
+# A viewer's own ceiling: provider declarations are taken only up to these (review P2-2), so one agent can't make
+# this extension hold unbounded state.
+VIEW_MAX_ENTITIES = 4096
+VIEW_MAX_ENTITY_BYTES = 4 * 1024 * 1024
+
+
 class Conversation:
     """One agent's item stream (agent-v0 section 4) and its reconstruction. The SDK calls the sink on its reader
     thread: it only feeds bytes and wakes the worker, never calls the core."""
@@ -234,11 +240,15 @@ class Conversation:
         self.lock = threading.Lock()
         self.stream = None
         self.generation = 0  # bumped when a stream ends, so a late attach reply can't revive it
+        self.clamped = False  # the provider declared more than this viewer keeps
+        self.too_big = False  # a snapshot exceeded the bounds: stop reattaching (it would only overflow again)
 
     def data(self, data):
         with self.lock:
             self.view.feed(data)
             broken = self.view.broken
+            if broken and self.view.errors["over_bound"]:
+                self.too_big = True
         self.wake(self.rid, reattach=broken)
 
     def error(self, error):
@@ -321,9 +331,11 @@ class Agents:
             if self.streams_items(r):
                 bounds = self.provider_caps(r)["items.stream"]
                 if r["id"] not in self.conversations:
-                    self.conversations[r["id"]] = Conversation(r["id"], self.wake, {
-                        k: bounds[f] for k, f in (("max_entities", "entities"), ("max_entity_bytes", "entity_bytes"))
-                        if type(bounds.get(f)) is int and bounds[f] > 0})
+                    declared = {k: bounds[f] for k, f in (("max_entities", "entities"), ("max_entity_bytes", "entity_bytes"))
+                                if type(bounds.get(f)) is int and bounds[f] > 0}
+                    kept = {k: min(v, VIEW_MAX_ENTITIES if k == "max_entities" else VIEW_MAX_ENTITY_BYTES) for k, v in declared.items()}
+                    c = self.conversations[r["id"]] = Conversation(r["id"], self.wake, kept)
+                    c.clamped = kept != declared
                     self.wake(r["id"], reattach=True)
                 elif self.conversations[r["id"]].stream is None:
                     self.wake(r["id"], reattach=True)
@@ -344,7 +356,12 @@ class Agents:
         if c is None or r is None or not self.streams_items(r):
             return
         with c.lock:
-            if c.stream is not None and not c.view.broken:
+            if c.too_big or c.stream is not None and not c.view.broken:
+                if c.too_big and c.stream is not None:
+                    old, c.stream = c.stream, None
+                    c.view.stream_ended()
+                    c.generation += 1
+                    self.ext.close_stream(old)
                 return
             old, c.stream = c.stream, None
             # After lost records, start over from a fresh snapshot: simple, bounded, and right whatever the loss was
@@ -485,9 +502,17 @@ class Agents:
         # Until callers carry principals (C2), a human sender without a principal is the workspace's user ("You").
         names = agent_transcript.Names(self.ext.resources, r["id"])
         with c.lock:
+            notes = []
+            if c.too_big:
+                notes.append({"type": "text", "style": "warn", "text": "This agent's history is larger than this pane can hold "
+                              f"({VIEW_MAX_ENTITIES} items, {VIEW_MAX_ENTITY_BYTES // 1048576} MiB), so the conversation stopped updating. "
+                              "Close and reopen the pane to try again."})
+            elif c.clamped:
+                notes.append({"type": "text", "style": "dim", "text": "This agent declares more history than this pane keeps; "
+                              "if it sends that much, the conversation stops updating and says so."})
             if c.view.epoch is None:
-                return [{"type": "text", "style": "dim", "text": "Loading the conversation…"}]
-            out = agent_transcript.rows(c.view.entities, names, c.view.coverage, self.view_of(r["id"]))
+                return notes + [{"type": "text", "style": "dim", "text": "Loading the conversation…"}]
+            out = notes + agent_transcript.rows(c.view.entities, names, c.view.coverage, self.view_of(r["id"]))
         if c.stream is None and r.get("available") is not False:
             out.append({"type": "text", "style": "dim", "text": "Reconnecting to the conversation…"})
         return out or [{"type": "text", "style": "dim", "text": "No messages yet."}]
@@ -1176,10 +1201,16 @@ class Agents:
         elif not r.get("available"):
             content["items"].insert(0, {"type": "text", "style": "warn", "text": self.disconnected(r)})
         bound = 32768 if conversation is None else agent_transcript.BUDGET + 32768  # the conversation bounds itself
-        if len(json.dumps(content, ensure_ascii=False).encode()) > bound:
-            content["items"].insert(0, {"type": "text", "style": "warn", "text": "Bounded agent panel: some provider output omitted."})
-            while len(json.dumps(content, ensure_ascii=False).encode()) > bound and len(content["items"]) > 1:
-                del content["items"][1]
+        size = len(json.dumps(content, ensure_ascii=False).encode())
+        if size > bound:  # drop the oldest rows after the first; each row's size is measured once
+            first, rest = content["items"][0], content["items"][1:]
+            sizes = [len(json.dumps(row, ensure_ascii=False).encode()) + 1 for row in rest]
+            cut = 0
+            while size > bound and cut < len(rest):
+                size -= sizes[cut]
+                cut += 1
+            content["items"] = [{"type": "text", "style": "warn", "text": "Bounded agent panel: some provider output omitted."},
+                                first, *rest[cut:]]
         return content
 
     def disconnected(self, r):

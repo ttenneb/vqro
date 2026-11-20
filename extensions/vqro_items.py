@@ -42,16 +42,23 @@ def _pointer(value, field):
     last = parts[-1]
     if isinstance(node, dict) and isinstance(node.get(last), str):
         return node, last
-    if isinstance(node, list) and last.isdigit() and int(last) < len(node) and isinstance(node[int(last)], str):
-        return node, int(last)
+    index = _index(last)
+    if isinstance(node, list) and index is not None and index < len(node) and isinstance(node[index], str):
+        return node, index
     return None
+
+
+def _index(part):
+    """An RFC 6901 array index: ASCII digits without a leading zero (as serde_json), else None."""
+    return int(part) if part == "0" or (part.isascii() and part.isdigit() and part[0] != "0") else None
 
 
 def _step(node, part):
     if isinstance(node, dict):
         return node.get(part)
-    if isinstance(node, list) and part.isdigit() and int(part) < len(node):
-        return node[int(part)]
+    index = _index(part)
+    if isinstance(node, list) and index is not None and index < len(node):
+        return node[index]
     return None
 
 
@@ -67,7 +74,7 @@ class ItemView:
         self.records = 0  # live records applied
         self.snapshots = 0  # snapshots installed
         self.broken = False
-        self._pending = None  # (epoch, coverage, entities) while a snapshot is being received
+        self._pending = None  # [epoch, coverage, entities, entity bytes] while a snapshot is being received
         self._overflow = False
         self._buf = bytearray()
 
@@ -141,7 +148,7 @@ class ItemView:
             phase = r.get("phase")
             if phase == "begin":
                 if isinstance(r.get("epoch"), str) and isinstance(r.get("coverage"), str):
-                    self._pending = (r["epoch"], r["coverage"], {})
+                    self._pending = [r["epoch"], r["coverage"], {}, 0]
                 else:
                     self._error("bad_record")
             elif phase == "end" and pending is not None:
@@ -149,8 +156,7 @@ class ItemView:
                     self._overflow = False
                 elif type(r.get("seq")) is int and r["seq"] >= 0:
                     # Installed only now: epoch, every entity and the cut's seq.
-                    self.epoch, self.coverage, self.entities = pending
-                    self.entity_bytes = sum(encoded_size(v) for _, v in self.entities.values())
+                    self.epoch, self.coverage, self.entities, self.entity_bytes = pending
                     self.seq = r["seq"]
                     self.snapshots += 1
                 else:
@@ -164,12 +170,12 @@ class ItemView:
         if self._pending is not None:  # inside a snapshot: only puts without seq
             entities = self._pending[2]
             if op == "put" and valid_key and type(rev) is int and "seq" not in r and "value" in r:
-                total = sum(encoded_size(v) for _, v in entities.values())
-                if self._admit(entities, total, key, r["value"]) is None:
+                total = self._admit(entities, self._pending[3], key, r["value"])  # a running total: linear
+                if total is None:
                     self._error("over_bound")
                     self._overflow = True
                 else:
-                    entities[key] = (rev, r["value"])
+                    entities[key], self._pending[3] = (rev, r["value"]), total
             else:
                 self._error("out_of_snapshot")
             return None
@@ -205,7 +211,7 @@ class ItemView:
             current = self.entities.get(key)
             if current is None:
                 return self._loss("unknown_entity")
-            if r.get("base") != current[0]:
+            if type(r.get("base")) is not int or r["base"] != current[0]:  # 1.0 or "1" is not a revision
                 return self._loss("stale_base")
             if ("text" in r) == ("bytes" in r):  # exactly one payload key, even if the other is null
                 return self._loss("bad_record")

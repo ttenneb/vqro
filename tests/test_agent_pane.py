@@ -286,6 +286,21 @@ class AgentPane(unittest.TestCase):
         self.assertEqual(queue["text"], "Messages · 1 held by Pi")
         self.assertEqual(queue["menu"][0]["command"], "agents.clear_queue")
 
+    def test_provider_bounds_are_clamped_and_an_overflowing_history_stops_instead_of_looping(self):
+        """Review P2-2: a provider's declaration is taken only up to the viewer's own ceiling."""
+        self.core.providers["items"]["capabilities"]["items.stream"] = {"entities": 10 ** 9, "entity_bytes": 10 ** 10}
+        self.core.resources["r3"] = dict(self.core.resources["r2"], id="r3")
+        self.agents.event("resource", {"id": "r3"})
+        c = self.agents.conversations["r3"]
+        self.assertEqual((c.view.max_entities, c.view.max_entity_bytes, c.clamped), (4096, 4 * 1024 * 1024, True))
+        many = {("message", f"m{i}"): {"position": i, "role": "assistant", "content": text("x"), "final": True} for i in range(65)}
+        self.feed(snapshot(many))  # r2 keeps 64 entities: this snapshot overflows
+        attaches = len(self.attaches())
+        self.assertIn("stopped updating", " ".join(self.texts()))
+        self.agents.flush_conversations()
+        self.assertEqual(len(self.attaches()), attaches, "no reattach loop")
+        self.assertIsNone(self.agents.conversations["r2"].stream)
+
     def test_a_failed_attach_is_retried_later_not_in_a_loop(self):
         self.core.fail_attach = True
         self.core.resources["r3"] = dict(self.core.resources["r2"], id="r3")
