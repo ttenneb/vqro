@@ -1,4 +1,5 @@
 """Owned native job-lifetime regressions: real check.sh bootstrap, no gate suites/backends/builds."""
+import errno
 import importlib.util
 import json
 import os
@@ -12,12 +13,43 @@ import sys
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('check_lifetime', ROOT/'scripts/check_lifetime.py')
 lifetime = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(lifetime)
+
+
+def collected_or_empty_cgroup(events):
+    """Only called after all owned-member pidfds reported exit; collection can race this read."""
+    try:
+        content = events.read_text()
+    except OSError as error:
+        if error.errno in (errno.ENOENT, errno.ENODEV):
+            return True
+        raise
+    return 'populated 0' in content.splitlines()
+
+
+class CgroupObservationTests(unittest.TestCase):
+    def test_collected_or_empty_is_accepted(self):
+        for content, error in (('populated 0\nfrozen 0\n', None), (None, errno.ENOENT), (None, errno.ENODEV)):
+            with self.subTest(content=content, error=error):
+                events = Mock()
+                if error: events.read_text.side_effect = OSError(error, 'fixture collection race')
+                else: events.read_text.return_value = content
+                self.assertTrue(collected_or_empty_cgroup(events))
+                events.read_text.assert_called_once_with()
+
+    def test_populated_or_other_errors_are_not_collected(self):
+        for content in ('populated 1\nfrozen 0\n', 'frozen 0\n', ''):
+            self.assertFalse(collected_or_empty_cgroup(Mock(read_text=Mock(return_value=content))))
+        for code in (errno.EACCES, errno.EIO, errno.EBADF, errno.ENOTDIR):
+            with self.subTest(errno=code):
+                with self.assertRaises(OSError) as caught:
+                    collected_or_empty_cgroup(Mock(read_text=Mock(side_effect=OSError(code, 'fixture error'))))
+                self.assertEqual(caught.exception.errno, code)
 
 
 @unittest.skipUnless(sys.platform == 'linux' and hasattr(os, 'pidfd_open'), 'Linux pidfd supervision')
@@ -169,7 +201,7 @@ exit "$code"
         for fd in self.fds:
             self.assertTrue(select.select([fd], [], [], 10)[0], 'owned job member survived teardown')
         events = Path('/sys/fs/cgroup'+(self.state/'cgroup').read_text().strip())/'cgroup.events'
-        if events.exists(): self.assertIn('populated 0', events.read_text())
+        self.assertTrue(collected_or_empty_cgroup(events), 'owned cgroup is still populated')
         self.assertIsNone(self.sentinel.poll(), 'unrelated owned sentinel must not be touched')
 
     def tearDown(self):
