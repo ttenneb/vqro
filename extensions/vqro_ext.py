@@ -13,6 +13,8 @@ them while the extension is off. Everything goes through the public core protoco
     ext.contribute({"menu/hello.say": {"where": "pane", "label": "Say hello", "command": "hello.say"}})
     ext.run()
 """
+import base64
+import collections
 import json
 import os
 import queue
@@ -57,6 +59,7 @@ def _resend_safe(method, params):
 
 
 MAX_RECORD_BYTES = 64 * 1024 * 1024
+STREAM_NOTES = ("stream.data", "stream.closed", "stream.gap", "stream.error")
 MAX_REQUEST_BYTES = 4 * 1024 * 1024
 NOTIFICATION_BYTES = 4 * 1024 * 1024
 MAX_PENDING = 128
@@ -83,6 +86,13 @@ class Vqro:
         self.recover_notifications = recover_notifications
         self.note_gap = None
         self.handlers = threading.BoundedSemaphore(32)
+        # Attached streams: id -> sink. Stream notifications go to the sink on the reader thread, in order and
+        # outside the event queue, so a busy extension can't turn stream data into an event gap. Sinks must
+        # not block or call the core (the reply would wait behind them).
+        self.streams = {}
+        self.early, self.early_bytes = {}, 0  # notes for a stream whose attach reply is not read yet (bounded)
+        self.closed = collections.deque(maxlen=256)  # streams closed here: late notes are dropped
+        self.closed_lock = threading.Lock()  # never self.lock: the reader must not wait behind a blocked send
         threading.Thread(target=self._read, daemon=True).start()
         threading.Thread(target=self._notes, daemon=True).start()
 
@@ -94,7 +104,7 @@ class Vqro:
                 raise VqroError("request exceeds 4 MiB; not sent" if "method" in msg else "reply exceeds recovery envelope; handler may have already run", "too_large")
             self.sock.sendall(wire)
 
-    def call(self, method, params=None):
+    def call(self, method, params=None, on_result=None):
         """One request. While `patient` (extension startup), a TRANSIENT failure of a request that is
         safe to resend (reads, registrations, compare-and-set writes) is retried with jittered
         backoff (0.5 s doubling, 30 s cap) instead of raising: a slow core must not burn the crash
@@ -102,7 +112,7 @@ class Vqro:
         n = 0
         while True:
             try:
-                return self._call(method, params)
+                return self._call(method, params, on_result)
             except VqroError as e:
                 if e.kind not in TRANSIENT or not getattr(self, "patient", False) or not _resend_safe(method, params):
                     raise
@@ -111,7 +121,9 @@ class Vqro:
                 print(f"vqro: {getattr(self, 'name', 'ext')}: {method}: {e.kind} (core slow); retrying in {delay:.1f}s", file=sys.stderr, flush=True)
                 time.sleep(delay)
 
-    def _call(self, method, params=None):
+    def _call(self, method, params=None, on_result=None):
+        """`on_result(result)` runs on the reader thread as the reply arrives, before anything after it is read
+        (used to register a stream's sink before its first data)."""
         if params is None or isinstance(params, dict):
             params = dict(params or {})
             known = getattr(self, "principal", os.environ.get("VQRO_PRINCIPAL"))
@@ -137,7 +149,7 @@ class Vqro:
                 raise VqroError("pending request limit; not sent", "overloaded")
             i = self.next
             self.next += 1
-            slot = self.waiting[i] = [ev, None]
+            slot = self.waiting[i] = [ev, None, on_result]
         try:
             self._send({"jsonrpc": "2.0", "id": i, "method": method, "params": params or {}})
             if not ev.wait(CALL_DEADLINE):
@@ -189,27 +201,72 @@ class Vqro:
         try:
             while True:
                 line = self.file.readline(MAX_RECORD_BYTES + 1)
-                if not line or len(line) > MAX_RECORD_BYTES:
+                if not line or len(line) > MAX_RECORD_BYTES or not self._line(json.loads(line), len(line)):
                     break
-                msg = json.loads(line)
-                if "method" in msg:
-                    if len(line) > MAX_REQUEST_BYTES:
-                        break
-                    if "id" not in msg:
-                        if not self._queue_note(msg, len(line)):
-                            break  # explicit disconnect/gap, never silent cache divergence
-                    elif self.handlers.acquire(blocking=False):
-                        threading.Thread(target=self._request, args=(msg,), daemon=True).start()
-                    else:
-                        self._send({"jsonrpc":"2.0", "id":msg["id"], "error":{"code":-32000,"message":"handler limit; not dispatched","data":{"kind":"overloaded"}}})
-                else:
-                    with self.lock:
-                        slot = self.waiting.get(msg.get("id"))
-                        if slot is not None:
-                            slot[1] = msg
-                            slot[0].set()
         finally:
             os._exit(0)  # core/transport failed; supervisor restarts, never replays calls
+
+    def _line(self, msg, size):
+        """Handle one message from the core on the reader thread; False ends the connection."""
+        if "method" in msg:
+            if size > MAX_REQUEST_BYTES:
+                return False
+            if "id" not in msg and msg["method"] in STREAM_NOTES:
+                self._stream_note(msg["method"], msg.get("params") or {})
+            elif "id" not in msg:
+                if not self._queue_note(msg, size):
+                    return False  # explicit disconnect/gap, never silent cache divergence
+            elif self.handlers.acquire(blocking=False):
+                threading.Thread(target=self._request, args=(msg,), daemon=True).start()
+            else:
+                self._send({"jsonrpc":"2.0", "id":msg["id"], "error":{"code":-32000,"message":"handler limit; not dispatched","data":{"kind":"overloaded"}}})
+            return True
+        with self.lock:
+            slot = self.waiting.get(msg.get("id"))
+        if slot is not None:
+            if slot[2] is not None and isinstance(msg.get("result"), dict):
+                try:
+                    slot[2](msg["result"])
+                except Exception:  # a broken hook must not kill the reader
+                    traceback.print_exc()
+            slot[1] = msg
+            slot[0].set()
+        return True
+
+    def register_stream(self, stream, sink):
+        """Route a stream's notes to `sink`, first replaying any that arrived before its attach reply. Runs on the
+        reader thread (from an `on_result` hook), so nothing can interleave."""
+        self.streams[stream] = sink
+        for method, params in self.early.pop(stream, ()):
+            self.early_bytes -= len(params.get("data") or "")
+            self._stream_note(method, params)
+
+    def _stream_note(self, method, params):
+        sink = self.streams.get(params.get("stream"))
+        if sink is None:
+            # Possibly ahead of its attach reply: keep a little (256 KiB); beyond that it is lost, and the
+            # viewer sees missing records and reattaches. Notes for streams never ours are dropped this way too.
+            stream, size = params.get("stream"), len(params.get("data") or "")
+            with self.closed_lock:
+                closed = stream in self.closed
+            if closed or size > 256 * 1024:
+                return
+            while self.early and (self.early_bytes + size > 256 * 1024 or len(self.early) >= 64):
+                for _, old in self.early.pop(next(iter(self.early))):  # evict the oldest stream's notes
+                    self.early_bytes -= len(old.get("data") or "")
+            self.early.setdefault(stream, []).append((method, params))
+            self.early_bytes += size
+            return
+        try:
+            if method == "stream.data":
+                sink.data(base64.b64decode(params.get("data") or ""))
+            elif method == "stream.error":
+                sink.error(params.get("error"))
+            else:
+                self.streams.pop(params.get("stream"), None)
+                sink.ended(method[len("stream."):], params.get("reason"))
+        except Exception:
+            traceback.print_exc()
 
     def _request(self, msg):
         try:
@@ -424,6 +481,24 @@ class Extension:
         """Set a view's live content (merged over its entry; not saved, not in history,
         cleared if this extension disconnects). Use for derived, frequently changing UI."""
         return self.vqro.call("view.publish", {"view": view, "content": content})
+
+    def attach_items(self, resource, sink, after=None):
+        """Attach a resource's item stream (agent-v0 section 4). `sink` gets `data(bytes)`, `error(error)` and
+        `ended(kind, reason)` (kind `closed` or `gap`) on the reader thread, in order; they must not block or call
+        the core. Returns the attach reply (`stream`, `epoch`, `initial`). Reattach after `ended` with `after`."""
+        params = {"resource": resource, "items": {"after": after} if after else {}}
+        return self.vqro.call("resource.attach", params,
+                              on_result=lambda r: self.vqro.register_stream(r["stream"], sink) if "stream" in r else None)
+
+    def close_stream(self, stream):
+        """Stop receiving a stream; its sink gets nothing more."""
+        with self.vqro.closed_lock:
+            self.vqro.closed.append(stream)
+        if self.vqro.streams.pop(stream, None) is not None:
+            try:
+                self.vqro.call("stream.close", {"stream": stream})
+            except VqroError:
+                pass  # already closed by the core
 
     def notify(self, text, style=None):
         """A short message every client shows briefly (style: ok, warn, error)."""

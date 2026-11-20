@@ -651,6 +651,9 @@ or `reset` (an in-stream snapshot, then records after its cut). Credit, window, 
 terminal stream's. A gap reason `retention` means the viewer fell out of the adapter's journal: reattach with
 `after`. Item streams have their own per-provider budget (`limits.max_item_streams`, at least agents × viewers),
 separate from terminal streams, and stream opens do not count against the provider's effect in-flight limit.
+Viewers: the Rust SDK's `provider_client::items::ItemView` and the Python SDK's `vqro_items.ItemView` with
+`Extension.attach_items` (stream notes reach a sink on the reader thread, outside the event queue, and data that
+outruns its attach reply is held briefly); the gate holds both to the runtime's digests.
 
 When a viewer cannot keep up, its affected stream closes with `reason: {reason: "slow_consumer"}`. All streams of a
 connection share one stream-data budget, so a viewer that stops reading loses every stream that writes while the

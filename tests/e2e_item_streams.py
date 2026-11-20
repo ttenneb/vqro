@@ -4,7 +4,8 @@ fake item runtime (src/bin/vqro-fake-items.rs) and 3 checking viewers (+1 stalle
 Timeline: steady; a stalled viewer holding every stream; a slow viewer (SIGSTOP); a session switch on 50 agents;
 a runtime SIGKILL + restart; then pause and compare every viewer's reconstruction with the runtime's digests.
 Exits 1 unless every viewer is identical to the runtime for every agent with zero integrity errors.
-Usage: e2e_item_streams.py OUT [--agents 200] [--rate 2] [--timescale 1] [--cpus 8-15]"""
+With --py-viewer a fourth viewer, the Python SDK's (tests/py_items_viewer.py), is held to the same checks.
+Usage: e2e_item_streams.py OUT [--agents 200] [--rate 2] [--timescale 1] [--cpus 8-15] [--py-viewer]"""
 import json, os, shutil, signal, socket, subprocess, sys, tempfile, threading, time
 from pathlib import Path
 
@@ -19,6 +20,8 @@ SCRATCH.mkdir(parents=True, exist_ok=True)
 R = Path(tempfile.mkdtemp(prefix="p3", dir=SCRATCH))  # socket path stays short (< 103 bytes)
 STOP_FILE = R / "stop"
 BURST_AGENTS, BURST_EVERY = arg("--burst-agents", "4"), arg("--burst-every", "8")
+PY = "--py-viewer" in sys.argv
+VIEWERS = ("v1", "v2", "v3", "p1") if PY else ("v1", "v2", "v3")
 for d in ("home", "st", "ext", "run"): (R / d).mkdir()
 (R / "run").chmod(0o700)
 (R / "ext/defaults.json").write_text('{"version":4,"extensions":[]}')
@@ -88,6 +91,8 @@ try:
     total = int(400 * SCALE)
     for v in ("v1", "v2", "v3"):
         start(v, [BIN / "vqro-items-viewer", "--name", v, "--seconds", total + 300, "--stop-file", STOP_FILE, "--out", OUT / f"{v}.json"], OUT / f"{v}.out")
+    if PY:
+        start("p1", [sys.executable, Path(__file__).resolve().parent / "py_items_viewer.py", "--name", "p1", "--seconds", total + 300, "--stop-file", STOP_FILE, "--out", OUT / "p1.json"], OUT / "p1.out")
     threading.Thread(target=sampler, daemon=True).start()
     PHASE[0] = "steady"; at(90)
     if "--no-stall" not in sys.argv:
@@ -123,11 +128,11 @@ try:
         truth[x["id"]] = r.get("result", {}).get("data")
     (OUT / "truth.json").write_text(json.dumps(truth, indent=1))
     STOP_FILE.touch()  # viewers finish after the truth is taken, never on a fixed clock
-    for v in ("v1", "v2", "v3"): procs[v].wait(timeout=120)
+    for v in VIEWERS: procs[v].wait(timeout=120)
     STOP.set()
     # Compare each viewer's reconstruction with the runtime at the paused cut.
     summary = {}
-    for v in ("v1", "v2", "v3"):
+    for v in VIEWERS:
         d = json.loads((OUT / f"{v}.json").read_text())
         same = sum(1 for k, t in truth.items() if t and d["agents"].get(k, {}).get("digest") == t["digest"] and d["agents"][k]["seq"] == t["seq"] and d["agents"][k]["epoch"] == t["epoch"])
         summary[v] = {"agents": len(truth), "identical_to_runtime": same, "counters": d["counters"]}

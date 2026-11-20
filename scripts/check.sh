@@ -115,9 +115,9 @@ history_budget() {
   "${CARGO[@]}" cargo test --release --test history_budget -- --include-ignored --test-threads=1 --nocapture
 }
 
-item_streams() {  # agent-v0 §4 regression gate (P3): 200 agents x 3 viewers + stalled, restart, session switch
+item_streams() {  # agent-v0 §4 regression gate (P3): 200 agents x 3 viewers + the Python SDK viewer + stalled, restart, session switch
   "${CARGO[@]}" cargo build --release --bin vqro --bin vqro-fake-items --bin vqro-items-viewer || return 1
-  "${CLEAN[@]}" CARGO_TARGET_DIR="$TARGET" python3 tests/e2e_item_streams.py "$LOGS/item-streams" --agents 200 --rate 2 --timescale 0.25
+  "${CLEAN[@]}" CARGO_TARGET_DIR="$TARGET" python3 tests/e2e_item_streams.py "$LOGS/item-streams" --agents 200 --rate 2 --timescale 0.25 --py-viewer
 }
 
 tui_scale_probe() {
