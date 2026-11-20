@@ -216,7 +216,7 @@ Checked against fake adapters. Level **P** (pull): a terminal agent plus a plugi
 
 | Declaration | Where | Checked by |
 |---|---|---|
-| operation window, scope capacity, quotas, protected-domain budget, identity cache size | the extension | I10, I17–I19, I21–I22, H14, H16, L7–L9 |
+| operation window, scope capacity, quotas, protected-domain budget, identity cache size | the extension | I10, I17–I19, I21–I23, H14, H16, L7–L9 |
 | `pull {points: {<point>: {precision}}, insert, evidence, framing}`, `consumer`; advisory terminal status | plugin's endpoint, agents extension | T1–T15 |
 | request route `human` / `coordinator` / `both` | ordinary attributed agent configuration | Q1–Q4 |
 
@@ -277,6 +277,13 @@ for one fake agent; the rest need the full extension.
   get/list results show held `ordering_unknown` plus that predecessor's delivery id. Observation does not resolve
   or resend it. An explicit authorized resolution lets scheduling reevaluate the successor's other eligibility
   checks, never replay the unknown predecessor.
+- I23 recovery funding: saturate normal content, then admit a bounded interrupt from the normal control share
+  (64 KiB / 16 records unavailable to content). Potentially uncertain controls stop at normal quota before
+  another native invocation; an explicit one-record archive still freezes/exports/frees with no resend.
+  Non-archive recovery cannot consume the defensive archive-only 64 KiB / 16-record margin inside the 10%
+  reserve. Accepted plans pre-fund 16 KiB / 4 future records, reduced to 8 KiB / 2 after export; scope receipts
+  retain at most 16. A known-metadata negative control need not exhaust without the defensive margin and is
+  not evidence that the margin is necessary.
 
 **H. Pause and scope resume** (R's traces). H1 crash before claim: no effect until an explicit current-epoch resume,
 then at most one claim. H2 crash after durable claim: `unknown` through any resume, never invoked again. H3 the runtime

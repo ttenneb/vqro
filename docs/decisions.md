@@ -557,6 +557,13 @@ replaced when the Pi bridge is ported.
   can hold 300 MiB of extra encoded payload at 200 default agents. This is a calculated bound, not a measured
   RSS cap; C3's gate now covers attached retention gaps and a stalled viewer with all 200 streams.
 
+**Further implementation rulings (2026-11-20, spec batch 5).**
+- Uncertain external intents use normal storage admission, with 64 KiB / 16 normal record slots left for bounded
+  controls, unavailable to content. Reserved control-lane priority is independent of storage classification.
+  Inside the full 10% recovery reserve, the final 64 KiB / 16 records are archive-only as a defensive margin,
+  not a second proved counterexample. Scope receipts retain 16; accepted archive plans separately fund
+  16 KiB / 4 future records (8 KiB / 2 after export), with at most four pending plans.
+
 **Human answers (2026-11-19, CONFIRMED).**
 - **AS1, pause:** "vqro stops delivery": paused means vqro sends, hands out and wakes nothing until resumed; an agent
   still working shows as working; a runtime with a real pause may offer it as an extra capability. Physical

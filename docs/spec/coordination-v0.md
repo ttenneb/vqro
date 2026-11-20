@@ -406,7 +406,9 @@ without ever losing it:
    nothing is freed. Repeating the `op` inspects that archive, never exports a different set or frees blindly.
 
 A lookup of an archived delivery returns its locator. A missing or unreadable archive answers `unknown`, never "no
-effect". Archive is never triggered by memory pressure.
+effect". Archive is never triggered by memory pressure. At most four archive plans are pending. Every accepted
+plan pre-reserves **16 KiB / 4 future records** for its remaining recovery metadata; after export this is
+**8 KiB / 2 future records**. Reject admission if the funding does not fit, before external effects (§10).
 
 ### 6.2 Request routing
 
@@ -567,10 +569,19 @@ different base, so no controlled equivalence is claimed. The 2 MiB case also pas
 capacity, **not certified at 100 txn/s** (normal traffic 8927/9000, layout p99 up to 1.27 s). Every retained item is
 charged at its encoded size:
 
+**Recovery partition (K2 `476e43a`).** Potentially uncertain external intents are charged to the **normal storage
+budget before invocation**, even though their writes use reserved control-lane priority. Content cannot consume
+a **64 KiB / 16-record share within that normal budget** kept for bounded control intents. The separate 10%
+recovery reserve keeps its full size; its last **64 KiB / 16 records are archive-only**, leaving the remainder
+for other recovery controls. This archive-only share is a defensive margin, not a second proved exhaustion case:
+the known-metadata negative control was already covered by retaining only **16 scope receipts**. Archive plans
+also fund their future metadata (§6.1); this charge is separate from their actual retained manifest/plan bytes.
+
 | Retained item | Bound each | Count | `B` = 2 MiB, 200 agents | `B` = 4 MiB | `B` = 8 MiB |
 |---|---|---|---|---|---|
 | domain audit/header metadata (C1, fixed) | 64 KiB | 1 | 65,536 | 65,536 | 65,536 |
-| control and recovery reserve | | `ceil(B/10)` | 209,716 | 419,431 | 838,861 |
+| control and recovery reserve (includes archive-only 64 KiB / 16 records, not added again) | | `ceil(B/10)` | 209,716 | 419,431 | 838,861 |
+| normal-ledger control headroom (content excluded) | 64 KiB | 16 record slots | 65,536 | 65,536 | 65,536 |
 | tombstone summary (encoded identity ≤ 2 KiB, ≤ 4 handles, evidence, counts, membership ref; legal maximum 2,503 B) | 3 KiB | agents with coordination state | 614,400 | 614,400 | 614,400 |
 | gate | 128 B | agents | 25,600 | 25,600 | 25,600 |
 | operation-window result or refusal (compact: state, outcome, receipt stage, error kind, ids) + fingerprint | 256 B | window `W` (1024) | 262,144 | 262,144 | 262,144 |
@@ -578,14 +589,17 @@ charged at its encoded size:
 | final record, compact (metadata, attempt, compact result; content dropped) | 1 KiB | 256 retained | 262,144 | 262,144 | 262,144 |
 | handover plan | 4 KiB | 16 open | 65,536 | 65,536 | 65,536 |
 | archive manifest (pending archive) | 4 KiB | 4 | 16,384 | 16,384 | 16,384 |
+| future archive metadata funding (frozen/exporting plan; 8 KiB / 2 records after export) | 16 KiB / 4 records | 4 plans | 65,536 | 65,536 | 65,536 |
 | scope receipt | 8 KiB | 16 retained | 131,072 | 131,072 | 131,072 |
-| **fixed subtotal** | | | **1,718,068** | **1,927,783** | **2,347,213** |
-| open record: metadata 2 KiB + content ≤ 32 KiB + compact outcome reserved at admission 1 KiB (per step for a recipe) | ≤ 35 KiB | the rest | 379,084 left | 2,266,521 left | 6,041,395 left |
+| **fixed subtotal** | | | **1,849,140** | **2,058,855** | **2,478,285** |
+| open record: metadata 2 KiB + content ≤ 32 KiB + compact outcome reserved at admission 1 KiB (per step for a recipe) | ≤ 35 KiB | the rest | 248,012 left | 2,135,449 left | 5,910,323 left |
 
 C1 charges every domain a fixed 64 KiB audit/header reservation inside `B`. With 200 agents, the default **4 MiB**
-domain leaves room for about **63 maximum-size open messages or 553 small ones** (1 KiB content, 4 KiB charged),
-beyond which admission is refused `quota`; a 2 MiB domain holds about 10 or 92, and an 8 MiB domain about 168 or
-1,474 under its 4096-record ceiling. A record count is a ceiling, not room for that many maximum payloads.
+domain leaves room for about **59 maximum-size open messages or 521 small ones** (1 KiB content, 4 KiB charged),
+beyond which admission is refused `quota`; a 2 MiB domain holds about 6 or 60, and an 8 MiB domain about 164 or
+1,442 under its 4096-record ceiling. This conservative example includes four frozen plans' future funding and
+normal control headroom; the archive-only share is already inside the 10% reserve. A record count is a ceiling,
+not room for that many maximum payloads.
 Bounds are on the **encoded** size, not raw string limits (an identity of legal strings can encode to 1,989 B). Each
 open record reserves a **compact outcome** per attempt and per recipe step (steps × 1 KiB) at admission, and admission
 is refused `quota` if the reservation doesn't fit. A compact outcome is at most 1 KiB: state, receipt stage, outcome
