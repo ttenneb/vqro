@@ -10,7 +10,6 @@ import json
 
 from .cases import case, invocations, settled
 from ..wire import RpcError
-from ..results import HarnessGap
 
 
 def digest(value):
@@ -39,7 +38,9 @@ def frozen_set_kept(initial, *replays):
     """L10: every replay of the frozen scope action reports exactly the recorded target set (no extra or missing
     target, same receipt)."""
     return all(sorted(replay.get("targets") or []) == sorted(initial.get("targets") or [])
-               and replay.get("receipt") == initial.get("receipt") for replay in replays)
+               and replay.get("receipt") == initial.get("receipt")
+               and replay.get("selected", len(replay.get("targets") or [])) == initial.get("selected", len(initial.get("targets") or []))
+               for replay in replays)
 
 
 def status_effects(events):
@@ -228,6 +229,12 @@ async def membership_is_ordinary_configuration(ctx):
         await sub.peer.call("workspace.revert", {"txn": again["txn"]})
         ctx.check((await membership(sub, mover))["value"] == old, "an explicit revert undoes the move with the domain full", txn=again["txn"])
         replay_after_revert = await sub.command("inbox.op", {"op": op})
+        stored = (await sub.peer.call("operational.get", {"domain": "coord", "key": "operational/coord/scope/" + frozen["receipt"]})).get("entry") or {}
+        stored_value = stored.get("value") or {}
+        ctx.check(stored_value.get("control_revision") == frozen.get("control_revision") and sorted(stored_value.get("targets") or []) == sorted(frozen.get("targets") or []),
+                  "the stored frozen selection keeps its control revision and targets after both undos",
+                  stored={k: stored_value.get(k) for k in ("targets", "control_revision", "membership_revision")},
+                  frozen={k: frozen.get(k) for k in ("targets", "control_revision", "receipt")})
         ctx.check(frozen_set_kept(frozen, replay, replay_after_revert) and latecomer not in (replay.get("targets") or []),
                   "the scope action frozen before the undo keeps exactly its recorded set (after u and after revert)",
                   frozen=frozen.get("targets"), after_undo=replay.get("targets"), after_revert=replay_after_revert.get("targets"),
@@ -461,8 +468,27 @@ async def advisory_terminal_status(ctx):
     try: owner_check = await report(c, "intruder", "requires_action", 50, peer=other)
     except RpcError as error: owner_check = {"refused": error.kind}
     await asyncio.sleep(.3)
+    # The terminal's launcher-tagged principal may report: the launcher supplies VQRO_PRINCIPAL at spawn (core-protocol
+    # generic spawn), and that principal connects with it as its hello identity.
+    launched = (await ctx.peer.call("resource.spawn", {"argv": ["sh"], "env": {"VQRO_PRINCIPAL": "t13-launched"}}, timeout=30))["resource"]["id"]
+    launcher_peer = await ctx.connect("t13-launched")
+    try: launched_reply = await report(launched, "launched-app", "running", 1, peer=launcher_peer)
+    except RpcError as error: launched_reply = {"refused": error.kind}
+    await table_has(lambda t: t.get(launched, {}).get("app") == "launched-app", "launcher-tagged report published") if launched_reply.get("applied") else None
     ownership = {"reply": owner_check, "before": before_other, "after": views.table().get(c),
-                 "launcher_tagged_positive": "not exercised: needs a terminal spawned with a launcher principal tag"}
+                 "launcher_tagged": {"terminal": launched, "principal": "t13-launched", "reply": launched_reply,
+                                     "published": views.table().get(launched)}}
+    # Reports drop at removal (a live terminal resource removed by its provider, no end) as well as at end.
+    await ctx.native.call("add", ref="t13-removed", fields={"kind": "terminal"})
+    async def removable():
+        rows = [row for row in await ctx.resources() if row["backend_ref"] == "t13-removed" and row.get("available")]
+        return rows[0]["id"] if rows else None
+    removed = await ctx.wait(removable, label="a provider terminal to remove", timeout=10)
+    await report(removed, "app", "idle", 1)
+    await table_has(lambda t: removed in t, "report for the provider terminal published")
+    await ctx.native.call("remove", ref="t13-removed")
+    await table_has(lambda t: removed not in t, "a removed terminal's report is dropped")
+    ctx.check(removed not in views.table(), "a report is dropped at terminal removal (no end)", terminal=removed)
     # Reports drop at terminal end.
     await ctx.peer.call("resource.kill", {"resource": d})
     await table_has(lambda t: d not in t, "an ended terminal's report is dropped")
@@ -501,6 +527,8 @@ async def advisory_terminal_status(ctx):
             raise
     again = await ctx.wait(restarted, label="agents.status answered by the restarted extension", timeout=30)
     ctx.check(again.get("applied") is True, "reports are lost on extension restart (seq 1 applies again)", reply=again)
+    ctx.check(ownership["launcher_tagged"]["reply"].get("applied") is True
+              and (ownership["launcher_tagged"]["published"] or {}).get("app") == "launched-app",
+              "the terminal's launcher-tagged principal may report", **ownership["launcher_tagged"])
     ctx.check(ownership["reply"].get("refused") == "not_authorized" and ownership["after"] == ownership["before"],
               "another principal's report is refused not_authorized without applying", **ownership)
-    raise HarnessGap("T13 launcher-tagged non-owner positive report remains unexercised; no whole-row pass")
