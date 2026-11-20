@@ -2736,6 +2736,10 @@ impl App {
     /// A click in a panel: page tabs, expanders, rows (left activates, right opens the row's menu).
     /// Returns whether it hit something.
     fn panel_click(&mut self, key: &str, view: &str, pos: Position, button: MouseButton, ctx: Value) -> bool {
+        // Every click path (inline actions, a row's menu, chips, rows) runs in the panel's context, as keys do.
+        let mut ctx = ctx;
+        ctx["panel"] = json!(key);
+        ctx["panel_view"] = json!(view);
         let Some(root_hits) = self.hit.panels.get(key) else { return false };
         let in_detail=root_hits.detail_area.is_some_and(|r|r.contains(pos));
         let hits=if in_detail {let Some(h)=root_hits.detail.as_deref()else{return false};h}else{root_hits};
@@ -2758,6 +2762,7 @@ impl App {
             st.sel = row;
             let st = st.clone();
             if let Some(a) = panel::rows(&value, &st).get(row).and_then(|r| r.item["actions"].get(ai).cloned()) {
+                // `ctx` names this panel (set above), so client.panel and client.copy act on it.
                 if button == MouseButton::Left { self.activate_item(Item::from_entry(&a), ctx, Some(pos)); }
             }
             return true;
@@ -4096,6 +4101,16 @@ mod tests {
         let x = line.find("[copy]").map(|i| line[..i].chars().count() as u16).unwrap();
         app.panel_click("p", "p", Position { x: x + 1, y: 1 }, MouseButton::Left, json!({}));
         assert!(app.message.starts_with("copy: sent 1 character"), "{}", app.message);
+        // An action that acts on its panel (client.panel) gets the panel in its context, as a key would: the
+        // mouse caller's context names only the pane (vqro-lead-secondary's probe).
+        app.load(&json!({"epoch":"e","seq":2,"entries":{"view/p":{"value":{"kind":"panel","items":[
+            {"text":"first","actions":[{"text":"last","command":"client.panel","args":{"action":"last"}}]},{"text":"second"},{"text":"third"}]}}}}));
+        let mut line = String::new();
+        terminal.draw(|f| { app.draw_view(f, "p", Rect::new(0, 0, 70, 6), true, &Palette::default(), &Icons::new(None, false));
+            let b = f.buffer_mut(); line = (0..70).map(|x| b[(x, 1)].symbol().to_string()).collect(); }).unwrap();
+        let x = line.find("[last]").map(|i| line[..i].chars().count() as u16).unwrap();
+        app.panel_click("p", "p", Position { x: x + 1, y: 1 }, MouseButton::Left, json!({"view": "p"}));
+        assert_eq!(app.pstate["p"].sel, 2, "client.panel from an inline action acted on this panel");
     }
 
     #[tokio::test]
