@@ -246,7 +246,7 @@ impl Agent {
         let content=project_content(&message["content"]);
         let mut native=message.as_object().cloned().unwrap_or_default();native.remove("role");native.remove("content");
         let mut value=json!({"position":position,"role":message["role"],"content":content,"final":final_value,"native":native});
-        let at_ms=if message["role"]=="user"{count(&message["timestamp"])}else{None};
+        let at_ms=count(&message["timestamp"]);
         if let Some(at_ms)=at_ms{value["at_ms"]=json!(at_ms);}
         if vqro::limits::encoded_bytes(&value)>ENTITY_BYTES {
             self.incomplete.insert("items".into());self.journal.set_coverage(Coverage::Tail);

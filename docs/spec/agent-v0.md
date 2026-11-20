@@ -125,7 +125,7 @@ reports another directory. Its coalesced read-only `get_session_stats` observati
 `contextUsage` window/nullable occupancy and input/output/cache token totals, fenced by session/observation epoch
 and metadata revision. Pi1.5.2's aggregate cost is a bare number without retained currency or reported/estimated
 basis; the bridge omits `usage.cost` and marks `usage.cost` incomplete rather than guessing billing semantics or
-publishing a private cost mirror. Native user-message timestamps become `at_ms`; uncorrelated native messages
+publishing a private cost mirror. Valid native message timestamps (including assistant replies) become `at_ms`; uncorrelated native messages
 still have no inferred core origin/delivery. A newly evidenced empty native session starts `all_retained`; a
 loaded/unknown history starts `tail`, and pruning, omissions or protocol gaps downgrade coverage to `tail`.
 A new observation epoch or native command ACK alone never proves complete native history.

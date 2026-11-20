@@ -198,6 +198,25 @@ fn native_user_timestamp_never_invents_a_sender_or_delivery(){
     }
 }
 #[test]
+fn assistant_and_other_native_message_roles_keep_their_timestamp_even_when_omitted(){
+    for role in ["assistant","system","_future_role"]{
+        for text in ["reply".to_owned(),"x".repeat(100000)]{
+            let mut a=make();event(&mut a,json!({"type":"message_end","message":{"role":role,"timestamp":1795190400123u64,"content":text}}));
+            let rows=entities(&a,"message");let value=&rows[0]["value"];
+            assert_eq!(value["at_ms"],1795190400123u64);assert_eq!(value["role"],role);
+            assert!(value.get("origin").is_none());assert!(value.get("delivery").is_none());
+            if text.len()>state::ENTITY_BYTES{assert_eq!(value["incomplete"],json!(["content"]));}
+        }
+    }
+}
+#[test]
+fn assistant_missing_or_invalid_native_time_is_not_replaced_with_receive_time(){
+    for timestamp in [Value::Null,json!(-1),json!("1795190400123"),json!(1.25),json!(1u64<<53)]{
+        let mut a=make();event(&mut a,json!({"type":"message_end","message":{"role":"assistant","timestamp":timestamp,"content":"reply"}}));
+        assert!(entities(&a,"message")[0]["value"].get("at_ms").is_none());
+    }
+}
+#[test]
 fn session_cwd_is_native_or_the_known_controlled_launch_directory(){
     let mut a=Agent::with_cwd("private".into(),Signals::new(),"/private/launch".into());native_session(&mut a,"s1",json!(0));
     assert_eq!(a.session.as_ref().unwrap()["cwd"],"/private/launch");
