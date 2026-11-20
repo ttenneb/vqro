@@ -197,6 +197,17 @@ fn tab_marks_like_the_model() {
 }
 
 #[test]
+fn tab_latches_like_the_model() {
+    check("tablatch.json", |case| {
+        let mut ws = Workspace::default();
+        for step in case["steps"].as_array().unwrap() {
+            if step.get("load").is_some() { ws.load(&step["load"]); } else { ws.apply(&step["event"]); }
+        }
+        json!(ws.reached.iter().collect::<std::collections::BTreeMap<_, _>>())
+    });
+}
+
+#[test]
 fn tab_finishes_like_the_model() {
     check("tabreached.json", |case| json!(tabbar::reached(Some(&case["old"]).filter(|o| !o.is_null()), &case["new"])));
 }

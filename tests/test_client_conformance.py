@@ -155,6 +155,13 @@ class Conformance(unittest.TestCase):
         ws.load(snap(3, []))
         self.assertEqual(ws.reached, {}, "a snapshot without the resource prunes its finish")
 
+    def test_tab_latch(self):
+        for case in fixture("tablatch.json")["cases"]:
+            ws = model.Workspace()
+            for step in case["steps"]:
+                ws.load(step["load"]) if "load" in step else ws.apply(step["event"])
+            self.assertEqual(ws.reached, case["expect"], case["name"])
+
     def test_tab_reached(self):
         for case in fixture("tabreached.json")["cases"]:
             self.assertEqual(model.reached(case["old"], case["new"]), case["expect"], case["name"])

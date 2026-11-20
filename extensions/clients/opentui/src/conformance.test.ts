@@ -137,6 +137,14 @@ test("snapshot adoption keeps a covered finish (review P2) and prunes gone resou
   expect(ws.reached.size).toBe(0);
 });
 
+test("tab latches", async () => {
+  for (const c of (await fixture("tablatch.json")).cases) {
+    const ws = new m.Workspace();
+    for (const step of c.steps) { if (step.load) ws.load(step.load); else ws.apply(step.event); }
+    expect(Object.fromEntries(ws.reached), c.name).toEqual(c.expect);
+  }
+});
+
 test("tab finishes", async () => {
   for (const c of (await fixture("tabreached.json")).cases) expect(m.reached(c.old, c.new), c.name).toEqual(c.expect);
 });
