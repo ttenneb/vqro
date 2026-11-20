@@ -849,7 +849,7 @@ class Coordinator:
         mode = record["mode"]
         caps = self._caps(self.resources().get(target, {}), native)
         if record.get("strategy") == "interrupt_then_start":
-            steps = [("agent.queue", {"v": 0, "action": "clear"}, "queue"),
+            steps = [("agent.queue", {"v": 0, "epoch": native.get("epoch"), "action": "clear"}, "queue"),
                      ("agent.interrupt", {"v": 0}, "interrupt"),
                      ("agent.send", self._send_args(record, "start"), "send:start")]
         else:
@@ -1353,6 +1353,8 @@ class Coordinator:
                 work.put("control", control)
             method, target = operation, agent
             native_args = dict(args.get("args") or {}, v=0)
+            if method == "agent.queue":
+                native_args.setdefault("epoch", native.get("epoch"))
             caps = self._caps(resource, native)
             how = native_args.pop("how", "graceful") if action == "stop" else None
             if action == "stop" and how not in ("graceful", "host_kill"):

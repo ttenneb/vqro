@@ -120,7 +120,7 @@ def agent(ref, native, name=None, instance='stable', incarnation='i1', handler=N
     peer = Client(handler=handler)
     reg = peer.call('provider.register', {'name': name, 'role': 'backend', 'instance': instance,
         'software': {'name': 'fake', 'version': '0'}, 'provider_version': '0',
-        'capabilities': {'agent': {}, **({'agent.send': {}} if handler else {})}})
+        'capabilities': {'agent': {}, **{key: {} for key in native.get('caps', {}) if key.startswith('agent.')}}})
     facts = {'ref': ref, 'incarnation': incarnation, 'kind': 'agent', 'state': 'live',
              'status': {'state': native.get('state', 'idle'), 'app': 'fake'}, 'data': {'agent': native}}
     peer.call('provider.sync', {'generation': reg['generation'], 'resources': [facts], 'final': True})
@@ -478,9 +478,43 @@ def case_archive():
     return {'verified_free': True, 'missing_artifact_unknown': True}
 
 
+def case_queue_epoch():
+    calls, runtime = [], {'running': True}
+    def handle(method, params):
+        operation, args = params['op'], params['args']
+        calls.append({'operation': operation, 'epoch': args.get('epoch')})
+        if operation == 'agent.queue':
+            if args.get('epoch') != 'e1':
+                return {'outcome': 'rejected', 'error': {'kind': 'stale', 'message': 'queue epoch mismatch'}}
+        elif operation == 'agent.interrupt':
+            runtime['running'] = False
+        elif operation == 'agent.send':
+            assert not runtime['running'], 'start before native interrupt observation'
+        return {'outcome': 'accepted' if operation == 'agent.send' else 'observed'}
+    facts = native('running')
+    facts['caps'].update({'agent.send': {'modes': {'start': {'busy': 'reject'}},
+        'origin': [{'as': 'attributed_user', 'role': 'user', 'frame': 'sender_header'}]},
+        'agent.queue': {'actions': ['clear', 'list']},
+        'agent.interrupt': {'pending': 'unknown', 'scope': 'foreground', 'waits': 'idle'}})
+    rid = agent('queue-epoch', facts, handler=handle)
+    scope('pause')
+    o = op('recipe')
+    delivery = cmd('inbox.send', {'op': o, 'submission': o, 'to': rid, 'mode': 'preempt',
+        'strategy': 'interrupt_then_start', 'content': [{'type': 'text', 'text': 'recipe input'}]})['delivery']
+    scope('resume')
+    wait(lambda: cmd('inbox.get', {'delivery': delivery})['state'] == 'accepted')
+    assert [row['operation'] for row in calls] == ['agent.queue', 'agent.interrupt', 'agent.send'], calls
+    assert calls[0]['epoch'] == 'e1', calls
+    default = cmd('control', {'op': op('queue-list'), 'target': rid, 'action': 'queue', 'args': {'action': 'list'}})
+    assert default['state'] == 'observed' and calls[-1]['epoch'] == 'e1', (default, calls)
+    stale = cmd('control', {'op': op('queue-stale'), 'target': rid, 'action': 'queue', 'args': {'action': 'list', 'epoch': 'old'}})
+    assert stale['state'] == 'rejected' and calls[-1]['epoch'] == 'old', (stale, calls)
+    return {'native_recipe_steps': 3, 'queue_epoch': 'e1', 'explicit_stale_preserved': True}
+
+
 CASES = {'brick': case_brick, 'idle': case_idle, 'membership': case_membership, 'identity': case_identity, 'reconcile': case_reconcile, 'names': case_names,
          'rawcycle': case_rawcycle, 'invalid_declaration': case_invalid_declaration,
-         'window': case_window, 'handover': case_handover, 'archive': case_archive}
+         'window': case_window, 'handover': case_handover, 'archive': case_archive, 'queue_epoch': case_queue_epoch}
 core = None
 try:
     core = subprocess.Popen([str(BIN), 'serve', '--fake'], env=ENV, cwd=ROOT, stdout=open(ROOT / 'core.log', 'wb'), stderr=subprocess.STDOUT)
