@@ -41,6 +41,8 @@ fn panels_flatten_like_the_model() {
         state.page = s["page"].as_u64().unwrap_or(0) as usize;
         state.filter = s["filter"].as_str().unwrap_or("").to_string();
         state.open = s["open"].as_object().map(|o| o.iter().map(|(k, v)| (k.clone(), v == true)).collect()).unwrap_or_default();
+        state.facets = s["facets"].as_object().map(|o| o.iter().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).collect()).unwrap_or_default();
+        state.sort = s["sort"].as_u64().map(|n| n as usize);
         let p = &case["panel"];
         let custom: Option<Vec<&str>> = case["features"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect());
         let features = custom.as_deref().unwrap_or(panel::BASE_FEATURES);
@@ -51,6 +53,19 @@ fn panels_flatten_like_the_model() {
         let mut out = json!({"rows": rows, "missing": panel::missing_for(p, panel::BASE_FEATURES), "list_detail": enhancement});
         if let Some(q) = s["search"].as_str() {
             out["search"] = json!(panel::search(p, &state, q, features).into_iter().map(|(id, open)| json!({"id": id, "open": open})).collect::<Vec<_>>());
+        }
+        // Facet line counts and the sort label, where the panel declares them (features `facets`, `sort`).
+        let counts = panel::facet_counts(p, &state, features);
+        if !counts.is_empty() {
+            out["facets"] = json!(counts.iter().map(|c| json!({"key": c.key, "label": c.label, "chosen": c.chosen, "all": c.all,
+                "values": c.values.iter().map(|(v, l, n)| json!({"value": v, "label": l, "count": n})).collect::<Vec<_>>()})).collect::<Vec<_>>());
+        }
+        if features.contains(&"sort") { if let Some(label) = panel::sort_label(p, &state) { out["sort"] = json!(label); } }
+        // Column widths for a given width, where the panel declares `columns` (feature `columns`).
+        if let (Some(spec), Some(width)) = (panel::declared(p, &state, "columns"), case["width"].as_u64()) {
+            if features.contains(&"columns") {
+                out["column_widths"] = json!(panel::column_widths(spec, &panel::rows_for(p, &state, features), width as usize));
+            }
         }
         out
     });

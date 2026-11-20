@@ -13,13 +13,21 @@ test("panels", async () => {
   expect(doc.base_features).toEqual(m.BASE_FEATURES);
   for (const c of doc.cases) {
     const s = c.state, p = c.panel;
-    const got = m.rows(p, s.page ?? 0, s.filter ?? "", s.open ?? {}, c.features ?? m.BASE_FEATURES).map((r) => ({
+    const features = c.features ?? m.BASE_FEATURES;
+    const got = m.rows(p, s.page ?? 0, s.filter ?? "", s.open ?? {}, features, s.facets ?? {}, s.sort ?? null).map((r) => ({
       id: r.id, depth: r.depth, text: r.item.text ?? null, type: m.kind(r.item), has_children: r.has_children, expanded: r.expanded,
       pinned: r.pinned, selectable: m.selectable(r.item), bottom: r.bottom, chips: "chips" in r.item ? r.item.chips.map((x: any) => x.text ?? null) : null,
     }));
     const enhancement = p.list_detail && typeof p.list_detail === "object" ? m.missingFor(p.list_detail, m.BASE_FEATURES).length === 0 : null;
     const want: any = { rows: got, missing: m.missingFor(p, m.BASE_FEATURES), list_detail: enhancement };
     if (s.search !== undefined) want.search = m.search(p, s.search, s.page ?? 0, s.filter ?? "", c.features ?? m.BASE_FEATURES).map(([id, open]) => ({ id, open }));
+    const counts = m.facetCounts(p, s.page ?? 0, s.filter ?? "", s.facets ?? {}, features);
+    if (counts.length) want.facets = counts;
+    const label = features.includes("sort") ? m.sortLabel(p, s.page ?? 0, s.sort ?? null) : null;
+    if (label) want.sort = label;
+    const spec = m.declared(p, s.page ?? 0, "columns");
+    if (spec && features.includes("columns") && c.width != null)
+      want.column_widths = m.columnWidths(spec, m.rows(p, s.page ?? 0, s.filter ?? "", s.open ?? {}, features, s.facets ?? {}, s.sort ?? null), c.width);
     expect(want, c.name).toEqual(c.expect);
   }
 });

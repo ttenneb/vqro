@@ -129,8 +129,154 @@ def _shown(items, prefix, features):
     return [pair for i, item in enumerate(items) if isinstance(item, dict) for pair in expand(item, f"{prefix}{i}", features)]
 
 
-def _subtree(item, rid, f, features):
-    return _matches(item, f) or any(_subtree(c, cid, f, features) for c, cid in _shown(item.get("children") or [], rid + "/", features))
+def _row_ok(item, f, chosen):
+    """A row's own match: the text filter (lower case) and every chosen facet."""
+    return (not f or _matches(item, f)) and all(has_facet(item, k, w) for k, w in chosen)
+
+
+def _subtree(item, rid, f, features, chosen=()):
+    return _row_ok(item, f, chosen) or any(_subtree(c, cid, f, features, chosen) for c, cid in _shown(item.get("children") or [], rid + "/", features))
+
+
+# ---- facets, sort, columns (features `facets`, `sort`, `columns`) --------------------------------------------------
+
+def _page_value(value, page=0):
+    pages = value.get("pages")
+    if isinstance(pages, list) and pages:
+        p = pages[min(page, len(pages) - 1)]
+        return p if isinstance(p, dict) else value
+    return value
+
+
+def declared(value, page, field):
+    """Where a panel declares `facets`, `sorts` or `columns`: on the current page, else on the panel."""
+    own = _page_value(value, page).get(field)
+    if isinstance(own, list):
+        return own
+    top = value.get(field)
+    return top if isinstance(top, list) else None
+
+
+def has_facet(item, key, want):
+    v = (item.get("facets") or {}).get(key) if isinstance(item.get("facets"), dict) else None
+    return v == want if isinstance(v, str) else isinstance(v, list) and want in v
+
+
+def chosen_facets(value, page, facets, features):
+    if "facets" not in features or not facets:
+        return []
+    keys = [f.get("key") for f in declared(value, page, "facets") or [] if isinstance(f, dict)]
+    return sorted((k, w) for k, w in facets.items() if k in keys and isinstance(w, str))
+
+
+def chosen_sort(value, page, sort, features):
+    if "sort" not in features or sort is None:
+        return None
+    sorts = declared(value, page, "sorts") or []
+    if not 0 <= sort < len(sorts) or not isinstance(sorts[sort].get("key"), str):
+        return None
+    return sorts[sort]["key"], sorts[sort].get("desc") is True
+
+
+def _sort_key(item, key, desc):
+    v = (item.get("sort") or {}).get(key) if isinstance(item.get("sort"), dict) else None
+    if isinstance(v, bool) or not isinstance(v, (int, float, str)):
+        return None
+    return (0, v) if isinstance(v, (int, float)) else (1, v.lower())
+
+
+def _sorted(pairs, by):
+    """One sibling list, stably sorted within each run between header and separator rows; keyless rows last."""
+    if not by:
+        return pairs
+    key, desc = by
+    out, run = [], []
+
+    def flush():
+        keyed = [p for p in run if _sort_key(p[0], key, desc) is not None]
+        rest = [p for p in run if _sort_key(p[0], key, desc) is None]
+        out.extend(sorted(keyed, key=lambda p: _sort_key(p[0], key, desc), reverse=desc) + rest)
+        run.clear()
+    for pair in pairs:
+        if kind(pair[0]) in ("header", "separator"):
+            flush()
+            out.append(pair)
+        else:
+            run.append(pair)
+    flush()
+    return out
+
+
+def facet_counts(value, page=0, filter="", facets=None, features=BASE_FEATURES):
+    """The facet line: [{key, label, chosen, all, values: [{value, label, count}]}]. A count is the rows that would
+    show if that value were chosen, given the text filter and the other choices; headers, separators, toolbar and
+    pin: "bottom" rows don't count; rows without the key count only under All."""
+    decl = declared(value, page, "facets") if "facets" in features else None
+    if not decl:
+        return []
+    f, chosen, items = filter.lower(), chosen_facets(value, page, facets, features), []
+
+    def walk(lst, prefix):
+        for item, rid in _shown(lst, prefix, features):
+            if kind(item) not in ("header", "separator"):
+                items.append(item)
+            walk(item.get("children") or [], rid + "/")
+    walk([i for i in page_items(value, page) if not ("pin" in features and isinstance(i, dict) and i.get("pin") == "bottom")], "")
+    out = []
+    for d in decl:
+        if not isinstance(d, dict) or not isinstance(d.get("key"), str):
+            continue
+        key = d["key"]
+        pool = [i for i in items if _row_ok(i, f, [c for c in chosen if c[0] != key])]
+        if isinstance(d.get("values"), list):
+            values = [(x["value"], x.get("label") or x["value"]) for x in d["values"] if isinstance(x, dict) and isinstance(x.get("value"), str)]
+        else:
+            values = []
+            for i in items:
+                v = (i.get("facets") or {}).get(key) if isinstance(i.get("facets"), dict) else None
+                for s in ([v] if isinstance(v, str) else [x for x in v if isinstance(x, str)] if isinstance(v, list) else []):
+                    if s not in [x for x, _ in values]:
+                        values.append((s, s))
+        out.append({"key": key, "label": d.get("label") or key, "chosen": dict(chosen).get(key), "all": len(pool),
+                    "values": [{"value": v, "label": l, "count": sum(1 for i in pool if has_facet(i, key, v))} for v, l in values]})
+    return out
+
+
+def sort_label(value, page=0, sort=None):
+    sorts = declared(value, page, "sorts")
+    if not sorts:
+        return None
+    chosen = sorts[sort] if isinstance(sort, int) and 0 <= sort < len(sorts) else None
+    return (chosen.get("label") or chosen.get("key")) if chosen else "given order"
+
+
+def column_widths(spec, shown_rows, width):
+    """Column widths in `width` cells (one-cell gaps): numbers fixed, absent the widest cell (capped at a third),
+    "fill" shares what is left."""
+    if not spec:
+        return []
+    def cell(r, i):
+        c = r["item"].get("columns")
+        return len(c[i]) if isinstance(c, list) and i < len(c) and isinstance(c[i], str) else 0
+    w = []
+    for i, c in enumerate(spec):
+        cw = c.get("width") if isinstance(c, dict) else None
+        if isinstance(cw, int) and not isinstance(cw, bool):
+            w.append(cw)
+        elif cw == "fill":
+            w.append(None)
+        else:
+            label = c.get("label") if isinstance(c, dict) and isinstance(c.get("label"), str) else ""
+            w.append(max(1, min(width // 3, max([cell(r, i) for r in shown_rows] + [len(label)]))))
+    fills = sum(1 for x in w if x is None)
+    left = max(0, width - sum(x for x in w if x is not None) - (len(spec) - 1))
+    k, out = 0, []
+    for x in w:
+        if x is None:
+            x = left // max(fills, 1) + (1 if k < left % max(fills, 1) else 0)
+            k += 1
+        out.append(x)
+    return out
 
 
 def page_items(value, page=0):
@@ -142,22 +288,26 @@ def page_items(value, page=0):
     return value.get("items") or []
 
 
-def rows(value, page=0, filter="", open=None, features=BASE_FEATURES):
-    """Visible rows after toolbar, pages, element fallbacks, tree expansion and filtering: dicts {item, depth, id,
-    parent, has_children, expanded, pinned}. `open` is the user's expansion by row id."""
+def rows(value, page=0, filter="", open=None, features=BASE_FEATURES, facets=None, sort=None):
+    """Visible rows after toolbar, pages, element fallbacks, facets and filtering, sort, tree expansion and pin:
+    dicts {item, depth, id, parent, has_children, expanded, pinned}. `open` is the user's expansion by row id,
+    `facets` the chosen value per facet key, `sort` the chosen entry of `sorts`."""
     open, f, out = open or {}, filter.lower(), []
+    chosen, by = chosen_facets(value, page, facets, features), chosen_sort(value, page, sort, features)
 
     def one(item, rid, depth, parent, f, bottom):
-        if f and not _subtree(item, rid, f, features):
+        mine = [] if bottom else chosen  # pin: "bottom" rows are never filtered
+        narrowed = bool(f) or bool(mine)
+        if narrowed and not _subtree(item, rid, f, features, mine):
             return
         children = item.get("children") or []
-        expanded = bool(children) and (bool(f) or open.get(rid, item.get("expanded") is True))
+        expanded = bool(children) and (narrowed or open.get(rid, item.get("expanded") is True))
         shown = {k: v for k, v in item.items() if k != "children"}
         me = len(out)
         out.append({"item": shown, "depth": depth, "id": rid, "parent": parent, "has_children": bool(children),
                     "expanded": expanded, "pinned": False, "bottom": bottom})
         if expanded:
-            for child, cid in _shown(children, rid + "/", features):
+            for child, cid in _sorted(_shown(children, rid + "/", features), by):
                 one(child, cid, depth + (kind(item) != "header"), me, f, bottom)
 
     for n, (item, _) in enumerate(_shown(value.get("toolbar") or [], "toolbar/", features)):
@@ -165,25 +315,25 @@ def rows(value, page=0, filter="", open=None, features=BASE_FEATURES):
                     "pinned": True, "bottom": False})
     top = _shown(page_items(value, page), "", features)
     pin = "pin" in features  # pin: "bottom" rows (feature pin) come last, never filtered out
-    for item, rid in top:
-        if not (pin and item.get("pin") == "bottom"):
-            one(item, rid, 0, None, f, False)
+    for item, rid in _sorted([pr for pr in top if not (pin and pr[0].get("pin") == "bottom")], by):
+        one(item, rid, 0, None, f, False)
     for item, rid in top:
         if pin and item.get("pin") == "bottom":
             one(item, rid, 0, None, "", True)
     return out
 
 
-def search(value, query, page=0, filter="", features=BASE_FEATURES):
-    """Search (feature search): matching selectable rows on the page, collapsed ones included, in display order, as
-    (id, ids to open). Toolbar and bottom-pinned rows are not searched; the filter still applies."""
+def search(value, query, page=0, filter="", features=BASE_FEATURES, facets=None, sort=None):
+    """Search (feature search): matching selectable rows on the page, collapsed ones included, in display order (sort
+    included), as (id, ids to open). Toolbar and bottom-pinned rows are not searched; the filter and facets apply."""
     q, f, out = query.lower(), filter.lower(), []
+    chosen, by = chosen_facets(value, page, facets, features), chosen_sort(value, page, sort, features)
     if not q:
         return out
 
     def walk(items, path):
-        for item, rid in items:
-            if f and not _subtree(item, rid, f, features):
+        for item, rid in _sorted(items, by):
+            if (f or chosen) and not _subtree(item, rid, f, features, chosen):
                 continue
             if _matches(item, q) and selectable(item):
                 out.append((rid, list(path)))

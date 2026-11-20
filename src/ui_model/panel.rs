@@ -2,7 +2,8 @@
 //! The panel catalogue itself is documented in `tui/panel.rs` and `docs/spec/core-protocol.md`; conformance cases
 //! for other clients are `tests/fixtures/client/panels.json`.
 
-use std::collections::HashMap;
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -34,22 +35,26 @@ pub struct State {
     pub search: String,
     pub searching: bool,
     pub search_hit: usize,
+    /// Chosen facet values, by facet key (feature `facets`); an absent key shows all.
+    pub facets: BTreeMap<String, String>,
+    /// The chosen entry of the panel's `sorts` (feature `sort`); None is the given order.
+    pub sort: Option<usize>,
     pub(crate) prepared: Option<Arc<Prepared>>,
 }
 
 /// Only fields that affect flattening belong to this cache key. Selection/scroll/chips do not.
 pub(crate) struct Prepared {
-    value: Arc<Value>, page: usize, filter: String, open: HashMap<String,bool>, pub(crate) rows: Vec<Flat>, pub(crate) total:usize,
+    value: Arc<Value>, page: usize, filter: String, open: HashMap<String,bool>, facets: BTreeMap<String,String>, sort: Option<usize>, pub(crate) rows: Vec<Flat>, pub(crate) total:usize,
 }
 impl State {
     /// Flattened rows for this value and state, reused while content and page/filter/expansion are unchanged.
     pub(crate) fn prepare(&mut self, value: &Arc<Value>) -> Arc<Prepared> {
         if let Some(cache) = &self.prepared {
-            if Arc::ptr_eq(&cache.value,value) && cache.page==self.page && cache.filter==self.filter && cache.open==self.open { return cache.clone(); }
+            if Arc::ptr_eq(&cache.value,value) && cache.page==self.page && cache.filter==self.filter && cache.open==self.open && cache.facets==self.facets && cache.sort==self.sort { return cache.clone(); }
         }
         let shown=rows(value,self);
-        let total=if self.filter.is_empty(){shown.iter().filter(|r|selectable(&r.item)).count()}else{let mut unfiltered=self.clone();unfiltered.filter.clear();rows(value,&unfiltered).iter().filter(|r|selectable(&r.item)).count()};
-        let prepared=Arc::new(Prepared { value:value.clone(),page:self.page,filter:self.filter.clone(),open:self.open.clone(),rows:shown,total });
+        let total=if self.filter.is_empty()&&self.facets.is_empty(){shown.iter().filter(|r|selectable(&r.item)).count()}else{let mut unfiltered=self.clone();unfiltered.filter.clear();unfiltered.facets.clear();rows(value,&unfiltered).iter().filter(|r|selectable(&r.item)).count()};
+        let prepared=Arc::new(Prepared { value:value.clone(),page:self.page,filter:self.filter.clone(),open:self.open.clone(),facets:self.facets.clone(),sort:self.sort,rows:shown,total });
         self.prepared=Some(prepared.clone()); prepared
     }
 }
@@ -71,7 +76,7 @@ pub struct Flat {
 
 
 /// Panel features this client renders. A panel may list what it needs in `requires`.
-pub const SUPPORTED: &[&str] = &["items", "pages", "tree", "badges", "menu", "input", "description", "filter", "toolbar", "chips", "select", "options", "badge_color", "icon", "icon_names", "list_detail", "wrap", "embedded_views", "current_when", "follow", "markdown", "pin", "composer", "multiline", "search"];
+pub const SUPPORTED: &[&str] = &["items", "pages", "tree", "badges", "menu", "input", "description", "filter", "toolbar", "chips", "select", "options", "badge_color", "icon", "icon_names", "list_detail", "wrap", "embedded_views", "current_when", "follow", "markdown", "pin", "composer", "multiline", "search", "facets", "sort", "columns"];
 
 /// Features a panel needs that this client lacks.
 pub fn missing(v: &Value) -> Vec<String> { missing_for(v, SUPPORTED) }
@@ -170,8 +175,180 @@ fn shown(items: &[Value], prefix: &str, features: &[&str]) -> Vec<(Value, String
     items.iter().enumerate().flat_map(|(i, item)| expand(item, &format!("{prefix}{i}"), features)).collect()
 }
 
-fn subtree_matches(item: &Value, id: &str, f: &str, features: &[&str]) -> bool {
-    matches(item, f) || shown(item["children"].as_array().map(|c| c.as_slice()).unwrap_or(&[]), &format!("{id}/"), features).iter().any(|(c, cid)| subtree_matches(c, cid, f, features))
+/// A row's own match: the text filter (lower case) and every chosen facet.
+fn row_ok(item: &Value, f: &str, chosen: &[(String, String)]) -> bool {
+    (f.is_empty() || matches(item, f)) && chosen.iter().all(|(k, want)| has_facet(item, k, want))
+}
+
+fn subtree_matches(item: &Value, id: &str, f: &str, chosen: &[(String, String)], features: &[&str]) -> bool {
+    row_ok(item, f, chosen) || shown(item["children"].as_array().map(|c| c.as_slice()).unwrap_or(&[]), &format!("{id}/"), features).iter().any(|(c, cid)| subtree_matches(c, cid, f, chosen, features))
+}
+
+// ---- facets, sort, columns (features `facets`, `sort`, `columns`) ------------------------------------------------
+
+/// Where a panel declares `facets`, `sorts` or `columns`: on the current page, else on the panel itself.
+pub fn declared<'a>(v: &'a Value, st: &State, field: &str) -> Option<&'a Vec<Value>> {
+    page_value(v, st).get(field).and_then(Value::as_array).or_else(|| v.get(field).and_then(Value::as_array))
+}
+
+/// Whether a row's `facets[key]` is `want` (a string), or contains it (a list).
+pub fn has_facet(item: &Value, key: &str, want: &str) -> bool {
+    match &item["facets"][key] {
+        Value::String(s) => s == want,
+        Value::Array(a) => a.iter().any(|x| x.as_str() == Some(want)),
+        _ => false,
+    }
+}
+
+/// The facet choices in effect: chosen values of declared facet keys, when the client renders `facets`.
+pub fn chosen_facets(v: &Value, st: &State, features: &[&str]) -> Vec<(String, String)> {
+    if !features.contains(&"facets") { return Vec::new(); }
+    let keys: Vec<&str> = declared(v, st, "facets").into_iter().flatten().filter_map(|f| f["key"].as_str()).collect();
+    st.facets.iter().filter(|(k, _)| keys.contains(&k.as_str())).map(|(k, w)| (k.clone(), w.clone())).collect()
+}
+
+/// The sort in effect: (key, descending) of the chosen entry of `sorts`, when the client renders `sort`.
+pub fn chosen_sort(v: &Value, st: &State, features: &[&str]) -> Option<(String, bool)> {
+    if !features.contains(&"sort") { return None; }
+    let s = declared(v, st, "sorts")?.get(st.sort?)?;
+    Some((s["key"].as_str()?.to_string(), s["desc"] == true))
+}
+
+/// Compare two rows by `sort[key]`: numbers before strings, strings case-insensitively; rows without the key last
+/// (also when descending).
+fn compare(a: &Value, b: &Value, key: &str, desc: bool) -> Ordering {
+    let (x, y) = (&a["sort"][key], &b["sort"][key]);
+    let keyed = |v: &Value| v.is_number() || v.is_string();
+    match (keyed(x), keyed(y)) {
+        (false, false) => return Ordering::Equal,
+        (false, true) => return Ordering::Greater,
+        (true, false) => return Ordering::Less,
+        _ => {}
+    }
+    let o = match (x.as_f64(), y.as_f64()) {
+        (Some(p), Some(q)) => p.partial_cmp(&q).unwrap_or(Ordering::Equal),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => x.as_str().unwrap_or("").to_lowercase().cmp(&y.as_str().unwrap_or("").to_lowercase()),
+    };
+    if desc { o.reverse() } else { o }
+}
+
+/// One sibling list sorted, stably, within each run between `header` and `separator` rows (they stay put).
+fn sorted(list: Vec<(Value, String)>, by: &Option<(String, bool)>) -> Vec<(Value, String)> {
+    let Some((key, desc)) = by else { return list };
+    let mut out = Vec::with_capacity(list.len());
+    let mut run: Vec<(Value, String)> = Vec::new();
+    let flush = |run: &mut Vec<(Value, String)>, out: &mut Vec<(Value, String)>| {
+        run.sort_by(|a, b| compare(&a.0, &b.0, key, *desc));
+        out.append(run);
+    };
+    for x in list {
+        if matches!(kind(&x.0), "header" | "separator") { flush(&mut run, &mut out); out.push(x); } else { run.push(x); }
+    }
+    flush(&mut run, &mut out);
+    out
+}
+
+/// One facet's chips: its key and label, the chosen value, the count under All and each value's count.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FacetCount {
+    pub key: String,
+    pub label: String,
+    pub chosen: Option<String>,
+    pub all: usize,
+    /// (value, label, count), in declared order, else first seen in the rows.
+    pub values: Vec<(String, String, usize)>,
+}
+
+/// The facet line's counts. A count is the number of rows that would show if that value were chosen, given the
+/// text filter and the other facets' choices. Headers, separators, toolbar and `pin: "bottom"` rows don't count;
+/// rows without the key count only under All.
+pub fn facet_counts(v: &Value, st: &State, features: &[&str]) -> Vec<FacetCount> {
+    if !features.contains(&"facets") { return Vec::new(); }
+    let Some(decl) = declared(v, st, "facets") else { return Vec::new() };
+    let f = st.filter.to_lowercase();
+    let chosen = chosen_facets(v, st, features);
+    let pin = features.contains(&"pin");
+    let mut items = Vec::new();
+    fn walk(list: &[Value], prefix: &str, features: &[&str], out: &mut Vec<Value>) {
+        for (item, id) in shown(list, prefix, features) {
+            if !matches!(kind(&item), "header" | "separator") { out.push(item.clone()); }
+            if let Some(c) = item["children"].as_array() { walk(c, &format!("{id}/"), features, out); }
+        }
+    }
+    let top: Vec<Value> = page_items(v, st).iter().filter(|i| !(pin && i["pin"] == "bottom")).cloned().collect();
+    walk(&top, "", features, &mut items);
+    decl.iter().filter_map(|d| {
+        let key = d["key"].as_str()?.to_string();
+        let others: Vec<(String, String)> = chosen.iter().filter(|(k, _)| *k != key).cloned().collect();
+        let pool: Vec<&Value> = items.iter().filter(|i| row_ok(i, &f, &others)).collect();
+        let mut values: Vec<(String, String)> = d["values"].as_array().into_iter().flatten()
+            .filter_map(|x| Some((x["value"].as_str()?.to_string(), x["label"].as_str().or(x["value"].as_str())?.to_string()))).collect();
+        if !d["values"].is_array() {
+            for i in &items {
+                let found: Vec<&str> = match &i["facets"][key.as_str()] { Value::String(s) => vec![s.as_str()], Value::Array(a) => a.iter().filter_map(Value::as_str).collect(), _ => vec![] };
+                for s in found { if !values.iter().any(|(x, _)| x == s) { values.push((s.to_string(), s.to_string())); } }
+            }
+        }
+        Some(FacetCount {
+            label: d["label"].as_str().unwrap_or(&key).to_string(),
+            chosen: chosen.iter().find(|(k, _)| *k == key).map(|(_, w)| w.clone()),
+            all: pool.len(),
+            values: values.into_iter().map(|(value, label)| { let n = pool.iter().filter(|i| has_facet(i, &key, &value)).count(); (value, label, n) }).collect(),
+            key,
+        })
+    }).collect()
+}
+
+/// `client.panel {action: "facet", key, value?}`: choose a value (None: All). Unknown keys are ignored.
+pub fn choose_facet(v: &Value, st: &mut State, key: &str, value: Option<&str>) {
+    if !declared(v, st, "facets").into_iter().flatten().any(|f| f["key"] == key) { return; }
+    match value { Some(w) => { st.facets.insert(key.to_string(), w.to_string()); } None => { st.facets.remove(key); } }
+    st.sel = 0; st.top = 0;
+}
+
+/// The facet key `f` cycles: the first declared facet, All -> each value in order -> All.
+pub fn cycle_facet(v: &Value, st: &mut State, features: &[&str]) {
+    let Some(first) = facet_counts(v, st, features).into_iter().next() else { return };
+    let at = first.chosen.as_ref().and_then(|c| first.values.iter().position(|(x, _, _)| x == c));
+    let next = match at { None => first.values.first(), Some(i) => first.values.get(i + 1) }.map(|(x, _, _)| x.clone());
+    choose_facet(v, st, &first.key, next.as_deref());
+}
+
+/// `client.panel {action: "sort", key?}`: sort by that entry of `sorts` (no key: the given order).
+pub fn choose_sort(v: &Value, st: &mut State, key: Option<&str>) {
+    st.sort = key.and_then(|k| declared(v, st, "sorts")?.iter().position(|s| s["key"] == k));
+}
+
+/// The sort key `s` cycles: given order -> each entry of `sorts` -> given order.
+pub fn cycle_sort(v: &Value, st: &mut State) {
+    let n = declared(v, st, "sorts").map(|s| s.len()).unwrap_or(0);
+    st.sort = match st.sort { None if n > 0 => Some(0), Some(i) if i + 1 < n => Some(i + 1), _ => None };
+}
+
+/// The label of the sort in effect (`given` for the given order), for the client's line.
+pub fn sort_label(v: &Value, st: &State) -> Option<String> {
+    let sorts = declared(v, st, "sorts").filter(|s| !s.is_empty())?;
+    Some(st.sort.and_then(|i| sorts.get(i)).and_then(|s| s["label"].as_str().or(s["key"].as_str())).unwrap_or("given order").to_string())
+}
+
+/// Column widths for `columns` in `width` cells (gap of one between columns): numbers are fixed, absent widths
+/// take the widest cell (capped at a third of the width), `"fill"` columns share what is left.
+pub fn column_widths(spec: &[Value], rows: &[Flat], width: usize) -> Vec<usize> {
+    let n = spec.len();
+    if n == 0 { return Vec::new(); }
+    let cell = |r: &Flat, i: usize| r.item["columns"].get(i).and_then(Value::as_str).map(|s| s.chars().count()).unwrap_or(0);
+    let mut w: Vec<Option<usize>> = spec.iter().enumerate().map(|(i, c)| match &c["width"] {
+        Value::Number(x) => x.as_u64().map(|x| x as usize),
+        Value::String(s) if s == "fill" => None,
+        _ => Some(rows.iter().map(|r| cell(r, i)).chain(std::iter::once(c["label"].as_str().map(|l| l.chars().count()).unwrap_or(0))).max().unwrap_or(0).min(width / 3).max(1)),
+    }).collect();
+    let fixed: usize = w.iter().flatten().sum::<usize>() + n.saturating_sub(1);
+    let fills = w.iter().filter(|x| x.is_none()).count();
+    let left = width.saturating_sub(fixed);
+    for (k, x) in w.iter_mut().filter(|x| x.is_none()).enumerate() { *x = Some(left / fills.max(1) + usize::from(k < left % fills.max(1))); }
+    w.into_iter().map(|x| x.unwrap_or(0)).collect()
 }
 
 /// The rows to show, in order, for this client's features.
@@ -182,16 +359,21 @@ pub fn rows(v: &Value, st: &State) -> Vec<Flat> { rows_for(v, st, SUPPORTED) }
 /// filtered out; clients without it show them where they are.
 pub fn rows_for(v: &Value, st: &State, features: &[&str]) -> Vec<Flat> {
     let f = st.filter.to_lowercase();
+    let chosen = chosen_facets(v, st, features);
+    let by = chosen_sort(v, st, features);
     let mut out = Vec::new();
-    #[allow(clippy::too_many_arguments)]
-    fn one(item: Value, id: String, depth: usize, parent: Option<usize>, st: &State, f: &str, features: &[&str], bottom: bool, out: &mut Vec<Flat>) {
-        if !f.is_empty() && !subtree_matches(&item, &id, f, features) {
+    struct Ctx<'a> { st: &'a State, features: &'a [&'a str], chosen: &'a [(String, String)], by: &'a Option<(String, bool)> }
+    fn one(item: Value, id: String, depth: usize, parent: Option<usize>, c: &Ctx, f: &str, bottom: bool, out: &mut Vec<Flat>) {
+        let (st, features) = (c.st, c.features);
+        let chosen: &[(String, String)] = if bottom { &[] } else { c.chosen };  // pin: "bottom" rows are never filtered
+        let narrowed = !f.is_empty() || !chosen.is_empty();
+        if narrowed && !subtree_matches(&item, &id, f, chosen, features) {
             return;
         }
         let children = item["children"].as_array().cloned().unwrap_or_default();
         let has_children = !children.is_empty();
-        // Filtering opens everything that matched below.
-        let expanded = has_children && (!f.is_empty() || st.open.get(&id).copied().unwrap_or(item["expanded"] == true));
+        // Filtering (text or facets) opens everything that matched below.
+        let expanded = has_children && (narrowed || st.open.get(&id).copied().unwrap_or(item["expanded"] == true));
         let mut row = item.clone();
         if let Some(o) = row.as_object_mut() {
             o.remove("children");
@@ -199,45 +381,50 @@ pub fn rows_for(v: &Value, st: &State, features: &[&str]) -> Vec<Flat> {
         let me = out.len();
         out.push(Flat { item: row, depth, id: id.clone(), parent, has_children, expanded, pinned: false, bottom });
         if expanded {
-            for (child, cid) in shown(&children, &format!("{id}/"), features) {
-                one(child, cid, depth + (kind(&item) != "header") as usize, Some(me), st, f, features, bottom, out);
+            for (child, cid) in sorted(shown(&children, &format!("{id}/"), features), c.by) {
+                one(child, cid, depth + (kind(&item) != "header") as usize, Some(me), c, f, bottom, out);
             }
         }
     }
+    let c = Ctx { st, features, chosen: &chosen, by: &by };
     let toolbar = v["toolbar"].as_array().map(|a| a.as_slice()).unwrap_or(&[]);
     for (n, (item, _)) in shown(toolbar, "toolbar/", features).into_iter().enumerate() {
         out.push(Flat { item, depth: 0, id: format!("toolbar/{n}"), parent: None, has_children: false, expanded: false, pinned: true, bottom: false });
     }
     let pin = features.contains(&"pin");
     let (bottom, list): (Vec<_>, Vec<_>) = shown(page_items(v, st), "", features).into_iter().partition(|(item, _)| pin && item["pin"] == "bottom");
-    for (item, id) in list { one(item, id, 0, None, st, &f, features, false, &mut out); }
-    for (item, id) in bottom { one(item, id, 0, None, st, "", features, true, &mut out); }
+    for (item, id) in sorted(list, &by) { one(item, id, 0, None, &c, &f, false, &mut out); }
+    for (item, id) in bottom { one(item, id, 0, None, &c, "", true, &mut out); }
     out
 }
 
 /// Search (feature `search`): every row on the current page whose text matches `query` (as the filter matches,
 /// case-insensitive), collapsed rows included, in display order, with the ids of the rows to open to show it.
-/// Toolbar rows and bottom-pinned rows are not searched; the text filter still applies.
+/// Toolbar rows and bottom-pinned rows are not searched; the text filter and facets still apply, and the order is the
+/// display order (sort included).
 pub fn search(v: &Value, st: &State, query: &str, features: &[&str]) -> Vec<(String, Vec<String>)> {
     let q = query.to_lowercase();
     let f = st.filter.to_lowercase();
+    let chosen = chosen_facets(v, st, features);
+    let by = chosen_sort(v, st, features);
     let mut out = Vec::new();
     if q.is_empty() { return out; }
-    fn walk(items: Vec<(Value, String)>, path: &[String], q: &str, f: &str, features: &[&str], out: &mut Vec<(String, Vec<String>)>) {
-        for (item, id) in items {
-            if !f.is_empty() && !subtree_matches(&item, &id, f, features) { continue; }
+    #[allow(clippy::too_many_arguments)]
+    fn walk(items: Vec<(Value, String)>, path: &[String], q: &str, f: &str, chosen: &[(String, String)], by: &Option<(String, bool)>, features: &[&str], out: &mut Vec<(String, Vec<String>)>) {
+        for (item, id) in sorted(items, by) {
+            if (!f.is_empty() || !chosen.is_empty()) && !subtree_matches(&item, &id, f, chosen, features) { continue; }
             if matches(&item, q) && selectable(&item) { out.push((id.clone(), path.to_vec())); }
             let children = item["children"].as_array().map(|c| c.as_slice()).unwrap_or(&[]);
             if !children.is_empty() {
                 let mut p = path.to_vec();
                 p.push(id.clone());
-                walk(shown(children, &format!("{id}/"), features), &p, q, f, features, out);
+                walk(shown(children, &format!("{id}/"), features), &p, q, f, chosen, by, features, out);
             }
         }
     }
     let pin = features.contains(&"pin");
     let list: Vec<_> = shown(page_items(v, st), "", features).into_iter().filter(|(item, _)| !(pin && item["pin"] == "bottom")).collect();
-    walk(list, &[], &q, &f, features, &mut out);
+    walk(list, &[], &q, &f, &chosen, &by, features, &mut out);
     out
 }
 
@@ -402,6 +589,25 @@ mod tests {
         tb["toolbar"] = serde_json::json!([{"type": "select", "text": "Source", "options": []}]);
         let mut st = State::default();
         assert_eq!(pin_rows(&tb, &mut st), 3, "toolbar row 0, then list rows 1..=3");
+    }
+
+    #[test]
+    fn facet_and_sort_choices_cycle_and_invalidate_prepared_rows() {
+        let v = Arc::new(serde_json::json!({"facets": [{"key": "k"}], "sorts": [{"key": "n"}, {"key": "n", "desc": true}],
+            "items": [{"text": "b", "facets": {"k": "x"}, "sort": {"n": "b"}}, {"text": "a", "facets": {"k": "y"}, "sort": {"n": "a"}}]}));
+        let mut st = State::default();
+        let all = st.prepare(&v);
+        cycle_facet(&v, &mut st, SUPPORTED); assert_eq!(st.facets.get("k").map(String::as_str), Some("x"));
+        let narrowed = st.prepare(&v); assert!(!Arc::ptr_eq(&all, &narrowed)); assert_eq!(narrowed.rows.len(), 1);
+        assert_eq!(narrowed.total, 2, "the total counts every row, the shown count only matches");
+        cycle_facet(&v, &mut st, SUPPORTED); assert_eq!(st.facets.get("k").map(String::as_str), Some("y"));
+        cycle_facet(&v, &mut st, SUPPORTED); assert!(st.facets.is_empty(), "back to All");
+        cycle_sort(&v, &mut st); assert_eq!(st.sort, Some(0));
+        assert_eq!(st.prepare(&v).rows.iter().map(|r| r.item["text"].clone()).collect::<Vec<_>>(), vec!["a", "b"]);
+        cycle_sort(&v, &mut st); cycle_sort(&v, &mut st); assert_eq!(st.sort, None, "back to the given order");
+        choose_sort(&v, &mut st, Some("n")); assert_eq!(st.sort, Some(0));
+        choose_facet(&v, &mut st, "unknown", Some("x")); assert!(st.facets.is_empty(), "undeclared keys are ignored");
+        assert_eq!(sort_label(&v, &st).as_deref(), Some("n"));
     }
 
     #[test]

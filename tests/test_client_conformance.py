@@ -29,17 +29,27 @@ class Conformance(unittest.TestCase):
         for case in doc["cases"]:
             with self.subTest(case["name"]):
                 s, p = case["state"], case["panel"]
+                features = case.get("features") or model.BASE_FEATURES
                 got = [{"id": r["id"], "depth": r["depth"], "text": r["item"].get("text"), "type": model.kind(r["item"]),
                         "has_children": r["has_children"], "expanded": r["expanded"], "pinned": r["pinned"],
                         "selectable": model.selectable(r["item"]), "bottom": r.get("bottom", False),
                         "chips": [c.get("text") for c in r["item"]["chips"]] if "chips" in r["item"] else None}
-                       for r in model.rows(p, s.get("page", 0), s.get("filter", ""), s.get("open"), case.get("features") or model.BASE_FEATURES)]
+                       for r in model.rows(p, s.get("page", 0), s.get("filter", ""), s.get("open"), features, s.get("facets"), s.get("sort"))]
                 enhancement = None
                 if isinstance(p.get("list_detail"), dict):
                     enhancement = not model.missing_for(p["list_detail"], model.BASE_FEATURES)
                 want = {"rows": got, "missing": model.missing_for(p, model.BASE_FEATURES), "list_detail": enhancement}
                 if "search" in s:
                     want["search"] = [{"id": i, "open": o} for i, o in model.search(p, s["search"], s.get("page", 0), s.get("filter", ""), case.get("features") or model.BASE_FEATURES)]
+                counts = model.facet_counts(p, s.get("page", 0), s.get("filter", ""), s.get("facets"), features)
+                if counts:
+                    want["facets"] = counts
+                label = model.sort_label(p, s.get("page", 0), s.get("sort")) if "sort" in features else None
+                if label:
+                    want["sort"] = label
+                spec = model.declared(p, s.get("page", 0), "columns")
+                if spec and "columns" in features and "width" in case:
+                    want["column_widths"] = model.column_widths(spec, model.rows(p, s.get("page", 0), s.get("filter", ""), s.get("open"), features, s.get("facets"), s.get("sort")), case["width"])
                 self.assertEqual(want, case["expect"])
 
     def test_contributions(self):

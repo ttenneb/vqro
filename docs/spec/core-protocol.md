@@ -893,7 +893,7 @@ what it renders in `hello {client, version, build?, profiles, features}`:
   resize per the provider's owner rule). A viewer sends no query responses.
 - **`keys`**: the prefix key with the `C-g` fallback, binding precedence and `client.*` commands.
 - **Optional features** are the other ids (`badge_color`, `icon_names`, `list_detail`, `embedded_views`, `filter`,
-  `current_when`,
+  `current_when`, `facets`, `sort`, `columns`,
   or a third party's `x.<owner>.<name>@<major>`). Content using one must keep a fallback: a row's or view's
   `fallback` (below, "Fallbacks"), or a scoped enhancement (as `list_detail`) so the plain content remains;
   otherwise clients without it show the panel's "missing" notice. A view kind is a feature too: a client claims
@@ -1113,9 +1113,12 @@ Older clients ignore the extra objects; row `menu` actions can provide the same 
   selected row id changes, not on a status refresh. List clicks select without running the row command; clicking
   a toggle's checkbox, or Enter/Space on the list, explicitly activates it. Detail actions activate normally.
 - Tab/Shift-Tab switches list/detail focus. Within either pane arrows retain normal tree/chip semantics.
-  `[`/`]` selects outer pages; PgUp/PgDn moves by the visible selectable-row count; Home/End selects first/last.
-  The list shows matching `n of m`, visible row range and a scrollbar; scrolled groups retain a readable header.
-- `/` filters the list over text, detail, description, optional `summary` and string `tags: [...]`. Header rows
+  **The focused pane is a full panel:** `[`/`]` select the focused pane's own `pages` (the detail's, when it has
+  them; otherwise the outer pages); PgUp/PgDn moves by the visible selectable-row count; Home/End selects
+  first/last; `/` filters the focused pane; `f`/`s` cycle its facets and sort (below). The focused pane shows its
+  matching `n of m`, visible row range and a scrollbar; scrolled groups retain a readable header.
+  `client.panel {action, pane?: "list"|"detail"}` acts on the named pane, by default the focused one.
+- `/` filters over text, detail, description, optional `summary` and string `tags: [...]`. Header rows
   with expanded children form groups and remain when descendants match. Headers/toolbars do not count as results.
 - Text rows may use `wrap:true` (feature `wrap`) for plain word-wrapped paragraphs and `focusable:true` for
   keyboard reading/scrolling; they remain inert unless they explicitly carry a command. Styles stay semantic.
@@ -1132,6 +1135,40 @@ Illustrative row (inside an enhanced panel/page):
  "command":"example.open","detail_panel":{"title":"Record A","requires":["wrap"],
  "items":[{"type":"text","text":"A short explanatory paragraph.","wrap":true,"focusable":true},
           {"text":"Open","command":"example.open"}]}}
+```
+
+### Facets, sort and columns (D29)
+
+Any panel, page or `detail_panel` may declare these; they are per-window view state like the filter (never saved,
+never sent to the extension), applied by the client model (`rows_for`) after element fallbacks: facets and the text
+filter, then sort, then tree expansion, then `pin`. A page's declaration wins over its panel's. Each degrades to the
+given rows in clients without the feature. Fixtures: `tests/fixtures/client/panels.json`.
+
+- **Facets** (feature `facets`): `facets: [{key, label?, values?: [{value, label?}]}]` on the panel; rows carry
+  `facets: {key: value | [values]}`. The client draws a line `Show: All n · value n …` above the rows (after the
+  `toolbar`) and shows only rows whose `facets[key]` equals (or contains) the chosen value of every chosen key, AND
+  the text filter. Groups stay while a descendant matches. A count is the number of rows that would show if that
+  value were chosen, given the text filter and the other keys' choices; headers, separators, toolbar and `pin:
+  "bottom"` rows don't count (and pinned rows are never hidden); rows without the key count only under All.
+  Without `values`, values are collected from the rows in first-seen order. `f` cycles the first facet (All, each
+  value, All); `client.panel {action: "facet", key, value?}` chooses one (no value: All).
+- **Sort** (feature `sort`): `sorts: [{key, label?, desc?}]` on the panel; rows carry `sort: {key: string | number}`.
+  The given order is always the first choice. Sorting is stable and per sibling list (top level, and each node's
+  children); `header` and `separator` rows stay put and split runs, so groups survive. Numbers come before strings,
+  strings compare case-insensitively, `desc` reverses keyed rows, and rows without the key stay last. The client
+  shows `Sort: <label>` in the same line; `s` cycles; `client.panel {action: "sort", key?}` chooses (no key: given).
+- **Columns** (feature `columns`): `columns: [{label?, width?: cells | "fill", align?: "left"|"right"}]` on the
+  panel; rows carry `columns: [text…]`. Widths: a number is fixed, absent is the widest cell or label (at most a
+  third of the width), `"fill"` columns share the rest; one-cell gaps; long cells are truncated with `…`; badges still
+  go at the right edge. A header line shows when any column has a label. `text` stays required and is what clients
+  without the feature show, so write it as a readable join (`"command · agents.abort"`).
+
+Illustrative panel:
+```json
+{"facets": [{"key": "kind", "label": "Show"}], "sorts": [{"key": "name", "label": "name"}],
+ "columns": [{"label": "kind", "width": 9}, {"label": "name", "width": "fill"}],
+ "items": [{"text": "command · agents.abort", "columns": ["command", "agents.abort"],
+            "facets": {"kind": "command"}, "sort": {"name": "agents.abort"}}]}
 ```
 
 ### Client rendering under load

@@ -103,8 +103,126 @@ export function expand(item: Json, rid: string, features: string[], depth = 0): 
 const shownRows = (items: Json[], prefix: string, features: string[]): [Json, string][] =>
   items.flatMap((item, i) => (isObj(item) ? expand(item, `${prefix}${i}`, features) : []));
 
-function subtree(item: Json, rid: string, f: string, features: string[]): boolean {
-  return matches(item, f) || shownRows(Array.isArray(item.children) ? item.children : [], rid + "/", features).some(([c, cid]) => subtree(c, cid, f, features));
+/** A row's own match: the text filter (lower case) and every chosen facet. */
+const rowOk = (item: Json, f: string, chosen: [string, string][]) => (!f || matches(item, f)) && chosen.every(([k, w]) => hasFacet(item, k, w));
+
+function subtree(item: Json, rid: string, f: string, features: string[], chosen: [string, string][] = []): boolean {
+  return rowOk(item, f, chosen) || shownRows(Array.isArray(item.children) ? item.children : [], rid + "/", features).some(([c, cid]) => subtree(c, cid, f, features, chosen));
+}
+
+// ---- facets, sort, columns (features `facets`, `sort`, `columns`) -----------------------------------------------
+
+const pageValue = (value: Json, page = 0): Json =>
+  Array.isArray(value.pages) && value.pages.length && isObj(value.pages[Math.min(page, value.pages.length - 1)]) ? value.pages[Math.min(page, value.pages.length - 1)] : value;
+
+/** Where a panel declares `facets`, `sorts` or `columns`: on the current page, else on the panel. */
+export function declared(value: Json, page: number, field: string): Json[] | null {
+  const own = pageValue(value, page)[field];
+  if (Array.isArray(own)) return own;
+  return Array.isArray(value[field]) ? value[field] : null;
+}
+
+export function hasFacet(item: Json, key: string, want: string): boolean {
+  const v = isObj(item.facets) ? item.facets[key] : undefined;
+  return isStr(v) ? v === want : Array.isArray(v) && v.includes(want);
+}
+
+export function chosenFacets(value: Json, page: number, facets: Record<string, string> | undefined, features: string[]): [string, string][] {
+  if (!features.includes("facets") || !facets) return [];
+  const keys = (declared(value, page, "facets") ?? []).filter(isObj).map((f) => f.key);
+  return Object.entries(facets).filter(([k, w]) => keys.includes(k) && isStr(w)).sort(([a], [b]) => cmp(a, b));
+}
+
+export function chosenSort(value: Json, page: number, sort: number | null | undefined, features: string[]): [string, boolean] | null {
+  if (!features.includes("sort") || sort == null) return null;
+  const s = (declared(value, page, "sorts") ?? [])[sort];
+  return isObj(s) && isStr(s.key) ? [s.key, s.desc === true] : null;
+}
+
+const sortValue = (item: Json, key: string): number | string | null => {
+  const v = isObj(item.sort) ? item.sort[key] : undefined;
+  return typeof v === "number" || isStr(v) ? v : null;
+};
+
+/** Numbers before strings, strings case-insensitively; `desc` reverses keyed rows only (keyless rows stay last). */
+function compareRows(a: Json, b: Json, key: string, desc: boolean): number {
+  const x = sortValue(a, key), y = sortValue(b, key);
+  if (x === null || y === null) return x === null ? (y === null ? 0 : 1) : -1;
+  let o: number;
+  if (typeof x === "number" && typeof y === "number") o = x - y;
+  else if (typeof x === "number") o = -1;
+  else if (typeof y === "number") o = 1;
+  else o = cmp(x.toLowerCase(), (y as string).toLowerCase());
+  return desc ? -o : o;
+}
+
+/** One sibling list, stably sorted within each run between header and separator rows (they stay put). */
+function sortedRows(pairs: [Json, string][], by: [string, boolean] | null): [Json, string][] {
+  if (!by) return pairs;
+  const out: [Json, string][] = [];
+  let run: [Json, string][] = [];
+  const flush = () => { out.push(...run.slice().sort((a, b) => compareRows(a[0], b[0], by[0], by[1]))); run = []; };
+  for (const p of pairs) {
+    if (["header", "separator"].includes(kind(p[0]))) { flush(); out.push(p); } else run.push(p);
+  }
+  flush();
+  return out;
+}
+
+export interface FacetCount { key: string; label: string; chosen: string | null; all: number; values: { value: string; label: string; count: number }[] }
+
+/** The facet line: a count is the rows that would show if that value were chosen, given the text filter and the other
+ *  choices; headers, separators, toolbar and pin: "bottom" rows don't count; rows without the key only under All. */
+export function facetCounts(value: Json, page = 0, filter = "", facets: Record<string, string> = {}, features = BASE_FEATURES): FacetCount[] {
+  const decl = features.includes("facets") ? declared(value, page, "facets") : null;
+  if (!decl) return [];
+  const f = filter.toLowerCase(), chosen = chosenFacets(value, page, facets, features), items: Json[] = [];
+  const walk = (list: Json[], prefix: string) => {
+    for (const [item, rid] of shownRows(list, prefix, features)) {
+      if (!["header", "separator"].includes(kind(item))) items.push(item);
+      walk(Array.isArray(item.children) ? item.children : [], rid + "/");
+    }
+  };
+  walk(pageItems(value, page).filter((i) => !(features.includes("pin") && isObj(i) && i.pin === "bottom")), "");
+  return decl.filter((d) => isObj(d) && isStr(d.key)).map((d) => {
+    const key: string = d.key;
+    const pool = items.filter((i) => rowOk(i, f, chosen.filter(([k]) => k !== key)));
+    let values: [string, string][];
+    if (Array.isArray(d.values)) values = d.values.filter((x: Json) => isObj(x) && isStr(x.value)).map((x: Json) => [x.value, x.label ?? x.value]);
+    else {
+      values = [];
+      for (const i of items) {
+        const v = isObj(i.facets) ? i.facets[key] : undefined;
+        for (const s of isStr(v) ? [v] : Array.isArray(v) ? v.filter(isStr) : []) if (!values.some(([x]) => x === s)) values.push([s, s]);
+      }
+    }
+    const pick = chosen.find(([k]) => k === key);
+    return { key, label: d.label ?? key, chosen: pick ? pick[1] : null, all: pool.length,
+      values: values.map(([v, l]) => ({ value: v, label: l, count: pool.filter((i) => hasFacet(i, key, v)).length })) };
+  });
+}
+
+export function sortLabel(value: Json, page = 0, sort: number | null = null): string | null {
+  const sorts = declared(value, page, "sorts");
+  if (!sorts || !sorts.length) return null;
+  const s = sort != null ? sorts[sort] : null;
+  return isObj(s) ? (s.label ?? s.key) : "given order";
+}
+
+/** Column widths in `width` cells (one-cell gaps): numbers fixed, absent the widest cell (capped at a third), "fill"
+ *  shares what is left. */
+export function columnWidths(spec: Json[], shown: Row[], width: number): number[] {
+  if (!spec.length) return [];
+  const cell = (r: Row, i: number) => (Array.isArray(r.item.columns) && isStr(r.item.columns[i]) ? [...r.item.columns[i]].length : 0);
+  const w: (number | null)[] = spec.map((c, i) => {
+    if (isInt(c?.width)) return c.width;
+    if (c?.width === "fill") return null;
+    return Math.max(1, Math.min(Math.floor(width / 3), Math.max(isStr(c?.label) ? [...c.label].length : 0, ...shown.map((r) => cell(r, i)))));
+  });
+  const fills = w.filter((x) => x === null).length;
+  const left = Math.max(0, width - w.reduce<number>((s, x) => s + (x ?? 0), 0) - (spec.length - 1));
+  let k = 0;
+  return w.map((x) => (x === null ? Math.floor(left / Math.max(fills, 1)) + (k++ < left % Math.max(fills, 1) ? 1 : 0) : x));
 }
 
 export function pageItems(value: Json, page = 0): Json[] {
@@ -118,37 +236,43 @@ export function pageItems(value: Json, page = 0): Json[] {
 export interface Row { item: Json; depth: number; id: string; parent: number | null; has_children: boolean; expanded: boolean; pinned: boolean; bottom: boolean }
 
 /** Visible rows: toolbar, page, element fallbacks, tree expansion and filter. */
-export function rows(value: Json, page = 0, filter = "", open: Record<string, boolean> = {}, features = BASE_FEATURES): Row[] {
+export function rows(value: Json, page = 0, filter = "", open: Record<string, boolean> = {}, features = BASE_FEATURES,
+  facets: Record<string, string> = {}, sort: number | null = null): Row[] {
   const f = filter.toLowerCase();
   const out: Row[] = [];
+  const chosen = chosenFacets(value, page, facets, features), by = chosenSort(value, page, sort, features);
   const one = (item: Json, rid: string, depth: number, parent: number | null, f: string, bottom: boolean) => {
-    if (f && !subtree(item, rid, f, features)) return;
+    const mine = bottom ? [] : chosen; // pin: "bottom" rows are never filtered
+    const narrowed = !!f || mine.length > 0;
+    if (narrowed && !subtree(item, rid, f, features, mine)) return;
     const children = Array.isArray(item.children) ? item.children : [];
-    const expanded = children.length > 0 && (!!f || (rid in open ? open[rid] : item.expanded === true));
+    const expanded = children.length > 0 && (narrowed || (rid in open ? open[rid] : item.expanded === true));
     const { children: _, ...shown } = item;
     const me = out.length;
     out.push({ item: shown, depth, id: rid, parent, has_children: children.length > 0, expanded, pinned: false, bottom });
-    if (expanded) for (const [c, cid] of shownRows(children, rid + "/", features)) one(c, cid, depth + (kind(item) !== "header" ? 1 : 0), me, f, bottom);
+    if (expanded) for (const [c, cid] of sortedRows(shownRows(children, rid + "/", features), by)) one(c, cid, depth + (kind(item) !== "header" ? 1 : 0), me, f, bottom);
   };
   shownRows(Array.isArray(value.toolbar) ? value.toolbar : [], "toolbar/", features).forEach(([item], n) =>
     out.push({ item, depth: 0, id: `toolbar/${n}`, parent: null, has_children: false, expanded: false, pinned: true, bottom: false }));
   // pin: "bottom" rows (feature pin) come last and are never filtered out; without the feature they stay in place.
   const pin = features.includes("pin");
   const top = shownRows(pageItems(value, page), "", features);
-  for (const [item, rid] of top) if (!(pin && item.pin === "bottom")) one(item, rid, 0, null, f, false);
+  for (const [item, rid] of sortedRows(top.filter(([item]) => !(pin && item.pin === "bottom")), by)) one(item, rid, 0, null, f, false);
   for (const [item, rid] of top) if (pin && item.pin === "bottom") one(item, rid, 0, null, "", true);
   return out;
 }
 
 /** Search (feature search): matching selectable rows on the page, collapsed ones included, in display order, as
  *  [id, ids to open]. Toolbar and bottom-pinned rows are not searched; the filter still applies. */
-export function search(value: Json, query: string, page = 0, filter = "", features = BASE_FEATURES): [string, string[]][] {
+export function search(value: Json, query: string, page = 0, filter = "", features = BASE_FEATURES,
+  facets: Record<string, string> = {}, sort: number | null = null): [string, string[]][] {
   const q = query.toLowerCase(), f = filter.toLowerCase();
   const out: [string, string[]][] = [];
   if (!q) return out;
+  const chosen = chosenFacets(value, page, facets, features), by = chosenSort(value, page, sort, features);
   const walk = (items: [Json, string][], path: string[]) => {
-    for (const [item, rid] of items) {
-      if (f && !subtree(item, rid, f, features)) continue;
+    for (const [item, rid] of sortedRows(items, by)) {
+      if ((f || chosen.length) && !subtree(item, rid, f, features, chosen)) continue;
       if (matches(item, q) && selectable(item)) out.push([rid, [...path]]);
       if (Array.isArray(item.children) && item.children.length) walk(shownRows(item.children, rid + "/", features), [...path, rid]);
     }

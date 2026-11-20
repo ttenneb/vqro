@@ -1192,7 +1192,7 @@
             "id": "act",
             "pinned": false,
             "selectable": true,
-            "text": "Activity · 3 tools",
+            "text": "Activity \u00b7 3 tools",
             "type": "item"
           },
           {
@@ -1294,7 +1294,7 @@
               }
             ],
             "id": "act",
-            "text": "Activity · 3 tools"
+            "text": "Activity \u00b7 3 tools"
           },
           {
             "text": "lockfile header",
@@ -1396,6 +1396,2109 @@
       "state": {
         "filter": "beta",
         "search": "lockfile"
+      }
+    },
+    {
+      "expect": {
+        "facets": [
+          {
+            "all": 5,
+            "chosen": "command",
+            "key": "kind",
+            "label": "Show",
+            "values": [
+              {
+                "count": 1,
+                "label": "view",
+                "value": "view"
+              },
+              {
+                "count": 2,
+                "label": "command",
+                "value": "command"
+              },
+              {
+                "count": 1,
+                "label": "data",
+                "value": "data"
+              }
+            ]
+          }
+        ],
+        "list_detail": null,
+        "missing": [],
+        "rows": [
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "1",
+            "pinned": false,
+            "selectable": true,
+            "text": "command \u00b7 agents.show",
+            "type": "item"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "3",
+            "pinned": false,
+            "selectable": true,
+            "text": "command \u00b7 agents.abort",
+            "type": "item"
+          }
+        ],
+        "sort": "given order"
+      },
+      "features": [
+        "items",
+        "pages",
+        "tree",
+        "toolbar",
+        "badges",
+        "description",
+        "menu",
+        "input",
+        "options",
+        "select",
+        "chips",
+        "icon",
+        "wrap",
+        "facets",
+        "sort",
+        "columns",
+        "pin"
+      ],
+      "name": "facets: chosen value, counts, rows without the key only under All",
+      "panel": {
+        "facets": [
+          {
+            "key": "kind",
+            "label": "Show"
+          }
+        ],
+        "items": [
+          {
+            "columns": [
+              "view",
+              "agents-*"
+            ],
+            "facets": {
+              "kind": "view"
+            },
+            "sort": {
+              "kind": "view",
+              "name": "agents-*"
+            },
+            "text": "view \u00b7 agents-*"
+          },
+          {
+            "columns": [
+              "command",
+              "agents.show"
+            ],
+            "facets": {
+              "kind": "command"
+            },
+            "sort": {
+              "kind": "command",
+              "name": "agents.show"
+            },
+            "text": "command \u00b7 agents.show"
+          },
+          {
+            "columns": [
+              "data",
+              "agents.status"
+            ],
+            "facets": {
+              "kind": "data"
+            },
+            "sort": {
+              "kind": "data",
+              "name": "agents.status"
+            },
+            "text": "data \u00b7 agents.status"
+          },
+          {
+            "columns": [
+              "command",
+              "agents.abort"
+            ],
+            "facets": {
+              "kind": "command"
+            },
+            "sort": {
+              "kind": "command",
+              "name": "agents.abort"
+            },
+            "text": "command \u00b7 agents.abort"
+          },
+          {
+            "sort": {},
+            "text": "no kind"
+          }
+        ],
+        "sorts": [
+          {
+            "key": "name",
+            "label": "name"
+          },
+          {
+            "key": "kind",
+            "label": "kind"
+          },
+          {
+            "desc": true,
+            "key": "name",
+            "label": "name (Z-A)"
+          }
+        ]
+      },
+      "state": {
+        "facets": {
+          "kind": "command"
+        }
+      }
+    },
+    {
+      "expect": {
+        "facets": [
+          {
+            "all": 5,
+            "chosen": null,
+            "key": "kind",
+            "label": "Show",
+            "values": [
+              {
+                "count": 1,
+                "label": "view",
+                "value": "view"
+              },
+              {
+                "count": 2,
+                "label": "command",
+                "value": "command"
+              },
+              {
+                "count": 1,
+                "label": "data",
+                "value": "data"
+              }
+            ]
+          }
+        ],
+        "list_detail": null,
+        "missing": [],
+        "rows": [
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "0",
+            "pinned": false,
+            "selectable": true,
+            "text": "view \u00b7 agents-*",
+            "type": "item"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "1",
+            "pinned": false,
+            "selectable": true,
+            "text": "command \u00b7 agents.show",
+            "type": "item"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "2",
+            "pinned": false,
+            "selectable": true,
+            "text": "data \u00b7 agents.status",
+            "type": "item"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "3",
+            "pinned": false,
+            "selectable": true,
+            "text": "command \u00b7 agents.abort",
+            "type": "item"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "4",
+            "pinned": false,
+            "selectable": true,
+            "text": "no kind",
+            "type": "item"
+          }
+        ],
+        "sort": "given order"
+      },
+      "features": [
+        "items",
+        "pages",
+        "tree",
+        "toolbar",
+        "badges",
+        "description",
+        "menu",
+        "input",
+        "options",
+        "select",
+        "chips",
+        "icon",
+        "wrap",
+        "facets",
+        "sort",
+        "columns",
+        "pin"
+      ],
+      "name": "facets: All shows every row; counts per value",
+      "panel": {
+        "facets": [
+          {
+            "key": "kind",
+            "label": "Show"
+          }
+        ],
+        "items": [
+          {
+            "columns": [
+              "view",
+              "agents-*"
+            ],
+            "facets": {
+              "kind": "view"
+            },
+            "sort": {
+              "kind": "view",
+              "name": "agents-*"
+            },
+            "text": "view \u00b7 agents-*"
+          },
+          {
+            "columns": [
+              "command",
+              "agents.show"
+            ],
+            "facets": {
+              "kind": "command"
+            },
+            "sort": {
+              "kind": "command",
+              "name": "agents.show"
+            },
+            "text": "command \u00b7 agents.show"
+          },
+          {
+            "columns": [
+              "data",
+              "agents.status"
+            ],
+            "facets": {
+              "kind": "data"
+            },
+            "sort": {
+              "kind": "data",
+              "name": "agents.status"
+            },
+            "text": "data \u00b7 agents.status"
+          },
+          {
+            "columns": [
+              "command",
+              "agents.abort"
+            ],
+            "facets": {
+              "kind": "command"
+            },
+            "sort": {
+              "kind": "command",
+              "name": "agents.abort"
+            },
+            "text": "command \u00b7 agents.abort"
+          },
+          {
+            "sort": {},
+            "text": "no kind"
+          }
+        ],
+        "sorts": [
+          {
+            "key": "name",
+            "label": "name"
+          },
+          {
+            "key": "kind",
+            "label": "kind"
+          },
+          {
+            "desc": true,
+            "key": "name",
+            "label": "name (Z-A)"
+          }
+        ]
+      },
+      "state": {}
+    },
+    {
+      "expect": {
+        "facets": [
+          {
+            "all": 5,
+            "chosen": null,
+            "key": "kind",
+            "label": "Show",
+            "values": [
+              {
+                "count": 1,
+                "label": "view",
+                "value": "view"
+              },
+              {
+                "count": 2,
+                "label": "command",
+                "value": "command"
+              },
+              {
+                "count": 1,
+                "label": "data",
+                "value": "data"
+              }
+            ]
+          }
+        ],
+        "list_detail": null,
+        "missing": [],
+        "rows": [
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "0",
+            "pinned": false,
+            "selectable": true,
+            "text": "view \u00b7 agents-*",
+            "type": "item"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "3",
+            "pinned": false,
+            "selectable": true,
+            "text": "command \u00b7 agents.abort",
+            "type": "item"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "1",
+            "pinned": false,
+            "selectable": true,
+            "text": "command \u00b7 agents.show",
+            "type": "item"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "2",
+            "pinned": false,
+            "selectable": true,
+            "text": "data \u00b7 agents.status",
+            "type": "item"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "4",
+            "pinned": false,
+            "selectable": true,
+            "text": "no kind",
+            "type": "item"
+          }
+        ],
+        "sort": "name"
+      },
+      "features": [
+        "items",
+        "pages",
+        "tree",
+        "toolbar",
+        "badges",
+        "description",
+        "menu",
+        "input",
+        "options",
+        "select",
+        "chips",
+        "icon",
+        "wrap",
+        "facets",
+        "sort",
+        "columns",
+        "pin"
+      ],
+      "name": "sort: by name within the list; rows without the key last",
+      "panel": {
+        "facets": [
+          {
+            "key": "kind",
+            "label": "Show"
+          }
+        ],
+        "items": [
+          {
+            "columns": [
+              "view",
+              "agents-*"
+            ],
+            "facets": {
+              "kind": "view"
+            },
+            "sort": {
+              "kind": "view",
+              "name": "agents-*"
+            },
+            "text": "view \u00b7 agents-*"
+          },
+          {
+            "columns": [
+              "command",
+              "agents.show"
+            ],
+            "facets": {
+              "kind": "command"
+            },
+            "sort": {
+              "kind": "command",
+              "name": "agents.show"
+            },
+            "text": "command \u00b7 agents.show"
+          },
+          {
+            "columns": [
+              "data",
+              "agents.status"
+            ],
+            "facets": {
+              "kind": "data"
+            },
+            "sort": {
+              "kind": "data",
+              "name": "agents.status"
+            },
+            "text": "data \u00b7 agents.status"
+          },
+          {
+            "columns": [
+              "command",
+              "agents.abort"
+            ],
+            "facets": {
+              "kind": "command"
+            },
+            "sort": {
+              "kind": "command",
+              "name": "agents.abort"
+            },
+            "text": "command \u00b7 agents.abort"
+          },
+          {
+            "sort": {},
+            "text": "no kind"
+          }
+        ],
+        "sorts": [
+          {
+            "key": "name",
+            "label": "name"
+          },
+          {
+            "key": "kind",
+            "label": "kind"
+          },
+          {
+            "desc": true,
+            "key": "name",
+            "label": "name (Z-A)"
+          }
+        ]
+      },
+      "state": {
+        "sort": 0
+      }
+    },
+    {
+      "expect": {
+        "facets": [
+          {
+            "all": 5,
+            "chosen": null,
+            "key": "kind",
+            "label": "Show",
+            "values": [
+              {
+                "count": 1,
+                "label": "view",
+                "value": "view"
+              },
+              {
+                "count": 2,
+                "label": "command",
+                "value": "command"
+              },
+              {
+                "count": 1,
+                "label": "data",
+                "value": "data"
+              }
+            ]
+          }
+        ],
+        "list_detail": null,
+        "missing": [],
+        "rows": [
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "2",
+            "pinned": false,
+            "selectable": true,
+            "text": "data \u00b7 agents.status",
+            "type": "item"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "1",
+            "pinned": false,
+            "selectable": true,
+            "text": "command \u00b7 agents.show",
+            "type": "item"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "3",
+            "pinned": false,
+            "selectable": true,
+            "text": "command \u00b7 agents.abort",
+            "type": "item"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "0",
+            "pinned": false,
+            "selectable": true,
+            "text": "view \u00b7 agents-*",
+            "type": "item"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "4",
+            "pinned": false,
+            "selectable": true,
+            "text": "no kind",
+            "type": "item"
+          }
+        ],
+        "sort": "name (Z-A)"
+      },
+      "features": [
+        "items",
+        "pages",
+        "tree",
+        "toolbar",
+        "badges",
+        "description",
+        "menu",
+        "input",
+        "options",
+        "select",
+        "chips",
+        "icon",
+        "wrap",
+        "facets",
+        "sort",
+        "columns",
+        "pin"
+      ],
+      "name": "sort: descending keeps rows without the key last",
+      "panel": {
+        "facets": [
+          {
+            "key": "kind",
+            "label": "Show"
+          }
+        ],
+        "items": [
+          {
+            "columns": [
+              "view",
+              "agents-*"
+            ],
+            "facets": {
+              "kind": "view"
+            },
+            "sort": {
+              "kind": "view",
+              "name": "agents-*"
+            },
+            "text": "view \u00b7 agents-*"
+          },
+          {
+            "columns": [
+              "command",
+              "agents.show"
+            ],
+            "facets": {
+              "kind": "command"
+            },
+            "sort": {
+              "kind": "command",
+              "name": "agents.show"
+            },
+            "text": "command \u00b7 agents.show"
+          },
+          {
+            "columns": [
+              "data",
+              "agents.status"
+            ],
+            "facets": {
+              "kind": "data"
+            },
+            "sort": {
+              "kind": "data",
+              "name": "agents.status"
+            },
+            "text": "data \u00b7 agents.status"
+          },
+          {
+            "columns": [
+              "command",
+              "agents.abort"
+            ],
+            "facets": {
+              "kind": "command"
+            },
+            "sort": {
+              "kind": "command",
+              "name": "agents.abort"
+            },
+            "text": "command \u00b7 agents.abort"
+          },
+          {
+            "sort": {},
+            "text": "no kind"
+          }
+        ],
+        "sorts": [
+          {
+            "key": "name",
+            "label": "name"
+          },
+          {
+            "key": "kind",
+            "label": "kind"
+          },
+          {
+            "desc": true,
+            "key": "name",
+            "label": "name (Z-A)"
+          }
+        ]
+      },
+      "state": {
+        "sort": 2
+      }
+    },
+    {
+      "expect": {
+        "facets": [
+          {
+            "all": 5,
+            "chosen": "off",
+            "key": "status",
+            "label": "Show",
+            "values": [
+              {
+                "count": 2,
+                "label": "running",
+                "value": "running"
+              },
+              {
+                "count": 2,
+                "label": "off",
+                "value": "off"
+              },
+              {
+                "count": 1,
+                "label": "failed",
+                "value": "failed"
+              }
+            ]
+          }
+        ],
+        "list_detail": null,
+        "missing": [],
+        "rows": [
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": true,
+            "has_children": true,
+            "id": "kind/interface",
+            "pinned": false,
+            "selectable": false,
+            "text": "Interface",
+            "type": "header"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "agents",
+            "pinned": false,
+            "selectable": true,
+            "text": "Agent controls",
+            "type": "item"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": true,
+            "has_children": true,
+            "id": "kind/provider",
+            "pinned": false,
+            "selectable": false,
+            "text": "Provider",
+            "type": "header"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "tmux",
+            "pinned": false,
+            "selectable": true,
+            "text": "tmux backend",
+            "type": "item"
+          }
+        ],
+        "sort": "name"
+      },
+      "features": [
+        "items",
+        "pages",
+        "tree",
+        "toolbar",
+        "badges",
+        "description",
+        "menu",
+        "input",
+        "options",
+        "select",
+        "chips",
+        "icon",
+        "wrap",
+        "facets",
+        "sort",
+        "columns",
+        "pin"
+      ],
+      "name": "facets and sort inside groups: headers stay, groups kept while a child matches",
+      "panel": {
+        "facets": [
+          {
+            "key": "status",
+            "label": "Show",
+            "values": [
+              {
+                "label": "running",
+                "value": "running"
+              },
+              {
+                "label": "off",
+                "value": "off"
+              },
+              {
+                "label": "failed",
+                "value": "failed"
+              }
+            ]
+          }
+        ],
+        "items": [
+          {
+            "children": [
+              {
+                "facets": {
+                  "status": "running"
+                },
+                "id": "tabs",
+                "sort": {
+                  "name": "Tabs",
+                  "status": 2
+                },
+                "text": "Tabs"
+              },
+              {
+                "facets": {
+                  "status": "off"
+                },
+                "id": "agents",
+                "sort": {
+                  "name": "Agent controls",
+                  "status": 1
+                },
+                "text": "Agent controls"
+              },
+              {
+                "facets": {
+                  "status": "running"
+                },
+                "id": "icons",
+                "sort": {
+                  "name": "icons",
+                  "status": 2
+                },
+                "text": "Icons"
+              }
+            ],
+            "expanded": true,
+            "id": "kind/interface",
+            "text": "Interface",
+            "type": "header"
+          },
+          {
+            "children": [
+              {
+                "facets": {
+                  "status": "off"
+                },
+                "id": "tmux",
+                "sort": {
+                  "name": "tmux backend",
+                  "status": 1
+                },
+                "text": "tmux backend"
+              },
+              {
+                "facets": {
+                  "status": "failed"
+                },
+                "id": "herdr",
+                "sort": {
+                  "name": "herdr-core backend",
+                  "status": 0
+                },
+                "text": "herdr-core backend"
+              }
+            ],
+            "expanded": true,
+            "id": "kind/provider",
+            "text": "Provider",
+            "type": "header"
+          }
+        ],
+        "sorts": [
+          {
+            "key": "name",
+            "label": "name"
+          },
+          {
+            "key": "status",
+            "label": "status"
+          }
+        ]
+      },
+      "state": {
+        "facets": {
+          "status": "off"
+        },
+        "sort": 0
+      }
+    },
+    {
+      "expect": {
+        "facets": [
+          {
+            "all": 5,
+            "chosen": null,
+            "key": "status",
+            "label": "Show",
+            "values": [
+              {
+                "count": 2,
+                "label": "running",
+                "value": "running"
+              },
+              {
+                "count": 2,
+                "label": "off",
+                "value": "off"
+              },
+              {
+                "count": 1,
+                "label": "failed",
+                "value": "failed"
+              }
+            ]
+          }
+        ],
+        "list_detail": null,
+        "missing": [],
+        "rows": [
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": true,
+            "has_children": true,
+            "id": "kind/interface",
+            "pinned": false,
+            "selectable": false,
+            "text": "Interface",
+            "type": "header"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "agents",
+            "pinned": false,
+            "selectable": true,
+            "text": "Agent controls",
+            "type": "item"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "tabs",
+            "pinned": false,
+            "selectable": true,
+            "text": "Tabs",
+            "type": "item"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "icons",
+            "pinned": false,
+            "selectable": true,
+            "text": "Icons",
+            "type": "item"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": true,
+            "has_children": true,
+            "id": "kind/provider",
+            "pinned": false,
+            "selectable": false,
+            "text": "Provider",
+            "type": "header"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "herdr",
+            "pinned": false,
+            "selectable": true,
+            "text": "herdr-core backend",
+            "type": "item"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "tmux",
+            "pinned": false,
+            "selectable": true,
+            "text": "tmux backend",
+            "type": "item"
+          }
+        ],
+        "sort": "status"
+      },
+      "features": [
+        "items",
+        "pages",
+        "tree",
+        "toolbar",
+        "badges",
+        "description",
+        "menu",
+        "input",
+        "options",
+        "select",
+        "chips",
+        "icon",
+        "wrap",
+        "facets",
+        "sort",
+        "columns",
+        "pin"
+      ],
+      "name": "sort inside groups by a number",
+      "panel": {
+        "facets": [
+          {
+            "key": "status",
+            "label": "Show",
+            "values": [
+              {
+                "label": "running",
+                "value": "running"
+              },
+              {
+                "label": "off",
+                "value": "off"
+              },
+              {
+                "label": "failed",
+                "value": "failed"
+              }
+            ]
+          }
+        ],
+        "items": [
+          {
+            "children": [
+              {
+                "facets": {
+                  "status": "running"
+                },
+                "id": "tabs",
+                "sort": {
+                  "name": "Tabs",
+                  "status": 2
+                },
+                "text": "Tabs"
+              },
+              {
+                "facets": {
+                  "status": "off"
+                },
+                "id": "agents",
+                "sort": {
+                  "name": "Agent controls",
+                  "status": 1
+                },
+                "text": "Agent controls"
+              },
+              {
+                "facets": {
+                  "status": "running"
+                },
+                "id": "icons",
+                "sort": {
+                  "name": "icons",
+                  "status": 2
+                },
+                "text": "Icons"
+              }
+            ],
+            "expanded": true,
+            "id": "kind/interface",
+            "text": "Interface",
+            "type": "header"
+          },
+          {
+            "children": [
+              {
+                "facets": {
+                  "status": "off"
+                },
+                "id": "tmux",
+                "sort": {
+                  "name": "tmux backend",
+                  "status": 1
+                },
+                "text": "tmux backend"
+              },
+              {
+                "facets": {
+                  "status": "failed"
+                },
+                "id": "herdr",
+                "sort": {
+                  "name": "herdr-core backend",
+                  "status": 0
+                },
+                "text": "herdr-core backend"
+              }
+            ],
+            "expanded": true,
+            "id": "kind/provider",
+            "text": "Provider",
+            "type": "header"
+          }
+        ],
+        "sorts": [
+          {
+            "key": "name",
+            "label": "name"
+          },
+          {
+            "key": "status",
+            "label": "status"
+          }
+        ]
+      },
+      "state": {
+        "sort": 1
+      }
+    },
+    {
+      "expect": {
+        "facets": [
+          {
+            "all": 2,
+            "chosen": null,
+            "key": "status",
+            "label": "Show",
+            "values": [
+              {
+                "count": 0,
+                "label": "running",
+                "value": "running"
+              },
+              {
+                "count": 1,
+                "label": "off",
+                "value": "off"
+              },
+              {
+                "count": 1,
+                "label": "failed",
+                "value": "failed"
+              }
+            ]
+          }
+        ],
+        "list_detail": null,
+        "missing": [],
+        "rows": [
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": true,
+            "has_children": true,
+            "id": "kind/provider",
+            "pinned": false,
+            "selectable": false,
+            "text": "Provider",
+            "type": "header"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "tmux",
+            "pinned": false,
+            "selectable": true,
+            "text": "tmux backend",
+            "type": "item"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "herdr",
+            "pinned": false,
+            "selectable": true,
+            "text": "herdr-core backend",
+            "type": "item"
+          }
+        ],
+        "sort": "given order"
+      },
+      "features": [
+        "items",
+        "pages",
+        "tree",
+        "toolbar",
+        "badges",
+        "description",
+        "menu",
+        "input",
+        "options",
+        "select",
+        "chips",
+        "icon",
+        "wrap",
+        "facets",
+        "sort",
+        "columns",
+        "pin"
+      ],
+      "name": "facets combine with the text filter (counts follow the filter)",
+      "panel": {
+        "facets": [
+          {
+            "key": "status",
+            "label": "Show",
+            "values": [
+              {
+                "label": "running",
+                "value": "running"
+              },
+              {
+                "label": "off",
+                "value": "off"
+              },
+              {
+                "label": "failed",
+                "value": "failed"
+              }
+            ]
+          }
+        ],
+        "items": [
+          {
+            "children": [
+              {
+                "facets": {
+                  "status": "running"
+                },
+                "id": "tabs",
+                "sort": {
+                  "name": "Tabs",
+                  "status": 2
+                },
+                "text": "Tabs"
+              },
+              {
+                "facets": {
+                  "status": "off"
+                },
+                "id": "agents",
+                "sort": {
+                  "name": "Agent controls",
+                  "status": 1
+                },
+                "text": "Agent controls"
+              },
+              {
+                "facets": {
+                  "status": "running"
+                },
+                "id": "icons",
+                "sort": {
+                  "name": "icons",
+                  "status": 2
+                },
+                "text": "Icons"
+              }
+            ],
+            "expanded": true,
+            "id": "kind/interface",
+            "text": "Interface",
+            "type": "header"
+          },
+          {
+            "children": [
+              {
+                "facets": {
+                  "status": "off"
+                },
+                "id": "tmux",
+                "sort": {
+                  "name": "tmux backend",
+                  "status": 1
+                },
+                "text": "tmux backend"
+              },
+              {
+                "facets": {
+                  "status": "failed"
+                },
+                "id": "herdr",
+                "sort": {
+                  "name": "herdr-core backend",
+                  "status": 0
+                },
+                "text": "herdr-core backend"
+              }
+            ],
+            "expanded": true,
+            "id": "kind/provider",
+            "text": "Provider",
+            "type": "header"
+          }
+        ],
+        "sorts": [
+          {
+            "key": "name",
+            "label": "name"
+          },
+          {
+            "key": "status",
+            "label": "status"
+          }
+        ]
+      },
+      "state": {
+        "filter": "backend"
+      }
+    },
+    {
+      "expect": {
+        "list_detail": null,
+        "missing": [],
+        "rows": [
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "1",
+            "pinned": false,
+            "selectable": true,
+            "text": "ten",
+            "type": "item"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "0",
+            "pinned": false,
+            "selectable": true,
+            "text": "b",
+            "type": "item"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "2",
+            "pinned": false,
+            "selectable": false,
+            "text": "",
+            "type": "separator"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "5",
+            "pinned": false,
+            "selectable": true,
+            "text": "two",
+            "type": "item"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "4",
+            "pinned": false,
+            "selectable": true,
+            "text": "apple",
+            "type": "item"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "3",
+            "pinned": false,
+            "selectable": true,
+            "text": "Zed",
+            "type": "item"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "6",
+            "pinned": false,
+            "selectable": true,
+            "text": "none",
+            "type": "item"
+          }
+        ],
+        "sort": "number"
+      },
+      "features": [
+        "items",
+        "pages",
+        "tree",
+        "toolbar",
+        "badges",
+        "description",
+        "menu",
+        "input",
+        "options",
+        "select",
+        "chips",
+        "icon",
+        "wrap",
+        "facets",
+        "sort",
+        "columns",
+        "pin"
+      ],
+      "name": "sort: numbers before strings, case-insensitive, separators split runs",
+      "panel": {
+        "items": [
+          {
+            "sort": {
+              "n": "b"
+            },
+            "text": "b"
+          },
+          {
+            "sort": {
+              "n": 10
+            },
+            "text": "ten"
+          },
+          {
+            "text": "",
+            "type": "separator"
+          },
+          {
+            "sort": {
+              "n": "Zed"
+            },
+            "text": "Zed"
+          },
+          {
+            "sort": {
+              "n": "apple"
+            },
+            "text": "apple"
+          },
+          {
+            "sort": {
+              "n": 2
+            },
+            "text": "two"
+          },
+          {
+            "text": "none"
+          }
+        ],
+        "sorts": [
+          {
+            "key": "n",
+            "label": "number"
+          }
+        ]
+      },
+      "state": {
+        "sort": 0
+      }
+    },
+    {
+      "expect": {
+        "facets": [
+          {
+            "all": 2,
+            "chosen": "x",
+            "key": "tag",
+            "label": "Tag",
+            "values": [
+              {
+                "count": 1,
+                "label": "x",
+                "value": "x"
+              },
+              {
+                "count": 1,
+                "label": "y",
+                "value": "y"
+              }
+            ]
+          },
+          {
+            "all": 2,
+            "chosen": "off",
+            "key": "state",
+            "label": "State",
+            "values": [
+              {
+                "count": 1,
+                "label": "on",
+                "value": "on"
+              },
+              {
+                "count": 1,
+                "label": "off",
+                "value": "off"
+              }
+            ]
+          }
+        ],
+        "list_detail": null,
+        "missing": [],
+        "rows": [
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "2",
+            "pinned": false,
+            "selectable": true,
+            "text": "c",
+            "type": "item"
+          },
+          {
+            "bottom": true,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "3",
+            "pinned": false,
+            "selectable": true,
+            "text": "composer",
+            "type": "item"
+          }
+        ]
+      },
+      "features": [
+        "items",
+        "pages",
+        "tree",
+        "toolbar",
+        "badges",
+        "description",
+        "menu",
+        "input",
+        "options",
+        "select",
+        "chips",
+        "icon",
+        "wrap",
+        "facets",
+        "sort",
+        "columns",
+        "pin"
+      ],
+      "name": "facets: list values, two keys AND, pin bottom rows exempt",
+      "panel": {
+        "facets": [
+          {
+            "key": "tag",
+            "label": "Tag"
+          },
+          {
+            "key": "state",
+            "label": "State"
+          }
+        ],
+        "items": [
+          {
+            "facets": {
+              "state": "on",
+              "tag": [
+                "x",
+                "y"
+              ]
+            },
+            "text": "a"
+          },
+          {
+            "facets": {
+              "state": "off",
+              "tag": "y"
+            },
+            "text": "b"
+          },
+          {
+            "facets": {
+              "state": "off",
+              "tag": "x"
+            },
+            "text": "c"
+          },
+          {
+            "facets": {},
+            "pin": "bottom",
+            "text": "composer"
+          }
+        ]
+      },
+      "state": {
+        "facets": {
+          "state": "off",
+          "tag": "x"
+        }
+      }
+    },
+    {
+      "expect": {
+        "column_widths": [
+          9,
+          30
+        ],
+        "facets": [
+          {
+            "all": 3,
+            "chosen": "command",
+            "key": "kind",
+            "label": "Show",
+            "values": [
+              {
+                "count": 2,
+                "label": "command",
+                "value": "command"
+              },
+              {
+                "count": 1,
+                "label": "view",
+                "value": "view"
+              }
+            ]
+          }
+        ],
+        "list_detail": null,
+        "missing": [],
+        "rows": [
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "2",
+            "pinned": false,
+            "selectable": true,
+            "text": "command \u00b7 a.cmd",
+            "type": "item"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "0",
+            "pinned": false,
+            "selectable": true,
+            "text": "command \u00b7 b.cmd",
+            "type": "item"
+          }
+        ],
+        "sort": "name"
+      },
+      "features": [
+        "items",
+        "pages",
+        "tree",
+        "toolbar",
+        "badges",
+        "description",
+        "menu",
+        "input",
+        "options",
+        "select",
+        "chips",
+        "icon",
+        "wrap",
+        "facets",
+        "sort",
+        "columns",
+        "pin"
+      ],
+      "name": "facets, sort and columns on a page; column widths",
+      "panel": {
+        "pages": [
+          {
+            "items": [
+              {
+                "focusable": true,
+                "text": "Kind: interface",
+                "type": "text"
+              }
+            ],
+            "title": "About"
+          },
+          {
+            "columns": [
+              {
+                "label": "kind",
+                "width": 9
+              },
+              {
+                "label": "name",
+                "width": "fill"
+              }
+            ],
+            "facets": [
+              {
+                "key": "kind",
+                "label": "Show"
+              }
+            ],
+            "items": [
+              {
+                "columns": [
+                  "command",
+                  "b.cmd"
+                ],
+                "facets": {
+                  "kind": "command"
+                },
+                "sort": {
+                  "kind": "command",
+                  "name": "b.cmd"
+                },
+                "text": "command \u00b7 b.cmd"
+              },
+              {
+                "columns": [
+                  "view",
+                  "a-*"
+                ],
+                "facets": {
+                  "kind": "view"
+                },
+                "sort": {
+                  "kind": "view",
+                  "name": "a-*"
+                },
+                "text": "view \u00b7 a-*"
+              },
+              {
+                "columns": [
+                  "command",
+                  "a.cmd"
+                ],
+                "facets": {
+                  "kind": "command"
+                },
+                "sort": {
+                  "kind": "command",
+                  "name": "a.cmd"
+                },
+                "text": "command \u00b7 a.cmd"
+              }
+            ],
+            "sorts": [
+              {
+                "key": "name",
+                "label": "name"
+              }
+            ],
+            "title": "Provides 3"
+          }
+        ]
+      },
+      "state": {
+        "facets": {
+          "kind": "command"
+        },
+        "page": 1,
+        "sort": 0
+      },
+      "width": 40
+    },
+    {
+      "expect": {
+        "list_detail": null,
+        "missing": [],
+        "rows": [
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": true,
+            "has_children": true,
+            "id": "kind/interface",
+            "pinned": false,
+            "selectable": false,
+            "text": "Interface",
+            "type": "header"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "tabs",
+            "pinned": false,
+            "selectable": true,
+            "text": "Tabs",
+            "type": "item"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "agents",
+            "pinned": false,
+            "selectable": true,
+            "text": "Agent controls",
+            "type": "item"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "icons",
+            "pinned": false,
+            "selectable": true,
+            "text": "Icons",
+            "type": "item"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": true,
+            "has_children": true,
+            "id": "kind/provider",
+            "pinned": false,
+            "selectable": false,
+            "text": "Provider",
+            "type": "header"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "tmux",
+            "pinned": false,
+            "selectable": true,
+            "text": "tmux backend",
+            "type": "item"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "herdr",
+            "pinned": false,
+            "selectable": true,
+            "text": "herdr-core backend",
+            "type": "item"
+          }
+        ]
+      },
+      "name": "without facets, sort and columns: given order, every row",
+      "panel": {
+        "facets": [
+          {
+            "key": "status",
+            "label": "Show",
+            "values": [
+              {
+                "label": "running",
+                "value": "running"
+              },
+              {
+                "label": "off",
+                "value": "off"
+              },
+              {
+                "label": "failed",
+                "value": "failed"
+              }
+            ]
+          }
+        ],
+        "items": [
+          {
+            "children": [
+              {
+                "facets": {
+                  "status": "running"
+                },
+                "id": "tabs",
+                "sort": {
+                  "name": "Tabs",
+                  "status": 2
+                },
+                "text": "Tabs"
+              },
+              {
+                "facets": {
+                  "status": "off"
+                },
+                "id": "agents",
+                "sort": {
+                  "name": "Agent controls",
+                  "status": 1
+                },
+                "text": "Agent controls"
+              },
+              {
+                "facets": {
+                  "status": "running"
+                },
+                "id": "icons",
+                "sort": {
+                  "name": "icons",
+                  "status": 2
+                },
+                "text": "Icons"
+              }
+            ],
+            "expanded": true,
+            "id": "kind/interface",
+            "text": "Interface",
+            "type": "header"
+          },
+          {
+            "children": [
+              {
+                "facets": {
+                  "status": "off"
+                },
+                "id": "tmux",
+                "sort": {
+                  "name": "tmux backend",
+                  "status": 1
+                },
+                "text": "tmux backend"
+              },
+              {
+                "facets": {
+                  "status": "failed"
+                },
+                "id": "herdr",
+                "sort": {
+                  "name": "herdr-core backend",
+                  "status": 0
+                },
+                "text": "herdr-core backend"
+              }
+            ],
+            "expanded": true,
+            "id": "kind/provider",
+            "text": "Provider",
+            "type": "header"
+          }
+        ],
+        "sorts": [
+          {
+            "key": "name",
+            "label": "name"
+          },
+          {
+            "key": "status",
+            "label": "status"
+          }
+        ]
+      },
+      "state": {
+        "facets": {
+          "status": "off"
+        },
+        "sort": 0
       }
     }
   ]
