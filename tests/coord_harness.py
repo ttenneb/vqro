@@ -97,9 +97,10 @@ class Harness:
             self.spawn([sys.executable, os.path.join(HERE, "fixtures", "fake_inbox.py"), self.inbox_log],
                        env=dict(self.env, VQRO_EXT_PATH=os.path.join(HERE, "..", "extensions")), stderr=open(os.path.join(root, "inbox.err"), "w"))
         if inbox == "k2core":
-            # Product cores do not bootstrap an owner for a test. Use a real raw
-            # recovery transaction before requesting the configured owner identity.
-            bootstrap = Client(self.sock, principal="p:native-bootstrap")
+            # Resolve the core's actual bootstrapped owner, then configure this
+            # fixture's owner through an authorized public transaction. A label
+            # or an arbitrary ordinary principal confers no such standing.
+            bootstrap = Client(self.sock, owner=True)
             bootstrap.call("workspace.apply", {"ops": [{"op": "set", "key": "doc/principals/owner",
                                                        "value": "p:owner"}], "note": "private native pull fixture owner"})
             bootstrap.f.close(); bootstrap.s.close()
