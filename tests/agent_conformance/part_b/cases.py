@@ -1233,3 +1233,7 @@ async def readonly_boot_before_writes(ctx):
             (Path(sub.backend.env["VQRO_STATE_DIR"])/"release-fault").touch()
             await sub.close();ctx.evidence.extend(sub.evidence)
     ctx.check(not failures,"both registration cuts must retain the required public read-only paths",failures=failures)
+
+
+# Registration of independently grouped probes; imported after their shared helpers exist.
+from . import inbox_cases  # noqa: E402,F401
