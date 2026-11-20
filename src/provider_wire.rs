@@ -484,6 +484,7 @@ impl WireProvider {
         }
         let _effect=EffectLease { inventory:&self.inventory,effect:&context.effect };
         let mut p = json!({"generation": self.generation, "effect": context.effect, "op": op, "args": args,"principal":context.author.effective().unwrap_or(crate::principal::UNDECLARED), "author":context.author.author,"actor":context.author.attribution.actor,"initiator":context.author.attribution.initiator,"label":context.author.attribution.label, "deadline_ms": remaining.as_millis().clamp(1, 300000) as u64});
+        context.author.attribution.causality.annotate(&mut p);
         if let Some((reference, incarnation)) = target { p["ref"] = json!(reference); p["incarnation"] = json!(incarnation); }
         if encoded_bytes(&p) + 128 > MAX_RECORD_BYTES { return Err(AdapterError::RejectedKind { kind: "overloaded".into(), message: "provider effect record exceeds 1 MiB".into() }); }
         let remaining=context.deadline.saturating_duration_since(Instant::now());

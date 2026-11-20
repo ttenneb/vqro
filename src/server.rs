@@ -526,6 +526,7 @@ fn attribution(core:&Shared,conn:&Conn,params:&mut Value)->Result<crate::invocat
 
 async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, mut p: Value) -> RpcResult {
     crate::limits::json_depth(&p,crate::limits::MESSAGE_DEPTH)?;
+    if method=="resource.invoke" {crate::causality::Causality::lift_args(&mut p)?;}
     let context=attribution(core,conn,&mut p)?;
     if conn.peer.is_closed() { return Err(provider::rejected("disconnected", "connection closed before dispatch")); }
     if core.lock().unwrap().shutdown.is_requested() && method != "core.shutdown" && !(method == "command.invoke" && p["name"] == "vqro.shutdown") {
@@ -855,7 +856,9 @@ where F: std::future::Future<Output = Result<T, RpcError>> + Send + 'static {
         Ok(value) => success(value),
         Err(error) => error.data.as_ref().and_then(|d| d["outcome"].as_str()).unwrap_or("indeterminate"),
     };
-    core.lock().unwrap().emit("effect", json!({"effect": id, "provider": route.handle.name, "generation": route.generation, "method": method, "author": author,"actor":attribution.actor,"principal":attribution.principal,"initiator":attribution.initiator,"label":attribution.label, "resource":detail["resource"], "op":detail["op"], "target":route.target.as_ref().map(|(reference,incarnation)|json!({"ref":reference,"incarnation":incarnation})), "outcome": outcome, "error": result.as_ref().err()}));
+    let mut audit=json!({"effect": id, "provider": route.handle.name, "generation": route.generation, "method": method, "author": author,"actor":attribution.actor,"principal":attribution.principal,"initiator":attribution.initiator,"label":attribution.label, "resource":detail["resource"], "op":detail["op"], "target":route.target.as_ref().map(|(reference,incarnation)|json!({"ref":reference,"incarnation":incarnation})), "outcome": outcome, "error": result.as_ref().err()});
+    attribution.causality.annotate(&mut audit);
+    core.lock().unwrap().emit("effect",audit);
     result.map(|value| (id.clone(), value)).map_err(|mut error| {
         if let Some(data) = error.data.as_mut() { data["effect"] = json!(id); }
         error
@@ -931,7 +934,8 @@ fn forget_cached(core:&Shared,author:&Caller,p:Value,attribution:Attribution)->R
     let id=p["resource"].as_str().ok_or_else(||RpcError::invalid("needs `resource`"))?;
     let mut c=core.lock().unwrap();author.check(&c)?;let effect=c.effect_id();let result=c.forget_cached_resource(id);
     let outcome=if result.is_ok(){"observed"}else{result.as_ref().err().and_then(|e|e.data.as_ref()).and_then(|d|d["outcome"].as_str()).unwrap_or("indeterminate")};
-    c.emit("effect",json!({"effect":effect,"provider":null,"generation":null,"method":"resource.forget_cached","resource":id,"op":"resource.forget_cached","author":author,"actor":attribution.actor,"principal":attribution.principal,"initiator":attribution.initiator,"label":attribution.label,"scope":"cached_facts","outcome":outcome,"error":result.as_ref().err()}));
+    let mut audit=json!({"effect":effect,"provider":null,"generation":null,"method":"resource.forget_cached","resource":id,"op":"resource.forget_cached","author":author,"actor":attribution.actor,"principal":attribution.principal,"initiator":attribution.initiator,"label":attribution.label,"scope":"cached_facts","outcome":outcome,"error":result.as_ref().err()});
+    attribution.causality.annotate(&mut audit);c.emit("effect",audit);
     result.map_err(|mut error| {if let Some(data)=error.data.as_mut(){data["effect"]=json!(effect);data["scope"]=json!("cached_facts");}error})?;
     Ok(json!({"outcome":"observed","effect":effect,"data":{"scope":"cached_facts","backend_effect":"none"}}))
 }

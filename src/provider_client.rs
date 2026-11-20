@@ -267,6 +267,9 @@ pub struct EffectRequest {
 }
 
 impl EffectRequest {
+    /// Explicit caller links, unchanged; neither accessor establishes native evidence.
+    pub fn cause(&self)->Option<&Value>{self.attribution.causality.cause.as_ref()}
+    pub fn correlation(&self)->Option<&str>{self.attribution.causality.correlation.as_deref()}
     /// Reply with a D10 outcome. Adapter refusals (including `busy`/`stale`) must use
     /// `Ok(Outcome::Rejected { .. })`: an arbitrary error does NOT establish no effect.
     /// The core rejects only its fixed protocol-error kinds; other errors become indeterminate.
@@ -1013,7 +1016,8 @@ fn effect_request(id: &Value, p: &Value, shared: &Arc<Shared>, config: &Arc<Conf
     }
     if !config.capabilities.contains_key(op) { return Err(ProviderError::new("unsupported",format!("op {op} is not a declared capability"))); }
     let author=match p.get("author"){None=>crate::principal::UNDECLARED.into(),Some(Value::String(author))=>author.clone(),Some(_)=>return Err(ProviderError::new("invalid","author must be a core author string"))};
-    let attribution=serde_json::from_value(p.clone()).map_err(|_|ProviderError::new("invalid","malformed effect attribution"))?;
+    let mut attribution:crate::principal::Attribution=serde_json::from_value(p.clone()).map_err(|_|ProviderError::new("invalid","malformed effect attribution"))?;
+    attribution.causality=crate::causality::Causality::parse(p).map_err(|error|ProviderError::new(error.kind(),error.message.clone()))?;
     shared.effect_ids.lock().unwrap().begin(effect.to_string(),config.max_effect_ids)?;
     let mut response=responder(shared,id);
     response.effect=Some(effect.to_string());

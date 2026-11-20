@@ -22,6 +22,8 @@ pub struct Attribution {
     pub initiator:Option<String>,
     #[serde(default,skip_serializing_if="Option::is_none")]
     pub label:Option<String>,
+    #[serde(default,flatten)]
+    pub causality:crate::causality::Causality,
     #[serde(skip)]
     pub(crate) authority:Option<Authority>,
 }
@@ -38,7 +40,7 @@ impl Attribution {
             Some(_)=>return Err(RpcError::invalid("label must be a bounded string without control characters")),
         };
         if let Some(object)=params.as_object_mut(){object.remove("label");}
-        Ok(Self {actor:Some(actor.into()),principal:Some(actor.into()),initiator:None,label,authority:None})
+        Ok(Self {actor:Some(actor.into()),principal:Some(actor.into()),initiator:None,label,causality:crate::causality::Causality::take(params)?,authority:None})
     }
     pub(crate) fn recorded(mut self)->Self {self.authority=None;self}
     pub fn effective(&self)->Option<&str> {self.actor.as_ref()?;self.principal.as_deref().filter(|id|*id!=UNDECLARED)}
@@ -119,7 +121,7 @@ pub(crate) fn resolve(core:&crate::core::Core,connection:u64,base:Attribution,in
 }
 pub(crate) fn revalidate(core:&crate::core::Core,attribution:&Attribution)->Result<Attribution,RpcError> {
     let Some(authority)=&attribution.authority else{return Ok(attribution.clone())};
-    let base=Attribution{actor:attribution.actor.clone(),principal:attribution.actor.clone(),initiator:None,label:attribution.label.clone(),authority:None};
+    let base=Attribution{actor:attribution.actor.clone(),principal:attribution.actor.clone(),initiator:None,label:attribution.label.clone(),causality:attribution.causality.clone(),authority:None};
     Ok(resolve(core,authority.connection,base,authority.invocation.clone(),authority.target.clone())?.attribution)
 }
 pub fn protected(key:&str)->bool {key==OWNER_KEY || key.starts_with(DELEGATIONS)}
@@ -173,7 +175,7 @@ pub fn bootstrap(store:&mut Store)->Result<(),RpcError> {
     if store.get(OWNER_KEY).is_some() && owner(store).is_ok(){return Ok(())}
     let mut nonce=[0u8;16];getrandom::fill(&mut nonce).map_err(|error|RpcError::new("io",format!("owner bootstrap nonce: {error}")))?;
     let author=format!("system:{}",nonce.iter().map(|b|format!("{b:02x}")).collect::<String>());
-    let attribution=Attribution{actor:Some("system".into()),principal:Some("system".into()),initiator:None,label:None,authority:None};
+    let attribution=Attribution{actor:Some("system".into()),principal:Some("system".into()),initiator:None,label:None,causality:Default::default(),authority:None};
     match store.apply_context(&author,None,attribution,Some("initialize workspace owner (prior value retained in history)".into()),vec![Op::Set{key:OWNER_KEY.into(),value:json!(OWNER),expect:None}]) {
         Ok(_)=>Ok(()),
         Err(error)if error.kind()=="durability_unconfirmed"=>{eprintln!("vqro: owner bootstrap adopted, durability unconfirmed; do not replay: {error}");Ok(())},

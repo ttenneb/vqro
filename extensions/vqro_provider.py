@@ -81,6 +81,8 @@ class Effect:
     principal: str | None = None
     initiator: str | None = None
     label: str | None = None
+    cause: dict | None = None
+    correlation: str | None = None
 
     @property
     def remaining(self):
@@ -89,6 +91,50 @@ class Effect:
     @property
     def expired(self):
         return self.remaining == 0
+
+
+def causal_links(params):
+    """Same generic shape bounds as core; preserve links and provenance without inferring evidence."""
+    def text(value, field):
+        try:
+            valid = isinstance(value, str) and 1 <= len(value.encode("utf-8")) <= 256
+        except UnicodeError:
+            valid = False
+        if not valid:
+            raise ProviderError("invalid", f"{field} must be a string of 1..=256 bytes")
+        return value
+    cause = params.get("cause")
+    if "cause" in params:
+        if not isinstance(cause, dict):
+            raise ProviderError("invalid", "cause must be an object")
+        # One iterator per ancestor; a wide object does not allocate an unbounded pending list.
+        pending = [iter((cause,))]
+        while pending:
+            try:
+                value = next(pending[-1])
+            except StopIteration:
+                pending.pop()
+                continue
+            if isinstance(value, (dict, list)):
+                if len(pending) > 64:
+                    raise ProviderError("invalid", "cause exceeds 64 containers")
+                pending.append(iter(value.values() if isinstance(value, dict) else value))
+        try:
+            size = len(json.dumps(cause, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8"))
+        except (ValueError, TypeError, UnicodeError):
+            raise ProviderError("invalid", "cause must contain JSON values") from None
+        if size > 4096:
+            raise ProviderError("invalid", "cause exceeds 4096 encoded bytes")
+        for field in ("kind", "id", "provenance"):
+            text(cause.get(field), f"cause.{field}")
+        for field in ("endpoint", "epoch", "boot"):
+            if field in cause:
+                text(cause[field], f"cause.{field}")
+        required = ("endpoint", "epoch") if cause["kind"] in ("entity", "request") else ("boot",) if cause["kind"] == "effect" else ()
+        for field in required:
+            text(cause.get(field), f"cause.{field}")
+    correlation = text(params["correlation"], "correlation") if "correlation" in params else None
+    return cause, correlation
 
 
 def integer(value, minimum=0, maximum=2**64 - 1):
@@ -426,8 +472,9 @@ class Provider:
         provenance = [params.get(key) for key in ("author", "actor", "principal", "initiator", "label")]
         if any(value is not None and not isinstance(value, str) for value in provenance):
             raise ProviderError("invalid", "effect provenance fields must be strings")
+        cause, correlation = causal_links(params)
         ctx = Effect(ident, op, params.get("ref"), params.get("incarnation", ""),
-                     asyncio.get_running_loop().time() + duration / 1000, *provenance)
+                     asyncio.get_running_loop().time() + duration / 1000, *provenance, cause, correlation)
         # Exactly one eventual reply, even after the core deadline. Never cancel
         # or retry a possibly dispatched backend effect merely because it expired.
         self._effect_ids.add(ident, self.limits.identities)

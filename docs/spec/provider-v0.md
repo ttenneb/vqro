@@ -184,7 +184,7 @@ Public calls stay resource-centric: `resource.spawn {provider?, kind, ...}`, `re
 | `rejected` | the layer below refused it; no effect |
 | `indeterminate` | sent, but the answer was lost (deadline, disconnect); the effect may or may not have happened |
 
-- **Explicit causality** `(pending C2 core-causality)`: optional `cause` / `correlation` from `resource.invoke`
+- **Explicit causality** (generic): optional `cause` / `correlation` from `resource.invoke`
   root params or `args` are lifted into `effect.invoke` metadata and audits, with `args` unchanged. Both forms,
   when supplied, must match. The core validates bounded shape only and preserves provenance, unknown enum values
   and extra bounded fields exactly; it never infers or upgrades a cause. Bounds/qualifiers are pinned in
@@ -430,6 +430,10 @@ existing status consumers and partial resource events (`src/events.rs`) work unc
   `label` the caller's diagnostic declaration. Effective and initiator stay distinct through delegated callbacks.
   Rust exposes `EffectRequest.author` plus `EffectRequest.attribution`; Python exposes the five fields on `Effect`.
   Missing legacy metadata is unknown/undeclared, never owner or evidence of native delivery/authentication.
+- Optional `cause` / `correlation` are validated and exposed unchanged: Rust `EffectRequest.cause()` /
+  `correlation()` (and attribution.causality), Python `Effect.cause` / `correlation`. Absence is unknown, not an
+  inferred link. Provenance labels are data, not a core certification of native evidence or authority; adapters echo
+  links only onto the items/receipts they can prove the operation produced.
 - Provider SDKs bind configured `VQRO_PRINCIPAL` through `hello.identity`, not per-call principal assertions.
   Without known configuration they are undeclared; a runtime's existing host bootstrap claim supplies its host
   principal when no other actor is known (`provider.register` returns `host` and resolved `actor`). A multi-endpoint

@@ -3,6 +3,15 @@
 D16: build vqro itself, smallest complete and usable first. The north star: an agent can substantially modify its own
 workspace through reliable public primitives, without changing the host or endangering underlying processes.
 
+## Generic explicit causality (2026-11-19; separate from C2 identity)
+
+Bounded cause/correlation now pass unchanged through resource.invoke args/root metadata, provider effect.invoke,
+SDK handlers and effect audits. Root fields persist in workspace/operational audits and their existing events;
+operational traffic remains outside global undo. Qualified shape only: no reference lookup, provenance upgrade,
+inferred links, deduplication or replay. Six Rust and three Python focused cases pass, including the original C9
+red/green trace and managed operational proof revalidation. Full-gate evidence is in the separate handoff;
+see `research/generic-causality.md`. Experimental snapshots are not release acceptance.
+
 ## Agent-standard C2: connection-known principals and explicit representation (2026-11-19)
 
 AS6 binds identity at hello from explicit launcher/TUI/extension/host context, with undeclared raw fallback and no

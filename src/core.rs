@@ -305,7 +305,8 @@ impl Core {
             .iter()
             .map(|c| json!({"key": c.key, "version": c.after_version, "value": self.store.get(&c.key).map(|entry|entry.value.clone())}))
             .collect();
-        self.emit("entries", json!({"txn": txn.id, "author": txn.author, "actor":txn.attribution.actor,"principal":txn.attribution.principal,"initiator":txn.attribution.initiator,"label":txn.attribution.label, "on_behalf_of": txn.on_behalf_of, "undoable":txn.undoable, "note": txn.note, "reverts": txn.reverts, "changes": changes}));
+        let mut audit=json!({"txn": txn.id, "author": txn.author, "actor":txn.attribution.actor,"principal":txn.attribution.principal,"initiator":txn.attribution.initiator,"label":txn.attribution.label, "on_behalf_of": txn.on_behalf_of, "undoable":txn.undoable, "note": txn.note, "reverts": txn.reverts, "changes": changes});
+        txn.attribution.causality.annotate(&mut audit);self.emit("entries",audit);
     }
 
     /// Publish every adopted transaction, including a replacement whose final directory sync
@@ -328,7 +329,8 @@ impl Core {
         if !adopted {return (result.map(|_|Value::Null),None);}
         let transaction=domain.last.as_ref().expect("adopted operational audit").clone();
         let changes=transaction.changes.iter().map(|change|json!({"key":change.key,"version":change.version,"value":domain.entries.get(&change.key).map(|entry|&entry.value)})).collect::<Vec<_>>();
-        self.emit("operational",json!({"domain":domain.name,"owner":domain.owner,"txn":transaction.id,"author":transaction.attribution.author,"actor":transaction.attribution.context.actor,"principal":transaction.attribution.context.principal,"initiator":transaction.attribution.context.initiator,"label":transaction.attribution.context.label,"on_behalf_of":transaction.attribution.on_behalf_of,"writer_epoch":transaction.attribution.epoch,"generation":transaction.attribution.generation,"operation":if registration {"register"}else{"apply"},"bytes":domain.max_bytes,"records_limit":domain.max_records,"capacity_request":domain.metadata()["capacity_request"],"undoable":false,"durability_unconfirmed":result.is_err(),"changes":changes}));
+        let mut audit=json!({"domain":domain.name,"owner":domain.owner,"txn":transaction.id,"author":transaction.attribution.author,"actor":transaction.attribution.context.actor,"principal":transaction.attribution.context.principal,"initiator":transaction.attribution.context.initiator,"label":transaction.attribution.context.label,"on_behalf_of":transaction.attribution.on_behalf_of,"writer_epoch":transaction.attribution.epoch,"generation":transaction.attribution.generation,"operation":if registration {"register"}else{"apply"},"bytes":domain.max_bytes,"records_limit":domain.max_records,"capacity_request":domain.metadata()["capacity_request"],"undoable":false,"durability_unconfirmed":result.is_err(),"changes":changes});
+        transaction.attribution.context.causality.annotate(&mut audit);self.emit("operational",audit);
         let mut metadata=domain.metadata();metadata["epoch"]=json!(self.epoch);metadata["seq"]=json!(self.seq);metadata["txn"]=json!(transaction.id);metadata["undoable"]=json!(false);
         metadata["changes"]=json!(transaction.changes);
         if let Err(error)=&mut result {let data=error.data.as_mut().unwrap();data["epoch"]=json!(self.epoch);data["seq"]=json!(self.seq);}

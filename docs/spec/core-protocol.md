@@ -514,16 +514,25 @@ new host's agents without full snapshots. The Pi launcher reads its settings via
 `resource.list {host}` after an observed spawn. Transient status-read failures may retry that read, never spawn;
 expiry/UI failure retains the observed host/result and offers the terminal fallback, not an apparent failed launch.
 
-**Explicit effect causality** `(pending C2 core-causality)`. On `resource.invoke`, a caller may supply `cause` and
+**Explicit effect causality** (generic). On `resource.invoke`, a caller may supply `cause` and
 `correlation` in root params or `args`; if either field appears in both, its JSON values must match or the call is
 `invalid` before dispatch. The core lifts the fields into provider effect metadata and effect audits without
 changing `args`, upgrading provenance or inferring anything from text/timing.
 - `cause`: object with required string `kind`, `id`, `provenance`; for kind `entity`/`request`, string `endpoint` and
   `epoch` are required, and for `effect`, string `boot`. Qualifiers are checked for presence/type only, not resolved
   as evidence or authority. Unknown enums and extra bounded fields pass unchanged.
-- Bounds: cause ≤ 4 KiB encoded, known strings (`kind`, `id`, `provenance`, `endpoint`, `epoch`, `boot`) ≤ 256 bytes,
+- Bounds: cause ≤ 4 KiB encoded, known strings (`kind`, `id`, `provenance`, `endpoint`, `epoch`, `boot`) are non-empty and ≤ 256 bytes,
   depth ≤ 64; `correlation` is a non-empty string ≤ 256 bytes. Invalid types, missing required fields and excess
-  bounds are `invalid`; provenance is preserved exactly, including unknown values.
+  bounds are `invalid`; provenance is preserved exactly, including unknown values. The outer wire's independent
+  size/depth admission can reject first.
+- Root `cause?` / `correlation?` are also recorded on `workspace.apply`/`workspace.revert` and
+  `operational.register`/`operational.apply`: persisted with their existing audit and emitted on their existing
+  entries/operational events. Operational metadata never enters workspace undo history. Prepare-time identity/proof
+  revalidation retains these explicit fields; proofs do not infer or propagate causal links to later requests.
+- Missing stays absent/unknown: no backfill, current-boot substitution, delivery inference or deduplication from
+  caller references. Native effects keep their independent core effect ids and D10 outcomes. Links confer no rights.
+  SDKs expose validated fields via Rust `EffectRequest.cause()`/`correlation()` (also attribution.causality), and
+  Python `Effect.cause`/`correlation`; ordinary client calls pass the optional fields explicitly.
 
 Spawn, kill and attach check declared capabilities and provider/resource availability before dispatch. Their default
 deadline is 30000 ms, override 1–300000 ms. Expiry is `timeout` with an indeterminate outcome; connection or resource
