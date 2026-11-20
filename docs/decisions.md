@@ -525,6 +525,11 @@ replaced when the Pi bridge is ported.
 - The default coordination extension declares **4 MiB** (generic core default 2 MiB). C1's measured 4 MiB workload
   passed 9000/9000 at 100 txn/s (operational p99 32–36 ms, layout p99 42–48 ms); 8 MiB is not certified at that rate.
   The capacity table charges the fixed 64 KiB domain metadata before payload space.
+- Pi dialogs use distinct operation scopes and `background_requests: false`; answers stay `dispatched` without
+  native acknowledgement. A positive native relative timeout cannot yield an evidenced absolute expiry: cancel
+  once as unrepresentable instead of guessing; untimed dialogs remain answerable.
+- Item adapters declare snapshot coverage (`all_retained`, `tail`, `state_only`). Appends must also fit their
+  resulting whole snapshot entity; the shared producer refuses `too_large` without changing state.
 
 Nothing is stable until Pi and the two other real runtimes pass conformance.
 

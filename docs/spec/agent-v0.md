@@ -290,8 +290,16 @@ A per-viewer credited stream of JSON records (core addition §9.1). P3 confirmed
   draining never wait. Closure follows the per-stream rule within one stream budget shared by the connection, so it
   may end all of a viewer's streams at once. A viewer discards a partial line when a stream ends. Falling out of
   retention while attached ends the stream with gap reason `retention`; an unknown gap reason is a protocol error that
-  still ends the stream. Adapters declare `items.retain_bytes` in facts. **Coverage** `tail`/`state_only` is never
-  shown as complete; current state and pending requests survive pruning.
+  still ends the stream. Adapters declare `items.retain_bytes` in facts.
+- **Coverage.** Adapters declare each snapshot's coverage: `all_retained` (every retained entity), `tail` (only
+  recent history, including when native history is missing) or `state_only` (current state and pending requests,
+  no timeline). `tail`/`state_only` is never shown as complete; current state and pending requests survive pruning.
+  The shared Rust producer uses `Coverage::{AllRetained, Tail, StateOnly}` and `set_coverage`; adapters must choose
+  honestly rather than rely on its `AllRetained` default after a new epoch.
+- **Producer bounds.** An append must fit both its encoded record and the resulting entity's whole snapshot `put`.
+  The shared producer's `append_text` / `append_bytes` return `too_large` before changing the entity, revision or
+  sequence if either exceeds the record bound. Adapters must handle that refusal explicitly, never silently lose
+  content or emit a snapshot that cannot fit the declared bound.
 
 **Entity kinds** (unknown kinds preserved and shown generically; `native` holds lossless extras; `thought` is only
 reasoning the runtime exposes for display):
@@ -333,6 +341,14 @@ subject?}` or `{operation}` (e.g. authentication before any session); it is inde
   assumed resolved. Unrepresentable and unknown methods are cancelled once and reported, never auto-approved. An
   `incomplete` request is never approved; if its full entity exceeds the entity bound it is cancelled as
   unrepresentable. Who may answer is the coordination layer's concern.
+
+**Pi example (A1).** Native UI dialogs carry no evidenced session, run or parent operation. Each gets its own
+adapter-minted dialog operation and `scope: {operation}`; declare `agent.respond.scopes: ["operation"]` and
+`background_requests: false`, not a foreground association inferred from arrival time. Answers stay `dispatched`:
+the native UI response has no acknowledgement. A dialog with a **positive native relative timeout** is cancelled
+once and reported unrepresentable: its timer starts before emission and Pi exposes neither the absolute deadline
+nor silent timeout cancellation, so the adapter cannot faithfully set `expires_at_ms` from receive time. Untimed
+dialogs remain answerable; nothing is auto-approved.
 
 ## 6. Modules (declared per resource in `caps`)
 

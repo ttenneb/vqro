@@ -47,7 +47,7 @@ equality, and every exercised behaviour must lie within the resource's current c
 | per mode: `busy`, `idle` (`start \| reject \| park`), `point`, `batch`, `batch_at`, `preflight` | `agent.send.modes` | D1–D5, D9, D12, D13 |
 | `content {types, shape}`, `correlation`, `keys {scope, retention}`, `guards`, `receipts.retain`, `literal`, `handled`, `origin` | `agent.send` | C8, D6–D8, D14–D16 |
 | `pending`, `scope`, `waits` | `agent.interrupt` | D10 |
-| `items` bounds (per entity and aggregate), `retain_bytes` | `agent` | O1–O11 |
+| `items` bounds (per entity and aggregate), `retain_bytes`; snapshot coverage | `agent`, snapshot begin | O1–O12 |
 | request `methods`, `scopes`, `background_requests`, answer acknowledgement | `agent.respond` | R1–R7 |
 | module actions (queue, session, config, command, history, object, display terminals) | each op | M1–M7 |
 | `covers`, `waits` | `agent.stop` | L2 |
@@ -116,17 +116,22 @@ O8 JSONL lines split across frames and UTF-8 boundaries. O9 coverage `tail`/`sta
 current state and pending requests survive pruning. O10 retained memory stays within the declared bounds (P3: 200 ×
 128 KiB = 26.2 MB plateau). O11 (untested) a viewer draining steadily but slower than generation gets gap reason
 `retention`; a stalled viewer holding all 200 of its streams loses them together and harms nobody; an unknown gap
-reason ends the stream.
+reason ends the stream. O12 producer append bounds: a small append whose resulting whole snapshot `put` exceeds
+the record bound returns `too_large`, leaving entity, revision and `seq` unchanged; both text and decoded-byte
+appends are covered. Adapters record how they handle this refusal without silently losing content.
 
 **R. Requests.** R1 a request appears in facts and stream with its scope; `requires_action` when it blocks. R2 two
 simultaneous answers: exactly one native response; stale revision, foreign epoch, expired, no longer pending, dead
 scope or invalid response → rejected before native write. R3 `accepted` only with native ack, else `dispatched`. R4
-unrepresentable or unknown methods cancelled once, never auto-approved; `incomplete` never approvable. R5 explicit
+unrepresentable or unknown methods cancelled once, never auto-approved; `incomplete` never approvable. For Pi, a
+dialog with a positive native relative timeout is cancelled once as unrepresentable (no fabricated absolute expiry);
+an untimed dialog remains answerable. R5 explicit
 cancel for permission, choice, confirm and text is distinct from denial, false and empty text. R6 requests are tested
 only in the declared `scopes`; with `background_requests: true`, a background request and a foreground permission are
 pending and interrupt withdraws only the one the runtime stops waiting on; with `false` that scenario is
 not-applicable. R7 reconnect verifies, reissues or cancels pending requests; an authentication request before any
-session is operation-scoped.
+session is operation-scoped. Pi's native UI dialogs have distinct adapter-minted operation scopes, never guessed
+session/run associations, and `background_requests: false`; their answers remain `dispatched` without a native ack.
 
 **M. Modules.** M1 native queue list/clear/withdraw/replace as declared; clear returns content once; null ids allow no
 per-item ops; an emptied queue never yields `inserted`. M2 sessions: `new` on a sessionless endpoint; switch keeps `rN`
