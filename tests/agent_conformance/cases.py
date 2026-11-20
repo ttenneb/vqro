@@ -1014,9 +1014,12 @@ def schema_example(schema, depth=0):
         raise HarnessGap("form fixture schema is not a bounded object")
     supported = {"$schema", "$id", "title", "description", "default", "examples", "type", "properties", "required",
                  "additionalProperties", "enum", "const", "oneOf", "anyOf", "items", "minItems", "maxItems",
-                 "minLength", "maxLength", "minimum", "maximum"}
+                 "minLength", "maxLength", "minimum", "maximum", "writeOnly"}
     if set(schema) - supported:
-        raise HarnessGap("form fixture cannot safely generate unsupported schema constraints")
+        raise HarnessGap("form fixture cannot safely generate unsupported schema constraints: " + ",".join(sorted(set(schema) - supported)))
+    # writeOnly is a boolean annotation, not an instance validation constraint.
+    if "writeOnly" in schema and type(schema["writeOnly"]) is not bool:
+        raise HarnessGap("form fixture writeOnly annotation is not boolean")
     if "const" in schema:
         return deepcopy(schema["const"])
     if schema.get("enum"):

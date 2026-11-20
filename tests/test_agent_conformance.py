@@ -383,6 +383,11 @@ class ResultTests(unittest.TestCase):
 
 
 class SchemaFixtureTests(unittest.TestCase):
+    def test_write_only_is_an_annotation_not_an_instance_constraint(self):
+        self.assertEqual(schema_example({"type": "string", "minLength": 3, "writeOnly": True}), "xxx")
+        with self.assertRaises(CheckFailed):
+            schema_example({"type": "string", "writeOnly": "true"})
+
     def test_valid_simple_form_and_bounded_generation(self):
         self.assertEqual(schema_example({"type": "object", "required": ["a"], "properties": {
             "a": {"type": "string", "enum": ["one", "two"]}}, "additionalProperties": False}), {"a": "one"})
