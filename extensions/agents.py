@@ -274,6 +274,9 @@ PANE_KEYS = {
     "binding/agents.send.follow_up": {"key": "M-f", "scope": "composer", "when": AGENT_PANE, "command": "client.composer",
                                       "args": {"action": "send", "set": {"mode": "settle"}}, "label": "send as follow-up"},
 }
+# The message box starts at one line and grows with the draft up to this many lines (mockup: about a third of the pane),
+# then scrolls; clients that can't grow draw it at this height.
+COMPOSER_ROWS = 8
 VIEW_DEFAULTS = "doc/settings/agents"  # {"view": {...}}: defaults for new agent panes (agent_transcript.view_settings)
 VIEW_PANE = "doc/agents/view/"  # + rid: this agent pane's own view settings (AS10d: per pane, workspace defaults)
 OWNED_PREFIXES = ("view/agents-requests-", "view/agents-settings-", "view/agents-stop-", "view/agents-send-", "view/agents-")
@@ -595,7 +598,7 @@ class Agents:
                 {"text": names.get(m, m), "value": m} for m in modes if m not in ("start", "admit")]
             rows.append({"type": "composer", "id": "compose", "pin": "bottom", "text": "Message " + name,
                          "command": "agents.send", "args": {"resource": rid, "caps_rev": caps(r).get("rev")},
-                         "placeholder": f"Write a message to {name}…", "rows": 3, "max_bytes": 65536, "submit": "Enter",
+                         "placeholder": f"Write a message to {name}…", "rows": COMPOSER_ROWS, "max_bytes": 65536, "submit": "Enter",
                          "autofocus": True, "requires": ["composer"],
                          "controls": [{"type": "chips", "arg": "mode", "text": "Mode", "chips": chips}],
                          "fallback": {"text": f"Message {name}…", "command": "agents.send",

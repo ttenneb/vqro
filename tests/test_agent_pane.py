@@ -341,6 +341,23 @@ class AgentPane(unittest.TestCase):
         self.assertEqual((sent["mode"], sent["content"]), ("start", [{"type": "text", "text": "go"}]))
         self.assertEqual(sent["render"], ["user", "attributed_user"], "plain user words when the owner is proven")
 
+    def test_an_admit_only_agent_is_still_reachable_from_the_composer(self):
+        """prim-opus-review: with admit hidden from the chips, auto on an admit-only agent (Codex) asks, and the choice
+        still offers admit, labelled weaker."""
+        self.core.providers["items"]["capabilities"].update({"agent.send": {"modes": {"admit": {}}}})
+        self.core.resources["r2"]["data"] = {"agent": {"v": 0, "state": "idle", "lifecycle": "live", "epoch": "e1",
+                                                       "caps": {"rev": 1, "agent.send": {"modes": {"admit": {}}}}}}
+        self.agents.event("resource", {"id": "r2"})
+        self.feed(snapshot(CONVERSATION))
+        composer = next(r for r in self.core.live["agents-r2"]["items"] if r.get("type") == "composer")
+        self.assertEqual([c["value"] for c in composer["controls"][0]["chips"]], ["auto"])
+        self.assertEqual(composer["rows"], 8, "grows up to about a third of the pane")
+        reply = self.core.handlers["agents.send"](dict(composer["args"], mode="auto", text="hi"))
+        rows = [r for r in self.core.live[reply["client"]["popup"]["view"]]["items"] if r.get("command") == "agents.send"]
+        self.assertEqual([(r["args"]["mode"], "weaker" in r.get("description", "")) for r in rows], [("admit", True)])
+        self.core.handlers["agents.send"](rows[0]["args"])
+        self.assertEqual([p for m, p in self.core.calls if m == "resource.invoke"][-1]["args"]["mode"], "admit")
+
     def test_auto_on_a_busy_agent_asks_and_sends_nothing(self):
         items = self.make_v0(state="running")
         composer = next(r for r in items if r.get("type") == "composer")
