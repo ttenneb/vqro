@@ -12,6 +12,16 @@
 set -u
 MODE=${1:-quick}
 case "$MODE" in quick|full) ;; *) echo "usage: $0 quick|full" >&2; exit 2 ;; esac
+# Full gates share a bounded pool, then run latency/RSS/scale probes without sibling steps.
+CHECK_JOBS=${CHECK_JOBS:-6}
+if ! [[ "$CHECK_JOBS" =~ ^[1-9][0-9]?$ ]] || (( CHECK_JOBS > 64 )); then
+  echo "check: CHECK_JOBS must be an integer from 1 to 64" >&2; exit 2
+fi
+# Change only our own priority; do not raise an already-nicer caller's priority.
+NICE=$(ps -o ni= -p "$$" 2>/dev/null | tr -d ' ')
+if [[ "$NICE" =~ ^-?[0-9]+$ ]] && (( NICE < 10 )); then
+  renice -n 10 -p "$$" >/dev/null 2>&1 || echo "check: could not lower CPU priority" >&2
+fi
 # Run inside our own transient user scope (a cgroup): every process this run starts stays in it, even
 # daemons that reparent or rename themselves, and nothing of a concurrent run is in it. The leftover check
 # then lists exactly our processes. systemd-run --user needs the user bus: XDG_RUNTIME_DIR (and
@@ -24,7 +34,7 @@ if [ -z "${VQRO_CHECK_SCOPED:-}" ]; then
     export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
   fi
   if command -v systemd-run >/dev/null 2>&1 && systemd-run --user --scope --quiet --collect -- true >/dev/null 2>&1; then
-    VQRO_CHECK_SCOPED=1 exec systemd-run --user --scope --quiet --collect --unit="vqro-check-$(date +%s)-$$" -- "$0" "$@"
+    VQRO_CHECK_SCOPED=1 exec systemd-run --user --scope --quiet --collect --property=CPUWeight=50 --unit="vqro-check-$(date +%s)-$$" -- "$0" "$@"
   fi
   echo "check: no systemd user scope (set XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS); the leftover check is UNSCOPED: report only, no kill, no failure" >&2
 fi
@@ -80,15 +90,72 @@ for pid in filter(str.isdigit, os.listdir("/proc")):
 PY
 }
 
-step() {  # step NAME CMD...: run, log, record
-  local name=$1; shift
-  local log="$LOGS/$name.log" start=$SECONDS rc
-  printf '%-28s ' "$name"
-  "$@" > "$log" 2>&1; rc=$?
-  local secs=$((SECONDS - start)) result=PASS
-  [ $rc -ne 0 ] && result=FAIL
-  printf '%s  %4ss\n' "$result" "$secs"
-  printf '%s\t%s\t%s\t%s\n' "$name" "$result" "$secs" "$log" >> "$STEPS"
+# Registration order remains the public table/receipt order, independent of execution order.
+STEP_NAMES=()
+NEXT_RESULT=0
+step() {  # Capture argv as an array: paths/arguments never pass through eval or a shell string.
+  local index=${#STEP_NAMES[@]} name=$1; shift
+  STEP_NAMES+=("$name")
+  declare -ga "CHECK_STEP_$index"
+  local -n command="CHECK_STEP_$index"
+  command=("$@")
+}
+run_step() {
+  local index=$1 name=${STEP_NAMES[$1]} start=$SECONDS rc
+  local -n command="CHECK_STEP_$index"
+  local log="$LOGS/$name.log" result=PASS
+  "${command[@]}" > "$log" 2>&1; rc=$?
+  [ "$rc" -ne 0 ] && result=FAIL
+  # A separate atomic result per worker; only the parent appends the ordered receipt.
+  printf '%s\t%s\t%s\t%s\n' "$name" "$result" "$((SECONDS-start))" "$log" > "$LOGS/step-$index.tmp"
+  mv "$LOGS/step-$index.tmp" "$LOGS/step-$index.tsv"
+}
+show_ready() {
+  local name result seconds log
+  while [ "$NEXT_RESULT" -lt "${#STEP_NAMES[@]}" ] && [ -f "$LOGS/step-$NEXT_RESULT.tsv" ]; do
+    IFS=$'\t' read -r name result seconds log < "$LOGS/step-$NEXT_RESULT.tsv"
+    printf '%-28s %s  %4ss\n' "$name" "$result" "$seconds"
+    cat "$LOGS/step-$NEXT_RESULT.tsv" >> "$STEPS"
+    NEXT_RESULT=$((NEXT_RESULT+1))
+  done
+}
+sensitive() {
+  case "$1" in
+    # The default Rust suite includes the inventory core-lock hold-time assertion too.
+    cargo-test|history-budget|scale-harness|e2e-tui-scale-budgets|e2e-sidebar-scale|e2e-item-streams|pi-bridge-memory|opt-in:core_storm|opt-in:accept_limits|opt-in:fd_lifecycle|e2e-scale-herdr) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+run_steps() {
+  local index
+  # Build first: every concurrent suite sees complete binaries. --all-targets includes --bins.
+  for index in 0 1 2; do run_step "$index"; show_ready; done
+  if [ "$MODE" = quick ]; then
+    for ((index=3; index<${#STEP_NAMES[@]}; index++)); do run_step "$index"; show_ready; done
+    return
+  fi
+  echo "check: independent phase (CHECK_JOBS=$CHECK_JOBS); timing/scale probes run serially afterward"
+  for ((index=3; index<${#STEP_NAMES[@]}; index++)); do
+    sensitive "${STEP_NAMES[$index]}" && continue
+    # Count running jobs, not unreaped statuses: even instant failures cannot lose a pool slot.
+    while [ "$(jobs -pr | wc -l)" -ge "$CHECK_JOBS" ]; do wait -n || :; show_ready; done
+    run_step "$index" &
+    show_ready
+  done
+  wait
+  # A worker stopped before publishing its result is a failed step, never a missing/green row.
+  for ((index=3; index<${#STEP_NAMES[@]}; index++)); do
+    sensitive "${STEP_NAMES[$index]}" && continue
+    if [ ! -f "$LOGS/step-$index.tsv" ]; then
+      printf 'check worker stopped before recording its result\n' >> "$LOGS/${STEP_NAMES[$index]}.log"
+      printf '%s\tFAIL\t0\t%s\n' "${STEP_NAMES[$index]}" "$LOGS/${STEP_NAMES[$index]}.log" > "$LOGS/step-$index.tsv"
+    fi
+  done
+  show_ready
+  echo "check: final serial timing/scale phase (independent workers drained)"
+  for ((index=3; index<${#STEP_NAMES[@]}; index++)); do
+    if sensitive "${STEP_NAMES[$index]}"; then run_step "$index"; show_ready; fi
+  done
 }
 
 no_warnings() {  # build everything; any compiler warning fails (cargo replays cached ones)
@@ -172,7 +239,6 @@ opentui_model() {  # the OpenTUI trial client's model against the shared fixture
 }
 step opentui-model opentui_model
 if [ "$MODE" = full ]; then
-  "${CARGO[@]}" cargo build --bins >/dev/null 2>&1
   for suite in tmux tmux_timeout tmux_provider herdr_provider provider_wire provider_errors undo_attribution core_storm fd_lifecycle accept_limits operational_crash; do
     step "opt-in:$suite" opt_in "$suite"
   done
@@ -200,6 +266,7 @@ if [ "$MODE" = full ]; then
   step e2e-item-streams item_streams
   step scale-harness scale_harness
 fi
+run_steps
 sleep 2
 if [ -n "$CGROUP" ]; then
   SCOPE="cgroup $CGROUP"
