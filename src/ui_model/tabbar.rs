@@ -103,3 +103,38 @@ pub fn tab_title(setting: Option<&Value>, title: &str, resource: Option<&Value>)
         _ => title.to_string(),
     }
 }
+
+/// Marks on inactive tabs, most urgent first (the setting's `marks`, default off).
+pub const MARKS: [&str; 4] = ["blocked", "error", "done", "activity"];
+
+/// What a client remembers about a resource when its tab is shown: `{state, title}` (status state, program title).
+pub fn seen_of(resource: &Value) -> Value {
+    json!({"state": resource["status"]["state"], "title": resource["title"]})
+}
+
+/// The mark an inactive tab shows, from its resources now and what they were when the tab was last shown (`seen`,
+/// one `seen_of` snapshot per resource, null when never seen). With `marks` on: `blocked` while any agent there
+/// waits for you; `error` or `done` when one reached that state since; `activity` when a program title changed
+/// since. The most urgent wins (`MARKS`). Derived on draw, never written (core-protocol.md "Tab bar").
+pub fn tab_mark(setting: Option<&Value>, now: &[&Value], seen: &[&Value]) -> Option<&'static str> {
+    if setting.and_then(|s| s.get("marks")).and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    let mark = |r: &Value, was: &Value| -> Option<&'static str> {
+        let state = r["status"]["state"].as_str();
+        if state == Some("blocked") {
+            return Some("blocked");
+        }
+        if was.is_null() {
+            return None;
+        }
+        match state {
+            Some(s @ ("error" | "done")) if was["state"].as_str() != Some(s) => Some(if s == "error" { "error" } else { "done" }),
+            _ if r["title"].is_string() && r["title"] != was["title"] => Some("activity"),
+            _ => None,
+        }
+    };
+    now.iter().enumerate()
+        .filter_map(|(i, r)| mark(r, seen.get(i).copied().unwrap_or(&Value::Null)))
+        .min_by_key(|m| MARKS.iter().position(|x| x == m))
+}

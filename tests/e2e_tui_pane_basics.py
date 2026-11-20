@@ -159,6 +159,26 @@ try:
     check("a shell tab shows its program's OSC title", wait(lambda: "MYTITLE₂" in bar()), bar())
     print("CAPTURE program-title\n" + bar(), flush=True)
 
+    # Marks on other tabs (opt-in): this tab's program reports working, then blocked, then done (OSC 7501)
+    # while the first tab is shown.
+    call("command.invoke", {"name": "tabs.set", "args": {"field": "marks", "value": True}})
+    keys("printf '\\033]7501;state=working:app=e2e\\007'; /usr/bin/sleep 2; printf '\\033]7501;state=blocked:app=e2e\\007';"
+         " /usr/bin/sleep 3; printf '\\033]7501;state=done:app=e2e\\007'", literal=True)
+    keys("Enter")
+    time.sleep(0.6)
+    prefix("1")
+    check("a background agent that waits for you marks its tab ⚠", wait(lambda: "MYTITLE₂ ⚠" in bar(), 10), bar())
+    print("CAPTURE mark-blocked\n" + bar(), flush=True)
+    check("one that finished since you looked marks it ✓", wait(lambda: "MYTITLE₂ ✓" in bar(), 10),
+          bar() + "\n" + str([{k: r.get(k) for k in ("id", "state", "status", "available", "stale")} for r in call("workspace.snapshot")["resources"]]))
+    prefix("2")
+    check("showing the tab clears its mark", wait(lambda: "✓" not in bar()), bar())
+    prefix("1")
+    time.sleep(1)
+    check("a finish you have seen stays unmarked", "✓" not in bar() and "MYTITLE₂" in bar(), bar())
+    call("command.invoke", {"name": "tabs.set", "args": {"field": "marks", "value": False}})
+    prefix("2")
+
     # Tab move by key, then back by dragging its chip onto the other tab.
     prefix("<", literal=True)
     check("prefix < moves the tab left and keeps it shown", wait(lambda: [views(t)[0] for t in tabs()["tabs"]] == [second, first]

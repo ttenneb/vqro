@@ -152,6 +152,13 @@ class PaneBasics(unittest.TestCase):
         row = next(i for i in self.core.live["tabs-settings"]["items"] if i["text"] == "Program titles")
         self.assertIs(row["value"], False)
 
+    def test_marks_is_an_opt_in_tabs_setting(self):
+        self.core.handlers["tabs.settings"]({})
+        row = next(i for i in self.core.live["tabs-settings"]["items"] if i["text"] == "Marks on other tabs")
+        self.assertIs(row["value"], False)
+        self.core.handlers["tabs.set"]({"field": "marks", "value": True})
+        self.assertEqual(self.core.value("doc/settings/tabs"), {"marks": True})
+
     def test_bindings_are_declared(self):
         keys = {v["key"]: v["command"] for k, v in self.core.entries.items() if k.startswith("binding/") for v in [v["value"]]}
         for key, command in {"r": "tabs.rename", "<": "tabs.move", ">": "tabs.move", ".": "tabs.move", ";": "client.focus",

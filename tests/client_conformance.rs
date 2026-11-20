@@ -187,6 +187,15 @@ fn links_like_the_model() {
 }
 
 #[test]
+fn tab_marks_like_the_model() {
+    check("tabmark.json", |case| {
+        let now: Vec<&Value> = case["now"].as_array().unwrap().iter().collect();
+        let seen: Vec<&Value> = case["seen"].as_array().unwrap().iter().collect();
+        json!(tabbar::tab_mark(case.get("setting"), &now, &seen))
+    });
+}
+
+#[test]
 fn tab_titles_like_the_model() {
     check("tabtitle.json", |case| {
         let resource = Some(&case["resource"]).filter(|r| !r.is_null());

@@ -75,6 +75,17 @@ export class App {
   /** Until this time (ms), keys with a `repeat` binding run without the prefix (binding `repeat`). */
   repeatUntil = 0;
   armRepeat(b: Json) { if (b?.repeat === true && !this.overlay) this.repeatUntil = Date.now() + 600; }
+  /** What each resource reported when its tab was last shown (m.seenOf), for tab marks. */
+  seen = new Map<string, Json>();
+  /** A tab's mark (m.tabMark); showing a tab remembers what its resources report now. */
+  tabMark(tab: Json, shown: boolean): string | null {
+    const views: string[] = [];
+    const walk = (n: Json) => { if (!isObj(n)) return; if (typeof n.view === "string") views.push(n.view); (n.children ?? []).forEach(walk); (n.tabs ?? []).forEach((t: Json) => walk(t?.node)); };
+    walk(tab?.node);
+    const rids = views.map((v) => this.ws.entries.get(`view/${v}`)?.resource).filter((r): r is string => typeof r === "string" && this.ws.resources.has(r));
+    for (const r of rids) if (shown || !this.seen.has(r)) this.seen.set(r, m.seenOf(this.ws.resources.get(r)));
+    return shown ? null : m.tabMark(this.ws.entries.get(m.TABS_ENTRY), rids.map((r) => this.ws.resources.get(r)), rids.map((r) => this.seen.get(r)));
+  }
   focusLast: string | null = null;
   hits: Hit[] = [];
   listed = new Map<string, { rows: m.Row[]; hits: { y: number; x: number; w: number; i: number; chip?: number }[]; area?: Rect }>();
@@ -806,10 +817,18 @@ export class Screen extends Renderable {
         if (i > 0 && style.chips) x += 1;
         const only = typeof t?.node?.view === "string" ? a.ws.entries.get(`view/${t.node.view}`) : null;
         const shown = m.tabTitle(a.ws.entries.get(m.TABS_ENTRY), t?.title ?? "tab", only ? a.ws.resources.get(only.resource) ?? null : null);
-        const label = m.tabLabel(style, i, clean(shown));
+        let label = m.tabLabel(style, i, clean(shown));
         const on = i === active;
         const bg = on ? a.pal.color("tab_active") : style.chips ? a.pal.color("surface") : a.pal.color("tab_bar");
+        const mark = a.tabMark(t, on);
+        const glyph = mark ? iconText(a, { name: mark, text: ({ blocked: "⚠", error: "✗", done: "✓" } as Json)[mark] ?? "•" }) : "";
+        if (glyph) label = label.replace(/ $/, "");
         text(buf, x, r.y, fit(label, r.x + r.w - x), on ? a.pal.color("tab_active_text") : a.pal.color("muted"), bg, on ? TextAttributes.BOLD : TextAttributes.NONE);
+        if (glyph) {  // inside the chip after the name, in the mark's semantic colour
+          const color = a.pal.color(({ blocked: "warn", error: "error", done: "ok" } as Json)[mark!] ?? "accent");
+          text(buf, x + width(label), r.y, fit(` ${glyph} `, r.x + r.w - x - width(label)), color, bg);
+          label += ` ${glyph} `;
+        }
         const rect = { x, y: r.y, w: width(label), h: 1 };
         a.hits.push({ rect, act: (e) => {
           const gesture = e.button === 2 ? a.ws.gesture("mouse.right", "tab") : e.button === 1 ? a.ws.gesture("mouse.middle", "tab") : null;

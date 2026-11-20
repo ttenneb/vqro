@@ -138,6 +138,10 @@ class Conformance(unittest.TestCase):
                     outcomes.append(outcome)
                 self.assertEqual({"outcomes": outcomes, "text": c.editor.string(), "cursor": c.editor.cursor, "args": args}, case["expect"])
 
+    def test_tab_mark(self):
+        for case in fixture("tabmark.json")["cases"]:
+            self.assertEqual(model.tab_mark(case.get("setting"), case["now"], case["seen"]), case["expect"], case["name"])
+
     def test_tab_title(self):
         for case in fixture("tabtitle.json")["cases"]:
             self.assertEqual(model.tab_title(case.get("setting"), case["title"], case["resource"]), case["expect"], case["name"])

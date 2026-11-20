@@ -51,6 +51,7 @@ class TextClient:
         self.window = model.Window()  # the layout (workspace) this client shows: its own, never shared state
         self.focus = 0
         self.focus_last = None  # the pane focused before (client.focus {dir: last})
+        self.seen = {}  # resource id -> what it reported when its tab was last shown (tab marks)
         self.shown = None          # the view whose rows were listed last (a pane's view or a popup)
         self.popup = None          # a view a command asked to show (reply hint), until closed
         self.state = {}            # per view: {page, filter, open}
@@ -147,6 +148,10 @@ class TextClient:
         r = self.ws.resources.get(v.get("resource")) or {}
         return text_of(r.get("name")) or text_of((r.get("argv") or [""])[0]) or view
 
+    def view_resource(self, view):
+        v = self.ws.entries.get(f"view/{view}")
+        return v.get("resource") if isinstance(v, dict) else None
+
     def tab_resource(self, tab):
         """The resource of a tab's only view (program titles), or None."""
         node = (tab or {}).get("node") if isinstance(tab, dict) else None
@@ -189,7 +194,16 @@ class TextClient:
             setting = self.ws.entries.get(model.TABS_ENTRY)
             style = model.tab_style(setting or {})
             name = lambda t: model.tab_title(setting, text_of((t or {}).get("title")) or "tab", self.tab_resource(t))
-            return "  " * depth + "tabs: " + "  ".join(f"[{model.tab_label(style, i, name(t)).strip()}{'*' if i == active else ''}]"
+
+            def mark(i, t):
+                """A mark on an inactive tab (model.tab_mark), as a word; showing a tab remembers its resources."""
+                rids = [r for r in (self.view_resource(v) for v in model_views((t or {}).get("node"))) if r in self.ws.resources]
+                for r in rids:
+                    if i == active or r not in self.seen:
+                        self.seen[r] = model.seen_of(self.ws.resources[r])
+                found = None if i == active else model.tab_mark(setting, [self.ws.resources[r] for r in rids], [self.seen[r] for r in rids])
+                return f" !{found}" if found else ""
+            return "  " * depth + "tabs: " + "  ".join(f"[{model.tab_label(style, i, name(t)).strip()}{'*' if i == active else ''}{mark(i, t)}]"
                                                       for i, t in enumerate(tabs))
 
         def walk(node, depth):
@@ -669,6 +683,18 @@ def model_hello():
     principal = os.environ.get("VQRO_PRINCIPAL")
     identity = {"kind": "principal", "principal": principal} if principal and principal != "undeclared" else {"kind": "owner"}
     return {"client": "text", "version": "0.1.0", "profiles": ["base"], "features": FEATURES, "identity": identity}
+
+
+def model_views(node):
+    """Every view a layout node holds, depth-first."""
+    if not isinstance(node, dict):
+        return []
+    out = [node["view"]] if isinstance(node.get("view"), str) else []
+    for child in node.get("children") or []:
+        out += model_views(child)
+    for tab in node.get("tabs") or []:
+        out += model_views((tab or {}).get("node"))
+    return out
 
 
 def main(argv):

@@ -800,6 +800,36 @@ def tab_title(setting, title, resource):
     return program + mark
 
 
+TAB_MARKS = ["blocked", "error", "done", "activity"]
+
+
+def seen_of(resource):
+    """What a client remembers about a resource when its tab is shown (ui_model::tabbar::seen_of)."""
+    status = resource.get("status") if isinstance(resource.get("status"), dict) else {}
+    return {"state": status.get("state"), "title": resource.get("title")}
+
+
+def tab_mark(setting, now, seen):
+    """The mark an inactive tab shows (ui_model::tabbar::tab_mark): blocked while an agent waits; error/done
+    reached since last shown; activity when a program title changed since. Off unless `marks` is true."""
+    if not (isinstance(setting, dict) and setting.get("marks") is True):
+        return None
+    found = []
+    for i, r in enumerate(now):
+        was = seen[i] if i < len(seen) else None
+        status = r.get("status") if isinstance(r.get("status"), dict) else {}
+        state = status.get("state") if isinstance(status.get("state"), str) else None
+        if state == "blocked":
+            found.append("blocked")
+        elif not isinstance(was, dict):
+            continue
+        elif state in ("error", "done") and was.get("state") != state:
+            found.append(state)
+        elif isinstance(r.get("title"), str) and r.get("title") != was.get("title"):
+            found.append("activity")
+    return min(found, key=TAB_MARKS.index) if found else None
+
+
 def tab_bar(setting, titles, active):
     style = tab_style(setting)
     return {"labels": [tab_label(style, i, t) for i, t in enumerate(titles)], "active": active,

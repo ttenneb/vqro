@@ -7,5 +7,5 @@
   "settings_command":"tabs.settings",
   "works_with":[{"cap":"ability/vqro.terminals","suggest":"herdr","without":"New tab cannot start a shell; closing the last tab leaves the layout unchanged"},
                 {"cap":"command/agents.show","suggest":"agents","without":"An agent is shown as its bridge terminal"}],
-  "contributes":{"commands":["tabs.open","tabs.show","tabs.close","tabs.rename","tabs.move","tabs.close_ended","tabs.settings"],"keys":["Prefix n: new tab","Prefix r: rename tab","Prefix < >: move tab left/right","Prefix .: move tab to a number"],"menu_items":["New tab (+, the only tab-bar button)","Rename tab","Close tab","Close ended tabs (tab menu)"],"settings":["doc/settings/tabs: tab number style, chips and program titles"]}
+  "contributes":{"commands":["tabs.open","tabs.show","tabs.close","tabs.rename","tabs.move","tabs.close_ended","tabs.settings"],"keys":["Prefix n: new tab","Prefix r: rename tab","Prefix < >: move tab left/right","Prefix .: move tab to a number"],"menu_items":["New tab (+, the only tab-bar button)","Rename tab","Close tab","Close ended tabs (tab menu)"],"settings":["doc/settings/tabs: tab number style, chips, program titles and marks on other tabs"]}
 }

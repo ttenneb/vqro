@@ -1243,13 +1243,20 @@ Colours: a name (the 16 ANSI names such as `cyan`, `darkgray`, `lightblue`), `#R
 ### Tab bar
 
 A layout `tabs` node draws as a one-row tab bar. Its look is the shared setting `doc/settings/tabs`
-`{numbers?: "subscript"|"superscript"|"plain"|"none", position?: "after"|"before", chips?: bool, program_titles?: bool}`,
+`{numbers?: "subscript"|"superscript"|"plain"|"none", position?: "after"|"before", chips?: bool, program_titles?: bool,
+marks?: bool}`,
 written by the tabs extension (`tabs.settings`) and read by every client (renderer-independent model:
-`ui_model::tabbar`; conformance: `tests/fixtures/client/tabbar.json`, `tabtitle.json`).
+`ui_model::tabbar`; conformance: `tests/fixtures/client/tabbar.json`, `tabtitle.json`, `tabmark.json`).
 - **Name** (`program_titles`, default on): a tab that still has its automatic name, the command of the one terminal
   it shows (`zsh`, keeping an ` [ended]`/` [gone]` mark), shows that program's own title (`resource.title`, from
   OSC 0/2) instead, cut to 24 characters with `…`. Renamed tabs, named resources and tabs showing several panes keep
   their names. Clients derive it on every draw and never write it back (it changes too often for transactions).
+- **Marks** (`marks`, default off): an inactive tab shows one mark after its name, from its resources'
+  `status.state` and `title` now against what they were when the tab was last shown (client-local memory,
+  `seen_of`; never written): `blocked` (⚠, `warn`) while any agent there waits for you, `error` (✗, `error`) or
+  `done` (✓, `ok`) reached since, `activity` (•, `accent`) when a program title changed since; the most urgent wins.
+  Icon names `blocked`, `error`, `done`, `activity` let an icon set restyle them. Output and bells of hidden
+  terminals are not visible to clients (their streams are closed); a backend activity fact would add them.
 - **Label** for tab *i* (1-based) titled *t*, padding included. After the name (default): ` t₁ `, ` t¹ `, ` t 1 `.
   Before it: ` ₁ t `, ` ¹t `, ` 1 t `, or the flat ` 1:t ` with `chips: false` and plain numbers. `none`: ` t `.
   Numbers past 9 use more digits (`₁₀`).

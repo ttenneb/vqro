@@ -365,6 +365,8 @@ struct App {
     /// The focused view at the last draw, and the one focused before it (`client.focus {dir: "last"}`).
     focus_now: Option<String>,
     focus_last: Option<String>,
+    /// What each resource reported when its tab was last shown (`ui_model::tabbar::seen_of`), for tab marks.
+    seen: HashMap<String, Value>,
     /// The terminal speaks the kitty keyboard protocol; used only while the prefix menu is open.
     kbd_enhance: bool,
     /// Modifiers held after the prefix (reported only with keyboard enhancement), shown live.
@@ -652,7 +654,7 @@ impl App {
             leaves: Vec::new(), focus: 0, overlay: None, pstate: HashMap::new(),
             filtering: None, filter_detail: false, toast: None, bells: HashMap::new(), selections: HashMap::new(), selecting: None, last_press: None, scroll_mode: None, pending_popup: None, cursor_style: vt100::CursorStyle::Default, cursor_sent: vt100::CursorStyle::Default, panel_values: Mutex::new(HashMap::new()), panel_dependencies: Mutex::new(HashMap::new()), hit: Hit::default(),
             drag: None, overrides: HashMap::new(), mouse_owner: None, mouse_on: true,
-            under: None, input_queues: HashMap::new(), view_streams: Arc::default(), zoomed: None, autofocused: None, window: Window::default(), pending_focus: None, tab_press: None, link_click: None, repeat_until: None, focus_now: None, focus_last: None, kbd_enhance: false,
+            under: None, input_queues: HashMap::new(), view_streams: Arc::default(), zoomed: None, autofocused: None, window: Window::default(), pending_focus: None, tab_press: None, link_click: None, repeat_until: None, focus_now: None, focus_last: None, seen: HashMap::new(), kbd_enhance: false,
             held: KeyModifiers::NONE, message: String::new(), key_hint: None,
             quit: false, connected: true, connection: 0,
             generation: 0, resyncing: false, buffered: Vec::new(), buffered_bytes: 0, recovery_only: false, retry_snapshot: None, snapshot_retries: 0,
@@ -2220,6 +2222,39 @@ impl App {
         }
     }
 
+    /// Mark inactive tabs (`tab["mark"]`, `ui_model::tabbar::tab_mark`) and remember what the shown tabs' resources
+    /// report now. Client-local: nothing is written.
+    fn tab_marks(&mut self, node: &mut Value) {
+        if let Some(children) = node.get_mut("children").and_then(Value::as_array_mut) {
+            children.iter_mut().for_each(|c| self.tab_marks(c));
+        }
+        let active = node["active"].as_u64().unwrap_or(0) as usize;
+        let Some(tabs) = node.get_mut("tabs").and_then(Value::as_array_mut) else { return };
+        let setting = self.ws.entries.get(crate::ui_model::tabbar::ENTRY).cloned();
+        let shown = active.min(tabs.len().saturating_sub(1));
+        for (i, tab) in tabs.iter_mut().enumerate() {
+            let rids: Vec<String> = views_of(&tab["node"]).iter()
+                .filter_map(|v| self.ws.entries.get(&format!("view/{v}"))?["resource"].as_str().map(String::from))
+                .filter(|r| self.ws.resources.contains_key(r))
+                .collect();
+            if i == shown {
+                for r in &rids {
+                    self.seen.insert(r.clone(), crate::ui_model::tabbar::seen_of(&self.ws.resources[r]));
+                }
+            } else {
+                for r in &rids {  // first sight: nothing happened yet
+                    self.seen.entry(r.clone()).or_insert_with(|| crate::ui_model::tabbar::seen_of(&self.ws.resources[r]));
+                }
+                let now: Vec<&Value> = rids.iter().map(|r| &self.ws.resources[r]).collect();
+                let seen: Vec<&Value> = rids.iter().map(|r| &self.seen[r]).collect();
+                if let Some(mark) = crate::ui_model::tabbar::tab_mark(setting.as_ref(), &now, &seen) {
+                    tab["mark"] = json!(mark);
+                }
+            }
+            self.tab_marks(&mut tab["node"]);
+        }
+    }
+
     fn tab_title(&self, ctx: &Value) -> Option<String> {
         let (_, mut root) = self.active_layout()?;
         let path: Vec<usize> = ctx["tab_path"].as_array()?.iter().filter_map(|x| x.as_u64().map(|n| n as usize)).collect();
@@ -2925,6 +2960,7 @@ impl App {
         self.cursor_style = vt100::CursorStyle::Default;
         match self.active_layout() {
             Some((_, mut root)) => {
+                self.tab_marks(&mut root);
                 self.shown_tab_titles(&mut root);
                 let tabbar = self.menu_items("tabbar", &json!({}));
                 let tabstyle = crate::ui_model::tabbar::Style::from_setting(self.ws.entries.get(crate::ui_model::tabbar::ENTRY));
@@ -3483,6 +3519,18 @@ fn node_at_mut<'a>(root: &'a mut Value, path: &[usize]) -> Option<&'a mut Value>
 
 /// Lay out a layout node: tabs, splits and view leaves, recording hit areas.
 #[allow(clippy::too_many_arguments)]
+/// Every view a layout node shows or holds (all tabs, all panes), depth-first.
+fn views_of(node: &Value) -> Vec<String> {
+    let mut out: Vec<String> = node["view"].as_str().map(String::from).into_iter().collect();
+    for c in node["children"].as_array().into_iter().flatten() {
+        out.extend(views_of(c));
+    }
+    for t in node["tabs"].as_array().into_iter().flatten() {
+        out.extend(views_of(&t["node"]));
+    }
+    out
+}
+
 fn walk(node: &Value, area: Rect, path: &mut Vec<usize>, overrides: &HashMap<Vec<usize>, Vec<u16>>, tabbar: &[Item], tabstyle: &crate::ui_model::tabbar::Style, hit: &mut Hit, buf: &mut Buffer, pal: &Palette, icons: &Icons) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -3521,7 +3569,12 @@ fn walk(node: &Value, area: Rect, path: &mut Vec<usize>, overrides: &HashMap<Vec
                 x = x.saturating_add(tabstyle.gap() as u16);
             }
             let label = tabstyle.label(i, t["title"].as_str().unwrap_or("tab"));
-            let w = icons::width(&label);
+            // A mark (inactive tabs, the tabs setting's `marks`) sits inside the chip after the name.
+            let mark = t["mark"].as_str().map(|m| {
+                let (text, style) = match m { "blocked" => ("⚠", "warn"), "error" => ("✗", "error"), "done" => ("✓", "ok"), _ => ("•", "accent") };
+                (icons.resolve(&json!({"name": m, "text": text})).unwrap_or(text).to_string(), style)
+            });
+            let w = icons::width(&label) + mark.as_ref().map(|(g, _)| icons::width(g) + 1).unwrap_or(0);
             hit.tabs.push((path.clone(), i, Rect { x, y: bar.y, width: w.min(bar.right().saturating_sub(x)), height: 1 }));
             x = x.saturating_add(w);
             let style = match (i == active, tabstyle.chips) {
@@ -3529,7 +3582,15 @@ fn walk(node: &Value, area: Rect, path: &mut Vec<usize>, overrides: &HashMap<Vec
                 (false, true) => Style::new().bg(pal.surface).fg(pal.muted),
                 (false, false) => pal.style(Some("muted")),
             };
-            spans.push(Span::styled(label, style));
+            match mark {
+                Some((glyph, name)) => {
+                    spans.push(Span::styled(label.trim_end_matches(' ').to_string() + " ", style));
+                    let fg = pal.style(Some(name)).fg.unwrap_or(pal.muted);
+                    spans.push(Span::styled(glyph, style.fg(fg)));
+                    spans.push(Span::styled(" ", style));
+                }
+                None => spans.push(Span::styled(label, style)),
+            }
         }
         if tabstyle.chips && !tabbar.is_empty() {
             spans.push(Span::raw(" "));

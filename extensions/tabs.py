@@ -318,6 +318,7 @@ def settings_panel():
     position = current.get("position") if current.get("position") in dict(POSITIONS) else "after"
     chips = current.get("chips") if isinstance(current.get("chips"), bool) else True
     program = current.get("program_titles") if isinstance(current.get("program_titles"), bool) else True
+    marks = current.get("marks") is True
     return {"title": "Tabs", "requires": ["select"], "items": [
         {"type": "select", "text": "Number style", "value": numbers, "description": "the small number before each tab's name",
          "options": [{"label": label, "value": value} for value, label in NUMBERS], "command": "tabs.set", "args": {"field": "numbers"}},
@@ -327,21 +328,24 @@ def settings_panel():
          "options": [{"label": "On", "value": True}, {"label": "Off", "value": False}], "command": "tabs.set", "args": {"field": "chips"}},
         {"type": "select", "text": "Program titles", "value": program,
          "description": "a tab still named after its command (zsh) shows the program's own title; renamed tabs keep their names",
-         "options": [{"label": "On", "value": True}, {"label": "Off", "value": False}], "command": "tabs.set", "args": {"field": "program_titles"}}]}
+         "options": [{"label": "On", "value": True}, {"label": "Off", "value": False}], "command": "tabs.set", "args": {"field": "program_titles"}},
+        {"type": "select", "text": "Marks on other tabs", "value": marks,
+         "description": "⚠ an agent waits for you, ✗/✓ one failed or finished, • a program's title changed since you looked",
+         "options": [{"label": "On", "value": True}, {"label": "Off", "value": False}], "command": "tabs.set", "args": {"field": "marks"}}]}
 
 
-@ext.command("tabs.settings", "Tab bar settings (number style and position, chips, program titles)")
+@ext.command("tabs.settings", "Tab bar settings (number style and position, chips, program titles, marks)")
 def tab_settings(args):
     ext.publish("tabs-settings", settings_panel())
     return {"client": {"popup": {"view": "tabs-settings", "width": 64}}}
 
 
-@ext.command("tabs.set", "Set a tab bar option (args: field numbers|position|chips|program_titles, value)")
+@ext.command("tabs.set", "Set a tab bar option (args: field numbers|position|chips|program_titles|marks, value)")
 def tab_set(args):
     field, value = args.get("field"), args.get("value")
     if not ((field == "numbers" and value in dict(NUMBERS)) or (field == "position" and value in dict(POSITIONS))
-            or (field in ("chips", "program_titles") and isinstance(value, bool))):
-        raise VqroError("choose numbers subscript|superscript|plain|none, position after|before, chips or program_titles true|false", "invalid")
+            or (field in ("chips", "program_titles", "marks") and isinstance(value, bool))):
+        raise VqroError("choose numbers subscript|superscript|plain|none, position after|before, chips, program_titles or marks true|false", "invalid")
     def attempt():
         current = ext.value(TAB_SETTING)
         value_now = dict(current if isinstance(current, dict) else {}, **{field: value})

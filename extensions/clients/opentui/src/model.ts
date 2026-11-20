@@ -968,6 +968,29 @@ export function tabTitle(setting: Json, title: string, resource: Json): string {
   return (chars.length > PROGRAM_TITLE_MAX ? chars.slice(0, PROGRAM_TITLE_MAX - 1).join("") + "…" : program) + mark;
 }
 
+export const TAB_MARKS = ["blocked", "error", "done", "activity"];
+
+/** What a client remembers about a resource when its tab is shown (ui_model::tabbar::seen_of). */
+export function seenOf(resource: Json): Json {
+  return { state: isObj(resource?.status) ? resource.status.state ?? null : null, title: resource?.title ?? null };
+}
+
+/** The mark an inactive tab shows (ui_model::tabbar::tab_mark): blocked while an agent waits; error/done reached
+ * since last shown; activity when a program title changed since. Off unless `marks` is true. */
+export function tabMark(setting: Json, now: Json[], seen: Json[]): string | null {
+  if (!(isObj(setting) && setting.marks === true)) return null;
+  const found: string[] = [];
+  now.forEach((r, i) => {
+    const was = seen[i];
+    const state = isObj(r?.status) && typeof r.status.state === "string" ? r.status.state : null;
+    if (state === "blocked") found.push("blocked");
+    else if (!isObj(was)) return;
+    else if ((state === "error" || state === "done") && was.state !== state) found.push(state);
+    else if (typeof r?.title === "string" && r.title !== was.title) found.push("activity");
+  });
+  return found.length ? found.sort((a, b) => TAB_MARKS.indexOf(a) - TAB_MARKS.indexOf(b))[0] : null;
+}
+
 export function tabBar(setting: Json, titles: string[], active: number): Json {
   const style = tabStyle(setting);
   return { labels: titles.map((t, i) => tabLabel(style, i, t)), active, gap: style.chips ? 1 : 0, chips: style.chips };
