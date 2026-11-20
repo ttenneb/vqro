@@ -575,3 +575,15 @@ sorts. Answers: section tabs, an id column, per-window choices (not saved), colu
 - Settings: one dense row per extension (title, id, kind columns, status chip; Show by status and kind; sort by
   name, status, id, kind); the detail has section pages About · Needs n · Used by n · Provides n · Runtime, each a
   list with columns and, where useful, Show and Sort. `GROUP_BY_KIND` switches to kind groups (pending answer).
+
+## G11 opt-in host tool context (2026-11-20)
+
+Core/provider SDK/CLI implementation in progress: runtime registration explicitly requests a private host-context
+credential, scoped to that registration/host/managed owner. Public tool-environment helpers +explicit hello and
+CLI route derive only host:<rid>, never endpoint identity or an env capability. Existing caller lifetime fences
+cover queued commits/native dispatch; already-admitted effects keep truthful outcomes/no replay. Core-start,
+extension and native backend services scrub it; no human-shell inheritance or persistent token store.
+- Meaningful native core/real2endpoint CLI/queued-lifetime reds then greens, Rust276library+22integration tests,
+  native private-herdr user-shell scrub1 and Python3helper/handshake tests passed (zero warnings).
+- Final actual-candidate full gate, independent review and K1 PartB G11 reprobe still pending; no qualification
+  or install claim. See docs/research/host-tool-context.md and the new core/provider protocol paragraphs.
