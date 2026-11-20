@@ -32,9 +32,11 @@ installs it); `PATH`. Without it, New Claude agent refuses before starting anyth
    the runtime without `VQRO_AGENT`, so the plugin stays inert, and prints one line saying why. It never blocks you.
 6. **Tab.** The terminal opens in a new tab (`tabs.show`). No prompt is sent.
 
-**Request routing (AS10c'):** nothing is recorded yet. Tier-1 plugins forward no native requests: you answer
-permission prompts in the pane, so the route is `human` in effect. When coordination defines the route key, the
-launcher will record `human` explicitly.
+**Request routing (AS10c'):** for an agent the workspace owner starts (the core's record of who invoked the
+command, never its arguments), the same transaction as the declaration records `doc/agents/request-routes/<rN>` =
+`{route: "human"}` (coordination-v0 §6.2). It is a creation (`expect: 0`): an existing endpoint's route is never
+rewritten, and nothing is retried; a refused write is named in the launch notice. A launch by another principal
+records no route (missing means human); coordinator-launched routing is the coordination layer's.
 
 ## Settings
 

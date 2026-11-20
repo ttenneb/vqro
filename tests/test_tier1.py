@@ -86,6 +86,11 @@ class Tier1Tests(unittest.TestCase):
         declared = self.core.value("doc/agents/terminals/r1")
         self.assertEqual((declared["launch"], declared["app"]), (nonce, "claude"))
         self.assertEqual(declared["pull"]["points"]["idle"], {"precision": "approximate"}, "the plugin's own declaration")
+        self.assertEqual(self.core.value("doc/agents/request-routes/r1"), {"route": "human"})
+        initial = next(ops for ops in self.core.transactions if any(op["key"] == "doc/agents/terminals/r1" for op in ops))
+        self.assertEqual([(op["key"], op["expect"]) for op in initial],
+                         [("doc/agents/terminals/r1", 0), ("doc/agents/request-routes/r1", 0)],
+                         "declaration and route are one creation transaction")
         self.assertEqual([name for name, _ in self.coord_calls],
                          ["coord.inbox.window", "coord.grants", "coord.scope", "coord.inbox.window", "coord.scope"])
         grant = self.coord_calls[1][1]
@@ -129,6 +134,21 @@ class Tier1Tests(unittest.TestCase):
         self.assertIn("inbox left paused", text)
         self.assertIn("forbidden", text)
         self.assertIsNotNone(self.core.value("doc/agents/terminals/r1"), "the declaration is still recorded")
+
+    def test_a_launch_by_someone_other_than_the_owner_records_no_route(self):
+        self.core.caller_record = {"author": "client:2", "actor": "lead", "principal": "p:lead", "initiator": "p:lead"}
+        self.launch("pi")
+        self.assertIsNotNone(self.core.value("doc/agents/terminals/r1"))
+        self.assertIsNone(self.core.value("doc/agents/request-routes/r1"), "missing means human; no coordinator guess")
+        self.assertIn("request route not recorded", self.core.notices[-1][0])
+
+    def test_an_existing_route_is_never_rewritten_and_the_failure_is_named(self):
+        self.core.entries["doc/agents/request-routes/r1"] = {"value": {"route": "coordinator"}, "version": 3}
+        result = self.launch("pi")
+        self.assertEqual(result["resource"], "r1")
+        self.assertEqual(self.core.value("doc/agents/request-routes/r1"), {"route": "coordinator"})
+        self.assertIn("declaration and request route not recorded (conflict)", self.core.notices[-1][0])
+        self.assertEqual(len(self.spawns()), 1, "no spawn replay")
 
     def test_claude_without_its_hook_refuses_before_spawning(self):
         with patch.object(tier1, "find_hook", return_value=None), self.assertRaises(VqroError) as caught:

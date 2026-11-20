@@ -9,8 +9,9 @@ A launch spawns `tier1_run.py` in a new backend terminal named `<runtime>-<nonce
 (`VQRO_PRINCIPAL=p:<uuid>`) and the launch nonce. Then, in the owner's command, it records the endpoint's pull declaration (the plugin's own) with that
 nonce in `doc/agents/terminals/<rN>`, grants the principal `receive` on `agent:<rN>`, and resumes its inbox gate (the
 owner's click is the intent; a refusal leaves it paused and says why). The wrapper finds its own terminal by that name, waits
-(bounded) for the declaration carrying its nonce and the grant, and execs the runtime with `VQRO_AGENT=rN`. Request routing is not recorded (tier-1 plugins forward no native requests;
-the human answers them in the pane): `human`, in effect.
+(bounded) for the declaration carrying its nonce and the grant, and execs the runtime with `VQRO_AGENT=rN`. For an agent the workspace owner starts (the
+core's record of the caller, never args), the declaration's transaction also records its request route
+`doc/agents/request-routes/<rN>` = `{route: "human"}` (coordination-v0 6.2).
 
 Nothing else depends on this extension; with it off, launched terminals keep running as plain terminals.
 """
@@ -36,6 +37,7 @@ PI_PLUGIN = next((path for path in (HERE / "tier1" / "vqro-pull.ts", HERE.parent
 SETTINGS = "doc/settings/tier1"
 DEFAULTS = {"claude": ["claude"], "pi": ["pi"]}
 TITLES = {"claude": "Claude", "pi": "Pi"}
+ROUTES = "doc/agents/request-routes/"
 
 
 def state_dir():
@@ -114,12 +116,22 @@ class Tier1:
         result = self.ext.vqro.call("resource.spawn", params)  # exactly once, never retried
         rid = result["resource"]["id"]
         problems = []
-        # The endpoint's declaration (with the nonce the wrapper waits for), then its plugin's receive grant.
+        # One ordinary attributed transaction initializes the new endpoint: its declaration (with the nonce the
+        # wrapper waits for) and, for an agent the owner starts, its request route `human` (coordination-v0 6.2).
+        # Both are creations (expect 0): an existing endpoint's configuration is never rewritten.
+        ops = [{"op": "set", "key": "doc/agents/terminals/" + rid, "expect": 0,
+                "value": {"pull": declaration, "launch": nonce, "app": runtime}}]
+        caller, owner = self.ext.caller(), self.ext.owner()
+        owner_started = bool(caller) and owner is not None and caller.get("principal") == owner
+        if owner_started:
+            ops.append({"op": "set", "key": ROUTES + rid, "expect": 0, "value": {"route": "human"}})
         try:
-            self.ext.apply([{"op": "set", "key": "doc/agents/terminals/" + rid, "expect": 0,
-                             "value": {"pull": declaration, "launch": nonce, "app": runtime}}], "tier1: " + runtime + " endpoint")
+            self.ext.apply(ops, "tier1: " + runtime + " endpoint")
         except VqroError as error:
-            problems.append(f"declaration not recorded ({error.kind}); the plugin stays inert")
+            problems.append(f"declaration{' and request route' if owner_started else ''} not recorded ({error.kind});"
+                            " the plugin stays inert")
+        if not owner_started:
+            problems.append("request route not recorded (not started by the workspace owner; human, in effect)")
         try:
             self.coord("grants", {"id": "tier1-" + rid, "expect": 0,
                                   "value": {"who": principal, "on": "agent:" + rid, "can": ["receive"]}})

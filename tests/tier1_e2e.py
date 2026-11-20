@@ -205,6 +205,8 @@ def launched(runtime):
     row = next((r for r in c.call("resource.list", {"id": rid})["resources"]), {})
     declared = c.call("workspace.get", {"key": "doc/agents/terminals/" + rid})
     granted = c.call("workspace.get", {"key": "doc/agents/grants/tier1-" + rid})
+    routed = c.call("workspace.get", {"key": "doc/agents/request-routes/" + rid})
+    check(f"{runtime}: request route recorded as human (owner-started)", bool(routed) and routed["value"] == {"route": "human"}, routed)
     check(f"{runtime}: launched in a terminal with its fresh principal recorded", row.get("kind") == "terminal"
           and row.get("principal") == reply["principal"] and reply["principal"].startswith("p:"), {"reply": reply, "row": row})
     check(f"{runtime}: declaration (plugin's own) and receive grant recorded",
