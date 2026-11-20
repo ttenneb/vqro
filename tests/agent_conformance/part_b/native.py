@@ -88,7 +88,6 @@ class Native:
         self.provider, self.root = provider, root
         self.agents, self.plans, self.barriers = {}, {}, {}
         self.queues, self.receipts, self.items, self.drafts = {}, {}, {}, {}
-        self.receipt_revisions = {}  # (ref, delivery) -> last published typed receipt entity revision
         self.pull_entries,self.pull_pending,self.context_pending,self.host_members={},{},{},{}
         self.serial = 0
         self.ledger = root / "native.jsonl"
@@ -158,7 +157,7 @@ class Native:
         old=self.items.get(ref)
         if old is None or old["epoch"]!=epoch:
             if old is not None: old["wake"].set()
-            self.items[ref]={"epoch":epoch,"seq":0,"rows":[],"bytes":0,"entities":{},"entity_bytes":0,"wake":asyncio.Event(),"position":0}
+            self.items[ref]={"epoch":epoch,"seq":0,"rows":[],"bytes":0,"entities":{},"entity_bytes":0,"wake":asyncio.Event(),"position":0,"receipt_revisions":{}}
         return self.items[ref]
 
     def item(self,ref,value):
@@ -176,13 +175,18 @@ class Native:
             journal["rows"].append((journal["seq"],data));journal["bytes"]+=len(data)
             while journal["bytes"]>131072:
                 _,old=journal["rows"].pop(0);journal["bytes"]-=len(old)
-        previous=journal["entities"].pop(entity["id"],None)
+        # Entity identity within an epoch is (kind, id) (agent-v0 §4): a delivery id never displaces a message.
+        key=(entity["kind"],entity["id"])
+        previous=journal["entities"].pop(key,None)
         if previous is not None: journal["entity_bytes"]-=len(encoded(previous))
-        journal["entities"][entity["id"]]=entity;journal["entity_bytes"]+=len(encoded(entity))
+        journal["entities"][key]=entity;journal["entity_bytes"]+=len(encoded(entity))
+        if entity["kind"]=="receipt": journal["receipt_revisions"][entity["id"]]=entity["rev"]
         while len(journal["entities"])>512 or journal["entity_bytes"]>524288:
-            identifier=next(iter(journal["entities"]));removed=journal["entities"].pop(identifier)
+            kind,identifier=next(iter(journal["entities"]));removed=journal["entities"].pop((kind,identifier))
             journal["entity_bytes"]-=len(encoded(removed))
-            append({"op":"remove","kind":removed["kind"],"id":identifier,"rev":removed["rev"]+1})
+            revision=removed["rev"]+1
+            if kind=="receipt": journal["receipt_revisions"][identifier]=revision  # a re-creation must exceed the remove
+            append({"op":"remove","kind":kind,"id":identifier,"rev":revision})
         append(entity);journal["wake"].set()
 
     def insert(self, ref, args):
@@ -395,10 +399,13 @@ class Native:
                 row = json.loads(line)
                 if row.get("kind") == "model_request" and row.get("ref") == ref and row.get("delivery") == delivery:
                     linked = row["seq"]
-            revision = self.receipt_revisions.get((ref, delivery), 0) + 1
+            journal = self.journal(ref)
+            revision = journal["receipt_revisions"].get(delivery, 0) + 1  # high-water includes removes (eviction)
             value = deepcopy(stored)
             self.publish_entity(ref, {"op": "put", "kind": "receipt", "id": delivery, "rev": revision, "value": value})
-            self.receipt_revisions[(ref, delivery)] = revision
+            # Only deliveries the native still stores can be republished; keep the high-water map within that bound.
+            stale = [key for key in journal["receipt_revisions"] if key not in self.receipts[ref]]
+            for key in stale: del journal["receipt_revisions"][key]
             self.append("receipt_published", ref=ref, delivery=delivery, stage=value.get("stage"), rev=revision,
                         model_request_seq=linked)
             return {"receipt": value, "rev": revision, "model_request_seq": linked}

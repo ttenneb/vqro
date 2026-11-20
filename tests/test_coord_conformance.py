@@ -205,6 +205,33 @@ class NativeOracle(unittest.IsolatedAsyncioTestCase):
             receipt=[row for row in removes if row["id"]=="d:x"]
             self.assertEqual([row["rev"] for row in receipt],[4])
 
+    async def test_receipt_and_message_with_the_same_id_are_distinct_entities(self):
+        from agent_conformance.wire import ItemReducer
+        with tempfile.TemporaryDirectory() as root:
+            native=Native(Provider(),Path(root));await native.add("a0")
+            native.insert("a0",{"delivery":"m1","content":[{"type":"text","text":"real inserted payload"}]})
+            await native.control({"verb":"publish-receipt","ref":"a0","delivery":"m1"})
+            journal=native.journal("a0")
+            live=ItemReducer();live.accept({"op":"snapshot","phase":"begin","epoch":journal["epoch"],"coverage":"tail"})
+            live.accept({"op":"snapshot","phase":"end","seq":0})
+            for _,data in journal["rows"]: live.accept(json.loads(data))
+            fresh=ItemReducer();fresh.accept({"op":"snapshot","phase":"begin","epoch":journal["epoch"],"coverage":"tail"})
+            for entity in journal["entities"].values(): fresh.accept(entity)
+            fresh.accept({"op":"snapshot","phase":"end","seq":journal["seq"]})
+            self.assertEqual(sorted(live.entities),sorted(fresh.entities))
+            self.assertEqual(len(journal["entities"]),2,"message m1 and receipt m1 are both retained")
+
+    async def test_republish_after_eviction_exceeds_the_remove_revision(self):
+        with tempfile.TemporaryDirectory() as root:
+            native=Native(Provider(),Path(root));await native.add("a0")
+            native.insert("a0",{"delivery":"d:repeat","content":[]})
+            for _ in range(2): await native.control({"verb":"publish-receipt","ref":"a0","delivery":"d:repeat"})
+            for _ in range(600): native.item("a0",{"role":"user","content":[],"final":True})
+            rows=[json.loads(data) for _,data in native.journal("a0")["rows"]]
+            removed=next(row for row in rows if row["op"]=="remove" and row["kind"]=="receipt" and row["id"]=="d:repeat")
+            again=await native.control({"verb":"publish-receipt","ref":"a0","delivery":"d:repeat"})
+            self.assertEqual((removed["rev"],again["rev"]),(3,4),"revisions strictly increase across eviction and re-creation")
+
     async def test_control_error_reply_keeps_the_request_id(self):
         from agent_conformance.core import Native as Client
         from agent_conformance.results import FixtureFailed
