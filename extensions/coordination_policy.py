@@ -96,7 +96,7 @@ def _member(value):
 
 @dataclass(frozen=True)
 class QuotaLimits:
-    domain_bytes: int = 8 * 1024 * 1024
+    domain_bytes: int = 2 * 1024 * 1024
     domain_records: int = 1024
     sender_target_records: int = 8
     sender_target_bytes: int = 128 * 1024

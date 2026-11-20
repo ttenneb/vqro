@@ -261,6 +261,14 @@ class Configuration(Fixture):
 
 
 class Admission(Fixture):
+    def test_default_domain_is_measured_two_mib_fallback_with_control_reserve(self):
+        limits = QuotaLimits()
+        self.assertEqual(limits.domain_bytes, 2 * 1024 * 1024)
+        self.assertEqual(limits.domain_records, 1024)
+        self.assertEqual(limits.domain_bytes - limits.normal_bytes, 209716)
+        self.assertEqual(limits.domain_records - limits.normal_records, 103)
+        self.assertEqual(QuotaLimits(domain_bytes=4 * 1024 * 1024).domain_bytes, 4 * 1024 * 1024)
+
     def test_finite_default_and_explicit_expiry_never_renew(self):
         p = self.policy()
         args = {"mode": "boundary", "content": [{"type": "text", "text": "go"}]}
