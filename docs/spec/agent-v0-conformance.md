@@ -285,7 +285,7 @@ membership, held records and unknown operations before any write. H16 a team of 
 action, frozen at one membership revision, with paged results.
 
 **G. Principals and grants.** P2's prototype (`proto/principal-undo` f12f4e2, gate 29/29) passes G2, G3 (owner and
-additive grants), G5, G6 and G10; G1, G9, G11 and G12 are `(pending C2)`. G1 the default principal comes from the
+additive grants), G5, G6 and G10; G1, G9, G11, G12 and G14 are `(pending C2)`. G1 the default principal comes from the
 connection's known identity (TUI → owner, a spawned pane → its launcher's agent principal); a hand-started agent
 in a human-opened shell inherits that shell's `VQRO_PRINCIPAL` (including owner), not a guessed agent identity.
 A declared label is recorded separately and never changes it. G2 a pane's CLI writes as Alice, Bob writes later, Alice's TUI `u` removes
@@ -322,6 +322,10 @@ with a missing, unknown or revoked grant dispatches zero native writes; raw prim
 G13 handle grants pin both ends at issuance: grant on `@worker` to `@reviewer`, rebind both handles, and verify the
 right stays on the original exact agent for the original bound principal; the new bindings receive nothing. A
 subject handle without an unambiguous principal is refused. Team/project grants still follow recorded membership.
+G14 principal recovery and inheritance: `hello` cannot assert `extension:`, `host:` or `system:` ids (`invalid`);
+backend/supervised child environments do not inherit caller identity variables, including `VQRO_PRINCIPAL`.
+Missing/invalid owner configuration gives the TUI `owner-unset`, no coordination grants and a visible bootstrap
+notice, while raw/recovery still works. No connection/environment/process is guessed to be the owner.
 
 **T. Pull** (P5; Pi pinned per run). T1 OSC 7501 and marker mapping; nothing typed into the terminal by default;
 without a plugin, records stay held `integration_unavailable`. T2 eligibility comes from the point: a `turn` take

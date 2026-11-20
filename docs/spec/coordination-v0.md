@@ -68,7 +68,10 @@ the generic keys below (`doc/principals/…`) and never reads coordination grant
   call with nothing known is `undeclared`: accepted for raw and recovery primitives, never the owner, no coordination
   grants, no default `u`. An agent started by hand inside a human-opened shell inherits that shell's principal
   (`VQRO_PRINCIPAL`, possibly the owner) by design; its process or app name does not retag it. Use the launcher
-  to obtain a launcher-tagged agent principal.
+  to obtain a launcher-tagged agent principal. Principal ids beginning `extension:`, `host:` or `system:` are
+  core-assigned only; asserting one at `hello` is rejected `invalid`. Backends and supervised children never
+  inherit `VQRO_PRINCIPAL` or other caller-identity variables from the parent environment; launcher tagging is
+  explicit, not ambient identity inheritance.
 - **Callback proofs** travel in the `invocation` request field (an opaque proof). A live invocation proof captures
   the invoking call's effective principal and its original initiator separately; writes made under the proof carry
   that effective principal and that initiator. Example: A holds a B→A delegation and invokes `on_behalf_of` B; the
@@ -98,7 +101,9 @@ the generic keys below (`doc/principals/…`) and never reads coordination grant
   extension's `u`; others' changes stay attributed, explicitly revertable and CAS-protected (D28, refining D24).
   Inbox state is never in global undo.
 - The **workspace owner principal** is `doc/principals/owner = "<principal>"` and holds every coordination right;
-  other rights come only from grants (§4).
+  other rights come only from grants (§4). If that row is missing or invalid, the TUI acts as `owner-unset` with
+  no coordination grants. Raw/recovery primitives stay usable (D15) and a visible notice requests audited owner
+  bootstrap; no owner is guessed from a connection, environment or process.
 
 *Evidence (P2, `proto/principal-undo` f12f4e2, gate 29/29):* a pane's CLI writes as Alice through the launcher
 environment; Alice's TUI `u` removes it while Bob's later change stays; another principal's change is revertable by

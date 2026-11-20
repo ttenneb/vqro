@@ -528,6 +528,10 @@ replaced when the Pi bridge is ported.
   its human-opened shell's `VQRO_PRINCIPAL` by design; the launcher supplies a tagged agent principal.
   Callback proofs use `invocation`; the legacy `on_behalf_of` proof form is refused (explicit principal delegation
   through `on_behalf_of: P` remains).
+- `extension:`, `host:` and `system:` principals are core-assigned, never asserted at hello (`invalid`). Backend
+  and supervised child processes do not inherit caller identity variables. A missing/invalid owner row gives the
+  TUI `owner-unset` without coordination grants, with a visible bootstrap notice and raw/recovery still usable;
+  no fallback guesses owner authority.
 
 **Human answers (2026-11-19, CONFIRMED).**
 - **AS1, pause:** "vqro stops delivery": paused means vqro sends, hands out and wakes nothing until resumed; an agent
