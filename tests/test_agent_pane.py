@@ -31,9 +31,10 @@ CONVERSATION = {
                         "at_ms": 1_763_600_000_000, "delivery": "d:1", "origin": {"kind": "human", "principal": "undeclared"}},
     ("receipt", "d:1"): {"delivery": "d:1", "stage": "inserted"},
     ("message", "m2"): {"position": 2, "role": "assistant", "content": text("Let me look.\nFirst the CI log."), "final": True},
-    ("tool", "t1"): {"position": 3, "title": "Read ci.yml", "status": "completed", "input": {"path": "ci.yml"},
+    ("tool", "t1"): {"position": 3, "title": "read", "status": "completed", "input": {"path": "ci.yml"},
                      "started_ms": 1000, "ended_ms": 1200, "locations": [{"path": "/w/ci.yml", "line": 4}]},
-    ("tool", "t2"): {"position": 4, "title": "npm test", "status": "failed", "content": text("\n".join(f"l{i}" for i in range(30))),
+    ("tool", "t2"): {"position": 4, "title": "bash", "status": "failed", "input": {"command": "npm test", "timeout": 10000},
+                     "content": text("\n".join(f"line {i} of the test log" for i in range(30))),
                      "started_ms": 1200, "ended_ms": 5800},
     ("message", "m3"): {"position": 5, "role": "user", "content": text("Bump the lockfile too."), "final": True,
                         "origin": {"kind": "agent", "agent": "r7", "principal": "p:lead"}, "quoted": {"label": "alice"}},
@@ -51,7 +52,8 @@ class TranscriptRows(unittest.TestCase):
         headers = [r["text"] for r in self.rows() if str(r.get("id", "")).startswith("m:")]
         self.assertEqual(headers[0].split(" · ")[0], "Human (undeclared)", "as recorded, never inferred to be the viewer")
         self.assertIn("in the conversation", headers[0], "the delivery's receipt stage")
-        self.assertEqual(headers[1:], ["Pi", "Message from vqro-lead (agent r7)", "Thinking", "Pi · writing…"])
+        self.assertEqual(headers[1:], ["Pi", "Message from vqro-lead (agent r7)", "Pi · writing…"], "thinking has no label of its own")
+        self.assertIn("┊ Config change, not code.", [r.get("text") for r in self.rows()])
         texts = [r.get("text") for r in self.rows()]
         self.assertIn("quoting alice (claimed)", texts)
         self.assertLess(texts.index("Let me look."), texts.index("First the CI log."), "one row per line")
@@ -112,15 +114,31 @@ class TranscriptRows(unittest.TestCase):
                                     "origin": {"kind": "human", "principal": "alice"}}}
         self.assertEqual(self.rows(other)[0]["text"], "Message from alice")
 
-    def test_tool_calls_group_with_status_duration_location_and_bounded_output(self):
+    def test_tool_calls_are_one_line_each_under_one_collapsed_activity_line(self):
+        """Redesign (mockup rev 3, reply-13): Activity collapsed, one line per tool, readable arguments, output cut."""
         group = next(r for r in self.rows() if r.get("text", "").startswith("Activity"))
-        self.assertEqual(group["text"], "Activity · 2 tools · 4.8s")
-        self.assertEqual(group["description"], "✓1 ✗1")
+        self.assertEqual((group["text"], group["expanded"]), ("Activity · 2 tools · 4.8s · 1 failed", False))
+        self.assertEqual([b["text"] for b in group["badges"]], ["✓ read", "✗ bash"])
         read, test = group["children"]
-        self.assertEqual((read["text"], read["description"]), ("✓ Read ci.yml", "completed · 0.2s"))
+        self.assertEqual((read["text"], [b["text"] for b in read["badges"]], read["expanded"]), ("✓ read   ci.yml", ["0.2s"], False))
         self.assertIn("/w/ci.yml:4", [c["text"] for c in read["children"]])
-        self.assertEqual((test["style"], test["children"][-1]["text"]), ("error", "… 10 more lines"))
-        self.assertTrue(group["expanded"] and test["expanded"], "nothing hidden by default")
+        self.assertEqual((test["text"], test["style"], test["description"]), ("✗ bash   npm test", "error", "failed"))
+        texts = [c["text"] for c in test["children"]]
+        self.assertEqual(texts[0], "timeout 10000", "other arguments as name value, never JSON")
+        self.assertEqual(texts[-1], "… 18 more lines", "output cut at 12 lines")
+        self.assertEqual(len(test["children"][-1]["children"]), 18)
+
+    def test_short_output_is_packed_and_placeholders_never_appear(self):
+        listing = agent_transcript.output_rows("/w\n" + "\n".join(f"file{i}.md" for i in range(20)))
+        self.assertEqual(listing[0]["text"], "/w")
+        self.assertTrue(len(listing) <= 3 and "file19.md" in listing[-1]["text"], "a file listing packs several per row")
+        pi = {("message", "m"): {"position": 1, "role": "assistant", "final": True, "content": [
+            {"type": "thought", "text": "first\nsecond\nthird"}, {"type": "toolCall", "name": "bash", "arguments": {}},
+            {"type": "text", "text": "done"}]}}
+        texts = [r.get("text") for r in self.rows(pi)]
+        self.assertFalse(any("content]" in (t or "") for t in texts), "no [thought content] / [toolCall content]")
+        self.assertEqual(texts[1:4], ["┊ first", "┊ second", "▸ more"], "thinking: the first 2 lines, then more")
+        self.assertEqual(texts[-1], "done")
 
     def test_tail_coverage_says_so_and_the_budget_keeps_the_newest(self):
         note = {"type": "text", "style": "dim", "text": "Showing the recent history this agent reported."}
@@ -160,14 +178,14 @@ class ViewSettings(unittest.TestCase):
 
     def test_defaults_show_everything(self):
         self.assertEqual(agent_transcript.view_settings(), agent_transcript.DEFAULT_VIEW)
-        self.assertTrue(any(str(r.get("id", "")).startswith("m:") and r["text"].startswith("Thinking · ") for r in self.rows()))
+        self.assertIn("┊ Config change, not code.", [r.get("text") for r in self.rows()], "thinking shown by default")
 
     def test_summary_replaces_a_kind_with_a_configurable_expandable_line(self):
         rows = self.rows(thinking="summary", tools="summary")
         thinking = self.find(rows, "▸ Thinking")
         self.assertEqual(thinking["text"], "▸ Thinking · " + agent_transcript.when(1_763_600_060_000) + " · 1.2k tokens")
         self.assertFalse(thinking["expanded"])
-        self.assertIn("Config change, not code.", [c.get("text") for c in thinking["children"]], "one expand away")
+        self.assertIn("┊ Config change, not code.", [c.get("text") for c in thinking["children"]], "one expand away")
         tools = self.find(rows, "▸ Activity")
         self.assertEqual((tools["text"], tools["expanded"]), ("▸ Activity · 4.8s · 2 tools", False))
         lines = self.rows(thinking="summary", summary=["lines", "words"])
@@ -414,7 +432,7 @@ class AgentPane(unittest.TestCase):
         sender = next(r for r in content["items"] if r.get("id") == "m:m2")
         self.assertEqual((sender["focusable"], sender["copy"]), (True, "Let me look.\nFirst the CI log."))
         group = next(r for r in content["items"] if str(r.get("id", "")).startswith("g:"))
-        self.assertEqual(group["children"][1]["copy"].splitlines()[0], "l0", "a tool row copies its output")
+        self.assertEqual(group["children"][1]["copy"].splitlines()[0], "line 0 of the test log", "a tool row copies its output")
         self.assertEqual(json.loads(group["children"][0]["copy"]), {"path": "ci.yml"}, "or its input when there is no output")
         colours = agent_transcript.tool_row("t9", {"status": "completed", "content": text("\x1b[31mred\x1b[0m \x1b]0;title\x07ok")})
         self.assertEqual(colours["copy"], "red ok", "copied without terminal colour codes")

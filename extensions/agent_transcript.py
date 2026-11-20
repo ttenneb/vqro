@@ -19,7 +19,11 @@ RECEIPT = {"recorded": "recorded", "held": "held", "admitted": "admitted", "queu
            "unknown": "unknown"}
 MARKDOWN_ROW_BYTES = 60 * 1024  # under the 64 KiB per formatted row (core-protocol "Formatted text")
 LINE_BYTES = 4096  # one row; longer lines are cut with a mark (display only, never a request's question)
-TOOL_LINES = 20  # lines of a tool's input or output shown before "… N more lines"
+TOOL_LINES = 12  # lines of a tool's output shown before "… N more lines" (redesign mockup)
+THOUGHT_LINES = 2  # thinking shows its first lines, then "▸ more" (the human's choice, reply-13)
+THOUGHT_BLOCKS = ("thought", "thinking")
+TOOL_CALL_BLOCKS = ("toolCall", "tool_call", "tool_use")
+PACK_WIDTH = 120  # short one-word output lines (a file listing) are packed several to a row up to this width
 BUDGET = 160 * 1024  # encoded bytes of the conversation in one panel; older blocks give way first
 FOLD_LINES = 40  # compact view: longer messages fold after this many lines
 
@@ -107,6 +111,8 @@ def content_rows(content, style=None, limit=None):
         if not isinstance(block, dict):
             continue
         kind = block.get("type")
+        if kind in THOUGHT_BLOCKS or kind in TOOL_CALL_BLOCKS:
+            continue  # thinking is its own block (thought_rows); a tool call is its tool line, never a placeholder
         if kind == "text" and isinstance(block.get("text"), str):
             # Plain is the default; only an explicit markdown block is rendered as markdown (agent-v0 section 3.2).
             markdown = block.get("format") == "markdown" and not limit
@@ -117,6 +123,27 @@ def content_rows(content, style=None, limit=None):
             rows.append({"type": "text", "style": "dim", "text": "[" + clip(plain(str(block.get("name") or block.get("uri") or kind)), 512) + "]"})
         else:
             rows.append({"type": "text", "style": "dim", "text": f"[{plain(str(kind))} content]"})
+    return rows
+
+
+def thought_text(value):
+    """The reasoning a message carries: its thought blocks (an assistant message), or its text (a thought message)."""
+    content = value.get("content") if isinstance(value.get("content"), list) else []
+    if value.get("role") == "thought":
+        return "\n".join(b["text"] for b in content if isinstance(b, dict) and isinstance(b.get("text"), str))
+    return "\n".join(str(b.get("text") or b.get("thinking") or "") for b in content
+                     if isinstance(b, dict) and b.get("type") in THOUGHT_BLOCKS).strip()
+
+
+def thought_rows(eid, text, limit=THOUGHT_LINES):
+    """Thinking as a dim block with a left rule: the first lines, then "▸ more" with the rest one expand away."""
+    out = [line for line in text.split("\n") if line.strip()]
+    rows = [{"type": "text", "wrap": True, "focusable": True, "style": "dim", "text": "┊ " + clip(plain(line))}
+            for line in out[:limit]]
+    if len(out) > limit:
+        rows.append({"id": "th:" + eid, "text": "▸ more", "style": "dim", "expanded": False,
+                     "children": [{"type": "text", "wrap": True, "focusable": True, "style": "dim", "text": "┊ " + clip(plain(line))}
+                                  for line in out[limit:]]})
     return rows
 
 
@@ -194,7 +221,7 @@ class Names:
         return {"you": "You", "user": "User (no origin)", "human:undeclared": "Human (undeclared)"}.get(key, plain(key.split(":", 1)[-1]))
 
 
-def message_rows(eid, value, names, receipts, show_time=True, fold=None):
+def message_rows(eid, value, names, receipts, show_time=True, fold=None, thinking="show", fields=("time",)):
     sender, style, _ = names.sender(value)
     head = [sender]
     if show_time and when(value.get("at_ms")):
@@ -212,47 +239,115 @@ def message_rows(eid, value, names, receipts, show_time=True, fold=None):
     if isinstance(quoted, dict) and quoted.get("label"):
         rows.append({"type": "text", "style": "dim", "text": "quoting " + clip(plain(str(quoted["label"])), 256) + " (claimed)"})
     body_style = "dim" if value.get("role") in ("thought", "system") else None
-    body = content_rows(value.get("content"), body_style)
+    reasoning = thought_text(value) if value.get("role") != "thought" else ""
+    if reasoning and thinking == "show":
+        body = thought_rows(eid, reasoning)
+    elif reasoning and thinking == "summary":
+        body = [{"id": "s:" + eid, "style": "dim", "expanded": False, "children": thought_rows(eid, reasoning, limit=10 ** 6),
+                 "text": summary_text("Thinking", [value], fields)}]
+    else:
+        body = []  # hidden, or no reasoning
+    body += content_rows(value.get("content"), body_style)
     if fold and len(body) > fold:  # compact view: long messages fold, the rest one expand away
         body = body[:fold] + [{"id": "f:" + eid, "text": f"… {len(body) - fold} more lines", "style": "dim",
                                "children": body[fold:], "expanded": False}]
     return rows + body
 
 
+PRIMARY = {"bash": "command", "shell": "command", "read": "path", "edit": "path", "write": "path", "grep": "pattern",
+           "find": "pattern", "ls": "path"}
+
+
+def primary_argument(name, args):
+    """The argument that says what a tool call did, as text: bash's command, read's path (with its range), else the first
+    short string argument. Returns (text, the keys it used)."""
+    if not isinstance(args, dict):
+        return (clip(plain(str(args)), 200), set()) if args not in (None, "") else ("", set())
+    key = PRIMARY.get(str(name).lower())
+    if key not in args or not isinstance(args[key], str):
+        key = next((k for k, v in args.items() if isinstance(v, str) and v), None)
+    if key is None:
+        return "", set()
+    text, used = args[key], {key}
+    if str(name).lower() == "read" and type(args.get("offset")) is int:
+        end = args["offset"] + args["limit"] - 1 if type(args.get("limit")) is int else None
+        text += f" · lines {args['offset']}–{end}" if end else f" · from line {args['offset']}"
+        used |= {"offset", "limit"}
+    return clip(plain(text.split("\n")[0]), 200), used
+
+
+def output_rows(text, limit=TOOL_LINES):
+    """A tool's output as wrapped rows: short one-word lines packed several to a row; the first `limit` rows, then
+    "… N more lines" with the rest one expand away."""
+    out = ANSI.sub("", text).split("\n")
+    while out and not out[-1].strip():
+        out.pop()
+    if len(out) > 3 and all(len(line) <= 40 and " " not in line.strip() for line in out[1:]):
+        packed, row = [out[0]], ""
+        for word in out[1:]:
+            if row and len(row) + 2 + len(word) > PACK_WIDTH:
+                packed.append(row)
+                row = ""
+            row = word if not row else row + "  " + word
+        out = packed + ([row] if row else [])
+    rows = [{"type": "text", "wrap": True, "focusable": True, "style": "muted", "text": clip(plain(line))} for line in out[:limit]]
+    if len(out) > limit:
+        rows.append({"text": f"… {len(out) - limit} more lines", "style": "dim", "expanded": False,
+                     "children": [{"type": "text", "wrap": True, "focusable": True, "style": "muted", "text": clip(plain(line))}
+                                  for line in out[limit:]]})
+    return rows
+
+
 def tool_row(eid, value):
+    """One line per tool call (redesign): icon, name, its main argument; size and time on the right. Opening it shows
+    the other arguments as "name value" lines and the output, wrapped and cut."""
     status = value.get("status") if isinstance(value.get("status"), str) else "unknown"
+    name = plain(str(value.get("title") or "tool"))
+    args = value.get("input")
+    main, used = primary_argument(name, args)
+    output = text_of(value)
     took = duration(value.get("started_ms"), value.get("ended_ms"))
+    count = len([line for line in ANSI.sub("", output).split("\n")]) if output else 0
     children = []
-    if "input" in value:
-        raw = value["input"] if isinstance(value["input"], str) else json.dumps(value["input"], ensure_ascii=False, indent=1)
-        children += lines(raw, "muted", TOOL_LINES)
+    if isinstance(args, dict):
+        for key, arg in args.items():
+            if key in used or arg is None:
+                continue
+            shown = arg if isinstance(arg, str) else json.dumps(arg, ensure_ascii=False)
+            children.append({"type": "text", "wrap": True, "style": "dim", "text": clip(plain(f"{key} {shown}"), 1024)})
     for loc in value.get("locations") if isinstance(value.get("locations"), list) else []:
         if isinstance(loc, dict) and isinstance(loc.get("path"), str):
             line = f":{loc['line']}" if type(loc.get("line")) is int else ""
             children.append({"type": "text", "style": "accent", "text": clip(plain(loc["path"] + line), 1024)})
-    children += content_rows(value.get("content"), None, TOOL_LINES)
-    output = ANSI.sub("", text_of(value))  # terminal output: copy the text, not its colour codes
-    raw_input = value.get("input")
-    copy = output or (raw_input if isinstance(raw_input, str) else json.dumps(raw_input, ensure_ascii=False, indent=1) if "input" in value else None)
-    copy = copyable(copy) if copy else None
-    return {"id": "t:" + eid, "text": f"{TOOL_ICON.get(status, '?')} " + clip(plain(str(value.get("title") or "tool")), 512),
-            **({"copy": copy} if copy else {}),
-            "description": " · ".join(x for x in (status, took) if x), "style": "error" if status == "failed" else None,
-            "children": children, "expanded": True}
+    if output:
+        children += output_rows(output)
+    children += [r for r in content_rows([b for b in value.get("content") or [] if isinstance(b, dict) and b.get("type") != "text"])]
+    raw_input = args if isinstance(args, str) else json.dumps(args, ensure_ascii=False, indent=1) if "input" in value else None
+    copy = copyable(ANSI.sub("", output) or raw_input) if (output or raw_input) else None
+    badges = [b for b in (f"{count} lines" if count > 1 else None, took) if b]
+    return {"id": "t:" + eid, "text": f"{TOOL_ICON.get(status, '?')} {clip(name, 40)}" + (f"   {main}" if main else ""),
+            "style": "error" if status == "failed" else None, **({"copy": copy} if copy else {}),
+            **({"badges": [{"text": b, "style": "dim"} for b in badges]} if badges else {}),
+            **({"description": "failed"} if status == "failed" else {}),
+            **({"children": children} if children else {}), "expanded": False}
 
 
 def group_row(tools):
-    counts = {}
-    for _, value in tools:
-        counts[value.get("status")] = counts.get(value.get("status"), 0) + 1
+    """A run of tool calls as one Activity line (Pi style, collapsed): count, total time, failures; each tool with its
+    status on the right."""
     starts = [v.get("started_ms") for _, v in tools if type(v.get("started_ms")) is int]
     ends = [v.get("ended_ms") for _, v in tools if type(v.get("ended_ms")) is int]
     took = duration(min(starts), max(ends)) if starts and ends else None
-    summary = [f"{len(tools)} tool" + ("s" if len(tools) != 1 else "")] + ([took] if took else [])
-    marks = " ".join(f"{icon}{counts[s]}" for s, icon in (("completed", "✓"), ("failed", "✗"), ("running", "…"))
-                     if counts.get(s))
-    return {"id": "g:" + tools[0][0], "text": "Activity · " + " · ".join(summary), "description": marks,
-            "children": [tool_row(eid, value) for eid, value in tools], "expanded": True}
+    failed = sum(1 for _, v in tools if v.get("status") == "failed")
+    summary = [f"{len(tools)} tool" + ("s" if len(tools) != 1 else "")] + ([took] if took else []) + ([f"{failed} failed"] if failed else [])
+    tally = {}
+    for _, value in tools:
+        key = (TOOL_ICON.get(value.get("status"), "?"), plain(str(value.get("title") or "tool"))[:20])
+        tally[key] = tally.get(key, 0) + 1
+    badges = [{"text": f"{icon} {name}" + (f" ×{n}" if n > 1 else ""), "style": "error" if icon == "✗" else "dim"}
+              for (icon, name), n in list(tally.items())[:6]]
+    return {"id": "g:" + tools[0][0], "text": "Activity · " + " · ".join(summary), "badges": badges,
+            "children": [tool_row(eid, value) for eid, value in tools], "expanded": False}
 
 
 def amount(n):
@@ -374,11 +469,7 @@ def rows(entities, names, coverage=None, view=None):
             hidden["tools"] = hidden.get("tools", 0) + len(tools)
         else:
             flush_hidden()
-            group = group_row(tools)
-            if compact or mode == "summary":
-                group["expanded"] = False
-                for child in group["children"]:
-                    child["expanded"] = False
+            group = group_row(tools)  # collapsed by default (the human's choice, reply-13)
             if mode == "summary":
                 group["text"], group["style"] = summary_text("Activity", [v for _, v in tools], view["summary"], len(tools)), "dim"
             blocks.append([group])
@@ -390,16 +481,17 @@ def rows(entities, names, coverage=None, view=None):
             continue
         end_tools()
         if kind == "message":
-            if value.get("final") is not False and not content_rows(value.get("content")) \
+            if value.get("final") is not False and not content_rows(value.get("content")) and not thought_text(value) \
                     and not (isinstance(value.get("delivery"), str) and value["delivery"] in receipts):
                 continue  # a finished message with nothing to show and no delivery to report: no bare label
             label_, _, key = names.sender(value)
             role = value.get("role")
             show_time = not compact or key != last_sender
             last_sender = key
-            body = message_rows(eid, value, names, receipts, show_time, FOLD_LINES if compact else None)
-            if role == "thought":
-                add("thinking", body, "Thinking", [value], eid)
+            body = message_rows(eid, value, names, receipts, show_time, FOLD_LINES if compact else None,
+                                view["thinking"], view["summary"])
+            if role == "thought":  # a separate thinking entity: the block alone, under the agent's last label
+                add("thinking", thought_rows(eid, thought_text(value)), "Thinking", [value], eid)
             elif role == "system":
                 add("system", body, "System", [value], eid)
             elif key in view["hidden_senders"]:
