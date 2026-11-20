@@ -6,7 +6,7 @@ pub mod observation;
 pub mod runtime;
 
 use crate::rpc::{RpcError, RpcResult};
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, VecDeque};
 
 pub const RECEIPTS: usize = 256;
@@ -136,6 +136,9 @@ pub struct Endpoint {
     pub completion: Option<Value>,
     pub lifecycle: String,
     pub caps_rev: u64,
+    model: Option<Value>,
+    usage: Option<Value>,
+    run_metadata: Option<Value>,
     next_request: u64,
     pending: BTreeMap<String, Pending>,
     receipts: BTreeMap<String, Value>,
@@ -160,6 +163,9 @@ impl Endpoint {
             completion: None,
             lifecycle: "live".into(),
             caps_rev: 1,
+            model: None,
+            usage: None,
+            run_metadata: None,
             next_request: 0,
             pending: BTreeMap::new(),
             receipts: BTreeMap::new(),
@@ -198,9 +204,9 @@ impl Endpoint {
             "data":{"agent":{"v":0,"state":self.state,"run":self.run,"lifecycle":self.lifecycle,
                 "host":{"id":self.host,"provider":self.host_provider,"instance":self.host_instance,
                     "incarnation":self.incarnation,"kind":"server","owns_lifecycle":true},
-                "completion":self.completion,"session":self.session.as_ref().map(|id| json!({"id":id,"title":self.title})),
+                "completion":self.completion,"session":self.session_info(),
                 "epoch":self.epoch,"caps":caps,"queue":null,"requests":requests,"background":null,
-                "config":[],"commands":[],"usage":null,"incomplete":[],
+                "config":[],"commands":[],"usage":self.usage,"incomplete":[],
                 "items":items}}})
     }
 
@@ -434,11 +440,79 @@ impl Endpoint {
     }
 
     pub fn state_entity(&self) -> Change {
-        Change::new(
-            "state",
-            "current",
-            json!({"state":self.state,"run":self.run,"completion":self.completion,"background":null}),
-        )
+        let mut value = json!({"state":self.state,"run":self.run,"completion":self.completion,"background":null});
+        if let Some(usage) = &self.usage {
+            value["usage"] = usage.clone();
+        }
+        Change::new("state", "current", value)
+    }
+
+    pub fn session_info(&self) -> Value {
+        let Some(id) = &self.session else {
+            return Value::Null;
+        };
+        let mut session = json!({"id":id,"title":self.title});
+        if let Some(cwd) = &self.cwd {
+            session["cwd"] = json!(cwd);
+        }
+        if let Some(model) = &self.model {
+            session["model"] = model.clone();
+        }
+        session
+    }
+
+    /// Read-only settings are native response fields, never bridge defaults or a write capability.
+    pub fn set_session_response(
+        &mut self,
+        response: &Value,
+        epoch: String,
+    ) -> Result<Vec<Change>, RpcError> {
+        let _changes = self.set_session(&response["thread"], epoch)?;
+        if let Some(cwd) = reported_string(&response["cwd"], 4096) {
+            self.cwd = Some(cwd);
+        }
+        if let Some(id) = reported_string(&response["model"], 256) {
+            let mut model = json!({"id":id});
+            if let Some(effort) = reported_string(&response["reasoningEffort"], 128) {
+                model["effort"] = json!(effort);
+            }
+            self.model = Some(model);
+        }
+        Ok(vec![
+            Change::new("session", "current", self.session_info()),
+            self.state_entity(),
+        ])
+    }
+
+    fn run_change(&mut self, turn: &Value) -> Option<Change> {
+        let run = turn["id"]
+            .as_str()
+            .filter(|id| !id.is_empty() && id.len() <= 128)?;
+        let mut value = self
+            .run_metadata
+            .as_ref()
+            .filter(|v| v["id"] == run)
+            .cloned()
+            .unwrap_or_else(|| json!({"id":run}));
+        if let Some(status) = reported_string(&turn["status"], 128) {
+            value["status"] = json!(status);
+        }
+        // Native Turn timestamps are Unix seconds; unlike item timestamps, they are not ms.
+        for (native, field) in [("startedAt", "started_ms"), ("completedAt", "ended_ms")] {
+            if let Some(ms) = turn[native].as_u64().and_then(|n| n.checked_mul(1000)) {
+                value[field] = json!(ms);
+            }
+        }
+        if self.run.as_deref() == Some(run)
+            || self.run_metadata.as_ref().is_some_and(|v| v["id"] == run)
+        {
+            self.run_metadata = Some(value.clone());
+        }
+        if value.get("started_ms").is_some() || value.get("ended_ms").is_some() {
+            Some(Change::new("run", run, value))
+        } else {
+            None
+        }
     }
 
     /// Apply a successful metadata/session response before publishing the provider result.
@@ -457,17 +531,16 @@ impl Endpoint {
             .or_else(|| thread.get("title"))
             .and_then(Value::as_str)
             .map(|s| s.chars().take(256).collect());
-        self.cwd = thread["cwd"].as_str().map(str::to_owned);
+        self.cwd = reported_string(&thread["cwd"], 4096);
+        self.model = None;
+        self.usage = None;
+        self.run_metadata = None;
         self.pending.clear();
         self.run = None;
         self.completion = None;
         self.apply_status(&thread["status"]);
         Ok(vec![
-            Change::new(
-                "session",
-                "current",
-                json!({"id":self.session,"title":self.title}),
-            ),
+            Change::new("session", "current", self.session_info()),
             self.state_entity(),
         ])
     }
@@ -536,7 +609,11 @@ impl Endpoint {
                     .filter(|s| s.len() <= 128)
                     .map(str::to_owned);
                 self.state = "running".into();
-                vec![self.state_entity()]
+                let mut changes = vec![self.state_entity()];
+                if let Some(change) = self.run_change(&p["turn"]) {
+                    changes.push(change);
+                }
+                changes
             }
             "turn/completed" => {
                 let turn = &p["turn"];
@@ -558,6 +635,39 @@ impl Endpoint {
                     self.state = if !known { "unknown" } else { "idle" }.into();
                     self.completion = Some(completion);
                 }
+                let mut changes = vec![self.state_entity()];
+                if let Some(change) = self.run_change(turn) {
+                    changes.push(change);
+                }
+                changes
+            }
+            "thread/tokenUsage/updated" => {
+                let reported = &p["tokenUsage"];
+                let mut usage = serde_json::Map::new();
+                if let Some(window) = reported["modelContextWindow"].as_u64() {
+                    usage.insert("context".into(), json!({"window":window})); // no native occupancy witness
+                }
+                let totals = &reported["total"];
+                if let (Some(input), Some(output)) = (
+                    totals["inputTokens"].as_u64(),
+                    totals["outputTokens"].as_u64(),
+                ) {
+                    let mut tokens = json!({"input":input,"output":output});
+                    for (native, field) in [
+                        ("cachedInputTokens", "cache_read"),
+                        ("cacheWriteInputTokens", "cache_write"),
+                    ] {
+                        if let Some(n) = totals[native].as_u64() {
+                            tokens[field] = json!(n);
+                        }
+                    }
+                    usage.insert("tokens".into(), tokens);
+                }
+                self.usage = if usage.is_empty() {
+                    None
+                } else {
+                    Some(Value::Object(usage))
+                };
                 vec![self.state_entity()]
             }
             "item/started" | "item/completed" => self.item(&p["item"], method == "item/completed"),
@@ -912,6 +1022,13 @@ impl Endpoint {
             change: Change::new("request", key, pending.entity),
         })
     }
+}
+
+fn reported_string(value: &Value, limit: usize) -> Option<String> {
+    value
+        .as_str()
+        .filter(|s| !s.is_empty() && s.len() <= limit)
+        .map(str::to_owned)
 }
 
 fn bounded_error(error: &Value) -> Value {

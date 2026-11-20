@@ -1,6 +1,6 @@
 # Codex app-server adapter: initial declaration (2026-11-19)
 
-Draft implementation target: `agent-v0.md` on `agent-standard` (initial `4e46730`, updated through `fe368bd`, not yet on main). This declaration was written **before implementation** and is not a conformance claim. Adapter binary: `vqro-bridge-codex`; explicit runtime argv, no default installation or credential discovery. The intermediate binary deliberately omits item-stream/observation capabilities until C3's shared producer is integrated; the JSON declaration describes the target subset, not a certification.
+The initial declaration preceded implementation on `agent-standard`; the binding contracts are now `docs/spec/{agent-v0,coordination-v0,agent-v0-conformance}.md` on main. This is not a conformance claim. Adapter binary: `vqro-bridge-codex`; explicit runtime argv, no default installation or credential discovery. Shared SDK item observation is implemented; certification still requires current-head gates, conformance and separately approved native smoke.
 
 ## Protocol evidence
 
@@ -41,6 +41,17 @@ The adapter owns that app-server child: only an observed child exit or native en
 - Requests: representable command/file approvals as typed permission choices, and structured native user questions as a constrained form. Declared scopes are session/run, with `background_requests: true`; native pending requests survive unrelated foreground completion until the runtime resolves them. Responses are dispatched (JSON-RPC responses have no acknowledgement); first valid answer claims the request once. Unknown/incomplete requests are rejected/cancelled once, never approved.
 - Observation: current facts and bounded item journal, fenced per-viewer snapshots/continuation through C3's item-stream API. Pending request/state entities survive transcript pruning. Unknown native item variants retain bounded native data rather than inventing an outcome. Large entities are explicitly incomplete; no blob service is claimed.
 - Omitted: config, commands, native queue, history/fork positions, children controls, background cancellation, auth, native idempotency and stop. Optional omissions are visible, not claimed as implemented.
+
+## Optional reported view metadata
+
+The installed I0 Codex0.170 schemas (`v2/{ThreadStartResponse,ThreadResumeResponse,ThreadTokenUsageUpdatedNotification,TurnStartedNotification}.json`) establish these mappings:
+
+- Native response `cwd`, `model`, `reasoningEffort` → read-only `session.cwd` and `session.model {id, effort?}`. Missing values stay absent; no configure capability is implied. Oversized identifiers/paths are omitted, not truncated into a different identifier.
+- `tokenUsage.modelContextWindow` → `usage.context.window` only. No occupancy is inferred from `last.totalTokens` or session totals. Explicit cumulative `total.inputTokens/outputTokens/cachedInputTokens/cacheWriteInputTokens` map to the corresponding token counters; missing counters are not zero-filled. No price, cost, local observation time or native format is invented.
+- Native Turn `startedAt/completedAt` are Unix **seconds**; reported values become run `started_ms/ended_ms` with checked multiplication. Missing, negative or overflowing times remain unknown. Item timestamps are a different native millisecond field, never confused with these turn fields. An active timed run is protected from transcript eviction; completion can release that protection.
+- Session changes clear old reported settings, usage and run metadata. Session facts are core-confirmed through the public sync acknowledgement before an observed new/resume response. The fence uses the original deadline: under load an already native-observed change may be indeterminate to the caller, never permission to retry.
+
+Snapshot leases conservatively fund an epoch replacement before releasing the old cut. Under pressure a viewer can close as overloaded during a session switch; it is not a guaranteed-open promise. Worst-case framing charges allow about five maximum-size cuts in the provider's8MiB snapshot budget. Viewers must back off/report incompatible streams as the shared contract requires.
 
 ## Integration dependencies
 

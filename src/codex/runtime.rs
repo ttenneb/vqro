@@ -1,13 +1,13 @@
 //! Provider-facing orchestration. Native event draining and controls never wait on an admission.
 //! The shared SDK item producer is supplied as a callback; no second item reducer lives here.
-use super::{Change, Endpoint, provider_capabilities};
+use super::{provider_capabilities, Change, Endpoint};
 use crate::provider_client::{Outcome, ProviderError};
 use crate::rpc::{Incoming, Peer, RpcError};
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::{Mutex as AsyncMutex, Semaphore, oneshot, watch};
+use tokio::sync::{oneshot, watch, Mutex as AsyncMutex, Semaphore};
 use tokio::time::Instant;
 
 pub type Observer = Arc<dyn Fn(usize, &str, Vec<Change>, bool) + Send + Sync>;
@@ -580,9 +580,9 @@ impl Runtime {
         let mut endpoint = self.slots[index].endpoint.lock().unwrap();
         let next_epoch = unique_epoch(&self.incarnation);
         let changes = endpoint
-            .set_session(&result["thread"], next_epoch)
+            .set_session_response(&result, next_epoch)
             .map_err(Fault::Unknown)?;
-        let session = json!({"id":endpoint.session,"title":endpoint.title});
+        let session = endpoint.session_info();
         self.emit(index, &endpoint, changes, true);
         Ok(Outcome::Observed(Some(json!({"session":session}))))
     }

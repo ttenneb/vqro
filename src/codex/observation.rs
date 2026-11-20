@@ -39,6 +39,7 @@ fn control(kind: &str, value: &Value) -> bool {
 }
 fn protected(kind: &str, value: &Value) -> bool {
     control(kind, value)
+        || (kind == "run" && value["status"] == "inProgress")
         || (kind == "message" && value["final"] == false)
         || (kind == "tool" && matches!(value["status"].as_str(), Some("pending" | "running")))
         || (kind == "receipt" && value["stage"] == "dispatched")
