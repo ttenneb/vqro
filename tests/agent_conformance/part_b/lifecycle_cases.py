@@ -88,6 +88,15 @@ class Backend:
 
 
 @case("L7")
+def within_declared_n(count, cache):
+    """L7: None when the extension declares no integer identity-cache N (that gap is graded separately); otherwise
+    whether the actual cache count is at most N."""
+    declared = cache.get("capacity") if isinstance(cache, dict) else None
+    if not isinstance(declared, int) or isinstance(declared, bool):
+        return None
+    return count <= declared
+
+
 async def identity_cache_and_tombstones(ctx):
     """~900 unavailable agents per hour: K2-driven forgetting stays within the cache; durable evidence is kept;
     evidence-free tombstones are pruned oldest first; maximum legal identities and summaries fit; a large native
@@ -166,10 +175,9 @@ async def identity_cache_and_tombstones(ctx):
     if flood_size:
         ctx.check(stats["count"] == stats["max_entries"], "the flood filled the cache to its bound (eviction happened)", stats=stats)
     # L7's N is the extension-declared identity-cache size: the actual cache count must stay within it too.
-    declared_n = cache.get("capacity") if isinstance(cache, dict) else None
-    if isinstance(declared_n, int) and not isinstance(declared_n, bool):
-        ctx.check(stats["count"] <= declared_n, "the actual identity-cache count stays within the extension-declared N",
-                  count=stats["count"], declared_n=declared_n, core_max_entries=stats["max_entries"])
+    if within_declared_n(stats["count"], cache) is not None:
+        ctx.check(within_declared_n(stats["count"], cache), "the actual identity-cache count stays within the extension-declared N",
+                  count=stats["count"], declared_n=cache["capacity"], core_max_entries=stats["max_entries"])
 
     async def pruned():
         current = await tombstones(ctx)

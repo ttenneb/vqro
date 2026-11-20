@@ -408,3 +408,14 @@ class ScaleControlCheckerRegressions(unittest.TestCase):
         self.assertFalse(control_admissions_ok([dict(good[0], native=2), good[1]]), "a duplicated native interrupt")
         self.assertFalse(control_admissions_ok([dict(good[0], state=None), good[1]]), "an interrupt with no reply")
         self.assertFalse(control_admissions_ok([good[0]]), "no answer sample at all")
+
+
+class IdentityCacheCheckerRegressions(unittest.TestCase):
+    """L7: the actual cache count is graded against the extension-declared N, not only the core bound."""
+
+    def test_count_over_declared_n_fails(self):
+        from agent_conformance.part_b.lifecycle_cases import within_declared_n
+        self.assertTrue(within_declared_n(100, {"capacity": 128}))
+        self.assertFalse(within_declared_n(4096, {"capacity": 128}), "a core-bounded count above the declared N")
+        self.assertIsNone(within_declared_n(4096, {"capacity": None, "incomplete": True}), "undeclared N is a separate gap")
+        self.assertIsNone(within_declared_n(1, {"capacity": True}))
