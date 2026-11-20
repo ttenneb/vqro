@@ -130,21 +130,40 @@ did not change (an edit of a held record) would then never arrive. The wake cont
 
 ## Robustness (review A3)
 
-- **Lost take reply:** the same take (same op) is repeated on a fresh connection. It returns its claims, never
-  content again, and they are released. Tested with an injected 4.5 s reply delay (fake inbox), for both plugins.
-- **Context budget:** whole records only, up to 9,000 characters. The rest are released in order and taken at later
-  points.
+- **Lost take reply:** the plugin inspects that exact op with `coord.inbox.op` on a fresh connection. It returns the
+  take's claims, never content, and they are released. A new take is never sent instead: if the window epoch moved
+  on, it would be a different op and claim nothing back. Tested with an injected 4.5 s reply delay, with and without
+  a window change (fake inbox), for both plugins.
+- **Record size (Claude Code):**
+  - `take {max_bytes: 5000}` (compact UTF-8 JSON bytes of the content, K2's filter). Larger records stay held
+    `too_large_for_consumer` and are never claimed, so they never block later mail.
+  - Quoting adds at most 3 bytes per line and a line costs at least 2 JSON bytes. Header fields are clipped to
+    120 characters. So any record taken renders within the 9,000-character budget, even one that is all line breaks
+    (tested).
+  - Against an inbox without `max_bytes`, a record that does not fit is released, and the plugin then takes one
+    record at a time until the head changes. A stuck head costs one take and one release per point, not the batch.
+- **Context budget:** whole records only, up to 9,000 characters per hand-off. The rest are released in order and
+  taken at later points.
 - **Content:** `take {accept: [...]}` (K2's filter). Claude accepts text; Pi accepts text and images. Other records
   stay held `unsupported_content`, never flattened.
-- **Compaction and `/clear`:** `SessionStart` with these sources keeps the consumer and the open hand-offs; it is not
-  a restart.
+- **Compaction and `/clear`:**
+  - `SessionStart` with these sources keeps the consumer and its window; it is not a restart.
+  - Claude Code 2.1.329 gives `/clear` a **new session id** (verified in the real TUI, `claude_code_tui` I6). The hook
+    finds the agent's previous session through a per-agent pointer file and carries the consumer over.
+  - Hand-offs open in the cleared session stay `supplied` (their context is gone, so they are never `read`).
+  - Mail keeps flowing in the new session (tested).
 - **Reconnects:**
   - The Claude idle waiter reconnects with backoff.
   - The Pi plugin reconnects and resubscribes after a core restart, and reconciles again when its consumer is
     fenced. Tested by restarting the core under a running Pi.
+  - A connection whose hello or subscribe fails is dropped, never kept half-open.
+- **Report order (Pi):** `read` is sent only after its `inserted` report has completed.
+- **Evidence nonce:** 128 bits from the OS. If randomness fails, nothing is handed over and the claims are released.
 - **Op ids:** report op ids are deterministic per claim and stage, and the command prefix is configurable
   (`VQRO_COORD_PREFIX`).
 - **Hook state:** private (0700/0600; symlinked directories refused), with a rotated 1 MiB log.
+- **Test faults:** fault injection lives only in a test wrapper (`tests/fixtures/pi/vqro-pull-faults.ts`). The
+  shipped Pi plugin reads no fault setting.
 
 ## Open
 - **Real-model smoke:** this needs a native Claude Code login (I0 helper), a cheap model and coordinator approval.

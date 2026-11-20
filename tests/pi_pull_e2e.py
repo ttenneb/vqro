@@ -247,13 +247,18 @@ if a.inbox == "fake":
     got = wait_for(lambda: first_request_with("MSG-AFTER-RESTART") is not None, 40)
     check("R Pi reconnects after a core restart and still pulls (re-reconciles when fenced)", reconnected and got,
           {"connected": len(plugin_events("connected")), "state": h.get(rs)})
-    # a lost take reply: the plugin repeats the same take, releases its claims, and the mail is delivered later
-    h.c.cmd("fixture.fault", take_delay_s=4.5)
-    lt = h.send(AGENT, "start", txt("MSG-LOST-TAKE"))
-    recovered = wait_for(lambda: plugin_events("take_recovered"), 30)
-    got = wait_for(lambda: first_request_with("MSG-LOST-TAKE") is not None, 40)
-    check("L lost take reply: claims released by repeating the take, then delivered", recovered and got and h.get(lt)["state"] in ("inserted", "read"),
-          {"recovered": plugin_events("take_recovered"), "state": h.get(lt)})
+    # a lost take reply: the plugin inspects that op (inbox.op), releases its claims, and the mail is delivered
+    # later; also when the window epoch moved on meanwhile (a new take would claim nothing back)
+    for rotate in (False, True):
+        base_recovered = len(plugin_events("take_recovered"))
+        h.c.cmd("fixture.fault", take_delay_s=4.5, rotate_window=rotate)
+        lt = h.send(AGENT, "start", txt(f"MSG-LOST-TAKE-{rotate}"))
+        recovered = wait_for(lambda: len(plugin_events("take_recovered")) > base_recovered, 30)
+        got = wait_for(lambda: first_request_with(f"MSG-LOST-TAKE-{rotate}") is not None, 40)
+        released = any(e.get("released") for e in plugin_events("take_recovered")[base_recovered:])
+        check(f"L lost take reply ({'window moved on' if rotate else 'same window'}): claims found by op and released, then delivered",
+              recovered and released and got and h.get(lt)["state"] in ("inserted", "read"),
+              {"recovered": plugin_events("take_recovered"), "state": h.get(lt)})
 pi.close()
 
 calls = [e for e in plugin_events("taken") + plugin_events("held") + plugin_events("take_failed")]

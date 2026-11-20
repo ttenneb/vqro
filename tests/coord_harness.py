@@ -147,6 +147,12 @@ class Harness:
             args["expect"] = rec.get("revision")
         return self.c.cmd("coord.inbox.edit", **args)
 
+    def withdraw(self, delivery):
+        args = {"op": self.op(), "delivery": delivery}
+        if self.kind in ("k2", "k2core"):
+            args["expect"] = self.get(delivery).get("revision")
+        return self.c.cmd("coord.inbox.withdraw", **args)
+
     def get(self, delivery):
         return self.c.cmd("coord.inbox.get", delivery=delivery)
 

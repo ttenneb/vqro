@@ -4,8 +4,10 @@ prefixed with the window epoch, records whose state is their evidence stage, and
 `coord-status` live view. Not the coordination extension: no grants, gates, lanes, budgets or persistence. Every
 call is appended to the log given as argv[1] (the test oracle). `tests/fixtures/coord_k2.py` runs K2 itself.
 
-`take {accept: [...]}` (default `["text"]`, as K2) names the block types a plugin can insert; other records stay
-held `unsupported_content`. `agents.status` records tier-1 status reports (K3's command, not in this inbox).
+`take {accept: [...], max_bytes}` (as K2: default `["text"]` and 32 KiB) names the block types a plugin can insert and
+the largest content it takes (compact UTF-8 JSON bytes); other records stay held `unsupported_content` or
+`too_large_for_consumer`. `max_bytes` is ignored while `fixture.fault {no_max_bytes}` is set (an older inbox). A lost
+take reply is inspected with `coord.inbox.op {op}`: claims, never content. `agents.status` records tier-1 status reports (K3's command, not in this inbox).
 """
 import json, os, sys, threading, time
 
@@ -15,8 +17,7 @@ from vqro_ext import Extension, VqroError  # noqa: E402
 ELIGIBLE = {"turn": {"boundary"}, "settle": {"boundary", "settle"}, "idle": {"start", "boundary", "settle"}}
 LEVEL = {"claimed": 0, "supplied": 1, "inserted": 1, "read": 2, "handled": 2}
 BLOCKS = {"text": ("text",), "image": ("mime", "data"), "audio": ("mime", "data"), "resource_link": ("uri",), "resource": ("uri",)}
-EPOCH = "w:fake"
-WINDOW = {"epoch": EPOCH, "from": 0, "to": 1024}
+WINDOW = {"epoch": "w:fake", "from": 0, "to": 1024}
 LOG = sys.argv[1] if len(sys.argv) > 1 else os.devnull
 ext = Extension("coord-fake")
 lock = threading.RLock()
@@ -56,17 +57,20 @@ def mutation(fn):
     def run(args):
         with lock:
             op = args.get("op")
-            if not isinstance(op, str) or not op.startswith(EPOCH + ":"):
-                raise VqroError("operation is outside its window", "expired_operation")
-            if op in ops:
+            if op in ops:  # as K2: a cached op is answered before its window is checked
                 return ops[op]
-            result = dict(fn(args), window=WINDOW)
+            if not isinstance(op, str) or not op.startswith(WINDOW["epoch"] + ":"):
+                raise VqroError("operation is outside its window", "expired_operation")
+            result = dict(fn(args), window=dict(WINDOW))
             # A repeated take returns its claims (history), never content again.
             ops[op] = result if "records" not in result else dict(result, records=[], historical=True)
             if FAULT.get("take_delay_s") and "records" in result and result["records"]:
                 delay = FAULT.pop("take_delay_s")
                 log("fault_delay", seconds=delay)
                 time.sleep(delay)  # the caller's reply deadline passes: a lost take reply
+                if FAULT.pop("rotate_window", False):  # and the window moves on meanwhile
+                    WINDOW["epoch"] = "w:fake" + str(time.time_ns())
+                    log("window_rotated", epoch=WINDOW["epoch"])
             return result
     return run
 
@@ -75,7 +79,20 @@ def command(name, title):
     return ext.command(name, title)
 
 
-command("coord.inbox.window", "window")(lambda args: WINDOW)
+command("coord.inbox.window", "window")(lambda args: dict(WINDOW))
+
+
+@command("coord.inbox.op", "inspect an op: a take returns its claims, never content")
+def op(args):
+    with lock:
+        saved = ops.get(args.get("op"))
+        log("op", op=args.get("op"), found=saved is not None)
+        if saved is None:
+            return {"state": "unknown", "window": dict(WINDOW)}
+        if "claims" in saved:
+            live = [c for c in saved["claims"] if records[c["delivery"]].get("claim") == c["claim"]]
+            return {"state": saved["state"], "claims": live, "records": [], "historical": True, "window": dict(WINDOW)}
+        return dict(saved, historical=True)
 
 
 @command("coord.inbox.send", "test: admit a message")
@@ -105,6 +122,17 @@ def edit(args):
     return {"state": "held", "rev": r["rev"]}
 
 
+@command("coord.inbox.withdraw", "test: withdraw while held")
+@mutation
+def withdraw(args):
+    r = records[args["delivery"]]
+    if r["state"] != "held":
+        raise VqroError(f"too_late: {r['state']}", "conflict")
+    r.update(state="withdrawn", reason="sender_withdrawn")
+    log("withdrawn", delivery=r["delivery"])
+    return {"state": "withdrawn"}
+
+
 @command("coord.inbox.get", "one record")
 def get(args):
     with lock:
@@ -121,14 +149,18 @@ def take(args):
         raise VqroError("consumer must reconcile before taking", "conflict")
     if any(r["to"] == agent and r["state"] == "claimed" for r in records.values()):
         return {"state": "held", "records": [], "held": "claim_in_flight"}
-    out = []
+    out, held = [], "no_eligible_input"
     for r in sorted(records.values(), key=lambda r: r["order"]):
         if len(out) >= min(int(args.get("limit", 16)), 16):
             break
         if r["to"] == agent and r["state"] == "held" and r["mode"] in ELIGIBLE[at]:
             accepts = args.get("accept", ["text"])  # as K2: block types the plugin inserts without loss
             if any(b["type"] not in accepts for b in r["content"]):
-                r["reason"] = "unsupported_content"
+                r["reason"] = held = "unsupported_content"
+                continue
+            size = len(json.dumps(r["content"], ensure_ascii=False, separators=(",", ":")).encode())
+            if not FAULT.get("no_max_bytes") and size > args.get("max_bytes", 32768):
+                r["reason"] = held = "too_large_for_consumer"
                 continue
             claim = f"claim:{r['delivery']}.{len(r.get('attempts', [])) + 1}"
             r.update(state="claimed", reason=None, claim=claim, consumer=args["consumer"], at=at)
@@ -139,7 +171,7 @@ def take(args):
     if out:
         wake(agent)
     return {"state": "claimed" if out else "held", "records": out, "claims": [{"delivery": o["delivery"], "claim": o["claim"]} for o in out],
-            "held": None if out else "no_eligible_input"}
+            "held": None if out else held}
 
 
 @command("coord.inbox.report", "pull: report evidence for a claim")

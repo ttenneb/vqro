@@ -63,6 +63,13 @@ mod unix {
     const CALL_MS: u64 = 3000;
     /// Claude Code moves `additionalContext` over 10,000 characters out to a file; whole records only, below that.
     const MAX_CONTEXT: usize = 9000;
+    /// The largest record this plugin takes (`take {max_bytes}`: compact UTF-8 JSON bytes of its content). Larger
+    /// records stay held `too_large_for_consumer` and are never claimed. Quoting adds at most 3 bytes per line and a
+    /// line costs at least 2 JSON bytes, so the body renders within 1.5 x 5,000 + 3 bytes; the header is at most
+    /// ~800 (`clip`). One record therefore always fits `MAX_CONTEXT` (bytes >= UTF-16 characters).
+    const RECORD_MAX: usize = 5000;
+    /// Header fields are clipped so a header stays bounded whatever the ids are.
+    const FIELD_MAX: usize = 120;
     /// The coordination extension's live status view; `wake.pending[<rN>]` is a count, never content.
     const WAKE_VIEW: &str = "coord-status";
     const LOG_BYTES: u64 = 1 << 20;
@@ -76,6 +83,8 @@ mod unix {
         w: UnixStream,
         next: u64,
         events: Vec<Value>,
+        /// The op id of the last mutation sent (a lost take is inspected by it).
+        last_op: String,
     }
 
     impl Core {
@@ -83,7 +92,7 @@ mod unix {
             let w = UnixStream::connect(path).map_err(|e| format!("transport: connect: {e}"))?;
             w.set_read_timeout(Some(Duration::from_millis(CALL_MS))).ok();
             let r = BufReader::new(w.try_clone().map_err(|e| format!("transport: {e}"))?);
-            let mut core = Core { r, w, next: 0, events: Vec::new() };
+            let mut core = Core { r, w, next: 0, events: Vec::new(), last_op: String::new() };
             // The launcher injects the plugin's principal (C2: bound at hello, never per call).
             let mut hello = json!({"client": "vqro-claude-hook", "version": env!("CARGO_PKG_VERSION")});
             if let Ok(principal) = std::env::var("VQRO_PRINCIPAL") {
@@ -138,6 +147,7 @@ mod unix {
                     ctx.with_state(|s| s.set("epoch", json!(epoch)));
                 }
                 args["op"] = json!(format!("{epoch}:{suffix}"));
+                self.last_op = format!("{epoch}:{suffix}");
                 match self.coord(name, args.clone()) {
                     Ok(reply) => {
                         if let Some(e) = reply.pointer("/window/epoch").and_then(Value::as_str) {
@@ -343,11 +353,32 @@ mod unix {
 
     fn session_start(ctx: &Ctx, core: &mut Core) {
         let source = ctx.input.get("source").and_then(Value::as_str).unwrap_or("startup");
-        let existing = ctx.with_state(|s| s.get("consumer").as_str().map(String::from));
-        // Compaction and /clear keep the process, its consumer and its open hand-offs: not a restart.
-        if matches!(source, "compact" | "clear") && existing.is_some() {
-            ctx.log("session_continued", json!({"source": source}));
-            return;
+        let mut existing = ctx.with_state(|s| s.get("consumer").as_str().map(String::from));
+        // The agent's latest session: /clear starts a new session id (2.1.329, claude_code_tui I6).
+        let pointer = ctx.dir.join(format!("agent-{}.session", sanitize(&ctx.agent)));
+        let previous = fs::read_to_string(&pointer).ok().filter(|p| !p.is_empty() && *p != ctx.session);
+        // Compaction and /clear keep the process, its consumer and its window: not a restart. Under a new session id
+        // they are carried over; that session's open hand-offs stay `supplied` (their context was cleared).
+        if matches!(source, "compact" | "clear") {
+            if let (None, Some(prev)) = (&existing, &previous) {
+                let old = Ctx { agent: ctx.agent.clone(), socket: ctx.socket.clone(), dir: ctx.dir.clone(), session: prev.clone(), input: Value::Null };
+                let (consumer, epoch) = old.with_state(|s| (s.get("consumer").clone(), s.get("epoch").clone()));
+                if consumer.is_string() {
+                    ctx.with_state(|s| {
+                        s.set("consumer", consumer.clone());
+                        s.set("epoch", epoch);
+                        s.set("busy", json!(true));
+                        s.set("open", json!([]));
+                        s.set("stop_continuations", json!(0));
+                    });
+                    existing = consumer.as_str().map(String::from);
+                }
+            }
+            if existing.is_some() {
+                ctx.log("session_continued", json!({"source": source, "from_session": previous}));
+                write_private(&pointer, &ctx.session);
+                return;
+            }
         }
         let consumer = format!("claude:{}:{}", ctx.session, random_hex());
         ctx.log("session", json!({"consumer": consumer, "source": source,
@@ -365,6 +396,17 @@ mod unix {
             s.set("open", json!([]));
             s.set("stop_continuations", json!(0));
         });
+        write_private(&pointer, &ctx.session);
+    }
+
+    /// Replace a small private file atomically (0600).
+    fn write_private(path: &Path, text: &str) {
+        let tmp = path.with_extension("tmp");
+        if let Ok(mut file) = OpenOptions::new().create(true).truncate(true).write(true).mode(0o600).open(&tmp) {
+            if file.write_all(text.as_bytes()).is_ok() {
+                let _ = fs::rename(&tmp, path);
+            }
+        }
     }
 
     /// What a take hands to Claude Code: the context text and, per record, `[delivery, claim, nonce]`.
@@ -379,12 +421,18 @@ mod unix {
         let consumer = ctx.with_state(|s| s.get("consumer").as_str().map(String::from))?;
         // `accept` names the block types context insertion carries without loss; the inbox keeps others held
         // (`unsupported_content`).
-        let args = json!({"agent": ctx.agent, "consumer": consumer, "at": at, "limit": TAKE_LIMIT, "accept": CONTENT});
+        // `max_bytes` keeps records this plugin cannot hand over whole held (`too_large_for_consumer`) instead of
+        // claiming and releasing them at every point. `narrow`: an inbox without that filter returned a record that
+        // did not fit; take one at a time until the head changes, so a stuck head costs one take and one release.
+        let narrow = ctx.with_state(|s| s.get("narrow").as_bool().unwrap_or(false));
+        let limit = if narrow { 1 } else { TAKE_LIMIT };
+        let args = json!({"agent": ctx.agent, "consumer": consumer, "at": at, "limit": limit, "accept": CONTENT, "max_bytes": RECORD_MAX});
         let suffix = format!("{}:take:{}", ctx.session, random_hex());
-        let reply = match core.mutate(ctx, "inbox.take", args.clone(), &suffix) {
+        let reply = match core.mutate(ctx, "inbox.take", args, &suffix) {
             Ok(r) => r,
             Err(e) if uncertain(&e) => {
-                recover_take(ctx, args, &suffix, &e);
+                let op = core.last_op.clone();
+                recover_take(ctx, &op, &e);
                 return None;
             }
             Err(e) => {
@@ -405,16 +453,24 @@ mod unix {
         for r in &records {
             let delivery = r.get("delivery").and_then(Value::as_str).unwrap_or("").to_string();
             let insertable = r.get("content").and_then(Value::as_array).is_some_and(|b| b.iter().all(|b| b.get("type").and_then(Value::as_str).is_some_and(|t| CONTENT.contains(&t))));
-            let nonce = random_hex() + &random_hex();
-            let piece = render(r, &nonce);
-            if !insertable || full || text.len() + piece.len() > MAX_CONTEXT {
+            // No nonce, no hand-off: a guessable reference would let content forge evidence.
+            let nonce = nonce();
+            let piece = nonce.as_ref().map(|n| render(r, n)).unwrap_or_default();
+            if nonce.is_none() || !insertable || full || text.len() + piece.len() > MAX_CONTEXT {
                 full |= insertable; // keep order: nothing after a record that did not fit jumps ahead of it
-                ctx.log("released", json!({"delivery": delivery, "why": if insertable { "context_limit" } else { "unsupported_content" }}));
+                let why = if nonce.is_none() { "no_randomness" } else if !insertable { "unsupported_content" } else { "context_limit" };
+                ctx.log("released", json!({"delivery": delivery, "why": why}));
                 report(ctx, core, &delivery, &r["claim"], "released");
                 continue;
             }
             text.push_str(&piece);
-            taken.push((delivery, r["claim"].clone(), nonce));
+            taken.push((delivery, r["claim"].clone(), nonce.unwrap_or_default()));
+        }
+        // Narrow while the first record does not fit on its own; widen again once it does.
+        let stuck = taken.is_empty() && full;
+        if stuck != narrow {
+            ctx.log(if stuck { "narrowed" } else { "widened" }, json!({"head": records[0].get("delivery")}));
+            ctx.with_state(|s| s.set("narrow", json!(stuck)));
         }
         if taken.is_empty() {
             return None;
@@ -423,12 +479,13 @@ mod unix {
         Some(Handoff { text: text.trim_end().to_string(), records: taken })
     }
 
-    /// A take reply was lost: repeat the identical take (same op) on a fresh connection. A repeat returns the claims
-    /// it made, never content again; release them so the mail stays deliverable instead of claimed until restart.
-    fn recover_take(ctx: &Ctx, args: Value, suffix: &str, error: &str) {
-        ctx.log("take_uncertain", json!({"error": error}));
+    /// A take reply was lost: inspect that exact op on a fresh connection (`inbox.op`; never a new take, which a
+    /// changed window epoch would make). It returns the claims the take made, never content; release them so the
+    /// mail stays deliverable instead of claimed until restart.
+    fn recover_take(ctx: &Ctx, op: &str, error: &str) {
+        ctx.log("take_uncertain", json!({"error": error, "op": op}));
         let Ok(mut fresh) = Core::connect(&ctx.socket) else { return };
-        match fresh.mutate(ctx, "inbox.take", args, suffix) {
+        match fresh.coord("inbox.op", json!({"op": op})) {
             Ok(reply) => {
                 let claims = reply.get("claims").and_then(Value::as_array).cloned().unwrap_or_default();
                 let records = reply.get("records").and_then(Value::as_array).cloned().unwrap_or_default();
@@ -444,12 +501,12 @@ mod unix {
 
     /// The plugin's own header, then the content as a quote: content cannot pose as a header.
     fn render(r: &Value, nonce: &str) -> String {
-        let delivery = r.get("delivery").and_then(Value::as_str).unwrap_or("?");
-        let mode = r.get("mode").and_then(Value::as_str).unwrap_or("?");
-        let from = r.get("from").map(|v| v.as_str().or_else(|| v.get("principal").and_then(Value::as_str)).unwrap_or("?").to_string()).unwrap_or_else(|| "?".into());
+        let delivery = clip(r.get("delivery").and_then(Value::as_str).unwrap_or("?"));
+        let mode = clip(r.get("mode").and_then(Value::as_str).unwrap_or("?"));
+        let from = clip(r.get("from").and_then(|v| v.as_str().or_else(|| v.get("principal").and_then(Value::as_str))).unwrap_or("?"));
         let origin = r.get("origin").filter(|o| o.is_object()).map(|o| {
-            let kind = o.get("kind").and_then(Value::as_str).unwrap_or("?");
-            let actor = o.get("actor").and_then(Value::as_str).map(|a| format!(" {a}")).unwrap_or_default();
+            let kind = clip(o.get("kind").and_then(Value::as_str).unwrap_or("?"));
+            let actor = o.get("actor").and_then(Value::as_str).map(|a| format!(" {}", clip(a))).unwrap_or_default();
             format!(", origin {kind}{actor}")
         }).unwrap_or_default();
         let body: String = content_text(r.get("content")).lines().map(|l| format!("> {l}\n")).collect();
@@ -698,10 +755,26 @@ mod unix {
         s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).take(100).collect()
     }
 
+    /// A one-line header field of bounded length (`FIELD_MAX` characters, then `…`).
+    fn clip(s: &str) -> String {
+        let one: String = s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+        if one.chars().count() <= FIELD_MAX { one } else { one.chars().take(FIELD_MAX).collect::<String>() + "…" }
+    }
+
+    /// Ids for ops and consumers (unique, not secret).
     fn random_hex() -> String {
         let mut b = [0u8; 8];
-        let _ = getrandom::fill(&mut b);
+        if getrandom::fill(&mut b).is_err() {
+            return format!("{:016x}", now_ms() as u64 ^ u64::from(std::process::id()));
+        }
         b.iter().map(|x| format!("{x:02x}")).collect()
+    }
+
+    /// The evidence nonce: 128 secret bits, or none (then nothing is handed over).
+    fn nonce() -> Option<String> {
+        let mut b = [0u8; 16];
+        getrandom::fill(&mut b).ok()?;
+        Some(b.iter().map(|x| format!("{x:02x}")).collect())
     }
 
     fn now_ms() -> u128 {

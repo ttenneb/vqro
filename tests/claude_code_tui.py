@@ -208,6 +208,29 @@ if socks:
     rows = [json.loads(l) for l in open(tx[-1])] if tx else []
     results["I4_I5_transcript_kinds"] = [(x.get("type"), (x.get("attachment") or {}).get("type"), x.get("operation")) for x in rows if "MSG-NATIVE" in json.dumps(x)]
 
+# I6: /clear. Does Claude Code keep the session id? Either way the hook keeps its consumer (not a restart).
+starts = lambda: [e for e in hooklog() if e["event"] == "hook" and e["detail"].get("hook") == "SessionStart"]
+n_starts = len(starts())
+consumers_before = {e["detail"].get("consumer") for e in hooklog() if e["event"] == "session"}
+pump(2)
+typed("/clear"); pump(0.5); os.write(fd, b"\r")
+cleared = wait_for(lambda: len(starts()) > n_starts, 30)
+pump(2)
+first_session = starts()[0]["session"] if starts() else None
+after = starts()[-1]["session"] if cleared else None
+results["I6_clear_session"] = {"before": first_session, "after": after, "same": first_session == after}
+print(f"     /clear: session id {'kept' if first_session == after else 'changed'} ({first_session} -> {after})")
+new_consumers = {e["detail"].get("consumer") for e in hooklog() if e["event"] == "session"} - consumers_before
+check("I6 /clear runs SessionStart and keeps the consumer (no reconcile as a restart)",
+      cleared and not new_consumers and any(e["event"] == "session_continued" for e in hooklog()),
+      {"clear": results["I6_clear_session"], "new_consumers": list(new_consumers), "tail": [e["event"] for e in hooklog()][-8:]})
+# ...and mail still flows into the cleared session (the next prompt's tool batch takes a boundary message)
+after_clear = h.send(AGENT, "boundary", txt("MSG-AFTER-CLEAR"), render=["context"])
+typed("steps:1 sleep:1 after clear"); os.write(fd, b"\r")
+check("I6 after /clear a boundary message is handed over in the new session", wait_for(lambda: first_request_with("MSG-AFTER-CLEAR") is not None, 40),
+      {"record": h.get(after_clear), "tail": [e["event"] for e in hooklog()][-8:]})
+results["I6_after_clear"] = h.get(after_clear)
+
 results["hook_log"] = [f"{e['event']} {json.dumps(e['detail'])[:120]}" for e in hooklog()][-40:]
 results["screen_tail"] = plain()[-1500:]
 json.dump(results, open(os.path.join(root, "tui-results.json"), "w"), indent=1)

@@ -73,6 +73,7 @@ function plugin(pi: any, hooks: TestHooks) {
   let stopped = false;
   const claims = new Map<string, string>();   // delivery -> claim, taken, not yet evidenced inserted
   const unread = new Map<string, string>();   // delivery -> claim, inserted, not yet read
+  const inserting = new Map<string, Promise<void>>(); // delivery -> its inserted report (read follows it)
   let inContext: string[] = [];
 
   const log = (event: string, detail: any = {}) => {
@@ -96,15 +97,16 @@ function plugin(pi: any, hooks: TestHooks) {
   }
 
   // A mutation: op = `<window epoch>:<suffix>`. An expired_operation created nothing, so one retry under the new
-  // epoch is safe; anything else surfaces.
+  // epoch is safe; anything else surfaces, carrying the op it was sent with (`error.op`).
   async function mutate(name: string, args: any, suffix = `${consumer}:${randomBytes(6).toString("hex")}`) {
     for (let attempt = 0; ; attempt++) {
       if (!epoch) epoch = (await command("inbox.window", {})).epoch;
+      const op = `${epoch}:${suffix}`;
       try {
-        return await command(name, { ...args, op: `${epoch}:${suffix}` });
+        return await command(name, { ...args, op });
       } catch (e) {
         if (attempt === 0 && String(e).includes("expired_operation")) { epoch = ""; continue; }
-        throw e;
+        throw Object.assign(e instanceof Error ? e : new Error(String(e)), { op });
       }
     }
   }
@@ -154,10 +156,18 @@ function plugin(pi: any, hooks: TestHooks) {
       });
       await new Promise<void>((resolve, reject) => { socket.once("connect", () => resolve()); socket.once("error", reject); });
       conn = socket;
-      // The launcher injects the plugin's principal (C2: bound at hello, never per call).
-      const principal = process.env.VQRO_PRINCIPAL;
-      await call("hello", { client: "vqro-pi-pull", ...(principal ? { identity: { kind: "principal", principal } } : {}) });
-      await call("events.subscribe", { types: ["view.content"], view_content: { names: [WAKE_VIEW] } });
+      try {
+        // The launcher injects the plugin's principal (C2: bound at hello, never per call).
+        const principal = process.env.VQRO_PRINCIPAL;
+        await call("hello", { client: "vqro-pi-pull", ...(principal ? { identity: { kind: "principal", principal } } : {}) });
+        await call("events.subscribe", { types: ["view.content"], view_content: { names: [WAKE_VIEW] } });
+      } catch (e) {
+        // Never keep a connection without its hello and subscription: drop it, the caller schedules a reconnect.
+        conn = undefined;
+        socket.destroy();
+        log("connect_failed", { error: String(e) });
+        throw e;
+      }
       backoff = 500;
       epoch = "";
       pending = 1; // unknown after a gap: one take
@@ -172,6 +182,7 @@ function plugin(pi: any, hooks: TestHooks) {
     consumer = `pi:${ctx.sessionManager.getSessionId()}:${randomBytes(6).toString("hex")}`;
     claims.clear();
     unread.clear();
+    inserting.clear();
     const records = ctx.sessionManager.getEntries()
       .filter((e: any) => e.type === "custom_message" && e.customType === TYPE && e.details?.vqro?.delivery && e.id)
       .map((e: any) => ({ delivery: e.details.vqro.delivery, entry: e.id }))
@@ -210,12 +221,11 @@ function plugin(pi: any, hooks: TestHooks) {
     if (!consumer || pending === 0) return []; // no inbox call at a safe point without mail
     if (!conn) { void ensureConnected().catch(() => scheduleReconnect()); return []; }
     const args = { agent: AGENT, consumer, at, limit: LIMIT, accept: [...CONTENT] }; // K2: block types we can insert
-    const suffix = `${consumer}:take:${randomBytes(6).toString("hex")}`;
     let reply: any;
     try {
-      reply = await mutate("inbox.take", args, suffix);
+      reply = await mutate("inbox.take", args, `${consumer}:take:${randomBytes(6).toString("hex")}`);
     } catch (e) {
-      if (uncertain(e)) await recoverTake(args, suffix, e);
+      if (uncertain(e)) await recoverTake((e as any).op, e);
       else if (String(e).includes("reconcile")) { log("consumer_fenced"); if (current) await reconcile(current).catch(() => {}); }
       else log("take_failed", { at, error: String(e) });
       return [];
@@ -233,13 +243,14 @@ function plugin(pi: any, hooks: TestHooks) {
     return usable;
   }
 
-  // A lost take reply: repeat the identical take (same op). The repeat returns the claims it made, never content;
-  // release them so the mail stays deliverable instead of claimed until the next restart.
-  async function recoverTake(args: any, suffix: string, error: unknown) {
-    log("take_uncertain", { error: String(error) });
+  // A lost take reply: inspect that exact op (`inbox.op`, also after the window epoch moved on). It returns the claims
+  // the take made, never content; release them so the mail stays deliverable instead of claimed until a restart.
+  async function recoverTake(op: string | undefined, error: unknown) {
+    log("take_uncertain", { error: String(error), op });
+    if (!op) return;
     try {
       await ensureConnected();
-      const reply = await mutate("inbox.take", args, suffix);
+      const reply = await command("inbox.op", { op }); // inspect that exact op; never a new take
       const claimed = [...(reply.claims ?? []), ...(reply.records ?? [])];
       for (const c of claimed) await report(c.delivery, c.claim, "released");
       log("take_recovered", { released: claimed.length });
@@ -325,7 +336,9 @@ function plugin(pi: any, hooks: TestHooks) {
       claims.delete(delivery);
       unread.set(delivery, claim);
       inContext.push(delivery);
-      reports.push(report(delivery, claim, "inserted"));
+      const sent = report(delivery, claim, "inserted");
+      inserting.set(delivery, sent);
+      reports.push(sent);
     }
     void Promise.all(reports);
   });
@@ -338,7 +351,10 @@ function plugin(pi: any, hooks: TestHooks) {
       const claim = unread.get(delivery);
       if (!claim) continue;
       unread.delete(delivery);
-      void report(delivery, claim, "read");
+      // In order: read only after its inserted report (the inbox refuses a report that does not advance).
+      const before = inserting.get(delivery) ?? Promise.resolve();
+      inserting.delete(delivery);
+      void before.then(() => report(delivery, claim, "read"));
     }
   });
 

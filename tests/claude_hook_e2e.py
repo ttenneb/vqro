@@ -219,6 +219,11 @@ hook("SessionStart", {"source": "compact"})
 hook("SessionStart", {"source": "clear"})
 after = json.load(open(os.path.join(root, "hookstate", "s1.json")))["consumer"]
 check("compaction/clear keep the consumer and do not reconcile", before == after and state(c1) == "supplied", (before, after, h.get(c1)))
+# Claude Code 2.1.329 gives /clear a new session id (claude_code_tui I6): the consumer carries over all the same
+hook("SessionStart", {"source": "clear", "session_id": "s1-cleared"})
+carried = json.load(open(os.path.join(root, "hookstate", "s1-cleared.json"))).get("consumer")
+check("/clear under a new session id carries the consumer over (no reconcile)", carried == before and state(c1) == "supplied"
+      and not any(e["event"] == "reconciled" and e["session"] == "s1-cleared" for e in hooklog()), (carried, before, h.get(c1)))
 # 9c. a batch larger than Claude Code's context limit: whole records up to the limit, the rest released (held)
 # (6 x 1.6 KB: over the 9,000-character budget and within K2's sender-target quota of 8 open messages)
 big = [h.send(AGENT, "boundary", txt(f"BIG{i} " + "x" * 1600), render=CTX) for i in range(6)]
@@ -231,15 +236,60 @@ check("the rest stay held, in order, for the next point", all(state(d) == "held"
 for _ in range(4):
     hook("PostToolBatch", {"tool_calls": []})
 check("the rest are handed over at later points", all(state(d) == "supplied" for d in big), [state(d) for d in big])
-# 9d. a lost take reply (fake only: fault injection) is recovered by repeating the same take and releasing its claims
+# 9d. a lost take reply (fake only: fault injection) is inspected by its op (inbox.op) and its claims released, also
+# when the window epoch moved on meanwhile (a new take under the new epoch would claim nothing back)
 if a.inbox == "fake":
-    h.c.cmd("fixture.fault", take_delay_s=4.5)
-    lost = h.send(AGENT, "boundary", txt("LOST reply"), render=CTX)
+    for rotate in (False, True):
+        h.c.cmd("fixture.fault", take_delay_s=4.5, rotate_window=rotate)
+        lost = h.send(AGENT, "boundary", txt(f"LOST reply {rotate}"), render=CTX)
+        time.sleep(0.3)
+        rc, out, _ = hook("PostToolBatch", {"tool_calls": []})
+        why = "window moved on" if rotate else "same window"
+        check(f"lost take reply ({why}): nothing handed over, claim released (held), not stranded as claimed",
+              out == "" and state(lost) == "held" and any(e["event"] == "take_recovered" for e in hooklog()[-6:]), (h.get(lost), hooklog()[-4:]))
+        rc, out, _ = hook("PostToolBatch", {"tool_calls": []})
+        check(f"the released record is taken at the next point ({why})", lost in context(out), out)
+# 9e. a record larger than this plugin hands over whole stays held (take max_bytes) and never blocks later mail.
+# The largest record taken renders within the budget even when it is all line breaks (quoting adds per line).
+# (K2 checkouts before its take max_bytes filter claim it; 9f covers the plugin's fallback for those)
+MAX_BYTES = a.inbox == "fake" or "max_bytes" in open(os.path.join(a.coord_ext, "coordination_engine.py")).read()
+if not MAX_BYTES:
+    print("SKIP 9e: this K2 has no take max_bytes")
+HUGE = h.send(AGENT, "boundary", txt("HUGE " + "y" * 9500), render=CTX) if MAX_BYTES else None
+if MAX_BYTES:
+    SMALL = h.send(AGENT, "boundary", txt("SMALL after huge"), render=CTX)
     time.sleep(0.3)
     rc, out, _ = hook("PostToolBatch", {"tool_calls": []})
-    check("lost take reply: nothing handed over, claim released (held), not stranded as claimed", out == "" and state(lost) == "held", h.get(lost))
+    # K2 may record a different held reason; the fake records too_large_for_consumer
+    check("a record over max_bytes is never claimed; the next record is handed over", SMALL in context(out) and HUGE not in out
+          and state(HUGE) == "held" and (a.inbox != "fake" or h.get(HUGE).get("reason") == "too_large_for_consumer"),
+          ({k: h.get(HUGE).get(k) for k in ("state", "reason", "reason_consumer")}, state(SMALL), out[:200]))
+    check("...and was never taken (no take/release churn)", not any(HUGE in json.dumps(e) for e in hooklog() if e["event"] in ("released", "taken")))
+    h.withdraw(HUGE)
+    LINES = h.send(AGENT, "boundary", txt("\n" * 2480), render=CTX)  # 4,987 JSON bytes, ~7,440 rendered bytes
+    time.sleep(0.3)
     rc, out, _ = hook("PostToolBatch", {"tool_calls": []})
-    check("the released record is taken at the next point", lost in context(out), out)
+    check("the largest record taken renders within the context budget", LINES in context(out) and len(context(out)) <= 9000,
+          (len(context(out)), h.get(LINES).get("state")))
+# 9f. an inbox without max_bytes (fake only): a record that does not fit is released and the plugin narrows to one
+# record per take (one take and one release per point, not the whole batch), widening once the head changes
+if a.inbox == "fake":
+    h.c.cmd("fixture.fault", no_max_bytes=True)
+    HEAD = h.send(AGENT, "boundary", txt("HEAD " + "z" * 9500), render=CTX)
+    NEXT = [h.send(AGENT, "boundary", txt(f"NEXT{i}"), render=CTX) for i in range(3)]
+    time.sleep(0.3)
+    hook("PostToolBatch", {"tool_calls": []})
+    check("a head that does not fit narrows the take", hooklog()[-1]["event"] == "narrowed" or any(e["event"] == "narrowed" for e in hooklog()[-6:]))
+    n0 = len([e for e in hooklog() if e["event"] == "released"])
+    hook("PostToolBatch", {"tool_calls": []})
+    n1 = len([e for e in hooklog() if e["event"] == "released"])
+    check("narrowed: one release per point while the head is stuck", n1 - n0 == 1 and all(state(d) == "held" for d in NEXT), (n1 - n0, [state(d) for d in NEXT]))
+    h.withdraw(HEAD)
+    hook("PostToolBatch", {"tool_calls": []})
+    rc, out, _ = hook("PostToolBatch", {"tool_calls": []})
+    check("head withdrawn: the plugin widens and the rest are handed over",
+          all(state(d) == "supplied" for d in NEXT) and any(e["event"] == "widened" for e in hooklog()), [state(d) for d in NEXT])
+    h.c.cmd("fixture.fault", no_max_bytes=False)
 # 10. status reports (fake inbox only: no standard status command exists)
 if a.inbox == "fake":
     seen = [s["state"] for s in h.statuses() if s.get("terminal") == AGENT and s.get("app") == "claude"]
