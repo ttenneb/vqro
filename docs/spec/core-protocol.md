@@ -345,7 +345,9 @@ Incoming methods and queued application ingress are each capped at **4 MiB**, wi
 Framing, including unterminated records and replies, is capped at 64 MiB by default; registered providers lower
 that to 1 MiB, replies included. `Peer::set_max_record_bytes` also checks an in-progress record. Queued response
 values have 4 MiB plus one large-response permit, held until the call consumes them. Pending calls and admitted
-server requests are capped at 128/connection. Overflow closes ingress explicitly: recover facts, never resend
+server requests are capped at 128/connection. On the serving side (the core) overflow closes ingress explicitly:
+a client stops reading instead (it waits for room), so a viewer that can't keep up with an output flood is a
+slow viewer to the core (bounded queues, `slow_consumer`) rather than a dropped connection. Recover facts, never resend
 effects. The Python helper caps notifications at 4 MiB/128 queued records through callbacks, request handlers at 32,
 and pending calls at 128. `Extension` opts into overflow recovery: discard only undispatched notifications,
 queue one local `missed {reason: "notification_backlog"}`, then snapshot/fence before applying subsequent

@@ -265,7 +265,16 @@ impl Peer {
                         Some(id) if !id.is_null() => Incoming::Request { id, method, params },
                         _ => Incoming::Notification { method, params },
                     };
-                    if in_tx.try_send(incoming, bytes).is_err() { break; }
+                    if drain_read_eof {
+                        // Serving (the core): a peer that outruns its bounded ingress is cut off.
+                        if in_tx.try_send(incoming, bytes).is_err() { break; }
+                    } else {
+                        // A client reading from the core: wait for room instead of hanging up. The core
+                        // then sees a slow viewer (bounded queues, slow_consumer stream closure) rather
+                        // than this client dropping the whole connection under an output flood.
+                        let sent = tokio::select! { sent = in_tx.send(incoming, bytes) => sent, _ = stopped.changed() => break };
+                        if sent.is_err() { break; }
+                    }
                 } else if let Some(id) = msg.get("id").and_then(Value::as_u64) {
                     // Leave envelope headroom when opaque provider/extension replies are audited
                     // or forwarded; a malformed peer does not get to poison retained events.
@@ -536,8 +545,9 @@ mod tests {
 
     #[tokio::test]
     async fn undrained_incoming_queue_is_bounded_and_overflow_is_explicit() {
+        // Serving side (the core): a peer that outruns its bounded ingress is cut off.
         let (reader, mut writer) = tokio::io::duplex(65536);
-        let (peer, incoming) = Peer::spawn(reader, tokio::io::sink());
+        let (peer, incoming) = Peer::spawn_serving(reader, tokio::io::sink());
         let line = format!("{}\n", json!({"jsonrpc":"2.0","method":"stream.data","params":{"data":"x".repeat(1024)}}));
         for _ in 0..20_000 {
             if writer.write_all(line.as_bytes()).await.is_err() { break; }
@@ -545,6 +555,32 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(incoming.len() <= 4096, "undrained application queue retained {} records", incoming.len());
         assert!(peer.is_closed(), "overflow must close rather than silently lose records");
+    }
+
+    #[tokio::test]
+    async fn a_client_behind_on_its_ingress_waits_instead_of_dropping_the_connection() {
+        // A viewer that can't keep up with a flood stops reading: the core sees a slow viewer
+        // (bounded queues, slow_consumer) instead of the client hanging up and reconnecting.
+        let (reader, mut writer) = tokio::io::duplex(65536);
+        let (peer, mut incoming) = Peer::spawn(reader, tokio::io::sink());
+        let total = 8_000; // about 8 MiB: twice the ingress budget
+        let flood = tokio::spawn(async move {
+            for i in 0..total {
+                let line = format!("{}\n", json!({"jsonrpc":"2.0","method":"stream.data","params":{"stream":i,"data":"x".repeat(1024)}}));
+                writer.write_all(line.as_bytes()).await.unwrap();
+            }
+            writer
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(incoming.queued_bytes() <= INBOUND_BYTES, "ingress stays bounded");
+        assert!(!flood.is_finished(), "the sender is held back, not buffered without bound");
+        assert!(!peer.is_closed(), "a client behind on its ingress keeps its connection");
+        for i in 0..total {
+            let Some(Incoming::Notification { params, .. }) = incoming.recv().await else { panic!("record {i} lost") };
+            assert_eq!(params["stream"], i, "in order, none dropped");
+        }
+        let _writer = flood.await.unwrap();
+        assert!(!peer.is_closed());
     }
 
     #[tokio::test]
