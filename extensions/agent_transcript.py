@@ -20,6 +20,7 @@ RECEIPT = {"recorded": "recorded", "held": "held", "admitted": "admitted", "queu
 MARKDOWN_ROW_BYTES = 60 * 1024  # under the 64 KiB per formatted row (core-protocol "Formatted text")
 LINE_BYTES = 4096  # one row; longer lines are cut with a mark (display only, never a request's question)
 TOOL_LINES = 12  # lines of a tool's output shown before "… N more lines" (redesign mockup)
+OTHER_FOLD = 4  # another agent's (or person's) message folds after this many lines (reply-13)
 THOUGHT_LINES = 2  # thinking shows its first lines, then "▸ more" (the human's choice, reply-13)
 THOUGHT_BLOCKS = ("thought", "thinking")
 TOOL_CALL_BLOCKS = ("toolCall", "tool_call", "tool_use")
@@ -141,7 +142,7 @@ def thought_rows(eid, text, limit=THOUGHT_LINES):
     rows = [{"type": "text", "wrap": True, "focusable": True, "style": "dim", "text": "┊ " + clip(plain(line))}
             for line in out[:limit]]
     if len(out) > limit:
-        rows.append({"id": "th:" + eid, "text": "▸ more", "style": "dim", "expanded": False,
+        rows.append({"id": "th:" + eid, "text": "more", "style": "dim", "expanded": False,  # clients draw the ▸
                      "children": [{"type": "text", "wrap": True, "focusable": True, "style": "dim", "text": "┊ " + clip(plain(line))}
                                   for line in out[limit:]]})
     return rows
@@ -332,9 +333,16 @@ def tool_row(eid, value):
             **({"children": children} if children else {}), "expanded": False}
 
 
-def group_row(tools):
+def group_row(steps):
     """A run of tool calls as one Activity line (Pi style, collapsed): count, total time, failures; each tool with its
-    status on the right."""
+    status on the right. The agent's thinking between its calls (steps with no text of their own) sits inside, in order."""
+    tools = [(eid, value) for eid, value in steps if "__thought__" not in value]
+    children = [{"id": "th:" + eid, "style": "dim", "expanded": False, "text": "┊ " + clip(plain(value["__thought__"].strip().split("\n")[0]), 300),
+                 "children": thought_rows(eid, value["__thought__"], limit=10 ** 6)[1:]} if "__thought__" in value
+                else tool_row(eid, value) for eid, value in steps]
+    for child in children:  # a one-line thought has nothing to open
+        if not child.get("children", True):
+            del child["children"]
     starts = [v.get("started_ms") for _, v in tools if type(v.get("started_ms")) is int]
     ends = [v.get("ended_ms") for _, v in tools if type(v.get("ended_ms")) is int]
     took = duration(min(starts), max(ends)) if starts and ends else None
@@ -346,8 +354,8 @@ def group_row(tools):
         tally[key] = tally.get(key, 0) + 1
     badges = [{"text": f"{icon} {name}" + (f" ×{n}" if n > 1 else ""), "style": "error" if icon == "✗" else "dim"}
               for (icon, name), n in list(tally.items())[:6]]
-    return {"id": "g:" + tools[0][0], "text": "Activity · " + " · ".join(summary), "badges": badges,
-            "children": [tool_row(eid, value) for eid, value in tools], "expanded": False}
+    return {"id": "g:" + steps[0][0], "text": "Activity · " + " · ".join(summary), "badges": badges,
+            "children": children, "expanded": False}
 
 
 def amount(n):
@@ -427,7 +435,7 @@ def summary_text(title, values, fields, tools=None):
     if "words" in fields:
         first = " ".join(text_of(values[0]).split()[:8])
         parts += [clip(plain(first), 160) + "…"] if first else []
-    return "▸ " + " · ".join(parts)
+    return " · ".join(parts)  # a row with children: clients draw its ▸/▾
 
 
 def rows(entities, names, coverage=None, view=None):
@@ -464,20 +472,34 @@ def rows(entities, names, coverage=None, view=None):
         already stands in for its calls."""
         if not tools:
             return
+        if all("__thought__" in v for _, v in tools):  # thinking steps with no tool call: just the thinking
+            if view["thinking"] != "hide":
+                flush_hidden()
+                blocks.append([row for eid, v in tools for row in thought_rows(eid, v["__thought__"])])
+            tools.clear()
+            return
         mode = view["tools"]
         if mode == "hide":
-            hidden["tools"] = hidden.get("tools", 0) + len(tools)
+            hidden["tools"] = hidden.get("tools", 0) + sum(1 for _, v in tools if "__thought__" not in v)
         else:
             flush_hidden()
             group = group_row(tools)  # collapsed by default (the human's choice, reply-13)
             if mode == "summary":
-                group["text"], group["style"] = summary_text("Activity", [v for _, v in tools], view["summary"], len(tools)), "dim"
+                real = [v for _, v in tools if "__thought__" not in v]
+                group["text"], group["style"] = summary_text("Activity", real, view["summary"], len(real)), "dim"
             blocks.append([group])
         tools.clear()
 
     for _, kind, eid, value in timeline:
         if kind == "tool":
             tools.append((eid, value))
+            continue
+        if kind == "message" and value.get("role") == "assistant" and value.get("final") is not False \
+                and not content_rows(value.get("content")) and not names.sender(value)[2].startswith("human"):
+            # A step of the agent's work with no text of its own (thinking and tool calls): it continues the current
+            # Activity instead of starting a labelled block.
+            if thought_text(value) and view["thinking"] != "hide":
+                tools.append(("~" + eid, {"__thought__": thought_text(value)}))
             continue
         end_tools()
         if kind == "message":
@@ -496,10 +518,16 @@ def rows(entities, names, coverage=None, view=None):
                 add("system", body, "System", [value], eid)
             elif key in view["hidden_senders"]:
                 flush_hidden()
-                blocks.append([{"id": "h:" + eid, "text": "▸ " + label_ + " (sender hidden)", "style": "dim",
+                blocks.append([{"id": "h:" + eid, "text": label_ + " (sender hidden)", "style": "dim",
                                 "children": body, "expanded": False}])
             else:
                 flush_hidden()
+                if key not in ("agent", "you", "user", "human:undeclared") and len(body) > OTHER_FOLD + 1:
+                    # Another sender's message folds after 4 lines (the human's choice, reply-13); the rest is one
+                    # expand away. (ui-owner's framed message row will draw this fold itself.)
+                    rest = body[1 + OTHER_FOLD:]
+                    body = body[:1 + OTHER_FOLD] + [{"id": "of:" + eid, "text": f"{len(rest)} more lines", "style": "dim",
+                                                     "expanded": False, "children": rest}]
                 blocks.append(body)
         elif kind == "compaction":
             add("system", [{"type": "text", "style": "dim", "text": "· System · context compacted"}], "System · context compacted", [value], eid)
@@ -516,7 +544,8 @@ def rows(entities, names, coverage=None, view=None):
             break
         out.append(block)
         size += cost
-    shown = [row for block in reversed(out) for row in block]
+    # A blank line between blocks: senders and activity read as separate blocks (mockup), not one stream of rows.
+    shown = [row for i, block in enumerate(reversed(out)) for row in ([{"type": "text", "text": ""}] if i else []) + block]
     while len(shown) > 1 and len(json.dumps(shown, ensure_ascii=False).encode()) > BUDGET:
         del shown[:max(1, len(shown) // 8)]  # one block larger than the budget: keep its newest rows
         dropped = dropped or 1

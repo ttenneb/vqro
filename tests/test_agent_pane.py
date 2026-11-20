@@ -128,6 +128,15 @@ class TranscriptRows(unittest.TestCase):
         self.assertEqual(texts[-1], "… 18 more lines", "output cut at 12 lines")
         self.assertEqual(len(test["children"][-1]["children"]), 18)
 
+    def test_another_senders_message_folds_after_4_lines_and_blocks_are_spaced(self):
+        long = {("message", "a"): {"position": 1, "role": "user", "final": True, "origin": {"kind": "agent", "agent": "r7", "principal": "p:lead"},
+                                   "content": text("\n".join(f"point {i}" for i in range(9)))},
+                ("message", "b"): {"position": 2, "role": "assistant", "final": True, "content": text("ok")}}
+        rows = self.rows(long)
+        texts = [r.get("text") for r in rows]
+        self.assertEqual(texts[:6], ["Message from vqro-lead (agent r7)", "point 0", "point 1", "point 2", "point 3", "5 more lines"])
+        self.assertEqual(texts[6:8], ["", "Pi"], "a blank line between blocks")
+
     def test_short_output_is_packed_and_placeholders_never_appear(self):
         listing = agent_transcript.output_rows("/w\n" + "\n".join(f"file{i}.md" for i in range(20)))
         self.assertEqual(listing[0]["text"], "/w")
@@ -137,7 +146,7 @@ class TranscriptRows(unittest.TestCase):
             {"type": "text", "text": "done"}]}}
         texts = [r.get("text") for r in self.rows(pi)]
         self.assertFalse(any("content]" in (t or "") for t in texts), "no [thought content] / [toolCall content]")
-        self.assertEqual(texts[1:4], ["┊ first", "┊ second", "▸ more"], "thinking: the first 2 lines, then more")
+        self.assertEqual(texts[1:4], ["┊ first", "┊ second", "more"], "thinking: the first 2 lines, then more")
         self.assertEqual(texts[-1], "done")
 
     def test_tail_coverage_says_so_and_the_budget_keeps_the_newest(self):
@@ -182,14 +191,14 @@ class ViewSettings(unittest.TestCase):
 
     def test_summary_replaces_a_kind_with_a_configurable_expandable_line(self):
         rows = self.rows(thinking="summary", tools="summary")
-        thinking = self.find(rows, "▸ Thinking")
-        self.assertEqual(thinking["text"], "▸ Thinking · " + agent_transcript.when(1_763_600_060_000) + " · 1.2k tokens")
+        thinking = self.find(rows, "Thinking ·")
+        self.assertEqual(thinking["text"], "Thinking · " + agent_transcript.when(1_763_600_060_000) + " · 1.2k tokens")
         self.assertFalse(thinking["expanded"])
         self.assertIn("┊ Config change, not code.", [c.get("text") for c in thinking["children"]], "one expand away")
-        tools = self.find(rows, "▸ Activity")
-        self.assertEqual((tools["text"], tools["expanded"]), ("▸ Activity · 4.8s · 2 tools", False))
+        tools = self.find(rows, "Activity ·")
+        self.assertEqual((tools["text"], tools["expanded"]), ("Activity · 4.8s · 2 tools", False))
         lines = self.rows(thinking="summary", summary=["lines", "words"])
-        self.assertEqual(self.find(lines, "▸ Thinking")["text"], "▸ Thinking · 1 lines · Config change, not code.…")
+        self.assertEqual(self.find(lines, "Thinking ·")["text"], "Thinking · 1 lines · Config change, not code.…")
 
     def test_hide_leaves_a_count_and_senders_can_be_folded(self):
         rows = self.rows(thinking="hide", tools="hide")
@@ -197,7 +206,7 @@ class ViewSettings(unittest.TestCase):
         self.assertIn("· hidden: 2 tools", texts)
         self.assertIn("· hidden: 1 thinking", texts)
         self.assertFalse(any(t and t.startswith("Activity") for t in texts))
-        folded = self.find(self.rows(hidden_senders=["principal:p:lead"]), "▸ Message from vqro-lead")
+        folded = self.find(self.rows(hidden_senders=["principal:p:lead"]), "Message from vqro-lead")
         self.assertFalse(folded["expanded"])
 
     def test_compact_collapses_tools_folds_long_messages_and_drops_repeat_times(self):
