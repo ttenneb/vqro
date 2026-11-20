@@ -26,6 +26,17 @@ class RpcError(WireFailure):
         super().__init__(error.get("message", self.kind))
 
 
+async def close_writer(writer, *, timeout=.2):
+    """Bound graceful flushing, then abort this owned transport even on cancellation."""
+    try:
+        writer.close()
+        await asyncio.wait_for(writer.wait_closed(), timeout)
+    except (OSError, asyncio.TimeoutError):
+        pass
+    finally:
+        writer.transport.abort()
+
+
 class Peer:
     """One connection; bounded messages and requests; no automatic request replay."""
 
@@ -36,7 +47,7 @@ class Peer:
         self.max_notifications, self.notification_bytes = max_notifications, notification_bytes
         self.pending, self.notifications = {}, deque()
         self.notification_size = 0
-        self.serial, self.failure = 0, None
+        self.serial, self.failure, self.closed = 0, None, False
         self.callbacks = {}
         self.changed = asyncio.Event()
         self.write_lock = asyncio.Lock()
@@ -154,13 +165,14 @@ class Peer:
         return await asyncio.wait_for(waiting(), timeout)
 
     async def close(self):
-        self.writer.close()
+        if self.closed:
+            return
+        self.closed = True
         try:
-            await self.writer.wait_closed()
-        except OSError:
-            pass
-        self.task.cancel()
-        await asyncio.gather(self.task, return_exceptions=True)
+            await close_writer(self.writer)
+        finally:
+            self.task.cancel()
+            await asyncio.gather(self.task, return_exceptions=True)
 
 
 class ItemReducer:

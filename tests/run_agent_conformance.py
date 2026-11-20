@@ -43,16 +43,25 @@ def main():
         (root / "home").mkdir()
         copy = root / "implementation.json"
         copy.write_text(json.dumps(manifest, indent=2) + "\n")
-        command = ["/usr/bin/unshare", "-Urn", "/usr/bin/python3", str(Path(__file__).resolve()), "--run",
+        # A killed namespace init kills every descendant, including detached backends.
+        command = ["/usr/bin/unshare", "-Urnpmf", "--kill-child=KILL", "--mount-proc", "/usr/bin/python3", str(Path(__file__).resolve()), "--run",
                    "--implementation", str(copy), "--vqro", str(args.vqro), "--hc", str(args.hc),
                    "--isolated-root", str(root), "--parent-net", os.readlink("/proc/self/ns/net")]
         if args.cases:
             command += ["--cases", args.cases]
-        result = subprocess.run(command, cwd=root, env={"HOME": str(root / "home"), "PATH": "/usr/bin:/bin",
-            "LANG": "C.UTF-8", "PYTHONDONTWRITEBYTECODE": "1"})
-        print(json.dumps({"code": result.returncode, "results": str(root / "results.json"),
+        try:
+            result = subprocess.run(command, cwd=root, timeout=30 + 70 * len(selected),
+                env={"HOME": str(root / "home"), "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8",
+                     "PYTHONDONTWRITEBYTECODE": "1"})
+            code = result.returncode
+        except subprocess.TimeoutExpired:
+            code = 124
+            (root / "parent-timeout.json").write_text(json.dumps({"status": "fail", "component": "cleanup",
+                "detail": "private PID namespace exceeded whole-run deadline; namespace killed",
+                "complete_inventory": False}) + "\n")
+        print(json.dumps({"code": code, "results": str(root / "results.json"),
                           "table": str(root / "results.md")}), flush=True)
-        raise SystemExit(result.returncode)
+        raise SystemExit(code)
     if not (args.isolated_root / ".private-conformance").is_file():
         parser.error("isolated root marker missing")
     if args.parent_net == os.readlink("/proc/self/ns/net") or args.parent_net is None:

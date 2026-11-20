@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 from pi_provider_e2e import E2E, identity, live
 from .results import CheckFailed, FixtureFailed, HarnessGap, check
-from .wire import ItemReducer, Peer, RpcError, WireFailure
+from .wire import ItemReducer, Peer, RpcError, WireFailure, close_writer
 
 HERE = Path(__file__).resolve().parent
 MAX_LEDGER = 16 << 20
@@ -48,8 +48,7 @@ class Native:
         except (ValueError, KeyError, asyncio.TimeoutError) as error:
             raise FixtureFailed(f"invalid/timed-out native fixture control: {error}") from error
         finally:
-            writer.close()
-            await writer.wait_closed()
+            await close_writer(writer)
 
     def records(self, kind=None, *, after=0, operation=None):
         if not self.path.exists():
@@ -381,22 +380,24 @@ class PublicImplementation:
         self.evidence.append({"kind": "core_restart", "native_pid": self.native.state["pid"]})
 
     async def close(self):
-        for peer in self.peers:
-            await peer.close()
-        self.peers.clear()
+        failures = []
         try:
-            await asyncio.to_thread(self.backend.cleanup)
-            if self.native.endpoint.exists():
-                try:
-                    _, writer = await asyncio.wait_for(asyncio.open_unix_connection(str(self.native.endpoint)), .2)
-                except (ConnectionRefusedError, FileNotFoundError):
-                    # SIGKILL can leave an inert socket inode. Its root is ours,
-                    # and tracked children/backend have already been verified dead.
-                    self.native.endpoint.unlink(missing_ok=True)
-                else:
-                    writer.close()
-                    await writer.wait_closed()
-                    raise FixtureFailed("owned native fixture still listens after backend cleanup")
+            failures = await asyncio.gather(*(peer.close() for peer in self.peers), return_exceptions=True)
         finally:
-            (self.root / "lifecycle.json").write_text(json.dumps({"log": self.backend.log,
-                "environment": self.backend.env, "network_namespace": os.readlink("/proc/self/ns/net")}, indent=2) + "\n")
+            self.peers.clear()
+            # A failed/cancelled peer shutdown must never skip owned-child cleanup.
+            try:
+                await asyncio.to_thread(self.backend.cleanup)
+                if self.native.endpoint.exists():
+                    try:
+                        _, writer = await asyncio.wait_for(asyncio.open_unix_connection(str(self.native.endpoint)), .2)
+                    except (ConnectionRefusedError, FileNotFoundError):
+                        self.native.endpoint.unlink(missing_ok=True)
+                    else:
+                        await close_writer(writer)
+                        raise FixtureFailed("owned native fixture still listens after backend cleanup")
+            finally:
+                (self.root / "lifecycle.json").write_text(json.dumps({"log": self.backend.log,
+                    "environment": self.backend.env, "network_namespace": os.readlink("/proc/self/ns/net")}, indent=2) + "\n")
+        if any(isinstance(error, BaseException) for error in failures):
+            raise FixtureFailed("peer shutdown failed; owned backend cleanup was still attempted")

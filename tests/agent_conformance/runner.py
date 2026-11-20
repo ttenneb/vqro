@@ -50,7 +50,7 @@ async def run_case(case, root, manifest, vqro, hc, *, factory=PublicImplementati
         if case.operation == "agent.send" or (case.operation == "agent.respond" and case.id != "R7") or case.id.startswith("O") or case.id in ("C3", "C7", "L1", "M1", "D10", "L4") or (case.id == "C2" and "agent.send" in facts.get("caps", {})):
             facts = await ctx.ensure_session()
             declarations["resource"] = facts.get("caps", {})
-        await handler(ctx)
+        await asyncio.wait_for(handler(ctx), 45)
         status, component, detail = "pass", None, "public-wire assertions passed"
         if any(row.get("kind") == "inherited_component" for row in ctx.evidence):
             detail = "assertions passed; pinned shared-component evidence inherited (see references)"
@@ -72,7 +72,7 @@ async def run_case(case, root, manifest, vqro, hc, *, factory=PublicImplementati
         if ctx is not None:
             evidence.extend(ctx.evidence)
             try:
-                await ctx.close()
+                await asyncio.wait_for(ctx.close(), 15)
             except Exception as error:
                 original = {"status": status, "component": component, "detail": detail}
                 evidence.append({"kind": "result_before_cleanup_failure", **original})

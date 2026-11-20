@@ -3,6 +3,7 @@ import asyncio
 import base64
 import io
 import json
+import socket
 import struct
 import wave
 import zlib
@@ -18,7 +19,7 @@ from agent_conformance.cases import declarations, restriction, schema_example
 from agent_conformance.content import compare_content, examples, png, wav
 from agent_conformance.results import CASES, BY_ID, Case, CheckFailed, FixtureFailed, HarnessGap, NotApplicable, Result, markdown, report, select_cases
 from agent_conformance.runner import run_case
-from agent_conformance.wire import ItemReducer, Peer, RpcError, WireFailure
+from agent_conformance.wire import ItemReducer, Peer, RpcError, WireFailure, close_writer
 
 RUNTIME = Path(__file__).parent / "agent_conformance/runtime.py"
 
@@ -221,8 +222,7 @@ class PeerTests(unittest.IsolatedAsyncioTestCase):
         for peer in self.peers:
             await peer.close()
         for writer in self.server_writers:
-            writer.close()
-            await writer.wait_closed()
+            await close_writer(writer)
         if hasattr(self, "server"):
             self.server.close()
             await self.server.wait_closed()
@@ -236,6 +236,35 @@ class PeerTests(unittest.IsolatedAsyncioTestCase):
         peer = await Peer.connect(self.endpoint)
         self.peers.append(peer)
         return peer
+
+    async def test_stalled_socket_close_is_bounded_and_joins_reader(self):
+        async def hold(reader, writer):
+            pass  # Deliberately never consume this owned socket's input.
+        peer = await self.connect(hold)
+        peer.writer.transport.get_extra_info("socket").setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+        peer.writer.write(b"x" * 500000)
+        await asyncio.sleep(.05)
+        self.assertGreater(peer.writer.transport.get_write_buffer_size(), 0)
+        await asyncio.wait_for(peer.close(), .8)
+        self.assertTrue(peer.task.done())
+        self.assertTrue(peer.writer.transport.is_closing())
+        await peer.close()  # Idempotent even after the flush deadline expired.
+
+    async def test_cancelled_close_still_aborts_transport_and_joins_reader(self):
+        waiting, aborted = asyncio.Event(), []
+        async def never_closed():
+            waiting.set()
+            await asyncio.Event().wait()
+        writer = SimpleNamespace(close=lambda: None, wait_closed=never_closed,
+                                 transport=SimpleNamespace(abort=lambda: aborted.append(True)))
+        peer = Peer(asyncio.StreamReader(), writer)
+        closing = asyncio.create_task(peer.close())
+        await asyncio.wait_for(waiting.wait(), 1)
+        closing.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await closing
+        self.assertEqual(aborted, [True])
+        self.assertTrue(peer.task.done())
 
     async def test_response_error_and_unknown_late_id(self):
         async def server(reader, writer):
@@ -285,6 +314,24 @@ class PeerTests(unittest.IsolatedAsyncioTestCase):
         await peer.wait(lambda: reducer.snapshots == 1)
         self.assertFalse(peer.notifications)
         self.assertIsNone(reducer.failure)
+
+
+class BackendCleanupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_peer_failure_does_not_skip_owned_backend_cleanup(self):
+        cleaned = []
+        async def failing_close():
+            raise OSError("deliberate peer close failure")
+        with tempfile.TemporaryDirectory() as root:
+            ctx = object.__new__(PublicImplementation)
+            ctx.root = Path(root)
+            ctx.peers = [SimpleNamespace(close=failing_close)]
+            ctx.backend = SimpleNamespace(cleanup=lambda: cleaned.append(True), log=[], env={})
+            ctx.native = SimpleNamespace(endpoint=Path(root) / "absent.sock")
+            with self.assertRaises(FixtureFailed):
+                await asyncio.wait_for(ctx.close(), 1)
+            self.assertEqual(cleaned, [True])
+            self.assertEqual(ctx.peers, [])
+            self.assertTrue((Path(root) / "lifecycle.json").exists())
 
 
 class ContentFixtureTests(unittest.TestCase):
