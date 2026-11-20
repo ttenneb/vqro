@@ -2,10 +2,40 @@
 # Copyright 2026 Bennett Garcia
 """Priority ordering never grants admission, execution or reserved capacity."""
 import asyncio
+import json
 from .cases import case, invocations, settled, held
 from .inbox_cases import pending_mutation_claim_races
 from ..wire import RpcError
 from ..results import HarnessGap
+
+
+def reserve_pressure_plan(limits):
+    """Legal encoded content and fresh targets; never shrink the real domain budget."""
+    quotas = limits.get("quotas") or {}
+    names = ("content_bytes", "domain_bytes", "metadata_bytes", "outcome_bytes",
+             "sender_target_bytes", "sender_bytes", "target_bytes")
+    if any(type(quotas.get(name)) is not int or quotas[name] <= 0 for name in names):
+        raise HarnessGap("I21 needs actual declared content/domain/sender/target byte quotas")
+    percent = limits.get("control_reserve_percent")
+    if type(percent) is not int or not 0 < percent < 100:
+        raise HarnessGap("I21 needs the actual control reserve percentage")
+    overhead = len(json.dumps([{"type": "text", "text": ""}], separators=(",", ":")).encode())
+    charge_extra = quotas["metadata_bytes"] + quotas["outcome_bytes"]
+    content = min(quotas["content_bytes"], quotas["sender_target_bytes"] - charge_extra,
+                  quotas["sender_bytes"] // 2 - charge_extra, quotas["target_bytes"] - charge_extra)
+    if content <= overhead:
+        raise HarnessGap("declared quotas cannot fit a legal I21 pressure text record")
+    normal = quotas["domain_bytes"] - (quotas["domain_bytes"] * percent + 99) // 100
+    inputs = (normal + content - 1) // content + 1
+    if inputs > 128:
+        raise HarnessGap("declared reserve cannot be reached by the bounded128-input I21 fixture")
+    return {"text": "x" * (content - overhead), "encoded_content_bytes": content,
+            "targets": inputs, "normal_bytes": normal, "quotas": quotas}
+
+
+def reserve_refusal(error):
+    return error.kind == "quota" and any(message in str(error) for message in (
+        "normal byte budget would consume control reserve", "normal record budget would consume control reserve"))
 
 
 @case("I21")
@@ -45,19 +75,34 @@ async def priority_obeys_all_other_guards(ctx):
     try: await ctx.send(target=ctx.agents[1]["id"],mode="boundary",priority="high",send_new=True)
     except RpcError as error: ctx.check(error.kind=="quota","high cannot bypass sender-target count quota")
     else: ctx.check(False,"ninth high message bypassed eight-record quota")
-    exhausted=False
-    for index in range(64):
-        principal="worker:priority-fill-"+str(index);peer=await ctx.connect(principal)
-        await ctx.grant("priority-fill-"+str(index),principal,["send:boundary"])
-        for agent in ctx.agents:
-            try: await ctx.send(peer=peer,target=agent["id"],mode="boundary",priority="high",text="x"*60000,send_new=True)
-            except RpcError as error:
-                ctx.check(error.kind=="quota" and "reserve" in str(error),"normal high-input saturation stops at control-reserve fence",error=error.error)
-                exhausted=True;break
-        if exhausted: break
-    if not exhausted: raise HarnessGap("declared control reserve not reached by128 real high-priority inputs; no reduced budget fixture qualifies")
+    plan = reserve_pressure_plan((await ctx.command("status")).get("limits") or {})
+    control_target = ctx.agents[0]["id"]
+    original_count = len(ctx.agents)
+    await ctx.native.call("add-many", count=plan["targets"], prefix="i21-pressure-")
+    await ctx.wait_agents(original_count + plan["targets"])
+    targets = [agent for agent in ctx.agents if agent["backend_ref"].startswith("i21-pressure-")]
+    ctx.check(len(targets) == plan["targets"], "fresh pressure targets prevent per-target quotas hiding the domain reserve")
+    peers = []
+    for index in range((len(targets) + 1) // 2):
+        principal = "worker:priority-fill-" + str(index)
+        await ctx.grant("priority-fill-" + str(index), principal, ["send:boundary"])
+        peers.append(await ctx.connect(principal))
+    ctx.evidence.append({"kind": "priority_pressure_plan", **{key: value for key, value in plan.items() if key != "text"},
+                         "principals_pregranted": len(peers), "one_input_per_fresh_target": True})
+    exhausted = False
+    for index, agent in enumerate(targets):
+        try:
+            await ctx.send(peer=peers[index // 2], target=agent["id"], mode="boundary", priority="high", text=plan["text"], send_new=True)
+        except RpcError as error:
+            ctx.evidence.append({"kind": "priority_pressure_refusal", "error": error.error, "accepted_before": index})
+            if not reserve_refusal(error):
+                raise HarnessGap("legal I21 workload hit a non-reserve refusal: " + str(error)) from error
+            exhausted = True
+            ctx.check(True, "normal high-input saturation stops at the declared control-reserve fence", error=error.error)
+            break
+    if not exhausted: raise HarnessGap("declared control reserve not reached by legal128-input pressure; no reduced budget fixture qualifies")
     before=len(invocations(ctx,op="agent.send"))
-    reply=await ctx.command("control",{"op":await ctx.operation(),"action":"interrupt","target":ctx.agents[0]["id"],"args":{"v":0}})
+    reply=await ctx.command("control",{"op":await ctx.operation(),"action":"interrupt","target":control_target,"args":{"v":0}})
     ctx.check(reply["state"] in ("accepted","observed","dispatched") and invocations(ctx,op="agent.interrupt"),"high-input saturation leaves the reserved control path usable")
     await asyncio.sleep(.1)
     ctx.check(len(invocations(ctx,op="agent.send"))==before,"saturated high input stays behind closed gates even while control succeeds")
