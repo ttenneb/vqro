@@ -157,7 +157,7 @@ class Native:
         old=self.items.get(ref)
         if old is None or old["epoch"]!=epoch:
             if old is not None: old["wake"].set()
-            self.items[ref]={"epoch":epoch,"seq":0,"rows":[],"bytes":0,"entities":{},"entity_bytes":0,"wake":asyncio.Event(),"position":0,"receipt_revisions":{}}
+            self.items[ref]={"epoch":epoch,"seq":0,"rows":[],"bytes":0,"entities":{},"entity_bytes":0,"wake":asyncio.Event(),"position":0}
         return self.items[ref]
 
     def item(self,ref,value):
@@ -180,13 +180,11 @@ class Native:
         previous=journal["entities"].pop(key,None)
         if previous is not None: journal["entity_bytes"]-=len(encoded(previous))
         journal["entities"][key]=entity;journal["entity_bytes"]+=len(encoded(entity))
-        if entity["kind"]=="receipt": journal["receipt_revisions"][entity["id"]]=entity["rev"]
         while len(journal["entities"])>512 or journal["entity_bytes"]>524288:
             kind,identifier=next(iter(journal["entities"]));removed=journal["entities"].pop((kind,identifier))
             journal["entity_bytes"]-=len(encoded(removed))
-            revision=removed["rev"]+1
-            if kind=="receipt": journal["receipt_revisions"][identifier]=revision  # a re-creation must exceed the remove
-            append({"op":"remove","kind":kind,"id":identifier,"rev":revision})
+            # The remove's own seq is a revision floor: later re-creations (seq-based) always exceed it.
+            append({"op":"remove","kind":kind,"id":identifier,"rev":max(removed["rev"]+1,journal["seq"]+1)})
         append(entity);journal["wake"].set()
 
     def insert(self, ref, args):
@@ -399,13 +397,11 @@ class Native:
                 row = json.loads(line)
                 if row.get("kind") == "model_request" and row.get("ref") == ref and row.get("delivery") == delivery:
                     linked = row["seq"]
-            journal = self.journal(ref)
-            revision = journal["receipt_revisions"].get(delivery, 0) + 1  # high-water includes removes (eviction)
+            # The revision is the seq this put will carry: monotonic within the epoch, so it exceeds every earlier put or
+            # remove of this receipt (including after eviction or a reused delivery id) with no per-id state to bound.
+            revision = self.journal(ref)["seq"] + 1
             value = deepcopy(stored)
             self.publish_entity(ref, {"op": "put", "kind": "receipt", "id": delivery, "rev": revision, "value": value})
-            # Only deliveries the native still stores can be republished; keep the high-water map within that bound.
-            stale = [key for key in journal["receipt_revisions"] if key not in self.receipts[ref]]
-            for key in stale: del journal["receipt_revisions"][key]
             self.append("receipt_published", ref=ref, delivery=delivery, stage=value.get("stage"), rev=revision,
                         model_request_seq=linked)
             return {"receipt": value, "rev": revision, "model_request_seq": linked}

@@ -180,12 +180,12 @@ class NativeOracle(unittest.IsolatedAsyncioTestCase):
             inserted=next(row["seq"] for row in ledger() if row["kind"]=="model_request" and row["delivery"]=="d:late")
             journal=native.journal("a0")
             first=await native.control({"verb":"publish-receipt","ref":"a0","delivery":"d:late"})
-            self.assertEqual(first,{"receipt":{"delivery":"d:late","stage":"inserted"},"rev":1,"model_request_seq":inserted})
+            self.assertEqual({k:first[k] for k in ("receipt","model_request_seq")},{"receipt":{"delivery":"d:late","stage":"inserted"},"model_request_seq":inserted})
             row=json.loads(journal["rows"][-1][1])
             self.assertEqual((row["op"],row["kind"],row["id"],row["rev"],row["value"]),
-                             ("put","receipt","d:late",1,{"delivery":"d:late","stage":"inserted"}))
+                             ("put","receipt","d:late",first["rev"],{"delivery":"d:late","stage":"inserted"}))
             second=await native.control({"verb":"publish-receipt","ref":"a0","delivery":"d:late"})
-            self.assertEqual(second["rev"],2)
+            self.assertGreater(second["rev"],first["rev"])
             encoded=lambda entity:len(json.dumps(entity,ensure_ascii=False,separators=(",",":")).encode())+1
             self.assertEqual(journal["entity_bytes"],sum(map(encoded,journal["entities"].values())),"republish keeps byte accounting exact")
             self.assertEqual(sum(1 for entity in journal["entities"].values() if entity["kind"]=="receipt"),1)
@@ -203,7 +203,7 @@ class NativeOracle(unittest.IsolatedAsyncioTestCase):
             for index in range(600): native.item("a0",{"role":"user","content":[],"final":True})
             removes=[json.loads(data) for _,data in native.journal("a0")["rows"] if json.loads(data)["op"]=="remove"]
             receipt=[row for row in removes if row["id"]=="d:x"]
-            self.assertEqual([row["rev"] for row in receipt],[4])
+            self.assertEqual(len(receipt),1);self.assertGreater(receipt[0]["rev"],3)
 
     async def test_receipt_and_message_with_the_same_id_are_distinct_entities(self):
         from agent_conformance.wire import ItemReducer
@@ -230,7 +230,23 @@ class NativeOracle(unittest.IsolatedAsyncioTestCase):
             rows=[json.loads(data) for _,data in native.journal("a0")["rows"]]
             removed=next(row for row in rows if row["op"]=="remove" and row["kind"]=="receipt" and row["id"]=="d:repeat")
             again=await native.control({"verb":"publish-receipt","ref":"a0","delivery":"d:repeat"})
-            self.assertEqual((removed["rev"],again["rev"]),(3,4),"revisions strictly increase across eviction and re-creation")
+            self.assertGreater(again["rev"],removed["rev"],"revisions strictly increase across eviction and re-creation")
+
+    async def test_reused_delivery_after_native_receipt_turnover_keeps_revisions_increasing(self):
+        # Review R2: the native keeps 256 stored receipts; a delivery inserted again after that turnover must not
+        # restart its still-retained typed receipt at a lower revision.
+        with tempfile.TemporaryDirectory() as root:
+            native=Native(Provider(),Path(root));await native.add("a0")
+            native.insert("a0",{"delivery":"d:repeat","content":[]})
+            for _ in range(2): await native.control({"verb":"publish-receipt","ref":"a0","delivery":"d:repeat"})
+            retained=native.journal("a0")["entities"][("receipt","d:repeat")]["rev"]
+            for index in range(257): native.insert("a0",{"delivery":f"d:{index}","content":[]})
+            await native.control({"verb":"publish-receipt","ref":"a0","delivery":"d:256"})
+            self.assertNotIn("d:repeat",native.receipts["a0"],"the native receipt store turned over")
+            self.assertIn(("receipt","d:repeat"),native.journal("a0")["entities"],"the typed receipt is still retained")
+            native.insert("a0",{"delivery":"d:repeat","content":[]})
+            again=await native.control({"verb":"publish-receipt","ref":"a0","delivery":"d:repeat"})
+            self.assertGreater(again["rev"],retained)
 
     async def test_control_error_reply_keeps_the_request_id(self):
         from agent_conformance.core import Native as Client
