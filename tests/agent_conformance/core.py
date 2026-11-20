@@ -28,6 +28,13 @@ class Native:
         self.state = None
 
     async def call(self, verb, *, timeout=2, **params):
+        return await self.call_fields(verb, params, timeout=timeout)
+
+    async def call_fields(self, verb, params, *, timeout=2):
+        """Send a private control with exactly `params` as its fields. `timeout` is only this control call's RPC
+        deadline; a native field named `timeout` (for example a dialog's relative timeout) goes in `params`."""
+        check(isinstance(params, dict) and "id" not in params and "verb" not in params,
+              "native control fields must not override id/verb", component="harness")
         self.serial += 1
         ident = self.serial
         try:
