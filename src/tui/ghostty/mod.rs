@@ -226,10 +226,16 @@ fn history_bytes(lines: usize, cols: u16) -> usize {
     lines.saturating_mul((usize::from(cols.max(1)) * 8 + 8) * 2)
 }
 
+/// The width the history budget is sized for. The library's budget is bytes, fixed when the terminal is made (no
+/// setter), so a pane made narrow and then widened would keep far fewer lines than asked (ghostty-audit P1-2).
+/// Budgeting for at least this width keeps the setting for panes up to it; the extra is used only by narrower
+/// panes' hidden rows (the exposed history stays the setting). Wider panes keep fewer lines.
+const BUDGET_COLS: u16 = 240;
+
 impl Ghostty {
     pub fn new(cols: u16, rows: u16, scrollback: usize) -> Result<Self, Error> {
         let mut raw = ptr::null_mut();
-        let options = ffi::GhosttyTerminalOptions { cols: cols.max(1), rows: rows.max(1), max_scrollback: history_bytes(scrollback, cols) };
+        let options = ffi::GhosttyTerminalOptions { cols: cols.max(1), rows: rows.max(1), max_scrollback: history_bytes(scrollback, cols.max(BUDGET_COLS)) };
         // SAFETY: a valid out-pointer and options; a null allocator means the library's default allocator.
         unsafe { ffi::ghostty_terminal_new(ptr::null(), &mut raw, options) }.ok()?;
         if raw.is_null() { return Err(Error(ffi::GhosttyResult_GHOSTTY_INVALID_VALUE)); }
@@ -242,6 +248,10 @@ impl Ghostty {
             ffi::ghostty_terminal_set(raw, ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_USERDATA, userdata).ok()?;
             ffi::ghostty_terminal_set(raw, ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_BELL, (bell_cb as *const ()).cast()).ok()?;
             ffi::ghostty_terminal_set(raw, ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE, (clipboard_cb as *const ()).cast()).ok()?;
+            // vqro draws no images, so it keeps none: a zero limit turns the Kitty graphics protocol off (the
+            // library would otherwise keep up to 10 MB per screen; ghostty-audit P3-1). Input: a uint64_t*.
+            let zero: u64 = 0;
+            ffi::ghostty_terminal_set(raw, ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_STORAGE_LIMIT, (&zero as *const u64).cast()).ok()?;
         }
         engine.count_dropped(false);
         Ok(engine)
@@ -601,5 +611,28 @@ mod tests {
         let mut g = Ghostty::new(40, 4, 100).unwrap();
         g.process(b"\x1b]9;hi\x1b[2J\x1b]52;c;?\x07");
         assert!(g.take_effects().is_empty());
+    }
+
+    /// ghostty-audit P1-2: a pane made narrow and then widened keeps the lines asked for (the budget is sized for
+    /// BUDGET_COLS), and only those are exposed when narrow.
+    #[test]
+    fn a_widened_pane_keeps_its_history() {
+        for (from, to) in [(40u16, 200u16), (20, 240), (80, 200)] {
+            let mut g = Ghostty::new(from, 10, 2000).unwrap();
+            g.resize(to, 10);
+            let line = "x".repeat(usize::from(to) - 1) + "\r\n";
+            for _ in 0..3000 { g.process(line.as_bytes()); }
+            assert_eq!(g.scrollback_len(), 2000, "{from} -> {to} columns");
+        }
+        let mut g = Ghostty::new(80, 10, 2000).unwrap();
+        for _ in 0..8000 { g.process(b"line\r\n"); }
+        assert_eq!(g.scrollback_len(), 2000, "narrow: the extra budget stays hidden");
+    }
+
+    /// ghostty-audit P3-1: images are not kept (vqro draws none).
+    #[test]
+    fn kitty_images_are_not_stored() {
+        let g = Ghostty::new(40, 4, 100).unwrap();
+        assert_eq!(g.get::<u64>(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_KITTY_IMAGE_STORAGE_LIMIT), Some(0));
     }
 }
