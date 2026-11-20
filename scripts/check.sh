@@ -12,6 +12,13 @@
 # never PASS; skips are non-failing and listed explicitly in the table, summary and receipt.
 # Needs: cargo, python3, /usr/bin/tmux 3.7b and ~/.local/bin/herdr-core for `full`.
 set -u
+# Capture the caller before any subprocess/exec can outlive it during bootstrap.
+CHECK_OWNER_PID=$PPID
+CHECK_OWNER_BIRTH=
+if [ -r "/proc/$CHECK_OWNER_PID/stat" ] && IFS= read -r CHECK_OWNER_STAT < "/proc/$CHECK_OWNER_PID/stat"; then
+  read -r -a CHECK_OWNER_FIELDS <<< "${CHECK_OWNER_STAT##*) }"
+  CHECK_OWNER_BIRTH=${CHECK_OWNER_FIELDS[19]:-}
+fi
 SKIP_EXIT=77
 MODE=${1:-quick}
 case "$MODE" in quick|full) ;; *) echo "usage: $0 quick|full" >&2; exit 2 ;; esac
@@ -25,28 +32,27 @@ NICE=$(ps -o ni= -p "$$" 2>/dev/null | tr -d ' ')
 if [[ "$NICE" =~ ^-?[0-9]+$ ]] && (( NICE < 10 )); then
   renice -n 10 -p "$$" >/dev/null 2>&1 || echo "check: could not lower CPU priority" >&2
 fi
-# Run inside our own transient user scope (a cgroup): every process this run starts stays in it, even
-# daemons that reparent or rename themselves, and nothing of a concurrent run is in it. The leftover check
-# then lists exactly our processes. systemd-run --user needs the user bus: XDG_RUNTIME_DIR (and
-# DBUS_SESSION_BUS_ADDRESS); under `env -i` they are recovered from /run/user/<uid> when that is ours.
-# Without a scope the leftover check is UNSCOPED: it only reports (it can match concurrent runs by other
-# agents), never kills and never fails the gate.
-if [ -z "${VQRO_CHECK_SCOPED:-}" ]; then
+REPO=$(cd "$(dirname "$0")/.." && pwd)
+# A transient service owns this run's cgroup, including reparented/session-detached daemons.
+# Unlike a scope, its native main-process lifetime tears down all members on interruption.
+# The supervisor also watches the original launcher/parent with pidfds, including startup races.
+# Under env -i recover only the user bus; never replay a failed service launch unscoped.
+# Without a manager the leftover check remains UNSCOPED/report-only: never kill other runs.
+if [ -z "${VQRO_CHECK_SUPERVISED:-}" ]; then
   if [ -z "${XDG_RUNTIME_DIR:-}" ] && [ -O "/run/user/$(id -u)" ]; then export XDG_RUNTIME_DIR=/run/user/$(id -u); fi
   if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && [ -S "${XDG_RUNTIME_DIR:-/nonexistent}/bus" ]; then
     export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
   fi
-  if command -v systemd-run >/dev/null 2>&1 && systemd-run --user --scope --quiet --collect -- true >/dev/null 2>&1; then
-    VQRO_CHECK_SCOPED=1 exec systemd-run --user --scope --quiet --collect --property=CPUWeight=50 --unit="vqro-check-$(date +%s)-$$" -- "$0" "$@"
+  if command -v systemd-run >/dev/null 2>&1 && systemctl --user show --property=Version >/dev/null 2>&1; then
+    exec python3 -I "$REPO/scripts/check_lifetime.py" --owner "$CHECK_OWNER_PID" "$CHECK_OWNER_BIRTH" -- "$REPO/scripts/check.sh" "$@"
   fi
-  echo "check: no systemd user scope (set XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS); the leftover check is UNSCOPED: report only, no kill, no failure" >&2
+  echo "check: no systemd user manager (set XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS); the leftover check is UNSCOPED: report only, no kill, no failure" >&2
 fi
 CGROUP=
-if [ -n "${VQRO_CHECK_SCOPED:-}" ]; then
+if [ -n "${VQRO_CHECK_SUPERVISED:-}" ]; then
   CGROUP=$(sed -n 's/^0:://p' /proc/self/cgroup)
-  case "$CGROUP" in */vqro-check-*.scope) ;; *) CGROUP= ;; esac
+  case "$CGROUP" in */vqro-check-*.service) [ "${CGROUP##*/}" = "${VQRO_CHECK_UNIT:-}" ] || CGROUP= ;; *) CGROUP= ;; esac
 fi
-REPO=$(cd "$(dirname "$0")/.." && pwd)
 TARGET=${CARGO_TARGET_DIR:-$REPO/target}
 STAMP=$(date +%Y%m%d-%H%M%S)-$$
 LOGS=$TARGET/check-logs/$STAMP
@@ -231,8 +237,8 @@ opt_in() {  # opt_in SUITE: every test of an integration suite, including the ig
   "${CARGO[@]}" cargo test --test "$1" -- --include-ignored --test-threads=1
 }
 
-# Processes of this run still alive: everything in our scope that is not this script or its live helpers
-# (its descendants at this moment). Reparented or renamed daemons stay in the scope and are counted.
+# Processes of this run still alive, excluding this script, its supervisor ancestors and live helpers
+# (its descendants at this moment). Reparented or renamed daemons stay in the cgroup and are counted.
 scoped_leftovers() {
   python3 - "/sys/fs/cgroup$CGROUP" "$$" <<'PY'
 import os, sys
@@ -247,8 +253,9 @@ def ancestors(pid):
         except (OSError, ValueError, IndexError):
             break
     return seen
+supervisors = set(ancestors(me))
 for pid in map(int, procs):
-    if me not in ancestors(pid) and pid != me:
+    if me not in ancestors(pid) and pid not in supervisors:
         try:
             cmd = open(f"/proc/{pid}/cmdline", "rb").read().replace(b"\0", b" ").decode(errors="replace").strip()
         except OSError:

@@ -64,15 +64,18 @@ listed); state-schema rollback; late crash 30 s after load (crash budget); 5 s s
   `e2e_tui_smoke.sh` (private herdr-core and vqro core; 30 MB flood, core restart reattach, quit while the core
   cannot start);
 - the default scale profile;
-- a leftover-process check scoped to this run: `check.sh` re-runs itself in a transient systemd user scope
-  (`systemd-run --user --scope`), so every process it starts stays in that cgroup even after reparenting or
-  renaming (tmux becomes `tmux: server`), and concurrent runs by other agents are never counted. Leftovers are
-  recorded in the receipt (`leftover_pids`, `leftover_scope`) and then killed. The scope needs the user bus:
-  `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS`; under `env -i` check.sh recovers them from `/run/user/<uid>`
-  when that directory is the user's. Without a scope (no systemd user manager, or no bus), the step is
-  `UNSCOPED`: a before/after diff of processes tied to test roots that can match other agents' concurrent runs,
-  so it only reports them; it never kills them and never fails the gate.
-  `VQRO_CHECK_INJECT_LEAK=1` leaks one detached process to prove the check fails.
+- a leftover-process check scoped to this run: `check.sh` re-runs itself in an owned transient systemd user
+  service (`check_lifetime.py`, native main-process lifetime and `KillMode=control-group`). Every process stays
+  in that cgroup even after reparenting/renaming, and concurrent runs are not counted. Leftovers are recorded
+  in the receipt (`leftover_pids`, `leftover_scope`) and killed. A blocking Linux pidfd owner watch binds the
+  service to its launcher/parent: TERM/INT/HUP, SIGKILL and parent death also tear down detached descendants,
+  rather than depending on the end-of-script scan. Output still streams through `--pipe`. The service needs
+  a suitable systemd user manager and Linux pidfds; `XDG_RUNTIME_DIR`/`DBUS_SESSION_BUS_ADDRESS` are recovered
+  from `/run/user/<uid>` under `env -i` when owned by the user. A failed launch is never replayed unscoped.
+  With no user manager/bus, the step remains `UNSCOPED`: its heuristic may match other agents, so it reports
+  only, never kills and never fails the gate. Quick mode retains that fallback.
+  `VQRO_CHECK_INJECT_LEAK=1` leaks one detached process to prove the check fails. Native lifecycle regression
+  tests stage the real bootstrap around owned fixtures; see `docs/research/gate-lifetime.md`.
 
 Every step runs under `env -i` with private paths and never touches a live vqro, hc or tmux. It prints a PASS/FAIL
 table and writes a JSON receipt to `$CHECK_RECEIPT` (default `<target>/check-receipt.json`), with step logs under
