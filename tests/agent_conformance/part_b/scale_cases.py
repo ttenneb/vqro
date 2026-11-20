@@ -14,6 +14,7 @@ from pathlib import Path
 
 from .cases import case, invocations, settled, ordinary
 from ..wire import RpcError
+from ..results import HarnessGap
 
 
 def canonical(value):
@@ -210,6 +211,31 @@ async def saturate_domain(ctx, sub, targets, *, senders=16, size=30000):
     return accepted, probe, refusal
 
 
+async def roll_operation_window(ctx, peer, target, *, attempts=2099, check_every=64):
+    """Read the actual epoch change; quota, duplicate and stale probes are not rollover proof."""
+    if type(attempts) is not int or attempts < 1 or type(check_every) is not int or check_every < 1:
+        raise ValueError("window probe bounds must be positive integers")
+    first = (await ctx.command("inbox.window"))["epoch"]
+    refusals, admitted = {}, []
+    for count in range(1, attempts + 1):
+        try:
+            reply = await ctx.send(peer=peer, target=target, mode="admit", text="p")
+            if not isinstance(reply, dict) or not isinstance(reply.get("delivery"), str):
+                raise HarnessGap("window probe returned no admitted delivery identity")
+            admitted.append(reply["delivery"])
+        except RpcError as error:
+            if error.kind not in ("quota", "busy", "expired_operation", "pending_exists"):
+                raise
+            refusals[error.kind] = refusals.get(error.kind, 0) + 1
+        if count % check_every == 0 and (await ctx.command("inbox.window"))["epoch"] != first:
+            break
+    current = (await ctx.command("inbox.window"))["epoch"]
+    ctx.evidence.append({"kind": "window_roll_probes", "before": first, "after": current,
+                         "attempts": count, "refusals": refusals, "admitted_deliveries": admitted})
+    ctx.check(current != first, "the operation window rolled while saturated", attempts=count,
+              refusals=refusals, admitted_deliveries=admitted)
+
+
 @case("L8")
 async def full_durable_budget(ctx):
     """At the durable budget, after GC, operation-window eviction and alias growth: a new send is refused quota; a late
@@ -244,13 +270,7 @@ async def full_durable_budget(ctx):
         fill_targets = sub.agents[1:-1]
         accepted, probe, refusal = await saturate_domain(ctx, sub, fill_targets)
         # Operation-window eviction under saturation: refusals also take window slots.
-        first = (await sub.command("inbox.window"))["epoch"]
-        for count in range(1, 2100):
-            try: await sub.send(peer=probe, target=sub.agents[1]["id"], mode="admit", text="p")
-            except RpcError as error:
-                if error.kind not in ("quota", "busy"): raise
-            if count % 64 == 0 and (await sub.command("inbox.window"))["epoch"] != first: break
-        ctx.check((await sub.command("inbox.window"))["epoch"] != first, "the operation window rolled while saturated", refusals=count)
+        await roll_operation_window(sub, probe, sub.agents[1]["id"])
         try:
             await sub.command("names", {"op": await sub.operation(), "handle": "@l8-grown", "agent": sub.agents[4]["id"], "expect": 0})
             alias = "accepted"
@@ -360,6 +380,22 @@ def declared_latency(status):
     return found
 
 
+async def observed_setup_grant(ctx, identifier, principal, rights, target="*"):
+    """Untimed setup: issue once and observe actual config inside ONE existing60s window."""
+    expected = {"who": principal, "can": list(rights), "on": target}
+    key = "doc/agents/grants/" + identifier
+    async def configure_and_observe():
+        await ctx.grant(identifier, principal, rights, target, timeout=60)
+        async def visible():
+            entry = await ctx.peer.call("workspace.get", {"key": key}, timeout=60)
+            value = entry.get("value")
+            return entry if isinstance(value, dict) and all(value.get(k) == v for k, v in expected.items()) else None
+        return await ctx.wait(visible, label="setup grant visible " + identifier, timeout=60)
+    entry = await asyncio.wait_for(configure_and_observe(), 60)
+    ctx.evidence.append({"kind": "observed_setup_grant", "key": key, "entry": entry})
+    return entry
+
+
 @case("I19")
 async def control_headroom_under_reconnect_burst_and_flood(ctx):
     """During a burst of 200 item-stream opens and an inbox flood, interrupts and answers are admitted within the
@@ -375,7 +411,7 @@ async def control_headroom_under_reconnect_burst_and_flood(ctx):
     await ctx.native_set(0, requests=[request(0)], state="running")
     viewers = [await ctx.connect("owner") for _ in range(4)]
     for index in range(4):
-        await ctx.grant(f"i19-f{index}", f"i19-f{index}", ["send:admit"], "*")
+        await observed_setup_grant(ctx, f"i19-f{index}", f"i19-f{index}", ["send:admit"], "*")
     flooders = [await ctx.connect(f"i19-f{index}") for index in range(4)]
     async def burst():
         async def open_all(peer, rows):

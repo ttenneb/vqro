@@ -47,11 +47,11 @@ async def pending_mutation_claim_races(ctx,priority=False):
     ctx.check(winners=={True,False},"both winners exercised, not only a lucky race outcome")
 
 
-async def age_out_history(ctx,delivery,operation=None):
+async def age_out_history(ctx,delivery,operation=None,*,settle_timeout=8):
     """Discover actual eviction; no smaller retained-count substitute can pass."""
     await ctx.scope("resume")
     for index in range(4096):
-        sent=await ctx.send(mode="admit",text="retention-"+str(index));await settled(ctx,sent["delivery"])
+        sent=await ctx.send(mode="admit",text="retention-"+str(index));await settled(ctx,sent["delivery"],timeout=settle_timeout)
         if index%32==31:
             old=await ctx.get(delivery)
             lookup=await ctx.command("inbox.op",{"op":operation}) if operation else {"state":"unknown"}
@@ -84,7 +84,8 @@ async def evicted_operation_replay_is_not_new_input(ctx):
     await ctx.native.call("point",ref=row["backend_ref"],point="idle")
     report_op=await ctx.operation();report_args={"op":report_op,"consumer":"consumer-1","stage":"read",**batch["claims"][0]}
     await ctx.command("inbox.report",report_args)
-    await age_out_history(ctx,sent["delivery"],report_op)
+    # History construction observes settlement, not a dispatch-latency bound (same60s observation window as L8).
+    await age_out_history(ctx,sent["delivery"],report_op,settle_timeout=60)
     before=len(invocations(ctx));entries=len((await ctx.native.call("session",ref=row["backend_ref"]))["entries"])
     async def replay_old():
         for command,args in (("inbox.send",send_args),("inbox.report",report_args)):

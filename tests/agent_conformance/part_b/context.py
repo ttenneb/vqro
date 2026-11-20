@@ -139,27 +139,27 @@ class PublicCoordination(PublicImplementation):
                 return self.agents
         return await self.wait(ready, label=f"{count} native agents")
 
-    async def command(self, name, args=None, *, peer=None):
-        return await (peer or self.peer).call("command.invoke", {"name": "coord." + name, "args": args or {}}, timeout=8)
+    async def command(self, name, args=None, *, peer=None, timeout=8):
+        return await (peer or self.peer).call("command.invoke", {"name": "coord." + name, "args": args or {}}, timeout=timeout)
 
-    async def wait_command(self, name, predicate, *, args=None):
+    async def wait_command(self, name, predicate, *, args=None, timeout=8):
         last=None
         async def ready():
             nonlocal last
-            try: row = await self.command(name, args)
+            try: row = await self.command(name, args, timeout=timeout)
             except RpcError as error:
                 if error.kind == "not_found": return None
                 raise
             last=row
             return row if predicate(row) else None
-        try: return await self.wait(ready, label="coord." + name)
+        try: return await self.wait(ready, label="coord." + name, timeout=timeout)
         except CheckFailed:
             self.evidence.append({"kind":"unmet_public_observation","command":name,"args":args,"last":last})
             raise
 
-    async def operation(self, suffix="op"):
+    async def operation(self, suffix="op", *, timeout=8):
         self.serial += 1
-        window = await self.command("inbox.window")
+        window = await self.command("inbox.window", timeout=timeout)
         return window["epoch"] + f":b{self.serial}:{suffix}"
 
     async def send(self, *, target=None, text="literal conformance input", peer=None, **fields):
@@ -171,11 +171,11 @@ class PublicCoordination(PublicImplementation):
     async def get(self, delivery):
         return await self.command("inbox.get", {"delivery": delivery})
 
-    async def grant(self, identifier, principal, rights, target="*", *, until_ms=None, peer=None):
+    async def grant(self, identifier, principal, rights, target="*", *, until_ms=None, peer=None, timeout=8):
         value = {"who": principal, "can": list(rights), "on": target}
         if until_ms is not None: value["until_ms"] = until_ms
-        return await self.command("grants", {"op": await self.operation("grant"), "id": identifier,
-            "value": value, "expect": 0}, peer=peer)
+        return await self.command("grants", {"op": await self.operation("grant", timeout=timeout), "id": identifier,
+            "value": value, "expect": 0}, peer=peer, timeout=timeout)
 
     async def native_set(self, index, **fields):
         target = self.agents[index]

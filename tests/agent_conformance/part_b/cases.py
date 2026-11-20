@@ -47,9 +47,9 @@ async def native_idle(ctx, index=0):
     await ctx.wait(ready, label="native idle facts")
 
 
-async def settled(ctx, delivery):
+async def settled(ctx, delivery, *, timeout=8):
     return await ctx.wait_command("inbox.get", lambda row: row.get("state") not in ("held", "recorded", "claimed"),
-                                  args={"delivery": delivery})
+                                  args={"delivery": delivery}, timeout=timeout)
 
 
 async def held(ctx, delivery, reason=None):
@@ -1137,7 +1137,8 @@ async def moving_member_does_not_replay_resume(ctx):
     ctx.check(len(invocations(ctx,delivery=sent["delivery"]))==1,"active member retains its existing gate after movement")
     await ctx.scope("pause","agent:"+ctx.agents[1]["id"]);await native_idle(ctx,1)
     await ctx.peer.call("workspace.revert",{"txn":move_txn})
-    selection=await ctx.command("scope",{"action":"inspect","scope":"team:"+ctx.agents[0]["id"]})
+    selection=await ctx.wait_command("scope",lambda row: ctx.agents[1]["id"] in row.get("targets", []),
+                                     args={"action":"inspect","scope":"team:"+ctx.agents[0]["id"]})
     ctx.check(ctx.agents[1]["id"] in selection["targets"],"undoing membership restores selection")
     pending=await ctx.send(target=ctx.agents[1]["id"],text="undo must not restore old resume")
     await held(ctx,pending["delivery"],"paused")
