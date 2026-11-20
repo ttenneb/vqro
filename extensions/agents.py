@@ -311,7 +311,6 @@ class Conversation:
         self.stream = None
         self.generation = 0  # bumped when a stream ends, so a late attach reply can't revive it
         self.clamped = False  # the provider declared more than this viewer keeps
-        self.cut = False  # evidence that history was cut (a retention gap); see conversation_rows
         self.too_big = False  # a snapshot exceeded the bounds: stop reattaching (it would only overflow again)
 
     def data(self, data):
@@ -327,8 +326,6 @@ class Conversation:
 
     def ended(self, kind, reason):
         with self.lock:
-            if isinstance(reason, dict) and "retention" in (reason.get("gap"), reason.get("reason")):
-                self.cut = True  # the viewer fell out of the agent's history: something it had is not shown
             self.view.stream_ended()
             self.stream = None
             self.generation += 1
@@ -622,7 +619,7 @@ class Agents:
                               "if it sends that much, the conversation stops updating and says so."})
             if c.view.epoch is None:
                 return notes + [{"type": "text", "style": "dim", "text": "Loading the conversation…"}]
-            out = notes + agent_transcript.rows(c.view.entities, names, c.view.coverage, self.view_of(r["id"]), cut=c.cut)
+            out = notes + agent_transcript.rows(c.view.entities, names, c.view.coverage, self.view_of(r["id"]))
         if c.stream is None and r.get("available") is not False:
             out.append({"type": "text", "style": "dim", "text": "Reconnecting to the conversation…"})
         return out or [{"type": "text", "style": "dim", "text": "No messages yet."}]

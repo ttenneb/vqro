@@ -119,9 +119,7 @@ class TranscriptRows(unittest.TestCase):
         note = {"type": "text", "style": "dim", "text": "Showing the history this agent kept; anything earlier isn't shown."}
         later = {k: dict(v, position=v.get("position", 0) + 5) if k[0] != "receipt" else v for k, v in CONVERSATION.items()}
         self.assertEqual(self.rows(later, coverage="tail")[0], note, "positions after the first: something was cut")
-        names = agent_transcript.Names({"r2": {"name": "Pi"}}, "r2")
-        cut = agent_transcript.rows({k: (1, v) for k, v in CONVERSATION.items()}, names, "tail", cut=True)
-        self.assertEqual(cut[0], note, "a retention gap is evidence")
+
         many = {("message", f"m{i}"): {"position": i, "role": "assistant", "content": text(f"{i} " + "x" * 2000), "final": True}
                 for i in range(200)}
         rows = self.rows(many)
@@ -260,15 +258,6 @@ class AgentPane(unittest.TestCase):
         self.feed(snapshot({("message", "m5"): {"position": 7, "role": "assistant", "content": text("Fixed."), "final": True}}, seq=9))
         self.assertIn("Fixed.", self.texts())
         self.assertNotIn("Fixing both now!", self.texts())
-
-    def test_a_retention_gap_is_evidence_that_history_was_cut(self):
-        self.feed(snapshot(CONVERSATION, coverage="tail", seq=4))
-        self.assertFalse(any("Showing the history" in (t or "") for t in self.texts()), "fresh tail: no note")
-        stream = self.agents.conversations["r2"].stream
-        self.core.sinks.pop(stream).ended("gap", {"gap": "retention"})
-        self.agents.flush_conversations()
-        self.feed(snapshot(CONVERSATION, coverage="tail", seq=9))
-        self.assertIn("Showing the history this agent kept; anything earlier isn't shown.", self.texts())
 
     def test_a_closed_stream_reattaches_and_an_unavailable_agent_keeps_its_last_state(self):
         self.feed(snapshot(CONVERSATION, seq=4))

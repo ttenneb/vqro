@@ -335,7 +335,7 @@ def summary_text(title, values, fields, tools=None):
     return "▸ " + " · ".join(parts)
 
 
-def rows(entities, names, coverage=None, view=None, cut=False):
+def rows(entities, names, coverage=None, view=None):
     """Panel rows for an agent's conversation, oldest first, bounded to BUDGET encoded bytes (newest kept).
     `entities` maps (kind, id) to (rev, value) as in vqro_items.ItemView; `view` is view_settings()."""
     view = view or view_settings()
@@ -430,11 +430,12 @@ def rows(entities, names, coverage=None, view=None, cut=False):
         dropped = dropped or 1
     if dropped:
         shown.insert(0, {"type": "text", "style": "dim", "text": f"… {dropped} earlier blocks not shown here (pane limit)"})
-    # Say history is missing only with evidence: a retention gap (`cut`), or the agent's own positions starting after
-    # the first. A fresh agent's "tail" snapshot alone is no evidence that anything was left out.
+    # A "tail" snapshot says only that it may not be complete. Show the note when the agent's own positions show
+    # something before the first entity kept. The Pi bridge (state.rs) and vqro-fake-items number positions from 1, but
+    # agent-v0 §4 does not promise that: this is a dim note, never a claim. (A retention gap is no evidence: the reset snapshot holds
+    # everything the adapter still has.) A fresh agent shows nothing.
     positions = [v.get("position") for (_, _), (_, v) in entities.items() if isinstance(v, dict) and type(v.get("position")) is int]
-    cut = cut or (bool(positions) and min(positions) > 1)
-    if coverage in ("tail", "state_only") and cut:
+    if coverage in ("tail", "state_only") and positions and min(positions) > 1:
         shown.insert(0, {"type": "text", "style": "dim", "text": "Showing the history this agent kept; anything earlier isn't shown."
                          if coverage == "tail" else "Showing the agent's current state only."})
     return shown
