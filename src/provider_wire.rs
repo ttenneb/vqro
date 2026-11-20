@@ -34,7 +34,7 @@ fn invalid(message: impl Into<String>) -> RpcError { RpcError::invalid(message) 
 fn overloaded(message: impl Into<String>) -> RpcError { provider::rejected("overloaded", message) }
 /// Gap reasons of provider-v0 9.5 plus `retention` (an item stream fell out of the journal).
 fn gap_reason_known(why: &Value) -> bool {
-    why["reason"] != "gap" || matches!(why["gap"].as_str(), Some("backend_dropped" | "paused" | "viewer_slow" | "retention"))
+    why["reason"] == "gap" && matches!(why["gap"].as_str(), Some("backend_dropped" | "paused" | "viewer_slow" | "retention"))
 }
 
 fn reason(value: &Value) -> Result<Value, RpcError> {
@@ -237,7 +237,8 @@ impl Connection {
             inventory: Mutex::new(Inventory { started: false, syncing: false, seen: BTreeMap::new(), current: BTreeMap::new(), effects: BTreeSet::new(), recent_effects:VecDeque::new() }), stopped, health });
         *self.provider.lock().unwrap() = Some(provider.clone());
         tokio::spawn(provider.clone().run(inbox));
-        let mut result = json!({"provider": provider.name, "generation": generation, "limits": {"stream_window_bytes": window, "max_record_bytes": MAX_RECORD_BYTES}});
+        let mut result = json!({"provider": provider.name, "generation": generation, "limits": {"stream_window_bytes": window, "max_record_bytes": MAX_RECORD_BYTES,
+            "max_streams": r.limits.max_streams.min(512), "max_item_streams": r.limits.max_item_streams.min(MAX_ITEM_STREAMS)}});
         if let Some(token) = resume_token { result["resume_token"] = json!(token); }
         Ok(result)
     }
@@ -374,12 +375,14 @@ impl WireProvider {
                 if failed { self.end(id, false, json!({"reason": "slow_consumer"}), true); }
             }
             "stream.closed" | "stream.gap" => {
-                // A malformed or unknown reason is a protocol error that still ends the stream (agent-v0 §4).
+                // A malformed or unknown reason is a protocol error that ends **that stream** as invalid (agent-v0
+                // §4); the connection and the provider's other streams and resources are unaffected. Only a
+                // malformed envelope (no stream id) is a connection error.
                 let why = match reason(&p["reason"]) {
                     Ok(why) if method != "stream.gap" || gap_reason_known(&why) => why,
                     Ok(_) | Err(_) => {
                         self.end(id, false, json!({"reason": "invalid", "message": format!("{method} with an unknown or malformed reason")}), true);
-                        return Err(invalid(format!("{method} reason must be an object with a known reason")));
+                        return Ok(());
                     }
                 };
                 if method == "stream.gap" {
@@ -540,9 +543,12 @@ impl WireProvider {
         let result = self.peer.call_reserved("stream.open", open, remaining).await;
         if Instant::now() >= context.deadline { return Err(AdapterError::Timeout("provider stream.open deadline expired; outcome indeterminate".into())); }
         let epoch = if items.is_some() { result.as_ref().ok().and_then(|r| r["epoch"].as_str()).filter(|e| !e.is_empty() && e.len() <= 256).map(String::from) } else { None };
+        // `continue` is only meaningful for an open that carried `after`, in that same epoch (agent-v0 §4).
+        let after_epoch = items.as_ref().and_then(|i| i["after"]["epoch"].as_str());
         let initial = match (items.is_some(), result.as_ref().ok().and_then(|r| r["initial"].as_str())) {
             (false, Some("history")) => "history", (false, Some("repaint")) => "repaint", (false, Some("none")) => "none",
-            (true, Some("continue")) if epoch.is_some() => "continue", (true, Some("reset")) if epoch.is_some() => "reset", _ => {
+            (true, Some("continue")) if epoch.is_some() && epoch.as_deref() == after_epoch => "continue",
+            (true, Some("reset")) if epoch.is_some() => "reset", _ => {
             self.end(id, false, json!({"reason": "closed"}), true);
             return Err(result.err().map(provider_error).unwrap_or_else(|| AdapterError::Backend("stream.open returned invalid initial".into())));
         }};

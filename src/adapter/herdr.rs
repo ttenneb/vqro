@@ -268,6 +268,7 @@ async fn session(
                         pending.insert(id, Pending::Kill(reply));
                         send_frame(&frame_tx, bytes)?;
                     }
+                    AdapterCmd::Attach { reply, items: Some(_), .. } => { let _ = reply.send(Err(AdapterError::RejectedKind { kind: "unsupported".into(), message: "item streams need a provider with items.stream".into() })); }
                     AdapterCmd::Attach { backend_ref, cols, rows, history, reply, .. } => {
                         if remote_effect(&backend_ref) { let _ = reply.send(Err(remote_unsupported())); continue; }
                         let (id, bytes) = call(&mut next_id, "terminal.attach", json!({"terminal": backend_ref, "cols": cols, "rows": rows, "history": history}));

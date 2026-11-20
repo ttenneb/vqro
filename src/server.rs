@@ -936,6 +936,9 @@ async fn forget(core: &Shared, author: &Caller, p: Value) -> RpcResult {
 async fn attach(core: &Shared, conn: &Arc<Conn>, a: Attach) -> RpcResult {
     let (cols, rows) = (a.cols.unwrap_or(80), a.rows.unwrap_or(24));
     if a.items.is_none() && (!(1..=9999).contains(&cols) || !(1..=9999).contains(&rows)) { return Err(provider::rejected("invalid", "stream dimensions must be between 1 and 9999")); }
+    if a.items.is_some() && (a.cols.is_some() || a.rows.is_some() || a.history.is_some()) {
+        return Err(provider::rejected("invalid", "items streams take no cols, rows or history"));
+    }
     if let Some(items) = &a.items {
         // `{after?: {epoch, seq}}`: an exact cursor or nothing (agent-v0 §4).
         let after = &items["after"];

@@ -300,9 +300,15 @@ pub struct OpenRequest {
 }
 
 impl OpenRequest {
-    /// Reply to an item-stream open: `continue` (records strictly after the viewer's cursor follow)
-    /// or `reset` (a `reset` record and a snapshot follow in-stream), with the current epoch.
+    /// Reply to an item-stream open: `continue` (only for an open with `after` in this same epoch; records strictly
+    /// after the viewer's cursor follow) or `reset` (`snapshot begin`, puts, `snapshot end` follow in-stream), with
+    /// the current epoch (1-256 bytes; anything else is refused here as `invalid` and the stream is not opened).
+    /// Answer opens quickly (one cut under the agent lock, as [`items::ItemJournal::open`]): opens share the request
+    /// channel with effects and are not bounded by `max_in_flight`.
     pub fn respond_items(self, reset: bool, epoch: &str) -> Option<ProviderStream> {
+        if epoch.is_empty() || epoch.len() > 256 {
+            return self.respond(Err(ProviderError::new("invalid", "item epoch must be 1-256 bytes")));
+        }
         let OpenRequest { stream, responder, .. } = self;
         responder.send(Ok(json!({"initial": if reset { "reset" } else { "continue" }, "epoch": epoch})));
         stream.inner.set_ready();
@@ -539,6 +545,9 @@ struct Shared {
     stream_ids: Mutex<IdLedger<u64>>,
     effect_ids: Mutex<IdLedger<String>>,
     in_flight: AtomicU64,
+    /// Stream limits granted at registration (`limits.max_streams` / `max_item_streams`), `u64::MAX` before.
+    granted_streams: AtomicU64,
+    granted_item_streams: AtomicU64,
     sync_started: AtomicBool,
     max_record: AtomicU64,
 }
@@ -638,6 +647,8 @@ impl Provider {
             stream_ids: Mutex::new(IdLedger::default()),
             effect_ids: Mutex::new(IdLedger::default()),
             in_flight: AtomicU64::new(0),
+            granted_streams: AtomicU64::new(u64::MAX),
+            granted_item_streams: AtomicU64::new(u64::MAX),
             sync_started: AtomicBool::new(false),
             max_record: AtomicU64::new(MAX_RECORD as u64),
         });
@@ -675,6 +686,9 @@ impl Provider {
         if let Some(m) = r["limits"]["max_record_bytes"].as_u64() {
             self.shared.max_record.store(m.clamp(1024, MAX_RECORD as u64), Ordering::Relaxed);
         }
+        // The core may grant less than asked; admit opens against the granted value.
+        if let Some(m) = r["limits"]["max_streams"].as_u64() { self.shared.granted_streams.store(m, Ordering::Relaxed); }
+        if let Some(m) = r["limits"]["max_item_streams"].as_u64() { self.shared.granted_item_streams.store(m, Ordering::Relaxed); }
         self.shared.generation.store(generation, Ordering::Relaxed);
         Ok(())
     }
@@ -1027,8 +1041,9 @@ fn open_request(id: &Value, p: &Value, shared: &Arc<Shared>, config: &Arc<Config
     {
         let streams = shared.streams.lock().unwrap();
         let open = streams.values().filter(|s| s.items == items.is_some()).count();
-        if items.is_some() && open >= config.max_item_streams { return Err(ProviderError::new("overloaded", "max_item_streams open")); }
-        if items.is_none() && open >= config.max_streams { return Err(ProviderError::new("overloaded", "max_streams open")); }
+        let granted = |g: &AtomicU64, own: usize| (g.load(Ordering::Relaxed).min(own as u64)) as usize;
+        if items.is_some() && open >= granted(&shared.granted_item_streams, config.max_item_streams) { return Err(ProviderError::new("overloaded", "max_item_streams open")); }
+        if items.is_none() && open >= granted(&shared.granted_streams, config.max_streams) { return Err(ProviderError::new("overloaded", "max_streams open")); }
     }
     shared.stream_ids.lock().unwrap().begin(stream,config.max_streams.saturating_add(config.max_item_streams).saturating_add(256))?;
     let (tx, rx) = mpsc::unbounded_channel();
@@ -1129,7 +1144,7 @@ mod qa2_tests {
     use super::*;
     fn shared() -> Arc<Shared> {
         let (out,_rx)=mpsc::unbounded_channel(); let (closed_tx,_)=watch::channel(false);
-        Arc::new(Shared { out,budget:Arc::new(Semaphore::new(1024*1024)),outgoing_bytes:1024*1024,generation:AtomicU64::new(1),pending:Mutex::new(HashMap::new()),next_id:AtomicU64::new(1),closed:AtomicBool::new(false),closed_tx,failure:Mutex::new(None),streams:Mutex::new(HashMap::new()),stream_ids:Mutex::new(IdLedger::default()),effect_ids:Mutex::new(IdLedger::default()),in_flight:AtomicU64::new(0),sync_started:AtomicBool::new(false),max_record:AtomicU64::new(MAX_RECORD as u64) })
+        Arc::new(Shared { out,budget:Arc::new(Semaphore::new(1024*1024)),outgoing_bytes:1024*1024,generation:AtomicU64::new(1),pending:Mutex::new(HashMap::new()),next_id:AtomicU64::new(1),closed:AtomicBool::new(false),closed_tx,failure:Mutex::new(None),streams:Mutex::new(HashMap::new()),stream_ids:Mutex::new(IdLedger::default()),effect_ids:Mutex::new(IdLedger::default()),in_flight:AtomicU64::new(0),granted_streams:AtomicU64::new(u64::MAX),granted_item_streams:AtomicU64::new(u64::MAX),sync_started:AtomicBool::new(false),max_record:AtomicU64::new(MAX_RECORD as u64) })
     }
     #[test]
     fn identity_eviction_never_forgets_active_ids() {
@@ -1180,7 +1195,7 @@ mod qa2_tests {
     #[tokio::test]
     async fn retention_is_a_gap_reason_and_an_unknown_reason_still_ends_the_stream() {
         let (out, mut rx) = mpsc::unbounded_channel(); let (closed_tx, _) = watch::channel(false);
-        let shared = Arc::new(Shared { out,budget:Arc::new(Semaphore::new(1024*1024)),outgoing_bytes:1024*1024,generation:AtomicU64::new(1),pending:Mutex::new(HashMap::new()),next_id:AtomicU64::new(1),closed:AtomicBool::new(false),closed_tx,failure:Mutex::new(None),streams:Mutex::new(HashMap::new()),stream_ids:Mutex::new(IdLedger::default()),effect_ids:Mutex::new(IdLedger::default()),in_flight:AtomicU64::new(0),sync_started:AtomicBool::new(false),max_record:AtomicU64::new(MAX_RECORD as u64) });
+        let shared = Arc::new(Shared { out,budget:Arc::new(Semaphore::new(1024*1024)),outgoing_bytes:1024*1024,generation:AtomicU64::new(1),pending:Mutex::new(HashMap::new()),next_id:AtomicU64::new(1),closed:AtomicBool::new(false),closed_tx,failure:Mutex::new(None),streams:Mutex::new(HashMap::new()),stream_ids:Mutex::new(IdLedger::default()),effect_ids:Mutex::new(IdLedger::default()),in_flight:AtomicU64::new(0),granted_streams:AtomicU64::new(u64::MAX),granted_item_streams:AtomicU64::new(u64::MAX),sync_started:AtomicBool::new(false),max_record:AtomicU64::new(MAX_RECORD as u64) });
         let config = Arc::new(Config::new("test", "i", json!({"items.stream": {}}).as_object().unwrap().clone()));
         let Ok(Request::Open(a)) = item_open(&shared, &config, 1) else { panic!() };
         let Ok(Request::Open(b)) = item_open(&shared, &config, 2) else { panic!() };

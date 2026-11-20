@@ -136,6 +136,7 @@ pub fn start_with_instance(name: String, instance: String, events: mpsc::Unbound
                         let _ = reply.send(Ok(EffectResult::accepted(json!({"reason": "killed"}))));
                     }
                 },
+                AdapterCmd::Attach { reply, items: Some(_), .. } => { let _ = reply.send(Err(AdapterError::RejectedKind { kind: "unsupported".into(), message: "item streams need a provider with items.stream".into() })); }
                 AdapterCmd::Attach { backend_ref, reply, .. } => {
                     let Some(t) = terms.get(&backend_ref) else {
                         let _ = reply.send(Err(format!("no terminal {backend_ref}").into()));

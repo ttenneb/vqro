@@ -66,7 +66,8 @@ pub enum Incoming {
 }
 
 struct PendingReply { result: RpcResult, _permit: Option<OwnedSemaphorePermit> }
-type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<PendingReply>>>>;
+/// Pending calls by id; `true` marks a reserved call (admitted by its caller's own budget, e.g. stream opens).
+type Pending = Arc<Mutex<HashMap<u64, (oneshot::Sender<PendingReply>, bool)>>>;
 
 /// Byte-bounded application ingress. Dequeue releases its charge; at most one additional record
 /// may be in the consumer's hands. Overflow closes the connection rather than dropping messages.
@@ -106,8 +107,6 @@ pub struct Peer {
     shutdown: watch::Sender<bool>,
     pending: Pending,
     next_id: Arc<AtomicU64>,
-    /// Calls admitted by their own caller-held budget (stream opens), not by MAX_PENDING_CALLS.
-    reserved: Arc<AtomicUsize>,
 }
 
 struct Outbound {
@@ -154,11 +153,6 @@ impl StreamWriter {
             self.close(json!({"reason": "slow_consumer"}));
         }
     }
-}
-
-struct ReservedCall(Arc<AtomicUsize>);
-impl Drop for ReservedCall {
-    fn drop(&mut self) { self.0.fetch_sub(1, Ordering::AcqRel); }
 }
 
 // Cancellation, timeout and late replies must not leave an ever-growing pending-call map.
@@ -275,7 +269,7 @@ impl Peer {
                     // Leave envelope headroom when opaque provider/extension replies are audited
                     // or forwarded; a malformed peer does not get to poison retained events.
                     if crate::limits::json_depth(&msg,crate::limits::MESSAGE_DEPTH).is_err() {break;}
-                    let Some(tx) = pend.lock().unwrap().remove(&id) else { continue };
+                    let Some((tx, _)) = pend.lock().unwrap().remove(&id) else { continue };
                     let permit = if bytes > INBOUND_BYTES {
                         large_response.clone().try_acquire_owned()
                     } else { response_budget.clone().try_acquire_many_owned(bytes.max(64) as u32) };
@@ -290,13 +284,13 @@ impl Peer {
             ended.store(true,Ordering::Release);
             if !drain_read_eof || !clean_eof {stop.send_replace(true);}
             // No further response can arrive, even if the serving side can still send replies.
-            for (_, tx) in pend.lock().unwrap().drain() {
+            for (_, (tx, _)) in pend.lock().unwrap().drain() {
                 let _ = tx.send(PendingReply { result: Err(RpcError::new("disconnected", "connection closed")), _permit: None });
             }
         });
 
         let incoming = IncomingReceiver { rx: in_rx, limit: record_limit.clone(), shutdown: shutdown.clone(), closed: false };
-        (Peer { control, data, large, large_bytes, record_limit, read_ended, shutdown, pending, next_id: Arc::new(AtomicU64::new(1)), reserved: Arc::new(AtomicUsize::new(0)) }, incoming)
+        (Peer { control, data, large, large_bytes, record_limit, read_ended, shutdown, pending, next_id: Arc::new(AtomicU64::new(1)) }, incoming)
     }
 
     pub async fn call(&self, method: &str, params: Value) -> RpcResult {
@@ -309,6 +303,7 @@ impl Peer {
 
     /// A call admitted by the caller's own bounded budget (stream opens): it neither counts against
     /// nor is refused by MAX_PENDING_CALLS, so a burst of opens cannot starve effects or vice versa.
+    /// It has **no bound of its own**: callers must hold a permit from their own semaphore.
     pub async fn call_reserved(&self, method: &str, params: Value, deadline: Duration) -> RpcResult {
         self.call_admitted(method, params, deadline, true).await
     }
@@ -319,11 +314,11 @@ impl Peer {
         {
             let mut pending = self.pending.lock().unwrap();
             if self.read_ended.load(Ordering::Acquire) {return Err(RpcError::new("disconnected","request input ended; peer cannot answer a new call"));}
-            if !reserved && pending.len().saturating_sub(self.reserved.load(Ordering::Acquire)) >= MAX_PENDING_CALLS { return Err(RpcError::new("overloaded", "pending call limit; request not sent")); }
-            if reserved { self.reserved.fetch_add(1, Ordering::AcqRel); }
-            pending.insert(id, tx);
+            // Ordinary calls are counted directly: a reserved entry leaves the map with its reply, so the
+            // count can never under-state ordinary calls in flight.
+            if !reserved && pending.values().filter(|(_, r)| !*r).count() >= MAX_PENDING_CALLS { return Err(RpcError::new("overloaded", "pending call limit; request not sent")); }
+            pending.insert(id, (tx, reserved));
         }
-        let _reserved = reserved.then(|| ReservedCall(self.reserved.clone()));
         let _guard = PendingCall { id, pending: self.pending.clone() };
         let msg = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
         crate::limits::json_depth(&msg,crate::limits::MESSAGE_DEPTH)?;
@@ -612,7 +607,6 @@ mod tests {
         assert_eq!(peer.call("not_sent", Value::Null).await.unwrap_err().kind(), "overloaded");
         for task in opens.into_iter().chain(calls) { task.abort(); let _ = task.await; }
         assert!(peer.pending.lock().unwrap().is_empty());
-        assert_eq!(peer.reserved.load(Ordering::Acquire), 0);
     }
 
     #[tokio::test]
