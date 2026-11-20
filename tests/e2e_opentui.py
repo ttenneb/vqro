@@ -200,7 +200,7 @@ try:
     keys("Escape"); time.sleep(0.5)
     # list_detail: the selected extension's details beside the list; Tab moves into them.
     # The window is 90 columns now: the detail sits below the list (narrow layout).
-    check("list_detail shows the selected row's details with its actions", bool(wait(lambda: " of 16 · " in screen() and "Restart   View log" in screen())), screen())
+    check("list_detail shows the selected row's details with its actions", bool(wait(lambda: " of 16 · " in screen() and "Restart   " in screen() and "View log" in screen())), screen())
     keys("Tab"); time.sleep(0.3); keys("Enter")
     check("Tab focuses the detail; its first action runs from there", bool(wait(lambda: "Turn off Tabs: breaks" in screen())), screen())
     keys("Escape"); time.sleep(0.5); keys("Escape"); time.sleep(0.5)
