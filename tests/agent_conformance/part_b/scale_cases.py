@@ -224,7 +224,21 @@ async def full_durable_budget(ctx):
                                    text="z" * 30000))["delivery"] for _ in range(2)]
         for index, row in enumerate(sub.agents[:4]):
             await sub.command("names", {"op": await sub.operation(), "handle": f"@l8-{index}", "agent": row["id"], "expect": 0})
-        accepted, probe, refusal = await saturate_domain(ctx, sub, sub.agents[1:-1])
+        # GC witness (prim-final-review): settle more records than K2 keeps in full on one target, staying below the
+        # sender/target open quota, so history GC compacts the oldest before the fill.
+        gc_target = sub.agents[1]
+        await scope(sub, "resume", "agent:" + gc_target["id"])
+        gc_sent = []
+        for index in range(300):
+            gc_sent.append((await sub.send(target=gc_target["id"], text=f"settle {index}", send_new=True, mode="admit"))["delivery"])
+            if len(gc_sent) >= 6: await settled(sub, gc_sent[-6])
+        for delivery in gc_sent[-6:]: await settled(sub, delivery)
+        await scope(sub, "pause", "agent:" + gc_target["id"])
+        oldest = await sub.get(gc_sent[0])
+        ctx.check(oldest.get("incomplete") or not oldest.get("content"), "history GC compacted the oldest settled record before the fill",
+                  settled=len(gc_sent), oldest={k: oldest.get(k) for k in ("state", "incomplete")})
+        fill_targets = sub.agents[1:-1]
+        accepted, probe, refusal = await saturate_domain(ctx, sub, fill_targets)
         # Operation-window eviction under saturation: refusals also take window slots.
         first = (await sub.command("inbox.window"))["epoch"]
         for count in range(1, 2100):
@@ -242,6 +256,20 @@ async def full_durable_budget(ctx):
             await sub.send(peer=probe, target=sub.agents[1]["id"], mode="admit", text="p", send_new=True)
             ctx.check(False, "still refused after the window rolled")
         except RpcError as error: after_roll = {"kind": error.kind, "message": str(error)}
+        # New sends at the budget from a never-used sender, rotating targets so per-pair quotas never mask the budget
+        # (prim-final-review): count only refusals that name the budget; every one must be quota.
+        await sub.grant("l8-fresh", "l8-fresh", ["send:admit"], "*")
+        fresh = await sub.connect("l8-fresh")
+        at_budget = []
+        for index in range(40):
+            target = fill_targets[1 + index % (len(fill_targets) - 1)]  # never the GC target
+            try:
+                reply = await sub.send(peer=fresh, target=target["id"], text="fresh sender at budget", send_new=True, mode="admit")
+                at_budget.append({"admitted": reply.get("delivery")})
+            except RpcError as error:
+                at_budget.append({"kind": error.kind, "message": str(error)[:120],
+                                  "budget": any(word in str(error) for word in ("reserve", "domain", "budget", "slot"))})
+            if sum(bool(row.get("budget")) for row in at_budget) >= 4: break
         # Observation (not graded by L8): an admitted, never-claimed record is not dispatched at the budget.
         await sub.scope("resume", "agent:" + late_agent["id"])
         await asyncio.sleep(.5)
@@ -293,9 +321,10 @@ async def full_durable_budget(ctx):
         late_outcome = {"state": record["state"], "reason": record.get("reason"), "result": record.get("result")}
         ctx.check(late_outcome["state"] in ("accepted", "observed", "dispatched") and (late_outcome["result"] or {}).get("native"),
                   "a late native reply to an admitted record records its outcome at the budget", late=late_outcome)
-        ctx.check(refusal["kind"] == "quota" and after_roll["kind"] == "quota",
-                  "at the durable budget a new send is refused quota (fresh sender, least-loaded target), "
-                  "before and after the window rolls", at_budget=refusal, after_roll=after_roll)
+        budget_refusals = [row for row in at_budget if row.get("budget")]
+        ctx.check(len(budget_refusals) >= 4 and all(row["kind"] == "quota" for row in budget_refusals),
+                  "at the durable budget a new send is refused quota (never-used sender, rotating targets)",
+                  fresh_at_budget=at_budget, first_probe=refusal, after_roll=after_roll)
     finally:
         ctx.evidence.append({"kind": "sub_fixture", "name": "l8", "evidence": sub.evidence})
         await sub.close()
