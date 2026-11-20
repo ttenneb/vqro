@@ -196,7 +196,7 @@ class Native:
         delivery = args.get("delivery")
         if delivery:
             saved = self.receipts[ref]
-            saved[delivery] = {"delivery": delivery, "stage": "inserted", "run": native["run"]}
+            saved[delivery] = {"delivery": delivery, "stage": "inserted"}
             while len(saved) > 256: saved.pop(next(iter(saved)))
 
     async def effect(self, op, effect, args):
@@ -340,7 +340,7 @@ class Native:
         if verb == "emit-receipt":
             ref=request["ref"];delivery=request["delivery"]
             observed=self.receipts.get(ref,{}).get(delivery)
-            if not observed or observed.get("stage") not in ("inserted","read"):
+            if not observed or observed.get("stage")!="inserted":
                 raise ValueError("no native insertion evidence for this delivery")
             self.entity(ref,"receipt",delivery,observed)
             self.append("receipt_observation",ref=ref,receipt=deepcopy(observed))
@@ -354,7 +354,6 @@ class Native:
         if verb in ("abort","message_start"):
             ref=request["ref"];self.append(verb,ref=ref)
             self.agents[ref]["data"]["agent"]["state"]="idle" if verb=="abort" else "running"
-            if verb=="abort": self.agents[ref]["data"]["agent"]["run"]=None
             await self.publish(ref);return {"observed":True}
         if verb == "draft":
             import base64
@@ -373,10 +372,6 @@ class Native:
             ref, point = request["ref"], request["point"]
             native = self.agents[ref]["data"]["agent"]
             if point in ("settle", "idle"):
-                finished=native.get("run")
-                for receipt in self.receipts[ref].values():
-                    if finished is not None and receipt.get("run")==finished and receipt["stage"]=="inserted":
-                        receipt["stage"]="read"
                 native.update(state="idle", run=None, completion={"seq": self.serial, "reason": "completed"})
             pending = self.queues[ref]
             for index, args in enumerate(pending):
