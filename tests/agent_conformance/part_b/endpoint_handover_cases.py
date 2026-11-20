@@ -23,6 +23,20 @@ def lookup_names_plan(inspected, plan_id):
     return inspected.get("plan") == plan_id and inspected.get("historical") is True and inspected.get("state") in ("held", "completed")
 
 
+def barrier_invoked(calls, endpoint, barrier):
+    """T9: exactly one native agent.send of the barrier delivery, in the settle lane, at this endpoint, whose durable
+    claim names the endpoint's exact id and incarnation (the proof relies on settle being the last lane)."""
+    if len(calls) != 1:
+        return False
+    call = calls[0]
+    claim = ((call.get("witness") or {}).get("entry") or {}).get("value") or {}
+    target = claim.get("to") or {}
+    return (call.get("op") == "agent.send" and call.get("ref") == endpoint["backend_ref"]
+            and (call.get("args") or {}).get("mode") == "settle" and (call.get("args") or {}).get("delivery") == barrier
+            and claim.get("state") == "claimed" and target.get("agent") == endpoint["id"]
+            and target.get("incarnation") == endpoint["incarnation"])
+
+
 async def stored_plan(ctx, plan_id):
     """The recorded handover plan, read through the public operational API (never a store import)."""
     entry = (await ctx.peer.call("operational.get", {"domain": "coord", "key": "operational/coord/plan/" + plan_id})).get("entry")
@@ -37,10 +51,9 @@ async def scheduling_barrier(ctx, endpoint, text):
     await settled(ctx, barrier)
     calls = invocations(ctx, delivery=barrier)
     claim = (((calls[0].get("witness") or {}).get("entry") or {}).get("value") or {}) if calls else {}
-    ctx.check(len(calls) == 1 and calls[0]["ref"] == endpoint["backend_ref"] and claim.get("state") == "claimed"
-              and (claim.get("to") or {}).get("agent") == endpoint["id"],
-              "a later input through the same open destination was durably claimed and invoked (scheduler ran)",
-              barrier=barrier, claim=claim.get("to"))
+    ctx.check(barrier_invoked(calls, endpoint, barrier),
+              "a later settle-lane input through the same open destination was durably claimed and invoked (scheduler ran)",
+              barrier=barrier, mode=((calls[0].get("args") or {}).get("mode") if calls else None), claim=claim.get("to"))
     await ctx.native.call("point", ref=endpoint["backend_ref"], point="idle")
     return barrier
 

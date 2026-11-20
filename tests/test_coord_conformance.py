@@ -383,3 +383,14 @@ class HandoverCheckerRegressions(unittest.TestCase):
         self.assertFalse(ok(dict(self.plan, deliveries=["d:1"])))
         self.assertFalse(ok(dict(self.plan, deliveries=["d:1", "d:2", "d:3"])))
         self.assertFalse(ok(dict(self.plan, stages=[{"kind": "names", "state": "accepted"}])))
+
+    def test_barrier_needs_settle_lane_and_exact_claimed_target(self):
+        endpoint = {"id": "r2", "incarnation": "i:b", "backend_ref": "t9-plugin"}
+        def call(mode="settle", incarnation="i:b", delivery="d:bar", op="agent.send", ref="t9-plugin"):
+            return {"op": op, "ref": ref, "args": {"mode": mode, "delivery": delivery},
+                    "witness": {"entry": {"value": {"state": "claimed", "to": {"agent": "r2", "incarnation": incarnation}}}}}
+        self.assertTrue(self.m.barrier_invoked([call()], endpoint, "d:bar"))
+        self.assertFalse(self.m.barrier_invoked([call(mode="admit")], endpoint, "d:bar"))
+        self.assertFalse(self.m.barrier_invoked([call(incarnation="i:old")], endpoint, "d:bar"))
+        self.assertFalse(self.m.barrier_invoked([call(delivery="d:other")], endpoint, "d:bar"))
+        self.assertFalse(self.m.barrier_invoked([call(), call()], endpoint, "d:bar"))
