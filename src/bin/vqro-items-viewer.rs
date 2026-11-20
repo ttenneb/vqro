@@ -61,6 +61,7 @@ fn sum_errors(views: &HashMap<String, View>) -> ViewErrors {
         let e = &v.view.errors;
         a.duplicate += e.duplicate; a.missing += e.missing; a.stale_base += e.stale_base; a.unknown_entity += e.unknown_entity;
         a.bad_utf8 += e.bad_utf8; a.bad_json += e.bad_json; a.bad_record += e.bad_record; a.out_of_snapshot += e.out_of_snapshot;
+        a.oversize += e.oversize; a.over_bound += e.over_bound;
         a
     })
 }

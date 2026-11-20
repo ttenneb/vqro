@@ -354,15 +354,27 @@ pub struct ViewErrors {
     pub bad_record: u64,
     /// Snapshot framing out of order (a put with `seq` inside a snapshot, an `end` without `begin`, …).
     pub out_of_snapshot: u64,
+    /// A line longer than the record bound (dropped unread).
+    pub oversize: u64,
+    /// More entities or entity bytes than the view's bounds (the record, or the whole snapshot, is dropped).
+    pub over_bound: u64,
 }
 
 impl ViewErrors {
-    pub fn total(&self) -> u64 { self.duplicate + self.missing + self.stale_base + self.unknown_entity + self.bad_utf8 + self.bad_json + self.bad_record + self.out_of_snapshot }
+    pub fn total(&self) -> u64 { self.duplicate + self.missing + self.stale_base + self.unknown_entity + self.bad_utf8 + self.bad_json + self.bad_record + self.out_of_snapshot + self.oversize + self.over_bound }
 }
 
-/// A viewer's reconstruction of one agent's item stream.
+/// A viewer's reconstruction of one agent's item stream, bounded like the producer (record, entity count and entity
+/// bytes from [`JournalConfig`]): a longer line or more entities than declared is an error, never unbounded growth.
+/// After any error that loses data ([`ItemView::broken`]) the caller closes the stream and reattaches with
+/// [`ItemView::after`]; the installed state is never patched from a stream that lost records.
 #[derive(Debug, Default)]
 pub struct ItemView {
+    bounds: Option<JournalConfig>,
+    entity_bytes: usize,
+    broken: bool,
+    /// The snapshot being received exceeded the bounds: it is dropped at `end`, never installed.
+    snapshot_overflow: bool,
     epoch: Option<String>,
     seq: u64,
     entities: BTreeMap<(String, String), (u64, Value)>,
@@ -376,7 +388,13 @@ pub struct ItemView {
 }
 
 impl ItemView {
-    pub fn new() -> Self { Self::default() }
+    /// A view with the default bounds (64 KiB records, 512 entities, 512 KiB of entities).
+    pub fn new() -> Self { Self::with_bounds(JournalConfig::default()) }
+    /// A view bounded by the producer's declared limits (`items.entities`, `items.entity_bytes`).
+    pub fn with_bounds(bounds: JournalConfig) -> Self { ItemView { bounds: Some(bounds), ..Default::default() } }
+    /// Data was lost (a missing record, a stale append, an oversized line, a bound exceeded): close the stream and
+    /// reattach from [`ItemView::after`]. Cleared by [`ItemView::stream_ended`].
+    pub fn broken(&self) -> bool { self.broken }
     pub fn epoch(&self) -> Option<&str> { self.epoch.as_deref() }
     pub fn seq(&self) -> u64 { self.seq }
     pub fn len(&self) -> usize { self.entities.len() }
@@ -392,6 +410,19 @@ impl ItemView {
     pub fn stream_ended(&mut self) {
         self.buf.clear();
         self.pending = None;
+        self.snapshot_overflow = false;
+        self.broken = false;
+    }
+
+    fn bounds(&self) -> JournalConfig { self.bounds.clone().unwrap_or_default() }
+
+    /// The new entity-bytes total if `value` (new or replacing `key`) stays within the bounds, else None.
+    fn admit(entities: &BTreeMap<(String, String), (u64, Value)>, total: usize, key: &(String, String), value: &Value, b: &JournalConfig) -> Option<usize> {
+        let size = serde_json::to_vec(value).map(|v| v.len()).unwrap_or(usize::MAX);
+        let old = entities.get(key).map(|(_, v)| serde_json::to_vec(v).map(|v| v.len()).unwrap_or(0));
+        if old.is_none() && entities.len() >= b.max_entities { return None; }
+        let total = total.saturating_sub(old.unwrap_or(0)).saturating_add(size);
+        (total <= b.max_entity_bytes).then_some(total)
     }
 
     /// Feed stream bytes (any split); returns the notices received, in order.
@@ -401,13 +432,22 @@ impl ItemView {
     pub fn feed_records(&mut self, data: &[u8], mut on_record: impl FnMut(&Value)) -> Vec<Value> {
         self.buf.extend_from_slice(data);
         let mut notices = Vec::new();
-        while let Some(pos) = self.buf.iter().position(|b| *b == b'\n') {
+        let max_line = self.bounds().max_record_bytes;
+        loop {
+            let Some(pos) = self.buf.iter().position(|b| *b == b'\n') else {
+                // A partial line never grows past the record bound.
+                if self.buf.len() > max_line { self.buf.clear(); self.errors.oversize += 1; self.broken = true; }
+                break;
+            };
+            if pos >= max_line { self.buf.drain(..=pos); self.errors.oversize += 1; self.broken = true; continue; }
             let l: Vec<u8> = self.buf.drain(..=pos).collect();
             let Ok(text) = std::str::from_utf8(&l[..l.len() - 1]) else { self.errors.bad_utf8 += 1; continue };
             let Ok(r) = serde_json::from_str::<Value>(text) else { self.errors.bad_json += 1; continue };
-            let before = self.records;
+            let lossy = |e: &ViewErrors| e.missing + e.stale_base + e.over_bound + e.unknown_entity;
+            let (before, errors) = (self.records, lossy(&self.errors));
             if let Some(n) = self.apply(&r) { notices.push(n); }
             if self.records != before { on_record(&r); }
+            if lossy(&self.errors) != errors { self.broken = true; }
         }
         notices
     }
@@ -424,8 +464,13 @@ impl ItemView {
                         _ => self.errors.bad_record += 1,
                     },
                     // Installed only now (agent-v0 §4): epoch, every entity and the cut's seq.
+                    // An overflowing snapshot is dropped whole (the view is broken: reattach).
+                    (Some("end"), Some(_)) if self.snapshot_overflow => { self.snapshot_overflow = false; }
                     (Some("end"), Some((epoch, entities))) => match r["seq"].as_u64() {
-                        Some(seq) => { self.epoch = Some(epoch); self.entities = entities; self.seq = seq; self.snapshots += 1; }
+                        Some(seq) => {
+                            self.entity_bytes = entities.values().map(|(_, v)| serde_json::to_vec(v).map(|v| v.len()).unwrap_or(0)).sum();
+                            self.epoch = Some(epoch); self.entities = entities; self.seq = seq; self.snapshots += 1;
+                        }
                         None => self.errors.bad_record += 1,
                     },
                     _ => self.errors.out_of_snapshot += 1,
@@ -437,7 +482,14 @@ impl ItemView {
         if let Some((_, entities)) = self.pending.as_mut() {
             // Inside a snapshot: only puts without seq.
             match (op, key(), r["rev"].as_u64(), r.get("seq")) {
-                ("put", Some(k), Some(rev), None) if r.get("value").is_some() => { entities.insert(k, (rev, r["value"].clone())); }
+                ("put", Some(k), Some(rev), None) if r.get("value").is_some() => {
+                    let b = self.bounds.clone().unwrap_or_default();
+                    let total = entities.values().map(|(_, v)| serde_json::to_vec(v).map(|v| v.len()).unwrap_or(0)).sum();
+                    match Self::admit(entities, total, &k, &r["value"], &b) {
+                        Some(_) => { entities.insert(k, (rev, r["value"].clone())); }
+                        None => { self.errors.over_bound += 1; self.snapshot_overflow = true; }
+                    }
+                }
                 _ => self.errors.out_of_snapshot += 1,
             }
             return None;
@@ -449,13 +501,20 @@ impl ItemView {
         self.seq = seq;
         self.records += 1;
         match op {
-            "put" if r.get("value").is_some() => { self.entities.insert(k, (rev, r["value"].clone())); }
-            "remove" => { if self.entities.remove(&k).is_none() { self.errors.unknown_entity += 1; } }
+            "put" if r.get("value").is_some() => match Self::admit(&self.entities, self.entity_bytes, &k, &r["value"], &self.bounds()) {
+                Some(total) => { self.entity_bytes = total; self.entities.insert(k, (rev, r["value"].clone())); }
+                None => self.errors.over_bound += 1,
+            },
+            "remove" => match self.entities.remove(&k) {
+                Some((_, v)) => self.entity_bytes = self.entity_bytes.saturating_sub(serde_json::to_vec(&v).map(|v| v.len()).unwrap_or(0)),
+                None => self.errors.unknown_entity += 1,
+            },
             "append" => {
                 let Some((cur, value)) = self.entities.get_mut(&k) else { self.errors.unknown_entity += 1; return None };
                 if r["base"].as_u64() != Some(*cur) { self.errors.stale_base += 1; return None; }
                 let Some(field) = r["field"].as_str() else { self.errors.bad_record += 1; return None };
                 let Some(Value::String(s)) = value.pointer_mut(field) else { self.errors.bad_record += 1; return None };
+                let before = s.len();
                 match (r["text"].as_str(), r["bytes"].as_str()) {
                     (Some(t), None) => s.push_str(t),
                     (None, Some(b)) => match (B64.decode(s.as_bytes()), B64.decode(b)) {
@@ -465,6 +524,8 @@ impl ItemView {
                     _ => { self.errors.bad_record += 1; return None; }
                 }
                 *cur = rev;
+                self.entity_bytes += s.len().saturating_sub(before);
+                if self.entity_bytes > self.bounds().max_entity_bytes { self.errors.over_bound += 1; }
             }
             _ => self.errors.bad_record += 1,
         }
@@ -710,6 +771,36 @@ mod tests {
         assert_eq!(begin(&j)["coverage"], "state_only");
         j.new_epoch("e2");
         assert_eq!(j.coverage(), Coverage::AllRetained);
+    }
+
+    #[test]
+    fn a_view_is_bounded_and_says_when_to_reattach() {
+        // A line that never ends stops growing at the record bound.
+        let mut v = ItemView::new();
+        v.feed(&ItemJournal::new("e1", JournalConfig::default()).snapshot());
+        for _ in 0..100 { v.feed(&[b'x'; 4096]); }
+        assert!(v.buf.len() <= 64 * 1024);
+        assert!(v.errors.oversize >= 1);
+        assert!(v.broken());
+        v.stream_ended();
+        assert!(!v.broken());
+        // More entities than the view's bounds: the snapshot is dropped whole and flagged, never installed partially.
+        let mut j = ItemJournal::new("e1", JournalConfig { max_entities: 10, ..Default::default() });
+        for i in 0..10 { j.put("m", &format!("{i}"), json!({})).unwrap(); }
+        let mut v = ItemView::with_bounds(JournalConfig { max_entities: 5, ..Default::default() });
+        v.feed(&j.snapshot());
+        assert_eq!(v.errors.over_bound, 5);
+        assert!(v.broken() && v.is_empty() && v.epoch().is_none(), "nothing installed from an overflowing snapshot");
+        // Live puts past the bound are dropped and flagged too.
+        let mut v = ItemView::with_bounds(JournalConfig { max_entities: 2, ..Default::default() });
+        let mut j = ItemJournal::new("e1", JournalConfig::default());
+        v.feed(&j.snapshot());
+        let mut c = j.open(Some(&json!({"epoch": "e1", "seq": 0})));
+        for i in 0..3 { j.put("m", &format!("{i}"), json!({})).unwrap(); }
+        let Next::Data(d) = c.next(&j, 1 << 20) else { panic!() };
+        v.feed(&d);
+        assert_eq!((v.len(), v.errors.over_bound), (2, 1));
+        assert!(v.broken());
     }
 
     #[test]
