@@ -52,7 +52,7 @@ cd "$REPO" || exit 2
 snapshot() {
   python3 - "$RUN" <<'PY'
 import os, sys
-roots = [b"/tmp/pt", b"/tmp/pe2", b"/tmp/ppd", b"/tmp/pps", b"/tmp/pke", b"/tmp/phc", b"/tmp/pft", b"/tmp/ppe", b"/tmp/pev", b"/tmp/pscale", b"/tmp/vqro-tmux",
+roots = [b"/tmp/pt", b"/tmp/pe2", b"/tmp/ppd", b"/tmp/pps", b"/tmp/pst", b"/tmp/pke", b"/tmp/phc", b"/tmp/pft", b"/tmp/ppe", b"/tmp/pev", b"/tmp/pscale", b"/tmp/vqro-tmux",
          b"/tmp/pnf", b"/tmp/pws", b"/tmp/ptw", sys.argv[1].encode()]
 socks = {}
 for line in open("/proc/net/unix").read().splitlines()[1:]:
@@ -180,6 +180,7 @@ if [ "$MODE" = full ]; then
   step e2e-providers "${CLEAN[@]}" python3 tests/e2e_providers.py "$TARGET"
   step e2e-tui-providers "${CLEAN[@]}" python3 tests/e2e_tui_providers.py "$TARGET"
   step e2e-tui-paste-dropdown "${CLEAN[@]}" python3 tests/e2e_tui_paste_dropdown.py "$TARGET"
+  step e2e-tui-sidebar-tree "${CLEAN[@]}" python3 tests/e2e_tui_sidebar_tree.py "$TARGET"
   step e2e-tui-pick-search "${CLEAN[@]}" python3 tests/e2e_tui_pick_search.py "$TARGET"
   step e2e-tui-keys "${CLEAN[@]}" python3 tests/e2e_tui_keys.py "$TARGET"
   step e2e-workspace-tabs "${CLEAN[@]}" python3 tests/e2e_workspace_tabs.py "$TARGET"

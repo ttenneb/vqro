@@ -365,7 +365,7 @@ def visible_worktrees(w, prefs):
            if not (prefs["hide_detached"] and t.get("branch") == "(detached)")
            and not (prefs["changed_only"] and not (t.get("dirty") or t.get("ahead")))]
     limit = prefs["limit"]
-    if isinstance(limit, int) and limit > 0 and w["path"] not in expanded_worktrees and len(wts) > limit:
+    if type(limit) is int and limit > 0 and w["path"] not in expanded_worktrees and len(wts) > limit:
         return wts[:limit], len(wts) - limit
     return wts, 0
 
@@ -547,7 +547,7 @@ def option_rows():
         rows.append(row)
     rows += [{"type": "header", "text": "Worktrees"},
              {"type": "select", "text": "Per workspace", "value": wt["limit"], "command": "sidebar.worktrees", "args": {"key": "limit"},
-              "options": [{"label": "all" if n == 0 else f"at most {n}", "value": n} for n in LIMITS]},
+              "options": [{"label": "all" if n == 0 else f"at most {n}", "value": n} for n in sorted(set(LIMITS) | {wt["limit"]})]},
              {"type": "toggle", "text": "Only with changes", "checked": bool(wt["changed_only"]), "detail": "uncommitted or ahead of the repo's branch",
               "command": "sidebar.worktrees", "args": {"key": "changed_only", "value": not wt["changed_only"]}},
              {"type": "toggle", "text": "Hide detached", "checked": bool(wt["hide_detached"]), "detail": "no branch checked out",
