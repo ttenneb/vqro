@@ -8,7 +8,7 @@ cargo build --release
 # Copy from the directory cargo just built into (a per-agent CARGO_TARGET_DIR included), and check
 # every binary is there before anything is installed, so a failure never leaves a half install.
 TARGET="${CARGO_TARGET_DIR:-target}"
-for bin in vqro-herdr vqro-tmux vqro-bridge-pi vqro; do
+for bin in vqro-herdr vqro-tmux vqro-bridge-pi vqro-claude-hook vqro; do
   [ -x "$TARGET/release/$bin" ] || { echo "dev-install: $TARGET/release/$bin missing; nothing installed" >&2; exit 1; }
 done
 # Bundled extensions: the core installs the ones in defaults.json on first run.
@@ -16,6 +16,9 @@ mkdir -p "$HOME/.local/share/vqro/extensions" "$HOME/.local/bin"
 cp extensions/*.py extensions/defaults.json "$HOME/.local/share/vqro/extensions/"
 mkdir -p "$HOME/.local/share/vqro/extensions/manifests"
 cp extensions/manifests/*.json "$HOME/.local/share/vqro/extensions/manifests/"
+# The tier-1 Pi plugin, loaded per launch by the tier1 extension (pi -e); never added to ~/.pi.
+mkdir -p "$HOME/.local/share/vqro/extensions/tier1"
+cp integrations/pi/vqro-pull.ts "$HOME/.local/share/vqro/extensions/tier1/"
 # UI clients for `vqro ui <name>` (client manifests and programs; the built-in TUI needs none).
 mkdir -p "$HOME/.local/share/vqro/extensions/clients"
 # The OpenTUI trial client (clients/opentui, needs Bun and its packages) is not installed; run it from the repo.
@@ -33,8 +36,9 @@ for source in extensions/*; do
   cp "$source"/*.py "$destination/"
 done
 # Atomic replace: a running binary keeps its old inode. The provider programs (backends run as
-# extensions: vqro-herdr, vqro-tmux) go next to vqro, where the default extensions find them.
-for bin in vqro-herdr vqro-tmux vqro-bridge-pi vqro; do
+# extensions: vqro-herdr, vqro-tmux) go next to vqro, where the default extensions find them; so does
+# vqro-claude-hook, which the tier1 extension finds there.
+for bin in vqro-herdr vqro-tmux vqro-bridge-pi vqro-claude-hook vqro; do
   install -m 755 "$TARGET/release/$bin" "$HOME/.local/bin/.$bin.new"
   mv -f "$HOME/.local/bin/.$bin.new" "$HOME/.local/bin/$bin"
   cmp -s "$TARGET/release/$bin" "$HOME/.local/bin/$bin" || { echo "dev-install: $bin differs from $TARGET/release/$bin after install" >&2; exit 1; }

@@ -1,5 +1,5 @@
 {
-  "version": 7,
+  "version": 8,
   "extensions": [
     {
       "name": "tabs",
@@ -142,6 +142,15 @@
       ],
       "since": 6,
       "description": "Opens what you Ctrl-click in a terminal: URLs in the browser, files in an editor split. Off: links do nothing."
+    },
+    {
+      "name": "tier1",
+      "argv": [
+        "python3",
+        "tier1.py"
+      ],
+      "since": 8,
+      "description": "New Claude agent and New Pi agent (tier 1): the runtime in a plain terminal with vqro's inbox plugin wired for that launch only; your ~/.claude and ~/.pi are not touched."
     }
   ]
 }
