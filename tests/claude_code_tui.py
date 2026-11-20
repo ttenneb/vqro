@@ -238,6 +238,27 @@ try:
     os.kill(pid, 9); os.waitpid(pid, 0)
 except OSError:
     pass
+
+
+def waiters():
+    out = subprocess.run(["pgrep", "-f", a.hook + " wait"], capture_output=True, text=True).stdout.split()
+    mine = []
+    for w in out:
+        try:
+            if P["hookstate"] in open(f"/proc/{w}/environ", "rb").read().decode("utf-8", "replace"):
+                mine.append(w)
+        except OSError:
+            pass
+    return mine
+
+
+end = time.time() + 15
+while waiters() and time.time() < end:
+    time.sleep(0.5)
+left = waiters()
+check("no idle waiter outlives a killed Claude Code", not left, left)
+for w in left:
+    os.kill(int(w), 9)
 h.stop()
 print(f"{'FAILED' if fails else 'OK'}: {len(fails)} failures; root {root}")
 sys.exit(1 if fails else 0)

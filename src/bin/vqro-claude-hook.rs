@@ -655,7 +655,13 @@ mod unix {
         let mut backoff = Duration::from_millis(500);
         let mut core: Option<Core> = None;
         let mut woken = true; // take once when armed or reconnected, then only after a wake event: never poll
+        // Claude Code started this waiter; if it goes away (killed), nobody would read a rewake: exit.
+        let parent = std::os::unix::process::parent_id();
         loop {
+            if std::os::unix::process::parent_id() != parent {
+                ctx.log("waiter_orphaned", json!({}));
+                return 0;
+            }
             // Only an idle, current waiter may take: a new turn or a newer waiter retires this one.
             let (busy, current) = ctx.with_state(|s| (s.get("busy").as_bool().unwrap_or(false), s.get("waiter").as_u64() == Some(me)));
             if !current || std::time::Instant::now() > deadline {
@@ -666,7 +672,7 @@ mod unix {
                 core = subscribe(ctx);
                 if core.is_none() {
                     std::thread::sleep(backoff);
-                    backoff = (backoff * 2).min(Duration::from_secs(30));
+                    backoff = (backoff * 2).min(Duration::from_secs(5));
                 } else {
                     backoff = Duration::from_millis(500);
                     woken = true;
