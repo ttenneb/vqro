@@ -325,6 +325,8 @@ struct App {
     /// The last left press in a terminal: when, where and how many in a row (double and triple clicks).
     last_press: Option<(std::time::Instant, String, scrollback::Pos, u8)>,
     scroll_mode: Option<ScrollMode>,
+    /// A popup whose view hasn't arrived yet: view, width, context, and until when it may still open.
+    pending_popup: Option<(String, u16, Value, std::time::Instant)>,
     /// The cursor shape the focused terminal's program asked for, and the one last sent to the outer terminal.
     cursor_style: vt100::CursorStyle,
     cursor_sent: vt100::CursorStyle,
@@ -641,7 +643,7 @@ impl App {
             peer, tx, ws: Workspace::default(), safe_selected: BTreeSet::new(), owner_unset:false,
             terms: HashMap::new(), stream_view: HashMap::new(), early: HashMap::new(), early_closed: HashMap::new(), typed: None,
             leaves: Vec::new(), focus: 0, overlay: None, pstate: HashMap::new(),
-            filtering: None, filter_detail: false, toast: None, bells: HashMap::new(), selections: HashMap::new(), selecting: None, last_press: None, scroll_mode: None, cursor_style: vt100::CursorStyle::Default, cursor_sent: vt100::CursorStyle::Default, panel_values: Mutex::new(HashMap::new()), panel_dependencies: Mutex::new(HashMap::new()), hit: Hit::default(),
+            filtering: None, filter_detail: false, toast: None, bells: HashMap::new(), selections: HashMap::new(), selecting: None, last_press: None, scroll_mode: None, pending_popup: None, cursor_style: vt100::CursorStyle::Default, cursor_sent: vt100::CursorStyle::Default, panel_values: Mutex::new(HashMap::new()), panel_dependencies: Mutex::new(HashMap::new()), hit: Hit::default(),
             drag: None, overrides: HashMap::new(), mouse_owner: None, mouse_on: true,
             under: None, input_queues: HashMap::new(), view_streams: Arc::default(), zoomed: None, autofocused: None, window: Window::default(), pending_focus: None, tab_press: None, focus_now: None, focus_last: None, kbd_enhance: false,
             held: KeyModifiers::NONE, message: String::new(), key_hint: None,
@@ -674,6 +676,34 @@ impl App {
         self.message = snap["recovery_notice"].as_str().unwrap_or(if self.owner_unset {crate::principal::OWNER_NOTICE}else{"reconnected"}).into();
     }
 
+    /// Open a popup a command reply asked for. A command may write the view and reply at once; the reply and the
+    /// entries event travel separately, so a view this client doesn't know yet waits for the next events (up to
+    /// `POPUP_WAIT`, or until the user does something) instead of being refused.
+    fn open_popup(&mut self, view: String, width: u16, ctx: Value) {
+        match self.view_kind(&view).as_str() {
+            "" => {
+                self.message = format!("opening {view}…");
+                self.pending_popup = Some((view, width, ctx, std::time::Instant::now() + POPUP_WAIT));
+            }
+            "terminal" => self.message = "popup refused: terminals never pop up".into(),
+            _ => {
+                self.pending_popup = None;
+                self.under = None;
+                self.pstate.insert("@popup".into(), panel::State::default());
+                self.overlay = Some(Overlay::Popup { view, width, ctx });
+                if self.message.starts_with("opening ") { self.message.clear(); }
+            }
+        }
+    }
+
+    /// After events arrive (or on input): open the waiting popup if its view is known now; past its wait, say so.
+    fn settle_pending_popup(&mut self) {
+        let Some((view, width, ctx, until)) = self.pending_popup.take() else { return };
+        if !self.view_kind(&view).is_empty() { return self.open_popup(view, width, ctx); }
+        if std::time::Instant::now() >= until { self.message = format!("popup: no view {view}"); }
+        else { self.pending_popup = Some((view, width, ctx, until)); }
+    }
+
     fn load(&mut self, snap: &Value) {
         if let Some(unset)=snap["client_owner_unset"].as_bool(){self.owner_unset=unset;}
         self.recovery_only = snap["recovery_only"].as_bool().unwrap_or(false);
@@ -684,6 +714,7 @@ impl App {
         for state in self.pstate.values_mut() { state.prepared = None; }
         let was_safe = self.ws.load(snap);
         self.safe_mode_changed(self.ws.safe_mode, was_safe);
+        self.settle_pending_popup();
         self.settle_window();
     }
 
@@ -797,6 +828,7 @@ impl App {
                 Change::View(view) => {
                     self.invalidate_panel(&view);
                     for state in self.pstate.values_mut() { state.prepared = None; }
+                    if self.pending_popup.as_ref().is_some_and(|p| p.0 == view) { self.settle_pending_popup(); }
                 }
                 // The committed layout replaces any local drag preview.
                 Change::Layout => self.overrides.clear(),
@@ -882,17 +914,7 @@ impl App {
                     if c.editor.string() == text { c.editor.text.clear(); c.editor.cursor = 0; }
                 }
             }
-            Msg::Popup { view, width, ctx } => {
-                match self.view_kind(&view).as_str() {
-                    "" => self.message = format!("popup: no view {view}"),
-                    "terminal" => self.message = "popup refused: terminals never pop up".into(),
-                    _ => {
-                        self.under = None;
-                        self.pstate.insert("@popup".into(), panel::State::default());
-                        self.overlay = Some(Overlay::Popup { view, width, ctx });
-                    }
-                }
-            }
+            Msg::Popup { view, width, ctx } => self.open_popup(view, width, ctx),
             Msg::ShowLayout(name) => self.show_layout(&name),
             Msg::FocusView(view) => {
                 self.zoomed = None;
@@ -961,6 +983,7 @@ impl App {
 
     /// Returns whether a redraw is needed.
     fn on_event(&mut self, ev: Event) -> bool {
+        self.settle_pending_popup();
         match ev {
             // Bare modifiers (keyboard enhancement, prefix menu open): live feedback only.
             Event::Key(KeyEvent { code: KeyCode::Modifier(m), kind, modifiers, .. }) => {
@@ -3521,6 +3544,9 @@ fn new_parser_with(cols: u16, rows: u16, lines: usize) -> vt100::Parser<Effects>
 const DEFAULT_SCROLLBACK: usize = 2000;
 const SCROLLBACK_RANGE: std::ops::RangeInclusive<usize> = 100..=20_000;
 
+/// How long a popup waits for its view's entries event (see `App::open_popup`).
+const POPUP_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Where a terminal view's scroll mode is: reading its history with keys, and searching it.
 struct ScrollMode {
     view: String,
@@ -3673,6 +3699,26 @@ mod tests {
         // The setting is bounded.
         app.ws.entries.insert("doc/settings/tui".into(), json!({"scrollback_lines": 10_000_000}));
         assert_eq!(app.scrollback_lines(), 20_000);
+    }
+
+    #[tokio::test]
+    async fn a_popup_reply_before_its_view_waits_for_the_entries_event() {
+        let (mut app, _) = app();
+        app.load(&json!({"epoch":"e","seq":1,"entries":{}}));
+        // The reply arrives first: the view is unknown, so it waits instead of being refused.
+        app.on_msg(Msg::Popup { view: "req".into(), width: 50, ctx: json!({}) });
+        assert!(app.overlay.is_none());
+        assert_eq!(app.message, "opening req…");
+        app.on_event_record(&json!({"epoch":"e","seq":2,"type":"entries","data":{"changes":[{"key":"view/req","value":{"kind":"panel","items":[{"text":"answer?"}]},"version":1}]}}));
+        assert!(matches!(&app.overlay, Some(Overlay::Popup { view, .. }) if view == "req"), "opened when its view arrived");
+        assert!(!app.message.starts_with("opening"), "{}", app.message);
+        // A view that never comes: past the wait, the next event or input says so and opens nothing.
+        app.overlay = None;
+        app.on_msg(Msg::Popup { view: "never".into(), width: 50, ctx: json!({}) });
+        app.pending_popup.as_mut().unwrap().3 = std::time::Instant::now();
+        app.on_event(Event::FocusGained);
+        assert!(app.pending_popup.is_none() && app.overlay.is_none());
+        assert_eq!(app.message, "popup: no view never");
     }
 
     #[tokio::test]

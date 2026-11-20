@@ -23,6 +23,8 @@ type Overlay =
   | { kind: "filter"; key: string; search?: string };  // search: typing a search in that view (feature search)
 type Hit = { rect: Rect; act: (e: MouseEvent) => void };
 
+/** How long a popup waits for its view's entries event (see App.openPopup). */
+const POPUP_WAIT_MS = 2000;
 const width = (s: string) => Bun.stringWidth(s);
 /** Cut a string to at most `w` cells. */
 export function fit(s: string, w: number): string {
@@ -105,12 +107,35 @@ export class App {
     try {
       const snap = await this.peer.call("workspace.snapshot", {}, 10_000);
       const was = this.ws.load(snap);
+      this.settlePendingPopup();
       this.win.settle(this.ws);
       this.safeModeChanged(this.ws.safeMode, was);
       try { await this.peer.call("events.subscribe", { from: snap.seq, epoch: snap.epoch, partial_resources: true }); }
       catch (e) { if (!(e instanceof RpcError && e.kind === "conflict")) throw e; }
     } catch (e) { this.message = `snapshot failed: ${(e as Error).message}`; }
     finally { this.resyncing = false; this.redraw(); }
+  }
+
+  /** A popup a command reply asked for. The reply and the view's entries event travel separately, so an unknown view
+   *  waits for the next events (up to POPUP_WAIT_MS, or until the user does something) instead of being refused. */
+  pendingPopup: { view: string; width: number; ctx: Json; until: number } | null = null;
+  openPopup(view: string, width: number, ctx: Json) {
+    const kind = this.viewKind(view);
+    if (kind === "terminal") this.message = "popup refused: terminals never pop up";
+    else if (!kind) { this.message = `opening ${view}…`; this.pendingPopup = { view, width, ctx, until: Date.now() + POPUP_WAIT_MS }; }
+    else {
+      this.pendingPopup = null;
+      this.pstate.delete("@popup"); this.under = null; this.overlay = { kind: "popup", view, width, ctx };
+      if (this.message.startsWith("opening ")) this.message = "";
+    }
+  }
+  settlePendingPopup() {
+    const p = this.pendingPopup;
+    if (!p) return;
+    this.pendingPopup = null;
+    if (this.viewKind(p.view)) this.openPopup(p.view, p.width, p.ctx);
+    else if (Date.now() >= p.until) this.message = `popup: no view ${p.view}`;
+    else this.pendingPopup = p;
   }
 
   onNotify(method: string, params: Json) {
@@ -121,6 +146,7 @@ export class App {
       switch (c.type) {
         case "resync": void this.resync(); return;
         case "entries": {
+          this.settlePendingPopup();
           const s = this.win.settle(this.ws);
           if (typeof s === "object" && "Closed" in s) this.message = `workspace ${s.Closed.was} was closed`;
           if (!c.author.startsWith("ext:") && !c.author.startsWith("client:")) this.message = `workspace changed by ${c.author}`;
@@ -236,12 +262,7 @@ export class App {
       if (layout) this.win.show(this.ws, layout);
       if (isObj(hints)) {
         if (hints.close === true && this.overlay?.kind === "popup") this.overlay = null;
-        if (isObj(hints.popup) && typeof hints.popup.view === "string") {
-          const kind = this.viewKind(hints.popup.view);
-          if (kind === "terminal") this.message = "popup refused: terminals never pop up";
-          else if (!kind) this.message = `popup: no view ${hints.popup.view}`;
-          else { this.pstate.delete("@popup"); this.under = null; this.overlay = { kind: "popup", view: hints.popup.view, width: hints.popup.width ?? 60, ctx }; }
-        }
+        if (isObj(hints.popup) && typeof hints.popup.view === "string") this.openPopup(hints.popup.view, hints.popup.width ?? 60, ctx);
         if (isObj(hints.focus) && typeof hints.focus.view === "string") {
           this.zoomed = null;
           setTimeout(() => { const i = this.leaves.findIndex((l) => l.view === hints.focus.view); if (i >= 0) this.focus = i; this.redraw(); }, 50);
@@ -380,6 +401,7 @@ export class App {
   prefix(): string { const p = this.prefixKey(); return /^(C-|M-)/.test(p) || /^F\d+$/.test(p) ? p : "C-g"; }
 
   onKey(k: KeyEvent) {
+    this.settlePendingPopup();
     const name = keyName(k);
     if (!name) return;
     const o = this.overlay;
