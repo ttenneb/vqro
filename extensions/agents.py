@@ -622,7 +622,7 @@ class Agents:
             out = notes + agent_transcript.rows(c.view.entities, names, c.view.coverage, self.view_of(r["id"]))
         if c.stream is None and r.get("available") is not False:
             out.append({"type": "text", "style": "dim", "text": "Reconnecting to the conversation…"})
-        return out or [{"type": "text", "style": "dim", "text": "No messages yet."}]
+        return out or [{"type": "text", "style": "dim", "text": "No messages yet."}]  # complete coverage only: rows() discloses others
 
     def provider_caps(self, resource):
         caps = self.ext.providers.get(resource.get("provider"), {}).get("capabilities", {})

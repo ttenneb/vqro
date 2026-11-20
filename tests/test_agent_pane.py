@@ -86,6 +86,14 @@ class TranscriptRows(unittest.TestCase):
         self.assertEqual(sender({"kind": "agent", "principal": "p:solo"}), "Message from solo (agent r10)", "an agent over its terminal")
         self.assertEqual(sender({"kind": "human", "principal": "owner"}), "Message from owner")
 
+    def test_incomplete_coverage_is_always_disclosed_even_when_empty(self):
+        """#67 (vqro-lead-secondary): state_only and an empty tail are never shown as complete ("No messages yet")."""
+        names = agent_transcript.Names({}, "r2")
+        self.assertEqual([r["text"] for r in agent_transcript.rows({}, names, "state_only")],
+                         ["The agent sent only its current state, not its conversation."])
+        self.assertEqual([r["text"] for r in agent_transcript.rows({}, names, "tail")], ["No messages in the history this agent sent."])
+        self.assertEqual(agent_transcript.rows({}, names, "all_retained"), [], "complete and empty: the pane says No messages yet")
+
     def test_a_finished_empty_message_shows_no_bare_label(self):
         empty = {("message", "s1"): {"position": 1, "role": "system", "content": [], "final": True},
                  ("message", "m1"): {"position": 2, "role": "assistant", "content": [], "final": False}}
@@ -115,8 +123,8 @@ class TranscriptRows(unittest.TestCase):
         self.assertTrue(group["expanded"] and test["expanded"], "nothing hidden by default")
 
     def test_tail_coverage_says_so_and_the_budget_keeps_the_newest(self):
-        self.assertNotIn("Showing the history", self.rows(coverage="tail")[0].get("text", ""), "a fresh tail is no evidence")
-        note = {"type": "text", "style": "dim", "text": "Showing the history this agent kept; anything earlier isn't shown."}
+        self.assertEqual(self.rows(coverage="tail")[0]["text"], "Showing the history this agent kept.", "neutral: never shown complete")
+        note = {"type": "text", "style": "dim", "text": "Showing the history this agent kept; earlier messages aren't shown."}
         later = {k: dict(v, position=v.get("position", 0) + 5) if k[0] != "receipt" else v for k, v in CONVERSATION.items()}
         self.assertEqual(self.rows(later, coverage="tail")[0], note, "positions after the first: something was cut")
 
@@ -258,6 +266,11 @@ class AgentPane(unittest.TestCase):
         self.feed(snapshot({("message", "m5"): {"position": 7, "role": "assistant", "content": text("Fixed."), "final": True}}, seq=9))
         self.assertIn("Fixed.", self.texts())
         self.assertNotIn("Fixing both now!", self.texts())
+
+    def test_an_empty_state_only_pane_says_so_instead_of_no_messages(self):
+        self.feed(snapshot({}, coverage="state_only"))
+        self.assertIn("The agent sent only its current state, not its conversation.", self.texts())
+        self.assertNotIn("No messages yet.", self.texts())
 
     def test_a_closed_stream_reattaches_and_an_unavailable_agent_keeps_its_last_state(self):
         self.feed(snapshot(CONVERSATION, seq=4))
