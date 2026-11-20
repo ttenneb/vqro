@@ -1,0 +1,11 @@
+{
+  "name": "vqro-opentui-client",
+  "private": true,
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "type": "module",
+  "description": "Trial vqro client on OpenTUI (base profile + terminal views). Not installed by default.",
+  "dependencies": {
+    "@opentui/core": "0.9.5"
+  }
+}

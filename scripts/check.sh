@@ -161,6 +161,11 @@ step manifest-deps "${CLEAN[@]}" python3 scripts/check_manifest_deps.py
 step build-zero-warnings no_warnings
 step cargo-test "${CARGO[@]}" cargo test
 step python-unittest "${CLEAN[@]}" python3 -m unittest discover -s tests -p 'test_*.py'
+opentui_model() {  # the OpenTUI trial client's model against the shared fixtures; needs Bun, not its packages
+  local bun; bun=$(command -v bun) || { echo "bun not found: OpenTUI trial client model not checked"; return 0; }
+  (cd extensions/clients/opentui && env -i HOME="$HOME" PATH="$(dirname "$bun"):/usr/bin:/bin" "$bun" test src/conformance.test.ts)
+}
+step opentui-model opentui_model
 if [ "$MODE" = full ]; then
   "${CARGO[@]}" cargo build --bins >/dev/null 2>&1
   for suite in tmux tmux_timeout tmux_provider herdr_provider provider_wire provider_errors undo_attribution core_storm fd_lifecycle accept_limits operational_crash; do
