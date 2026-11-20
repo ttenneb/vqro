@@ -55,10 +55,7 @@ class Harness:
                        env=dict(self.env, VQRO_EXT_PATH=os.path.join(HERE, "..", "extensions")), stderr=open(os.path.join(root, "inbox.err"), "w"))
         self.c = Client(self.sock, owner=inbox == "k2core")
         end = time.time() + 60
-        while not any(x.get("name") == "coord.inbox.take" for x in self.c.call("command.list", {})["commands"]):
-            if time.time() > end:
-                raise RuntimeError("coord.inbox.take never registered; see core.log / inbox.err")
-            time.sleep(0.1)
+        self.wait_commands(end)
         if inbox == "k2core":
             while self.c.cmd("coord.status").get("state") != "ready" and time.time() < end:
                 time.sleep(0.2)
@@ -84,10 +81,21 @@ class Harness:
         self.procs[1] = subprocess.Popen([sys.executable, os.path.join(HERE, "fixtures", "fake_inbox.py"), self.inbox_log],
                                          env=dict(self.env, VQRO_EXT_PATH=os.path.join(HERE, "..", "extensions")), stderr=open(os.path.join(self.root, "inbox2.err"), "w"))
         self.c = Client(self.sock)
-        while not any(x.get("name") == "coord.inbox.take" for x in self.c.call("command.list", {})["commands"]):
-            time.sleep(0.1)
+        self.wait_commands(time.time() + 60)
         for rid, pull in self.declared.items():  # the launcher's declarations are workspace state, not inbox state
             self.c.cmd("fixture.declare", agent=rid, pull=pull)
+
+    def wait_commands(self, end):
+        """Every command the tests use: an inbox registers them one by one, so one name is not readiness."""
+        needed = {"coord.inbox." + n for n in ("window", "take", "report", "reconcile", "op", "send", "get", "resolve")}
+        needed |= {"coord.scope", "coord.status"} if self.kind == "k2core" else {"fixture.declare"} if self.kind == "fake" else set()
+        while True:
+            missing = needed - {x.get("name") for x in self.c.call("command.list", {})["commands"]}
+            if not missing:
+                return
+            if time.time() > end:
+                raise RuntimeError(f"inbox commands never registered: {sorted(missing)}; see core.log / inbox.err")
+            time.sleep(0.1)
 
     def k2_extensions(self, coord_ext):
         """A private extension directory with only `coord` (K2) declared, copied from the given coord-ext tree."""
