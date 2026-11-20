@@ -430,14 +430,12 @@ def rows(entities, names, coverage=None, view=None):
         dropped = dropped or 1
     if dropped:
         shown.insert(0, {"type": "text", "style": "dim", "text": f"… {dropped} earlier blocks not shown here (pane limit)"})
-    # Coverage is always disclosed: a tail or state-only snapshot is never shown as complete (agent-v0 §4). The wording
-    # is neutral; it says more only with evidence. The agent's positions starting after 1 suggest earlier entries (the
-    # Pi bridge and vqro-fake-items number from 1; agent-v0 does not promise it, so this only adds a phrase).
-    positions = [v.get("position") for (_, _), (_, v) in entities.items() if isinstance(v, dict) and type(v.get("position")) is int]
+    # Coverage is decided from what the agent DECLARED (agent-v0 §4): a tail or state-only snapshot is never shown as
+    # complete, in neutral words. Nothing here claims history was cut: positions are not evidence of that.
+    timeline = any(isinstance(v, dict) and type(v.get("position")) is int for (_, _), (_, v) in entities.items())
     if coverage == "state_only":
         shown.insert(0, {"type": "text", "style": "dim", "text": "The agent sent only its current state, not its conversation."})
     elif coverage == "tail":
-        text = ("Showing the history this agent kept; earlier messages aren't shown." if positions and min(positions) > 1
-                else "Showing the history this agent kept." if positions else "No messages in the history this agent sent.")
-        shown.insert(0, {"type": "text", "style": "dim", "text": text})
+        shown.insert(0, {"type": "text", "style": "dim", "text": "Showing the recent history this agent reported." if timeline
+                         else "No messages in the recent history this agent reported."})
     return shown

@@ -91,7 +91,7 @@ class TranscriptRows(unittest.TestCase):
         names = agent_transcript.Names({}, "r2")
         self.assertEqual([r["text"] for r in agent_transcript.rows({}, names, "state_only")],
                          ["The agent sent only its current state, not its conversation."])
-        self.assertEqual([r["text"] for r in agent_transcript.rows({}, names, "tail")], ["No messages in the history this agent sent."])
+        self.assertEqual([r["text"] for r in agent_transcript.rows({}, names, "tail")], ["No messages in the recent history this agent reported."])
         self.assertEqual(agent_transcript.rows({}, names, "all_retained"), [], "complete and empty: the pane says No messages yet")
 
     def test_a_finished_empty_message_shows_no_bare_label(self):
@@ -123,10 +123,11 @@ class TranscriptRows(unittest.TestCase):
         self.assertTrue(group["expanded"] and test["expanded"], "nothing hidden by default")
 
     def test_tail_coverage_says_so_and_the_budget_keeps_the_newest(self):
-        self.assertEqual(self.rows(coverage="tail")[0]["text"], "Showing the history this agent kept.", "neutral: never shown complete")
-        note = {"type": "text", "style": "dim", "text": "Showing the history this agent kept; earlier messages aren't shown."}
+        note = {"type": "text", "style": "dim", "text": "Showing the recent history this agent reported."}
+        self.assertEqual(self.rows(coverage="tail")[0], note, "declared tail: disclosed, neutral, never shown complete")
         later = {k: dict(v, position=v.get("position", 0) + 5) if k[0] != "receipt" else v for k, v in CONVERSATION.items()}
-        self.assertEqual(self.rows(later, coverage="tail")[0], note, "positions after the first: something was cut")
+        self.assertEqual(self.rows(later, coverage="tail")[0], note, "positions are no evidence of a cut: same words")
+        self.assertNotEqual(self.rows(later, coverage="all_retained")[0].get("style"), "dim", "complete: no note")
 
         many = {("message", f"m{i}"): {"position": i, "role": "assistant", "content": text(f"{i} " + "x" * 2000), "final": True}
                 for i in range(200)}
