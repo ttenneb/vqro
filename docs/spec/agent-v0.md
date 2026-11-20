@@ -1,8 +1,10 @@
 # vqro agent integration contract, v0 (draft)
 
-> **Status (2026-11-19): draft, not implemented** (D28). vqro is a working prototype, and fluid. Prototype
-> results P2–P6 are folded in. Nothing is stable until Pi and two genuinely different real runtimes
-> (Codex app-server and Claude Code) pass Part A of `agent-v0-conformance.md`.
+> **Status (2026-11-20): draft, partially implemented, unqualified** (D28). vqro is a working prototype, and fluid.
+> Prototype results P2–P6 are folded in. Core primitives and Pi, Codex app-server and Claude Code integrations exist,
+> with different declared capability subsets; this is not whole-contract qualification. Nothing is stable until
+> Pi and the two genuinely different real runtimes (Codex app-server and Claude Code) pass Part A of
+> `agent-v0-conformance.md`.
 
 **Audience: adapter authors.** This contract says what an agent integration exposes to vqro: endpoint identity,
 capabilities, facts, an item stream, send, interrupt and requests, honest evidence, optional modules and lifecycle

@@ -1,9 +1,10 @@
 # vqro coordination standard, v0 (draft)
 
-> **Status (2026-11-19): draft, not implemented** (D28). vqro is a working prototype, and fluid. Prototype results
-> P1–P6 and the R design are folded in. Open points are marked with the implementation stream that settles them:
-> `(pending C1)`, `(pending C2)`, `(pending C4)` or `(pending K2)` (the default coordination extension). Nothing is
-> stable until it passes Part B of `agent-v0-conformance.md` with real runtimes behind it.
+> **Status (2026-11-20): draft, partially implemented, unqualified** (D28). vqro is a working prototype, and fluid.
+> Prototype results P1–P6 and the R design are folded in. Generic core primitives and the default `coord` extension
+> exist; whole current-image Part B qualification is still outstanding. Remaining `(pending C1)`, `(pending C2)`,
+> `(pending C4)` and `(pending K2)` annotations identify the original implementation streams, not conformance
+> evidence. Nothing is stable until it passes Part B of `agent-v0-conformance.md` with real runtimes behind it.
 
 **Audience: whoever coordinates agents through vqro**, and authors of a replacement coordination extension. This is
 how vqro delivers messages to agents and organizes them: inbox, delivery strategies and composition, pull, handover,

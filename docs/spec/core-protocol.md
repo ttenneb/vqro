@@ -1480,7 +1480,9 @@ is running but no provider authenticated to that extension is connected and full
 and an available settings command remains usable to repair a disconnected provider. `generation` is an ephemeral supervisor counter (changes on launch/stop, resets
 with a core), not an execution-lifetime guarantee. Process ids stay internal. Last-exit evidence survives disabling
 or safe entry even when the display badge is off/stopped-by-safe-mode. Logs remain core-host files at
-`<state dir>/ext-<name>.log`; no generic in-app log viewer exists, so Settings reports the path and that limitation.
+`<state dir>/ext-<name>.log`. The bundled `logs` extension reads these core-host files and presents a bounded
+in-app tail (`logs.open`) through a generic panel fallback. Settings reports the path and offers **View log** while
+that command is available; disabling the viewer does not stop core log collection.
 
 `crashes` counts unexpected exits still in the current restart-budget window (300 seconds), excluding a budget
 cleared by explicit restart/spec replacement. It is computed when facts are serialized, so a healthy run ages

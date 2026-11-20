@@ -7,13 +7,17 @@ revised as we learn, not a commitment. Detail of what was built and when: `build
 > use and hardening are active; the platform and multi-machine streams below are candidates, not an order. The
 > multi-machine constraints (D23, confirmed) apply to all work now.
 
-## Where we are (2026-11-17)
+## Where we are (2026-11-20)
 
 Working and used daily over herdr-core on Linux:
 - Core: durable transactional store, event log with boot epochs, commands routed to owning connections, extension
   supervisor with a lifetime channel, bounded streams and queues, live view content, scale harness.
 - Providers (`spec/provider-v0.md`, section 9): wire protocol and Python/Rust SDKs, out-of-process `vqro-herdr` and
-  `vqro-tmux`, a Pi RPC bridge and the `agents` extension. The in-process herdr adapter is still the default.
+  `vqro-tmux`. The default herdr backend is the external `vqro-herdr` provider; in-process adapters remain for
+  tests/embedders, not normal `vqro serve` execution.
+- Agents: Rust Pi RPC bridge, Codex app-server adapter, Claude Code hooks and tier-1 launchers, plus the `agents`
+  and default `coord` extensions. Their capability subsets differ; the draft integration/coordination standards
+  are partially implemented and unqualified, pending current-image conformance.
 - TUI client and the bundled extensions (tabs, panes, gestures, workspaces, sidebar, themes, icons, keys, settings).
 
 Not yet: native Windows (compiles except the transport; runtime gaps in `build-plan.md`, "Windows work"), macOS
@@ -47,7 +51,8 @@ validation (compiles), WSL validation, any second machine.
    Windows in CI.
 3. WSL: vqro inside WSL smoke; then a Windows-side provider over `wsl.exe` and the bridge reachability mechanism.
 4. macOS: smoke run of core, TUI, providers; fix provider default names and the herdr command line.
-5. Second runtime (Claude Code) and undo for user-initiated extension changes, as daily use needs them.
+5. Qualify the implemented agent integrations and default coordination extension against their draft contracts.
+   Claude Code and Codex integrations and per-principal undo for user-initiated extension changes already exist.
 6. Freeze candidates: only pieces that survived two backends, two runtimes and two operating systems.
 
 Kill / rethink questions: does any primitive assume one host or one OS? Does a provider need the core to know its

@@ -1,6 +1,6 @@
 # vqro: architecture
 
-Status: **implemented working prototype, and fluid**, revised 2026-11-17. This replaces the 2026-11-16
+Status: **implemented working prototype, and fluid**, revised 2026-11-20. This replaces the 2026-11-16
 in-process-adapter architecture. The living contracts are `spec/core-protocol.md` and the implemented wire section
 9 of `spec/provider-v0.md`. Earlier sketches are historical, not alternative APIs.
 
@@ -11,7 +11,7 @@ second authority system. No contract is called stable before two implementations
 ## Execution and ownership
 
 ```text
-Clients (Rust TUI now; other clients later)
+Clients (built-in Rust TUI; Python text; optional OpenTUI trial)
   render terminal streams and declarative panels; own local focus/selection/scroll
                     |
 vqro core: transactions/history/undo, commands/bindings, resource identities,
@@ -38,7 +38,9 @@ capabilities. Explicit in-process adapters remain for tests/embedders, not the n
 | Providers | External backend/runtime registration, generation/source fencing, inventory chunks, capabilities, forwarded effects and credited streams | `src/provider.rs`, `src/provider_wire.rs`, `src/provider_client.rs` |
 | Identity/facts | Indexed active identity map with durable monotonic id counter; batched inventory replacement; observed availability and explicit retirement | `src/provider.rs`, `src/core.rs`, `src/resource_admission.rs` |
 | Backend implementations | `vqro-herdr` over hc framing; `vqro-tmux` over its separate native server; fake backend/provider fixtures | `src/bin/vqro-herdr.rs`, `src/bin/vqro-tmux.rs`, `src/adapter/`, `src/tmux/` |
-| Pi integration | Backend-owned bridge process driving Pi RPC; durable bootstrap/resume binding and runtime resources; fake-Pi E2Es require no model calls | `extensions/pi_bridge/`, `src/bridge_tokens.rs` |
+| Structured agent integrations | Backend-owned Rust Pi RPC bridge and Codex app-server adapter; declared native capability subsets and shared item streams; draft contracts remain unqualified | `src/bin/vqro-bridge-pi/`, `src/bin/vqro-bridge-codex.rs`, `src/provider_client/`, `src/bridge_tokens.rs` |
+| Terminal-agent integration | Claude Code hooks/native admission and Pi pull plugin; per-launch tier-1 wiring without changing the user's runtime configuration | `src/bin/vqro-claude-hook.rs`, `integrations/pi/`, `extensions/tier1.py`, `extensions/tier1_run.py` |
+| Coordination policy | Default replaceable `coord` extension: inbox, grants, pause/resume, handover and retained evidence over generic protected operational state; draft contract remains unqualified | `extensions/coordination*.py`, `src/operational.rs` |
 | Extensions | Supervised declarations, static manifests, versioned defaults, live replacement/crash diagnostics and empty-start safe-mode recovery | `src/ext.rs`, `src/manifest.rs`, `extensions/` |
 | TUI | Terminal VT rendering, layouts/tabs/splits, generic panels/list-detail, menus/popups, mouse, themes/icons/keymaps, recovery prefix and reinstall re-exec | `src/tui/` |
 | Workspace opinions | Tabs/panes/gestures/workspaces/sidebar, theme/icon/key catalogues, Settings, capability-driven agent controls, Pi launcher, tmux server controls | `extensions/*.py`, `extensions/manifests/` |
@@ -90,6 +92,8 @@ collision/attribution mechanisms, not a new grant system.
 
 The endpoint contract is platform-neutral and opaque (D12/D22); Unix transport ships today, native Windows
 transport remains unimplemented. Runtime/provider execution placement and any future remote reachability must
-stay backend-neutral (D23): the rejected herdr document relay is not an architectural dependency. Other runtime
-adapters (Claude Code, Codex, ACP), remote-machine UX, a registry/installer and broader view vocabulary remain
-roadmap/research work, not shipped guarantees. `roadmap.md` owns their order.
+stay backend-neutral (D23): the rejected herdr document relay is not an architectural dependency. Pi, Codex and
+Claude Code integrations exist, but implementation and real-runtime smokes are not whole-contract qualification:
+`spec/agent-v0.md` and `spec/coordination-v0.md` remain drafts, partially implemented and unqualified. Remote-machine
+UX, a registry/installer and broader view vocabulary remain roadmap/research work, not shipped guarantees.
+`roadmap.md` owns their order.
