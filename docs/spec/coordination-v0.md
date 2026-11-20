@@ -64,8 +64,8 @@ the generic keys below (`doc/principals/…`) and never reads coordination grant
 - **Resolving `actor`** (the human's choice AS6) `(pending C2)`: the TUI is the owner principal; an extension is
   itself; a pane vqro spawned is the principal its launcher injected. A host that serves several endpoints (an
   app-server) passes a per-endpoint tag to each tool it runs where the runtime evidences which endpoint ran it;
-  otherwise its calls resolve to the host's own principal (`host:<id>`), never to one of its endpoints by guess. A
-  call with nothing known is `undeclared`: accepted for raw and recovery primitives, never the owner, no coordination
+  otherwise a verified host-context route may bind the host's own principal (`host:<rid>`), never one of its
+  endpoints by guess. A call with nothing known is `undeclared`: accepted for raw and recovery primitives, never the owner, no coordination
   grants, no default `u`. An agent started by hand inside a human-opened shell inherits that shell's principal
   (`VQRO_PRINCIPAL`, possibly the owner) by design; its process or app name does not retag it. Use the launcher
   to obtain a launcher-tagged agent principal. Principal ids beginning `extension:`, `host:` or `system:` are
@@ -81,8 +81,13 @@ the generic keys below (`doc/principals/…`) and never reads coordination grant
   and socket to its runtime child; an inherited owner principal from a human shell is not this route.
   A many-endpoint runtime needs native
   per-endpoint/per-thread environment support (or a child per endpoint), not one shared principal for all tools.
-  Without that native route, the capability is absent and attribution remains the host's principal, visibly a
-  gap, never guessed as one endpoint. This is not permission to assert core-reserved principal names at hello.
+  Without that native route, the capability is absent: host attribution, where verified, remains a visible
+  per-endpoint gap, never guessed as one endpoint. **Opt-in host context:** a provider serving many endpoints may
+  explicitly export a verifiable host token to tool child processes it launches. The core verifies this context
+  like an extension token and binds their CLI calls to its core-assigned `host:<rid>` principal. This is not a
+  `hello` identity assertion and does not satisfy per-endpoint `tool_principal: "env"`. Human-opened shells never
+  inherit the host token; without a verified context or another connection-known identity the call remains
+  `undeclared`. G11 selects its shared-host branch on this verified opt-in route, not a caller's claimed host id.
 - **Callback proofs** travel in the `invocation` request field (an opaque proof). A live invocation proof captures
   the invoking call's effective principal and its original initiator separately; writes made under the proof carry
   that effective principal and that initiator. Example: A holds a B→A delegation and invokes `on_behalf_of` B; the

@@ -580,6 +580,12 @@ replaced when the Pi bridge is ported.
   asserted by the coordination extension from protected state, not a core attestation. Show from sender via actor.
   Asynchronous forwarding has no end-to-end core proof in v0; no invented proof retention or implicit delegation.
 
+**Further implementation rulings (2026-11-20, spec batch 7).**
+- A many-endpoint host provider may opt in to export a verifiable host token to tool child processes it launches.
+  Verified like an extension token, it binds CLI calls to core-assigned `host:<rid>`, never a `hello` assertion or
+  an endpoint guessed from placement. Human-opened shells never inherit it. G11 selects the shared-host branch
+  on this route; it does not satisfy per-endpoint `tool_principal: "env"` or confer endpoint rights by itself.
+
 **Human answers (2026-11-19, CONFIRMED).**
 - **AS1, pause:** "vqro stops delivery": paused means vqro sends, hands out and wakes nothing until resumed; an agent
   still working shows as working; a runtime with a real pause may offer it as an extra capability. Physical

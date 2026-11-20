@@ -159,6 +159,8 @@ Adapters publish only what the runtime reports, including estimates labelled as 
   host must use native per-endpoint/per-thread environment support or a runtime child per endpoint; one shared
   process-wide principal is not per-endpoint attribution. If the runtime cannot provide that, omit the capability
   and report the host-attribution gap (conformance G11), never guess, emulate or assert a reserved principal at hello.
+  The opt-in verified host-token route (`coordination-v0.md` §3) can bind provider-launched tools to `host:<rid>`;
+  it is a shared-host attribution route, not this per-endpoint `env` capability, and never enters human shells.
 - Every `agent.*` op takes `args {v, caps_rev?, epoch?, guard?, cause?, …}`. The core checks only that the op is
   declared. **The adapter rejects** before any native write (`unsupported`, `stale` or `invalid`): an unknown action,
   args outside its `caps`, a stale `caps_rev` or `epoch`, a precondition it cannot check as strongly as declared, and

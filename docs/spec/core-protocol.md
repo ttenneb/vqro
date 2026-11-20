@@ -66,8 +66,12 @@ Verified supervised extensions resolve to `extension:<name>`. Callers cannot ass
 A runtime registration without a configured actor
 resolves to `host:<host resource id>` from its existing bootstrap claim; the reply supplies `host` and `actor`.
 Multi-endpoint runtimes must inject an evidenced endpoint principal into each tool's environment, or use their
-host principal: neither core nor SDK guesses from the last message, pane, pid or placement. A bound connection
-cannot be retagged by another hello; open a new connection to deliberately change configured identity.
+host principal: neither core nor SDK guesses from the last message, pane, pid or placement. An opt-in host
+provider may export a verifiable host-context token only to tool children it launches; verified like an extension
+token, it binds their CLI calls to core-assigned `host:<rid>`, never a caller's `hello.identity` host assertion.
+Human-opened shells never inherit that token. Without verified context or another configured identity, ordinary
+clients remain `undeclared`. This shared-host route does not claim per-endpoint tool attribution (G11).
+A bound connection cannot be retagged by another hello; open a new connection to deliberately change configured identity.
 
 Requests may declare diagnostic `label` (at most 256 bytes, no controls); it never changes identity or rights.
 Record fields `author`, `actor`, `principal`, `initiator`, and `label` are core supplied except the diagnostic label:

@@ -347,9 +347,13 @@ a single-endpoint host passes its launcher-given values to the child, never an i
 principal under an `env` claim. With a many-endpoint host, tools from two endpoints
 must still resolve to distinct correct endpoint principals using native per-endpoint/per-thread support or
 separate runtime children; a shared process-wide principal fails that declaration. If the native route is not
-provided, omit the capability and record the attribution gap: calls resolve to `host:<id>`, shown as such,
-never the host's first endpoint by guess. Reserved principal names are not asserted at hello; `host:<id>` acts
-for an endpoint's principal only through a delegation row with `on_behalf_of`.
+provided, omit the capability and record the per-endpoint attribution gap. Select the **shared-host** case only
+when the host provider opts in to export a verifiable host-context token to tool children it launches: CLI calls
+from tools of two endpoints both bind the correct core-assigned `host:<rid>`, verified like an extension token,
+never guessed as either endpoint. A raw `hello.identity` host assertion still rejects; absent/unverified context
+never establishes host identity. Human-opened shells do not inherit the host token and receive no host attribution
+from it. `host:<rid>` acts for an endpoint's principal only through a delegation row with `on_behalf_of`; this
+route never upgrades the missing per-endpoint `env` declaration.
 G12 write ownership, checked against the state before the transaction and the connection's **actor**, never its
 effective/delegated principal: a non-owner actor's write, delete or revert of `doc/principals/owner` is refused;
 W cannot create `{from: P, to:
