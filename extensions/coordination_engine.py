@@ -13,6 +13,7 @@ import uuid
 
 from coordination_store import StoreError, encoded
 from coordination_archive import export as export_archive
+from coordination_requests import inspect_route, notice_states, notice_open
 from coordination_policy import Policy, PolicyError, QuotaLimits, check_admission, bounded_page, FairQueue, record_charge
 
 OPEN = {"recorded", "held", "claimed", "unknown"}
@@ -495,7 +496,28 @@ class Coordinator:
             row["membership_ref"] = {"rN": agent, "revision": policy.entries[key]["version"]}
         self._agent_put(work, agent, row)
 
-    def send(self, args, context):
+    def request_route(self, agent, policy=None):
+        route = inspect_route(policy or self.policy(), agent)
+        for endpoint, label in ((agent, 'requester'), (route['coordinator'], 'coordinator')):
+            if endpoint:
+                row = self.store.get(self._agent_key(endpoint))
+                stone = (row or {}).get('value', {}).get(endpoint, {})
+                if stone.get('lifecycle') in ('retired', 'ended'):
+                    return dict(route, route='human', human=True, coordinator=None, fallback_reason=label + '_' + stone['lifecycle'])
+        return route
+
+    def _notice_authorized(self, notice, target, principal, policy):
+        if principal != getattr(self, "notice_principal", None) or not isinstance(notice, dict):
+            return False
+        source = notice.get("agent")
+        if not isinstance(source, str):
+            return False
+        route = self.request_route(source, policy)
+        states = notice_states({source: policy.resources.get(source, {})})
+        return (route["coordinator"] == target and route["fallback_reason"] is None
+                and states.get(source) is not None and notice.get("key") in states[source])
+
+    def send(self, args, context, *, request_notice=None):
         def admit(work, policy):
             principal = context["principal"]
             submission = args.get("submission")
@@ -520,7 +542,11 @@ class Coordinator:
             if not isinstance(address, (str, dict)):
                 raise CoordinationError("invalid", "send needs an exact address or readable handle")
             agent = policy.resolve_target(address if isinstance(address, str) else address.get("agent"))
-            policy.require(principal, "send:" + (args.get("strategy") or normalized["mode"]), agent)
+            if request_notice is None:
+                policy.require(principal, "send:" + (args.get("strategy") or normalized["mode"]), agent)
+            elif (normalized["mode"] != "admit" or normalized.get("strategy") is not None
+                    or not self._notice_authorized(request_notice, agent, principal, policy)):
+                raise CoordinationError("no_grant", "native request notice route is no longer authorized")
             if normalized.get("strategy") == "interrupt_then_start":
                 for step_right in ("queue", "interrupt", "send:start"):
                     policy.require(principal, step_right, agent)
@@ -572,6 +598,8 @@ class Coordinator:
                 record[key] = copy.deepcopy(args.get(key))
             record["follow_current_session"] = args.get("follow_current_session", False)
             record["outcome_steps"] = outcome_steps
+            if request_notice is not None:
+                record["request_notice"] = copy.deepcopy(request_notice)
             cause = copy.deepcopy(args.get("cause"))
             if cause:
                 cause["provenance"] = "asserted"
@@ -820,7 +848,10 @@ class Coordinator:
         if self._ordering_predecessor(record, self._ordering_heads(self.records())):
             return "ordering_unknown"
         right = "send:" + (record.get("strategy") or record["mode"])
-        if not policy.allowed(record["from"]["principal"], right, agent):
+        if record.get("request_notice") is not None:
+            if not self._notice_authorized(record["request_notice"], agent, record["from"]["principal"], policy):
+                return "request_route_changed"
+        elif not policy.allowed(record["from"]["principal"], right, agent):
             return "membership_invalid" if policy.team_grant_blocked(record["from"]["principal"], right, agent) else "no_grant"
         if record.get("strategy") == "interrupt_then_start" and not all(
                 policy.allowed(record["from"]["principal"], step_right, agent)
@@ -997,7 +1028,9 @@ class Coordinator:
                 elif ((record.get("guard") or {}).get("run") is not None and facts.get("run") is not None
                       and record["guard"]["run"] != facts["run"]):
                     reason = "stale_guard"
-                elif not self.policy().allowed(record["from"]["principal"], right, target):
+                elif (not self._notice_authorized(record['request_notice'], target, record['from']['principal'], self.policy())
+                      if record.get('request_notice') is not None else
+                      not self.policy().allowed(record["from"]["principal"], right, target)):
                     reason = "no_grant"
                 elif not outcomes and record.get("expires_at_ms") is not None and self.clock() >= record["expires_at_ms"]:
                     reason = "expired"
@@ -1382,6 +1415,8 @@ class Coordinator:
                                             expect=args.get("expect"), membership_revision=args.get("membership_revision"))
             elif command == "grants":
                 ops = policy.grant_ops(principal, args.get("id"), args.get("value"), expect=args.get("expect"))
+            elif command == "request_route":
+                ops = policy.request_route_ops(principal, args)
             else:
                 raise CoordinationError("invalid", "unknown configuration operation")
             return {"ops": ops}
@@ -1823,6 +1858,8 @@ class Coordinator:
         frozen = {record_key for name, row in work.rows.items() if name.startswith("archive/")
                   and row["value"].get("state") in ("frozen", "exporting", "exported", "partial")
                   for record_key in row["value"].get("frozen", {})}
+        pinned = []
+        request_states = notice_states(self.resources())
         for key, row in work.rows.items():
             value = row["value"]
             if key.startswith("message/") and value.get("state") not in OPEN:
@@ -1833,7 +1870,8 @@ class Coordinator:
                     continue  # insertion/context supply is not a completed pull report
                 if key in frozen:
                     continue
-                finals.append((value.get("final_seq", row["version"]), key, row))
+                destination = pinned if notice_open(value, request_states) else finals
+                destination.append((value.get("final_seq", row["version"]), key, row))
             elif key.startswith("external/") and value.get("state") in ("accepted", "observed", "dispatched", "rejected", "partial"):
                 if key not in frozen:
                     finals.append((value.get("final_seq", row["version"]), key, row))
@@ -1853,7 +1891,7 @@ class Coordinator:
             work.put("settled", settled)
         # Compact retained native outcomes, not active pull tokens or unknown claims.
         oversized = []
-        for _, key, row in finals[excess:]:
+        for _, key, row in pinned + finals[excess:]:
             if len(work.changes) >= 45:
                 break
             value = row["value"]
@@ -1877,6 +1915,8 @@ class Coordinator:
                 continue
             result = value.get("result") or {}
             compact = {name: copy.deepcopy(value.get(name)) for name in ("v", "delivery", "submission", "intent", "mode", "priority", "order", "state", "reason")}
+            if "request_notice" in value:
+                compact["request_notice"] = copy.deepcopy(value["request_notice"])
             compact.update(to={"agent": value["to"]["agent"]}, **{"from": {"principal": value["from"]["principal"]}},
                            incomplete=True, final_seq=value.get("final_seq", row["version"]),
                            content_hash=digest(value.get("content", [])),
@@ -2024,6 +2064,9 @@ class Coordinator:
                     data = source.read(9 * 1024 * 1024 + 1)
                 if len(data) > 9 * 1024 * 1024 or hashlib.sha256(data).hexdigest() != plan["manifest_hash"]:
                     raise CoordinationError("conflict", "archive readback changed; retain all source evidence")
+                request_states = notice_states(self.resources())
+                if any(notice_open(work.get(key, {}), request_states) for key in plan["frozen"]):
+                    raise CoordinationError("conflict", "request notice source is pending or unknown; original retained")
                 index = work.get("archive-index", {})
                 freed, changed = [], []
                 for key, version in plan["frozen"].items():

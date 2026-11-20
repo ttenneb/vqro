@@ -488,10 +488,19 @@ plan pre-reserves **16 KiB / 4 future records** for its remaining recovery metad
 
 ### 6.2 Request routing
 
-Each agent has a request route: `human`, `coordinator` or `both`. This is ordinary attributed agent
-configuration, not native request state; the owner or a principal holding `configure` on that agent may change
-it through transactions. Launchers record the route: default `human` for agents the owner starts,
-`coordinator` for agents launched by a coordinator.
+The public ordinary key is **`doc/agents/request-routes/<rN> = {route: human | coordinator | both}`**.
+This is attributed agent configuration, not native request state. Missing means `human`; malformed/unknown values
+remain untouched and yield a visible human fallback. `coord.request_route {action: inspect, agent}` returns the key,
+version, configured/effective route, human flag, exact coordinator or null and `fallback_reason` (no writes).
+`{op, action: set, agent, route, expect}` requires the owner or current `configure` on that agent and applies an
+ordinary attributed CAS transaction (undoable; no native effect). Raw workspace writes are outside this cooperative
+policy check, not an impersonation/security boundary. `initialize` has the same configure/CAS checks, requires an
+unset key and derives defaults from the core-authenticated SDK caller, never body fields: owner-started `human`,
+a unique associated coordinator agent `coordinator`; unbound/ambiguous callers default human. It can seed a missing
+`reports_to` to that exact launcher only with current membership rights on both endpoints; otherwise the coordinator
+preference has a visible human fallback until membership/answer rights exist. Team launchers seed the needed rights.
+The Pi launcher records this once after observed spawn (failure never replays spawn); tier-1 launchers explicitly
+record `human`. No name, foreground pane, title or arbitrary answer holder confers coordinator identity.
 
 - `human`: show the waiting notice and request popup in the requesting agent's pane.
 - `coordinator`: deliver an inbox message about the request to the requesting agent's **recorded coordinator**,
@@ -502,12 +511,31 @@ it through transactions. Launchers record the route: default `human` for agents 
   with a visible reason. There is no guessed coordinator or automatic successor routing.
 - `both`: coordinator delivery plus the human waiting notice/popup (or the visible human fallback above).
 
-Routing never answers or auto-approves. The coordinator answers through `coord.control {action: respond}` with
+Autonomous notices act as the actual `extension:coord` principal under only this configured pending-request route,
+not a forged owner or a general send grant. They use normal sender/target/domain quotas and receiver gates; a
+pre-effect refusal gives a visible human fallback. The source request's native epoch/id/revision/scope accompany the
+notice (as data, not an answer). An existing inbox record carries `request_notice:{agent,key}`; its source key is the
+hash of requester/incarnation/native epoch/id/revision/scope. The same source+recipient is not recreated after
+operation-window expiry or restart. While the source remains pending or unknown, this ordinary charged record is
+compacted but protected from final GC/archive-free; only positive obsolete native facts release that protection.
+No second pool, silent evidence eviction, expiry extension or native input replay is introduced. Derived
+`coord-requests-<rN>` live content reports effective human/fallback/delivery state; disconnection clears it, and the
+agents UI conservatively shows human fallback when the projection is missing or does not match current requests.
+
+The coordinator-only pane still pins a non-interactive “waiting for <coordinator>” line, not an idle-looking pane.
+Shared projections do not establish a viewer's answer right; manual Control remains available. The agents UI uses
+the shared request-route contract helper, not a dependency on the replaceable coordinator implementation.
+
+Routing never answers or auto-approves. The coordinator and v0 agents UI answer through `coord.control {action: respond}` with
 `agent.respond`'s epoch/revision/scope/expiry fences (`agent-v0.md` §5), checked along with its current `answer`
 right. Any other principal holding `answer`, including the owner, may still respond through Control regardless
 of route. **First valid answer wins**; other viewers/controllers see it answered and cannot write a second native
 response. Unanswered requests stay pending under their native expiry rules; routing creates no new expiry,
 renewal or weaker response fence. Inbox delivery or a human notice is never evidence of an answer.
+For D15 recovery, the v0 UI checks public `command.list` before attempting coordination: when either required command
+is positively absent it uses raw `agent.respond` with the shown native epoch/revision. After any registered command
+error/timeout it never falls back or resends. A deliberate later retry is a new operation; the native revision fence
+preserves first-valid-answer-wins. Raw core Control remains available with coordination off/failed/safe-mode/replaced.
 
 ## 7. Pull at safe points (P5)
 

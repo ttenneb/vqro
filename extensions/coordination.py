@@ -4,6 +4,7 @@ No terminal typing, native replay, runtime supervision, or workspace persistence
 fallback. Missing C1/C2 support is visible and fails closed; raw recovery survives.
 """
 import copy
+import json
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -15,12 +16,13 @@ from coordination_engine import (Coordinator, digest, refusal_receipt, SCOPE_CAP
                                  ARCHIVE_ESCROW_BYTES, ARCHIVE_ESCROW_RECORDS, IDENTITY_SUMMARY_BYTES)
 from coordination_policy import PolicyError, bounded_page, QuotaLimits
 from coordination_streams import ItemReceiptStreams, ItemReceiptSink
+from coordination_requests import pending_requests, request_key, native_facts
 from dataclasses import asdict
 
 COMMANDS = (
     "inbox.window", "inbox.send", "inbox.edit", "inbox.withdraw", "inbox.take", "inbox.report",
     "inbox.reconcile", "inbox.peek", "inbox.resolve", "inbox.list", "inbox.get", "inbox.op",
-    "inbox.archive", "handover", "scope", "control", "names", "grants", "membership.set", "status",
+    "inbox.archive", "handover", "scope", "control", "names", "grants", "membership.set", "request_route", "status",
 )
 
 
@@ -77,6 +79,9 @@ class CoordinationService:
         self.event = threading.Event()
         self.inventory_dirty = True
         self.dispatch_dirty = True
+        self.request_cursor = 0
+        self.request_views = set()
+        self.next_request_scan = 0.0
         self.pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="coord-native")
         self.jobs = set()
         self.job_lock = threading.Lock()
@@ -145,6 +150,7 @@ class CoordinationService:
                                  invoke=self.invoke, config_apply=self.config_apply, wake=self.wake)
             # Do not expose a partially recovered engine or any of its permits.
             # Every Coordinator boot write has confirmed before this publication.
+            engine.notice_principal = self.ext.info.get("principal")
             self.engine = engine
             self.bootstrap_state = "ready"
             self.inventory_dirty = self.dispatch_dirty = True
@@ -389,6 +395,9 @@ class CoordinationService:
             return engine.scope_preview(args.get("scope", "workspace"))
         if command == "control" and args.get("action") == "inspect":
             return engine.control(args, context)
+        if command == "request_route" and args.get("action", "inspect") == "inspect":
+            policy = engine.policy()
+            return engine.request_route(policy.resolve_target(args.get("agent")), policy)
         if command == "scope" and args.get("action") == "result":
             return engine.scope_result(args.get("receipt"), args.get("page"))
         if command == "inbox.archive":
@@ -398,13 +407,82 @@ class CoordinationService:
                    "handover": engine.handover, "scope": engine.scope, "control": engine.control}
         if command == "inbox.withdraw":
             result = engine.edit(args, context, withdraw=True)
-        elif command in ("names", "grants", "membership.set"):
+        elif command in ("names", "grants", "membership.set", "request_route"):
+            if command == 'request_route' and args.get('action') == 'initialize':
+                self.ext.fresh()  # observed spawn must not race this SDK's resource notification cache
             result = engine.config_action("membership" if command == "membership.set" else command, args, context)
         else:
             result = actions[command](args, context)
         self.dispatch_dirty = True
         self.event.set()
         return result
+
+    def route_requests(self):
+        """Bounded autonomous notices, never answers; all data/evidence stays in the existing ledger."""
+        engine = self.engine
+        policy = engine.policy()
+        records = engine.records()
+        existing = {(r['request_notice']['key'], r['to']['agent']): r for r in records
+                    if isinstance(r.get('request_notice'), dict) and isinstance(r['request_notice'].get('key'), str)}
+        views, candidates, expected = {}, [], {}
+        for agent, resource in policy.resources.items():
+            native = native_facts(resource)
+            rows = native.get('requests')
+            if not isinstance(rows, list) or not rows:
+                continue
+            route = engine.request_route(agent, policy)
+            view = dict(route, notices=[])
+            views[agent] = view
+            pending = pending_requests(resource)
+            if pending is None:
+                view.update(human=True, fallback_reason='request_facts_incomplete')
+                continue
+            view['request_keys'] = [request_key(resource, question) for question in pending]
+            if not route['coordinator']:
+                continue
+            expected[agent] = len(pending)
+            for question in pending:
+                key = request_key(resource, question)
+                previous = existing.get((key, route['coordinator']))
+                if previous:
+                    view['notices'].append({'source_key': key, 'request': question['request'], 'revision': question['revision'],
+                                            'delivery': previous['delivery'], 'state': previous['state']})
+                    if previous['state'] in ('withdrawn', 'expired', 'superseded', 'rejected', 'resolved'):
+                        view.update(human=True, fallback_reason='notice_no_longer_deliverable')
+                else:
+                    view.update(human=True, fallback_reason='notification_pending')
+                    candidates.append((agent, resource, question, key, route['coordinator']))
+        count = len(candidates)
+        chosen = [candidates[(self.request_cursor + i) % count] for i in range(min(4, count))] if count else []
+        self.request_cursor = (self.request_cursor + len(chosen)) % count if count else 0
+        identity = self.ext.info
+        context = {name: identity.get(name) for name in ('principal', 'actor', 'author', 'initiator')}
+        context['kind'] = 'tool'
+        context['author'] = identity.get('actual_author', context.get('author'))
+        for agent, resource, question, key, target in chosen:
+            view = views[agent]
+            epoch = engine.window()['epoch']
+            operation = epoch + ':request:' + digest([key, target])
+            facts = native_facts(resource)
+            content = {'agent': agent, 'epoch': facts.get('epoch'), 'request': question['request'],
+                       'revision': question['revision'], 'scope': copy.deepcopy(question['scope']),
+                       'expires_at_ms': question.get('expires_at_ms'), 'question': copy.deepcopy(question)}
+            args = {'op': operation, 'submission': operation, 'to': target, 'mode': 'admit', 'send_new': True,
+                    'content': [{'type': 'text', 'text': 'Native request notice (not an answer):\n' +
+                                 json.dumps(content, ensure_ascii=False, sort_keys=True)}]}
+            try:
+                result = engine.send(args, context, request_notice={'agent': agent, 'key': key})
+                view['notices'].append({'source_key': key, 'request': question['request'], 'revision': question['revision'], **result})
+                self.dispatch_dirty = True
+            except (PolicyError, StoreError, VqroError) as error:
+                view.update(human=True, fallback_reason='notification_' + str(getattr(error, 'kind', 'unknown')))
+        for agent, view in views.items():
+            if view['fallback_reason'] == 'notification_pending' and len(view['notices']) == expected.get(agent):
+                view.update(human=view['configured'] == 'both', fallback_reason=None)
+            self.ext.publish('coord-requests-' + agent, view)
+        for agent in self.request_views - set(views):
+            self.ext.publish('coord-requests-' + agent, None)
+        self.request_views = set(views)
 
     def work(self):
         next_sweep = 0.0
@@ -419,6 +497,15 @@ class CoordinationService:
                     self.items.sync(self.resources(), self.providers())
                 if self.items.pump():
                     self.event.set()
+                if time.monotonic() >= self.next_request_scan:
+                    try:
+                        self.route_requests()
+                    except (PolicyError, StoreError, VqroError):
+                        for agent in self.request_views:
+                            self.ext.publish('coord-requests-' + agent, None)
+                        self.request_views.clear()
+                        raise
+                    self.next_request_scan = time.monotonic() + 1.0
                 if time.monotonic() >= next_sweep:
                     self.engine.lifecycle_sweep(forget=self.forget)
                     next_sweep = time.monotonic() + 5.0

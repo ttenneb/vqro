@@ -12,6 +12,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import re
+from coordination_requests import REQUEST_ROUTES, ROUTES
 
 
 NAMES = "doc/agents/names/"
@@ -580,6 +581,8 @@ class Policy:
             return self._membership_ops(args, principal)
         if kind in ("coord.grants", "agents.grants"):
             return self._grant_ops(args, principal)
+        if kind == "coord.request_route":
+            return self.request_route_ops(principal, args)
         _fail("invalid", "unknown configuration command")
 
     # Public API used by the coordination engine. The compact methods above also
@@ -598,6 +601,32 @@ class Policy:
 
     def grant_ops(self, principal, identifier, value, *, expect):
         return self._grant_ops({"id": identifier, "value": value, "expect": expect}, principal)
+
+    def request_route_ops(self, principal, args):
+        agent = self.resolve(args.get("agent"))
+        self.require(principal, "configure", agent)
+        action = args.get("action", "set")
+        route = args.get("route")
+        ops = []
+        if action == "initialize":
+            if self._version(REQUEST_ROUTES + agent):
+                _fail("conflict", "request route was already configured")
+            parents = {rid for rid in self._principal_agents.get(principal, set())
+                       if self.resources.get(rid, {}).get('kind') == 'agent' or rid in self.markers} if principal != self.owner else set()
+            route = "coordinator" if len(parents) == 1 else "human"
+            if route == "coordinator" and agent not in self.members:
+                parent = next(iter(parents))
+                # Initial membership is still cooperative configuration authority,
+                # not an implicit grant obtained by invoking a launcher.
+                if parent in self.members and self.has(principal, "membership", agent) and self.has(principal, "membership", parent):
+                    ops.extend(self.membership_ops(principal, agent, self.members.get(parent, {}).get("project"), parent,
+                                                   expect=0, membership_revision=self.membership_revision))
+        elif action != "set":
+            _fail("invalid", "request route action must be inspect, set or initialize")
+        if not isinstance(route, str) or route not in ROUTES:
+            _fail("invalid", "request route must be human, coordinator or both")
+        ops.append(self._cas(REQUEST_ROUTES + agent, {"route": route}, args.get("expect")))
+        return ops
 
     def _cas(self, key, value, expect):
         _integer(expect, "expect")
