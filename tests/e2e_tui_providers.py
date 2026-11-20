@@ -79,6 +79,8 @@ try:
         {"op": "set", "key": "extension/tmux", "value": {"argv": ["/usr/bin/env", "PATH=", PTMUX, "--tmux", "/usr/bin/tmux", "--name", "tmux"]}}]})
     ok = wait(lambda: all(call("workspace.snapshot")["providers"].get(n, {}).get("state") == "connected" for n in ("herdr", "tmux")), 30)
     check("providers connected (with default extensions running)", bool(ok))
+    with open(f"{R}/effects.sh", "w") as f:
+        f.write("printf '\\033]52;c;aGk=\\007\\007\\033]9;e2e-note\\007\\033]777;notify;T;B\\007\\033]2;e2e-title\\007\\033[5 q\\033[2mdim\\033[0m\\ne2e-effects-done\\n'\n")
     with open(f"{R}/tui.sh", "w") as f:
         f.write("".join(f"export {k}='{v}'\n" for k, v in ENV.items()) + f"exec {VQRO} tui\n")
     subprocess.run([*HARNESS, "new-session", "-d", "-x", "120", "-y", "32", f"/bin/sh {R}/tui.sh"], env={"PATH": "/usr/bin:/bin", "HOME": f"{R}/home"})
@@ -102,6 +104,27 @@ try:
             if seen:
                 break
         check(f"{name}: TUI shows the provider's terminal and typing reaches it", bool(seen), screen()[-600:])
+        # A program's clipboard write, bell, notification, dim text and cursor shape reach the outer terminal; its
+        # title names the pane. Raw bytes from the TUI to the harness, as the user's terminal would get them.
+        raw = f"{R}/raw-{name}.log"
+        subprocess.run([*HARNESS, "pipe-pane", "-o", f"cat >> {raw}"])
+        keys(f"/bin/sh {R}/effects.sh", literal=True); keys("Enter")
+        got = lambda: open(raw, "rb").read() if os.path.exists(raw) else b""
+        wanted = [b"\x1b]52;c;aGk=\x07", b"\x07", b"\x1b]9;e2e-note\x07", b"\x1b]777;notify;T;B\x07", b"\x1b[5 q", b"\x1b[2m"]
+        ok = wait(lambda: all(w in got() for w in wanted), 10)
+        check(f"{name}: program clipboard, bell, notifications, dim and cursor shape reach the terminal", bool(ok), repr([w for w in wanted if w not in got()]))
+        if name == "herdr":  # herdr-core reports program titles (OSC 2); unnamed panes show it (unit test in tui)
+            title = lambda: next(r for r in call("workspace.snapshot")["resources"] if r["id"] == rid).get("title")
+            check(f"{name}: the backend reports the program's title for pane names", wait(lambda: title() == "e2e-title", 10) is not None, str(title()))
+        subprocess.run([*HARNESS, "pipe-pane"])
+        # Reattach (a new TUI): the backend's history repaint must not copy or ring again.
+        raw2 = f"{R}/raw2-{name}.log"
+        subprocess.run([*HARNESS, "respawn-pane", "-k", f"/bin/sh {R}/tui.sh"], env={"PATH": "/usr/bin:/bin", "HOME": f"{R}/home"})
+        subprocess.run([*HARNESS, "pipe-pane", "-o", f"cat >> {raw2}"])
+        wait(lambda: "e2e-effects-done" in screen(), 15); time.sleep(1)
+        again = open(raw2, "rb").read() if os.path.exists(raw2) else b""
+        check(f"{name}: reattaching does not replay a copy or a notification", b"]52;" not in again and b"]9;e2e" not in again and b"e2e-effects-done" in again, repr(again[-300:]))
+        subprocess.run([*HARNESS, "pipe-pane"])
         call("resource.kill", {"resource": rid})
         time.sleep(1)
     # Tab bar: chips with subscript numbers after the name (doc/settings/tabs default), then only "+" (new tab) and

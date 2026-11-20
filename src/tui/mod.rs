@@ -76,10 +76,54 @@ fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
     out
 }
 
+/// What a program asked of the terminal beyond drawing, collected while parsing its output and passed on to the
+/// outer terminal after (never mid-frame): clipboard writes (OSC 52), bells, desktop notifications (OSC 9, OSC 777).
+/// Clipboard reads (OSC 52 `?`) are never answered: a program could read what the user copied elsewhere.
+#[derive(Default)]
+struct Effects {
+    out: Vec<Effect>,
+}
+
+#[derive(Debug, PartialEq)]
+enum Effect {
+    /// The selection names (`c`, `p`, ...) and base64 data, as the program sent them.
+    Clipboard(Vec<u8>, Vec<u8>),
+    Bell,
+    /// A whole notification OSC body (`9;text` or `777;notify;title;body`), passed on verbatim.
+    Notify(Vec<u8>),
+}
+
+/// Bounds what one parse may queue: a program can't flood the outer terminal or the client's memory.
+const MAX_EFFECTS: usize = 64;
+const MAX_CLIPBOARD_B64: usize = 1 << 20;
+
+impl Effects {
+    fn push(&mut self, e: Effect) {
+        if self.out.len() < MAX_EFFECTS && !(e == Effect::Bell && self.out.contains(&Effect::Bell)) { self.out.push(e); }
+    }
+}
+
+impl vt100::Callbacks for Effects {
+    fn audible_bell(&mut self, _: &mut vt100::Screen) { self.push(Effect::Bell); }
+    fn copy_to_clipboard(&mut self, _: &mut vt100::Screen, ty: &[u8], data: &[u8]) {
+        if data.len() <= MAX_CLIPBOARD_B64 { self.push(Effect::Clipboard(ty.to_vec(), data.to_vec())); }
+    }
+    fn unhandled_osc(&mut self, _: &mut vt100::Screen, params: &[&[u8]]) {
+        // OSC 9 is a notification unless it is ConEmu's progress (`9;4;...`), which the outer terminal may also
+        // show but which is too chatty to pass on from every pane; OSC 777 only for `notify`.
+        let notify = match params {
+            [b"9", rest @ ..] => !rest.is_empty() && rest[0] != b"4",
+            [b"777", b"notify", ..] => true,
+            _ => false,
+        };
+        if notify && params.iter().map(|p| p.len() + 1).sum::<usize>() <= 4096 { self.push(Effect::Notify(params.join(&b';'))); }
+    }
+}
+
 struct Term {
     resource: String,
     stream: Option<u64>,
-    parser: vt100::Parser,
+    parser: vt100::Parser<Effects>,
     size: (u16, u16),
     attaching: bool,
     closed: Option<String>,
@@ -261,6 +305,11 @@ struct App {
     filtering: Option<String>,
     /// A transient notification: text, style, until.
     toast: Option<(String, Option<String>, std::time::Instant)>,
+    /// When each view last showed a bell notice (rate limit).
+    bells: HashMap<String, std::time::Instant>,
+    /// The cursor shape the focused terminal's program asked for, and the one last sent to the outer terminal.
+    cursor_style: vt100::CursorStyle,
+    cursor_sent: vt100::CursorStyle,
     /// Merged immutable panel values; invalidate only on this view's entry/live update or snapshot.
     panel_values: Mutex<HashMap<String, Arc<Value>>>,
     panel_dependencies: Mutex<HashMap<String, HashSet<String>>>,
@@ -439,6 +488,7 @@ pub async fn run(socket: &Path) -> Result<()> {
             let now = std::time::Instant::now();
             if frames.ready(dirty, interactive, now) {
                 probe.draw(interactive, || terminal.draw(|f| app.draw(f)))?;
+                app.sync_cursor_style();
                 frames.drawn(now);
                 dirty = false;
             }
@@ -519,6 +569,7 @@ pub async fn run(socket: &Path) -> Result<()> {
     }
     // Every way out (quit, error, re-exec) passes here; pop before leaving the alternate screen.
     keys::enhance(keys::Enhance::Off);
+    if app.cursor_sent != vt100::CursorStyle::Default { let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::SetCursorStyle::DefaultUserShape); }
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture, crossterm::event::DisableBracketedPaste);
     ratatui::restore();
     if reexec {
@@ -564,7 +615,7 @@ impl App {
             peer, tx, ws: Workspace::default(), safe_selected: BTreeSet::new(),
             terms: HashMap::new(), stream_view: HashMap::new(), early: HashMap::new(), early_closed: HashMap::new(),
             leaves: Vec::new(), focus: 0, overlay: None, pstate: HashMap::new(),
-            filtering: None, toast: None, panel_values: Mutex::new(HashMap::new()), panel_dependencies: Mutex::new(HashMap::new()), hit: Hit::default(),
+            filtering: None, toast: None, bells: HashMap::new(), cursor_style: vt100::CursorStyle::Default, cursor_sent: vt100::CursorStyle::Default, panel_values: Mutex::new(HashMap::new()), panel_dependencies: Mutex::new(HashMap::new()), hit: Hit::default(),
             drag: None, overrides: HashMap::new(), mouse_owner: None, mouse_on: true,
             under: None, input_queues: HashMap::new(), view_streams: Arc::default(), zoomed: None, autofocused: None, window: Window::default(), pending_focus: None, tab_press: None, focus_now: None, focus_last: None, kbd_enhance: false,
             held: KeyModifiers::NONE, message: String::new(), key_hint: None,
@@ -621,7 +672,11 @@ impl App {
                 let (Some(sid), Some(data)) = (params["stream"].as_u64(), params["data"].as_str()) else { return };
                 let Ok(bytes) = B64.decode(data) else { return };
                 match self.stream_view.get(&sid).and_then(|v| self.terms.get_mut(v)) {
-                    Some(t) => t.feed(&bytes),
+                    Some(t) => {
+                        t.feed(&bytes);
+                        let effects = std::mem::take(&mut t.parser.callbacks_mut().out);
+                        if !effects.is_empty() { let view = self.stream_view[&sid].clone(); self.pass_effects(&view, effects); }
+                    }
                     None => {
                         if self.early_closed.contains_key(&sid) { return; }
                         if !self.terms.values().any(|t| t.attaching) { self.peer.notify("stream.close", json!({"stream":sid})); return; }
@@ -855,6 +910,9 @@ impl App {
                             for bytes in self.early.remove(&sid).unwrap_or_default() {
                                 t.feed(&bytes);
                             }
+                            // Output from before the attach reply is the backend's history repaint: never re-run a
+                            // copy, bell or notification from it.
+                            t.parser.callbacks_mut().out.clear();
                         }
                     }
                     Err(e) => t.close(e),
@@ -1419,6 +1477,31 @@ impl App {
         key.to_string()
     }
 
+    /// Pass a program's clipboard writes, bells and notifications on to the outer terminal, and say what happened:
+    /// the terminal reports nothing back. A bell in a pane that isn't focused also shows its name (once a second).
+    fn pass_effects(&mut self, view: &str, effects: Vec<Effect>) {
+        use std::io::Write;
+        let mut out = std::io::stdout();
+        for e in &effects {
+            let _ = out.write_all(&effect_bytes(e));
+        }
+        let _ = out.flush();
+        let focused = self.leaves.get(self.focus).is_some_and(|v| v == view);
+        for e in effects {
+            match e {
+                Effect::Clipboard(_, data) => self.message = format!("{}: sent {} bytes to the terminal clipboard (OSC 52; some terminals ignore it)", self.view_title(view), data.len() / 4 * 3),
+                Effect::Bell if !focused => {
+                    let now = std::time::Instant::now();
+                    if self.bells.get(view).is_none_or(|at| now.duration_since(*at) >= std::time::Duration::from_secs(1)) {
+                        self.bells.insert(view.to_string(), now);
+                        self.message = format!("bell in {}", self.view_title(view));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn on_popup_key(&mut self, k: KeyEvent) {
         let Some(Overlay::Popup { view, ctx, .. }) = self.overlay.clone_popup() else { return };
         match k.code {
@@ -1776,7 +1859,9 @@ impl App {
             return t.to_string();
         }
         let r = v["resource"].as_str().and_then(|r| self.ws.resources.get(r));
-        r.and_then(|r| r["name"].as_str().or_else(|| r["argv"][0].as_str()).map(String::from)).unwrap_or_else(|| view.to_string())
+        // A name the user gave, else the title the program set (OSC 0/2, reported by the backend), else its command.
+        let named = |r: &Value| r["name"].as_str().or_else(|| r["title"].as_str().filter(|t| !t.trim().is_empty())).or_else(|| r["argv"][0].as_str()).map(String::from);
+        r.and_then(named).unwrap_or_else(|| view.to_string())
     }
 
     /// Run an item: prompt or pick first if it asks to.
@@ -2465,6 +2550,8 @@ impl App {
         let icons = Icons::new(if self.ws.safe_mode { None } else { self.ws.entries.get(icons::ENTRY) }, self.nerd_icons());
         let [main, status] = Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(f.area());
         let mut hit = Hit::default();
+        // Only a focused terminal's cursor carries its program's shape; anything else gets the user's default.
+        self.cursor_style = vt100::CursorStyle::Default;
         match self.active_layout() {
             Some((_, mut root)) => {
                 self.shown_tab_titles(&mut root);
@@ -2536,7 +2623,16 @@ impl App {
         self.draw_toast(f, main, &pal);
         if let (Some(c), None) = (cursor, &self.overlay) {
             f.set_cursor_position(c);
+        } else {
+            self.cursor_style = vt100::CursorStyle::Default;
         }
+    }
+
+    /// After a frame: send the cursor shape the focused program asked for (DECSCUSR), only when it changed.
+    fn sync_cursor_style(&mut self) {
+        if self.cursor_style == self.cursor_sent { return; }
+        self.cursor_sent = self.cursor_style;
+        let _ = crossterm::execute!(std::io::stdout(), cursor_shape(self.cursor_style));
     }
 
     fn draw_view(&mut self, f: &mut Frame, view: &str, rect: Rect, focused: bool, pal: &Palette, icons: &Icons) -> Option<(u16, u16)> {
@@ -2628,6 +2724,7 @@ impl App {
                 if focused && !screen.hide_cursor() && screen.scrollback() == 0 {
                     let (r, c) = screen.cursor_position();
                     if r < inner.height && c < inner.width {
+                        self.cursor_style = screen.cursor_style();
                         return Some((inner.x + c, inner.y + r));
                     }
                 }
@@ -3088,8 +3185,31 @@ fn nz(n: u16) -> std::num::NonZeroU16 {
     std::num::NonZeroU16::new(n.max(1)).unwrap()
 }
 
-fn new_parser(cols: u16, rows: u16) -> vt100::Parser {
-    vt100::Parser::new(nz(rows), nz(cols), 2000)
+fn new_parser(cols: u16, rows: u16) -> vt100::Parser<Effects> {
+    vt100::Parser::new_with_callbacks(nz(rows), nz(cols), 2000, Effects::default())
+}
+
+fn cursor_shape(s: vt100::CursorStyle) -> crossterm::cursor::SetCursorStyle {
+    use crossterm::cursor::SetCursorStyle as C;
+    use vt100::CursorStyle as V;
+    match s {
+        V::Default => C::DefaultUserShape,
+        V::BlinkBlock => C::BlinkingBlock,
+        V::SteadyBlock => C::SteadyBlock,
+        V::BlinkUnderline => C::BlinkingUnderScore,
+        V::SteadyUnderline => C::SteadyUnderScore,
+        V::BlinkVerticalBar => C::BlinkingBar,
+        V::SteadyVerticalBar => C::SteadyBar,
+    }
+}
+
+/// The bytes that pass a program's effect on to the outer terminal.
+fn effect_bytes(e: &Effect) -> Vec<u8> {
+    match e {
+        Effect::Clipboard(ty, data) => [b"\x1b]52;".as_slice(), ty, b";", data, b"\x07"].concat(),
+        Effect::Bell => b"\x07".to_vec(),
+        Effect::Notify(body) => [b"\x1b]".as_slice(), body, b"\x07"].concat(),
+    }
 }
 
 fn color(c: vt100::Color) -> Color {
@@ -3112,6 +3232,9 @@ fn render_screen(buf: &mut Buffer, area: Rect, screen: &vt100::Screen) {
             let mut style = Style::new().fg(color(cell.fgcolor())).bg(color(cell.bgcolor()));
             if cell.bold() {
                 style = style.add_modifier(Modifier::BOLD);
+            }
+            if cell.dim() {
+                style = style.add_modifier(Modifier::DIM);
             }
             if cell.italic() {
                 style = style.add_modifier(Modifier::ITALIC);
@@ -3140,6 +3263,37 @@ mod tests {
         let (peer, _) = Peer::spawn(tokio::io::empty(), tokio::io::sink());
         let (tx, rx) = mpsc::unbounded_channel();
         (App::new(peer, tx), rx)
+    }
+
+    #[test]
+    fn program_effects_are_collected_bounded_and_passed_on_verbatim() {
+        let mut p = new_parser(80, 24);
+        p.process(b"a\x07b\x07\x1b]52;c;aGk=\x07\x1b]52;c;?\x07\x1b]9;done\x07\x1b]9;4;1;50\x07\x1b]777;notify;T;B\x07\x1b]777;other\x07\x1b]8;;http://x\x07");
+        let out = std::mem::take(&mut p.callbacks_mut().out);
+        assert_eq!(out, vec![Effect::Bell, Effect::Clipboard(b"c".to_vec(), b"aGk=".to_vec()), Effect::Notify(b"9;done".to_vec()), Effect::Notify(b"777;notify;T;B".to_vec())],
+            "one bell per parse; clipboard reads and progress OSC 9;4 are not passed on");
+        assert_eq!(effect_bytes(&out[1]), b"\x1b]52;c;aGk=\x07");
+        assert_eq!(effect_bytes(&out[3]), b"\x1b]777;notify;T;B\x07");
+        for _ in 0..100 { p.process(b"\x1b]9;x\x07"); }
+        assert_eq!(p.callbacks().out.len(), MAX_EFFECTS);
+        // Dim is drawn; the cursor shape a program sets is tracked for the outer terminal.
+        let mut p = new_parser(10, 2);
+        p.process(b"\x1b[2mD\x1b[5 q");
+        let mut buf = Buffer::empty(Rect::new(0, 0, 10, 2));
+        render_screen(&mut buf, Rect::new(0, 0, 10, 2), p.screen());
+        assert!(buf[(0, 0)].modifier.contains(Modifier::DIM));
+        assert_eq!(p.screen().cursor_style(), vt100::CursorStyle::BlinkVerticalBar);
+    }
+
+    #[tokio::test]
+    async fn pane_titles_fall_back_to_the_programs_title() {
+        let (mut app, _) = app();
+        app.load(&json!({"epoch":"e","seq":1,"entries":{"view/t":{"value":{"kind":"terminal","resource":"r1"}}},
+            "resources":[{"id":"r1","kind":"terminal","state":"live","argv":["/bin/bash"],"title":"vim notes.md"}]}));
+        assert_eq!(app.view_title("t"), "vim notes.md");
+        app.load(&json!({"epoch":"e","seq":2,"entries":{"view/t":{"value":{"kind":"terminal","resource":"r1"}}},
+            "resources":[{"id":"r1","kind":"terminal","state":"live","argv":["/bin/bash"],"title":" ","name":"build"}]}));
+        assert_eq!(app.view_title("t"), "build", "a name the user gave wins; a blank title is no title");
     }
 
     #[tokio::test]

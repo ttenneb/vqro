@@ -620,6 +620,16 @@ with a `reason` string). Input is handled in order; one input message may contai
 A full bounded input queue returns `overloaded` without dispatching that input. A rejected input notification
 produces `stream.error {stream, error, outcome: "rejected"}` instead; it is never replayed.
 
+**Program effects beyond drawing.** A client's emulator passes these on to the user's terminal, after parsing
+and never mid-frame: clipboard writes (OSC 52 with base64 data, at most 1 MiB), bells (BEL, at most one per chunk;
+a bell in a pane that isn't focused also shows "bell in <pane>"), and desktop notifications (OSC 9, except ConEmu
+progress `9;4`, and OSC 777 `notify`). Clipboard reads (OSC 52 `?`) are never answered. Output that arrives before the
+attach reply (the backend's history repaint) runs none of these, so reattaching never copies or rings again.
+The focused terminal's cursor shape (DECSCUSR) is sent on change and reset when focus leaves a terminal and on
+exit. Dim text (SGR 2) is drawn. A terminal pane's name is the view `title`, else the resource `name`, else the
+`title` its program set (OSC 0/2, as the backend reports it), else its command. The Rust TUI does all of this; the
+OpenTUI trial client does not yet.
+
 Clients paste like terminals: wrapped in bracketed-paste markers (`ESC[200~` … `ESC[201~`) when the program in the
 pane enabled bracketed paste (DECSET 2004, tracked by the client's emulator), raw otherwise; markers inside the
 pasted text are removed so a paste can't end its bracket early. The Rust TUI sends a paste over 64 KiB as ordered
