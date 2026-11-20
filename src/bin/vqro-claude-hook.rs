@@ -33,8 +33,8 @@
 //! Environment: `VQRO_SOCKET` (core endpoint), `VQRO_AGENT` (this agent's `rN`, injected by its launcher). Without
 //! both the plugin does nothing. Every failure is silent towards Claude Code (a hook must never break the session)
 //! and logged to the private state directory. Status: hooks have no controlling terminal and Claude Code's
-//! `terminalSequence` allowlist excludes OSC 7501, so tier-1 status needs a call the standard does not name yet; it
-//! is sent only to the command named by `VQRO_CLAUDE_STATUS_COMMAND`.
+//! `terminalSequence` allowlist excludes OSC 7501, so tier-1 status goes to `agents.status {terminal, app, state,
+//! seq}` (K3; `$VQRO_CLAUDE_STATUS_COMMAND` overrides the name, `off` disables it). The endpoint is the terminal.
 
 #[cfg(unix)]
 fn main() {
@@ -536,12 +536,28 @@ mod unix {
         Some((rows[i].get("uuid").cloned().unwrap_or(json!(i)), read))
     }
 
+    /// Tier-1 status (K3 `agents.status`; hooks cannot emit OSC 7501). Lossy and advisory: last writer by `seq`
+    /// (epoch ms) wins, so a restarted hook never goes backwards. A failure is logged once per distinct error.
     fn status(ctx: &Ctx, core: &mut Core, state: &str, event: &str) {
-        // No standard tier-1 status call exists yet (hooks cannot emit OSC 7501): opt-in, named by the launcher.
-        let Ok(command) = std::env::var("VQRO_CLAUDE_STATUS_COMMAND") else { return };
-        let args = json!({"agent": ctx.agent, "state": state, "app": "claude", "source": event, "session": ctx.session});
-        if let Err(e) = core.call("command.invoke", json!({"name": command, "args": args, "deadline_ms": CALL_MS})) {
-            ctx.log("status_failed", json!({"state": state, "error": e}));
+        let command = std::env::var("VQRO_CLAUDE_STATUS_COMMAND").unwrap_or_else(|_| "agents.status".into());
+        if command == "off" {
+            return;
+        }
+        let state = match state {
+            "working" => "running",
+            "blocked" => "requires_action",
+            "idle" | "error" => "idle",
+            _ => "unknown",
+        };
+        let args = json!({"terminal": ctx.agent, "app": "claude", "state": state, "seq": now_ms() as u64});
+        let error = core.call("command.invoke", json!({"name": command, "args": args, "deadline_ms": CALL_MS})).err();
+        let changed = ctx.with_state(|s| {
+            let previous = s.get("status_error").as_str().map(String::from);
+            s.set("status_error", json!(error));
+            previous != error
+        });
+        if let (Some(e), true) = (error, changed) {
+            ctx.log("status_failed", json!({"state": state, "hook": event, "error": e}));
         }
     }
 

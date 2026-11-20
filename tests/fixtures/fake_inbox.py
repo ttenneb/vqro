@@ -5,7 +5,7 @@ prefixed with the window epoch, records whose state is their evidence stage, and
 call is appended to the log given as argv[1] (the test oracle). `tests/fixtures/coord_k2.py` runs K2 itself.
 
 Extra (proposed, not in K2): `take {content: [...]}` names the block types a plugin can insert; other records stay
-held `unsupported_content`. `agents.terminal_status` records tier-1 status reports (no standard command yet).
+held `unsupported_content`. `agents.status` records tier-1 status reports (K3's command, not in this inbox).
 """
 import json, os, sys, threading, time
 
@@ -197,10 +197,10 @@ def fault(args):
     return {"fault": FAULT}
 
 
-@command("agents.terminal_status", "tier-1 status report (placeholder; no standard command yet)")
+@command("agents.status", "tier-1 status report (K3 shape: terminal, app, state, seq)")
 def terminal_status(args):
-    log("status", **{k: args.get(k) for k in ("agent", "state", "source")})
-    return {"ok": True}
+    log("status", terminal=args.get("terminal"), app=args.get("app"), state=args.get("state"), seq=args.get("seq"))
+    return {"ok": True, "applied": True}
 
 
 log("ready")

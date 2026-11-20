@@ -26,7 +26,7 @@ def txt(s):
 
 class Harness:
     def __init__(self, root, vqro, *, inbox="fake", coord_ext=None):
-        self.root, self.kind = root, inbox
+        self.root, self.kind, self.vqro = root, inbox, vqro
         os.makedirs(root, exist_ok=True)
         self.sock = os.path.join(root, "v.sock")
         self.inbox_log = os.path.join(root, "inbox.jsonl")
@@ -53,6 +53,24 @@ class Harness:
         if inbox == "k2":
             self.c.cmd("fixture.principal", author=self.c.me, principal="p:owner")
             self.c.call("workspace.apply", {"ops": [{"op": "set", "key": "doc/principals/owner", "value": "p:owner"}]})
+
+    def restart_core(self):
+        """Kill and restart the core and the fake inbox on the same endpoint (state dir kept). Fake inbox only: its
+        records are in memory, so mail sent before the restart is gone, like an inbox owner replacement."""
+        assert self.kind == "fake"
+        for p in self.procs[:2]:
+            p.kill()
+            p.wait()
+        if os.path.exists(self.sock):
+            os.unlink(self.sock)
+        self.procs[0] = subprocess.Popen([self.vqro, "serve", "--fake"], env=self.env, stdout=open(os.path.join(self.root, "core2.log"), "w"), stderr=subprocess.STDOUT)
+        while not os.path.exists(self.sock):
+            time.sleep(0.05)
+        self.procs[1] = subprocess.Popen([sys.executable, os.path.join(HERE, "fixtures", "fake_inbox.py"), self.inbox_log],
+                                         env=dict(self.env, VQRO_EXT_PATH=os.path.join(HERE, "..", "extensions")), stderr=open(os.path.join(self.root, "inbox2.err"), "w"))
+        self.c = Client(self.sock)
+        while not any(x.get("name") == "coord.inbox.take" for x in self.c.call("command.list", {})["commands"]):
+            time.sleep(0.1)
 
     def spawn(self, argv, **kw):
         p = subprocess.Popen(argv, **kw)

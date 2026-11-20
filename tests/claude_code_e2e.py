@@ -60,8 +60,6 @@ json.dump(settings, open(os.path.join(P["cfg"], "settings.json"), "w"), indent=1
 cenv = dict(base, PATH=os.environ["PATH"], CLAUDE_CONFIG_DIR=P["cfg"], VQRO_AGENT=AGENT, VQRO_CLAUDE_STATE=P["hookstate"], DISABLE_TELEMETRY="1",
             DISABLE_ERROR_REPORTING="1", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1", DISABLE_AUTOUPDATER="1",
             ANTHROPIC_BASE_URL=f"http://127.0.0.1:{port}", ANTHROPIC_API_KEY="sk-fake-not-a-key")
-if a.inbox == "fake":
-    cenv["VQRO_CLAUDE_STATUS_COMMAND"] = "agents.terminal_status"
 version = subprocess.run([a.claude, "--version"], capture_output=True, text=True, env=cenv).stdout.strip()
 print("claude", version, flush=True)
 results["claude_version"] = version
@@ -140,8 +138,8 @@ check("D resume: read records keep their evidence", get(b1)["state"] == "read")
 # --- S: status from hooks (fake inbox only: no standard status command yet) ---
 if a.inbox == "fake":
     st_events = h.statuses()
-    results["S_status"] = [(s["source"], s["state"]) for s in st_events][-30:]
-    check("S status working on UserPromptSubmit/PreToolUse, idle on Stop", {"working", "idle"} <= {s["state"] for s in st_events})
+    results["S_status"] = [s["state"] for s in st_events][-30:]
+    check("S status (agents.status) running on prompt/tool, idle on Stop", {"running", "idle"} <= {s["state"] for s in st_events})
 
 results["hook_log"] = open(os.path.join(P["hookstate"], "hook.log")).read().splitlines()[-40:]
 json.dump(results, open(os.path.join(root, "results.json"), "w"), indent=1)

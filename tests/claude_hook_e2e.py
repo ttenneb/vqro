@@ -38,8 +38,6 @@ CTX = ["context"]  # senders accept context insertion
 transcript = os.path.join(root, "transcript.jsonl")
 open(transcript, "w").close()
 hook_env = dict(h.env, VQRO_AGENT=AGENT, VQRO_CLAUDE_STATE=os.path.join(root, "hookstate"), CLAUDE_CODE_ENTRYPOINT="cli")
-if a.inbox == "fake":
-    hook_env["VQRO_CLAUDE_STATUS_COMMAND"] = "agents.terminal_status"
 waiters = []
 
 
@@ -244,9 +242,9 @@ if a.inbox == "fake":
     check("the released record is taken at the next point", lost in context(out), out)
 # 10. status reports (fake inbox only: no standard status command exists)
 if a.inbox == "fake":
-    seen = {(s["source"], s["state"]) for s in h.statuses()}
-    check("status: SessionStart unknown, UserPromptSubmit working, Stop idle",
-          {("SessionStart", "unknown"), ("UserPromptSubmit", "working"), ("Stop", "idle")} <= seen, seen)
+    seen = [s["state"] for s in h.statuses() if s.get("terminal") == AGENT and s.get("app") == "claude"]
+    check("status (agents.status, K3 shape): unknown at start, running on a prompt/tool, idle at Stop",
+          {"unknown", "running", "idle"} <= set(seen) and all(isinstance(s.get("seq"), int) for s in h.statuses()), seen)
 # 11. hook latency without mail: what every tool batch costs
 t = time.time()
 for _ in range(10):
