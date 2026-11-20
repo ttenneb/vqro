@@ -449,9 +449,9 @@ class E2E:
         self.ui('new-session', '-d', '-s', 'ui', '-x', '150', '-y', '36', '/usr/bin/env', '-i',
                 *[key+'='+value for key, value in self.env.items()], str(self.args.vqro), 'tui')
         self.ui_running = True
-        self.ui_frame('gone-agent', 'Agent gone', '[gone]')
+        self.ui_frame('gone-agent', 'Agent gone')  # its tab is drawn dim (tabs `state` hint), title unchanged
         self.call('command.invoke', {'name': 'sidebar.toggle'})
-        self.ui_frame('ended-sidebar', 'ended', '[gone]')
+        self.ui_frame('ended-sidebar', 'ended')
         self.call('command.invoke', {'name': 'sidebar.close_ended'})
         def cleaned():
             snap = self.snapshot()

@@ -801,16 +801,17 @@ def tab_title(setting, title, resource):
     named = isinstance(resource.get("name"), str) and resource["name"] != ""
     argv = resource.get("argv") if isinstance(resource.get("argv"), list) else []
     command = argv[0].rsplit("/", 1)[-1] if argv and isinstance(argv[0], str) else None
-    base, mark = title, ""
-    for m in (" [ended]", " [gone]"):
-        if title.endswith(m):
-            base, mark = title[:-len(m)], m
-            break
-    if not program or named or command is None or base != command:
+    if not program or named or command is None or title != command:
         return title
     if len(program) > PROGRAM_TITLE_MAX:
         program = program[:PROGRAM_TITLE_MAX - 1] + "…"
-    return program + mark
+    return program
+
+
+def tab_state(tab):
+    """A tab's lifecycle hint (ui_model::tabbar::tab_state): "ended" or "gone", drawn dim; unknown values: None."""
+    state = tab.get("state") if isinstance(tab, dict) else None
+    return state if state in ("ended", "gone") else None
 
 
 TAB_MARKS = ["blocked", "error", "done", "activity"]

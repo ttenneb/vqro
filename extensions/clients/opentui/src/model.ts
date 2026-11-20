@@ -961,11 +961,14 @@ export function tabTitle(setting: Json, title: string, resource: Json): string {
   const named = typeof resource.name === "string" && resource.name !== "";
   const argv0 = Array.isArray(resource.argv) && typeof resource.argv[0] === "string" ? resource.argv[0] : null;
   const command = argv0 === null ? null : argv0.split("/").pop()!;
-  let base = title, mark = "";
-  for (const m of [" [ended]", " [gone]"]) if (title.endsWith(m)) { base = title.slice(0, -m.length); mark = m; break; }
-  if (!program || named || command === null || base !== command) return title;
+  if (!program || named || command === null || title !== command) return title;
   const chars = [...program];
-  return (chars.length > PROGRAM_TITLE_MAX ? chars.slice(0, PROGRAM_TITLE_MAX - 1).join("") + "…" : program) + mark;
+  return chars.length > PROGRAM_TITLE_MAX ? chars.slice(0, PROGRAM_TITLE_MAX - 1).join("") + "…" : program;
+}
+
+/** A tab's lifecycle hint (ui_model::tabbar::tab_state): "ended" or "gone", drawn dim; unknown values: null. */
+export function tabState(tab: Json): string | null {
+  return isObj(tab) && (tab.state === "ended" || tab.state === "gone") ? tab.state : null;
 }
 
 export const TAB_MARKS = ["blocked", "error", "done", "activity"];

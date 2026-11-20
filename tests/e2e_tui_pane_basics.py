@@ -158,6 +158,9 @@ try:
     keys("printf '\\033]0;MYTITLE\\007'", literal=True); keys("Enter")
     check("a shell tab shows its program's OSC title", wait(lambda: "MYTITLE₂" in bar()), bar())
     print("CAPTURE program-title\n" + bar(), flush=True)
+    colored = subprocess.run([*HARNESS, "capture-pane", "-p", "-e"], capture_output=True, text=True).stdout
+    chip = next((line for line in colored.splitlines() if "MYTITLE" in line), "")
+    check("the active (live) tab chip is bold", "\x1b[1m" in chip or ";1m" in chip or "[1;" in chip, repr(chip))
 
     # Marks on other tabs (opt-in): this tab's program reports working, then blocked, then done (OSC 7501)
     # while the first tab is shown.

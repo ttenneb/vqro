@@ -163,12 +163,14 @@ try:
     # Tab bar: chips with subscript numbers after the name (doc/settings/tabs default), then only "+" (new tab) and
     # the compact new-agent "+<agent icon>"; the other buttons moved to menus and keys.
     bar = lambda: screen().splitlines()[0]
-    check("tab bar shows chips with subscript numbers and only + and +agent", bool(wait(lambda: "]₁ " in bar() and
+    check("tab bar shows chips with subscript numbers and only + and +agent", bool(wait(lambda: "tui-tmux₁ " in bar() and
         bar().rstrip().endswith(" +  +◆"), 10)) and not any(
         word in bar() for word in ("New Pi agent", "Agents", "Close ended tabs", "Switch workspace", "1:")), bar())
     colored = subprocess.run([*HARNESS, "capture-pane", "-p", "-e"], capture_output=True, text=True).stdout.splitlines()[0]
     print("CAPTURE tabbar-chips\n" + bar() + "\nANSI: " + repr(colored), flush=True)
-    check("the active tab chip is bold", "\x1b[1m" in colored or ";1m" in colored or "[1;" in colored, repr(colored))
+    # Its program was killed: the tabs extension hints `state` and the chip is drawn dim, the title unchanged.
+    check("an ended tab is dim with its title unchanged (no [gone] text)", "[gone]" not in bar() and "[ended]" not in bar()
+          and ("\x1b[2m" in colored or ";2m" in colored or "[2;" in colored), repr(colored))
     call("command.invoke", {"name": "tabs.set", "args": {"field": "numbers", "value": "superscript"}})
     call("command.invoke", {"name": "tabs.set", "args": {"field": "position", "value": "before"}})
     check("the tabs setting changes the number style and position", bool(wait(lambda: " ¹tui-" in bar() and "₁" not in bar(), 10)), bar())

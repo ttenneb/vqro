@@ -196,6 +196,11 @@ fn tab_marks_like_the_model() {
 }
 
 #[test]
+fn tab_states_like_the_model() {
+    check("tabstate.json", |case| json!(tabbar::tab_state(&case["tab"])));
+}
+
+#[test]
 fn tab_titles_like_the_model() {
     check("tabtitle.json", |case| {
         let resource = Some(&case["resource"]).filter(|r| !r.is_null());

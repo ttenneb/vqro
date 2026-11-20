@@ -167,8 +167,8 @@ async fn tab_view_cleanup_preserves_layout_pins_and_retention_undo_grace() {
     }
     p.call("resource.kill", json!({"resource": shown})).await.unwrap();
     finished(&p, &json!(shown)).await;
-    eventually("ended tab title reconciled", async || {
-        p.call("workspace.snapshot", Value::Null).await.unwrap()["entries"]["layout/main"]["value"]["tabs"][0]["title"].as_str().is_some_and(|title| title.ends_with(" [ended]"))
+    eventually("ended tab state reconciled", async || {
+        p.call("workspace.snapshot", Value::Null).await.unwrap()["entries"]["layout/main"]["value"]["tabs"][0]["state"] == "ended"
     }).await;
     let snap = p.call("workspace.snapshot", Value::Null).await.unwrap();
     p.call("workspace.apply", json!({"ops": [{"op": "set", "key": "layout/mirror", "value": snap["entries"]["layout/main"]["value"]}]})).await.unwrap();

@@ -124,6 +124,10 @@ test("tab marks", async () => {
   for (const c of (await fixture("tabmark.json")).cases) expect(m.tabMark(c.setting, c.now, c.seen), c.name).toEqual(c.expect);
 });
 
+test("tab states", async () => {
+  for (const c of (await fixture("tabstate.json")).cases) expect(m.tabState(c.tab), c.name).toEqual(c.expect);
+});
+
 test("tab titles", async () => {
   for (const c of (await fixture("tabtitle.json")).cases) expect(m.tabTitle(c.setting, c.title, c.resource), c.name).toEqual(c.expect);
 });

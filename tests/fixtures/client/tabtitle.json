@@ -62,20 +62,6 @@
       "title": "Liaison"
     },
     {
-      "expect": "vim notes.md [ended]",
-      "name": "an ended mark stays after the program title",
-      "resource": {
-        "argv": [
-          "/bin/zsh"
-        ],
-        "id": "r1",
-        "kind": "terminal",
-        "state": "finished",
-        "title": "vim notes.md"
-      },
-      "title": "zsh [ended]"
-    },
-    {
       "expect": "zsh",
       "name": "no program title keeps the command",
       "resource": {

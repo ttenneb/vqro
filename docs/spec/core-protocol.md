@@ -1283,9 +1283,15 @@ marks?: bool}`,
 written by the tabs extension (`tabs.settings`) and read by every client (renderer-independent model:
 `ui_model::tabbar`; conformance: `tests/fixtures/client/tabbar.json`, `tabtitle.json`, `tabmark.json`).
 - **Name** (`program_titles`, default on): a tab that still has its automatic name, the command of the one terminal
-  it shows (`zsh`, keeping an ` [ended]`/` [gone]` mark), shows that program's own title (`resource.title`, from
+  it shows (`zsh`), shows that program's own title (`resource.title`, from
   OSC 0/2) instead, cut to 24 characters with `…`. Renamed tabs, named resources and tabs showing several panes keep
   their names. Clients derive it on every draw and never write it back (it changes too often for transactions).
+- **Ended tabs:** the tabs extension sets a tab's `state` to `ended` when all its programs ended, or `gone` when
+  one was removed (and drops it when they are live again). Clients draw such a tab dim (inactive chip: `dim`
+  text; active chip: its fill with the terminal's dim attribute; the text client appends `(ended)`), the title
+  unchanged; unknown `state` values give no hint (`ui_model::tabbar::tab_state`, `tabstate.json`). Titles saved
+  with the former ` [gone]`/` [ended]` suffix are stripped when the extension reconciles. Close ended tabs
+  (`tabs.close_ended`) closes them as before.
 - **Marks** (`marks`, default off): an inactive tab shows one mark after its name, from its resources'
   `status.state` and `title` now against what they were when the tab was last shown (client-local memory,
   `seen_of`; never written): `blocked` (⚠, `warn`) while any agent there waits for you, `error` (✗, `error`) or

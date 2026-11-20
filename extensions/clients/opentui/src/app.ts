@@ -823,7 +823,9 @@ export class Screen extends Renderable {
         const mark = a.tabMark(t, on);
         const glyph = mark ? iconText(a, { name: mark, text: ({ blocked: "⚠", error: "✗", done: "✓" } as Json)[mark] ?? "•" }) : "";
         if (glyph) label = label.replace(/ $/, "");
-        text(buf, x, r.y, fit(label, r.x + r.w - x), on ? a.pal.color("tab_active_text") : a.pal.color("muted"), bg, on ? TextAttributes.BOLD : TextAttributes.NONE);
+        const ended = m.tabState(t) !== null;  // programs ended (tabs extension hint): dim, title unchanged
+        text(buf, x, r.y, fit(label, r.x + r.w - x), on ? a.pal.color("tab_active_text") : a.pal.color(ended ? "dim" : "muted"), bg,
+          on ? (ended ? TextAttributes.DIM : TextAttributes.BOLD) : TextAttributes.NONE);
         if (glyph) {  // inside the chip after the name, in the mark's semantic colour
           const color = a.pal.color(({ blocked: "warn", error: "error", done: "ok" } as Json)[mark!] ?? "accent");
           text(buf, x + width(label), r.y, fit(` ${glyph} `, r.x + r.w - x - width(label)), color, bg);

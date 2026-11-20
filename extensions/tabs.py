@@ -257,21 +257,29 @@ def close_ended(args):
         raise
 
 
+LEGACY_SUFFIXES = (" [gone]", " [ended]")  # what tab titles carried before the `state` hint; stripped on sight
+
+
 def mark_ended(node):
+    """Tabs whose programs all ended get `state: "ended"` (or `"gone"` when one was removed), which clients draw
+    dim (core-protocol.md "Tab bar"); the title stays the user's. Live again: the hint goes."""
     for child in node.get("children", []):
         mark_ended(child)
     for tab in node.get("tabs", []):
         mark_ended(tab["node"])
         ids = [view_resource(ext, view) for view in views_in(tab["node"])]
-        suffix = ""
+        state = None
         if ids and all(rid and ended(ext.resources.get(rid)) for rid in ids):
-            suffix = " [gone]" if any(rid not in ext.resources for rid in ids) else " [ended]"
+            state = "gone" if any(rid not in ext.resources for rid in ids) else "ended"
+        if state:
+            tab["state"] = state
+        else:
+            tab.pop("state", None)
         text = tab.get("title", "")
-        for old in (" [gone]", " [ended]"):
+        for old in LEGACY_SUFFIXES:
             if text.endswith(old):
-                text = text[:-len(old)]
+                tab["title"] = text[:-len(old)]
                 break
-        tab["title"] = text + suffix
 
 
 resource_states = {}

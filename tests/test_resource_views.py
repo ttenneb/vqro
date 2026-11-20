@@ -121,10 +121,21 @@ class ResourceViews(unittest.TestCase):
         self.assertEqual(len(core.transactions), count)
         core.resources.pop("r2")
         module["resource_state"]("resource.removed", {"id": "r2"})
-        self.assertEqual(core.value("layout/main")["tabs"][0]["title"], "User title [gone]")
+        tab = core.value("layout/main")["tabs"][0]
+        self.assertEqual((tab["title"], tab.get("state")), ("User title", "gone"))
         core.add_agent()
         module["resource_state"]("resource", {"id": "r2"})
-        self.assertEqual(core.value("layout/main")["tabs"][0]["title"], "User title")
+        tab = core.value("layout/main")["tabs"][0]
+        self.assertEqual((tab["title"], tab.get("state")), ("User title", None))
+
+    def test_legacy_gone_suffixes_are_stripped_on_load(self):
+        """Layouts saved before the `state` hint carry " [gone]"/" [ended]" in titles: the reconcile at start drops them."""
+        module, core = load("tabs")
+        core.apply([{"op": "set", "key": "layout/main", "value": {"tabs": [
+            {"title": "User title [gone]", "node": {"view": "agents-r2"}}, {"title": "zsh [ended]", "node": {"view": "agents-r2"}}],
+            "active": 0}}], "fixture")
+        module["resource_state"]("missed", {})
+        self.assertEqual([t["title"] for t in core.value("layout/main")["tabs"]], ["User title", "zsh"])
 
     def test_close_tab_deletes_nested_orphans_but_preserves_other_layout_and_popup_views(self):
         module, core = load("tabs")

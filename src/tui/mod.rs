@@ -3528,10 +3528,13 @@ fn walk(node: &Value, area: Rect, path: &mut Vec<usize>, overrides: &HashMap<Vec
             let w = icons::width(&label) + mark.as_ref().map(|(g, _)| icons::width(g) + 1).unwrap_or(0);
             hit.tabs.push((path.clone(), i, Rect { x, y: bar.y, width: w.min(bar.right().saturating_sub(x)), height: 1 }));
             x = x.saturating_add(w);
+            // A tab whose programs ended (`state` hint from the tabs extension) is drawn dim, its title unchanged.
+            let ended = crate::ui_model::tabbar::tab_state(t).is_some();
             let style = match (i == active, tabstyle.chips) {
+                (true, _) if ended => Style::new().bg(pal.tab_active).fg(pal.tab_active_text).add_modifier(Modifier::DIM),
                 (true, _) => Style::new().bg(pal.tab_active).fg(pal.tab_active_text).add_modifier(Modifier::BOLD),
-                (false, true) => Style::new().bg(pal.surface).fg(pal.muted),
-                (false, false) => pal.style(Some("muted")),
+                (false, true) => Style::new().bg(pal.surface).fg(if ended { pal.dim } else { pal.muted }),
+                (false, false) => pal.style(Some(if ended { "dim" } else { "muted" })),
             };
             match mark {
                 Some((glyph, name)) => {

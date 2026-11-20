@@ -203,7 +203,8 @@ class TextClient:
                         self.seen[r] = model.seen_of(self.ws.resources[r])
                 found = None if i == active else model.tab_mark(setting, [self.ws.resources[r] for r in rids], [self.seen[r] for r in rids])
                 return f" !{found}" if found else ""
-            return "  " * depth + "tabs: " + "  ".join(f"[{model.tab_label(style, i, name(t)).strip()}{'*' if i == active else ''}{mark(i, t)}]"
+            ended = lambda t: f" ({model.tab_state(t)})" if model.tab_state(t) else ""  # text's form of the dim style
+            return "  " * depth + "tabs: " + "  ".join(f"[{model.tab_label(style, i, name(t)).strip()}{'*' if i == active else ''}{ended(t)}{mark(i, t)}]"
                                                       for i, t in enumerate(tabs))
 
         def walk(node, depth):
