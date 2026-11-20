@@ -16,12 +16,17 @@ def part_a_ids(text):
     except IndexError as error:
         raise ValueError("normative Part A test boundaries missing") from error
     found = set()
-    for match in re.finditer(r"\b([CDORML])([1-9][0-9]*)(?:[–-]([CDORML]?)([1-9][0-9]*))?\b", tests):
+    # A3 explicitly marks definitions; plain IDs (including ranges in prose)
+    # are references, not extra normative cases.
+    for match in re.finditer(r"\*\*([CDORML])([1-9][0-9]*)(?:[–-]([CDORML]?)([1-9][0-9]*))?\*\*", tests):
         group, start, end_group, end = match.groups()
         start, end = int(start), int(end or start)
         if end_group and end_group != group or not start <= end <= 1000:
             raise ValueError("invalid normative case range")
-        found.update(f"{group}{index}" for index in range(start, end + 1))
+        defined = {f"{group}{index}" for index in range(start, end + 1)}
+        if found & defined:
+            raise ValueError("duplicate normative case definition")
+        found.update(defined)
     if not found or set(ident[0] for ident in found) != set(GROUPS):
         raise ValueError("normative Part A groups missing")
     return sorted(found, key=lambda ident: (GROUPS.index(ident[0]), int(ident[1:])))

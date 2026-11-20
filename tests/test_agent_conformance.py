@@ -395,7 +395,7 @@ class ResultTests(unittest.TestCase):
         self.assertEqual(set(document["not_selected"]), missing)
 
     def test_contract_ranges_and_unverified_exports(self):
-        text = "## A3. Tests\nC1–C12 D1–D17 O1–O14 R1–R7 M1–M8 L1–L4\n## A4. Done"
+        text = "## A3. Tests\n**C1–C12** **D1–D17** **O1–O14** **R1–R7** **M1–M8** **L1–L4**\n## A4. Done"
         self.assertEqual(part_a_ids(text), [case.id for case in CASES])
         contract = Contract(text, None, "bundled-unverified")
         rows = [Result(case.id, case.title, "pass") for case in CASES]
@@ -406,6 +406,33 @@ class ResultTests(unittest.TestCase):
             part_a_ids("no normative test boundaries")
         with self.assertRaises(ValueError):
             part_a_ids(text.replace("C1–C12", "C1–D12"))
+
+    def test_definition_scan_ignores_plain_ids_and_ranges_in_prose(self):
+        text = "## A3. Tests\n**C1** core. **D1-D5** modes. **O1** observe. **R1** request. **M1** module. **L1** life.\n"
+        text += "C99 is only a reference. See D98–D99, O87, R76, M65 and L54.\n## A4. Done\n**C100** outside A3"
+        self.assertEqual(part_a_ids(text), ["C1", "D1", "D2", "D3", "D4", "D5", "O1", "R1", "M1", "L1"])
+        with self.assertRaises(ValueError):
+            part_a_ids(text.replace("**", ""))
+
+    def test_duplicate_or_overlapping_bold_definitions_are_refused(self):
+        text = "## A3. Tests\n**C1** **D1–D5** **O1** **R1** **M1** **L1**\n## A4. Done"
+        for duplicate in ("**C1**", "**D3**", "**D4–D6**"):
+            with self.subTest(duplicate=duplicate), self.assertRaisesRegex(ValueError, "duplicate"):
+                part_a_ids(text.replace("## A4.", duplicate + "\n## A4."))
+
+    def test_each_missing_definition_marker_refuses_before_fixture_effects(self):
+        from agent_conformance.runner import run_selection
+        text = "## A3. Tests\n" + " ".join("**" + case.id + "** definition." for case in CASES) + "\n## A4. Done"
+        with tempfile.TemporaryDirectory(prefix="k1-marker-") as temp:
+            root = Path(temp) / "must-not-start"
+            for case in CASES:
+                broken = text.replace("**" + case.id + "**", case.id)
+                with self.subTest(case=case.id), patch("agent_conformance.inventory.main_contract", return_value=Contract(broken, "a" * 40, "git-main")), \
+                     patch("agent_conformance.runner.run_case", new_callable=AsyncMock) as execute:
+                    with self.assertRaisesRegex(HarnessGap, "inventory differs"):
+                        asyncio.run(run_selection(root, {}, [], Path("/unused"), Path("/unused")))
+                    execute.assert_not_awaited()
+                    self.assertFalse(root.exists())
 
     def test_partial_pass_never_claims_complete_or_real_certification(self):
         selected = select_cases(["C1"])
