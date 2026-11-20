@@ -28,6 +28,13 @@ async def record(ctx, delivery):
     return value["entry"]["value"]
 
 
+async def gate_cut(ctx, expected):
+    control = await ctx.peer.call("operational.get", {"domain": "coord", "key": "operational/coord/control"})
+    gates = control["entry"]["value"]["gates"]
+    ctx.check(all(gates.get(agent) is value for agent, value in expected.items()),
+        "handover preserves actual source and destination pause gates", expected=expected, observed=gates)
+
+
 async def name(ctx, agent):
     current = (await entries(ctx)).get(NAME_KEY, {})
     return await ctx.command("names", {"op": await ctx.operation("i13-name"), "handle": HANDLE,
@@ -70,14 +77,23 @@ async def scheduling_witness(ctx, deliveries, destination, plan, label):
     # The move RPC has already committed. This later message uses the same admit
     # lane/endpoint; its real claim+native invocation proves a scheduler pass before
     # the caller is allowed to issue the next (possibly failing) stage.
+    observed = deepcopy(next(row for row in ctx.agents if row["id"] == destination))
     sentinel = await ctx.send(target=destination, mode="admit", send_new=True, text="I13 scheduling witness: " + label)
     result = await settled(ctx, sentinel["delivery"])
     calls = invocations(ctx, delivery=sentinel["delivery"], op="agent.send")
     ctx.check(result["state"] in ("accepted", "admitted", "dispatched", "observed", "inserted") and len(calls) == 1,
         "a real destination scheduling pass completes before the next handover stage", result=result, calls=calls)
-    claim = ((calls[0].get("witness") or {}).get("entry") or {}).get("value", {})
-    ctx.check(claim.get("state") == "claimed" and claim.get("delivery") == sentinel["delivery"],
-        "positive scheduling witness saw its actual durable claim, not only a timer or ACK", claim=claim)
+    call = calls[0]
+    args = call.get("args") or {}
+    ctx.check(call.get("ref") == observed["backend_ref"] and args.get("mode") == "admit" and
+        args.get("delivery") == sentinel["delivery"],
+        "actual native scheduling invocation uses the inspected destination and admit lane", call=call, destination=observed)
+    claim = ((call.get("witness") or {}).get("entry") or {}).get("value", {})
+    target = claim.get("to") or {}
+    ctx.check(claim.get("state") == "claimed" and claim.get("delivery") == sentinel["delivery"] and
+        target.get("agent") == observed["id"] and target.get("incarnation") == observed["incarnation"] and
+        claim.get("mode") == "admit" and (claim.get("attempt") or {}).get("strategy") == "admit",
+        "positive scheduling witness saw a real claim for the inspected destination/incarnation and admit lane", claim=claim)
     await pending_cut(ctx, deliveries, destination)
     ctx.evidence.append({"kind": "handover_scheduling_barrier", "plan": plan, "label": label,
         "sentinel": sentinel["delivery"], "native_invoke_seq": calls[0]["seq"], "moved": list(deliveries)})
@@ -98,12 +114,15 @@ async def refuses_complete(ctx, plan):
 async def refusal_preserves(ctx, source, destination, deliveries, expected_state):
     before = [await record(ctx, delivery) for delivery in deliveries]
     ctx.check(before[-1]["state"] == expected_state, "protected non-pending state really exists before move", record=before[-1])
+    ctx.check(all(row["state"] in ("held", "recorded") and not row.get("attempt") for row in before[:-1]),
+        "mixed-list prefix really is pending before the refusal", records=before[:-1])
     await ctx.rejected("handover", {"op": await ctx.operation("i13-nonpending"), "from": exact(source),
         "to": exact(destination), "deliveries": deliveries}, {"too_late"})
     after = [await record(ctx, delivery) for delivery in deliveries]
-    ctx.check([row["to"] for row in after] == [row["to"] for row in before] and
-        all(not row.get("handover_plan") for row in after) and after[-1]["state"] == expected_state,
-        "mixed-list refusal never moves even its earlier pending record", before=before, after=after)
+    # Both native barriers keep this cut stable. No concurrent evidence is allowed
+    # to explain away any sibling's state, content, guard, identity or intent loss.
+    ctx.check(after == before, "mixed-list refusal preserves every complete protected record at the held stable cut",
+        before=before, after=after)
 
 
 @case("I13")
@@ -123,12 +142,14 @@ async def staged_successor_handover(ctx):
         and row.get("origin") for row in original), "preservation probes begin with real nonempty source constraints", records=original)
     resumed = await ctx.scope("resume", "agent:" + did)
     ctx.check(resumed.get("targets") == [did], "destination is explicitly open while source stays paused", reply=resumed)
+    await gate_cut(ctx, {sid: False, did: True})
     await ctx.native_set(0, lifecycle="ended")
 
     for failure in ("names", "membership"):
         arguments = await stages(ctx, did)
         move = await handover(ctx, **{"from": exact(source), "to": exact(destination), "deliveries": moved, **arguments})
         plan = move["plan"]
+        await gate_cut(ctx, {sid: False, did: True})
         await pending_cut(ctx, moved, did)
         await scheduling_witness(ctx, moved, did, plan, "after-move-before-failed-" + failure)
         await refuses_complete(ctx, plan)
@@ -157,9 +178,11 @@ async def staged_successor_handover(ctx):
         aborted = await handover(ctx, action="abort", plan=plan)
         ctx.check(aborted.get("state") == "aborted", "failed plan is explicitly aborted, not silently completed", reply=aborted)
         await pending_cut(ctx, moved, sid, reason="handover_aborted")
+        await gate_cut(ctx, {sid: False, did: True})
 
     final = await handover(ctx, **{"from": exact(source), "to": exact(destination), "deliveries": moved, **(await stages(ctx, did))})
     plan = final["plan"]
+    await gate_cut(ctx, {sid: False, did: True})
     await scheduling_witness(ctx, moved, did, plan, "successful-plan-before-stages")
     for index in (0, 1):
         stage = await handover(ctx, action="stage", plan=plan, stage=index)
@@ -170,6 +193,7 @@ async def staged_successor_handover(ctx):
     complete = await handover(ctx, action="complete", plan=plan)
     ctx.check(complete.get("state") == "completed", "only an explicit all-stage complete releases the plan", reply=complete)
     delivered = await pending_cut(ctx, moved, did, reason="paused")
+    await gate_cut(ctx, {sid: False, did: False})
     for before, after in zip(original, delivered):
         ctx.check(all(after.get(key) == before.get(key) for key in ("origin", "content", "guard", "expires_at_ms")),
             "handover preserves sender, content, guard and expiry", before=before, after=after)
