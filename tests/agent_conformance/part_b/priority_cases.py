@@ -26,11 +26,16 @@ async def priority_obeys_all_other_guards(ctx):
     senders=["a" if delivery in {r["delivery"] for r in ah} else "b" for delivery in order[:4]]
     ctx.check(senders[0]!=senders[1] and senders[2]!=senders[3] and all(order.index(rows[0]["delivery"])<order.index(rows[1]["delivery"]) for rows in (ah,bh)),"equal priority uses sender round-robin and per-sender FIFO")
     ctx.evidence.append({"kind":"spec_scope","source":"coordination-v0.md priority rule","rule":"There is no aging in v0"})
+    # The fake's native queue advances one accepted boundary input per safe point.
+    for _ in range(6): drained=await ctx.native.call("point",ref=ctx.agents[0]["backend_ref"],point="idle")
+    ctx.check(drained["pending"]==0 and [row["delivery"] for row in ctx.native.records("model_request")]==order,
+              "actual native model requests retain the observed priority selection order")
     await pending_mutation_claim_races(ctx,priority=True)
-    denied=await ctx.connect("worker:priority-no-grant")
+    denied=await ctx.connect("worker:priority-no-grant");before_denied=len(invocations(ctx))
     try: await ctx.send(peer=denied,mode="boundary",priority="high")
-    except RpcError as error: ctx.check(error.kind=="forbidden","priority conveys no standing")
+    except RpcError as error: ctx.check(error.kind in ("forbidden","no_grant"),"priority conveys no standing")
     else: ctx.check(False,"high priority bypassed grant admission")
+    ctx.check(len(invocations(ctx))==before_denied,"denied high-priority admission dispatches no native input")
     await ctx.scope("pause");await ctx.native_set(0,state="running",run="existing-run")
     blocked=await ctx.send(priority="high",mode="start",text="busy high start")
     await ctx.scope("resume");await held(ctx,blocked["delivery"],"agent_busy")
