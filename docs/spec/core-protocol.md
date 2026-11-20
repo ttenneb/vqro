@@ -671,6 +671,16 @@ with a `reason` string). Input is handled in order; one input message may contai
 A full bounded input queue returns `overloaded` without dispatching that input. A rejected input notification
 produces `stream.error {stream, error, outcome: "rejected"}` instead; it is never replayed.
 
+**Terminal engines** (Rust TUI; client mechanism). The emulator that draws terminal panes is a built-in engine
+chosen by `doc/settings/tui.terminal_engine` (Settings > Interface): `vt100` (always available, the fallback) or
+`libghostty` (Ghostty's libghostty-vt; from libghostty plan G2). Changing it switches open panes, which start a
+fresh emulator and repaint from the backend's attach history. An engine that can't be selected or fails to start
+(or reports a failure) is replaced by vt100 for that pane, and the status line says which and why, once per
+reason. A fault inside a native engine that crashes the process can't be caught this way: native engines keep
+their FFI defensive instead (no panics across it, bounded inputs). Engines answer no terminal queries: the
+backend already does. Every engine passes the shared engine conformance suite's baseline; richer fidelity
+(grapheme clusters, OSC 8, strikethrough, ...) is declared per engine.
+
 **Program effects beyond drawing.** A client's emulator passes these on to the user's terminal, after parsing
 and never mid-frame: clipboard writes (OSC 52 with base64 data, at most 1 MiB), bells (BEL, at most one per chunk;
 a bell in a pane that isn't focused also shows "bell in <pane>"), and desktop notifications (OSC 9, except ConEmu

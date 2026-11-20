@@ -1,7 +1,12 @@
-//! The terminal emulator behind terminal views, as one small interface (libghostty plan, slice G1). Everything the
-//! client needs from an emulator goes through `Emulator`: feeding program output, what the program asked of the
-//! terminal beyond drawing (`Effect`), modes, the cursor, the viewport and its history, and drawing into a buffer.
-//! Today it wraps the `vt100` crate; the rest of the client never names `vt100`.
+//! The terminal emulator behind terminal views. Everything the client needs from an emulator goes through
+//! `Emulator`: feeding program output, what the program asked of the terminal beyond drawing (`Effect`), modes, the
+//! cursor, the viewport and its history, and drawing into a buffer.
+//!
+//! **Engines** (built in, chosen in Settings: `doc/settings/tui.terminal_engine`): each implements `Engine`. `vt100`
+//! (the `vt100` crate) is always available and is the fallback; `libghostty` (Ghostty's libghostty-vt) is added by
+//! slice G2. An engine that can't be selected or fails to start is replaced by vt100, and the client says why
+//! (`Emulator::fallback`). A fault inside a native engine that crashes the process can't be caught this way: native
+//! engines keep their FFI defensive (no panics across it, bounded inputs) instead.
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -92,37 +97,141 @@ impl vt100::Callbacks for Effects {
 
 fn nz(n: u16) -> NonZeroU16 { NonZeroU16::new(n.max(1)).unwrap() }
 
-/// One terminal view's emulator.
+/// The built-in engines.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EngineKind {
+    Vt100,
+    Libghostty,
+}
+
+impl EngineKind {
+    pub const ALL: [EngineKind; 2] = [EngineKind::Libghostty, EngineKind::Vt100];
+    /// The engine used when the setting names none (or one this client doesn't know).
+    pub const DEFAULT: EngineKind = EngineKind::Vt100;
+
+    pub fn name(self) -> &'static str {
+        match self { EngineKind::Vt100 => "vt100", EngineKind::Libghostty => "libghostty" }
+    }
+    pub fn parse(name: &str) -> Option<EngineKind> { Self::ALL.into_iter().find(|k| k.name() == name) }
+}
+
+/// What a terminal engine does for one terminal view. Rows of history are numbered like `scrollback::Pos`: rows above
+/// the live screen so far (dropped plus kept) come first, then the screen's rows.
+pub trait Engine {
+    /// Program output. Its effects queue until `take_effects`.
+    fn process(&mut self, bytes: &[u8]);
+    /// The effects queued since the last call (at most `MAX_EFFECTS`).
+    fn take_effects(&mut self) -> Vec<Effect>;
+    fn resize(&mut self, cols: u16, rows: u16);
+    fn rows(&self) -> u16;
+    fn cols(&self) -> u16;
+    fn application_cursor(&self) -> bool;
+    fn bracketed_paste(&self) -> bool;
+    fn alternate_screen(&self) -> bool;
+    fn mouse(&self) -> (MouseMode, MouseEncoding);
+    /// Where the cursor is on screen and its shape, when the program shows it and the view is at the live screen.
+    fn cursor(&self) -> Option<(u16, u16, CursorShape)>;
+    /// How many lines the view is scrolled back from the live screen (0: live).
+    fn scroll_offset(&self) -> usize;
+    /// Scroll back `n` lines (clamped to the history kept).
+    fn set_scroll_offset(&mut self, n: usize);
+    fn scrollback_len(&self) -> usize;
+    fn scrollback_capacity(&self) -> usize;
+    /// Rows above the live screen so far (dropped plus kept).
+    fn scrolled(&self) -> usize;
+    /// One row's text with trailing blanks removed, the cell where each of its characters starts, and whether the
+    /// row wraps onto the next. None when the row is no longer kept. Leaves the view where it was.
+    fn row_text(&mut self, row: usize) -> Option<(Vec<char>, Vec<u16>, bool)>;
+    /// Draw the screen as shown into `area` of `buf` (cells past the screen's size are left alone).
+    fn draw(&self, buf: &mut Buffer, area: Rect);
+    /// The screen as shown, as plain text (tests).
+    #[cfg(test)]
+    fn contents(&self) -> String;
+}
+
+/// Start an engine, or say why it can't start.
+fn start(kind: EngineKind, cols: u16, rows: u16, scrollback: usize) -> Result<Box<dyn Engine>, String> {
+    match kind {
+        EngineKind::Vt100 => Ok(Box::new(Vt100::new(cols, rows, scrollback))),
+        EngineKind::Libghostty => Err("not built into this client yet".into()),
+    }
+}
+
+/// One terminal view's emulator: the engine it runs, and the one that was asked for if it had to fall back.
 pub struct Emulator {
-    parser: vt100::Parser<Effects>,
+    engine: Box<dyn Engine>,
+    kind: EngineKind,
+    wanted: EngineKind,
+    /// Why the wanted engine isn't the one running (None: it is).
+    fallback: Option<String>,
 }
 
 impl Emulator {
-    /// A blank terminal of `cols` x `rows` keeping up to `scrollback` lines of history.
-    pub fn new(cols: u16, rows: u16, scrollback: usize) -> Self {
+    /// A blank terminal of `cols` x `rows` keeping up to `scrollback` lines of history, on the default engine.
+    #[cfg(test)]
+    pub fn new(cols: u16, rows: u16, scrollback: usize) -> Self { Self::with_engine(EngineKind::DEFAULT, cols, rows, scrollback) }
+
+    /// The same on the engine `wanted`; if it can't start, on vt100 (see `fallback`).
+    pub fn with_engine(wanted: EngineKind, cols: u16, rows: u16, scrollback: usize) -> Self {
+        match start(wanted, cols, rows, scrollback) {
+            Ok(engine) => Self { engine, kind: wanted, wanted, fallback: None },
+            Err(why) => Self { engine: Box::new(Vt100::new(cols, rows, scrollback)), kind: EngineKind::Vt100, wanted, fallback: Some(why) },
+        }
+    }
+
+    /// A blank terminal of the same size, history capacity and wanted engine (a fresh attach never reuses old state;
+    /// the engine choice, and a fallback's reason if it falls back again, carry over).
+    pub fn fresh(&self) -> Self {
+        Self::with_engine(self.wanted, self.cols(), self.rows(), self.scrollback_capacity())
+    }
+
+    /// The engine running, the one asked for, and why they differ.
+    pub fn engine(&self) -> EngineKind { self.kind }
+    pub fn wanted(&self) -> EngineKind { self.wanted }
+    pub fn fallback(&self) -> Option<&str> { self.fallback.as_deref() }
+
+    pub fn process(&mut self, bytes: &[u8]) { self.engine.process(bytes) }
+    pub fn take_effects(&mut self) -> Vec<Effect> { self.engine.take_effects() }
+    pub fn resize(&mut self, cols: u16, rows: u16) { self.engine.resize(cols, rows) }
+    pub fn rows(&self) -> u16 { self.engine.rows() }
+    pub fn cols(&self) -> u16 { self.engine.cols() }
+    pub fn application_cursor(&self) -> bool { self.engine.application_cursor() }
+    pub fn bracketed_paste(&self) -> bool { self.engine.bracketed_paste() }
+    pub fn alternate_screen(&self) -> bool { self.engine.alternate_screen() }
+    pub fn mouse(&self) -> (MouseMode, MouseEncoding) { self.engine.mouse() }
+    pub fn cursor(&self) -> Option<(u16, u16, CursorShape)> { self.engine.cursor() }
+    pub fn scroll_offset(&self) -> usize { self.engine.scroll_offset() }
+    pub fn set_scroll_offset(&mut self, n: usize) { self.engine.set_scroll_offset(n) }
+    pub fn scrollback_len(&self) -> usize { self.engine.scrollback_len() }
+    pub fn scrollback_capacity(&self) -> usize { self.engine.scrollback_capacity() }
+    pub fn scrolled(&self) -> usize { self.engine.scrolled() }
+    pub fn row_text(&mut self, row: usize) -> Option<(Vec<char>, Vec<u16>, bool)> { self.engine.row_text(row) }
+    pub fn draw(&self, buf: &mut Buffer, area: Rect) { self.engine.draw(buf, area) }
+    #[cfg(test)]
+    pub fn contents(&self) -> String { self.engine.contents() }
+}
+
+/// The `vt100` crate engine: always available, the fallback.
+struct Vt100 {
+    parser: vt100::Parser<Effects>,
+}
+
+impl Vt100 {
+    fn new(cols: u16, rows: u16, scrollback: usize) -> Self {
         Self { parser: vt100::Parser::new_with_callbacks(nz(rows), nz(cols), scrollback, Effects::default()) }
     }
+}
 
-    /// A blank terminal of the same size and history capacity (a fresh attach never reuses old state).
-    pub fn fresh(&self) -> Self {
-        Self::new(self.cols(), self.rows(), self.scrollback_capacity())
-    }
-
-    /// Program output. Its effects queue until `take_effects`.
-    pub fn process(&mut self, bytes: &[u8]) { self.parser.process(bytes); }
-
-    /// The effects queued since the last call (at most `MAX_EFFECTS`).
-    pub fn take_effects(&mut self) -> Vec<Effect> { std::mem::take(&mut self.parser.callbacks_mut().out) }
-
-    pub fn resize(&mut self, cols: u16, rows: u16) { self.parser.screen_mut().set_size(nz(rows), nz(cols)); }
-    pub fn rows(&self) -> u16 { self.parser.screen().size().0.get() }
-    pub fn cols(&self) -> u16 { self.parser.screen().size().1.get() }
-
-    // ---- modes the program set ----
-    pub fn application_cursor(&self) -> bool { self.parser.screen().application_cursor() }
-    pub fn bracketed_paste(&self) -> bool { self.parser.screen().bracketed_paste() }
-    pub fn alternate_screen(&self) -> bool { self.parser.screen().alternate_screen() }
-    pub fn mouse(&self) -> (MouseMode, MouseEncoding) {
+impl Engine for Vt100 {
+    fn process(&mut self, bytes: &[u8]) { self.parser.process(bytes); }
+    fn take_effects(&mut self) -> Vec<Effect> { std::mem::take(&mut self.parser.callbacks_mut().out) }
+    fn resize(&mut self, cols: u16, rows: u16) { self.parser.screen_mut().set_size(nz(rows), nz(cols)); }
+    fn rows(&self) -> u16 { self.parser.screen().size().0.get() }
+    fn cols(&self) -> u16 { self.parser.screen().size().1.get() }
+    fn application_cursor(&self) -> bool { self.parser.screen().application_cursor() }
+    fn bracketed_paste(&self) -> bool { self.parser.screen().bracketed_paste() }
+    fn alternate_screen(&self) -> bool { self.parser.screen().alternate_screen() }
+    fn mouse(&self) -> (MouseMode, MouseEncoding) {
         let s = self.parser.screen();
         let mode = match s.mouse_protocol_mode() {
             vt100::MouseProtocolMode::None => MouseMode::None,
@@ -139,8 +248,7 @@ impl Emulator {
         (mode, enc)
     }
 
-    /// Where the cursor is on screen and its shape, when the program shows it and the view is at the live screen.
-    pub fn cursor(&self) -> Option<(u16, u16, CursorShape)> {
+    fn cursor(&self) -> Option<(u16, u16, CursorShape)> {
         let s = self.parser.screen();
         if s.hide_cursor() || s.scrollback() > 0 { return None; }
         let (r, c) = s.cursor_position();
@@ -156,20 +264,13 @@ impl Emulator {
         Some((r, c, shape))
     }
 
-    // ---- the viewport and its history ----
-    /// How many lines the view is scrolled back from the live screen (0: live).
-    pub fn scroll_offset(&self) -> usize { self.parser.screen().scrollback() }
-    /// Scroll back `n` lines (clamped to the history kept).
-    pub fn set_scroll_offset(&mut self, n: usize) { self.parser.screen_mut().set_scrollback(n); }
-    pub fn scrollback_len(&self) -> usize { self.parser.screen().scrollback_len() }
-    pub fn scrollback_capacity(&self) -> usize { self.parser.screen().scrollback_capacity() }
-    /// Rows above the live screen so far (dropped plus kept): the numbering of `scrollback::Pos` rows.
-    pub fn scrolled(&self) -> usize { self.parser.callbacks().dropped + self.scrollback_len() }
+    fn scroll_offset(&self) -> usize { self.parser.screen().scrollback() }
+    fn set_scroll_offset(&mut self, n: usize) { self.parser.screen_mut().set_scrollback(n); }
+    fn scrollback_len(&self) -> usize { self.parser.screen().scrollback_len() }
+    fn scrollback_capacity(&self) -> usize { self.parser.screen().scrollback_capacity() }
+    fn scrolled(&self) -> usize { self.parser.callbacks().dropped + self.scrollback_len() }
 
-    /// One row's text (`row` counts like `scrollback::Pos`) with trailing blanks removed, the cell where each of its
-    /// characters starts, and whether the row wraps onto the next. None when the row is no longer kept. Reading
-    /// moves the view and puts it back.
-    pub fn row_text(&mut self, row: usize) -> Option<(Vec<char>, Vec<u16>, bool)> {
+    fn row_text(&mut self, row: usize) -> Option<(Vec<char>, Vec<u16>, bool)> {
         let scrolled = self.scrolled();
         if row + self.scrollback_len() < scrolled || row > scrolled + usize::from(self.rows()) - 1 {
             return None;
@@ -199,12 +300,10 @@ impl Emulator {
         Some((chars, starts, wrapped))
     }
 
-    /// The screen as shown (scrolled back or live) as plain text (tests and diagnostics).
     #[cfg(test)]
-    pub fn contents(&self) -> String { self.parser.screen().contents() }
+    fn contents(&self) -> String { self.parser.screen().contents() }
 
-    /// Draw the screen as shown into `area` of `buf` (cells past the screen's size are left alone).
-    pub fn draw(&self, buf: &mut Buffer, area: Rect) {
+    fn draw(&self, buf: &mut Buffer, area: Rect) {
         let screen = self.parser.screen();
         for row in 0..self.rows().min(area.height) {
             for col in 0..self.cols().min(area.width) {
@@ -232,5 +331,27 @@ fn color(c: vt100::Color) -> Color {
         vt100::Color::Default => Color::Reset,
         vt100::Color::Idx(i) => Color::Indexed(i),
         vt100::Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_engine_that_cannot_start_falls_back_to_vt100_and_says_why() {
+        assert_eq!(EngineKind::parse("libghostty"), Some(EngineKind::Libghostty));
+        assert_eq!(EngineKind::parse("alacritty"), None, "unknown names are not engines");
+        let mut e = Emulator::with_engine(EngineKind::Libghostty, 20, 4, 100);
+        // Until slice G2 builds libghostty in, asking for it falls back; the terminal still works.
+        assert_eq!((e.wanted(), e.engine()), (EngineKind::Libghostty, EngineKind::Vt100));
+        assert!(e.fallback().is_some());
+        e.process(b"hello");
+        assert!(e.contents().starts_with("hello"));
+        // A fresh terminal (reattach) asks for the same engine again, not for whatever it fell back to.
+        let f = e.fresh();
+        assert_eq!((f.wanted(), f.engine(), f.fallback().is_some()), (EngineKind::Libghostty, EngineKind::Vt100, true));
+        let v = Emulator::with_engine(EngineKind::Vt100, 20, 4, 100);
+        assert_eq!((v.engine(), v.fallback()), (EngineKind::Vt100, None));
     }
 }

@@ -281,6 +281,8 @@ struct App {
     /// The last left press in a terminal: when, where and how many in a row (double and triple clicks).
     last_press: Option<(std::time::Instant, String, scrollback::Pos, u8)>,
     scroll_mode: Option<ScrollMode>,
+    /// Engine fallbacks already reported (each reason once per session).
+    engine_notes: HashSet<String>,
     /// A popup whose view hasn't arrived yet: view, width, context, and until when it may still open.
     pending_popup: Option<(String, u16, Value, std::time::Instant)>,
     /// The cursor shape the focused terminal's program asked for, and the one last sent to the outer terminal.
@@ -607,7 +609,7 @@ impl App {
             peer, tx, ws: Workspace::default(), safe_selected: BTreeSet::new(), owner_unset:false,
             terms: HashMap::new(), stream_view: HashMap::new(), early: HashMap::new(), early_closed: HashMap::new(), typed: None,
             leaves: Vec::new(), focus: 0, overlay: None, pstate: HashMap::new(),
-            filtering: None, filter_detail: false, toast: None, bells: HashMap::new(), selections: HashMap::new(), selecting: None, last_press: None, scroll_mode: None, pending_popup: None, cursor_style: CursorShape::Default, cursor_sent: CursorShape::Default, panel_values: Mutex::new(HashMap::new()), panel_dependencies: Mutex::new(HashMap::new()), hit: Hit::default(),
+            filtering: None, filter_detail: false, toast: None, bells: HashMap::new(), selections: HashMap::new(), selecting: None, last_press: None, scroll_mode: None, engine_notes: HashSet::new(), pending_popup: None, cursor_style: CursorShape::Default, cursor_sent: CursorShape::Default, panel_values: Mutex::new(HashMap::new()), panel_dependencies: Mutex::new(HashMap::new()), hit: Hit::default(),
             drag: None, overrides: HashMap::new(), mouse_owner: None, mouse_on: true,
             under: None, input_queues: HashMap::new(), view_streams: Arc::default(), zoomed: None, autofocused: None, window: Window::default(), pending_focus: None, tab_press: None, link_click: None, repeat_until: None, focus_now: None, focus_last: None, seen: HashMap::new(), kbd_enhance: false,
             held: KeyModifiers::NONE, message: String::new(), key_hint: None,
@@ -1542,6 +1544,12 @@ impl App {
         matches!(&self.overlay, Some(Overlay::Input { multi: Some(_), .. }))
             || (matches!(&self.overlay, Some(Overlay::Popup { .. })) && editing("@popup"))
             || self.leaves.get(self.focus).is_some_and(|v| editing(v))
+    }
+
+    /// `doc/settings/tui.terminal_engine`: the built-in engine new and reattached terminal panes use.
+    fn terminal_engine(&self) -> emulator::EngineKind {
+        self.ws.entries.get("doc/settings/tui").and_then(|s| s["terminal_engine"].as_str()).and_then(emulator::EngineKind::parse)
+            .unwrap_or(emulator::EngineKind::DEFAULT)
     }
 
     /// `doc/settings/tui.scrollback_lines`, bounded (see `SCROLLBACK_RANGE`); new and reattached panes use it.
@@ -3041,21 +3049,29 @@ impl App {
                 let live = res.as_ref().map(|r| r["state"] == "live").unwrap_or(false) && available;
                 let dragging = self.drag.is_some();
                 let lines = self.scrollback_lines();
+                let engine = self.terminal_engine();
                 let t = self.terms.entry(view.to_string()).or_insert_with(|| Term {
                     resource: rid.clone(),
                     stream: None,
-                    emu: Emulator::new(inner.width, inner.height, lines),
+                    emu: Emulator::with_engine(engine, inner.width, inner.height, lines),
                     size: (inner.width, inner.height),
                     attaching: false,
                     closed: None,
                     retry_at: None, modes: Default::default(),
                 });
-                if t.resource != rid {
+                // Another resource, or another engine chosen in Settings: start over and reattach (the backend's history
+                // repaints it). Never while an attach is in flight: its reply belongs to the current state.
+                if t.resource != rid || (t.emu.wanted() != engine && !t.attaching) {
                     if let Some(sid) = t.stream.take() {
                         self.stream_view.remove(&sid);
                         self.peer.notify("stream.close", json!({"stream": sid}));
                     }
-                    *t = Term { resource: rid.clone(), stream: None, emu: Emulator::new(inner.width, inner.height, lines), size: (inner.width, inner.height), attaching: false, closed: None, retry_at: None, modes: Default::default() };
+                    *t = Term { resource: rid.clone(), stream: None, emu: Emulator::with_engine(engine, inner.width, inner.height, lines), size: (inner.width, inner.height), attaching: false, closed: None, retry_at: None, modes: Default::default() };
+                }
+                if let Some(why) = t.emu.fallback() {
+                    // Say once per reason that the chosen engine isn't running (the pane still works on vt100).
+                    let note = format!("terminal engine {}: {why}; using {}", t.emu.wanted().name(), t.emu.engine().name());
+                    if self.engine_notes.insert(note.clone()) { self.message = note; }
                 }
                 if !available && (t.stream.is_some() || t.attaching) {
                     if let Some(stream) = t.stream.take() {
@@ -3814,6 +3830,27 @@ mod tests {
         terminal.draw(|f| { app.draw_view(f, "p", Rect::new(0, 0, 70, 16), true, &Palette::default(), &Icons::new(None, false));
             let b = f.buffer_mut(); n = (0..16).filter(|y| (0..70).any(|x| b[(x, *y)].symbol() == "▌")).count(); }).unwrap();
         assert_eq!(n, 5);
+    }
+
+    #[tokio::test]
+    async fn the_engine_setting_switches_open_panes_and_reports_a_fallback_once() {
+        let (mut app, _) = app();
+        app.load(&json!({"epoch":"e","seq":1,"entries":{"view/t":{"value":{"kind":"terminal","resource":"r1"}}},
+            "resources":[{"id":"r1","kind":"terminal","state":"live","argv":["/bin/sh"]}]}));
+        app.leaves = vec!["t".into()];
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 8)).unwrap();
+        let mut draw = |app: &mut App| { terminal.draw(|f| { app.draw_view(f, "t", Rect::new(0, 0, 40, 8), true, &Palette::default(), &Icons::new(None, false)); }).unwrap(); };
+        draw(&mut app);
+        assert_eq!(app.terms["t"].emu.engine(), emulator::EngineKind::Vt100);
+        app.terms.get_mut("t").unwrap().attaching = false;
+        app.ws.entries.insert("doc/settings/tui".into(), json!({"terminal_engine": "libghostty"}));
+        draw(&mut app);
+        assert_eq!(app.terms["t"].emu.wanted(), emulator::EngineKind::Libghostty, "an open pane switches");
+        assert!(app.message.starts_with("terminal engine libghostty: "), "{}", app.message);
+        app.message.clear();
+        app.terms.get_mut("t").unwrap().attaching = false;
+        draw(&mut app);
+        assert!(app.message.is_empty(), "each fallback reason is reported once");
     }
 
     #[tokio::test]
