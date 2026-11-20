@@ -8,5 +8,8 @@
               "command/agents.answer","command/agents.send","command/agents.stop","command/agents.forget","command/agents.status","data/agents.terminal_status","view/agents-*"],
   "needs":[{"cap":"ability/vqro.agents","suggest":"pi","why":"Agents come from a runtime integration such as the Pi launcher"},
            {"cap":"command/tabs.show","suggest":"tabs","why":"Agent panels open in a tab"}],
-  "contributes":{"commands":["agents.*: capability-driven controls"],"keys":["Prefix A: agents list","Prefix p: prompt the focused agent","Prefix P: agent settings for the focused agent"],"menu_items":["Per-agent actions"],"panels":["Agent list","Agent details","Pending requests","Agent settings (declared model, thinking, commands)","Stop agent confirmation"]}
+  "works_with":[{"cap":"ui/vqro.markdown","without":"Agent messages marked as markdown show as plain wrapped text"},
+                {"cap":"ui/vqro.pin","without":"The agent facts line scrolls with the conversation instead of staying at the bottom"},
+                {"cap":"ui/vqro.follow","without":"The conversation doesn't keep its view on the newest output"}],
+  "contributes":{"commands":["agents.*: capability-driven controls"],"keys":["Prefix A: agents list","Prefix p: prompt the focused agent","Prefix P: agent settings for the focused agent"],"menu_items":["Per-agent actions"],"panels":["Agent list","Agent details (the conversation from an item stream, with a facts line)","Pending requests","Agent settings (declared model, thinking, commands)","Stop agent confirmation"]}
 }

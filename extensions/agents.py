@@ -1028,7 +1028,8 @@ class Agents:
         if conversation is not None:
             # The agent's own item stream: the conversation is drawn here (agent pane, K3 phase 2).
             content = {"title": title, "follow": True, "items": [
-                {"text": title, "badges": [{"text": status(r), "style": "dim"}]}, *conversation]}
+                {"text": title, "badges": [{"text": status(r), "style": "dim"}]}, *conversation,
+                agent_transcript.facts_footer(agent_facts(r), plain(str(r.get("name") or r["id"])))]}
         elif sources:
             # Keep controls/warnings here, but never copy a provider's transcript into another
             # publication. Generic client composition enforces read-only source rows.

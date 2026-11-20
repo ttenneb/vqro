@@ -90,6 +90,30 @@ class TranscriptRows(unittest.TestCase):
         self.assertIn("[image: image/png]", texts)
 
 
+class FormattingAndFacts(unittest.TestCase):
+    def test_only_blocks_marked_markdown_are_formatted_and_they_stay_whole(self):
+        names = agent_transcript.Names({}, "r2")
+        entities = {("message", "m"): (1, {"position": 1, "role": "assistant", "final": True, "content": [
+            {"type": "text", "text": "# Plan\n- one\n- two", "format": "markdown"}, {"type": "text", "text": "# not\nmarkdown"}]})}
+        rows = agent_transcript.rows(entities, names)
+        self.assertEqual(rows[1], {"type": "text", "wrap": True, "format": "markdown", "text": "# Plan\n- one\n- two"})
+        self.assertEqual([r["text"] for r in rows[2:]], ["# not", "markdown"], "plain is the default")
+        self.assertNotIn("format", rows[2])
+        big = agent_transcript.markdown_rows("\n".join("x" * 1000 for _ in range(200)))
+        self.assertTrue(len(big) > 1 and all(len(r["text"].encode()) <= agent_transcript.MARKDOWN_ROW_BYTES for r in big))
+
+    def test_the_footer_shows_only_reported_facts(self):
+        footer = agent_transcript.facts_footer({
+            "session": {"cwd": "~/Projects/site", "model": {"id": "claude-opus-5-5", "effort": "medium"}},
+            "usage": {"context": {"used": 73_000, "window": 1_000_000}, "tokens": {"input": 234, "output": 37_000},
+                      "cost": {"amount": 5.217, "currency": "USD", "basis": "reported", "plan": "sub"}}}, "Pi r32")
+        self.assertEqual(footer["text"], "~/Projects/site · Pi r32 · claude-opus-5-5 (medium) · ctx 7% 73k/1.0M · ↑234 ↓37k · $5.22 (sub)")
+        self.assertEqual(footer["pin"], "bottom")
+        bare = agent_transcript.facts_footer({"usage": {"context": {"window": 200_000},
+                                                        "cost": {"amount": 1, "currency": "EUR", "basis": "estimated"}}}, "Codex")
+        self.assertEqual(bare["text"], "Codex · ctx ?/200k · ~1.00 EUR", "unknown occupancy is never derived")
+
+
 class AgentPane(unittest.TestCase):
     def setUp(self):
         self.core = FakeCore()

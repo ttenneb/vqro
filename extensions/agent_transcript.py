@@ -14,6 +14,7 @@ TOOL_ICON = {"pending": "…", "running": "…", "completed": "✓", "failed": "
 RECEIPT = {"recorded": "recorded", "held": "held", "admitted": "admitted", "queued": "queued",
            "inserted": "in the conversation", "handled": "handled", "supplied": "supplied", "read": "read",
            "unknown": "unknown"}
+MARKDOWN_ROW_BYTES = 60 * 1024  # under the 64 KiB per formatted row (core-protocol "Formatted text")
 LINE_BYTES = 4096  # one row; longer lines are cut with a mark (display only, never a request's question)
 TOOL_LINES = 20  # lines of a tool's input or output shown before "… N more lines"
 BUDGET = 160 * 1024  # encoded bytes of the conversation in one panel; older blocks give way first
@@ -46,6 +47,20 @@ def lines(text, style=None, limit=None):
     return rows
 
 
+def markdown_rows(text, style=None):
+    """A block the agent marks `format: "markdown"`: whole rows (feature `markdown`; clients without it show the
+    raw text, wrapped). Split at line breaks only when longer than one row may be."""
+    rows, chunk = [], []
+    for line in plain(text).split("\n"):
+        if chunk and len("\n".join(chunk + [line]).encode()) > MARKDOWN_ROW_BYTES:
+            rows.append(chunk)
+            chunk = []
+        chunk.append(clip(line, MARKDOWN_ROW_BYTES))
+    rows.append(chunk)
+    return [{"type": "text", "wrap": True, "format": "markdown", "text": "\n".join(c), **({"style": style} if style else {})}
+            for c in rows]
+
+
 def content_rows(content, style=None, limit=None):
     """A message's or tool's `content`: always an array of typed blocks (agent-v0 section 3.2)."""
     rows = []
@@ -54,7 +69,9 @@ def content_rows(content, style=None, limit=None):
             continue
         kind = block.get("type")
         if kind == "text" and isinstance(block.get("text"), str):
-            rows += lines(block["text"], style, limit)
+            # Plain is the default; only an explicit markdown block is rendered as markdown (agent-v0 section 3.2).
+            markdown = block.get("format") == "markdown" and not limit
+            rows += markdown_rows(block["text"], style) if markdown else lines(block["text"], style, limit)
         elif kind in ("image", "audio"):
             rows.append({"type": "text", "style": "dim", "text": f"[{kind}: {plain(str(block.get('mime') or '?'))}]"})
         elif kind in ("resource_link", "resource"):
@@ -141,6 +158,39 @@ def group_row(tools):
                      if counts.get(s))
     return {"id": "g:" + tools[0][0], "text": "Activity · " + " · ".join(summary), "description": marks,
             "children": [tool_row(eid, value) for eid, value in tools], "expanded": True}
+
+
+def amount(n):
+    return f"{n / 1_000_000:.1f}M" if n >= 1_000_000 else f"{n / 1000:.0f}k" if n >= 10_000 else f"{n / 1000:.1f}k" if n >= 1000 else str(n)
+
+
+def facts_footer(facts, name):
+    """One line of the agent's own facts (agent-v0 "Optional view facts"): folder, name, model, context, tokens, cost.
+    Only what the agent reports; an absent fact is left out, never guessed or derived."""
+    session = facts.get("session") if isinstance(facts.get("session"), dict) else {}
+    usage = facts.get("usage") if isinstance(facts.get("usage"), dict) else {}
+    parts = []
+    if isinstance(session.get("cwd"), str):
+        parts.append(session["cwd"])
+    parts.append(name)
+    model = session.get("model") if isinstance(session.get("model"), dict) else {}
+    if isinstance(model.get("label") or model.get("id"), str):
+        parts.append(str(model.get("label") or model["id"]) + (f" ({model['effort']})" if isinstance(model.get("effort"), str) else ""))
+    context = usage.get("context") if isinstance(usage.get("context"), dict) else {}
+    used, window = context.get("used"), context.get("window")
+    if type(used) is int and type(window) is int and window > 0:
+        parts.append(f"ctx {100 * used // window}% {amount(used)}/{amount(window)}")
+    elif type(window) is int:
+        parts.append(f"ctx ?/{amount(window)}")  # occupancy unknown, never derived
+    tokens = usage.get("tokens") if isinstance(usage.get("tokens"), dict) else {}
+    if type(tokens.get("input")) is int and type(tokens.get("output")) is int:
+        parts.append(f"↑{amount(tokens['input'])} ↓{amount(tokens['output'])}")
+    cost = usage.get("cost") if isinstance(usage.get("cost"), dict) else {}
+    if isinstance(cost.get("amount"), (int, float)) and isinstance(cost.get("currency"), str):
+        money = f"{cost['amount']:.2f} {cost['currency']}" if cost["currency"] != "USD" else f"${cost['amount']:.2f}"
+        parts.append(("~" if cost.get("basis") == "estimated" else "") + money
+                     + (f" ({plain(str(cost['plan']))})" if isinstance(cost.get("plan"), str) else ""))
+    return {"type": "text", "pin": "bottom", "style": "dim", "text": clip(plain(" · ".join(parts)), 1024)}
 
 
 def rows(entities, names, coverage=None):
