@@ -7,7 +7,7 @@ pub async fn socket(explicit: Option<PathBuf>, standalone: bool) -> Result<PathB
         path
     } else if let Ok(endpoint) = std::env::var("VQRO_SOCKET") {
         // Public primitive: use the actual core state root, not the extension's HOME or cwd.
-        let (peer, _, hello) = vqro::client::connect(Path::new(&endpoint), "tmux-server-location").await.map_err(|e| e.to_string())?;
+        let (peer, _, hello) = vqro::client::connect_with(Path::new(&endpoint), vqro::client::supervision_hello(json!({"client":"tmux-server-location","version":env!("CARGO_PKG_VERSION"),"build":vqro::client::build_stamp()}))).await.map_err(|e| e.to_string())?;
         peer.close();
         hello["state_dir"].as_str().map(PathBuf::from).ok_or("tmux requires a persistent core state directory")?
     } else if standalone {

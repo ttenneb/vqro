@@ -65,6 +65,16 @@ NOTIFICATION_BYTES = 4 * 1024 * 1024
 MAX_PENDING = 128
 
 
+def supervision_hello(params=None):
+    """Explicitly present configured supervision credentials; only core verifies their lifetime."""
+    params = dict(params or {})
+    if "extension" not in params and "extension_token" not in params:
+        name, token = os.environ.get("VQRO_EXTENSION"), os.environ.get("VQRO_EXTENSION_TOKEN")
+        if name is not None and token is not None:
+            params.update(extension=name, extension_token=token)
+    return params
+
+
 class Vqro:
     """JSON-RPC over lines. The core may send us requests (command.invoke) and notifications."""
 
@@ -129,10 +139,6 @@ class Vqro:
             params = dict(params or {})
             known = getattr(self, "principal", os.environ.get("VQRO_PRINCIPAL"))
             if method == "hello":
-                if "extension" not in params and "extension_token" not in params:
-                    name, token = os.environ.get("VQRO_EXTENSION"), os.environ.get("VQRO_EXTENSION_TOKEN")
-                    if name is not None and token is not None:
-                        params.update(extension=name, extension_token=token)
                 if known and known != "undeclared":
                     params.setdefault("identity", {"kind": "principal", "principal": known})
         proof = getattr(getattr(self, "_command_context", None), "invocation", None)

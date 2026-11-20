@@ -68,12 +68,23 @@ class InvocationAttribution(unittest.TestCase):
         vqro._send = send
         return vqro, messages
 
-    def test_generic_hello_carries_configured_supervision_without_synthesizing_it(self):
+    def test_child_generic_hello_never_implicitly_attaches_supervision(self):
         from unittest.mock import patch
         with patch.dict("os.environ", {"VQRO_EXTENSION":"managed", "VQRO_EXTENSION_TOKEN":"fixture-token", "VQRO_PRINCIPAL":"extension:managed"}, clear=True):
             vqro, messages = self.vqro(None)
+            vqro.call("hello", {"features":["child"]})
+            hello = messages[-1]["params"]
+            self.assertNotIn("extension", hello)
+            self.assertNotIn("extension_token", hello)
+            self.assertEqual(hello["identity"], {"kind":"principal", "principal":"extension:managed"}, "a reserved assertion is refused by core, never silently promoted")
+
+    def test_generic_hello_explicitly_opts_into_configured_supervision(self):
+        from unittest.mock import patch
+        from vqro_ext import supervision_hello
+        with patch.dict("os.environ", {"VQRO_EXTENSION":"managed", "VQRO_EXTENSION_TOKEN":"fixture-token", "VQRO_PRINCIPAL":"extension:managed"}, clear=True):
+            vqro, messages = self.vqro(None)
             params = {"features":["fixture"]}
-            vqro.call("hello", params)
+            vqro.call("hello", supervision_hello(params))
             hello = messages[-1]["params"]
             self.assertEqual((hello["extension"], hello["extension_token"]), ("managed", "fixture-token"))
             self.assertEqual(hello["identity"], {"kind":"principal", "principal":"extension:managed"})

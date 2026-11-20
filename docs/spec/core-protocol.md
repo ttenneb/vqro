@@ -63,7 +63,11 @@ principal/coordination grants; hello supplies `owner_unset:true` and a visible `
 usable. TUI/text UI display bootstrap/reconnect guidance, including safe mode; cache refresh never retags a connection. Rust/Python SDKs send configured
 `VQRO_PRINCIPAL` in that typed hello field, never as a per-call assertion. Ordinary CLI/provider clients without
 it are `undeclared`; the TUI explicitly defaults to owner unless its launcher configures another principal.
-Verified supervised extensions resolve to `extension:<name>`. Callers cannot assert `extension:*`, `host:*`,
+Generic Rust/Python SDK connections never attach inherited supervision credentials implicitly (including tool/git-hook
+children). A managed helper deliberately opts in using public `client::supervision_hello(hello)` / Python
+`supervision_hello(hello)`, which copies a configured extension name/token pair only when neither field is explicit;
+core still verifies its lifetime. Extension/provider handshakes remain explicit. Inherited reserved identity without
+verified supervision is refused, not silently promoted. Verified supervised extensions resolve to `extension:<name>`. Callers cannot assert `extension:*`, `host:*`,
 `system` or `system:*` in `hello.identity`: these are core-derived; rejection is `invalid` and emits bounded
 `identity.rejected {author,actor,outcome,error}` diagnostics (no claimed identity, token or proof is logged).
 A runtime registration without a configured actor

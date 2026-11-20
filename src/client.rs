@@ -19,14 +19,18 @@ pub async fn connect_with_identity(socket:&Path,client:&str,identity:Option<crat
     if let Some(identity)=identity{hello["identity"]=json!(identity);}
     connect_with(socket,hello).await
 }
-/// Explicit hello retains rendering declarations; only configured environment supplies a default identity.
-pub async fn connect_with(socket:&Path,mut hello:Value)->Result<(Peer,IncomingReceiver,Value)> {
-    // Managed helpers (including backend-location probes) carry their real lifetime, not a free prefix claim.
+/// Opt in to presenting the configured supervision credentials. Core still verifies the lifetime.
+/// Generic children never opt in implicitly; explicit hello fields are never overwritten.
+pub fn supervision_hello(mut hello:Value)->Value {
     if hello.get("extension").is_none() && hello.get("extension_token").is_none() {
         if let (Ok(name),Ok(token))=(std::env::var("VQRO_EXTENSION"),std::env::var("VQRO_EXTENSION_TOKEN")) {
             hello["extension"]=json!(name);hello["extension_token"]=json!(token);
         }
     }
+    hello
+}
+/// Explicit hello retains rendering declarations; environment identity is not supervision authority.
+pub async fn connect_with(socket:&Path,mut hello:Value)->Result<(Peer,IncomingReceiver,Value)> {
     if hello.get("identity").is_none(){if let Ok(principal)=std::env::var("VQRO_PRINCIPAL"){if principal!=crate::principal::UNDECLARED{hello["identity"]=json!({"kind":"principal","principal":principal});}}}
     let stream = UnixStream::connect(socket)
         .await
