@@ -206,9 +206,10 @@ fn chips(item: &Value, features: &[&str]) -> Value {
     let mut shown = Vec::new();
     for chip in list {
         let mut c = chip.clone();
-        if superseded(&c, features) { continue; }
-        for _ in 0..4 {
-            if missing_for(&c, features).is_empty() { break; }
+        // Each chip reached (the declared one, then each fallback) is checked for `requires_absent` first.
+        for depth in 0..=4 {
+            if superseded(&c, features) { c = Value::Null; break; }
+            if depth == 4 || missing_for(&c, features).is_empty() { break; }
             match &c["fallback"] { Value::Object(_) => c = c["fallback"].clone(), Value::String(s) if s == "drop" => { c = Value::Null; break; } _ => break }
         }
         if !c.is_null() { shown.push(c); }

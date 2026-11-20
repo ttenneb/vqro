@@ -4442,6 +4442,237 @@
         ]
       },
       "state": {}
+    },
+    {
+      "expect": {
+        "list_detail": null,
+        "missing": [],
+        "rows": [
+          {
+            "bottom": false,
+            "chips": [
+              "plain fallback"
+            ],
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "toolbar/0",
+            "pinned": true,
+            "selectable": true,
+            "text": null,
+            "type": "chips"
+          }
+        ]
+      },
+      "features": [
+        "items",
+        "pages",
+        "tree",
+        "toolbar",
+        "badges",
+        "description",
+        "menu",
+        "input",
+        "options",
+        "select",
+        "chips",
+        "icon",
+        "wrap",
+        "title_actions"
+      ],
+      "name": "requires_absent on fallbacks: a reached chip or row fallback marked requires_absent is dropped too",
+      "panel": {
+        "items": [
+          {
+            "fallback": {
+              "requires_absent": [
+                "title_actions"
+              ],
+              "text": "row stand-in"
+            },
+            "requires": [
+              "x.modern"
+            ],
+            "text": "modern row"
+          }
+        ],
+        "toolbar": [
+          {
+            "chips": [
+              {
+                "command": "x.m",
+                "fallback": {
+                  "command": "x.s",
+                  "requires_absent": [
+                    "title_actions"
+                  ],
+                  "text": "stand-in"
+                },
+                "requires": [
+                  "x.modern"
+                ],
+                "text": "modern"
+              },
+              {
+                "command": "x.d",
+                "fallback": {
+                  "command": "x.d",
+                  "fallback": {
+                    "command": "x.d",
+                    "requires_absent": [
+                      "title_actions"
+                    ],
+                    "text": "level 2 stand-in"
+                  },
+                  "requires": [
+                    "x.b"
+                  ],
+                  "text": "level 1"
+                },
+                "requires": [
+                  "x.a"
+                ],
+                "text": "deep"
+              },
+              {
+                "command": "x.k",
+                "fallback": {
+                  "command": "x.k",
+                  "text": "plain fallback"
+                },
+                "requires": [
+                  "x.a"
+                ],
+                "text": "kept"
+              }
+            ],
+            "type": "chips"
+          }
+        ]
+      },
+      "state": {}
+    },
+    {
+      "expect": {
+        "list_detail": null,
+        "missing": [],
+        "rows": [
+          {
+            "bottom": false,
+            "chips": [
+              "stand-in",
+              "level 2 stand-in",
+              "plain fallback"
+            ],
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "toolbar/0",
+            "pinned": true,
+            "selectable": true,
+            "text": null,
+            "type": "chips"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "0",
+            "pinned": false,
+            "selectable": true,
+            "text": "row stand-in",
+            "type": "item"
+          }
+        ]
+      },
+      "features": [
+        "items",
+        "pages",
+        "tree",
+        "toolbar",
+        "badges",
+        "description",
+        "menu",
+        "input",
+        "options",
+        "select",
+        "chips",
+        "icon",
+        "wrap"
+      ],
+      "name": "requires_absent on fallbacks: without the feature, the stand-in fallbacks show",
+      "panel": {
+        "items": [
+          {
+            "fallback": {
+              "requires_absent": [
+                "title_actions"
+              ],
+              "text": "row stand-in"
+            },
+            "requires": [
+              "x.modern"
+            ],
+            "text": "modern row"
+          }
+        ],
+        "toolbar": [
+          {
+            "chips": [
+              {
+                "command": "x.m",
+                "fallback": {
+                  "command": "x.s",
+                  "requires_absent": [
+                    "title_actions"
+                  ],
+                  "text": "stand-in"
+                },
+                "requires": [
+                  "x.modern"
+                ],
+                "text": "modern"
+              },
+              {
+                "command": "x.d",
+                "fallback": {
+                  "command": "x.d",
+                  "fallback": {
+                    "command": "x.d",
+                    "requires_absent": [
+                      "title_actions"
+                    ],
+                    "text": "level 2 stand-in"
+                  },
+                  "requires": [
+                    "x.b"
+                  ],
+                  "text": "level 1"
+                },
+                "requires": [
+                  "x.a"
+                ],
+                "text": "deep"
+              },
+              {
+                "command": "x.k",
+                "fallback": {
+                  "command": "x.k",
+                  "text": "plain fallback"
+                },
+                "requires": [
+                  "x.a"
+                ],
+                "text": "kept"
+              }
+            ],
+            "type": "chips"
+          }
+        ]
+      },
+      "state": {}
     }
   ]
 }

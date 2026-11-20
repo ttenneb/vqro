@@ -114,10 +114,12 @@ def _chips(item, features):
         return item
     shown = []
     for chip in item["chips"]:
-        if isinstance(chip, dict) and _superseded(chip, features):
-            continue
-        for _ in range(4):
-            if not isinstance(chip, dict) or not missing_for(chip, features):
+        # Each chip reached (the declared one, then each fallback) is checked for `requires_absent` first.
+        for depth in range(5):
+            if isinstance(chip, dict) and _superseded(chip, features):
+                chip = None
+                break
+            if depth == 4 or not isinstance(chip, dict) or not missing_for(chip, features):
                 break
             fb = chip.get("fallback")
             if fb == "drop":

@@ -94,9 +94,10 @@ function chips(item: Json, features: string[]): Json {
   if (kind(item) !== "chips" || !Array.isArray(item.chips)) return item;
   const shown: Json[] = [];
   for (let chip of item.chips) {
-    if (isObj(chip) && superseded(chip, features)) continue;
-    for (let n = 0; n < 4; n++) {
-      if (!isObj(chip) || missingFor(chip, features).length === 0) break;
+    // Each chip reached (the declared one, then each fallback) is checked for `requires_absent` first.
+    for (let n = 0; n <= 4; n++) {
+      if (isObj(chip) && superseded(chip, features)) { chip = null; break; }
+      if (n === 4 || !isObj(chip) || missingFor(chip, features).length === 0) break;
       if (chip.fallback === "drop") { chip = null; break; }
       if (!isObj(chip.fallback)) break;
       chip = chip.fallback;
