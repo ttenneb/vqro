@@ -150,7 +150,9 @@ class Harness:
 
     def agent(self, pull):
         """A terminal endpoint (fake backend) declared for pull; returns its rN."""
-        rid = self.c.call("resource.spawn", {"argv": ["sh"]})["resource"]["id"]
+        # As a launcher does: tag the endpoint's terminal with the plugin's principal (VQRO_PRINCIPAL), which the core
+        # records as its resource.principal (C2) and which the plugin's own hello binds.
+        rid = self.c.call("resource.spawn", {"argv": ["sh"], "env": {"VQRO_PRINCIPAL": self.PLUGIN}})["resource"]["id"]
         assert isinstance(pull.get("points"), dict), "pull.points is a map {point: {precision}} (coordination-v0 §7)"
         if self.kind == "fake":
             self.declared[rid] = pull

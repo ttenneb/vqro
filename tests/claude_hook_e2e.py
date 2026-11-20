@@ -365,6 +365,8 @@ if a.inbox == "fake":
           last.get("session", {}).get("cwd") == root and last["session"].get("model") == {"id": "claude-fixture-1"}
           and "usage" not in last, last)
 if a.inbox == "k2core":  # K3 agents.status itself accepts the reports and their facts
+    tag = next(r.get("principal") for r in h.c.call("resource.list", {"id": AGENT})["resources"])
+    check("the endpoint terminal's resource.principal is the plugin's hello principal (launcher tag, C2)", tag == h.PLUGIN, tag)
     refused = [e for e in hooklog() if e["event"] in ("status_failed", "status_facts_refused")]
     check("K3 agents.status accepts every report and its facts", not refused, refused[:2])
 # 11. hook latency without mail: what every tool batch costs
