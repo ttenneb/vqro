@@ -19,7 +19,7 @@ ap.add_argument("--framing-only", action="store_true", help="native rewake and h
 a = ap.parse_args()
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from coord_harness import Harness, txt, pull_declaration, finish_framing  # noqa: E402
+from coord_harness import Harness, txt, finish_framing  # noqa: E402
 
 root = a.root
 P = {k: os.path.join(root, k) for k in ("home", "cfg", "work", "hookstate")}

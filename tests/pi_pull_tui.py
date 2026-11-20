@@ -18,7 +18,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PLUGIN = os.path.join(HERE, "..", "integrations", "pi", "vqro-pull.ts")
 root = a.root
 sys.path.insert(0, HERE)
-from coord_harness import Harness, txt, pull_declaration, finish_framing  # noqa: E402
+from coord_harness import Harness, txt, finish_framing  # noqa: E402
 
 P = {k: os.path.join(root, k) for k in ("home", "agent", "sessions", "work")}
 for d in P.values():

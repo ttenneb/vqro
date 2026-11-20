@@ -25,7 +25,7 @@ PLUGIN = os.path.join(HERE, "..", "integrations", "pi", "vqro-pull.ts")
 FAULT_PLUGIN = os.path.join(HERE, "fixtures", "pi", "vqro-pull-faults.ts")  # test-only wrapper; the shipped plugin has no faults
 root = a.root or tempfile.mkdtemp(prefix="pi-pull-")
 sys.path.insert(0, HERE)
-from coord_harness import Harness, txt, pull_declaration, finish_framing  # noqa: E402
+from coord_harness import Harness, txt, finish_framing  # noqa: E402
 
 P = {k: os.path.join(root, k) for k in ("home", "agent", "sessions", "work")}
 for d in P.values():

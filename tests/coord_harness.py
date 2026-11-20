@@ -28,21 +28,6 @@ def txt(s):
     return [{"type": "text", "text": s}]
 
 
-def pull_declaration(runtime):
-    """Launcher declarations for these pinned native plugin paths, not inferred precision."""
-    points = {point: {"precision": "exact"} for point in ("turn", "settle", "idle")}
-    if runtime == "pi":
-        framing = {point: {"role": "user", "frame": "sender_header"} for point in points}
-        return {"points": points, "insert": "user", "evidence": "entry", "framing": framing}
-    if runtime != "claude":
-        raise ValueError("unknown native pull fixture")
-    points["idle"]["precision"] = "approximate"
-    framing = {point: {"role": "user", "frame": "system-reminder", "authority": "above_user"}
-               for point in ("turn", "settle")}
-    framing["idle"] = {"role": "user", "frame": "SYSTEM NOTIFICATION - NOT USER INPUT", "authority": "above_user"}
-    return {"points": points, "insert": "context", "evidence": "none", "framing": framing}
-
-
 def finish_framing(harness, results, failures):
     """Keep actual model logs and public declaration readbacks; callers grade them independently."""
     declarations = []

@@ -24,7 +24,7 @@ ap.add_argument("--coord-ext")
 a = ap.parse_args()
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from coord_harness import Harness, txt, pull_declaration, finish_framing  # noqa: E402
+from coord_harness import Harness, txt, finish_framing  # noqa: E402
 
 root = a.root or tempfile.mkdtemp(prefix="a3-cc-")
 os.makedirs(root, exist_ok=True)

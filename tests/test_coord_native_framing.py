@@ -4,9 +4,10 @@
 import unittest
 import tempfile
 from pathlib import Path
-from agent_conformance.part_b.native_framing_case import first_message, framed, take_point, module_tree_digest, notification_rendered
-from agent_conformance.results import FixtureFailed
-from coord_harness import pull_declaration
+from agent_conformance.part_b.native_framing_case import (
+    first_message, framed, take_point, module_tree_digest, notification_rendered, delivery_segment,
+)
+from agent_conformance.results import FixtureFailed, HarnessGap
 
 
 class NativeFrames(unittest.TestCase):
@@ -28,20 +29,35 @@ class NativeFrames(unittest.TestCase):
             path.write_text("second")
             self.assertNotEqual(before, module_tree_digest(root))
             (Path(root) / "escape").symlink_to("/usr/bin/python3")
-            with self.assertRaises(FixtureFailed): module_tree_digest(root)
+            with self.assertRaises(FixtureFailed):
+                module_tree_digest(root)
 
     def test_actual_wire_not_truncated_summary(self):
         message = {"role": "user", "content": [{"type": "tool_result", "content": [{"type": "text", "text": "token"}]}]}
         self.assertEqual(first_message([{"n": 1, "wire": {"messages": [message]}}], "token")[1], message)
-        with self.assertRaises(FixtureFailed): first_message([{"messages": [{"text": "token"}]}], "token")
+        with self.assertRaises(FixtureFailed):
+            first_message([{"messages": [{"text": "token"}]}], "token")
 
-    def test_header_and_role_and_added_wrapper_are_all_required(self):
-        body = "<system-reminder>vqro inbox message d1 from p:owner (mode boundary): token</system-reminder>"
-        valid = {"role": "user", "content": body}
-        self.assertTrue(framed(valid, "user", "system-reminder"))
-        self.assertFalse(framed({**valid, "role": "system"}, "user", "system-reminder"))
-        self.assertFalse(framed({**valid, "content": "token"}, "user", "system-reminder"))
-        self.assertFalse(framed(valid, "user", "NOT USER INPUT"))
+    def test_declared_binding_requires_native_container_and_wire_role(self):
+        body = "<system-reminder>\nPostToolBatch hook additional context:\nvqro inbox message d1 [ref abc] from p:owner (mode boundary):\n> token\n</system-reminder>"
+        valid = {"role": "user", "content": [{"type": "tool_result", "content": body}]}
+        self.assertTrue(framed(valid, "system_reminder", "hook_additional_context", "turn", "token"))
+        self.assertFalse(framed({**valid, "role": "system"}, "system_reminder", "hook_additional_context", "turn", "token"))
+        self.assertFalse(framed({"role": "user", "content": body}, "system_reminder", "hook_additional_context", "turn", "token"))
+        self.assertFalse(framed(valid, "system_reminder", "hook_additional_context", "settle", "token"))
+
+    def test_arbitrary_wire_substring_is_not_a_declared_binding(self):
+        message = {"role": "user", "content": "system-reminder"}
+        with self.assertRaises(HarnessGap):
+            framed(message, "user", "system-reminder", "turn", "token")
+
+    def test_batch_selects_the_header_whose_quoted_body_has_the_token(self):
+        body = ("vqro inbox message first from p:owner (mode boundary):\n> unrelated\n"
+                "vqro inbox message second [ref abc] from p:owner (mode settle):\n> token\n")
+        selected = delivery_segment(body, "token")
+        self.assertEqual((selected["delivery"], selected["mode"]), ("second", "settle"))
+        with self.assertRaises(FixtureFailed):
+            delivery_segment(body.replace("unrelated", "token"), "token")
 
     def test_exact_point_requires_one_correlated_native_take(self):
         pi = {"event": "taken", "at": "turn", "deliveries": ["d1"]}
@@ -49,15 +65,8 @@ class NativeFrames(unittest.TestCase):
         self.assertEqual(take_point([pi, cc], "d1"), "turn")
         self.assertEqual(take_point([pi, cc], "d2"), "idle")
         for journal in ([], [pi, pi]):
-            with self.assertRaises(FixtureFailed): take_point(journal, "d1")
-
-    def test_declarations_do_not_infer_exact_idle_for_claude(self):
-        pi, cc = pull_declaration("pi"), pull_declaration("claude")
-        self.assertEqual(pi["points"]["idle"]["precision"], "exact")
-        self.assertEqual(cc["points"]["idle"]["precision"], "approximate")
-        self.assertIn("NOT USER INPUT", cc["framing"]["idle"]["frame"])
-        self.assertNotEqual(cc["framing"]["turn"], cc["framing"]["idle"])
-        with self.assertRaises(ValueError): pull_declaration("unknown")
+            with self.assertRaises(FixtureFailed):
+                take_point(journal, "d1")
 
 
 if __name__ == "__main__":

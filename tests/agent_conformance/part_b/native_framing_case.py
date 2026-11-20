@@ -76,10 +76,74 @@ def load_rows(path):
     return rows
 
 
-def framed(message, role, frame):
-    body = texts(message.get("content"))
-    return (message.get("role") == role and "vqro inbox message " in body and " from p:owner" in body
-            and (frame == "sender_header" or frame in body))
+FRAME_BINDINGS = {
+    ("user", "sender_header", point): {"wire_role": "user", "prefix": None}
+    for point in ("turn", "settle", "idle")
+}
+FRAME_BINDINGS.update({
+    ("system_reminder", "hook_additional_context", "turn"):
+        {"wire_role": "user", "prefix": "PostToolBatch hook additional context:", "tool_result": True, "authority": "above_user"},
+    ("system_reminder", "hook_additional_context", "settle"):
+        {"wire_role": "user", "prefix": "Stop hook additional context:", "authority": "above_user"},
+    ("user", "task_notification_not_user_input", "idle"):
+        {"wire_role": "user", "prefix": "[SYSTEM NOTIFICATION - NOT USER INPUT]", "notification": True},
+})
+
+
+def delivery_segment(body, token):
+    pattern = re.compile(r'(?m)^\s*(?:(?:PostToolBatch|Stop) hook additional context: |Stop hook blocking error from command "Stop": )?vqro inbox message (?P<delivery>\S+)(?: \[ref [^\]\n]+\])? from (?P<sender>[^\n]+?) \(mode (?P<mode>\w+)\)[^\n]*')
+    headers = list(pattern.finditer(body))
+    selected = []
+    for index, header in enumerate(headers):
+        quoted = body[header.end():headers[index + 1].start() if index + 1 < len(headers) else len(body)]
+        if token in quoted:
+            selected.append({**header.groupdict(), "quoted": quoted})
+    if len(selected) != 1:
+        raise FixtureFailed("native payload token has no unambiguous quoted delivery header")
+    return selected[0]
+
+
+def model_text_blocks(value, tool_result=False):
+    if isinstance(value, str):
+        yield value, tool_result
+    elif isinstance(value, list):
+        for item in value:
+            yield from model_text_blocks(item, tool_result)
+    elif isinstance(value, dict):
+        if value.get("type") == "tool_result":
+            yield texts(value.get("content")), True
+        elif isinstance(value.get("text"), str):
+            yield value["text"], tool_result
+        elif "content" in value:
+            yield from model_text_blocks(value["content"], tool_result)
+
+
+def framed(message, role, frame, point, token):
+    binding = FRAME_BINDINGS.get((role, frame, point))
+    if binding is None:
+        raise HarnessGap("no reviewed native evidence binding for declared role/frame/point")
+    if message.get("role") != binding["wire_role"]:
+        return False
+    if binding["prefix"] is None:
+        body = texts(message.get("content"))
+        segment = delivery_segment(body, token)
+        return body.lstrip().startswith("vqro inbox message ") and re.match(r"p:owner(?:$|[, ])", segment["sender"]) is not None
+    for text, in_tool_result in model_text_blocks(message.get("content")):
+        if token not in text or binding.get("tool_result") and not in_tool_result:
+            continue
+        segment = delivery_segment(text, token)
+        if re.match(r"p:owner(?:$|[, ])", segment["sender"]) is None:
+            continue
+        prefix = binding["prefix"]
+        if prefix is None:
+            if text.lstrip().startswith("vqro inbox message "):
+                return True
+            continue
+        for reminder in re.findall(r"<system-reminder>(.*?)</system-reminder>", text, re.DOTALL):
+            if token in reminder and reminder.lstrip().startswith(prefix):
+                if not binding.get("notification") or "<task-notification>" in reminder and "<summary>" in reminder:
+                    return True
+    return False
 
 
 def notification_rendered(screen, transcript, delivery, token, summary):
@@ -180,10 +244,8 @@ async def native_framing_and_precision(ctx):
         for token, expected_point, mode in checks:
             request, message = first_message(models, token)
             body = texts(message.get("content"))
-            match = re.search(r"vqro inbox message (\S+)", body)
-            if not match:
-                raise FixtureFailed("native envelope lost its delivery identity")
-            delivery = match[1]
+            segment = delivery_segment(body, token)
+            delivery = segment["delivery"]
             deliveries.append(delivery)
             point = take_point(journal, delivery)
             metadata = (declaration.get("points") or {}).get(point)
@@ -193,7 +255,10 @@ async def native_framing_and_precision(ctx):
                       "each actually served native point declares precision and added framing", route=label, point=point,
                       declaration=declaration)
             ctx.check((expected_point is None or point == expected_point)
-                      and framed(message, framing["role"], framing["frame"]) and "(mode " + mode + ")" in body,
+                      and framed(message, framing["role"], framing["frame"], point, token)
+                      and segment["mode"] == mode
+                      and all(framing.get(key) == value for key, value in FRAME_BINDINGS[(framing["role"], framing["frame"], point)].items()
+                              if key == "authority"),
                       "actual native model envelope retains its declared role/frame/origin and insertion contract",
                       route=label, point=point, delivery=delivery, request=request["n"], envelope=message)
             if label in ("pi", "pt"):
@@ -232,7 +297,7 @@ async def native_framing_and_precision(ctx):
             human_seen = isinstance(prompt, str) and bool(prompt) and any(prompt in json.dumps(row.get("wire")) for row in models)
             ctx.check(unsafe.get("state") in ("held", "recorded") and not unsafe.get("attempt")
                       and safe.get("mode") == "boundary" and human_seen,
-                      "a real human-prompt race makes no unsafe start claim and preserves the boundary contract", race=race)
+                      "concurrent send and human submission preserve boundary without an unsafe start; native take overlap is not inferred", race=race)
             ctx.check(not any("MSG-BUSY-I3" in json.dumps(row.get("wire")) for row in models),
                       "a plugin unable to preserve approximate-idle start makes no model input")
     ctx.check(module_tree_digest(module_root) == modules["sha256"], "native Pi dependency closure stayed frozen")
