@@ -506,7 +506,7 @@ class Agents:
             if c.too_big:
                 notes.append({"type": "text", "style": "warn", "text": "This agent's history is larger than this pane can hold "
                               f"({VIEW_MAX_ENTITIES} items, {VIEW_MAX_ENTITY_BYTES // 1048576} MiB), so the conversation stopped updating. "
-                              "Close and reopen the pane to try again."})
+                              "Show the agent again (Agents, or its pane menu) to retry."})
             elif c.clamped:
                 notes.append({"type": "text", "style": "dim", "text": "This agent declares more history than this pane keeps; "
                               "if it sends that much, the conversation stops updating and says so."})
@@ -601,6 +601,12 @@ class Agents:
     def show(self, args):
         self.ext.fresh()
         r = self.agent(args, inspect=True)
+        c = self.conversations.get(r["id"])
+        if c is not None and c.too_big:  # showing the agent again retries a conversation that overflowed
+            with c.lock:
+                c.too_big = False
+                c.view = ItemView(max_entities=c.view.max_entities, max_entity_bytes=c.view.max_entity_bytes)
+            self.wake(r["id"], reattach=True)
         self.ext.contribute(self.declarations([r]))
         self.publish_panel(r)
         result = self.ext.invoke("tabs.show", {"view": view(r["id"]), "title": label(r.get("name") or "Agent")+" "+r["id"]})

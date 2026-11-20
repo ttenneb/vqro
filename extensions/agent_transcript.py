@@ -9,6 +9,7 @@ import time
 
 from vqro_display import plain
 
+ACTORS = {"agents": "agents UI"}  # recorded actor -> how it reads in a label
 ROLE_LABEL = {"thought": "Thinking", "coordination": "Coordination", "system": "System"}
 TOOL_ICON = {"pending": "…", "running": "…", "completed": "✓", "failed": "✗", "cancelled": "⊘"}
 RECEIPT = {"recorded": "recorded", "held": "held", "admitted": "admitted", "queued": "queued",
@@ -133,11 +134,16 @@ class Names:
             return (f"Message from {name}" + (f" (agent {plain(rid)})" if isinstance(rid, str) else ""), "accent",
                     "agent:" + (rid if isinstance(rid, str) else str(origin.get("principal"))))
         principal = origin.get("principal")
-        if origin.get("kind") == "human" and principal in (None, "undeclared", self.owner):
-            return "You", "bold", "you"
+        if origin.get("kind") == "human" and self.owner is not None and principal == self.owner:
+            return "You", "bold", "you"  # only an exact match with the workspace owner (once C2 supplies it)
+        if origin.get("kind") == "human" and principal in (None, "undeclared"):
+            # As recorded, never inferred to be the viewer: an undeclared human, and the actor that sent it.
+            actor = origin.get("actor")
+            via = f"via {ACTORS.get(actor, plain(str(actor)))}, " if isinstance(actor, str) and actor else ""
+            return f"Human ({via}undeclared)", "bold", "human:undeclared"
         if isinstance(principal, str):
             return "Message from " + plain(principal), "accent", "human:" + principal
-        return "User", "bold", "user"  # no recorded origin: never assumed to be you
+        return "User", "bold", "user"  # no recorded origin: nothing assumed
 
     def sender_name(self, key):
         """A short name for a sender key, for the senders filter."""
@@ -145,7 +151,7 @@ class Names:
             return self.agent_name(self.agent)
         if key.startswith("agent:"):
             return self.agent_name(key[6:])
-        return {"you": "You", "user": "User (no origin)"}.get(key, plain(key.split(":", 1)[-1]))
+        return {"you": "You", "user": "User (no origin)", "human:undeclared": "Human (undeclared)"}.get(key, plain(key.split(":", 1)[-1]))
 
 
 def message_rows(eid, value, names, receipts, show_time=True, fold=None):

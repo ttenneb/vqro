@@ -49,12 +49,19 @@ class TranscriptRows(unittest.TestCase):
 
     def test_senders_come_from_the_recorded_origin_in_order(self):
         headers = [r["text"] for r in self.rows() if r.get("type") == "header"]
-        self.assertEqual(headers[0].split(" · ")[0], "You")
+        self.assertEqual(headers[0].split(" · ")[0], "Human (undeclared)", "as recorded, never inferred to be the viewer")
         self.assertIn("in the conversation", headers[0], "the delivery's receipt stage")
         self.assertEqual(headers[1:], ["Pi", "Message from vqro-lead (agent r7)", "Thinking", "Pi · writing…"])
         texts = [r.get("text") for r in self.rows()]
         self.assertIn("quoting alice (claimed)", texts)
         self.assertLess(texts.index("Let me look."), texts.index("First the CI log."), "one row per line")
+
+    def test_you_only_for_the_owner_principal_and_the_actor_is_shown(self):
+        names = agent_transcript.Names({}, "r2", owner="p:owner")
+        own = {"kind": "human", "principal": "p:owner"}
+        via = {"kind": "human", "principal": "undeclared", "actor": "agents"}
+        self.assertEqual(names.sender({"role": "user", "origin": own})[0], "You")
+        self.assertEqual(names.sender({"role": "user", "origin": via})[0], "Human (via agents UI, undeclared)")
 
     def test_no_origin_is_never_you_and_another_human_is_named(self):
         bare = {("message", "m"): {"position": 1, "role": "user", "content": text("hi"), "final": True}}
@@ -135,7 +142,8 @@ class ViewSettings(unittest.TestCase):
                 for i in range(2)}
         rows = agent_transcript.rows({k: (1, v) for k, v in long.items()}, names, None, agent_transcript.view_settings({"density": "compact"}))
         headers = [r["text"] for r in rows if r.get("type") == "header"]
-        self.assertEqual(headers, ["You · " + agent_transcript.when(1_763_600_000_000), "You"], "time only when the sender changes")
+        self.assertEqual(headers, ["Human (undeclared) · " + agent_transcript.when(1_763_600_000_000), "Human (undeclared)"],
+                         "time only when the sender changes")
         fold = next(r for r in rows if r.get("text") == "… 20 more lines")
         self.assertEqual((fold["expanded"], len(fold["children"])), (False, 20))
 
@@ -300,6 +308,11 @@ class AgentPane(unittest.TestCase):
         self.agents.flush_conversations()
         self.assertEqual(len(self.attaches()), attaches, "no reattach loop")
         self.assertIsNone(self.agents.conversations["r2"].stream)
+        self.assertIn("Show the agent again", " ".join(self.texts()))
+        self.core.handlers["agents.show"]({"resource": "r2"})  # what the advice says: it retries
+        self.agents.flush_conversations()
+        self.assertFalse(self.agents.conversations["r2"].too_big)
+        self.assertEqual(self.attaches()[-1], {"resource": "r2", "items": {}}, "a fresh attach")
 
     def test_a_failed_attach_is_retried_later_not_in_a_loop(self):
         self.core.fail_attach = True
