@@ -50,7 +50,7 @@ equality, and every exercised behaviour must lie within the resource's current c
 | `items` bounds (per entity and aggregate), `retain_bytes`; snapshot coverage | `agent`, snapshot begin | O1–O12 |
 | request `methods`, `scopes`, `background_requests`, answer acknowledgement | `agent.respond` | R1–R7 |
 | module actions (queue, session, config, command, history, object, display terminals) | each op | M1–M7 |
-| `covers`, `waits` | `agent.stop` | L2 |
+| `covers`, `waits`; per-call reply `covers`, `covers_evidence` when requested-only | `agent.stop` | L2 |
 
 ## A2. Levels
 
@@ -147,7 +147,9 @@ non-UTF-8 output reconstruct exactly, through a snapshot `put` and live continua
 is rejected as a gap.
 
 **L. Lifecycle evidence.** L1 interrupt ends the turn only; stop ends the endpoint. L2 `agent.stop` is invoked once
-and reports what it covers; `ended` only after end evidence; a refused stop returns to `live`. L3 the host terminal of
+and its reply data includes this call's `covers`, equal to or narrower than declared and never wider. If effective
+coverage is not natively evidenced, `covers_evidence: "requested"` is present and no stopped-work claim is inferred.
+`ended` only after end evidence; a refused stop returns to `live`. L3 the host terminal of
 a bridge that declares `owns_lifecycle` finishes → `ended`; an app-server host that does not declare it disappears →
 its endpoints `unknown`, never `ended`; a late end event from an old host incarnation ends nothing. L4 a bridge
 disconnect with no end evidence is `disconnected`, never `ended`; a reconnect never undoes `ended`; an idle completion

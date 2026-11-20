@@ -496,6 +496,8 @@ replaced when the Pi bridge is ported.
 - Tier-1 `agents.status {terminal, app, state, seq}` is lossy advisory live data, like OSC 7501, for hooks without
   a terminal status path. Reports use last sequence per terminal and disappear on terminal end/removal or extension
   restart. The sidebar uses `agents.terminal_status` only when the terminal has no OSC status; unknown stays unknown.
+- Every `agent.stop` reply's data includes per-call `covers`, never wider than declared. When the adapter cannot
+  evidence effective coverage, `covers_evidence: "requested"` marks requested scope only, not proof of stopped work.
 
 **Human answers (2026-11-19, CONFIRMED).**
 - **AS1, pause:** "vqro stops delivery": paused means vqro sends, hands out and wakes nothing until resumed; an agent

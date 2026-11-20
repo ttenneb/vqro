@@ -398,7 +398,11 @@ dialogs remain answerable; nothing is auto-approved.
    patch?, binary?}`. ACP v1 client services (`fs.*` with an explicit host and buffer source, `terminal.*`) are
    reserved, separate from display entities.
 7. **Stop.** `agent.stop {v, covers: [...]}` asks the runtime to end this endpoint; declared `covers`
-   (`foreground`, `queued`, `background`, `children`) and `waits: exit | none` (§7).
+   (`foreground`, `queued`, `background`, `children`) and `waits: exit | none` (§7). Reply data **must include
+   `covers`** for what this call applied, equal to or narrower than the declaration, never wider. If the adapter
+   cannot establish effective coverage from native evidence, include `covers_evidence: "requested"`: those covers
+   describe the requested scope, not proof that the covered work stopped. Acceptance and coverage alone are never
+   end evidence.
 8. **Reserved names, no v0 semantics:** `agent.authenticate`, `agent.blob`, rewind/checkpoints.
 
 ## 7. Lifecycle evidence
