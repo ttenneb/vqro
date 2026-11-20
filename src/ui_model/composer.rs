@@ -147,6 +147,7 @@ pub fn buttons(row: &Value) -> Vec<(String, Option<Value>)> {
             for chip in c["chips"].as_array().into_iter().flatten() { out.push((arg.clone(), Some(chip["value"].clone()))); }
         } else { out.push((arg, None)); }
     }
-    out.push((String::new(), None));
+    // Send, unless the row hides it (`send_button: false`: Enter still sends).
+    if row["send_button"] != false { out.push((String::new(), None)); }
     out
 }

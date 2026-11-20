@@ -607,7 +607,9 @@ fn draw_composer(buf: &mut Buffer, row: Rect, item: &Value, selected: bool, chip
             button(format!("{}: {shown} ▾", ctl["text"].as_str().unwrap_or(arg)), pal.style(Some("accent")), &mut x, buf, hits);
         }
     }
-    button("[Send]".into(), pal.style(Some("accent")).add_modifier(Modifier::BOLD), &mut x, buf, hits);
+    if item["send_button"] != false {
+        button("[Send]".into(), pal.style(Some("accent")).add_modifier(Modifier::BOLD), &mut x, buf, hits);
+    }
     let n = lines.len();
     // The new-line key that works here: Shift-Enter when the terminal reports it (keyboard enhancement), else Alt-Enter
     // (Ctrl-J works everywhere).

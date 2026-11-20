@@ -1340,7 +1340,7 @@ function composerButtons(row: Json): { arg: string; value?: Json; send?: boolean
     if (c.type === "chips") for (const ch of c.chips ?? []) out.push({ arg: c.arg, value: ch.value, label: String(ch.text ?? ch.value), on: (v) => v[c.arg] === ch.value });
     else out.push({ arg: c.arg, label: String(c.text ?? c.arg), on: () => false });
   }
-  out.push({ arg: "", send: true, label: "[Send]", on: () => false });
+  if (row.send_button !== false) out.push({ arg: "", send: true, label: "[Send]", on: () => false });  // send_button:false hides it
   return out;
 }
 

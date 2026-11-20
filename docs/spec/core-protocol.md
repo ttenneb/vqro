@@ -1171,7 +1171,7 @@ New row types, components and view kinds are progressive enhancements: every cli
   at most 64 KiB): clients with the feature open a multi-line editor; others their one-line prompt.
 - **A composer row** (feature `composer`): `{type: "composer", id, text, command, args?, placeholder?, prefill?, rows?
   (1-12, default 3), max_bytes?, submit?: "Enter" | "C-Enter", autofocus?, controls?: [select | chips row with an
-  `arg`], fallback?}`. `text` describes it for base clients; give a `fallback` (an item with `input` and
+  `arg`], send_button?, fallback?}`. `send_button: false` hides the drawn Send (Enter still sends). `text` describes it for base clients; give a `fallback` (an item with `input` and
   `multiline: true`) so they can still send. Clients draw the draft (or placeholder) and a control line: each
   control's choices (a select opens its options; a chips row shows each chip, the checked one is the default) and
   Send. Choices and the draft are client-local per row `id` until Send, which invokes `command` with `args`, the

@@ -4099,6 +4099,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_composer_without_a_send_button_and_a_select_control() {
+        let (mut app, _) = app();
+        app.load(&json!({"epoch":"e","seq":1,"entries":{"view/p":{"value":{"kind":"panel","items":[
+            {"type":"composer","id":"c","text":"Message","command":"x","send_button":false,
+             "controls":[{"type":"select","arg":"mode","text":"Input","value":"auto","options":[{"label":"auto","value":"auto"},{"label":"steer","value":"steer"}]}]}]}}}}));
+        app.leaves = vec!["p".into()];
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(70, 8)).unwrap();
+        let mut screen = String::new();
+        terminal.draw(|f| { app.draw_view(f, "p", Rect::new(0, 0, 70, 8), true, &Palette::default(), &Icons::new(None, false));
+            let b = f.buffer_mut(); screen = (0..8).map(|y| (0..70).map(|x| b[(x, y)].symbol().to_string()).collect::<String>() + "\n").collect(); }).unwrap();
+        assert!(screen.contains("Input: auto ▾") && !screen.contains("[Send]"), "one select button, no Send: {screen}");
+        // The select is the only control: Tab reaches it and Enter opens its options; Enter in the draft still sends.
+        app.pstate.get_mut("p").unwrap().sel = 0;
+        app.panel_key("p", "p", KeyEvent::new(KeyCode::Right, KeyModifiers::NONE), json!({}));
+        app.panel_key("p", "p", KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), json!({}));
+        assert!(matches!(app.overlay, Some(Overlay::Menu { .. })), "the select's options open");
+    }
+
+    #[tokio::test]
     async fn pane_titles_fall_back_to_the_programs_title() {
         let (mut app, _) = app();
         app.load(&json!({"epoch":"e","seq":1,"entries":{"view/t":{"value":{"kind":"terminal","resource":"r1"}}},
