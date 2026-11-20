@@ -167,6 +167,24 @@ class CompleteObserverControls(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(result["mail"]), 1)
                 self.assertEqual(len(result["human"]), 1)
 
+    async def test_claimed_before_native_callback_waits_for_positive_witness(self):
+        ctx = Context()
+        ctx.records[0].update(state="claimed", attempt={"id": "attempt"})
+        # A permanently unobserved claim never passes the complete helper.
+        with self.assertRaises(CheckFailed): await self.grade(ctx)
+        polls = []
+        async def wait(predicate, **_):
+            first = await predicate(); polls.append(first)
+            self.assertIsNone(first)
+            ctx.calls = Context(compact=True).calls
+            second = await predicate(); polls.append(second)
+            self.assertTrue(second)
+            return second
+        ctx.wait = wait
+        result = await self.grade(ctx)
+        self.assertEqual(len(polls), 2)
+        self.assertEqual(len(result["mail"][0]["native_calls"]), 1)
+
     async def test_wrong_scope_epoch_revision_expiry_question_or_actor_never_passes(self):
         for field, wrong in (("scope", {"session": "wrong"}), ("epoch", "other"), ("revision", True),
                              ("expires_at_ms", 1), ("question", {"request": "forged"}), ("request", "other")):

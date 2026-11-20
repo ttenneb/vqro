@@ -275,6 +275,11 @@ class PublicRequestRouting:
                 ctx.check(sender.get("principal") == "extension:coord" and sender.get("actor") == "extension:coord" and
                     isinstance(sender.get("author"), str) and bool(sender["author"]),
                     "notice sender is actual coord, never owner or requester", sender=sender, record=record)
+                if not calls and record.get("state") == "claimed":
+                    # The durable permit can precede the native callback's ledger.
+                    # Await that positive witness; never call an in-flight claim
+                    # unclaimed mail, nor turn an elapsed delay into a PASS.
+                    return None
                 if not calls:
                     ctx.check(record.get("state") in ("held", "recorded") and not record.get("attempt"),
                         "unclaimed held mail proves only durable routing, never native delivery", record=record)
