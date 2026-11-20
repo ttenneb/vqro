@@ -27,7 +27,7 @@ impl Agent {
     pub fn new(instance:String,signals:Arc<Signals>)->Self {
         let mut bytes=[0u8;16];getrandom::fill(&mut bytes).expect("fresh observation epoch");
         let boot=bytes.iter().map(|byte|format!("{byte:02x}")).collect::<String>();
-        let mut journal=ItemJournal::new(format!("{boot}.e1"),JournalConfig {max_entity_bytes:ENTITY_TOTAL,..Default::default()});
+        let mut journal=ItemJournal::new(format!("{boot}.e1"),JournalConfig {max_entities:ENTITY_COUNT,max_entity_bytes:ENTITY_TOTAL,snapshot_buffer_bytes:1024*1024,..Default::default()});
         journal.set_coverage(Coverage::Tail);
         let mut agent=Self {journal,signals,incomplete:BTreeSet::new(),receipts:BTreeMap::new(),queue:None,queue_version:0,receipt_order:VecDeque::new(),history:VecDeque::new(),tools:HashMap::new(),current_message:None,
             position:0,serial:0,epoch_number:1,instance,boot,session:None,run:None,completion:None,reason:"unknown".into(),error:None,exit:None,caps:Value::Null};
@@ -58,7 +58,7 @@ impl Agent {
             "agent.interrupt":{"pending":"unknown","scope":"foreground","waits":"none"},"agent.receipt":{},
             "agent.stop":{"covers":["foreground","queued"],"waits":"exit"},
             "agent.queue":{"actions":["list","clear"],"ids":"none","removed":{"content":["text"],"media":"unknown"}},
-            "items.stream":{"retain_bytes":131072,"entities":ENTITY_COUNT,"entity_bytes":ENTITY_TOTAL,"max_viewers":4}})
+            "items.stream":{"retain_bytes":131072,"entities":ENTITY_COUNT,"entity_bytes":ENTITY_TOTAL,"snapshot_buffer_bytes":1048576,"max_viewers":4}})
     }
     pub fn provider_capabilities(&self)->Map<String,Value> {
         fn bound(value:Value)->Value {match value {
@@ -81,7 +81,7 @@ impl Agent {
                 "host":{"id":format!("{}.child",self.boot),"provider":provider,"instance":self.instance,"incarnation":"","kind":"process","owns_lifecycle":true},
                 "session":self.session,"epoch":self.epoch(),"caps":self.caps,"completion":self.completion,"queue":self.queue,"requests":[],"background":null,
                 "config":[],"commands":[],"usage":null,"incomplete":self.incomplete,
-                "items":{"retain_bytes":131072,"entities":ENTITY_COUNT,"entity_bytes":ENTITY_TOTAL,"coverage":"tail"}}}})
+                "items":{"retain_bytes":131072,"entities":ENTITY_COUNT,"entity_bytes":ENTITY_TOTAL,"snapshot_buffer_bytes":1048576,"coverage":"tail"}}}})
     }
     pub fn refresh(&mut self) {
         let mut caps=self.declarations();

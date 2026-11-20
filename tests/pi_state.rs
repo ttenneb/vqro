@@ -34,9 +34,10 @@ fn message_deltas_are_append_records_and_materialize_identically() {
     let mut a=make();event(&mut a,json!({"type":"agent_start"}));
     event(&mut a,json!({"type":"message_start","message":{"role":"assistant","content":[]}}));
     event(&mut a,json!({"type":"message_update","message":{"role":"assistant","content":[{"type":"text","text":"he"}]},"assistantMessageEvent":{"type":"text_start","contentIndex":0}}));
-    let mut cursor=a.journal.open(Some(&json!({"epoch":a.epoch(),"seq":a.journal.seq()})));
+    let after=json!({"epoch":a.epoch(),"seq":a.journal.seq()});
+    let mut cursor=a.journal.open(Some(&after));
     event(&mut a,json!({"type":"message_update","message":{"role":"assistant","content":[{"type":"text","text":"hello"}]},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"llo"}}));
-    let Next::Data(bytes)=cursor.next(&a.journal,65536) else {panic!("delta");};
+    let Next::Data(bytes)=cursor.next(&mut a.journal,65536) else {panic!("delta");};
     assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap()["op"],"append");
     message(&mut a,"hello","stop");event(&mut a,json!({"type":"agent_settled","aborted":false}));
     let messages=entities(&a,"message");assert_eq!(messages.len(),1);

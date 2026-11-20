@@ -159,7 +159,7 @@ async fn publish(shared:Arc<Shared>,provider:Provider,name:String) {
 async fn viewer(shared:Arc<Shared>,mut stream:ProviderStream,mut cursor:ItemCursor) {
     loop {
         let wake=shared.changed.notified();tokio::pin!(wake);wake.as_mut().enable();
-        let next={let agent=shared.agent.lock().unwrap();cursor.next(&agent.journal,65536)};
+        let next={let mut agent=shared.agent.lock().unwrap();cursor.next(&mut agent.journal,65536)};
         match next {
             Next::Data(bytes)=>if stream.send(&bytes).await.is_err(){break;},
             Next::Gap(reason)=>{let _=stream.gap(reason).await;break;},
