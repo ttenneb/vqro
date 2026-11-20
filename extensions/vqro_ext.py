@@ -133,7 +133,12 @@ class Vqro:
                 raise VqroError("response deadline; outcome indeterminate, never resend automatically", "timeout")
             msg = slot[1]
             if "error" in msg:
-                raise VqroError(msg["error"].get("message"), (msg["error"].get("data") or {}).get("kind"))
+                error = msg["error"]
+                if not isinstance(error, dict):
+                    raise VqroError("malformed JSON-RPC error object", "protocol", wire_error=error)
+                data = error.get("data")
+                kind = data.get("kind") if isinstance(data, dict) else None
+                raise VqroError(error.get("message"), kind, data=data, wire_error=error)
             return msg.get("result")
         finally:
             with self.lock:
@@ -267,9 +272,14 @@ CONTRIBUTION_NAMESPACES = ("menu/", "binding/", "view/")
 
 
 class VqroError(RuntimeError):
-    def __init__(self, message, kind=None):
+    def __init__(self, message, kind=None, *, data=None, wire_error=None):
         super().__init__(message)
         self.kind = kind
+        # References to the already-decoded, MAX_RECORD_BYTES-bounded reply;
+        # retain the original evidence without serializing or copying its payload.
+        # Callers should treat these as read-only and avoid logging sensitive data.
+        self.data = data
+        self.wire_error = wire_error
 
 
 class Extension:
