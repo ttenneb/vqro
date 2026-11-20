@@ -1,4 +1,5 @@
-// vqro-pull: the tier-1 Pi plugin (coordination-v0.md §7). Load with `pi -e <this file>`.
+// vqro-pull: the tier-1 Pi plugin (coordination-v0.md §7; default coordination extension `coord`, K2).
+// Load with `pi -e <this file>`.
 //
 // A Pi running in a backend terminal pulls its vqro inbox at Pi's own safe points. vqro never types into the
 // terminal, and this plugin never reads or writes the editor.
@@ -7,16 +8,20 @@
 //   agent_before_settle  the run would otherwise end (continues once)             -> take {at: "settle"}
 //   idle                 a counts-only wake while Pi is idle                      -> take {at: "idle"}, start a turn
 //
-// Insertion is a `custom_message` entry (user role in the next request), so the declaration is
-// `pull {points: [turn, settle, idle], insert: user, evidence: entry}`. Stages are reported from evidence only:
+// Insertion is a `custom_message` entry (user role in the next request): the endpoint's declaration, written by its
+// launcher in `doc/agents/terminals/<rN>`, is `pull {points: [turn, settle, idle], insert: user, evidence: entry}`,
+// and the launcher grants the plugin's principal `receive` on that endpoint. Stages come from evidence only:
 //   inserted  the `context` hook shows the entry in the conversation Pi is about to send (durable session entry);
 //   read      an assistant message for a request containing it finished normally (an abort right after a take is
-//             inserted but unread: measured in P5, and neither `context` nor `message_start` counts).
-// A new consumer (every session_start) reconciles open claims against the session's entries first.
+//             inserted but unread; neither `context` nor `message_start` counts).
+// A new consumer (every session_start) reconciles open claims against the session's entries before taking.
 //
-// Environment: VQRO_SOCKET (core endpoint), VQRO_AGENT (this agent's rN, injected by its launcher). Without both,
-// the plugin does nothing. Errors never break Pi: they are logged to VQRO_PULL_LOG when set.
-// Tested with Pi 0.87.0 and 1.5.0 (tests/pi_pull_e2e.py).
+// Wire: `coord.inbox.window`, `coord.inbox.reconcile`, `coord.inbox.take`, `coord.inbox.report` via command.invoke;
+// every mutation's `op` is prefixed with the current window epoch. Wake: the `coord-status` live view's
+// `wake.pending[<rN>]` count (never content).
+//
+// Environment: VQRO_SOCKET (core endpoint), VQRO_AGENT (this agent's rN, injected by its launcher). Without both the
+// plugin does nothing. Errors never break Pi: they are logged to VQRO_PULL_LOG when set.
 import net from "node:net";
 import fs from "node:fs";
 import { randomBytes } from "node:crypto";
@@ -26,10 +31,11 @@ const AGENT = process.env.VQRO_AGENT;
 const LOG = process.env.VQRO_PULL_LOG;
 const FAULT = process.env.VQRO_PULL_FAULT ?? ""; // test-only fault injection: crash_after_take | drop_report | abort_after_take
 const TYPE = "vqro-inbox";
-const CONTENT = ["text", "image", "resource_link"]; // block types inserted without loss
+const CONTENT = new Set(["text", "image", "resource_link"]); // block types inserted without loss
 const LIMIT = 16;
+const WAKE_VIEW = "coord-status";
 
-type Rec = { delivery: string; from: unknown; mode: string; content: any[]; claim: string };
+type Rec = { delivery: string; from: any; origin?: any; mode: string; content: any[]; claim: string };
 
 export default function (pi: any) {
   if (!SOCK || !AGENT) return;
@@ -38,19 +44,18 @@ export default function (pi: any) {
   let nextId = 1;
   const waiting = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
   let consumer = "";
+  let epoch = "";
   let current: any;
   let pullingIdle = false;
   let woken = false;
-  let pending = 1; // last pending count from the wake view; unknown at start, so one take
-  const claims = new Map<string, string>();   // delivery -> claim, taken and not yet evidenced as inserted
-  const unread = new Map<string, string>();   // delivery -> claim, inserted and not yet read
+  let pending = 1; // last wake count for this agent; unknown at start, so one take
+  const claims = new Map<string, string>();   // delivery -> claim, taken, not yet evidenced inserted
+  const unread = new Map<string, string>();   // delivery -> claim, inserted, not yet read
   let inContext: string[] = [];
-  let opSeq = 0;
 
   const log = (event: string, detail: any = {}) => {
     if (LOG) fs.appendFileSync(LOG, JSON.stringify({ t: Date.now(), event, ...detail }) + "\n");
   };
-  const op = (what: string) => `${consumer}:${what}:${++opSeq}`;
 
   function call(method: string, params: any): Promise<any> {
     return new Promise((resolve, reject) => {
@@ -60,7 +65,26 @@ export default function (pi: any) {
       conn.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
     });
   }
-  const inbox = (name: string, args: any) => call("command.invoke", { name, args, deadline_ms: 3000 });
+
+  async function command(name: string, args: any) {
+    const reply = await call("command.invoke", { name: "coord." + name, args, deadline_ms: 3000 });
+    if (reply?.window?.epoch) epoch = reply.window.epoch;
+    return reply;
+  }
+
+  // A mutation: op ids carry the window epoch. An expired_operation created nothing, so one retry with a fresh id
+  // under the new epoch is safe; anything else surfaces.
+  async function mutate(name: string, args: any) {
+    for (let attempt = 0; ; attempt++) {
+      if (!epoch) epoch = (await command("inbox.window", {})).epoch;
+      try {
+        return await command(name, { ...args, op: `${epoch}:${consumer}:${randomBytes(6).toString("hex")}` });
+      } catch (e) {
+        if (attempt === 0 && String(e).includes("expired_operation")) { epoch = ""; continue; }
+        throw e;
+      }
+    }
+  }
 
   async function connect() {
     conn = net.createConnection(SOCK!);
@@ -74,8 +98,8 @@ export default function (pi: any) {
           const w = waiting.get(row.id)!;
           waiting.delete(row.id);
           row.error ? w.reject(new Error(`${row.error.data?.kind ?? "error"}: ${row.error.message}`)) : w.resolve(row.result);
-        } else if (row.method === "event" && row.params?.type === "view.content") {
-          const count = row.params?.data?.content?.pending; // counts only; never message content
+        } else if (row.method === "event" && row.params?.type === "view.content" && row.params?.data?.view === WAKE_VIEW) {
+          const count = row.params?.data?.content?.wake?.pending?.[AGENT!]; // counts only; never message content
           if (typeof count === "number") pending = count;
           woken = pending > 0;
           void pullIdle();
@@ -92,9 +116,10 @@ export default function (pi: any) {
     await call("hello", { client: "vqro-pi-pull" });
   }
 
+  const sender = (rec: Rec) => typeof rec.from === "string" ? rec.from : rec.from?.principal ?? JSON.stringify(rec.from);
+
   function render(rec: Rec): any[] {
-    const head = `vqro message ${rec.delivery} from ${typeof rec.from === "string" ? rec.from : JSON.stringify(rec.from)} (mode ${rec.mode}):`;
-    const out: any[] = [{ type: "text", text: head }];
+    const out: any[] = [{ type: "text", text: `vqro message ${rec.delivery} from ${sender(rec)} (mode ${rec.mode}):` }];
     for (const b of rec.content) {
       if (b.type === "text") out.push({ type: "text", text: b.text });
       else if (b.type === "image") out.push({ type: "image", data: b.data, mimeType: b.mime });
@@ -112,28 +137,32 @@ export default function (pi: any) {
   async function take(at: string): Promise<Rec[]> {
     if (!conn || !consumer || pending === 0) return []; // no inbox call at a safe point without mail
     try {
-      const { records } = await inbox("inbox.take", { op: op("take"), agent: AGENT, consumer, at, limit: LIMIT, content: CONTENT });
-      if (records.length) log("taken", { at, deliveries: records.map((r: Rec) => r.delivery) });
+      const reply = await mutate("inbox.take", { agent: AGENT, consumer, at, limit: LIMIT, content: [...CONTENT] });
+      const records: Rec[] = reply.records ?? [];
+      if (records.length) log("taken", { at, deliveries: records.map((r) => r.delivery) });
+      else if (reply.held) log("held", { at, held: reply.held });
       if (records.length && FAULT === "crash_after_take") { log("fault", { FAULT }); process.exit(42); }
-      return records;
+      const usable: Rec[] = [];
+      for (const rec of records) {
+        // Never flatten or drop: a block this plugin cannot insert goes back, uninserted.
+        if (rec.content.every((b) => CONTENT.has(b.type))) usable.push(rec);
+        else await report(rec.delivery, rec.claim, "released");
+      }
+      return usable;
     } catch (e) {
       log("take_failed", { at, error: String(e) });
       return [];
     }
   }
 
-  async function report(delivery: string, claim: string, stage: string, evidence: any = {}) {
-    if (FAULT === "drop_report") return log("fault", { FAULT, delivery, stage });
+  async function report(delivery: string, claim: string, stage: string) {
+    if (FAULT === "drop_report" && stage !== "released") return log("fault", { FAULT, delivery, stage });
     try {
-      await inbox("inbox.report", { op: `${delivery}:${claim}:${stage}`, delivery, claim, stage, evidence });
+      await mutate("inbox.report", { delivery, claim, stage });
       log("reported", { delivery, stage });
     } catch (e) {
       log("report_failed", { delivery, stage, error: String(e) });
     }
-  }
-
-  async function status(state: string, source: string) {
-    try { await inbox("agents.terminal_status", { agent: AGENT, state, app: "pi", source }); } catch { /* status is best effort */ }
   }
 
   async function pullIdle() {
@@ -142,7 +171,6 @@ export default function (pi: any) {
     woken = false;
     try {
       const recs = await take("idle");
-      if (!recs.length) pending = 0; // idle serves every pullable mode: nothing eligible until the next wake
       for (const rec of recs) {
         const d = draft(rec);
         // followUp, not steer: a run that started meanwhile is not steered by an idle take.
@@ -160,21 +188,17 @@ export default function (pi: any) {
       if (!conn) await connect();
       const records = ctx.sessionManager.getEntries()
         .filter((e: any) => e.type === "custom_message" && e.customType === TYPE && e.details?.vqro?.delivery)
-        .map((e: any) => ({ delivery: e.details.vqro.delivery, entry: e.id }));
-      const result = await inbox("inbox.reconcile", { op: op("reconcile"), agent: AGENT, consumer, records });
-      log("reconciled", { consumer, ...result });
-      await call("events.subscribe", { types: ["view.content"], view_content: { names: [`inbox-wake-${AGENT}`] } });
+        .map((e: any) => ({ delivery: e.details.vqro.delivery, entry: e.id }))
+        .slice(-64);
+      const result = await mutate("inbox.reconcile", { agent: AGENT, consumer, records });
+      log("reconciled", { consumer, records: result.records });
+      await call("events.subscribe", { types: ["view.content"], view_content: { names: [WAKE_VIEW] } });
       woken = true; // one take when armed, then only on wake events
-      void status("idle", "session_start");
       void pullIdle();
     } catch (e) {
       log("start_failed", { error: String(e) });
     }
   });
-
-  pi.on("agent_start", async () => void status("working", "agent_start"));
-  pi.on("ui_prompt_start", async () => void status("blocked", "ui_prompt_start"));
-  pi.on("ui_prompt_end", async () => void status("working", "ui_prompt_end"));
 
   pi.on("turn_end", async (event: any, ctx: any) => {
     current = ctx;
@@ -204,8 +228,7 @@ export default function (pi: any) {
       claims.delete(delivery);
       unread.set(delivery, claim);
       inContext.push(delivery);
-      const entry = ctx.sessionManager.getEntries().find((e: any) => e.type === "custom_message" && e.details?.vqro?.delivery === delivery);
-      await report(delivery, claim, "inserted", { entry: entry?.id ?? null, session: ctx.sessionManager.getSessionId() });
+      await report(delivery, claim, "inserted");
     }
   });
 
@@ -223,7 +246,6 @@ export default function (pi: any) {
 
   pi.on("agent_settled", async (_event: any, ctx: any) => {
     current = ctx;
-    void status("idle", "agent_settled");
     woken = pending > 0; // something may have arrived while busy
     void pullIdle();
   });
