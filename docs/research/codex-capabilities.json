@@ -1,11 +1,11 @@
 {
   "agent": {
     "v": 0,
-    "modules": {"interaction": {}, "observation": {}, "requests": {}, "sessions": {}},
-    "items": {"retain_bytes": 131072, "entity_bytes": 65536, "coverage": "tail"}
+    "modules": {"sessions": {"v": 0}},
+    "items": {"retain_bytes": 131072, "entities": 512, "entity_bytes": 524288, "record_bytes": 65536, "coverage": "tail", "max_viewers": 4, "snapshot_bytes_per_provider": 8388608, "snapshot_buffer_bytes": 1048576}
   },
   "host": {"kind": "server", "endpoints": "many"},
-  "items.stream": {},
+  "items.stream": {"retain_bytes": 131072},
   "agent.send": {
     "modes": {"admit": {}},
     "content": {"types": ["text"], "shape": "ordered"},

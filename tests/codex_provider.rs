@@ -1,7 +1,8 @@
 //! Production bridge binary over the provider wire against a private socket core stub and native
 //! fake app-server. No installed runtime, model, live core, backend or credential store is opened.
-use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use base64::Engine;
+use serde_json::{json, Value};
+use std::collections::{BTreeMap, BTreeSet};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -11,11 +12,17 @@ use tokio::sync::watch;
 use vqro::rpc::{Incoming, Peer};
 
 type Facts = Arc<Mutex<BTreeMap<String, Value>>>;
+const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
+#[path = "codex_provider/items.rs"]
+mod items;
 
 struct Core {
     peer: Peer,
     generation: u64,
     facts: Facts,
+    events: Arc<Mutex<Vec<Value>>>,
+    auto_credit: Arc<Mutex<BTreeSet<u64>>>,
+    reject_syncs: Arc<std::sync::atomic::AtomicBool>,
     changed: watch::Receiver<u64>,
     reader: tokio::task::JoinHandle<()>,
 }
@@ -30,6 +37,12 @@ impl Core {
         let (peer, mut incoming) = Peer::spawn(read, write);
         let facts: Facts = Arc::new(Mutex::new(BTreeMap::new()));
         let observed = facts.clone();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let recorded = events.clone();
+        let auto_credit = Arc::new(Mutex::new(BTreeSet::new()));
+        let credited = auto_credit.clone();
+        let reject_syncs = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reject = reject_syncs.clone();
         let (changed, changed_rx) = watch::channel(0);
         let server = peer.clone();
         let expected_token = expected_token.to_string();
@@ -50,13 +63,23 @@ impl Core {
                                     params["capabilities"]["agent.send"]["correlation"],
                                     json!(["acceptance"])
                                 );
-                                // Intermediate builds must not claim missing item observation.
-                                assert!(params["capabilities"].get("items.stream").is_none());
+                                assert!(params["capabilities"]["items.stream"].is_object());
                                 json!({"provider":params["name"],"generation":generation,"resume_token":"resume-native",
                                     "limits":{"stream_window_bytes":262144,"max_record_bytes":1048576}})
                             }
                             "provider.sync" => {
+                                recorded
+                                    .lock()
+                                    .unwrap()
+                                    .push(json!({"method":"provider.sync","params":params}));
                                 assert_eq!(params["generation"], generation);
+                                if reject.load(std::sync::atomic::Ordering::Relaxed) {
+                                    server.respond(
+                                        id,
+                                        Err(vqro::rpc::RpcError::invalid("fixture refuses sync")),
+                                    );
+                                    continue;
+                                }
                                 for fact in params["resources"].as_array().unwrap() {
                                     observed
                                         .lock()
@@ -80,6 +103,24 @@ impl Core {
                                 .insert(fact["ref"].as_str().unwrap().into(), fact.clone());
                             changed.send_modify(|n| *n += 1);
                         }
+                        if method.starts_with("stream.") {
+                            recorded
+                                .lock()
+                                .unwrap()
+                                .push(json!({"method":method,"params":params}));
+                            changed.send_modify(|n| *n += 1);
+                            if method == "stream.data" {
+                                let id = params["stream"].as_u64().unwrap();
+                                if credited.lock().unwrap().contains(&id) {
+                                    let bytes =
+                                        B64.decode(params["data"].as_str().unwrap()).unwrap().len();
+                                    server.notify(
+                                        "stream.credit",
+                                        json!({"generation":generation,"stream":id,"bytes":bytes}),
+                                    );
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -88,6 +129,9 @@ impl Core {
             peer,
             generation,
             facts,
+            events,
+            auto_credit,
+            reject_syncs,
             changed: changed_rx,
             reader,
         }
@@ -309,6 +353,80 @@ async fn core_reconnect_keeps_native_process_session_and_late_receipt_without_re
         .wait(|facts| facts["endpoint-1"]["data"]["agent"]["lifecycle"] == "ended")
         .await;
     second.close().await;
+}
+
+#[tokio::test]
+async fn session_observed_reply_waits_for_confirmed_core_facts() {
+    let root = tempfile::tempdir().unwrap();
+    let listener = UnixListener::bind(root.path().join("core.sock")).unwrap();
+    let child = bridge(&root, 1, 0, &[]);
+    let mut core = Core::accept(&listener, 1, "bootstrap").await;
+    core.wait(|f| f.len() == 1).await;
+    let before = core
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| e["method"] == "provider.sync")
+        .count();
+    let result = core
+        .effect(
+            "new-fenced",
+            "endpoint-1",
+            "agent.session",
+            json!({"v":0,"action":"new"}),
+            1000,
+        )
+        .await;
+    assert_eq!(result["outcome"], "observed");
+    let after = core
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| e["method"] == "provider.sync")
+        .count();
+    let session = core.facts.lock().unwrap()["endpoint-1"]["data"]["agent"]["session"].clone();
+    finish(child).await;
+    core.close().await;
+    assert!(
+        after > before,
+        "an upsert notification alone cannot fence final audit after facts commit"
+    );
+    assert_eq!(session, result["data"]["session"]);
+}
+
+#[tokio::test]
+async fn session_publication_refusal_keeps_native_observation_and_never_replays() {
+    let root = tempfile::tempdir().unwrap();
+    let listener = UnixListener::bind(root.path().join("core.sock")).unwrap();
+    let child = bridge(&root, 1, 0, &[]);
+    let mut core = Core::accept(&listener, 1, "bootstrap").await;
+    core.wait(|f| f.len() == 1).await;
+    core.reject_syncs
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let incarnation = core.facts.lock().unwrap()["endpoint-1"]["incarnation"].clone();
+    let result = core.peer.call_with_timeout("effect.invoke",json!({"generation":1,"effect":"new-refused",
+        "ref":"endpoint-1","incarnation":incarnation,"op":"agent.session","args":{"v":0,"action":"new"},"deadline_ms":1000}),Duration::from_secs(2)).await;
+    finish(child).await;
+    core.close().await;
+    let error = result.unwrap_err().data.unwrap();
+    assert_eq!(error["outcome"], "indeterminate");
+    assert_eq!(error["native_outcome"], "observed");
+    assert_eq!(error["native_data"]["session"]["id"], "thread-1");
+    let calls: Vec<Value> = std::fs::read_to_string(root.path().join("native.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|v| v["method"] == "thread/start")
+            .count(),
+        1,
+        "publication failure cannot replay a native session effect"
+    );
 }
 
 #[tokio::test]

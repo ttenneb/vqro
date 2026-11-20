@@ -2,6 +2,7 @@
 //!
 //! Protocol evidence/declarations: docs/research/codex-adapter.md. The native JSONL transport is
 //! the existing bounded `rpc::Peer`; this module only validates and reduces native observations.
+pub mod observation;
 pub mod runtime;
 
 use crate::rpc::{RpcError, RpcResult};
@@ -74,6 +75,8 @@ pub struct Change {
     pub kind: String,
     pub id: String,
     pub value: Value,
+    pub append: Option<(String, String)>,
+    pub create: bool,
 }
 impl Change {
     fn new(kind: &str, id: impl Into<String>, value: Value) -> Self {
@@ -81,6 +84,17 @@ impl Change {
             kind: kind.into(),
             id: id.into(),
             value,
+            append: None,
+            create: true,
+        }
+    }
+    fn append(kind: &str, id: String, base: Value, field: &str, text: String) -> Self {
+        Self {
+            kind: kind.into(),
+            id,
+            value: base,
+            append: Some((field.into(), text)),
+            create: true,
         }
     }
 }
@@ -156,6 +170,7 @@ impl Endpoint {
     pub fn facts(&self) -> Value {
         let mut caps = Value::Object(capabilities());
         caps["rev"] = json!(self.caps_rev);
+        let items = caps["agent"]["items"].clone();
         let requests: Vec<_> = self
             .pending
             .iter()
@@ -186,7 +201,7 @@ impl Endpoint {
                 "completion":self.completion,"session":self.session.as_ref().map(|id| json!({"id":id,"title":self.title})),
                 "epoch":self.epoch,"caps":caps,"queue":null,"requests":requests,"background":null,
                 "config":[],"commands":[],"usage":null,"incomplete":[],
-                "items":{"retain_bytes":131072,"snapshot_bytes":131072,"coverage":"tail"}}}})
+                "items":items}}})
     }
 
     /// All adapter-side preconditions are checked before a native request can be constructed.
@@ -546,6 +561,30 @@ impl Endpoint {
                 vec![self.state_entity()]
             }
             "item/started" | "item/completed" => self.item(&p["item"], method == "item/completed"),
+            "item/agentMessage/delta" => {
+                let (Ok(item), Some(text)) = (id(p, "itemId"), p["delta"].as_str()) else {
+                    return vec![];
+                };
+                vec![Change::append(
+                    "message",
+                    item,
+                    json!({"role":"assistant","content":[{"type":"text","text":""}],"final":false}),
+                    "/content/0/text",
+                    text.into(),
+                )]
+            }
+            "item/commandExecution/outputDelta" => {
+                let (Ok(item), Some(text)) = (id(p, "itemId"), p["delta"].as_str()) else {
+                    return vec![];
+                };
+                vec![Change::append(
+                    "tool",
+                    item,
+                    json!({"title":"Codex command","status":"running","content":[{"type":"text","text":""}]}),
+                    "/content/0/text",
+                    text.into(),
+                )]
+            }
             "serverRequest/resolved" => {
                 let native = &p["requestId"];
                 let key = self
@@ -605,10 +644,9 @@ impl Endpoint {
                     _ if final_item => "unknown",
                     _ => "running",
                 };
-                let content = item["aggregatedOutput"]
-                    .as_str()
-                    .map(|s| vec![json!({"type":"text","text":s})])
-                    .unwrap_or_default();
+                let content = vec![
+                    json!({"type":"text","text":item["aggregatedOutput"].as_str().unwrap_or("")}),
+                ];
                 (
                     "tool",
                     json!({"title":item.get("command").or_else(||item.get("tool")).unwrap_or(&item["type"]),"status":status,
@@ -618,11 +656,33 @@ impl Endpoint {
             Some("contextCompaction") => ("compaction", json!({"native":item})),
             _ => ("_codex_item", json!({"native":item})),
         };
-        value["native"] = item.clone();
-        if !small(&value, ENTITY_BYTES - 1024) {
-            value = json!({"incomplete":true,"native_type":item["type"],"final":final_item});
+        let mut native = item.clone();
+        if let Some(fields) = native.as_object_mut() {
+            if item["type"] == "agentMessage" {
+                fields.remove("text");
+            }
+            if item["type"] == "commandExecution" {
+                fields.remove("aggregatedOutput");
+            }
         }
-        vec![Change::new(kind, item_id, value)]
+        value["native"] = native;
+        if !small(&value, ENTITY_BYTES - 1024) {
+            let mut short =
+                json!({"incomplete":true,"native_type":item["type"],"final":final_item});
+            if kind == "message" {
+                short["role"] = value["role"].clone();
+                short["content"] = json!([]);
+            }
+            if kind == "tool" {
+                short["title"] = json!("Codex tool (details truncated)");
+                short["status"] = value["status"].clone();
+                short["content"] = json!([]);
+            }
+            value = short;
+        }
+        let mut change = Change::new(kind, item_id, value);
+        change.create = !final_item;
+        vec![change]
     }
 
     /// Surface only a bounded, representable native request. Failure returns a safe native cancel
@@ -639,14 +699,14 @@ impl Endpoint {
                 "request does not belong to this endpoint session",
             ));
         }
+        if self.pending.values().any(|p| p.native_id == native_id) {
+            return Err(rejected("stale", "native request id is already pending"));
+        }
         if self.pending.len() >= REQUESTS || !small(params, REQUEST_BYTES / 2) {
             return Err(rejected(
                 "unsupported",
                 "request exceeds bounded representation",
             ));
-        }
-        if self.pending.values().any(|p| p.native_id == native_id) {
-            return Err(rejected("stale", "native request id is already pending"));
         }
         let mut entity = match method {
             "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
@@ -740,6 +800,22 @@ impl Endpoint {
             },
         );
         Ok(Change::new("request", key, entity))
+    }
+
+    /// A bounded, unanswerable host diagnostic, not a fabricated native resolution. Never copy
+    /// unknown request parameters here: host-wide requests can contain authentication material.
+    pub fn request_cancellation_notice(&mut self) -> Change {
+        self.next_request += 1;
+        Change::new(
+            "message",
+            format!("_codex_notice_{}", self.next_request),
+            json!({
+                "role":"system", "content":[{"type":"text","format":"plain",
+                    "text":"Cancellation requested for an unrepresentable request from the shared Codex host. Native resolution is unknown."}],
+                "final":true, "notice":{"kind":"unrepresentable_request","scope":"host",
+                    "host":self.host,"cancellation":"requested","native_outcome":"unknown"}
+            }),
+        )
     }
 
     pub fn prepare_answer(&mut self, args: &Value) -> Result<Answer, RpcError> {

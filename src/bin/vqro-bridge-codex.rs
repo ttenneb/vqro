@@ -7,6 +7,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
+use vqro::codex::observation::{Observation, VIEWERS};
 use vqro::codex::runtime::Runtime;
 use vqro::provider_client::{Config, Provider, ProviderError, Request};
 use vqro::rpc::Peer;
@@ -92,13 +93,14 @@ async fn run(args: Args) -> Result<(), String> {
     let (exited, mut exit) = watch::channel::<Option<String>>(None);
     let provider_name = format!("codex-{label}");
     let provider_instance = format!("{label}:{incarnation}");
+    let observation = Observation::new(args.slots, incarnation.clone());
     let runtime = Runtime::with_host(
         native.clone(),
         args.slots,
         incarnation.clone(),
         provider_name.clone(),
         provider_instance.clone(),
-        None,
+        Some(observation.observer()),
     );
     let model = runtime.clone();
     let child_native = native.clone();
@@ -163,8 +165,17 @@ async fn run(args: Args) -> Result<(), String> {
             config.role = "runtime".into();
             config.token = Some(token);
             config.max_in_flight = 128;
+            config.max_item_streams = args.slots * VIEWERS;
             config.software = json!({"name":"vqro-bridge-codex","version":env!("CARGO_PKG_VERSION"),"runtime":init["userAgent"].as_str().map(|s|s.chars().take(128).collect::<String>())});
-            serve(&core, runtime.clone(), config, &mut exit, stop.subscribe()).await
+            serve(
+                &core,
+                runtime.clone(),
+                observation.clone(),
+                config,
+                &mut exit,
+                stop.subscribe(),
+            )
+            .await
         }
         Err(error) => Err(error),
     };
@@ -180,6 +191,7 @@ async fn run(args: Args) -> Result<(), String> {
 async fn serve(
     core: &str,
     runtime: Arc<Runtime>,
+    observation: Arc<Observation>,
     mut config: Config,
     exit: &mut watch::Receiver<Option<String>>,
     mut stopped: watch::Receiver<bool>,
@@ -259,18 +271,27 @@ async fn serve(
                         tokio::spawn(async move {
                             if connection.is_closed(){request.respond(Err(ProviderError::new("unavailable","originating core connection closed; no native effect started")));return;}
                             let result=runtime.invoke(request.r#ref.as_deref().unwrap_or(""),&request.incarnation,&request.op,request.args.clone(),request.deadline).await;
-                            // Session results are published before their observed reply. No global
-                            // snapshot, hidden spawn or second native call is needed to do so.
-                            if request.op=="agent.session" && matches!(result,Ok(vqro::provider_client::Outcome::Observed(_))) {
-                                let _publisher=publisher.lock().await;
-                                let mut facts=runtime.take_dirty_facts();
-                                if let Some(current)=request.r#ref.as_deref().and_then(|r|runtime.fact(r)) {facts.push(current);}
-                                for facts in facts {if let Err(error)=connection.upsert(facts).await{request.respond(Err(error));return;}}
+                            // An upsert notification can arrive before a response but commit after
+                            // its audit. The public sync acknowledgement fences the current inventory
+                            // before an observed session change; never repeat the native operation.
+                            if request.op=="agent.session" && matches!(result,Ok(vqro::provider_client::Outcome::Observed(_)))
+                                && matches!(request.args["action"].as_str(),Some("new"|"resume")) {
+                                let publication=tokio::time::timeout_at(request.deadline,async {
+                                    let _publisher=publisher.lock().await;
+                                    connection.full_sync(runtime.facts()).await
+                                }).await;
+                                let failure=match publication {Ok(Ok(()))=>None,Ok(Err(e))=>Some(e.kind),Err(_)=>Some("timeout".into())};
+                                if let Some(kind)=failure {
+                                    let native_data=match &result {Ok(vqro::provider_client::Outcome::Observed(data))=>data.clone(),_=>None};
+                                    request.respond(Err(ProviderError::new("backend","native session observed; core facts publication was not confirmed")
+                                        .with_data(json!({"outcome":"indeterminate","native_outcome":"observed","native_data":native_data,"publication_kind":kind}))));
+                                    return;
+                                }
                             }
                             request.respond(result);
                         });
                     },
-                    Some(Request::Open(request))=>{request.respond(Err(ProviderError::new("unsupported","item producer integration is not ready in this intermediate build")));},
+                    Some(Request::Open(request))=>{observation.open(request);},
                     None=>break,
                 },
                 _=changed.changed()=>{

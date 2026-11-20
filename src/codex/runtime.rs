@@ -71,7 +71,7 @@ impl Runtime {
         assert!((1..=200).contains(&count));
         let (changed, _) = watch::channel(0);
         let host = format!("codex:{incarnation}");
-        Arc::new(Self {
+        let runtime = Arc::new(Self {
             native,
             slots: (0..count)
                 .map(|i| {
@@ -95,7 +95,20 @@ impl Runtime {
             changed,
             observer,
             incarnation,
-        })
+        });
+        for (index, slot) in runtime.slots.iter().enumerate() {
+            let endpoint = slot.endpoint.lock().unwrap();
+            runtime.emit(
+                index,
+                &endpoint,
+                vec![
+                    endpoint.state_entity(),
+                    Change::new("session", "current", json!({"id":null,"title":null})),
+                ],
+                false,
+            );
+        }
+        runtime
     }
 
     pub fn capabilities(&self) -> Map<String, Value> {
@@ -221,10 +234,21 @@ impl Runtime {
                         // A reused outstanding native id is a protocol fault, not another answer
                         // to the original request. Closing preserves uncertainty and never approves.
                         Err(error) if error.kind() == "stale" => self.native.close(),
-                        Err(_) => self.cancel_unknown(id),
+                        Err(_) => {
+                            self.cancel_unknown(id);
+                            let notice = endpoint.request_cancellation_notice();
+                            self.emit(index, &endpoint, vec![notice], false);
+                        }
                     }
                 } else {
                     self.cancel_unknown(id);
+                    // A host-wide/unbound request has no honest endpoint/session association.
+                    // Report that shared-host diagnostic to its endpoints, never invent a question.
+                    for (index, slot) in self.slots.iter().enumerate() {
+                        let mut endpoint = slot.endpoint.lock().unwrap();
+                        let notice = endpoint.request_cancellation_notice();
+                        self.emit(index, &endpoint, vec![notice], false);
+                    }
                 }
             }
         }
