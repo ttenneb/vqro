@@ -115,8 +115,13 @@ class TranscriptRows(unittest.TestCase):
         self.assertTrue(group["expanded"] and test["expanded"], "nothing hidden by default")
 
     def test_tail_coverage_says_so_and_the_budget_keeps_the_newest(self):
-        self.assertEqual(self.rows(coverage="tail")[0], {"type": "text", "style": "dim",
-                         "text": "Showing the history this agent kept; anything earlier isn't shown."})
+        self.assertNotIn("Showing the history", self.rows(coverage="tail")[0].get("text", ""), "a fresh tail is no evidence")
+        note = {"type": "text", "style": "dim", "text": "Showing the history this agent kept; anything earlier isn't shown."}
+        later = {k: dict(v, position=v.get("position", 0) + 5) if k[0] != "receipt" else v for k, v in CONVERSATION.items()}
+        self.assertEqual(self.rows(later, coverage="tail")[0], note, "positions after the first: something was cut")
+        names = agent_transcript.Names({"r2": {"name": "Pi"}}, "r2")
+        cut = agent_transcript.rows({k: (1, v) for k, v in CONVERSATION.items()}, names, "tail", cut=True)
+        self.assertEqual(cut[0], note, "a retention gap is evidence")
         many = {("message", f"m{i}"): {"position": i, "role": "assistant", "content": text(f"{i} " + "x" * 2000), "final": True}
                 for i in range(200)}
         rows = self.rows(many)
@@ -256,6 +261,15 @@ class AgentPane(unittest.TestCase):
         self.assertIn("Fixed.", self.texts())
         self.assertNotIn("Fixing both now!", self.texts())
 
+    def test_a_retention_gap_is_evidence_that_history_was_cut(self):
+        self.feed(snapshot(CONVERSATION, coverage="tail", seq=4))
+        self.assertFalse(any("Showing the history" in (t or "") for t in self.texts()), "fresh tail: no note")
+        stream = self.agents.conversations["r2"].stream
+        self.core.sinks.pop(stream).ended("gap", {"gap": "retention"})
+        self.agents.flush_conversations()
+        self.feed(snapshot(CONVERSATION, coverage="tail", seq=9))
+        self.assertIn("Showing the history this agent kept; anything earlier isn't shown.", self.texts())
+
     def test_a_closed_stream_reattaches_and_an_unavailable_agent_keeps_its_last_state(self):
         self.feed(snapshot(CONVERSATION, seq=4))
         stream = self.agents.conversations["r2"].stream
@@ -273,7 +287,7 @@ class AgentPane(unittest.TestCase):
 
     def test_view_chips_write_this_panes_settings_and_make_default_copies_them(self):
         self.feed(snapshot(CONVERSATION))
-        toolbar = self.core.live["agents-r2"]["toolbar"][0]["chips"]
+        toolbar = next(t for t in self.core.live["agents-r2"]["toolbar"] if any(c["text"].startswith("Thinking") for c in t.get("chips", [])))["chips"]
         thinking = next(c for c in toolbar if c["text"] == "Thinking: show")
         self.core.handlers["agents.view"](dict(thinking["args"], value="hide"))
         self.assertEqual(self.core.value("doc/agents/view/r2"), {"thinking": "hide"})
@@ -307,9 +321,10 @@ class AgentPane(unittest.TestCase):
         self.core.resources["r2"]["data"] = {"agent": {"v": 0, "state": "idle", "lifecycle": "live", "session": {"cwd": "~/Projects/site"}}}
         self.agents.event("resource", {"id": "r2"})
         self.feed(snapshot(CONVERSATION))
-        items = self.core.live["agents-r2"]["items"]
-        self.assertEqual((items[0]["id"], items[0]["text"]), ("header", "Pi r2 · ~/Projects/site"))
-        self.assertEqual([m["label"] for m in items[0]["menu"]], ["Bridge terminal (pi-bridge-1)", "Stop agent…"])
+        items, toolbar = self.core.live["agents-r2"]["items"], self.core.live["agents-r2"]["toolbar"]
+        self.assertEqual((toolbar[0]["id"], toolbar[0]["text"]), ("header", "Pi r2 · ~/Projects/site"), "pinned at the top")
+        self.assertEqual([m["label"] for m in toolbar[0]["menu"]], ["Bridge terminal (pi-bridge-1)", "Stop agent…"])
+        self.assertEqual([c["text"] for c in toolbar[1]["chips"]], ["Stop…", "⋯ Bridge terminal"], "visible buttons (mockup)")
         self.assertFalse(any(r.get("text") in ("Bridge terminal", "Agent settings…") for r in items), "no old panel rows")
 
     def test_the_composer_offers_auto_and_the_declared_modes_and_sends(self):

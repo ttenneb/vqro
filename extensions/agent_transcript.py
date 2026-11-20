@@ -335,7 +335,7 @@ def summary_text(title, values, fields, tools=None):
     return "▸ " + " · ".join(parts)
 
 
-def rows(entities, names, coverage=None, view=None):
+def rows(entities, names, coverage=None, view=None, cut=False):
     """Panel rows for an agent's conversation, oldest first, bounded to BUDGET encoded bytes (newest kept).
     `entities` maps (kind, id) to (rev, value) as in vqro_items.ItemView; `view` is view_settings()."""
     view = view or view_settings()
@@ -430,7 +430,11 @@ def rows(entities, names, coverage=None, view=None):
         dropped = dropped or 1
     if dropped:
         shown.insert(0, {"type": "text", "style": "dim", "text": f"… {dropped} earlier blocks not shown here (pane limit)"})
-    if coverage in ("tail", "state_only"):  # honest, not alarming: the agent says it may not have sent everything
+    # Say history is missing only with evidence: a retention gap (`cut`), or the agent's own positions starting after
+    # the first. A fresh agent's "tail" snapshot alone is no evidence that anything was left out.
+    positions = [v.get("position") for (_, _), (_, v) in entities.items() if isinstance(v, dict) and type(v.get("position")) is int]
+    cut = cut or (bool(positions) and min(positions) > 1)
+    if coverage in ("tail", "state_only") and cut:
         shown.insert(0, {"type": "text", "style": "dim", "text": "Showing the history this agent kept; anything earlier isn't shown."
                          if coverage == "tail" else "Showing the agent's current state only."})
     return shown

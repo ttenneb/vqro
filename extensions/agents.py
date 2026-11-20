@@ -308,6 +308,7 @@ class Conversation:
         self.stream = None
         self.generation = 0  # bumped when a stream ends, so a late attach reply can't revive it
         self.clamped = False  # the provider declared more than this viewer keeps
+        self.cut = False  # evidence that history was cut (a retention gap); see conversation_rows
         self.too_big = False  # a snapshot exceeded the bounds: stop reattaching (it would only overflow again)
 
     def data(self, data):
@@ -323,6 +324,8 @@ class Conversation:
 
     def ended(self, kind, reason):
         with self.lock:
+            if isinstance(reason, dict) and "retention" in (reason.get("gap"), reason.get("reason")):
+                self.cut = True  # the viewer fell out of the agent's history: something it had is not shown
             self.view.stream_ended()
             self.stream = None
             self.generation += 1
@@ -552,6 +555,18 @@ class Agents:
         return {"id": "header", "text": " · ".join([f"{name} {rid}"] + ([head(plain(folder), 120)] if folder else [])),
                 "style": "bold", "badges": [{"text": status(r), "style": "dim"}], **({"menu": menu} if menu else {})}
 
+    def action_chips(self, r):
+        """The header's controls as visible buttons (mockup §1: Stop… ⚙ ⋯); the header row's menu has the same."""
+        rid, chips = r["id"], []
+        if self.can_stop(r):
+            chips.append({"text": "Stop…", "command": "agents.stop", "args": {"resource": rid}, "style": "warn"})
+        if self.has_settings(r) and r.get("available"):
+            chips.append({"text": "⚙ Settings", "command": "agents.config", "args": {"resource": rid}})
+        host = self.ext.resources.get(r.get("host"))
+        if host and host.get("kind") == "terminal":
+            chips.append({"text": "⋯ Bridge terminal", "command": "tabs.show", "args": {"resource": host["id"]}})
+        return [{"type": "chips", "chips": chips}] if chips else []
+
     def bottom_rows(self, r):
         """Pinned under the conversation (feature `pin`; otherwise simply last): what the runtime holds, what waits
         for you, the composer. The facts line follows."""
@@ -604,7 +619,7 @@ class Agents:
                               "if it sends that much, the conversation stops updating and says so."})
             if c.view.epoch is None:
                 return notes + [{"type": "text", "style": "dim", "text": "Loading the conversation…"}]
-            out = notes + agent_transcript.rows(c.view.entities, names, c.view.coverage, self.view_of(r["id"]))
+            out = notes + agent_transcript.rows(c.view.entities, names, c.view.coverage, self.view_of(r["id"]), cut=c.cut)
         if c.stream is None and r.get("available") is not False:
             out.append({"type": "text", "style": "dim", "text": "Reconnecting to the conversation…"})
         return out or [{"type": "text", "style": "dim", "text": "No messages yet."}]
@@ -1267,8 +1282,9 @@ class Agents:
             c = self.conversations[r["id"]]
             with c.lock:
                 seen = agent_transcript.senders(c.view.entities, agent_transcript.Names(self.ext.resources, r["id"], self.ext.owner()))
-            content = {"title": title, "follow": True, "search": True, "toolbar": self.view_toolbar(r["id"], self.view_of(r["id"]), seen), "items": [
-                self.header_row(r), *conversation, *self.bottom_rows(r),
+            content = {"title": title, "follow": True, "search": True,
+                       "toolbar": [self.header_row(r), *self.action_chips(r), *self.view_toolbar(r["id"], self.view_of(r["id"]), seen)],
+                       "items": [*conversation, *self.bottom_rows(r),
                 agent_transcript.facts_footer(agent_facts(r), plain(str(r.get("name") or r["id"])))]}
         elif sources:
             # Keep controls/warnings here, but never copy a provider's transcript into another
