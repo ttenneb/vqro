@@ -354,6 +354,15 @@ impl Ghostty {
     /// History rows exposed: what the library keeps, up to the lines asked for.
     fn exposed(&self) -> usize { self.kept().min(self.scrollback) }
 
+    /// Row numbers in use: the history's and the screen's.
+    fn issued(&self) -> usize { self.scrolled() + usize::from(self.rows()) }
+
+    /// Number the rows from `from`: every row gets a number at or above it.
+    fn renumber(&mut self, from: usize) {
+        self.untrack();
+        self.dropped = from.max(self.dropped);
+    }
+
     fn untrack(&mut self) {
         if !self.tracked.is_null() {
             // SAFETY: a handle from ghostty_terminal_grid_ref_track, freed once.
@@ -365,6 +374,7 @@ impl Ghostty {
     /// After a write: count the rows that left above the tracked row, then track the bottom row again. Only on the
     /// primary screen (the alternate one has no history, and a tracked row belongs to the screen it was made on).
     fn count_dropped(&mut self, was_alternate: bool) {
+        let alternate = self.alternate_screen();
         if !self.tracked.is_null() && !was_alternate {
             let mut at = ffi::GhosttyPointCoordinate::default();
             // SAFETY: a live tracked handle and an out struct of the documented type.
@@ -375,7 +385,7 @@ impl Ghostty {
             self.dropped += gone as usize;
         }
         self.untrack();
-        if self.alternate_screen() { return; }
+        if alternate { return; }
         let y = (self.kept() + usize::from(self.rows())).saturating_sub(1) as u32;
         let mut tracked = ptr::null_mut();
         // SAFETY: a live terminal, a screen point inside it and an out-pointer for the handle.
@@ -432,11 +442,18 @@ impl Engine for Ghostty {
         // (a byte scrolls at most one row, bar CSI S), so every dropped row is counted.
         for piece in bytes.chunks((self.scrollback / 2).max(256)) {
             if piece.is_empty() { continue; }
-            let was_alternate = self.alternate_screen();
+            let (was_alternate, before) = (self.alternate_screen(), self.issued());
             // SAFETY: a live terminal and a byte slice; the library accepts any bytes. Callbacks run during this call
             // and only touch `collected`.
             unsafe { ffi::ghostty_terminal_vt_write(self.raw, piece.as_ptr(), piece.len()) };
             self.count_dropped(was_alternate);
+            // A switch between the screens (a full-screen program starting or ending, or a reset) shows other rows,
+            // and the primary screen isn't tracked meanwhile: number them above every number in use, so a row number
+            // never names two rows' text.
+            if self.alternate_screen() != was_alternate {
+                self.renumber(before);
+                self.count_dropped(true);
+            }
         }
         self.clamp_view();
         let c = &mut *self.collected;
@@ -453,8 +470,22 @@ impl Engine for Ghostty {
     fn take_effects(&mut self) -> Vec<Effect> { mem::take(&mut self.effects) }
 
     fn resize(&mut self, cols: u16, rows: u16) {
+        // Never resize with the view pinned on history: at this pin the library can leave its viewport pin on a
+        // freed page, and the next read reaches `unreachable` (a segfault in ReleaseFast; ghostty-audit P0-1). So
+        // follow the live screen, resize, and go back to the same distance from the bottom (0: keep following;
+        // the library's reflow could otherwise leave a following view scrolled back, P1-3).
+        let back = self.scroll_offset();
+        if back > 0 { self.set_scroll_offset(0); }
+        let before = self.issued();
         // SAFETY: a live terminal; cell pixel sizes are nominal (no pixel queries are answered).
         let _ = unsafe { ffi::ghostty_terminal_resize(self.raw, cols.max(1), rows.max(1), 1, 1) };
+        // Reflow re-wraps the history, so rows change without being dropped (P2-3): counting them as dropped would
+        // number rows backwards and a remembered row would name other text. Instead the rows after a resize are
+        // numbered above every number in use before, so an old number reads nothing. Row numbers hold between
+        // resizes. Re-track without counting.
+        self.renumber(before);
+        self.count_dropped(true);
+        self.set_scroll_offset(back);
         self.clamp_view();
     }
     fn rows(&self) -> u16 { self.get::<u16>(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_ROWS).unwrap_or(1) }
@@ -503,6 +534,10 @@ impl Engine for Ghostty {
     }
     fn scrollback_len(&self) -> usize { self.exposed() }
     fn scrolled(&self) -> usize { self.dropped + self.kept() }
+    fn renumber_from(&mut self, from: usize) {
+        self.renumber(from);
+        self.count_dropped(true);
+    }
     fn row_text(&mut self, row: usize) -> Option<(Vec<char>, Vec<u16>, bool)> {
         // Screen coordinates: 0 is the oldest kept row; `row` counts dropped rows too. Rows kept beyond the lines
         // asked for are hidden.
@@ -627,6 +662,25 @@ mod tests {
         let mut g = Ghostty::new(80, 10, 2000).unwrap();
         for _ in 0..8000 { g.process(b"line\r\n"); }
         assert_eq!(g.scrollback_len(), 2000, "narrow: the extra budget stays hidden");
+    }
+
+    /// ghostty-audit P2-3 and P1-3: a resize (reflow) never numbers rows backwards or reuses a number, so a row
+    /// remembered before reads nothing rather than other text; a following view keeps following.
+    #[test]
+    fn a_resize_never_reuses_row_numbers() {
+        let mut g = Ghostty::new(40, 10, 500).unwrap();
+        for i in 0..600 { g.process(format!("{i:03} {}\r\n", "w".repeat(50)).as_bytes()); }
+        let before = g.scrolled() + usize::from(g.rows());
+        let remembered: Vec<usize> = (g.scrolled() - g.scrollback_len()..before).collect();
+        for (c, r) in [(80, 10), (30, 12), (120, 8)] {
+            g.resize(c, r);
+            assert_eq!(g.scroll_offset(), 0, "following stays following");
+            assert!(g.scrolled() - g.scrollback_len() >= before, "numbers above every earlier one");
+            assert!(remembered.iter().all(|row| g.row_text(*row).is_none()), "an old number reads nothing");
+        }
+        g.set_scroll_offset(30);
+        g.resize(50, 10);
+        assert_eq!(g.scroll_offset(), 30, "a view scrolled back stays as far back");
     }
 
     /// ghostty-audit P3-1: images are not kept (vqro draws none).

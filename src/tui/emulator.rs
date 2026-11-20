@@ -139,6 +139,8 @@ pub trait Engine {
     fn scrollback_len(&self) -> usize;
     /// Rows above the live screen so far (dropped plus kept).
     fn scrolled(&self) -> usize;
+    /// Number every row at or above `from` from now on (the history was cleared or replaced uncounted).
+    fn renumber_from(&mut self, from: usize);
     /// One row's text with trailing blanks removed, the cell where each of its characters starts, and whether the
     /// row wraps onto the next. None when the row is no longer kept. Leaves the view where it was.
     fn row_text(&mut self, row: usize) -> Option<(Vec<char>, Vec<u16>, bool)>;
@@ -178,6 +180,8 @@ pub struct Emulator {
     /// The history lines asked for. Kept here: an engine on its alternate screen reports no history capacity, and a
     /// fresh terminal or an attach must still ask for these.
     lines: usize,
+    /// The output ended with ESC (perhaps the start of a full reset, RIS).
+    esc: bool,
 }
 
 impl Emulator {
@@ -188,8 +192,8 @@ impl Emulator {
     /// The same on the engine `wanted`; if it can't start, on vt100 (see `fallback`).
     pub fn with_engine(wanted: EngineKind, cols: u16, rows: u16, scrollback: usize) -> Self {
         match start(wanted, cols, rows, scrollback) {
-            Ok(engine) => Self { engine, kind: wanted, wanted, fallback: None, lines: scrollback },
-            Err(why) => Self { engine: Box::new(Vt100::new(cols, rows, scrollback)), kind: EngineKind::Vt100, wanted, fallback: Some(why), lines: scrollback },
+            Ok(engine) => Self { engine, kind: wanted, wanted, fallback: None, lines: scrollback, esc: false },
+            Err(why) => Self { engine: Box::new(Vt100::new(cols, rows, scrollback)), kind: EngineKind::Vt100, wanted, fallback: Some(why), lines: scrollback, esc: false },
         }
     }
 
@@ -204,7 +208,16 @@ impl Emulator {
     pub fn wanted(&self) -> EngineKind { self.wanted }
     pub fn fallback(&self) -> Option<&str> { self.fallback.as_deref() }
 
-    pub fn process(&mut self, bytes: &[u8]) { self.engine.process(bytes) }
+    pub fn process(&mut self, bytes: &[u8]) {
+        // A full reset (RIS, ESC c) clears the history without the engine counting the rows it drops: after one,
+        // every row is numbered above the numbers in use, so a row number never names two rows' text. (An ESC c
+        // inside a string is not a reset; renumbering then costs nothing but old numbers.)
+        let before = self.engine.scrolled() + usize::from(self.engine.rows());
+        let reset = (self.esc && bytes.first() == Some(&b'c')) || bytes.windows(2).any(|w| w == b"\x1bc");
+        self.esc = bytes.last() == Some(&0x1b);
+        self.engine.process(bytes);
+        if reset { self.engine.renumber_from(before); }
+    }
     pub fn take_effects(&mut self) -> Vec<Effect> { self.engine.take_effects() }
     pub fn resize(&mut self, cols: u16, rows: u16) { self.engine.resize(cols, rows) }
     pub fn rows(&self) -> u16 { self.engine.rows() }
@@ -239,7 +252,13 @@ impl Vt100 {
 }
 
 impl Engine for Vt100 {
-    fn process(&mut self, bytes: &[u8]) { self.parser.process(bytes); }
+    fn process(&mut self, bytes: &[u8]) {
+        let (was_alternate, kept, before) = (self.alternate_screen(), self.scrollback_len(), self.scrolled() + usize::from(self.rows()));
+        self.parser.process(bytes);
+        // History rows leave uncounted when the screens switch (the alternate one has none) or a reset clears them:
+        // then number every row above the numbers in use, so a row number never names two rows' text.
+        if self.alternate_screen() != was_alternate || self.scrollback_len() < kept { self.renumber_from(before); }
+    }
     fn take_effects(&mut self) -> Vec<Effect> { std::mem::take(&mut self.parser.callbacks_mut().out) }
     fn resize(&mut self, cols: u16, rows: u16) { self.parser.screen_mut().set_size(nz(rows), nz(cols)); }
     fn rows(&self) -> u16 { self.parser.screen().size().0.get() }
@@ -284,6 +303,10 @@ impl Engine for Vt100 {
     fn set_scroll_offset(&mut self, n: usize) { self.parser.screen_mut().set_scrollback(n); }
     fn scrollback_len(&self) -> usize { self.parser.screen().scrollback_len() }
     fn scrolled(&self) -> usize { self.parser.callbacks().dropped + self.scrollback_len() }
+    fn renumber_from(&mut self, from: usize) {
+        let d = &mut self.parser.callbacks_mut().dropped;
+        *d = (*d).max(from);
+    }
 
     fn row_text(&mut self, row: usize) -> Option<(Vec<char>, Vec<u16>, bool)> {
         let scrolled = self.scrolled();
@@ -515,6 +538,12 @@ mod fuzz {
         b"\x1b]0;t\x07", b"\x1b[?2004h", b"\x1b[?1000h", b"\x1b[?1006h", b"\x1b[>1u", b"\x1b[<u", b"\r\n", b"\n", b"\t", b"\x08",
         "漢".as_bytes(), "👩‍💻".as_bytes(), "🇯🇵".as_bytes(), "e\u{301}".as_bytes(), b"\xff\xfe", b"\xe2\x82", b"0123456789",
         b"\x1b[;;;;;;;;;;;;;;;;;;;;;;;;;;;;m", b"\x1b[9999999999999999999999C", b"\x1b[?9999999h", b"\x1b[1000000@",
+        // ghostty-audit's extra pieces: line and margin edits, DECALN, DECAWM, DECCOLM, DECLRMM, mode 2027, REP,
+        // hyperlinks, long combining runs, Kitty graphics and queries.
+        b"\x1b[5L", b"\x1b[5M", b"\x1b#8", b"\x1b[?7l", b"\x1b[?7h", b"\x1b[?3h", b"\x1b[?69h\x1b[5;20s", b"\x1b[?69l",
+        b"\x1b[?2027h", b"\x1b[3S", b"\x1b[;3r", b"x\x1b[300b", b"\x1b]8;;http://y\x1b\\link\x1b]8;;\x1b\\",
+        "a\u{301}\u{302}\u{303}\u{304}\u{305}\u{306}\u{307}\u{308}\u{309}\u{30a}\u{30b}\u{30c}\u{30d}\u{30e}\u{30f}\u{310}\u{311}\u{312}".as_bytes(),
+        b"\x1b_Ga=T,f=24,s=1,v=1;AAAA\x1b\\", b"\x1b[c", b"\x1b[6n", b"\x1b[?u",
     ];
 
     fn stream(r: &mut Rng) -> Vec<u8> {
@@ -523,10 +552,73 @@ mod fuzz {
             match r.below(3) {
                 0 => out.extend_from_slice(PIECES[r.below(PIECES.len() as u64) as usize]),
                 1 => out.push(r.below(256) as u8),
+                _ if r.below(8) == 0 => for n in 0..r.below(200) { out.extend_from_slice(format!("flood {n}\r\n").as_bytes()) },
                 _ => for _ in 0..r.below(80) { out.push(b' ' + r.below(95) as u8) },
             }
         }
         out
+    }
+
+    /// Replays a trace on every engine (a 40x10 terminal with `lines` of history): lines "P <hex>" (output),
+    /// "R <cols> <rows>", "S <offset>" (scroll back), "o" (read the offset), "d" (draw); after each step it reads
+    /// what the TUI reads. `VQRO_FUZZ_TRACE` makes the fuzz write one, for minimising what it finds.
+    fn replay(kind: EngineKind, trace: &str, lines: usize) {
+        let mut e = Emulator::with_engine(kind, 40, 10, lines);
+        // History rows read since the last resize: each reads the same text later, or nothing.
+        let mut seen: std::collections::HashMap<usize, Vec<char>> = std::collections::HashMap::new();
+        for line in trace.lines() {
+            let mut w = line.split(' ');
+            match (w.next(), w.next(), w.next()) {
+                (Some("P"), Some(h), _) => e.process(&(0..h.len() / 2).map(|i| u8::from_str_radix(&h[2 * i..2 * i + 2], 16).unwrap()).collect::<Vec<_>>()),
+                (Some("P"), None, _) => {}
+                (Some("R"), Some(c), Some(r)) => { e.resize(c.parse().unwrap(), r.parse().unwrap()); seen.clear() }
+                (Some("S"), Some(n), _) => e.set_scroll_offset(n.parse().unwrap()),
+                (Some("o"), _, _) => { let _ = e.scroll_offset(); }
+                (Some("d"), _, _) => {}
+                _ => continue,
+            }
+            let rows = e.rows();
+            assert!(e.scroll_offset() <= e.scrollback_len(), "{}: the view inside the history after `{}`", kind.name(), &line[..line.len().min(20)]);
+            for row in e.scrolled() - e.scrollback_len()..e.scrolled() + usize::from(rows) {
+                let text = e.row_text(row).map(|t| t.0);
+                if let (Some(was), Some(now)) = (seen.get(&row), &text) {
+                    assert_eq!(was, now, "{}: history row {row} changed its text at `{}`", kind.name(), &line[..line.len().min(20)]);
+                }
+                if let Some(t) = text.filter(|_| row < e.scrolled()) { seen.insert(row, t); }
+            }
+            let area = Rect::new(0, 0, e.cols(), rows);
+            e.draw(&mut Buffer::empty(area), area);
+        }
+    }
+
+    /// `VQRO_FUZZ_REPLAY=<trace>` (and `VQRO_FUZZ_LINES`, default 50): replay one trace.
+    #[test]
+    fn engines_replay_a_trace() {
+        let Ok(path) = std::env::var("VQRO_FUZZ_REPLAY") else { return };
+        let lines = std::env::var("VQRO_FUZZ_LINES").ok().and_then(|v| v.parse().ok()).unwrap_or(50);
+        replay(traced(), &std::fs::read_to_string(path).unwrap(), lines);
+    }
+
+    /// The engine traced and replayed: `VQRO_FUZZ_ENGINE` (a setting name), else libghostty.
+    fn traced() -> EngineKind {
+        std::env::var("VQRO_FUZZ_ENGINE").ok().and_then(|n| EngineKind::parse(&n)).unwrap_or(EngineKind::Libghostty)
+    }
+
+    /// Crashes found before (ghostty-audit's minimal logs), replayed on every engine: `<name>.<lines>.log` in
+    /// tests/fixtures/terminal/libghostty-replays. P0-1: a resize while scrolled back left libghostty-vt's
+    /// viewport pin on a freed page; the next read segfaulted.
+    #[test]
+    fn engines_survive_known_crash_traces() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/terminal/libghostty-replays");
+        let mut n = 0;
+        for f in std::fs::read_dir(dir).unwrap() {
+            let path = f.unwrap().path();
+            let lines: usize = path.file_stem().and_then(|s| s.to_str()).and_then(|s| s.rsplit('.').next()).and_then(|l| l.parse().ok()).expect("<name>.<lines>.log");
+            let trace = std::fs::read_to_string(&path).unwrap();
+            for kind in EngineKind::ALL { replay(kind, &trace, lines); }
+            n += 1;
+        }
+        assert!(n >= 2);
     }
 
     #[test]
@@ -537,13 +629,19 @@ mod fuzz {
             let mut r = Rng(seed);
             let mut e = Emulator::with_engine(kind, 40, 10, 50);
             assert_eq!(e.engine(), kind);
+            let mut trace = std::env::var("VQRO_FUZZ_TRACE").ok().filter(|_| kind == traced()).map(|p| std::fs::File::create(p).unwrap());
+            let mut note = |line: String| if let Some(t) = trace.as_mut() { use std::io::Write; let _ = writeln!(t, "{line}"); let _ = t.flush(); };
+            // History rows sampled since the last resize: each reads the same text later, or nothing.
+            let mut seen: Vec<(usize, Vec<char>)> = Vec::new();
             for i in 0..iters {
-                e.process(&stream(&mut r));
+                let bytes = stream(&mut r);
+                note(format!("P {}", bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()));
+                e.process(&bytes);
                 assert!(e.take_effects().len() <= MAX_EFFECTS, "{} round {i}: effects bounded", kind.name());
                 match r.below(6) {
-                    0 => e.resize(1 + r.below(200) as u16, 1 + r.below(60) as u16),
-                    1 => e.set_scroll_offset(r.below(500) as usize),
-                    2 => e.set_scroll_offset(0),
+                    0 => { let (c, rw) = (1 + r.below(200) as u16, 1 + r.below(60) as u16); note(format!("R {c} {rw}")); e.resize(c, rw); seen.clear() }
+                    1 => { let n = r.below(500) as usize; note(format!("S {n}")); e.set_scroll_offset(n) }
+                    2 => { note("S 0".into()); e.set_scroll_offset(0) }
                     _ => {}
                 }
                 let (rows, cols) = (e.rows(), e.cols());
@@ -563,6 +661,13 @@ mod fuzz {
                     assert!(starts.iter().all(|c| *c < cols), "{k} round {i}: cells inside the row");
                 }
                 assert!(e.row_text(newest + 1).is_none(), "{k} round {i}: a row past the screen reads");
+                for (row, text) in &seen {
+                    if let Some((now, _, _)) = e.row_text(*row) { assert_eq!(&now, text, "{k} round {i}: history row {row} changed its text"); }
+                }
+                if seen.len() < 16 && e.scrollback_len() > 0 {
+                    let row = oldest + r.below(e.scrollback_len() as u64) as usize;
+                    if let Some((text, _, _)) = e.row_text(row) { seen.push((row, text)); }
+                }
                 if oldest > 0 { assert!(e.row_text(oldest - 1).is_none(), "{k} round {i}: a row older than the history reads"); }
                 let _ = e.hyperlink_at(r.below(u64::from(rows)) as u16, r.below(u64::from(cols)) as u16);
                 let area = Rect::new(0, 0, cols, rows);

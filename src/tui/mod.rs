@@ -3199,6 +3199,14 @@ impl App {
                 if t.size != (inner.width, inner.height) && !dragging {
                     t.size = (inner.width, inner.height);
                     t.emu.resize(inner.width, inner.height);
+                    // Row numbers hold only between resizes (an engine may reflow its history): a selection is
+                    // dropped, and a search finds its matches again.
+                    self.selections.remove(view);
+                    if let Some(m) = self.scroll_mode.as_mut().filter(|m| m.view == view && !m.query.is_empty()) {
+                        let scrolled = t.emu.scrolled();
+                        m.hits = scrollback::search(&mut t.emu, scrolled, &m.query);
+                        m.at = m.at.min(m.hits.len().saturating_sub(1));
+                    }
                     if let Some(sid) = t.stream {
                         self.peer.notify("stream.resize", json!({"stream": sid, "cols": inner.width, "rows": inner.height}));
                     }
@@ -3912,6 +3920,14 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
         assert!(app.message.contains("/ALPHA  3 of 3"), "{}", app.message);
         assert_eq!(app.terms["v"].emu.scroll_offset(), 2, "the oldest match is in view");
+        // A resize (an engine may reflow, so row numbers hold only between resizes) drops the selection and finds
+        // the search's matches again.
+        assert!(app.selections.contains_key("v"));
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(30, 6)).unwrap();
+        terminal.draw(|f| { app.draw_view(f, "v", Rect::new(0, 0, 30, 6), true, &Palette::default(), &Icons::new(None, false)); }).unwrap();
+        assert_eq!(app.terms["v"].size, (28, 4));
+        assert!(!app.selections.contains_key("v"), "the selection is dropped on a resize");
+        assert_eq!(app.scroll_mode.as_ref().map(|m| m.hits.len()), Some(3), "the matches are found again");
         app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(app.scroll_mode.is_none());
         assert_eq!(app.terms["v"].emu.scroll_offset(), 0, "leaving returns to the live screen");

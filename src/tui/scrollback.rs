@@ -4,7 +4,9 @@
 //! A position's `row` counts lines since the parser started: the rows that scrolled off the top so far
 //! (`scrolled`: `Emulator::scrolled`, the rows the full scrollback dropped plus those it keeps) and the screen
 //! row. Asking for a dropped row gets nothing. Reading moves the emulator's view and puts it back.
-//! Clearing the scrollback (`CSI 3 J`) renumbers rows; a selection made before it may then name other text.
+//! A row number never names two rows' text: when rows change uncounted (a resize that reflows, clearing the
+//! scrollback with `CSI 3 J`, a full reset, a switch between the screens) every row is numbered above the numbers
+//! used before, so an older position reads nothing. The TUI drops a selection on a resize.
 use super::emulator::Emulator;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]

@@ -693,7 +693,9 @@ produces `stream.error {stream, error, outcome: "rejected"}` instead; it is neve
 **Terminal engines** (Rust TUI; client mechanism). The emulator that draws terminal panes is a built-in engine
 chosen by `doc/settings/tui.terminal_engine` (Settings > Interface): `vt100` (the default until libghostty's
 independent audit; always available, the fallback) or `libghostty` (Ghostty's libghostty-vt). Both keep exactly `scrollback_lines` of history and number
-history rows so a selection or search match keeps naming its line while older rows are dropped. Changing it switches open panes, which start a
+history rows so a selection or search match keeps naming its line while older rows are dropped; a row number never
+names another row's text (after a resize, a cleared history, a reset or a screen switch, rows get new numbers and
+a selection is dropped). Changing it switches open panes, which start a
 fresh emulator and repaint from the backend's attach history. An engine that can't be selected or fails to start
 (or reports a failure) is replaced by vt100 for that pane, and the status line says which and why, once per
 reason. A fault inside a native engine that crashes the process can't be caught this way: native engines keep
