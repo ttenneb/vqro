@@ -665,6 +665,13 @@ class ClassificationTests(unittest.IsolatedAsyncioTestCase):
                                         Path("/vqro"), Path("/hc"), factory=self.factory(), handlers={})
                 self.assertEqual((result.status, result.component, result.reason), ("fail", "harness", "harness_gap"))
 
+    async def test_known_incomplete_review_handlers_cannot_report_pass(self):
+        async def partial(ctx): pass
+        for ident in ("O7", "C9", "R3", "R4"):
+            result = await run_case(Case(ident, "incomplete review witness"), Path(self.temp.name) / ident,
+                self.manifest, Path("/vqro"), Path("/hc"), factory=self.factory(), handlers={ident: partial})
+            self.assertEqual((result.status, result.component, result.reason), ("fail", "harness", "harness_gap"))
+
     async def test_only_absent_optional_declaration_is_unsupported(self):
         result = await self.run_one(factory=self.factory(declared_send=False), handlers={})
         self.assertEqual(result.status, "unsupported-declared")

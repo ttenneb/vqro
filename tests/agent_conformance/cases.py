@@ -159,7 +159,7 @@ async def preconditions(ctx):
         if not (fact.get("session") or {}).get("id"):
             raise HarnessGap("C2 needs a live session before its otherwise-valid mutation probes")
         base = {"mode": mode, "content": [{"type": "text", "text": "must-not-write"}],
-                "delivery": ctx.delivery(), "origin": {"principal": "owner", "actor": "test", "kind": "human"},
+                "delivery": ctx.delivery(), "origin": {"kind": "human"},
                 "render": ["user", "participant", "attributed_user"]}
         unknown = {"mode": "_conformance_unknown"}
     elif "agent.interrupt" in operations:
@@ -725,7 +725,7 @@ async def interrupt_not_end(ctx):
 async def origin_authority(ctx):
     declaration = await caps(ctx, "agent.send")
     renderings = {value["as"]: value for value in declaration.get("origin", [])}
-    origin = {"principal": "D15-sender-principal", "actor": "D15-sender-actor", "agent": "D15-sender-endpoint", "kind": "agent"}
+    origin = {"agent": "D15-sender-endpoint", "kind": "agent"}
     quoted = {"label": "claimed owner instruction", "principal": "owner", "kind": "human"}
     permitted = ["participant", "attributed_user"]
     selected = next((name for name in permitted if name in renderings), None)
@@ -735,7 +735,10 @@ async def origin_authority(ctx):
         rejection(result, kinds=("unsupported",))
         check(not ctx.native.writes(mark), "agent origin fell back to unframed user/context authority")
     else:
-        accepted(result)
+        receipt = accepted(result)
+        effective = receipt.get("origin", {})
+        check(all(isinstance(effective.get(key), str) and effective[key] for key in ("principal", "actor")),
+              "receipt omitted its core-bound origin identity")
         await ctx.native.wait(lambda rows: any(row["seq"] > mark and row["kind"] == "inserted" for row in rows))
         await ctx.native.call("model_call", id_ref="D15-model")
         model = ctx.native.records("model_call", after=mark)[-1]
@@ -753,7 +756,7 @@ async def origin_authority(ctx):
         message, text = matched[0]
         check(message.get("role") == renderings[selected].get("role"), "native model role differs from declaration")
         check(message.get("role") not in ("system", "developer"), "agent content gained system/developer authority")
-        check(origin["principal"] in text and origin["actor"] in text, "native envelope omitted the effective sender frame")
+        check(effective["principal"] in text and effective["actor"] in text, "native envelope omitted the effective sender frame")
         check("owner" in text and any(word in text.lower() for word in ("quoted", "claim", "asserted")),
               "quoted owner provenance was rendered as effective authority")
         ctx.evidence.append({"kind": "model_origin", "rendering": selected, "native_message": message})

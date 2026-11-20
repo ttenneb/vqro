@@ -328,7 +328,8 @@ class PublicImplementation:
         mode = mode or next((name for name in ("start", "admit") if name in modes), None)
         if mode is None:
             raise HarnessGap("scenario needs a start/admit mode but neither is declared")
-        origin = {"principal": "owner", "actor": "conformance-human", "kind": "human"}
+        # Principal/actor/initiator are core-bound, not invented fixture identities.
+        origin = {"kind": "human"}
         links = {key: value for key, value in (("cause", cause), ("correlation", correlation)) if value is not None}
         return await self.invoke("agent.send", {"mode": mode, "delivery": self.delivery(),
             "content": content if content is not None else [{"type": "text", "text": text}],
