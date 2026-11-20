@@ -573,8 +573,27 @@ class E2E:
                 current = self.resource(rid)['data']['agent']
                 return self.invoke(rid, 'send', {'v': 0, 'epoch': current['epoch'], 'caps_rev': current['caps']['rev'],
                     'mode': mode, 'delivery': delivery, 'content': [{'type': 'text', 'text': text}], 'origin': origin, 'render': ['attributed_user']})
-            send('start', 'rust-default-start', 'rust-default-start')
-            self.agent(rid, lambda r: r['data']['agent']['state'] == 'running')
+            owner = self.call('workspace.get', {'key': 'doc/principals/owner'}).get('value')
+            if not isinstance(owner, str):
+                self.call('workspace.owner.bootstrap', {'principal': 'p:framing-owner'})
+                owner = self.call('workspace.get', {'key': 'doc/principals/owner'})['value']
+            typed = '  Hello?\n\n{"literal": true}\t  '
+            previous = self.env.get('VQRO_PRINCIPAL')
+            self.env['VQRO_PRINCIPAL'] = owner
+            origin = {'kind': 'human'}  # IDs must come from the actual core, not a caller assertion.
+            try:
+                send('start', typed, 'rust-default-start')
+                self.agent(rid, lambda r: r['data']['agent']['state'] == 'running')
+                native = next(row for row in reversed(self.trace()) if row.get('type') == 'prompt')
+                assert native['message'].encode() == typed.encode(), native
+                self.log.append({'owner_native_prompt_exact': True, 'typed_bytes': len(typed.encode()),
+                                 'origin_identity': 'core-recorded; public owner read', 'model_calls': 0})
+            finally:
+                if previous is None:
+                    self.env.pop('VQRO_PRINCIPAL', None)
+                else:
+                    self.env['VQRO_PRINCIPAL'] = previous
+            origin = {'principal': 'undeclared', 'actor': 'undeclared', 'kind': 'coordination'}
             self.invoke(rid, 'send', {'mode': 'start', 'delivery': 'must-not-write', 'content': [{'type': 'text', 'text': 'must-not-write'}], 'origin': origin, 'render': ['attributed_user']}, outcome='rejected')
             send('boundary', 'rust-default-queued', 'rust-default-boundary')
             self.invoke(rid, 'interrupt', {'v': 0})

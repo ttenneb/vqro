@@ -230,7 +230,15 @@ async fn invoke(shared:&Arc<Shared>,provider:&Provider,effect:&EffectRequest)->R
             let delivery=match contract::id(&args["delivery"]){Ok(delivery)=>delivery,Err(error)=>return rejected(error.kind,error.message)};
             let agent=shared.agent.lock().unwrap();Ok(Outcome::Observed(Some(agent.receipts.get(delivery).cloned().unwrap_or_else(||json!({"stage":"unknown"})))))
         }
-        "agent.send"=>{let bound=match contract::bind_origin(args,&effect.attribution){Ok(bound)=>bound,Err(error)=>return rejected(error.kind,error.message)};send(shared,&bound,effect.deadline).await},
+        "agent.send"=>{
+            let bound=match contract::bind_origin(args,&effect.attribution){Ok(bound)=>bound,Err(error)=>return rejected(error.kind,error.message)};
+            // A caller's human claim is insufficient. Resolve the current owner through the public
+            // core primitive; absent/invalid/unavailable ownership stays conservatively attributed.
+            let owner_proven=match tokio::time::timeout_at(effect.deadline,provider.call("workspace.get",json!({"key":vqro::principal::OWNER_KEY}))).await {
+                Ok(Ok(owner))=>contract::recorded_owner(&effect.attribution,&owner),_=>false,
+            };
+            send(shared,&bound,effect.deadline,owner_proven).await
+        },
         "agent.queue"=>queue_op(shared,args,effect.deadline).await,
         "agent.respond"=>respond(shared,args,effect.deadline).await,
         "agent.configure"=>configure(shared,provider,args,effect.deadline).await,
@@ -254,13 +262,13 @@ async fn invoke(shared:&Arc<Shared>,provider:&Provider,effect:&EffectRequest)->R
 fn stop_report(covers:&[Value],exit:Option<&native::Exit>)->Value {json!({"covers":covers,"covers_evidence":"requested","exit":exit.map(|exit|json!({"code":exit.code})),"pending":"unknown"})}
 fn native_message(reply:&native::Reply)->String {reply.error.as_str().unwrap_or("native operation failed; outcome unknown").chars().take(1024).collect()}
 fn record_receipt(shared:&Shared,delivery:&str,value:Value){shared.agent.lock().unwrap().receipt(delivery,value);shared.wake();}
-async fn send(shared:&Arc<Shared>,args:&Value,deadline:Instant)->Result<Outcome,ProviderError> {
+async fn send(shared:&Arc<Shared>,args:&Value,deadline:Instant,owner_proven:bool)->Result<Outcome,ProviderError> {
     let prepared={
         let agent=shared.agent.lock().unwrap();let current=agent.signals.current();
         if agent.configuration.pending{return rejected("busy","native configuration change is unresolved");}
         if args["mode"]=="start" && agent.state()!="idle"{return rejected("busy","endpoint is not evidenced idle");}
         if agent.caps()["agent.send"]["modes"].get(args["mode"].as_str().unwrap_or("")).is_none(){return rejected("unsupported","mode not in current capabilities");}
-        let context=contract::Context {caps_rev:agent.caps()["rev"].as_u64().unwrap(),epoch:agent.epoch(),session:current.metadata["sessionId"].as_str(),owner_proven:false,
+        let context=contract::Context {caps_rev:agent.caps()["rev"].as_u64().unwrap(),epoch:agent.epoch(),session:current.metadata["sessionId"].as_str(),owner_proven,
             images:agent.caps()["agent.send"]["content"]["types"].as_array().is_some_and(|types|types.iter().any(|kind|kind=="image")),literal:true};
         let prepared=match contract::send(args,&context){Ok(prepared)=>prepared,Err(error)=>return rejected(error.kind,error.message)};
         if agent.receipts.contains_key(&prepared.delivery){return rejected("conflict","delivery already recorded; lookup is not a native insertion key");}

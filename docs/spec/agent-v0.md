@@ -252,6 +252,10 @@ concatenated.
   the original sender in v0; never invent retained callback proofs or implicit delegation to conceal that gap.
   `quoted? {label, principal?, kind?}` is separately asserted provenance (a forwarded message's original author)
   and is rendered as a claim, never as core identity.
+  Pi keeps this structured provenance in receipt metadata, never serialized JSON in a model prompt. For a
+  core-recorded current owner with claimed kind `human`, its native message is exactly the typed text (including
+  on the default attributed route: no redundant sender or quoted-provenance prefix). Other Pi sends use the short
+  plain-text `from <sender> via <actor>` header; any quoted label is plain text explicitly marked asserted.
 - **Rendering** is declared per runtime, each with its native role and resulting authority:
   `"origin": [{"as": "user", "role": "user"}, {"as": "attributed_user", "role": "user", "frame": "sender_header"},
   {"as": "participant", "role": "<native>"}, {"as": "context", "role": "system_reminder", "authority":

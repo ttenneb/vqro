@@ -78,6 +78,12 @@ pub fn bind_origin(args:&Value,attribution:&vqro::principal::Attribution)->Resul
     Ok(args)
 }
 
+/// Only the current valid owner key and core-recorded effective principal can prove ownership.
+pub fn recorded_owner(attribution:&vqro::principal::Attribution,owner:&Value)->bool {
+    let Some(owner)=owner.get("value").and_then(Value::as_str) else{return false;};
+    vqro::principal::validate_assertable(owner).is_ok() && attribution.principal.as_deref()==Some(owner)
+}
+
 pub fn send(args:&Value,context:&Context<'_>)->Result<Send,Refusal> {
     common(args,context)?;
     for field in args.as_object().unwrap().keys() {
@@ -139,12 +145,17 @@ pub fn send(args:&Value,context:&Context<'_>)->Result<Send,Refusal> {
         }
     }
     let body=text.unwrap_or("");
-    let mut message=if rendering=="attributed_user" {
-        let sender=origin.get("sender").unwrap_or(&origin["principal"]);
-        let provenance=if origin.get("sender").is_some(){"sender is coordination-asserted inbox provenance, not core-proven"}else{"effective principal recorded by core"};
-        format!("Effective sender (user authority): from {sender} via {} ({provenance})\nOrigin (principal/actor recorded by core; claimed fields are asserted): {origin}\n\n{body}",origin["actor"])
+    let owner_human=context.owner_proven && origin["kind"]=="human";
+    // Keep provenance in the receipt. The human owner's native input is the literal typed body,
+    // including when the default route is attributed_user; never serialize metadata into a prompt.
+    let mut message=if rendering=="attributed_user" && !owner_human {
+        let sender=origin.get("sender").and_then(|sender|sender.get("principal").and_then(Value::as_str).or_else(||sender.as_str()))
+            .unwrap_or_else(||origin["principal"].as_str().unwrap());
+        format!("from {sender} via {}\n\n{body}",origin["actor"].as_str().unwrap())
     } else {body.to_string()};
-    if let Some(quoted)=&quoted {message=format!("Quoted provenance (asserted, not the effective sender): {quoted}\n{message}");}
+    if !owner_human {if let Some(quoted)=&quoted {
+        message=format!("Quoted provenance (asserted, not the effective sender): {}\n{message}",quoted["label"].as_str().unwrap());
+    }}
     let mut native=json!({"message":message});
     if !images.is_empty() {native["images"]=json!(images);}
     if mode=="admit" {native["streamingBehavior"]=json!("followUp");}

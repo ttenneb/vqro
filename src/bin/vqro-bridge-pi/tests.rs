@@ -62,12 +62,33 @@ async fn c2_effect_identity_mismatch_is_forbidden_before_any_native_write(){
         if let Some(field)=field{args["origin"][field]=json!("owner");}else{args["origin"].as_object_mut().unwrap().remove("principal");args["origin"].as_object_mut().unwrap().remove("actor");}
         let wire=json!({"jsonrpc":"2.0","id":index,"method":"effect.invoke","params":{"generation":1,"effect":format!("e{index}"),"op":"agent.send","ref":"agent","incarnation":"","args":args,"deadline_ms":2000,"principal":"p:sender","actor":"extension:coord","initiator":"p:original","cause":{"kind":"delivery","id":"original-delivery","provenance":"asserted","extra":"preserved"},"correlation":"root-only-thread"}});
         core.w.write_all(format!("{wire}\n").as_bytes()).await.unwrap();let request=core.requests.as_mut().unwrap().recv().await.unwrap();let Request::Effect(effect)=request else{panic!("not an effect")};
-        let result=invoke(&shared,&provider,&effect).await.unwrap();
+        let result=if field.is_none(){
+            let respond_owner=async {let get=core.recv().await;assert_eq!(get["method"],"workspace.get");assert_eq!(get["params"]["key"],vqro::principal::OWNER_KEY);core.reply(&get,json!({"value":"actual-owner"})).await;};
+            let (result,())=tokio::join!(invoke(&shared,&provider,&effect),respond_owner);result.unwrap()
+        }else{invoke(&shared,&provider,&effect).await.unwrap()};
         if field.is_some(){assert!(matches!(result,Outcome::Rejected{ref kind,..} if kind=="forbidden"));assert!(!root.path().join("ledger").exists());assert!(shared.agent.lock().unwrap().receipts.is_empty());}
         else{let Outcome::Accepted(Some(value))=&result else{panic!("not accepted: {result:?}")};assert_eq!(value["receipt"]["origin"]["principal"],"p:sender");assert_eq!(value["receipt"]["origin"]["actor"],"extension:coord");assert_eq!(value["receipt"]["origin"]["initiator"],"p:original");assert_eq!(value["receipt"]["origin"]["claimed"],json!(["kind","agent"]));assert_eq!(value["receipt"]["quoted"],args["quoted"]);assert_eq!(value["receipt"]["cause"],wire["params"]["cause"]);assert_eq!(value["receipt"]["correlation"],"root-only-thread");}
         effect.respond(Ok(result));let reply=core.recv().await;assert_eq!(reply["id"],index);
     }
-    let ledger=std::fs::read_to_string(root.path().join("ledger")).unwrap();let rows:Vec<Value>=ledger.lines().map(|line|serde_json::from_str(line).unwrap()).collect();let prompts:Vec<_>=rows.iter().filter(|row|row["type"]=="prompt").collect();assert_eq!(prompts.len(),1);assert!(prompts[0]["message"].as_str().unwrap().ends_with("\n\nexact literal"));assert!(prompts[0]["message"].as_str().unwrap().contains("claimed fields are asserted"));dispose(&shared,&provider).await;
+    let ledger=std::fs::read_to_string(root.path().join("ledger")).unwrap();let rows:Vec<Value>=ledger.lines().map(|line|serde_json::from_str(line).unwrap()).collect();let prompts:Vec<_>=rows.iter().filter(|row|row["type"]=="prompt").collect();assert_eq!(prompts.len(),1);assert!(prompts[0]["message"].as_str().unwrap().ends_with("\n\nexact literal"));assert_eq!(prompts[0]["message"],"Quoted provenance (asserted, not the effective sender): asserted source\nfrom p:sender via extension:coord\n\nexact literal");dispose(&shared,&provider).await;
+}
+#[tokio::test]
+async fn owner_human_effect_reaches_native_as_exact_typed_text(){
+    let root=tempfile::tempdir().unwrap();let (shared,provider,mut core)=fixture(root.path(),true).await;
+    let typed="  Hello?\n\n{\"literal\": true}\t  ";
+    let wire=json!({"jsonrpc":"2.0","id":99,"method":"effect.invoke","params":{"generation":1,"effect":"owner-send","op":"agent.send","ref":"agent","incarnation":"","deadline_ms":2000,
+        "principal":"person:alice","actor":"extension:agents","initiator":"person:alice",
+        "args":{"v":0,"mode":"start","delivery":"owner-send","origin":{"kind":"human"},"content":[{"type":"text","text":typed}]}}});
+    core.w.write_all(format!("{wire}\n").as_bytes()).await.unwrap();
+    let Request::Effect(effect)=core.requests.as_mut().unwrap().recv().await.unwrap() else{panic!("not effect")};
+    let owner_read=async {let get=core.recv().await;assert_eq!(get["method"],"workspace.get");assert_eq!(get["params"]["key"],vqro::principal::OWNER_KEY);core.reply(&get,json!({"value":"person:alice"})).await;};
+    let (outcome,())=tokio::join!(invoke(&shared,&provider,&effect),owner_read);
+    assert!(matches!(outcome.unwrap(),Outcome::Accepted(_)));
+    let rows:Vec<Value>=std::fs::read_to_string(root.path().join("ledger")).unwrap().lines().map(|row|serde_json::from_str(row).unwrap()).collect();
+    let prompts:Vec<_>=rows.iter().filter(|row|row["type"]=="prompt").collect();assert_eq!(prompts.len(),1);
+    assert_eq!(prompts[0]["message"].as_str().unwrap().as_bytes(),typed.as_bytes());
+    effect.respond(Ok(Outcome::Accepted(None)));let reply=core.recv().await;assert_eq!(reply["id"],99);
+    dispose(&shared,&provider).await;
 }
 #[tokio::test]
 async fn optional_view_retries_are_three_per_connection_and_do_not_block_native_reader(){
