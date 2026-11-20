@@ -412,6 +412,108 @@ class AgentsTests(unittest.TestCase):
         self.assertEqual(self.native()[-1][1]["resource"], "r4")
 
 
+class AgentV0Tests(unittest.TestCase):
+    """A runtime declaring agent standard v0 ops is driven with them; legacy runtimes keep legacy ops."""
+
+    def setUp(self):
+        self.core = FakeCore()
+        self.core.providers["v0"] = {"name": "v0", "capabilities": {
+            "agent": {"v": 0}, "agent.send": {"modes": {"start": {}, "settle": {}, "admit": {}}},
+            "agent.interrupt": {}, "agent.queue": {}, "agent.respond": {}, "agent.stop": {}}}
+        self.agents = Agents(self.core)
+        self.core.add_agent()
+        self.core.resources["r2"].update({"provider": "v0", "host": None, "data": {"agent": {
+            "v": 0, "state": "idle", "epoch": "e7", "caps": {
+                "rev": 3, "agent.send": {"modes": {"start": {"busy": "reject"}, "settle": {"point": "would_stop"},
+                                                     "admit": {}}},
+                "agent.queue": {"actions": ["list", "clear"]}, "agent.stop": {"covers": ["foreground", "queued"]}},
+            "requests": [{"request": "q1", "revision": 2, "method": "confirm", "title": "Run it?"},
+                         {"request": "q2", "revision": 1, "method": "permission", "title": "Push?",
+                          "choices": [{"id": "allow_once", "label": "Allow"}, {"id": "reject_once", "label": "Reject"}]},
+                         {"request": "q3", "revision": 1, "method": "form", "title": "Details", "incomplete": ["params"]},
+                         {"request": "q4", "revision": 1, "method": "text", "title": "Old", "status": "answered"}]}}})
+        self.agents.event("resource", {"id": "r2"})
+
+    def command(self, name, **args):
+        return self.core.handlers["agents."+name](args)
+
+    def native(self):
+        return [(m, p) for m, p in self.core.calls if m.startswith("resource.")]
+
+    def test_idle_prompt_sends_start_with_typed_content_and_steer_is_absent_when_undeclared(self):
+        self.command("prompt", context={"view": "agents-r2"}, text="go")
+        (method, params), = self.native()
+        self.assertEqual((method, params["op"]), ("resource.invoke", "agent.send"))
+        args = params["args"]
+        self.assertEqual((args["v"], args["caps_rev"], args["mode"]), (0, 3, "start"))
+        self.assertEqual(args["content"], [{"type": "text", "text": "go"}], "always an array of typed blocks")
+        self.assertTrue(args["delivery"].startswith("d:"))
+        self.assertEqual(args["origin"]["kind"], "human")
+        self.assertIsNone(self.core.value("menu/agents.r2.steer"), "boundary is not declared")
+        self.assertIsNotNone(self.core.value("menu/agents.r2.send"))
+        self.command("follow_up", resource="r2", text="later")
+        self.assertEqual(self.native()[-1][1]["args"]["mode"], "settle")
+
+    def test_busy_prompt_offers_only_declared_modes_and_sends_nothing_until_chosen(self):
+        self.core.resources["r2"]["data"]["agent"]["state"] = "running"
+        popup = self.command("prompt", context={"view": "agents-r2"}, text="careful")
+        self.assertEqual(popup["client"]["popup"]["view"], "agents-send-r2")
+        self.assertEqual(self.native(), [], "no silent fallback to another mode")
+        rows = [row for row in self.core.live["agents-send-r2"]["items"] if row.get("command") == "agents.send"]
+        self.assertEqual([row["args"]["mode"] for row in rows], ["start", "settle", "admit"])
+        self.assertIn("weaker", rows[2]["description"])
+        self.command("send", **rows[1]["args"])
+        sent = self.native()[-1][1]["args"]
+        self.assertEqual((sent["mode"], sent["content"]), ("settle", [{"type": "text", "text": "careful"}]))
+        with self.assertRaises(VqroError) as caught:
+            self.command("send", resource="r2", mode="boundary", text="x")
+        self.assertEqual(caught.exception.kind, "unsupported")
+        self.assertEqual(len(self.native()), 1)
+
+    def test_interrupt_and_queue_clear_use_v0_ops(self):
+        self.command("abort", resource="r2")
+        self.command("clear_queue", resource="r2")
+        self.assertEqual([(p["op"], p["args"]) for _, p in self.native()],
+                         [("agent.interrupt", {"v": 0, "caps_rev": 3}),
+                          ("agent.queue", {"v": 0, "caps_rev": 3, "action": "clear", "epoch": "e7"})])
+
+    def test_respond_carries_epoch_and_revision_and_incomplete_requests_only_cancel(self):
+        self.command("answer", resource="r2")
+        items = self.core.live["agents-requests-r2"]["items"]
+        self.assertTrue(any("can't be approved" in row.get("text", "") for row in items))
+        self.command("answer", resource="r2", request="q1", value=True)
+        self.command("answer", resource="r2", request="q2", value="allow_once")
+        self.command("answer", resource="r2", request="q3", cancelled=True)
+        self.assertEqual([p["args"] for _, p in self.native()], [
+            {"v": 0, "request": "q1", "response": {"value": True}, "revision": 2, "epoch": "e7"},
+            {"v": 0, "request": "q2", "response": {"choice": "allow_once"}, "revision": 1, "epoch": "e7"},
+            {"v": 0, "request": "q3", "response": {"action": "cancel"}, "revision": 1, "epoch": "e7"}])
+        self.assertNotIn("Old", json.dumps(items), "only pending requests are offered")
+        for bad in ({"request": "q4", "text": "late"}, {"request": "q3", "value": True}, {"request": "q2", "value": "always"}, {"request": "gone", "value": True}):
+            with self.assertRaises(VqroError):
+                self.command("answer", resource="r2", **bad)
+        self.assertEqual(len(self.native()), 3)
+
+    def test_graceful_stop_is_offered_without_a_host_and_asks_first(self):
+        popup = self.command("stop", resource="r2")
+        self.assertEqual(self.native(), [])
+        rows = [row for row in self.core.live[popup["client"]["popup"]["view"]]["items"] if row.get("command")]
+        self.assertEqual([row["args"].get("how") for row in rows], ["graceful"], "no host terminal: no kill offered")
+        self.assertIn("foreground, queued", json.dumps(self.core.live["agents-stop-r2"]))
+        self.command("stop", **rows[0]["args"])
+        self.assertEqual(self.native(), [("resource.invoke", {"resource": "r2", "op": "agent.stop",
+                                                           "args": {"v": 0, "caps_rev": 3, "covers": ["foreground", "queued"]}})])
+        self.assertIn("ended only when the runtime reports", self.core.notices[-1][0])
+
+    def test_list_status_uses_v0_lifecycle_and_state(self):
+        self.command("list")
+        row = self.core.live["agents-list"]["items"][0]
+        self.assertEqual(row["description"], "idle")
+        self.core.resources["r2"]["data"]["agent"]["lifecycle"] = "stopping"
+        self.agents.event("resource", {"id": "r2"})
+        self.assertEqual(self.core.live["agents-list"]["items"][0]["description"], "stopping")
+
+
 class ProviderCache(unittest.TestCase):
     def test_snapshot_events_and_snapshot_without_providers(self):
         ext = Extension.__new__(Extension)

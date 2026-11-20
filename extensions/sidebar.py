@@ -134,10 +134,13 @@ def term_row(rid, r, where=False):
             *([{"label": "Agent settings…", "command": "agents.config", "args": {"resource": rid}}]
               if r.get("kind") == "agent" and live and isinstance((r.get("data") or {}).get("agent"), dict)
               and (r["data"]["agent"].get("config") or r["data"]["agent"].get("commands")) else []),
-            # Only agents with a bridge terminal can be stopped from vqro; the agents extension asks first.
+            # Agents with a bridge terminal, or whose runtime declares agent.stop (agent v0), can be stopped from
+            # vqro; the agents extension asks first.
             *([{"label": "Stop agent…", "command": "agents.stop", "args": {"resource": rid}}]
               if r.get("kind") == "agent" and not ended(r)
-              and (ext.resources.get(r.get("host")) or {}).get("kind") == "terminal" else []),
+              and ((ext.resources.get(r.get("host")) or {}).get("kind") == "terminal"
+                   or isinstance(((ext.providers.get(r.get("provider")) or {}).get("capabilities") or {}).get("agent.stop"), dict))
+              else []),
             # Explicit only: retention never forgets an agent by time.
             *([{"label": "Forget agent", "command": "agents.forget", "args": {"resource": rid}}]
               if r.get("kind") == "agent" and not ended(r) and not r.get("available", True) else []),

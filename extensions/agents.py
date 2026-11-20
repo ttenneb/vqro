@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import sys
 import threading
+import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from vqro_ext import Extension, VqroError, views_in
@@ -13,6 +14,16 @@ from vqro_views import ended, unknown_since
 EFFECTS = {"prompt": "Prompt", "steer": "Steer", "follow_up": "Follow-up", "abort": "Abort",
            "clear_queue": "Clear queue", "answer": "Answer pending request"}
 
+# Agent standard v0 (docs/spec/agent-v0.md): legacy pane actions map onto declared delivery modes and ops.
+# A provider that declares the v0 op is driven with it; otherwise the legacy op (provider-v0 section 6) is used.
+V0_MODE = {"prompt": "start", "steer": "boundary", "follow_up": "settle"}
+V0_OP = {"prompt": "send", "steer": "send", "follow_up": "send", "abort": "interrupt", "clear_queue": "queue",
+         "answer": "respond"}
+MODE_ORDER = ("start", "boundary", "settle", "admit", "preempt")
+MODE_SHORT = {"start": "Prompt", "boundary": "Steer", "settle": "Queue", "admit": "Admit", "preempt": "Interrupt and send"}
+RECEIPT_TEXT = {"admitted": "admitted; where it landed is unknown", "queued": "held by the runtime",
+                "inserted": "in the conversation", "handled": "handled without a model turn"}
+
 
 def data(resource):
     value = resource.get("data")
@@ -20,12 +31,50 @@ def data(resource):
 
 
 def status(resource):
+    lifecycle = agent_facts(resource).get("lifecycle")
+    if isinstance(lifecycle, str) and lifecycle != "live":
+        return label(lifecycle)  # agent v0 section 7: stopping, disconnected, unknown, ended
+    state = agent_facts(resource).get("state")
+    if isinstance(state, str):
+        return label(state.replace("_", " "))
     value = resource.get("status")
     return label(value.get("state", "unknown")) if isinstance(value, dict) else "unknown"
 
 
 def view(rid):
     return "agents-"+rid
+
+
+def agent_facts(resource):
+    """The resource's `data.agent` object (agent v0 section 2.3), or {}."""
+    value = data(resource).get("agent")
+    return value if isinstance(value, dict) else {}
+
+
+def caps(resource):
+    """This resource's own capabilities (`data.agent.caps`, agent v0 section 2.4), or {}."""
+    value = agent_facts(resource).get("caps")
+    return value if isinstance(value, dict) else {}
+
+
+def mode_label(mode, descriptor):
+    """What a delivery mode does, in the words of its declaration (no runtime names)."""
+    point = descriptor.get("point")
+    where = " at "+label(str(point), 40) if isinstance(point, str) else ""
+    return {"start": "Prompt (start work)",
+            "boundary": "Steer: join current work"+where,
+            "settle": "Queue: when current work would stop" if point == "would_stop" else "Queue: after current work",
+            "admit": "Admit (runtime order; when it is read is not guaranteed)",
+            "preempt": "Interrupt and send (native)"}.get(mode, label(mode, 40))
+
+
+def busy(resource):
+    """Treat anything but evidenced idle as busy (agent v0 section 2.3)."""
+    state = agent_facts(resource).get("state")
+    if isinstance(state, str):
+        return state != "idle"
+    value = resource.get("status")
+    return not (isinstance(value, dict) and value.get("state") in ("idle", "done"))
 
 
 def advertised(resource, field):
@@ -41,7 +90,7 @@ def panel_key(key):
 
 
 # Owned per-agent derived views, longest prefix first ("agents-" would also match the others).
-OWNED_PREFIXES = ("view/agents-requests-", "view/agents-settings-", "view/agents-stop-", "view/agents-")
+OWNED_PREFIXES = ("view/agents-requests-", "view/agents-settings-", "view/agents-stop-", "view/agents-send-", "view/agents-")
 
 
 def host_of(resources, r):
@@ -67,6 +116,7 @@ class Agents:
                                 ("config", self.settings, "Agent settings and commands (popup)"),
                                 ("configure", self.configure, "Change an agent setting (args: id, value)"),
                                 ("command", self.command, "Run an agent command (args: name, text?)"),
+                                ("send", self.send, "Send a message in a declared delivery mode (args: mode?, text?)"),
                                 ("stop", self.stop, "Stop an agent: kill its bridge terminal and the runtime in it (asks first)"),
                                 ("forget", self.forget, "Forget an unavailable agent's cached facts (its process is not touched)")]:
             ext.command("agents."+name, title)(self.guarded(fn))
@@ -94,12 +144,35 @@ class Agents:
         self.publish_panels()
         self.refresh(prune_views=True)
 
+    def provider_caps(self, resource):
+        caps = self.ext.providers.get(resource.get("provider"), {}).get("capabilities", {})
+        return caps if isinstance(caps, dict) else {}
+
+    def v0(self, resource, op):
+        """The provider declares the agent v0 op (`agent.send`, `agent.interrupt`, ...)."""
+        return isinstance(self.provider_caps(resource).get("agent."+op), dict)
+
+    def modes(self, resource):
+        """Delivery modes this agent declares in its own caps, in a fixed order; {} for legacy agents."""
+        if not self.v0(resource, "send"):
+            return {}
+        declared = (caps(resource).get("agent.send") or {}).get("modes")
+        declared = declared if isinstance(declared, dict) else {}
+        return {m: declared[m] for m in MODE_ORDER if isinstance(declared.get(m), dict)}
+
     def supported(self, resource, op):
-        provider = self.ext.providers.get(resource.get("provider"), {})
-        return isinstance(provider.get("capabilities", {}).get("agent."+op), dict)
+        if op in V0_OP and self.v0(resource, V0_OP[op]):
+            if op in V0_MODE:
+                return V0_MODE[op] in self.modes(resource) or (op == "prompt" and bool(self.modes(resource)))
+            if op == "clear_queue":
+                actions = (caps(resource).get("agent.queue") or {}).get("actions")
+                return isinstance(actions, list) and "clear" in actions
+            return True
+        return isinstance(self.provider_caps(resource).get("agent."+op), dict)
 
     def current_signature(self):
-        return tuple(sorted((r["id"], tuple(op for op in EFFECTS if self.supported(r, op)), self.has_settings(r))
+        return tuple(sorted((r["id"], tuple(op for op in EFFECTS if self.supported(r, op)), tuple(self.modes(r)),
+                             self.has_settings(r), self.v0(r, "stop"))
                             for r in self.ext.resources.values() if r.get("kind") == "agent"))
 
     def has_settings(self, r):
@@ -138,32 +211,55 @@ class Agents:
         return {"resource": r["id"], "view": view(r["id"]), "tab": result, "client": {"close": True, "focus": {"view": view(r["id"])}}}
 
     def stop(self, args):
-        """Runtime-neutral: end the agent by killing its host (bridge) terminal, after confirmation.
+        """End an agent, after confirmation: gracefully when its runtime declares agent.stop (agent v0 section 6.7),
+        or by killing its host (bridge) terminal, whose end takes the runtime with it.
 
-        The agent's own process lives inside that terminal, so killing it ends the runtime too.
-        An agent without a host terminal known to vqro is not stopped here (nothing is sent).
+        The confirmation names everything the host terminal serves. Nothing escalates silently: a graceful stop
+        that the runtime refuses leaves the agent running, and the host kill is a separate, explicit choice.
         """
         self.ext.fresh()
         r = self.agent(args, inspect=True)
         rid, name = r["id"], label(r.get("name") or "Agent")
         host = host_of(self.ext.resources, r)
-        if host is None:
+        graceful = self.v0(r, "stop") and r.get("available") and not ended(r)
+        if args.get("how") == "graceful" and args.get("confirm") is True:
+            if not graceful:
+                raise VqroError(f"{name} {rid} declares no graceful stop or is unavailable; nothing sent", "unsupported")
+            covers = (caps(r).get("agent.stop") or {}).get("covers")
+            native = {**self.v0_args(r), "covers": covers if isinstance(covers, list) else []}
+            result = self.ext.vqro.call("resource.invoke", {"resource": rid, "op": "agent.stop", "args": native})
+            outcome = result.get("outcome", "unknown")
+            what = {"accepted": "stop accepted; it is ended only when the runtime reports its end",
+                    "observed": "the runtime reports it ended"}.get(outcome, outcome+"; watch the agent's status")
+            self.ext.notify(label(f"Stop {name} {rid}: {what}"), "ok" if outcome in ("accepted", "observed") else "warn")
+            return {**result, "client": {"close": True}}
+        if host is None and not graceful:
             why = ("its provider ("+label(str(r.get("provider")))+") runs it outside any vqro terminal" if not r.get("host")
                    else "its bridge terminal "+label(str(r["host"]))+" is not known to vqro right now")
             raise VqroError(f"{name} {rid} can't be stopped from vqro: {why}. Stop it where it runs; nothing sent.", "unsupported")
-        hid = host["id"]
-        if ended(host):
+        hid = host["id"] if host else None
+        if host is not None and ended(host) and not graceful:
             raise VqroError(f"{name} {rid}: its bridge terminal {hid} has already ended; nothing to stop", "invalid")
         if args.get("confirm") is not True:
-            program = label(" ".join(str(a) for a in (host.get("argv") or [])[:3]) or host.get("name") or hid, 200)
-            self.ext.publish("agents-stop-"+rid, {"title": "Stop "+name+" "+rid+"?", "items": [
-                {"type": "text", "text": f"This kills terminal {hid} ({program}), the agent's bridge."},
-                {"type": "text", "text": "The agent's runtime process runs inside it and ends too; work in progress is interrupted."},
-                {"type": "text", "style": "warn", "text": "Undo can't bring it back, and nothing is resent. Esc cancels."},
-                {"text": "Stop agent "+rid, "style": "error", "command": "agents.stop",
-                 "args": {"resource": rid, "host": hid, "confirm": True}}]})
+            items = []
+            if graceful:
+                covers = (caps(r).get("agent.stop") or {}).get("covers")
+                what = ", ".join(str(c) for c in covers) if isinstance(covers, list) and covers else "what the runtime decides"
+                items += [{"type": "text", "text": label(f"Graceful stop asks the runtime to end; it covers: {what}.", 300)},
+                          {"text": "Stop "+rid+" gracefully", "style": "warn", "command": "agents.stop",
+                           "args": {"resource": rid, "how": "graceful", "confirm": True}}]
+            if host is not None and not ended(host):
+                program = label(" ".join(str(a) for a in (host.get("argv") or [])[:3]) or host.get("name") or hid, 200)
+                served = [a["id"] for a in self.ext.resources.values() if a.get("kind") == "agent" and a.get("host") == hid]
+                items += [{"type": "text", "text": f"Killing terminal {hid} ({program}), the agent's bridge, ends the agent's runtime process inside it"
+                           + (" and every agent it serves: "+", ".join(served) if len(served) > 1 else "")
+                           + "; work in progress is interrupted."},
+                          {"text": "Stop agent "+rid+" (kill terminal "+hid+")", "style": "error", "command": "agents.stop",
+                           "args": {"resource": rid, "host": hid, "confirm": True}}]
+            items.append({"type": "text", "style": "warn", "text": "Undo can't bring it back, and nothing is resent. Esc cancels."})
+            self.ext.publish("agents-stop-"+rid, {"title": "Stop "+name+" "+rid+"?", "items": items})
             return {"client": {"popup": {"view": "agents-stop-"+rid, "width": 76}}}
-        if args.get("host") != hid:
+        if host is None or args.get("host") != hid:
             raise VqroError(f"{name} {rid}: its bridge terminal changed since you confirmed; confirm again. Nothing sent.", "conflict")
         result = self.ext.vqro.call("resource.kill", {"resource": hid})
         outcome = result.get("outcome", "unknown")
@@ -190,6 +286,8 @@ class Agents:
     def effect(self, op, args):
         self.ext.fresh()
         r = self.agent(args, op)
+        if op in V0_OP and self.v0(r, V0_OP[op]):
+            return self.effect_v0(op, r, args)
         native = {}
         if op in ("prompt", "steer", "follow_up"):
             text = args.get("text")
@@ -200,12 +298,155 @@ class Agents:
         self.outcome(op, result)
         return result
 
+    def effect_v0(self, op, r, args):
+        """Legacy pane actions on an agent v0 runtime: modes for messages, interrupt, queue clear."""
+        if op in V0_MODE:
+            text = args.get("text")
+            if not isinstance(text, str) or not text.strip():
+                raise VqroError("message must not be empty", "invalid")
+            mode = V0_MODE[op]
+            if op == "prompt" and (busy(r) or mode not in self.modes(r)):
+                # Agent v0 section 3.1: no mode falls back to another. A busy agent gets an explicit choice.
+                return self.choose_mode(r, text)
+            return self.send_mode(r, mode, text)
+        if op == "abort":
+            result = self.ext.vqro.call("resource.invoke", {"resource": r["id"], "op": "agent.interrupt", "args": self.v0_args(r)})
+        else:  # clear_queue
+            native = {**self.v0_args(r), "action": "clear"}
+            if isinstance(agent_facts(r).get("epoch"), str):
+                native["epoch"] = agent_facts(r)["epoch"]
+            result = self.ext.vqro.call("resource.invoke", {"resource": r["id"], "op": "agent.queue", "args": native})
+        self.outcome(op, result)
+        return result
+
+    @staticmethod
+    def v0_args(r):
+        """Common agent v0 args: version and, when known, the caps revision the choice was made on."""
+        rev = caps(r).get("rev")
+        return {"v": 0, **({"caps_rev": rev} if type(rev) is int else {})}
+
+    def send_mode(self, r, mode, text):
+        """One agent.send in exactly the chosen, declared mode (agent v0 section 3.2)."""
+        if mode not in self.modes(r):
+            raise VqroError("this agent does not declare that delivery mode; nothing sent", "unsupported")
+        native = {**self.v0_args(r), "mode": mode, "content": [{"type": "text", "text": text}],
+                  "delivery": "d:"+uuid.uuid4().hex,
+                  # The effective principal comes from the core once principals by connection land (C2).
+                  "origin": {"principal": "undeclared", "actor": "agents", "kind": "human"}}
+        result = self.ext.vqro.call("resource.invoke", {"resource": r["id"], "op": "agent.send", "args": native})
+        outcome = result.get("outcome", "unknown")
+        receipt = (result.get("data") or {}).get("receipt") if isinstance(result.get("data"), dict) else None
+        stage = receipt.get("stage") if isinstance(receipt, dict) else None
+        detail = RECEIPT_TEXT.get(stage, "acceptance is not settlement: watch agent status" if outcome == "accepted" else
+                                  "no runtime acknowledgement" if outcome == "dispatched" else "")
+        self.ext.notify(label(MODE_SHORT.get(mode, mode)+": "+outcome+("; "+detail if detail else "")),
+                        "ok" if outcome in ("accepted", "observed") else "warn")
+        return {**result, "client": {"close": True}}
+
+    def choose_mode(self, r, text=None):
+        """Popup of the modes this agent declares; the human picks one. Nothing is sent until then."""
+        rid, modes = r["id"], self.modes(r)
+        if not modes:
+            raise VqroError("this agent declares no delivery modes; nothing sent", "unsupported")
+        target = "agents-send-"+rid
+        items = [{"type": "text", "text": "The agent is busy. Choose how this message joins its work:" if busy(r)
+                  else "Choose how to deliver this message:"}]
+        for mode, descriptor in modes.items():
+            row = {"text": mode_label(mode, descriptor), "command": "agents.send", "args": {"resource": rid, "mode": mode}}
+            if mode == "admit":
+                row["description"] = "weaker: the runtime decides when it reads it"
+            if text is None:
+                row["input"] = "Message"
+            else:
+                row["args"]["text"] = text
+            if mode == "start" and busy(r) and descriptor.get("busy") == "reject":
+                row["description"] = "the agent is busy: the runtime will refuse this"
+            items.append(row)
+        self.ext.contribute({"view/"+target: {"kind": "panel", "title": "Send to agent", "items": []}})
+        self.ext.publish(target, {"title": "Send to "+label(r.get("name") or "Agent")+" "+rid, "requires": ["menu", "input"],
+                                  "items": items})
+        return {"client": {"popup": {"view": target, "width": 76}}}
+
+    def send(self, args):
+        """agents.send {resource, mode?, text?}: a declared mode sends at once; no mode opens the choice."""
+        self.ext.fresh()
+        r = self.agent(args, "send")
+        text, mode = args.get("text"), args.get("mode")
+        if mode is None:
+            return self.choose_mode(r, text if isinstance(text, str) and text.strip() else None)
+        if not isinstance(text, str) or not text.strip():
+            raise VqroError("message must not be empty", "invalid")
+        return self.send_mode(r, mode, text)
+
     def outcome(self, op, result):
         outcome = result.get("outcome", "unknown")
         extra = "; acceptance is not settlement: watch agent status" if outcome == "accepted" else "; no runtime acknowledgement" if outcome == "dispatched" else ""
         self.ext.notify(label(EFFECTS[op]+": "+outcome+extra), "ok" if outcome in ("accepted", "observed") else "warn")
 
+    def requests_v0(self, r):
+        """Pending requests from agent v0 facts (section 5): summaries with request id, revision and method."""
+        rows = agent_facts(r).get("requests")
+        return [q for q in rows if isinstance(q, dict) and isinstance(q.get("request"), str)
+                and q.get("status", "pending") == "pending"] if isinstance(rows, list) else None
+
+    def requests_panel_v0(self, r):
+        rid, items = r["id"], []
+        requests = self.requests_v0(r)
+        if requests is None:
+            requests = []
+            items.append({"type": "text", "style": "warn", "text": "Request facts incomplete/unavailable; nothing assumed answered."})
+        for q in requests:
+            args = {"resource": rid, "request": q["request"]}
+            method, choices = q.get("method"), q.get("choices")
+            row = {"text": label(q.get("title") or q["request"]), "description": label(str(method)), "command": "agents.answer",
+                   "args": args}
+            if q.get("incomplete"):  # true or a non-empty list of cut fields
+                row = {"type": "text", "style": "warn", "text": label((q.get("title") or q["request"])
+                       + ": details incomplete, so it can't be approved here; Cancel stays available.")}
+            elif method == "confirm":
+                row["options"] = [{"label": "Yes", "value": True}, {"label": "No", "value": False}]
+            elif method in ("choice", "permission") and isinstance(choices, list) and choices:
+                row["options"] = [{"label": label(str(c.get("label") or c.get("id")), 200), "value": c.get("id")}
+                                  for c in choices if isinstance(c, dict) and isinstance(c.get("id"), str)]
+            elif method == "text":
+                row["input"] = label(q.get("title") or "Answer")
+            else:
+                row = {"type": "text", "style": "warn", "text": label((q.get("title") or q["request"])+": "+str(method)
+                       + " can't be answered from this panel; Cancel stays available.")}
+            items.extend([row, {"text": "Cancel "+label(q["request"]), "command": "agents.answer", "args": {**args, "cancelled": True}}])
+        if not items:
+            items = [{"type": "text", "text": "No pending requests."}]
+        return {"title": "Requests: "+rid, "requires": ["menu", "input"], "items": items}
+
+    def answer_v0(self, r, args):
+        """agent.respond with the request's epoch and revision: a stale answer is refused by the adapter."""
+        request = next((q for q in self.requests_v0(r) or [] if q["request"] == args["request"]), None)
+        if request is None:
+            raise VqroError("that request is no longer pending; nothing sent", "not_found")
+        method, choices = request.get("method"), request.get("choices")
+        ids = [c.get("id") for c in choices if isinstance(c, dict)] if isinstance(choices, list) else []
+        if args.get("cancelled") is True:
+            response = {"action": "cancel"}
+        elif request.get("incomplete"):
+            raise VqroError("request details are incomplete; only Cancel is possible", "invalid")
+        elif method == "confirm" and type(args.get("value")) is bool:
+            response = {"value": args["value"]}
+        elif method in ("choice", "permission") and args.get("value") in ids:
+            response = {"choice": args["value"]}
+        elif method == "text" and isinstance(args.get("text"), str):
+            response = {"value": args["text"]}
+        else:
+            raise VqroError("choose a valid answer for this request", "invalid")
+        native = {"v": 0, "request": request["request"], "response": response,
+                  **({"revision": request["revision"]} if type(request.get("revision")) is int else {}),
+                  **({"epoch": agent_facts(r)["epoch"]} if isinstance(agent_facts(r).get("epoch"), str) else {})}
+        result = self.ext.vqro.call("resource.invoke", {"resource": r["id"], "op": "agent.respond", "args": native})
+        self.outcome("answer", result)
+        return {**result, "client": {"close": True}}
+
     def requests_panel(self, r):
+        if self.v0(r, "respond"):
+            return self.requests_panel_v0(r)
         items = []
         requests = data(r).get("requests")
         if not isinstance(requests, list):
@@ -246,6 +487,8 @@ class Agents:
             self.open_requests.add(rid)
             self.ext.publish(target, self.requests_panel(r))
             return {"client": {"popup": {"view": target, "width": 80}}}
+        if self.v0(r, "respond"):
+            return self.answer_v0(r, args)
         requests = data(r).get("requests")
         request = next((q for q in requests if isinstance(q, dict) and q.get("id") == args["request"]), None) if isinstance(requests, list) else None
         if request is None:
@@ -443,7 +686,7 @@ class Agents:
                           *([{"label": "Agent settings…", "command": "agents.config", "args": {"resource": r["id"]}}]
                             if self.has_settings(r) and r.get("available") else []),
                           *([{"label": "Stop agent…", "command": "agents.stop", "args": {"resource": r["id"]}}]
-                            if host_of(self.ext.resources, r) is not None and not ended(r) else []),
+                            if (host_of(self.ext.resources, r) is not None or self.v0(r, "stop")) and not ended(r) else []),
                           *([{"label": "Forget agent", "command": "agents.forget", "args": {"resource": r["id"]}}]
                             if not r.get("available") and not ended(r) else [])]}
                 for r in self.ext.resources.values() if r.get("kind") == "agent"]
@@ -476,6 +719,9 @@ class Agents:
                 if op in ("prompt", "steer", "follow_up"):
                     menu["input"] = title
                 entries["menu/agents."+rid+"."+op] = menu
+            if self.modes(r):
+                entries["menu/agents."+rid+".send"] = {"where": "pane", "label": "Send…", "command": "agents.send",
+                                                       "when": {"view": view(rid)}, "order": 98}
             if self.has_settings(r):
                 entries["menu/agents."+rid+".settings"] = {"where": "pane", "label": "Agent settings…", "command": "agents.config",
                                                            "when": {"view": view(rid)}, "order": 99}

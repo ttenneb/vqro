@@ -5,7 +5,7 @@
   "requires":{"protocol":1,"client_features":["items","chips","input","menu"]},
   "provides":["command/agents.list","command/agents.show","command/agents.config","command/agents.configure","command/agents.command",
               "command/agents.prompt","command/agents.steer","command/agents.follow_up","command/agents.abort","command/agents.clear_queue",
-              "command/agents.answer","command/agents.stop","command/agents.forget","view/agents-*"],
+              "command/agents.answer","command/agents.send","command/agents.stop","command/agents.forget","view/agents-*"],
   "needs":[{"cap":"ability/vqro.agents","suggest":"pi","why":"Agents come from a runtime integration such as the Pi launcher"},
            {"cap":"command/tabs.show","suggest":"tabs","why":"Agent panels open in a tab"}],
   "contributes":{"commands":["agents.*: capability-driven controls"],"keys":["Prefix p: prompt the focused agent","Prefix P: agent settings for the focused agent"],"menu_items":["Agents","Per-agent actions"],"panels":["Agent list","Agent details","Pending requests","Agent settings (declared model, thinking, commands)","Stop agent confirmation"]}
