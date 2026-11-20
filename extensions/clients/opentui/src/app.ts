@@ -6,7 +6,7 @@ import { Peer, RpcError, type Json } from "./rpc";
 import { Palette } from "./theme";
 import { Terminals } from "./terminal";
 
-export const FEATURES = [...m.BASE_FEATURES, "icon_names", "current_when", "follow", "list_detail"];
+export const FEATURES = [...m.BASE_FEATURES, "icon_names", "current_when", "follow", "list_detail", "embedded_views"];
 export const PROFILES = ["base", "keys", "terminal"];
 const KINDS = ["panel", "terminal"];
 
@@ -157,7 +157,8 @@ export class App {
   panelValue(view: string): Json {
     if (view === m.SAFE_MODE_VIEW) return m.safeChooser(this.ws, this.safeSelected);
     const shown = this.shownView(view) ?? view;
-    return m.markCurrent(m.merged(shown, this.ws.entries, this.ws.live) ?? {}, this.win.shown(this.ws));
+    if (!this.ws.entries.has(`view/${shown}`)) return {};
+    return m.markCurrent(m.compose(shown, this.ws.entries, this.ws.live, FEATURES)[0], this.win.shown(this.ws));
   }
 
   viewTitle(view: string): string {

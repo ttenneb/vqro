@@ -163,6 +163,64 @@ export function shownView(view: string, value: (id: string) => Json | null, canR
   return [null, chain];
 }
 
+// ---- read-only panel references (feature embedded_views) -----------------------------------------------------
+
+const READONLY_FIELDS = ["type", "text", "style", "description", "detail", "detail_style", "badges", "id", "expanded", "wrap", "focusable"];
+
+function readonlyRow(row: Json): Json {
+  if (!isObj(row)) return { type: "text", text: isStr(row) ? row : JSON.stringify(row) };
+  const out: Json = {};
+  for (const k of READONLY_FIELDS) if (k in row) out[k] = row[k];
+  for (const k of ["text", "description", "detail"]) {
+    if (isStr(out[k])) out[k] = [...out[k]].slice(0, 8192).map((c) => (/[\x00-\x08\x0b-\x1f\x7f]/.test(c) ? JSON.stringify(c).slice(1, -1) : c)).join("");
+  }
+  if (Array.isArray(row.badges)) out.badges = row.badges.filter(isObj).map((b: Json) => ({ text: b.text, style: b.style }));
+  if (Array.isArray(row.children)) out.children = row.children.map(readonlyRow);
+  return out;
+}
+
+/** A panel view with its `{type: "view"}` references replaced by the source panels' rows, read-only: commands,
+ *  menus and inputs are not imported; cycles, terminals, missing or unsupported sources and depth beyond eight
+ *  show the reference's `text`; at most 2048 rows. Sources that can't be rendered use their view-kind fallback.
+ *  Returns the value and every view it depends on (core-protocol.md, Live view content). */
+export function compose(view: string, entries: Map<string, Json>, live: Map<string, Json>, features: string[]): [Json, Set<string>] {
+  const value = (v: string): Json => {
+    const l = live.get(v);
+    const base = entries.get(`view/${v}`) ?? (isObj(l) && Array.isArray(l.items) ? { kind: "panel" } : {});
+    return isObj(l) ? { ...base, ...l } : { ...base };
+  };
+  const deps = new Set<string>(), seen = new Set<string>([view]);
+  let remaining = 2048;
+  const rowsOf = (rows: Json[], depth: number): Json[] => {
+    const out: Json[] = [];
+    for (const row of rows) {
+      if (remaining === 0) { out.push({ type: "text", style: "warn", text: "Composed panel row limit reached." }); break; }
+      remaining--;
+      if (isObj(row) && row.type === "view") {
+        const source = isStr(row.view) ? row.view : "";
+        deps.add(source);
+        let panel = value(source);
+        for (let n = 0; n < MAX_CHAIN && !(panel.kind === "panel" && missingFor(panel, features).length === 0) && isStr(panel.fallback); n++) {
+          deps.add(panel.fallback);
+          panel = value(panel.fallback);
+        }
+        if (depth >= 8 || seen.has(source) || panel.kind !== "panel" || !Array.isArray(panel.items) || missingFor(panel, features).length) {
+          out.push({ type: "text", style: "dim", text: isStr(row.text) ? row.text : "Referenced panel unavailable or unsupported." });
+        } else {
+          seen.add(source);
+          out.push(...rowsOf(panel.items, depth + 1).map(readonlyRow));
+          seen.delete(source);
+        }
+      } else if (isObj(row) && Array.isArray(row.children)) out.push({ ...row, children: rowsOf(row.children, depth + 1) });
+      else out.push(row);
+    }
+    return out;
+  };
+  const result = value(view);
+  if (Array.isArray(result.items)) result.items = rowsOf(result.items, 0);
+  return [result, deps];
+}
+
 // ---- workspace cache and contributions --------------------------------------------------------------------------
 
 export const whenHolds = (entry: Json, ctx: Json) => !isObj(entry.when) || Object.entries(entry.when).every(([k, v]) => JSON.stringify(ctx?.[k] ?? null) === JSON.stringify(v));

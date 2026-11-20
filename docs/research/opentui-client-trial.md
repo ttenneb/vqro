@@ -55,5 +55,5 @@ attach history parameter type, now named in the spec's Resources table).
 ## Decision (human, 2026-11-19, Q-UI-5)
 The OpenTUI client stays an optional, separately installed client and is never bundled with vqro (so its
 dependencies, including the FFmpeg/LGPL native library, are the installer's choice). The built-in TUI stays the
-default and the rescue client. Its gaps (mouse forwarding, `list_detail`, `embedded_views`) are being closed
-(Q-UI-6).
+default and the rescue client. Its gaps (mouse forwarding, `list_detail`, `embedded_views`) were closed the
+same day (Q-UI-6; `tests/e2e_opentui.py` checks each).

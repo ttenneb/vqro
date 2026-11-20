@@ -83,3 +83,23 @@ test("key names follow the spec", () => {
     expect(m.normalize(raw), raw).toBe(want);
   }
 });
+
+test("embedded views are read-only, cycle-bounded and never attach terminals", () => {
+  const entries = new Map<string, any>([
+    ["view/root", { kind: "panel", items: [{ type: "view", view: "source", readonly: true }] }],
+    ["view/source", { kind: "panel", items: [] }],
+    ["view/term", { kind: "terminal", resource: "r1" }],
+    ["view/odd", { kind: "x.odd", fallback: "plain" }],
+    ["view/plain", { kind: "panel", items: [{ text: "via fallback" }] }]]);
+  const live = new Map<string, any>([["source", { items: [
+    { text: "native", command: "forbidden", args: {}, children: [{ text: "nested", command: "bad" }] },
+    { type: "view", view: "root" }, { type: "view", view: "term", text: "no terminals here" }, { type: "view", view: "odd" }] }]]);
+  const [panel, deps] = m.compose("root", entries, live, [...m.BASE_FEATURES, "embedded_views"]);
+  expect(panel.items[0].text).toBe("native");
+  expect(panel.items[0].command).toBeUndefined();
+  expect(panel.items[0].children[0].command).toBeUndefined();
+  expect(panel.items[1].text).toBe("Referenced panel unavailable or unsupported.");  // the cycle back to root
+  expect(panel.items[2].text).toBe("no terminals here");
+  expect(panel.items[3].text).toBe("via fallback");
+  expect([...deps].sort()).toEqual(["odd", "plain", "root", "source", "term"]);
+});

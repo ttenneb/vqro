@@ -129,6 +129,13 @@ try:
         if again:
             break
     check("the same shell answers after reattaching", bool(again), screen())
+    # embedded_views: a panel that references another panel shows its rows, read-only.
+    call("workspace.apply", {"note": "e2e embedded", "ops": [
+        {"op": "set", "key": "view/e2e-src", "value": {"kind": "panel", "items": [{"text": "embedded-source-row", "command": "tabs.open"}]}},
+        {"op": "set", "key": "view/e2e-root", "value": {"kind": "panel", "title": "Composed", "requires": ["embedded_views"],
+         "items": [{"text": "own-row"}, {"type": "view", "view": "e2e-src", "readonly": True, "text": "source unavailable"}]}}]})
+    call("command.invoke", {"name": "tabs.show", "args": {"view": "e2e-root", "title": "Composed"}})
+    check("embedded_views: the referenced panel's rows show in place", bool(wait(lambda: "own-row" in screen() and "embedded-source-row" in screen())), screen())
     keys("C-g")
     check("prefix menu lists recovery actions", bool(wait(lambda: "undo last change" in screen() and "safe mode / recovery choices" in screen())), screen())
     keys(",")
