@@ -79,6 +79,16 @@ use the fake native process, never a paid model call. Late bounded results are c
 Native cycle_model results are projected to safe model identity/label/thinking fields; raw configured model headers
 are never published in reply data or retained item records.
 
+## Installed-runtime preflight regression
+The opt-in pi_real_start component runs the actual installed runtimes with a public registerProvider/streamSimple
+file-only fixture, private HOME/config/work/cache and a separate user/network namespace. On Pi1.5.2, one held
+before_agent_start flow admits one native input/model call and rejects a second start before write. Its native
+metadata already reports streaming:true there. On0.87.0, metadata is still idle; even an abort ACK cannot unlock the
+unresolved first preflight, and both second attempts reject before write. Each final run has one input, one fake
+model call,0paid calls and a confirmed owned child exit. Native abort itself waits on the held hook on1.5.2; no
+claim of an idle preflight or immediate abort ACK is generalized from0.87. Runtime/source/fixture fingerprints
+and exact component scope are retained with receipts; this is not a whole-adapter certificate.
+
 ## Sessions in the initial declaration
 `agent.session:new` preserves the Python bridge's native new_session control. It neither prompts nor changes the
 endpoint/owning host. The current session and one new epoch are read back and fenced into core facts before an
@@ -98,8 +108,11 @@ lost CAS race is never overwritten or published. No full workspace snapshot or d
 
 The panel is derived from canonical message/tool/notice entities, not a second retained transcript document.
 Text is a128-row/16KiB tail, under32KiB encoded; omissions are visible and terminal controls are removed. Only
-changed transcript content is published, so queue-only updates do not resend it. Final content publication is
-bounded before fenced native end evidence. Native retry/compaction notices are system-role entities, not replay.
+changed transcript content is published, so queue-only updates do not resend it. Every optional view lookup/storage/
+publication error is view-local (including io/overloaded/unavailable), never a native lifetime decision. Up to3
+retries per provider connection run outside the native reader/control loop; exhaustion leaves a visible warning.
+Actual connection loss reconnects normally. Final publication is bounded before fenced native end evidence.
+Native retry/compaction notices are system-role entities, not replay.
 
 An independent TTY monitor redraws native status, queue/dialog summaries and the same derived tail even when core
 is unavailable. Its raw-write thread has one latest-frame slot and never holds Rust's global stdout lock. A stalled
