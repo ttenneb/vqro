@@ -31,7 +31,7 @@ struct Args {
     #[arg(long)] cwd:Option<std::path::PathBuf>,
     #[arg(last=true,required=true)] native:Vec<String>,
 }
-struct Shared {agent:Mutex<Agent>,fallback:panel::Fallback,connected:std::sync::atomic::AtomicBool,native:OnceLock<Native>,starts:OnceLock<Starts>,changed:Notify,cwd:String,provider_name:String,ui_slots:Arc<tokio::sync::Semaphore>}
+struct Shared {agent:Mutex<Agent>,fallback:panel::Fallback,connected:std::sync::atomic::AtomicBool,native:OnceLock<Native>,starts:OnceLock<Starts>,changed:Notify,cwd:String,provider_name:String,instance:String,ui_slots:Arc<tokio::sync::Semaphore>}
 impl Shared {
     fn facts(&self,name:&str)->Value {self.agent.lock().unwrap().facts(name,&self.cwd)}
     fn wake(&self) {self.changed.notify_waiters();}
@@ -63,7 +63,7 @@ async fn main()->Result<()> {
     let argv=controlled(args.native)?;
     let cwd=args.cwd.unwrap_or(std::env::current_dir()?);
     let signals=admission::Signals::new();
-    let shared=Arc::new(Shared {agent:Mutex::new(Agent::new(instance.clone(),signals.clone())),fallback:panel::Fallback::tty(),connected:std::sync::atomic::AtomicBool::new(false),native:OnceLock::new(),starts:OnceLock::new(),changed:Notify::new(),cwd:cwd.to_string_lossy().into_owned(),provider_name:name.clone(),ui_slots:Arc::new(tokio::sync::Semaphore::new(24))});
+    let shared=Arc::new(Shared {agent:Mutex::new(Agent::new(instance.clone(),signals.clone())),fallback:panel::Fallback::tty(),connected:std::sync::atomic::AtomicBool::new(false),native:OnceLock::new(),starts:OnceLock::new(),changed:Notify::new(),cwd:cwd.to_string_lossy().into_owned(),provider_name:name.clone(),instance:instance.clone(),ui_slots:Arc::new(tokio::sync::Semaphore::new(24))});
     let weak=Arc::downgrade(&shared);
     let native=Native::spawn(&argv,&cwd,&std::env::vars().collect::<HashMap<_,_>>(),Arc::new(move|event|{
         if let Some(shared)=weak.upgrade(){
@@ -112,7 +112,7 @@ async fn main()->Result<()> {
                 let setup=async{
                     {let mut agent=shared.agent.lock().unwrap();agent.view=None;agent.view_error=None;}
                     provider.full_sync(vec![shared.facts(&name)]).await?;
-                    let view=views::claim(&provider,&name,&instance).await?;
+                    let view=views::claim(&provider,&name,&instance).await;
                     {let mut agent=shared.agent.lock().unwrap();agent.view=view.view;agent.view_error=view.error;}
                     provider.upsert(shared.facts(&name)).await
                 }.await;
@@ -183,17 +183,24 @@ async fn monitor(shared:Arc<Shared>){
 }
 async fn publish(shared:Arc<Shared>,provider:Provider,name:String) {
     let mut signals=shared.agent.lock().unwrap().signals.changes();let mut last=shared.facts(&name);let mut last_content=None;
+    let mut retries=0u32;let mut retry_at=Instant::now()+Duration::from_millis(250);
     loop {
         let wake=shared.changed.notified();tokio::pin!(wake);wake.as_mut().enable();
         let _=signals.borrow_and_update();
+        if retries<3 && Instant::now()>=retry_at && shared.agent.lock().unwrap().view.is_none(){
+            retries+=1;retry_at=Instant::now()+Duration::from_millis(250u64<<retries);
+            let setup=views::claim(&provider,&name,&shared.instance).await;
+            let mut agent=shared.agent.lock().unwrap();agent.view=setup.view;agent.view_error=setup.error;last_content=None;drop(agent);shared.wake();
+        }
         let (facts,view,content)={let mut agent=shared.agent.lock().unwrap();agent.refresh();(agent.facts(&name,&shared.cwd),agent.view.clone(),agent.transcript())};
+        let needs_view=view.is_none();
         if facts!=last {if provider.upsert(facts.clone()).await.is_err(){break;}last=facts;}
         if let Some(view)=view{if last_content.as_ref()!=Some(&content){
             match provider.call("view.publish",json!({"view":view,"content":content})).await{
-                Ok(_)=>last_content=Some(content),Err(error)=>{let mut agent=shared.agent.lock().unwrap();agent.view=None;agent.view_error=Some(format!("Transcript view unavailable ({}); use its backend terminal.",error.kind));drop(agent);shared.wake();}
+                Ok(_)=>last_content=Some(content),Err(error)=>{let mut agent=shared.agent.lock().unwrap();agent.view=None;agent.view_error=Some(format!("Transcript view unavailable ({}); use its backend terminal.",error.kind.chars().take(64).collect::<String>()));retry_at=Instant::now()+Duration::from_millis(250u64<<retries);drop(agent);shared.wake();}
             }
         }}
-        tokio::select! {_=wake=>{},result=signals.changed()=>{if result.is_err(){break;}},_=provider.closed()=>break}
+        tokio::select! {_=wake=>{},result=signals.changed()=>{if result.is_err(){break;}},_=provider.closed()=>break,_=tokio::time::sleep_until(retry_at),if needs_view && retries<3=>{}}
     }
 }
 async fn viewer(shared:Arc<Shared>,mut stream:ProviderStream,mut cursor:ItemCursor) {

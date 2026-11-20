@@ -29,6 +29,7 @@ impl Fallback {
         let queued=agent["queue"].as_array().map(|rows|rows.len().to_string()).unwrap_or_else(||"unknown".into());let pending=agent["requests"].as_array().map_or(0,Vec::len);
         let lifecycle=agent["lifecycle"].as_str().unwrap_or("unknown");let core=match facts["_core_connected"].as_bool(){Some(true)=>"connected",Some(false)=>"unavailable",None=>"unknown"};
         let mut frame=format!("\x1b[2J\x1b[HPi RPC bridge — {lifecycle}, {state}; core {core}\nRead-only monitor; use agent controls in vqro.\nQueue: {queued}; pending dialogs: {pending}\n");
+        if let Some(problem)=facts["data"]["view_error"].as_str(){frame.extend(problem.chars().filter(|c|!c.is_control()).take(512));frame.push('\n');}
         if let Some(requests)=agent["requests"].as_array(){for request in requests.iter().take(8){
             let mut text=format!("Request {}: {}",request["request"].as_str().unwrap_or("unknown"),request["title"].as_str().unwrap_or(""));
             if let Some(message)=request["params"]["message"].as_str(){text+=&format!(" — {message}");}if let Some(choices)=request["choices"].as_array(){for choice in choices{text+=&format!(" | {}",choice["label"].as_str().unwrap_or(""));}}

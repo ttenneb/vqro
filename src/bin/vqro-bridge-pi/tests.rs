@@ -25,7 +25,7 @@ impl Core {
     async fn reply(&mut self,row:&Value,result:Value){self.w.write_all(format!("{}\n",json!({"jsonrpc":"2.0","id":row["id"],"result":result})).as_bytes()).await.unwrap();self.w.flush().await.unwrap();}
 }
 async fn fixture(root:&std::path::Path,apply:bool)->(Arc<Shared>,Provider,Core){
-    let signals=admission::Signals::new();let shared=Arc::new(Shared {agent:Mutex::new(Agent::new("instance".into(),signals)),fallback:Default::default(),connected:std::sync::atomic::AtomicBool::new(false),native:OnceLock::new(),starts:OnceLock::new(),changed:Notify::new(),cwd:root.to_string_lossy().into_owned(),provider_name:"pi-test".into(),ui_slots:Arc::new(tokio::sync::Semaphore::new(24))});
+    let signals=admission::Signals::new();let shared=Arc::new(Shared {agent:Mutex::new(Agent::new("instance".into(),signals)),fallback:Default::default(),connected:std::sync::atomic::AtomicBool::new(false),native:OnceLock::new(),starts:OnceLock::new(),changed:Notify::new(),cwd:root.to_string_lossy().into_owned(),provider_name:"pi-test".into(),instance:"instance".into(),ui_slots:Arc::new(tokio::sync::Semaphore::new(24))});
     let initial=json!({"sessionId":"fixture","isStreaming":false,"isCompacting":false,"steeringMode":"one-at-a-time","followUpMode":"all"});
     {let event=native::Event::Record(json!({"type":"response","command":"get_state","success":true,"data":initial}));let mut agent=shared.agent.lock().unwrap();agent.signals.observe(&event);agent.observe(&event);}
     let script=format!(r#"import sys,json,time,pathlib
@@ -54,6 +54,33 @@ for line in sys.stdin:
     (shared,provider,core)
 }
 async fn dispose(shared:&Shared,provider:&Provider){let native=shared.native.get().unwrap();native.stop();tokio::time::timeout(Duration::from_secs(2),native.exited()).await.unwrap();provider.close();}
+#[tokio::test]
+async fn optional_view_retries_are_three_per_connection_and_do_not_block_native_reader(){
+    let root=tempfile::tempdir().unwrap();let (shared,provider,mut core)=fixture(root.path(),true).await;let task=tokio::spawn(publish(shared.clone(),provider.clone(),"pi-test".into()));let mut attempts=0;
+    while attempts<3{
+        let row=core.recv().await;
+        match row["method"].as_str().unwrap(){
+            "resource.list"=>{assert!(shared.native.get().unwrap().call("get_state",json!({}),Duration::from_secs(1)).await.unwrap().success);core.reply(&row,json!({"resources":[{"id":"r42","provider":"pi-test","backend_ref":"agent","kind":"agent"}]})).await;},
+            "workspace.get"=>core.reply(&row,Value::Null).await,
+            "workspace.apply"=>{attempts+=1;core.w.write_all(format!("{}\n",json!({"jsonrpc":"2.0","id":row["id"],"error":{"code":-32000,"message":"optional io","data":{"kind":"io"}}})).as_bytes()).await.unwrap();},
+            "resource.upsert"=>{},other=>panic!("unexpected {other}"),
+        }
+    }
+    tokio::select!{_=tokio::time::sleep(Duration::from_millis(2200))=>{},row=core.recv()=>panic!("unbounded optional view retry: {row}")}
+    assert!(shared.native.get().unwrap().alive());assert!(shared.agent.lock().unwrap().view_error.is_some());task.abort();let _=task.await;dispose(&shared,&provider).await;
+}
+#[tokio::test]
+async fn optional_view_io_overload_and_unavailability_never_stop_native_controls(){
+    for kind in ["io","overloaded","unavailable"]{
+        let root=tempfile::tempdir().unwrap();let (shared,provider,mut core)=fixture(root.path(),true).await;let p=provider.clone();
+        let task=tokio::spawn(async move{views::claim(&p,"pi-test","instance").await});
+        let list=core.recv().await;core.reply(&list,json!({"resources":[{"id":"r42","provider":"pi-test","backend_ref":"agent","kind":"agent"}]})).await;
+        let get=core.recv().await;core.reply(&get,Value::Null).await;let apply=core.recv().await;assert_eq!(apply["method"],"workspace.apply");
+        core.w.write_all(format!("{}\n",json!({"jsonrpc":"2.0","id":apply["id"],"error":{"code":-32000,"message":"optional storage failure","data":{"kind":kind}}})).as_bytes()).await.unwrap();
+        let setup=task.await.unwrap();assert!(setup.view.is_none());assert!(setup.error.unwrap().contains(kind));assert!(!provider.is_closed());
+        let native=shared.native.get().unwrap();assert!(native.alive());assert!(native.call("get_state",json!({}),Duration::from_secs(2)).await.unwrap().success);dispose(&shared,&provider).await;
+    }
+}
 #[tokio::test]
 async fn late_configuration_ack_is_not_replayed_and_fresh_facts_are_fenced(){
     let root=tempfile::tempdir().unwrap();let (shared,provider,mut core)=fixture(root.path(),true).await;
