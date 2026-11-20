@@ -129,16 +129,23 @@ sensitive() {
     *) return 1 ;;
   esac
 }
+BUILD_STEP=build-zero-warnings
 run_steps() {
-  local index
-  # Build first: every concurrent suite sees complete binaries. --all-targets includes --bins.
-  for index in 0 1 2; do run_step "$index"; show_ready; done
+  local index prefix=0
+  # Build first: every step registered up to and including the build (found by name, never by position, so adding
+  # a step before it can't move the build into the concurrent phase) runs serially, so every concurrent suite sees
+  # complete binaries. --all-targets includes --bins.
+  for ((index=0; index<${#STEP_NAMES[@]}; index++)); do
+    if [ "${STEP_NAMES[$index]}" = "$BUILD_STEP" ]; then prefix=$((index+1)); break; fi
+  done
+  if [ "$prefix" -eq 0 ]; then echo "check: no $BUILD_STEP step registered" >&2; return 2; fi
+  for ((index=0; index<prefix; index++)); do run_step "$index"; show_ready; done
   if [ "$MODE" = quick ]; then
-    for ((index=3; index<${#STEP_NAMES[@]}; index++)); do run_step "$index"; show_ready; done
+    for ((index=prefix; index<${#STEP_NAMES[@]}; index++)); do run_step "$index"; show_ready; done
     return
   fi
   echo "check: independent phase (CHECK_JOBS=$CHECK_JOBS); timing/scale probes run serially afterward"
-  for ((index=3; index<${#STEP_NAMES[@]}; index++)); do
+  for ((index=prefix; index<${#STEP_NAMES[@]}; index++)); do
     sensitive "${STEP_NAMES[$index]}" && continue
     # Count running jobs, not unreaped statuses: even instant failures cannot lose a pool slot.
     while [ "$(jobs -pr | wc -l)" -ge "$CHECK_JOBS" ]; do wait -n || :; show_ready; done
@@ -147,7 +154,7 @@ run_steps() {
   done
   wait
   # A worker stopped before publishing its result is a failed step, never a missing/green row.
-  for ((index=3; index<${#STEP_NAMES[@]}; index++)); do
+  for ((index=prefix; index<${#STEP_NAMES[@]}; index++)); do
     sensitive "${STEP_NAMES[$index]}" && continue
     if [ ! -f "$LOGS/step-$index.tsv" ]; then
       printf 'check worker stopped before recording its result\n' >> "$LOGS/${STEP_NAMES[$index]}.log"
@@ -156,7 +163,7 @@ run_steps() {
   done
   show_ready
   echo "check: final serial timing/scale phase (independent workers drained)"
-  for ((index=3; index<${#STEP_NAMES[@]}; index++)); do
+  for ((index=prefix; index<${#STEP_NAMES[@]}; index++)); do
     if sensitive "${STEP_NAMES[$index]}"; then run_step "$index"; show_ready; fi
   done
 }

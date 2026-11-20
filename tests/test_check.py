@@ -32,6 +32,37 @@ class CheckTests(unittest.TestCase):
                                "quick", "fixture", str(self.root), "", "private fixture", stamp],
                               input=RECEIPT_PROGRAM, text=True, capture_output=True, env=self.env, umask=0o077)
 
+    def scheduled(self, names, mode="full"):
+        """Run check.sh's own run_steps over fake steps: the build step marks the binaries ready, the others say
+        whether they ran before or after it."""
+        def function(name):
+            start = SOURCE.index(name + "() {")
+            return SOURCE[start:SOURCE.index("\n}", start) + 2]
+        body = "\n".join(["set -u", f"MODE={mode}", "CHECK_JOBS=6", "LOGS=$1",
+                          "STEP_NAMES=(" + " ".join(names) + ")", "show_ready(){ :; }",
+                          'run_step(){ local i=$1 name=${STEP_NAMES[$1]}',
+                          '  if [ "$name" = build-zero-warnings ]; then sleep 0.2; touch "$LOGS/built"; echo "BUILT"; '
+                          '  elif [ -f "$LOGS/built" ]; then echo "AFTER $name"; else echo "BEFORE $name"; fi',
+                          '  printf "%s\\tPASS\\t0\\t-\\n" "$name" > "$LOGS/step-$i.tsv"; }',
+                          SOURCE[SOURCE.index("BUILD_STEP="):SOURCE.index("\n", SOURCE.index("BUILD_STEP="))],
+                          function("sensitive"), function("run_steps"), "run_steps"])
+        logs = Path(tempfile.mkdtemp(dir=self.root))
+        r = subprocess.run(["/bin/bash", "-c", body, "sched", str(logs)], capture_output=True, text=True, env=self.env)
+        return r.returncode, r.stdout.split("\n")
+
+    def test_the_build_runs_before_every_concurrent_step_wherever_steps_are_inserted(self):
+        # Steps registered before the build (licenses, vendor checks, ...) run serially with it; every later step,
+        # concurrent or serial, sees the built binaries, whatever position the build has.
+        for names in (["licenses", "manifest-deps", "build-zero-warnings", "e2e-a", "e2e-b", "cargo-test"],
+                      ["licenses", "vendor-libghostty", "manifest-deps", "new-check", "build-zero-warnings", "e2e-a", "cargo-test"]):
+            for mode in ("full", "quick"):
+                rc, out = self.scheduled(names, mode)
+                self.assertEqual(rc, 0, out)
+                after = names[names.index("build-zero-warnings") + 1:]
+                self.assertEqual(sorted(l for l in out if l.startswith("AFTER")), sorted(f"AFTER {n}" for n in after), (names, mode, out))
+        rc, out = self.scheduled(["licenses", "e2e-a"])
+        self.assertNotEqual(rc, 0, "a gate without the build step refuses to run")
+
     def test_exit_77_is_skip_not_pass_or_failure_in_the_table(self):
         body = f"set -u\nSKIP_EXIT=77\nLOGS={shlex.quote(str(self.root))}\nSTEPS=$LOGS/steps.tsv\n: > \"$STEPS\"\n"
         body += SCHEDULER
