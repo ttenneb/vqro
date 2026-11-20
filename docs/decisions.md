@@ -542,6 +542,10 @@ replaced when the Pi bridge is ported.
   extension actor's existing ownership rights.
 - An unknown-predecessor stall is operator-visible: held `ordering_unknown` includes the blocking delivery id in
   views and bounded lookups/lists. Visibility is not resolution, negative evidence or permission to replay.
+- Pull points form a map with per-point `precision: exact | approximate`; `pull.framing` uses the existing
+  role/frame/authority descriptors per safe point. Fixed native framing (including `NOT USER INPUT` on Claude
+  rewake) is declared/shown, never silently upgraded. Approximate idle must preserve the record's boundary/settle
+  contract if a human prompt wins the race; it never authorizes a start that assumes idle.
 
 **Human answers (2026-11-19, CONFIRMED).**
 - **AS1, pause:** "vqro stops delivery": paused means vqro sends, hands out and wakes nothing until resumed; an agent

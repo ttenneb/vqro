@@ -212,7 +212,7 @@ Checked against fake adapters. Level **P** (pull): a terminal agent plus a plugi
 | Declaration | Where | Checked by |
 |---|---|---|
 | operation window, scope capacity, quotas, protected-domain budget, identity cache size | the extension | I10, I17–I19, I21–I22, H14, H16, L7–L9 |
-| `pull {points, insert, evidence}`, `consumer`; advisory terminal status | plugin's endpoint, agents extension | T1–T14 |
+| `pull {points: {<point>: {precision}}, insert, evidence, framing}`, `consumer`; advisory terminal status | plugin's endpoint, agents extension | T1–T15 |
 | request route `human` / `coordinator` / `both` | ordinary attributed agent configuration | Q1–Q4 |
 
 **I. Inbox.** P1's prototype (`proto/inbox-seam` b26cf0a, fake native ledger recording every invocation) passes I1–I6
@@ -370,6 +370,12 @@ T14 per-record consumer budget: a take with `max_bytes` below a record's size le
 `too_large_for_consumer` for that agent through repeated safe points, with zero claims/releases and no truncation;
 smaller eligible mail remains selectable, aggregate batch bounds still hold, and a sufficient budget permits a
 first claim only when the other eligibility checks pass.
+T15 path framing/precision: every served point declares exact/approximate precision and its added framing via
+`pull.framing`. Check native model envelopes for turn, settle and idle independently, including Claude's rewake
+`NOT USER INPUT`; renderers never hide a path's actual role/authority or relabel it plain user input. At an
+approximate idle point, race a human prompt: the claimed record still meets its own boundary/settle contract,
+never an assumed-idle start. A plugin unable to preserve that contract makes no claim. Exact points retain their
+native guarantee; observation gaps are not interpreted as exactness.
 
 **L. Lifecycle policy.** L5 stop closes the gate first; without a declared `agent.stop`, `host_kill` is offered only
 when the host is a core resource of the bound incarnation with a declared termination primitive, after showing

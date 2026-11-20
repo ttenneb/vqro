@@ -427,13 +427,23 @@ use it too. The plugin needs the `receive` right on its agent and never reads or
 vqro never types into an agent's terminal by default; guarded typing is an optional extension that needs fresh
 editor-empty evidence, reports `dispatched`, labels the mode unverified and obeys the gate.
 
-- **Declaration** `pull {points, insert, evidence}` and a `consumer` incarnation id per load. `points` ⊆ `turn` (tool
-  results recorded, before the next model request) | `settle` (work would otherwise end) | `idle` (nothing running)
-  | `tool` (the model asks for its mail). `insert`: `user` (attributed user message) or `context`. `evidence`:
+- **Declaration** `pull {points, insert, evidence, framing}` and a `consumer` incarnation id per load. `points`
+  is a map `{<point>: {precision: "exact" | "approximate"}}`, not a list. Point names: `turn` (tool results
+  recorded, before the next model request), `settle` (work would otherwise end), `idle` (nothing running),
+  `tool` (the model asks for its mail). Each served point declares its precision; approximate never claims an
+  atomic native safe-point guarantee. `insert`: `user` (attributed user message) or `context`. `evidence`:
   `entry` (a durable runtime record carrying the delivery id) or `none`.
+- **Framing per path.** `pull.framing` maps safe points to `{role, frame, authority?}` using the rendering
+  descriptors of `agent-v0.md` §3.2. Plugins/renderers/adapters declare the framing each path adds, including
+  fixed native wrappers, rather than claiming all paths have the same role or authority. The route must fit
+  the sender's accepted rendering; framing never silently promotes authority or rewrites the recorded origin.
+  Unknown framing is shown generically, not assumed to be plain user input.
 - **Eligibility is the inbox's:** `turn` serves `boundary`; `settle` serves `boundary` and `settle`; `idle` serves
   `start`, `boundary` and `settle`; `tool` serves `admit`, plus `boundary` where declared an evidenced boundary.
-  `preempt` is never pulled.
+  `preempt` is never pulled. At **approximate idle**, a human prompt may have started work by the time insertion
+  occurs. Only records safe under their declared `boundary`/`settle` insertion contract may be taken there;
+  preserve that mode if the agent is busy, never treat the take as `start` on an assumed idle runtime. If the
+  plugin cannot maintain that contract it must not claim the record at that point.
 - **Take:** `coord.inbox.take {op, agent, consumer, at, accept: [block types], max_bytes, limit ≤ 16}` claims, as
   one batch, up to `limit` eligible records in §5.6 selection order within the page bound (the rest stay held), durably before replying,
   and returns `{records:
@@ -465,7 +475,10 @@ editor-empty evidence, reports `dispatched`, labels the mode unverified and obey
 `evidence: none`: a flushed hand-off is `supplied`, never `inserted`. `read` requires a model-visible transcript
 request containing that hand-off and normal completion evidence; hook success is never evidence. Framing differs
 by path: tool-result / Stop context uses native system-reminder framing; rewake is framed `SYSTEM NOTIFICATION -
-NOT USER INPUT`. Senders must accept context rendering. Non-interactive sessions do not support this idle wake.
+NOT USER INPUT`. These are per-path framing declarations, not permission to present a rewake as plain user
+input or upgrade its authority. Claude's hook-based idle point is approximate (it can race a human prompt);
+Pi's measured idle point is exact. Senders must accept the route's context rendering. Non-interactive Claude
+sessions do not support this idle wake.
 The native session inbox socket is a separate `admit` route without vqro-side edit after posting.
 
 ### 7.1 Advisory terminal status

@@ -233,8 +233,11 @@ concatenated.
   Anything else is framed with its sender (`attributed_user`, `participant`) or, only if the call's `render` list
   names it, `context`; it is never placed in a system or developer role. The adapter uses the first rendering in
   `render` (default `[participant, attributed_user]`) that it declares, and rejects (`unsupported`) if none fits. The
-  inserted message carries `origin`, `quoted` and the rendering used. This is provenance at the model-request
-  envelope, not prompt-injection immunity.
+  inserted message carries `origin`, `quoted` and the rendering used. Framing is declared **per native path**
+  when it differs, with that path's role/frame/authority; pull paths use `pull.framing` keyed by safe point
+  (`coordination-v0.md` §7). Renderers preserve/show fixed native wrappers (for example, a rewake labelled
+  `NOT USER INPUT`) rather than silently relabel them as plain user input or upgrade authority. Such a wrapper
+  never changes the recorded sender. This is provenance at the model-request envelope, not prompt-injection immunity.
 - Busy rejects with `error.kind: "busy"`, a failed guard with `"stale"`: both before any native write, as `rejected`,
   never as an error the core would report `indeterminate`.
 - An adapter never injects Enter, runs a slash command found in literal text, or changes mode, model or queue
