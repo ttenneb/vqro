@@ -1146,13 +1146,19 @@ New row types, components and view kinds are progressive enhancements: every cli
 - **Chip `short`**: a short label (an icon, "/") used when the row's chips don't fit on one line.
 - **Panel `title_right`** (and `title_right_style`, a semantic style): a short status at the right end of the
   pane's frame, e.g. an agent's "● idle".
+- **Panel `title_actions`** (feature `title_actions`): `[{text, command, args?, input?} | {text, menu}]`. Small
+  `[text]` buttons in the frame's top border, before `title_right`: no line of their own (an agent pane's ⚙). A
+  click runs the command in the panel's context, or opens `menu` (entries as a row's `menu`: `{label, command,
+  args?}`). For a key: `client.panel {action: "title", index?}` (the first by default). Entries without a label, or
+  without a command or menu, are skipped; in a frame too narrow to show them they are not clickable. Keep the same
+  commands in the pane menu for clients without the feature (and for recovery, D15).
 - **Row `actions`** (feature `actions`): `[{text, command, args?, input?}]`. These are drawn right-aligned in the
   row as `[text]` buttons, before its detail and badges. A click runs the action in the row's context. Put the same
   entries in the row's `menu` for clients without the feature.
 - **"↓ Latest · End"**: the client draws it at the bottom right of a following list (`follow: true`) scrolled away
   from its newest rows. A click or End goes back and follows again. Panels need nothing for it.
 - Clients without these show chips in order with their full labels, the plain title, and no buttons (the menu
-  stays). The Rust TUI implements them all.
+  stays). The Rust TUI implements them all; the text client and OpenTUI do not draw `title_actions` yet.
 
 ### Formatted text and bottom-pinned rows (D29)
 

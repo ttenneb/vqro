@@ -227,6 +227,8 @@ struct Hit {
     status: Rect,
     /// Panel hit areas by panel key (view id, or "@popup").
     panels: HashMap<String, panel::Hits>,
+    /// A panel's `title_actions` drawn in its frame: (where, the panel's view, the action).
+    title_actions: Vec<(Rect, String, Value)>,
     overlay: Option<(Rect, Rect, usize)>,
 }
 
@@ -1476,6 +1478,15 @@ impl App {
     }
 
     /// A row's own actions (`menu`), shown like any other menu.
+    /// Run one of a panel's `title_actions` (a click on it, or `client.panel {action: "title"}`): its menu, or its
+    /// command in the panel's context.
+    fn title_action(&mut self, view: &str, action: &Value, ctx: Value, at: Option<Position>) {
+        let mut ctx = ctx;
+        ctx["panel"] = json!(view);
+        ctx["panel_view"] = json!(view);
+        if action["menu"].is_array() { self.row_menu(action, ctx, at) } else { self.activate_item(Item::from_entry(action), ctx, at) }
+    }
+
     fn row_menu(&mut self, item: &Value, ctx: Value, at: Option<Position>) {
         let items: Vec<Item> = item["menu"].as_array().into_iter().flatten().map(Item::from_entry).filter(|i| !i.command.is_empty()).collect();
         if items.is_empty() {
@@ -2318,6 +2329,15 @@ impl App {
                         }
                     }
                     "activate" => { let (key, view) = (key.clone(), view.clone()); self.panel_key(&key, &view, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), ctx.clone()); }
+                    // One of the panel's `title_actions` (`index`, default the first), for a key.
+                    "title" => {
+                        let i = args["index"].as_u64().unwrap_or(0) as usize;
+                        match self.panel_value(&view)["title_actions"].get(i).cloned() {
+                            Some(a) => { let at = self.hit.title_actions.iter().find(|(_, v, x)| *v == view && *x == a).map(|(r, _, _)| Position { x: r.x, y: r.y + 1 });
+                                self.title_action(&view, &a, ctx.clone(), at) }
+                            None => self.message = format!("client.panel: this panel has no title action {i}"),
+                        }
+                    }
                     "facet" => if let Some(k) = args["key"].as_str() { panel::choose_facet(&value, st, k, args["value"].as_str()); },
                     "sort" => panel::choose_sort(&value, st, args["key"].as_str()),
                     other => self.message = format!("client.panel: unknown action {other}"),
@@ -2634,6 +2654,13 @@ impl App {
                 }
                 let Some(idx) = self.hit.leaves.iter().position(|(_, outer, _)| outer.contains(pos)) else { return false };
                 self.focus = idx;
+                if button == MouseButton::Left {
+                    if let Some((_, view, action)) = self.hit.title_actions.iter().find(|(r, _, _)| r.contains(pos)).cloned() {
+                        let ctx = self.ctx_leaf(idx);
+                        self.title_action(&view, &action, ctx, Some(pos));
+                        return true;
+                    }
+                }
                 let (view, _, inner) = self.hit.leaves[idx].clone();
                 if button == MouseButton::Right && self.view_kind(&view) == "panel" {
                     let ctx = self.ctx_leaf(idx);
@@ -3229,10 +3256,35 @@ impl App {
                 let v = self.panel_value(view);
                 let title = v["title"].as_str().unwrap_or(view).to_string();
                 let mut block = Block::bordered().title(format!(" {title} ")).border_style(border);
-                // `title_right`: a short status at the frame's right end (an agent's state), in `title_right_style`.
-                if let Some(right) = v["title_right"].as_str().filter(|s| !s.is_empty()) {
+                // The frame's right end: `title_actions` as small buttons, then `title_right`, a short status (an
+                // agent's state) in `title_right_style`. One right-aligned title, so the buttons' cells are known.
+                let actions: Vec<Value> = v["title_actions"].as_array().into_iter().flatten()
+                    .filter(|a| a["text"].as_str().is_some_and(|t| !t.is_empty()) && (a["command"].is_string() || a["menu"].is_array())).cloned().collect();
+                let mut right: Vec<Span> = Vec::new();
+                let mut spots: Vec<(u16, u16, Value)> = Vec::new();
+                let mut at = 0u16;
+                for a in &actions {
+                    let label = format!("[{}]", a["text"].as_str().unwrap_or(""));
+                    let w = unicode_width::UnicodeWidthStr::width(label.as_str()) as u16;
+                    right.push(Span::raw(" "));
+                    spots.push((at + 1, w, a.clone()));
+                    right.push(Span::styled(label, pal.style(Some(a["style"].as_str().unwrap_or("accent")))));
+                    at += 1 + w;
+                }
+                if let Some(status) = v["title_right"].as_str().filter(|s| !s.is_empty()) {
                     let style = v["title_right_style"].as_str().map(|s| pal.style(Some(s))).unwrap_or_else(|| pal.style(None));
-                    block = block.title(Line::from(Span::styled(format!(" {right} "), style)).right_aligned());
+                    right.push(Span::styled(format!(" {status}"), style));
+                    at += 1 + unicode_width::UnicodeWidthStr::width(status) as u16;
+                }
+                if !right.is_empty() {
+                    right.push(Span::raw(" "));
+                    at += 1;
+                    // Drawn ending one cell before the frame's corner.
+                    let start = (rect.x + rect.width).saturating_sub(1 + at);
+                    if rect.width > at + 4 {
+                        for (dx, w, a) in spots { self.hit.title_actions.push((Rect::new(start + dx, rect.y, w, 1), view.to_string(), a)); }
+                    }
+                    block = block.title(Line::from(right).right_aligned());
                 }
                 let inner = block.inner(rect);
                 f.render_widget(block, rect);
@@ -4148,6 +4200,47 @@ mod tests {
         app.panel_key("p", "p", KeyEvent::new(KeyCode::Right, KeyModifiers::NONE), json!({}));
         app.panel_key("p", "p", KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), json!({}));
         assert!(matches!(app.overlay, Some(Overlay::Menu { .. })), "the select's options open");
+    }
+
+    #[tokio::test]
+    async fn title_actions_sit_in_the_frame_and_run_by_click_or_key() {
+        let (mut app, _) = app();
+        let menu = json!([{"label":"Stop","command":"agents.stop"},{"label":"Bridge terminal","command":"agents.bridge"}]);
+        app.load(&json!({"epoch":"e","seq":1,"entries":{"view/p":{"value":{"kind":"panel","title":"Pi","title_right":"● idle","title_right_style":"ok",
+            "title_actions":[{"text":"⚙","menu":menu},{"text":"↓","command":"client.panel","args":{"action":"last"}},{"text":""},{"text":"no command"}],
+            "items":[{"text":"first"},{"text":"second"},{"text":"third"}]}}}}));
+        let draw = |app: &mut App, w: u16| -> String {
+            app.hit = Hit::default();
+            let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, 6)).unwrap();
+            let mut top = String::new();
+            terminal.draw(|f| { app.draw_view(f, "p", Rect::new(0, 0, w, 6), true, &Palette::default(), &Icons::new(None, false));
+                let b = f.buffer_mut(); top = (0..w).map(|x| b[(x, 0)].symbol().to_string()).collect(); }).unwrap();
+            app.hit.leaves = vec![("p".into(), Rect::new(0, 0, w, 6), Rect::new(1, 1, w - 2, 4))];
+            top
+        };
+        let top = draw(&mut app, 40);
+        assert!(top.trim_end_matches(['┐', '─']).ends_with(" [⚙] [↓] ● idle "), "buttons, then the status, at the frame's right end: {top}");
+        assert_eq!(app.hit.title_actions.len(), 2, "entries without a label or a command/menu are skipped");
+        let cell = |top: &str, s: &str| top.find(s).map(|i| top[..i].chars().count() as u16).unwrap();
+        let click = |app: &mut App, x: u16| { app.on_mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: x, row: 0, modifiers: KeyModifiers::NONE }); };
+        // A command runs in the panel's context (client.panel acts on this panel); the frame takes no extra line.
+        click(&mut app, cell(&top, "[↓]") + 1);
+        assert_eq!(app.pstate["p"].sel, 2);
+        // A menu opens; its entries carry the panel's context.
+        click(&mut app, cell(&top, "[⚙]") + 1);
+        match &app.overlay { Some(Overlay::Menu { items, ctx, .. }) => {
+            assert_eq!(items.iter().map(|i| i.command.as_str()).collect::<Vec<_>>(), ["agents.stop", "agents.bridge"]);
+            assert_eq!(ctx["panel"], "p");
+        } _ => panic!("the ⚙ menu opens") }
+        // By key: client.panel {action: "title", index}, the first by default.
+        app.overlay = None;
+        app.run_command("client.panel", json!({"action":"title"}), json!({"panel":"p","panel_view":"p"}), None);
+        assert!(matches!(app.overlay, Some(Overlay::Menu { .. })), "the first title action by key");
+        app.run_command("client.panel", json!({"action":"title","index":7}), json!({"panel":"p","panel_view":"p"}), None);
+        assert!(app.message.contains("no title action 7"), "{}", app.message);
+        // Too narrow for the title: the buttons are not drawn clickable over a cut-off title.
+        draw(&mut app, 12);
+        assert!(app.hit.title_actions.is_empty());
     }
 
     #[tokio::test]
