@@ -115,14 +115,14 @@ async fn unresolved_preflight_is_busy_despite_idle_and_abort_ack() {
 #[tokio::test(flavor="multi_thread",worker_threads=2)]
 async fn ack_without_a_run_uses_fresh_idle_cut_and_never_infers_insertion() {
     let f=Fixture::new().await;f.idle().await;
-    for _ in 0..2 {
+    for _ in 0..32 {
         let Admission::Acknowledged {native,reply}=f.send("handled-or-queued-unknown",500).await else {panic!("ACK");};
         assert!(!native.is_empty());assert!(reply.success);assert!(reply.data.is_null());
         f.fence().await;
         assert_eq!(f.signals.current().starts,0);
         assert!(f.signals.current().idle());
     }
-    assert_eq!(f.prompts(),2);assert_eq!(f.receipts.lock().unwrap().len(),2);
+    assert_eq!(f.prompts(),32);assert_eq!(f.receipts.lock().unwrap().len(),32);
     f.close().await;
 }
 

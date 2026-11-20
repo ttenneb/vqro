@@ -66,10 +66,13 @@ pub enum Admission {
 }
 pub type Receipt = Arc<dyn Fn(String,Result<Reply,Error>)+Send+Sync>;
 
-struct Flight { _guard:OwnedMutexGuard<()>,signals:Arc<Signals> }
+struct Flight { guard:Option<OwnedMutexGuard<()>>,signals:Arc<Signals> }
 impl Drop for Flight {
     fn drop(&mut self) {
-        self.signals.current.lock().unwrap().preflights-=1;
+        let mut current=self.signals.current.lock().unwrap();
+        current.preflights-=1;
+        // Publish idle only after the serialization guard is actually released.
+        drop(self.guard.take());drop(current);
         self.signals.changed.send_modify(|value|*value=value.wrapping_add(1));
     }
 }
@@ -87,7 +90,7 @@ impl Starts {
             current.preflights+=1;
             current.starts
         };
-        let flight = Flight { _guard:guard,signals:self.signals.clone() };
+        let flight = Flight { guard:Some(guard),signals:self.signals.clone() };
         self.signals.changed.send_modify(|value|*value=value.wrapping_add(1));
         let mut ticket = match self.native.submit("prompt",args,deadline) {
             Ok(ticket)=>ticket,
