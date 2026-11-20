@@ -13,7 +13,10 @@
 //! scrollback, forwarding to programs that asked for the mouse. What other gestures mean comes from
 //! bindings such as `{"key": "mouse.right", "where": "pane", "command": "client.menu"}`.
 //! Client commands: `client.menu {where}`, `client.prefix`, `client.palette`, `client.focus {dir}`,
-//! `client.tab {to}`, `client.quit`, `client.none` (unbinds a key).
+//! `client.tab {to}`, `client.layout {name?}`, `client.quit`, `client.none` (unbinds a key).
+//!
+//! Each window shows its own layout (workspace, `ui_model::window`): it opens on the shared `workspace/active`,
+//! then follows only its own switches. Every command it invokes carries that layout in `args.context.layout`.
 
 mod icons;
 mod keys;
@@ -43,6 +46,7 @@ use tokio::sync::mpsc;
 use crate::client;
 use crate::rpc::{Incoming, Peer};
 use crate::ui_model::recovery::{self, PrefixRow, SAFE_MODE_VIEW};
+use crate::ui_model::window::{self, Settled, Window};
 use crate::ui_model::workspace::{Change, Workspace};
 use icons::Icons;
 use theme::Palette;
@@ -152,6 +156,8 @@ struct Item {
     view: Option<String>,
     /// Explicit initial input text: a string, or {context: field} read from invocation context.
     prefill: Value,
+    /// For status items: take the label from this window's context (`layout`, `layout_title`).
+    label_context: Option<String>,
 }
 
 
@@ -166,6 +172,7 @@ impl Item {
             pick: v["pick"].as_str().map(String::from),
             view: v["view"].as_str().map(String::from),
             prefill: v["prefill"].clone(),
+            label_context: v["label_context"].as_str().map(String::from),
         }
     }
 }
@@ -182,6 +189,8 @@ enum Msg {
     ClosePopup,
     /// A command's reply asks to focus a visible view, independently of its kind.
     FocusView(String),
+    /// A command's reply (or this window's reset) asked this window to show a layout.
+    ShowLayout(String),
     /// A stream's ordered input sender found its queue empty after `n` items: if nothing was queued
     /// since, its input can go direct again.
     InputIdle(String, u64),
@@ -255,6 +264,8 @@ struct App {
     view_streams: Arc<Mutex<HashMap<String, u64>>>,
     /// The pane shown alone (`client.zoom`): this window's presentation only, never workspace state.
     zoomed: Option<String>,
+    /// The layout (workspace) this window shows: window state, never workspace state (`ui_model::window`).
+    window: Window,
     /// Focus this view on the next draw (after leaving zoom the leaves are recomputed).
     pending_focus: Option<String>,
     /// The terminal speaks the kitty keyboard protocol; used only while the prefix menu is open.
@@ -359,6 +370,9 @@ fn hello_params() -> Value {
     crate::ui_model::hello("tui", client::build_stamp(), crate::ui_model::PROFILES, panel::SUPPORTED)
 }
 
+/// Carries a window's shown layout across its re-exec into a new build (read only at start).
+const LAYOUT_ENV: &str = "VQRO_TUI_LAYOUT";
+
 pub async fn run(socket: &Path) -> Result<()> {
     let started_as = exe_stamp();
     let mut reexec = false;
@@ -367,6 +381,8 @@ pub async fn run(socket: &Path) -> Result<()> {
     let seq = snap["seq"].as_u64().unwrap_or(0);
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut app = App::new(peer.clone(), tx);
+    // A UI restarting into a new build keeps showing its window's workspace.
+    app.window.pinned = std::env::var(LAYOUT_ENV).ok().filter(|s| !s.is_empty());
     app.load(&snap);
     if let Some(notice)=snap["recovery_notice"].as_str() {app.message=notice.into();}
     else {app.set_key_hint("click vqro or press ", &app.prefix(), " for the menu");}
@@ -474,6 +490,7 @@ pub async fn run(socket: &Path) -> Result<()> {
         }
     }
     .await;
+    let shown = app.window.shown(&app.ws);
     if let Some(task) = reconnecting {
         task.abort();
     }
@@ -487,7 +504,10 @@ pub async fn run(socket: &Path) -> Result<()> {
             {
                 use std::os::unix::process::CommandExt;
                 let args: Vec<String> = std::env::args().skip(1).collect();
-                let err = std::process::Command::new(exe).args(args).exec();
+                let mut cmd = std::process::Command::new(exe);
+                // The restarted UI keeps showing this window's workspace.
+                if let Some(layout) = &shown { cmd.env(LAYOUT_ENV, layout); }
+                let err = cmd.args(args).exec();
                 anyhow::bail!("could not restart into the new vqro: {err}");
             }
         }
@@ -523,7 +543,7 @@ impl App {
             leaves: Vec::new(), focus: 0, overlay: None, pstate: HashMap::new(),
             filtering: None, toast: None, panel_values: Mutex::new(HashMap::new()), panel_dependencies: Mutex::new(HashMap::new()), hit: Hit::default(),
             drag: None, overrides: HashMap::new(), mouse_owner: None, mouse_on: true,
-            under: None, input_queues: HashMap::new(), view_streams: Arc::default(), zoomed: None, pending_focus: None, kbd_enhance: false,
+            under: None, input_queues: HashMap::new(), view_streams: Arc::default(), zoomed: None, window: Window::default(), pending_focus: None, kbd_enhance: false,
             held: KeyModifiers::NONE, message: String::new(), key_hint: None,
             quit: false, connected: true, connection: 0,
             generation: 0, resyncing: false, buffered: Vec::new(), buffered_bytes: 0, recovery_only: false, retry_snapshot: None, snapshot_retries: 0,
@@ -562,6 +582,7 @@ impl App {
         for state in self.pstate.values_mut() { state.prepared = None; }
         let was_safe = self.ws.load(snap);
         self.safe_mode_changed(self.ws.safe_mode, was_safe);
+        self.settle_window();
     }
 
     /// Entering safe mode opens the built-in chooser; leaving it closes the chooser.
@@ -669,6 +690,7 @@ impl App {
                     if !author.starts_with("tui:") && !author.starts_with("ext:") {
                         self.message = format!("workspace changed by {author} (txn {txn})");
                     }
+                    self.settle_window();
                 }
                 Change::Resource { id, available, live, restored } => {
                     for term in self.terms.values_mut().filter(|t| t.resource == id) {
@@ -752,6 +774,7 @@ impl App {
                     }
                 }
             }
+            Msg::ShowLayout(name) => self.show_layout(&name),
             Msg::FocusView(view) => {
                 self.zoomed = None;
                 self.pending_focus = Some(view);
@@ -1000,8 +1023,9 @@ impl App {
     fn panel_value(&self, view: &str) -> Arc<Value> {
         if view==SAFE_MODE_VIEW { return Arc::new(self.safe_chooser_value()); }
         if let Some(value) = self.panel_values.lock().unwrap().get(view).cloned() { return value; }
-        let (v, deps) = compose::resolve(view, &self.ws.entries, &self.ws.live);
+        let (mut v, deps) = compose::resolve(view, &self.ws.entries, &self.ws.live);
         self.panel_dependencies.lock().unwrap().insert(view.into(), deps);
+        window::mark_current(&mut v, self.window.shown(&self.ws).as_deref());
         let v = Arc::new(v);
         self.panel_values.lock().unwrap().insert(view.to_string(), v.clone());
         v
@@ -1123,6 +1147,7 @@ impl App {
                     pick: None,
                     view: None,
                     prefill: o.get("prefill").or_else(|| item.get("prefill")).cloned().unwrap_or(Value::Null),
+                    label_context: None,
                 }
             })
             .collect();
@@ -1492,7 +1517,7 @@ impl App {
     }
 
     fn active_layout_key(&self) -> (Option<String>, Option<u64>) {
-        let name = self.ws.entries.get("workspace/active").and_then(|a| a["layout"].as_str()).map(String::from);
+        let name = self.window.shown(&self.ws);
         let version = name.as_ref().and_then(|n| self.ws.versions.get(&format!("layout/{n}")).copied());
         (name, version)
     }
@@ -1587,11 +1612,18 @@ impl App {
             }
             "client.safe_mode.leave" => self.invoke("vqro.safe_mode",json!({"on":false})),
             "client.quit" => self.quit = true,
+            // Show a layout in this window only; without a name, the shared default.
+            "client.layout" => match self.window.client_layout(&self.ws, &args) {
+                Ok(true) => self.window_changed(),
+                Ok(false) => {}
+                Err(message) => self.message = message,
+            },
             "client.none" => {}
             // Never sent to the core: a client that doesn't know one says so.
             other if other.starts_with("client.") => self.message = format!("{other}: not supported by this client"),
             _ => {
-                let args = with_arg(&args, "context", ctx);
+                // Every invocation names this window's layout (palette, status bar and popups too).
+                let args = with_arg(&args, "context", self.window.invocation_context(&self.ws, ctx));
                 self.invoke(name, args);
             }
         }
@@ -2008,6 +2040,10 @@ impl App {
                     if r["client"]["close"] == true {
                         let _ = tx.send(Msg::ClosePopup);
                     }
+                    // Layout before focus: the focused view may live in the layout being shown.
+                    if let Some(layout) = window::reply_layout(&name, &r) {
+                        let _ = tx.send(Msg::ShowLayout(layout));
+                    }
                     if let Some(view) = r["client"]["focus"]["view"].as_str() {
                         let _ = tx.send(Msg::FocusView(view.to_string()));
                     }
@@ -2032,9 +2068,37 @@ impl App {
     }
 
     fn active_layout(&self) -> Option<(String, Value)> {
-        let name = self.ws.entries.get("workspace/active")?["layout"].as_str()?.to_string();
+        let name = self.window.shown(&self.ws)?;
         let v = self.ws.entries.get(&format!("layout/{name}"))?.clone();
         Some((name, v))
+    }
+
+    /// Redraw for another layout in this window: leave zoom, drop previews and `current_when` marks.
+    fn window_changed(&mut self) {
+        self.unzoom();
+        self.overrides.clear();
+        self.panel_values.lock().unwrap().clear();
+    }
+
+    /// Show `name` in this window only (a reply hint, `client.layout`, this window's reset).
+    fn show_layout(&mut self, name: &str) {
+        match self.window.show(&self.ws, name) {
+            Ok(true) => self.window_changed(),
+            Ok(false) => {}
+            Err(message) => self.message = message,
+        }
+    }
+
+    /// Keep this window on an existing layout (after a snapshot or a workspace change).
+    fn settle_window(&mut self) {
+        match self.window.settle(&self.ws) {
+            Settled::Same => {}
+            Settled::Took(_) => self.window_changed(),
+            Settled::Closed { was, now } => {
+                self.message = match now { Some(now) => format!("workspace {was} closed; showing {now}"), None => format!("workspace {was} closed") };
+                self.window_changed();
+            }
+        }
     }
 
     fn select_tab(&mut self, path: &[usize], i: usize) {
@@ -2286,7 +2350,20 @@ impl App {
         }
         // Contributed status-bar buttons.
         let mut x = area.x + spans.iter().map(|s| s.content.chars().count() as u16).sum::<u16>();
+        let window = self.window.context(&self.ws);
         for item in self.menu_items("status", &json!({})) {
+            // A segment may name this window's own state, e.g. the workspace it shows; empty hides it.
+            if let Some(field) = &item.label_context {
+                let value = window[field.as_str()].as_str().unwrap_or("");
+                if value.is_empty() { continue; }
+                let label = format!(" {} ", icons.label(&item.icon, value));
+                let w = icons::width(&label);
+                if x + w > area.right() { break; }
+                self.hit.buttons.push((Rect { x, y: area.y, width: w, height: 1 }, item, json!({})));
+                x += w;
+                spans.push(Span::styled(label, pal.style(Some("muted"))));
+                continue;
+            }
             // Live segments take their label, icon and style from a view's live content. An empty
             // label hides a live segment (nothing to report), whatever its icon.
             let (text, style) = match item.view.as_deref().and_then(|v| self.ws.live.get(v)) {

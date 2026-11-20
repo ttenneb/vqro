@@ -36,6 +36,8 @@ pub async fn ensure_core() -> Result<()> {
     drop(crate::store::Store::lock_state(&state.join("workspace.json"))?);
     let log = std::fs::OpenOptions::new().create(true).append(true).open(state.join("serve.log"))?;
     let mut cmd = std::process::Command::new(executable_path()?);
+    // A UI's own window state never reaches the core it starts.
+    cmd.env_remove("VQRO_TUI_LAYOUT");
     cmd.arg("serve").stdin(std::process::Stdio::null()).stdout(log.try_clone()?).stderr(log);
     #[cfg(unix)]
     {

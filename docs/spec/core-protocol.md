@@ -93,17 +93,24 @@ Transactions are validated against the resulting state and applied all-or-nothin
 (0 = must not exist). Key namespaces and value shapes: `src/store.rs` header. Layouts may only reference
 existing views; `workspace/active` must name an existing layout.
 
-**Several layouts; layout settings.** A workspace may hold any number of `layout/<name>` trees; the one
-named by `workspace/active` is shown, and switching is a write of that entry (shared by every client
-for now). A layout's optional settings live beside it, in `doc/layout/<name>` = `{cwd?, title?}`: `cwd`
+**Several layouts; layout settings.** A workspace may hold any number of `layout/<name>` trees. Each
+client window shows one of them: its own choice, client state like zoom, not workspace state. A window
+starts on `workspace/active`, the shared default (the layout anyone last switched to), and then moves only
+when it switches itself: a command reply's `{"client": {"layout"}}`, `client.layout`, its own
+`vqro.layout.reset`, or its layout being deleted (it falls back to the default). Switching extensions also
+write `workspace/active`, so new windows open there and older clients (which show the default) follow;
+another window's switch, or a script writing the default, never moves an open window. Every invocation a
+client sends carries `args.context.layout` (and `layout_version`) for the window it came from, also from the
+palette and status bar, and extensions act on that layout: the Python helper's `context_layout(args)` and
+`layout_folder(args)` read it, and nested `command.invoke`s inherit it. A layout's optional settings live beside it, in `doc/layout/<name>` = `{cwd?, title?}`: `cwd`
 is the folder new things start in (bundled `tabs.open`, `panes.split` and `pi.new` use it when not
 given one; the Python helper's `layout_folder(args)` reads the invoking context's layout, else the
 active one), `title` a display name. They are separate from the tree so that writers which replace a
 layout's root node (wrapping it in a split, `vqro.layout.reset`) can't drop them; whoever deletes a layout
 deletes its settings in the same transaction. The core does not interpret them. The bundled
 `workspaces` extension gives each workspace folder its own layout `ws-<id>` (id from the folder's real
-path) and `main` holds the rest; `vqro.layout.reset` rebuilds `main` with every live terminal and
-selects it.
+path) and `main` holds the rest; `vqro.layout.reset` rebuilds `main` with every live terminal and makes
+it the default, and the client that ran it shows it (other windows keep theirs).
 
 A successful apply or revert has persisted the candidate through a unique temporary file in the same directory,
 then the platform's **durable replace**: on Unix file sync, rename, then directory sync (implemented); on Windows file
@@ -690,7 +697,8 @@ reconcile later with their full set (`exclusive=True`). Other runtimes should fo
   `client.zoom` (toggle: the focused pane fills this window; per window, not workspace state; moving focus leaves it).
 - More client-side commands, so bindings can reach what the prefix keys do: `client.focus {dir: next|prev|left|right|
   up|down}` (directions pick the adjacent pane), `client.tab {to: next|prev|<n>}` (n counts from 1, in the tab group
-  holding the focused pane), `client.quit` (this UI only), `client.none` (does nothing: binds a key to nothing). A
+  holding the focused pane), `client.quit` (this UI only), `client.none` (does nothing: binds a key to nothing),
+  `client.layout {name?}` (show that layout in this window only; without a name, the shared default). A
   client answers an unknown `client.*` command with a message and never sends it to the core.
 
 ## Clients and profiles (D29)
@@ -699,7 +707,9 @@ A client is any process that renders the workspace over this protocol; it is not
 what it renders in `hello {client, version, build?, profiles, features}`:
 
 - **`base`** (every interactive client): the snapshot/event cache with resync fencing; the layout tree (splits,
-  tabs, the active layout); `panel` views with the base panel features (`items`, `pages`, `tree`, `toolbar`,
+  tabs) of the layout this window shows (its own, starting from `workspace/active`; see "Several layouts"), named
+  in every invocation's `args.context.layout`, with the reply hint `layout` and `client.layout` moving only this
+  window; `panel` views with the base panel features (`items`, `pages`, `tree`, `toolbar`,
   `badges`, `description`, `menu`, `input`, `options`, `select`, `chips`, `icon`, `wrap`); unknown row types as plain
   items; `menu/*` entries; prompts (`input`, `prefill`) and pick-one `options`; command invocation with
   `args.context` and the reply hints `popup`, `close`, `focus`; `ui.notify`; semantic styles over a built-in palette;
@@ -710,13 +720,14 @@ what it renders in `hello {client, version, build?, profiles, features}`:
   resize per the provider's owner rule). A viewer sends no query responses.
 - **`keys`**: the prefix key with the `C-g` fallback, binding precedence and `client.*` commands.
 - **Optional features** are the other ids (`badge_color`, `icon_names`, `list_detail`, `embedded_views`, `filter`,
+  `current_when`,
   or a third party's `x.<owner>.<name>@<major>`). Content using one must keep a fallback: scope it inside the
   enhancement (as `list_detail` does) so the plain content remains, or accept that clients without it show the
   panel's "missing" notice. Clients never tailor shared content per client: several clients view one workspace.
 
 The shared definitions are executable fixtures: `tests/fixtures/client/panels.json` (flattening, `requires`),
-`contributions.json` (menus, key and gesture precedence) and `recovery.json` (prefix recovery rows, safe-mode
-chooser). The Rust model (`src/ui_model`) and every bundled client are checked against them.
+`contributions.json` (menus, key and gesture precedence), `recovery.json` (prefix recovery rows, safe-mode
+chooser) and `window.json` (which layout a window shows, its invocation context, `current_when` marks). The Rust model (`src/ui_model`) and every bundled client are checked against them.
 
 `vqro ui [<client>]` starts a client (the core too, if needed). Without a name, or with `tui`, it runs the built-in
 terminal client, which is always present so recovery never depends on an optional client. Other clients are
@@ -807,7 +818,8 @@ and sets the prefix; the active profile is `doc/keys/profile`, and the list is l
   lifetime or resource-retention promises. Older clients reject the declared capability gracefully rather than
   silently showing an incomplete composition; the badge/prefix recovery path remains independent.
 - A command's reply may ask the invoking client for UI: `{"client": {"popup": {"view", "width"?}}}`,
-  `{"client": {"close": true}}`, or `{"client": {"focus": {"view": "view-id"}}}`. These fields may be combined.
+  `{"client": {"close": true}}`, `{"client": {"layout": "name"}}` (show that layout in this window; applied
+  before `focus`), or `{"client": {"focus": {"view": "view-id"}}}`. These fields may be combined.
   Per client and temporary; clients refuse terminal views as popups. `focus` leaves zoom and focuses an already
   visible view after the command's layout changes; it never opens a view or changes another client's focus.
   Missing/hidden targets are ignored. Older clients ignore unknown reply fields. Extensions choose what to show;
@@ -833,7 +845,13 @@ and sets the prefix; the active profile is `doc/keys/profile`, and the list is l
   everything else, so extensions follow the theme.
 - `ui.notify {text, style?}`: a transient message every client shows briefly (event `notify`). Not state.
 - Status-bar menu items may name a live `view`; clients take the label, icon and style from its content
-  (`{label, icon?, style}`), hiding it while the label is empty.
+  (`{label, icon?, style}`), hiding it while the label is empty. Or they may name a field of the window's own
+  context with `label_context` (`layout`, `layout_title`: the shown layout's `doc/layout/<name>.title`, else its
+  name), so each window shows its own value; `label` stays the fallback for clients without it.
+- **Per-window marks (`current_when`).** Several windows share one panel's content, so a row can't say which
+  layout is "current" for everyone. A row with `current_when: {"layout": name}` is drawn as current (accent,
+  a leading "current" badge) in a window that shows layout `name`, and plainly elsewhere and in clients
+  without the feature (`current_when` in `requires` if a panel depends on it).
 
 ### Optional list with detail (`list_detail`)
 

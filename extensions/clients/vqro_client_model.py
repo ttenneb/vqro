@@ -4,7 +4,9 @@ spec and checked against the shared fixtures `tests/fixtures/client/*.json`:
 
 - `Workspace`: the snapshot/event cache and contributions (visible menus and bindings, key precedence, gestures);
 - `rows`, `missing_for`: panel flattening and `requires`;
-- `prefix_rows`, `safe_chooser`: the shared recovery content.
+- `prefix_rows`, `safe_chooser`: the shared recovery content;
+- `Window`, `reply_layout`, `mark_current`: which layout (workspace) a window shows, its invocation context and
+  `current_when` marks.
 """
 
 BASE_FEATURES = ["items", "pages", "tree", "toolbar", "badges", "description", "menu", "input", "options", "select",
@@ -340,3 +342,105 @@ def safe_chooser(ws, selected):
     items += [{"type": "separator"}, {"id": "safe/apply", "text": "Enable selected", "command": "client.safe_mode.apply"},
               {"id": "safe/leave", "text": "Leave safe mode", "command": "client.safe_mode.leave"}]
     return {"title": "Safe mode recovery", "items": items}
+
+
+# ---- the window's layout ---------------------------------------------------------------------------------------
+
+def default_layout(ws):
+    """The shared default `workspace/active`: the layout anyone last switched to."""
+    active = ws.entries.get("workspace/active")
+    name = active.get("layout") if isinstance(active, dict) else None
+    return name if isinstance(name, str) else None
+
+
+class Window:
+    """Which layout this window shows: window state, never workspace state. It starts on the shared default and
+    then moves only on its own switches (a reply's `{"client": {"layout"}}`, `client.layout`, its own reset) or
+    when its layout is deleted (then it falls back to the default)."""
+
+    def __init__(self, pinned=None):
+        self.pinned = pinned
+
+    def _exists(self, ws, name):
+        return isinstance(name, str) and f"layout/{name}" in ws.entries
+
+    def shown(self, ws):
+        return self.pinned if self._exists(ws, self.pinned) else default_layout(ws)
+
+    def settle(self, ws):
+        """After a snapshot and every `entries` event: "Same", {"Took": name} or {"Closed": {"was", "now"}}."""
+        if self._exists(ws, self.pinned):
+            return "Same"
+        now = default_layout(ws)
+        now = now if self._exists(ws, now) else None
+        if self.pinned is not None:
+            was, self.pinned = self.pinned, now
+            return {"Closed": {"was": was, "now": now}}
+        if now is None:
+            return "Same"
+        self.pinned = now
+        return {"Took": now}
+
+    def show(self, ws, name):
+        """Show `name` here only: (True, changed) or (False, message)."""
+        if not self._exists(ws, name):
+            return False, f"no layout {name}"
+        changed, self.pinned = self.pinned != name, name
+        return True, changed
+
+    def client_layout(self, ws, args):
+        name = (args or {}).get("name") or (args or {}).get("layout")
+        if not isinstance(name, str):
+            name = default_layout(ws)
+            if name is None:
+                return False, "client.layout: no layout to show"
+        return self.show(ws, name)
+
+    def context(self, ws):
+        layout = self.shown(ws)
+        settings = ws.entries.get(f"doc/layout/{layout}") if layout else None
+        title = settings.get("title") if isinstance(settings, dict) and isinstance(settings.get("title"), str) else layout
+        return {"layout": layout, "layout_version": ws.versions.get(f"layout/{layout}") if layout else None, "layout_title": title}
+
+    def invocation_context(self, ws, ctx):
+        """The context an invocation carries: the place's own, with this window's layout when it names none."""
+        ctx = dict(ctx) if isinstance(ctx, dict) else {}
+        if ctx.get("layout") is None:
+            window = self.context(ws)
+            ctx["layout"], ctx["layout_version"] = window["layout"], window["layout_version"]
+        return ctx
+
+
+def reply_layout(command, reply):
+    """The layout a reply asks the invoking window to show (its hint), or `main` after this window's own reset."""
+    hints = reply.get("client") if isinstance(reply, dict) else None
+    layout = hints.get("layout") if isinstance(hints, dict) else None
+    if isinstance(layout, str):
+        return layout
+    return "main" if command == "vqro.layout.reset" else None
+
+
+def mark_current(value, layout):
+    """Rows with `current_when: {"layout": name}` get the accent style (unless styled) and a leading "current"
+    badge in the window showing `name`. Returns a marked copy; panel content is shared by every window."""
+    import copy
+    value = copy.deepcopy(value)
+
+    def rows(items):
+        for row in items if isinstance(items, list) else []:
+            if not isinstance(row, dict):
+                continue
+            when = row.get("current_when")
+            if layout is not None and isinstance(when, dict) and when.get("layout") == layout:
+                if row.get("style") is None:
+                    row["style"] = "accent"
+                row["badges"] = [{"text": "current", "style": "accent"}] + list(row.get("badges") or [])
+            if "children" in row:
+                rows(row["children"])
+    if isinstance(value, dict):
+        rows(value.get("items"))
+        rows(value.get("toolbar"))
+        for page in value.get("pages") or []:
+            if isinstance(page, dict):
+                rows(page.get("items"))
+    return value

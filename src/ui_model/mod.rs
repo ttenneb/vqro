@@ -6,6 +6,7 @@
 //! - `panel`: panel flattening (pages, tree, filter, toolbar), selection steps, `requires` and fallbacks.
 //! - `recovery`: the shared recovery content (prefix recovery rows and the safe-mode chooser).
 //! - `keys`: key names.
+//! - `window`: which layout (workspace) a window shows, its invocation context and `current_when` marks.
 //! - this module: client profiles and UI features declared in `hello`.
 //!
 //! Nothing here imports a terminal or rendering library.
@@ -13,6 +14,7 @@
 pub mod keys;
 pub mod panel;
 pub mod recovery;
+pub mod window;
 pub mod workspace;
 
 use serde_json::{json, Value};

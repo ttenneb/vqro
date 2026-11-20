@@ -21,9 +21,9 @@ sys.path.insert(1, os.path.dirname(HERE))  # vqro_ext.py beside the bundled exte
 import vqro_client_model as model  # noqa: E402
 from vqro_ext import Vqro, VqroError  # noqa: E402
 
-FEATURES = model.BASE_FEATURES + ["icon_names"]
+FEATURES = model.BASE_FEATURES + ["icon_names", "current_when"]
 HELP = """commands (numbers refer to the last listing):
-  show                    the active layout: tabs and numbered panes (* = focused)
+  show                    this client's layout (workspace): tabs and numbered panes (* = focused)
   focus <pane>            focus a pane; `view` then shows it
   view [<pane>|<view id>] a pane's content: panel rows numbered; terminals are named only
   do <row>[.<chip>] [<value or text>]   activate a row (or chip) of the shown panel
@@ -44,6 +44,7 @@ class TextClient:
         self.out = out
         self.lock = threading.RLock()
         self.ws = model.Workspace()
+        self.window = model.Window()  # the layout (workspace) this client shows: its own, never shared state
         self.focus = 0
         self.shown = None          # the view whose rows were listed last (a pane's view or a popup)
         self.popup = None          # a view a command asked to show (reply hint), until closed
@@ -62,6 +63,7 @@ class TextClient:
         with self.lock:
             was = self.ws.load(snap)
             self.safe_mode_changed(self.ws.safe_mode, was)
+            self.settle_window()
         try:
             self.vqro.call("events.subscribe", {"from": snap["seq"], "epoch": snap["epoch"], "partial_resources": True})
         except VqroError as e:
@@ -85,7 +87,16 @@ class TextClient:
                 self.say(f"! extension {data} failed (p lists its restart)")
             elif change == "safe_mode":
                 self.safe_mode_changed(*data)
+            elif change == "entries":
+                with self.lock:
+                    self.settle_window()
         return None
+
+    def settle_window(self):
+        settled = self.window.settle(self.ws)
+        if isinstance(settled, dict) and "Closed" in settled:
+            closed = settled["Closed"]
+            self.say(f"* workspace {closed['was']} closed; showing {closed['now']}")
 
     def safe_mode_changed(self, on, was):
         if on and not was:
@@ -101,8 +112,8 @@ class TextClient:
     # ---- layout ---------------------------------------------------------------------------------------------
 
     def active_layout(self):
-        active = self.ws.entries.get("workspace/active") or {}
-        name = active.get("layout") if isinstance(active, dict) else None
+        """This client's layout: its own choice, starting from the shared default (vqro_client_model.Window)."""
+        name = self.window.shown(self.ws)
         return name, self.ws.entries.get(f"layout/{name}") if name else None
 
     def leaves(self):
@@ -196,7 +207,7 @@ class TextClient:
         live = self.ws.live.get(view)
         if isinstance(live, dict):
             value.update(live)
-        return value
+        return model.mark_current(value, self.window.shown(self.ws))
 
     def icon(self, icon):
         """A row's icon as text: the active icon set's glyph for its names (feature icon_names), else its own text."""
@@ -277,12 +288,18 @@ class TextClient:
         if name.startswith("client."):
             return self.client_command(name, args or {}, ctx)
         args = dict(args) if isinstance(args, dict) else {}
-        args["context"] = ctx
+        args["context"] = self.window.invocation_context(self.ws, ctx)
         try:
             reply = self.vqro.call("command.invoke", {"name": name, "args": args})
         except VqroError as e:
             return [f"{name}: {e} ({e.kind})"]
         out = [f"{name}: done"]
+        layout = model.reply_layout(name, reply)
+        if layout:
+            ok, changed = self.window.show(self.ws, layout)
+            if ok and changed:
+                self.focus = 0
+                out.append(f"showing layout {layout}")
         hints = (reply or {}).get("client") if isinstance(reply, dict) else None
         if isinstance(hints, dict):
             if hints.get("close"):
@@ -329,6 +346,12 @@ class TextClient:
             return ["Safe-mode choices applied; enabled declarations were not changed"]
         if name == "client.safe_mode.leave":
             return self.invoke("vqro.safe_mode", {"on": False}, ctx)
+        if name == "client.layout":
+            ok, result = self.window.client_layout(self.ws, args)
+            if not ok:
+                return [result]
+            self.focus = 0
+            return self.show()
         if name == "client.none":
             return []
         return [f"{name}: not supported by this client"]

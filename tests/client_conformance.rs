@@ -3,7 +3,7 @@
 //! `clients/`) check themselves against the same files. `VQRO_FIXTURE_UPDATE=1 cargo test --test
 //! client_conformance` rewrites the `expect` fields from the model; review the diff before committing.
 use serde_json::{json, Value};
-use vqro::ui_model::{panel, recovery, workspace::{resolve, Workspace}};
+use vqro::ui_model::{panel, recovery, window::{self, Settled, Window}, workspace::{resolve, Workspace}};
 
 fn fixture(name: &str) -> (std::path::PathBuf, Value) {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/client").join(name);
@@ -79,5 +79,40 @@ fn recovery_content_is_the_shared_definition() {
         let selected = case["selected"].as_array().into_iter().flatten().filter_map(Value::as_str).map(String::from).collect();
         let chooser = ws.safe_mode.then(|| recovery::safe_chooser(&ws, &selected));
         json!({"prefix": rows, "safe_mode_chooser": chooser})
+    });
+}
+
+#[test]
+fn windows_show_their_own_layout_like_the_model() {
+    check("window.json", |case| {
+        let mut ws = workspace(&case["snapshot"]);
+        let mut win = Window::default();
+        let settled = |s: Settled| match s {
+            Settled::Same => json!("Same"),
+            Settled::Took(l) => json!({"Took": l}),
+            Settled::Closed { was, now } => json!({"Closed": {"was": was, "now": now}}),
+        };
+        let result = |r: Result<bool, String>| match r { Ok(changed) => json!({"ok": changed}), Err(e) => json!({"error": e}) };
+        let steps: Vec<Value> = case["steps"].as_array().unwrap().iter().map(|step| {
+            let out = match step["do"].as_str().unwrap() {
+                "start" => json!({"settled": settled(win.settle(&ws))}),
+                "event" => { ws.apply(&step["event"]); json!({"settled": settled(win.settle(&ws))}) }
+                "show" => json!(result(win.show(&ws, step["layout"].as_str().unwrap()))),
+                "client.layout" => json!(result(win.client_layout(&ws, &step["args"]))),
+                "reply" => {
+                    let hinted = window::reply_layout(step["command"].as_str().unwrap(), &step["reply"]);
+                    if let Some(l) = &hinted { let _ = win.show(&ws, l); }
+                    json!({"reply_layout": hinted})
+                }
+                "invoke" => json!({"ctx": win.invocation_context(&ws, step["ctx"].clone())}),
+                "context" => json!({"context": win.context(&ws)}),
+                "mark" => { let mut p = step["panel"].clone(); window::mark_current(&mut p, win.shown(&ws).as_deref()); json!({"panel": p}) }
+                other => panic!("unknown step {other}"),
+            };
+            let mut out = out;
+            out["shown"] = json!(win.shown(&ws));
+            out
+        }).collect();
+        json!(steps)
     });
 }

@@ -59,6 +59,35 @@ class Conformance(unittest.TestCase):
                 chooser = model.safe_chooser(ws, set(case.get("selected") or [])) if ws.safe_mode else None
                 self.assertEqual({"prefix": prefix, "safe_mode_chooser": chooser}, case["expect"])
 
+    def test_window(self):
+        for case in fixture("window.json")["cases"]:
+            with self.subTest(case["name"]):
+                ws, win, got = workspace(case["snapshot"]), model.Window(), []
+                for step in case["steps"]:
+                    do = step["do"]
+                    if do == "start":
+                        out = {"settled": win.settle(ws)}
+                    elif do == "event":
+                        ws.apply(step["event"])
+                        out = {"settled": win.settle(ws)}
+                    elif do in ("show", "client.layout"):
+                        ok, r = win.show(ws, step["layout"]) if do == "show" else win.client_layout(ws, step["args"])
+                        out = {"ok": r} if ok else {"error": r}
+                    elif do == "reply":
+                        hinted = model.reply_layout(step["command"], step["reply"])
+                        if hinted:
+                            win.show(ws, hinted)
+                        out = {"reply_layout": hinted}
+                    elif do == "invoke":
+                        out = {"ctx": win.invocation_context(ws, step["ctx"])}
+                    elif do == "context":
+                        out = {"context": win.context(ws)}
+                    elif do == "mark":
+                        out = {"panel": model.mark_current(step["panel"], win.shown(ws))}
+                    out["shown"] = win.shown(ws)
+                    got.append(out)
+                self.assertEqual(got, case["expect"])
+
     def test_key_names_follow_the_spec(self):
         for raw, want in (("C-space", "C-Space"), ("Ctrl-Shift-Left", "C-S-Left"), ("C-Q", "C-q"), ("S-a", None), ("Hyper-x", None),
                           ("f12", "F12"), ("F13", None), ("C--", "C--"), ("M-x", "M-x"), (" ", "Space"), ("BackTab", "BackTab")):
