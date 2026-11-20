@@ -161,6 +161,19 @@ did not change (an edit of a held record) would then never arrive. The wake cont
   - The Pi plugin reconnects and resubscribes after a core restart, and reconciles again when its consumer is
     fenced. Tested by restarting the core under a running Pi.
   - A connection whose hello or subscribe fails is dropped, never kept half-open.
+- **Lifetimes:** no helper outlives what it serves.
+  - The Claude Code hook (`hook` mode) is bounded by 3 s call deadlines.
+  - The idle waiter (`wait` mode) exits when its parent Claude Code goes away (checked every loop, at most ~5 s
+    apart).
+  - The Pi plugin starts no processes. Its idle core connection and its reconnect timer never keep Pi alive; only a
+    call in flight does, for at most 5 s.
+  - After `session_shutdown` the Pi plugin cancels its reconnect timer and destroys the connection.
+  - Pi 1.5.2 exits explicitly in RPC and print mode, so even the earlier plugin never kept it running. These are
+    hardening for hosts that wait for the event loop to drain.
+  - Tested: print mode exits after its answer. With the core gone and a reconnect pending, RPC Pi exits promptly when
+    its input closes and never reconnects afterwards.
+  - Test harnesses must drain Pi's stdout: Node writes to a pipe synchronously, so an undrained pipe blocks Pi mid-run.
+    That was the cause of an intermittent "lost take, window moved on" failure.
 - **Report order (Pi):** `read` is sent only after its `inserted` report has completed.
 - **Evidence nonce:** 128 bits from the OS. If randomness fails, nothing is handed over and the claims are released.
 - **Op ids:** report op ids are deterministic per claim and stage, and the command prefix is configurable

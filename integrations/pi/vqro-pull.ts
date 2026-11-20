@@ -84,8 +84,9 @@ function plugin(pi: any, hooks: TestHooks) {
     return new Promise((resolve, reject) => {
       if (!conn) return reject(new Error("transport: core not connected"));
       const id = nextId++;
-      const timer = setTimeout(() => { waiting.delete(id); reject(new Error("transport: timeout")); }, CALL_MS);
+      const timer = setTimeout(() => { waiting.delete(id); idle(); reject(new Error("transport: timeout")); }, CALL_MS);
       waiting.set(id, { resolve, reject, timer });
+      conn.ref(); // a call in flight keeps Pi alive (Pi awaits our handlers), at most CALL_MS
       conn.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
     });
   }
@@ -113,15 +114,26 @@ function plugin(pi: any, hooks: TestHooks) {
 
   const uncertain = (e: unknown) => /transport:|timeout|unavailable|indeterminate/.test(String(e));
 
+  // Nothing the plugin holds keeps Pi alive beyond a call in flight: the idle connection and the reconnect timer
+  // are unref'd, and nothing reconnects after session_shutdown.
+  function idle() {
+    if (!waiting.size) conn?.unref();
+  }
+  let reconnectTimer: NodeJS.Timeout | undefined;
   function scheduleReconnect() {
-    if (stopped) return;
+    if (stopped || reconnectTimer) return;
     const delay = backoff;
     backoff = Math.min(backoff * 2, 30000);
     log("reconnect_scheduled", { delay });
-    setTimeout(() => { void ensureConnected().catch(() => scheduleReconnect()); }, delay);
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = undefined;
+      if (!stopped) void ensureConnected().catch(() => scheduleReconnect());
+    }, delay);
+    reconnectTimer.unref();
   }
 
   async function ensureConnected() {
+    if (stopped) throw new Error("transport: plugin stopped");
     if (conn) return;
     if (connecting) return connecting;
     connecting = (async () => {
@@ -138,6 +150,7 @@ function plugin(pi: any, hooks: TestHooks) {
             const w = waiting.get(row.id)!;
             waiting.delete(row.id);
             clearTimeout(w.timer);
+            idle();
             row.error ? w.reject(new Error(`${row.error.data?.kind ?? "error"}: ${row.error.message}`)) : w.resolve(row.result);
           } else if (row.method === "event" && row.params?.type === "view.content" && row.params?.data?.view === WAKE_VIEW) {
             const count = row.params?.data?.content?.wake?.pending?.[AGENT!]; // counts only; never message content
@@ -168,6 +181,7 @@ function plugin(pi: any, hooks: TestHooks) {
         log("connect_failed", { error: String(e) });
         throw e;
       }
+      idle();
       backoff = 500;
       epoch = "";
       pending = 1; // unknown after a gap: one take
@@ -365,5 +379,11 @@ function plugin(pi: any, hooks: TestHooks) {
     void pullIdle();
   });
 
-  pi.on("session_shutdown", async () => { stopped = true; const c = conn; conn = undefined; c?.end(); });
+  pi.on("session_shutdown", async () => {
+    stopped = true;
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = undefined; }
+    const c = conn;
+    conn = undefined;
+    c?.destroy();
+  });
 }
