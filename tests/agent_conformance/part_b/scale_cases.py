@@ -159,8 +159,8 @@ async def budgets_are_atomic_and_outcomes_compact(ctx):
                                     args={"delivery": recipe["delivery"]})
     steps = (record.get("attempt") or {}).get("steps") or []
     ctx.check(all(len(canonical(step)) <= 1024 for step in steps), "every stored recipe step is at most 1 KiB", steps=steps)
-    ctx.check(len(steps) == 3, "the 3-step recipe ran all its steps, each with a compact outcome "
-              "(agent.queue needs `epoch`, agent-v0 §6)", state=record.get("state"), reason=record.get("reason"),
+    ctx.check(len(steps) == 3, "the 3-step recipe retains every issued step with its compact outcome",
+              state=record.get("state"), reason=record.get("reason"),
               steps=steps, queue_invocations=[row["args"] for row in invocations(ctx, op="agent.queue")])
 
 

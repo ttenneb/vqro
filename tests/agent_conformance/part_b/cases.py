@@ -22,6 +22,16 @@ def case(identifier):
     return register
 
 
+def inbox_dispatch_origin(origin, principal):
+    """C2 core transport identity stays separate from the protected inbox sender assertion."""
+    if not isinstance(origin, dict) or not isinstance(principal, str) or not principal:
+        return False
+    sender = origin.get("sender")
+    return (origin.get("principal") == "extension:coord" and origin.get("actor") == "extension:coord"
+            and isinstance(sender, dict) and sender.get("principal") == principal
+            and sender.get("provenance") == "inbox-record")
+
+
 def invocations(ctx, *, delivery=None, after=0, op=None):
     rows = ctx.native.records("invoke", after=after)
     return [row for row in rows if (op is None or row["op"] == op) and
@@ -156,8 +166,8 @@ async def quotes_never_impersonate_the_sender(ctx):
     await ctx.scope("resume","agent:"+ctx.agents[1]["id"]);await settled(ctx,sent["delivery"])
     model=next(row for row in ctx.native.records("model_request") if row.get("delivery")==sent["delivery"])
     ctx.check(record["origin"]["principal"]==principal and record["origin"]["kind"]=="agent" and
-              model["role"]=="user" and model["sender"]["principal"]==principal and model["quoted_claim"]==quote,
-              "effective sender remains A; model receives owner quote only as a claim",model=model)
+              model["role"]=="user" and inbox_dispatch_origin(model["sender"], principal) and model["quoted_claim"]==quote,
+              "inbox sender assertion remains A; core actor stays coord and owner quote remains a claim",model=model)
     caps=deepcopy(ctx.agents[2]["data"]["agent"]["caps"]);caps["rev"]+=1;caps["agent.send"]["origin"]=[]
     await ctx.native_set(2,caps=caps)
     unsupported=await ctx.send(target=ctx.agents[2]["id"],peer=sender,quoted=quote,render=["attributed_user"])
@@ -443,8 +453,8 @@ async def grant_survives_restart(ctx):
     worker=await ctx.connect(principal);sent=await ctx.send(peer=worker)
     await ctx.scope("resume");await settled(ctx,sent["delivery"])
     calls=invocations(ctx,delivery=sent["delivery"])
-    ctx.check(len(calls)==1 and calls[0]["args"]["origin"]["principal"]==principal,
-              "same declared principal uses its retained grant, without owner rebinding")
+    ctx.check(len(calls)==1 and inbox_dispatch_origin(calls[0]["args"]["origin"], principal),
+              "same inbox sender uses its retained grant via the core-stamped coord actor, without owner rebinding")
 
 
 @case("G7")
@@ -881,8 +891,8 @@ async def handle_grants_pin_both_ends(ctx):
             "value":{"who":handle,"on":"agent:"+ctx.agents[0]["id"],"can":["send:start"]}},{"invalid"})
     await ctx.scope("resume");await settled(ctx,sent["delivery"])
     calls=invocations(ctx,delivery=sent["delivery"])
-    ctx.check(len(calls)==1 and calls[0]["args"]["origin"]["principal"]==original_principal,
-              "only original bound principal reaches the original exact agent")
+    ctx.check(len(calls)==1 and inbox_dispatch_origin(calls[0]["args"]["origin"], original_principal),
+              "only original bound inbox sender reaches the exact agent via the core-stamped coord actor")
     from .context import PublicCoordination
     sub=PublicCoordination(ctx.root/"g",ctx.manifest,ctx.vqro)
     try:
