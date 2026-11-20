@@ -641,8 +641,12 @@ class Agents:
                          # [Answer…] (feature actions; mockup Screen D), the same in the menu for other clients.
                          "actions": [{"text": "Answer…", "command": "agents.answer", "args": {"resource": rid}}],
                          "menu": [{"label": "Answer…", "command": "agents.answer", "args": {"resource": rid}}]})
+        # The pane's one settings button, ⚙ (agents.pane: view filters, agent settings, bridge terminal, stop). The
+        # user's icon set draws it (a bare "⚙" is ambiguous width: its highlight came out uneven).
+        gear = {"text": "", "icon": {"name": "settings", "text": "⚙"}, "command": "agents.pane", "args": {"resource": rid}}
         modes = self.modes(r)
-        if modes and r.get("available") and not ended(r):
+        composing = bool(modes and r.get("available") and not ended(r))
+        if composing:
             names = {"start": "start", "boundary": "steer", "settle": "follow-up", "admit": "admit (weaker)",
                      "preempt": "interrupt and send"}
             # admit stays available to agents and the API (agents.send mode admit), not as a chip for the human (mockup).
@@ -653,9 +657,14 @@ class Agents:
                          "placeholder": f"Write a message to {name}…", "rows": COMPOSER_ROWS, "max_bytes": 65536, "submit": "Enter",
                          "autofocus": True, "requires": ["composer"], "send_button": False,  # Enter sends (the human, relay-11)
                          # One input-settings button (the human, relay-11): the delivery mode now, more input options later.
-                         "controls": [{"type": "select", "arg": "mode", "text": "Input", "value": "auto", "options": options}],
+                         # Then the pane's ⚙ (the human, 17:00: no top bar; the settings button at the bottom).
+                         "controls": [{"type": "select", "arg": "mode", "text": "Input", "value": "auto", "options": options},
+                                      {"type": "button", **gear}],
                          "fallback": {"text": f"Message {name}…", "command": "agents.send",
                                       "args": {"resource": rid, "mode": "auto"}, "input": "Message", "multiline": True}})
+        # Clients without composer buttons (or a pane with no message box) get the ⚙ as a one-chip row at the bottom.
+        rows.append({"type": "chips", "id": "gear", "pin": "bottom", "text": "Pane options", "chips": [gear],
+                     **({"requires_absent": ["composer_buttons"]} if composing else {})})
         return rows
 
     def conversation_rows(self, r):
@@ -1355,8 +1364,6 @@ class Agents:
         if conversation is not None:
             # The agent's own item stream: the conversation is drawn here (agent pane, K3 phase 2).
             content = {**self.frame(r), "follow": True, "search": True,
-                       # One small ⚙ (the human, relay-11); the filters, settings, bridge terminal and Stop are in it.
-                       "toolbar": [{"type": "chips", "chips": [{"text": "⚙", "command": "agents.pane", "args": {"resource": r["id"]}}]}],
                        "items": [*conversation, *self.bottom_rows(r),
                 agent_transcript.facts_footer(agent_facts(r), plain(str(r.get("name") or r["id"])))]}
         elif sources:

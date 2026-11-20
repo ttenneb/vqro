@@ -6,8 +6,9 @@
 - An agent with a terminal host has a **Bridge terminal** action. The sidebar groups that terminal as a collapsed child of the agent instead of showing it as an unrelated terminal.
 - **Stop agent…** (agent pane menu, sidebar agent row menu, Agents list row menu) ends an agent the runtime-neutral way: it kills the agent's host (bridge) terminal, which ends the runtime process inside it. It first asks for confirmation in a popup naming that terminal; the confirmed action rechecks that the host is unchanged and reports the honest `resource.kill` outcome (accepted is not "ended"). Agents with no host terminal known to vqro are not stopped; the message says why (stop them where they run). Nothing is resent and undo can't revive the process.
 - The agent pane (an agent with an item stream) keeps its chrome small (the human, relay-11): the frame title is
-  name · folder, with the reported state at its right end (`title_right`). The only button above the conversation
-  is **⚙** (`agents.pane`): a popup with the view filters (thinking, tools, system, senders, layout, summary fields,
+  name · folder, with the reported state at its right end (`title_right`). Nothing sits above the conversation. The only
+  button is **⚙** at the bottom, beside the composer's Input button (a composer `button` control; a one-chip row at
+  the bottom on clients without composer buttons) and `agents.pane` opens a popup with the view filters (thinking, tools, system, senders, layout, summary fields,
   make default; the pane keys t/T/s still cycle them), then Agent settings…, Bridge terminal and Stop agent… (also in
   the pane menu). The composer has one **Input** button (the delivery mode: auto, steer, follow-up) and Enter sends.
   A file a tool call names opens in an editor from that tool line's menu (`links.open`, only on a click).

@@ -450,7 +450,7 @@ class AgentPane(unittest.TestCase):
 
     def gear(self):
         """Open the pane's ⚙ popup; its rows."""
-        chip = self.core.live["agents-r2"]["toolbar"][0]["chips"][0]
+        chip = next(r for r in self.core.live["agents-r2"]["items"] if r.get("id") == "gear")["chips"][0]
         reply = self.core.handlers[chip["command"]](dict(chip["args"]))
         return self.core.live[reply["client"]["popup"]["view"]]["items"]
 
@@ -493,10 +493,13 @@ class AgentPane(unittest.TestCase):
         self.agents.event("resource", {"id": "r2"})
         self.feed(snapshot(CONVERSATION))
         pane = self.core.live["agents-r2"]
-        items, toolbar = pane["items"], pane["toolbar"]
+        items = pane["items"]
         self.assertEqual((pane["title"], pane["title_right"], pane["title_right_style"]), ("Pi r2 · ~/Projects/site", "● idle", "ok"))
-        self.assertEqual(toolbar, [{"type": "chips", "chips": [{"text": "⚙", "command": "agents.pane", "args": {"resource": "r2"}}]}],
-                         "one small settings button and nothing else (filters fold into it: the human, relay-11)")
+        self.assertNotIn("toolbar", pane, "no top bar at all (the human, 17:00)")
+        gear = {"text": "", "icon": {"name": "settings", "text": "⚙"}, "command": "agents.pane", "args": {"resource": "r2"}}
+        row = next(r for r in items if r.get("id") == "gear")
+        self.assertEqual((row["chips"], row["pin"], "requires_absent" in row), ([gear], "bottom", False),
+                         "no message box here: the ⚙ is a bottom row for every client")
         self.assertFalse(any(r.get("text") in ("Bridge terminal", "Agent settings…") for r in items), "no old panel rows")
         gear = self.gear()
         self.assertEqual([r.get("text") for r in gear], ["View", "Thinking: show", "Tools: show", "System: show", "Senders: all",
@@ -516,6 +519,10 @@ class AgentPane(unittest.TestCase):
         self.assertEqual((composer["pin"], composer["autofocus"], composer["submit"], composer["args"]),
                          ("bottom", True, "Enter", {"resource": "r2", "caps_rev": 2}))
         self.assertEqual((composer["controls"][0]["type"], composer["controls"][0]["value"]), ("select", "auto"), "one input-settings button")
+        self.assertEqual(composer["controls"][1], {"type": "button", "text": "", "icon": {"name": "settings", "text": "⚙"},
+                                                   "command": "agents.pane", "args": {"resource": "r2"}}, "⚙ beside Input")
+        stand_in = next(r for r in items if r.get("id") == "gear")
+        self.assertEqual(stand_in["requires_absent"], ["composer_buttons"], "older clients: a ⚙ row instead, never both")
         self.assertIs(composer["send_button"], False, "no Send button: Enter sends")
         self.assertEqual([c["value"] for c in composer["controls"][0]["options"]], ["auto", "boundary", "settle"], "steer before follow-up")
         self.core.handlers["agents.send"](dict(composer["args"], mode="settle", text="later"))  # declared modes still send
