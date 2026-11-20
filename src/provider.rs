@@ -181,6 +181,68 @@ pub struct IdentityRecord {
 struct Persisted {
     next: u64,
     ids: BTreeMap<String, IdentityRecord>,
+    reservations:Reservations,
+}
+
+#[cfg(test)]
+#[path="identity_reservation_tests.rs"]
+mod identity_reservation_tests;
+
+pub const IDENTITY_RESERVATIONS:usize=4096;
+const RESERVATION_BYTES:usize=2048;
+
+/// Bounded identity hints, never execution/evidence state. Persisted with the active map/high-water. Both indexes share the full identity.
+/// Only cached-forget creates a hint; durable reappearance consumes it after adoption, not before IO.
+#[derive(Default,Clone)]
+struct Reservations {
+    identities:std::collections::HashMap<std::sync::Arc<Identity>,(String,u64,usize)>,
+    oldest:BTreeMap<u64,std::sync::Arc<Identity>>,next:u64,bytes:usize,
+}
+impl Reservations {
+    fn get(&self,identity:&Identity)->Option<&str>{self.identities.get(identity).map(|row|row.0.as_str())}
+    fn remove(&mut self,identity:&Identity){if let Some((_,order,bytes))=self.identities.remove(identity){self.oldest.remove(&order);self.bytes-=bytes;}}
+    fn remember(&mut self,identity:Identity,id:String){
+        self.remove(&identity);
+        let bytes=crate::limits::encoded_bytes(&serde_json::json!({"identity":identity,"id":id}));
+        if bytes>RESERVATION_BYTES{return;} // An uncachable hint must never refuse ordinary registration/forget.
+        if self.next==u64::MAX { // Renumber order, never silently evict a surviving reservation.
+            let ordered=self.oldest.values().cloned().collect::<Vec<_>>();self.oldest.clear();
+            for (order,identity) in ordered.into_iter().enumerate(){self.identities.get_mut(&identity).unwrap().1=order as u64;self.oldest.insert(order as u64,identity);}
+            self.next=self.identities.len() as u64;
+        }
+        while self.identities.len()>=IDENTITY_RESERVATIONS {let(_,old)=self.oldest.pop_first().unwrap();self.remove(&old);}
+        let identity=std::sync::Arc::new(identity);let order=self.next;self.next+=1;self.bytes+=bytes;
+        self.oldest.insert(order,identity.clone());self.identities.insert(identity,(id,order,bytes));
+    }
+}
+
+impl Serialize for Reservations {
+    fn serialize<S:serde::Serializer>(&self,serializer:S)->Result<S::Ok,S::Error>{
+        use serde::ser::SerializeSeq;
+        #[derive(Serialize)]struct Row<'a>{identity:&'a Identity,id:&'a str}
+        let mut rows=serializer.serialize_seq(Some(self.oldest.len()))?;
+        for identity in self.oldest.values(){rows.serialize_element(&Row {identity,id:&self.identities[identity].0})?;}
+        rows.end()
+    }
+}
+impl<'de> Deserialize<'de> for Reservations {
+    fn deserialize<D:serde::Deserializer<'de>>(deserializer:D)->Result<Self,D::Error>{
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value=Reservations;
+            fn expecting(&self,f:&mut std::fmt::Formatter)->std::fmt::Result{f.write_str("bounded ordered resource identity reservations")}
+            fn visit_seq<A:serde::de::SeqAccess<'de>>(self,mut rows:A)->Result<Self::Value,A::Error>{
+                #[derive(Deserialize)]struct Row {identity:Identity,id:String}
+                let mut cache=Reservations::default();let mut ids=std::collections::HashSet::new();
+                while let Some(row)=rows.next_element::<Row>()? {
+                    if cache.identities.len()>=IDENTITY_RESERVATIONS||cache.get(&row.identity).is_some()||!ids.insert(row.id.clone())||crate::limits::encoded_bytes(&serde_json::json!({"identity":row.identity,"id":row.id}))>RESERVATION_BYTES {return Err(serde::de::Error::custom("invalid/duplicate/oversized resource identity reservation"));}
+                    cache.remember(row.identity,row.id);
+                }
+                Ok(cache)
+            }
+        }
+        deserializer.deserialize_seq(Visitor)
+    }
 }
 
 pub struct IdentityMap {
@@ -210,13 +272,18 @@ impl IdentityMap {
         #[serde(untagged)]
         enum Record { Current(IdentityRecord), Legacy((String, String)) }
         #[derive(Deserialize)]
-        struct File { next: u64, ids: BTreeMap<String, Record> }
-        let mut state = Persisted { next: 1, ids: BTreeMap::new() };
+        struct File { next: u64, ids: BTreeMap<String, Record>,#[serde(default)] reservations:Reservations }
+        let mut state = Persisted { next: 1, ids: BTreeMap::new(),reservations:Reservations::default() };
         if let Some(path) = &path {
             match std::fs::read(path) {
                 Ok(bytes) => {
                     let saved: File = serde_json::from_slice(&bytes)?;
-                    state.next = saved.next.max(1);
+                    state.next = saved.next.max(1);state.reservations=saved.reservations;
+                    for (id,_,_) in state.reservations.identities.values() {
+                        let number:u64=id.strip_prefix('r').ok_or_else(||anyhow::anyhow!("invalid reserved resource id"))?.parse()?;
+                        state.next=state.next.max(number.checked_add(1).ok_or_else(||anyhow::anyhow!("resource id exhausted"))?);
+                        anyhow::ensure!(!saved.ids.contains_key(id),"reserved resource id is also active");
+                    }
                     for (id, record) in saved.ids {
                         let record = match record {
                             Record::Current(record) => record,
@@ -244,6 +311,7 @@ impl IdentityMap {
             map.by_provider.entry(record.identity.provider.clone()).or_default().insert(id.clone());
             if map.by_identity.insert(record.identity.clone(),id.clone()).is_some() || map.by_reference.insert((record.identity.provider.clone(),record.identity.reference.clone()),id.clone()).is_some() {anyhow::bail!("duplicate active resource identity/reference");}
         }
+        anyhow::ensure!(map.state.reservations.identities.keys().all(|identity|!map.by_identity.contains_key(identity.as_ref())),"reserved identity is also active");
         Ok(map)
     }
 
@@ -286,7 +354,8 @@ impl IdentityMap {
     pub fn lookup(&self,identity:&Identity)->Option<&str>{self.by_identity.get(identity).map(String::as_str)}
 
     /// One candidate, one durable replace, then adoption. No candidate id escapes a failed write.
-    pub fn batch(&mut self,identities:&[Identity],mut remove:impl FnMut(&Identity)->bool)->Result<IdentityBatch,RpcError>{
+    pub fn batch(&mut self,identities:&[Identity],remove:impl FnMut(&Identity)->bool)->Result<IdentityBatch,RpcError>{self.batch_inner(identities,remove,false)}
+    fn batch_inner(&mut self,identities:&[Identity],mut remove:impl FnMut(&Identity)->bool,reserve_removed:bool)->Result<IdentityBatch,RpcError>{
         let mut candidate=self.state.clone();let mut exact=self.by_identity.clone();let mut references=self.by_reference.clone();
         let mut result=IdentityBatch{ids:Vec::with_capacity(identities.len()),replaced:Vec::new(),removed:Vec::new(),uncertain:None};
         let mut changed=false;
@@ -294,10 +363,14 @@ impl IdentityMap {
             if let Some(id)=exact.get(identity){result.ids.push(id.clone());continue;}
             let reference=(identity.provider.clone(),identity.reference.clone());
             if let Some(old)=references.remove(&reference) {if let Some(record)=candidate.ids.remove(&old){exact.remove(&record.identity);}result.replaced.push(old);}
-            let id=format!("r{}",candidate.next);candidate.next=candidate.next.checked_add(1).ok_or_else(||RpcError::new("io","resource ids exhausted"))?;
+            let id=if let Some(id)=candidate.reservations.get(identity).filter(|id|!candidate.ids.contains_key(*id)) {
+                id.to_owned()
+            }else{let id=format!("r{}",candidate.next);candidate.next=candidate.next.checked_add(1).ok_or_else(||RpcError::new("io","resource ids exhausted"))?;id};
+            candidate.reservations.remove(identity);
             candidate.ids.insert(id.clone(),IdentityRecord{identity:identity.clone(),retired:false});exact.insert(identity.clone(),id.clone());references.insert(reference,id.clone());result.ids.push(id);changed=true;
         }
-        candidate.ids.retain(|id,record|{if remove(&record.identity){result.removed.push(id.clone());changed=true;false}else{true}});
+        let reservations=&mut candidate.reservations;
+        candidate.ids.retain(|id,record|{if remove(&record.identity){if reserve_removed {reservations.remember(record.identity.clone(),id.clone());}result.removed.push(id.clone());changed=true;false}else{true}});
         if changed || self.needs_sync {result.uncertain=self.commit(candidate)?;}
         Ok(result)
     }
@@ -313,6 +386,13 @@ impl IdentityMap {
     pub fn retire(&mut self, predicate: impl FnMut(&Identity) -> bool) -> Result<(Vec<String>, Option<RpcError>), RpcError> {
         let batch=self.batch(&[],predicate)?;Ok((batch.removed,batch.uncertain))
     }
+    /// Unlike native forget/end, cached retirement may recover the EXACT identity while this hint survives.
+    /// On clean failure no hint is created; uncertain retirement follows the actual adopted candidate.
+    pub fn forget_cached(&mut self,identity:&Identity)->Result<(Vec<String>,Option<RpcError>),RpcError>{
+        let batch=self.batch_inner(&[],|candidate|candidate==identity,true)?;
+        Ok((batch.removed,batch.uncertain))
+    }
+    pub fn reservation_stats(&self)->serde_json::Value {serde_json::json!({"count":self.state.reservations.identities.len(),"bytes":self.state.reservations.bytes,"max_entries":IDENTITY_RESERVATIONS,"max_entry_bytes":RESERVATION_BYTES,"persistent":true})}
     #[cfg(test)] pub(crate) fn writes(&self)->usize{self.writes}
     #[cfg(test)] pub(crate) fn set_writer(&mut self,writer:crate::store::DurableWriter){self.writer=writer;}
 }

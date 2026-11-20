@@ -415,15 +415,16 @@ session-allowlist policy below; no provider is privileged as essential.
 `terminal.exit {exit_code:true|false}` declares whether numeric exit codes are natively reportable; absent/unknown
 parameters imply no numeric-code guarantee. Never manufacture a code from an unknown reason.
 
-A resource's identity is `(provider, instance, backend_ref, incarnation)`. IDs never reuse a retired identity's id.
+A resource's identity is `(provider, instance, backend_ref, incarnation)`. An ID is never rebound to a different
+identity. Native retirement removes it permanently; cached forgetting may reserve that EXACT identity as below.
 Herdr's instance is the stable `hello.core.id` (not pid/uptime); `created_ms` identifies a terminal incarnation.
 The fake gets a random instance per start. Instance/incarnation changes retire old ids and emit
 `resource.removed {id, reason: {reason: "replaced"}}`; an authoritative inventory removes absent identities with
 `reason: {reason: "closed"}`. Views/layouts are never rebound automatically. A disconnect instead keeps known facts
 with `available: false, stale: true`; the same instance and identity returns with its original id after fresh facts.
 
-Identity reservations and the monotonic allocation high-water mark are durable before publication. Retired
-records are dropped, not retained as a growing tombstone table. Opening old files accounts for every saved id
+Active mappings, bounded cached-forget reservations and the monotonic allocation high-water mark are durable
+before publication. Native-retired records are dropped, not retained as a growing tombstone table. Opening old files accounts for every saved id
 (including retired and legacy records) before pruning them, so restart cannot reuse or rebind an id. Active tuple
 lookups are indexed. A native inventory or wire sync chunk uses one candidate/identity-map write, including
 final-chunk removals, before publication; failed batches retain bounded pending facts. Host credential expiry is
@@ -501,7 +502,22 @@ any connected client may use them, as with every other agent op.
 fresh durable identity bookkeeping and a `resource.removed` event. Available resources reject with `invalid`;
 a reconnect that wins the race therefore cancels cached forgetting. No backend capability is required, no native
 operation is dispatched, and the backend program/terminal is neither killed nor forgotten. Independent later
-observations may create a fresh resource id. This is not a fallback for native `resource.forget`; older cores
+observations of the exact full identity reclaim the original resource id while its reservation survives.
+
+The core keeps at most4096 reservations of at most2KiB encoded each (≤8MiB logical encoded records). The complete
+identity and rN are stored in oldest-forgotten-first order with the existing `resources.json` active map/high-water,
+using ONE existing atomic durable replacement. Reservations survive core restarts; oldest entries are evicted only
+at the bound. An oversized hint is not retained but never refuses registration/forget. Eviction or a different
+provider/instance/ref/incarnation produces a fresh monotonic rN inheriting no old identity. Native forget, native
+inventory removals and replacement retirements NEVER create reservations. Only cached-forget does. A clean
+write failure changes neither active mappings nor reservations; uncertain post-rename adoption updates both and
+requires the existing durability confirmation, never replay. Reappearance consumes its hint only after actual
+adoption. Old files without the optional reservations array load unchanged; malformed/duplicate/reserved-active
+collisions fail closed instead of rebinding authority. `workspace.snapshot.identity_reservations` reports count,
+encoded bytes, limits and `persistent:true` (not private RSS). This is identity bookkeeping only: no pause, membership,
+grants, mail or execution state is inferred/changed. Extensions still own restart-held/paused policy.
+
+This is not a fallback for native `resource.forget`; older cores
 reject the distinct unknown method rather than accidentally executing a native effect.
 
 The retention extension uses this mechanism only on an observed end: an unavailable agent whose host (bridge)

@@ -287,7 +287,7 @@ impl Core {
 
     pub fn capture_snapshot(&self)->CapturedSnapshot {
         CapturedSnapshot {
-            header:json!({"epoch":self.epoch,"seq":self.seq,"operational":self.operational.summaries(),"recovery_notice":self.store.recovery_notice(),
+            header:json!({"epoch":self.epoch,"seq":self.seq,"operational":self.operational.summaries(),"identity_reservations":self.identities.reservation_stats(),"recovery_notice":self.store.recovery_notice(),
                 "commands":self.commands.values().map(|c|c.to_json()).collect::<Vec<_>>(),
                 "extensions":self.extension_states(),
                 "backend_notice":self.backend_notice(),"safe_mode":self.safe_mode,"safe_mode_allow":self.safe_mode_allow,"provider_extensions":self.provider_extensions}),
@@ -474,7 +474,7 @@ impl Core {
         let resource=self.resources.get(id).ok_or_else(||provider::rejected("not_found",format!("no resource {id}")))?;
         if resource.available {return Err(provider::rejected("invalid","available resources require native forget"));}
         let name=resource.adapter.clone();let identity=provider::identity(&name,&resource.instance,&resource.facts);
-        let (ids,uncertain)=self.identities.retire(|i|i==&identity).map_err(|mut error| {error.data.as_mut().unwrap()["outcome"]=json!("rejected");error})?;
+        let (ids,uncertain)=self.identities.forget_cached(&identity).map_err(|mut error| {error.data.as_mut().unwrap()["outcome"]=json!("rejected");error})?;
         if let Some(pending)=self.pending_facts.get_mut(&name) {
             if pending.get(&identity.reference).is_some_and(|(instance,facts)|instance==&identity.instance&&facts.incarnation==identity.incarnation) {
                 pending.remove(&identity.reference);self.admission.remove_pending(&name,&identity.reference);
@@ -765,6 +765,15 @@ pub fn add_adapter(core: &Shared, handle: AdapterHandle, events: mpsc::Unbounded
             assert!(commands.try_recv().is_err(),"cache retirement never invokes the backend");
             assert!(c.resources.is_empty());assert!(c.providers.is_empty());assert_eq!(c.provider_metadata_bytes,0);assert!(!c.identities.active(&id));previous=id;
         }
+    }
+    #[test]
+    fn cached_agent_return_keeps_id_and_config_without_native_calls_or_pause_policy() {
+        let mut c=Core::new(Store::in_memory(),None,PathBuf::from("unused"),false).unwrap();
+        let install=|c:&mut Core| {let(tx,rx)=mpsc::unbounded_channel();c.install_provider(AdapterHandle{name:"runtime".into(),session:None,context:None,capabilities:json!({}),cmds:tx},false,false).unwrap();c.on_adapter_event("runtime",AdapterEvent::Registered(crate::provider::ProviderInfo{connection:1,instance:"host".into(),role:"runtime".into(),software:json!({"name":"fixture","version":"1"})}));rx};
+        let mut commands=install(&mut c);let fact=||serde_json::from_value(json!({"backend_ref":"endpoint","incarnation":"session","kind":"agent","state":"live"})).unwrap();
+        let id=c.upsert_resource("runtime",fact()).unwrap();let key=format!("doc/agents/membership/{id}");c.store.apply("fixture",None,vec![crate::store::Op::Set{key:key.clone(),value:json!({"paused":true}),expect:None}]).unwrap();
+        c.on_adapter_event("runtime",AdapterEvent::Connected(false,None));c.forget_cached_resource(&id).unwrap();assert!(commands.try_recv().is_err());assert!(c.resources.is_empty());assert_eq!(c.capture_snapshot().into_value()["identity_reservations"]["count"],1);
+        let mut returning=install(&mut c);assert_eq!(c.upsert_resource("runtime",fact()).unwrap(),id);assert!(returning.try_recv().is_err());assert_eq!(c.store.get(&key).unwrap().value,json!({"paused":true}));assert_eq!(c.capture_snapshot().into_value()["identity_reservations"]["count"],0);
     }
     #[test]
     fn cached_retirement_preserves_identity_write_failure_semantics() {
