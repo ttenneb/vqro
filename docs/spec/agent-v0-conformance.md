@@ -261,8 +261,9 @@ for one fake agent; the rest need the full extension.
   new record, no native write; the same after a new `control_epoch`; same `op` other payload → `conflict`;
   `coord.inbox.op` answers `unknown` when it doesn't know. Well-formed validation, grant and quota refusals are
   cached and budgeted: after a grant or capacity change, the identical `op` returns its original refusal; a new
-  `op` is evaluated afresh. Malformed and undeclared-principal calls take no slot; a full window refuses `busy`
-  before evaluating the call.
+  `op` is evaluated afresh. Malformed and undeclared-principal calls take no slot. Refusal-slot admission and
+  persistence use the same reserved control share, not content capacity; only a genuinely full operation window,
+  bounded by that share, refuses `busy` before evaluating the call. Content saturation alone is not a full window.
 - I11 composition: Pi gets only `interrupt_then_start` (clear, abort, start), never `preempt`; with exclusive writers
   it succeeds; a steer after clear or a competing start is reported as partial with step outcomes; pause or deadline
   after the interrupt stops the input step; a definite prerequisite failure stops the recipe; no continuation after
@@ -438,7 +439,9 @@ evicting an entry makes a return a new agent; durable evidence is never dropped 
 are pruned oldest first; identities and summaries of maximum legal encoded size (256 control characters in the
 instance, 4 handles) stay within 2 KiB and 3 KiB; a native result larger than the compact outcome is stored as its
 size, sha256 and `incomplete: true`, with the full result only in the live reply and `agent.receipt`. L8 at the
-durable budget, after GC, operation-window eviction and alias growth: a new send is refused `quota`; a late native
+durable budget, after GC, operation-window eviction and alias growth: a new send with an available window slot is
+refused `quota`, persisted using the reserved control share; content saturation must not instead yield pre-evaluation
+`busy`. Archive/control headroom stays preserved. A late native
 reply to an already admitted record still records its outcome (its space was reserved at admission); agent
 registration still succeeds; an explicit `coord.inbox.archive` exports and frees space. L9 an explicit `retire` of a
 disconnected agent shows `retired` with native execution unknown, never `ended`; routing stops; later end evidence

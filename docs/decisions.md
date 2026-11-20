@@ -589,6 +589,13 @@ replaced when the Pi bridge is ported.
   pulled there, never start. Starting an idle session uses its native session socket via explicitly selected
   `admit`, or the human, never an assumed-idle hook start or hidden mode fallback. Pi's measured idle is exact.
 
+**Further implementation rulings (2026-11-20, spec batch 8).**
+- Compact refusal result slots use the existing reserved control share, not content capacity; pre-evaluation slot
+  admission and refusal persistence use the same funding. At the durable content budget a new well-formed send
+  with a window slot reports `quota`, not `busy`. Only a genuinely full operation window (bounded by that control
+  share) returns pre-evaluation `busy`; archive/control headroom stays preserved. I10 and L8 keep these distinct:
+  an observed content-budget `busy` remains an L8 failure, not a fixture reinterpretation or synthetic quota pass.
+
 **Human answers (2026-11-19, CONFIRMED).**
 - **AS1, pause:** "vqro stops delivery": paused means vqro sends, hands out and wakes nothing until resumed; an agent
   still working shows as working; a runtime with a real pause may offer it as an extra capability. Physical
