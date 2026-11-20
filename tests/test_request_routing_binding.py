@@ -43,6 +43,7 @@ class Context:
             "request_keys": ["source-current"], "notices": [] if fallback else [{"source_key": "source-current",
                 "request": self.q["request"], "revision": self.q["revision"], "delivery": "d1", "state": "held"}]}
         self.panel = {"items": [{"children": [{"id": "waiting", "text": self.q["title"],
+            "command": "agents.answer", "args": {"resource": "r1"},
             "description": self.projection["fallback_reason"] or ""}]}]}
         self.records = [] if fallback else [{"delivery": "d1", "state": "held", "attempt": None,
             "to": {"agent": "r2", "incarnation": "i:a1"}, "request_notice": {"agent": "r1", "key": "source-current"},
@@ -81,8 +82,8 @@ class Context:
             assert params == {"action": "inspect", "agent": "r1"}
             configured = self.entry["value"]["route"] if self.entry else None
             return {"key": route_key("r1"), "agent": "r1", "version": self.entry["version"] if self.entry else 0,
-                "configured": configured, "route": "both" if self.projection.get("coordinator") else "human",
-                "human": True, "coordinator": self.projection.get("coordinator"),
+                "configured": configured, "route": configured if self.projection.get("coordinator") else "human",
+                "human": self.projection["human"], "coordinator": self.projection.get("coordinator"),
                 "fallback_reason": self.projection.get("fallback_reason")}
         assert name == "inbox.list" and params == {}, "do not filter away unrelated receivers"
         return {"items": deepcopy(self.records), "next": self.more}
@@ -137,7 +138,11 @@ class CompleteObserverControls(unittest.IsolatedAsyncioTestCase):
 
     async def test_wrong_current_ui_or_projection_or_truncation_is_not_visibility(self):
         for mutate in (lambda c: c.panel["items"][0]["children"][0].update(text="old question"),
-                       lambda c: c.panel.update(items=[]), lambda c: c.projection.update(agent="other"),
+                       lambda c: c.panel.update(items=[]),
+                       lambda c: c.panel["items"][0]["children"][0].pop("command"),
+                       lambda c: c.panel["items"][0]["children"][0].update(command="other.action"),
+                       lambda c: c.panel["items"][0]["children"][0]["args"].update(resource="other"),
+                       lambda c: c.projection.update(agent="other"),
                        lambda c: c.projection.update(version=6), lambda c: c.projection.update(request_keys=[]),
                        lambda c: c.projection["notices"][0].update(source_key="old"),
                        lambda c: setattr(c, "more", "unread-page")):
@@ -162,6 +167,18 @@ class CompleteObserverControls(unittest.IsolatedAsyncioTestCase):
         ctx.records.append(other)
         result = await self.grade(ctx)
         self.assertEqual({mail["to"] for mail in result["mail"]}, {"r2", "r3"})
+
+    async def test_coordinator_only_status_row_is_not_a_human_answer_action(self):
+        ctx = Context()
+        ctx.entry["value"]["route"] = "coordinator"
+        ctx.projection["human"] = False
+        row = ctx.panel["items"][0]["children"][0]
+        row.pop("command"); row.pop("args"); row["text"] = "waiting for coordinator r2"
+        self.assertEqual((await self.grade(ctx))["human"], [])
+        for command in ("agents.answer", "other.action"):
+            with self.subTest(command=command):
+                row["command"] = command
+                with self.assertRaises(CheckFailed): await self.grade(ctx)
 
     async def test_actual_missing_and_malformed_human_rows_need_no_mail(self):
         result = await self.grade(Context(fallback=True))

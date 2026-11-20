@@ -213,11 +213,18 @@ class PublicRequestRouting:
             if reason == "notification_pending": return None
             waiting = waiting_rows(panel)
             human = []
+            if len(waiting) != 1: return None
             if projection["human"]:
-                if len(waiting) != 1 or question["title"] not in str(waiting[0].get("text", "")): return None
-                if reason and str(reason) not in str(waiting[0].get("description", "")): return None
-                human = [dict(waiting[0], reason=reason, source_view="agents-" + agent)]
-            elif waiting: return None
+                row = waiting[0]
+                args = row.get("args")
+                if (row.get("command") != "agents.answer" or not isinstance(args, dict) or args.get("resource") != agent or
+                    question["title"] not in str(row.get("text", ""))): return None
+                if reason and str(reason) not in str(row.get("description", "")): return None
+                human = [dict(row, reason=reason, source_view="agents-" + agent)]
+            elif waiting[0].get("command"):
+                # Coordinator-only still has a pinned non-actionable status row;
+                # row existence alone never proves a human answer affordance.
+                return None
             page = await ctx.command("inbox.list", {})
             ctx.check(isinstance(page.get("items"), list) and not page.get("next"),
                 "actual small routing fixture inbox is fully observed, not recipient-filtered/truncated", page=page)
@@ -258,7 +265,8 @@ class PublicRequestRouting:
             if projection.get("coordinator") and not reason:
                 if not any(row.get("request") == question["request"] and row.get("revision") == question["revision"] and
                     row.get("source_key") in keys and any(item["source_key"] == row.get("source_key") and
-                        item["delivery"] == row.get("delivery") for item in mail) for row in notices): return None
+                        item["delivery"] == row.get("delivery") and item["to"] == projection["coordinator"]
+                        for item in mail) for row in notices): return None
                 if not mail: return None
             observation = {"mail": mail, "human": human, "projection": projection, "panel": panel, "shown": shown}
             ctx.evidence.append({"kind": "actual_public_request_routing", "agent": agent, "question": question,
