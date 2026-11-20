@@ -632,6 +632,20 @@ exit. Dim text (SGR 2) is drawn. A terminal pane's name is the view `title`, els
 `title` its program set (OSC 0/2, as the backend reports it), else its command. The Rust TUI does all of this; the
 OpenTUI trial client does not yet.
 
+**Reading a terminal's history** (Rust TUI; client mechanism, no protocol). A left drag in a terminal pane selects
+text (a double click a word, where paths and URLs stay whole; a triple click the line, joined across wraps); with
+`doc/settings/tui.copy_on_select` (default on) the selection is copied through the user's terminal (OSC 52) and the
+status line says what was sent. A program that asked for the mouse gets plain presses; Alt or Ctrl takes them
+back for selecting. The selection stays on its text while output scrolls; a key typed into the pane or a click
+clears it. `client.copy` with no `text` copies the focused terminal's selection. **`client.scroll`**
+(`{action?: "search"}`) enters scroll mode for the focused terminal: arrows or j/k a line, PgUp/PgDn (b/f, Space) a
+page, g/G (Home/End) the oldest or newest line, `/` searches the kept history (case-insensitive, within a row; each
+change shows the nearest match at or above the view), `n` goes to the next match up and `N` down, with
+`/query  2 of 5  n/N` in the status line; `y` copies the selection; Esc or q returns to the live screen; the prefix
+key always leaves it. The panes extension binds `[` (as tmux's and screen's copy mode).
+`doc/settings/tui.scrollback_lines` sets the history kept per pane and requested on attach (default 2000, bounded
+to 100-20000; about 6 MB per 1000 lines at 200 columns); panes opened or reattached after a change use it.
+
 Clients paste like terminals: wrapped in bracketed-paste markers (`ESC[200~` … `ESC[201~`) when the program in the
 pane enabled bracketed paste (DECSET 2004, tracked by the client's emulator), raw otherwise; markers inside the
 pasted text are removed so a paste can't end its bracket early. The Rust TUI sends a paste over 64 KiB as ordered

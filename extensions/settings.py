@@ -34,7 +34,9 @@ ICONS = "doc/settings/icons"
 OPTIONS = [
     ("mouse", "Capture the mouse", "off: your terminal handles the mouse and selects text", True),
     ("wheel_arrows", "Wheel scrolls full-screen programs", "sends arrow keys when a program has no mouse support", True),
+    ("copy_on_select", "Copy selected text", "selecting in a terminal copies it through your terminal's clipboard (OSC 52)", True),
 ]
+SCROLLBACK = [1000, 2000, 5000, 10000, 20000]  # the client bounds it to 100..20000
 STATUS_STYLE = {"running": "ok", "failed": "error", "starting": "warn", "stopped-by-safe-mode": "warn", "provider-not-connected": "warn"}
 
 
@@ -440,6 +442,10 @@ def refresh(*_):
                       "options":[{"label":"Full (Ctrl-g, Alt-x)","value":"full"},{"label":"Short (C-g, M-x)","value":"short"}],
                       "command":"settings.set", "args":{"tui":"key_labels"},
                       "description":"Display names only; configured key syntax stays unchanged."})
+    interface.append({"type": "select", "text": "Scrollback lines", "value": t.get("scrollback_lines", 2000),
+                      "options": [{"label": f"{n:,}", "value": n} for n in SCROLLBACK],
+                      "command": "settings.set", "args": {"tui": "scrollback_lines"},
+                      "description": "per terminal pane; about 6 MB per 1,000 lines at 200 columns; panes opened or reattached after a change use it"})
     info = ext.info
     about = [
         {"text": "vqro", "detail": f"{info.get('server')} {info.get('version')} · protocol {info.get('protocol')}", "disabled": True, "style": "plain"},

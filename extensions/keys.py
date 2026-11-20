@@ -44,7 +44,7 @@ PROFILES = {
     # vqro: the client's defaults and the extensions' own keys, nothing added.
     "vqro": {"label": "vqro (C-g)", "prefix": "C-g", "keys": {}},
     # tmux's default prefix key table (`tmux list-keys -T prefix`), mapped onto vqro commands.
-    # Gaps (no vqro command): l last window, [ ] copy and paste, q display-panes (vqro's q quit stays),
+    # Gaps (no vqro command): l last window, ] paste (copy mode is scroll mode: select with the mouse), q display-panes (vqro's q quit stays),
     # $ ( ) rename/cycle sessions, f find, t clock, i info, ~ messages, D/L clients.
     # Differences: x and & close without asking and keep the programs running; s switches workspace (a
     # tmux session), so the sidebar's own s is shadowed here (its status-bar button remains); d quits this UI,
@@ -70,6 +70,7 @@ PROFILES = {
         "detach": b("d", "client.quit", "detach (quit this UI)"),
         "commands": b(":", "client.palette", "all commands"),
         "keys": b("?", "client.prefix", "list keys"),
+        "copy-mode": b("[", "client.scroll", "scroll back and search"),
         "zoom": b("z", "client.zoom", "zoom pane (toggle)"),
         "last-pane": b(";", "client.focus", "last pane", args={"dir": "last"}),
         "swap-prev": b("{", "panes.swap", "swap with previous pane", args={"dir": "prev"}),
@@ -88,7 +89,7 @@ PROFILES = {
     }},
     # GNU screen's default key bindings (`man screen`, "Default Key Bindings"), mapped onto vqro.
     # Gaps: C-a (other window) and a (send C-a; here press C-a twice), w (window list in the message
-    # line), Q (only this region), [ ] copy and paste, x lock, H log, M/_ monitor, F fit, i info,
+    # line), Q (only this region), ] paste (copy mode is scroll mode: select with the mouse), x lock, H log, M/_ monitor, F fit, i info,
     # ' select by name, z suspend, \ quit all.
     # Differences: k kills the program but its pane stays (showing it ended) until closed; " picks
     # from every terminal rather than this session's windows.
@@ -114,6 +115,7 @@ PROFILES = {
         "detach-c": b("C-d", "client.quit", "detach (quit this UI)", hidden=True),
         "commands": b(":", "client.palette", "all commands"),
         "keys": b("?", "client.prefix", "list keys"),
+        "copy-mode": b("[", "client.scroll", "scroll back and search"),
     }},
 }
 DEFAULT = "vqro"

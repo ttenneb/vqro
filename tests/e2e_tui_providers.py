@@ -118,14 +118,29 @@ try:
         if name == "herdr":  # herdr-core reports program titles (OSC 2); unnamed panes show it (unit test in tui)
             title = lambda: next(r for r in call("workspace.snapshot")["resources"] if r["id"] == rid).get("title")
             check(f"{name}: the backend reports the program's title for pane names", wait(lambda: title() == "e2e-title", 10) is not None, str(title()))
+        if name == "herdr":
+            # Terminal reading: a mouse drag selects and copies (OSC 52); prefix [ scrolls back and / searches.
+            keys("i=0; while [ $i -lt 300 ]; do echo line-$i; i=$((i+1)); done", literal=True); keys("Enter")
+            wait(lambda: "line-299" in screen(), 10)
+            rows = screen().splitlines()
+            y = next(i for i, l in enumerate(rows) if "line-299" in l)
+            x = rows[y].index("line-299")
+            keys(f"\x1b[<0;{x + 1};{y + 1}M\x1b[<32;{x + 4};{y + 1}M\x1b[<32;{x + 8};{y + 1}M\x1b[<0;{x + 8};{y + 1}m", literal=True)
+            b64 = __import__("base64").b64encode(b"line-299").decode()
+            check(f"{name}: dragging over terminal text copies it", bool(wait(lambda: f"\x1b]52;c;{b64}\x07".encode() in got(), 10)), screen()[-300:])
+            keys("C-g"); time.sleep(0.4); keys("["); time.sleep(0.4); keys("/"); keys("line-12", literal=True)
+            check(f"{name}: scroll mode searches the history", bool(wait(lambda: "line-12" in screen() and " of " in screen() and "n/N" in screen(), 10)), screen()[-400:])
+            keys("Enter"); time.sleep(0.2); keys("Escape"); time.sleep(0.5)
+            check(f"{name}: Esc leaves scroll mode at the live screen", bool(wait(lambda: "line-299" in screen() and "↑" not in screen(), 10)), screen()[:300])
         subprocess.run([*HARNESS, "pipe-pane"])
         # Reattach (a new TUI): the backend's history repaint must not copy or ring again.
         raw2 = f"{R}/raw2-{name}.log"
         subprocess.run([*HARNESS, "respawn-pane", "-k", f"/bin/sh {R}/tui.sh"], env={"PATH": "/usr/bin:/bin", "HOME": f"{R}/home"})
         subprocess.run([*HARNESS, "pipe-pane", "-o", f"cat >> {raw2}"])
-        wait(lambda: "e2e-effects-done" in screen(), 15); time.sleep(1)
+        marker = "line-299" if name == "herdr" else "e2e-effects-done"  # the last output before the reattach
+        wait(lambda: marker in screen(), 15); time.sleep(1)
         again = open(raw2, "rb").read() if os.path.exists(raw2) else b""
-        check(f"{name}: reattaching does not replay a copy or a notification", b"]52;" not in again and b"]9;e2e" not in again and b"e2e-effects-done" in again, repr(again[-300:]))
+        check(f"{name}: reattaching does not replay a copy or a notification", b"]52;" not in again and b"]9;e2e" not in again and marker.encode() in again, repr(again[-300:]))
         subprocess.run([*HARNESS, "pipe-pane"])
         call("resource.kill", {"resource": rid})
         time.sleep(1)

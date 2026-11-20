@@ -24,6 +24,7 @@ mod mouse;
 mod panel;
 mod compose;
 mod probe;
+mod scrollback;
 mod frame_budget;
 mod theme;
 
@@ -82,6 +83,8 @@ fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
 #[derive(Default)]
 struct Effects {
     out: Vec<Effect>,
+    /// Rows the full scrollback dropped (normal screen): with the kept rows, the numbering of `scrollback::Pos`.
+    dropped: usize,
 }
 
 #[derive(Debug, PartialEq)]
@@ -105,6 +108,9 @@ impl Effects {
 
 impl vt100::Callbacks for Effects {
     fn audible_bell(&mut self, _: &mut vt100::Screen) { self.push(Effect::Bell); }
+    fn on_scroll(&mut self, _: vt100::capture::RowContents<'_>, alternate: bool) {
+        if !alternate { self.dropped += 1; }
+    }
     fn copy_to_clipboard(&mut self, _: &mut vt100::Screen, ty: &[u8], data: &[u8]) {
         if data.len() <= MAX_CLIPBOARD_B64 { self.push(Effect::Clipboard(ty.to_vec(), data.to_vec())); }
     }
@@ -156,7 +162,7 @@ impl Term {
         self.closed = None;
         // A gap invalidates VT parser state. Only the backend's new attach/history repaint can
         // restore it; never concatenate an old partial escape sequence with a fresh stream.
-        self.parser = new_parser(self.size.0, self.size.1);
+        self.parser = new_parser_with(self.size.0, self.size.1, self.parser.screen().scrollback_capacity());
     }
 }
 
@@ -309,6 +315,12 @@ struct App {
     toast: Option<(String, Option<String>, std::time::Instant)>,
     /// When each view last showed a bell notice (rate limit).
     bells: HashMap<String, std::time::Instant>,
+    /// Text selected in terminal views (by mouse), and the view a selecting drag is in.
+    selections: HashMap<String, scrollback::Selection>,
+    selecting: Option<String>,
+    /// The last left press in a terminal: when, where and how many in a row (double and triple clicks).
+    last_press: Option<(std::time::Instant, String, scrollback::Pos, u8)>,
+    scroll_mode: Option<ScrollMode>,
     /// The cursor shape the focused terminal's program asked for, and the one last sent to the outer terminal.
     cursor_style: vt100::CursorStyle,
     cursor_sent: vt100::CursorStyle,
@@ -623,7 +635,7 @@ impl App {
             peer, tx, ws: Workspace::default(), safe_selected: BTreeSet::new(),
             terms: HashMap::new(), stream_view: HashMap::new(), early: HashMap::new(), early_closed: HashMap::new(), typed: None,
             leaves: Vec::new(), focus: 0, overlay: None, pstate: HashMap::new(),
-            filtering: None, toast: None, bells: HashMap::new(), cursor_style: vt100::CursorStyle::Default, cursor_sent: vt100::CursorStyle::Default, panel_values: Mutex::new(HashMap::new()), panel_dependencies: Mutex::new(HashMap::new()), hit: Hit::default(),
+            filtering: None, toast: None, bells: HashMap::new(), selections: HashMap::new(), selecting: None, last_press: None, scroll_mode: None, cursor_style: vt100::CursorStyle::Default, cursor_sent: vt100::CursorStyle::Default, panel_values: Mutex::new(HashMap::new()), panel_dependencies: Mutex::new(HashMap::new()), hit: Hit::default(),
             drag: None, overrides: HashMap::new(), mouse_owner: None, mouse_on: true,
             under: None, input_queues: HashMap::new(), view_streams: Arc::default(), zoomed: None, autofocused: None, window: Window::default(), pending_focus: None, tab_press: None, focus_now: None, focus_last: None, kbd_enhance: false,
             held: KeyModifiers::NONE, message: String::new(), key_hint: None,
@@ -1082,6 +1094,13 @@ impl App {
         if self.filtering.is_some() {
             return self.on_filter_key(k);
         }
+        if self.scroll_mode.is_some() && self.overlay.is_none() {
+            if is_prefix || self.scroll_mode.as_ref().is_some_and(|m| self.leaves.get(self.focus) != Some(&m.view)) {
+                self.leave_scroll_mode();
+            } else {
+                return self.on_scroll_key(k);
+            }
+        }
         match self.overlay {
             Some(Overlay::Popup { .. }) => return self.on_popup_key(k),
             Some(Overlay::Prefix { .. }) => return self.on_prefix_key(k, is_prefix),
@@ -1097,6 +1116,7 @@ impl App {
             "terminal" => {
                 let Some(t) = self.terms.get(&view) else { return };
                 if let Some(bytes) = keys::encode(&k, t.parser.screen().application_cursor(), t.modes.extended()) {
+                    self.selections.remove(&view);
                     self.send_to_focused(bytes);
                 }
             }
@@ -1493,6 +1513,175 @@ impl App {
     fn panel_view_for(&self, key: &str) -> String {
         if key == "@popup" { if let Some(Overlay::Popup { view, .. }) = &self.overlay { return view.clone(); } }
         key.to_string()
+    }
+
+    /// `doc/settings/tui.scrollback_lines`, bounded (see `SCROLLBACK_RANGE`); new and reattached panes use it.
+    fn scrollback_lines(&self) -> usize {
+        let v = self.ws.entries.get("doc/settings/tui").and_then(|s| s["scrollback_lines"].as_u64()).map(|n| n as usize);
+        v.map(|n| n.clamp(*SCROLLBACK_RANGE.start(), *SCROLLBACK_RANGE.end())).unwrap_or(DEFAULT_SCROLLBACK)
+    }
+
+    /// Copy text through the user's terminal (OSC 52). Terminals report nothing back: say what was sent.
+    fn copy_text(&mut self, t: &str) {
+        use base64::Engine;
+        use std::io::Write;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(t.as_bytes());
+        let mut out = std::io::stdout();
+        let _ = write!(out, "\x1b]52;c;{b64}\x07").and_then(|_| out.flush());
+        self.message = format!("copy: sent {} characters to the terminal clipboard (OSC 52; some terminals ignore it)", t.chars().count());
+    }
+
+    /// The text selected in a terminal view, if any.
+    fn selection_text(&mut self, view: &str) -> Option<String> {
+        let sel = self.selections.get(view).filter(|s| s.dragged || s.unit != scrollback::Unit::Cell)?.clone();
+        let t = self.terms.get_mut(view)?;
+        let scrolled = scrollback::scrolled(&t.parser, t.parser.callbacks().dropped);
+        let (a, b) = sel.ordered();
+        Some(scrollback::text(&mut t.parser, scrolled, a, b)).filter(|s| !s.is_empty())
+    }
+
+    /// A mouse position in a terminal view's text, if it is inside the view.
+    fn terminal_pos(&self, view: &str, pos: Position, clamp: bool) -> Option<scrollback::Pos> {
+        let (_, _, inner) = self.hit.leaves.iter().find(|(v, _, _)| v == view)?;
+        if !clamp && !inner.contains(pos) { return None; }
+        let t = self.terms.get(view)?;
+        let y = pos.y.clamp(inner.y, inner.bottom().saturating_sub(1)) - inner.y;
+        let x = pos.x.clamp(inner.x, inner.right().saturating_sub(1)) - inner.x;
+        let scrolled = scrollback::scrolled(&t.parser, t.parser.callbacks().dropped);
+        Some(scrollback::Pos { row: scrollback::top(&t.parser, scrolled) + y as usize, col: x })
+    }
+
+    /// A left press in a terminal that vqro handles: start a selection (a double press selects a word, a triple
+    /// press a line, each copied at once when `copy_on_select` is on).
+    fn selection_press(&mut self, view: &str, pos: Position) {
+        let Some(p) = self.terminal_pos(view, pos, false) else { return };
+        let now = std::time::Instant::now();
+        let count = match &self.last_press {
+            Some((at, v, q, n)) if v == view && q.row == p.row && q.col.abs_diff(p.col) <= 1 && now.duration_since(*at) < std::time::Duration::from_millis(400) => n % 3 + 1,
+            _ => 1,
+        };
+        self.last_press = Some((now, view.to_string(), p, count));
+        let unit = [scrollback::Unit::Cell, scrollback::Unit::Word, scrollback::Unit::Line][count as usize - 1];
+        let mut sel = scrollback::Selection { anchor: p, head: p, unit, ..Default::default() };
+        if unit != scrollback::Unit::Cell {
+            if let Some(t) = self.terms.get_mut(view) {
+                let scrolled = scrollback::scrolled(&t.parser, t.parser.callbacks().dropped);
+                scrollback::widen(&mut t.parser, scrolled, &mut sel);
+            }
+        }
+        self.selections.insert(view.to_string(), sel);
+        self.selecting = Some(view.to_string());
+    }
+
+    /// The selecting drag moved: extend to the pointer (past the top or bottom edge, scroll a line that way).
+    fn selection_drag(&mut self, view: &str, pos: Position) {
+        if let (Some((_, _, inner)), Some(t)) = (self.hit.leaves.iter().find(|(v, _, _)| v == view).cloned(), self.terms.get_mut(view)) {
+            let at = t.parser.screen().scrollback();
+            if pos.y < inner.y { t.parser.screen_mut().set_scrollback(at + 1); }
+            else if pos.y >= inner.bottom() { t.parser.screen_mut().set_scrollback(at.saturating_sub(1)); }
+        }
+        let Some(p) = self.terminal_pos(view, pos, true) else { return };
+        let Some(mut sel) = self.selections.get(view).cloned() else { return };
+        sel.head = p;
+        sel.dragged = true;
+        if sel.unit != scrollback::Unit::Cell {
+            if let Some(t) = self.terms.get_mut(view) {
+                let scrolled = scrollback::scrolled(&t.parser, t.parser.callbacks().dropped);
+                scrollback::widen(&mut t.parser, scrolled, &mut sel);
+            }
+        }
+        self.selections.insert(view.to_string(), sel);
+    }
+
+    /// The selecting press ended: a click (no drag, single) clears the selection; otherwise it stays shown and is
+    /// copied when `copy_on_select` is on (default).
+    fn selection_release(&mut self, view: &str) {
+        self.selecting = None;
+        let Some(sel) = self.selections.get_mut(view) else { return };
+        if !sel.dragged && sel.unit == scrollback::Unit::Cell {
+            self.selections.remove(view);
+            return;
+        }
+        let copy = self.ws.entries.get("doc/settings/tui").and_then(|s| s["copy_on_select"].as_bool()).unwrap_or(true);
+        if copy {
+            if let Some(t) = self.selection_text(view) { self.copy_text(&t); }
+        }
+    }
+
+    fn leave_scroll_mode(&mut self) {
+        if let Some(m) = self.scroll_mode.take() {
+            if let Some(t) = self.terms.get_mut(&m.view) { t.parser.screen_mut().set_scrollback(0); }
+            self.message.clear();
+        }
+    }
+
+    /// Keys in scroll mode: arrows/j/k a line, PgUp/PgDn (b/f, Space) a page, g/G (Home/End) the oldest/newest
+    /// line, `/` search, n/N the next match up/down, y copy the selection, Esc or q leave. Other keys do nothing.
+    fn on_scroll_key(&mut self, k: KeyEvent) {
+        let Some(mut m) = self.scroll_mode.take() else { return };
+        let Some(t) = self.terms.get_mut(&m.view) else { return };
+        let scrolled = scrollback::scrolled(&t.parser, t.parser.callbacks().dropped);
+        if m.typing {
+            match k.code {
+                KeyCode::Esc => { m.typing = false; m.query.clear(); m.hits.clear(); }
+                KeyCode::Enter => m.typing = false,
+                KeyCode::Backspace => { m.query.pop(); }
+                KeyCode::Char(c) if !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => m.query.push(c),
+                _ => {}
+            }
+            if !matches!(k.code, KeyCode::Enter | KeyCode::Esc) {
+                // Each change searches again and shows the nearest match at or above the bottom of the view.
+                m.hits = scrollback::search(&mut t.parser, scrolled, &m.query);
+                let bottom = scrollback::top(&t.parser, scrolled) + usize::from(t.parser.screen().size().0.get()) - 1;
+                m.at = m.hits.iter().rposition(|h| h.row <= bottom).unwrap_or(m.hits.len().saturating_sub(1));
+                if let Some(h) = m.hits.get(m.at) { scrollback::reveal(&mut t.parser, scrolled, h.row); }
+            }
+        } else {
+            let rows = usize::from(t.parser.screen().size().0.get());
+            let at = t.parser.screen().scrollback();
+            let len = t.parser.screen().scrollback_len();
+            let mut set = |to: usize| t.parser.screen_mut().set_scrollback(to.min(len));
+            match (k.code, keys::name(&k).unwrap_or_default().as_str()) {
+                (KeyCode::Esc, _) | (_, "q") => { self.scroll_mode = Some(m); return self.leave_scroll_mode(); }
+                (KeyCode::Up, _) | (_, "k") => set(at + 1),
+                (KeyCode::Down, _) | (_, "j") => set(at.saturating_sub(1)),
+                (KeyCode::PageUp, _) | (_, "b") | (_, "C-b") => set(at + rows.saturating_sub(1)),
+                (KeyCode::PageDown, _) | (_, "f") | (_, "C-f") | (_, "Space") => set(at.saturating_sub(rows.saturating_sub(1))),
+                (KeyCode::Home, _) | (_, "g") => set(len),
+                (KeyCode::End, _) | (_, "G") => set(0),
+                (_, "/") | (_, "?") => { m.typing = true; m.query.clear(); m.hits.clear(); }
+                (_, "n") | (_, "N") if !m.hits.is_empty() => {
+                    let n = m.hits.len();
+                    m.at = if keys::name(&k).as_deref() == Some("n") { (m.at + n - 1) % n } else { (m.at + 1) % n };
+                    let row = m.hits[m.at].row;
+                    scrollback::reveal(&mut t.parser, scrolled, row);
+                }
+                (_, "y") => {
+                    let view = m.view.clone();
+                    self.scroll_mode = Some(m);
+                    match self.selection_text(&view) {
+                        Some(text) => self.copy_text(&text),
+                        None => self.message = "copy: select text with the mouse first".into(),
+                    }
+                    return;
+                }
+                _ => {}
+            }
+        }
+        self.scroll_mode = Some(m);
+        self.scroll_status();
+    }
+
+    /// The status line in scroll mode: where the view is, and the search's count.
+    fn scroll_status(&mut self) {
+        let Some(m) = &self.scroll_mode else { return };
+        let Some(t) = self.terms.get(&m.view) else { return };
+        let (at, len) = (t.parser.screen().scrollback(), t.parser.screen().scrollback_len());
+        let found = if m.query.is_empty() { String::new() }
+            else if m.hits.is_empty() { format!("  /{}: no match", m.query) }
+            else { format!("  /{}  {} of {}  n/N", m.query, m.hits.len() - m.at, m.hits.len()) };
+        self.message = if m.typing { found.trim_start().to_string() }
+            else { format!("scroll ↑{at} of {len}{found}  ·  ↑↓ PgUp/PgDn g/G  / search  y copy  Esc") };
     }
 
     /// Pass a program's clipboard writes, bells and notifications on to the outer terminal, and say what happened:
@@ -1982,23 +2171,31 @@ impl App {
                 // terminal reports nothing back, so the notice says what was sent, not that it arrived.
                 let text = args["text"].as_str().map(String::from).or_else(|| {
                     let key = ctx["panel"].as_str().map(String::from).or_else(|| self.hit.leaves.get(self.focus).map(|l| l.0.clone()))?;
+                    if self.view_kind(&key) != "panel" { return None; }
                     let view = ctx["panel_view"].as_str().map(String::from).unwrap_or_else(|| key.clone());
                     let value = self.panel_value(&view);
                     let st = self.pstate.get(&key).cloned().unwrap_or_default();
                     let item = panel::rows(&value, &st).get(st.sel)?.item.clone();
                     item["copy"].as_str().or(item["text"].as_str()).map(String::from)
                 });
+                // A focused terminal: its selection.
+                let text = text.or_else(|| {
+                    let view = self.leaves.get(self.focus)?.clone();
+                    self.selection_text(&view)
+                });
                 match text {
-                    Some(t) => {
-                        use base64::Engine;
-                        use std::io::Write;
-                        let b64 = base64::engine::general_purpose::STANDARD.encode(t.as_bytes());
-                        let mut out = std::io::stdout();
-                        let _ = write!(out, "\x1b]52;c;{b64}\x07").and_then(|_| out.flush());
-                        self.message = format!("copy: sent {} characters to the terminal clipboard (OSC 52; some terminals ignore it)", t.chars().count());
-                    }
+                    Some(t) => self.copy_text(&t),
                     None => self.message = "copy: nothing selected".into(),
                 }
+            }
+            "client.scroll" => {
+                // Scroll mode for the focused terminal (keys read its history; `/` searches it).
+                let Some(view) = self.leaves.get(self.focus).cloned().filter(|v| self.view_kind(v) == "terminal" && self.terms.contains_key(v)) else {
+                    self.message = "scroll: focus a terminal first".into();
+                    return;
+                };
+                self.scroll_mode = Some(ScrollMode { view, query: String::new(), typing: args["action"] == "search", hits: Vec::new(), at: 0 });
+                self.scroll_status();
             }
             "client.palette" => self.overlay = Some(Overlay::Palette { query: String::new(), sel: 0 }),
             "client.focus" => self.focus_to(args["dir"].as_str().unwrap_or("next")),
@@ -2219,6 +2416,15 @@ impl App {
             }
         }
 
+        // A selecting drag in a terminal gets the rest of the gesture.
+        if let Some(view) = self.selecting.clone() {
+            match m.kind {
+                MouseEventKind::Drag(MouseButton::Left) => { self.selection_drag(&view, pos); return true; }
+                MouseEventKind::Up(_) => { self.selection_release(&view); return true; }
+                _ => self.selecting = None,
+            }
+        }
+
         // A program that took a press gets the rest of the gesture.
         if let Some(owner) = self.mouse_owner.clone() {
             if matches!(m.kind, MouseEventKind::Drag(_) | MouseEventKind::Up(_)) {
@@ -2293,8 +2499,13 @@ impl App {
                 }
                 match self.view_kind(&view).as_str() {
                     "terminal" if inner.contains(pos) => {
-                        if self.forward_mouse(&view, &m) {
+                        // A program that asked for the mouse gets it; otherwise (or with Alt or Ctrl) the press selects
+                        // text.
+                        let force = m.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::CONTROL);
+                        if !force && self.forward_mouse(&view, &m) {
                             self.mouse_owner = Some(view);
+                        } else if button == MouseButton::Left {
+                            self.selection_press(&view, pos);
                         }
                     }
                     "panel" => {
@@ -2327,6 +2538,7 @@ impl App {
                             let cur = t.parser.screen().scrollback();
                             let next = if up { cur + 3 } else { cur.saturating_sub(3) };
                             t.parser.screen_mut().set_scrollback(next);
+                            self.scroll_status();
                             true
                         }
                     }
@@ -2686,10 +2898,11 @@ impl App {
                 let available = res.as_ref().is_some_and(|r| r["available"] != false);
                 let live = res.as_ref().map(|r| r["state"] == "live").unwrap_or(false) && available;
                 let dragging = self.drag.is_some();
+                let lines = self.scrollback_lines();
                 let t = self.terms.entry(view.to_string()).or_insert_with(|| Term {
                     resource: rid.clone(),
                     stream: None,
-                    parser: new_parser(inner.width, inner.height),
+                    parser: new_parser_with(inner.width, inner.height, lines),
                     size: (inner.width, inner.height),
                     attaching: false,
                     closed: None,
@@ -2700,7 +2913,7 @@ impl App {
                         self.stream_view.remove(&sid);
                         self.peer.notify("stream.close", json!({"stream": sid}));
                     }
-                    *t = Term { resource: rid.clone(), stream: None, parser: new_parser(inner.width, inner.height), size: (inner.width, inner.height), attaching: false, closed: None, retry_at: None, modes: Default::default() };
+                    *t = Term { resource: rid.clone(), stream: None, parser: new_parser_with(inner.width, inner.height, lines), size: (inner.width, inner.height), attaching: false, closed: None, retry_at: None, modes: Default::default() };
                 }
                 if !available && (t.stream.is_some() || t.attaching) {
                     if let Some(stream) = t.stream.take() {
@@ -2722,9 +2935,10 @@ impl App {
                     let (peer, tx, view, rid) = (self.peer.clone(), self.tx.clone(), view.to_string(), rid.clone());
                     let (cols, rows) = (inner.width, inner.height);
                     let connection = self.connection;
+                    let history = t.parser.screen().scrollback_capacity();
                     tokio::spawn(async move {
                         let result = peer
-                            .call("resource.attach", json!({"resource": rid, "cols": cols, "rows": rows, "history": 2000}))
+                            .call("resource.attach", json!({"resource": rid, "cols": cols, "rows": rows, "history": history}))
                             .await
                             .map(|r| r["stream"].as_u64().unwrap_or(0))
                             .map_err(|e| e.to_string());
@@ -2732,6 +2946,27 @@ impl App {
                     });
                 }
                 render_screen(f.buffer_mut(), inner, t.parser.screen());
+                // The selection and search matches, by row so they stay on their text while output scrolls.
+                let scrolled = scrollback::scrolled(&t.parser, t.parser.callbacks().dropped);
+                let top = scrollback::top(&t.parser, scrolled);
+                let buf = f.buffer_mut();
+                if let Some(sel) = self.selections.get(view) {
+                    for r in 0..inner.height {
+                        for c in 0..inner.width {
+                            if sel.contains(scrollback::Pos { row: top + r as usize, col: c }) {
+                                if let Some(cell) = buf.cell_mut((inner.x + c, inner.y + r)) { cell.set_style(pal.selected()); }
+                            }
+                        }
+                    }
+                }
+                if let Some(sm) = self.scroll_mode.as_ref().filter(|m| m.view == view) {
+                    for (i, h) in sm.hits.iter().enumerate().filter(|(_, h)| h.row >= top && h.row < top + inner.height as usize) {
+                        let style = if i == sm.at { pal.selected() } else { Style::new().add_modifier(Modifier::UNDERLINED | Modifier::BOLD) };
+                        for c in h.col..(h.col + h.width).min(inner.width) {
+                            if let Some(cell) = buf.cell_mut((inner.x + c, inner.y + (h.row - top) as u16)) { cell.set_style(style); }
+                        }
+                    }
+                }
                 if let Some(reason) = &t.closed {
                     let line = Line::from(Span::styled(format!(" stream closed: {reason} "), pal.style(Some("warn"))));
                     f.render_widget(Paragraph::new(line), Rect { height: 1, ..inner });
@@ -3207,8 +3442,28 @@ fn resource_name(r: &Value) -> Option<String> {
     r["name"].as_str().or_else(|| r["title"].as_str().filter(|t| !t.trim().is_empty())).or_else(|| r["argv"][0].as_str()).map(String::from)
 }
 
+#[cfg(test)]
 fn new_parser(cols: u16, rows: u16) -> vt100::Parser<Effects> {
-    vt100::Parser::new_with_callbacks(nz(rows), nz(cols), 2000, Effects::default())
+    new_parser_with(cols, rows, DEFAULT_SCROLLBACK)
+}
+
+fn new_parser_with(cols: u16, rows: u16, lines: usize) -> vt100::Parser<Effects> {
+    vt100::Parser::new_with_callbacks(nz(rows), nz(cols), lines, Effects::default())
+}
+
+/// Scrollback lines per terminal pane (`doc/settings/tui.scrollback_lines`): each line costs 32 bytes per column,
+/// about 6 MB per 1000 lines in a 200-column pane, so the setting is bounded.
+const DEFAULT_SCROLLBACK: usize = 2000;
+const SCROLLBACK_RANGE: std::ops::RangeInclusive<usize> = 100..=20_000;
+
+/// Where a terminal view's scroll mode is: reading its history with keys, and searching it.
+struct ScrollMode {
+    view: String,
+    query: String,
+    /// The search line is being typed.
+    typing: bool,
+    hits: Vec<scrollback::Hit>,
+    at: usize,
 }
 
 fn cursor_shape(s: vt100::CursorStyle) -> crossterm::cursor::SetCursorStyle {
@@ -3305,6 +3560,54 @@ mod tests {
         render_screen(&mut buf, Rect::new(0, 0, 10, 2), p.screen());
         assert!(buf[(0, 0)].modifier.contains(Modifier::DIM));
         assert_eq!(p.screen().cursor_style(), vt100::CursorStyle::BlinkVerticalBar);
+    }
+
+    #[tokio::test]
+    async fn terminal_selection_scroll_mode_and_search() {
+        let (mut app, _) = app();
+        app.load(&json!({"epoch":"e","seq":1,"entries":{"view/v":{"value":{"kind":"terminal","resource":"r1"}}},"resources":[{"id":"r1","kind":"terminal","state":"live"}]}));
+        let mut parser = new_parser_with(20, 3, 100);
+        parser.process(b"one alpha\r\ntwo /tmp/x.log\r\nthree alpha\r\nfour\r\nfive alpha");
+        app.terms.insert("v".into(), Term { resource: "r1".into(), stream: None, parser, size: (20, 3), attaching: false, closed: None, retry_at: None, modes: Default::default() });
+        app.leaves = vec!["v".into()];
+        let inner = Rect::new(1, 1, 20, 3);
+        app.hit.leaves = vec![("v".into(), Rect::new(0, 0, 22, 5), inner)];
+        let at = |x: u16, y: u16| Position { x: inner.x + x, y: inner.y + y };
+        // Screen rows now: three alpha / four / five alpha (rows 2-4; rows 0-1 in the scrollback).
+        app.selection_press("v", at(0, 0));
+        app.selection_drag("v", at(3, 1));
+        app.selection_release("v");
+        assert!(app.message.starts_with("copy: sent 16 characters"), "{}", app.message);
+        assert_eq!(app.selection_text("v").as_deref(), Some("three alpha\nfour"));
+        // A click clears it; a double click selects a word (a path stays whole), a triple click the line.
+        app.last_press = None;
+        app.selection_press("v", at(2, 1)); app.selection_release("v");
+        assert!(!app.selections.contains_key("v"));
+        app.last_press = None;
+        app.run_command("client.scroll", json!({}), json!({}), None);
+        assert!(app.message.starts_with("scroll ↑0 of 2"), "{}", app.message);
+        app.on_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        assert_eq!(app.terms["v"].parser.screen().scrollback(), 2, "g: the oldest line");
+        app.selection_press("v", at(6, 1)); app.selection_press("v", at(6, 1)); app.selection_release("v");
+        assert_eq!(app.selection_text("v").as_deref(), Some("/tmp/x.log"));
+        app.selection_press("v", at(6, 1)); app.selection_release("v");
+        assert_eq!(app.selection_text("v").as_deref(), Some("two /tmp/x.log"), "third press: the line");
+        // Search from the bottom up: the nearest match first, n goes further up, N back down.
+        app.on_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        for c in "ALPHA".chars() { app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::SHIFT)); }
+        assert_eq!(app.message, "/ALPHA  1 of 3  n/N");
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert!(app.message.contains("/ALPHA  3 of 3"), "{}", app.message);
+        assert_eq!(app.terms["v"].parser.screen().scrollback(), 2, "the oldest match is in view");
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.scroll_mode.is_none());
+        assert_eq!(app.terms["v"].parser.screen().scrollback(), 0, "leaving returns to the live screen");
+        // The setting is bounded.
+        app.ws.entries.insert("doc/settings/tui".into(), json!({"scrollback_lines": 10_000_000}));
+        assert_eq!(app.scrollback_lines(), 20_000);
     }
 
     #[tokio::test]

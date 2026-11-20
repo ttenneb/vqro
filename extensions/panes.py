@@ -360,6 +360,7 @@ ext.contribute({
     "binding/panes.split-v": {"key": "v", "command": "panes.split", "args": {"dir": "down"}, "label": "split stacked"},
     "binding/panes.close": {"key": "x", "command": "panes.close", "label": "close pane (program keeps running)"},
     "binding/panes.zoom": {"key": "z", "command": "client.zoom", "label": "zoom pane (toggle)"},
+    "binding/panes.scroll": {"key": "[", "command": "client.scroll", "label": "scroll back and search (terminal)"},
     "binding/panes.last": {"key": ";", "command": "client.focus", "args": {"dir": "last"}, "label": "last pane"},
     "binding/panes.swap-prev": {"key": "{", "command": "panes.swap", "args": {"dir": "prev"}, "label": "swap with previous pane"},
     "binding/panes.swap-next": {"key": "}", "command": "panes.swap", "args": {"dir": "next"}, "label": "swap with next pane"},
