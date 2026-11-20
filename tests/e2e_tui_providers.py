@@ -12,6 +12,8 @@ TARGET = sys.argv[1]
 VQRO, PHERDR, PTMUX = (os.path.join(TARGET, "debug", b) for b in ("vqro", "vqro-herdr", "vqro-tmux"))
 HC = os.path.expanduser("~/.local/bin/herdr-core")
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+with open(os.path.join(REPO, "extensions", "defaults.json"), encoding="utf-8") as defaults:
+    BUILTIN_COUNT = len(json.load(defaults)["extensions"])
 R = tempfile.mkdtemp(prefix="pe2t", dir="/tmp")
 for d in ("home", "st", "xst", "run", "cfg", "ext", "bin"):
     os.makedirs(os.path.join(R, d))
@@ -149,7 +151,7 @@ try:
         "No default backend is ready" in screen() and
         call("extension.list")["extensions"]["herdr"]["display_status"] == "provider-not-connected")))
     keys("C-g", ",")
-    check("catalogue opens before typing its search", bool(wait(lambda:"16 of 16" in screen() and "Agent controls" in screen())))
+    check("catalogue opens before typing its search", bool(wait(lambda:f"{BUILTIN_COUNT} of {BUILTIN_COUNT}" in screen() and "Agent controls" in screen())))
     keys("/"); keys("herdr", literal=True); keys("Enter")
     check("catalogue separates disconnected provider from running process", bool(wait(lambda:
         "provider-not-connected" in screen() and "Process: running" in screen())))
@@ -160,11 +162,11 @@ try:
     keys("Escape")
     # Settings is an extension using the same list/detail primitives available to every panel.
     keys("C-g", ",")
-    check("Extensions page opens with static manifests", bool(wait(lambda: "16 of 16" in screen() and "Agent controls" in screen())))
+    check("Extensions page opens with static manifests", bool(wait(lambda: f"{BUILTIN_COUNT} of {BUILTIN_COUNT}" in screen() and "Agent controls" in screen())))
     wide = screen()
     print("CAPTURE extensions-wide\n" + wide, flush=True)
     keys("/"); keys("pi", literal=True); keys("Enter")
-    check("manifest list search and count", bool(wait(lambda: "1 of 16" in screen() and "Pi launcher" in screen())))
+    check("manifest list search and count", bool(wait(lambda: f"1 of {BUILTIN_COUNT}" in screen() and "Pi launcher" in screen())))
     # Clicking a row selects details; only its checkbox or explicit keyboard activation changes state.
     row = next((i, line) for i, line in enumerate(screen().splitlines()) if "[x]" in line and "Pi launcher" in line)
     before = call("extension.list")["extensions"]["pi"]["generation"]
@@ -174,16 +176,16 @@ try:
     # Tab enters detail actions; restart is generic and keeps the list selection/filter.
     keys("Tab", "Right", "Enter")
     check("detail restart action", bool(wait(lambda: call("extension.list")["extensions"]["pi"]["generation"] > before)))
-    check("detail restart preserves list search", bool(wait(lambda: "1 of 16" in screen())))
+    check("detail restart preserves list search", bool(wait(lambda: f"1 of {BUILTIN_COUNT}" in screen())))
     wait(lambda: any(c["name"] == "pi.settings" and c.get("available") for c in call("command.list")["commands"]))
     keys("Right", "Enter")
     check("manifest settings_command opens its own settings", bool(wait(lambda: "Pi runtime argv" in screen())))
     keys("Escape"); keys("C-g", ","); keys("/"); keys("Escape")
     keys("End", "PageUp", "Home")
-    check("Home End and paging retain catalogue", bool(wait(lambda: "16 of 16" in screen())))
+    check("Home End and paging retain catalogue", bool(wait(lambda: f"{BUILTIN_COUNT} of {BUILTIN_COUNT}" in screen())))
     # Dependencies: turning off a needed extension warns once; turning on one with an off need offers it too.
     keys("/"); keys("tabs", literal=True); keys("Enter")
-    wait(lambda: "1 of 16" in screen() and "[x] Tabs (tabs)" in screen())
+    wait(lambda: f"1 of {BUILTIN_COUNT}" in screen() and "[x] Tabs (tabs)" in screen())
     keys("Space")
     check("turning off a needed extension warns what breaks", bool(wait(lambda: "Turn off Tabs: breaks" in screen() and "Sidebar" in screen())), screen())
     print("CAPTURE dependency-warning\n" + screen(), flush=True)
@@ -194,7 +196,7 @@ try:
     # The sidebar needs tabs.show (workspaces only works with tabs.open since each workspace has its own tabs).
     check("core reports the dependent's missing need", bool(wait(lambda: call("extension.list")["extensions"]["sidebar"]["dependencies"]["status"] == "missing")))
     keys("/"); keys("Escape"); keys("/"); keys("sidebar", literal=True); keys("Enter")
-    check("dependents show a needs badge and the need in detail", bool(wait(lambda: "1 of 16" in screen() and "needs Tabs (off)" in screen()
+    check("dependents show a needs badge and the need in detail", bool(wait(lambda: f"1 of {BUILTIN_COUNT}" in screen() and "needs Tabs (off)" in screen()
         and "Tabs: command/tabs.show (off)" in screen())), screen())
     keys("Tab")  # detail: the Turn off chip is first; turn the sidebar off directly (nothing needs it)
     keys("Enter")
@@ -212,7 +214,7 @@ try:
     with open(f"{R}/st/ext-tabs.log", "a") as log:
         log.write("".join(f"e2e-tail-{n}\n" for n in range(5)))
     keys("/"); keys("tabs", literal=True); keys("Enter")
-    wait(lambda: "1 of 16" in screen() and "View log" in screen())
+    wait(lambda: f"1 of {BUILTIN_COUNT}" in screen() and "View log" in screen())
     keys("Tab", "Right", "Right", "Right", "Enter")  # Turn off, Restart, Extension settings, View log
     check("View log opens the log viewer through its fallback panel", bool(wait(lambda: "Log: tabs" in screen() and "e2e-tail-4" in screen())), screen())
     with open(f"{R}/st/ext-tabs.log", "a") as log:
@@ -226,7 +228,7 @@ try:
     check("reading earlier lines stops following", "e2e-tail-80" not in screen() and "e2e-tail-76" in screen(), screen())
     keys("Escape")
     keys("C-g", ",")
-    wait(lambda: "16 of 16" in screen())
+    wait(lambda: f"{BUILTIN_COUNT} of {BUILTIN_COUNT}" in screen())
     keys("/"); keys("icons", literal=True); keys("Enter")
     check("Icons search and details are ready before keyboard activation", bool(wait(lambda: "/icons" in screen() and "[x] Icons (icons)" in screen() and "Publishes icon sets" in screen())))
     keys("Space")
@@ -242,7 +244,7 @@ try:
     check("failed extension retains manifest and visible reason", bool(wait(lambda: "failed" in screen() and "extension program" in screen() and "vqro-extension-page-test-missing" in screen() and "Publishes icon sets" in screen())))
     subprocess.run([*HARNESS, "resize-window", "-x", "72", "-y", "36"], capture_output=True)
     time.sleep(.3)
-    check("narrow list detail stacks below", bool(wait(lambda: "Icons (icons)" in screen() and "1 of 16" in screen())))
+    check("narrow list detail stacks below", bool(wait(lambda: "Icons (icons)" in screen() and f"1 of {BUILTIN_COUNT}" in screen())))
     narrow = screen(); print("CAPTURE extensions-narrow\n" + narrow, flush=True)
     if len(sys.argv) > 2:
         os.makedirs(sys.argv[2], exist_ok=True)
