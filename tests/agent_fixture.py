@@ -18,12 +18,18 @@ class FakeCore:
         self.shells = []  # ids for plain shell spawns (resource.spawn without argv), consumed in order
         self.contributed = False
         self.sinks, self.fail_attach = {}, False
+        # The core's record of the current command's caller (D24); tests set another to act as someone else.
+        self.caller_record = {"author": "client:1", "actor": "owner", "principal": "owner", "initiator": "owner"}
 
     def fresh(self):
         pass
 
+    def caller(self):
+        return self.caller_record
+
     # The real cache readers: they use only value().
     layout_settings = Extension.layout_settings
+    owner = Extension.owner
     layout_folder = Extension.layout_folder
     invocation_layout = Extension.invocation_layout
     context_layout = Extension.context_layout

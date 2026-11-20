@@ -344,9 +344,12 @@ class Vqro:
             context = self._command_context = threading.local()
         previous = getattr(context, "invocation", None)
         previous_layout = getattr(context, "layout", None)
+        previous_caller = getattr(context, "caller", None)
         params = msg.get("params") or {}
         command = msg.get("method") == "command.invoke" and isinstance(params, dict)
         context.invocation = params.get("invocation") if command else None
+        # The core's record of who invoked this command (D24 envelope): never read from args.
+        context.caller = {k: params.get(k) for k in ("author", "actor", "principal", "initiator")} if command else None
         # The layout the invoking window shows (`args.context.layout`), for nested commands and helpers.
         ctx = ((params.get("args") or {}) if command and isinstance(params.get("args"), dict) else {}).get("context")
         context.layout = ctx.get("layout") if isinstance(ctx, dict) and isinstance(ctx.get("layout"), str) else None
@@ -363,6 +366,7 @@ class Vqro:
         finally:
             context.invocation = previous
             context.layout = previous_layout
+            context.caller = previous_caller
 
 
 # Namespaces an activation's contribute() reconciles (owner-tagged entries only).
@@ -536,6 +540,17 @@ class Extension:
 
     def invoke(self, name, args=None):
         return self.vqro.call("command.invoke", {"name": name, "args": args or {}})
+
+    def caller(self):
+        """The core's record of the command being handled, `{author, actor, principal, initiator}` (D24), or None
+        outside a command. `principal` is the effective principal. Never taken from the command's args."""
+        context = getattr(self.vqro, "_command_context", None)
+        return getattr(context, "caller", None) if context is not None else None
+
+    def owner(self):
+        """The workspace owner principal (`doc/principals/owner`, default "owner")."""
+        value = self.value("doc/principals/owner")
+        return value if isinstance(value, str) and value else "owner"
 
     def value(self, key, default=None):
         e = self.entries.get(key)

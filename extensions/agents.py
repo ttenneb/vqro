@@ -486,6 +486,9 @@ class Agents:
         r = self.agent(args, inspect=True)
         rid, what, value = r["id"], args.get("set"), args.get("value")
         current = self.view_of(rid)
+        if what in agent_transcript.KINDS and rid not in self.conversations:
+            raise VqroError(f"{label(r.get('name') or rid)} doesn't stream its conversation, so there is nothing to show or "
+                            "hide here", "unsupported")
         if what in agent_transcript.KINDS and value == "cycle":  # the pane keys: show -> summary -> hide -> show
             modes = agent_transcript.MODES
             change = {what: modes[(modes.index(current[what]) + 1) % len(modes)]}
@@ -570,8 +573,7 @@ class Agents:
         c = self.conversations.get(r["id"])
         if c is None:
             return None
-        # Until callers carry principals (C2), a human sender without a principal is the workspace's user ("You").
-        names = agent_transcript.Names(self.ext.resources, r["id"])
+        names = agent_transcript.Names(self.ext.resources, r["id"], self.ext.owner())
         with c.lock:
             notes = []
             if c.too_big:
@@ -898,10 +900,11 @@ class Agents:
         Published as live data `agents.terminal_status` ({data: {terminal: {app, state, seq, at_ms, status}}}), where
         `status` is OSC 7501-shaped for readers of terminal status. Lossy and advisory: an unknown state value
         becomes `unknown`, a report with seq not above the last one is ignored, and nothing is kept across a
-        restart of this extension. Not attributed: any caller can report for any terminal until callers carry
-        a principal (C2). Errors go to the caller only, never to a notice. Optional `facts` are view facts the
-        plugin read from its runtime (`tier1_facts`); a report without `facts` keeps the last ones while the app is
-        unchanged (a different app starts with none), and a report with `facts` replaces them. They are published as the entry's `facts`, never inferred or merged.
+        restart of this extension. Only the terminal's launcher-tagged principal (resource.principal) or the
+        workspace owner may report (C2); others get not_authorized. Errors go to the caller only, never to a notice.
+        Optional `facts` are view facts the plugin read from its runtime (`tier1_facts`); a report without `facts`
+        keeps the last ones while the app is unchanged (a different app starts with none), and a report with `facts`
+        replaces them. They are published as the entry's `facts`, never inferred or merged.
         """
         terminal, app, seq = args.get("terminal"), args.get("app"), args.get("seq")
         if not isinstance(terminal, str) or not terminal or len(terminal) > 64:
@@ -916,6 +919,14 @@ class Agents:
             r = self.ext.resources.get(terminal)
         if r is None or r.get("kind", "terminal") != "terminal" or ended(r):
             raise VqroError(f"{label(terminal, 64)} is not a live terminal; nothing recorded", "not_found")
+        # Only the terminal's own launcher-tagged principal (resource.principal, recorded by the core at spawn) or the
+        # workspace owner may report its status. Unknown (null) or undeclared tags authorise nobody but the owner.
+        caller = (self.ext.caller() or {}).get("principal")
+        tag = r.get("principal")
+        known = isinstance(tag, str) and tag != "undeclared"
+        if caller != self.ext.owner() and not (known and caller == tag):
+            raise VqroError(f"only {label(terminal, 64)}'s launcher-tagged principal or the workspace owner may report its "
+                            "status; nothing recorded", "not_authorized")
         state = args.get("state") if args.get("state") in TIER1_STATES else "unknown"
         facts = tier1_facts(args["facts"]) if args.get("facts") is not None else None
         with self.tier1_lock:
@@ -1233,7 +1244,7 @@ class Agents:
             # The agent's own item stream: the conversation is drawn here (agent pane, K3 phase 2).
             c = self.conversations[r["id"]]
             with c.lock:
-                seen = agent_transcript.senders(c.view.entities, agent_transcript.Names(self.ext.resources, r["id"]))
+                seen = agent_transcript.senders(c.view.entities, agent_transcript.Names(self.ext.resources, r["id"], self.ext.owner()))
             content = {"title": title, "follow": True, "search": True, "toolbar": self.view_toolbar(r["id"], self.view_of(r["id"]), seen), "items": [
                 {"text": title, "badges": [{"text": status(r), "style": "dim"}]}, *conversation, *self.bottom_rows(r),
                 agent_transcript.facts_footer(agent_facts(r), plain(str(r.get("name") or r["id"])))]}
@@ -1348,8 +1359,8 @@ class Agents:
             # popup is then dropped ("popup: no view"). Opening a popup writes no workspace state.
             for popup, title in (("stop", "Stop agent"), ("requests", "Pending requests"), ("settings", "Agent settings"),
                                  ("send", "Send to agent")):
-                entries[f"view/agents-{popup}-{rid}"] = {"kind": "panel", "title": f"{title} {rid}",
-                                                         "items": [{"type": "text", "text": "Agents extension is not running."}]}
+                entries[f"view/agents-{popup}-{rid}"] = {"kind": "panel", "title": f"{title} {rid}", "items": [
+                    {"type": "text", "text": "Loading… (stays if the agents extension is not running)"}]}
             entries["menu/agents."+rid+".stop"] = {"where": "pane", "label": "Stop agent…", "command": "agents.stop",
                                                   "when": {"view": view(rid)}, "order": 190}
             # Static (menus are workspace entries; no churn per disconnect): the command refuses connected agents.

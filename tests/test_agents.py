@@ -813,6 +813,28 @@ class Tier1StatusTests(unittest.TestCase):
                 self.report({"terminal": "r1", "app": "claude", "state": "idle", "seq": 1, "facts": bad})
         self.assertNotIn("r1", self.agents.tier1)
 
+    def test_only_the_terminals_launcher_tagged_principal_or_the_owner_may_report(self):
+        """C2: resource.principal is the core-recorded launcher tag; nobody else may report that terminal's status."""
+        self.core.resources["r1"]["principal"] = "p:hook"
+        report = {"terminal": "r1", "app": "claude", "state": "running", "seq": 1}
+        self.core.caller_record = {"principal": "p:hook"}
+        self.assertTrue(self.report(report)["applied"])
+        for who in ("p:other", "undeclared", None):
+            self.core.caller_record = {"principal": who}
+            with self.assertRaises(VqroError) as caught:
+                self.report(dict(report, seq=2))
+            self.assertEqual(caught.exception.kind, "not_authorized")
+        self.core.caller_record = {"principal": "owner"}
+        self.assertTrue(self.report(dict(report, seq=3))["applied"], "the workspace owner may")
+        self.core.resources["r1"]["principal"] = "undeclared"  # no known tag: only the owner
+        self.core.caller_record = {"principal": "undeclared"}
+        with self.assertRaises(VqroError):
+            self.report(dict(report, seq=4))
+        self.core.resources["r1"].pop("principal")  # an old core (null): only the owner
+        with self.assertRaises(VqroError):
+            self.report(dict(report, seq=5))
+        self.assertEqual(self.agents.tier1["r1"]["seq"], 3)
+
     def test_bad_reports_are_refused_to_the_caller_without_notices(self):
         for bad in ({"terminal": "r9", "app": "c", "state": "idle", "seq": 1}, {"terminal": "r1", "app": "", "seq": 1},
                     {"terminal": "r1", "app": "c", "state": "idle", "seq": -1}, {"terminal": "r1", "app": "c", "seq": "1"}):

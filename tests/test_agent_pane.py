@@ -44,7 +44,7 @@ CONVERSATION = {
 
 class TranscriptRows(unittest.TestCase):
     def rows(self, entities=CONVERSATION, coverage=None):
-        names = agent_transcript.Names({"r2": {"name": "Pi"}, "r7": {"name": "vqro-lead"}}, "r2")
+        names = agent_transcript.Names({"r2": {"name": "Pi"}, "r7": {"name": "vqro-lead", "kind": "agent", "principal": "p:lead"}}, "r2")
         return agent_transcript.rows({k: (1, v) for k, v in entities.items()}, names, coverage)
 
     def test_senders_come_from_the_recorded_origin_in_order(self):
@@ -62,6 +62,18 @@ class TranscriptRows(unittest.TestCase):
         via = {"kind": "human", "principal": "undeclared", "actor": "agents"}
         self.assertEqual(names.sender({"role": "user", "origin": own})[0], "You")
         self.assertEqual(names.sender({"role": "user", "origin": via})[0], "Human (via agents UI, undeclared)")
+
+    def test_senders_are_named_from_the_core_recorded_principal(self):
+        """C2: the sender's principal (core-recorded) names it via the resource its launcher tagged; claims say so."""
+        names = agent_transcript.Names({"r7": {"name": "vqro-lead", "kind": "agent", "principal": "p:lead"},
+                                        "r8": {"name": "codex", "kind": "agent"}}, "r2", owner="me")
+        sender = lambda origin: names.sender({"role": "user", "origin": origin})[0]
+        self.assertEqual(sender({"kind": "human", "principal": "me"}), "You")
+        self.assertEqual(sender({"kind": "agent", "principal": "p:lead"}), "Message from vqro-lead (agent r7)")
+        self.assertEqual(sender({"kind": "agent", "principal": "undeclared", "agent": "r8"}), "Message from codex (claimed agent r8)")
+        self.assertEqual(sender({"kind": "human", "principal": "alice"}), "Message from alice")
+        self.assertEqual(sender({"kind": "agent", "principal": "p:lead", "agent": "r8"}), "Message from vqro-lead (agent r7)",
+                         "the recorded principal wins over a claimed agent id")
 
     def test_no_origin_is_never_you_and_another_human_is_named(self):
         bare = {("message", "m"): {"position": 1, "role": "user", "content": text("hi"), "final": True}}
@@ -101,7 +113,7 @@ class ViewSettings(unittest.TestCase):
     """AS10: nothing hidden by default; each kind shown, summarised (expandable) or hidden with a count left."""
 
     def rows(self, **view):
-        names = agent_transcript.Names({"r2": {"name": "Pi"}, "r7": {"name": "vqro-lead"}}, "r2")
+        names = agent_transcript.Names({"r2": {"name": "Pi"}, "r7": {"name": "vqro-lead", "kind": "agent", "principal": "p:lead"}}, "r2")
         entities = dict(CONVERSATION)
         entities[("message", "m4")] = dict(entities[("message", "m4")], at_ms=1_763_600_060_000,
                                            usage={"tokens": {"output": 1200}})
@@ -132,7 +144,7 @@ class ViewSettings(unittest.TestCase):
         self.assertIn("· hidden: 2 tools", texts)
         self.assertIn("· hidden: 1 thinking", texts)
         self.assertFalse(any(t and t.startswith("Activity") for t in texts))
-        folded = self.find(self.rows(hidden_senders=["agent:r7"]), "▸ Message from vqro-lead")
+        folded = self.find(self.rows(hidden_senders=["principal:p:lead"]), "▸ Message from vqro-lead")
         self.assertFalse(folded["expanded"])
 
     def test_compact_collapses_tools_folds_long_messages_and_drops_repeat_times(self):
@@ -182,7 +194,7 @@ class AgentPane(unittest.TestCase):
         self.core.providers["items"] = {"name": "items", "capabilities": {"items.stream": {"entities": 64, "entity_bytes": 65536}}}
         self.core.resources["r2"] = {"id": "r2", "kind": "agent", "provider": "items", "name": "Pi", "state": "live",
                                      "available": True, "data": {}}
-        self.core.resources["r7"] = {"id": "r7", "kind": "agent", "provider": "other", "name": "vqro-lead", "state": "live",
+        self.core.resources["r7"] = {"id": "r7", "kind": "agent", "provider": "other", "name": "vqro-lead", "state": "live", "principal": "p:lead",
                                      "available": True, "data": {}}
         self.agents = Agents(self.core)
         self.agents.flush_conversations()
@@ -243,9 +255,9 @@ class AgentPane(unittest.TestCase):
         self.core.handlers["agents.view"](dict(thinking["args"], value="hide"))
         self.assertEqual(self.core.value("doc/agents/view/r2"), {"thinking": "hide"})
         senders = next(c for c in toolbar if c["text"] == "Senders: all")
-        self.assertIn("agent:r7", [o["value"] for o in senders["options"]])
-        self.core.handlers["agents.view"](dict(senders["args"], value="agent:r7"))
-        self.assertEqual(self.core.value("doc/agents/view/r2")["hidden_senders"], ["agent:r7"])
+        self.assertIn("principal:p:lead", [o["value"] for o in senders["options"]])
+        self.core.handlers["agents.view"](dict(senders["args"], value="principal:p:lead"))
+        self.assertEqual(self.core.value("doc/agents/view/r2")["hidden_senders"], ["principal:p:lead"])
         self.agents.event("entries", {"changes": [{"key": "doc/agents/view/r2"}]})
         self.assertIn("· hidden: 1 thinking", self.texts())
         self.core.handlers["agents.view"]({"resource": "r2", "set": "defaults"})
@@ -331,6 +343,8 @@ class AgentPane(unittest.TestCase):
         group = next(r for r in content["items"] if str(r.get("id", "")).startswith("g:"))
         self.assertEqual(group["children"][1]["copy"].splitlines()[0], "l0", "a tool row copies its output")
         self.assertEqual(json.loads(group["children"][0]["copy"]), {"path": "ci.yml"}, "or its input when there is no output")
+        colours = agent_transcript.tool_row("t9", {"status": "completed", "content": text("\x1b[31mred\x1b[0m \x1b]0;title\x07ok")})
+        self.assertEqual(colours["copy"], "red ok", "copied without terminal colour codes")
         for expected in ("summary", "hide", "show"):
             self.core.handlers["agents.view"]({"context": {"view": "agents-r2"}, "set": "thinking", "value": "cycle"})
             self.assertEqual(self.agents.view_of("r2")["thinking"], expected)

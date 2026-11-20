@@ -5,10 +5,12 @@ from the recorded `origin`, never from text; anything the agent doesn't report (
 guessed. Rows use base panel features (`wrap` text, `children`/`expanded`), so every client can show them.
 """
 import json
+import re
 import time
 
 from vqro_display import plain
 
+ANSI = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])")  # CSI, OSC, 2-byte escapes
 ACTORS = {"agents": "agents UI"}  # recorded actor -> how it reads in a label
 ROLE_LABEL = {"thought": "Thinking", "coordination": "Coordination", "system": "System"}
 TOOL_ICON = {"pending": "…", "running": "…", "completed": "✓", "failed": "✗", "cancelled": "⊘"}
@@ -51,6 +53,14 @@ def view_settings(*layers):
 def clip(text, size=LINE_BYTES):
     wire = text.encode()
     return text if len(wire) <= size else wire[:size - 3].decode("utf-8", errors="ignore") + "…"
+
+
+COPY_BYTES = 16 * 1024  # a row's copy payload; larger ones are left out (y then copies the selected line)
+
+
+def copyable(text):
+    """The copy payload for a row, or None when it would cost more of the pane's budget than it is worth."""
+    return text if text and len(text.encode()) <= COPY_BYTES else None
 
 
 def when(ms):
@@ -115,6 +125,17 @@ class Names:
 
     def __init__(self, resources, agent, owner=None):
         self.resources, self.agent, self.owner = resources, agent, owner
+        self._principals = None
+
+    def by_principal(self, principal):
+        """The resource the launcher tagged with this principal (resource.principal), preferring an agent; else None."""
+        if self._principals is None:
+            self._principals = {}
+            for rid, r in self.resources.items():
+                tag = r.get("principal") if isinstance(r, dict) else None
+                if isinstance(tag, str) and tag != "undeclared" and (tag not in self._principals or r.get("kind") == "agent"):
+                    self._principals[tag] = (rid, r)
+        return self._principals.get(principal)
 
     def agent_name(self, rid):
         r = self.resources.get(rid) or {}
@@ -128,20 +149,27 @@ class Names:
         if role in ROLE_LABEL:
             return ROLE_LABEL[role], "dim" if role in ("thought", "system") else None, role
         origin = value.get("origin") if isinstance(value.get("origin"), dict) else {}
-        if origin.get("kind") == "agent" or origin.get("agent"):
-            rid = origin.get("agent")
-            name = self.agent_name(rid) if isinstance(rid, str) else plain(str(origin.get("principal") or "an agent"))
-            return (f"Message from {name}" + (f" (agent {plain(rid)})" if isinstance(rid, str) else ""), "accent",
-                    "agent:" + (rid if isinstance(rid, str) else str(origin.get("principal"))))
         principal = origin.get("principal")
-        if origin.get("kind") == "human" and self.owner is not None and principal == self.owner:
-            return "You", "bold", "you"  # only an exact match with the workspace owner (once C2 supplies it)
-        if origin.get("kind") == "human" and principal in (None, "undeclared"):
+        known = isinstance(principal, str) and principal != "undeclared"
+        if known and self.owner is not None and principal == self.owner:
+            return "You", "bold", "you"  # the workspace owner's principal, as the core recorded it
+        holder = self.by_principal(principal) if known else None
+        if holder is not None:  # the core-recorded sender is a resource the launcher tagged with that principal
+            rid, r = holder
+            what = f" (agent {plain(rid)})" if r.get("kind") == "agent" else ""
+            return f"Message from {self.agent_name(rid)}{what}", "accent", "principal:" + principal
+        if origin.get("kind") == "agent" or origin.get("agent"):  # only claimed: say so
+            rid = origin.get("agent")
+            name = self.agent_name(rid) if isinstance(rid, str) else plain(str(principal or "an agent"))
+            claim = f" (claimed agent {plain(rid)})" if isinstance(rid, str) else " (claimed agent)"
+            return (f"Message from {name}{claim}", "accent",
+                    "agent:" + (rid if isinstance(rid, str) else str(principal)))
+        if origin.get("kind") == "human" and not known:
             # As recorded, never inferred to be the viewer: an undeclared human, and the actor that sent it.
             actor = origin.get("actor")
             via = f"via {ACTORS.get(actor, plain(str(actor)))}, " if isinstance(actor, str) and actor else ""
             return f"Human ({via}undeclared)", "bold", "human:undeclared"
-        if isinstance(principal, str):
+        if known:
             return "Message from " + plain(principal), "accent", "human:" + principal
         return "User", "bold", "user"  # no recorded origin: nothing assumed
 
@@ -151,6 +179,9 @@ class Names:
             return self.agent_name(self.agent)
         if key.startswith("agent:"):
             return self.agent_name(key[6:])
+        if key.startswith("principal:"):
+            holder = self.by_principal(key[10:])
+            return self.agent_name(holder[0]) if holder else plain(key[10:])
         return {"you": "You", "user": "User (no origin)", "human:undeclared": "Human (undeclared)"}.get(key, plain(key.split(":", 1)[-1]))
 
 
@@ -165,7 +196,7 @@ def message_rows(eid, value, names, receipts, show_time=True, fold=None):
     if value.get("final") is False:
         head.append("writing…")
     # The sender line is selectable and copies the whole message (client.copy, bound to y in the pane).
-    whole = text_of(value)
+    whole = copyable(text_of(value))
     rows = [{"type": "text", "focusable": True, "id": "m:" + eid, "text": " · ".join(head), "style": style or "bold",
              **({"copy": whole} if whole else {})}]
     quoted = value.get("quoted")
@@ -191,9 +222,10 @@ def tool_row(eid, value):
             line = f":{loc['line']}" if type(loc.get("line")) is int else ""
             children.append({"type": "text", "style": "accent", "text": clip(plain(loc["path"] + line), 1024)})
     children += content_rows(value.get("content"), None, TOOL_LINES)
-    output = text_of(value)
+    output = ANSI.sub("", text_of(value))  # terminal output: copy the text, not its colour codes
     raw_input = value.get("input")
     copy = output or (raw_input if isinstance(raw_input, str) else json.dumps(raw_input, ensure_ascii=False, indent=1) if "input" in value else None)
+    copy = copyable(copy) if copy else None
     return {"id": "t:" + eid, "text": f"{TOOL_ICON.get(status, '?')} " + clip(plain(str(value.get("title") or "tool")), 512),
             **({"copy": copy} if copy else {}),
             "description": " · ".join(x for x in (status, took) if x), "style": "error" if status == "failed" else None,
