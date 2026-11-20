@@ -22,6 +22,11 @@ WINDOW = 1024
 OP_BUCKETS = 32
 SCOPE_CAPACITY = 256
 MAX_NATIVE_RESULT = 256 * 1024 - 4096
+CONTROL_ADMISSION_BYTES = 64 * 1024
+CONTROL_ADMISSION_RECORDS = 16
+ARCHIVE_FUTURE_BYTES = 16 * 1024
+ARCHIVE_ESCROW_BYTES = 64 * 1024
+ARCHIVE_ESCROW_RECORDS = 16
 
 
 def digest(value):
@@ -37,8 +42,9 @@ class CoordinationError(PolicyError):
 
 
 class Working:
-    def __init__(self, engine):
+    def __init__(self, engine, *, archive=False):
         self.engine = engine
+        self.archive = archive
         self.rows = engine.store.view()
         self.changes = {}
 
@@ -55,7 +61,7 @@ class Working:
     def delete(self, key):
         self.changes[key] = None
 
-    def commit(self, *, control=False):
+    def commit(self, *, control=False, normal=False):
         ops = [{"op": "set", "key": key, "value": row["value"], "expect": self.version(key)} if row else
                {"op": "delete", "key": key, "expect": self.version(key)} for key, row in self.changes.items()]
         if ops:
@@ -65,7 +71,7 @@ class Working:
                     prospective[key] = {"version": max((r["version"] for r in self.rows.values()), default=0) + 1, "value": row["value"]}
                 else:
                     prospective.pop(key, None)
-            self.engine._preflight_reservations(prospective, self.rows, control=control)
+            self.engine._preflight_reservations(prospective, self.rows, control=control, normal=normal, archive=self.archive)
             return self.engine.store.apply(ops, control=control)
 
 
@@ -118,6 +124,11 @@ class Coordinator:
                 charge += 1024
             elif key == "settled":
                 charge += max(0, 128 * len(value) - encoded(value))
+            elif key.startswith("archive/") and value.get("state") in ("frozen", "exporting", "exported", "partial"):
+                # Four accepted plans retain funding for export, readback, free,
+                # locator-index growth and their operation receipts.
+                charge += ARCHIVE_FUTURE_BYTES if value["state"] in ("frozen", "exporting") else ARCHIVE_FUTURE_BYTES // 2
+                records += 4 if value["state"] in ("frozen", "exporting") else 2
         summaries = {agent: value for key, row in rows.items() if key.startswith("agents/") for agent, value in row["value"].items()}
         charge += sum(max(0, 2048 - encoded(value)) for value in summaries.values())
         gates = rows.get("control", {}).get("value", {}).get("gates", {})
@@ -126,11 +137,19 @@ class Coordinator:
                 charge += 2048
         return charge, records
 
-    def _preflight_reservations(self, rows, before, *, control):
+    def _preflight_reservations(self, rows, before, *, control, normal=False, archive=False):
         charge, count = self._reservation(rows)
         old_charge, old_count = self._reservation(before)
-        byte_limit = self.store.byte_limit if control else self.store.byte_limit - (self.store.byte_limit + 9) // 10
-        count_limit = self.store.record_limit if control else self.store.record_limit - (self.store.record_limit + 9) // 10
+        byte_limit = self.store.byte_limit if control and not normal else self.store.byte_limit - (self.store.byte_limit + 9) // 10
+        count_limit = self.store.record_limit if control and not normal else self.store.record_limit - (self.store.record_limit + 9) // 10
+        if control and not normal and not archive:
+            byte_limit -= ARCHIVE_ESCROW_BYTES
+            count_limit -= ARCHIVE_ESCROW_RECORDS
+        if not control:
+            # Ordinary content leaves bounded normal-ledger space for controls;
+            # unresolved controls themselves never borrow the recovery reserve.
+            byte_limit -= CONTROL_ADMISSION_BYTES
+            count_limit -= CONTROL_ADMISSION_RECORDS
         if ((charge > byte_limit and charge > old_charge) or (count > count_limit and count > old_count)):
             raise CoordinationError("quota", "outcome/tombstone reservations preserve recovery capacity")
 
@@ -229,7 +248,7 @@ class Coordinator:
             result["historical"] = True
             return result
 
-    def _mutate(self, command, args, context, fn, *, control=False):
+    def _mutate(self, command, args, context, fn, *, control=False, normal=False):
         principal = context.get("principal", "undeclared")
         if principal == "undeclared":
             raise CoordinationError("no_grant", "undeclared callers have no coordination rights")
@@ -237,10 +256,11 @@ class Coordinator:
         if not isinstance(op, str) or len(op.encode()) > 256:
             raise CoordinationError("invalid", "op must be a bounded caller-chosen string")
         fingerprint = digest([command, args])
+        archive = command.startswith("coord.inbox.archive")
         with self.lock:
             if not self.current:
                 raise CoordinationError("unavailable", "inbox owner was replaced")
-            work = Working(self)
+            work = Working(self, archive=archive)
             saved = self._cached(work, principal, op)
             if saved:
                 if saved["fingerprint"] != fingerprint:
@@ -262,14 +282,14 @@ class Coordinator:
                 raise CoordinationError("busy", "bounded result window closed before evaluation", {"window": self.window()})
             # A refusal also needs a slot. Test room for the largest canonical
             # refusal before consulting policy or evaluating the requested action.
-            trial = Working(self)
+            trial = Working(self, archive=archive)
             self._cache_operation(trial, command, principal, op, fingerprint,
                                   {"state": "rejected", "reserved": " " * 2048}, compact=False)
             prospective = dict(trial.rows)
             for key, value in trial.changes.items():
                 prospective[key] = {"version": max((row["version"] for row in trial.rows.values()), default=0) + 1, "value": value["value"]}
             try:
-                self._preflight_reservations(prospective, before=trial.rows, control=control)
+                self._preflight_reservations(prospective, before=trial.rows, control=control, archive=archive)
             except PolicyError:
                 meta["window_epoch"], meta["window_count"] = nonce("w:"), 0
                 work.put("meta", meta)
@@ -290,14 +310,14 @@ class Coordinator:
                 uncertain = result.pop("_uncertain", None)
                 write_control = result.pop("_control", control)
                 self._cache_operation(work, command, principal, op, fingerprint, result)
-                work.commit(control=write_control)
+                work.commit(control=write_control, normal=normal)
             except (PolicyError, StoreError) as error:
                 if isinstance(error, StoreError) and error.kind not in ("quota", "too_large", "invalid", "conflict", "io"):
                     if uncertain and error.kind in ("durability_unconfirmed", "indeterminate", "timeout"):
                         uncertain()
                     raise
                 failure = self._bounded_refusal(error)
-                work = Working(self)  # discard all uncommitted requested changes
+                work = Working(self, archive=archive)  # discard all uncommitted requested changes
                 result = {"state": "rejected", "reason": failure["kind"], "refusal": failure}
                 self._cache_operation(work, command, principal, op, fingerprint, result, compact=False)
                 try:
@@ -372,7 +392,9 @@ class Coordinator:
         resource = policy.resources.get(agent, {})
         native = (resource.get("data") or {}).get("agent") or {}
         lifecycle = native.get("lifecycle", "unknown")
-        row = {"agent": agent, "identity": {key: resource.get(key) for key in ("provider", "instance", "ref", "incarnation")},
+        identity = {key: resource.get(key) for key in ("provider", "instance", "incarnation")}
+        identity["ref"] = resource.get("backend_ref", resource.get("ref"))
+        row = {"agent": agent, "identity": identity,
                "handles": sorted(handle for handle, bound in policy.names.items() if bound["agent"] == agent),
                "last_seen_ms": self.clock() if resource and resource.get("available") is not False else None,
                "last_evidence": "native_ended" if lifecycle == "ended" else None,
@@ -731,6 +753,10 @@ class Coordinator:
                 if agent is not None and record["to"]["agent"] != agent:
                     continue
                 reason = self._eligibility(record, policy)
+                if (reason in ("integration_unavailable", "unsupported_mode", "origin_unsupported")
+                        and record.get("reason") in ("unsupported_content", "too_large_for_consumer")
+                        and record.get("reason_consumer") == work.get("control")["consumers"].get(record["to"]["agent"])):
+                    continue  # the native dispatcher cannot erase the active pull consumer's precise hold
                 if reason:
                     desired = "expired" if reason == "expired" else "held"
                     if record.get("reason") != reason or record["state"] != desired:
@@ -829,21 +855,20 @@ class Coordinator:
                 now["attempt"]["steps"] = self._compact_steps(outcomes) + [{"op": op, "outcome": "unknown"}]
                 work.put("message/" + record["delivery"], now)
                 work.commit(control=True)
-            coordinated = False
+            reported = None
             try:
                 result = self.invoke(target, op, args, max(1, int((deadline - time.monotonic()) * 1000)))
+                reported = result if isinstance(result, dict) else None
                 if not isinstance(result, dict) or result.get("outcome") not in ("accepted", "observed", "dispatched", "rejected", "indeterminate"):
-                    coordinated = True
                     result = {"outcome": "indeterminate", "error": {"kind": "invalid_native_result"}, "raw_native": result}
             except Exception as error:
-                coordinated = True
-                kind = getattr(error, "kind", "transport")
-                no_effect = kind in ("invalid", "unknown_method", "unsupported", "not_found", "stale_generation", "conflict", "forbidden", "overloaded", "too_large")
-                result = {"outcome": "rejected" if no_effect else "indeterminate", "error": {"kind": kind, "message": str(error)[:1024]}}
+                result, reported = self._rpc_outcome(error)
+            coordinated = reported is None
             outcomes.append({"op": op, "outcome": result.get("outcome"),
-                             "native": None if coordinated else result, "coordination": result if coordinated else None})
+                             "native": reported, "coordination": result if coordinated else None})
             if result["outcome"] not in ("accepted", "observed", "dispatched"):
-                return self._finish_attempt(record, outcomes, result, partial=len(outcomes) > 1, coordinated=coordinated)
+                return self._finish_attempt(record, outcomes, result, partial=len(outcomes) > 1,
+                                            coordinated=coordinated, native_reply=reported)
             if result["outcome"] == "dispatched" and len(steps) > 1 and op != "agent.send":
                 # No acknowledgement that a prerequisite completed: do not run its tail.
                 return self._finish_attempt(record, outcomes, result, partial=True)
@@ -856,14 +881,26 @@ class Coordinator:
                 "cause": record.get("cause"), "correlation": record.get("correlation")}
 
     @staticmethod
+    def _rpc_outcome(error):
+        data = getattr(error, "data", None)
+        reported = getattr(error, "wire_error", None)
+        reported = reported if isinstance(reported, dict) else None
+        outcome = data.get("outcome") if reported is not None and isinstance(data, dict) else None
+        if outcome not in ("rejected", "indeterminate"):
+            outcome = "indeterminate"  # a kind or missing reply is never certainty
+        return ({"outcome": outcome, "error": {"kind": getattr(error, "kind", None) or "transport",
+                                                "message": str(error)[:1024]}}, reported)
+
+    @staticmethod
     def _compact(native, operation=None):
         data = native.get("data") or {}
         receipt = data.get("receipt", native.get("receipt", {})) if isinstance(data, dict) else {}
         error = native.get("error") or {}
         def tag(value):
             return value if value is None or isinstance(value, str) and len(value.encode()) <= 128 else "_oversize"
-        compact = {"outcome": tag(native.get("outcome", "indeterminate")), "stage": tag(receipt.get("stage")) if isinstance(receipt, dict) else None,
-                   "error_kind": tag(error.get("kind")) if isinstance(error, dict) else None, "native_op": tag(operation),
+        rpc_data = data if "code" in native and "outcome" not in native and isinstance(data, dict) else {}
+        compact = {"outcome": tag(native.get("outcome", rpc_data.get("outcome", "indeterminate"))), "stage": tag(receipt.get("stage")) if isinstance(receipt, dict) else None,
+                   "error_kind": tag(error.get("kind", rpc_data.get("kind"))) if isinstance(error, dict) else None, "native_op": tag(operation),
                    "bytes": encoded(native), "sha256": digest(native), "incomplete": True}
         if encoded(compact) > 1024:
             raise CoordinationError("too_large", "compact outcome exceeds its 1 KiB reservation")
@@ -875,7 +912,7 @@ class Coordinator:
                  self._compact(step["native"] if step.get("native") is not None else step["coordination"], step["op"])}
                 for step in steps]
 
-    def _finish_attempt(self, original, outcomes, native, *, partial, coordinated=False):
+    def _finish_attempt(self, original, outcomes, native, *, partial, coordinated=False, native_reply=None):
         with self.lock:
             if not self.current:
                 return {"state": "unknown", "reason": "owner_replaced"}
@@ -883,8 +920,9 @@ class Coordinator:
             record = self._record(work, original["delivery"])
             if record.get("attempt", {}).get("id") != original["attempt"]["id"]:
                 return {"state": "unknown", "reason": "attempt_replaced"}
+            reported = native if native_reply is None else native_reply
             result = {"state": "partial" if partial else native.get("outcome", "unknown"),
-                      "attempt": {"id": record["attempt"]["id"], "steps": outcomes}, "native": None if coordinated else native}
+                      "attempt": {"id": record["attempt"]["id"], "steps": outcomes}, "native": None if coordinated else reported}
             if coordinated:
                 result["reason"] = (native.get("error") or {}).get("kind")
             observed_receipt = (record.get("result") or {}).get("receipt")
@@ -893,7 +931,7 @@ class Coordinator:
                 compact_steps[-1].pop("native")
                 compact_steps[-1]["native_ref"] = "result.native"
             record["attempt"]["steps"] = compact_steps
-            record["result"] = dict(result, native=None if coordinated else self._compact(native, outcomes[-1]["op"] if outcomes else None),
+            record["result"] = dict(result, native=None if coordinated else self._compact(reported, outcomes[-1]["op"] if outcomes else None),
                                     attempt={"id": record["attempt"]["id"], "steps_ref": "attempt.steps"})
             outcome = native.get("outcome")
             kind = (native.get("error") or {}).get("kind")
@@ -1096,7 +1134,8 @@ class Coordinator:
                 gates = intent.get("close_gates") or ([intent["close_gate"]] if intent.get("close_gate") else [])
                 self.permits.difference_update(gates)
             return {"state": "claimed", "result_ref": key, "_after": close, "_uncertain": close}
-        result = self._mutate(command, args, context, begin, control=True)
+        result = self._mutate(command, args, context, begin, control=True,
+                              normal=command != "coord.inbox.archive.export")
         if result.get("historical"):
             return result
         with self.lock:
@@ -1104,23 +1143,25 @@ class Coordinator:
             if not self.current or row["value"]["control_epoch"] != self.control_epoch:
                 return {"state": "unknown", "reason": "owner_replaced", "window": self.window()}
             intent = row["value"]["intent"]
-        coordinated = False
+        reported = None
         try:
             native = execute(intent)
+            reported = native if isinstance(native, dict) else None
+            if not isinstance(native, dict) or native.get("outcome") not in ("accepted", "observed", "dispatched", "rejected", "indeterminate"):
+                native = {"outcome": "indeterminate", "error": {"kind": "invalid_native_result"}, "raw_native": native}
         except Exception as error:
-            coordinated = True  # there is no unchanged native result to return
-            kind = getattr(error, "kind", "transport")
-            no_effect = command == "coord.control" and (isinstance(error, PolicyError) or kind in (
-                "invalid", "unknown_method", "unsupported", "not_found", "stale_generation", "conflict", "forbidden", "overloaded", "too_large"))
-            native = {"outcome": "rejected" if no_effect else "indeterminate", "error": {"kind": kind, "message": str(error)[:1024]}}
+            native, reported = self._rpc_outcome(error)
+            if command == "coord.control" and isinstance(error, PolicyError):
+                native["outcome"] = "rejected"  # local precondition, before native invocation
+        coordinated = reported is None
         with self.lock:
             if not self.current:
                 return {"state": "unknown", "reason": "owner_replaced"}
-            work = Working(self)
+            work = Working(self, archive=command.startswith("coord.inbox.archive"))
             record = work.get(key)
             outcome = native.get("outcome", "accepted")
             native_kind = command == "coord.control" and intent.get("op") is not None and not coordinated
-            evidence = self._compact(native, intent.get("op") or command)
+            evidence = self._compact(reported if reported is not None else native, intent.get("op") or command)
             state = "unknown" if outcome == "indeterminate" else outcome
             if intent.get("close_gate") and outcome == "rejected":
                 state = "partial"  # admission closed, even though native stop had no effect
@@ -1138,8 +1179,8 @@ class Coordinator:
                 work.put(bucket_key, bucket)
             work.commit(control=True)
             self._safe_maintain()
-            return dict(record, native=native if native_kind else None,
-                        coordination=record["coordination"] if native_kind else native, window=self.window())
+            return dict(record, native=reported if native_kind else None,
+                        coordination=record["coordination"] if native_kind else reported if reported is not None else native, window=self.window())
 
     def config_action(self, command, args, context):
         def prepare(work, policy):
@@ -1629,7 +1670,7 @@ class Coordinator:
                         records.append({"delivery": key, "version": version, "record": row["value"]})
                 exported = export_archive(plan["destination"], archive_id, records)
                 with self.lock:
-                    work = Working(self)
+                    work = Working(self, archive=True)
                     current = work.get("archive/" + archive_id)
                     current.update(exported, state="exported")
                     work.put("archive/" + archive_id, current)

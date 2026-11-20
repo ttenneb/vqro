@@ -102,20 +102,68 @@ class SharedHostTests(unittest.TestCase):
         self.assertEqual(result["coordination"]["error"]["kind"], "no_grant")
         self.assertEqual(f.ledger, [])
 
-    def test_core_too_large_is_definite_refusal_not_a_fabricated_native_reply(self):
+    @staticmethod
+    def rpc_error(kind, outcome):
+        error = service_fixtures.VqroError("reported native result", kind)
+        error.data = {"kind": kind, "outcome": outcome, "effect": "e:fixture"}
+        error.wire_error = {"code": -32000, "message": str(error), "data": error.data}
+        return error
+
+    def test_reported_core_refusal_retains_raw_error_instead_of_fabricating_reply(self):
         f = self.f
+        error = self.rpc_error("too_large", "rejected")
         def refuse(*args):
-            raise service_fixtures.VqroError("core admission refused the request", "too_large")
+            raise error
         f.engine.invoke = refuse
         control = f.engine.control({"op": f.op(), "target": "r1", "action": "interrupt"}, fixtures.OWNER)
         self.assertEqual(control["state"], "rejected")
-        self.assertIsNone(control["native"])
-        f.send()
+        self.assertEqual(control["native"], error.wire_error)
+        sent = f.send()
         result = f.engine.dispatch_one()
         self.assertEqual(result["state"], "rejected")
-        self.assertIsNone(result["native"])
-        self.assertEqual(result["attempt"]["steps"][0]["coordination"]["error"]["kind"], "too_large")
+        self.assertEqual(result["native"], error.wire_error)
+        self.assertEqual(result["attempt"]["steps"][0]["native"], error.wire_error)
+        compact = f.engine.get(sent["delivery"])["result"]["native"]
+        self.assertEqual(compact["outcome"], "rejected")
+        self.assertEqual(compact["error_kind"], "too_large")
         self.assertEqual(f.ledger, [])
+
+    def test_reported_native_stale_is_rejected_not_unknown(self):
+        f = self.f
+        error = self.rpc_error("stale", "rejected")
+        def refuse(*args):
+            raise error
+        f.engine.invoke = refuse
+        f.resources["r1"]["data"]["agent"]["caps"]["agent.respond"] = {}
+        control = f.engine.control({"op": f.op(), "target": "r1", "action": "respond", "args": {"id": "native-question", "confirmed": True}}, fixtures.OWNER)
+        self.assertEqual(control["state"], "rejected")
+        self.assertEqual(control["native"], error.wire_error)
+        sent = f.send(follow_current_session=True)
+        f.engine.dispatch_one()
+        record = f.engine.get(sent["delivery"])
+        self.assertEqual(record["state"], "held")
+        self.assertEqual(record["review_required"], "stale_guard")
+        self.assertIsNone(f.engine.dispatch_one())
+
+    def test_error_kind_alone_never_supplies_certainty(self):
+        f = self.f
+        def unknown(*args):
+            raise service_fixtures.VqroError("no reported outcome", "too_large")
+        f.engine.invoke = unknown
+        result = f.engine.control({"op": f.op(), "target": "r1", "action": "interrupt"}, fixtures.OWNER)
+        self.assertEqual(result["state"], "unknown")
+        self.assertIsNone(result["native"])
+        self.assertEqual(result["coordination"]["outcome"], "indeterminate")
+
+    def test_reported_uncertainty_wins_over_a_familiar_error_kind(self):
+        f = self.f
+        error = self.rpc_error("stale", "indeterminate")
+        def unknown(*args):
+            raise error
+        f.engine.invoke = unknown
+        result = f.engine.control({"op": f.op(), "target": "r1", "action": "interrupt"}, fixtures.OWNER)
+        self.assertEqual(result["state"], "unknown")
+        self.assertEqual(result["native"], error.wire_error)
 
     def test_unknown_stop_strategy_never_becomes_graceful_stop(self):
         f = self.f

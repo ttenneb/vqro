@@ -120,6 +120,13 @@ class SafetyTests(unittest.TestCase):
             "receipt": {"delivery": sent["delivery"], "stage": "completed"}}]))
         self.assertEqual(f.engine.get(sent["delivery"])["state"], "held")
 
+    def test_identity_summary_keeps_the_core_canonical_backend_reference(self):
+        f = self.f
+        f.resources["r1"].update(provider="native-fixture", instance="instance1", backend_ref="opaque/native/reference")
+        f.send()
+        identity = f.engine.tombstones()["r1"]["identity"]
+        self.assertEqual(identity, {"provider": "native-fixture", "instance": "instance1", "ref": "opaque/native/reference", "incarnation": "i1"})
+
     def test_scope_materializes_two_hundred_reserved_identity_summaries_atomically(self):
         f = self.f
         f.resources = {"r" + str(n): fixtures.resource("r" + str(n)) for n in range(1, 201)}
@@ -208,6 +215,21 @@ class SafetyTests(unittest.TestCase):
         f.engine.reconcile({"op": f.op(), "agent": "r1", "consumer": "c2", "records": []}, fixtures.OWNER)
         capable = f.engine.take({"op": f.op(), "agent": "r1", "consumer": "c2", "at": "turn", "max_bytes": 8192}, fixtures.OWNER)
         self.assertEqual(capable["records"][0]["delivery"], large["delivery"])
+
+    def test_native_dispatcher_does_not_erase_current_pull_consumer_byte_hold(self):
+        f = self.f
+        f.setup_pull()
+        f.resources["r1"]["kind"] = "terminal"
+        f.resources["r1"]["data"]["agent"]["caps"] = {}
+        f.config["doc/agents/terminals/r1"] = {"version": 1, "value": {"pull": f.resources["r1"]["data"]["agent"]["pull"]}}
+        sent = f.send("boundary", content=[{"type": "text", "text": "x" * 5000}])
+        f.engine.take({"op": f.op(), "agent": "r1", "consumer": "c1", "at": "turn", "max_bytes": 256}, fixtures.OWNER)
+        self.assertEqual(f.engine.get(sent["delivery"])["reason"], "too_large_for_consumer")
+        self.assertIsNone(f.engine.dispatch_one())
+        self.assertEqual(f.engine.get(sent["delivery"])["reason"], "too_large_for_consumer")
+        f.now += 300001
+        f.engine.dispatch_one()
+        self.assertEqual(f.engine.get(sent["delivery"])["state"], "expired")
 
     def test_pull_byte_budget_uses_encoded_utf8_content_and_validates_bounds(self):
         f = self.f
