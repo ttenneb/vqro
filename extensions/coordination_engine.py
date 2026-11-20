@@ -792,6 +792,8 @@ class Coordinator:
                 if agent is not None and record["to"]["agent"] != agent:
                     continue
                 reason = self._eligibility(record, policy)
+                if reason == "archive_pending":
+                    continue  # a dispatch hold must not invalidate frozen archive evidence
                 if (reason in ("integration_unavailable", "unsupported_mode", "origin_unsupported")
                         and record.get("reason") in ("unsupported_content", "too_large_for_consumer")
                         and record.get("reason_consumer") == work.get("control")["consumers"].get(record["to"]["agent"])):

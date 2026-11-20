@@ -6,6 +6,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "extensions"))
 from coordination_archive import export
+import test_coordination_engine as fixtures
 
 
 class ArchiveTests(unittest.TestCase):
@@ -27,6 +28,34 @@ class ArchiveTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 export(directory, "abc", [])
             self.assertEqual(path.read_bytes(), b"partial")
+
+    def test_native_and_pull_scans_leave_frozen_pending_versions_unchanged(self):
+        for pull in (False, True):
+            with self.subTest(pull=pull), tempfile.TemporaryDirectory(prefix='coord-archive-scan-') as directory:
+                f = fixtures.EngineTests(); f.setUp()
+                if pull:
+                    f.resources['r1']['data']['agent']['pull'] = {
+                        'points': {'idle': {'precision': 'exact'}}, 'insert': 'context', 'evidence': 'entry'}
+                    f.engine.reconcile({'op': f.op(), 'agent': 'r1', 'consumer': 'c1', 'records': []}, fixtures.OWNER)
+                f.resume()
+                delivery = f.send(**({'render': ['context']} if pull else {}))['delivery']
+                plan = f.engine.archive({'op': f.op(), 'agents': ['r1'], 'destination': directory}, fixtures.OWNER)['archive']
+                frozen = f.engine.get(delivery)
+                for phase in ('frozen', 'exported'):
+                    for _ in range(3):
+                        self.assertIsNone(f.engine.claim_one())
+                        if pull:
+                            result = f.engine.take({'op': f.op(), 'agent': 'r1', 'consumer': 'c1',
+                                                    'at': 'idle', 'accept': ['text']}, fixtures.OWNER)
+                            self.assertEqual(result['records'], [])
+                        self.assertEqual(f.engine.get(delivery), frozen, phase)
+                    if phase == 'frozen':
+                        exported = f.engine.archive({'op': f.op(), 'action': 'export', 'archive': plan}, fixtures.OWNER)
+                        self.assertEqual(exported['state'], 'accepted')
+                freed = f.engine.archive({'op': f.op(), 'action': 'free', 'archive': plan}, fixtures.OWNER)
+                self.assertEqual(freed['state'], 'completed')
+                self.assertEqual(freed['freed'], ['message/' + delivery])
+                self.assertEqual(f.ledger, [])
 
     def test_destination_and_identifier_are_explicit(self):
         with self.assertRaises(ValueError):
