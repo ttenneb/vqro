@@ -12,7 +12,7 @@ const KINDS = ["panel", "terminal"];
 
 export interface Rect { x: number; y: number; w: number; h: number }
 interface Leaf { view: string; rect: Rect; inner: Rect; path: number[] }
-interface PState { sel: number; top: number; page: number; filter: string; open: Record<string, boolean>; chip: number; followEnd: number | null; manual: boolean; detailFocus: boolean; detailFor: string; composers: Map<string, m.Composer>; editing: string | null; search: string; searchHit: number; facets: Record<string, string>; sort: number | null }
+interface PState { sel: number; top: number; page: number; filter: string; open: Record<string, boolean>; chip: number; followEnd: number | null; manual: boolean; detailFocus: boolean; detailFor: string; composers: Map<string, m.Composer>; editing: string | null; search: string; searchHit: number; seenPages: string[]; facets: Record<string, string>; sort: number | null }
 type Overlay =
   | { kind: "prefix"; sel: number }
   | { kind: "palette"; query: string; sel: number }
@@ -551,7 +551,7 @@ export class App {
 
   state(key: string): PState {
     let st = this.pstate.get(key);
-    if (!st) { st = { sel: 0, top: 0, page: 0, filter: "", open: {}, chip: 0, followEnd: null, manual: false, detailFocus: false, detailFor: "", composers: new Map(), editing: null, search: "", searchHit: 0, facets: {}, sort: null }; this.pstate.set(key, st); }
+    if (!st) { st = { sel: 0, top: 0, page: 0, filter: "", open: {}, chip: 0, followEnd: null, manual: false, detailFocus: false, detailFor: "", composers: new Map(), editing: null, search: "", searchHit: 0, seenPages: [], facets: {}, sort: null }; this.pstate.set(key, st); }
     return st;
   }
 
@@ -1081,6 +1081,13 @@ function drawValue(a: App, buf: OptimizedBuffer, area: Rect, key: string, value:
   const st = a.state(key);
   let y = area.y;
   if (Array.isArray(value.pages) && value.pages.length) {
+    // Keep showing the same page when pages are added or removed before it (another extension's page appears).
+    const titles: string[] = value.pages.map((pg: Json) => String(pg?.title ?? "page"));
+    if (titles.join("\u0000") !== st.seenPages.join("\u0000")) {
+      const at = titles.indexOf(st.seenPages[st.page] ?? "\u0000");
+      if (at >= 0) st.page = at;
+      st.seenPages = titles;
+    }
     st.page = Math.min(st.page, value.pages.length - 1);
     let x = area.x;
     value.pages.forEach((pg: Json, i: number) => {

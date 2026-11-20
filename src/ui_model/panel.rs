@@ -12,6 +12,8 @@ use serde_json::Value;
 #[derive(Default, Clone)]
 pub struct State {
     pub sel: usize,
+    /// The page titles when last shown, so the same page stays shown when a page is added or removed before it.
+    pub seen_pages: Vec<String>,
     /// Expansion the user chose, by row id (overrides the row's `expanded`).
     pub open: HashMap<String, bool>,
     pub page: usize,
@@ -48,7 +50,18 @@ pub(crate) struct Prepared {
 }
 impl State {
     /// Flattened rows for this value and state, reused while content and page/filter/expansion are unchanged.
+    /// Keep showing the same page when the panel's pages change (another extension's page appears or goes): find the
+    /// page shown last time by its title. Pages the user switches to are remembered as they are drawn.
+    pub fn keep_page(&mut self, v: &Value) {
+        let titles = page_titles(v);
+        if titles != self.seen_pages {
+            if let Some(i) = self.seen_pages.get(self.page).and_then(|t| titles.iter().position(|x| x == t)) { self.page = i; }
+            self.seen_pages = titles;
+        }
+    }
+
     pub(crate) fn prepare(&mut self, value: &Arc<Value>) -> Arc<Prepared> {
+        self.keep_page(value);
         if let Some(cache) = &self.prepared {
             if Arc::ptr_eq(&cache.value,value) && cache.page==self.page && cache.filter==self.filter && cache.open==self.open && cache.facets==self.facets && cache.sort==self.sort { return cache.clone(); }
         }
@@ -626,6 +639,20 @@ mod tests {
         choose_sort(&v, &mut st, Some("n")); assert_eq!(st.sort, Some(0));
         choose_facet(&v, &mut st, "unknown", Some("x")); assert!(st.facets.is_empty(), "undeclared keys are ignored");
         assert_eq!(sort_label(&v, &st).as_deref(), Some("n"));
+    }
+
+    #[test]
+    fn the_shown_page_stays_when_a_page_is_added_before_it() {
+        let v = |titles: &[&str]| serde_json::json!({"pages": titles.iter().map(|t| serde_json::json!({"title": t, "items": []})).collect::<Vec<_>>()});
+        let mut st = State::default();
+        st.keep_page(&v(&["Extensions", "Icons", "Keys"]));
+        st.page = 2;  // the user went to Keys
+        st.keep_page(&v(&["Extensions", "Icons", "Keys"]));
+        assert_eq!(st.page, 2, "unchanged pages: the user's choice stands");
+        st.keep_page(&v(&["Extensions", "Sidebar", "Icons", "Keys"]));
+        assert_eq!(st.page, 3, "a page added before it: still Keys");
+        st.keep_page(&v(&["Extensions", "Icons"]));
+        assert_eq!(st.page, 3, "its page gone: the index stays (clamped when drawn)");
     }
 
     #[test]

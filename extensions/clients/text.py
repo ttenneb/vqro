@@ -280,6 +280,7 @@ class TextClient:
         st = self.state.setdefault(view, {"page": 0, "filter": "", "open": {}})
         st.setdefault("facets", {})
         st.setdefault("sort", None)
+        model.keep_page(value, st)
         lines = [f"== {text_of(value.get('title')) or title}"]
         missing = model.missing_for(value, FEATURES)
         if missing:

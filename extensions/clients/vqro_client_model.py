@@ -296,6 +296,19 @@ def _widths_for(spec, shown_rows, width, shown):
     return out
 
 
+def keep_page(value, st):
+    """Keep showing the same page when a panel's pages change (another extension's page appears or goes): `st` holds
+    `page` and `seen_pages` (the titles when last shown); the page shown last time is found by its title."""
+    pages = value.get("pages") if isinstance(value.get("pages"), list) else []
+    titles = [str(p.get("title", "page")) if isinstance(p, dict) else "page" for p in pages]
+    seen = st.get("seen_pages") or []
+    if titles != seen:
+        page = st.get("page", 0)
+        if page < len(seen) and seen[page] in titles:
+            st["page"] = titles.index(seen[page])
+        st["seen_pages"] = titles
+
+
 def page_items(value, page=0):
     pages = value.get("pages")
     if isinstance(pages, list):
