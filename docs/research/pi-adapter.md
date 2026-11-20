@@ -50,7 +50,24 @@ Native JSONL/write budget1MiB,32 pending native calls,64KiB stderr tail. Input76
 completed plus active native calls; no claimed persistent idempotency key. End evidence is fenced through gone and
 a scoped acknowledged read before provider teardown. Requests: eight pending dialogs,16KiB each; at most16
 unconfirmed automatic cancellations and24 UI control/fence tasks. Cancellation-control overflow fails closed by
-stopping the owned child, not by approving or silently dropping a question. Config bounds remain pending.
+stopping the owned child, not by approving or silently dropping a question.
+
+## Native configuration
+Ports the existing Python control declarations: up to64 model choices plus the current native model,64 reported
+thinking levels, native queue delivery modes and auto-compaction. Model choice values are collision-free opaque
+encodings of the native provider/ID pair (a provider containing `/` is not split). A cut/invalid catalog is marked
+incomplete; it never becomes a known-empty inventory. Revisions change with values/descriptors; stale revisions,
+wrong types and values outside advertised choices reject before write.
+
+A setter is written once. Its unresolved workflow masks old model/image and queue-batch semantics, blocks sends
+and another setter, but not native controls. A native ACK is only accepted; observed requires the later reported
+value. Late ACKs continue readback without replay. Facts are published and followed by an acknowledged scoped read
+before an observed reply. Config/command catalogs are omitted with an explicit incomplete marker if combined facts
+would exceed60KiB. A failed/unknown readback stays visibly unresolved, never falsely ready.
+
+Private native subprocess/SDK tests cover a late ACK past the caller deadline, no duplicate setter, concurrent
+setter refusal, fresh facts/fence delivery, and successful ACK with mismatching readback remaining only accepted.
+Pure tests cover actual metadata containers/arrays, native model IDs, revisions, allowed values and catalog cuts.
 
 ## Partial verification —1874677
 Native dialog normalizer/state and stop-coverage regressions pass; warning-free bridge build. Public

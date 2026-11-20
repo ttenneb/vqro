@@ -4,6 +4,7 @@
 #[allow(dead_code)] #[path="../src/bin/vqro-bridge-pi/contract.rs"] mod contract;
 #[allow(dead_code)] #[path="../src/bin/vqro-bridge-pi/queue.rs"] mod queue;
 #[allow(dead_code)] #[path="../src/bin/vqro-bridge-pi/requests.rs"] mod requests;
+#[allow(dead_code)] #[path="../src/bin/vqro-bridge-pi/configuration.rs"] mod configuration;
 #[path="../src/bin/vqro-bridge-pi/state.rs"] mod state;
 use admission::Signals;
 use native::{Event,Exit};
@@ -116,6 +117,15 @@ fn pending_dialogs_survive_pruning_and_dispatched_answers_do_not_invent_idle(){
     metadata(&mut a,"s1","one-at-a-time");assert_eq!(a.state(),"unknown","metadata alone is not an answer-resolution witness");
     a.answer_fenced(&id);assert_eq!(a.state(),"idle");
     assert_eq!(a.journal.entity("request",&id).unwrap().1["native"]["response"],"dispatched");
+}
+
+#[test]
+fn unresolved_configuration_never_publishes_stale_batch_or_image_semantics(){
+    let mut a=make();let rev=a.caps()["rev"].clone();assert!(a.caps()["agent.send"]["content"]["types"].as_array().unwrap().iter().any(|v|v=="image"));
+    a.configuration_pending(true);assert_eq!(a.state(),"unknown");assert!(a.caps()["agent.send"]["modes"].get("boundary").is_none());
+    assert_eq!(a.caps()["agent.send"]["content"]["types"],json!(["text"]));assert_ne!(a.caps()["rev"],rev);
+    metadata(&mut a,"s1","all");assert_eq!(a.state(),"unknown");
+    a.configuration_pending(false);assert_eq!(a.state(),"idle");assert_eq!(a.caps()["agent.send"]["modes"]["boundary"]["batch"],"all");
 }
 
 #[test]

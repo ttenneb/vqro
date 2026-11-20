@@ -6,6 +6,7 @@ mod state;
 mod retirement;
 mod queue;
 mod requests;
+mod configuration;
 use std::collections::HashMap;
 use std::sync::{Arc,Mutex,OnceLock};
 use std::time::Duration;
@@ -27,7 +28,7 @@ struct Args {
     #[arg(long)] cwd:Option<std::path::PathBuf>,
     #[arg(last=true,required=true)] native:Vec<String>,
 }
-struct Shared {agent:Mutex<Agent>,native:OnceLock<Native>,starts:OnceLock<Starts>,changed:Notify,cwd:String,ui_slots:Arc<tokio::sync::Semaphore>}
+struct Shared {agent:Mutex<Agent>,native:OnceLock<Native>,starts:OnceLock<Starts>,changed:Notify,cwd:String,provider_name:String,ui_slots:Arc<tokio::sync::Semaphore>}
 impl Shared {
     fn facts(&self,name:&str)->Value {self.agent.lock().unwrap().facts(name,&self.cwd)}
     fn wake(&self) {self.changed.notify_waiters();}
@@ -55,7 +56,7 @@ async fn main()->Result<()> {
     let argv=controlled(args.native)?;
     let cwd=args.cwd.unwrap_or(std::env::current_dir()?);
     let signals=admission::Signals::new();
-    let shared=Arc::new(Shared {agent:Mutex::new(Agent::new(instance.clone(),signals.clone())),native:OnceLock::new(),starts:OnceLock::new(),changed:Notify::new(),cwd:cwd.to_string_lossy().into_owned(),ui_slots:Arc::new(tokio::sync::Semaphore::new(24))});
+    let shared=Arc::new(Shared {agent:Mutex::new(Agent::new(instance.clone(),signals.clone())),native:OnceLock::new(),starts:OnceLock::new(),changed:Notify::new(),cwd:cwd.to_string_lossy().into_owned(),provider_name:name.clone(),ui_slots:Arc::new(tokio::sync::Semaphore::new(24))});
     let weak=Arc::downgrade(&shared);
     let native=Native::spawn(&argv,&cwd,&std::env::vars().collect::<HashMap<_,_>>(),Arc::new(move|event|{
         if let Some(shared)=weak.upgrade(){
@@ -74,6 +75,10 @@ async fn main()->Result<()> {
     if let Ok(reply)=native.call("get_commands",json!({}),Duration::from_secs(3)).await {
         if !reply.success || contract::rows(&reply.data,"commands").is_none(){shared.agent.lock().unwrap().incomplete.insert("commands".into());}
     }
+    let (metadata_native,metadata_shared)=(native.clone(),shared.clone());
+    tokio::spawn(async move{for command in ["get_available_models","get_available_thinking_levels"]{
+        if !matches!(metadata_native.call(command,json!({}),Duration::from_secs(3)).await,Ok(reply) if reply.success){metadata_shared.agent.lock().unwrap().incomplete.insert("config".into());metadata_shared.wake();}
+    }});
     let life=Arc::new(Notify::new());
     if std::env::var("VQRO_EXTENSION_LIFETIME").as_deref()==Ok("stdin") {
         let notify=life.clone();std::thread::spawn(move||{use std::io::Read;let mut buf=[0;4096];while matches!(std::io::stdin().read(&mut buf),Ok(n) if n>0){} notify.notify_one();});
@@ -99,7 +104,7 @@ async fn main()->Result<()> {
                         loop {
                             tokio::select! {
                                 request=requests.recv()=>match request {
-                                    Some(Request::Effect(effect))=>{let s=shared.clone();tokio::spawn(async move{let result=invoke(&s,&effect).await;effect.respond(result);});}
+                                    Some(Request::Effect(effect))=>{let s=shared.clone();let p=provider.clone();tokio::spawn(async move{let result=invoke(&s,&p,&effect).await;effect.respond(result);});}
                                     Some(Request::Open(open))=>{
                                         if open.stream.r#ref!="agent" || open.stream.incarnation!="" || open.items.is_none(){open.respond(Err(ProviderError::new("unsupported","one agent item channel only")));continue;}
                                         let cursor=shared.agent.lock().unwrap().journal.open(open.items.as_ref().and_then(|items|items.get("after")));
@@ -165,7 +170,7 @@ async fn viewer(shared:Arc<Shared>,mut stream:ProviderStream,mut cursor:ItemCurs
         }
     }
 }
-async fn invoke(shared:&Arc<Shared>,effect:&EffectRequest)->Result<Outcome,ProviderError> {
+async fn invoke(shared:&Arc<Shared>,provider:&Provider,effect:&EffectRequest)->Result<Outcome,ProviderError> {
     if effect.r#ref.as_deref()!=Some("agent") || !effect.incarnation.is_empty() {return rejected("not_found","unknown endpoint incarnation");}
     let args=&effect.args;
     {
@@ -182,6 +187,7 @@ async fn invoke(shared:&Arc<Shared>,effect:&EffectRequest)->Result<Outcome,Provi
         "agent.send"=>send(shared,args,effect.deadline).await,
         "agent.queue"=>queue_op(shared,args,effect.deadline).await,
         "agent.respond"=>respond(shared,args,effect.deadline).await,
+        "agent.configure"=>configure(shared,provider,args,effect.deadline).await,
         "agent.interrupt"=>{
             if shared.agent.lock().unwrap().signals.current().idle(){return Ok(Outcome::Observed(Some(json!({"noop":true}))));}
             let result=shared.native.get().unwrap().call("abort",json!({}),effect.deadline.saturating_duration_since(Instant::now())).await;
@@ -203,6 +209,7 @@ fn record_receipt(shared:&Shared,delivery:&str,value:Value){shared.agent.lock().
 async fn send(shared:&Arc<Shared>,args:&Value,deadline:Instant)->Result<Outcome,ProviderError> {
     let prepared={
         let agent=shared.agent.lock().unwrap();let current=agent.signals.current();
+        if agent.configuration.pending{return rejected("busy","native configuration change is unresolved");}
         if args["mode"]=="start" && agent.state()!="idle"{return rejected("busy","endpoint is not evidenced idle");}
         if agent.caps()["agent.send"]["modes"].get(args["mode"].as_str().unwrap_or("")).is_none(){return rejected("unsupported","mode not in current capabilities");}
         let context=contract::Context {caps_rev:agent.caps()["rev"].as_u64().unwrap(),epoch:agent.epoch(),session:current.metadata["sessionId"].as_str(),owner_proven:false,
@@ -233,6 +240,58 @@ async fn send(shared:&Arc<Shared>,args:&Value,deadline:Instant)->Result<Outcome,
         }
         Admission::Dispatched {native}=>{let mut value=base;value["stage"]=json!("dispatched");value["native"]=json!({"request":native});record_receipt(shared,&delivery,value.clone());Ok(Outcome::Dispatched(Some(json!({"receipt":value}))))}
         Admission::Refused(error)=>rejected(error.kind,error.message),Admission::Unknown(error)=>native_failure(error),
+    }
+}
+async fn publish_fenced(shared:&Shared,provider:&Provider)->Result<(),ProviderError>{
+    provider.upsert(shared.facts(&shared.provider_name)).await?;
+    provider.call("resource.list",json!({"provider":shared.provider_name,"backend_ref":"agent"})).await?;Ok(())
+}
+async fn finish_configuration(shared:Arc<Shared>,provider:Provider,change:configuration::Change,reply:Result<native::Reply,native::Error>)->Result<Outcome,ProviderError>{
+    let reply=match reply{Ok(reply)=>reply,Err(error) if !error.may_have_acted=>{shared.agent.lock().unwrap().configuration_pending(false);shared.wake();return rejected(error.kind,error.message);},Err(error)=>{shared.agent.lock().unwrap().incomplete.insert("config".into());shared.wake();return Err(ProviderError::new("backend",format!("native configuration outcome unknown: {error}")));}};
+    // An ACK is not the reported value. Keep this one bounded workflow alive after the caller deadline,
+    // including a late native reply; never retry the setter and never expose stale model/batch semantics.
+    let native=shared.native.get().unwrap();
+    if change.command=="set_model"{
+        let levels=match native.submit("get_available_thinking_levels",json!({}),Instant::now()+Duration::from_secs(3)){Ok(mut ticket)=>ticket.reply().await,Err(error)=>Err(error)};
+        if !matches!(levels,Ok(ref reply) if reply.success){shared.agent.lock().unwrap().configuration.observe_levels(&Value::Null);}
+    }
+    let read=match native.submit("get_state",json!({}),Instant::now()+Duration::from_secs(3)){
+        Ok(mut ticket)=>ticket.reply().await,
+        Err(error)=>Err(error),
+    };
+    if !matches!(read,Ok(ref value) if value.success && value.data.is_object()){
+        shared.agent.lock().unwrap().incomplete.insert("config".into());shared.wake();
+        return if reply.success{Ok(Outcome::Accepted(Some(json!({"id":change.id,"value_evidence":"unknown"}))))}else{Err(ProviderError::new("backend","native setter failed; current configuration unverified"))};
+    }
+    let observed={let mut agent=shared.agent.lock().unwrap();agent.configuration_pending(false);agent.configuration.matches(&change)};shared.wake();
+    publish_fenced(&shared,&provider).await.map_err(|_|ProviderError::new("backend","native configuration changed; facts publication not confirmed"))?;
+    if !reply.success{return Err(ProviderError::new("backend",native_message(&reply)));}
+    let data=Some(json!({"id":change.id,"value":change.value,"value_evidence":if observed{"reported"}else{"not_matched"}}));
+    if observed{Ok(Outcome::Observed(data))}else{Ok(Outcome::Accepted(data))}
+}
+async fn configure(shared:&Arc<Shared>,provider:&Provider,args:&Value,deadline:Instant)->Result<Outcome,ProviderError>{
+    if Instant::now()>=deadline{return rejected("timeout","configuration deadline elapsed before write");}
+    let id=match contract::id(&args["id"]){Ok(id)=>id,Err(error)=>return rejected(error.kind,error.message)};
+    if args.get("value").is_none(){return rejected("invalid","configuration value required");}
+    let change={let mut agent=shared.agent.lock().unwrap();
+        if !agent.facts(&shared.provider_name,&shared.cwd)["data"]["agent"]["config"].as_array().is_some_and(|rows|rows.iter().any(|row|row["id"]==id)) && agent.configuration.options().iter().any(|row|row["id"]==id){return rejected("too_large","configuration facts are currently incomplete");}
+        let change=match agent.configuration.prepare(id,&args["value"],args.get("rev"),&agent.signals.current().metadata){Ok(change)=>change,Err(error)=>return rejected(error.kind,error.message)};
+        agent.configuration_pending(true);change
+    };shared.wake();
+    let native=shared.native.get().unwrap();
+    let mut ticket=match native.submit(change.command,change.args.clone(),deadline){Ok(ticket)=>ticket,Err(error)=>{shared.agent.lock().unwrap().configuration_pending(false);shared.wake();return native_failure(error);}};
+    let reply=tokio::select!{biased;reply=ticket.reply()=>Some(reply),_=tokio::time::sleep_until(deadline)=>None};
+    if reply.is_none() && ticket.cancel_before_write(){shared.agent.lock().unwrap().configuration_pending(false);shared.wake();return rejected("timeout","configuration deadline elapsed before write");}
+    if let Some(Err(error))=&reply{if !error.may_have_acted{shared.agent.lock().unwrap().configuration_pending(false);shared.wake();return rejected(error.kind,error.message.clone());}}
+    let written=ticket.written();let acknowledged=reply.as_ref().is_some_and(|reply|matches!(reply,Ok(reply) if reply.success));
+    let (s,p)=(shared.clone(),provider.clone());let result=tokio::spawn(async move{
+        let reply=match reply{Some(reply)=>reply,None=>ticket.reply().await};finish_configuration(s,p,change,reply).await
+    });
+    match tokio::time::timeout_at(deadline,result).await{
+        Ok(Ok(result))=>result,Ok(Err(_))=>Err(ProviderError::new("backend","configuration workflow failed; outcome unknown")),
+        Err(_) if acknowledged=>Ok(Outcome::Accepted(Some(json!({"id":id,"value_evidence":"unknown"})))),
+        Err(_) if written=>Ok(Outcome::Dispatched(Some(json!({"id":id,"value_evidence":"unknown"})))),
+        Err(_)=>Err(ProviderError::new("backend","configuration write incomplete at deadline; outcome unknown")),
     }
 }
 async fn ui_fence(shared:Arc<Shared>,native:Native,id:String) {
@@ -318,14 +377,4 @@ async fn direct(native:&Native,command:&str,args:Value,deadline:Instant,receipt:
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn stop_reply_preserves_requested_coverage_without_claiming_wider_effects(){
-        let covers=vec![json!("foreground")];
-        for exit in [None,Some(native::Exit {code:Some(0),success:true})]{
-            let result=stop_report(&covers,exit.as_ref());assert_eq!(result["covers"],json!(["foreground"]));
-            assert_eq!(result["covers_evidence"],"requested");assert_eq!(result["pending"],"unknown");
-        }
-    }
-}
+#[path="tests.rs"] mod tests;

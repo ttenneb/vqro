@@ -15,6 +15,7 @@ pub struct Agent {
     pub incomplete:BTreeSet<String>,
     pub receipts:BTreeMap<String,Value>,
     pub queue:Option<Value>,pub queue_version:u64,
+    pub configuration:super::configuration::Configuration,
     pub requests:super::requests::Requests,ui_cancels:Vec<(String,Value)>,ui_unconfirmed:BTreeSet<String>,pub ui_overflow:bool,
     receipt_order:VecDeque<String>,
     history:VecDeque<(String,String)>,
@@ -30,7 +31,7 @@ impl Agent {
         let boot=bytes.iter().map(|byte|format!("{byte:02x}")).collect::<String>();
         let mut journal=ItemJournal::new(format!("{boot}.e1"),JournalConfig {max_entities:ENTITY_COUNT,max_entity_bytes:ENTITY_TOTAL,snapshot_buffer_bytes:1024*1024,..Default::default()});
         journal.set_coverage(Coverage::Tail);
-        let mut agent=Self {journal,signals,incomplete:BTreeSet::new(),receipts:BTreeMap::new(),queue:None,queue_version:0,requests:Default::default(),ui_cancels:Vec::new(),ui_unconfirmed:BTreeSet::new(),ui_overflow:false,receipt_order:VecDeque::new(),history:VecDeque::new(),tools:HashMap::new(),current_message:None,
+        let mut agent=Self {journal,signals,incomplete:BTreeSet::new(),receipts:BTreeMap::new(),queue:None,queue_version:0,configuration:Default::default(),requests:Default::default(),ui_cancels:Vec::new(),ui_unconfirmed:BTreeSet::new(),ui_overflow:false,receipt_order:VecDeque::new(),history:VecDeque::new(),tools:HashMap::new(),current_message:None,
             position:0,serial:0,epoch_number:1,instance,boot,session:None,run:None,completion:None,reason:"unknown".into(),error:None,exit:None,caps:Value::Null};
         agent.refresh();agent
     }
@@ -42,24 +43,26 @@ impl Agent {
         if self.exit.is_some() {"unknown"}
         else if self.requests.ids().iter().any(|id|self.journal.entity("request",id).is_some_and(|(_,value)|value["status"]=="pending")){"requires_action"}
         else if current.run_active || current.streaming==Some(true) || current.compacting==Some(true) {"running"}
-        else if self.requests.has_unconfirmed() || !self.ui_unconfirmed.is_empty(){"unknown"}
+        else if self.requests.has_unconfirmed() || !self.ui_unconfirmed.is_empty() || self.configuration.pending{"unknown"}
         else if current.idle() {"idle"} else {"unknown"}
     }
     fn declarations(&self)->Value {
         let current=self.signals.current();
-        let images=current.metadata["model"]["input"].as_array().is_some_and(|types|types.iter().any(|v|v=="image"));
+        let images=!self.configuration.pending && current.metadata["model"]["input"].as_array().is_some_and(|types|types.iter().any(|v|v=="image"));
         let mut modes=json!({"start":{"busy":"reject","preflight":"serialized"},"admit":{}});
         for (mode,field,point) in [("boundary","steeringMode","after_tool_calls"),("settle","followUpMode","would_stop")] {
+            if self.configuration.pending{continue;}
             if let Some(batch)=match current.metadata[field].as_str() {Some("one-at-a-time")=>Some("one"),Some("all")=>Some("all"),_=>None} {
                 modes[mode]=json!({"point":point,"batch":batch,"batch_at":"consume","idle":"park"});
             }
         }
-        json!({"agent":{"v":0,"modules":{"queue":{"v":0},"stop":{"v":0}}},"host":{"kind":"process","endpoints":"one"},
+        json!({"agent":{"v":0,"modules":{"queue":{"v":0},"stop":{"v":0},"config":{"v":0}}},"host":{"kind":"process","endpoints":"one"},
             "agent.send":{"modes":modes,"content":{"types":if images {vec!["text","image"]} else {vec!["text"]},"shape":"text_then_media","max_bytes":super::contract::input_bytes()},
                 "literal":"controlled_launch","origin":[{"as":"attributed_user","role":"user","frame":"sender_header"}],
                 "correlation":"none","handled":"none","keys":null,"guards":{"session":"adapter","run":"none"},"receipts":{"retain":256}},
             "agent.interrupt":{"pending":"unknown","scope":"foreground","waits":"none"},"agent.receipt":{},
             "agent.respond":{"ack":"dispatched","methods":["choice","confirm","text"],"scopes":["operation"],"background_requests":false,"native_timeout":"unrepresentable_positive","max_pending":super::requests::MAX_PENDING,"request_bytes":super::requests::MAX_REQUEST_BYTES},
+            "agent.configure":{},
             "agent.stop":{"covers":["foreground","queued"],"waits":"exit"},
             "agent.queue":{"actions":["list","clear"],"ids":"none","removed":{"content":["text"],"media":"unknown"}},
             "items.stream":{"retain_bytes":131072,"entities":ENTITY_COUNT,"entity_bytes":ENTITY_TOTAL,"snapshot_buffer_bytes":1048576,"max_viewers":4}})
@@ -79,14 +82,19 @@ impl Agent {
     }
     pub fn facts(&self,provider:&str,cwd:&str)->Value {
         let phase=match self.state() {"running"=>"working","requires_action"=>"blocked","idle" if self.completion.as_ref().is_some_and(|c|c["reason"]=="error")=>"error","idle"=>"idle",_=>"working"};
-        json!({"ref":"agent","incarnation":"","kind":"agent","state":if self.exit.is_some(){"finished"}else{"live"},"name":"Pi","cwd":cwd,"exit":self.exit.as_ref().map(|exit|json!({"code":exit.code,"success":exit.success})),
+        let mut facts=json!({"ref":"agent","incarnation":"","kind":"agent","state":if self.exit.is_some(){"finished"}else{"live"},"name":"Pi","cwd":cwd,"exit":self.exit.as_ref().map(|exit|json!({"code":exit.code,"success":exit.success})),
             "status":{"state":phase},
             "data":{"agent":{"v":0,"state":self.state(),"lifecycle":if self.exit.is_some(){"ended"}else{"live"},
                 "host":{"id":format!("{}.child",self.boot),"provider":provider,"instance":self.instance,"incarnation":"","kind":"process","owns_lifecycle":true},
                 "session":self.session,"epoch":self.epoch(),"caps":self.caps,"completion":self.completion,"queue":self.queue,"requests":self.request_summaries(),"background":null,
-                "config":[],"commands":[],"usage":null,"incomplete":self.incomplete,
-                "items":{"retain_bytes":131072,"entities":ENTITY_COUNT,"entity_bytes":ENTITY_TOTAL,"snapshot_buffer_bytes":1048576,"coverage":"tail"}}}})
+                "config":self.configuration.options(),"commands":[],"usage":null,"incomplete":self.incomplete,
+                "items":{"retain_bytes":131072,"entities":ENTITY_COUNT,"entity_bytes":ENTITY_TOTAL,"snapshot_buffer_bytes":1048576,"coverage":"tail"}}}});
+        if self.configuration.incomplete {facts["data"]["agent"]["incomplete"].as_array_mut().unwrap().push(json!("config.models_or_levels"));}
+        // Optional UI catalogs never displace requests/current state or exceed the64KiB facts contract.
+        for field in ["commands","config"]{if vqro::limits::encoded_bytes(&facts["data"])>60*1024{facts["data"]["agent"][field]=json!([]);facts["data"]["agent"]["incomplete"].as_array_mut().unwrap().push(json!(field));}}
+        facts
     }
+    pub fn configuration_pending(&mut self,pending:bool){self.configuration.pending=pending;self.configuration.rebuild(&self.signals.current().metadata);self.refresh();}
     pub fn refresh(&mut self) {
         let mut caps=self.declarations();
         let rev=self.caps["rev"].as_u64().unwrap_or(0);
@@ -242,7 +250,10 @@ impl Agent {
                     self.queue=super::queue::summary(record);self.queue_version=self.queue_version.wrapping_add(1);
                     if self.queue.is_none(){self.incomplete.insert("queue".into());}else{self.incomplete.remove("queue");}
                 }
+                Some("response") if record["command"]=="get_available_models" && record["success"]==true=>{self.configuration.observe_models(&record["data"]);self.configuration.rebuild(&self.signals.current().metadata);},
+                Some("response") if record["command"]=="get_available_thinking_levels" && record["success"]==true=>{self.configuration.observe_levels(&record["data"]);self.configuration.rebuild(&self.signals.current().metadata);},
                 Some("response") if record["command"]=="get_state" && record["success"]==true=>{
+                    self.configuration.rebuild(&self.signals.current().metadata);
                     if let Some(count)=record["data"]["pendingMessageCount"].as_u64(){
                         if count==0 {self.queue=Some(json!([]));self.queue_version=self.queue_version.wrapping_add(1);}
                         else if self.queue.as_ref().and_then(Value::as_array).is_some_and(|rows|rows.len() as u64!=count){self.invalidate_queue();}
@@ -251,7 +262,16 @@ impl Agent {
                         if self.session.as_ref().is_some_and(|session|session["id"]!=id) {
                             self.cancel_requests("epoch_changed");self.epoch_number+=1;self.journal.new_epoch(format!("{}.e{}",self.boot,self.epoch_number));self.journal.set_coverage(Coverage::Tail);self.history.clear();self.tools.clear();self.current_message=None;self.run=None;self.completion=None;
                         }
-                        self.session=Some(json!({"id":id,"title":record["data"]["sessionName"]}));
+                        let mut session=json!({"id":id});
+                        if let Some(title)=record["data"]["sessionName"].as_str().filter(|s|s.len()<=512){session["title"]=json!(title);}
+                        else if !record["data"]["sessionName"].is_null(){self.incomplete.insert("session.title".into());}
+                        if let Some(model)=record["data"]["model"]["id"].as_str().filter(|s|s.len()<=256){
+                            session["model"]=json!({"id":model});
+                            if let Some(label)=record["data"]["model"]["name"].as_str().filter(|s|s.len()<=512){session["model"]["label"]=json!(label);}
+                            if let Some(effort)=record["data"]["thinkingLevel"].as_str().filter(|s|s.len()<=64){session["model"]["effort"]=json!(effort);}
+                        }
+                        if let Some(cwd)=record["data"]["cwd"].as_str().filter(|s|s.len()<=4096){session["cwd"]=json!(cwd);}
+                        self.session=Some(session);
                         self.store("session","current",self.session.clone().unwrap(),false);
                     }else{self.incomplete.insert("session".into());}
                 }
