@@ -226,6 +226,10 @@ async def staged_successor_handover(ctx):
             label="actual native application before end with reply held")
         await ctx.native_set(2, lifecycle="ended")
         unknown = await ctx.wait_command("inbox.get", lambda row: row.get("state") == "unknown", args={"delivery": claimed["delivery"]})
+        # The observed native end also derives the sibling's held reason. Observe
+        # that actual transition before demanding a stable-cut equality; do not
+        # ignore a reason mutation or mistake concurrent end evidence for refusal.
+        await held(ctx, sibling["delivery"], "agent_ended")
         await ctx.wait_agents(3)
         ctx.check(all(any(row["id"] == old["id"] and row["incarnation"] == old["incarnation"] for row in ctx.agents)
             for old in (source, destination, other)), "available endpoints retain the exact inspected identities at unknown refusal")

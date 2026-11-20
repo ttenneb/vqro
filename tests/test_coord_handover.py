@@ -124,7 +124,7 @@ class MixedRefusal(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(CheckFailed): await self.grade(state, mutate)
 
     async def test_each_members_protected_state_and_intent_must_remain_unchanged(self):
-        mutations = {"state": "withdrawn", "content": [], "guard": {"session": "wrong"},
+        mutations = {"state": "withdrawn", "reason": "changed", "content": [], "guard": {"session": "wrong"},
             "origin": {"principal": "wrong"}, "intent": "changed", "to": subject.exact(DESTINATION),
             "attempt": {"id": "changed"}, "handover_plan": "unexpected"}
         for state in ("claimed", "unknown"):
