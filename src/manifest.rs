@@ -63,7 +63,7 @@ impl Catalog {
                     if cap.starts_with("ui/") {
                         ui_status(&mut row,&(cap,major),clients);rows.push(row);continue;
                     }
-                    let state=if core_provides(&cap) {
+                    let state=if core_provides(&cap,major) {
                         row["providers"]=json!([{"name":"vqro","display_status":"core"}]);"satisfied"
                     } else {
                         let offered=providers.get(&cap).map(Vec::as_slice).unwrap_or(&[]);
@@ -104,7 +104,8 @@ pub fn parse_cap(text:&str)->Option<(String,u64)> {
     (ok(kind) && !kind.contains('/') && ok(name)).then(||(body.to_string(),major))
 }
 /// Built-in capabilities: core commands and the spec-defined shared settings, whose readers always have a fallback.
-fn core_provides(cap:&str)->bool {
+fn core_provides(cap:&str,major:u64)->bool {
+    if cap=="ability/vqro.operational-domains" {return major==1;}
     cap.starts_with("command/vqro.") || matches!(cap,"doc/settings/tui"|"doc/settings/theme"|"doc/settings/icons")
 }
 /// Declared entries of `needs`/`works_with` as objects; `requires.client_features` are UI needs (`ui/vqro.<feature>`).
@@ -129,6 +130,11 @@ fn ui_status(row:&mut Value,want:&(String,u64),clients:&[Value]) {
     row["lacking_in"]=json!(lacking);row["unknown_in"]=json!(unknown);
 }
 #[cfg(test)] mod tests {
+    #[test]
+    fn operational_core_ability_does_not_claim_unknown_major_versions() {
+        assert!(super::core_provides("ability/vqro.operational-domains",1));
+        assert!(!super::core_provides("ability/vqro.operational-domains",2));
+    }
     use super::*;
     #[test]fn dependencies_report_satisfied_off_missing_version_and_reverse_users(){
         let root=tempfile::tempdir().unwrap();

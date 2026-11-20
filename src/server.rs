@@ -548,6 +548,7 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, p: Value) -> Rp
             c.clients.insert(conn.id, me);
             Ok(json!({
                 "server": "vqro", "version": env!("CARGO_PKG_VERSION"), "protocol": PROTOCOL, "you": conn.author(),
+                "provides":["ability/vqro.operational-domains@1"],
                 "epoch": c.epoch, "seq": c.seq, "backend_notice":c.backend_notice(), "safe_mode": c.safe_mode, "socket": c.socket, "state_dir": c.state_dir,
             }))
         }

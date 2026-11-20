@@ -141,7 +141,9 @@ clean persistence failure or a promise that replacement did not happen. Unadmitt
 
 ### Protected operational domains
 
-Generic non-undo state uses its own persisted file and the same durable writer/committer, not workspace history.
+The core declares `ability/vqro.operational-domains@1` in hello `provides` and manifest dependency facts;
+unknown requested majors are not claimed. Generic non-undo state uses its own persisted file and the same durable
+writer/committer, not workspace history.
 No agent/inbox schema is interpreted by core. Only its current supervised owning extension may register/write;
 ordinary clients may read. Ownership comes from the existing verified extension lifetime, never a body label.
 The existing generation fence is checked at dispatch and irreversible writer admission. Already dispatched writes
