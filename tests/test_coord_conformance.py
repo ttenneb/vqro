@@ -94,7 +94,8 @@ class Runner(unittest.IsolatedAsyncioTestCase):
 class Provider:
     def __init__(self):
         from agent_conformance.part_b.native import send_caps
-        self.capabilities = {"agent.send":send_caps(), "agent.interrupt":{}, "agent.receipt":{}}
+        self.capabilities = {"agent.send":send_caps(), "agent.interrupt":{}, "agent.receipt":{},
+                             "agent.respond":{"methods":["confirm"],"scopes":["session"],"background_requests":False}}
         self.registration = {}; self.handlers = {}; self.published = []
     def effect(self, op):
         def register(handler): self.handlers[op] = handler; return handler
@@ -119,6 +120,21 @@ class NativeOracle(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(sum(row["kind"]=="invoke" for row in rows),2)
             self.assertEqual(sum(row["kind"]=="model_request" for row in rows),2)
             self.assertTrue(all(row["witness"]["entry"]["value"]["state"]=="claimed" for row in rows if row["kind"]=="invoke"))
+
+    async def test_request_validation_precedes_native_response_and_false_is_not_cancel(self):
+        with tempfile.TemporaryDirectory() as root:
+            provider=Provider();native=Native(provider,Path(root));await native.add("a0")
+            native.agents["a0"]["data"]["agent"]["requests"]=[{"request":"q","revision":1,"method":"confirm",
+                "scope":{"session":"s1"},"status":"pending","params":{},"incomplete":False}]
+            effect=SimpleNamespace(id="e",ref="a0",incarnation="i:a0")
+            args={"v":0,"epoch":"e1","request":"q","revision":1,"response":{"value":"not a boolean"}}
+            invalid=await native.effect("agent.respond",effect,args)
+            self.assertEqual(invalid["error"]["kind"],"invalid")
+            self.assertFalse(any(row["kind"]=="native_response" for row in map(json.loads,native.ledger.read_text().splitlines())))
+            args["response"]={"value":False};valid=await native.effect("agent.respond",effect,args)
+            self.assertEqual(valid["outcome"],"accepted")
+            self.assertEqual(native.agents["a0"]["data"]["agent"]["requests"][0]["status"],"answered")
+            repeated=await native.effect("agent.respond",effect,args);self.assertEqual(repeated["error"]["kind"],"stale")
 
     async def test_boundary_joins_only_at_fake_safe_point_and_quote_stays_claim(self):
         with tempfile.TemporaryDirectory() as root:

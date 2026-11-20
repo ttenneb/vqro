@@ -126,6 +126,7 @@ class Native:
         if op == "agent.send" and args.get("mode") == "start" and native["state"] != "idle": kind = "busy"
         if op == "agent.send" and native.get("lifecycle") == "ended": kind = "stale"
         if guard.get("run", native.get("run")) != native.get("run"): kind = "stale"
+        if op == "agent.queue" and args.get("epoch") != native["epoch"]: kind = "stale"
         supplied_result = plan.get("result") is not None
         result = deepcopy(plan.get("result"))
         if kind:
@@ -138,10 +139,17 @@ class Native:
             return {"outcome": "observed", "data": {"queue": deepcopy(self.queues[effect.ref])}}
         if result["outcome"] in ("accepted", "observed", "dispatched"):
             if op == "agent.respond":
-                request = next((r for r in native.get("requests", []) if r.get("id") == args.get("request")), None)
-                if not request or request.get("revision") != args.get("revision") or request.get("status") != "pending" or args.get("epoch") != native["epoch"]:
+                request = next((r for r in native.get("requests", []) if r.get("request") == args.get("request")), None)
+                if (not request or request.get("revision") != args.get("revision") or request.get("status") != "pending"
+                        or args.get("epoch") != native["epoch"] or request.get("scope",{}).get("session") != native["session"]["id"]
+                        or request.get("expires_at_ms",float("inf")) <= time.time()*1000):
                     return {"outcome": "rejected", "error": {"kind": "stale", "message": "request changed or answered"}}
-                request["status"] = "answered"
+                response=args.get("response")
+                if (request.get("method") != "confirm" or request.get("incomplete") or not isinstance(response,dict)
+                        or not (type(response.get("value")) is bool or response.get("action")=="cancel")):
+                    return {"outcome":"rejected","error":{"kind":"invalid","message":"invalid confirm response"}}
+                self.append("native_response",request=args["request"],revision=args["revision"],response=deepcopy(response))
+                request["status"] = "cancelled" if response.get("action")=="cancel" else "answered"
             self.append("applied", op=op, ref=effect.ref, args=deepcopy(args))
             if op == "agent.send":
                 mode = args.get("mode")
@@ -226,7 +234,7 @@ async def main():
     from vqro_provider import Provider, Limits
     capabilities = {"agent": {"v": 0, "modules": {}}, "agent.send": send_caps(), "agent.interrupt": {"v": 0},
         "agent.queue": {"v": 0, "actions": ["list", "clear"]},
-        "agent.respond": {"v": 0, "methods": ["permission"], "scopes": ["session"], "background_requests": False},
+        "agent.respond": {"v": 0, "methods": ["confirm"], "scopes": ["session"], "background_requests": False},
         "agent.stop": {"v": 0}, "agent.receipt": {"v": 0}}
     from vqro_provider import ProviderError
     native, provider = None, None

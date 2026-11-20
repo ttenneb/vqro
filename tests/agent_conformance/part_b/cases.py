@@ -487,6 +487,65 @@ async def unconfirmed_claim(ctx):
     ctx.evidence.append({"kind":"unconfirmed_claim","adopted":adopted,"repair":repair,"native_calls":calls})
 
 
+@case("H6")
+async def frozen_scope_and_historical_targets(ctx):
+    await member(ctx,0,"project-frozen")
+    preview=await ctx.command("scope",{"action":"inspect","scope":"project:project-frozen"})
+    sent=await ctx.send()
+    await member(ctx,1,"project-frozen")
+    await ctx.rejected("scope",{"op":await ctx.operation(),"action":"resume","scope":"project:project-frozen","expect":preview["expect"]},{"conflict"})
+    ctx.check(not invocations(ctx,delivery=sent["delivery"]),"changed membership refuses the whole stale scope before dispatch")
+    fresh=await ctx.command("scope",{"action":"inspect","scope":"project:project-frozen"})
+    args={"op":await ctx.operation(),"action":"resume","scope":"project:project-frozen","expect":fresh["expect"]}
+    original=await ctx.command("scope",args)
+    await member(ctx,1,"other-project")
+    replay=await ctx.command("scope",args)
+    ctx.check(set(original["targets"])=={row["id"] for row in ctx.agents} and replay["targets"]==original["targets"],
+              "committed operation returns the frozen original set, not a later expansion",original=original,replay=replay)
+
+
+@case("H7")
+async def moving_member_does_not_replay_resume(ctx):
+    await member(ctx,0,"moving-project");await member(ctx,1,"moving-project",ctx.agents[0]["id"])
+    await ctx.scope("resume","team:"+ctx.agents[0]["id"])
+    await member(ctx,1,"other-project")
+    move_txn=(await ctx.peer.call("workspace.history",{"limit":1}))["txns"][-1]["id"]
+    sent=await ctx.send(target=ctx.agents[1]["id"],text="gate survives move")
+    await settled(ctx,sent["delivery"])
+    ctx.check(len(invocations(ctx,delivery=sent["delivery"]))==1,"active member retains its existing gate after movement")
+    await ctx.scope("pause","agent:"+ctx.agents[1]["id"]);await native_idle(ctx,1)
+    await ctx.peer.call("workspace.revert",{"txn":move_txn})
+    selection=await ctx.command("scope",{"action":"inspect","scope":"team:"+ctx.agents[0]["id"]})
+    ctx.check(ctx.agents[1]["id"] in selection["targets"],"undoing membership restores selection")
+    pending=await ctx.send(target=ctx.agents[1]["id"],text="undo must not restore old resume")
+    await held(ctx,pending["delivery"],"paused")
+    ctx.check(not invocations(ctx,delivery=pending["delivery"]),"membership undo cannot reopen a separately paused gate")
+
+
+@case("H12")
+async def controls_answers_bypass_held_mail(ctx):
+    request={"request":"question","revision":1,"scope":{"session":"s1"},"status":"pending",
+             "method":"confirm","title":"continue?","params":{},"incomplete":False}
+    await ctx.native_set(0,requests=[request],state="running")
+    sent=await ctx.send(text="held start must not block controls")
+    await held(ctx,sent["delivery"],"paused")
+    interrupted=await ctx.command("control",{"op":await ctx.operation(),"target":ctx.agents[0]["id"],"action":"interrupt","args":{"v":0}})
+    ctx.check(interrupted["state"] in ("accepted","observed","dispatched"),"interrupt is admitted while start is held")
+    request["revision"]=2;await ctx.native_set(0,requests=[request])
+    stale=await ctx.command("control",{"op":await ctx.operation(),"target":ctx.agents[0]["id"],"action":"respond",
+        "args":{"v":0,"request":"question","epoch":"e1","revision":1,"response":{"value":True}}})
+    ctx.check(not ctx.native.records("native_response"),
+              "old question revision produces zero native responses",reply=stale)
+    answered=await ctx.command("control",{"op":await ctx.operation(),"target":ctx.agents[0]["id"],"action":"respond",
+        "args":{"v":0,"request":"question","epoch":"e1","revision":2,"response":{"value":True}}})
+    ctx.check(answered["state"] in ("accepted","observed","dispatched") and len(ctx.native.records("native_response"))==1,
+              "valid answer bypasses held start and reaches native request",reply=answered)
+    ctx.check(not invocations(ctx,delivery=sent["delivery"]),"neither control opens the send gate")
+    await ctx.native_set(0,requests=[])
+    mark=ctx.native.mark();await ctx.scope("resume");await settled(ctx,sent["delivery"])
+    ctx.check(not invocations(ctx,after=mark,op="agent.respond"),"resume itself never answers an old request")
+
+
 @case("I12")
 async def session_pinning_and_claim_race(ctx):
     pinned=await ctx.send(text="pinned S1")
