@@ -10,7 +10,7 @@ D edit while held reaches the model, edit after take is too_late; C idle start w
 unknown, never resent; F lost report -> reconciled inserted from the session; G abort after take -> inserted, read
 only by the next answered request; I image block inserted as an image; U a block Pi cannot insert stays held.
 """
-import argparse, json, os, socket, subprocess, sys, tempfile, time
+import argparse, json, os, queue, socket, subprocess, sys, tempfile, threading, time
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--vqro", required=True)
@@ -84,6 +84,15 @@ class Pi:
                 "--no-context-files", "--no-prompt-templates", *OPTIONAL, "--session-dir", P["sessions"], "--tools", "bash"] + (["-c"] if resume else [])
         self.p = spawn(argv, cwd=P["work"], env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                        stderr=open(os.path.join(root, "pi-stderr.log"), "a"), text=True, bufsize=1)
+        # Drain Pi's stdout continuously: Node writes to a pipe synchronously, so an undrained pipe blocks Pi
+        # mid-run (it then looks hung and never exits).
+        self.lines = queue.Queue()
+        threading.Thread(target=self._drain, daemon=True).start()
+
+    def _drain(self):
+        for line in self.p.stdout:
+            self.lines.put(line)
+        self.lines.put(None)
 
     def ready(self):
         return wait_for(lambda: len(plugin_events("reconciled")) > self.base, 30)
@@ -94,7 +103,10 @@ class Pi:
     def until(self, pred, timeout=60):
         end = time.time() + timeout
         while time.time() < end:
-            line = self.p.stdout.readline()
+            try:
+                line = self.lines.get(timeout=max(0.1, end - time.time()))
+            except queue.Empty:
+                break
             if not line:
                 raise RuntimeError(f"pi exited ({self.p.poll()}); see pi-stderr.log")
             ev = json.loads(line)
@@ -259,7 +271,39 @@ if a.inbox == "fake":
         check(f"L lost take reply ({'window moved on' if rotate else 'same window'}): claims found by op and released, then delivered",
               recovered and released and got and h.get(lt)["state"] in ("inserted", "read"),
               {"recovered": plugin_events("take_recovered"), "state": h.get(lt)})
-pi.close()
+# P. print mode (`pi -p`) ends when its answer is done: the plugin's connection and timers never keep it running
+penv = dict(base, PI_CODING_AGENT_DIR=P["agent"], PI_OFFLINE="1", PI_SKIP_VERSION_CHECK="1", PI_TELEMETRY="0",
+            VQRO_AGENT=AGENT, VQRO_PRINCIPAL=h.PLUGIN, VQRO_PULL_LOG=plugin_log)
+t0 = time.time()
+try:
+    pp = subprocess.run(["node", a.pi, "-p", "steps:0 print mode", "-ne", "-e", PLUGIN, "--no-skills", "--no-context-files",
+                         "--no-prompt-templates", "--no-session"], cwd=P["work"], env=penv, capture_output=True, text=True, timeout=30)
+    print_exit = (round(time.time() - t0, 1), pp.returncode)
+except subprocess.TimeoutExpired:
+    print_exit = None
+check("P print mode exits after its answer with the plugin loaded", print_exit is not None and print_exit[0] < 15, print_exit)
+# X. the plugin never keeps Pi alive (fake only): with the core gone and a reconnect pending, Pi still exits
+# promptly when its input closes, and the plugin does not reconnect after shutdown
+if a.inbox == "fake":
+    lost_before = len(plugin_events("core_lost"))
+    for p in h.procs[:2]:
+        p.kill(); p.wait()
+    wait_for(lambda: len(plugin_events("core_lost")) > lost_before and plugin_events("reconnect_scheduled"), 20)
+    t0 = time.time()
+    pi.p.stdin.close()
+    try:
+        pi.p.wait(8)
+        exited = time.time() - t0
+    except subprocess.TimeoutExpired:
+        exited = None
+        pi.p.kill(); pi.p.wait()
+    shutdown_ms = t0 * 1000
+    time.sleep(1)
+    late = [e for e in plugin_events("connected") + plugin_events("connect_failed") if e["t"] > shutdown_ms]
+    check("X Pi exits promptly on input close while the plugin waits to reconnect", exited is not None and exited < 5, exited)
+    check("X no reconnect attempt after shutdown", not late, late)
+else:
+    pi.close()
 
 calls = [e for e in plugin_events("taken") + plugin_events("held") + plugin_events("take_failed")]
 results["takes"] = len(calls)
