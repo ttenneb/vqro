@@ -335,6 +335,9 @@ coordination envelope. It never waits behind inbox records and runs on reserved 
   rerouted.
 - **Retire** (right `stop`) is an administrative judgement, never a claim that the agent stopped: routing is off,
   cleanup and handover are allowed, native execution stays unknown until end evidence makes it `ended`.
+- **Owning-host exit is end evidence.** When the bound owning host terminal finishes with an exit, the endpoint
+  is `ended`; retention may then clean up cached facts and tombstones under these bounds. It never changes that
+  evidence to `retired` or `unknown`. A non-owning host's disappearance is not end evidence.
 - **Silence never ends an agent.** After the grace, retention may forget cached live facts (`resource.forget_cached`,
   never a native effect); the agent becomes `unavailable`.
 - **Two separate stores** (capacity in §10):
@@ -405,9 +408,15 @@ editor-empty evidence, reports `dispatched`, labels the mode unverified and obey
   suppression cannot lose the wake.
 - **Terminal agents.** A terminal is an agent target when it reports OSC 7501 with an `app` key or
   `doc/agents/terminals/<rid>` marks it; without a plugin its records stay held `integration_unavailable` and it stays
-  usable by hand. A plugin's structured endpoint supersedes the marker by a recorded handover. Informative,
-  unverified: Claude Code hooks can pull at `turn` (`PostToolBatch`), `settle` (`Stop`) and `idle` (`asyncRewake`)
-  with `insert: context`; its native session inbox socket is an `admit` route without vqro-side edit after posting.
+  usable by hand. A plugin's structured endpoint supersedes the marker by a recorded handover.
+
+**Claude Code example (informative, A3; measured with 2.1.329 and a fake model).** Hooks pull at `turn`
+(`PostToolBatch`), `settle` (`Stop`) and interactive-only `idle` (`asyncRewake`), with `insert: context`,
+`evidence: none`: a flushed hand-off is `supplied`, never `inserted`. `read` requires a model-visible transcript
+request containing that hand-off and normal completion evidence; hook success is never evidence. Framing differs
+by path: tool-result / Stop context uses native system-reminder framing; rewake is framed `SYSTEM NOTIFICATION -
+NOT USER INPUT`. Senders must accept context rendering. Non-interactive sessions do not support this idle wake.
+The native session inbox socket is a separate `admit` route without vqro-side edit after posting.
 
 ## 8. Causality
 

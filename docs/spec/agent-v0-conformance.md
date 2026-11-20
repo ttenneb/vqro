@@ -151,7 +151,8 @@ and reports what it covers; `ended` only after end evidence; a refused stop retu
 a bridge that declares `owns_lifecycle` finishes → `ended`; an app-server host that does not declare it disappears →
 its endpoints `unknown`, never `ended`; a late end event from an old host incarnation ends nothing. L4 a bridge
 disconnect with no end evidence is `disconnected`, never `ended`; a reconnect never undoes `ended`; an idle completion
-is never end evidence.
+is never end evidence. An observed exit from the bound owning host terminal is end evidence, permitting cache
+cleanup; it never relabels the endpoint `retired` or `unknown`.
 
 ## A4. Two implementations
 
@@ -310,6 +311,10 @@ endpoint supersedes the marker by a recorded handover. T10 `insert: context` wit
 never `inserted`, and is shown as context with its origin. T11 content filtering: with `accept: ["text"]`, a
 record containing an image stays held `unsupported_content` for that consumer through repeated safe points, with
 zero claims/releases; text-only mail remains eligible. A consumer accepting images may take it, without flattening.
+T12 Claude Code context evidence: PostToolBatch/Stop and interactive rewake hand-offs report `supplied`, never
+`inserted`; `hook_success`, a tool result or a human quote of the hand-off never yields `read`. Only a correlated
+model-visible request plus normal completion may yield `read`; verify native framing on each path, including
+`NOT USER INPUT` on rewake. Non-interactive idle wake is not declared.
 
 **L. Lifecycle policy.** L5 stop closes the gate first; without a declared `agent.stop`, `host_kill` is offered only
 when the host is a core resource of the bound incarnation with a declared termination primitive, after showing

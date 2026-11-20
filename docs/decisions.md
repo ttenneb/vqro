@@ -530,6 +530,11 @@ replaced when the Pi bridge is ported.
   once as unrepresentable instead of guessing; untimed dialogs remain answerable.
 - Item adapters declare snapshot coverage (`all_retained`, `tail`, `state_only`). Appends must also fit their
   resulting whole snapshot entity; the shared producer refuses `too_large` without changing state.
+- An observed exit from the bound owning host terminal makes the endpoint `ended` and allows retention cleanup;
+  `retired` remains an explicit administrative judgement, never inferred from exit or silence.
+- Claude Code hook hand-offs are context (`supplied`, not `inserted`); `read` needs model-request and normal
+  completion evidence, never hook success. Idle `asyncRewake` is interactive-only, with native `NOT USER INPUT`
+  framing distinct from turn/settle context.
 
 Nothing is stable until Pi and the two other real runtimes pass conformance.
 
