@@ -59,7 +59,14 @@ def wait(predicate, timeout=30, step=0.2):
 
 
 def stop():
+    # The runtimes in the panes (and their children) go with the server; kill their groups so none lingers.
+    panes = subprocess.run(["/usr/bin/tmux", "-S", TSOCK, "list-panes", "-a", "-F", "#{pane_pid}"], capture_output=True, text=True).stdout
     subprocess.run(["/usr/bin/tmux", "-S", TSOCK, "kill-server"], capture_output=True)
+    for pid in panes.split():
+        try:
+            os.killpg(int(pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, ValueError):
+            pass
     for p in procs:
         try:
             os.killpg(p.pid, signal.SIGKILL)
