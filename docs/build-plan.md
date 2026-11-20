@@ -8,7 +8,8 @@ workspace through reliable public primitives, without changing the host or endan
 Bounded cause/correlation now pass unchanged through resource.invoke args/root metadata, provider effect.invoke,
 SDK handlers and effect audits. Root fields persist in workspace/operational audits and their existing events;
 operational traffic remains outside global undo. Qualified shape only: no reference lookup, provenance upgrade,
-inferred links, deduplication or replay. Six Rust and three Python focused cases pass, including the original C9
+inferred links, deduplication or replay. Eight Rust and four Python focused cases pass, including unsupported-method
+and control-character rejection plus the original C9
 red/green trace and managed operational proof revalidation. Full-gate evidence is in the separate handoff;
 see `research/generic-causality.md`. Experimental snapshots are not release acceptance.
 

@@ -526,6 +526,7 @@ fn attribution(core:&Shared,conn:&Conn,params:&mut Value)->Result<crate::invocat
 
 async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, mut p: Value) -> RpcResult {
     crate::limits::json_depth(&p,crate::limits::MESSAGE_DEPTH)?;
+    crate::causality::Causality::check_method(method,&p)?;
     if method=="resource.invoke" {crate::causality::Causality::lift_args(&mut p)?;}
     let context=attribution(core,conn,&mut p)?;
     if conn.peer.is_closed() { return Err(provider::rejected("disconnected", "connection closed before dispatch")); }
@@ -742,6 +743,7 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, mut p: Value) -
 }
 
 fn stream_op(core:&Shared, conn: &Arc<Conn>, method: &str, mut p: Value) -> RpcResult {
+    crate::causality::Causality::check_method(method,&p)?;
     let _declared=Attribution::for_actor(&conn.actor(),&mut p)?;
     let c=core.lock().unwrap();conn.caller().check(&c)?;
     let s: StreamParams = params(p)?;

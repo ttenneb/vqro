@@ -522,9 +522,15 @@ changing `args`, upgrading provenance or inferring anything from text/timing.
   `epoch` are required, and for `effect`, string `boot`. Qualifiers are checked for presence/type only, not resolved
   as evidence or authority. Unknown enums and extra bounded fields pass unchanged.
 - Bounds: cause ≤ 4 KiB encoded, known strings (`kind`, `id`, `provenance`, `endpoint`, `epoch`, `boot`) are non-empty and ≤ 256 bytes,
-  depth ≤ 64; `correlation` is a non-empty string ≤ 256 bytes. Invalid types, missing required fields and excess
+  depth ≤ 64; `correlation` is a non-empty string ≤ 256 bytes. Known strings/correlation reject control characters
+  as diagnostic labels do; extra bounded JSON remains opaque. Invalid types, missing required fields and excess
   bounds are `invalid`; provenance is preserved exactly, including unknown values. The outer wire's independent
   size/depth admission can reject first.
+- Root metadata is accepted only by `resource.spawn`/`kill`/`attach`/`invoke`/`forget`/`forget_cached`,
+  `workspace.apply`/`workspace.revert`, and `operational.register`/`operational.apply`. Other request methods,
+  including `command.invoke`, `stream.*` and `view.publish`, reject explicit root fields with `invalid` rather
+  than silently dropping them. Arbitrary command/payload args remain opaque (only resource.invoke has common
+  causal op args). Attach records its effect audit link; stream.open forwarding remains a separate follow-up.
 - Root `cause?` / `correlation?` are also recorded on `workspace.apply`/`workspace.revert` and
   `operational.register`/`operational.apply`: persisted with their existing audit and emitted on their existing
   entries/operational events. Operational metadata never enters workspace undo history. Prepare-time identity/proof

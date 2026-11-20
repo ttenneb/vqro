@@ -8,7 +8,11 @@ context. Links are data; they confer no authority and do not change native deliv
 
 `resource.invoke` accepts explicit `cause` / `correlation` in root params or common op args. Equal duplicate
 locations are allowed; disagreement is invalid before dispatch. Args remain unchanged. Root metadata is also
-recorded by workspace apply/revert and operational register/apply, using their existing audits/events. Prepare
+recorded by workspace apply/revert and operational register/apply, using their existing audits/events. Explicit
+root fields on methods with no recording sink (including command.invoke, stream.* and view.publish) are invalid,
+not accepted and stripped; inline stream request handling uses the same admission check. Arbitrary nested command
+args stay opaque. Known causal strings/correlation reject controls like label (Rust is_control/Python Unicode Cc).
+Prepare
 revalidation retains explicit links, but a callback proof does not invent or automatically forward a cause.
 
 Cause is an object: required non-empty kind/id/provenance strings, optional endpoint/epoch/boot strings. Entity
@@ -58,5 +62,11 @@ Experimental snapshot `experimental-6f1f168` is immutable and explicitly not ful
 patch+binary hashes. Its positive behavior passed 6 Rust and 3 Python cases. Before canonical acceptance, causal
 byte/depth refusal kinds were normalized from too_large to the spec-pinned invalid; no valid-link behavior
 changed. Independent K1 qualified-reference checks and the canonical full gate are reported separately.
+
+Static review found no P0-P2. Before the first full gate, two P3s were closed with meaningful red/green tests:
+unsupported-root metadata formerly disappeared on workspace.get, and control-containing known fields were accepted.
+Eight Rust and four Python causal cases now pass. Accepted post-merge follow-ups remain: prevalidate before
+lift_args clone; attach-link forwarding on stream.open; shared Rust/Python byte-edge vectors; and avoiding whole
+params buffering in the Rust SDK's serde flatten. These are not silently claimed fixed.
 
 No install, merge, push, paid model call or real backend/session mutation is part of this work.

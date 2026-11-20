@@ -433,7 +433,9 @@ existing status consumers and partial resource events (`src/events.rs`) work unc
 - Optional `cause` / `correlation` are validated and exposed unchanged: Rust `EffectRequest.cause()` /
   `correlation()` (and attribution.causality), Python `Effect.cause` / `correlation`. Absence is unknown, not an
   inferred link. Provenance labels are data, not a core certification of native evidence or authority; adapters echo
-  links only onto the items/receipts they can prove the operation produced.
+  links only onto the items/receipts they can prove the operation produced. Known causal strings reject control
+  characters. Attach records causal metadata in its core audit, but stream.open does not yet forward these fields
+  (accepted separate follow-up); effects sent through effect.invoke do.
 - Provider SDKs bind configured `VQRO_PRINCIPAL` through `hello.identity`, not per-call principal assertions.
   Without known configuration they are undeclared; a runtime's existing host bootstrap claim supplies its host
   principal when no other actor is known (`provider.register` returns `host` and resolved `actor`). A multi-endpoint

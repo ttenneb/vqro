@@ -15,6 +15,16 @@ fn qualified_shapes_open_values_and_exact_utf8_bounds() {
     let mut empty=json!({});Causality::default().annotate(&mut empty);assert_eq!(empty,json!({}),"unknown stays absent");
 }
 #[test]
+fn known_causal_strings_and_correlation_reject_controls() {
+    for field in ["kind","id","provenance","endpoint","epoch","boot"] {
+        let mut cause=link();cause[field]=json!("line\ncontrol");
+        assert_eq!(Causality::parse(&json!({"cause":cause})).unwrap_err().kind(),"invalid","field {field}");
+    }
+    for value in ["line\ncontrol","tab\tcontrol","nul\0control"] {
+        assert_eq!(Causality::parse(&json!({"correlation":value})).unwrap_err().kind(),"invalid");
+    }
+}
+#[test]
 fn cause_encoded_bytes_and_container_depth_are_exact() {
     let mut cause=link();cause["padding"]=json!("");let base=serde_json::to_vec(&cause).unwrap().len();
     cause["padding"]=json!("x".repeat(4096-base));assert_eq!(serde_json::to_vec(&cause).unwrap().len(),4096);
@@ -23,6 +33,24 @@ fn cause_encoded_bytes_and_container_depth_are_exact() {
     let mut nested=Value::Null;for _ in 0..63 {nested=json!([nested]);}
     let mut cause=link();cause["nested"]=nested;assert!(Causality::parse(&json!({"cause":cause})).is_ok());
     cause["nested"]=json!([cause["nested"]]);assert_eq!(Causality::parse(&json!({"cause":cause})).unwrap_err().kind(),"invalid");
+}
+#[tokio::test]
+async fn unsupported_root_causality_is_rejected_instead_of_silently_dropped() {
+    let root=tempfile::Builder::new().prefix("cause-u").tempdir().unwrap();let socket=root.path().join("s");
+    let core=server::start(socket.clone(),root.path().join("st"),false,Backend::Fake,None).unwrap();
+    let(peer,_,_)=client::connect_as(&socket,"unsupported-cause","owner").await.unwrap();
+    for(method,mut p)in [
+        ("workspace.get",json!({"key":"doc/missing"})),("resource.list",json!({})),
+        ("command.invoke",json!({"name":"vqro.revert"})),("view.publish",json!({"name":"unknown","content":{}})),
+        ("stream.input",json!({"stream":1,"text":"unused"})),("stream.resize",json!({"stream":1,"cols":80,"rows":24})),
+        ("stream.close",json!({"stream":1})),("events.subscribe",json!({"types":[]}))
+    ] {
+        p["cause"]=link();
+        assert_eq!(peer.call(method,p).await.unwrap_err().kind(),"invalid","unsupported sink {method}");
+    }
+    assert!(peer.call("workspace.get",json!({"key":"doc/missing","correlation":"thread"})).await.is_err());
+    assert!(peer.call("workspace.get",json!({"key":"doc/missing"})).await.unwrap().is_null());
+    server::shutdown(&core).await;
 }
 #[tokio::test]
 async fn workspace_audit_event_and_restart_preserve_explicit_links_without_backfill() {

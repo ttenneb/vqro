@@ -9,6 +9,7 @@ import inspect
 import json
 import math
 import os
+import unicodedata
 import vqro_ext  # managed extension lifetime watcher
 
 MAX_RECORD = 1048576
@@ -97,11 +98,11 @@ def causal_links(params):
     """Same generic shape bounds as core; preserve links and provenance without inferring evidence."""
     def text(value, field):
         try:
-            valid = isinstance(value, str) and 1 <= len(value.encode("utf-8")) <= 256
+            valid = isinstance(value, str) and 1 <= len(value.encode("utf-8")) <= 256 and not any(unicodedata.category(char) == "Cc" for char in value)
         except UnicodeError:
             valid = False
         if not valid:
-            raise ProviderError("invalid", f"{field} must be a string of 1..=256 bytes")
+            raise ProviderError("invalid", f"{field} must be a string of 1..=256 bytes without control characters")
         return value
     cause = params.get("cause")
     if "cause" in params:

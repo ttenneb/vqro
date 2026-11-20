@@ -21,6 +21,16 @@ class CausalShapes(unittest.TestCase):
                 causal_links(params)
             self.assertEqual(caught.exception.kind, "invalid")
 
+    def test_known_strings_and_correlation_reject_controls(self):
+        for field in ("kind", "id", "provenance", "endpoint", "epoch", "boot"):
+            with self.assertRaises(ProviderError) as caught:
+                causal_links({"cause": dict(link(), **{field: "line\ncontrol"})})
+            self.assertEqual(caught.exception.kind, "invalid")
+        for value in ("line\ncontrol", "tab\tcontrol", "nul\0control"):
+            with self.assertRaises(ProviderError) as caught:
+                causal_links({"correlation": value})
+            self.assertEqual(caught.exception.kind, "invalid")
+
     def test_exact_bytes_and_container_depth(self):
         cause = dict(link(), padding="")
         base = len(json.dumps(cause, ensure_ascii=False, separators=(",", ":")).encode())
