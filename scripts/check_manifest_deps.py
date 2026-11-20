@@ -22,6 +22,7 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EXT = os.path.join(ROOT, "extensions")
 CAP = re.compile(r"^[A-Za-z0-9._*-]+/[A-Za-z0-9._/*-]+(@[1-9][0-9]*)?$")
+COMMAND = re.compile(r"^[a-z][a-z0-9_-]*(\.[a-z0-9_-]+)+$")
 CORE_DOCS = {"doc/settings/tui", "doc/settings/theme", "doc/settings/icons"}
 # Shared conventions documented in core-protocol.md that any extension may read and write.
 CORE_DOC_PREFIXES = ("doc/layout/",)  # layout settings `doc/layout/<name>` = {cwd?, title?}
@@ -65,8 +66,10 @@ def helper_functions(tree):
 
 
 def scan(files):
-    """(strings, live reads, registrations, publications) found in the files and the helper functions they use."""
-    strings, live, registered, published = set(), set(), set(), set()
+    """(strings, live reads, registrations, publications, registration prefixes, command references) found in the
+    files and the helper functions they use. A command reference is a string in command position: a `"command"`
+    value in a dict literal or the first argument of `invoke`."""
+    strings, live, registered, published, refs = set(), set(), set(), set(), set()
     prefixes = set()  # ext.command("agents." + name): registered names known only by prefix
     seen = set()
 
@@ -86,6 +89,13 @@ def scan(files):
                         registered.add(first.value)
                     if attr == "publish":
                         published.add(first.value)
+            if isinstance(node, ast.Dict):
+                for k, v in zip(node.keys, node.values):
+                    if isinstance(k, ast.Constant) and k.value == "command" and isinstance(v, ast.Constant) and isinstance(v.value, str):
+                        refs.add(v.value)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "invoke" and node.args:
+                if isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
+                    refs.add(node.args[0].value)
             if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Attribute) and node.value.attr == "live":
                 if isinstance(node.slice, ast.Constant) and isinstance(node.slice.value, str):
                     live.add(node.slice.value)
@@ -107,7 +117,7 @@ def scan(files):
 
     for f in files:
         load(f)
-    return strings, live, registered, published, prefixes
+    return strings, live, registered, published, prefixes, refs
 
 
 def main(argv=None):
@@ -144,12 +154,19 @@ def main(argv=None):
                 return owners
         return []
 
+    scans = {}
+    for name in sorted(manifests):
+        files = sources(name, (defaults.get(name) or {}).get("argv") or [])
+        if files:  # native programs (providers): manifest syntax only
+            scans[name] = scan(files)
+    # Commands registered as `ext.command("agents." + name)` are known only by prefix: a reference inside such a
+    # family is a use of that extension's command, which its manifest must provide.
+    families = {prefix: owner for owner, sc in scans.items() for prefix in sc[4] if prefix.endswith(".")}
+
     for name, m in sorted(manifests.items()):
-        argv = (defaults.get(name) or {}).get("argv") or []
-        files = sources(name, argv)
-        if not files:
-            continue  # native program (providers): manifest syntax only
-        strings, live, registered, published, prefixes = scan(files)
+        if name not in scans:
+            continue
+        strings, live, registered, published, prefixes, refs = scans[name]
         own = {cap_key(c) for c in entries(m, "provides") if isinstance(c, str)}
         declared = {cap_key(c) for f in ("needs", "works_with") for c in entries(m, f) if isinstance(c, str)}
         uses = set()
@@ -161,6 +178,14 @@ def main(argv=None):
             elif s in ABILITY_METHODS:
                 uses.add(ABILITY_METHODS[s])
         uses |= {"data/" + x for x in live}
+        for ref in sorted(refs):
+            family = next((owner for prefix, owner in families.items() if ref.startswith(prefix) and COMMAND.match(ref)), None)
+            if family is None:
+                continue
+            if "command/" + ref not in provided:
+                problems.append(f"{name}: uses command {ref} of {family}'s registered family, which {family}'s manifest does not provide")
+            elif family != name:
+                uses.add("command/" + ref)
         for cmd in sorted(registered):
             if "command/" + cmd not in own:
                 problems.append(f"{name}: registers command {cmd} but does not list command/{cmd} in provides")

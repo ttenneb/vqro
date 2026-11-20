@@ -72,6 +72,42 @@ class ManifestDepsLint(unittest.TestCase):
                                  "themes": {"provides": ["data/themes@1"]}})
         self.assertEqual(rc, 0, out)
 
+    def test_prefix_registered_command_families_are_checked(self):
+        """`ext.command("agents." + name)` hides names from the scan: references inside the family still count."""
+        family = '''
+from vqro_ext import Extension
+ext = Extension("agents")
+for name in ("show", "stop"):
+    ext.command("agents." + name, name)(lambda a: {})
+row = {"text": "Stop", "command": "agents.stop"}
+'''
+        user = '''
+from vqro_ext import Extension
+ext = Extension("sidebar")
+menu = [{"label": "Stop", "command": "agents.stop"}, {"label": "Doc", "text": "agents.md"}]
+'''
+        with tempfile.TemporaryDirectory() as d:
+            os.mkdir(os.path.join(d, "manifests"))
+            write(os.path.join(d, "agents.py"), family)
+            write(os.path.join(d, "sidebar.py"), user)
+            write(os.path.join(d, "defaults.json"), json.dumps({"extensions": [{"name": n, "argv": ["python3", n + ".py"]} for n in ("agents", "sidebar")]}))
+
+            def lint(agents, sidebar):
+                write(os.path.join(d, "manifests", "agents.json"), json.dumps({"name": "agents", **agents}))
+                write(os.path.join(d, "manifests", "sidebar.json"), json.dumps({"name": "sidebar", **sidebar}))
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    return check_manifest_deps.main(["--extensions", d]), out.getvalue()
+
+            rc, out = lint({"provides": ["command/agents.show"]}, {})
+            self.assertEqual(rc, 1)
+            self.assertIn("agents: uses command agents.stop of agents's registered family, which agents's manifest does not provide", out)
+            self.assertIn("sidebar: uses command agents.stop of agents's registered family", out)
+            rc, out = lint({"provides": ["command/agents.show", "command/agents.stop"]}, {})
+            self.assertIn("sidebar: uses command/agents.stop (provided by agents) without declaring it", out)
+            rc, out = lint({"provides": ["command/agents.show", "command/agents.stop"]}, {"works_with": ["command/agents.stop"]})
+            self.assertEqual(rc, 0, out)
+
     def test_invalid_capability_names_fail(self):
         rc, out = self.run_lint({"tabs": {"provides": ["tabs.show"]}, "agents": {}})
         self.assertEqual(rc, 1)
