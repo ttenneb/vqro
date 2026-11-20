@@ -7,9 +7,12 @@
 #
 # Every step runs under `env -i` with private paths: no live vqro, hc/herdr-core or tmux server is
 # touched (suites start their own private ones and stop only those). Prints a PASS/FAIL table and writes
-# a JSON receipt to $CHECK_RECEIPT (default <target>/check-receipt.json); step logs go next to it.
+# a JSON receipt to $CHECK_RECEIPT (default <target>/check-receipt.json), plus an exclusive read-only
+# check-receipt-<commit>-<stamp>.json sibling. Exit 77 means an intentional optional-dependency SKIP,
+# never PASS; skips are non-failing and listed explicitly in the table, summary and receipt.
 # Needs: cargo, python3, /usr/bin/tmux 3.7b and ~/.local/bin/herdr-core for `full`.
 set -u
+SKIP_EXIT=77
 MODE=${1:-quick}
 case "$MODE" in quick|full) ;; *) echo "usage: $0 quick|full" >&2; exit 2 ;; esac
 # Full gates share a bounded pool, then run latency/RSS/scale probes without sibling steps.
@@ -45,7 +48,7 @@ if [ -n "${VQRO_CHECK_SCOPED:-}" ]; then
 fi
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 TARGET=${CARGO_TARGET_DIR:-$REPO/target}
-STAMP=$(date +%Y%m%d-%H%M%S)
+STAMP=$(date +%Y%m%d-%H%M%S)-$$
 LOGS=$TARGET/check-logs/$STAMP
 RECEIPT=${CHECK_RECEIPT:-$TARGET/check-receipt.json}
 mkdir -p "$LOGS"
@@ -105,7 +108,7 @@ run_step() {
   local -n command="CHECK_STEP_$index"
   local log="$LOGS/$name.log" result=PASS
   "${command[@]}" > "$log" 2>&1; rc=$?
-  [ "$rc" -ne 0 ] && result=FAIL
+  case "$rc" in 0) result=PASS ;; "$SKIP_EXIT") result=SKIP ;; *) result=FAIL ;; esac
   # A separate atomic result per worker; only the parent appends the ordered receipt.
   printf '%s\t%s\t%s\t%s\n' "$name" "$result" "$((SECONDS-start))" "$log" > "$LOGS/step-$index.tmp"
   mv "$LOGS/step-$index.tmp" "$LOGS/step-$index.tsv"
@@ -234,7 +237,7 @@ step build-zero-warnings no_warnings
 step cargo-test "${CARGO[@]}" cargo test
 step python-unittest "${CLEAN[@]}" python3 -m unittest discover -s tests -p 'test_*.py'
 opentui_model() {  # the OpenTUI trial client's model against the shared fixtures; needs Bun, not its packages
-  local bun; bun=$(command -v bun) || { echo "bun not found: OpenTUI trial client model not checked"; return 0; }
+  local bun; bun=$(command -v bun) || { echo "SKIP OpenTUI trial client model: bun not found"; return "$SKIP_EXIT"; }
   (cd extensions/clients/opentui && env -i HOME="$HOME" PATH="$(dirname "$bun"):/usr/bin:/bin" "$bun" test src/conformance.test.ts)
 }
 step opentui-model opentui_model
@@ -300,22 +303,35 @@ else
 fi
 rm -rf "$RUN"
 
-python3 - "$STEPS" "$RECEIPT" "$MODE" "$(git describe --always --dirty 2>/dev/null)" "$LOGS" "$LEFT" "$SCOPE" <<'PY'
+python3 - "$STEPS" "$RECEIPT" "$MODE" "$(git describe --always --dirty 2>/dev/null)" "$LOGS" "$LEFT" "$SCOPE" "$STAMP" <<'PY'
 import json, sys, time
-steps_file, receipt, mode, commit, logs, left, scope = sys.argv[1:8]
+from pathlib import Path
+steps_file, receipt, mode, commit, logs, left, scope, stamp = sys.argv[1:9]
 steps = [dict(zip(("name", "result", "seconds", "log"), l.split("\t"))) for l in open(steps_file).read().splitlines() if l]
 for s in steps:
     s["seconds"] = int(s["seconds"])
-failed = [s["name"] for s in steps if s["result"] not in ("PASS", "UNSCOPED")]
+    if s["result"] == "SKIP": s["result"] = "skip"
+skipped = [s["name"] for s in steps if s["result"] == "skip"]
+failed = [s["name"] for s in steps if s["result"] not in ("PASS", "UNSCOPED", "skip")]
 r = {"kind": "vqro.check-receipt", "version": 1, "mode": mode, "commit": commit, "finished_unix": int(time.time()),
-     "result": "fail" if failed else "pass", "failed": failed, "steps": steps, "leftover_pids": left.split(), "leftover_scope": scope, "logs": logs}
+     "result": "fail" if failed else "pass", "failed": failed, "skipped": skipped, "steps": steps, "leftover_pids": left.split(), "leftover_scope": scope, "logs": logs}
 scale = logs + "/scale-receipt.json"
 try:
     sr = json.load(open(scale))
     r["scale"] = {"result": sr["result"], "exceeded": sr["exceeded"], "commit": sr["commit"]}
 except (OSError, ValueError, KeyError):
     pass
-open(receipt, "w").write(json.dumps(r, indent=1) + "\n")
-print(f"{'PASS' if not failed else 'FAIL'}: {len(steps) - len(failed)}/{len(steps)} steps; receipt {receipt}")
+latest = Path(receipt)
+# Keep Git's full label in the data; tag path separators must not create subdirectories.
+label = commit.replace("/", "_") or "unknown"
+immutable = latest.with_name(f"check-receipt-{label}-{stamp}.json")
+payload = json.dumps(r, indent=1) + "\n"
+with immutable.open("x") as archive:
+    archive.write(payload)
+# Preserve the caller's umask/read permissions, removing only write permission.
+immutable.chmod(immutable.stat().st_mode & 0o555)
+if latest != immutable: latest.write_text(payload)
+passed = len(steps) - len(failed) - len(skipped)
+print(f"{'PASS' if not failed else 'FAIL'}: {passed}/{len(steps)}, {len(skipped)} skipped; receipt {receipt}; immutable {immutable}")
 sys.exit(1 if failed else 0)
 PY

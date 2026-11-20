@@ -3,7 +3,7 @@
 private herdr-core through vqro-herdr. Drives it in an outer tmux harness like tests/e2e_tui_providers.py.
 
 Usage: tests/e2e_opentui.py TARGET_DIR   (debug binaries in TARGET_DIR/debug)
-Skips (exit 0) when Bun or the client's node_modules are absent: the trial client is optional.
+Skips (exit 77) when Bun or the client's node_modules are absent: the trial client is optional.
 Private /tmp root; stops only what it started.
 """
 import json, os, shutil, socket, subprocess, sys, tempfile, time
@@ -16,7 +16,7 @@ CLIENT = os.path.join(REPO, "extensions", "clients", "opentui")
 BUN = shutil.which("bun") or os.path.expanduser("~/.local/bin/bun")
 if not os.path.isfile(BUN) or not os.path.isdir(os.path.join(CLIENT, "node_modules", "@opentui")):
     print("SKIP OpenTUI trial client: Bun or extensions/clients/opentui/node_modules missing (bun install)")
-    sys.exit(0)
+    sys.exit(77)
 R = tempfile.mkdtemp(prefix="pott", dir="/tmp")
 for d in ("home", "st", "run", "bin"):
     os.makedirs(os.path.join(R, d))
