@@ -1,0 +1,21 @@
+# Cached resource identity reservations (C4)
+
+AS4 chose keep mail + identity for disappeared agents. Core supplies only the generic identity mechanism: cached facts can disappear without discarding a bounded reservation of the complete `(provider,instance,backend_ref,incarnation)`→rN. Coordination extensions own tombstones, membership, held/unknown mail and restart-paused behavior; no native work or replay is supplied here.
+
+## Storage and lifetime
+
+`IdentityMap::forget_cached` uses the existing identity candidate and atomic durable writer. It removes unavailable active facts and reserves the exact identity; a return consumes that reservation only when the candidate is actually adopted. Native forget, authoritative removal and replacement retirements never create reservations. Different full identities get new monotonic IDs, never a reserved ID belonging to somebody else.
+
+The set is bounded to4096 entries of≤2KiB encoded each (≤8MiB logical record bytes, not RSS or total file size). It evicts oldest-forgotten first; full identity allocations are shared by its lookup/order indexes. Oversized hints are not cached but never refuse registration/cached-forget. Counter wrap renumbers order without evicting. Snapshot metadata exposes count/encoded bytes/limits/persistent:true, not message/effect authority.
+
+The coordinator explicitly required persistence rather than the initially proposed volatile cache: routine core restarts must preserve the human's keep-identity choice. Ordered reservations are therefore part of the SAME `resources.json` candidate as active mappings and rN high-water, never a second side file or journal. Restart restores the bounded order and accounts reserved IDs in high-water. Old files default to an empty reservation list. Malformed, duplicate, oversized or reserved/active-colliding rows fail closed, never silently rebind an old ID. Retired legacy two-field identities still cannot prove a full tuple and are not imported into reservations.
+
+A clean write failure adopts neither active retirement/reappearance nor cache changes. An uncertain post-rename write adopts BOTH, reports durability_unconfirmed and must later confirm via the existing identity writer; it is not permission to replay an effect. Cached facts/provider metadata still reap; an identity hint does not count as an active provider/resource or keep a process alive. No pause/configuration/grants/mail fields are fabricated or modified.
+
+## Evidence and limits
+
+`src/identity_reservation_tests.rs` covers every identity component, native retirement, capacity/oldest eviction, fresh high-water after eviction, restart/order restoration, old-file loading, malformed/colliding hints, oversized-hint non-refusal and clean/uncertain writes during both retirement and re-adoption (with independent disk reopen checks). `src/core.rs` checks provider/resource cleanup, zero backend commands, original rN on fresh provider observations and unchanged ordinary paused configuration.
+
+Initial targeted177 library tests passed/1ignored. Full scoped gate at2c67d1a passed36/36 with zero compiler warnings/scoped leftovers; receipt `<private-notes>`. Later rebase c6675a9 onto mainb9f3580 leaves the C4 implementation unchanged; its gate/review are recorded in the final handoff `<private-notes>`.
+
+Identity persistence remains the existing synchronous core-lock full-file write: this change bounds retained data, not filesystem latency, and adds no off-lock framework or new latency guarantee. An8MiB logical cache can increase identity replacement cost; ordinary facts with unchanged identities still use the existing no-write fast path. No power-loss certification, live install, model call, backend stop or migration of tombstone evidence was performed.
