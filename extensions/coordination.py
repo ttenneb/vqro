@@ -243,8 +243,8 @@ class CoordinationService:
                     "identity_cache": {"owner": "core", "capacity": None, "incomplete": True},
                     "receipts": self.items.status(), "maintenance": self.engine.maintenance_error if self.engine else None,
                     "limits_confirmed": self.engine is not None, "attention": self.engine.attention_summary() if self.engine else None}
-        if self.engine is None and command in ("inbox.get", "inbox.list", "inbox.peek") and self.read_only_rows is not None:
-            return self.read_only(command, args)
+        if self.engine is None and command in ("inbox.get", "inbox.list", "inbox.peek", "inbox.op") and self.read_only_rows is not None:
+            return self.read_only(command, args, principal=callback_context(params)["principal"])
         if self.engine is None:
             raise VqroError("coordination unavailable; no input was invoked: " + str(self.unavailable), "unavailable")
         context = callback_context(params)
@@ -259,7 +259,25 @@ class CoordinationService:
             context.update(agent=matches[0], kind="agent")
         return self.route(command, args, context)
 
-    def read_only(self, command, args):
+    def read_only(self, command, args, *, principal="undeclared"):
+        if command == "inbox.op":
+            identity = digest([principal, args.get("op")])
+            external = self.read_only_rows.get("external/" + identity)
+            if external:
+                result = copy.deepcopy(external["value"])
+                if result.get("state") == "claimed":
+                    result.update(state="unknown", reason="owner_unavailable")
+                return dict(result, read_only=True, stale=True, historical=True)
+            for key, row in self.read_only_rows.items():
+                if key.startswith("ops/") and identity in row["value"]:
+                    result = copy.deepcopy(row["value"][identity]["result"])
+                    if result.get("delivery"):
+                        return self.read_only("inbox.get", {"delivery": result["delivery"]}, principal=principal)
+                    if result.get("state") == "claimed":
+                        result.update(state="unknown", reason="owner_unavailable")
+                    # A cached take is history only: never return content for insertion.
+                    return dict(result, records=[], read_only=True, stale=True, historical=True, incomplete=True)
+            return {"state": "unknown", "read_only": True, "stale": True, "incomplete": True}
         records = []
         for key, row in self.read_only_rows.items():
             if not key.startswith("message/"):

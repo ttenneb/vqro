@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "extensions"))
 from coordination import CoordinationService, COMMANDS, main
+from coordination_engine import digest
 from coordination_store import StoreError
 from vqro_ext import VqroError
 from test_coordination_service import FakeExtension
@@ -36,6 +37,9 @@ class BootstrapTests(unittest.TestCase):
                       "to": {"agent": "r1"}, "from": {"principal": "p:owner"},
                       "content": [{"type": "text", "text": "saved"}], "attempt": {"id": "old"}}
             ext.vqro.store.apply([{"op": "set", "key": "message/" + delivery, "expect": 0, "value": record}], control=True)
+        ext.vqro.store.apply([{"op": "set", "key": "external/" + digest(["p:owner", "old-op"]), "expect": 0,
+                              "value": {"state": "unknown", "command": "coord.control", "principal": "p:owner",
+                                        "caller": "client:previous:9", "intent": {"agent": "r1"}, "native": None}}], control=True)
         entered, release = threading.Event(), threading.Event()
         timeline, registered = [], set()
         original = ext.vqro.call
@@ -81,7 +85,8 @@ class BootstrapTests(unittest.TestCase):
         return ext, service, entered, release, timeline, registered
 
     def handle(self, service, command, args=None):
-        return service.handle("command.invoke", {"name": "coord." + command, "args": args or {}})
+        return service.handle("command.invoke", {"name": "coord." + command, "args": args or {},
+                                                  "principal": "p:owner", "actor": "p:owner", "author": "client:current:1", "caller": "client:current:1"})
 
     def assert_reads(self, service, *, phase):
         outputs, errors = {}, []
@@ -91,6 +96,7 @@ class BootstrapTests(unittest.TestCase):
                 outputs["get"] = self.handle(service, "inbox.get", {"delivery": "d:claimed"})
                 outputs["list"] = self.handle(service, "inbox.list")
                 outputs["peek"] = self.handle(service, "inbox.peek")
+                outputs["op"] = self.handle(service, "inbox.op", {"op": "old-op"})
             except Exception as error:
                 errors.append(error)
         thread = threading.Thread(target=read, daemon=True)
@@ -104,6 +110,10 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(outputs["get"]["state"], "unknown")
         self.assertTrue(outputs["get"]["read_only"])
         self.assertTrue(outputs["get"]["stale"])
+        self.assertEqual(outputs["op"]["state"], "unknown")
+        self.assertEqual(outputs["op"]["command"], "coord.control")
+        self.assertTrue(outputs["op"]["read_only"])
+        self.assertTrue(outputs["op"]["stale"])
         for name in ("list", "peek"):
             self.assertEqual(len(outputs[name]["items"]), 2)
             self.assertEqual({row["state"] for row in outputs[name]["items"]}, {"unknown", "held"})
