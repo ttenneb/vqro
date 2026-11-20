@@ -252,8 +252,13 @@ class Coordinator:
 
     def attention_summary(self):
         rows = self.store.view()
-        messages = [{"delivery": row["value"]["delivery"], "agent": row["value"]["to"]["agent"], "state": row["value"]["state"]}
-                    for key, row in rows.items() if key.startswith("message/") and row["value"]["state"] in ("unknown", "claimed", "partial")]
+        records = self.records()
+        heads = self._ordering_heads(records)
+        messages = [{"delivery": record["delivery"], "agent": record["to"]["agent"], "state": record["state"],
+                     **({"reason": record["reason"], "ordering_predecessor": self._ordering_predecessor(record, heads)}
+                        if record.get("reason") == "ordering_unknown" else {})}
+                    for record in records if record["state"] in ("unknown", "claimed", "partial")
+                    or record["state"] in PENDING and record.get("reason") == "ordering_unknown"]
         controls = [{"reference": key, "principal": row["value"].get("principal"), "caller": row["value"].get("caller"),
                      "command": row["value"].get("command"), "agent": row["value"].get("intent", {}).get("agent"), "state": row["value"]["state"]}
                     for key, row in rows.items() if key.startswith("external/") and row["value"]["state"] in ("claimed", "unknown", "partial")]
@@ -614,6 +619,34 @@ class Coordinator:
                     "_control": withdraw or encoded(record) <= encoded(before)}
         return self._mutate("inbox.withdraw" if withdraw else "inbox.edit", args, context, change, control=True)
 
+    @staticmethod
+    def _ordering_heads(records):
+        heads = {}
+        for record in records:
+            if record["state"] == "unknown" and record.get("mode") is not None:
+                lane = (record["to"]["agent"], record["from"]["principal"], record["mode"])
+                candidate = (record["order"], record["delivery"])
+                if lane not in heads or candidate < heads[lane]:
+                    heads[lane] = candidate
+        return heads
+
+    @staticmethod
+    def _ordering_predecessor(record, heads):
+        if record.get("mode") is None:
+            return None  # partial historical recovery rows do not establish a lane
+        head = heads.get((record["to"]["agent"], record["from"]["principal"], record["mode"]))
+        return head[1] if head and head[0] < record["order"] else None
+
+    @staticmethod
+    def _visible_ordering(record, heads):
+        result = dict(record)
+        result.pop("ordering_predecessor", None)
+        if record["state"] in PENDING:
+            predecessor = Coordinator._ordering_predecessor(record, heads)
+            if predecessor:
+                result["ordering_predecessor"] = predecessor
+        return result
+
     def get(self, delivery):
         if self.store.get("message/" + str(delivery)) is None:
             archived = self.archive_locator("message/" + str(delivery))
@@ -622,11 +655,13 @@ class Coordinator:
         work = Working(self)
         if work.get("message/" + str(delivery)) is None:
             return dict(work.get("settled", {}).get(delivery, {"state": "unknown"}), delivery=delivery, incomplete=True)
-        record = self._record(work, delivery)
+        record = self._visible_ordering(self._record(work, delivery), self._ordering_heads(self.records()))
         return dict(record, revision=work.version("message/" + delivery))
 
     def listing(self, args):
-        rows = self.records()
+        records = self.records()
+        heads = self._ordering_heads(records)
+        rows = [self._visible_ordering(record, heads) for record in records]
         if args.get("target"):
             target = self.policy().resolve_target(args["target"])
             rows = [r for r in rows if r["to"]["agent"] == target]
@@ -634,7 +669,8 @@ class Coordinator:
             rows = [r for r in rows if r["from"]["principal"] == args["sender"]]
         if args.get("state"):
             rows = [r for r in rows if r["state"] == args["state"]]
-        revision = digest([(r["delivery"], self.store.get("message/" + r["delivery"])["version"]) for r in rows])
+        revision = digest([[(r["delivery"], self.store.get("message/" + r["delivery"])["version"]) for r in rows],
+                           sorted(heads.items())])
         return bounded_page(rows, page=args.get("page"), revision=revision, key=lambda r: (r["order"], r["delivery"]))
 
     @staticmethod
@@ -773,9 +809,7 @@ class Coordinator:
             return "stale_guard"
         if guard.get("run") is not None and native.get("run") is not None and guard["run"] != native["run"]:
             return "stale_guard"
-        if any(prior["state"] == "unknown" and prior["to"]["agent"] == agent
-               and prior["from"]["principal"] == record["from"]["principal"]
-               and prior["mode"] == record["mode"] and prior["order"] < record["order"] for prior in self.records()):
+        if self._ordering_predecessor(record, self._ordering_heads(self.records())):
             return "ordering_unknown"
         right = "send:" + (record.get("strategy") or record["mode"])
         if not policy.allowed(record["from"]["principal"], right, agent):

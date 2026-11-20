@@ -326,7 +326,11 @@ Results use one **coordination envelope** `{state, reason?, attempt?: {id, steps
 - **Lanes:** `boundary`, `preempt` and `admit` are never blocked by `start`/`settle` records waiting for idle.
   Priority never crosses lanes. An `unknown` blocks only records whose ordering depends on it; priority never
   makes an otherwise ineligible record eligible. A record blocked by an unknown predecessor is shown as held
-  `ordering_unknown` with the blocking predecessor's delivery id, in operator views and bounded lookups/lists;
+  `ordering_unknown` with the blocking predecessor's delivery id as read-only `ordering_predecessor`, in operator
+  attention and bounded get/list results (including stale recovery snapshots). It uses the same oldest-unknown
+  same-target/sender/mode lane predicate as scheduling. The dependency may also be shown beside a higher-priority hold
+  reason; observation changes no record or gate. List cuts include dependency changes, so resolution invalidates an
+  old page cursor even before the waiting record itself changes;
   the stall is never hidden as generic busy or absence. Displaying the dependency neither resolves the unknown
   nor authorizes replay.
 - **Priority and order.** Records carry `priority: low | normal | high`, default `normal`, editable while pending.

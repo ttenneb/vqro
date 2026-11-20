@@ -501,6 +501,50 @@ def case_archive():
     return {'verified_free': True, 'missing_artifact_unknown': True}
 
 
+def case_ordering_visibility():
+    calls = []
+    def handle(method, params):
+        assert params['op'] == 'agent.send', params
+        calls.append(params['args']['delivery'])
+        return {'outcome': 'indeterminate' if len(calls) == 1 else 'accepted'}
+    facts = native()
+    facts['caps']['agent.send'] = {'modes': {'start': {'busy': 'reject'}},
+        'origin': [{'as': 'attributed_user', 'role': 'user', 'frame': 'sender_header'}]}
+    rid = agent('ordering-visibility', facts, handler=handle)
+    def send(label):
+        o = op(label)
+        return cmd('inbox.send', {'op': o, 'submission': o, 'to': rid, 'mode': 'start',
+            'send_new': True, 'content': [{'type': 'text', 'text': label}]})['delivery']
+    scope('pause'); predecessor = send('unknown predecessor'); scope('resume')
+    wait(lambda: cmd('inbox.get', {'delivery': predecessor})['state'] == 'unknown')
+    successor = send('blocked successor')
+    wait(lambda: cmd('inbox.get', {'delivery': successor}).get('reason') == 'ordering_unknown')
+    for _ in range(3):
+        got = cmd('inbox.get', {'delivery': successor})
+        listed = next(row for row in cmd('inbox.list', {'target': rid, 'state': 'held'})['items'] if row['delivery'] == successor)
+        for row in (got, listed):
+            assert row['ordering_predecessor'] == predecessor, row
+        attention = cmd('status')['attention']
+        assert any(row.get('delivery') == successor and row.get('ordering_predecessor') == predecessor
+                   for row in attention['items']), attention
+    assert calls == [predecessor] and cmd('inbox.get', {'delivery': predecessor})['state'] == 'unknown'
+    other = Client({'kind': 'principal', 'principal': 'p:i22-other'})
+    try:
+        cmd('inbox.resolve', {'op': op('unauthorized-resolution'), 'delivery': predecessor, 'as': 'not_delivered'}, other)
+        raise AssertionError('ungranted principal resolved predecessor')
+    except RPCError as error:
+        assert error.kind == 'no_grant', str(error)
+    scope('pause')
+    cmd('inbox.resolve', {'op': op('authorized-resolution'), 'delivery': predecessor, 'as': 'not_delivered'})
+    wait(lambda: cmd('inbox.get', {'delivery': successor}).get('reason') == 'paused')
+    assert 'ordering_predecessor' not in cmd('inbox.get', {'delivery': successor})
+    scope('resume')
+    wait(lambda: cmd('inbox.get', {'delivery': successor})['state'] == 'accepted')
+    assert calls == [predecessor, successor], calls
+    return {'get_list_attention_name_predecessor': True, 'reads_do_not_resolve_or_replay': True,
+            'authorized_resolution_rechecks_pause': True, 'native_writes': len(calls)}
+
+
 def case_recipe_history():
     calls = []
     def handle(method, params):
@@ -723,7 +767,8 @@ def case_archive_abort():
     return {'owner_only': True, 'handover_frozen_refused': True, 'released_slot_reused': True, 'replanned_freed': 6}
 
 
-CASES = {'brick': case_brick, 'idle': case_idle, 'membership': case_membership, 'identity': case_identity, 'reconcile': case_reconcile, 'names': case_names,
+# Witness the bounded attention view before bulk uncertain-history fixtures fill it.
+CASES = {'ordering_visibility': case_ordering_visibility, 'brick': case_brick, 'idle': case_idle, 'membership': case_membership, 'identity': case_identity, 'reconcile': case_reconcile, 'names': case_names,
          'rawcycle': case_rawcycle, 'invalid_declaration': case_invalid_declaration,
          'window': case_window, 'handover': case_handover, 'archive': case_archive, 'queue_epoch': case_queue_epoch, 'handover_withdrawn': case_handover_withdrawn, 'archive_abort': case_archive_abort, 'handover_archive': case_handover_archive, 'pause_reporting': case_pause_reporting, 'recipe_history': case_recipe_history}
 core = None

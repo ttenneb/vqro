@@ -307,6 +307,8 @@ class CoordinationService:
             elif record["state"] in ("held", "recorded"):
                 record.update(state="held", reason="paused")
             records.append(record)
+        heads = Coordinator._ordering_heads(records)
+        records = [Coordinator._visible_ordering(record, heads) for record in records]
         if command == "inbox.get":
             return next((record for record in records if record["delivery"] == args.get("delivery")),
                         {"state": "unknown", "read_only": True})
