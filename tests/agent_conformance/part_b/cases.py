@@ -228,7 +228,19 @@ async def grants_query_not_authority(ctx):
     ctx.check(not invocations(ctx, after=mark), "coordinated no_grant dispatches zero native calls")
     raw = await worker.call("resource.invoke", {"resource": ctx.agents[0]["id"], "op": "agent.interrupt", "args": {"v": 0}})
     ctx.check(raw.get("outcome") in ("accepted", "observed", "dispatched"), "raw primitive remains available independently of coordination grants")
-    raise HarnessGap("G10 query + revoked/unknown grant variants still require explicit grant lifecycle inputs")
+    await ctx.grant("known-but-other","worker:somebody-else",["interrupt"])
+    queried=(await worker.call("workspace.snapshot"))["entries"]
+    ctx.check("doc/agents/grants/known-but-other" in queried and "doc/agents/grants/unknown-grant" not in queried,
+              "public grant queries expose configuration, not standing")
+    mark=ctx.native.mark()
+    await ctx.rejected("control",{"op":await ctx.operation(),"target":ctx.agents[0]["id"],"action":"interrupt","args":{"v":0}},
+                       {"no_grant"},peer=worker)
+    await ctx.grant("revoked-interrupt","worker:no-grants",["interrupt"])
+    queried=(await worker.call("workspace.snapshot"))["entries"]["doc/agents/grants/revoked-interrupt"]
+    await ctx.command("grants",{"op":await ctx.operation(),"id":"revoked-interrupt","value":None,"expect":queried["version"]})
+    await ctx.rejected("control",{"op":await ctx.operation(),"target":ctx.agents[0]["id"],"action":"interrupt","args":{"v":0}},
+                       {"no_grant"},peer=worker)
+    ctx.check(not invocations(ctx,after=mark),"unknown/inapplicable and revoked grants authorize zero coordinated native calls")
 
 
 @case("G12")
@@ -244,7 +256,42 @@ async def principal_writes_checked_before_transaction(ctx):
         try: await ordinary(ctx, operations, peer=worker)
         except RpcError as error: ctx.check(error.kind in ("forbidden", "no_grant"), "non-owner cannot change owner/from-P delegation")
         else: raise CheckFailed("principal authority escalation accepted", component="core")
-    raise HarnessGap("G12 requires remaining overwrite/delete/revert/expiry/pre-transaction and bootstrap audit probes")
+    async def refused(method,params,*,caller=worker):
+        try: await caller.call(method,params)
+        except RpcError as error:
+            ctx.check(error.kind in ("forbidden","no_grant"),"principal write ownership checked before commit",component="core",refusal=str(error))
+        else: raise CheckFailed("principal ownership mutation unexpectedly accepted",component="core")
+    # No existing standing: a row cannot authorize the rest of the transaction that creates it.
+    await refused("workspace.apply",{"on_behalf_of":owner,"ops":[
+        {"op":"set","key":key,"value":{"from":owner,"to":"worker:W"}},
+        {"op":"set","key":"doc/part-b/from-new-delegation","value":True}]})
+    ctx.check(key not in (await ctx.peer.call("workspace.snapshot"))["entries"],"self-authorizing transaction is rejected whole",component="core")
+    txns=(await ctx.peer.call("workspace.history",{"limit":1000}))["txns"]
+    bootstrap=[row for row in txns if row.get("principal")=="system" and str(row.get("author","")).startswith("system:")]
+    ctx.check(bool(bootstrap),"owner bootstrap has audited system attribution",component="core",bootstrap=bootstrap)
+    owner_before=(await ctx.peer.call("workspace.snapshot"))["entries"]["doc/principals/owner"]
+    try: await ctx.peer.call("command.invoke",{"name":"vqro.revert","args":{}})
+    except RpcError as error: ctx.check(error.kind in ("not_found","invalid"),"no owner undo target before owner writes",component="core")
+    ctx.check((await ctx.peer.call("workspace.snapshot"))["entries"]["doc/principals/owner"]==owner_before,
+              "default owner undo cannot select system bootstrap",component="core")
+    owner_write=await ordinary(ctx,[{"op":"set","key":"doc/principals/owner","value":owner}])
+    await refused("workspace.revert",{"txn":owner_write["txn"]})
+    own_key="doc/principals/delegations/part-b-own"
+    await ordinary(ctx,[{"op":"set","key":own_key,"value":{"from":"worker:W","to":"worker:W"}}],peer=worker)
+    await refused("workspace.apply",{"ops":[{"op":"set","key":own_key,"value":{"from":owner,"to":"worker:W"}}]})
+    replace=await ordinary(ctx,[{"op":"set","key":own_key,"value":{"from":owner,"to":"worker:W"}}])
+    await refused("workspace.apply",{"ops":[{"op":"set","key":own_key,"value":{"from":"worker:W","to":"worker:W"}}]})
+    await refused("workspace.apply",{"ops":[{"op":"delete","key":own_key}]})
+    await refused("workspace.revert",{"txn":replace["txn"]})
+    row=(await ctx.peer.call("workspace.snapshot"))["entries"][own_key]
+    expiry=int(time.time()*1000)+1000
+    await ordinary(ctx,[{"op":"set","key":own_key,"value":{"from":owner,"to":"worker:W","until_ms":expiry},"expect":row["version"]}])
+    delegated=await ordinary(ctx,[{"op":"set","key":"doc/part-b/delegated-before-expiry","value":True}],peer=worker,on_behalf_of=owner)
+    history_row=(await worker.call("workspace.history",{"limit":1}))["txns"][-1]
+    ctx.check(history_row.get("actor")=="worker:W" and history_row.get("principal")==owner and history_row.get("initiator")=="worker:W",
+              "standing delegation records actual actor and initiator separately",component="core",transaction=delegated)
+    await ctx.wait(lambda:int(time.time()*1000)>=expiry,label="standing delegation expiry")
+    await refused("workspace.apply",{"on_behalf_of":owner,"ops":[{"op":"set","key":"doc/part-b/after-expiry","value":True}]})
 
 
 async def member(ctx, index, project, reports_to=None):
@@ -438,6 +485,44 @@ async def unconfirmed_claim(ctx):
         ctx.check(confirmed is not None,"any later first delivery needs its own fresh confirmed claim",events=events)
     ctx.check(len(calls)<=1,"no duplicate native delivery after uncertain adoption/repair")
     ctx.evidence.append({"kind":"unconfirmed_claim","adopted":adopted,"repair":repair,"native_calls":calls})
+
+
+@case("I12")
+async def session_pinning_and_claim_race(ctx):
+    pinned=await ctx.send(text="pinned S1")
+    await ctx.native_set(0,session={"id":"S2"},epoch="e2")
+    await ctx.scope("resume")
+    await held(ctx,pinned["delivery"],"session_changed")
+    ctx.check(not invocations(ctx,delivery=pinned["delivery"]),"pinned S1 intent never follows S2 implicitly")
+    followed=await ctx.send(target=ctx.agents[1]["id"],text="explicitly follow S2",follow_current_session=True)
+    await ctx.native_set(1,session={"id":"S2"},epoch="e2")
+    await ctx.scope("resume","agent:"+ctx.agents[1]["id"]);await settled(ctx,followed["delivery"])
+    calls=invocations(ctx,delivery=followed["delivery"])
+    ctx.check(len(calls)==1 and calls[0]["args"]["guard"]["session"]=="S2",
+              "explicit follow selects S2 and dispatches with S2 runtime guard")
+    from .context import PublicCoordination
+    sub=PublicCoordination(ctx.root/"r",ctx.manifest,ctx.vqro)
+    try:
+        await sub.start();sent=await sub.send(text="S3 race",follow_current_session=True)
+        await sub.native_set(0,session={"id":"S2"},epoch="e2")
+        await sub.restart(fault="claim-after")
+        await sub.scope("resume");await sub.wait_cut("after-durable-before-receipt")
+        path=Path(sub.backend.env["VQRO_STATE_DIR"])
+        claim=json.loads((path/"operational/coord.json").read_text())["entries"]["operational/coord/message/"+sent["delivery"]]["value"]
+        ctx.check(claim["attempt"]["session"]=="S2" and not invocations(sub,delivery=sent["delivery"]),
+                  "durable S2 claim is blocked before acknowledgement and resource.invoke")
+        await sub.native_set(0,session={"id":"S3"},epoch="e3")
+        (path/"release-fault").touch()
+        stale=await held(sub,sent["delivery"],"stale_guard")
+        ctx.check(stale["attempt"]["session"]=="S2","S3 cannot rewrite the already pinned attempt")
+        await sub.scope("resume")
+        await asyncio.sleep(.25)
+        ctx.check((await sub.get(sent["delivery"]))["state"]=="held" and
+                  not any(row.get("delivery")==sent["delivery"] for row in sub.native.records("model_request")),
+                  "stale intent stays for review, including through a current-epoch resume")
+    finally:
+        (Path(sub.backend.env["VQRO_STATE_DIR"])/"release-fault").touch()
+        await sub.close();ctx.evidence.extend(sub.evidence)
 
 
 @case("H15")
