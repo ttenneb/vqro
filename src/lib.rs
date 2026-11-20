@@ -10,6 +10,7 @@ pub mod events;
 pub mod ext;
 mod ext_log;
 pub mod paths;
+pub mod principal;
 pub mod provider_client;
 pub mod queue;
 pub mod limits;

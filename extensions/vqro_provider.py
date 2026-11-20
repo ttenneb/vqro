@@ -76,6 +76,11 @@ class Effect:
     ref: str | None
     incarnation: str
     deadline: float
+    author: str | None = None
+    actor: str | None = None
+    principal: str | None = None
+    initiator: str | None = None
+    label: str | None = None
 
     @property
     def remaining(self):
@@ -127,10 +132,11 @@ async def maybe_await(value):
 
 class Provider:
     def __init__(self, name, instance, capabilities, *, role="backend", software=None,
-                 provider_version="0.1.0", token=None, limits=None):
+                 provider_version="0.1.0", token=None, limits=None, principal=None):
         if not isinstance(capabilities, dict) or any(not isinstance(v, dict) for v in capabilities.values()):
             raise ValueError("capability values must be objects")
         self.name, self.instance, self.role = name, instance, role
+        self.principal = os.environ.get("VQRO_PRINCIPAL") if principal is None else principal
         self.capabilities = capabilities
         self.software = software or {"name": name, "version": "0"}
         self.provider_version, self.token = provider_version, token
@@ -259,6 +265,9 @@ class Provider:
             self._disconnect("writer failed; delivery unknown")
 
     async def call(self, method, params, timeout=None):
+        params = dict(params)
+        if method == "hello" and self.principal and self.principal != "undeclared":
+            params.setdefault("identity", {"kind": "principal", "principal": self.principal})
         timeout = self.limits.deadline if timeout is None else timeout
         if not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
             raise ProviderError("invalid", "timeout must be finite and positive")
@@ -414,8 +423,11 @@ class Provider:
             raise ProviderError("invalid", "ref must be a string")
         if not isinstance(params.get("incarnation", ""), str):
             raise ProviderError("invalid", "incarnation must be a string")
+        provenance = [params.get(key) for key in ("author", "actor", "principal", "initiator", "label")]
+        if any(value is not None and not isinstance(value, str) for value in provenance):
+            raise ProviderError("invalid", "effect provenance fields must be strings")
         ctx = Effect(ident, op, params.get("ref"), params.get("incarnation", ""),
-                     asyncio.get_running_loop().time() + duration / 1000)
+                     asyncio.get_running_loop().time() + duration / 1000, *provenance)
         # Exactly one eventual reply, even after the core deadline. Never cancel
         # or retry a possibly dispatched backend effect merely because it expired.
         self._effect_ids.add(ident, self.limits.identities)

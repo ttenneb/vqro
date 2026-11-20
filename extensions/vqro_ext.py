@@ -65,7 +65,8 @@ MAX_PENDING = 128
 class Vqro:
     """JSON-RPC over lines. The core may send us requests (command.invoke) and notifications."""
 
-    def __init__(self, path, handler, *, recover_notifications=False):
+    def __init__(self, path, handler, *, recover_notifications=False, principal=None):
+        self.principal = os.environ.get("VQRO_PRINCIPAL") if principal is None else principal
         self.sock = socket.socket(socket.AF_UNIX)
         self.sock.connect(path)
         self.file = self.sock.makefile("rwb", buffering=0)
@@ -111,10 +112,15 @@ class Vqro:
                 time.sleep(delay)
 
     def _call(self, method, params=None):
-        proof = getattr(getattr(self, "_command_context", None), "invocation", None)
-        if proof is not None and method in ("workspace.apply", "workspace.revert", "command.invoke") and (params is None or isinstance(params, dict)):
+        if params is None or isinstance(params, dict):
             params = dict(params or {})
-            params.setdefault("on_behalf_of", proof)
+            known = getattr(self, "principal", os.environ.get("VQRO_PRINCIPAL"))
+            if method == "hello" and known and known != "undeclared":
+                params.setdefault("identity", {"kind": "principal", "principal": known})
+        proof = getattr(getattr(self, "_command_context", None), "invocation", None)
+        if proof is not None and method in ("workspace.apply", "workspace.revert", "operational.register", "operational.apply", "command.invoke", "resource.spawn", "resource.kill", "resource.invoke", "resource.forget", "resource.forget_cached", "resource.attach") and (params is None or isinstance(params, dict)):
+            params = dict(params or {})
+            params.setdefault("invocation", proof)
         # A nested command acts on the same window's layout as the command that runs it.
         layout = getattr(getattr(self, "_command_context", None), "layout", None)
         if layout and method == "command.invoke" and isinstance(params, dict) and isinstance(params.get("args", {}), dict) \
@@ -296,7 +302,8 @@ class Extension:
         self.resources = {}
         self.providers = {}
         self.cache_lock = threading.RLock()
-        self.vqro = Vqro(os.environ["VQRO_SOCKET"], self._handle, recover_notifications=True)
+        self.vqro = Vqro(os.environ["VQRO_SOCKET"], self._handle, recover_notifications=True,
+                         principal=os.environ.get("VQRO_PRINCIPAL", f"extension:{self.name}"))
         # A slow core delays startup (until run() subscribes); it must not burn the crash budget.
         # A dead connection still exits (the reader's EOF).
         self.vqro.name, self.vqro.patient = self.name, True

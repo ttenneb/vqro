@@ -240,6 +240,7 @@ impl Connection {
         let mut result = json!({"provider": provider.name, "generation": generation, "limits": {"stream_window_bytes": window, "max_record_bytes": MAX_RECORD_BYTES,
             "max_streams": r.limits.max_streams.min(512), "max_item_streams": r.limits.max_item_streams.min(MAX_ITEM_STREAMS)}});
         if let Some(token) = resume_token { result["resume_token"] = json!(token); }
+        if let Some(host)=host {result["host"]=json!(host);}
         Ok(result)
     }
     pub fn sync(&self, core: &Shared, p: Value) -> RpcResult {
@@ -482,7 +483,7 @@ impl WireProvider {
             inventory.effects.insert(context.effect.clone());
         }
         let _effect=EffectLease { inventory:&self.inventory,effect:&context.effect };
-        let mut p = json!({"generation": self.generation, "effect": context.effect, "op": op, "args": args, "deadline_ms": remaining.as_millis().clamp(1, 300000) as u64});
+        let mut p = json!({"generation": self.generation, "effect": context.effect, "op": op, "args": args,"principal":context.author.effective().unwrap_or(crate::principal::UNDECLARED), "author":context.author.author,"actor":context.author.attribution.actor,"initiator":context.author.attribution.initiator,"label":context.author.attribution.label, "deadline_ms": remaining.as_millis().clamp(1, 300000) as u64});
         if let Some((reference, incarnation)) = target { p["ref"] = json!(reference); p["incarnation"] = json!(incarnation); }
         if encoded_bytes(&p) + 128 > MAX_RECORD_BYTES { return Err(AdapterError::RejectedKind { kind: "overloaded".into(), message: "provider effect record exceeds 1 MiB".into() }); }
         let remaining=context.deadline.saturating_duration_since(Instant::now());
@@ -532,7 +533,7 @@ impl WireProvider {
         self.check_dispatch(context)?;
         let incarnation = context.target.as_ref().map(|t| t.1.as_str()).unwrap_or("");
         // Item streams carry no dimensions; the provider answers `continue`/`reset` and its epoch.
-        let open = match &items {
+        let mut open = match &items {
             Some(items) => {
                 let mut open = json!({"generation": self.generation, "stream": id, "ref": reference, "incarnation": incarnation, "channel": "items", "window_bytes": self.window});
                 if let Some(after) = items.get("after").filter(|a| !a.is_null()) { open["after"] = after.clone(); }
@@ -540,6 +541,7 @@ impl WireProvider {
             }
             None => json!({"generation": self.generation, "stream": id, "ref": reference, "incarnation": incarnation, "cols": cols, "rows": rows, "history_lines": history, "window_bytes": self.window}),
         };
+        open["principal"]=json!(context.author.effective().unwrap_or(crate::principal::UNDECLARED));
         let result = self.peer.call_reserved("stream.open", open, remaining).await;
         if Instant::now() >= context.deadline { return Err(AdapterError::Timeout("provider stream.open deadline expired; outcome indeterminate".into())); }
         let epoch = if items.is_some() { result.as_ref().ok().and_then(|r| r["epoch"].as_str()).filter(|e| !e.is_empty() && e.len() <= 256).map(String::from) } else { None };
@@ -646,7 +648,7 @@ mod qa2_tests {
     #[tokio::test]
     async fn expired_before_dispatch_is_definitely_rejected_and_sends_nothing() {
         let (_core,provider,remote,mut incoming)=fixture().await;
-        let context=EffectContext { effect:"expired".into(),deadline:Instant::now()-std::time::Duration::from_millis(1),target:None,caller:None };
+        let context=EffectContext { effect:"expired".into(),author:crate::principal::CallAuthor::default(),deadline:Instant::now()-std::time::Duration::from_millis(1),target:None,caller:None };
         let error=provider.invoke(&context,"fixture",None,json!({})).await.unwrap_err().rpc();
         assert!(incoming.try_recv().is_err(),"expired effect must never reach provider");
         assert_eq!(error.kind(),"timeout");
@@ -673,7 +675,7 @@ mod qa2_tests {
     #[tokio::test]
     async fn duplicate_active_and_recent_effect_ids_never_dispatch_twice() {
         let (_core,provider,remote,mut incoming)=fixture().await;
-        let context=EffectContext { effect:"same".into(),deadline:Instant::now()+std::time::Duration::from_secs(2),target:None,caller:None };
+        let context=EffectContext { effect:"same".into(),author:crate::principal::CallAuthor::default(),deadline:Instant::now()+std::time::Duration::from_secs(2),target:None,caller:None };
         let call=tokio::spawn({let provider=provider.clone();let context=context.clone();async move { provider.invoke(&context,"fixture",None,json!({})).await }});
         let Some(crate::rpc::Incoming::Request { id,method,.. })=incoming.recv().await else { panic!("missing effect"); };
         assert_eq!(method,"effect.invoke");

@@ -107,6 +107,7 @@ pub struct Peer {
     shutdown: watch::Sender<bool>,
     pending: Pending,
     next_id: Arc<AtomicU64>,
+    label:Option<Arc<str>>,
 }
 
 struct Outbound {
@@ -290,9 +291,17 @@ impl Peer {
         });
 
         let incoming = IncomingReceiver { rx: in_rx, limit: record_limit.clone(), shutdown: shutdown.clone(), closed: false };
-        (Peer { control, data, large, large_bytes, record_limit, read_ended, shutdown, pending, next_id: Arc::new(AtomicU64::new(1)) }, incoming)
+        (Peer { control, data, large, large_bytes, record_limit, read_ended, shutdown, pending, next_id: Arc::new(AtomicU64::new(1)),label:None }, incoming)
     }
 
+    /// A per-call diagnostic label, never a connection identity or authority.
+    pub fn with_label(mut self,label:impl Into<Arc<str>>)->Self {self.label=Some(label.into());self}
+    fn declare(&self,mut params:Value)->Value {
+        if let(Some(label),Some(object))=(&self.label,params.as_object_mut()) {
+            object.entry("label").or_insert_with(||json!(label.as_ref()));
+        }
+        params
+    }
     pub async fn call(&self, method: &str, params: Value) -> RpcResult {
         self.call_with_timeout(method, params, DEFAULT_CALL_TIMEOUT).await
     }
@@ -309,6 +318,7 @@ impl Peer {
     }
 
     async fn call_admitted(&self, method: &str, params: Value, deadline: Duration, reserved: bool) -> RpcResult {
+        let params=self.declare(params);
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         {
@@ -371,6 +381,7 @@ impl Peer {
     }
 
     pub fn notify(&self, method: &str, params: Value) {
+        let params=self.declare(params);
         if crate::limits::json_depth(&params,crate::limits::MESSAGE_DEPTH-1).is_err() {self.close();return;}
         self.send_control(json!({"jsonrpc": "2.0", "method": method, "params": params}).to_string());
     }

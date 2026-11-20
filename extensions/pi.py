@@ -104,7 +104,9 @@ class Pi:
         launcher = runtime.get("bridge_argv", default_bridge())
         # The local isolated launcher locates its installed package itself. Neither it nor
         # a configured host launcher injects a module path into the agent environment.
-        env = runtime.get("bridge_env", {})
+        env = dict(runtime.get("bridge_env", {}))
+        # A new agent owns its own logical work, not its launching TUI's undo scope.
+        env.setdefault("VQRO_PRINCIPAL", "p:"+uuid.uuid4().hex)
         params = {"bridge": True, "name": "pi-bridge-"+uuid.uuid4().hex[:12], "argv": [*launcher, "--", *runtime["argv"]], "env": env}
         if cwd:
             params["cwd"] = cwd

@@ -14,9 +14,9 @@ const OPERATIONAL_BYTES:usize=4*1024*1024;
 type Prepare = Box<dyn FnOnce(&Core) -> Result<Plan, RpcError> + Send>;
 
 pub(crate) enum Action {
-    Apply { author:String, on_behalf_of:Option<Arc<str>>, note:Option<String>, ops:Vec<Op> },
-    Revert { author:String, on_behalf_of:Option<Arc<str>>, txn:u64 },
-    Operational {domain:Box<crate::operational::Domain>,author:String,on_behalf_of:Option<Arc<str>>,note:Option<String>,ops:Option<Vec<Op>>,control:bool},
+    Apply { author:String, attribution:crate::principal::Attribution, on_behalf_of:Option<Arc<str>>, note:Option<String>, ops:Vec<Op> },
+    Revert { author:String, attribution:crate::principal::Attribution, on_behalf_of:Option<Arc<str>>, txn:u64 },
+    Operational {domain:Box<crate::operational::Domain>,author:String,attribution:crate::principal::Attribution,on_behalf_of:Option<Arc<str>>,note:Option<String>,ops:Option<Vec<Op>>,control:bool},
 }
 pub(crate) struct Plan {
     pub action: Action,
@@ -159,9 +159,9 @@ async fn run(core:Weak<Mutex<Core>>, queue:Receiver,control_queue:Receiver,cance
             Err(err) => { let _ = receipt.send(Err(err)); continue; }
         };
         let expanded_bytes=match &plan.action {
-            Action::Apply {author,on_behalf_of,note,ops}=>crate::limits::encoded_bytes(ops).saturating_add(crate::limits::encoded_bytes(&(author,on_behalf_of.as_deref(),note))),
-            Action::Revert {author,on_behalf_of,txn}=>store.as_ref().unwrap().revert_bytes(*txn).unwrap_or(0).saturating_add(crate::limits::encoded_bytes(&(author,on_behalf_of.as_deref(),format!("revert {txn}")))),
-            Action::Operational {author,on_behalf_of,note,ops,..}=>crate::limits::encoded_bytes(ops).saturating_add(crate::limits::encoded_bytes(&(author,on_behalf_of.as_deref(),note))),
+            Action::Apply {author,attribution,on_behalf_of,note,ops}=>crate::limits::encoded_bytes(ops).saturating_add(crate::limits::encoded_bytes(&(author,attribution,on_behalf_of.as_deref(),note))),
+            Action::Revert {author,attribution,on_behalf_of,txn}=>store.as_ref().unwrap().revert_bytes(*txn).unwrap_or(0).saturating_add(crate::limits::encoded_bytes(&(author,attribution,on_behalf_of.as_deref(),format!("revert {txn}")))),
+            Action::Operational {author,attribution,on_behalf_of,note,ops,..}=>crate::limits::encoded_bytes(ops).saturating_add(crate::limits::encoded_bytes(&(author,attribution,on_behalf_of.as_deref(),note))),
         };
         let resized=charge.try_resize(expanded_bytes.max(256)).and_then(|_|match &mut op_charge {Some(charge)=>charge.try_resize(expanded_bytes.max(256)),None=>Ok(())});
         if let Err(error)=resized {
@@ -182,11 +182,11 @@ async fn run(core:Weak<Mutex<Core>>, queue:Receiver,control_queue:Receiver,cance
             // this point the candidate MUST be adopted/reported normally, even if its owner exits.
             tokio::task::spawn_blocking(move || {
                 match plan.action {
-                    Action::Apply { author, on_behalf_of, note, ops } => {let mut store=store.take().unwrap();let result=store.apply_attributed(&author,on_behalf_of.as_deref(),note,ops);Written::Workspace(store,result)},
-                    Action::Revert { author, on_behalf_of, txn } => {let mut store=store.take().unwrap();let result=store.revert_attributed(&author,on_behalf_of.as_deref(),txn);Written::Workspace(store,result)},
-                    Action::Operational {mut domain,author,on_behalf_of,note,ops,control}=>{
+                    Action::Apply { author, attribution, on_behalf_of, note, ops } => {let mut store=store.take().unwrap();let result=store.apply_context(&author,on_behalf_of.as_deref(),attribution,note,ops);Written::Workspace(store,result)},
+                    Action::Revert { author, attribution, on_behalf_of, txn } => {let mut store=store.take().unwrap();let result=store.revert_context(&author,on_behalf_of.as_deref(),attribution,txn);Written::Workspace(store,result)},
+                    Action::Operational {mut domain,author,attribution,on_behalf_of,note,ops,control}=>{
                         let registration=ops.is_none();
-                        let attribution=crate::operational::Attribution {author,on_behalf_of:on_behalf_of.as_deref().map(str::to_owned),epoch,generation};
+                        let attribution=crate::operational::Attribution {author,context:attribution.recorded(),on_behalf_of:on_behalf_of.as_deref().map(str::to_owned),epoch,generation};
                         let result=match ops {Some(ops)=>domain.apply(attribution,note,ops,control),None=>domain.register(attribution)};
                         Written::Operational(domain,result,registration)
                     },
@@ -230,7 +230,7 @@ mod tests {
         Arc::new(Mutex::new(Core::new(crate::store::Store::in_memory(), None, "unused".into(), false).unwrap()))
     }
     fn prepare() -> Prepare {
-        Box::new(|_| Ok(Plan { owner:None, action:Action::Apply { author:"test".into(), on_behalf_of:None, note:None, ops:Vec::new() }, after_adopt:None }))
+        Box::new(|_| Ok(Plan { owner:None, action:Action::Apply { author:"test".into(), attribution:crate::principal::Attribution::default(), on_behalf_of:None, note:None, ops:Vec::new() }, after_adopt:None }))
     }
     #[test]
     fn operational_normal_leaves_workspace_and_control_count_and_byte_headroom() {
@@ -283,10 +283,10 @@ mod tests {
             core.lock().unwrap().manifest_catalog.root=root.path().join("empty");crate::ext::reconcile(&core);
             let until=std::time::Instant::now()+std::time::Duration::from_secs(5);
             let owner=loop {if let Ok(token)=std::fs::read_to_string(&token_path) {if let Some(owner)=crate::ext::authenticate(&core.lock().unwrap(),"owner",&token){break owner;}}assert!(std::time::Instant::now()<until);tokio::time::sleep(std::time::Duration::from_millis(5)).await;};
-            let registration_owner=owner.clone();submit_operational(&core,256,true,move|c|Ok(Plan {owner:Some(registration_owner.clone()),action:Action::Operational {domain:Box::new(c.operational.prepare("state",&registration_owner.name,None)?),author:"ext:owner".into(),on_behalf_of:None,note:None,ops:None,control:true},after_adopt:None})).await.unwrap();
+            let registration_owner=owner.clone();submit_operational(&core,256,true,move|c|Ok(Plan {owner:Some(registration_owner.clone()),action:Action::Operational {domain:Box::new(c.operational.prepare("state",&registration_owner.name,None)?),author:"ext:owner".into(),attribution:crate::principal::Attribution::default(),on_behalf_of:None,note:None,ops:None,control:true},after_adopt:None})).await.unwrap();
             let blocker=if !dispatched {let c=core.lock().unwrap();Some(c.committer.enqueue(&core,512,Box::new(|_|Ok(Plan {owner:None,action:Action::Apply {author:"fixture".into(),on_behalf_of:None,note:None,ops:vec![Op::Set {key:"doc/block".into(),value:serde_json::json!(1),expect:None}]},after_adopt:None}))).unwrap())}else{None};
             if !dispatched {tokio::time::timeout(std::time::Duration::from_secs(2),entered.notified()).await.unwrap();}
-            let c=core.clone();let owner2=owner.clone();let request=tokio::spawn(async move {submit_operational(&c,512,true,move|c|Ok(Plan {owner:Some(owner2.clone()),action:Action::Operational {domain:Box::new(c.operational.prepare("state",&owner2.name,None)?),author:"ext:owner".into(),on_behalf_of:None,note:Some("claim".into()),ops:Some(vec![Op::Set {key:"operational/state/a".into(),value:serde_json::json!({"phase":"claimed"}),expect:Some(0)}]),control:true},after_adopt:None})).await});
+            let c=core.clone();let owner2=owner.clone();let request=tokio::spawn(async move {submit_operational(&c,512,true,move|c|Ok(Plan {owner:Some(owner2.clone()),action:Action::Operational {domain:Box::new(c.operational.prepare("state",&owner2.name,None)?),author:"ext:owner".into(),attribution:crate::principal::Attribution::default(),on_behalf_of:None,note:Some("claim".into()),ops:Some(vec![Op::Set {key:"operational/state/a".into(),value:serde_json::json!({"phase":"claimed"}),expect:Some(0)}]),control:true},after_adopt:None})).await});
             if dispatched {tokio::time::timeout(std::time::Duration::from_secs(2),entered.notified()).await.unwrap();}else{let until=std::time::Instant::now()+std::time::Duration::from_secs(2);while core.lock().unwrap().committer.pending()<2 {assert!(std::time::Instant::now()<until,"operational request not queued");tokio::task::yield_now().await;}}
             crate::ext::stop_all(&core);assert!(!owner.is_live());*gate.0.lock().unwrap()=true;gate.1.notify_all();
             if let Some(blocker)=blocker {blocker.await.unwrap().unwrap();}
@@ -333,7 +333,7 @@ mod tests {
             let _keep=&root;entered.notify_one();let mut open=gate.0.lock().unwrap();while !*open {open=gate.1.wait(open).unwrap();}crate::store::write_atomic(path,bytes)
         }})).unwrap();
         fn hook(core:&Shared) { core.lock().unwrap().safe_mode=true; }
-        let plan=||Box::new(|_:&Core|Ok(Plan { owner:None, action:Action::Apply { author:"test".into(),on_behalf_of:None,note:None,ops:vec![Op::Set {key:"doc/queued".into(),value:serde_json::json!(1),expect:None}] },after_adopt:Some(hook) })) as Prepare;
+        let plan=||Box::new(|_:&Core|Ok(Plan { owner:None, action:Action::Apply { author:"test".into(),attribution:crate::principal::Attribution::default(),on_behalf_of:None,note:None,ops:vec![Op::Set {key:"doc/queued".into(),value:serde_json::json!(1),expect:None}] },after_adopt:Some(hook) })) as Prepare;
         let first=core.lock().unwrap().committer.enqueue(&core,256,plan()).unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(2),entered.notified()).await.unwrap();
         let second=core.lock().unwrap().committer.enqueue(&core,256,plan()).unwrap();

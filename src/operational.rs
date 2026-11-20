@@ -30,7 +30,7 @@ pub(crate) fn valid_name(name:&str)->bool {
 fn rejected(kind:&str,message:impl Into<String>)->RpcError {let mut e=RpcError::new(kind,message);e.data.as_mut().unwrap()["outcome"]=json!("rejected");e}
 
 #[derive(Debug,Clone,Serialize,Deserialize)]
-pub(crate) struct Attribution {pub author:String,pub on_behalf_of:Option<String>,pub epoch:String,pub generation:u64}
+pub(crate) struct Attribution {pub author:String,pub on_behalf_of:Option<String>,#[serde(default,flatten)] pub context:crate::principal::Attribution,pub epoch:String,pub generation:u64}
 #[derive(Debug,Clone,Serialize,Deserialize)]
 pub(crate) struct Transaction {
     pub id:u64,pub attribution:Attribution,pub at_ms:u64,pub note:Option<String>,
@@ -200,7 +200,7 @@ impl Registry {
 mod tests {
     use super::*;
     use crate::store::AtomicWriteError;
-    fn attribution()->Attribution {Attribution {author:"ext:test".into(),on_behalf_of:Some("client:invoker".into()),epoch:"boot-test".into(),generation:7}}
+    fn attribution()->Attribution {Attribution {author:"ext:test".into(),on_behalf_of:Some("client:invoker".into()),context:crate::principal::Attribution::default(),epoch:"boot-test".into(),generation:7}}
     fn set(key:&str,value:Value,expect:Option<u64>)->Op {Op::Set {key:key.into(),value,expect}}
     fn fixture()->(tempfile::TempDir,crate::store::Store,Registry) {
         let root=tempfile::tempdir().unwrap();let parent=crate::store::Store::open_locked(root.path().join("workspace.json")).unwrap();

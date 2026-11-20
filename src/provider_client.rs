@@ -116,6 +116,8 @@ impl std::error::Error for ProviderError {}
 #[derive(Clone)]
 pub struct Config {
     pub name: String,
+    /// Launcher-configured default identity; absent is undeclared, never implicit owner.
+    pub principal:Option<String>,
     /// "backend" or "runtime".
     pub role: String,
     pub instance: String,
@@ -155,6 +157,7 @@ impl Config {
     pub fn new(name: impl Into<String>, instance: impl Into<String>, capabilities: Map<String, Value>) -> Self {
         let name = name.into();
         Config {
+            principal:std::env::var("VQRO_PRINCIPAL").ok().filter(|principal|principal!=crate::principal::UNDECLARED),
             software: json!({"name": name, "version": "0"}),
             name,
             role: "backend".into(),
@@ -251,6 +254,8 @@ impl Drop for Responder {
 
 pub struct EffectRequest {
     pub effect: String,
+    pub author:String,
+    pub attribution:crate::principal::Attribution,
     pub op: String,
     pub r#ref: Option<String>,
     pub incarnation: String,
@@ -667,7 +672,9 @@ impl Provider {
 
     async fn handshake(&mut self) -> Result<(), ProviderError> {
         let ext = self.config.extension.clone().or_else(|| std::env::var("VQRO_EXTENSION").ok()).unwrap_or_else(|| self.config.name.clone());
-        self.call("hello", json!({"extension": ext,"extension_token":std::env::var("VQRO_EXTENSION_TOKEN").ok()})).await?;
+        let mut hello=json!({"extension":ext,"extension_token":std::env::var("VQRO_EXTENSION_TOKEN").ok()});
+        if let Some(principal)=&self.config.principal{hello["identity"]=json!({"kind":"principal","principal":principal});}
+        self.call("hello",hello).await?;
         let mut params = json!({
             "name": self.config.name, "role": self.config.role, "instance": self.config.instance,
             "software": self.config.software, "provider_version": self.config.provider_version,
@@ -1005,11 +1012,14 @@ fn effect_request(id: &Value, p: &Value, shared: &Arc<Shared>, config: &Arc<Conf
         return Err(ProviderError::new("invalid", "ref and incarnation must be strings"));
     }
     if !config.capabilities.contains_key(op) { return Err(ProviderError::new("unsupported",format!("op {op} is not a declared capability"))); }
+    let author=match p.get("author"){None=>crate::principal::UNDECLARED.into(),Some(Value::String(author))=>author.clone(),Some(_)=>return Err(ProviderError::new("invalid","author must be a core author string"))};
+    let attribution=serde_json::from_value(p.clone()).map_err(|_|ProviderError::new("invalid","malformed effect attribution"))?;
     shared.effect_ids.lock().unwrap().begin(effect.to_string(),config.max_effect_ids)?;
     let mut response=responder(shared,id);
     response.effect=Some(effect.to_string());
     Ok(Request::Effect(EffectRequest {
         effect: effect.into(),
+        author,attribution,
         op: op.into(),
         r#ref: p["ref"].as_str().map(String::from),
         incarnation: p["incarnation"].as_str().unwrap_or("").into(),

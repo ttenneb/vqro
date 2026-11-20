@@ -305,7 +305,7 @@ impl Core {
             .iter()
             .map(|c| json!({"key": c.key, "version": c.after_version, "value": self.store.get(&c.key).map(|entry|entry.value.clone())}))
             .collect();
-        self.emit("entries", json!({"txn": txn.id, "author": txn.author, "on_behalf_of": txn.on_behalf_of, "undoable":txn.undoable, "note": txn.note, "reverts": txn.reverts, "changes": changes}));
+        self.emit("entries", json!({"txn": txn.id, "author": txn.author, "actor":txn.attribution.actor,"principal":txn.attribution.principal,"initiator":txn.attribution.initiator,"label":txn.attribution.label, "on_behalf_of": txn.on_behalf_of, "undoable":txn.undoable, "note": txn.note, "reverts": txn.reverts, "changes": changes}));
     }
 
     /// Publish every adopted transaction, including a replacement whose final directory sync

@@ -12,12 +12,15 @@ pub(crate) type Shared = Arc<Mutex<Invocations>>;
 
 #[derive(Clone, Default)]
 pub(crate) struct Context {
-    pub origin: Option<Arc<str>>,
     pub proof: Option<String>,
+    pub principal: Option<Arc<str>>,
+    pub initiator: Option<Arc<str>>,
+    pub attribution: crate::principal::Attribution,
 }
 struct Entry {
     connection: u64,
-    origin: Arc<str>,
+    principal: Option<Arc<str>>,
+    initiator: Option<Arc<str>>,
     parent: Option<String>,
     expires: Instant,
     bytes: usize,
@@ -42,7 +45,7 @@ impl Drop for Scope {
 }
 fn denied() -> RpcError { RpcError::new("forbidden", "attribution requires a live command invocation on this connection") }
 impl Invocations {
-    fn chain(&self, proof: &str) -> Result<(Arc<str>, Instant, usize), RpcError> {
+    fn chain(&self, proof: &str) -> Result<(Instant, usize), RpcError> {
         let first = self.entries.get(proof).ok_or_else(denied)?;
         let mut expires = first.expires;
         let mut depth = 0;
@@ -55,7 +58,7 @@ impl Invocations {
             if expires <= Instant::now() { return Err(denied()); }
             current = entry.parent.as_deref();
         }
-        Ok((first.origin.clone(), expires, depth))
+        Ok((expires, depth))
     }
 }
 
@@ -64,23 +67,30 @@ pub(crate) fn authorize(shared: &Shared, connection: u64, proof: Option<String>)
     if proof.len() != 32 || !proof.bytes().all(|byte| byte.is_ascii_hexdigit()) { return Err(denied()); }
     let state = shared.lock().unwrap();
     if state.entries.get(&proof).is_none_or(|entry| entry.connection != connection) { return Err(denied()); }
-    let (origin, _, _) = state.chain(&proof)?;
-    Ok(Context { origin:Some(origin), proof:Some(proof) })
+    state.chain(&proof)?;
+    let principal=state.entries.get(&proof).and_then(|entry|entry.principal.clone());
+    let initiator=state.entries.get(&proof).and_then(|entry|entry.initiator.clone());
+    Ok(Context { proof:Some(proof), principal, initiator, attribution:crate::principal::Attribution::default() })
 }
 
+#[cfg(test)]
 pub(crate) fn enter(shared: &Shared, connection: u64, author: &str, parent: &Context, timeout: Duration) -> Result<Scope, RpcError> {
+    enter_attributed(shared,connection,Some(parent.principal.as_deref().unwrap_or(author)),parent.initiator.as_deref(),parent,timeout)
+}
+pub(crate) fn enter_attributed(shared:&Shared, connection:u64, principal:Option<&str>, initiator:Option<&str>, parent:&Context, timeout:Duration)->Result<Scope,RpcError> {
     let mut state = shared.lock().unwrap();
     let now = Instant::now();
     state.entries.retain(|_, entry| entry.expires > now);
     state.bytes = state.entries.values().map(|entry| entry.bytes).sum();
     let mut expires = now + timeout;
-    let origin = if let Some(proof) = &parent.proof {
-        let (origin, parent_expires, depth) = state.chain(proof)?;
+    if let Some(proof) = &parent.proof {
+        let (parent_expires, depth) = state.chain(proof)?;
         if depth >= MAX_DEPTH { return Err(RpcError::new("overloaded", "command attribution nesting limit; not dispatched")); }
         expires = expires.min(parent_expires);
-        origin
-    } else { Arc::<str>::from(author) };
-    let bytes = crate::limits::encoded_bytes(&origin.as_ref()).saturating_add(128);
+    }
+    let principal=principal.map(Arc::<str>::from).or_else(||parent.proof.as_ref().and_then(|proof|state.entries.get(proof).and_then(|entry|entry.principal.clone())));
+    let initiator=initiator.map(Arc::<str>::from).or_else(||parent.proof.as_ref().and_then(|proof|state.entries.get(proof).and_then(|entry|entry.initiator.clone()))).or_else(||principal.clone());
+    let bytes = crate::limits::encoded_bytes(&(principal.as_deref(),initiator.as_deref())).saturating_add(128);
     if state.entries.len() >= MAX_ACTIVE || bytes > MAX_BYTES.saturating_sub(state.bytes) {
         return Err(RpcError::new("overloaded", "command attribution capacity; not dispatched"));
     }
@@ -90,7 +100,7 @@ pub(crate) fn enter(shared: &Shared, connection: u64, author: &str, parent: &Con
         let token: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
         if !state.entries.contains_key(&token) { break token; }
     };
-    state.entries.insert(token.clone(), Entry { connection, origin, parent:parent.proof.clone(), expires, bytes });
+    state.entries.insert(token.clone(), Entry { connection, principal, initiator, parent:parent.proof.clone(), expires, bytes });
     state.bytes += bytes;
     Ok(Scope { shared:shared.clone(), token })
 }
@@ -105,7 +115,7 @@ mod tests {
         assert!(authorize(&state, 3, Some(parent.token().into())).is_err());
         let context = authorize(&state, 2, Some(parent.token().into())).unwrap();
         let child = enter(&state, 3, "ext:outer", &context, Duration::from_secs(60)).unwrap();
-        assert_eq!(authorize(&state, 3, Some(child.token().into())).unwrap().origin.as_deref(), Some("user:1"));
+        assert_eq!(authorize(&state, 3, Some(child.token().into())).unwrap().principal.as_deref(), Some("user:1"));
         { let state = state.lock().unwrap(); assert!(state.entries[child.token()].expires <= state.entries[parent.token()].expires); }
         drop(parent);
         assert!(authorize(&state, 3, Some(child.token().into())).is_err());

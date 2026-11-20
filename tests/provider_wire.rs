@@ -229,6 +229,9 @@ async fn bridge_tokens_wait_rotate_recover_lost_reply_and_survive_core_restart()
     host.respond(id, Ok(json!({"outcome":"observed","data":{"facts":facts("host")}})));
     let host_id = spawn.await.unwrap().unwrap()["resource"]["id"].clone();
     let first = pending.await.unwrap().unwrap();
+    assert_eq!(first["host"],host_id);assert_eq!(first["actor"],format!("host:{}",host_id.as_str().unwrap()));
+    runtime.call("workspace.apply",json!({"generation":first["generation"],"label":"an-endpoint-is-not-evidence","ops":[{"op":"set","key":"doc/host-work","value":1}]})).await.unwrap();
+    let history=viewer.call("workspace.history",json!({})).await.unwrap();assert_eq!(history["txns"][0]["principal"],first["actor"]);
     let first_resume = first["resume_token"].as_str().unwrap().to_string();
     let mut agent = facts("agent"); agent["kind"] = json!("agent");
     runtime.call("provider.sync", json!({"generation":first["generation"],"resources":[agent.clone()],"final":true})).await.unwrap();
@@ -260,6 +263,7 @@ async fn bridge_tokens_wait_rotate_recover_lost_reply_and_survive_core_restart()
     let (resumed, _rx, _) = client::connect(&socket, "resume").await.unwrap();
     reg["token"] = third["resume_token"].clone();
     let fourth = resumed.call("provider.register", reg.clone()).await.unwrap();
+    assert_eq!(fourth["actor"],first["actor"],"host default is stable, never guessed from its endpoint inventory");
     resumed.call("provider.sync", json!({"generation":fourth["generation"],"resources":[agent],"final":true})).await.unwrap();
     assert!(restarted.lock().unwrap().resources.contains_key(&agent_id), "same agent identity survives core restart");
     let (host_again, _rx, _) = client::connect(&socket, "host").await.unwrap();

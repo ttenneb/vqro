@@ -78,7 +78,7 @@ class InvocationAttribution(unittest.TestCase):
         vqro, messages = self.vqro(handler)
         vqro._dispatch({"id": 100, "method": "command.invoke", "params": {"invocation": "proof"}})
         requests = [msg for msg in messages if "method" in msg]
-        self.assertEqual([msg["params"].get("on_behalf_of") for msg in requests], ["proof", "proof", "proof", None])
+        self.assertEqual([msg["params"].get("invocation") for msg in requests], ["proof", "proof", "proof", None])
         self.assertNotIn("on_behalf_of", params)
         vqro.call("workspace.apply", params)
         self.assertNotIn("on_behalf_of", messages[-1]["params"], "scope ends with reply")
@@ -109,7 +109,7 @@ class InvocationAttribution(unittest.TestCase):
         vqro, messages = self.vqro(handler)
         vqro._dispatch({"id": 100, "method": "command.invoke", "params": {"invocation": "proof"}})
         requests = [msg["params"] for msg in messages if msg.get("method") == "workspace.apply"]
-        self.assertEqual({p["note"]: p.get("on_behalf_of") for p in requests}, {"event": None, "background": None, "command": "proof"})
+        self.assertEqual({p["note"]: p.get("invocation") for p in requests}, {"event": None, "background": None, "command": "proof"})
 
     def test_failed_handler_clears_context_and_explicit_claims_are_not_rewritten(self):
         def handler(method, args):
@@ -134,7 +134,7 @@ class InvocationAttribution(unittest.TestCase):
                        for i, name in enumerate(("a", "b"), 100)]
             for future in futures: future.result(3)
         requests = [msg["params"] for msg in messages if msg.get("method") == "workspace.apply"]
-        self.assertEqual({p["note"]: p.get("on_behalf_of") for p in requests}, {"a": "a", "b": "b"})
+        self.assertEqual({p["note"]: p.get("invocation") for p in requests}, {"a": "a", "b": "b"})
         self.assertFalse(any("error" in msg for msg in messages))
 
 

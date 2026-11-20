@@ -10,11 +10,12 @@ async fn aggregate_workspace_snapshot_is_not_limited_by_control_backlog_budget()
     let socket = dir.path().join("s");
     let _core = server::start(socket.clone(), dir.path().join("state"), false, Backend::Fake, None).unwrap();
     let (peer, _, _) = client::connect(&socket, "qa").await.unwrap();
+    let initial=peer.call("workspace.snapshot",Value::Null).await.unwrap()["entries"].as_object().unwrap().len();
     for i in 0..9 {
         peer.call("workspace.apply", json!({"ops":[{"op":"set","key":format!("doc/large/{i}"),"value":"x".repeat(768*1024)}]})).await.unwrap();
     }
     let snapshot = peer.call("workspace.snapshot", Value::Null).await.expect("accepted state must remain recoverable");
-    assert_eq!(snapshot["entries"].as_object().unwrap().len(), 9);
+    assert_eq!(snapshot["entries"].as_object().unwrap().len(), initial+9);
     assert!(!peer.is_closed());
 }
 

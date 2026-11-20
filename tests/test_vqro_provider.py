@@ -119,9 +119,9 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
         await self.provider.close()
         await self.core.close()
 
-    async def effect(self, op, args=None, ref=None, effect=None, deadline_ms=30000):
+    async def effect(self, op, args=None, ref=None, effect=None, deadline_ms=30000, **provenance):
         self.effect_n += 1
-        params = {"effect": effect or f"e{self.effect_n}", "op": op, "args": args or {}, "deadline_ms": deadline_ms}
+        params = {"effect": effect or f"e{self.effect_n}", "op": op, "args": args or {}, "deadline_ms": deadline_ms, **provenance}
         if ref is not None:
             params.update(ref=ref, incarnation="")
         return await self.core.call("effect.invoke", params)
@@ -134,6 +134,20 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
     async def attach(self, ref, stream=1, window=262144):
         return await self.core.call("stream.open", {"stream": stream, "ref": ref, "incarnation": "",
             "cols": 80, "rows": 24, "history_lines": 0, "window_bytes": window})
+
+    async def test_flat_author_fields_reach_native_handler_and_invalid_shape_dispatches_nothing(self):
+        captured = []
+        fields = {"author": "client:epoch:8", "actor": "extension:worker", "principal": "bob", "initiator": "alice", "label": "owner"}
+        def native(ctx, args):
+            captured.append({key: getattr(ctx, key) for key in fields})
+            return {"outcome": "accepted"}
+        self.provider.effects["terminal.spawn"] = native
+        result = await self.effect("terminal.spawn", **fields)
+        self.assertEqual(result["result"]["outcome"], "accepted")
+        self.assertEqual(captured, [fields])
+        invalid = await self.effect("terminal.spawn", author={"principal": "owner"})
+        self.assertEqual(invalid["error"]["data"]["kind"], "invalid")
+        self.assertEqual(captured, [fields])
 
     async def test_registration_sync_and_generation(self):
         register = self.core.notes("provider.register")[0]["params"]

@@ -377,7 +377,9 @@ async fn snapshot_for_client(peer: &Peer, hello: &Value) -> Result<Value> {
 
 /// This client's `hello`: name, build, profiles and the panel features it renders (D29).
 fn hello_params() -> Value {
-    crate::ui_model::hello("tui", client::build_stamp(), crate::ui_model::PROFILES, panel::SUPPORTED)
+    let mut hello=crate::ui_model::hello("tui", client::build_stamp(), crate::ui_model::PROFILES, panel::SUPPORTED);
+    hello["identity"]=match std::env::var("VQRO_PRINCIPAL").ok().filter(|id|id!=crate::principal::UNDECLARED){Some(principal)=>json!({"kind":"principal","principal":principal}),None=>json!({"kind":"owner"})};
+    hello
 }
 
 /// Carries a window's shown layout across its re-exec into a new build (read only at start).

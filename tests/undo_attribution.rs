@@ -39,7 +39,8 @@ impl Fixture {
     async fn peer(&self, name:&str) -> (Peer,IncomingReceiver,Value) {
         let deadline = Instant::now()+Duration::from_secs(5);
         loop {
-            if let Ok(result) = client::connect(&self.root.path().join("s"),name).await { return result; }
+            let result=if name=="extension"{client::connect(&self.root.path().join("s"),name).await}else{client::connect_as(&self.root.path().join("s"),name,"owner").await};
+            if let Ok(result)=result{return result;}
             assert!(Instant::now()<deadline,"private core startup");
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -74,7 +75,7 @@ async fn request(rx:&mut IncomingReceiver) -> (Value,Value) {
 }
 async fn set(peer:&Peer,key:&str,value:Value,proof:Option<&str>) -> Value {
     let mut params=json!({"ops":[{"op":"set","key":key,"value":value}]});
-    if let Some(proof)=proof { params["on_behalf_of"]=json!(proof); }
+    if let Some(proof)=proof { params["invocation"]=json!(proof); }
     peer.call("workspace.apply",params).await.unwrap()
 }
 async fn register(peer:&Peer,name:&str) { peer.call("command.register",json!({"name":name})).await.unwrap(); }
@@ -121,8 +122,8 @@ async fn real_settings_theme_command_uses_sdk_attribution_and_default_undo_resto
     assert_eq!(snapshot["entries"]["doc/autonomous-after-theme"]["value"],1);
     let history=user.call("workspace.history",json!({"limit":100})).await.unwrap();
     let picked=history["txns"].as_array().unwrap().iter().find(|txn|txn["note"]=="themes: light").unwrap();
-    assert_eq!(picked["author"],"ext:themes");
-    assert_eq!(picked["on_behalf_of"],hello["you"]);
+    assert_eq!(picked["actor"],"extension:themes");
+    assert_eq!(picked["principal"],hello["principal"]);
 }
 
 struct TuiHarness { socket:PathBuf }
@@ -130,12 +131,14 @@ impl Drop for TuiHarness {
     fn drop(&mut self) { let _=Command::new("/usr/bin/tmux").env_clear().args(["-N","-S"]).arg(&self.socket).arg("kill-server").output(); }
 }
 impl TuiHarness {
-    fn start(fixture:&Fixture) -> Self {
+    fn start(fixture:&Fixture) -> Self {Self::start_as(fixture,"owner")}
+    fn start_as(fixture:&Fixture,principal:&str) -> Self {
         let harness=Self {socket:fixture.root.path().join("h")};
         let output=Command::new("/usr/bin/tmux").env_clear().env("HOME",fixture.root.path()).env("PATH","/usr/bin:/bin")
             .args(["-S"]).arg(&harness.socket).args(["-f","/dev/null","new-session","-d","-s","undo","-x","120","-y","32",
                 "/usr/bin/env","-i"])
             .arg(format!("HOME={}",fixture.root.path().display())).args(["PATH=/usr/bin:/bin","TERM=xterm-256color"])
+            .arg(format!("VQRO_PRINCIPAL={principal}"))
             .arg(format!("VQRO_SOCKET={}",fixture.root.path().join("s").display()))
             .arg(format!("VQRO_STATE_DIR={}",fixture.root.path().join("st").display()))
             .arg(format!("VQRO_EXTENSIONS_DIR={}",fixture.root.path().join("extensions").display()))
@@ -148,12 +151,12 @@ impl TuiHarness {
     }
     fn ready(&self) -> bool {
         let output=Command::new("/usr/bin/tmux").env_clear().args(["-N","-S"]).arg(&self.socket)
-            .args(["capture-pane","-p","-t","undo"]).output().unwrap();
+            .args(["capture-pane","-p","-t","undo:0.0"]).output().unwrap();
         output.status.success() && String::from_utf8_lossy(&output.stdout).contains(" vqro ")
     }
     fn key(&self,key:&str) {
         assert!(Command::new("/usr/bin/tmux").env_clear().args(["-N","-S"]).arg(&self.socket)
-            .args(["send-keys","-t","undo",key]).status().unwrap().success());
+            .args(["send-keys","-t","undo:0.0",key]).status().unwrap().success());
     }
 }
 
@@ -188,7 +191,56 @@ async fn actual_tui_u_restores_a_real_theme_selected_from_settings() {
 }
 
 #[tokio::test]
-async fn client_started_theme_is_undone_globally_but_autonomous_writes_are_not() {
+#[ignore="requires private native tmux/pty; run --test undo_attribution -- --include-ignored"]
+async fn principal_from_spawned_pane_is_asserted_and_tui_u_only_undoes_its_presser() {
+    let mut fixture=Fixture::new().await;
+    let(observer,_,observer_hello)=fixture.peer("observer").await;
+    let ui=TuiHarness::start_as(&fixture,"alice");
+    let deadline=Instant::now()+Duration::from_secs(8);
+    let ui_actual=loop {
+        let clients=observer.call("client.list",json!({})).await.unwrap();
+        if let Some(client)=clients["clients"].as_array().unwrap().iter().find(|c|c["client"]=="tui" && c["actor"]=="alice") {
+            if ui.ready(){break client["actual_author"].clone();}
+        }
+        assert!(Instant::now()<deadline,"principal-labelled private TUI ready");tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    observer.call("workspace.apply",json!({"ops":[{"op":"set","key":"extension/pane-provider","value":{
+        "enabled":true,"kind":"provider","argv":[env!("CARGO_BIN_EXE_vqro-tmux"),"--tmux-socket",ui.socket,"--session","undo","--name","pane-provider"]
+    }}]})).await.unwrap();
+    loop {
+        let snapshot=observer.call("workspace.snapshot",json!({})).await.unwrap();
+        if snapshot["providers"]["pane-provider"]["connected"]==true{break;}
+        assert!(Instant::now()<deadline,"private pane provider ready");tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let request=json!({"ops":[{"op":"set","key":"doc/from-pane","value":1}]}).to_string();
+    let alice=client::connect_as(&fixture.root.path().join("s"),"alice-launcher","alice").await.unwrap().0;
+    alice.call("resource.spawn",json!({"provider":"pane-provider","argv":["/bin/sh","-c",
+        "\"$1\" call workspace.apply \"$2\"; exec /usr/bin/sleep 5","principal-pane",env!("CARGO_BIN_EXE_vqro"),request]})).await.unwrap();
+    let pane_txn=loop {
+        let rows=observer.call("workspace.history",json!({"limit":100})).await.unwrap();
+        if let Some(txn)=rows["txns"].as_array().unwrap().iter().find(|txn|txn["changes"].as_array().unwrap().iter().any(|change|change["key"]=="doc/from-pane")) {
+            assert_eq!(txn["principal"],"alice","CLI reads the injected cooperative assertion, not pane placement");
+            assert_ne!(txn["author"],observer_hello["actual_author"]);break txn["id"].clone();
+        }
+        assert!(Instant::now()<deadline,"pane call committed");tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    client::connect_as(&fixture.root.path().join("s"),"bob-launcher","bob").await.unwrap().0.call("workspace.apply",json!({"ops":[{"op":"set","key":"doc/bob-after-pane","value":2}]})).await.unwrap();
+    ui.key("C-g");tokio::time::sleep(Duration::from_millis(150)).await;ui.key("u");
+    loop {
+        let snapshot=observer.call("workspace.snapshot",json!({})).await.unwrap();
+        if snapshot["entries"].get("doc/from-pane").is_none(){
+            assert_eq!(snapshot["entries"]["doc/bob-after-pane"]["value"],2);break;
+        }
+        assert!(Instant::now()<deadline,"Alice's TUI u reverted Alice, not Bob");tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let rows=observer.call("workspace.history",json!({"limit":100})).await.unwrap();
+    let reverted=rows["txns"].as_array().unwrap().iter().find(|txn|txn["reverts"]==pane_txn).unwrap();
+    assert_eq!(reverted["principal"],"alice");assert_eq!(reverted["author"],ui_actual);
+    drop(ui);fixture.stop(&observer).await;
+}
+
+#[tokio::test]
+async fn same_principal_across_connections_undoes_command_work_but_not_other_principals() {
     let mut fixture=Fixture::new().await;
     let (user,_,hello)=fixture.peer("tui").await;
     let (extension,mut commands)=fixture.extension("themes").await;
@@ -210,13 +262,13 @@ async fn client_started_theme_is_undone_globally_but_autonomous_writes_are_not()
     let history=user.call("workspace.history",json!({"limit":100})).await.unwrap();
     assert_eq!(history["txns"].as_array().unwrap().iter().find(|txn|txn["id"]==undone["txn"]).unwrap()["reverts"],changed["txn"]);
     let transaction=history["txns"].as_array().unwrap().iter().find(|txn|txn["id"]==changed["txn"]).unwrap();
-    assert_eq!(transaction["author"],"ext:themes");
-    assert_eq!(transaction["on_behalf_of"],hello["you"]);
+    assert_eq!(transaction["actor"],"extension:themes");
+    assert_eq!(transaction["principal"],hello["principal"]);
     fixture.stop(&user).await;
     fixture.start();
     let (user,_,_)=fixture.peer("restarted").await;
     let history=user.call("workspace.history",json!({"limit":100})).await.unwrap();
-    assert_eq!(history["txns"].as_array().unwrap().iter().find(|txn|txn["id"]==changed["txn"]).unwrap()["on_behalf_of"],hello["you"]);
+    assert_eq!(history["txns"].as_array().unwrap().iter().find(|txn|txn["id"]==changed["txn"]).unwrap()["principal"],hello["principal"]);
 }
 
 #[tokio::test]
@@ -231,14 +283,14 @@ async fn forged_other_connection_and_completed_invocation_proofs_are_rejected() 
     let (id,params)=request(&mut commands).await;
     let proof=params["invocation"].as_str().unwrap();
     for (peer,proof) in [(&other,proof),(&extension,"user:1"),(&extension,"00000000000000000000000000000000")] {
-        let error=peer.call("workspace.apply",json!({"on_behalf_of":proof,"ops":[{"op":"set","key":"doc/forged","value":1}]})).await.unwrap_err();
+        let error=peer.call("workspace.apply",json!({"invocation":proof,"ops":[{"op":"set","key":"doc/forged","value":1}]})).await.unwrap_err();
         assert_eq!(error.kind(),"forbidden");
     }
-    assert_eq!(other.call("command.invoke",json!({"name":"writer.run","on_behalf_of":proof})).await.unwrap_err().kind(),"forbidden");
-    assert_eq!(other.call("workspace.revert",json!({"txn":0,"on_behalf_of":proof})).await.unwrap_err().kind(),"forbidden");
+    assert_eq!(other.call("command.invoke",json!({"name":"writer.run","invocation":proof})).await.unwrap_err().kind(),"forbidden");
+    assert_eq!(other.call("workspace.revert",json!({"txn":0,"invocation":proof})).await.unwrap_err().kind(),"forbidden");
     extension.respond(id,Ok(json!({})));
     invocation.await.unwrap().unwrap();
-    assert_eq!(extension.call("workspace.apply",json!({"on_behalf_of":proof,"ops":[{"op":"set","key":"doc/late","value":1}]})).await.unwrap_err().kind(),"forbidden");
+    assert_eq!(extension.call("workspace.apply",json!({"invocation":proof,"ops":[{"op":"set","key":"doc/late","value":1}]})).await.unwrap_err().kind(),"forbidden");
     let snapshot=user.call("workspace.snapshot",json!({})).await.unwrap();
     assert!(snapshot["entries"].get("doc/forged").is_none());
     assert!(snapshot["entries"].get("doc/late").is_none());
@@ -253,7 +305,7 @@ async fn callback_timeout_revokes_explicit_late_writes() {
     let invocation=tokio::spawn(async move { user.call("command.invoke",json!({"name":"slow.run","deadline_ms":100})).await });
     let (id,params)=request(&mut commands).await;
     assert_eq!(invocation.await.unwrap().unwrap_err().kind(),"timeout");
-    assert_eq!(extension.call("workspace.apply",json!({"on_behalf_of":params["invocation"],"ops":[{"op":"set","key":"doc/after-timeout","value":1}]})).await.unwrap_err().kind(),"forbidden");
+    assert_eq!(extension.call("workspace.apply",json!({"invocation":params["invocation"],"ops":[{"op":"set","key":"doc/after-timeout","value":1}]})).await.unwrap_err().kind(),"forbidden");
     extension.respond(id,Ok(json!({})));
 }
 
@@ -267,7 +319,7 @@ async fn extension_started_nested_commands_remain_autonomous_for_global_undo() {
     register(&worker,"worker.run").await;
     let invocation=tokio::spawn(async move {background.call("command.invoke",json!({"name":"worker.run"})).await});
     let (id,params)=request(&mut commands).await;
-    assert_eq!(params["on_behalf_of"],"ext:background");
+    assert_eq!(params["principal"],"extension:background");
     set(&worker,"doc/automatic",json!(1),params["invocation"].as_str()).await;
     worker.respond(id,Ok(json!({})));
     invocation.await.unwrap().unwrap();
@@ -288,15 +340,15 @@ async fn nested_invocation_retains_origin_and_is_revoked_when_parent_replies() {
     let invocation=tokio::spawn(async move { caller.call("command.invoke",json!({"name":"outer.run"})).await });
     let (outer_id,outer_params)=request(&mut outer_commands).await;
     let caller=outer.clone(); let proof=outer_params["invocation"].clone();
-    let nested=tokio::spawn(async move { caller.call("command.invoke",json!({"name":"inner.run","on_behalf_of":proof})).await });
+    let nested=tokio::spawn(async move { caller.call("command.invoke",json!({"name":"inner.run","invocation":proof})).await });
     let (inner_id,inner_params)=request(&mut inner_commands).await;
     let changed=set(&inner,"doc/nested",json!(1),inner_params["invocation"].as_str()).await;
-    assert_eq!(inner_params["on_behalf_of"],hello["you"]);
+    assert_eq!(inner_params["principal"],hello["principal"]);
     outer.respond(outer_id,Ok(json!({})));
     invocation.await.unwrap().unwrap();
-    assert_eq!(inner.call("workspace.apply",json!({"on_behalf_of":inner_params["invocation"],"ops":[{"op":"set","key":"doc/late-child","value":1}]})).await.unwrap_err().kind(),"forbidden");
+    assert_eq!(inner.call("workspace.apply",json!({"invocation":inner_params["invocation"],"ops":[{"op":"set","key":"doc/late-child","value":1}]})).await.unwrap_err().kind(),"forbidden");
     inner.respond(inner_id,Ok(json!({})));
     nested.await.unwrap().unwrap();
     let history=user.call("workspace.history",json!({})).await.unwrap();
-    assert_eq!(history["txns"].as_array().unwrap().iter().find(|txn|txn["id"]==changed["txn"]).unwrap()["on_behalf_of"],hello["you"]);
+    assert_eq!(history["txns"].as_array().unwrap().iter().find(|txn|txn["id"]==changed["txn"]).unwrap()["principal"],hello["principal"]);
 }

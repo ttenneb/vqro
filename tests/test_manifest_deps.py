@@ -6,6 +6,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
 import check_manifest_deps  # noqa: E402
@@ -126,6 +127,13 @@ ext.contribute({"view/canvas.a": {"kind": "canvas.native"}, "view/canvas.b": {"k
         self.assertEqual(rc, 1)
         self.assertIn("canvas: view/canvas.a has kind canvas.native, which base clients can't render, and no fallback view", out.getvalue())
         self.assertNotIn("canvas.b", out.getvalue())
+
+    def test_only_generic_principal_documents_are_core_owned(self):
+        for key, expected in (("doc/principals/owner", 0), ("doc/principals/delegations/a-b", 0),
+                              ("doc/principals/other", 1), ("doc/agents/grants", 1)):
+            with self.subTest(key=key), patch.dict(globals(), TABS=TABS+"\nkey = "+repr(key)+"\n"):
+                rc, out = self.run_lint({"tabs": {"provides": ["command/tabs.show", "data/tab-data"]}})
+            self.assertEqual(rc, expected, out)
 
     def test_invalid_capability_names_fail(self):
         rc, out = self.run_lint({"tabs": {"provides": ["tabs.show"]}, "agents": {}})

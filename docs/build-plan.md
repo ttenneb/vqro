@@ -3,6 +3,28 @@
 D16: build vqro itself, smallest complete and usable first. The north star: an agent can substantially modify its own
 workspace through reliable public primitives, without changing the host or endangering underlying processes.
 
+## Agent-standard C2: connection-known principals and explicit representation (2026-11-19)
+
+AS6 binds identity at hello from explicit launcher/TUI/extension/host context, with undeclared raw fallback and no
+implicit owner for unknown clients. Labels cannot change it. Generic exact delegation rows and owner/config write
+ownership are enforced at commit prepare, including old/new grantors, deletes, reverts and queued revocations.
+Flat actual/actor/effective/initiator/label metadata reaches both SDKs; scoped callbacks preserve effective and
+initiator separately without standing grants. Default u follows the effective principal; legacy free claims are
+not backfilled. Startup owner bootstrap is audited system work, not owner-u history. Pi's launcher assigns each new
+agent its own opaque principal. Core has no coordination-grants stand-in or agent policy.
+Focused core, native-ledger, Python and real private pane/TUI tests pass; release-gate/current-main integration is
+recorded in the C2 handoff. See `research/connection-principals.md` for the exact boundary and evidence.
+
+## Historical P2 prototype: principal / effect author / presser undo (2026-11-19; superseded by C2)
+
+Per-call cooperative assertions are recorded alongside independent boot-scoped actual authors. Existing command
+proofs retain original-principal context; native effect invokes expose it through both SDKs. Default u matches its
+presser's effective principal across reconnects/restarts, with no human/agent filter. Raw/recovery stays ungated;
+undeclared is visible and needs an explicit target for undo. A bounded additive grant query and enforced coordinated
+stand-in demonstrate the future inbox/control boundary, not a security system or those modules themselves.
+Private pane -> CLI -> TUI and fake native-ledger tests verify the seam. This is evidence, not a frozen standard:
+`research/principal-undo.md` records limits, measurements, D24/UI consequences and the P1 history:false merge seam.
+
 ## Final project name and offline state-copy migration (2026-11-18)
 
 D27 fixes the lowercase name **vqro** before publication: crate/binaries (`vqro`, `vqro-herdr`, `vqro-tmux`),

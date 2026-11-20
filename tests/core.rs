@@ -467,7 +467,7 @@ async fn transactions_revert_and_events() {
 
     // Survives a restart of the store.
     let hist = p.call("workspace.history", json!({"limit": 5})).await.unwrap();
-    assert_eq!(hist["txns"].as_array().unwrap().len(), 2);
+    assert_eq!(hist["txns"].as_array().unwrap().iter().filter(|txn|txn["principal"]!="system").count(), 2);
 }
 
 #[tokio::test]
@@ -553,9 +553,10 @@ async fn live_view_content_is_ephemeral() {
     publisher.call("view.publish", json!({"view": "panel1", "content": {"items": [{"text": "hi"}]}})).await.unwrap();
     let snap = p.call("workspace.snapshot", Value::Null).await.unwrap();
     assert_eq!(snap["live"]["panel1"]["items"][0]["text"], "hi");
-    // Not a transaction: history stays empty.
+    // Not a transaction: only the initial system owner bootstrap remains.
     let hist = p.call("workspace.history", json!({})).await.unwrap();
-    assert!(hist["txns"].as_array().unwrap().is_empty());
+    assert_eq!(hist["txns"].as_array().unwrap().len(),1);
+    assert_eq!(hist["txns"][0]["principal"],"system");
     // Cleared when the publisher goes away.
     drop(publisher);
     drop(_prx);

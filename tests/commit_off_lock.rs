@@ -31,6 +31,7 @@ impl Gate {
 
 struct Fixture {
     core: Shared,
+    base:u64,
     socket: std::path::PathBuf,
     gate: Arc<Gate>,
     stop: Option<tokio::sync::oneshot::Sender<()>>,
@@ -57,10 +58,11 @@ impl Fixture {
         }).await.unwrap();
         let gate = Gate::new();
         core.lock().unwrap().configure_workspace_writer(gate.writer()).unwrap();
-        Self { core, socket, gate, stop:Some(stop), thread:Some(thread), _dir:dir }
+        let base=core.lock().unwrap().snapshot()["entries"]["doc/principals/owner"]["version"].as_u64().unwrap();
+        Self { core, base, socket, gate, stop:Some(stop), thread:Some(thread), _dir:dir }
     }
     async fn peer(&self) -> (Peer, vqro::rpc::IncomingReceiver) {
-        let (peer, incoming, _) = client::connect(&self.socket, "commit-test").await.unwrap();
+        let (peer, incoming, _) = client::connect_as(&self.socket, "commit-test", "owner").await.unwrap();
         (peer, incoming)
     }
     async fn pending(&self, count:usize) {
@@ -159,7 +161,7 @@ async fn concurrent_cas_applies_once_and_publication_order_matches_transaction_o
     f.gate.release();
     let first = first.await.unwrap().unwrap();
     assert_eq!(second.await.unwrap().unwrap_err().kind(), "conflict");
-    let next = observer.call("workspace.apply", set(3, 1)).await.unwrap();
+    let next = observer.call("workspace.apply", set(3, first["txn"].as_u64().unwrap())).await.unwrap();
     assert_eq!(next["txn"].as_u64().unwrap(), first["txn"].as_u64().unwrap()+1, "conflicts consume no transaction id");
     let mut observed = Vec::new();
     tokio::time::timeout(Duration::from_secs(2), async {
@@ -179,15 +181,16 @@ async fn queued_cas_and_default_revert_use_the_preceding_adopted_state() {
     let first = tokio::spawn(async move { a.call("workspace.apply", set(1, 0)).await });
     tokio::time::timeout(Duration::from_secs(2), f.gate.entered.notified()).await.unwrap();
     // This CAS is valid only AFTER the first queued transaction is adopted.
-    let second = tokio::spawn(async move { b.call("workspace.apply", set(2, 1)).await });
+    let version=f.base+1;
+    let second = tokio::spawn(async move { b.call("workspace.apply", set(2, version)).await });
     f.pending(2).await;
     let core = f.core.clone();
-    let undo = tokio::spawn(async move { server::invoke(&core, "test", "vqro.revert", Value::Null).await });
+    let undo = tokio::spawn(async move { server::invoke_as(&core, "test", "owner", "vqro.revert", Value::Null).await });
     f.pending(3).await;
     f.gate.release();
-    assert_eq!(first.await.unwrap().unwrap()["txn"], 1);
-    assert_eq!(second.await.unwrap().unwrap()["txn"], 2);
-    assert_eq!(undo.await.unwrap().unwrap()["txn"], 3);
+    assert_eq!(first.await.unwrap().unwrap()["txn"], f.base+1);
+    assert_eq!(second.await.unwrap().unwrap()["txn"], f.base+2);
+    assert_eq!(undo.await.unwrap().unwrap()["txn"], f.base+3);
     assert_eq!(f.core.lock().unwrap().snapshot()["entries"]["doc/value"]["value"], 1, "default undo must select transaction2, not the pre-queue history");
 }
 
@@ -197,7 +200,7 @@ async fn cancelled_caller_cannot_suppress_adoption_or_extension_reconciliation()
     f.gate.armed.store(false, Ordering::SeqCst);
     let (peer, _) = f.peer().await;
     peer.call("workspace.apply", json!({"ops":[{"op":"set","key":"extension/gated","value":{"argv":["true"],"enabled":false}}]})).await.unwrap();
-    assert_eq!(f.core.lock().unwrap().exts["gated"].spec_version, 1);
+    assert_eq!(f.core.lock().unwrap().exts["gated"].spec_version, f.base+1);
     f.gate.armed.store(true, Ordering::SeqCst);
     let core = f.core.clone();
     let invoke = tokio::spawn(async move { server::invoke(&core, "test", "vqro.extension.disable", json!({"name":"gated"})).await });
@@ -207,8 +210,8 @@ async fn cancelled_caller_cannot_suppress_adoption_or_extension_reconciliation()
     f.gate.release();
     f.pending(0).await;
     let mut core = f.core.lock().unwrap();
-    assert_eq!(core.snapshot()["entries"]["extension/gated"]["version"], 2);
-    assert_eq!(core.exts["gated"].spec_version, 2, "adoption hook belongs to the committer, not the cancelled receipt");
+    assert_eq!(core.snapshot()["entries"]["extension/gated"]["version"], f.base+2);
+    assert_eq!(core.exts["gated"].spec_version, f.base+2, "adoption hook belongs to the committer, not the cancelled receipt");
     assert_eq!(core.configure_workspace_writer(f.gate.writer()).unwrap_err().kind(), "conflict");
 }
 
@@ -233,14 +236,14 @@ async fn clean_failure_is_invisible_but_post_rename_failure_is_adopted_once() {
         let snapshot = peer.call("workspace.snapshot", Value::Null).await.unwrap();
         let history = peer.call("workspace.history", Value::Null).await.unwrap();
         assert_eq!(snapshot["entries"].get("doc/value").is_some(), renamed);
-        assert_eq!(history["txns"].as_array().unwrap().len(), usize::from(renamed));
+        assert_eq!(history["txns"].as_array().unwrap().len(), f.base as usize+usize::from(renamed));
         if renamed {
-            assert_eq!(err.data.unwrap()["txn"], 1);
+            assert_eq!(err.data.unwrap()["txn"], f.base+1);
             assert_eq!(store::Store::open(f._dir.path().join("state/workspace.json")).unwrap().get("doc/value").unwrap().value, 1);
         }
-        let next = peer.call("workspace.apply", set(2, u64::from(renamed))).await.unwrap();
-        assert_eq!(next["txn"], if renamed { 2 } else { 1 });
-        let expected = if renamed { vec![1, 2] } else { vec![1] };
+        let next = peer.call("workspace.apply", set(2, if renamed{f.base+1}else{0})).await.unwrap();
+        assert_eq!(next["txn"], f.base+if renamed { 2 } else { 1 });
+        let expected = if renamed { vec![f.base+1, f.base+2] } else { vec![f.base+1] };
         let mut seen = Vec::new();
         tokio::time::timeout(Duration::from_secs(2), async {
             while seen.len() < expected.len() {
@@ -259,7 +262,7 @@ async fn commit_admission_counts_escaped_note_bytes_not_only_raw_text() {
     let f = Fixture::new().await;
     let (a, _) = f.peer().await; let (b, _) = f.peer().await; let (c, _) = f.peer().await;
     let mut authors=Vec::new();
-    for peer in [&a,&b,&c] {authors.push(peer.call("hello",json!({"client":"commit-budget"})).await.unwrap()["you"].as_str().unwrap().to_owned());}
+    for peer in [&a,&b,&c] {authors.push(peer.call("hello",json!({"client":"commit-budget"})).await.unwrap()["actual_author"].as_str().unwrap().to_owned());}
     // Use real retained metadata, within the note cap. Three operation payloads leave room for
     // raw notes, but not their six-byte JSON escapes. Descriptive client labels are not authors.
     let budget=8*1024*1024;
@@ -280,7 +283,7 @@ async fn commit_admission_counts_escaped_note_bytes_not_only_raw_text() {
     let err = rejected.unwrap_err();
     assert_eq!(err.kind(), "overloaded");
     assert_eq!(err.data.unwrap()["outcome"], "rejected");
-    assert_eq!(first.await.unwrap().unwrap()["txn"], 1);
+    assert_eq!(first.await.unwrap().unwrap()["txn"], f.base+1);
     assert_eq!(second.await.unwrap().unwrap_err().kind(), "conflict");
     f.pending(0).await;
 }
@@ -291,13 +294,13 @@ async fn descriptive_client_labels_are_not_duplicated_into_commit_metadata() {
     let (a,_)=f.peer().await;let (b,_)=f.peer().await;let (c,_)=f.peer().await;
     let label="\0".repeat(500*1024);
     let mut authors=Vec::new();
-    for peer in [&a,&b,&c] {authors.push(peer.call("hello",json!({"client":label})).await.unwrap()["you"].as_str().unwrap().to_owned());}
+    for peer in [&a,&b,&c] {authors.push(peer.call("hello",json!({"client":label})).await.unwrap()["actual_author"].as_str().unwrap().to_owned());}
     assert!(authors.iter().all(|author|author.starts_with("client:")&&author.len()<64));
     let first=tokio::spawn(async move{a.call("workspace.apply",set(1,0)).await});
     tokio::time::timeout(Duration::from_secs(2),f.gate.entered.notified()).await.unwrap();
     let second=tokio::spawn(async move{b.call("workspace.apply",set(2,0)).await});f.pending(2).await;
     let reader=c.clone();let third=tokio::spawn(async move{c.call("workspace.apply",set(3,0)).await});f.pending(3).await;
-    f.gate.release();assert_eq!(first.await.unwrap().unwrap()["txn"],1);
+    f.gate.release();assert_eq!(first.await.unwrap().unwrap()["txn"],f.base+1);
     assert_eq!(second.await.unwrap().unwrap_err().kind(),"conflict");assert_eq!(third.await.unwrap().unwrap_err().kind(),"conflict");f.pending(0).await;
     let history=reader.call("workspace.history",json!({"limit":10})).await.unwrap();
     assert_eq!(history["txns"][0]["author"],authors[0]);
@@ -370,7 +373,7 @@ async fn shutdown_drains_admitted_write_and_its_reply_but_rejects_new_commits() 
     let applied=apply.await.unwrap();
     if early.is_err() { stop.await.unwrap(); }
     assert!(early.is_err(),"shutdown completed before its admitted durable write");
-    assert_eq!(applied.unwrap()["txn"],1,"admitted commit reply must flush before peer closes");
+    assert_eq!(applied.unwrap()["txn"],f.base+1,"admitted commit reply must flush before peer closes");
     let error=rejected.unwrap_err();
     assert_eq!(error.kind(),"unavailable");
     assert_eq!(error.data.unwrap()["outcome"],"rejected");
@@ -397,5 +400,27 @@ async fn writer_panic_is_indeterminate_and_fails_closed_without_replay() {
     assert!(reader.call("workspace.snapshot", Value::Null).await.unwrap()["entries"].get("doc/value").is_none());
     let persisted = store::Store::open(f._dir.path().join("state/workspace.json")).unwrap();
     assert_eq!(persisted.get("doc/value").unwrap().value, 1, "no later queued write or replay may overwrite an uncertain rename");
-    assert_eq!(persisted.history(10).len(), 1);
+    assert_eq!(persisted.history(10).len(), f.base as usize+1);
+}
+
+#[tokio::test]
+async fn principal_config_ownership_observes_the_preceding_queued_owner_change() {
+    let f=Fixture::new().await;let(owner,_)=f.peer().await;let(second,_)=f.peer().await;
+    let change=tokio::spawn(async move{owner.call("workspace.apply",json!({"ops":[{"op":"set","key":"doc/principals/owner","value":"bob"}]})).await});
+    tokio::time::timeout(Duration::from_secs(2),f.gate.entered.notified()).await.unwrap();
+    let queued=tokio::spawn(async move{second.call("workspace.apply",json!({"ops":[{"op":"set","key":"doc/ordinary","value":1},{"op":"set","key":"doc/principals/delegations/c-d","value":{"from":"carol","to":"dave"}}]})).await});
+    f.pending(2).await;f.gate.release();change.await.unwrap().unwrap();assert_eq!(queued.await.unwrap().unwrap_err().kind(),"forbidden");
+    let snapshot=f.core.lock().unwrap().snapshot();assert!(snapshot["entries"].get("doc/ordinary").is_none());assert!(snapshot["entries"].get("doc/principals/delegations/c-d").is_none());
+}
+
+#[tokio::test]
+async fn queued_delegation_is_rechecked_after_an_earlier_revocation_is_adopted() {
+    let f=Fixture::new().await;f.gate.armed.store(false,Ordering::SeqCst);let(owner,_)=f.peer().await;
+    owner.call("workspace.apply",json!({"ops":[{"op":"set","key":"doc/principals/delegations/b-a","value":{"from":"bob","to":"alice"}}]})).await.unwrap();
+    let(alice,_,_)=client::connect_as(&f.socket,"delegate","alice").await.unwrap();f.gate.armed.store(true,Ordering::SeqCst);
+    let revoke=tokio::spawn(async move{owner.call("workspace.apply",json!({"ops":[{"op":"delete","key":"doc/principals/delegations/b-a"}]})).await});
+    tokio::time::timeout(Duration::from_secs(2),f.gate.entered.notified()).await.unwrap();
+    let queued=tokio::spawn(async move{alice.call("workspace.apply",json!({"on_behalf_of":"bob","ops":[{"op":"set","key":"doc/after-revoke","value":1}]})).await});
+    f.pending(2).await;f.gate.release();revoke.await.unwrap().unwrap();assert_eq!(queued.await.unwrap().unwrap_err().kind(),"forbidden");
+    assert!(f.core.lock().unwrap().snapshot()["entries"].get("doc/after-revoke").is_none());
 }

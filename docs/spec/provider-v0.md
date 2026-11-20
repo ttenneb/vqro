@@ -423,8 +423,20 @@ existing status consumers and partial resource events (`src/events.rs`) work unc
 
 | Method | Dir | Kind | Params | Result |
 |---|---|---|---|---|
-| `effect.invoke` | C→P | request | `generation`, `effect` (string), `op`, `ref?`, `incarnation?`, `args` (object), `deadline_ms` (integer), `cause?`, `correlation?` (C2 causality pin, §5) | `{outcome, data?, error?}` |
+| `effect.invoke` | C→P | request | `generation`, `effect` (string), `op`, `ref?`, `incarnation?`, `args` (object), `author` (actual connection string), `actor`, `principal`, `initiator?`, `label?`, `deadline_ms` (integer), `cause?`, `correlation?` (causality pin, §5) | `{outcome, data?, error?}` |
 
+- Author fields are flat and core supplied: `author` is the actual boot-scoped connection; `actor` its resolved
+  principal, `principal` its effective principal, `initiator` the original invoker for forwarded/delegated work, and
+  `label` the caller's diagnostic declaration. Effective and initiator stay distinct through delegated callbacks.
+  Rust exposes `EffectRequest.author` plus `EffectRequest.attribution`; Python exposes the five fields on `Effect`.
+  Missing legacy metadata is unknown/undeclared, never owner or evidence of native delivery/authentication.
+- Provider SDKs bind configured `VQRO_PRINCIPAL` through `hello.identity`, not per-call principal assertions.
+  Without known configuration they are undeclared; a runtime's existing host bootstrap claim supplies its host
+  principal when no other actor is known (`provider.register` returns `host` and resolved `actor`). A multi-endpoint
+  runtime injects an evidenced endpoint principal into its tools, otherwise the host principal: no timing/placement
+  inference. Per-call `label` cannot change binding. Scoped proofs use `invocation`; explicit representation uses
+  `on_behalf_of` with exact generic delegation rows. Raw operations stay ungated, coordination rights stay in
+  extensions. This is accident-proofing, not a new credential or human/agent mode; see core protocol principals.
 - `deadline_ms` is the **remaining** time at dispatch, 1–300000, always present; default 30000 (as forwarded
   commands). The provider converts it to a local monotonic deadline. The core owns the caller's deadline.
 - Result `outcome` is one of `dispatched`, `accepted`, `observed`, `rejected`. `dispatched` means handed to the layer

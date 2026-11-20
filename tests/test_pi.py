@@ -39,7 +39,8 @@ class PiTests(unittest.TestCase):
         self.assertTrue(spawn["bridge"])
         self.assertEqual(spawn["argv"][:3], default_bridge())
         self.assertEqual(spawn["argv"][3:], ["--", "/node", "literal $(not-a-shell)", "--mode", "rpc"])
-        self.assertEqual(spawn["env"], {})
+        self.assertRegex(spawn["env"]["VQRO_PRINCIPAL"], r"^p:[0-9a-f]{32}$")
+        self.assertEqual(set(spawn["env"]), {"VQRO_PRINCIPAL"})
         self.assertEqual(spawn["cwd"], "/private/project")
         self.assertEqual(self.core.calls[-1], ("agents.show", {"resource": "r2"}))
         self.assertEqual(len(self.native()), 1)
@@ -117,19 +118,21 @@ class PiTests(unittest.TestCase):
         self.command("new")
         spawn = self.native()[0][1]
         self.assertEqual(spawn["argv"], ["/Host Tools/python", "-m", "pi_bridge", "--", "pi-host", "--mode", "rpc"])
-        self.assertEqual(spawn["env"], {"PYTHONPATH": "/Host Modules"})
+        self.assertEqual(spawn["env"]["PYTHONPATH"], "/Host Modules")
+        self.assertRegex(spawn["env"]["VQRO_PRINCIPAL"], r"^p:[0-9a-f]{32}$")
 
     def test_custom_host_launcher_does_not_inject_core_module_path(self):
         self.core.apply([{"op": "set", "key": SETTINGS, "value": {"runtimes": [{"name": "host", "argv": ["pi-host"],
             "bridge_argv": ["vqro-bridge-pi"]}]}}], "host")
         self.command("new")
-        self.assertEqual(self.native()[0][1]["env"], {})
+        self.assertEqual(set(self.native()[0][1]["env"]), {"VQRO_PRINCIPAL"})
 
     def test_multiple_launches_name_the_bridge_not_the_interpreter(self):
         self.command("new")
         self.command("new")
         spawns = [params for method, params in self.native() if method == "resource.spawn"]
         self.assertEqual(len(spawns), 2)
+        self.assertNotEqual(spawns[0]["env"]["VQRO_PRINCIPAL"],spawns[1]["env"]["VQRO_PRINCIPAL"])
         self.assertTrue(all(params["name"].startswith("pi-bridge-") for params in spawns))
         self.assertNotEqual(spawns[0]["name"], spawns[1]["name"])
 

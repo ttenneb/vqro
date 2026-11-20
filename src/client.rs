@@ -9,17 +9,25 @@ use tokio::net::UnixStream;
 use crate::rpc::{IncomingReceiver, Peer};
 
 pub async fn connect(socket: &Path, client: &str) -> Result<(Peer, IncomingReceiver, Value)> {
-    connect_with(socket, json!({"client": client, "version": env!("CARGO_PKG_VERSION"), "build": build_stamp()})).await
+    connect_with(socket,json!({"client":client,"version":env!("CARGO_PKG_VERSION"),"build":build_stamp()})).await
 }
-
-/// Connect with explicit `hello` parameters (a rendering client adds its profiles and UI features, D29).
-pub async fn connect_with(socket: &Path, hello: Value) -> Result<(Peer, IncomingReceiver, Value)> {
+pub async fn connect_as(socket:&Path,client:&str,principal:&str)->Result<(Peer,IncomingReceiver,Value)> {
+    connect_with_identity(socket,client,Some(crate::principal::Identity::Principal{principal:principal.into()})).await
+}
+pub async fn connect_with_identity(socket:&Path,client:&str,identity:Option<crate::principal::Identity>)->Result<(Peer,IncomingReceiver,Value)> {
+    let mut hello=json!({"client":client,"version":env!("CARGO_PKG_VERSION"),"build":build_stamp()});
+    if let Some(identity)=identity{hello["identity"]=json!(identity);}
+    connect_with(socket,hello).await
+}
+/// Explicit hello retains rendering declarations; only configured environment supplies a default identity.
+pub async fn connect_with(socket:&Path,mut hello:Value)->Result<(Peer,IncomingReceiver,Value)> {
+    if hello.get("identity").is_none(){if let Ok(principal)=std::env::var("VQRO_PRINCIPAL"){if principal!=crate::principal::UNDECLARED{hello["identity"]=json!({"kind":"principal","principal":principal});}}}
     let stream = UnixStream::connect(socket)
         .await
         .with_context(|| format!("cannot reach vqro at {} (is `vqro serve` running?)", socket.display()))?;
     let (r, w) = stream.into_split();
     let (peer, incoming) = Peer::spawn(r, w);
-    let hello = peer.call("hello", hello).await?;
+    let hello=peer.call("hello",hello).await?;
     Ok((peer, incoming, hello))
 }
 

@@ -46,8 +46,52 @@ author. Human-readable client labels remain in `client.list`, with each client's
 (null when not declared; older cores ignore them). A rendering client declares the profiles it implements (`base`,
 which includes recovery; `terminal`; `keys`) and the optional UI feature ids it renders (bare names such as `items`
 mean `vqro.items`). They are reported for diagnostics and dependency facts, never used to tailor shared content:
-content carries its own fallback. D24 invocation proofs still carry original-invoker
-attribution; this is collision hygiene, not a new workspace permission scheme (D8/D24).
+content carries its own fallback. D24 invocation proofs still carry original-invoker attribution; these labels remain
+ownership/collision hygiene, not persistent principal identities (D8/D24).
+
+### Connection-known principals (AS6)
+
+This is accident-proof attribution, **not security** (D8); it creates no human/agent mode or new credential.
+Principals are opaque, case-sensitive strings of 1–256 UTF-8 bytes without whitespace/control characters.
+`undeclared` is reserved for unknown identity. Display/client names never resolve identity. See also
+[coordination-v0 §3](coordination-v0.md#3-principals), which uses this generic seam but owns its own rights policy.
+
+A launcher configures identity once in `hello.identity`: `{kind:"principal", principal:"…"}`; the TUI uses
+`{kind:"owner"}` to resolve `doc/principals/owner` (default `"owner"`). Rust/Python SDKs send configured
+`VQRO_PRINCIPAL` in that typed hello field, never as a per-call assertion. Ordinary CLI/provider clients without
+it are `undeclared`; the TUI explicitly defaults to owner unless its launcher configures another principal.
+Verified supervised extensions resolve to `extension:<name>`. A runtime registration without a configured actor
+resolves to `host:<host resource id>` from its existing bootstrap claim; the reply supplies `host` and `actor`.
+Multi-endpoint runtimes must inject an evidenced endpoint principal into each tool's environment, or use their
+host principal: neither core nor SDK guesses from the last message, pane, pid or placement. A bound connection
+cannot be retagged by another hello; open a new connection to deliberately change configured identity.
+
+Requests may declare diagnostic `label` (at most 256 bytes, no controls); it never changes identity or rights.
+Record fields `author`, `actor`, `principal`, `initiator`, and `label` are core supplied except the diagnostic label:
+`author` is the actual boot-scoped connection; `actor` its bound identity; `principal` the effective identity;
+`initiator` the original invoker for forwarded/delegated work. Free request `principal`/`actor`/`author` fields are
+not identity inputs. Legacy records are readable, not backfilled; an old principal claim without actor metadata
+is not known-principal undo history. Unknown calls are accepted by ordinary raw/resource/recovery primitives,
+record `undeclared`, receive no implicit owner identity, and cannot select default undo.
+
+Only generic representation is checked in core. `on_behalf_of:"P"` explicitly requests acting as P, admitted
+by an unexpired exact `doc/principals/delegations/<id> = {from:"P",to:"<actor>",until_ms?:null|<u64>,note?:"…"}`.
+There are no wildcard matches, chains, per-right/target scopes or deny rules. `until_ms` is integer Unix epoch
+milliseconds (missing/null means no expiry). Bounds are 1024 rows and 128 KiB encoded table; notes obey the
+ordinary 4096-byte note bound. Standing delegation always matches the connection actor, never an already
+represented principal. It does not revoke previously accepted native work.
+
+Owner/delegation rows are ordinary attributed configuration. Core initializes/migrates the owner with an audited
+system transaction, not an owner-u target. Owner changes require the current effective owner; delegation creates,
+replacements and deletes require the owner or each old/new row's `from`, including explicit reverts. Checks run
+at serialized commit prepare after preceding adopted commits; mixed writes reject atomically. Raw recovery on
+other keys is unaffected. Core never reads coordination grants (`doc/agents/grants`); there is no core
+`grants.check` or `coordination.invoke` stand-in.
+
+Generic spawn exports its effective principal through `VQRO_PRINCIPAL` when native environment passing is
+available, unless the launcher explicitly supplies one. The bundled Pi launcher chooses a fresh opaque principal
+for each new agent instead of inheriting the launching TUI's undo scope. These non-secret values survive the
+Pi child environment sanitizer; supervisor tokens and other internal configuration do not.
 
 A supervised connection is bound to its exact extension lifetime, not merely `ext:<name>`. Disable, restart,
 replacement, removal or child exit immediately fences its RPC mutations, provider publications/routes and command
@@ -83,9 +127,9 @@ disconnect uses legacy positive-pid signal fallback, never a protocol refusal. S
 |---|---|---|
 | `workspace.snapshot` | | `epoch`, `seq`, `entries` (key → `{version, value}`), `resources`, `commands`, `extensions`, `providers`, `adapters` (compatibility alias), `safe_mode` |
 | `workspace.get` | `key` | the single entry `{version, value}`, or `null` if absent |
-| `workspace.apply` | `ops: [{op: "set", key, value, expect?} \| {op: "delete", key, expect?}]`, `note?`, `on_behalf_of?` (invocation proof) | `txn`, `undoable`, `changes` |
+| `workspace.apply` | `ops: [{op: "set", key, value, expect?} \| {op: "delete", key, expect?}]`, `note?`, `invocation?` (proof), `on_behalf_of?` (target principal) | `txn`, `undoable`, `changes` |
 | `workspace.history` | `limit?` | `txns` (newest first) |
-| `workspace.revert` | `txn`, `on_behalf_of?` (invocation proof) | reverting `txn`, `undoable`, `changes` |
+| `workspace.revert` | `txn`, `invocation?` (proof), `on_behalf_of?` (target principal) | reverting `txn`, `undoable`, `changes` |
 
 `workspace.get` reads only the exact requested entry, not an aggregate snapshot or live content. It is available
 to clients, extensions and provider connections under the same normal entry/reply limits. A legacy oversized
@@ -199,7 +243,7 @@ file; the next successful mutation persists the compact form and bounded horizon
 
 Each history change stores `key`, `before: {version, value} | null`, and `after_version: integer | null`.
 The after value comes from current entries for publication, not a second retained history copy. Transactions keep
-`author`, optional D24 `on_behalf_of`, `at_ms`, optional `note`, and optional `reverts`; reverting is another audited
+core `author` and `actor`/`principal`/`initiator`/`label` metadata (legacy `on_behalf_of` remains readable), `at_ms`, optional `note`, and optional `reverts`; reverting is another audited
 transaction with fresh versions and CAS against the recorded after versions. Immutable history records and entry
 preimages are shared in memory rather than deep-cloned for every candidate.
 
@@ -348,7 +392,7 @@ connection. A bounded recovery buffer may discard its batch and request a newer 
 
 Then notifications `event {epoch, seq, type, data}` with types `entries`, `resource`, `resource.removed`, `command`,
 `extension`, `provider`, `adapter` (compatibility alias), `safe_mode`, `effect`, `persistence.error`, `persistence.recovered`; or `missed` when the bounded log can't serve the cursor
-(re-snapshot). `effect {effect, provider, generation, method, author, resource?, op?, target?, outcome, error?}` audits
+(re-snapshot). `effect {effect, provider, generation, method, author, actor, principal, initiator?, label?, resource?, op?, target?, outcome, error?}` audits
 the result observed by the caller, including an indeterminate timeout; it is not a late-reply notification. `resource`
 is the addressed core id, `op` the actual provider operation (e.g. `agent.send`), and `target` the exact native
 `{ref, incarnation}`. Spawn has no pre-existing target; cached retirement has no native target. These fields never
@@ -628,10 +672,10 @@ load/pruning/forget/no-reconnect regression is `tests/e2e_herdr_drift.py`. No po
 |---|---|---|
 | `command.register` | `name`, `title?` | the command; `vqro.*` is reserved for the core |
 | `command.list` | | `commands` |
-| `command.invoke` | `name`, `args?`, `deadline_ms?`, `on_behalf_of?` (invocation proof) | whatever the owner returns; closing owners can be unavailable/disconnected, removed names are `not_found` |
+| `command.invoke` | `name`, `args?`, `deadline_ms?`, `invocation?` (proof), `on_behalf_of?` (target principal) | whatever the owner returns; closing owners can be unavailable/disconnected, removed names are `not_found` |
 
 Built-in, non-replaceable commands (recovery surface, D15): `vqro.layout.reset`, `vqro.revert`
-(default: latest client-authored or client-started extension transaction), `vqro.safe_mode`, `vqro.extension.disable|enable|restart`, and
+(default: latest transaction for the presser's effective connection-known principal), `vqro.safe_mode`, `vqro.extension.disable|enable|restart`, and
 `vqro.shutdown` (implemented: the same ordered stop and accepted-reply flush as `core.shutdown`, including safe mode).
 Everything opinionated is an extension (D17).
 
@@ -649,19 +693,27 @@ never silently treated as latest.
 
 ### Command attribution and undo (D24)
 
-A forwarded command receives `command.invoke {name, args, caller, invocation, on_behalf_of}`: `caller` is the immediate
-invoker, `on_behalf_of` is the original invoker's author label, and `invocation` is an opaque proof for this callback.
-An extension returns that **proof**, not an author label, in the `on_behalf_of` request field on `workspace.apply`,
-`workspace.revert` or a nested `command.invoke`. The core validates the proof against the callback's owning connection
-and in-flight scope; forged, cross-connection, completed, expired or revoked-parent proofs fail `forbidden` before a
-workspace write is admitted. Nested commands preserve the original invoker, with no longer lifetime than their parent.
-Proofs are not grants or user identities (D8); they cannot restrict an agent's ordinary workspace primitives.
+A forwarded command receives flat `command.invoke {name,args,caller,author,actor,principal,initiator,label,invocation}`.
+`caller`/`author` identify its immediate actual invoking connection; `actor` is that connection's known principal,
+`principal` its effective principal, and `initiator` its original logical invoker. `label` is diagnostic only;
+`invocation` is an opaque live callback proof. Extensions read context from this core envelope, never `args`.
+They return the proof in the **`invocation`** request field on workspace writes/reverts, nested commands and
+resource effects. `on_behalf_of` is exclusively a target principal; it is never interpreted as a proof.
 
-History and entries events retain actual writer `author` plus optional **author label** `on_behalf_of`; proofs are never
-persisted or broadcast. Legacy history without the field remains valid. Default `vqro.revert`/TUI `u` keeps the existing
-**global** history behavior across windows/reconnects: it selects the latest non-extension writer, or extension write
-whose original invoker was not itself an extension. Autonomous extension writes/event reactions stay excluded. Explicit
-transaction revert and CAS conflict rules are unchanged; this does not introduce a per-user identity or undo stack.
+A valid proof propagates the invoking call's **effective principal** and **original initiator separately**, only
+inside that live callback. If A represents B, the extension's write records its own actor, effective B, initiator A.
+No standing B-to-extension row is needed for this scoped propagation; it grants no standing ability to represent B.
+Forged, cross-connection, completed, expired or revoked-parent proofs fail `forbidden`. Nested scopes revalidate
+their ancestors and never outlive them. Commit prepare rechecks proofs/delegation after preceding adopted commits.
+Proofs are never retained in history or broadcast; they do not restrict otherwise ordinary raw recovery (D8).
+
+History, entries and effect records use the five canonical author fields above. Default `vqro.revert`/TUI `u`
+selects the latest transaction whose effective principal matches the presser's, after preceding admitted commits,
+across windows/restarts—not another principal's latest change. Unknown clients must configure a connection identity
+or name an explicit transaction. Old unattributed/free-claim history is explicitly revertible, not guessed to be
+owner history. Explicit other-principal revert stays ungated except protected principal-config ownership, records
+the reverter and preserves original attribution. CAS rules and latest-transaction behavior (including reverting a
+revert) remain; this is not a new undo stack. Operational inbox state never enters global undo.
 
 The Python SDK propagates proofs automatically within the command-handler thread, including nested calls, without
 mutating caller dictionaries. Event callbacks and detached worker threads do not inherit them. Complete user writes

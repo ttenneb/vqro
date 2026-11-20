@@ -159,6 +159,7 @@ pub struct EffectContext {
     pub target: Option<(String, String)>,
     /// Rechecked at the adapter's native dispatch seam, not just RPC admission.
     pub caller: Option<crate::ext::Owner>,
+    pub author:crate::principal::CallAuthor,
 }
 
 #[derive(Debug)]

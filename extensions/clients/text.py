@@ -589,7 +589,9 @@ class TextClient:
 
 
 def model_hello():
-    return {"client": "text", "version": "0.1.0", "profiles": ["base"], "features": FEATURES}
+    principal = os.environ.get("VQRO_PRINCIPAL")
+    identity = {"kind": "principal", "principal": principal} if principal and principal != "undeclared" else {"kind": "owner"}
+    return {"client": "text", "version": "0.1.0", "profiles": ["base"], "features": FEATURES, "identity": identity}
 
 
 def main(argv):

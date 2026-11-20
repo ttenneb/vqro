@@ -174,6 +174,7 @@ pub fn reconcile(core: &Shared) {
             .env("VQRO_SOCKET", &socket)
             .env_remove("VQRO_SOCKET_SOURCE")
             .env("VQRO_EXTENSION", &name)
+            .env("VQRO_PRINCIPAL", format!("extension:{name}"))
             .env("VQRO_EXTENSION_TOKEN", &rt.token)
             .env("VQRO_EXTENSION_LIFETIME", "stdin")
             .stdin(std::process::Stdio::piped())

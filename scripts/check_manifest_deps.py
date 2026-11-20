@@ -23,7 +23,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EXT = os.path.join(ROOT, "extensions")
 CAP = re.compile(r"^[A-Za-z0-9._*-]+/[A-Za-z0-9._/*-]+(@[1-9][0-9]*)?$")
 COMMAND = re.compile(r"^[a-z][a-z0-9_-]*(\.[a-z0-9_-]+)+$")
-CORE_DOCS = {"doc/settings/tui", "doc/settings/theme", "doc/settings/icons"}
+CORE_DOCS = {"doc/settings/tui", "doc/settings/theme", "doc/settings/icons", "doc/principals/owner", "doc/principals/delegations/*"}
 # Shared conventions documented in core-protocol.md that any extension may read and write.
 CORE_DOC_PREFIXES = ("doc/layout/",)  # layout settings `doc/layout/<name>` = {cwd?, title?}
 ABILITY_METHODS = {"resource.spawn": "ability/vqro.terminals", "resource.forget": "ability/vqro.resource.forget"}
@@ -151,7 +151,7 @@ def main(argv=None):
                 provided.setdefault(cap_key(cap), []).append(name)
 
     def owner_of(cap):
-        if cap in CORE_DOCS or cap.startswith(("command/vqro.",) + CORE_DOC_PREFIXES):
+        if cap in CORE_DOCS or any(family.endswith("*") and cap.startswith(family[:-1]) for family in CORE_DOCS) or cap.startswith(("command/vqro.",) + CORE_DOC_PREFIXES):
             return ["vqro"]
         if cap in provided:
             return provided[cap]

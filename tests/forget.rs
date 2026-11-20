@@ -20,7 +20,7 @@ fn env() -> Env {
 }
 
 async fn connect(socket: &std::path::Path) -> (Peer, vqro::rpc::IncomingReceiver) {
-    let (p, rx, _) = client::connect(socket, "test").await.unwrap();
+    let (p, rx, _) = client::connect_as(socket, "test", "owner").await.unwrap();
     (p, rx)
 }
 

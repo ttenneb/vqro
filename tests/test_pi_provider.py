@@ -115,7 +115,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def start(self, token="bootstrap-once", ready=True, transcript_bytes=16384, connector=None, interval=.1,
                     env_extra=None, fixture_args=()):
         provider = Provider("pi-test", "one-process", CAPABILITIES, role="runtime", token=token,
-                            limits=Limits(deadline=1))
+                            principal=(env_extra or {}).get("VQRO_PRINCIPAL"), limits=Limits(deadline=1))
         env = {"HOME": self.root.name, "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8",
                "HERDR_SOCKET_PATH": "must-not-inherit", "VQRO_BRIDGE_TOKEN": token,
                "VQRO_EXTENSION_LIFETIME": "stdin", "VQRO_EXTENSION": "wrong-parent"}
@@ -313,12 +313,14 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         user=Path(self.root.name)/"user-modules";user.mkdir()
         capture=Path(self.root.name)/"child-env.json"
         bridge=await self.start(env_extra={"PYTHONPATH":os.pathsep.join([str(ROOT/"extensions"),str(user)]),
-            "VQRO_SOCKET":"private-terminal-endpoint","VQRO_STATE_DIR":"core-only","VQRO_EXTENSIONS_DIR":"core-only",
+            "VQRO_SOCKET":"private-terminal-endpoint","VQRO_PRINCIPAL":"alice","VQRO_STATE_DIR":"core-only","VQRO_EXTENSIONS_DIR":"core-only",
             "VQRO_EXTENSION_TOKEN":"supervised-secret","VQRO_OTHER_INTERNAL":"core-only"},fixture_args=("--env-file",str(capture)))
         record=json.loads(capture.read_text());child=record["env"]
         self.assertEqual(child.get("PYTHONPATH"),str(user))
         self.assertIsNone(record["settings"],"agent tools must not discover vqro's settings extension")
-        self.assertEqual({k for k in child if k.startswith("VQRO_")},{"VQRO_SOCKET","VQRO_SOCKET_SOURCE"})
+        self.assertEqual({k for k in child if k.startswith("VQRO_")},{"VQRO_SOCKET","VQRO_SOCKET_SOURCE","VQRO_PRINCIPAL"})
+        self.assertEqual(child["VQRO_PRINCIPAL"],"alice")
+        self.assertEqual(self.core.notes("hello")[0]["params"]["identity"],{"kind":"principal","principal":"alice"})
         self.assertEqual(child["VQRO_SOCKET_SOURCE"],"terminal")
         self.assertEqual(child["VQRO_SOCKET"],"private-terminal-endpoint")
         self.assertFalse(any(k.startswith("HERDR_") for k in child))

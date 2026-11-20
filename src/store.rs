@@ -101,6 +101,8 @@ fn is_true(value:&bool)->bool { *value }
 pub struct Txn {
     pub id: u64,
     pub author: String,
+    #[serde(flatten)]
+    pub attribution: crate::principal::Attribution,
     /// Original command invoker, validated before commit admission; writer stays in author.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_behalf_of: Option<String>,
@@ -367,16 +369,20 @@ impl Store {
     }
 
     pub fn apply_attributed(&mut self, author: &str, on_behalf_of: Option<&str>, note: Option<String>, ops: Vec<Op>) -> Result<std::sync::Arc<Txn>, RpcError> {
-        self.apply_inner(author, on_behalf_of, note, None, ops)
+        self.apply_context(author,on_behalf_of,crate::principal::Attribution::default(),note,ops)
     }
 
-    fn apply_inner(&mut self, author: &str, on_behalf_of: Option<&str>, note: Option<String>, reverts: Option<u64>, ops: Vec<Op>) -> Result<std::sync::Arc<Txn>, RpcError> {
+    pub fn apply_context(&mut self, author:&str, on_behalf_of:Option<&str>, attribution:crate::principal::Attribution, note:Option<String>, ops:Vec<Op>)->Result<std::sync::Arc<Txn>,RpcError> {
+        self.apply_inner(author,on_behalf_of,attribution,note,None,ops)
+    }
+
+    fn apply_inner(&mut self, author: &str, on_behalf_of: Option<&str>, attribution:crate::principal::Attribution, note: Option<String>, reverts: Option<u64>, ops: Vec<Op>) -> Result<std::sync::Arc<Txn>, RpcError> {
         let writer = self.writer.clone();
-        self.apply_with_writer(author, on_behalf_of, note, reverts, ops, |path, bytes| writer(path, bytes))
+        self.apply_with_writer(author, on_behalf_of, note, reverts, ops, &attribution, |path, bytes| writer(path, bytes))
     }
 
     fn apply_with_writer(
-        &mut self, author: &str, on_behalf_of: Option<&str>, note: Option<String>, reverts: Option<u64>, ops: Vec<Op>,
+        &mut self, author: &str, on_behalf_of: Option<&str>, note: Option<String>, reverts: Option<u64>, ops: Vec<Op>, attribution:&crate::principal::Attribution,
         write: impl FnOnce(&Path, &[u8]) -> Result<(), AtomicWriteError>,
     ) -> Result<std::sync::Arc<Txn>, RpcError> {
         validate_note(note.as_deref())?;
@@ -429,7 +435,7 @@ impl Store {
             .map(|(key, before)| Change { after_version: next.get(&key).map(|entry|entry.version), key, before })
             .filter(|change| change.before.as_ref().map(|entry|entry.version) != change.after_version)
             .collect();
-        let txn = retained_txn(Txn { id: self.next_txn, author: author.to_string(), on_behalf_of:on_behalf_of.map(String::from), at_ms: now_ms(), note, reverts, changes, undoable:true, encoded_bytes:0, revert_bytes:0,depth_quarantined:false },false)?;
+        let txn = retained_txn(Txn { id: self.next_txn, author: author.to_string(), attribution:attribution.clone().recorded(), on_behalf_of:on_behalf_of.map(String::from), at_ms: now_ms(), note, reverts, changes, undoable:true, encoded_bytes:0, revert_bytes:0,depth_quarantined:false },false)?;
         if let (Some(recovery),Some(path))=(&self.recovery,&self.path) {
             if recovery.preserve_source && recovery.backup.get().is_none() {
                 let backup=backup_quarantine(path).map_err(|error| {
@@ -469,6 +475,10 @@ impl Store {
     }
 
     pub fn revert_attributed(&mut self, author: &str, on_behalf_of: Option<&str>, txn_id: u64) -> Result<std::sync::Arc<Txn>, RpcError> {
+        self.revert_context(author,on_behalf_of,crate::principal::Attribution::default(),txn_id)
+    }
+
+    pub fn revert_context(&mut self, author:&str, on_behalf_of:Option<&str>, attribution:crate::principal::Attribution, txn_id:u64)->Result<std::sync::Arc<Txn>,RpcError> {
         let txn = self
             .history.txns
             .iter()
@@ -492,7 +502,7 @@ impl Store {
         if ops.is_empty() {
             return Err(RpcError::invalid(format!("transaction {txn_id} changed nothing")));
         }
-        self.apply_inner(author, on_behalf_of, Some(format!("revert {txn_id}")), Some(txn_id), ops)
+        self.apply_inner(author, on_behalf_of, attribution, Some(format!("revert {txn_id}")), Some(txn_id), ops)
     }
 }
 
@@ -848,7 +858,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ws.json");
         let mut s = Store::open(path.clone()).unwrap();
-        let err = s.apply_with_writer("t", None, None, None, vec![set("doc/a/b", json!(1))], |path, bytes| {
+        let err = s.apply_with_writer("t", None, None, None, vec![set("doc/a/b", json!(1))], &crate::principal::Attribution::default(), |path, bytes| {
             write_atomic_with_sync(path, bytes, |_| Err(std::io::Error::other("injected directory sync failure")))
         }).unwrap_err();
         assert_eq!(err.kind(), "durability_unconfirmed");
