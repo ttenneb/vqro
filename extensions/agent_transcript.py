@@ -22,6 +22,7 @@ MARKDOWN_ROW_BYTES = 60 * 1024  # under the 64 KiB per formatted row (core-proto
 LINE_BYTES = 4096  # one row; longer lines are cut with a mark (display only, never a request's question)
 TOOL_LINES = 12  # lines of a tool's output shown before "… N more lines" (redesign mockup)
 HIDDEN_ROWS, HIDDEN_BYTES = 200, 8 * 1024
+ACTIVITY_BYTES = 64 * 1024  # one Activity row's steps (newest kept), well inside the panel's BUDGET
 # A tool's output lines and copy, kept small: a turn can have dozens of calls, and the panel's BUDGET is shared.
 OUTPUT_LINE_BYTES, TOOL_COPY_BYTES = 1024, 8 * 1024  # the rest of an output or a thought, one expand away
 STEP_BYTES = 300  # a thinking step inside an Activity shows this much of its first line
@@ -434,6 +435,19 @@ def group_row(steps, cwd=None):
     tools = [(eid, value) for eid, value in steps if "__thought__" not in value]
     children = [thought_step(eid, value["__thought__"]) if "__thought__" in value else tool_row(eid, value, cwd)
                 for eid, value in steps]
+    # One Activity is one row, which the panel budget can't split: keep its newest steps within ACTIVITY_BYTES and say
+    # how many earlier ones are left out (the counts and badges above still cover all of them).
+    kept, size = [], 0
+    for child in reversed(children):
+        size += len(json.dumps(child, ensure_ascii=False).encode()) + 2
+        if kept and size > ACTIVITY_BYTES:
+            break
+        kept.insert(0, child)
+    if len(kept) < len(children):
+        left = len(children) - len(kept)
+        kept.insert(0, {"type": "text", "style": "dim",
+                        "text": f"… {left} earlier {'step' if left == 1 else 'steps'} not shown here (pane limit)"})
+    children = kept
     starts = [v.get("started_ms") for _, v in tools if type(v.get("started_ms")) is int]
     ends = [v.get("ended_ms") for _, v in tools if type(v.get("ended_ms")) is int]
     took = duration(min(starts), max(ends)) if starts and ends else None
@@ -591,6 +605,10 @@ def rows(entities, names, coverage=None, view=None, cwd=None):
         mode = view["tools"]
         if mode == "hide":
             hidden["tools"] = hidden.get("tools", 0) + sum(1 for _, v in tools if "__thought__" not in v)
+            thoughts = [(eid, v["__thought__"]) for eid, v in tools if "__thought__" in v]
+            if thoughts:  # hiding tools never hides thinking the Thinking setting shows (the steps were kept for it)
+                flush_hidden()
+                work([thought_step(eid, text) for eid, text in thoughts])
         else:
             flush_hidden()
             group = group_row(tools, cwd)  # collapsed by default (the human's choice, reply-13)

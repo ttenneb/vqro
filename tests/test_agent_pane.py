@@ -212,6 +212,32 @@ class TranscriptRows(unittest.TestCase):
         self.assertEqual(len(rest), agent_transcript.HIDDEN_ROWS + 1)
         self.assertTrue(rest[-1]["text"].endswith("more lines not shown here"))
 
+    def test_one_oversized_activity_keeps_its_newest_steps_within_the_budget(self):
+        """vqro-lead-secondary #74 (probe-74-transcript-controls.py): 40 legal reads in one Activity rendered 525 KB, 3x
+        BUDGET, because one row can't be trimmed. The Activity keeps its newest steps and says how many it left out."""
+        names = agent_transcript.Names({"r2": {"name": "Pi", "kind": "agent"}}, "r2")
+        reads = {("tool", f"t{i}"): {"position": i, "title": "read", "status": "completed", "input": {"path": f"file-{i}.txt"},
+                                     "content": text(("x" * 1000 + "\n") * 12)} for i in range(40)}
+        rows = agent_transcript.rows({k: (1, v) for k, v in reads.items()}, names, "all_retained")
+        self.assertLessEqual(len(json.dumps(rows, ensure_ascii=False).encode()), agent_transcript.BUDGET)
+        group = next(r for r in rows if r.get("text", "").startswith("Activity · 40 tools"))
+        self.assertRegex(group["children"][0]["text"], r"^… \d+ earlier steps not shown here \(pane limit\)$")
+        self.assertEqual(group["children"][-1]["text"], "✓ read   file-39.txt", "the newest step is kept")
+
+    def test_hiding_tools_never_hides_the_thinking_between_them(self):
+        """vqro-lead-secondary #74: Tools=hide with Thinking=show erased an intervening thought with no disclosure."""
+        names = agent_transcript.Names({"r2": {"name": "Pi", "kind": "agent"}}, "r2")
+        steps = {("message", "s"): {"position": 1, "role": "assistant", "final": True, "content": [{"type": "thought", "text": "KEEP_THIS"}]},
+                 ("tool", "c"): {"position": 2, "title": "read", "status": "completed", "input": {"path": "/w/x"}}}
+        for thinking, tools, shown in (("show", "show", True), ("show", "hide", True), ("show", "summary", True),
+                                       ("hide", "hide", False), ("hide", "show", False)):
+            rows = agent_transcript.rows({k: (1, v) for k, v in steps.items()}, names, "all_retained",
+                                         agent_transcript.view_settings({"thinking": thinking, "tools": tools}))
+            flat = json.dumps(rows, ensure_ascii=False)
+            self.assertEqual("KEEP_THIS" in flat, shown, (thinking, tools))
+            if tools == "hide":
+                self.assertIn("· hidden: 1 tools", [r.get("text") for r in rows], "the hidden tool is still disclosed")
+
     def test_a_long_thinking_step_inside_activity_stays_readable(self):
         """Review P2-2: a thought longer than its one line is all one expand away."""
         long = "x" * 999
