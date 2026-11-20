@@ -26,6 +26,7 @@ FAULT_PLUGIN = os.path.join(HERE, "fixtures", "pi", "vqro-pull-faults.ts")  # te
 root = a.root or tempfile.mkdtemp(prefix="pi-pull-")
 sys.path.insert(0, HERE)
 from coord_harness import Harness, txt, finish_framing  # noqa: E402
+from textfiles import read_json, read_lines, read_text, write_json, write_text  # noqa: E402
 
 P = {k: os.path.join(root, k) for k in ("home", "agent", "sessions", "work")}
 for d in P.values():
@@ -60,12 +61,10 @@ def spawn(argv, **kw):
 
 
 spawn([sys.executable, os.path.join(HERE, "fixtures", "fake_openai.py"), "--port", str(port), "--log", model_log])
-AGENT = h.agent(json.loads(re.search(r"^export const PULL_DECLARATION = (.*);$", open(PLUGIN).read(), re.M).group(1))["pull"])  # as the plugin declares
-json.dump({"providers": {"fake": {"baseUrl": f"http://127.0.0.1:{port}/v1", "api": "openai-completions", "apiKey": "fake",
-                                  "models": [{"id": "fake-1", "input": ["text", "image"]}]}}},
-          open(os.path.join(P["agent"], "models.json"), "w"))
-json.dump({"defaultProvider": "fake", "defaultModel": "fake-1", "retry": {"enabled": False}},
-          open(os.path.join(P["agent"], "settings.json"), "w"))
+AGENT = h.agent(json.loads(re.search(r"^export const PULL_DECLARATION = (.*);$", read_text(PLUGIN), re.M).group(1))["pull"])  # as the plugin declares
+write_json(os.path.join(P["agent"], "models.json"), {"providers": {"fake": {"baseUrl": f"http://127.0.0.1:{port}/v1", "api": "openai-completions", "apiKey": "fake",
+                                  "models": [{"id": "fake-1", "input": ["text", "image"]}]}}})
+write_json(os.path.join(P["agent"], "settings.json"), {"defaultProvider": "fake", "defaultModel": "fake-1", "retry": {"enabled": False}})
 HELP = subprocess.run(["node", a.pi, "--help"], capture_output=True, text=True).stdout
 OPTIONAL = [f for f in ("--no-mcp",) if f in HELP]
 results["pi_version"] = subprocess.run(["node", a.pi, "--version"], capture_output=True, text=True).stdout.strip()
@@ -73,22 +72,27 @@ print("pi", results["pi_version"], flush=True)
 
 
 # The shipped plugin reads no fault setting (faults live only in the test wrapper).
-check("shipped plugin has no fault injection", "FAULT" not in open(PLUGIN).read() and "process.exit" not in open(PLUGIN).read())
+check("shipped plugin has no fault injection", "FAULT" not in read_text(PLUGIN) and "process.exit" not in read_text(PLUGIN))
 
 
 class Pi:
+    started = []  # every Pi of this run: its pipes are released at the end, whatever path ended it
+
     def __init__(self, fault="", resume=False):
         self.base = len(plugin_events("reconciled"))
         env = dict(base, PI_CODING_AGENT_DIR=P["agent"], PI_OFFLINE="1", PI_SKIP_VERSION_CHECK="1", PI_TELEMETRY="0",
                    VQRO_AGENT=AGENT, VQRO_PRINCIPAL=h.PLUGIN, VQRO_PULL_LOG=plugin_log, **({"VQRO_PULL_TEST_FAULT": fault} if fault else {}))
         argv = ["node", a.pi, "--mode", "rpc", "-ne", "-e", FAULT_PLUGIN if fault else PLUGIN, "--no-skills",
                 "--no-context-files", "--no-prompt-templates", *OPTIONAL, "--session-dir", P["sessions"], "--tools", "bash"] + (["-c"] if resume else [])
-        self.p = spawn(argv, cwd=P["work"], env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                       stderr=open(os.path.join(root, "pi-stderr.log"), "a"), text=True, bufsize=1)
+        with open(os.path.join(root, "pi-stderr.log"), "a") as err:  # the child keeps its own descriptor
+            self.p = spawn(argv, cwd=P["work"], env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                           stderr=err, text=True, bufsize=1)
         # Drain Pi's stdout continuously: Node writes to a pipe synchronously, so an undrained pipe blocks Pi
         # mid-run (it then looks hung and never exits).
         self.lines = queue.Queue()
-        threading.Thread(target=self._drain, daemon=True).start()
+        self.drainer = threading.Thread(target=self._drain, daemon=True)
+        self.drainer.start()
+        Pi.started.append(self)
 
     def _drain(self):
         for line in self.p.stdout:
@@ -120,10 +124,24 @@ class Pi:
             self.p.stdin.close(); self.p.wait(5)
         except Exception:
             self.p.kill(); self.p.wait()
+        self.release()
+
+    def release(self):
+        """Close what this Pi's process handle opened (stdin, stdout), once the process has ended."""
+        if self.p.poll() is None:
+            self.p.kill()
+        self.p.wait()
+        self.drainer.join(5)  # stdout reaches EOF when the process ends
+        for pipe in (self.p.stdin, self.p.stdout):
+            if pipe is not None and not pipe.closed:
+                try:
+                    pipe.close()
+                except OSError:
+                    pass
 
 
 def requests():
-    return [json.loads(l) for l in open(model_log)] if os.path.exists(model_log) else []
+    return [json.loads(l) for l in read_lines(model_log)] if os.path.exists(model_log) else []
 
 
 def first_request_with(text):
@@ -135,7 +153,7 @@ def get(d):
 
 
 def plugin_events(kind):
-    return [json.loads(l) for l in open(plugin_log) if f'"event":"{kind}"' in l] if os.path.exists(plugin_log) else []
+    return [json.loads(l) for l in read_lines(plugin_log) if f'"event":"{kind}"' in l] if os.path.exists(plugin_log) else []
 
 
 def wait_for(pred, timeout=20):
@@ -336,7 +354,9 @@ else:
 
 calls = [e for e in plugin_events("taken") + plugin_events("held") + plugin_events("take_failed")]
 results["takes"] = len(calls)
-json.dump(results, open(os.path.join(root, "results.json"), "w"), indent=1)
+write_json(os.path.join(root, "results.json"), results, indent=1)
+for started in Pi.started:
+    started.release()
 for p in procs:
     if p.poll() is None:
         p.terminate()

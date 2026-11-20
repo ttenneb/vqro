@@ -19,6 +19,7 @@ PLUGIN = os.path.join(HERE, "..", "integrations", "pi", "vqro-pull.ts")
 root = a.root
 sys.path.insert(0, HERE)
 from coord_harness import Harness, txt, finish_framing  # noqa: E402
+from textfiles import read_json, read_lines, read_text, write_json, write_text  # noqa: E402
 
 P = {k: os.path.join(root, k) for k in ("home", "agent", "sessions", "work")}
 for d in P.values():
@@ -40,11 +41,10 @@ def check(name, ok, detail=""):
 
 
 h.spawn([sys.executable, os.path.join(HERE, "fixtures", "fake_openai.py"), "--port", str(port), "--log", model_log])
-AGENT = h.agent(json.loads(re.search(r"^export const PULL_DECLARATION = (.*);$", open(PLUGIN).read(), re.M).group(1))["pull"])  # as the plugin declares
-json.dump({"providers": {"fake": {"baseUrl": f"http://127.0.0.1:{port}/v1", "api": "openai-completions", "apiKey": "fake",
-                                  "models": [{"id": "fake-1", "input": ["text"]}]}}}, open(os.path.join(P["agent"], "models.json"), "w"))
-json.dump({"defaultProvider": "fake", "defaultModel": "fake-1", "retry": {"enabled": False}, "tuiMode": "regular"},
-          open(os.path.join(P["agent"], "settings.json"), "w"))
+AGENT = h.agent(json.loads(re.search(r"^export const PULL_DECLARATION = (.*);$", read_text(PLUGIN), re.M).group(1))["pull"])  # as the plugin declares
+write_json(os.path.join(P["agent"], "models.json"), {"providers": {"fake": {"baseUrl": f"http://127.0.0.1:{port}/v1", "api": "openai-completions", "apiKey": "fake",
+                                  "models": [{"id": "fake-1", "input": ["text"]}]}}})
+write_json(os.path.join(P["agent"], "settings.json"), {"defaultProvider": "fake", "defaultModel": "fake-1", "retry": {"enabled": False}, "tuiMode": "regular"})
 OPTIONAL = [f for f in ("--no-mcp",) if f in subprocess.run(["node", a.pi, "--help"], capture_output=True, text=True).stdout]
 results["pi_version"] = subprocess.run(["node", a.pi, "--version"], capture_output=True, text=True).stdout.strip()
 
@@ -77,7 +77,7 @@ def typed(text):
 
 
 def requests():
-    return [json.loads(l) for l in open(model_log)] if os.path.exists(model_log) else []
+    return [json.loads(l) for l in read_lines(model_log)] if os.path.exists(model_log) else []
 
 
 def first_request_with(text):
@@ -121,7 +121,7 @@ check("human draft submitted byte-identical and never mixed into earlier request
       last_user == DRAFT and not any(DRAFT in m["text"] for r in reqs[:-1] for m in r["messages"]), last_user)
 check("messages rendered in the TUI with their delivery id", f"vqro inbox message {b}" in plain and f"vqro inbox message {s}" in plain)
 check("both read", results["b"].get("state") == "read" and results["s"].get("state") == "read", (results["b"], results["s"]))
-json.dump(results, open(os.path.join(root, "tui-results.json"), "w"), indent=1, default=str)
+write_json(os.path.join(root, "tui-results.json"), results, indent=1, default=str)
 if a.framing_only:
     with open(os.path.join(root, "framing-screen.txt"), "w") as output:
         output.write(plain)

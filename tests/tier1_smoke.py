@@ -18,6 +18,7 @@ import glob
 import hashlib
 import json
 import os
+from pathlib import Path
 import re
 import shutil
 import signal
@@ -57,7 +58,7 @@ except Exception:
 
 def save(status):
     receipt["status"] = status
-    json.dump(receipt, open(os.path.join(root, "receipt.json"), "w"), indent=1, default=str)
+    write_json(os.path.join(root, "receipt.json"), receipt, indent=1, default=str)
     print(json.dumps({"status": status}), flush=True)
 
 
@@ -92,6 +93,8 @@ def stop():
 
 
 import atexit  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from textfiles import read_json, read_lines, read_text, write_json, write_text  # noqa: E402
 atexit.register(stop)
 
 
@@ -113,6 +116,10 @@ class Client:
                     raise RuntimeError(row["error"])
                 return row["result"]
 
+    def close(self):
+        self.f.close()
+        self.s.close()
+
     def cmd(self, name, **args):
         return self.call("command.invoke", {"name": name, "args": args})
 
@@ -123,7 +130,7 @@ class Client:
 
 
 def sha(path):
-    return hashlib.sha256(open(path, "rb").read()).hexdigest() if os.path.exists(path) else None
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest() if os.path.exists(path) else None
 
 
 def screen(row):
@@ -149,7 +156,7 @@ else:
     assert os.getuid() == 0 and os.getpid() == 1, "pi smoke requires a private user/mount/PID namespace"
     subprocess.run(["/usr/bin/mount", "--make-rprivate", "/"], check=True)
     target = os.path.join(P["agent"], "auth.json")
-    open(target, "w").close()
+    write_text(target, "")
     os.chmod(target, 0o600)
     subprocess.run(["/usr/bin/mount", "--bind", os.path.abspath(a.pi_auth), target], check=True)
     subprocess.run(["/usr/bin/mount", "-o", "remount,bind,ro", target], check=True)
@@ -163,10 +170,10 @@ else:
         save("blocked: credential not read-only, or a refresh would be needed (expiry absent or under 10 min); nothing started")
         sys.exit(3)
     # lastChangelogVersion: Pi records it itself on a first run (an existing user has it), not a vqro change.
-    version = json.load(open(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(a.pi)))), "package.json")))["version"]
+    version = read_json(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(a.pi)))), "package.json"))["version"]
     settings = {"retry": {"enabled": False, "maxRetries": 0, "provider": {"maxRetries": 0, "maxRetryDelayMs": 0, "timeoutMs": 60000}},
                 "compaction": {"enabled": False}, "cacheWarming": "off", "transport": "sse", "lastChangelogVersion": version}
-    json.dump(settings, open(os.path.join(P["agent"], "settings.json"), "w"))
+    write_json(os.path.join(P["agent"], "settings.json"), settings)
     TENV.update(HOME=P["home"], PI_CODING_AGENT_DIR=P["agent"], PI_SKIP_VERSION_CHECK="1", PI_TELEMETRY="0")
     guarded = os.path.join(P["agent"], "settings.json")
     # The real credential is never read here: only its metadata, before and after.
@@ -184,14 +191,14 @@ for name in os.listdir(os.path.join(REPO, "extensions")):
 shutil.copytree(os.path.join(REPO, "extensions", "manifests"), os.path.join(P["ext"], "manifests"))
 os.makedirs(os.path.join(P["ext"], "tier1"))
 shutil.copy(os.path.join(REPO, "integrations", "pi", "vqro-pull.ts"), os.path.join(P["ext"], "tier1"))
-defaults = json.load(open(os.path.join(REPO, "extensions", "defaults.json")))
+defaults = read_json(os.path.join(REPO, "extensions", "defaults.json"))
 defaults["extensions"] = [e for e in defaults["extensions"] if e["name"] in ("coord", "tier1")]
-json.dump(defaults, open(os.path.join(P["ext"], "defaults.json"), "w"))
+write_json(os.path.join(P["ext"], "defaults.json"), defaults)
 cenv = {"HOME": P["home"], "PATH": f"{os.path.dirname(BIN['vqro'])}:{PATH}", "XDG_RUNTIME_DIR": P["xrun"], "VQRO_STATE_DIR": P["state"],
         "VQRO_SOCKET": SOCK, "VQRO_EXTENSIONS_DIR": P["ext"], "HC_SOCKET": os.path.join(root, "h.sock"), "HC_SESSION": "tier1-smoke",
         "VQRO_HERDR": '["/bin/false"]'}
-procs.append(subprocess.Popen([BIN["vqro"], "serve"], env=cenv, start_new_session=True,
-                              stdout=open(os.path.join(root, "core.log"), "w"), stderr=subprocess.STDOUT))
+with open(os.path.join(root, "core.log"), "w") as log:  # the child keeps its own descriptor
+    procs.append(subprocess.Popen([BIN["vqro"], "serve"], env=cenv, start_new_session=True, stdout=log, stderr=subprocess.STDOUT))
 wait(lambda: os.path.exists(SOCK), 20)
 c = Client()
 c.call("workspace.apply", {"ops": [
@@ -209,7 +216,7 @@ receipt.update(resource=rid, principal_recorded=row.get("principal") == reply["p
 if a.runtime == "claude":
     def transcript():
         files = [f for f in glob.glob(os.path.join(TENV["CLAUDE_CONFIG_DIR"], "projects", "*", "*.jsonl")) if os.path.getmtime(f) >= START]
-        return [json.loads(line) for f in files for line in open(f) if line.strip()]
+        return [json.loads(line) for f in files for line in read_lines(f) if line.strip()]
 
     def requests():
         """One row per model response (a response can span several transcript entries with the same message id)."""
@@ -233,7 +240,7 @@ if a.runtime == "claude":
     tmux("send-keys", "-t", row["backend_ref"], "-l", "Reply with just: ok"); time.sleep(0.5)
     tmux("send-keys", "-t", row["backend_ref"], "Enter")
     log = os.path.join(P["hookstate"], "hook.log")
-    armed = wait(lambda: os.path.exists(log) and "waiter_armed" in open(log).read(), 120)
+    armed = wait(lambda: os.path.exists(log) and "waiter_armed" in read_text(log), 120)
     if not armed:
         receipt.update(screen_tail=screen(row)[-2500:], model_requests=len(requests()))
         stop()
@@ -253,7 +260,7 @@ if a.runtime == "claude":
     for f in glob.glob(os.path.join(TENV["CLAUDE_CONFIG_DIR"], "projects", "*t1smoke*")):
         shutil.move(f, os.path.join(root, "transcripts-" + os.path.basename(f)[-32:]))
 else:
-    started = wait(lambda: os.path.exists(TENV["VQRO_PULL_LOG"]) and '"reconciled"' in open(TENV["VQRO_PULL_LOG"]).read(), 60)
+    started = wait(lambda: os.path.exists(TENV["VQRO_PULL_LOG"]) and '"reconciled"' in read_text(TENV["VQRO_PULL_LOG"]), 60)
     delivery = c.send(rid, "start", "Teammate note for the vqro tier1 smoke test: reply with just the word PAPAYA.")
     answered = wait(lambda: c.cmd("coord.inbox.get", delivery=delivery).get("state") == "read"
                     and "PAPAYA" in screen(row).split("PAPAYA.", 1)[-1], 120)
@@ -271,6 +278,7 @@ if a.runtime == "pi":
     receipt["config_unchanged"] = receipt["config_unchanged"] and receipt["credential_unchanged"]
 ok = ok and receipt["config_unchanged"] and receipt["principal_recorded"]
 receipt["seconds"] = round(time.time() - START, 1)
+c.close()
 stop()
 save("PASS" if ok else "FAIL")
 sys.exit(0 if ok else 1)

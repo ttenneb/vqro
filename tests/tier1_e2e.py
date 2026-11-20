@@ -15,6 +15,7 @@ import argparse
 import hashlib
 import json
 import os
+from pathlib import Path
 import shutil
 import signal
 import socket
@@ -76,6 +77,8 @@ def stop():
 
 
 import atexit  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from textfiles import read_json, read_lines, read_text, write_json, write_text  # noqa: E402
 atexit.register(stop)
 signal.signal(signal.SIGTERM, lambda *_: sys.exit(1))
 
@@ -98,6 +101,10 @@ class Client:
                     raise RuntimeError(row["error"])
                 return row["result"]
 
+    def close(self):
+        self.f.close()
+        self.s.close()
+
     def cmd(self, name, **args):
         return self.call("command.invoke", {"name": name, "args": args})
 
@@ -107,7 +114,7 @@ class Client:
 
 
 def digest(paths):
-    return {p: hashlib.sha256(open(p, "rb").read()).hexdigest() if os.path.exists(p) else None for p in paths}
+    return {p: hashlib.sha256(Path(p).read_bytes()).hexdigest() if os.path.exists(p) else None for p in paths}
 
 
 def tmux(*args):
@@ -116,7 +123,7 @@ def tmux(*args):
 
 
 def model_requests(log):
-    return [json.loads(line) for line in open(log)] if os.path.exists(log) else []
+    return [json.loads(line) for line in read_lines(log)] if os.path.exists(log) else []
 
 
 def seen(log, token):
@@ -129,18 +136,16 @@ claude_dir, pi_dir = os.path.join(home, ".claude"), os.path.join(home, ".pi", "a
 os.makedirs(claude_dir, exist_ok=True)
 os.makedirs(pi_dir, exist_ok=True)
 key = "sk-ant-fake-key-for-tier1-tests-0123456789"
-json.dump({"permissions": {"allow": ["Bash"]}, "note": "the human's own settings; vqro must not add hooks here"},
-          open(os.path.join(claude_dir, "settings.json"), "w"))
-json.dump({"hasCompletedOnboarding": True, "theme": "dark", "numStartups": 5,
+write_json(os.path.join(claude_dir, "settings.json"), {"permissions": {"allow": ["Bash"]}, "note": "the human's own settings; vqro must not add hooks here"})
+write_json(os.path.join(home, ".claude.json"), {"hasCompletedOnboarding": True, "theme": "dark", "numStartups": 5,
            "customApiKeyResponses": {"approved": [key[-20:]], "rejected": []},
-           "projects": {P["work"]: {"hasTrustDialogAccepted": True, "hasCompletedProjectOnboarding": True}}},
-          open(os.path.join(home, ".claude.json"), "w"))  # Claude Code's state file; it writes it itself (not guarded)
-json.dump({"providers": {"fake": {"baseUrl": f"http://127.0.0.1:{OPENAI}/v1", "api": "openai-completions", "apiKey": "fake",
-                                  "models": [{"id": "fake-1", "input": ["text"]}]}}}, open(os.path.join(pi_dir, "models.json"), "w"))
+           "projects": {P["work"]: {"hasTrustDialogAccepted": True, "hasCompletedProjectOnboarding": True}}})  # Claude Code's state file; it writes it itself (not guarded)
+write_json(os.path.join(pi_dir, "models.json"), {"providers": {"fake": {"baseUrl": f"http://127.0.0.1:{OPENAI}/v1", "api": "openai-completions", "apiKey": "fake",
+                                  "models": [{"id": "fake-1", "input": ["text"]}]}}})
 # An existing Pi user's settings (Pi records lastChangelogVersion itself on a first run; a real user has it already).
 pi_version = subprocess.run(["node", a.pi, "--version"], capture_output=True, text=True).stdout.strip().split()[-1]
-json.dump({"defaultProvider": "fake", "defaultModel": "fake-1", "retry": {"enabled": False}, "tuiMode": "regular",
-           "lastChangelogVersion": pi_version}, open(os.path.join(pi_dir, "settings.json"), "w"), indent=2)
+write_json(os.path.join(pi_dir, "settings.json"), {"defaultProvider": "fake", "defaultModel": "fake-1", "retry": {"enabled": False}, "tuiMode": "regular",
+           "lastChangelogVersion": pi_version}, indent=2)
 GUARDED = [os.path.join(claude_dir, "settings.json"), os.path.join(pi_dir, "settings.json"), os.path.join(pi_dir, "models.json")]
 before = digest(GUARDED)
 
@@ -173,13 +178,13 @@ for name in os.listdir(os.path.join(REPO, "extensions")):
 shutil.copytree(os.path.join(REPO, "extensions", "manifests"), os.path.join(P["ext"], "manifests"))
 os.makedirs(os.path.join(P["ext"], "tier1"))
 shutil.copy(os.path.join(REPO, "integrations", "pi", "vqro-pull.ts"), os.path.join(P["ext"], "tier1"))  # as dev-install does
-defaults = json.load(open(os.path.join(REPO, "extensions", "defaults.json")))
+defaults = read_json(os.path.join(REPO, "extensions", "defaults.json"))
 defaults["extensions"] = [e for e in defaults["extensions"] if e["name"] in ("coord", "tier1")]
-json.dump(defaults, open(os.path.join(P["ext"], "defaults.json"), "w"))
+write_json(os.path.join(P["ext"], "defaults.json"), defaults)
 cenv = dict(base, VQRO_STATE_DIR=P["state"], VQRO_SOCKET=SOCK, VQRO_EXTENSIONS_DIR=P["ext"], HC_SOCKET=os.path.join(root, "h.sock"),
             HC_SESSION="tier1-e2e", VQRO_HERDR='["/bin/false"]', PATH=f"{os.path.dirname(BIN['vqro'])}:{PATH}")
-procs.append(subprocess.Popen([BIN["vqro"], "serve"], env=cenv, start_new_session=True,
-                              stdout=open(os.path.join(root, "core.log"), "w"), stderr=subprocess.STDOUT))
+with open(os.path.join(root, "core.log"), "w") as log:  # the child keeps its own descriptor
+    procs.append(subprocess.Popen([BIN["vqro"], "serve"], env=cenv, start_new_session=True, stdout=log, stderr=subprocess.STDOUT))
 check("core socket", bool(wait(lambda: os.path.exists(SOCK), 20)))
 c = Client()
 c.call("workspace.apply", {"ops": [
@@ -221,7 +226,7 @@ def send(rid, mode, text):
 if a.only in (None, "claude"):
     rid, row = launched("claude")
     hooked = wait(lambda: os.path.exists(os.path.join(P["hookstate"], "hook.log"))
-                  and '"session"' in open(os.path.join(P["hookstate"], "hook.log")).read(), 40)
+                  and '"session"' in read_text(os.path.join(P["hookstate"], "hook.log")), 40)
     panes = tmux("list-panes", "-a", "-F", "#{pane_id} #{pane_current_command} #{pane_dead}").stdout
     check("claude: its hooks run (SessionStart via the per-launch --settings file)", bool(hooked),
           {"ref": pane(row), "panes": panes, "screen": "".join(tmux("capture-pane", "-p", "-t", p.split()[0]).stdout[-700:]
@@ -237,12 +242,12 @@ if a.only in (None, "claude"):
     record = c.cmd("coord.inbox.get", delivery=delivery)
     check("claude: a boundary message reaches the model at the next turn point via the plugin",
           bool(got) and record.get("state") in ("supplied", "read"), record.get("state"))
-    log = open(os.path.join(P["hookstate"], "hook.log")).read() if hooked else ""
+    log = read_text(os.path.join(P["hookstate"], "hook.log")) if hooked else ""
     check("claude: the plugin runs as this terminal's agent", f'"session"' in log and "taken" in log, log[-400:])
 
 if a.only in (None, "pi"):
     rid, row = launched("pi")
-    started = wait(lambda: os.path.exists(TENV["VQRO_PULL_LOG"]) and '"reconciled"' in open(TENV["VQRO_PULL_LOG"]).read(), 60)
+    started = wait(lambda: os.path.exists(TENV["VQRO_PULL_LOG"]) and '"reconciled"' in read_text(TENV["VQRO_PULL_LOG"]), 60)
     check("pi: its plugin loaded via -e and reconciled as this terminal's consumer", bool(started))
     delivery = send(rid, "start", "TIER1-PI-START")
     got = wait(lambda: seen(pi_log, "TIER1-PI-START"), 60)
@@ -254,8 +259,9 @@ after = digest(GUARDED)
 check("the human's ~/.claude and ~/.pi configuration files are byte-identical", before == after,
       {k: (before[k], after[k]) for k in before if before[k] != after[k]})
 check("no vqro hook or plugin was written into ~/.claude or ~/.pi",
-      "vqro-claude-hook" not in open(GUARDED[0]).read() and "vqro-pull" not in open(GUARDED[1]).read())
-json.dump(results, open(os.path.join(root, "results.json"), "w"), indent=1)
+      "vqro-claude-hook" not in read_text(GUARDED[0]) and "vqro-pull" not in read_text(GUARDED[1]))
+write_json(os.path.join(root, "results.json"), results, indent=1)
+c.close()
 stop()
 print(f"{'FAILED' if fails else 'OK'}: {len(fails)} failures; root {root}")
 sys.exit(1 if fails else 0)

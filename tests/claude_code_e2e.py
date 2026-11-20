@@ -25,6 +25,7 @@ a = ap.parse_args()
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from coord_harness import Harness, txt, finish_framing  # noqa: E402
+from textfiles import read_json, read_lines, read_text, write_json, write_text  # noqa: E402
 
 root = a.root or tempfile.mkdtemp(prefix="a3-cc-")
 os.makedirs(root, exist_ok=True)
@@ -57,7 +58,7 @@ AGENT = h.agent(json.loads(subprocess.run([a.hook, "declaration"], capture_outpu
 CTX = ["context"]
 base = dict(h.env, HOME=P["home"])
 settings = json.loads(subprocess.run([a.hook, "settings", os.path.abspath(a.hook)], capture_output=True, text=True).stdout)
-json.dump(settings, open(os.path.join(P["cfg"], "settings.json"), "w"), indent=1)
+write_json(os.path.join(P["cfg"], "settings.json"), settings, indent=1)
 cenv = dict(base, PATH=os.environ["PATH"], CLAUDE_CONFIG_DIR=P["cfg"], VQRO_AGENT=AGENT, VQRO_PRINCIPAL=h.PLUGIN, VQRO_CLAUDE_STATE=P["hookstate"], DISABLE_TELEMETRY="1",
             DISABLE_ERROR_REPORTING="1", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1", DISABLE_AUTOUPDATER="1",
             ANTHROPIC_BASE_URL=f"http://127.0.0.1:{port}", ANTHROPIC_API_KEY="sk-fake-not-a-key")
@@ -67,7 +68,7 @@ results["claude_version"] = version
 
 
 def requests():
-    return [json.loads(l) for l in open(model_log)] if os.path.exists(model_log) else []
+    return [json.loads(l) for l in read_lines(model_log)] if os.path.exists(model_log) else []
 
 
 def first_request_with(text):
@@ -79,7 +80,7 @@ def first_request_with(text):
 
 def hook_events(name):
     path = os.path.join(P["hookstate"], "hook.log")
-    return [e for e in (json.loads(l) for l in open(path)) if e["event"] == "hook" and e["detail"].get("hook") == name] if os.path.exists(path) else []
+    return [e for e in (json.loads(l) for l in read_lines(path)) if e["event"] == "hook" and e["detail"].get("hook") == name] if os.path.exists(path) else []
 
 
 def get(d):
@@ -99,8 +100,8 @@ base_argv = [a.claude, "--model", a.model, "--allowedTools", "Bash", "--output-f
 
 # --- A + B: boundary and settle during a 3-step run (-p) ---
 n0 = len(requests())
-run = spawn(base_argv + ["-p", "steps:3 sleep:2 begin"], cwd=P["work"], env=cenv, stdout=open(os.path.join(root, "runAB.jsonl"), "w"),
-            stderr=open(os.path.join(root, "runAB.err"), "w"))
+with open(os.path.join(root, "runAB.jsonl"), "w") as out, open(os.path.join(root, "runAB.err"), "w") as err:
+    run = spawn(base_argv + ["-p", "steps:3 sleep:2 begin"], cwd=P["work"], env=cenv, stdout=out, stderr=err)
 wait_for(lambda: hook_events("PreToolUse"), 60)
 sent_after = len(requests()) - n0
 b1 = h.send(AGENT, "boundary", txt("MSG-BOUNDARY-A: the linux build is green"), render=CTX)
@@ -129,11 +130,12 @@ session_id = os.path.basename(sessions[0])[:-6] if sessions else None
 # a claim taken by an earlier consumer that never reached the transcript (simulated crash after take)
 d1 = h.send(AGENT, "boundary", txt("MSG-LOST-D"), render=CTX)
 time.sleep(0.3)
-cons = json.load(open(glob.glob(os.path.join(P["hookstate"], f"{session_id}.json"))[0]))["consumer"] if session_id else None
+cons = read_json(glob.glob(os.path.join(P["hookstate"], f"{session_id}.json"))[0])["consumer"] if session_id else None
 h.c.cmd("coord.inbox.take", op=h.op(), agent=AGENT, consumer=cons, at="turn", limit=1)  # as the old consumer
 n3 = len(requests())
-spawn(base_argv + ["-p", "--resume", session_id, "resumed, no task"], cwd=P["work"], env=cenv,
-      stdout=open(os.path.join(root, "runD.jsonl"), "w"), stderr=open(os.path.join(root, "runD.err"), "w")).wait(120)
+with open(os.path.join(root, "runD.jsonl"), "w") as out, open(os.path.join(root, "runD.err"), "w") as err:
+    resumed = spawn(base_argv + ["-p", "--resume", session_id, "resumed, no task"], cwd=P["work"], env=cenv, stdout=out, stderr=err)
+resumed.wait(120)
 results["D_resume"] = {"session": session_id, "record": get(d1), "ever_sent": first_request_with("MSG-LOST-D"),
                        "A_after_resume": get(b1).get("state")}
 check("D resume: claim without transcript evidence -> unknown, never sent", get(d1)["state"] == "unknown" and first_request_with("MSG-LOST-D") is None, results["D_resume"])
@@ -145,8 +147,8 @@ if a.inbox == "fake":
     results["S_status"] = [s["state"] for s in st_events][-30:]
     check("S status (agents.status) running on prompt/tool, idle on Stop", {"running", "idle"} <= {s["state"] for s in st_events})
 
-results["hook_log"] = open(os.path.join(P["hookstate"], "hook.log")).read().splitlines()[-40:]
-json.dump(results, open(os.path.join(root, "results.json"), "w"), indent=1)
+results["hook_log"] = read_text(os.path.join(P["hookstate"], "hook.log")).splitlines()[-40:]
+write_json(os.path.join(root, "results.json"), results, indent=1)
 h.stop()
 print(f"{'FAILED' if fails else 'OK'}: {len(fails)} failures; root {root}")
 sys.exit(1 if fails else 0)

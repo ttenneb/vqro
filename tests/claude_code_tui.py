@@ -9,6 +9,7 @@
   I3  a waiter armed while idle is retired by a new prompt (nothing taken while busy).
 """
 import argparse, fcntl, glob, json, os, pty, re, select, socket, struct, subprocess, sys, termios, time
+from pathlib import Path
 
 ap = argparse.ArgumentParser()
 for k in ("vqro", "hook", "claude", "root"):
@@ -20,6 +21,7 @@ a = ap.parse_args()
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from coord_harness import Harness, txt, finish_framing  # noqa: E402
+from textfiles import read_json, read_lines, read_text, write_json, write_text  # noqa: E402
 
 root = a.root
 P = {k: os.path.join(root, k) for k in ("home", "cfg", "work", "hookstate")}
@@ -47,12 +49,11 @@ AGENT = h.agent(json.loads(subprocess.run([a.hook, "declaration"], capture_outpu
 CTX = ["context"]
 base = dict(h.env, HOME=P["home"], PATH=os.environ["PATH"])
 settings = json.loads(subprocess.run([a.hook, "settings", os.path.abspath(a.hook)], capture_output=True, text=True).stdout)
-json.dump(settings, open(os.path.join(P["cfg"], "settings.json"), "w"), indent=1)
+write_json(os.path.join(P["cfg"], "settings.json"), settings, indent=1)
 key = "sk-ant-fake-key-for-a3-tests-0123456789"
-json.dump({"hasCompletedOnboarding": True, "theme": "dark", "numStartups": 5,
+write_json(os.path.join(P["cfg"], ".claude.json"), {"hasCompletedOnboarding": True, "theme": "dark", "numStartups": 5,
            "customApiKeyResponses": {"approved": [key[-20:]], "rejected": []},
-           "projects": {P["work"]: {"hasTrustDialogAccepted": True, "hasCompletedProjectOnboarding": True}}},
-          open(os.path.join(P["cfg"], ".claude.json"), "w"))
+           "projects": {P["work"]: {"hasTrustDialogAccepted": True, "hasCompletedProjectOnboarding": True}}})
 cenv = dict(base, CLAUDE_CONFIG_DIR=P["cfg"], VQRO_AGENT=AGENT, VQRO_PRINCIPAL=h.PLUGIN, VQRO_CLAUDE_STATE=P["hookstate"], DISABLE_TELEMETRY="1",
             DISABLE_ERROR_REPORTING="1", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1", DISABLE_AUTOUPDATER="1",
             ANTHROPIC_BASE_URL=f"http://127.0.0.1:{port}", ANTHROPIC_API_KEY=key, TERM="xterm-256color")
@@ -86,7 +87,7 @@ def typed(text):
 
 
 def requests():
-    return [json.loads(l) for l in open(model_log)] if os.path.exists(model_log) else []
+    return [json.loads(l) for l in read_lines(model_log)] if os.path.exists(model_log) else []
 
 
 def first_request_with(text):
@@ -95,7 +96,7 @@ def first_request_with(text):
 
 def hooklog():
     path = os.path.join(P["hookstate"], "hook.log")
-    return [json.loads(l) for l in open(path)] if os.path.exists(path) else []
+    return [json.loads(l) for l in read_lines(path)] if os.path.exists(path) else []
 
 
 def wait_for(pred, timeout=30):
@@ -138,7 +139,7 @@ check("I1 wake request does not contain the human draft", r is not None and not 
 wait_for(lambda: len([e for e in hooklog() if e["event"] == "waiter_armed"]) >= 2, 30)
 pump(1.0)
 tx = sorted(glob.glob(os.path.join(P["cfg"], "projects", "*", "*.jsonl")), key=os.path.getmtime)
-rows = [json.loads(l) for l in open(tx[-1])] if tx else []
+rows = [json.loads(l) for l in read_lines(tx[-1])] if tx else []
 kinds = [(x.get("type"), (x.get("attachment") or {}).get("type")) for x in rows if "MSG-WAKE-I1" in json.dumps(x)]
 results["I1_transcript_kinds"] = kinds
 # I2: submit the draft now; it must arrive unchanged
@@ -253,7 +254,7 @@ if socks:
     results["I5_block"] = r and next((b["type"] + ": " + b["text"] for m in r["messages"] for b in m["blocks"] if "MSG-NATIVE-BUSY" in b["text"]), None)[:500]
     check("I5 native socket while busy is read at the next request (between tool calls)", results["I5_first_request"] == n_busy + 1, results)
     tx = sorted(glob.glob(os.path.join(P["cfg"], "projects", "*", "*.jsonl")), key=os.path.getmtime)
-    rows = [json.loads(l) for l in open(tx[-1])] if tx else []
+    rows = [json.loads(l) for l in read_lines(tx[-1])] if tx else []
     results["I4_I5_transcript_kinds"] = [(x.get("type"), (x.get("attachment") or {}).get("type"), x.get("operation")) for x in rows if "MSG-NATIVE" in json.dumps(x)]
 
 # I6: /clear. Does Claude Code keep the session id? Either way the hook keeps its consumer (not a restart).
@@ -281,7 +282,7 @@ results["I6_after_clear"] = h.get(after_clear)
 
 results["hook_log"] = [f"{e['event']} {json.dumps(e['detail'])[:120]}" for e in hooklog()][-40:]
 results["screen_tail"] = plain()[-1500:]
-json.dump(results, open(os.path.join(root, "tui-results.json"), "w"), indent=1)
+write_json(os.path.join(root, "tui-results.json"), results, indent=1)
 try:
     os.kill(pid, 9); os.waitpid(pid, 0)
 except OSError:
@@ -293,7 +294,7 @@ def waiters():
     mine = []
     for w in out:
         try:
-            if P["hookstate"] in open(f"/proc/{w}/environ", "rb").read().decode("utf-8", "replace"):
+            if P["hookstate"] in Path(f"/proc/{w}/environ").read_bytes().decode("utf-8", "replace"):
                 mine.append(w)
         except OSError:
             pass

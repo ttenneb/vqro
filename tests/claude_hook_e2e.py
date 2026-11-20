@@ -18,6 +18,7 @@ a = ap.parse_args()
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from coord_harness import Harness, txt  # noqa: E402
+from textfiles import read_json, read_lines, read_text, write_json, write_text  # noqa: E402
 
 root = tempfile.mkdtemp(prefix="a3-hook-", dir=os.environ.get("A3_SCRATCH"))
 h = Harness(root, a.vqro, inbox=a.inbox, coord_ext=a.coord_ext)
@@ -36,7 +37,7 @@ def check(name, ok, detail=""):
 AGENT = h.agent(json.loads(subprocess.run([a.hook, "declaration"], capture_output=True, text=True, check=True).stdout)["pull"])  # the launcher writes what the plugin declares
 CTX = ["context"]  # senders accept context insertion
 transcript = os.path.join(root, "transcript.jsonl")
-open(transcript, "w").close()
+write_text(transcript, "")
 hook_env = dict(h.env, VQRO_AGENT=AGENT, VQRO_PRINCIPAL=h.PLUGIN, VQRO_CLAUDE_STATE=os.path.join(root, "hookstate"), CLAUDE_CODE_ENTRYPOINT="cli")
 waiters = []
 
@@ -83,7 +84,7 @@ def transcript_add(*rows):
 
 def hooklog():
     path = os.path.join(root, "hookstate", "hook.log")
-    return [json.loads(l) for l in open(path)] if os.path.exists(path) else []
+    return [json.loads(l) for l in read_lines(path)] if os.path.exists(path) else []
 
 
 # 1. SessionStart: a new consumer reconciles before anything is taken
@@ -199,7 +200,7 @@ except subprocess.TimeoutExpired:
     pass
 check("new turn retires the waiter (exit 0) and nothing is taken while busy", w3.returncode == 0 and state(st3) in ("held", "recorded"), f"rc={w3.returncode} state={state(st3)}")
 # 9. restart: a claim taken but never reported (crash between take and hand-off) becomes unknown, never retaken
-consumer = json.load(open(os.path.join(root, "hookstate", "s1.json")))["consumer"]
+consumer = read_json(os.path.join(root, "hookstate", "s1.json"))["consumer"]
 b3 = h.send(AGENT, "boundary", txt("B3 lost"), render=CTX)
 time.sleep(0.3)
 taken = h.c.cmd("coord.inbox.take", op=h.op(), agent=AGENT, consumer=consumer, at="turn", limit=1)  # as the old consumer
@@ -219,7 +220,7 @@ check("old consumer's late report after reconcile is rejected", "stale" in late 
 h.c.cmd("coord.inbox.resolve", op=h.op(), delivery=b3, **{"as": "not_delivered"})
 # 9a. reconciliation in pages (fake only: 1 claim per page): the plugin follows `reconciling` until `reconciled`
 if a.inbox == "fake":
-    old = json.load(open(os.path.join(root, "hookstate", "s1.json")))["consumer"]
+    old = read_json(os.path.join(root, "hookstate", "s1.json"))["consumer"]
     paged = [h.send(AGENT, "boundary", txt(f"PAGED{i}"), render=CTX) for i in range(3)]
     time.sleep(0.3)
     h.c.cmd("coord.inbox.take", op=h.op(), agent=AGENT, consumer=old, at="turn", limit=16)  # claimed, never handed over
@@ -232,23 +233,23 @@ if a.inbox == "fake":
     for d in paged:
         h.c.cmd("coord.inbox.resolve", op=h.op(), delivery=d, **{"as": "not_delivered"})
 # 9b. compaction and /clear are not restarts: same consumer, open hand-offs stay supplied (no false unknown)
-before = json.load(open(os.path.join(root, "hookstate", "s1.json")))["consumer"]
+before = read_json(os.path.join(root, "hookstate", "s1.json"))["consumer"]
 c1 = h.send(AGENT, "boundary", txt("C1 before compaction"), render=CTX)
 time.sleep(0.3)
 rc, out, _ = hook("PostToolBatch", {"tool_calls": []})
 hook("SessionStart", {"source": "compact"})
 hook("SessionStart", {"source": "clear"})
-after = json.load(open(os.path.join(root, "hookstate", "s1.json")))["consumer"]
+after = read_json(os.path.join(root, "hookstate", "s1.json"))["consumer"]
 check("compaction/clear keep the consumer and do not reconcile", before == after and state(c1) == "supplied", (before, after, h.get(c1)))
 # Claude Code 2.1.329 gives /clear a new session id (claude_code_tui I6): the consumer carries over all the same
 hook("SessionStart", {"source": "clear", "session_id": "s1-cleared"})
-carried = json.load(open(os.path.join(root, "hookstate", "s1-cleared.json"))).get("consumer")
+carried = read_json(os.path.join(root, "hookstate", "s1-cleared.json")).get("consumer")
 check("/clear under a new session id carries the consumer over (no reconcile)", carried == before and state(c1) == "supplied"
       and not any(e["event"] == "reconciled" and e["session"] == "s1-cleared" for e in hooklog()), (carried, before, h.get(c1)))
 # ...but only within the same Claude Code process: another process's /clear or compaction in this agent never shares
 # the consumer (it starts its own, which fences the first: one consumer per agent)
 hook("SessionStart", {"source": "clear", "session_id": "s-other"}, other=True)
-other_consumer = json.load(open(os.path.join(root, "hookstate", "s-other.json"))).get("consumer")
+other_consumer = read_json(os.path.join(root, "hookstate", "s-other.json")).get("consumer")
 check("another process's /clear does not carry this process's consumer over", other_consumer not in (None, before), (other_consumer, before))
 hook("SessionStart", {"source": "startup"})  # this test's session takes the agent back for the tests below
 # 9c. a batch larger than Claude Code's context limit: whole records up to the limit, the rest released (held)
@@ -283,10 +284,10 @@ if a.inbox == "fake":
     stuck = h.send(AGENT, "boundary", txt("LOST reply, lost recovery"), render=CTX)
     time.sleep(0.3)
     rc, out, _ = hook("PostToolBatch", {"tool_calls": []})
-    kept = json.load(open(os.path.join(root, "hookstate", "s1.json"))).get("recover") or []
+    kept = read_json(os.path.join(root, "hookstate", "s1.json")).get("recover") or []
     check("failed recovery: the op is kept, the claim not yet released", out == "" and len(kept) == 1 and state(stuck) == "claimed", (kept, state(stuck)))
     rc, out, _ = hook("PostToolBatch", {"tool_calls": []})
-    kept = json.load(open(os.path.join(root, "hookstate", "s1.json"))).get("recover") or []
+    kept = read_json(os.path.join(root, "hookstate", "s1.json")).get("recover") or []
     check("next point: recovery retried first, then the record is handed over", stuck in context(out) and not kept, (kept, state(stuck), out[:120]))
 # 9e. a record larger than this plugin hands over whole stays held (take max_bytes) and never blocks later mail.
 # The largest record taken renders within the budget even when it is all line breaks (quoting adds per line).
@@ -319,36 +320,36 @@ if a.inbox == "fake":
           and any(e["event"] == "released" and e["detail"].get("why") == "too_large_ignored_max_bytes" for e in hooklog()),
           ([state(d) for d in [HEAD] + NEXT], out[:200]))
     # with nothing else to hand over, the plugin backs off instead of taking and releasing it at every point
-    takes = lambda: sum(1 for l in open(h.inbox_log) if '"event": "take"' in l)
+    takes = lambda: sum(1 for l in read_lines(h.inbox_log) if '"event": "take"' in l)
     hook("PostToolBatch", {"tool_calls": []})  # takes HEAD alone, releases it, backs off
     sf = os.path.join(root, "hookstate", "s1.json")
-    b1 = json.load(open(sf)).get("oversize_backoff_ms")
+    b1 = read_json(sf).get("oversize_backoff_ms")
     n0 = takes()
     for _ in range(3):
         hook("PostToolBatch", {"tool_calls": []})
     check("ignored max_bytes, nothing else to take: back off (no take at the following points)", b1 == 2000 and takes() == n0, (b1, takes() - n0))
-    v = json.load(open(sf)); v["oversize_until_ms"] = 0; json.dump(v, open(sf, "w"))  # the backoff elapsed
+    v = read_json(sf); v["oversize_until_ms"] = 0; write_json(sf, v)  # the backoff elapsed
     hook("PostToolBatch", {"tool_calls": []})
-    check("...then one take, and the backoff doubles", takes() == n0 + 1 and json.load(open(sf)).get("oversize_backoff_ms") == 4000,
-          (takes() - n0, json.load(open(sf)).get("oversize_backoff_ms")))
+    check("...then one take, and the backoff doubles", takes() == n0 + 1 and read_json(sf).get("oversize_backoff_ms") == 4000,
+          (takes() - n0, read_json(sf).get("oversize_backoff_ms")))
     h.withdraw(HEAD)
-    v = json.load(open(sf)); v["oversize_until_ms"] = 0; json.dump(v, open(sf, "w"))
+    v = read_json(sf); v["oversize_until_ms"] = 0; write_json(sf, v)
     W2 = h.send(AGENT, "boundary", txt("after backoff"), render=CTX)
     time.sleep(0.3)
     rc, out, _ = hook("PostToolBatch", {"tool_calls": []})
-    check("a normal take resets the backoff", W2 in context(out) and json.load(open(sf)).get("oversize_backoff_ms") == 0, json.load(open(sf)).get("oversize_backoff_ms"))
+    check("a normal take resets the backoff", W2 in context(out) and read_json(sf).get("oversize_backoff_ms") == 0, read_json(sf).get("oversize_backoff_ms"))
     h.c.cmd("fixture.fault", no_max_bytes=False)
 # 9g. a failed window fetch sent no take: nothing is "recovered" (no inspection of an earlier, unrelated op)
 if a.inbox == "fake":
     st = os.path.join(root, "hookstate", "s1.json")
-    v = json.load(open(st)); v["epoch"] = ""; json.dump(v, open(st, "w"))
+    v = read_json(st); v["epoch"] = ""; write_json(st, v)
     W = h.send(AGENT, "boundary", txt("AFTER WINDOW FAILURE"), render=CTX)
     h.c.cmd("fixture.fault", window_fail=True)
-    n_op = sum(1 for l in open(h.inbox_log) if '"event": "op"' in l)
+    n_op = sum(1 for l in read_lines(h.inbox_log) if '"event": "op"' in l)
     rc, out, _ = hook("PostToolBatch", {"tool_calls": []})
     h.c.cmd("fixture.fault", window_fail=False)
     check("window fetch failed: no take sent, no lost-take recovery, record still held",
-          out == "" and state(W) == "held" and sum(1 for l in open(h.inbox_log) if '"event": "op"' in l) == n_op
+          out == "" and state(W) == "held" and sum(1 for l in read_lines(h.inbox_log) if '"event": "op"' in l) == n_op
           and not any(e["event"] == "take_uncertain" for e in hooklog()[-5:]), (h.get(W).get("state"), hooklog()[-3:]))
     rc, out, _ = hook("PostToolBatch", {"tool_calls": []})
     check("...and it is taken at the next point", W in context(out), out[:200])
@@ -375,6 +376,10 @@ for _ in range(10):
     hook("PostToolBatch", {"tool_calls": []})
 print(f"     PostToolBatch: {(time.time() - t) / 10 * 1000:.1f} ms per hook (incl. process start)")
 
+for p in waiters:  # the asyncRewake waiters' pipes are ours to close
+    for pipe in (p.stdin, p.stdout, p.stderr):
+        if pipe is not None and not pipe.closed:
+            pipe.close()
 h.stop()
 if not a.keep:
     shutil.rmtree(root, ignore_errors=True)
