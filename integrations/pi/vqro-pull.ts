@@ -26,7 +26,7 @@
 // Environment: VQRO_SOCKET (core endpoint), VQRO_AGENT (this agent's terminal rN) and VQRO_PRINCIPAL (the plugin's
 // principal, bound at hello), injected by its launcher. Without the first
 // both the plugin does nothing. Errors never break Pi: they are logged to VQRO_PULL_LOG when set.
-// VQRO_PULL_TEST_FAULT is test-only fault injection (crash_after_take | drop_report | abort_after_take).
+// No fault injection ships here: tests wrap `createPlugin` with their own hooks (tests/fixtures/pi/vqro-pull-faults.ts).
 import net from "node:net";
 import fs from "node:fs";
 import { randomBytes } from "node:crypto";
@@ -35,7 +35,6 @@ const SOCK = process.env.VQRO_SOCKET;
 const AGENT = process.env.VQRO_AGENT;
 const PREFIX = process.env.VQRO_COORD_PREFIX ?? "coord.";
 const LOG = process.env.VQRO_PULL_LOG;
-const FAULT = process.env.VQRO_PULL_TEST_FAULT ?? "";
 const TYPE = "vqro-inbox";
 const CONTENT = new Set(["text", "image"]); // block types inserted without loss (Pi has no link block)
 const LIMIT = 16;
@@ -44,7 +43,20 @@ const WAKE_VIEW = "coord-status";
 
 type Rec = { delivery: string; from: any; origin?: any; mode: string; content: any[]; claim: string };
 
-export default function (pi: any) {
+// Observation points for tests. The shipped default export passes none; nothing in the environment can set them.
+export type TestHooks = {
+  afterTake?: (count: number) => void; // records just claimed by a take
+  skipReport?: (stage: string) => boolean; // true: do not send this report
+  afterTurnTake?: (ctx: any) => void; // turn_end took records, before they are inserted
+};
+
+export default createPlugin();
+
+export function createPlugin(hooks: TestHooks = {}) {
+  return (pi: any) => plugin(pi, hooks);
+}
+
+function plugin(pi: any, hooks: TestHooks) {
   if (!SOCK || !AGENT) return;
   let conn: net.Socket | undefined;
   let connecting: Promise<void> | undefined;
@@ -211,7 +223,7 @@ export default function (pi: any) {
     const records: Rec[] = reply.records ?? [];
     if (records.length) log("taken", { at, deliveries: records.map((r) => r.delivery) });
     else if (reply.held) log("held", { at, held: reply.held });
-    if (records.length && FAULT === "crash_after_take") { log("fault", { FAULT }); process.exit(42); }
+    if (records.length) hooks.afterTake?.(records.length);
     const usable: Rec[] = [];
     for (const rec of records) {
       // Never flatten or drop: a block this plugin cannot insert goes back, uninserted.
@@ -237,7 +249,7 @@ export default function (pi: any) {
   }
 
   async function report(delivery: string, claim: string, stage: string) {
-    if (FAULT === "drop_report" && stage !== "released") return log("fault", { FAULT, delivery, stage });
+    if (hooks.skipReport?.(stage)) return log("report_skipped", { delivery, stage });
     try {
       await mutate("inbox.report", { delivery, claim, stage }, `report:${delivery}:${claim}:${stage}`);
       log("reported", { delivery, stage });
@@ -286,7 +298,7 @@ export default function (pi: any) {
     if (event.outcome !== "completed") return; // error/aborted turns are hard exits: take nothing
     const recs = await take("turn");
     if (!recs.length) return;
-    if (FAULT === "abort_after_take") { log("fault", { FAULT }); ctx.abort(); }
+    hooks.afterTurnTake?.(ctx);
     return { entries: [...event.entries, ...recs.map(draft)], continue: true };
   });
 

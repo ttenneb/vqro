@@ -21,6 +21,7 @@ ap.add_argument("--coord-ext", help="coord-ext checkout's extensions/ (for --inb
 a = ap.parse_args()
 HERE = os.path.dirname(os.path.abspath(__file__))
 PLUGIN = os.path.join(HERE, "..", "integrations", "pi", "vqro-pull.ts")
+FAULT_PLUGIN = os.path.join(HERE, "fixtures", "pi", "vqro-pull-faults.ts")  # test-only wrapper; the shipped plugin has no faults
 root = a.root or tempfile.mkdtemp(prefix="pi-pull-")
 sys.path.insert(0, HERE)
 from coord_harness import Harness, txt  # noqa: E402
@@ -70,13 +71,17 @@ results["pi_version"] = subprocess.run(["node", a.pi, "--version"], capture_outp
 print("pi", results["pi_version"], flush=True)
 
 
+# The shipped plugin reads no fault setting (faults live only in the test wrapper).
+check("shipped plugin has no fault injection", "FAULT" not in open(PLUGIN).read() and "process.exit" not in open(PLUGIN).read())
+
+
 class Pi:
     def __init__(self, fault="", resume=False):
         self.base = len(plugin_events("reconciled"))
         env = dict(base, PI_CODING_AGENT_DIR=P["agent"], PI_OFFLINE="1", PI_SKIP_VERSION_CHECK="1", PI_TELEMETRY="0",
-                   VQRO_AGENT=AGENT, VQRO_PRINCIPAL=h.PLUGIN, VQRO_PULL_LOG=plugin_log, VQRO_PULL_TEST_FAULT=fault)
-        argv = ["node", a.pi, "--mode", "rpc", "-ne", "-e", PLUGIN, "--no-skills", "--no-context-files",
-                "--no-prompt-templates", *OPTIONAL, "--session-dir", P["sessions"], "--tools", "bash"] + (["-c"] if resume else [])
+                   VQRO_AGENT=AGENT, VQRO_PRINCIPAL=h.PLUGIN, VQRO_PULL_LOG=plugin_log, **({"VQRO_PULL_TEST_FAULT": fault} if fault else {}))
+        argv = ["node", a.pi, "--mode", "rpc", "-ne", "-e", FAULT_PLUGIN if fault else PLUGIN, "--no-skills",
+                "--no-context-files", "--no-prompt-templates", *OPTIONAL, "--session-dir", P["sessions"], "--tools", "bash"] + (["-c"] if resume else [])
         self.p = spawn(argv, cwd=P["work"], env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                        stderr=open(os.path.join(root, "pi-stderr.log"), "a"), text=True, bufsize=1)
 
