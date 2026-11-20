@@ -25,6 +25,7 @@ mod panel;
 mod compose;
 mod probe;
 mod emulator;
+mod ghostty;
 mod scrollback;
 use emulator::{CursorShape, Effect, Emulator};
 mod frame_budget;
