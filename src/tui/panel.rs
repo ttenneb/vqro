@@ -17,8 +17,10 @@
 //! Optional `list_detail: {requires:["list_detail"]}` on a panel/page displays the selected row's
 //! `detail_panel: {title?, requires?, toolbar?, items}` beside/below it; ordinary items remain a fallback.
 //! `summary`/string `tags` extend search. Text rows support `wrap:true` and `focusable:true` for reading.
-//! Unknown types render as plain items (forward compatible). Selection, expansion, page, filter and
-//! scroll are client state (per view), never written back.
+//! Unknown types render as plain items (forward compatible). Selection, expansion, page, filter, facets,
+//! sort and scroll are client state (per view), never written back. Panels may declare `facets` (a client-drawn
+//! `Show:` line), `sorts` (`Sort:` on the same line) and `columns` (aligned cells with an optional header line);
+//! see `ui_model::panel` and core-protocol.md, "Facets, sort and columns".
 //!
 //! Colours come from the client's palette (`theme.rs`) through semantic style names, so panels follow
 //! the theme. A badge's `color` (any palette colour value) is the one exception: it shows a colour as
@@ -47,6 +49,10 @@ pub struct Hits {
     pub detail: Option<Box<Hits>>,
     pub detail_area: Option<Rect>,
     pub toggles: Vec<(Rect,usize)>,
+    /// The `Show:` line's chips: rect, facet key, value (None: All).
+    pub facets: Vec<(Rect, String, Option<String>)>,
+    /// The `Sort:` chip.
+    pub sort: Option<Rect>,
 }
 
 fn wrap_text(text:&str,width:u16)->Vec<String> {
@@ -199,7 +205,7 @@ fn render_list(buf:&mut Buffer,mut area:Rect,v:&Arc<Value>,st:&mut State,focused
     if indicator && area.height>1 {
         let n=rows.iter().filter(|r|selectable(&r.item)).count();
         let total=prepared.total;
-        let text=super::keys::display_labels(&format!("{n} of {total} · PgUp/PgDn · Tab: details"),key_labels);
+        let text=super::keys::display_labels(&format!("{n} of {total} · PgUp/PgDn{} · Tab: details",hint_keys(v,st)),key_labels);
         buf.set_string(area.x,area.bottom()-1,truncate(&text,area.width as usize),pal.style(Some("dim")));
         area.height-=1;
     }
@@ -225,10 +231,23 @@ fn render_list(buf:&mut Buffer,mut area:Rect,v:&Arc<Value>,st:&mut State,focused
         draw_row(buf, Rect { x: area.x, y, width: area.width, height: h }, r, focused && i == st.sel, st.chip, i, 0, hits, pal, icons, composer_of(st, r, focused));
         y += h;
     }
-    if pinned > 0 && y < area.bottom() {
+    // The facet/sort line (features `facets`, `sort`): client-drawn, below the toolbar.
+    let line_drawn = y < area.bottom() && facet_line(buf, Rect { x: area.x, y, width: area.width, height: 1 }, v, st, pal, hits);
+    if line_drawn { y += 1; }
+    // Columns (feature `columns`): one layout for every row of this pane, and a header line when labelled.
+    let layout = declared(v, st, "columns").filter(|c| !c.is_empty()).map(|spec| column_layout(spec, rows, area.width.saturating_sub(1), icons));
+    if let Some(l) = layout.as_ref().filter(|l| l.header.is_some()) {
+        if y < area.bottom() {
+            buf.set_string(area.x + l.start, y, truncate(l.header.as_deref().unwrap_or(""), area.width.saturating_sub(l.start) as usize), pal.style(Some("muted")).add_modifier(Modifier::BOLD));
+            y += 1;
+        }
+    }
+    if (pinned > 0 || line_drawn || layout.as_ref().is_some_and(|l| l.header.is_some())) && y < area.bottom() {
         buf.set_string(area.x, y, "─".repeat(area.width as usize), pal.border(false));
         y += 1;
     }
+    let laid: Vec<Flat>;
+    let rows: &[Flat] = match &layout { Some(l) => { laid = rows.iter().map(|r| l.apply(r, icons)).collect(); &laid } None => rows };
     // `pin: "bottom"` rows (feature pin): below the list, never scrolled, at most half of what is left.
     let first_bottom = rows.iter().position(|r| r.bottom).unwrap_or(rows.len());
     let mut bottom_y = area.bottom();
@@ -317,7 +336,103 @@ fn render_list(buf:&mut Buffer,mut area:Rect,v:&Arc<Value>,st:&mut State,focused
         let total=prepared.total;
         let start=rows[..*first].iter().filter(|r|selectable(&r.item)).count()+1;let end=rows[..=*last].iter().filter(|r|selectable(&r.item)).count();
         buf.set_string(area.x,y," ".repeat(area.width as usize),pal.style(Some("dim")));
-        buf.set_string(area.x,y,truncate(&super::keys::display_labels(&format!("{n} of {total} · {start}-{end} · PgUp/PgDn · Tab"),key_labels),area.width as usize),pal.style(Some("dim")));
+        let extra=hint_keys(v,st);
+        buf.set_string(area.x,y,truncate(&super::keys::display_labels(&format!("{n} of {total} · {start}-{end} · PgUp/PgDn{extra} · Tab"),key_labels),area.width as usize),pal.style(Some("dim")));
+    }
+}
+
+/// Footer hints for the keys a pane's declarations add: `f` cycles Show, `s` cycles Sort.
+fn hint_keys(v: &Value, st: &State) -> String {
+    let mut s = String::new();
+    if declared(v, st, "facets").is_some_and(|f| !f.is_empty()) { s.push_str(" · f show"); }
+    if declared(v, st, "sorts").is_some_and(|f| !f.is_empty()) { s.push_str(" · s sort"); }
+    s
+}
+
+/// Draw `Show: All n · value n …   Sort: label` (features `facets`, `sort`). Returns whether it drew anything.
+fn facet_line(buf: &mut Buffer, row: Rect, v: &Value, st: &State, pal: &Palette, hits: &mut Hits) -> bool {
+    let counts = facet_counts(v, st, SUPPORTED);
+    let sort = sort_label(v, st);
+    if counts.is_empty() && sort.is_none() { return false; }
+    let mut x = row.x;
+    let mut put = |text: &str, style: Style, x: &mut u16| -> Option<Rect> {
+        let w = icons::width(text);
+        if *x + w > row.right() { return None; }
+        buf.set_string(*x, row.y, text, style);
+        let r = Rect { x: *x, y: row.y, width: w, height: 1 };
+        *x += w;
+        Some(r)
+    };
+    for c in &counts {
+        put(&format!("{}: ", c.label), pal.style(Some("muted")), &mut x);
+        let mut chips = vec![(None, "All".to_string(), c.all)];
+        chips.extend(c.values.iter().map(|(v, l, n)| (Some(v.clone()), l.clone(), *n)));
+        for (n, (value, label, count)) in chips.into_iter().enumerate() {
+            if n > 0 { put("·", pal.style(Some("dim")), &mut x); }
+            let on = value == c.chosen;
+            let style = if on { pal.badge(Some("accent")) } else if count == 0 { pal.style(Some("dim")) } else { pal.style(None) };
+            if let Some(r) = put(&format!(" {label} {count} "), style, &mut x) { hits.facets.push((r, c.key.clone(), value)); } else { break; }
+        }
+        put("  ", Style::new(), &mut x);
+    }
+    if let Some(label) = sort {
+        put("Sort: ", pal.style(Some("muted")), &mut x);
+        if let Some(r) = put(&format!(" {label} ▾ "), Style::new().fg(pal.accent).bg(pal.surface), &mut x) { hits.sort = Some(r); }
+    }
+    true
+}
+
+/// Where columns start and how wide they are, for one pane (feature `columns`).
+struct ColumnLayout { start: u16, widths: Vec<usize>, aligns: Vec<bool>, header: Option<String> }
+
+/// Cells before a row's text: indent, expander, checkbox and icon, as `draw_row` lays them out.
+fn prefix_width(r: &Flat, icons: &Icons) -> u16 {
+    let mut x = (r.depth * 2) as u16 + 2 * (r.has_children || r.depth > 0) as u16;
+    if kind(&r.item) == "toggle" { x += 4; } else if r.depth == 0 && !r.has_children { x += 1; }
+    if let Some(icon) = icons.resolve(&r.item["icon"]) { let icon: String = icon.chars().take(2).collect(); x += icons.cell(&icon).1 + 1; }
+    x
+}
+
+/// Cells after a row's text: its right-aligned detail and badges.
+fn suffix_width(item: &Value) -> u16 {
+    let detail = item["detail"].as_str().map(|d| icons::width(d) + 1).unwrap_or(0);
+    let badges: u16 = item["badges"].as_array().into_iter().flatten().filter_map(|b| b["text"].as_str()).map(|t| icons::width(t) + 3).sum();
+    detail + badges + 1
+}
+
+fn column_layout(spec: &[Value], rows: &[Flat], width: u16, icons: &Icons) -> ColumnLayout {
+    let data: Vec<&Flat> = rows.iter().filter(|r| r.item["columns"].is_array()).collect();
+    let start = data.iter().map(|r| prefix_width(r, icons)).max().unwrap_or(1);
+    let reserve = data.iter().map(|r| suffix_width(&r.item)).max().unwrap_or(1);
+    let owned: Vec<Flat> = data.iter().map(|r| (*r).clone()).collect();
+    let widths = column_widths(spec, &owned, width.saturating_sub(start + reserve) as usize);
+    let aligns = spec.iter().map(|c| c["align"] == "right").collect::<Vec<_>>();
+    let labelled = spec.iter().any(|c| c["label"].is_string());
+    let header = labelled.then(|| join_cells(spec.iter().map(|c| c["label"].as_str().unwrap_or("").to_string()).collect(), &widths, &aligns));
+    ColumnLayout { start, widths, aligns, header }
+}
+
+fn join_cells(cells: Vec<String>, widths: &[usize], aligns: &[bool]) -> String {
+    let mut out = String::new();
+    for (i, w) in widths.iter().enumerate() {
+        let cell = cells.get(i).map(String::as_str).unwrap_or("");
+        let cut = truncate(cell, *w);
+        let pad = w.saturating_sub(icons::width(&cut) as usize);
+        if i > 0 { out.push(' '); }
+        if aligns.get(i) == Some(&true) { out.push_str(&" ".repeat(pad)); out.push_str(&cut); } else { out.push_str(&cut); out.push_str(&" ".repeat(pad)); }
+    }
+    out.trim_end().to_string()
+}
+
+impl ColumnLayout {
+    /// A row with `columns` drawn as aligned cells: its text becomes the padded cells, starting at `start`.
+    fn apply(&self, r: &Flat, icons: &Icons) -> Flat {
+        let Some(cells) = r.item["columns"].as_array() else { return r.clone() };
+        let cells: Vec<String> = cells.iter().map(|c| c.as_str().unwrap_or("").to_string()).collect();
+        let lead = " ".repeat(self.start.saturating_sub(prefix_width(r, icons)) as usize);
+        let mut out = r.clone();
+        out.item["text"] = Value::String(format!("{lead}{}", join_cells(cells, &self.widths, &self.aligns)));
+        out
     }
 }
 
@@ -565,6 +680,28 @@ mod tests {
             s.trim_end().to_string()
         };
         (0..area.height).map(line).collect()
+    }
+
+    #[test]
+    fn facet_line_sort_chip_and_columns_are_drawn_and_hit() {
+        let v=Arc::new(json!({"facets":[{"key":"kind","label":"Show"}],"sorts":[{"key":"name","label":"name"}],
+            "columns":[{"label":"kind","width":8},{"label":"name","width":"fill"}],
+            "items":[{"text":"command · agents.abort","columns":["command","agents.abort"],"facets":{"kind":"command"},"sort":{"name":"abort"},"badges":[{"text":"ok"}]},
+                     {"text":"view · agents-*","columns":["view","agents-*"],"facets":{"kind":"view"},"sort":{"name":"agents"}}]}));
+        let area=Rect::new(0,0,60,8);let mut buf=Buffer::empty(area);let mut st=State::default();
+        let hits=render(&mut buf,area,&v,&mut st,true,&Palette::default(),&Icons::new(None,false),None);
+        let line=|y:u16|(0..60).map(|x|buf[(x,y)].symbol().to_string()).collect::<String>().trim_end().to_string();
+        assert!(line(0).starts_with("Show:  All 2 · command 1 · view 1"),"{}",line(0));
+        assert!(line(0).contains("Sort:  given order ▾"),"{}",line(0));
+        assert_eq!(hits.facets.len(),3);assert!(hits.sort.is_some());
+        assert!(line(1).trim_start().starts_with("kind     name"),"header: {}",line(1));
+        let (a,b)=(line(3),line(4));
+        assert_eq!(a.find("agents.abort"),b.find("agents-*"),"columns align: {a} / {b}");
+        assert!(a.ends_with("ok"),"badges stay at the right: {a}");
+        // Without the features: plain text rows, no line.
+        let plain=Arc::new(json!({"items":[{"text":"command · agents.abort","columns":["command","agents.abort"]}]}));
+        let mut buf=Buffer::empty(area);render(&mut buf,area,&plain,&mut State::default(),true,&Palette::default(),&Icons::new(None,false),None);
+        assert!((0..60).map(|x|buf[(x,0)].symbol().to_string()).collect::<String>().contains("command · agents.abort"));
     }
 
     #[test]

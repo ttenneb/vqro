@@ -311,6 +311,8 @@ struct App {
     pstate: HashMap<String, panel::State>,
     /// Panel key whose filter is being typed in the status bar.
     filtering: Option<String>,
+    /// The filter being typed applies to the panel's detail pane, not its list.
+    filter_detail: bool,
     /// A transient notification: text, style, until.
     toast: Option<(String, Option<String>, std::time::Instant)>,
     /// When each view last showed a bell notice (rate limit).
@@ -635,7 +637,7 @@ impl App {
             peer, tx, ws: Workspace::default(), safe_selected: BTreeSet::new(),
             terms: HashMap::new(), stream_view: HashMap::new(), early: HashMap::new(), early_closed: HashMap::new(), typed: None,
             leaves: Vec::new(), focus: 0, overlay: None, pstate: HashMap::new(),
-            filtering: None, toast: None, bells: HashMap::new(), selections: HashMap::new(), selecting: None, last_press: None, scroll_mode: None, cursor_style: vt100::CursorStyle::Default, cursor_sent: vt100::CursorStyle::Default, panel_values: Mutex::new(HashMap::new()), panel_dependencies: Mutex::new(HashMap::new()), hit: Hit::default(),
+            filtering: None, filter_detail: false, toast: None, bells: HashMap::new(), selections: HashMap::new(), selecting: None, last_press: None, scroll_mode: None, cursor_style: vt100::CursorStyle::Default, cursor_sent: vt100::CursorStyle::Default, panel_values: Mutex::new(HashMap::new()), panel_dependencies: Mutex::new(HashMap::new()), hit: Hit::default(),
             drag: None, overrides: HashMap::new(), mouse_owner: None, mouse_on: true,
             under: None, input_queues: HashMap::new(), view_streams: Arc::default(), zoomed: None, autofocused: None, window: Window::default(), pending_focus: None, tab_press: None, focus_now: None, focus_last: None, kbd_enhance: false,
             held: KeyModifiers::NONE, message: String::new(), key_hint: None,
@@ -1193,6 +1195,18 @@ impl App {
         ctx["panel_view"] = json!(view);
         let value = self.panel_value(view);
         let mut container = self.pstate.get(key).cloned().unwrap_or_default();
+        // The focused pane is a full panel: its own pages, filter, facets and sort (core-protocol.md, list_detail).
+        let focused_detail = container.detail_focus.then(|| panel::selected_detail(&value, &container)).flatten();
+        if let Some((id, detail)) = focused_detail.clone() {
+            panel::sync_detail(&mut container, &id);
+            let dst = container.detail.get_or_insert_with(Box::default);
+            if pane_key(&detail, dst, &k, true) { self.pstate.insert(key.into(), container); return true; }
+            if k.code == KeyCode::Char('/') && dst.editing.is_none() { self.pstate.insert(key.into(), container); self.filtering = Some(key.into()); self.filter_detail = true; return true; }
+        } else if pane_key(&value, &mut container, &k, false) {
+            container.detail_focus = false;
+            self.pstate.insert(key.into(), container);
+            return true;
+        }
         let pages = panel::page_titles(&value).len();
         // Typing in a composer: every key edits the draft (below), none switches pages, filters or searches.
         let typing = container.editing.is_some();
@@ -1215,7 +1229,7 @@ impl App {
             // `/` searches panels that ask for it (`search: true`), else filters.
             container.detail_focus=false;container.searching=value["search"]==true;
             if container.searching { container.search.clear(); container.search_hit=0; }
-            self.pstate.insert(key.into(),container);self.filtering=Some(key.into());return true;
+            self.pstate.insert(key.into(),container);self.filtering=Some(key.into());self.filter_detail=false;return true;
         }
         let selected=panel::selected_detail(&value,&container);
         let in_detail=container.detail_focus && selected.is_some();
@@ -1457,8 +1471,9 @@ impl App {
 
     fn on_filter_key(&mut self, k: KeyEvent) {
         let Some(key) = self.filtering.clone() else { return };
-        if self.pstate.get(&key).is_some_and(|s| s.searching) { return self.on_search_key(&key, k); }
-        let st = self.pstate.entry(key).or_default();
+        if !self.filter_detail && self.pstate.get(&key).is_some_and(|s| s.searching) { return self.on_search_key(&key, k); }
+        let root = self.pstate.entry(key).or_default();
+        let st = if self.filter_detail { root.detail.get_or_insert_with(Box::default).as_mut() } else { root };
         match k.code {
             KeyCode::Esc => {
                 st.filter.clear();
@@ -2136,7 +2151,14 @@ impl App {
                 let Some(key) = ctx["panel"].as_str().map(String::from) else { return };
                 let view = ctx["panel_view"].as_str().unwrap_or(&key).to_string();
                 let value = self.panel_value(&view);
-                let st = self.pstate.entry(key.clone()).or_default();
+                let root = self.pstate.entry(key.clone()).or_default();
+                // `pane`: "list" or "detail"; by default the focused one.
+                let detail = match args["pane"].as_str() { Some("detail") => true, Some("list") => false, _ => root.detail_focus };
+                let selected = if detail { panel::selected_detail(&value, root) } else { None };
+                let (value, st) = match &selected {
+                    Some((id, v)) => { panel::sync_detail(root, id); (Arc::new(v.clone()), root.detail.get_or_insert_with(Box::default).as_mut()) }
+                    None => (value, root),
+                };
                 match args["action"].as_str().unwrap_or("") {
                     "expand_all" | "collapse_all" => {
                         let open = args["action"] == "expand_all";
@@ -2144,7 +2166,7 @@ impl App {
                             st.open.insert(id, open);
                         }
                     }
-                    "filter" => self.filtering = Some(key),
+                    "filter" => { self.filtering = Some(key); self.filter_detail = selected.is_some(); }
                     "clear_filter" => st.filter.clear(),
                     "search" => { st.searching = true; st.search.clear(); st.search_hit = 0; self.filtering = Some(key); }
                     "search_next" | "search_prev" => { let d = if args["action"] == "search_next" { 1 } else { -1 }; self.search_step(&key, &view, d); }
@@ -2163,6 +2185,8 @@ impl App {
                         }
                     }
                     "activate" => { let (key, view) = (key.clone(), view.clone()); self.panel_key(&key, &view, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), ctx.clone()); }
+                    "facet" => if let Some(k) = args["key"].as_str() { panel::choose_facet(&value, st, k, args["value"].as_str()); },
+                    "sort" => panel::choose_sort(&value, st, args["key"].as_str()),
                     other => self.message = format!("client.panel: unknown action {other}"),
                 }
             }
@@ -2573,11 +2597,26 @@ impl App {
         let in_detail=root_hits.detail_area.is_some_and(|r|r.contains(pos));
         let hits=if in_detail {let Some(h)=root_hits.detail.as_deref()else{return false};h}else{root_hits};
         if let Some((_, page)) = hits.pages.iter().find(|(r, _)| r.contains(pos)).copied() {
-            let st = self.pstate.entry(key.to_string()).or_default();
+            let root = self.pstate.entry(key.to_string()).or_default();
+            root.detail_focus = in_detail;
+            let st = if in_detail { root.detail.get_or_insert_with(Box::default).as_mut() } else { root };
             st.page = page;
             st.sel = 0;
             st.top = 0;
-            st.detail_focus=false;
+            return true;
+        }
+        let facet = hits.facets.iter().find(|(r, _, _)| r.contains(pos)).map(|(_, k, v)| (k.clone(), v.clone()));
+        let sort = hits.sort.is_some_and(|r| r.contains(pos));
+        if facet.is_some() || sort {
+            let value = self.panel_value(view);
+            let root = self.pstate.entry(key.to_string()).or_default();
+            root.detail_focus = in_detail;
+            let selected = if in_detail { panel::selected_detail(&value, root) } else { None };
+            let (value, st) = match &selected {
+                Some((id, v)) => { panel::sync_detail(root, id); (Arc::new(v.clone()), root.detail.get_or_insert_with(Box::default).as_mut()) }
+                None => (value, root),
+            };
+            match facet { Some((k, v)) => panel::choose_facet(&value, st, &k, v.as_deref()), None => panel::cycle_sort(&value, st) }
             return true;
         }
         let toggle=hits.toggles.iter().any(|(r,_)|r.contains(pos));
@@ -3003,7 +3042,7 @@ impl App {
 
     fn draw_status(&mut self, f: &mut Frame, area: Rect, pal: &Palette, icons: &Icons) {
         // Keyboard modes turn the bar into an input line, like a multiplexer's prompt.
-        let filtering = self.filtering.as_ref().map(|k| self.pstate.get(k).map(|s| if s.searching { s.search.clone() } else { s.filter.clone() }).unwrap_or_default());
+        let filtering = self.filtering.as_ref().map(|k| self.pstate.get(k).map(|s| if self.filter_detail { s.detail.as_ref().map(|d| d.filter.clone()).unwrap_or_default() } else if s.searching { s.search.clone() } else { s.filter.clone() }).unwrap_or_default());
         let prompt = match &self.overlay {
             _ if filtering.is_some() => Some(("/".to_string(), filtering.clone().unwrap_or_default())),
             Some(Overlay::Prefix { .. }) => Some((self.key_labels(&self.prefix()), self.key_labels(&keys::held_words(self.held)))),
@@ -3285,6 +3324,24 @@ fn neighbour(rects: &[Rect], from: usize, dir: &str) -> Option<usize> {
         })
         .min()
         .map(|(_, i)| i)
+}
+
+/// Keys a pane's own declarations add, on the focused pane: `[`/`]` its pages (`own_pages`: a detail pane; the list's
+/// pages keep their handling in `panel_key`), `f` its first facet, `s` its sort. Returns whether the key was used; a
+/// pane without pages, facets or sorts leaves these keys alone.
+fn pane_key(v: &Value, st: &mut panel::State, k: &KeyEvent, own_pages: bool) -> bool {
+    if st.editing.is_some() { return false; }  // a composer being typed into takes every key
+    let pages = panel::page_titles(v).len();
+    match k.code {
+        KeyCode::Char('[') | KeyCode::Char(']') if own_pages && pages > 0 => {
+            st.page = if k.code == KeyCode::Char(']') { (st.page + 1) % pages } else { (st.page + pages - 1) % pages };
+            st.sel = 0; st.top = 0;
+            true
+        }
+        KeyCode::Char('f') if k.modifiers.is_empty() && panel::declared(v, st, "facets").is_some_and(|f| !f.is_empty()) => { panel::cycle_facet(v, st, panel::SUPPORTED); true }
+        KeyCode::Char('s') if k.modifiers.is_empty() && panel::declared(v, st, "sorts").is_some_and(|f| !f.is_empty()) => { panel::cycle_sort(v, st); true }
+        _ => false,
+    }
 }
 
 fn with_arg(args: &Value, key: &str, v: Value) -> Value {
@@ -3770,6 +3827,33 @@ mod tests {
             params["partial"] = json!(true);
         }
         Incoming::Notification { method: "event".into(), params }
+    }
+
+    #[tokio::test]
+    async fn the_focused_detail_is_a_full_panel_with_pages_filter_facets_and_sort() {
+        let(mut app,_)=app();
+        let provides=json!({"title":"Provides","facets":[{"key":"kind","label":"Show"}],"sorts":[{"key":"name","label":"name"}],"items":[
+            {"text":"command · b","facets":{"kind":"command"},"sort":{"name":"b"}},{"text":"view · a","facets":{"kind":"view"},"sort":{"name":"a"}}]});
+        let detail=json!({"title":"Ext","pages":[{"title":"About","items":[{"type":"text","text":"about","focusable":true}]},provides]});
+        app.ws.entries.insert("view/test".into(),json!({"kind":"panel","list_detail":{"requires":["list_detail"]},"pages":[{"title":"P1","items":[{"id":"e","text":"Ext","detail_panel":detail}]},{"title":"P2","items":[]}]}));
+        let key=|app:&mut App,code|app.panel_key("test","test",KeyEvent::new(code,KeyModifiers::NONE),json!({}));
+        key(&mut app,KeyCode::Tab);assert!(app.pstate["test"].detail_focus);
+        key(&mut app,KeyCode::Char(']'));
+        let st=&app.pstate["test"];assert_eq!((st.page,st.detail.as_ref().unwrap().page,st.detail_focus),(0,1,true),"] moves the detail's pages, not the list's");
+        key(&mut app,KeyCode::Char('f'));assert_eq!(app.pstate["test"].detail.as_ref().unwrap().facets.get("kind").map(String::as_str),Some("command"));
+        key(&mut app,KeyCode::Char('s'));assert_eq!(app.pstate["test"].detail.as_ref().unwrap().sort,Some(0));
+        key(&mut app,KeyCode::Char('/'));assert!(app.filtering.is_some()&&app.filter_detail);
+        app.on_filter_key(KeyEvent::new(KeyCode::Char('b'),KeyModifiers::NONE));
+        let st=&app.pstate["test"];assert_eq!((st.filter.as_str(),st.detail.as_ref().unwrap().filter.as_str()),("","b"),"/ filters the focused detail");
+        app.on_filter_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
+        key(&mut app,KeyCode::BackTab);assert!(!app.pstate["test"].detail_focus);
+        key(&mut app,KeyCode::Char(']'));assert_eq!(app.pstate["test"].page,1,"with the list focused, ] moves the list's pages");
+        // client.panel names a pane and acts on its facets and sort.
+        let ctx=json!({"panel":"test","panel_view":"test"});
+        app.pstate.get_mut("test").unwrap().page=0;
+        app.run_command("client.panel",json!({"action":"facet","pane":"detail","key":"kind","value":"view"}),ctx.clone(),None);
+        assert_eq!(app.pstate["test"].detail.as_ref().unwrap().facets.get("kind").map(String::as_str),Some("view"));
+        app.run_command("client.panel",json!({"action":"sort","pane":"detail"}),ctx,None);assert_eq!(app.pstate["test"].detail.as_ref().unwrap().sort,None);
     }
 
     #[tokio::test]
