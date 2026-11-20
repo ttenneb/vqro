@@ -568,6 +568,11 @@ replaced when the Pi bridge is ported.
   the cursor, relax limits or install a partial cut; limits below producer facts and unknown newer ops remain
   visible compatibility problems.
 
+**Further implementation rulings (2026-11-20, spec batch 6).**
+- Keep the audited startup owner bootstrap. Missing/invalid owner configuration can also be repaired by an explicit
+  public bootstrap supplying a principal, guarded by the row still being missing/invalid at serialized prepare.
+  It is an audited system transaction, not a `u` target; refuse once a valid owner exists. Never guess an owner.
+
 **Human answers (2026-11-19, CONFIRMED).**
 - **AS1, pause:** "vqro stops delivery": paused means vqro sends, hands out and wakes nothing until resumed; an agent
   still working shows as working; a runtime with a real pause may offer it as an extra capability. Physical

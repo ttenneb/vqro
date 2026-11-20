@@ -99,7 +99,8 @@ the generic keys below (`doc/principals/…`) and never reads coordination grant
   acts as `from` for everything until `until_ms`. Scoped delegation is a possible later extension.
 - **Write ownership** for `doc/principals/*` is enforced by the core at commit prepare against the state before
   the transaction and the request's fixed **actor** (the connection's own principal), never its effective/delegated
-  principal; creates, replacements, deletes and reverts alike. Only the owner actor writes `doc/principals/owner`.
+  principal; creates, replacements, deletes and reverts alike. Ordinary writes of `doc/principals/owner` require
+  the owner actor; the explicit owner-unset bootstrap below is a separate guarded system transaction.
   For `doc/principals/delegations/<id>`, a create needs the actor to be the new row's `from` (or the owner); a delete
   or revert needs the existing row's `from` (or the owner); a replacement needs both existing and new `from`
   (or the owner), so only the owner actor can change `from`. A delegation or callback proof never lets a delegate
@@ -119,7 +120,12 @@ the generic keys below (`doc/principals/…`) and never reads coordination grant
 - The **workspace owner principal** is `doc/principals/owner = "<principal>"` and holds every coordination right;
   other rights come only from grants (§4). If that row is missing or invalid, the TUI acts as `owner-unset` with
   no coordination grants. Raw/recovery primitives stay usable (D15) and a visible notice requests audited owner
-  bootstrap; no owner is guessed from a connection, environment or process.
+  bootstrap; no owner is guessed from a connection, environment or process. The audited startup bootstrap stays.
+  An explicit public owner-bootstrap request may supply a principal to repair a missing/invalid owner row, but
+  only while that row is still missing/invalid at serialized commit prepare. This is an audited **system
+  transaction**, not an ordinary caller write or a `u` target. A request prepared after a valid owner exists is
+  refused without changing it; concurrent requests cannot both establish an owner. The request supplies the
+  principal explicitly: neither startup recovery nor this repair guesses one.
 
 *Evidence (P2, `proto/principal-undo` f12f4e2, gate 29/29):* a pane's CLI writes as Alice through the launcher
 environment; Alice's TUI `u` removes it while Bob's later change stays; another principal's change is revertable by

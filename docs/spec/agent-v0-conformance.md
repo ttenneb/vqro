@@ -357,7 +357,11 @@ subject handle without an unambiguous principal is refused. Team/project grants 
 G14 principal recovery and inheritance: `hello` cannot assert `extension:`, `host:` or `system:` ids (`invalid`);
 backend/supervised child environments do not inherit caller identity variables, including `VQRO_PRINCIPAL`.
 Missing/invalid owner configuration gives the TUI `owner-unset`, no coordination grants and a visible bootstrap
-notice, while raw/recovery still works. No connection/environment/process is guessed to be the owner.
+notice, while raw/recovery still works. No connection/environment/process is guessed to be the owner. The audited
+startup bootstrap is unchanged. With a missing/invalid owner, an explicit public bootstrap supplying P succeeds
+only if serialized prepare still sees a missing/invalid row; it records an audited system transaction, not a `u`
+target. Race two supplied principals: at most one establishes the owner; the other is refused once the owner is
+valid. A later bootstrap cannot replace a valid owner, and ordinary non-owner writes/reverts still fail G12.
 
 **T. Pull** (P5; Pi pinned per run). T1 OSC 7501 and marker mapping; nothing typed into the terminal by default;
 without a plugin, records stay held `integration_unavailable`. T2 eligibility comes from the point: a `turn` take
