@@ -317,7 +317,9 @@ for one fake agent; the rest need the full extension.
 **H. Pause and scope resume** (R's traces). H1 crash before claim: no effect until an explicit current-epoch resume,
 then at most one claim. H2 crash after durable claim: `unknown` through any resume, never invoked again. H3 the runtime
 inserts natively held input while the inbox is paused: no duplicate, no claim of physical suspension. H4 pause/claim
-race: pause wins → no claim; claim wins → pause reports the outstanding attempt. H5 a restored open-gate record or a
+race: pause wins → no claim; claim wins → the live pause reply reports selection-point outstanding attempt IDs
+across the frozen target set, including targets beyond its first page and an in-flight call with an early receipt.
+Historical scope receipts retain only count/hash with incomplete details, never content or claim tokens. H5 a restored open-gate record or a
 stale resume request creates no permit. H6 a member added after the preview makes the resume `conflict`; repeating a
 committed `op` returns the original target set. H7 moving an active member keeps its gate; no earlier resume is
 replayed; undoing the move changes selection only. H8 absent, unsupported and grant-blocked members report their

@@ -501,6 +501,49 @@ def case_archive():
     return {'verified_free': True, 'missing_artifact_unknown': True}
 
 
+def case_pause_reporting():
+    calls, entered, released = [], threading.Event(), threading.Event()
+    def handle(method, params):
+        assert params['op'] == 'agent.send', params
+        calls.append(params['args']['delivery'])
+        entered.set()
+        if not released.wait(8):
+            raise AssertionError('owned H4 native reply barrier was not released')
+        return {'outcome': 'accepted'}
+    facts = native()
+    facts['caps']['agent.send'] = {'modes': {'start': {'busy': 'reject'}},
+        'origin': [{'as': 'attributed_user', 'role': 'user', 'frame': 'sender_header'}]}
+    rid = agent('h4-reporting', facts, handler=handle)
+    scope('pause')
+    o = op('h4-send')
+    delivery = cmd('inbox.send', {'op': o, 'submission': o, 'to': rid, 'mode': 'start',
+        'content': [{'type': 'text', 'text': 'H4 private insertion'}]})['delivery']
+    assert not cmd('inbox.get', {'delivery': delivery}).get('attempt') and not calls
+    scope('resume')
+    assert entered.wait(4), 'native call did not start'
+    try:
+        claimed = cmd('inbox.get', {'delivery': delivery})
+        assert claimed['state'] == 'claimed', claimed
+        attempt = claimed['attempt']['id']
+        paused = scope('pause')
+        assert next(item for item in paused['outstanding'] if item['agent'] == rid)['attempts'] == [attempt], paused
+        assert paused['outstanding_count'] >= 1 and not paused['outstanding_incomplete'], paused
+        assert 'H4 private insertion' not in json.dumps(paused)
+        history = cmd('scope', {'action': 'result', 'receipt': paused['receipt']})
+        assert history['outstanding_count'] == paused['outstanding_count'] and history['outstanding_incomplete'], history
+        assert history['outstanding_hash'] == paused['outstanding_hash'] and attempt not in json.dumps(history)
+    finally:
+        released.set()
+    wait(lambda: cmd('inbox.get', {'delivery': delivery})['state'] == 'accepted')
+    later_op = op('h4-later')
+    later = cmd('inbox.send', {'op': later_op, 'submission': later_op, 'to': rid, 'mode': 'start',
+        'content': [{'type': 'text', 'text': 'stays behind closed gate'}]})['delivery']
+    wait(lambda: cmd('inbox.get', {'delivery': later})['reason'] == 'paused')
+    assert not cmd('inbox.get', {'delivery': later}).get('attempt') and calls == [delivery], calls
+    return {'pause_wins_no_claim': True, 'winning_attempt_reported': True,
+            'historical_details_incomplete': True, 'native_writes': len(calls)}
+
+
 def case_queue_epoch():
     calls, runtime = [], {'running': True}
     def handle(method, params):
@@ -649,7 +692,7 @@ def case_archive_abort():
 
 CASES = {'brick': case_brick, 'idle': case_idle, 'membership': case_membership, 'identity': case_identity, 'reconcile': case_reconcile, 'names': case_names,
          'rawcycle': case_rawcycle, 'invalid_declaration': case_invalid_declaration,
-         'window': case_window, 'handover': case_handover, 'archive': case_archive, 'queue_epoch': case_queue_epoch, 'handover_withdrawn': case_handover_withdrawn, 'archive_abort': case_archive_abort, 'handover_archive': case_handover_archive}
+         'window': case_window, 'handover': case_handover, 'archive': case_archive, 'queue_epoch': case_queue_epoch, 'handover_withdrawn': case_handover_withdrawn, 'archive_abort': case_archive_abort, 'handover_archive': case_handover_archive, 'pause_reporting': case_pause_reporting}
 core = None
 try:
     core = subprocess.Popen([str(BIN), 'serve', '--fake'], env=ENV, cwd=ROOT, stdout=open(ROOT / 'core.log', 'wb'), stderr=subprocess.STDOUT)

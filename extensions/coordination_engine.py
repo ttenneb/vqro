@@ -655,6 +655,20 @@ class Coordinator:
             targets = policy.scope(args.get("scope"))
             for agent in targets:
                 policy.require(context["principal"], action, agent)
+            outstanding, grouped = [], {}
+            if action == "pause":
+                selected = set(targets)
+                for key, row in work.rows.items():
+                    if not key.startswith("message/"):
+                        continue
+                    record = row["value"]
+                    agent, attempt = record["to"]["agent"], (record.get("attempt") or {}).get("id")
+                    if agent in selected and attempt and (record["state"] in ("claimed", "unknown")
+                            or self.native_inflight.get(agent) == attempt):
+                        grouped.setdefault(agent, set()).add(attempt)
+                outstanding = [{"agent": agent, "attempts": sorted(attempts)} for agent, attempts in sorted(grouped.items())]
+            summary = {"count": sum(len(item["attempts"]) for item in outstanding),
+                       "sha256": digest(outstanding), "incomplete": True}
             for agent in targets:
                 self._ensure_agent(work, agent, policy)
                 control["gates"][agent] = action == "resume"
@@ -672,12 +686,16 @@ class Coordinator:
                               key=lambda key: work.rows[key]["value"]["control_revision"])
             for key in retained[:-15] if len(retained) >= 16 else []:
                 work.delete(key)
-            work.put("scope/" + receipt, {"targets": targets, "control_revision": control["revision"], "membership_revision": self._membership_cut(policy)})
+            work.put("scope/" + receipt, {"targets": targets, "control_revision": control["revision"],
+                     "membership_revision": self._membership_cut(policy),
+                     **({"outstanding": summary} if action == "pause" else {})})
             page = bounded_page([{"agent": agent, "order": order} for order, agent in enumerate(targets)],
                                 revision=receipt, key=lambda row: row["order"])
             return {"state": "accepted", "action": action, "targets": [row["agent"] for row in page["items"]],
                     "selected": len(targets), "receipt": receipt, "next": page["next"], "control_revision": control["revision"],
                     "execution": "not_asserted", "_after": release,
+                    **({"outstanding": outstanding, "outstanding_count": summary["count"],
+                        "outstanding_hash": summary["sha256"], "outstanding_incomplete": False} if action == "pause" else {}),
                     "_uncertain": lambda: self.permits.difference_update(targets) if action == "pause" else None}
         return self._mutate("inbox.scope", args, context, apply, control=True)
 
@@ -695,8 +713,11 @@ class Coordinator:
         targets = row["value"]["targets"]
         result = bounded_page([{"agent": agent, "order": order} for order, agent in enumerate(targets)],
                               page=page, revision=receipt, key=lambda item: item["order"])
+        summary = row["value"].get("outstanding")
         return {"state": "accepted", "receipt": receipt, "targets": [item["agent"] for item in result["items"]],
-                "selected": len(targets), "next": result["next"]}
+                "selected": len(targets), "next": result["next"],
+                **({"outstanding_count": summary["count"], "outstanding_hash": summary["sha256"],
+                    "outstanding_incomplete": True} if summary is not None else {})}
 
     def _wake(self, agent):
         if agent in self.permits and self.current:

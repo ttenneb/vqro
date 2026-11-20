@@ -396,6 +396,15 @@ inspected list (bounded; oversized is rejected before any change).
   capacity is rejected before any change. Live permits exist only after acceptance is confirmed durable; replay,
   restore, revert, adapter registration or an old epoch's result never create permits; a non-revertible
   `control_revision` makes stale requests fail.
+- **Pause evidence.** The live accepted pause reply includes `outstanding: [{agent, attempts: [id, …]}, …]`,
+  `outstanding_count`, `outstanding_hash` and `outstanding_incomplete: false`, captured at the selection point across
+  the whole frozen target set (even when `targets` has a next page). These are claimed or unresolved unknown input
+  attempts, plus locally in-flight native attempts even if an early positive receipt arrived. They are not proof of
+  physical execution or suspension; `execution` remains `not_asserted`. No insertion content or pull claim token is
+  exposed. IDs are bounded by the existing protected-record and scope capacities. Durable scope history retains only
+  the count/hash and `incomplete: true`, not the IDs: historical scope receipts/operation lookup return
+  `outstanding_count`, `outstanding_hash`, `outstanding_incomplete: true`. The original frozen target set is unchanged;
+  no new protected pool or replay permission is created. Older receipts without this summary do not invent counts.
 - **Cascade means parent-first release of gates, not coordinator-first native execution.** Each target reports
   readiness or its hold reason.
 - Membership is ordinary configuration and gates are protected state; there is no atomicity across them. Later
