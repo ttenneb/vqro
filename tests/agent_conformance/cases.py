@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from .content import compare_content, examples
+from .evidence import connection_scale, host_generation_fence, producer_overflow
 from .results import CheckFailed, FixtureFailed, HarnessGap, NotApplicable, NotDeclared, check, declared
 from .wire import ItemReducer, RpcError
 
@@ -295,27 +296,57 @@ async def literal_text(ctx):
         check(all(r.get("operation") == "send" for r in ctx.native.writes(mark)), "text caused an extra native control effect")
 
 
-@case("C9")
-async def qualified_causality(ctx):
-    snapshot, facts = await ctx.peer.call("workspace.snapshot"), await ctx.facts()
-    cause = {"kind": "effect", "id": "same-local-effect", "endpoint": ctx.agents[0]["id"],
-             "epoch": facts["epoch"], "boot": snapshot["epoch"], "provenance": "asserted"}
+async def causal_echo(ctx, cause):
+    await ctx.native.call("turn", state="settled")
+    await ctx.wait_facts(lambda f: f.get("state") == "idle")
     correlation = "C9-caller-thread"
     result = await ctx.send("C9-qualified-cause", cause=cause, correlation=correlation)
     receipt = accepted(result)
-    def effect_event():
-        return next((row["data"] for row in ctx.events if row.get("type") == "effect"
-                     and row.get("data", {}).get("effect") == result.get("effect")), None)
-    try:
-        event = await ctx.peer.wait(effect_event)
-    except asyncio.TimeoutError as error:
-        raise CheckFailed("core did not publish the effect audit", component="core") from error
+    event = (await audit_fence(ctx, result))["data"]
     ctx.evidence.append({"kind": "causality_echo", "expected": cause, "receipt": receipt, "effect_event": event})
     check(event.get("cause") == cause and event.get("correlation") == correlation,
           "generic core effect audit dropped caller causality", component="core")
     check(receipt.get("cause") == cause and receipt.get("correlation") == correlation,
           "adapter receipt dropped/changed asserted caller causality")
-    raise HarnessGap("C9 echo exercised; dual-endpoint request and reused-effect-after-restart branches pending")
+    return receipt["cause"]
+
+
+@case("C9")
+async def qualified_causality(ctx):
+    snapshot, facts = await ctx.peer.call("workspace.snapshot"), await ctx.facts()
+    cause = {"kind": "effect", "id": "same-local-effect", "endpoint": ctx.agents[0]["id"],
+             "epoch": facts["epoch"], "boot": snapshot["epoch"], "provenance": "asserted"}
+    old = await causal_echo(ctx, cause)
+    await ctx.restart_core()
+    await ctx.wait_facts(lambda f: f.get("v") == 0)
+    restarted = await ctx.peer.call("workspace.snapshot")
+    check(restarted["epoch"] != snapshot["epoch"], "core restart reused its boot qualifier", component="core")
+    fresh = await causal_echo(ctx, {**cause, "boot": restarted["epoch"]})
+    check(old != fresh, "reused asserted effect ID lost its core-boot distinction")
+    if "agent.respond" not in facts["caps"]:
+        ctx.evidence.append({"kind": "subcase", "case": "C9.request_sources", "status": "unsupported-declared",
+                             "declaration": {"path": "agent.respond", "actual": None}})
+        return
+    from .core import PublicImplementation
+    other = PublicImplementation(ctx.root / "x", ctx.manifest, ctx.backend.args.vqro, ctx.backend.args.hc)
+    try:
+        await other.start()
+        await other.ensure_session()
+        request_causes = []
+        for source in (ctx, other):
+            _, request = await make_request(source)
+            source_facts = await source.facts()
+            request_causes.append({"kind": "request", "id": request["request"], "endpoint": source.agents[0]["id"],
+                                   "epoch": source_facts["epoch"], "provenance": "asserted"})
+            mark = source.native.mark()
+            await answer(source, request, {"action": "cancel"})
+            await source.native.wait(lambda rows: any(row["seq"] > mark and row["kind"] == "answer" for row in rows))
+        echoed = [await causal_echo(ctx, reference) for reference in request_causes]
+        check(echoed[0] != echoed[1], "two actual endpoint request scopes collapsed into one reference")
+        ctx.evidence.append({"kind": "qualified_request_sources", "references": request_causes,
+                             "second_endpoint_image": other.metadata.get("adapter_image")})
+    finally:
+        await other.close()
 
 
 @case("C10")
@@ -759,6 +790,16 @@ async def item_algebra(ctx):
     check(folded.entities == other.reducer.entities, "live algebra and authoritative snapshot disagree at the same cut")
     ctx.evidence.append({"kind": "item_algebra", "cut": cut, "ops": sorted({row["op"] for row in records}),
                          "append_base_validation": "independent reducer; wrong bases never applied"})
+
+
+@case("O3")
+async def shared_snapshot_overflow(ctx):
+    producer_overflow(ctx)
+
+
+@case("O11")
+async def shared_connection_scale(ctx):
+    connection_scale(ctx)
 
 
 @case("O4")
@@ -1402,22 +1443,22 @@ async def stop_evidence(ctx):
 @case("L3")
 async def host_lifecycle(ctx):
     facts = await ctx.facts()
-    owns = facts["host"]["owns_lifecycle"]
-    rid, host = ctx.agents[0]["id"], await ctx.resource(ctx.host)
-    result = await ctx.peer.call("resource.kill", {"resource": ctx.host, "deadline_ms": 1000})
-    check(result.get("outcome") in ("observed", "accepted"), "private host termination not acknowledged", component="core")
-    def finished():
-        value = ctx.resource_cache.get(ctx.host, {})
-        return value if value.get("state") == "finished" else None
-    final_host = await lifecycle_wait(ctx, finished, "bound host did not report its finish")
-    check(final_host.get("incarnation") == host.get("incarnation"), "host end evidence changed incarnation")
-    endpoint = ctx.resource_cache.get(rid, {})
-    if not owns:
-        check(endpoint.get("data", {}).get("agent", {}).get("lifecycle") != "ended",
-              "non-owning host disappearance fabricated endpoint end")
-    ctx.evidence.append({"kind": "host_end", "owns_lifecycle": owns, "bound_host": host,
-                         "observed_host": final_host, "endpoint": endpoint})
-    raise HarnessGap("L3 bound host end exercised; stale old-host end injection is not yet implemented")
+    host, declaration = facts["host"], facts["caps"].get("host", {})
+    if not (host.get("kind") == "process" and host.get("owns_lifecycle") is True and declaration.get("endpoints") == "one"):
+        raise HarnessGap("L3 many/cross-incarnation host needs a dedicated real late-old-host injection fixture")
+    rid, pid = ctx.agents[0]["id"], ctx.native.state["pid"]
+    await ctx.native.call("turn", state="start")
+    await ctx.wait_facts(lambda f: f.get("state") == "running")
+    await ctx.native.call("host_exit", code=0)
+    await lifecycle_wait(ctx, lambda: ctx.resource_cache.get(rid, {}).get("data", {}).get("agent", {}).get("lifecycle") == "ended",
+                         "process-owned native host end did not end its endpoint")
+    final = ctx.resource_cache[rid].get("data", {}).get("agent", {})
+    check(all(final.get("host", {}).get(key) == host.get(key) for key in ("id", "provider", "instance", "incarnation")),
+          "old host end was attributed to a different host incarnation")
+    ctx.evidence.append({"kind": "native_host_end", "branch": "process_owned_one", "native_pid": pid,
+                         "host_identity": host, "final_host_identity": final.get("host"), "ended": True,
+                         "late_records_proof": "pinned generic producer-generation/incarnation fence below"})
+    host_generation_fence(ctx)
 
 
 @case("L4")

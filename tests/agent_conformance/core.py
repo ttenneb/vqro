@@ -209,6 +209,7 @@ class PublicImplementation:
         self.backend.hc_process = identity(started["pid"])
         check(not (await asyncio.to_thread(self.backend.hc, "ls", "--all"))["terminals"], "private backend was not empty", component="harness")
         await asyncio.to_thread(self.backend.start)
+        self.metadata["core_image_sha256"] = hashlib.sha256(Path(f"/proc/{self.backend.core.pid}/exe").read_bytes()).hexdigest()
         self.peer = await self.viewer()
         snapshot = await self.peer.call("workspace.snapshot")
         await self.peer.call("events.subscribe", {"epoch": snapshot["epoch"], "from": snapshot["seq"], "types": ["effect", "resource", "resource.removed"]})

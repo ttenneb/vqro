@@ -100,6 +100,21 @@ list. The Pi fixture accepts real native `--mode rpc` launch arguments. Content 
 as not-applicable for an explicitly one-endpoint host, without inventing an
 unsupported feature or an extra top-level result status.
 
+## Inherited shared-component checks
+
+O3/O11 may inherit the shared Rust producer/core checks instead of relaunching
+200 fake endpoints for every adapter. A target supplies `component_evidence`
+entries keyed by case: executed `adapter_image_sha256`, reviewed `producer_source`,
+`component`, a `receipt` and `unit_log` (`{path,sha256}`), and `required_tests`.
+Every artifact is checksummed and bounded to4MiB; a passing full receipt is
+required. O3 names snapshot-hold, unfinished-cut-overflow and reset-recovery
+regressions. Known counterexamples override an older green receipt. O11 also
+binds `core_image_sha256`, validates the200-stream scale `summary`, and requires
+reserved-budget/open, writing-stream closure and idle-sibling survival proofs.
+The rule is per stream within one shared connection budget, not forced closure
+of idle sibling streams. Missing linkage/proofs are `fail/harness_gap`; these
+checks are explicitly inherited component evidence, never another runtime.
+
 ## Results / honesty
 
 Each case/subcase produces `pass`, `fail`, `unsupported-declared` or
