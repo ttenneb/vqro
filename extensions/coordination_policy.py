@@ -421,6 +421,10 @@ class Policy:
         if not isinstance(args, dict):
             _fail("invalid", "send arguments must be an object")
         normalized = copy.deepcopy(args)
+        priority = args.get("priority", "normal")
+        if priority not in ("low", "normal", "high"):
+            _fail("invalid", "priority must be low, normal or high")
+        normalized["priority"] = priority
         mode = args.get("mode")
         if not isinstance(mode, str) or mode not in MODES:
             _fail("invalid", "unknown delivery mode")
@@ -757,8 +761,8 @@ def check_admission(records, principal, target, content, *, reserved_bytes=0,
 class FairQueue:
     """Select among already eligible records; gates/unknown dependencies are not guessed.
 
-    Urgent lanes precede idle-waiting lanes. Within each lane, senders alternate
-    round-robin, retaining sender/target/lane order. Mixed-target input is also
+    Urgent lanes precede idle-waiting lanes. Per target/lane, highest eligible
+    priority wins, then equal-priority senders alternate round-robin/FIFO. Mixed-target input is also
     round-robin by target. The owner claims the returned record atomically and
     calls again after any lost race; this selector itself mutates no record.
     """
@@ -785,10 +789,15 @@ class FairQueue:
                 _agent(target)
             target = self._next(targets, self._last_target.get(lane))
             rows = [row for row in rows if row["to"]["agent"] == target]
+            ranks = {"low": 0, "normal": 1, "high": 2}
+            if any(row.get("priority", "normal") not in ranks for row in rows):
+                _fail("invalid", "unknown pending priority")
+            highest = max(ranks[row.get("priority", "normal")] for row in rows)
+            rows = [row for row in rows if ranks[row.get("priority", "normal")] == highest]
             senders = {row.get("from", {}).get("principal") for row in rows}
             for sender in senders:
                 _string(sender, "sender principal", 256)
-            cursor = (target, lane)
+            cursor = (target, lane, highest)
             sender = self._next(senders, self._last_sender.get(cursor))
             rows = [row for row in rows if row["from"]["principal"] == sender]
             for row in rows:
@@ -798,7 +807,7 @@ class FairQueue:
             self._last_target[lane] = target
             self._last_sender[cursor] = sender
             self._last_sender.move_to_end(cursor)
-            while len(self._last_sender) > MAX_MEMBERS * len(self.lanes):
+            while len(self._last_sender) > MAX_MEMBERS * len(self.lanes) * 3:
                 self._last_sender.popitem(last=False)
             return chosen
         return None

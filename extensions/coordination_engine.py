@@ -449,7 +449,7 @@ class Coordinator:
             origin = {"principal": principal, "actor": context.get("actor", principal), "kind": sender["kind"]}
             if sender_agent:
                 origin["agent"] = sender_agent
-            payload = {key: normalized[key] for key in ("mode", "content", "expires_at_ms") if key in normalized}
+            payload = {key: normalized[key] for key in ("mode", "content", "expires_at_ms", "priority") if key in normalized}
             record = dict(payload, v=0, delivery=delivery, submission=submission, to=target, **{"from": sender}, origin=origin,
                           state="held", reason="paused", held_by="vqro", order=meta["order"], attempt=None, result=None,
                           intent=digest({key: value for key, value in args.items() if key != "op"}), created_ms=self.clock(), failures=0, handed_over_from=None)
@@ -487,11 +487,11 @@ class Coordinator:
             if withdraw:
                 record.update(state="withdrawn", reason="sender_withdrawn")
             else:
-                allowed = {"content", "mode", "guard", "render", "quoted", "expires_at_ms"}
+                allowed = {"content", "mode", "guard", "render", "quoted", "expires_at_ms", "priority"}
                 if any(key not in allowed | {"op", "delivery", "expect"} for key in args):
                     raise CoordinationError("invalid", "edit changes only pending input fields")
                 updated = dict(record, **{key: value for key, value in args.items() if key in allowed})
-                request = {key: updated[key] for key in ("mode", "content", "expires_at_ms", "strategy", "guard", "render", "quoted", "follow_current_session") if key in updated}
+                request = {key: updated[key] for key in ("mode", "content", "expires_at_ms", "strategy", "guard", "render", "quoted", "follow_current_session", "priority") if key in updated}
                 record.update(policy.validate_send(request))
                 for key in ("guard", "render", "quoted"):
                     if key in args:
@@ -939,6 +939,9 @@ class Coordinator:
                     or any(not isinstance(kind, str) or not kind or len(kind.encode()) > 64 for kind in accept)
                     or len(set(accept)) != len(accept)):
                 raise CoordinationError("invalid", "accept must list 1..16 distinct bounded block types")
+            max_bytes = args.get("max_bytes", policy.limits.content_bytes)
+            if type(max_bytes) is not int or not 1 <= max_bytes <= 256 * 1024:
+                raise CoordinationError("invalid", "max_bytes must be 1..262144 UTF-8 content bytes")
             consumer, at = args.get("consumer"), args.get("at")
             if at not in ("turn", "settle", "idle", "tool"):
                 raise CoordinationError("invalid", "take must name a declared safe point")
@@ -952,16 +955,25 @@ class Coordinator:
             records = self.records()
             if agent in self.native_inflight or any(r["to"]["agent"] == agent and r["state"] == "claimed" for r in records):
                 return {"state": "held", "records": [], "held": "claim_in_flight"}
-            eligible, unsupported, changed = [], 0, 0
+            # Leave 128 KiB for the bounded operation bucket and 16 KiB for
+            # protocol/meta overhead. Holding a large record must not prevent a
+            # supported later record from fitting the same atomic C1 request.
+            def changed_bytes():
+                return sum(encoded(row["value"]) for row in work.changes.values() if row)
+            eligible, unsupported, oversized, changed = [], 0, 0, 0
             for record in records:
                 if record["to"]["agent"] != agent or record["state"] not in PENDING or self._eligibility(record, policy, at=at) is not None:
                     continue
-                if any(block["type"] not in accept for block in record["content"]):
-                    unsupported += 1
-                    if changed < 40 and (record.get("reason") != "unsupported_content" or record.get("reason_consumer") != consumer):
-                        record.update(state="held", reason="unsupported_content", reason_consumer=consumer)
-                        work.put("message/" + record["delivery"], record)
-                        changed += 1
+                reason = "unsupported_content" if any(block["type"] not in accept for block in record["content"]) else (
+                    "too_large_for_consumer" if encoded(record["content"]) > max_bytes else None)
+                if reason:
+                    unsupported += reason == "unsupported_content"
+                    oversized += reason == "too_large_for_consumer"
+                    if changed < 40 and (record.get("reason") != reason or record.get("reason_consumer") != consumer):
+                        record.update(state="held", reason=reason, reason_consumer=consumer)
+                        if changed_bytes() + encoded(record) <= 48 * 1024:
+                            work.put("message/" + record["delivery"], record)
+                            changed += 1
                     continue
                 eligible.append(record)
             supplied, claims = [], []
@@ -972,20 +984,22 @@ class Coordinator:
                 eligible.remove(record)
                 claimed = self._claim(work, record, consumer=consumer, at=at)
                 if claimed is None:
+                    if changed_bytes() > 112 * 1024:
+                        work.changes.pop("message/" + record["delivery"], None)
                     continue
                 claimed["attempt"]["take"] = digest([context["principal"], args["op"]])
                 work.put("message/" + claimed["delivery"], claimed)
-                row = {key: claimed.get(key) for key in ("delivery", "from", "origin", "quoted", "render", "mode", "content")}
+                row = {key: claimed.get(key) for key in ("delivery", "from", "origin", "quoted", "render", "mode", "priority", "content")}
                 row["claim"] = claimed["attempt"]["claim"]
-                if encoded(supplied + [row]) > 250 * 1024:
+                if encoded(supplied + [row]) > 250 * 1024 or changed_bytes() > 112 * 1024:
                     work.changes.pop("message/" + claimed["delivery"], None)
                     break
                 supplied.append(row)
                 claims.append({"delivery": row["delivery"], "claim": row["claim"]})
             # The first response carries content only after the whole claim batch commits.
             return {"state": "claimed" if claims else "held", "claims": claims, "records": [],
-                    "_first": {"records": supplied}, "unsupported": unsupported,
-                    "held": None if claims else "unsupported_content" if unsupported else "no_eligible_input"}
+                    "_first": {"records": supplied}, "unsupported": unsupported, "oversized": oversized,
+                    "held": None if claims else "unsupported_content" if unsupported else "too_large_for_consumer" if oversized else "no_eligible_input"}
         return self._mutate("inbox.take", args, context, pull)
 
     def reconcile(self, args, context):
@@ -1559,7 +1573,7 @@ class Coordinator:
                 work.put(key, compact)
                 continue
             result = value.get("result") or {}
-            compact = {name: copy.deepcopy(value.get(name)) for name in ("v", "delivery", "submission", "intent", "mode", "order", "state", "reason")}
+            compact = {name: copy.deepcopy(value.get(name)) for name in ("v", "delivery", "submission", "intent", "mode", "priority", "order", "state", "reason")}
             compact.update(to={"agent": value["to"]["agent"]}, **{"from": {"principal": value["from"]["principal"]}},
                            incomplete=True, final_seq=value.get("final_seq", row["version"]),
                            content_hash=digest(value.get("content", [])),

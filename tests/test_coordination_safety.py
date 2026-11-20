@@ -189,6 +189,61 @@ class SafetyTests(unittest.TestCase):
         self.assertEqual(capable["records"][0]["delivery"], sent["delivery"])
         self.assertNotIn("reason_consumer", f.engine.get(sent["delivery"]))
 
+    def test_pull_byte_filter_skips_oversized_head_without_claim_release_loop(self):
+        f = self.f
+        f.setup_pull()
+        large = f.send("boundary", content=[{"type": "text", "text": "large" * 1000}])
+        small = f.send("boundary", send_new=True)
+        result = f.engine.take({"op": f.op(), "agent": "r1", "consumer": "c1", "at": "turn", "accept": ["text"], "max_bytes": 256}, fixtures.OWNER)
+        self.assertEqual([row["delivery"] for row in result["records"]], [small["delivery"]])
+        held = f.engine.get(large["delivery"])
+        self.assertEqual(held["reason"], "too_large_for_consumer")
+        self.assertIsNone(held.get("attempt"))
+        self.assertEqual(result["oversized"], 1)
+        f.engine.report({"op": f.op(), "delivery": small["delivery"], "claim": result["records"][0]["claim"], "consumer": "c1", "stage": "inserted"}, fixtures.OWNER)
+        again = f.engine.take({"op": f.op(), "agent": "r1", "consumer": "c1", "at": "turn", "max_bytes": 256}, fixtures.OWNER)
+        self.assertEqual(again["records"], [])
+        self.assertEqual(again["held"], "too_large_for_consumer")
+        self.assertIsNone(f.engine.get(large["delivery"]).get("attempt"))
+        f.engine.reconcile({"op": f.op(), "agent": "r1", "consumer": "c2", "records": []}, fixtures.OWNER)
+        capable = f.engine.take({"op": f.op(), "agent": "r1", "consumer": "c2", "at": "turn", "max_bytes": 8192}, fixtures.OWNER)
+        self.assertEqual(capable["records"][0]["delivery"], large["delivery"])
+
+    def test_pull_byte_budget_uses_encoded_utf8_content_and_validates_bounds(self):
+        f = self.f
+        f.setup_pull()
+        sent = f.send("boundary", content=[{"type": "text", "text": "é" * 80}])
+        result = f.engine.take({"op": f.op(), "agent": "r1", "consumer": "c1", "at": "turn", "max_bytes": 100}, fixtures.OWNER)
+        self.assertEqual(result["records"], [])
+        self.assertEqual(f.engine.get(sent["delivery"])["reason"], "too_large_for_consumer")
+        for budget in (0, -1, True, "100", 262145):
+            with self.assertRaises(PolicyError) as invalid:
+                f.engine.take({"op": f.op(), "agent": "r1", "consumer": "c1", "at": "turn", "max_bytes": budget}, fixtures.OWNER)
+            self.assertEqual(invalid.exception.kind, "invalid")
+
+    def test_take_bounds_reason_updates_and_claims_by_c1_wire_budget(self):
+        f = self.f
+        f.setup_pull()
+        f.config["doc/agents/grants/senders"] = {"version": 1, "value": {"who": "*", "can": ["send:boundary"], "on": "agent:r1"}}
+        for n in range(7):
+            principal = "p:sender" + str(n)
+            context = {"principal": principal, "actor": principal, "author": "client:test:" + str(n)}
+            f.engine.send(self.request(mode="boundary", content=[{"type": "text", "text": "x" * 30000}]), context)
+        small = f.send("boundary")
+        original = f.store.apply
+        payloads = []
+        def apply(ops, **kwargs):
+            from coordination_engine import encoded
+            wire = [dict(op, key="operational/coord/" + op["key"]) for op in ops]
+            payloads.append(encoded({"domain": "coord", "ops": wire}))
+            return original(ops, **kwargs)
+        f.store.apply = apply
+        result = f.engine.take({"op": f.op(), "agent": "r1", "consumer": "c1", "at": "turn", "max_bytes": 256}, fixtures.OWNER)
+        self.assertEqual([row["delivery"] for row in result["records"]], [small["delivery"]])
+        self.assertEqual(result["oversized"], 7)
+        self.assertTrue(payloads)
+        self.assertLess(max(payloads), 256 * 1024)
+
     def test_pull_accept_types_are_bounded_and_deterministic(self):
         f = self.f
         f.setup_pull()
