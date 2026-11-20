@@ -299,7 +299,10 @@ async fn read_native(stdout: tokio::process::ChildStdout, state: Arc<Inner>) {
                 }
                 pending.phase.store(REPLIED,Ordering::SeqCst);
                 let reply = Reply { success:record["success"] == true,data:record.get("data").cloned().unwrap_or(Value::Null),error:record.get("error").cloned().unwrap_or(Value::Null) };
+                // Normalize observations before waking an effect/config caller on another thread.
+                (state.observe)(Event::Record(record));
                 let _ = pending.result.send(Ok(reply));
+                continue;
             }
         }
         (state.observe)(Event::Record(record));
