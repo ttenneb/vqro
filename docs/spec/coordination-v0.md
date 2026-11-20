@@ -171,7 +171,8 @@ shared publication fences are not implemented.
  "from": {"principal": "p:coord", "actor": "p:coord", "author": "client:12"},   // recorded fields (§3), never from the body
  "origin": {"principal": "p:coord", "actor": "p:coord", "agent": "r7", "kind": "agent"},  // derived from `from`
  "quoted": null, "render": null,                                                  // sender-supplied; see §5.6
- "mode": "boundary", "content": [{"type": "text", "text": "Run the linux tests too."}],  // as agent.send
+ "mode": "boundary", "priority": "normal",  // low | normal (default) | high; pending selection only
+ "content": [{"type": "text", "text": "Run the linux tests too."}],  // as agent.send
  "guard": null, "key": null,
  "reply_to": null, "thread": null, "retry_of": null, "cause": null, "correlation": null,   // deliveries / §8
  "expires_at_ms": "…", "supersedes": null, "order": 41,
@@ -196,7 +197,7 @@ Refusal entries are compact and charged to the operation-window budget (§10).
 
 | Command | Effect |
 |---|---|
-| `coord.inbox.send {op, submission, to, mode, strategy?, content, quoted?, render?, send_new?, …}` | grant and quota check, resolve `to` once, admit or reject atomically, return `delivery`; `pending_exists` while the sender already has a pending record for that target, unless `send_new: true`; `strategy: interrupt_then_start` selects that recipe (§5.7) |
+| `coord.inbox.send {op, submission, to, mode, priority?, strategy?, content, quoted?, render?, send_new?, …}` | grant and quota check, resolve `to` once, admit or reject atomically, return `delivery`; `pending_exists` while the sender already has a pending record for that target, unless `send_new: true`; `strategy: interrupt_then_start` selects that recipe (§5.7) |
 | `coord.inbox.edit` / `coord.inbox.withdraw {op, delivery, expect, …}` | while `recorded`/`held`, CAS on the record; after claim `too_late` |
 | `coord.inbox.take` / `coord.inbox.report` / `coord.inbox.reconcile` | pull (§7) |
 | `coord.inbox.peek {agent, at?, limit?}` | what a take at that point would return, without claiming (needs `receive`) |
@@ -244,15 +245,21 @@ Results use one **coordination envelope** `{state, reason?, attempt?: {id, steps
   kind); a sender cannot set it. A sender may add `quoted` (asserted provenance of forwarded content, shown as a claim)
   and `render` (the renderings it accepts, `agent-v0.md` §3.2). If the target declares no accepted rendering, the record
   is held `origin_unsupported`.
-- **Lanes:** `boundary`, `preempt` and `admit` are never blocked by `start`/`settle` records waiting for idle. Within
-  a lane, order is promised per (sender, target, lane) only. An `unknown` blocks only records whose ordering depends
-  on it.
-- **Fairness and quotas.** Per target, eligible records from different senders are served round-robin within a lane,
-  so one sender cannot starve others. Quotas per sender per target and per sender overall (open records and bytes;
-  `send_new` counts too) reject over the limit with `quota` `(pending K2 for numbers)`.
+- **Lanes:** `boundary`, `preempt` and `admit` are never blocked by `start`/`settle` records waiting for idle.
+  Priority never crosses lanes. An `unknown` blocks only records whose ordering depends on it; priority never
+  makes an otherwise ineligible record eligible.
+- **Priority and order.** Records carry `priority: low | normal | high`, default `normal`, editable while pending.
+  Within one target and lane, choose (1) highest priority among eligible waiting records **across senders**;
+  (2) sender round-robin among equal priority; (3) FIFO by `order` within one sender and equal priority. A sender's
+  higher-priority record may overtake its own lower ones. Priority never bypasses quotas, gates or controls and
+  never changes an already claimed record. Sustained higher-priority traffic can starve lower-priority mail;
+  quotas bound admissions, not the wait. There is no aging in v0.
+- **Fairness and quotas.** Within equal priority and one lane, round-robin prevents one sender from starving
+  another. Quotas per sender per target and per sender overall (open records and bytes; `send_new` counts too)
+  reject over the limit with `quota` `(pending K2 for numbers)`.
 - **Hold reasons** (always shown): `paused`, `agent_busy`, `agent_absent`, `agent_ended`, `agent_retired`,
-  `session_changed`, `stale_guard`, `unsupported_mode`, `unsupported_content`, `origin_unsupported`,
-  `integration_unavailable`, `no_grant`,
+  `session_changed`, `stale_guard`, `unsupported_mode`, `unsupported_content`, `too_large_for_consumer`,
+  `origin_unsupported`, `integration_unavailable`, `no_grant`,
   `quota`, `awaiting_route`, `handover_pending`, `claim_unconfirmed`, `ordering_unknown`.
 - **Mode resolution:** the native mode if declared. `start` with `busy: reject` waits for idle. `settle` without native
   settle waits for idle and goes as `start`, `held_by: vqro`. `boundary` without native support stays held. `preempt`
@@ -385,15 +392,16 @@ editor-empty evidence, reports `dispatched`, labels the mode unverified and obey
 - **Eligibility is the inbox's:** `turn` serves `boundary`; `settle` serves `boundary` and `settle`; `idle` serves
   `start`, `boundary` and `settle`; `tool` serves `admit`, plus `boundary` where declared an evidenced boundary.
   `preempt` is never pulled.
-- **Take:** `coord.inbox.take {op, agent, consumer, at, accept: [block types], limit ≤ 16}` claims, as one batch,
-  up to `limit` eligible records in `order` within the page bound (the rest stay held), durably before replying,
+- **Take:** `coord.inbox.take {op, agent, consumer, at, accept: [block types], max_bytes, limit ≤ 16}` claims, as
+  one batch, up to `limit` eligible records in §5.6 selection order within the page bound (the rest stay held), durably before replying,
   and returns `{records:
   [{delivery, from, origin, mode, content, claim}]}`. Each claim binds delivery and version, target and effective
   session, `control_epoch`, `consumer` and `at`. A paused, ended or unauthorized target returns `{records: [], held:
   <reason>}`. The plugin inserts every returned record at that point, in order, with its origin. A `turn` take may
   extend the run by one request. Every content block must have a type in `accept`; other records stay held
-  `unsupported_content` for that consumer, never claimed then released and reclaimed at each safe point. No block
-  is dropped or flattened.
+  `unsupported_content` for that consumer. `max_bytes` is the consumer's per-record byte budget: a larger record
+  stays held `too_large_for_consumer` for that agent. Neither filter claims then releases/reclaims the record at
+  each safe point. No block is dropped or flattened; the aggregate page/batch byte bound (§10) still applies.
 - **Report** `coord.inbox.report {op, delivery, claim, stage}` names the current claim and consumer and only moves
   forward; a stale claim is rejected unchanged. `inserted` (`evidence: entry` only), `supplied` (`insert: context,
   evidence: none`), `read`, `handled`, as in `agent-v0.md` §2.2. `released`: the plugin returned from the point
@@ -532,5 +540,5 @@ KiB encoded (legal maximum 1,989 B), so `N` = 4096 entries is 8 MiB.
 
 Operation permissions and sandboxing; security against same-user processes; task engines and automatic task
 completion; automatic agent activation; physical suspension; cross-workspace or cross-host delivery (D23);
-exactly-once; read markers; priorities beyond lanes and fairness; blocking waits for agents (send, end the turn, the
+exactly-once; read markers; priority aging; blocking waits for agents (send, end the turn, the
 reply wakes you).

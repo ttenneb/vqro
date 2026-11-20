@@ -504,6 +504,12 @@ replaced when the Pi bridge is ported.
   basis), session cwd and read-only model/effort. Tools/runs may carry start/end times and messages an `at_ms`;
   absent values stay unknown, never inferred. Text format is per block (`plain` default or `markdown`, fallback
   plain). Runtime/vqro notices use message role `system`, not `coordination`; send authority is unchanged.
+- Inbox priority is `low | normal | high` (default normal), editable pending only. Per target/lane, highest
+  eligible priority wins across senders, then sender round-robin, then equal-priority per-sender FIFO. It never
+  bypasses lanes, gates, quotas, controls or an existing claim; lower priorities may starve under sustained higher
+  traffic, with no aging in v0. This refines the earlier unconditional per-sender FIFO/fairness promise.
+- Pull `max_bytes` is a per-record consumer budget; oversized mail stays held `too_large_for_consumer` for the agent,
+  like unsupported content, without claim/release churn or truncation. Aggregate batch bounds still apply.
 
 **Human answers (2026-11-19, CONFIRMED).**
 - **AS1, pause:** "vqro stops delivery": paused means vqro sends, hands out and wakes nothing until resumed; an agent

@@ -201,8 +201,8 @@ Checked against fake adapters. Level **P** (pull): a terminal agent plus a plugi
 
 | Declaration | Where | Checked by |
 |---|---|---|
-| operation window, scope capacity, quotas, protected-domain budget, identity cache size | the extension | I10, I17–I19, H14, H16, L7–L9 |
-| `pull {points, insert, evidence}`, `consumer`; advisory terminal status | plugin's endpoint, agents extension | T1–T13 |
+| operation window, scope capacity, quotas, protected-domain budget, identity cache size | the extension | I10, I17–I19, I21, H14, H16, L7–L9 |
+| `pull {points, insert, evidence}`, `consumer`; advisory terminal status | plugin's endpoint, agents extension | T1–T14 |
 
 **I. Inbox.** P1's prototype (`proto/inbox-seam` b26cf0a, fake native ledger recording every invocation) passes I1–I6
 for one fake agent; the rest need the full extension.
@@ -245,14 +245,18 @@ for one fake agent; the rest need the full extension.
 - I16 a second pending send by the same sender to the same target returns `pending_exists` unless `send_new: true`.
 - I17 two principals both choose submission `s`: different `delivery` ids, and receipts, lookups and replies never mix
   them; a rolled operation window leaves both pending records editable.
-- I18 fairness: one sender floods a target; another sender's record is still served within one round of the lane;
-  over-quota sends (including `send_new`) are rejected `quota`.
+- I18 fairness: one sender floods a target; another sender's **equal-priority** record is still served within one
+  round of that priority in the lane; over-quota sends (including `send_new`) are rejected `quota`.
 - I19 control headroom: during a reconnect burst of 200 stream opens and an inbox flood, interrupts and answers are
   still admitted within the declared latency bound; stream opens use their own budget and never exhaust the control
   reservation.
 - I20 origin: agent A, holding only `send:start`, sends with `quoted {principal: owner, kind: human}`; the record's
   `origin` is still A (derived from `from`), the model envelope identifies A as sender and shows the quote as a claim,
   never as the owner's instruction; if B declares no rendering in `render`, the record is held `origin_unsupported`.
+- I21 priority: highest eligible priority wins across senders within one target/lane; equal priorities use sender
+  round-robin and then per-sender FIFO. A sender's high mail can overtake its earlier low mail. Default is normal;
+  a pending priority edit races claim by CAS, never modifies a claimed record. High never bypasses a gate, quota,
+  eligibility hold, lane or control reservation. Sustained high traffic may leave low held; no aging is promised.
 
 **H. Pause and scope resume** (R's traces). H1 crash before claim: no effect until an explicit current-epoch resume,
 then at most one claim. H2 crash after durable claim: `unknown` through any resume, never invoked again. H3 the runtime
@@ -307,7 +311,7 @@ subject handle without an unambiguous principal is refused. Team/project grants 
 **T. Pull** (P5; Pi pinned per run). T1 OSC 7501 and marker mapping; nothing typed into the terminal by default;
 without a plugin, records stay held `integration_unavailable`. T2 eligibility comes from the point: a `turn` take
 never returns `settle` or `start`; a `tool` take mid-run leaves a queued `settle` pending; `preempt` is never pulled;
-one take batch in flight per target; a batch over the page bound returns what fits; records arrive in order in exactly
+one take batch in flight per target; a batch over the page bound returns what fits; records arrive in selection order in exactly
 the next model request. T3 an abort right after take leaves the message inserted and unread; a context hook or
 `message_start` never produces `read`. T4 `released` only when the handler returned without the entry; a crash between
 take and insertion → `unknown`. T5 restart: `coord.inbox.reconcile` marks open claims `inserted` from the session
@@ -333,6 +337,10 @@ until a publication (including another terminal's change). The sidebar prefers t
 only without it; no report never
 implies idle. Reporter ownership `(pending C2)`: the terminal's launcher-tagged principal and owner may report;
 other principals get `not_authorized` without applying a report.
+T14 per-record consumer budget: a take with `max_bytes` below a record's size leaves it held
+`too_large_for_consumer` for that agent through repeated safe points, with zero claims/releases and no truncation;
+smaller eligible mail remains selectable, aggregate batch bounds still hold, and a sufficient budget permits a
+first claim only when the other eligibility checks pass.
 
 **L. Lifecycle policy.** L5 stop closes the gate first; without a declared `agent.stop`, `host_kill` is offered only
 when the host is a core resource of the bound incarnation with a declared termination primitive, after showing
