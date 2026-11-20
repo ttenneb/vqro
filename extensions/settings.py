@@ -257,6 +257,8 @@ def ext_rows(states, commands=None):
         if settings_command:
             actions.append({"text": "Extension settings", "command": settings_command,
                             "disabled": status not in ("running", "provider-not-connected") or settings_command not in commands})
+        if "logs.open" in commands:  # the logs extension's viewer, when it runs
+            actions.append({"text": "View log", "command": "logs.open", "args": {"name": name}})
         details = [info_row(manifest_text(manifest, "description", value.get("description") or "No description provided.")),
                    {"type": "header", "text": "Runtime"},
                    info_row(f"Status: {status}", STATUS_STYLE.get(status)),
@@ -299,7 +301,8 @@ def ext_rows(states, commands=None):
                 if isinstance(items, list) and items:
                     details.append(info_row(field.replace("_", " ").title() + ": " + ", ".join(label(s) for s in items if isinstance(s, str))))
         log_root = ext.info.get("state_dir")
-        details.append(info_row(f"Log: {os.path.join(log_root, 'ext-'+name+'.log')} (open externally; no in-app log viewer)" if log_root else "No in-app log viewer; log location unavailable."))
+        viewer = "View log above" if "logs.open" in commands else "turn on Extension logs to read it here"
+        details.append(info_row(f"Log: {os.path.join(log_root, 'ext-'+name+'.log')} ({viewer})" if log_root else "Log location unavailable."))
         groups.setdefault(kind, []).append({"id": "extension/"+name, "type": "toggle", "text": shown,
             "checked": on, "description": summary, "tags": [name, kind, summary],
             "badges": [{"text": status, "style": STATUS_STYLE.get(status, "dim")}] + [

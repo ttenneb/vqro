@@ -88,6 +88,11 @@ try:
     check("turning on offers the needed extension", "Turn on Sidebar and Tabs" in out, out)
     text("run settings.open; filter sidebar; do 1 1")
     check("offer turns both on", wait(lambda: all(call("extension.list")["extensions"][n]["display_status"] == "running" for n in ("tabs", "sidebar"))))
+    # A view of an unknown kind (the logs extension's logs.tail) is shown through its fallback panel.
+    with open(f"{R}/st/ext-tabs.log", "a") as log:
+        log.write("text-client-log-line\n")
+    out = wait(lambda: (lambda o: o if "text-client-log-line" in o else None)(text('run logs.open {"name": "tabs"}')))
+    check("a custom view kind is drawn through its fallback", out and "== Log: tabs" in out, out)
     # Recovery: safe mode, the shared chooser, session allowance, leave.
     text("p 5")
     check("prefix row enters safe mode", wait(lambda: call("workspace.snapshot").get("safe_mode") is True))

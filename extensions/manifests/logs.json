@@ -1,0 +1,10 @@
+{
+  "name":"logs", "title":"Extension logs", "version":"0.1.0", "license":"Apache-2.0", "author":"Bennett Garcia", "kind":"management",
+  "summary":"Read extension logs inside vqro, following new lines.",
+  "description":"Shows the end of an extension's log file from the core host (including its rotated part), follows new lines while you stay at the end, and filters with /. Settings offers it as View log. Turn it off to lose the viewer; the core keeps writing the logs.",
+  "requires":{"protocol":1,"client_features":["items","toolbar","select","chips"]},
+  "provides":["command/logs.open","command/logs.show","command/logs.refresh","view/logs.tail","view/logs.rows"],
+  "works_with":[{"cap":"command/tabs.show","suggest":"tabs","without":"Open in a tab does nothing"},
+                {"cap":"ui/logs.tail@1","without":"Every client shows the log as a panel (no native tail renderer exists yet)"}],
+  "contributes":{"commands":["logs.open","logs.show","logs.refresh"],"panels":["Extension logs"]}
+}

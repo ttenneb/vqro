@@ -20,7 +20,8 @@ mode. A missing/bad manifest affects information, not whether the program is per
   the existing session-only recovery allowance; saved enabled declarations remain unchanged.
 - Turning Settings itself off stops that page. The vqro badge/prefix still reaches commands and recovery,
   including enabling it again. The prefix remains available inside the popup and while searching.
-- There is no in-app log viewer yet. The detail reports the core-host log path for external inspection.
+- View log (when the `logs` extension runs) opens the extension's core-host log in a following, filterable viewer;
+  the detail also reports the log path for external inspection.
 - Dependencies (D29): the detail lists **Needs**, **Works with**, **Used by** and **Provides**, each with its status;
   a list badge says `needs Tabs (off)` (or `not installed`). Turning on an extension whose needs are off opens one
   confirmation: turn on both (default), turn on this one only, or cancel. A provider that is not installed is named

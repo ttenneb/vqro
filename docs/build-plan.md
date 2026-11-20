@@ -317,6 +317,12 @@ written the same way was contained by the crash budget and removed with one reve
   same fixtures). Next: element/view-kind `fallback`, an unfamiliar real extension (review P2), OpenTUI spike
   (needs a runtime install decision). Design: `research/declarations-and-ui-clients.md`.
 
+## Fallbacks and the log viewer (2026-11-19, D29, review P2)
+
+- Rows, chips and view kinds degrade to declared fallbacks (Rust model, TUI, Python text client, fixtures).
+- `logs` extension: in-app extension log viewer (Settings > View log), its own view kind with a panel fallback;
+  forced exactly two host changes, view-kind fallback and the `follow` panel hint (`research/log-viewer-p2.md`).
+
 ## Known gaps found while building
 
 - **History churn:** extensions that refresh views on every event (the sidebar on status changes) fill the
