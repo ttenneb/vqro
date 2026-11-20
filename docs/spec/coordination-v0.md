@@ -162,13 +162,29 @@ label and the delegation rows are not built yet.
 and confers no rights. It is resolved once when an action starts; records keep the exact `rN`. A handle whose agent
 ended or was retired resolves to `ended` or `retired`, and new sends are rejected until it is rebound.
 
-**Membership** `(pending K2)`. `doc/agents/members/<rN> = {project, reports_to}` is the one membership authority:
+**Membership**. `doc/agents/members/<rN> = {project, reports_to}` is the one membership authority:
 ordinary attributed workspace configuration, changed through `coord.membership.set` (right `membership` on the moved
 subtree and its source and destination), which validates the whole result in one write. Like any ordinary change it is
 undone by its author's `u` and revertable explicitly. The protected operational domain never owns or copies
 membership; its records only reference it by `{rN, revision}`. It is a bounded forest: at most one parent, no cycles,
 parent and child in the same project. Moving an agent moves its subtree. `team:<rN>` selects that coordinator and its
 transitive reports. Names, panes, process ancestry and parentage never create membership or rights.
+
+Raw/imported invalid membership is reported, never quietly normalized. Explicit recovery uses the existing
+`coord.membership.set {op,action:"repair",membership_revision,changes:[...]}` only while the forest is invalid.
+Read the opaque current stamp from `coord.status.configuration.membership_revision`. Each sparse change is
+`{agent,project,reports_to,expect}` or `{agent,action:"delete",expect}`; targets must be unique/exact/known, and
+both the current shared stamp and every touched row version are required. The entire proposed forest must be
+valid before one ordinary attributed transaction applies the shared revision CAS and all explicit row CASes.
+No unlisted edge/project is rewritten; multiple corrupt components therefore require one complete repair batch.
+Existing member/request/frame/transaction and normally charged effect-intent limits apply; no new pool/reserve.
+
+Repair requires `membership` on affected endpoints (cycle-safe old and proposed descendant closures), and on
+old/new coordinator boundaries or root projects, just as normal moves do. Invalid teams confer no authority;
+independent exact/project/wildcard rights still work. An unreadable original boundary requires the owner rather
+than guessed authority. Untouched malformed rows still refuse the whole result; invalid raw non-agent keys need
+the generic public workspace recovery path. No prior grants, gates or inbox effects are rewritten. Undo/revert
+may restore invalid ordinary membership, which is again reported; external-intent history never replays a repair.
 
 **Grants.** Coordination, not security. Rights come only from the owner rule and explicit additive grants (union of
 matching unexpired grants; no denies, no order), changed through `coord.grants` (attributed).

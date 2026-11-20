@@ -260,9 +260,12 @@ class Policy:
         children = {}
         for rid, row in members.items():
             children.setdefault(row["reports_to"], []).append(rid)
-        result, pending = [], [root]
+        result, pending, seen = [], [root], set()
         while pending:
             rid = pending.pop()
+            if rid in seen:
+                continue
+            seen.add(rid)
             result.append(rid)
             if len(result) > MAX_MEMBERS:
                 _fail("quota", "membership traversal bound")
@@ -659,7 +662,72 @@ class Policy:
             value["principal"] = _string(args["principal"], "bound principal", 256)
         return [self._cas(key, value, args.get("expect"))]
 
+    def _membership_repair_ops(self, args, principal):
+        if not self.membership_error:
+            _fail('invalid', 'membership repair requires an invalid forest; use a normal move')
+        revision = args.get('membership_revision')
+        if not isinstance(revision, str):
+            _fail('invalid', 'membership repair requires the current membership_revision')
+        if revision != self.membership_revision:
+            _fail('conflict', 'membership selection changed')
+        changes = args.get('changes')
+        if not isinstance(changes, list) or not 1 <= len(changes) <= MAX_MEMBERS:
+            _fail('invalid', 'repair needs a nonempty bounded changes list')
+        # Use raw values, not the degraded selector cache: an unreadable row
+        # outside the explicit patch must never silently become a valid root.
+        original = {_agent(key[len(MEMBERS):]): copy.deepcopy(entry['value'])
+                    for key, entry in self.entries.items() if key.startswith(MEMBERS)}
+        candidate, touched, ops = copy.deepcopy(original), set(), []
+        for change in changes:
+            if not isinstance(change, dict):
+                _fail('invalid', 'membership repair change must be an object')
+            agent = _agent(change.get('agent'))
+            if agent not in self.agents:
+                _fail('not_found', 'unknown membership target')
+            if agent in touched:
+                _fail('invalid', 'duplicate membership repair target')
+            touched.add(agent)
+            action = change.get('action', 'set')
+            if action not in ('set', 'delete'):
+                _fail('invalid', 'repair change action must be set or delete')
+            value = None if action == 'delete' else _member(change)
+            ops.append(self._cas(MEMBERS + agent, value, change.get('expect')))
+            if value is None:
+                candidate.pop(agent, None)
+            else:
+                candidate[agent] = value
+        if len(candidate) > MAX_MEMBERS:
+            _fail('quota', 'membership row limit')
+        candidate = {agent: _member(value) for agent, value in candidate.items()}
+        self._validate_forest(candidate)
+        old, unreadable = {}, set()
+        for agent, value in original.items():
+            try:
+                old[agent] = _member(value)
+            except PolicyError:
+                unreadable.add(agent)
+        if unreadable and principal != self.owner:
+            _fail('no_grant', 'owner required to repair an unreadable membership boundary')
+        affected = set()
+        for agent in touched:
+            affected.update(self._subtree(agent, old))
+            affected.update(self._subtree(agent, candidate))
+        for agent in sorted(affected):
+            self.require(principal, 'membership', agent)
+        for agent in touched:
+            for row in (old.get(agent), candidate.get(agent)):
+                if row is None:
+                    continue
+                if row['reports_to']:
+                    self.require(principal, 'membership', row['reports_to'])
+                elif row['project'] is not None and not self._has_scope(principal, 'membership', 'project:' + row['project']):
+                    _fail('no_grant', 'membership right missing on source or destination project')
+        digest = hashlib.sha256(encoded(sorted(candidate.items()))).hexdigest()
+        return [self._cas(MEMBERSHIP_REVISION, {'revision': digest}, self._version(MEMBERSHIP_REVISION)), *ops]
+
     def _membership_ops(self, args, principal):
+        if args.get('action') == 'repair':
+            return self._membership_repair_ops(args, principal)
         agent = _agent(args.get("agent"))
         if agent not in self.agents:
             _fail("not_found", "unknown membership target")

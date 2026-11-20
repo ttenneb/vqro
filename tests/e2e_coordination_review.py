@@ -302,6 +302,69 @@ def case_brick():
     return out
 
 
+def case_membership_repair():
+    native_calls = []
+    def receive(method, params):
+        native_calls.append(params)
+        return {'outcome': 'observed'}
+    agents = [agent('repair-' + str(i), native(), handler=receive) for i in range(4)]
+    a, b, c, d = agents
+    for rid, parent in [(a, b), (b, a), (c, d), (d, c)]:
+        raw_set('doc/agents/members/' + rid, {'project': 'repair', 'reports_to': parent})
+    raw_set('doc/agents/grants/repair-team', {'who': 'p:repair-team', 'on': 'team:' + a, 'can': ['membership']})
+    raw_set('doc/agents/grants/repair-project', {'who': 'p:repair-project', 'on': 'project:repair', 'can': ['membership']})
+    wait(lambda: not cmd('status')['configuration']['membership_valid'])
+    def args(roots=(a, c)):
+        return {'op': op('repair'), 'action': 'repair',
+                'membership_revision': cmd('status')['configuration']['membership_revision'],
+                'changes': [{'agent': rid, 'project': 'repair', 'reports_to': None,
+                             'expect': owner.call('workspace.get', {'key': 'doc/agents/members/' + rid})['version']}
+                            for rid in roots]}
+    before = {rid: owner.call('workspace.get', {'key': 'doc/agents/members/' + rid}) for rid in agents}
+    control = cmd('scope', {'action': 'preview', 'scope': 'agent:' + a})['expect']
+    try:
+        cmd('membership.set', args((a,)))
+        raise AssertionError('partial repair of two cycles was accepted')
+    except RPCError as error:
+        assert error.kind == 'invalid', error
+    assert all(owner.call('workspace.get', {'key': 'doc/agents/members/' + rid}) == before[rid] for rid in agents)
+    team = Client({'kind': 'principal', 'principal': 'p:repair-team'})
+    try:
+        cmd('membership.set', args(), team)
+        raise AssertionError('invalid team conferred repair authority')
+    except RPCError as error:
+        assert error.kind == 'membership_invalid', error
+    stale = args(); stale['changes'][0]['expect'] -= 1
+    try:
+        cmd('membership.set', stale)
+        raise AssertionError('stale repair row was accepted')
+    except RPCError as error:
+        assert error.kind == 'conflict', error
+    project = Client({'kind': 'principal', 'principal': 'p:repair-project'})
+    requested = args()
+    repaired = cmd('membership.set', requested, project)
+    assert repaired['state'] == 'accepted', repaired
+    wait(lambda: cmd('status')['configuration']['membership_valid'])
+    assert set(cmd('scope', {'action': 'preview', 'scope': 'team:' + a})['targets']) == {a, b}
+    assert set(cmd('scope', {'action': 'preview', 'scope': 'team:' + c})['targets']) == {c, d}
+    assert all(owner.call('workspace.get', {'key': 'doc/agents/members/' + rid}) == before[rid] for rid in (b, d))
+    replay = cmd('membership.set', requested, project)
+    assert replay['historical'], replay
+    txn = repaired['coordination']['data']['txn']
+    owner.call('workspace.revert', {'txn': txn})
+    wait(lambda: not cmd('status')['configuration']['membership_valid'])
+    assert all(owner.call('workspace.get', {'key': 'doc/agents/members/' + rid})['value'] == before[rid]['value'] for rid in agents)
+    assert cmd('membership.set', args(), project)['state'] == 'accepted'
+    wait(lambda: cmd('status')['configuration']['membership_valid'])
+    after = cmd('scope', {'action': 'preview', 'scope': 'agent:' + a})['expect']
+    assert (after['control_epoch'], after['control_revision']) == (control['control_epoch'], control['control_revision'])
+    assert native_calls == [], native_calls
+    return {'two_cycles_atomic': True, 'incomplete_refused': True, 'invalid_team_denied': True,
+            'project_authorized': True, 'stale_row_refused': True, 'untouched_rows_unchanged': True,
+            'ordinary_undo_restores_invalid_then_explicit_repair': True, 'historical_no_reapply': True,
+            'gate_control_unchanged': True, 'native_writes': 0}
+
+
 def case_rawcycle():
     pull = {'points': {'tool': {'precision': 'exact'}}, 'insert': 'user', 'evidence': 'entry'}
     a = agent('raw-a', native(principal='p:forest-native'))
@@ -919,7 +982,7 @@ def case_archive_abort():
 
 
 # Witness the bounded attention view before bulk uncertain-history fixtures fill it.
-CASES = {'request_routing': case_request_routing, 'ordering_visibility': case_ordering_visibility, 'brick': case_brick, 'idle': case_idle, 'membership': case_membership, 'identity': case_identity, 'reconcile': case_reconcile, 'names': case_names,
+CASES = {'membership_repair': case_membership_repair, 'request_routing': case_request_routing, 'ordering_visibility': case_ordering_visibility, 'brick': case_brick, 'idle': case_idle, 'membership': case_membership, 'identity': case_identity, 'reconcile': case_reconcile, 'names': case_names,
          'rawcycle': case_rawcycle, 'invalid_declaration': case_invalid_declaration,
          'window': case_window, 'handover': case_handover, 'archive': case_archive, 'queue_epoch': case_queue_epoch, 'handover_withdrawn': case_handover_withdrawn, 'archive_abort': case_archive_abort, 'handover_archive': case_handover_archive, 'pause_reporting': case_pause_reporting, 'recipe_history': case_recipe_history, 'compaction_identities': case_compaction_identities, 'declarations': case_declarations}
 core = None

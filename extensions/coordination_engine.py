@@ -248,6 +248,7 @@ class Coordinator:
         try:
             policy = self.policy()
             return {"membership_valid": not policy.membership_error,
+                    "membership_revision": policy.membership_revision,
                     "membership_errors": policy.membership_errors[:8], "incomplete": len(policy.membership_errors) > 8}
         except PolicyError as error:
             return {"valid": False, "error": {"kind": error.kind, "message": str(error)[:1024]}}
@@ -1468,6 +1469,8 @@ class Coordinator:
             principal = context["principal"]
             if command == "names":
                 ops = policy.names_ops(principal, args.get("handle"), args.get("agent"), expect=args.get("expect"), endpoint_principal=args.get("endpoint_principal"))
+            elif command == "membership" and args.get('action') == 'repair':
+                ops = policy.config_ops('coord.membership.set', args, principal)
             elif command == "membership":
                 ops = policy.membership_ops(principal, args.get("agent"), args.get("project"), args.get("reports_to"),
                                             expect=args.get("expect"), membership_revision=args.get("membership_revision"))
