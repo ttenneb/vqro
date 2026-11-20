@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from agent_conformance.evidence import CLOSURES, REGRESSIONS, connection_scale, host_generation_fence, producer_overflow, retained_memory_accounting
 from agent_conformance.results import CheckFailed, HarnessGap
@@ -35,9 +36,12 @@ class ComponentEvidenceTests(unittest.TestCase):
             target = self.repo / path
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(self.source_text[path])
-        self.run_git("init", "-q")
+        self.run_git("init", "-q", "-b", "main")
         self.run_git("add", ".")
         self.revision = self.commit()
+        trusted = patch("agent_conformance.evidence.HARNESS_REPO", self.repo)
+        trusted.start()
+        self.addCleanup(trusted.stop)
         self.ctx = SimpleNamespace(manifest={}, metadata={"adapter_image": {"sha256": "a" * 64}, "core_image_sha256": "b" * 64}, evidence=[])
 
     def tearDown(self):
@@ -198,6 +202,68 @@ class ComponentEvidenceTests(unittest.TestCase):
         producer_overflow(self.ctx)
         self.assertTrue(self.ctx.evidence[-1]["not_a_separate_runtime"])
         self.assertIn("asserted", self.ctx.evidence[-1]["build_source_linkage"])
+
+    def test_callers_main_cannot_authorize_a_producer_outside_trusted_main(self):
+        trusted = self.repo
+        caller = self.root / "caller-repository"
+        self.run_git("clone", "-q", str(trusted), str(caller))
+        self.repo = caller
+        (caller / "untrusted.txt").write_text("caller-only history\n")
+        self.run_git("add", ".")
+        self.revision = self.commit()
+        # Everything else is a valid, internally consistent proof, including
+        # its producer being the tip of the caller's own branch named main.
+        for ident, verify in (("O3", producer_overflow), ("O10", retained_memory_accounting),
+                              ("L3", host_generation_fence), ("O11", connection_scale)):
+            with self.subTest(case=ident):
+                self.bundle(ident)
+                with self.assertRaisesRegex(HarnessGap, "not reachable from trusted harness main"):
+                    verify(self.ctx)
+
+    def test_existing_but_unmerged_producer_is_not_authorized(self):
+        self.run_git("checkout", "-qb", "unmerged-producer")
+        (self.repo / "unmerged.txt").write_text("not part of main\n")
+        self.run_git("add", ".")
+        self.revision = self.commit()
+        self.bundle("O3")
+        with self.assertRaisesRegex(HarnessGap, "not reachable from trusted harness main"):
+            producer_overflow(self.ctx)
+
+    def test_producer_may_be_an_ancestor_instead_of_the_main_tip(self):
+        self.bundle("O3")
+        (self.repo / "later.txt").write_text("later main commit\n")
+        self.run_git("add", ".")
+        main = self.commit()
+        producer_overflow(self.ctx)
+        ancestry = next(row for row in self.ctx.evidence if row["kind"] == "trusted_producer_main")
+        self.assertEqual((ancestry["main"], ancestry["producer_source"]), (main, self.revision))
+
+    def test_source_checkout_override_does_not_replace_the_trust_anchor(self):
+        trusted = self.repo
+        caller = self.root / "source-checkout"
+        self.run_git("clone", "-q", str(trusted), str(caller))
+        row = self.bundle("O3")
+        row["source_repo"] = str(caller)
+        producer_overflow(self.ctx)
+        ancestry = next(row for row in self.ctx.evidence if row["kind"] == "trusted_producer_main")
+        self.assertEqual(ancestry["repo"], str(trusted))
+
+    def test_replace_refs_cannot_hide_a_changed_image_component(self):
+        caller = self.root / "source-checkout"
+        self.run_git("clone", "-q", str(self.repo), str(caller))
+        row = self.bundle("O3")
+        row["source_repo"] = str(caller)
+        self.repo = caller
+        path = "src/provider_client/items.rs"
+        (caller / path).write_text(self.source_text[path] + "fn changed_runtime() {}\n")
+        self.run_git("add", ".")
+        changed = self.commit()
+        self.run_git("replace", changed, self.revision)
+        build = json.loads(Path(row["build_manifest"]["path"]).read_text())
+        build["adapter"]["source_commit"] = changed
+        row["build_manifest"] = self.put("build.json", build)
+        with self.assertRaisesRegex(HarnessGap, "component differs from tested source"):
+            producer_overflow(self.ctx)
 
     def test_o10_accounting_requires_both_internal_witnesses_and_reports_scope(self):
         row = self.bundle("O10")

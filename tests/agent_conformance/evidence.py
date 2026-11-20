@@ -15,6 +15,7 @@ import subprocess
 from .results import CheckFailed, HarnessGap, check
 
 MAX_ARTIFACT = 4 << 20
+HARNESS_REPO = Path(__file__).resolve().parents[2]
 
 # Semantic regression identities are harness requirements, not caller-selected labels.
 REGRESSIONS = {
@@ -77,7 +78,7 @@ def document(row):
 
 def git(repo, *args):
     try:
-        return subprocess.run(["git", "--no-pager", "-C", str(repo), *args],
+        return subprocess.run(["git", "--no-pager", "--no-replace-objects", "-C", str(repo), *args],
             env={"PATH": os.defpath, "GIT_CONFIG_NOSYSTEM": "1"}, check=True,
             capture_output=True, timeout=2).stdout
     except (OSError, subprocess.SubprocessError) as error:
@@ -125,10 +126,19 @@ def component(ctx, ident):
         raise HarnessGap("component evidence is not linked to the executed adapter image")
     if row.get("known_counterexamples"):
         raise CheckFailed("shared component has unresolved counterexamples: " + json.dumps(row["known_counterexamples"]), component="producer")
-    repo = Path(row.get("source_repo", Path(__file__).resolve().parents[2]))
+    repo = Path(row.get("source_repo", HARNESS_REPO))
     if not repo.is_absolute() or not repo.is_dir():
         raise HarnessGap("component source repository is absent")
     producer = commit(repo, row.get("producer_source"))
+    # The manifest may locate an image's source checkout, not choose which
+    # producer history we trust. Pin our own main and prove ancestry there.
+    trusted_main = git(HARNESS_REPO, "rev-parse", "--verify", "refs/heads/main^{commit}").decode().strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", trusted_main):
+        raise HarnessGap("trusted harness main did not resolve to an immutable commit")
+    try:
+        git(HARNESS_REPO, "merge-base", "--is-ancestor", producer, trusted_main)
+    except HarnessGap as error:
+        raise HarnessGap("producer source is not reachable from trusted harness main") from error
     receipt = document(row.get("receipt"))
     steps = receipt.get("steps")
     if (receipt.get("kind") != "vqro.check-receipt" or receipt.get("result") != "pass"
@@ -159,13 +169,15 @@ def component(ctx, ident):
             raise HarnessGap("build record does not identify the executed " + role + " image")
         image_source = commit(repo, image.get("source_commit"))
         for path in paths:
-            if source(repo, producer, path) != source(repo, image_source, path):
+            if source(HARNESS_REPO, producer, path) != source(repo, image_source, path):
                 raise HarnessGap("executed image component differs from tested source: " + path)
     if "adapter" not in files:
         raise HarnessGap("producer inheritance does not identify the adapter's component")
     if ident in ("L3", "O11") and ("core" not in files or row.get("core_image_sha256") != ctx.metadata.get("core_image_sha256")):
         raise HarnessGap("shared core evidence is not linked to the executed core component")
-    return row, receipt, repo, producer
+    ctx.evidence.append({"kind": "trusted_producer_main", "repo": str(HARNESS_REPO),
+                         "main": trusted_main, "producer_source": producer})
+    return row, receipt, HARNESS_REPO, producer
 
 
 def regressions(row, receipt, repo, producer, ident):

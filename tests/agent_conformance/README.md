@@ -120,8 +120,13 @@ entries keyed by case: executed `adapter_image_sha256`, full40-hex
 `vqro.component-build-v1` and `adapter`/`core` objects with executed image `sha256`
 and immutable `source_commit`. `source_files` maps those roles to the runtime
 source closure; the minimum dependencies in `evidence.CLOSURES` cannot be omitted.
-Git objects must exist in the default source repository or explicit `source_repo`.
-The tested and executed sources must match for each component file.
+The producer commit must be reachable from an immutable resolved `main` in the
+**harness repository**. An explicit `source_repo` may locate image source objects,
+not supply a different trust anchor; even its own branch named `main` cannot
+approve a producer. Producer files and test definitions are read from the trusted
+harness repository, and Git replacement objects are ignored. Evidence records
+the exact trusted-main commit used for this ancestry check. The tested and
+executed sources must still match for each component file.
 
 `required_tests` must equal the exact semantic identifiers in `evidence.REGRESSIONS`,
 not arbitrary caller-chosen passing tests; `test_sources` supplies their fixed
