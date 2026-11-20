@@ -5,11 +5,14 @@ fallback. Missing C1/C2 support is visible and fails closed; raw recovery surviv
 """
 import copy
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 from vqro_ext import Extension, VqroError
 from coordination_store import OperationalStore, StoreError
 from coordination_engine import Coordinator, digest, SCOPE_CAPACITY, WINDOW
 from coordination_policy import PolicyError, bounded_page, QuotaLimits
+from coordination_streams import ItemReceiptStreams
 from dataclasses import asdict
 
 COMMANDS = (
@@ -29,34 +32,102 @@ def callback_context(params):
 
 
 class CoordinationService:
-    def __init__(self, ext):
+    def __init__(self, ext, *, defer_bootstrap=False):
         self.ext = ext
         self.engine = None
         self.unavailable = None
         self.read_only_rows = None
+        self.bootstrap_state = "pending"
+        self.bootstrap_done = threading.Event()
+        self._bootstrap_lock = threading.Lock()
+        self._bootstrap_started = False
+        self._bootstrap_thread = None
+        self._public_registered = False
+        self._defer_bootstrap = defer_bootstrap
         self.pending_wakes = {}
         self.wake_lock = threading.Lock()
         self.wake_seq = 0
         self.event = threading.Event()
+        self.inventory_dirty = True
+        self.dispatch_dirty = True
+        self.pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="coord-native")
+        self.jobs = set()
+        self.job_lock = threading.Lock()
+        self.items = ItemReceiptStreams(self.rpc, self.receipts, wake=self.event.set)
         self.old_handler = ext.vqro.handler
         ext.vqro.handler = self.handle
         self.store = OperationalStore(self.rpc)
-        try:
-            self.read_only_rows = self.store.snapshot()
-        except StoreError:
-            pass  # No invented empty state when a domain is absent/unreadable.
-        try:
-            self.store.register()
-            self.engine = Coordinator(self.store, config=self.config, resources=self.resources,
-                                      providers=self.providers, core_epoch=ext.epoch,
-                                      invoke=self.invoke, config_apply=self.config_apply, wake=self.wake)
-        except (StoreError, PolicyError, VqroError) as error:
-            # No fallback authorizes old ordinary documents as new execution state.
-            self.unavailable = {"kind": getattr(error, "kind", "unavailable"), "message": str(error)[:1024]}
-            ext.log("coordination unavailable (no input invoked):", self.unavailable)
+        # Install callbacks/listeners before subscription or any boot I/O. The
+        # default synchronous path remains for existing component callers only;
+        # production main defers until register() has received every public ACK.
         for name in COMMANDS:
             ext.command("coord." + name, "Coordination: " + name)(lambda args: None)
         ext.on_event(self.on_event)
+        if not defer_bootstrap:
+            self._bootstrap_started = True
+            self._bootstrap()
+
+    def register(self):
+        """The registration/subscription half of Extension.run(), without blocking.
+
+        The SDK currently has no register-only method. Keep its public sequence
+        here so startup mutation cannot block the only thread that registers
+        recovery commands. Notification callbacks are already installed above.
+        """
+        if self._public_registered:
+            return
+        for name, title in self.ext.titles.items():
+            self.rpc("command.register", {"name": name, "title": title})
+        sub = {"from": self.ext.seq, "epoch": self.ext.epoch, "partial_resources": True}
+        if self.ext.event_types is not None:
+            sub["types"] = list(self.ext.event_types)
+        if self.ext.view_content is not None:
+            sub["view_content"] = self.ext.view_content
+        try:
+            self.rpc("events.subscribe", sub)
+        except VqroError as error:
+            if error.kind != "conflict":
+                raise
+        self.ext.vqro.patient = False
+        self._public_registered = True
+
+    def start_bootstrap(self):
+        """Start exactly one autonomous boot, never inside a command's proof scope."""
+        with self._bootstrap_lock:
+            if self._bootstrap_started:
+                return self._bootstrap_thread
+            if self._defer_bootstrap and not self._public_registered:
+                raise VqroError("register coordination commands before bootstrap", "conflict")
+            self._bootstrap_started = True
+            self._bootstrap_thread = threading.Thread(target=self._bootstrap, daemon=True, name="coord-bootstrap")
+            self._bootstrap_thread.start()
+            return self._bootstrap_thread
+
+    def _bootstrap(self):
+        self.bootstrap_state = "reading"
+        try:
+            try:
+                self.read_only_rows = self.store.snapshot()
+            except StoreError:
+                pass  # Unreadable/absent is unknown, not an invented empty queue.
+            self.bootstrap_state = "registering"
+            self.store.register()
+            self.bootstrap_state = "recovering"
+            engine = Coordinator(self.store, config=self.config, resources=self.resources,
+                                 providers=self.providers, core_epoch=self.ext.epoch,
+                                 invoke=self.invoke, config_apply=self.config_apply, wake=self.wake)
+            # Do not expose a partially recovered engine or any of its permits.
+            # Every Coordinator boot write has confirmed before this publication.
+            self.engine = engine
+            self.bootstrap_state = "ready"
+            self.inventory_dirty = self.dispatch_dirty = True
+            self.event.set()
+        except Exception as error:
+            self.unavailable = {"kind": getattr(error, "kind", None) or "unavailable", "message": str(error)[:1024]}
+            self.bootstrap_state = "failed"
+            self.ext.log("coordination unavailable (no input invoked):", self.unavailable)
+        finally:
+            self.bootstrap_done.set()
 
     def rpc(self, method, params=None):
         params = dict(params or {})
@@ -109,13 +180,48 @@ class CoordinationService:
         with self.wake_lock:
             self.pending_wakes[agent] = count
             self.wake_seq += 1
+        self.dispatch_dirty = True
         self.event.set()
 
     def on_event(self, event_type, data):
-        if event_type in ("resource", "resource.removed", "entries", "provider", "missed", "operational"):
+        if event_type == "missed":
+            self.items.gap()
+        if event_type in ("resource", "resource.removed", "entries", "provider", "missed"):
+            self.inventory_dirty = True
+            self.dispatch_dirty = True
             self.event.set()
 
+    def receipts(self, agent, incarnation, events):
+        if self.engine and self.engine.observe_receipts(agent, incarnation, events):
+            self.dispatch_dirty = True
+            self.event.set()
+
+    def _job_finished(self, job):
+        with self.job_lock:
+            self.jobs.discard(job)
+        try:
+            job.result()
+        except Exception as error:
+            self.ext.log("native attempt needs attention:", getattr(error, "kind", "unknown"), str(error)[:512])
+        self.dispatch_dirty = True
+        self.event.set()
+
+    def schedule(self):
+        while True:
+            with self.job_lock:
+                if len(self.jobs) >= 8:
+                    return
+            record = self.engine.claim_one()
+            if record is None:
+                return
+            job = self.pool.submit(self.engine.execute_claim, record)
+            with self.job_lock:
+                self.jobs.add(job)
+            job.add_done_callback(self._job_finished)
+
     def handle(self, method, params):
+        if self.items.handle(method, params):
+            return None
         if method != "command.invoke" or not str(params.get("name", "")).startswith("coord."):
             return self.old_handler(method, params)
         command = params["name"][len("coord."):]
@@ -125,7 +231,8 @@ class CoordinationService:
         if not isinstance(args, dict):
             raise VqroError("coordination arguments must be an object", "invalid")
         if command == "status":
-            return {"state": "unavailable" if self.engine is None else "ready", "reason": self.unavailable,
+            return {"state": "ready" if self.engine else "unavailable" if self.bootstrap_done.is_set() else "initializing",
+                    "reason": self.unavailable, "bootstrap": self.bootstrap_state,
                     "physical_suspension": False, "window": self.engine.window() if self.engine else None,
                     "recovery_readable": self.read_only_rows is not None,
                     "limits": {"scope_targets": SCOPE_CAPACITY, "page_items": 64, "take_items": 16,
@@ -133,7 +240,8 @@ class CoordinationService:
                                "domain_bytes": self.store.byte_limit, "domain_records": self.store.record_limit,
                                "control_reserve_percent": 10,
                                "quotas": asdict(QuotaLimits(domain_bytes=self.store.byte_limit, scope_capacity=SCOPE_CAPACITY))},
-                    "identity_cache": {"owner": "core", "capacity": None, "incomplete": True}}
+                    "identity_cache": {"owner": "core", "capacity": None, "incomplete": True},
+                    "receipts": self.items.status(), "maintenance": self.engine.maintenance_error if self.engine else None}
         if self.engine is None and command in ("inbox.get", "inbox.list", "inbox.peek") and self.read_only_rows is not None:
             return self.read_only(command, args)
         if self.engine is None:
@@ -196,22 +304,29 @@ class CoordinationService:
             result = engine.config_action("membership" if command == "membership.set" else command, args, context)
         else:
             result = actions[command](args, context)
+        self.dispatch_dirty = True
         self.event.set()
         return result
 
     def work(self):
+        next_sweep = 0.0
         while True:
             self.event.wait(1.0)
             self.event.clear()
             if self.engine is None:
                 continue
             try:
-                self.engine.lifecycle_sweep(forget=self.forget)
-                for _ in range(16):
-                    if self.engine.dispatch_one() is None:
-                        break
-                else:
-                    self.event.set()  # bounded batch, then yield to controls/observations
+                if self.inventory_dirty:
+                    self.inventory_dirty = False
+                    self.items.sync(self.resources(), self.providers())
+                if self.items.pump():
+                    self.event.set()
+                if time.monotonic() >= next_sweep:
+                    self.engine.lifecycle_sweep(forget=self.forget)
+                    next_sweep = time.monotonic() + 5.0
+                if self.dispatch_dirty:
+                    self.dispatch_dirty = False
+                    self.schedule()
                 with self.wake_lock:
                     pending, self.pending_wakes = self.pending_wakes, {}
                     sequence = self.wake_seq
@@ -236,14 +351,18 @@ class CoordinationService:
             self.ext.log("unavailable cache retained:", agent, error.kind)
 
     def run(self):
-        self.ext.contribute({"view/coord-status": {"kind": "document", "title": "Coordination"}})
+        self.register()
+        self.start_bootstrap()
         threading.Thread(target=self.work, daemon=True, name="coord-dispatch").start()
-        self.ext.run()
+        self.ext.contribute({"view/coord-status": {"kind": "document", "title": "Coordination"}})
+        # Extension.run() would register/subscribe a second time before waiting.
+        # Its transport reader, notifications and lifetime watcher already run.
+        threading.Event().wait()
 
 
 def main():
     ext = Extension("coord", event_types=["entries", "resource", "resource.removed", "provider", "missed", "operational"])
-    CoordinationService(ext).run()
+    CoordinationService(ext, defer_bootstrap=True).run()
 
 
 if __name__ == "__main__":
