@@ -132,7 +132,8 @@ producer inherits the evidence, and its result records which producer it uses. O
 foreign epoch → `reset`, never a silent join. O5 a session switch on an open stream: a new `snapshot begin` with the
 new epoch precedes any new-epoch record (or the stream closes); a viewer at old `seq` 500 never ignores new records as
 duplicates. O6 two viewers attaching at different times show the same timeline order (by `position`). O7 three
-viewers, one stalled: only its connection closes; native draining continues; it resumes from its last applied record.
+viewers, one stalled: only the stalled stream closes (`slow_consumer`); its connection, its other streams and
+other viewers stay open. Native draining continues; the viewer reattaches from its last applied record.
 O8 JSONL lines split across frames and UTF-8 boundaries. O9 coverage `tail`/`state_only` never shown as complete;
 current state and pending requests survive pruning. O10 retained memory stays within the declared bounds: measure
 journal `max(retain_bytes + snapshot_buffer_bytes, max_record_bytes)` (the one-record floor) and old shared
