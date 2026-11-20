@@ -53,6 +53,10 @@ pub struct Hits {
     pub facets: Vec<(Rect, String, Option<String>)>,
     /// The `Sort:` chip.
     pub sort: Option<Rect>,
+    /// "↓ Latest · End" on a following list scrolled away from its end.
+    pub latest: Option<Rect>,
+    /// Inline row buttons (`actions`): rect, row index, action index.
+    pub actions: Vec<(Rect, usize, usize)>,
 }
 
 fn wrap_text(text:&str,width:u16)->Vec<String> {
@@ -70,8 +74,10 @@ fn wrap_text(text:&str,width:u16)->Vec<String> {
     out
 }
 
-fn chip_label(c: &Value, icons: &Icons) -> String {
-    let t = icons.label(&c["icon"], c["text"].as_str().unwrap_or(""));
+/// A chip's label: its `short` one when the row is narrow (`short`), else its text, with the icon.
+fn chip_label(c: &Value, icons: &Icons, short: bool) -> String {
+    let text = if short { c["short"].as_str().or(c["text"].as_str()) } else { c["text"].as_str() };
+    let t = icons.label(&c["icon"], text.unwrap_or(""));
     if c["options"].is_array() {
         format!(" {t} ▾ ")
     } else {
@@ -79,17 +85,37 @@ fn chip_label(c: &Value, icons: &Icons) -> String {
     }
 }
 
-/// Where each chip goes in a row of `width`, wrapping: (dx, dy, width).
-fn chip_layout(item: &Value, width: u16, icons: &Icons) -> Vec<(u16, u16, u16)> {
+/// Where each chip goes in a row of `width`: (dx, dy, width, short label). When the chips don't fit on one line,
+/// those with a `short` label use it. Chips with `align: "right"` sit at the right end of the line when everything
+/// fits on one; otherwise all chips wrap in order.
+fn chip_layout(item: &Value, width: u16, icons: &Icons) -> Vec<(u16, u16, u16, bool)> {
+    let chips: Vec<&Value> = item["chips"].as_array().into_iter().flatten().collect();
+    let widths = |short: bool| chips.iter().map(|c| icons::width(&chip_label(c, icons, short)).min(width.max(1))).collect::<Vec<u16>>();
+    let line = |ws: &[u16]| ws.iter().map(|w| u32::from(*w) + 1).sum::<u32>().saturating_sub(1);
+    let mut short = false;
+    let mut ws = widths(false);
+    if line(&ws) > u32::from(width) && chips.iter().any(|c| c["short"].is_string()) {
+        short = true;
+        ws = widths(true);
+    }
+    let right: Vec<bool> = chips.iter().map(|c| c["align"] == "right").collect();
     let mut out = Vec::new();
+    if right.iter().any(|r| *r) && line(&ws) <= u32::from(width) {
+        let rights: Vec<u16> = ws.iter().zip(&right).filter(|(_, r)| **r).map(|(w, _)| *w).collect();
+        let mut rx = width.saturating_sub(line(&rights) as u16);
+        let mut x = 0u16;
+        for (w, r) in ws.iter().zip(&right) {
+            if *r { out.push((rx, 0, *w, short)); rx += w + 1; } else { out.push((x, 0, *w, short)); x += w + 1; }
+        }
+        return out;
+    }
     let (mut x, mut y) = (0u16, 0u16);
-    for c in item["chips"].as_array().into_iter().flatten() {
-        let w = icons::width(&chip_label(c, icons)).min(width.max(1));
+    for w in ws {
         if x > 0 && x + w > width {
             x = 0;
             y += 1;
         }
-        out.push((x, y, w));
+        out.push((x, y, w, short));
         x += w + 1;
     }
     out
@@ -140,7 +166,7 @@ fn lines(item: &Value, width: u16, icons: &Icons) -> u16 {
     if kind(item)=="text" && item["format"]=="markdown" {return crate::ui_model::markdown::lines(item["text"].as_str().unwrap_or(""),width as usize).len().clamp(1,u16::MAX as usize) as u16;}
     if kind(item)=="text" && item["wrap"]==true {return wrap_text(item["text"].as_str().unwrap_or(""),width).len().min(u16::MAX as usize) as u16;}
     if kind(item) == "chips" {
-        return chip_layout(item, width, icons).last().map(|c| c.1 + 1).unwrap_or(1);
+        return chip_layout(item, width, icons).iter().map(|c| c.1 + 1).max().unwrap_or(1);
     }
     1 + item["description"].as_str().map(|_| 1).unwrap_or(0)
 }
@@ -366,6 +392,16 @@ fn render_list(buf:&mut Buffer,mut area:Rect,v:&Arc<Value>,st:&mut State,focused
         draw_row(buf, Rect { x: body.x, y, width: body.width, height: (h-skip).min((body.bottom() - y) as u32) as u16 }, r, focused && i == st.sel, st.chip, i, skip.min(u16::MAX as u32) as u16, hits, pal, icons, composer_of(st, r, focused), unfolded(r, st));
     }
 
+    // A following list (a conversation) scrolled away from its newest rows says how to get back.
+    if v["follow"] == true && top + u32::from(body.height) < total && body.height > 1 {
+        let hint = "↓ Latest · End";
+        let w = icons::width(hint);
+        if body.width > w + 2 {
+            let r = Rect { x: body.right() - w - 1, y: body.bottom() - 1, width: w, height: 1 };
+            buf.set_string(r.x, r.y, hint, pal.badge(Some("accent")));
+            hits.latest = Some(r);
+        }
+    }
     if scrollbar {
         let x = area.right() - 1;
         let thumb = ((area.height as u64 * area.height as u64) / total as u64).max(1) as u16;
@@ -649,7 +685,7 @@ fn draw_row(buf: &mut Buffer, row: Rect, r: &Flat, selected: bool, chip: usize, 
     match kind(item) {
         "chips" => {
             let chips = item["chips"].as_array().cloned().unwrap_or_default();
-            for (ci, ((dx, dy, cw), c)) in chip_layout(item, row.width, icons).into_iter().zip(chips.iter()).enumerate() {
+            for (ci, ((dx, dy, cw, short), c)) in chip_layout(item, row.width, icons).into_iter().zip(chips.iter()).enumerate() {
                 if dy<skip {continue;}
                 let dy=dy-skip;
                 if dy >= row.height {break;}
@@ -661,7 +697,7 @@ fn draw_row(buf: &mut Buffer, row: Rect, r: &Flat, selected: bool, chip: usize, 
                 let style = if let Some(n) = c["style"].as_str() { style.patch(pal.style(Some(n))) } else { style };
                 let style = if c["disabled"]==true {style.patch(pal.style(Some("dim")))}else if selected && ci == chip { style.add_modifier(Modifier::REVERSED | Modifier::BOLD) } else { style };
                 let rect = Rect { x: row.x + dx, y: y + dy, width: cw, height: 1 };
-                buf.set_string(rect.x, rect.y, truncate(&chip_label(c, icons), cw as usize), style);
+                buf.set_string(rect.x, rect.y, truncate(&chip_label(c, icons, short), cw as usize), style);
                 hits.chips.push((rect, i, ci));
             }
             hits.rows.push((row, i));
@@ -739,9 +775,19 @@ fn draw_row(buf: &mut Buffer, row: Rect, r: &Flat, selected: bool, chip: usize, 
                 buf.set_string(x, y, &cell, ink(pal.style(item["icon_style"].as_str().or(Some("muted")))));
                 x += cells + 1;
             }
-            // Right side: detail, then badges before it.
-            let detail = item["detail"].as_str().unwrap_or("");
+            // Right side: inline buttons (`actions`, feature actions), then detail, then badges before it.
             let mut right = row.right().saturating_sub(1);
+            for (ai, a) in item["actions"].as_array().into_iter().flatten().enumerate().collect::<Vec<_>>().into_iter().rev() {
+                let Some(t) = a["text"].as_str().filter(|_| a["command"].is_string()) else { continue };
+                let label = format!("[{t}]");
+                let aw = icons::width(&label);
+                if right < x + aw + 12 { break; }
+                right -= aw;
+                buf.set_string(right, y, &label, ink(pal.style(Some("accent"))));
+                hits.actions.push((Rect { x: right, y, width: aw, height: 1 }, i, ai));
+                right = right.saturating_sub(1);
+            }
+            let detail = item["detail"].as_str().unwrap_or("");
             if !detail.is_empty() {
                 let dw = icons::width(detail);
                 if right > x + dw + 2 {

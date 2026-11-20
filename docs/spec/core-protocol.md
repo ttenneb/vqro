@@ -1137,6 +1137,21 @@ New row types, components and view kinds are progressive enhancements: every cli
   selectability and matching. The Rust TUI implements both features; the text client too (`expand <row>`); the
   OpenTUI client draws messages whole (no `fold`).
 
+### Toolbar parts, frame status, inline buttons, the way back to the latest (D29)
+
+- **Chips `align: "right"`**: in a chips row (a toolbar's, typically), these chips sit at the right end of the
+  line when all fit on one; otherwise every chip wraps in order. Buttons go left and filters right, on one line.
+- **Chip `short`**: a short label (an icon, "/") used when the row's chips don't fit on one line.
+- **Panel `title_right`** (and `title_right_style`, a semantic style): a short status at the right end of the
+  pane's frame, e.g. an agent's "● idle".
+- **Row `actions`** (feature `actions`): `[{text, command, args?, input?}]`. These are drawn right-aligned in the
+  row as `[text]` buttons, before its detail and badges. A click runs the action in the row's context. Put the same
+  entries in the row's `menu` for clients without the feature.
+- **"↓ Latest · End"**: the client draws it at the bottom right of a following list (`follow: true`) scrolled away
+  from its newest rows. A click or End goes back and follows again. Panels need nothing for it.
+- Clients without these show chips in order with their full labels, the plain title, and no buttons (the menu
+  stays). The Rust TUI implements them all.
+
 ### Formatted text and bottom-pinned rows (D29)
 
 - **`format: "markdown"`** on a `text` row (feature `markdown`): a fixed subset, `#` to `###` headings, paragraphs,

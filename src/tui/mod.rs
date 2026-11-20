@@ -2748,6 +2748,26 @@ impl App {
             st.top = 0;
             return true;
         }
+        if let Some((_, row, ai)) = hits.actions.iter().find(|(r, _, _)| r.contains(pos)).copied() {
+            // An inline row button: its command, in the row's context (the row is selected first).
+            let value = self.panel_value(view);
+            let root = self.pstate.entry(key.to_string()).or_default();
+            root.detail_focus = in_detail;
+            let value = if in_detail { panel::selected_detail(&value, root).map(|(_, v)| Arc::new(v)).unwrap_or(value) } else { value };
+            let st = if in_detail { root.detail.get_or_insert_with(Box::default).as_mut() } else { root };
+            st.sel = row;
+            let st = st.clone();
+            if let Some(a) = panel::rows(&value, &st).get(row).and_then(|r| r.item["actions"].get(ai).cloned()) {
+                if button == MouseButton::Left { self.activate_item(Item::from_entry(&a), ctx, Some(pos)); }
+            }
+            return true;
+        }
+        if hits.latest.is_some_and(|r| r.contains(pos)) && !in_detail {
+            // "↓ Latest · End": back to the newest row, following again.
+            self.run_command("client.panel", json!({"action": "end"}), json!({"panel": key, "panel_view": view}), None);
+            if let Some(st) = self.pstate.get_mut(key) { st.manual_scroll = false; }
+            return true;
+        }
         let facet = hits.facets.iter().find(|(r, _, _)| r.contains(pos)).map(|(_, k, v)| (k.clone(), v.clone()));
         let sort = hits.sort.is_some_and(|r| r.contains(pos));
         if facet.is_some() || sort {
@@ -3185,7 +3205,12 @@ impl App {
             "panel" => {
                 let v = self.panel_value(view);
                 let title = v["title"].as_str().unwrap_or(view).to_string();
-                let block = Block::bordered().title(format!(" {title} ")).border_style(border);
+                let mut block = Block::bordered().title(format!(" {title} ")).border_style(border);
+                // `title_right`: a short status at the frame's right end (an agent's state), in `title_right_style`.
+                if let Some(right) = v["title_right"].as_str().filter(|s| !s.is_empty()) {
+                    let style = v["title_right_style"].as_str().map(|s| pal.style(Some(s))).unwrap_or_else(|| pal.style(None));
+                    block = block.title(Line::from(Span::styled(format!(" {right} "), style)).right_aligned());
+                }
                 let inner = block.inner(rect);
                 f.render_widget(block, rect);
                 let mut st = self.pstate.remove(view).unwrap_or_default();
@@ -4016,6 +4041,61 @@ mod tests {
         app.panel_key("p", "p", KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), json!({}));
         let screen = draw(&mut app);
         assert!(has(&screen, "four"), "{screen:#?}");
+    }
+
+    #[tokio::test]
+    async fn toolbar_parts_frame_status_latest_hint_and_short_labels() {
+        let (mut app, _) = app();
+        let chips = json!([{"text":"Stop…","short":"■","command":"x"},{"text":"⚙ Settings","short":"⚙","command":"x"},
+            {"text":"Thinking","align":"right","command":"x"},{"text":"/ search","short":"/","align":"right","command":"x"}]);
+        let mut items: Vec<Value> = (0..40).map(|i| json!({"type":"text","text":format!("message {i}"),"focusable":true})).collect();
+        items.push(json!({"type":"composer","id":"c","text":"Message","pin":"bottom","command":"x"}));
+        app.load(&json!({"epoch":"e","seq":1,"entries":{"view/p":{"value":{"kind":"panel","title":"Pi r52 · ~/vqro","title_right":"● idle","title_right_style":"ok",
+            "follow":true,"toolbar":[{"type":"chips","chips":chips}],"items":items}}}}));
+        app.leaves = vec!["p".into()];
+        let draw = |app: &mut App, w: u16| -> Vec<String> {
+            let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, 16)).unwrap();
+            let mut out = Vec::new();
+            terminal.draw(|f| { app.draw_view(f, "p", Rect::new(0, 0, w, 16), true, &Palette::default(), &Icons::new(None, false));
+                let b = f.buffer_mut(); out = (0..16).map(|y| (0..w).map(|x| b[(x, y)].symbol().to_string()).collect::<String>()).collect(); }).unwrap();
+            out
+        };
+        let wide = draw(&mut app, 80);
+        assert!(wide[0].contains(" Pi r52 · ~/vqro ") && wide[0].trim_end_matches(['┐', '─']).ends_with("● idle "), "frame title and status: {}", wide[0]);
+        let bar = &wide[1];
+        assert!(bar.find("Stop…").unwrap() < bar.find("⚙ Settings").unwrap() && bar.find("Thinking").unwrap() > 40 && bar.trim_end_matches(['│', ' ']).ends_with("/ search"),
+            "buttons left, filters right: {bar}");
+        let narrow = draw(&mut app, 34);
+        assert!(narrow[1].contains(" ■ ") && narrow[1].contains(" ⚙ ") && !narrow[1].contains("Settings"), "short labels when narrow: {}", narrow[1]);
+        // Following: no hint at the end; scrolled up, "↓ Latest · End", and a click on it returns.
+        assert!(!wide.iter().any(|l| l.contains("↓ Latest")));
+        for _ in 0..5 { app.panel_scroll("p", "p", Position { x: 5, y: 5 }, true, json!({})); }
+        let up = draw(&mut app, 80);
+        let y = up.iter().position(|l| l.contains("↓ Latest · End")).expect("hint when scrolled up") as u16;
+        let x = up[y as usize].find("↓").map(|i| up[y as usize][..i].chars().count() as u16).unwrap();
+        app.panel_click("p", "p", Position { x, y }, MouseButton::Left, json!({}));
+        let back = draw(&mut app, 80);
+        assert!(back.iter().any(|l| l.contains("message 39")) && !back.iter().any(|l| l.contains("↓ Latest")), "{back:#?}");
+    }
+
+    #[tokio::test]
+    async fn inline_row_actions_are_drawn_on_the_right_and_run_on_a_click() {
+        let (mut app, _) = app();
+        app.load(&json!({"epoch":"e","seq":1,"entries":{"view/p":{"value":{"kind":"panel","items":[
+            {"text":"✓ read   README.md · lines 1–40","detail":"0.1 s","actions":[{"text":"open","command":"links.open","args":{"path":"README.md"}},{"text":"copy","command":"client.copy","args":{"text":"x"}}],
+             "menu":[{"label":"Open","command":"links.open"}]}]}}}}));
+        app.leaves = vec!["p".into()];
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(70, 6)).unwrap();
+        let mut line = String::new();
+        terminal.draw(|f| { app.draw_view(f, "p", Rect::new(0, 0, 70, 6), true, &Palette::default(), &Icons::new(None, false));
+            let b = f.buffer_mut(); line = (0..70).map(|x| b[(x, 1)].symbol().to_string()).collect(); }).unwrap();
+        assert!(line.trim_end_matches(['│', ' ']).ends_with("0.1 s [open] [copy]"), "{line}");
+        let x = line.find("[open]").map(|i| line[..i].chars().count() as u16).unwrap();
+        app.panel_click("p", "p", Position { x: x + 1, y: 1 }, MouseButton::Left, json!({}));
+        assert!(app.message.starts_with("running links.open"), "{}", app.message);
+        let x = line.find("[copy]").map(|i| line[..i].chars().count() as u16).unwrap();
+        app.panel_click("p", "p", Position { x: x + 1, y: 1 }, MouseButton::Left, json!({}));
+        assert!(app.message.starts_with("copy: sent 1 character"), "{}", app.message);
     }
 
     #[tokio::test]
