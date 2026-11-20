@@ -72,6 +72,22 @@ def keys(*k, literal=False):
     subprocess.run([*HARNESS, "send-keys", *(["-l"] if literal else []), *k])
 
 
+POPUPS = ("╭ Settings", "╭ Log:", "╭ Pi runtime")
+
+
+def open_settings():
+    """Open Settings from a known state. The popup appears when the reply to `settings.open` is applied, and that
+    resets the popup's state (filter, selection). A popup still open (Escape only cleared its filter) would look
+    ready at once, and keys typed into it would be lost when the late reply lands. So: close, then open."""
+    for _ in range(5):
+        if not any(p in screen() for p in POPUPS):
+            break
+        keys("Escape"); wait(lambda: not any(p in screen() for p in POPUPS), 2)
+    assert not any(p in screen() for p in POPUPS), screen()
+    keys("C-g", ",")
+    return wait(lambda: "╭ Settings" in screen() and f"{BUILTIN_COUNT} of {BUILTIN_COUNT}" in screen())
+
+
 core = None
 try:
     core = subprocess.Popen([VQRO, "serve", "--fake"], env=ENV, stdout=open(f"{R}/serve.log", "w"), stderr=subprocess.STDOUT)
@@ -165,8 +181,7 @@ try:
     check("unreachable default notice is visible despite alternative backends", bool(wait(lambda:
         "No default backend is ready" in screen() and
         call("extension.list")["extensions"]["herdr"]["display_status"] == "provider-not-connected")))
-    keys("C-g", ",")
-    check("catalogue opens before typing its search", bool(wait(lambda:f"{BUILTIN_COUNT} of {BUILTIN_COUNT}" in screen() and "Agent controls" in screen())))
+    check("catalogue opens before typing its search", bool(open_settings()) and "Agent controls" in screen(), screen())
     keys("/"); keys("herdr", literal=True); keys("Enter")
     # The detail's Runtime section (`[` from About wraps to the last section) shows the process separately.
     keys("Tab", "[")
@@ -177,10 +192,8 @@ try:
     check("backend notice and catalogue recover without reopening settings", bool(wait(lambda:
         call("extension.list")["extensions"]["herdr"]["display_status"] == "running" and
         "provider-not-connected" not in screen() and "No default backend is ready" not in screen())))
-    keys("Escape")
     # Settings is an extension using the same list/detail primitives available to every panel.
-    keys("C-g", ",")
-    check("Extensions page opens with static manifests", bool(wait(lambda: f"{BUILTIN_COUNT} of {BUILTIN_COUNT}" in screen() and "Agent controls" in screen())))
+    check("Extensions page opens with static manifests", bool(open_settings()) and "Agent controls" in screen(), screen())
     wide = screen()
     print("CAPTURE extensions-wide\n" + wide, flush=True)
     keys("/"); keys("pi", literal=True); keys("Enter")
@@ -195,18 +208,19 @@ try:
     keys("Tab", "Right", "Enter")
     check("detail restart action", bool(wait(lambda: call("extension.list")["extensions"]["pi"]["generation"] > before)))
     check("detail restart preserves list search", bool(wait(lambda: f"1 of {BUILTIN_COUNT}" in screen())))
-    wait(lambda: any(c["name"] == "pi.settings" and c.get("available") for c in call("command.list")["commands"]))
-    # The restarted extension's command is back; wait until Settings has republished its chip as enabled too.
-    def pi_settings_chip_enabled():
-        pages = (call("workspace.snapshot").get("live", {}).get("settings") or {}).get("pages") or []
-        rows = pages[0].get("items", []) if pages else []
-        pi = next((r for r in rows if r.get("id") == "extension/pi"), {})
-        chips = ((pi.get("detail_panel") or {}).get("toolbar") or [{}])[0].get("chips", [])
-        return any(c.get("text") == "Extension settings" and not c.get("disabled") for c in chips)
-    wait(pi_settings_chip_enabled); time.sleep(0.3)
-    keys("Right", "Enter")
-    check("manifest settings_command opens its own settings", bool(wait(lambda: "Pi runtime argv" in screen())))
-    keys("Escape"); keys("C-g", ","); keys("/"); keys("Escape")
+    # A restart stops the old process (its commands are fenced) and starts a new one, which registers its
+    # settings command a moment later. The open popup still shows the chips drawn before the restart, so
+    # acting on them now invokes a command that is gone. Wait for the new process's command, then reopen
+    # Settings: its content is built from that state, and its keyboard position starts at the first chip.
+    # Probe the command itself (it only publishes its settings view): an answer means the new process has it.
+    check("restarted extension registered its settings command again", bool(wait(lambda: call("extension.list")["extensions"]["pi"]["generation"] >= before + 2
+        and call("command.invoke", {"name": "pi.settings", "args": {}}))))
+    open_settings()
+    keys("/"); keys("pi", literal=True); keys("Enter")
+    wait(lambda: f"1 of {BUILTIN_COUNT}" in screen() and "Extension settings" in screen())
+    keys("Tab", "Right", "Right", "Enter")  # Turn off, Restart, Extension settings
+    check("manifest settings_command opens its own settings", bool(wait(lambda: "Pi runtime argv" in screen())), screen())
+    open_settings()
     keys("End", "PageUp", "Home")
     check("Home End and paging retain catalogue", bool(wait(lambda: f"{BUILTIN_COUNT} of {BUILTIN_COUNT}" in screen())))
     # Dependencies: turning off a needed extension warns once; turning on one with an off need offers it too.
@@ -221,7 +235,8 @@ try:
     check("turn-off confirmation closes before changing the list filter", bool(wait(lambda: "Turn off Tabs: breaks" not in screen())))
     # The sidebar needs tabs.show (workspaces only works with tabs.open since each workspace has its own tabs).
     check("core reports the dependent's missing need", bool(wait(lambda: call("extension.list")["extensions"]["sidebar"]["dependencies"]["status"] == "missing")))
-    keys("/"); keys("Escape"); keys("/"); keys("sidebar", literal=True); keys("Enter")
+    # A fresh popup has no filter or search under way: keys typed into it act on a known state.
+    open_settings(); keys("/"); keys("sidebar", literal=True); keys("Enter")
     # The detail's Needs section lists each need as a row: provider, capability, relation, and its status chip.
     keys("Tab", "]")
     check("dependents show a needs badge and the need in detail", bool(wait(lambda: f"1 of {BUILTIN_COUNT}" in screen() and "needs Tabs (off)" in screen()
@@ -237,7 +252,7 @@ try:
     check("confirmed offer turns both on", bool(wait(lambda: all(call("extension.list")["extensions"][n]["display_status"] == "running" for n in ("tabs", "sidebar")))))
     # Another RPC can observe running before the TUI receives/applies its confirmation result.
     check("confirmation closes before the next catalogue action", bool(wait(lambda: "Turn on Sidebar and Tabs" not in screen())))
-    keys("/"); keys("Escape")
+    open_settings()
     # Extension logs (review P2): a view of its own kind drawn through its fallback panel, following new lines.
     with open(f"{R}/st/ext-tabs.log", "a") as log:
         log.write("".join(f"e2e-tail-{n}\n" for n in range(5)))
@@ -254,11 +269,9 @@ try:
         log.write("e2e-tail-80\n")
     time.sleep(2.5)
     check("reading earlier lines stops following", "e2e-tail-80" not in screen() and "e2e-tail-76" in screen(), screen())
-    keys("Escape")
-    keys("C-g", ",")
-    wait(lambda: f"{BUILTIN_COUNT} of {BUILTIN_COUNT}" in screen())
+    check("Settings reopens after the log viewer", bool(open_settings()), screen())
     keys("/"); keys("icons", literal=True); keys("Enter")
-    check("Icons search and details are ready before keyboard activation", bool(wait(lambda: "/icons" in screen() and "[x] Icons" in screen() and "Publishes icon sets" in screen())))
+    check("Icons search and details are ready before keyboard activation", bool(wait(lambda: "/icons" in screen() and "[x] Icons" in screen() and "Publishes icon sets" in screen())), screen())
     keys("Space")
     check("keyboard turns extension off", bool(wait(lambda: call("extension.list")["extensions"]["icons"]["display_status"] == "off")))
     check("disabled extension keeps static description", bool(wait(lambda: "saved icon set remains" in screen())))
