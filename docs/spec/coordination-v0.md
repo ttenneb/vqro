@@ -258,7 +258,10 @@ Results use one **coordination envelope** `{state, reason?, attempt?: {id, steps
   is held `origin_unsupported`.
 - **Lanes:** `boundary`, `preempt` and `admit` are never blocked by `start`/`settle` records waiting for idle.
   Priority never crosses lanes. An `unknown` blocks only records whose ordering depends on it; priority never
-  makes an otherwise ineligible record eligible.
+  makes an otherwise ineligible record eligible. A record blocked by an unknown predecessor is shown as held
+  `ordering_unknown` with the blocking predecessor's delivery id, in operator views and bounded lookups/lists;
+  the stall is never hidden as generic busy or absence. Displaying the dependency neither resolves the unknown
+  nor authorizes replay.
 - **Priority and order.** Records carry `priority: low | normal | high`, default `normal`, editable while pending.
   Within one target and lane, choose (1) highest priority among eligible waiting records **across senders**;
   (2) sender round-robin among equal priority; (3) FIFO by `order` within one sender and equal priority. A sender's

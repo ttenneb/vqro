@@ -536,6 +536,10 @@ replaced when the Pi bridge is ported.
   launchers record defaults. The exact `reports_to` coordinator must hold answer; absent/unavailable/ended or
   ungranted routing falls back visibly to human. Route never auto-approves or weakens native response fences.
 
+**Further implementation rulings (2026-11-19, spec batch 4).**
+- An unknown-predecessor stall is operator-visible: held `ordering_unknown` includes the blocking delivery id in
+  views and bounded lookups/lists. Visibility is not resolution, negative evidence or permission to replay.
+
 **Human answers (2026-11-19, CONFIRMED).**
 - **AS1, pause:** "vqro stops delivery": paused means vqro sends, hands out and wakes nothing until resumed; an agent
   still working shows as working; a runtime with a real pause may offer it as an extra capability. Physical

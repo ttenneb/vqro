@@ -211,7 +211,7 @@ Checked against fake adapters. Level **P** (pull): a terminal agent plus a plugi
 
 | Declaration | Where | Checked by |
 |---|---|---|
-| operation window, scope capacity, quotas, protected-domain budget, identity cache size | the extension | I10, I17–I19, I21, H14, H16, L7–L9 |
+| operation window, scope capacity, quotas, protected-domain budget, identity cache size | the extension | I10, I17–I19, I21–I22, H14, H16, L7–L9 |
 | `pull {points, insert, evidence}`, `consumer`; advisory terminal status | plugin's endpoint, agents extension | T1–T14 |
 | request route `human` / `coordinator` / `both` | ordinary attributed agent configuration | Q1–Q4 |
 
@@ -268,6 +268,10 @@ for one fake agent; the rest need the full extension.
   round-robin and then per-sender FIFO. A sender's high mail can overtake its earlier low mail. Default is normal;
   a pending priority edit races claim by CAS, never modifies a claimed record. High never bypasses a gate, quota,
   eligibility hold, lane or control reservation. Sustained high traffic may leave low held; no aging is promised.
+- I22 ordering visibility: an unknown predecessor blocks dependent waiting mail; operator views and bounded
+  get/list results show held `ordering_unknown` plus that predecessor's delivery id. Observation does not resolve
+  or resend it. An explicit authorized resolution lets scheduling reevaluate the successor's other eligibility
+  checks, never replay the unknown predecessor.
 
 **H. Pause and scope resume** (R's traces). H1 crash before claim: no effect until an explicit current-epoch resume,
 then at most one claim. H2 crash after durable claim: `unknown` through any resume, never invoked again. H3 the runtime
