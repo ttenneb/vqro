@@ -16,12 +16,13 @@ def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
 
 
-def receipts_isolated(rows):
+def receipts_isolated(rows, stage="inserted"):
     """I17: every (delivery, record) pair carries a projected receipt naming exactly its own delivery, and the
     deliveries differ. Crossed but individually valid receipt envelopes fail."""
     deliveries = [delivery for delivery, _ in rows]
     return len(set(deliveries)) == len(deliveries) and all(
-        ((record.get("result") or {}).get("receipt") or {}).get("delivery") == delivery for delivery, record in rows)
+        ((record.get("result") or {}).get("receipt") or {}).get("delivery") == delivery
+        and ((record.get("result") or {}).get("receipt") or {}).get("stage") == stage for delivery, record in rows)
 
 
 def operator_view_names(surfaces, successor, predecessor):
@@ -160,7 +161,9 @@ async def shared_submission_ids_stay_per_principal(ctx):
         try: published = await ctx.native.call("publish-receipt", ref=ctx.agents[0]["backend_ref"], delivery=delivery)
         except Exception as error: published = {"error": str(error)}  # e.g. a queued (never inserted) delivery
         try:
-            record = await ctx.wait_command("inbox.get", lambda r: (r.get("result") or {}).get("receipt"), args={"delivery": delivery})
+            # The published insertion receipt, not the admitted ACK: exact delivery and stage inserted.
+            record = await ctx.wait_command("inbox.get", lambda r, delivery=delivery: ((r.get("result") or {}).get("receipt") or {}).get("delivery") == delivery
+                                            and ((r.get("result") or {}).get("receipt") or {}).get("stage") == "inserted", args={"delivery": delivery})
         except Exception:
             record = await ctx.get(delivery)  # graded below: a missing receipt cannot witness isolation
         ctx.evidence.append({"kind": "i17_receipt", "delivery": delivery, "compacted_before_publish": compacted,

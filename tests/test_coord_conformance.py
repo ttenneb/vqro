@@ -335,6 +335,8 @@ class OrderingCheckerRegressions(unittest.TestCase):
         self.assertTrue(self.m.receipts_isolated([("d:alice", alice), ("d:bob", bob)]))
         self.assertFalse(self.m.receipts_isolated([("d:alice", bob), ("d:bob", alice)]))
         self.assertFalse(self.m.receipts_isolated([("d:alice", {"result": {"native": {"outcome": "accepted"}}}), ("d:bob", bob)]))
+        acked = {"result": {"receipt": {"delivery": "d:alice", "stage": "admitted"}}}
+        self.assertFalse(self.m.receipts_isolated([("d:alice", acked), ("d:bob", bob)]), "the admitted ACK is not the insertion witness")
 
     def test_i22_missing_operator_view_fails(self):
         self.assertFalse(self.m.operator_view_names([{}, None], "d:succ", "d:pred"))
