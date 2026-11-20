@@ -177,12 +177,26 @@ class NativeOracle(unittest.IsolatedAsyncioTestCase):
             args={"v":0,"delivery":"d:observed","mode":"start","content":[{"type":"text","text":"actual input"}]}
             await native.effect("agent.send",SimpleNamespace(id="e",ref="a0",incarnation="i:a0"),args)
             observed=await native.control({"verb":"emit-receipt","ref":"a0","delivery":"d:observed"})
-            self.assertEqual(observed,{"delivery":"d:observed","stage":"inserted"})
+            self.assertEqual((observed["delivery"],observed["stage"]),("d:observed","inserted"))
+            self.assertTrue(observed["run"].startswith("run:"))
             await native.control({"verb":"emit-receipt","ref":"a0","delivery":"d:observed"})
             entities=list(native.journal("a0")["entities"].values())
             receipt=next(row for row in entities if row["kind"]=="receipt")
             self.assertEqual((receipt["id"],receipt["rev"],receipt["value"]),("d:observed",2,observed))
             self.assertEqual(sum(row["kind"]=="receipt" for row in entities),1)
+
+    async def test_read_receipt_requires_actual_inclusion_and_normal_completion(self):
+        for abort in (False,True):
+            with tempfile.TemporaryDirectory() as root:
+                native=Native(Provider(),Path(root));await native.add("a0")
+                args={"v":0,"delivery":"d:read","mode":"start","content":[{"type":"text","text":"included"}]}
+                await native.effect("agent.send",SimpleNamespace(id="e",ref="a0",incarnation="i:a0"),args)
+                await native.control({"verb":"message_start","ref":"a0"})
+                self.assertEqual(native.receipts["a0"]["d:read"]["stage"],"inserted")
+                if abort: await native.control({"verb":"abort","ref":"a0"})
+                await native.control({"verb":"point","ref":"a0","point":"idle"})
+                observed=await native.control({"verb":"emit-receipt","ref":"a0","delivery":"d:read"})
+                self.assertEqual(observed["stage"],"inserted" if abort else "read")
 
     async def test_queued_but_not_inserted_input_cannot_invent_receipt(self):
         with tempfile.TemporaryDirectory() as root:
