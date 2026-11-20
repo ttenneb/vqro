@@ -249,10 +249,12 @@ by its `delivery`. `coord.inbox.op {op}` returns the result or `unknown`, never 
 The window also caches well-formed refusals (validation, grant and quota): an identical repeat returns the original
 refusal even if grants or capacity changed; retrying under changed conditions needs a new `op`. Malformed calls and
 calls from an undeclared principal occupy no slot. Refusal entries are compact and charged to the operation-window
-budget (§10), funded from the existing reserved control share, not content capacity. The pre-evaluation slot check
-and persistence of the refusal use that same funding, so a quota refusal remains reportable at the durable content
-budget; archive and control headroom remain preserved. Only a genuinely full operation window, itself bounded by
-that control share, refuses `busy` **before evaluation**. Content quota alone does not make the window full.
+budget (§10), funded through the existing control/recovery path: the 10% reserve excluding archive-only escrow,
+not content capacity or the normal-ledger 64 KiB / 16-record control-intent headroom. The pre-evaluation slot check
+and persistence of the refusal use that same recovery path; no new pool is added and archive escrow stays untouched.
+A quota refusal remains reportable at the durable content budget. The operation window's own bound limits refusal
+use of the reserve; only a genuinely full window refuses `busy` **before evaluation**. Content quota alone does not
+make the window full.
 
 | Command | Effect |
 |---|---|

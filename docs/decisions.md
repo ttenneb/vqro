@@ -590,11 +590,13 @@ replaced when the Pi bridge is ported.
   `admit`, or the human, never an assumed-idle hook start or hidden mode fallback. Pi's measured idle is exact.
 
 **Further implementation rulings (2026-11-20, spec batch 8).**
-- Compact refusal result slots use the existing reserved control share, not content capacity; pre-evaluation slot
-  admission and refusal persistence use the same funding. At the durable content budget a new well-formed send
-  with a window slot reports `quota`, not `busy`. Only a genuinely full operation window (bounded by that control
-  share) returns pre-evaluation `busy`; archive/control headroom stays preserved. I10 and L8 keep these distinct:
-  an observed content-budget `busy` remains an L8 failure, not a fixture reinterpretation or synthetic quota pass.
+- Compact refusal result slots use the existing control/recovery path (10% reserve minus archive-only escrow),
+  not content capacity or the normal-ledger 64 KiB / 16-record control-intent headroom; no new pool. Pre-evaluation
+  slot admission and refusal persistence use that same path; archive escrow stays untouched. At the durable
+  content budget a new well-formed send with a window slot reports `quota`, not `busy`. The window's own bound
+  limits refusal use of the reserve; only a genuinely full window returns pre-evaluation `busy`. I10 and L8 keep
+  these distinct: observed content-budget `busy` remains an L8 failure, not a fixture reinterpretation or synthetic
+  quota pass.
 
 **Human answers (2026-11-19, CONFIRMED).**
 - **AS1, pause:** "vqro stops delivery": paused means vqro sends, hands out and wakes nothing until resumed; an agent
