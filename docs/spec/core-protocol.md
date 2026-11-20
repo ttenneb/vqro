@@ -445,7 +445,7 @@ and old layouts may show gone resources until explicitly repaired/reset. No iden
 | `resource.kill` | `resource`, `deadline_ms?` | `outcome: accepted`, `effect`, `backend` |
 | `resource.forget` | `resource`, `deadline_ms?` | `outcome: observed`, `effect`, `data` |
 | `resource.forget_cached` | `resource` | `outcome: observed`, `effect`, `data: {scope: "cached_facts", backend_effect: "none"}` |
-| `resource.attach` | `resource`, `cols`, `rows`, `history?` (backend scrollback), `deadline_ms?` | `outcome: accepted`, `effect`, `stream`, `initial` (`history`, `repaint` or `none`) |
+| `resource.attach` | `resource`, `cols`, `rows`, `history?` (lines of backend scrollback, an integer), `deadline_ms?` | `outcome: accepted`, `effect`, `stream`, `initial` (`history`, `repaint` or `none`) |
 | `resource.invoke` | `resource`, `op`, `args?` (object), `deadline_ms?` | `outcome`, `effect`, `data?`; capability-checked generic provider operation |
 | `stream.input` | `stream`, `data` (base64) or `text` | `outcome: dispatched` (also accepted as a notification) |
 | `stream.resize` | `stream`, `cols`, `rows` | |
@@ -738,7 +738,8 @@ The shared definitions are executable fixtures: `tests/fixtures/client/panels.js
 terminal client, which is always present so recovery never depends on an optional client. Other clients are
 described by `<extensions dir>/clients/<name>.json` = `{name, kind: "client", title?, summary?, argv, profiles?,
 features?}`; a relative program in `argv` is resolved in that directory, and the client gets `VQRO_SOCKET`.
-`vqro ui --list` lists them. Bundled: `text`, a plain Python base client for scripts, agents and screen readers.
+`vqro ui --list` lists them. Bundled: `text`, a plain Python base client for scripts, agents and screen readers;
+in the repository only, `opentui`, a trial terminal client on OpenTUI (`extensions/clients/opentui`, needs Bun).
 
 ## Keys
 
