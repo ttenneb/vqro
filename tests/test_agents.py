@@ -635,7 +635,8 @@ class AgentV0RequestDetailTests(unittest.TestCase):
     def test_a_confirmation_shows_its_message_before_yes(self):
         items = self.panel()
         texts = [row.get("text") for row in items]
-        message, yes = texts.index("rm -rf build/ and rebuild"), texts.index("Run it?")
+        message, yes = texts.index("rm -rf build/ and rebuild"), texts.index("Answer: Run it?")
+        self.assertLess(texts.index("Run it?"), message, "the title, then the native message")
         self.assertLess(message, yes, "the native message comes before the row that approves")
         self.assertEqual(items[yes]["options"][0], {"label": "Yes", "value": True})
 
@@ -661,6 +662,39 @@ class AgentV0RequestDetailTests(unittest.TestCase):
         self.assertIn("command: git push", [row.get("text") for row in items])
         push = next(row for row in items if row.get("options"))
         self.assertEqual(push["options"], [{"label": "Allow (allow always)", "value": "a"}])
+
+    def check_whole_question(self, params):
+        """K3a P1 (spike-panel-2): a legal summary whose presentation grows (escaped controls, JSON) is never
+        clipped while Yes is offered: every byte of the question is shown, across rows, or only Cancel is."""
+        q = self.core.resources["r2"]["data"]["agent"]["requests"][0]
+        q["params"] = params
+        self.core.resources["r2"]["data"]["agent"]["requests"] = [q]
+        self.assertLessEqual(len(json.dumps(q, ensure_ascii=False, separators=(",", ":")).encode()), 2048)
+        items = self.panel()
+        shown = "".join(row.get("text", "") for row in items if row.get("type") == "text")
+        approvable = any(row.get("options") for row in items)
+        self.assertTrue(approvable)
+        self.assertIn("DELETE /sensitive-workspace !", shown)
+        self.assertTrue(all(len(row.get("text", "").encode()) <= 512 for row in items if row.get("type") == "text"))
+        self.assertIn("wrap", self.core.live["agents-requests-r2"]["requires"], "a client that can't wrap can't show it")
+        return shown
+
+    def test_escaped_controls_never_push_the_question_out_of_view(self):
+        shown = self.check_whole_question({"message": "DELETE /sensitive-workspace !" + "\x85" * 800})
+        self.assertTrue(shown.endswith("\\x85" * 10), "every escaped byte is shown, none dropped")
+
+    def test_json_params_are_shown_whole(self):
+        shown = self.check_whole_question({"tool": {"command": "DELETE /sensitive-workspace !", "arguments": [0] * 700}})
+        self.assertIn(",0]}", shown)
+
+    def test_a_question_too_long_to_show_whole_is_cancel_only(self):
+        q = self.core.resources["r2"]["data"]["agent"]["requests"][0]
+        q["params"] = {"message": "\x01" * 5000}
+        items = self.panel()
+        self.assertFalse(any(row.get("options") for row in items if row.get("args", {}).get("request") == "q1"))
+        self.assertTrue(any("too long to show" in row.get("text", "") for row in items))
+        with self.assertRaises(VqroError):
+            self.command("answer", resource="r2", request="q1", epoch="e7", revision=2, value=True)
 
     def test_a_cut_or_missing_lifecycle_is_not_idle(self):
         facts = self.core.resources["r2"]["data"]["agent"]
@@ -725,6 +759,19 @@ class Tier1StatusTests(unittest.TestCase):
         self.assertEqual(self.core.live["agents.terminal_status"]["data"]["r1"]["state"], "idle")
         self.report({"terminal": "r1", "app": "hook", "state": "idle", "seq": 3})
         self.assertEqual(self.core.live["agents.terminal_status"]["data"]["r1"]["state"], "idle")
+
+    def test_a_failed_publication_is_retried_by_the_next_report_even_if_unchanged(self):
+        """K3a P2 (spike-panel-2): one failed publication never leaves the table unpublished."""
+        original = self.core.publish
+
+        def fail(view, content):
+            raise VqroError("injected", "overloaded")
+        self.core.publish = fail
+        with self.assertRaises(VqroError):
+            self.report({"terminal": "r1", "app": "hook", "state": "idle", "seq": 1})
+        self.core.publish = original
+        self.report({"terminal": "r1", "app": "hook", "state": "idle", "seq": 2})
+        self.assertEqual(self.core.live["agents.terminal_status"]["data"]["r1"]["seq"], 2)
 
     def test_the_published_table_stays_under_the_live_value_cap(self):
         """K3a delta N2: admission counts encoded bytes, so a full table still publishes (1 MiB core cap)."""

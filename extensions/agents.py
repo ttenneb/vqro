@@ -9,7 +9,7 @@ import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from vqro_ext import Extension, VqroError, views_in
-from vqro_display import label
+from vqro_display import label, plain
 from vqro_views import ended, unknown_since
 
 EFFECTS = {"prompt": "Prompt", "steer": "Steer", "follow_up": "Follow-up", "abort": "Abort",
@@ -89,16 +89,55 @@ def busy(resource):
     return facts.get("lifecycle") != "live" or facts.get("state") != "idle"
 
 
-def param_rows(params):
-    """A request's native details as read-only text, shown before any approval (agent v0 section 5)."""
-    rows = []
-    for key, value in params.items():  # bounded: a summary is at most 2 KiB, else incomplete
-        if key == "multiline":
-            continue  # a presentation hint, not part of the question
-        text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
-        rows.append({"type": "text", "wrap": True, "style": "muted",
-                     "text": label(("" if key == "message" else key.replace("_", " ")+": ")+text, 2048)})
-    return rows
+DISCLOSURE_BYTES = 16 * 1024  # a whole request as shown; legal summaries (<= 2 KiB, escaped <= 4x) always fit
+DISCLOSURE_ROW_BYTES = 512
+
+
+def head(text, size=200):
+    """At most `size` bytes of `text` from its start, marked with … when cut (short labels only, never the question)."""
+    wire = text.encode()
+    return text if len(wire) <= size else wire[:size - 3].decode("utf-8", errors="ignore") + "…"
+
+
+def disclosure(parts):
+    """A request's question shown whole: `parts` are (prefix, value) pairs, rendered control-safe (plain) and split
+    across rows at line breaks and every DISCLOSURE_ROW_BYTES, never clipped. Returns (rows, complete); when the
+    whole presentation would exceed DISCLOSURE_BYTES, complete is False and the request must not be approvable."""
+    rows, total = [], 0
+    for prefix, value in parts:
+        if value is None:
+            continue
+        text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        for line in (prefix + text).split("\n"):
+            line = plain(line)
+            total += len(line.encode()) + 1
+            if total > DISCLOSURE_BYTES:
+                return rows, False
+            wire = line.encode()
+            while True:
+                cut = len(wire) if len(wire) <= DISCLOSURE_ROW_BYTES else DISCLOSURE_ROW_BYTES
+                while cut < len(wire) and (wire[cut] & 0xC0) == 0x80:  # never split a character
+                    cut -= 1
+                rows.append({"type": "text", "wrap": True, "style": "muted", "text": wire[:cut].decode()})
+                wire = wire[cut:]
+                if not wire:
+                    break
+    return rows, True
+
+
+def request_parts(q):
+    """What a v0 request asks (agent v0 section 5): its title, then every native param except presentation hints."""
+    params = q.get("params") if isinstance(q.get("params"), dict) else {}
+    return [("", q.get("title") or q["request"])] + [
+        ("" if key == "message" else key.replace("_", " ")+": ", value)
+        for key, value in params.items() if key != "multiline"]
+
+
+def legacy_parts(request):
+    """What a provider-v0 request asks: its prompt, message, prefill and options (shown whole)."""
+    detail = request.get("data") if isinstance(request.get("data"), dict) else {}
+    return [("", request.get("prompt") or request["id"]), ("", detail.get("message")),
+            ("Prefilled: ", detail.get("prefill")), ("Options: ", detail.get("options"))]
 
 
 def owns_lifecycle(resource):
@@ -507,7 +546,8 @@ class Agents:
             if sum(self.tier1_size.values()) - self.tier1_size.get(terminal, 0) + size > TIER1_BYTES:
                 raise VqroError("the published status table would exceed its size bound; nothing recorded", "overloaded")
             self.tier1[terminal], self.tier1_size[terminal] = entry, size
-            changed = previous is None or (previous["state"], previous["app"]) != (state, app)
+            # A table left unpublished by a failed publication is sent again by the next report, changed or not.
+            changed = previous is None or (previous["state"], previous["app"]) != (state, app) or self.tier1_dirty
         if changed:
             self.publish_tier1()
         return {"ok": True, "applied": True}
@@ -569,12 +609,15 @@ class Agents:
                 items.append({"type": "text", "style": "warn", "text": label((q.get("title") or q["request"])
                               + ": no epoch or revision to answer against; answer it in the agent's own interface.")})
                 continue
-            row = {"text": label(q.get("title") or q["request"]), "description": label(str(method)), "command": "agents.answer",
-                   "args": args}
+            row = {"text": "Answer: "+head(plain(q.get("title") or q["request"])), "description": label(str(method)),
+                   "command": "agents.answer", "args": args}
             params = q.get("params")
-            if isinstance(params, dict):
-                items.extend(param_rows(params))
-            if q.get("incomplete"):  # true or a non-empty list of cut fields
+            shown, complete = disclosure(request_parts(q))
+            items.extend(shown)
+            if not complete:
+                row = {"type": "text", "style": "warn", "text": "The request is too long to show here whole, so it can't be "
+                       "approved; answer it in the agent's own screen. Cancel stays available."}
+            elif q.get("incomplete"):  # true or a non-empty list of cut fields
                 row = {"type": "text", "style": "warn", "text": label((q.get("title") or q["request"])
                        + ": details incomplete, so it can't be approved here; Cancel stays available.")}
             elif not isinstance(params, dict):
@@ -584,10 +627,12 @@ class Agents:
             elif method == "confirm":
                 row["options"] = [{"label": "Yes", "value": True}, {"label": "No", "value": False}]
             elif method in ("choice", "permission") and isinstance(choices, list) and choices:
-                row["options"] = [{"label": label(str(c.get("label") or c.get("id"))
-                                                  + (" ("+str(c["effect"]).replace("_", " ")+")" if isinstance(c.get("effect"), str) else ""), 200),
+                row["options"] = [{"label": head(plain(str(c.get("label") or c.get("id"))
+                                                  + (" ("+str(c["effect"]).replace("_", " ")+")" if isinstance(c.get("effect"), str) else ""))),
                                    "value": c.get("id")}
                                   for c in choices if isinstance(c, dict) and isinstance(c.get("id"), str)]
+                if any(option["label"].endswith("…") for option in row["options"]):
+                    items.extend(disclosure([("Choices: ", [c.get("label") for c in choices if isinstance(c, dict)])])[0])
             elif method == "text":
                 row["input"] = label(params.get("placeholder") if isinstance(params.get("placeholder"), str)
                                      else q.get("title") or "Answer")
@@ -601,7 +646,8 @@ class Agents:
             items.extend([row, {"text": "Cancel "+label(q["request"]), "command": "agents.answer", "args": {**args, "cancelled": True}}])
         if not items:
             items = [{"type": "text", "text": "No pending requests."}]
-        return {"title": "Requests: "+rid, "requires": ["menu", "input"], "items": items}
+        # `wrap` is required: a client that can't wrap would cut the question at the pane edge.
+        return {"title": "Requests: "+rid, "requires": ["menu", "input", "wrap"], "items": items}
 
     def answer_v0(self, r, args):
         """agent.respond with the request's epoch and revision: a stale answer is refused by the adapter."""
@@ -621,8 +667,8 @@ class Agents:
         ids = [c.get("id") for c in choices if isinstance(c, dict)] if isinstance(choices, list) else []
         if args.get("cancelled") is True:
             response = {"action": "cancel"}
-        elif request.get("incomplete") or not isinstance(request.get("params"), dict):
-            raise VqroError("request details are incomplete or missing; only Cancel is possible", "invalid")
+        elif request.get("incomplete") or not isinstance(request.get("params"), dict) or not disclosure(request_parts(request))[1]:
+            raise VqroError("request details are incomplete, missing or too long to show; only Cancel is possible", "invalid")
         elif method == "confirm" and type(args.get("value")) is bool:
             response = {"value": args["value"]}
         elif method in ("choice", "permission") and args.get("value") in ids:
@@ -650,20 +696,25 @@ class Agents:
             detail = request.get("data") if isinstance(request.get("data"), dict) else {}
             kind = request.get("kind")
             args = {"resource": r["id"], "request": request["id"]}
-            row = {"text": label(request.get("prompt") or request["id"]), "description": label(detail.get("message") or detail.get("prefill") or detail.get("placeholder") or kind),
+            row = {"text": "Answer: "+head(plain(request.get("prompt") or request["id"])), "description": label(str(kind)),
                    "command": "agents.answer", "args": args}
-            if kind == "confirm":
+            shown, complete = disclosure(legacy_parts(request))
+            items.extend(shown)
+            if not complete:
+                row = {"type": "text", "style": "warn", "text": "The request is too long to show here whole, so it can't be "
+                       "approved; answer it in the agent's own screen. Cancel stays available."}
+            elif kind == "confirm":
                 row["options"] = [{"label": "Yes", "value": True}, {"label": "No", "value": False}]
             elif kind == "select" and isinstance(detail.get("options"), list):
-                row["options"] = [{"label": label(v, 200), "value": v} for v in detail["options"]]
+                row["options"] = [{"label": head(plain(str(v))), "value": v} for v in detail["options"]]
             elif kind in ("input", "editor"):
-                row["input"] = label(request.get("prompt") or "Answer")
+                row["input"] = head(plain(request.get("prompt") or "Answer"))
             else:
                 row = {"type": "text", "text": label("Unsupported request kind: "+str(kind)), "style": "warn"}
             items.extend([row, {"text": "Cancel "+label(request["id"]), "command": "agents.answer", "args": {**args, "cancelled": True}}])
         if not items:
             items = [{"type": "text", "text": "No pending requests."}]
-        content = {"title": "Requests: "+r["id"], "requires": ["menu", "input"], "items": items}
+        content = {"title": "Requests: "+r["id"], "requires": ["menu", "input", "wrap"], "items": items}
         if len(json.dumps(content).encode()) > 262144:
             content["items"] = [{"type": "text", "style": "warn", "text": "Request details exceed the UI budget. Nothing answered; cancellation remains available."}]
             content["items"] += [{"text": "Cancel "+label(q["id"]), "command": "agents.answer",
@@ -671,6 +722,7 @@ class Agents:
         return content
 
     def answer(self, args):
+        """Answer a pending request. Approval needs the whole question to have been showable (disclosure)."""
         self.ext.fresh()
         r = self.agent(args, "answer")
         rid = r["id"]
@@ -690,6 +742,8 @@ class Agents:
         native = {"id": request["id"]}
         if args.get("cancelled") is True:
             native["cancelled"] = True
+        elif not disclosure(legacy_parts(request))[1]:
+            raise VqroError("this request is too long to show whole; only Cancel is possible", "invalid")
         elif request.get("kind") == "confirm" and type(args.get("value")) is bool:
             native["confirmed"] = args["value"]
         elif request.get("kind") == "select" and isinstance(detail.get("options"), list) and args.get("value") in detail["options"]:
