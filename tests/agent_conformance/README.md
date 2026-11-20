@@ -84,10 +84,11 @@ private core/backend per case, and writes `results.json`, `results.md`, per-case
 always name all omitted cases. Leaving `--cases` out includes all 55 Part A groups;
 currently unimplemented applicable handlers fail as `component:harness`.
 
-Current executable slice: C1–C5, C7–C10, D1–D15, O1/O4–O10,
-R1–R5, M1/M2 and L1–L4. Applicable C9/R2/R4/L3 and several optional declared
-branches still report a visible harness gap after their partial checks. Core
-causality loss and missing stop reply coverage are separate implementation failures.
+Current executable slice: C1–C10, D1–D15, O1–O11, R1–R7, M1–M3 and L1–L4.
+Some optional declared branches still have explicit harness gaps (including native
+preempt/keys, richer requests/configuration and a many-endpoint host rebind).
+Core causality forwarding and the old producer unfinished-cut overflow remain
+separate implementation failures until fixed target images are exercised.
 Children/display-terminal applicability uses canonical module descriptors, not an
 invented `agent.terminal` operation. This is an incremental harness release, **not complete Part A or Part B**.
 

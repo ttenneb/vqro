@@ -1449,7 +1449,7 @@ async def host_lifecycle(ctx):
     rid, pid = ctx.agents[0]["id"], ctx.native.state["pid"]
     await ctx.native.call("turn", state="start")
     await ctx.wait_facts(lambda f: f.get("state") == "running")
-    await ctx.native.call("host_exit", code=0)
+    await ctx.native.call("exit", code=0)
     await lifecycle_wait(ctx, lambda: ctx.resource_cache.get(rid, {}).get("data", {}).get("agent", {}).get("lifecycle") == "ended",
                          "process-owned native host end did not end its endpoint")
     final = ctx.resource_cache[rid].get("data", {}).get("agent", {})

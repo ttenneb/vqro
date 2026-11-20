@@ -52,6 +52,8 @@ async def run_case(case, root, manifest, vqro, hc, *, factory=PublicImplementati
             declarations["resource"] = facts.get("caps", {})
         await handler(ctx)
         status, component, detail = "pass", None, "public-wire assertions passed"
+        if any(row.get("kind") == "inherited_component" for row in ctx.evidence):
+            detail = "assertions passed; pinned shared-component evidence inherited (see references)"
     except NotApplicable as error:
         status, component, detail = "not-applicable", None, str(error)
         declarations["exclusion"] = {"path": error.path, "actual": error.actual}
