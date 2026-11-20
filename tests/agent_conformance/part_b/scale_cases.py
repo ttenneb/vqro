@@ -230,9 +230,9 @@ async def full_durable_budget(ctx):
         await scope(sub, "resume", "agent:" + gc_target["id"])
         gc_sent = []
         for index in range(300):
-            gc_sent.append((await sub.send(target=gc_target["id"], text=f"settle {index}", send_new=True, mode="admit"))["delivery"])
-            if len(gc_sent) >= 6: await settled(sub, gc_sent[-6])
-        for delivery in gc_sent[-6:]: await settled(sub, delivery)
+            gc_sent.append((await send_same_op(sub, target=gc_target["id"], text=f"settle {index}", send_new=True, mode="admit"))["delivery"])
+            if len(gc_sent) >= 6: await settled_within(sub, gc_sent[-6], 60)
+        for delivery in gc_sent[-6:]: await settled_within(sub, delivery, 60)
         await scope(sub, "pause", "agent:" + gc_target["id"])
         oldest = await sub.get(gc_sent[0])
         ctx.check(oldest.get("incomplete") or not oldest.get("content"), "history GC compacted the oldest settled record before the fill",
@@ -302,14 +302,18 @@ async def full_durable_budget(ctx):
         except Exception:
             ctx.check(False, "the admitted record is dispatched once space is freed", record=await sub.get(late["delivery"]),
                       status=(await sub.command("status")).get("attention"))
-        refill = []
-        for chunk in (30000, 8000, 2000, 500, 100, 1):
-            while True:
-                try: refill.append(len((await sub.send(peer=probe, target=spacer_agent["id"], mode="admit", send_new=True,
-                                                         text="y" * chunk))["delivery"]) and chunk)
-                except RpcError as error:
-                    if error.kind not in ("quota", "busy"): raise
-                    break
+        # Refill concurrently (about one round trip): the claimed reply must be released within K2's native deadline.
+        chunks = (30000, 30000, 8000, 8000, 2000, 2000, 500, 500, 100, 100, 1, 1, 1, 1)
+        async def refill_one(index, chunk):
+            try:
+                await concurrent_send(sub, peer=(probe, spacer_peer)[index % 2], target=spacer_agent["id"], send_new=True, text="y" * chunk)
+                return chunk
+            except RpcError as error:
+                if error.kind not in ("quota", "busy"): raise
+                return None
+        started = time.monotonic()
+        refill = [chunk for chunk in await asyncio.gather(*(refill_one(i, c) for i, c in enumerate(chunks))) if chunk]
+        sub.evidence.append({"kind": "refill", "admitted": refill, "seconds": round(time.monotonic() - started, 2)})
         try:
             await sub.send(peer=spacer_peer, target=sub.agents[2]["id"], mode="admit", text="p")
             refilled = False
@@ -422,6 +426,31 @@ async def operation(ctx, suffix="op"):
     serial = ctx.serial
     window = await ctx.command("inbox.window")
     return window["epoch"] + f":b{serial}:{suffix}"
+
+
+async def send_same_op(ctx, *, target, text, peer=None, attempts=3, **fields):
+    """A send that survives a slow reply: the window read is read-only, and repeating the same op id observes the
+    original result (K2 caches by op), so a timeout is retried without ever creating a second intent."""
+    for _ in range(attempts):
+        try: op = await operation(ctx, "send"); break
+        except (asyncio.TimeoutError, TimeoutError): continue
+    else: raise TimeoutError("operation window read timed out")
+    args = {"op": op, "submission": op, "to": target, "mode": fields.pop("mode", "admit"),
+            "content": [{"type": "text", "text": text}], **fields}
+    for attempt in range(attempts):
+        try: return await ctx.command("inbox.send", args, peer=peer)
+        except (asyncio.TimeoutError, TimeoutError):
+            ctx.evidence.append({"kind": "same_op_retry", "op": op, "attempt": attempt + 1})
+    raise TimeoutError("inbox.send timed out on every same-op attempt")
+
+
+async def settled_within(ctx, delivery, timeout):
+    """settled() with an explicit bound: the GC witness needs history, not speed, so a slow dispatcher under load is not
+    a failure, while a record that never settles still is."""
+    async def done():
+        row = await ctx.command("inbox.get", {"delivery": delivery})
+        return row if row.get("state") not in ("held", "recorded", "claimed") else None
+    return await ctx.wait(done, label="settled " + delivery, timeout=timeout)
 
 
 async def concurrent_send(ctx, *, peer, target, text, **fields):
