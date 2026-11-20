@@ -449,10 +449,27 @@ async def route_launch_defaults_and_attributed_config(ctx):
     ctx.check(restored["route"] == "both", "undo restores the actual previous route configuration")
 
 
-def mail_matches_request(mail, agent, question, epoch="e1"):
-    return (mail.get("agent") == agent and mail.get("epoch") == epoch and
+def mail_matches_request(mail, agent, question, epoch):
+    """Match the actual native question identity, including its entire scope.
+
+    Session/run/subject and operation-scoped questions are distinct (§5). Missing
+    scope on both sides is not evidence, nor is Python's True == 1 JSON equality.
+    Epoch is mandatory and must come from observed requester facts, never a default.
+    """
+    scope = question.get("scope")
+    if not isinstance(scope, dict) or not isinstance(mail.get("scope"), dict): return False
+    if "operation" in scope:
+        valid_scope = set(scope) == {"operation"} and isinstance(scope["operation"], str) and bool(scope["operation"])
+    else:
+        valid_scope = ("session" in scope and set(scope) <= {"session", "run", "subject"} and
+            isinstance(scope["session"], str) and bool(scope["session"]) and
+            ("run" not in scope or isinstance(scope["run"], str) and bool(scope["run"])))
+    if not valid_scope: return False
+    return (isinstance(epoch, str) and bool(epoch) and mail.get("agent") == agent and mail.get("epoch") == epoch and
             mail.get("request") == question["request"] and type(mail.get("revision")) is int and
-            type(question.get("revision")) is int and mail["revision"] > 0 and mail["revision"] == question["revision"])
+            type(question.get("revision")) is int and mail["revision"] > 0 and mail["revision"] == question["revision"] and
+            json.dumps(mail["scope"], sort_keys=True, separators=(",", ":")) ==
+            json.dumps(scope, sort_keys=True, separators=(",", ":")))
 
 
 @case("Q2")
@@ -465,13 +482,14 @@ async def exact_recorded_coordinator_and_visible_fallback(ctx):
     await ctx.grant("q2-other-answer", "worker:q2-other", ["answer"], "agent:" + requester)
     question = await publish_question(ctx, "q2-exact", expires_at_ms=int(time.time() * 1000) + 60000)
     observed = await routing_binding(ctx, "observe", agent=requester, question=question)
+    epoch = next(row for row in await ctx.resources() if row["id"] == requester)["data"]["agent"]["epoch"]
     ctx.check(len(observed["mail"]) == 1 and observed["mail"][0]["to"] == coordinator and
-              mail_matches_request(observed["mail"][0], requester, question),
-              "request mail names exact agent/epoch/id/revision and only the recorded answer-granted coordinator")
+              mail_matches_request(observed["mail"][0], requester, question, epoch),
+              "request mail names exact agent/epoch/id/revision/scope and only the recorded answer-granted coordinator")
     ctx.check(not observed["human"], "valid coordinator-only route does not also show a human request notice")
     for scenario in ("missing_coordinator", "ended_coordinator", "missing_answer_grant"):
         await member(ctx, 0, "q2-project", None if scenario == "missing_coordinator" else coordinator)
-        await ctx.native_set(1, lifecycle="end" if scenario == "ended_coordinator" else "live")
+        await ctx.native_set(1, lifecycle="ended" if scenario == "ended_coordinator" else "live")
         if scenario == "missing_answer_grant":
             entry = (await ctx.peer.call("workspace.snapshot"))["entries"]["doc/agents/grants/q2-coordinator-answer"]
             await ctx.command("grants", {"op": await ctx.operation(), "id": "q2-coordinator-answer", "value": None, "expect": entry["version"]})
@@ -492,8 +510,9 @@ async def both_routes_and_first_valid_answer_race(ctx):
         await ctx.grant("q3-" + suffix, "worker:q3-" + suffix, ["answer"], "agent:" + requester)
     question = await publish_question(ctx, "q3-race", expires_at_ms=int(time.time() * 1000) + 60000)
     routed = await routing_binding(ctx, "observe", agent=requester, question=question)
+    epoch = next(row for row in await ctx.resources() if row["id"] == requester)["data"]["agent"]["epoch"]
     ctx.check(routed["human"] and len(routed["mail"]) == 1 and routed["mail"][0]["to"] == coordinator and
-              mail_matches_request(routed["mail"][0], requester, question), "both route has actual human notice and exact coordinator mail")
+              mail_matches_request(routed["mail"][0], requester, question, epoch), "both route has actual human notice and exact coordinator mail")
     before = len(ctx.native.records("native_response"))
     results = await asyncio.gather(*(respond(ctx, question, peer=peer) for peer in controllers), return_exceptions=True)
     ctx.check(len(ctx.native.records("native_response")) == before + 1, "racing valid controllers produce exactly one actual native response", replies=[str(row) for row in results])

@@ -69,13 +69,43 @@ class IdentityWitnessTests(unittest.TestCase):
         self.assertFalse(callback_attribution_is_actual({"actor": self.actor, "author": self.hello["actual_author"]}, self.hello, None, None))
 
     def test_mail_requires_every_exact_request_identity_field(self):
-        question = {"request": "q", "revision": 2}
-        mail = {"agent": "r1", "epoch": "e1", "request": "q", "revision": 2}
-        self.assertTrue(cases.mail_matches_request(mail, "r1", question))
+        question = {"request": "q", "revision": 2, "scope": {"session": "s1"}}
+        mail = {"agent": "r1", "epoch": "e7", "request": "q", "revision": 2, "scope": {"session": "s1"}}
+        self.assertTrue(cases.mail_matches_request(mail, "r1", question, "e7"))
         for field, wrong in (("agent", "r2"), ("epoch", "e2"), ("request", "other"), ("revision", 1)):
-            self.assertFalse(cases.mail_matches_request({**mail, field: wrong}, "r1", question))
+            self.assertFalse(cases.mail_matches_request({**mail, field: wrong}, "r1", question, "e7"))
         for revision in (True, 1.0, "1", 0, -1):
-            self.assertFalse(cases.mail_matches_request({**mail, "revision": revision}, "r1", {"request": "q", "revision": 1}))
+            self.assertFalse(cases.mail_matches_request({**mail, "revision": revision}, "r1",
+                {**question, "revision": 1}, "e7"))
+        with self.assertRaises(TypeError): cases.mail_matches_request(mail, "r1", question)
+
+    def test_mail_requires_exact_native_session_run_subject_or_operation_scope(self):
+        scopes = [({"session": "s1"}, ({}, {"session": "other"}, {"session": "s1", "run": "invented"})),
+            ({"session": "s1", "run": "r1"}, ({"session": "s1"}, {"run": "r1"},
+                {"session": "other", "run": "r1"}, {"session": "s1", "run": "r2"})),
+            ({"session": "s1", "run": "r1", "subject": "tool:a"},
+                ({"session": "s1", "run": "r1"}, {"session": "s1", "run": "r1", "subject": "tool:b"})),
+            ({"operation": "op1"}, ({}, {"operation": "op2"}, {"session": "s1"},
+                {"operation": "op1", "session": "s1"}))]
+        for scope, wrong_scopes in scopes:
+            question = {"request": "q", "revision": 1, "scope": scope}
+            mail = {"agent": "r1", "epoch": "e7", "request": "q", "revision": 1, "scope": scope}
+            with self.subTest(scope=scope):
+                self.assertTrue(cases.mail_matches_request(mail, "r1", question, "e7"))
+                self.assertFalse(cases.mail_matches_request({k: v for k, v in mail.items() if k != "scope"}, "r1", question, "e7"))
+                for wrong in wrong_scopes:
+                    self.assertFalse(cases.mail_matches_request({**mail, "scope": wrong}, "r1", question, "e7"))
+
+    def test_missing_or_malformed_scope_on_both_sides_is_not_positive_evidence(self):
+        for scope in (None, {}, [], "s1", {"run": "r1"}, {"session": ""}, {"session": True},
+                      {"session": "s1", "run": None}, {"session": "s1", "run": True},
+                      {"operation": ""}, {"operation": True}, {"operation": "op", "session": "s1"}):
+            with self.subTest(scope=scope):
+                question = {"request": "q", "revision": 1, "scope": scope}
+                mail = {"agent": "r1", "epoch": "e7", "request": "q", "revision": 1, "scope": scope}
+                self.assertFalse(cases.mail_matches_request(mail, "r1", question, "e7"))
+        self.assertFalse(cases.mail_matches_request({"agent": "r1", "epoch": "e7", "request": "q", "revision": 1},
+            "r1", {"request": "q", "revision": 1}, "e7"))
 
 
 class RoutingAndResponseIntegrityTests(unittest.IsolatedAsyncioTestCase):
@@ -92,6 +122,27 @@ class RoutingAndResponseIntegrityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(failure.exception.component, "coordination")
         self.assertFalse(ctx.evidence[0]["semantic_probes_executed"])
         ctx.peer.call.assert_awaited_once_with("command.list")
+
+    async def test_q2_uses_actual_native_ended_and_observed_nondefault_epoch(self):
+        # Complete semantic helper with response doubles, never runtime evidence.
+        def check(ok, message, **_):
+            if not ok: raise CheckFailed(message)
+        ctx = SimpleNamespace(agents=[{"id": "r1"}, {"id": "r2"}], check=check,
+            native_set=AsyncMock(), grant=AsyncMock(), operation=AsyncMock(return_value="op"),
+            command=AsyncMock(), resources=AsyncMock(return_value=[{"id": "r1", "data": {"agent": {"epoch": "e7"}}}]),
+            peer=SimpleNamespace(call=AsyncMock(return_value={"entries": {"doc/agents/grants/q2-coordinator-answer": {"version": 1}}})))
+        async def question(_ctx, identifier, **_):
+            return {"request": identifier, "revision": 1, "scope": {"session": "s1"}}
+        async def binding(_ctx, operation, **params):
+            if operation != "observe": return {}
+            q = params["question"]
+            if q["request"] == "q2-exact":
+                return {"mail": [{"to": "r2", "agent": "r1", "epoch": "e7", **q}], "human": []}
+            return {"mail": [], "human": [{"reason": "unit observed fallback"}]}
+        with patch.object(cases, "routing_binding", binding), patch.object(cases, "publish_question", question), patch.object(cases, "member", AsyncMock()):
+            await cases.exact_recorded_coordinator_and_visible_fallback(ctx)
+        ctx.native_set.assert_any_await(1, lifecycle="ended")
+        self.assertFalse(any(call.kwargs.get("lifecycle") == "end" for call in ctx.native_set.await_args_list))
 
     def context(self, counts):
         records = iter(counts)
