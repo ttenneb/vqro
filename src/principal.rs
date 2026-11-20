@@ -6,6 +6,8 @@ use crate::{rpc::RpcError,store::{Store,Op}};
 
 pub const OWNER:&str="owner";
 pub const UNDECLARED:&str="undeclared";
+pub const OWNER_UNSET:&str="owner-unset";
+pub const OWNER_NOTICE:&str="Workspace owner is unset. Run vqro call workspace.owner.bootstrap with an explicit principal, then reconnect.";
 pub const OWNER_KEY:&str="doc/principals/owner";
 pub const DELEGATIONS:&str="doc/principals/delegations/";
 const ID_BYTES:usize=256;
@@ -43,8 +45,8 @@ impl Attribution {
         Ok(Self {actor:Some(actor.into()),principal:Some(actor.into()),initiator:None,label,causality:crate::causality::Causality::take(params)?,authority:None})
     }
     pub(crate) fn recorded(mut self)->Self {self.authority=None;self}
-    pub fn effective(&self)->Option<&str> {self.actor.as_ref()?;self.principal.as_deref().filter(|id|*id!=UNDECLARED)}
-    pub fn actor(&self)->Option<&str> {self.actor.as_deref().filter(|id|*id!=UNDECLARED)}
+    pub fn effective(&self)->Option<&str> {self.actor.as_ref()?;self.principal.as_deref().filter(|id|*id!=UNDECLARED && *id!=OWNER_UNSET)}
+    pub fn actor(&self)->Option<&str> {self.actor.as_deref().filter(|id|*id!=UNDECLARED && *id!=OWNER_UNSET)}
     pub fn forwarded(mut self,principal:&str,initiator:Option<&str>)->Self {
         self.principal=Some(principal.into());self.initiator=Some(initiator.unwrap_or(principal).into());self
     }
@@ -61,19 +63,19 @@ impl CallAuthor {pub fn effective(&self)->Option<&str>{self.attribution.effectiv
 pub enum Identity {Owner,Principal {principal:String}}
 
 pub fn validate(id:&str)->Result<(),RpcError> {
-    if id.is_empty() || id.len()>ID_BYTES || id.chars().any(|c|c.is_control()||c.is_whitespace()) || id==UNDECLARED {
-        return Err(RpcError::invalid("principal must be 1..=256 bytes without whitespace/control characters; undeclared is reserved"));
+    if id.is_empty() || id.len()>ID_BYTES || id.chars().any(|c|c.is_control()||c.is_whitespace()) || id==UNDECLARED || id==OWNER_UNSET {
+        return Err(RpcError::invalid("principal must be 1..=256 bytes without whitespace/control characters; undeclared and owner-unset are reserved"));
     }
     Ok(())
 }
 pub fn owner(store:&Store)->Result<String,RpcError> {
-    let principal=match store.get(OWNER_KEY) {None=>OWNER,Some(entry)=>entry.value.as_str().ok_or_else(||RpcError::invalid("workspace owner must be a principal string"))?};
+    let principal=store.get(OWNER_KEY).and_then(|entry|entry.value.as_str()).ok_or_else(||RpcError::invalid("workspace owner is unset; explicit bootstrap required"))?;
     validate(principal)?;Ok(principal.into())
 }
 pub fn identity(store:&Store,identity:Option<&Identity>,extension:Option<&str>)->Result<String,RpcError> {
     let resolved=if let Some(extension)=extension {format!("extension:{extension}")} else {
         match identity {
-            None=>return Ok(UNDECLARED.into()),Some(Identity::Owner)=>owner(store)?,
+            None=>return Ok(UNDECLARED.into()),Some(Identity::Owner)=>return Ok(owner(store).unwrap_or_else(|_|OWNER_UNSET.into())),
             Some(Identity::Principal {principal})=>{
                 validate(principal)?;
                 if principal=="system" || ["extension:","host:","system:"].iter().any(|prefix|principal.starts_with(*prefix)) {
@@ -170,16 +172,20 @@ pub fn validate_revert(store:&Store,attribution:&Attribution,txn:u64)->Result<()
     }).collect::<Vec<_>>();
     validate_writes(store,attribution,&ops)
 }
-/// Called with the startup state lock held; system work is visible but not an owner-u target.
-pub fn bootstrap(store:&mut Store)->Result<(),RpcError> {
-    if store.get(OWNER_KEY).is_some() && owner(store).is_ok(){return Ok(())}
+pub(crate) fn system_attribution()->Result<(String,Attribution),RpcError> {
     let mut nonce=[0u8;16];getrandom::fill(&mut nonce).map_err(|error|RpcError::new("io",format!("owner bootstrap nonce: {error}")))?;
     let author=format!("system:{}",nonce.iter().map(|b|format!("{b:02x}")).collect::<String>());
     let attribution=Attribution{actor:Some("system".into()),principal:Some("system".into()),initiator:None,label:None,causality:Default::default(),authority:None};
+    Ok((author,attribution))
+}
+/// Called with the startup state lock held; system work is visible but not an owner-u target.
+pub fn bootstrap(store:&mut Store)->Result<(),RpcError> {
+    if owner(store).is_ok(){return Ok(())}
+    let(author,attribution)=system_attribution()?;
     match store.apply_context(&author,None,attribution,Some("initialize workspace owner (prior value retained in history)".into()),vec![Op::Set{key:OWNER_KEY.into(),value:json!(OWNER),expect:None}]) {
         Ok(_)=>Ok(()),
         Err(error)if error.kind()=="durability_unconfirmed"=>{eprintln!("vqro: owner bootstrap adopted, durability unconfirmed; do not replay: {error}");Ok(())},
-        Err(error)if error.kind()=="too_large"=>{eprintln!("vqro: owner bootstrap could not grow legacy state; default owner retained for raw recovery: {error}");Ok(())},
+        Err(error)if error.kind()=="too_large"=>{eprintln!("vqro: owner bootstrap could not grow legacy state; owner remains unset, raw recovery and explicit bootstrap available: {error}");Ok(())},
         Err(error)=>Err(error),
     }
 }

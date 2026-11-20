@@ -57,7 +57,10 @@ Principals are opaque, case-sensitive strings of 1–256 UTF-8 bytes without whi
 [coordination-v0 §3](coordination-v0.md#3-principals), which uses this generic seam but owns its own rights policy.
 
 A launcher configures identity once in `hello.identity`: `{kind:"principal", principal:"…"}`; the TUI uses
-`{kind:"owner"}` to resolve `doc/principals/owner` (default `"owner"`). Rust/Python SDKs send configured
+`{kind:"owner"}` to resolve `doc/principals/owner` (fresh stores receive audited startup initialization to `"owner"`).
+If no valid owner remains, this hello binds the core-only `owner-unset` recovery marker, with no effective known
+principal/coordination grants; hello supplies `owner_unset:true` and a visible `owner_notice`. Raw/recovery remains
+usable. TUI/text UI display bootstrap/reconnect guidance, including safe mode; cache refresh never retags a connection. Rust/Python SDKs send configured
 `VQRO_PRINCIPAL` in that typed hello field, never as a per-call assertion. Ordinary CLI/provider clients without
 it are `undeclared`; the TUI explicitly defaults to owner unless its launcher configures another principal.
 Verified supervised extensions resolve to `extension:<name>`. Callers cannot assert `extension:*`, `host:*`,
@@ -94,7 +97,12 @@ delegation creates, replacements and deletes require that actor to be the owner 
 including explicit reverts. Effective/delegated identities and callback proofs cannot mint, extend or transfer
 standing authority. Checks run
 at serialized commit prepare after preceding adopted commits; mixed writes reject atomically. Raw recovery on
-other keys is unaffected. Core never reads coordination grants (`doc/agents/grants`); there is no core
+other keys is unaffected. `workspace.owner.bootstrap {principal}` is explicit raw recovery only while the owner
+row is missing/invalid: the serialized commit guard and CAS allow one initializer, never replacement of a valid
+owner. It creates an audited system transaction (logical initiator when known, actual requester in the note),
+retains causal metadata and is not an owner-u target. Existing startup bootstrap stays audited; a failed oversized
+legacy repair leaves owner-unset rather than guessed authority. Supply the owner explicitly, then open a new
+connection; accepted/indeterminate writes are never replayed. Core never reads coordination grants (`doc/agents/grants`); there is no core
 `grants.check` or `coordination.invoke` stand-in.
 
 Generic spawn exports its effective principal through `VQRO_PRINCIPAL` when native environment passing is
@@ -139,6 +147,7 @@ disconnect uses legacy positive-pid signal fallback, never a protocol refusal. S
 |---|---|---|
 | `workspace.snapshot` | | `epoch`, `seq`, `entries` (key → `{version, value}`), `resources`, `commands`, `extensions`, `providers`, `adapters` (compatibility alias), `safe_mode` |
 | `workspace.get` | `key` | the single entry `{version, value}`, or `null` if absent |
+| `workspace.owner.bootstrap` | `principal` (explicit new owner), `cause?`, `correlation?` | standard transaction receipt; refused `conflict` if a valid owner exists at serialized prepare |
 | `workspace.apply` | `ops: [{op: "set", key, value, expect?} \| {op: "delete", key, expect?}]`, `note?`, `invocation?` (proof), `on_behalf_of?` (target principal) | `txn`, `undoable`, `changes` |
 | `workspace.history` | `limit?` | `txns` (newest first) |
 | `workspace.revert` | `txn`, `invocation?` (proof), `on_behalf_of?` (target principal) | reverting `txn`, `undoable`, `changes` |
@@ -533,7 +542,7 @@ changing `args`, upgrading provenance or inferring anything from text/timing.
   bounds are `invalid`; provenance is preserved exactly, including unknown values. The outer wire's independent
   size/depth admission can reject first.
 - Root metadata is accepted only by `resource.spawn`/`kill`/`attach`/`invoke`/`forget`/`forget_cached`,
-  `workspace.apply`/`workspace.revert`, and `operational.register`/`operational.apply`. Other request methods,
+  `workspace.apply`/`workspace.revert`/`workspace.owner.bootstrap`, and `operational.register`/`operational.apply`. Other request methods,
   including `command.invoke`, `stream.*` and `view.publish`, reject explicit root fields with `invalid` rather
   than silently dropping them. Arbitrary command/payload args remain opaque (only resource.invoke has common
   causal op args). Attach records its effect audit link; stream.open forwarding remains a separate follow-up.

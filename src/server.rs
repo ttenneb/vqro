@@ -589,7 +589,7 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, mut p: Value) -
             Ok(json!({
                 "server": "vqro", "version": env!("CARGO_PKG_VERSION"), "protocol": PROTOCOL, "you": conn.author(),
                 "provides":["ability/vqro.operational-domains@1"],
-                "epoch": c.epoch, "seq": c.seq, "actual_author":conn.actual_author,"actor":conn.actor(),"principal":conn.actor(),"backend_notice":c.backend_notice(), "safe_mode": c.safe_mode, "socket": c.socket, "state_dir": c.state_dir,
+                "epoch": c.epoch, "seq": c.seq, "actual_author":conn.actual_author,"actor":conn.actor(),"principal":conn.actor(),"owner_unset":conn.actor()==principal::OWNER_UNSET,"owner_notice":(conn.actor()==principal::OWNER_UNSET).then_some(principal::OWNER_NOTICE),"backend_notice":c.backend_notice(), "safe_mode": c.safe_mode, "socket": c.socket, "state_dir": c.state_dir,
             }))
         }
         "workspace.snapshot" => {
@@ -611,6 +611,7 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, mut p: Value) -
             Ok(json!(entry))
         }
         "operational.register" | "operational.get" | "operational.list" | "operational.snapshot" | "operational.apply" => operational(core,conn,&caller,method,p,context.attribution).await,
+        "workspace.owner.bootstrap" => bootstrap_owner(core,&caller,p,context.attribution).await,
         "workspace.apply" => {
             let a: Apply = params(p)?;
             if a.history==Some(false) {return Err(provider::rejected("forbidden","history:false is not a raw workspace bypass; use the owning protected operational domain"));}
@@ -1176,6 +1177,25 @@ async fn apply_prepared(
 async fn apply(core:&Shared, author:&Caller, on_behalf_of:Option<Arc<str>>, note:Option<String>, ops:Vec<Op>, attribution:Attribution) -> RpcResult {
     let bytes = crate::limits::encoded_bytes(&ops);
     apply_prepared(core, author, on_behalf_of, note, bytes, attribution, move |_| Ok(ops)).await
+}
+
+/// Explicit recovery only: no existing owner can be replaced through this primitive.
+async fn bootstrap_owner(core:&Shared,caller:&Caller,p:Value,attribution:Attribution)->RpcResult {
+    #[derive(Deserialize)] struct Bootstrap {principal:String}
+    let request:Bootstrap=params(p)?;principal::validate(&request.principal)?;
+    let(system_author,system_context)=principal::system_attribution()?;
+    let requester=caller.to_string();let owner=caller.owner.clone();
+    let bytes=crate::limits::encoded_bytes(&(&request.principal,&attribution,&requester)).saturating_add(512);
+    crate::commit::submit(core,bytes,move |c| {
+        ext::check_owner(c,owner.as_ref())?;
+        if principal::owner(&c.store).is_ok(){return Err(RpcError::new("conflict","workspace owner already exists; bootstrap refused"));}
+        let context=principal::revalidate(c,&attribution)?;
+        let mut system_context=system_context;
+        system_context.initiator=context.effective().map(String::from);system_context.causality=context.causality;
+        let version=c.store.get(principal::OWNER_KEY).map(|entry|entry.version).unwrap_or(0);
+        let ops=vec![Op::Set{key:principal::OWNER_KEY.into(),value:json!(request.principal),expect:Some(version)}];
+        Ok(crate::commit::Plan{owner,action:crate::commit::Action::Apply{author:system_author,attribution:system_context,on_behalf_of:None,note:Some(format!("explicit workspace owner bootstrap requested by {requester}")),ops},after_adopt:None})
+    }).await
 }
 
 /// Run a command: built-ins here, everything else forwarded to the connection that owns it.

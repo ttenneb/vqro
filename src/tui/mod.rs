@@ -298,6 +298,8 @@ struct App {
     ws: Workspace,
     /// Safe-mode chooser choices not applied yet (this client's UI state).
     safe_selected: BTreeSet<String>,
+    /// This connection resolved no owner at hello; cache refreshes cannot retag it.
+    owner_unset: bool,
     terms: HashMap<String, Term>,
     stream_view: HashMap<u64, String>,
     early: HashMap<u64, Vec<Vec<u8>>>,
@@ -443,7 +445,7 @@ fn snapshot_retry_delay(attempt: u32) -> std::time::Duration {
 }
 
 async fn snapshot_for_client(peer: &Peer, hello: &Value) -> Result<Value> {
-    match peer.call_with_timeout("workspace.snapshot", Value::Null, SNAPSHOT_TIMEOUT).await {
+    let result:Result<Value>=match peer.call_with_timeout("workspace.snapshot", Value::Null, SNAPSHOT_TIMEOUT).await {
         Ok(snapshot) => Ok(snapshot),
         Err(error) if error.kind() == "too_large" => Ok(recovery_snapshot(hello, &error.message)),
         Err(error) if snapshot_transient(&error) => {
@@ -453,7 +455,8 @@ async fn snapshot_for_client(peer: &Peer, hello: &Value) -> Result<Value> {
             Ok(snap)
         }
         Err(error) => Err(error.into()),
-    }
+    };
+    result.map(|mut snap|{snap["client_owner_unset"]=json!(hello["owner_unset"].as_bool().unwrap_or(false));snap})
 }
 
 /// This client's `hello`: name, build, profiles and the panel features it renders (D29).
@@ -478,6 +481,7 @@ pub async fn run(socket: &Path) -> Result<()> {
     app.window.pinned = std::env::var(LAYOUT_ENV).ok().filter(|s| !s.is_empty());
     app.load(&snap);
     if let Some(notice)=snap["recovery_notice"].as_str() {app.message=notice.into();}
+    else if app.owner_unset {app.message=crate::principal::OWNER_NOTICE.into();}
     else {app.set_key_hint("click vqro or press ", &app.prefix(), " for the menu");}
     peer.call("events.subscribe", json!({"from": seq, "epoch": snap["epoch"], "partial_resources": true})).await?;
 
@@ -634,7 +638,7 @@ async fn reconnect(socket: std::path::PathBuf, tx: mpsc::UnboundedSender<Msg>) -
 impl App {
     fn new(peer: Peer, tx: mpsc::UnboundedSender<Msg>) -> Self {
         Self {
-            peer, tx, ws: Workspace::default(), safe_selected: BTreeSet::new(),
+            peer, tx, ws: Workspace::default(), safe_selected: BTreeSet::new(), owner_unset:false,
             terms: HashMap::new(), stream_view: HashMap::new(), early: HashMap::new(), early_closed: HashMap::new(), typed: None,
             leaves: Vec::new(), focus: 0, overlay: None, pstate: HashMap::new(),
             filtering: None, filter_detail: false, toast: None, bells: HashMap::new(), selections: HashMap::new(), selecting: None, last_press: None, scroll_mode: None, cursor_style: vt100::CursorStyle::Default, cursor_sent: vt100::CursorStyle::Default, panel_values: Mutex::new(HashMap::new()), panel_dependencies: Mutex::new(HashMap::new()), hit: Hit::default(),
@@ -667,10 +671,11 @@ impl App {
         self.early.clear();
         self.early_closed.clear();
         self.load(snap);
-        self.message = snap["recovery_notice"].as_str().unwrap_or("reconnected").into();
+        self.message = snap["recovery_notice"].as_str().unwrap_or(if self.owner_unset {crate::principal::OWNER_NOTICE}else{"reconnected"}).into();
     }
 
     fn load(&mut self, snap: &Value) {
+        if let Some(unset)=snap["client_owner_unset"].as_bool(){self.owner_unset=unset;}
         self.recovery_only = snap["recovery_only"].as_bool().unwrap_or(false);
         self.snapshot_retries = u32::from(snap["retry_snapshot"] == true);
         self.retry_snapshot = (self.snapshot_retries > 0).then(|| std::time::Instant::now() + snapshot_retry_delay(self.snapshot_retries));
@@ -3090,6 +3095,9 @@ impl App {
                 spans.push(Span::styled(format!(" {notice} "), pal.style(Some("warn"))));
             }
         }
+        if self.owner_unset {
+            spans.push(Span::styled(" OWNER UNSET: bootstrap + reconnect ",pal.style(Some("warn"))));
+        }
         // Contributed status-bar buttons.
         let mut x = area.x + spans.iter().map(|s| s.content.chars().count() as u16).sum::<u16>();
         let window = self.window.context(&self.ws);
@@ -3727,6 +3735,39 @@ mod tests {
         app.options_menu(&json!({"command": "any.option", "value": "implicit value", "options": [{"label": "Custom", "input": "Value", "prefill": "explicit option"}]}), pane, None);
         app.activate_overlay();
         assert!(matches!(&app.overlay, Some(Overlay::Input { text, .. }) if text == "explicit option"));
+    }
+
+    #[tokio::test]
+    async fn owner_unset_hello_reaches_the_real_snapshot_and_renderer() {
+        let root=tempfile::Builder::new().prefix("own-ui").tempdir().unwrap();let socket=root.path().join("s");
+        let core=crate::server::start(socket.clone(),root.path().join("st"),false,crate::server::Backend::Fake,None).unwrap();
+        let(owner,_,_)=client::connect_as(&socket,"owner","owner").await.unwrap();
+        owner.call("workspace.apply",json!({"ops":[{"op":"delete","key":crate::principal::OWNER_KEY}]})).await.unwrap();
+        let(peer,_,hello)=client::connect_with_identity(&socket,"owner-ui",Some(crate::principal::Identity::Owner)).await.unwrap();
+        let snap=snapshot_for_client(&peer,&hello).await.unwrap();assert_eq!(snap["client_owner_unset"],true);
+        let(tx,_)=mpsc::unbounded_channel();let mut app=App::new(peer,tx);app.load(&snap);
+        let mut terminal=ratatui::Terminal::new(ratatui::backend::TestBackend::new(120,30)).unwrap();terminal.draw(|f|app.draw(f)).unwrap();
+        let screen:String=terminal.backend().buffer().content.iter().map(|c|c.symbol()).collect();assert!(screen.contains("OWNER UNSET"));
+        crate::server::shutdown(&core).await;
+    }
+
+    #[tokio::test]
+    async fn owner_unset_notice_is_visible_without_extensions_and_in_safe_mode() {
+        let(mut app,_)=app();
+        app.load(&json!({"epoch":"boot","seq":1,"entries":{},"client_owner_unset":true}));
+        let mut terminal=ratatui::Terminal::new(ratatui::backend::TestBackend::new(120,30)).unwrap();
+        for safe in [false,true] {
+            app.ws.safe_mode=safe;terminal.draw(|f|app.draw(f)).unwrap();
+            let screen:String=terminal.backend().buffer().content.iter().map(|c|c.symbol()).collect();
+            assert!(screen.contains("OWNER UNSET"),"safe={safe}: {screen}");assert!(screen.contains("bootstrap"));
+        }
+        // A cache refresh is not a new hello and must not silently assign this connection an owner.
+        app.load(&json!({"epoch":"boot","seq":2,"entries":{}}));
+        terminal.draw(|f|app.draw(f)).unwrap();
+        let screen:String=terminal.backend().buffer().content.iter().map(|c|c.symbol()).collect();assert!(screen.contains("OWNER UNSET"));
+        app.load(&json!({"epoch":"boot","seq":3,"entries":{},"client_owner_unset":false}));
+        terminal.draw(|f|app.draw(f)).unwrap();
+        let screen:String=terminal.backend().buffer().content.iter().map(|c|c.symbol()).collect();assert!(!screen.contains("OWNER UNSET"));
     }
 
     #[tokio::test]

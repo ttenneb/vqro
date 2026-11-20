@@ -22,7 +22,7 @@ impl Causality {
     /// Explicit metadata must have a recording sink; accepting then stripping it would lose caller intent.
     pub(crate) fn check_method(method:&str,params:&Value)->Result<(),RpcError> {
         if (params.get("cause").is_some() || params.get("correlation").is_some()) && !matches!(method,
-            "workspace.apply"|"workspace.revert"|"operational.register"|"operational.apply"|
+            "workspace.apply"|"workspace.revert"|"workspace.owner.bootstrap"|"operational.register"|"operational.apply"|
             "resource.spawn"|"resource.kill"|"resource.attach"|"resource.invoke"|"resource.forget"|"resource.forget_cached") {
             return Err(RpcError::invalid("cause/correlation are not recorded by this method"));
         }

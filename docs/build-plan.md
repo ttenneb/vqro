@@ -3,6 +3,15 @@
 D16: build vqro itself, smallest complete and usable first. The north star: an agent can substantially modify its own
 workspace through reliable public primitives, without changing the host or endangering underlying processes.
 
+## Explicit owner-unset recovery (2026-11-20)
+
+Missing/invalid owner resolution no longer guesses the default: owner TUI connections get an unresolved core
+marker with no effective known principal, plus visible persistent bootstrap/reconnect guidance in both clients.
+Existing audited startup bootstrap stays. Public workspace.owner.bootstrap takes the principal explicitly and
+initializes only while no valid owner exists at serialized prepare; normal candidate/adoption/CAS rules apply.
+System audit, actual requester, no owner-u target and no connection retag are tested. Full gate/review receipts
+belong in the owner-group handoff; see `research/owner-unset-recovery.md`.
+
 ## Generic explicit causality (2026-11-19; separate from C2 identity)
 
 Bounded cause/correlation now pass unchanged through resource.invoke args/root metadata, provider effect.invoke,

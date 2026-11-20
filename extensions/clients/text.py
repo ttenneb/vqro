@@ -176,10 +176,12 @@ class TextClient:
         return ctx
 
     def show(self):
+        info = getattr(self, "info", {})
+        notice = ["OWNER UNSET: " + str(info.get("owner_notice") or "bootstrap an explicit owner, then reconnect")] if info.get("owner_unset") else []
         name, root = self.active_layout()
         if root is None:
-            return ["no active layout (try `p` and reset layout)"]
-        lines = [f"layout {name}"]
+            return notice + ["no active layout (try `p` and reset layout)"]
+        lines = notice + [f"layout {name}"]
 
         def tabs_line(node, depth):
             tabs = node["tabs"]
