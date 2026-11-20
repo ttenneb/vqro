@@ -31,7 +31,7 @@ struct Args {
     #[arg(long)] cwd:Option<std::path::PathBuf>,
     #[arg(last=true,required=true)] native:Vec<String>,
 }
-struct Shared {agent:Mutex<Agent>,fallback:panel::Fallback,connected:std::sync::atomic::AtomicBool,native:OnceLock<Native>,starts:OnceLock<Starts>,changed:Notify,cwd:String,provider_name:String,instance:String,ui_slots:Arc<tokio::sync::Semaphore>}
+struct Shared {agent:Mutex<Agent>,fallback:panel::Fallback,connected:std::sync::atomic::AtomicBool,native:OnceLock<Native>,starts:OnceLock<Starts>,changed:Notify,metadata_refresh:Notify,cwd:String,provider_name:String,instance:String,ui_slots:Arc<tokio::sync::Semaphore>}
 impl Shared {
     fn facts(&self,name:&str)->Value {self.agent.lock().unwrap().facts(name,&self.cwd)}
     fn wake(&self) {self.changed.notify_waiters();}
@@ -61,15 +61,16 @@ async fn main()->Result<()> {
     let instance=args.instance.unwrap_or_else(fresh);let name=args.name.unwrap_or_else(||format!("pi-{instance}"));
     anyhow::ensure!(!instance.is_empty() && instance.len()<=64 && !name.is_empty() && name.len()<=128,"provider identity exceeds bounds");
     let argv=controlled(args.native)?;
-    let cwd=args.cwd.unwrap_or(std::env::current_dir()?);
+    let cwd=args.cwd.unwrap_or(std::env::current_dir()?).canonicalize()?;
     let signals=admission::Signals::new();
-    let shared=Arc::new(Shared {agent:Mutex::new(Agent::new(instance.clone(),signals.clone())),fallback:panel::Fallback::tty(),connected:std::sync::atomic::AtomicBool::new(false),native:OnceLock::new(),starts:OnceLock::new(),changed:Notify::new(),cwd:cwd.to_string_lossy().into_owned(),provider_name:name.clone(),instance:instance.clone(),ui_slots:Arc::new(tokio::sync::Semaphore::new(24))});
+    let shared=Arc::new(Shared {agent:Mutex::new(Agent::with_cwd(instance.clone(),signals.clone(),cwd.to_string_lossy().into_owned())),fallback:panel::Fallback::tty(),connected:std::sync::atomic::AtomicBool::new(false),native:OnceLock::new(),starts:OnceLock::new(),changed:Notify::new(),metadata_refresh:Notify::new(),cwd:cwd.to_string_lossy().into_owned(),provider_name:name.clone(),instance:instance.clone(),ui_slots:Arc::new(tokio::sync::Semaphore::new(24))});
     let weak=Arc::downgrade(&shared);
     let native=Native::spawn(&argv,&cwd,&std::env::vars().collect::<HashMap<_,_>>(),Arc::new(move|event|{
         if let Some(shared)=weak.upgrade(){
             if let native::Event::ProtocolError(message)=&event {eprintln!("Pi native protocol: {message}");}
             let mut agent=shared.agent.lock().unwrap();agent.signals.observe(&event);agent.observe(&event);
             drop(agent);shared.wake();drive_ui_cancels(&shared);
+            if matches!(&event,native::Event::Record(record) if matches!(record["type"].as_str(),Some("agent_end"|"agent_settled"|"auto_compaction_end")) || (record["type"]=="response" && record["command"]=="get_state" && record["success"]==true)){shared.metadata_refresh.notify_one();}
         }
     })).await?;
     let _=shared.native.set(native.clone());let _=shared.starts.set(Starts::new(native.clone(),signals));
@@ -83,6 +84,8 @@ async fn main()->Result<()> {
     if let Ok(reply)=native.call("get_commands",json!({}),Duration::from_secs(3)).await {
         if !reply.success || contract::rows(&reply.data,"commands").is_none(){shared.agent.lock().unwrap().incomplete.insert("commands".into());}
     }
+    tokio::spawn(refresh_usage(shared.clone(),native.clone()));
+    shared.metadata_refresh.notify_one();
     let (metadata_native,metadata_shared)=(native.clone(),shared.clone());
     tokio::spawn(async move{for command in ["get_available_models","get_available_thinking_levels"]{
         if !matches!(metadata_native.call(command,json!({}),Duration::from_secs(3)).await,Ok(reply) if reply.success){metadata_shared.agent.lock().unwrap().incomplete.insert("config".into());metadata_shared.wake();}
@@ -158,6 +161,16 @@ async fn main()->Result<()> {
     native.stop();let _=tokio::time::timeout(Duration::from_secs(2),native.exited()).await;
     let (tail,total)=native.stderr_tail();eprintln!("Pi bridge ended; native pending {}; stderr retained {} of {total} bytes",native.pending(),tail.len());
     Ok(())
+}
+// Coalesced read-only observations: one bounded call at a time; no input, retry loop or native lifetime ownership.
+async fn refresh_usage(shared:Arc<Shared>,native:Native){
+    loop{
+        tokio::select!{_=native.exited()=>break,_=shared.metadata_refresh.notified()=>{}}
+        let (epoch,revision)={let agent=shared.agent.lock().unwrap();(agent.epoch().to_owned(),agent.usage_revision())};
+        let reply=native.call("get_session_stats",json!({}),Duration::from_secs(3)).await;
+        let data=reply.as_ref().ok().filter(|reply|reply.success).map(|reply|&reply.data);
+        shared.agent.lock().unwrap().usage_result(&epoch,revision,data);shared.wake();
+    }
 }
 async fn announce_end(shared:&Shared,provider:&Provider,name:&str) {
     let view={let agent=shared.agent.lock().unwrap();agent.view.as_ref().map(|view|(view.clone(),agent.transcript()))};
@@ -342,7 +355,7 @@ async fn finish_mutation(shared:Arc<Shared>,provider:Provider,mut change:Mutatio
                 (changed,json!({"session":agent.session,"cancelled":reply.data.get("cancelled")}))
             }
         }
-    };shared.wake();drive_ui_cancels(&shared);
+    };shared.wake();shared.metadata_refresh.notify_one();drive_ui_cancels(&shared);
     publish_fenced(&shared,&provider).await.map_err(|_|ProviderError::new("backend","native state changed; facts publication not confirmed"))?;
     if !reply.success{return Err(ProviderError::new("backend",native_message(&reply)));}
     if observed{Ok(Outcome::Observed(Some(data)))}else{Ok(Outcome::Accepted(Some(data)))}

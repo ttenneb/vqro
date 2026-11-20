@@ -25,7 +25,7 @@ impl Core {
     async fn reply(&mut self,row:&Value,result:Value){self.w.write_all(format!("{}\n",json!({"jsonrpc":"2.0","id":row["id"],"result":result})).as_bytes()).await.unwrap();self.w.flush().await.unwrap();}
 }
 async fn fixture(root:&std::path::Path,apply:bool)->(Arc<Shared>,Provider,Core){
-    let signals=admission::Signals::new();let shared=Arc::new(Shared {agent:Mutex::new(Agent::new("instance".into(),signals)),fallback:Default::default(),connected:std::sync::atomic::AtomicBool::new(false),native:OnceLock::new(),starts:OnceLock::new(),changed:Notify::new(),cwd:root.to_string_lossy().into_owned(),provider_name:"pi-test".into(),instance:"instance".into(),ui_slots:Arc::new(tokio::sync::Semaphore::new(24))});
+    let signals=admission::Signals::new();let shared=Arc::new(Shared {agent:Mutex::new(Agent::new("instance".into(),signals)),fallback:Default::default(),connected:std::sync::atomic::AtomicBool::new(false),native:OnceLock::new(),starts:OnceLock::new(),changed:Notify::new(),metadata_refresh:Notify::new(),cwd:root.to_string_lossy().into_owned(),provider_name:"pi-test".into(),instance:"instance".into(),ui_slots:Arc::new(tokio::sync::Semaphore::new(24))});
     let initial=json!({"sessionId":"fixture","isStreaming":false,"isCompacting":false,"steeringMode":"one-at-a-time","followUpMode":"all"});
     {let event=native::Event::Record(json!({"type":"response","command":"get_state","success":true,"data":initial}));let mut agent=shared.agent.lock().unwrap();agent.signals.observe(&event);agent.observe(&event);}
     let script=format!(r#"import sys,json,time,pathlib

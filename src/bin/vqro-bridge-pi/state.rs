@@ -18,6 +18,21 @@ fn project_content(content:&Value)->Value{
         block
     }).collect());}Value::Null
 }
+fn count(value:&Value)->Option<u64>{value.as_u64().filter(|n|*n<(1u64<<53))}
+fn project_usage(data:&Value,metadata:&Value)->Option<Value>{
+    let mut usage=json!({});
+    if let Some(window)=count(&data["contextUsage"]["contextWindow"]).or_else(||count(&metadata["model"]["contextWindow"])).filter(|n|*n>0){
+        usage["context"]=json!({"window":window});
+        if let Some(used)=count(&data["contextUsage"]["tokens"]){usage["context"]["used"]=json!(used);}
+    }
+    if let (Some(input),Some(output))=(count(&data["tokens"]["input"]),count(&data["tokens"]["output"])){
+        usage["tokens"]=json!({"input":input,"output":output});
+        for (native,standard) in [("cacheRead","cache_read"),("cacheWrite","cache_write")]{if let Some(n)=count(&data["tokens"][native]){usage["tokens"][standard]=json!(n);}}
+    }
+    // Pi's aggregate is a bare number: neither currency nor reported/estimated basis survives aggregation.
+    // Omit standard cost rather than invent its denomination or billing basis. No private cost-shaped mirror.
+    if usage.as_object().unwrap().is_empty(){None}else{Some(usage)}
+}
 pub struct Agent {
     pub journal:ItemJournal,
     pub signals:Arc<Signals>,
@@ -34,6 +49,7 @@ pub struct Agent {
     position:u64,serial:u64,epoch_number:u64,instance:String,boot:String,
     pub session:Option<Value>,pub session_pending:bool,pub run:Option<String>,pub completion:Option<Value>,
     reason:String,error:Option<String>,exit:Option<Exit>,caps:Value,
+    launch_cwd:Option<String>,usage:Option<Value>,usage_revision:u64,
 }
 impl Agent {
     pub fn new(instance:String,signals:Arc<Signals>)->Self {
@@ -42,8 +58,21 @@ impl Agent {
         let mut journal=ItemJournal::new(format!("{boot}.e1"),JournalConfig {max_entities:ENTITY_COUNT,max_entity_bytes:ENTITY_TOTAL,snapshot_buffer_bytes:1024*1024,..Default::default()});
         journal.set_coverage(Coverage::Tail);
         let mut agent=Self {journal,signals,incomplete:BTreeSet::new(),receipts:BTreeMap::new(),queue:None,queue_version:0,tool_principal_env:false,view:None,view_error:None,configuration:Default::default(),commands:Default::default(),requests:Default::default(),ui_cancels:Vec::new(),ui_unconfirmed:BTreeSet::new(),ui_overflow:false,receipt_order:VecDeque::new(),history:VecDeque::new(),tools:HashMap::new(),current_message:None,
-            position:0,serial:0,epoch_number:1,instance,boot,session:None,session_pending:false,run:None,completion:None,reason:"unknown".into(),error:None,exit:None,caps:Value::Null};
+            position:0,serial:0,epoch_number:1,instance,boot,session:None,session_pending:false,run:None,completion:None,reason:"unknown".into(),error:None,exit:None,caps:Value::Null,launch_cwd:None,usage:None,usage_revision:0};
         agent.refresh();agent
+    }
+    pub fn with_cwd(instance:String,signals:Arc<Signals>,cwd:String)->Self{let mut agent=Self::new(instance,signals);if cwd.len()<=4096{agent.launch_cwd=Some(cwd);}else{agent.incomplete.insert("session.cwd".into());}agent}
+    pub fn usage_revision(&self)->u64{self.usage_revision}
+    fn invalidate_usage(&mut self){self.usage_revision=self.usage_revision.wrapping_add(1);self.usage=None;}
+    pub fn usage_result(&mut self,epoch:&str,revision:u64,data:Option<&Value>){
+        if self.epoch()!=epoch || self.usage_revision!=revision{return;}
+        self.usage=None;self.incomplete.insert("usage".into());
+        if self.configuration.pending || self.session_pending{return;}
+        if let Some(data)=data.filter(|data|self.session.as_ref().is_some_and(|s|data["sessionId"].is_string() && s["id"]==data["sessionId"])){
+            self.usage=project_usage(data,&self.signals.current().metadata);
+            if self.usage.is_some(){self.incomplete.remove("usage");}
+            self.incomplete.insert("usage.cost".into());
+        }
     }
     fn next(&mut self,prefix:&str)->String {self.serial+=1;format!("{prefix}{}",self.serial)}
     pub fn epoch(&self)->&str {self.journal.epoch()}
@@ -98,8 +127,8 @@ impl Agent {
             "data":{"agent":{"v":0,"state":self.state(),"lifecycle":if self.exit.is_some(){"ended"}else{"live"},
                 "host":{"id":format!("{}.child",self.boot),"provider":provider,"instance":self.instance,"incarnation":"","kind":"process","owns_lifecycle":true},
                 "session":if self.session_pending {None}else{self.session.as_ref()},"epoch":self.epoch(),"caps":self.caps,"completion":self.completion,"queue":self.queue,"requests":self.request_summaries(),"background":null,
-                "config":self.configuration.options(),"commands":self.commands.facts(),"usage":null,"incomplete":self.incomplete,
-                "items":{"retain_bytes":131072,"entities":ENTITY_COUNT,"entity_bytes":ENTITY_TOTAL,"snapshot_buffer_bytes":1048576,"coverage":"tail"}},"views":self.view.iter().collect::<Vec<_>>(),"view_error":self.view_error}});
+                "config":self.configuration.options(),"commands":self.commands.facts(),"usage":if self.session_pending || self.configuration.pending{None}else{self.usage.as_ref()},"incomplete":self.incomplete,
+                "items":{"retain_bytes":131072,"entities":ENTITY_COUNT,"entity_bytes":ENTITY_TOTAL,"snapshot_buffer_bytes":1048576,"coverage":self.journal.coverage().as_str()}},"views":self.view.iter().collect::<Vec<_>>(),"view_error":self.view_error}});
         if self.commands.incomplete{facts["data"]["agent"]["incomplete"].as_array_mut().unwrap().push(json!("commands"));}
         if self.configuration.incomplete {facts["data"]["agent"]["incomplete"].as_array_mut().unwrap().push(json!("config.models_or_levels"));}
         // Optional UI catalogs never displace requests/current state or exceed the64KiB facts contract.
@@ -107,10 +136,11 @@ impl Agent {
         facts
     }
     pub fn new_session_epoch(&mut self){
+        self.invalidate_usage();
         self.cancel_requests("epoch_changed");self.epoch_number+=1;self.journal.new_epoch(format!("{}.e{}",self.boot,self.epoch_number));self.journal.set_coverage(Coverage::Tail);self.history.clear();self.tools.clear();self.current_message=None;self.run=None;self.completion=None;
     }
     pub fn ensure_session_epoch(&mut self,prior:&str){if self.epoch()==prior{self.new_session_epoch();if let Some(session)=self.session.clone(){self.store("session","current",session,false);}self.refresh();}}
-    pub fn configuration_pending(&mut self,pending:bool){self.configuration.pending=pending;if !pending{self.session_pending=false;}self.configuration.rebuild(&self.signals.current().metadata);self.refresh();}
+    pub fn configuration_pending(&mut self,pending:bool){if pending{self.invalidate_usage();}self.configuration.pending=pending;if !pending{self.session_pending=false;}self.configuration.rebuild(&self.signals.current().metadata);self.refresh();}
     pub fn transcript(&self)->Value{
         let entities=self.history.iter().filter(|(kind,_)|matches!(kind.as_str(),"message"|"tool"|"_ui")).filter_map(|(kind,id)|self.journal.entity(kind,id).map(|(_,value)|(kind.as_str(),value))).collect();
         super::panel::transcript(entities,self.incomplete.contains("items") || self.incomplete.contains("native"))
@@ -196,19 +226,19 @@ impl Agent {
             let active=self.current_message.as_deref()==Some(&id) || (except.0!="request" && self.tools.values().any(|tool|tool==&id))
                 || (kind=="receipt" && self.receipts.get(&id).is_some_and(|receipt|receipt["stage"]=="dispatched"));
             if (kind.as_str(),id.as_str())==except || active {self.history.push_back((kind,id));continue;}
-            if self.journal.entity(&kind,&id).is_some() {let _=self.journal.remove(&kind,&id);return true;}
+            if self.journal.entity(&kind,&id).is_some() {let _=self.journal.remove(&kind,&id);self.journal.set_coverage(Coverage::Tail);return true;}
         }
         false
     }
     fn store(&mut self,kind:&str,id:&str,value:Value,prunable:bool) {
         if self.journal.entity(kind,id).is_some_and(|(_,old)|old==&value) {return;}
         let existed=self.journal.entity(kind,id).is_some();
-        while !existed && self.journal.len()>=ENTITY_COUNT {if !self.prune((kind,id)){self.incomplete.insert("items".into());return;}}
+        while !existed && self.journal.len()>=ENTITY_COUNT {if !self.prune((kind,id)){self.incomplete.insert("items".into());self.journal.set_coverage(Coverage::Tail);return;}}
         loop {
             match self.journal.put(kind,id,value.clone()) {
                 Ok(_)=>{if !existed && prunable {self.history.push_back((kind.into(),id.into()));}break;},
                 Err(error) if error.kind=="overloaded" && self.prune((kind,id))=>{},
-                Err(_)=>{self.incomplete.insert("items".into());break;},
+                Err(_)=>{self.incomplete.insert("items".into());self.journal.set_coverage(Coverage::Tail);break;},
             }
         }
     }
@@ -216,9 +246,12 @@ impl Agent {
         let content=project_content(&message["content"]);
         let mut native=message.as_object().cloned().unwrap_or_default();native.remove("role");native.remove("content");
         let mut value=json!({"position":position,"role":message["role"],"content":content,"final":final_value,"native":native});
+        let at_ms=if message["role"]=="user"{count(&message["timestamp"])}else{None};
+        if let Some(at_ms)=at_ms{value["at_ms"]=json!(at_ms);}
         if vqro::limits::encoded_bytes(&value)>ENTITY_BYTES {
-            self.incomplete.insert("items".into());
+            self.incomplete.insert("items".into());self.journal.set_coverage(Coverage::Tail);
             value=json!({"position":position,"role":message["role"],"content":[{"type":"text","text":"[Native message exceeds the declared entity bound; content omitted]"}],"final":final_value,"incomplete":["content"]});
+            if let Some(at_ms)=at_ms{value["at_ms"]=json!(at_ms);}
         }
         value
     }
@@ -265,10 +298,10 @@ impl Agent {
             Event::Exited(exit)=>{self.exit=Some(exit.clone());self.run=None;self.ui_unconfirmed.clear();
                 for id in self.requests.ids(){self.requests.finish(&id);if let Some((_,value))=self.journal.entity("request",&id){let mut value=value.clone();value["status"]=json!("expired");self.store("request",&id,value,false);self.make_prunable("request",&id);}}
             },
-            Event::ProtocolError(_)=>{self.incomplete.insert("native".into());},
+            Event::ProtocolError(_)=>{self.incomplete.insert("native".into());self.journal.set_coverage(Coverage::Tail);},
             Event::Record(record)=>match record["type"].as_str() {
                 Some("extension_ui_request")=>self.ui(record),
-                Some("auto_retry_start"|"auto_retry_end"|"auto_compaction_start"|"auto_compaction_end")=>self.runtime_notice(record),
+                Some("auto_retry_start"|"auto_retry_end"|"auto_compaction_start"|"auto_compaction_end")=>{if matches!(record["type"].as_str(),Some("auto_compaction_start"|"auto_compaction_end")){self.invalidate_usage();}self.runtime_notice(record);},
                 Some("queue_update")=>{
                     self.queue=super::queue::summary(record);self.queue_version=self.queue_version.wrapping_add(1);
                     if self.queue.is_none(){self.incomplete.insert("queue".into());}else{self.incomplete.remove("queue");}
@@ -283,9 +316,9 @@ impl Agent {
                         else if self.queue.as_ref().and_then(Value::as_array).is_some_and(|rows|rows.len() as u64!=count){self.invalidate_queue();}
                     }
                     if let Some(id)=record["data"]["sessionId"].as_str().filter(|id|!id.is_empty() && id.len()<=128) {
-                        if self.session.as_ref().is_some_and(|session|session["id"]!=id) {
-                            self.new_session_epoch();
-                        }
+                        let new_session=self.session.as_ref().is_none_or(|session|session["id"]!=id);
+                        if self.session.as_ref().is_some_and(|session|session["id"]!=id) {self.new_session_epoch();}
+                        if new_session && record["data"]["messageCount"].as_u64()==Some(0){self.incomplete.remove("items");self.journal.set_coverage(Coverage::AllRetained);}
                         let mut session=json!({"id":id});
                         if let Some(title)=record["data"]["sessionName"].as_str().filter(|s|s.len()<=512){session["title"]=json!(title);}
                         else if !record["data"]["sessionName"].is_null(){self.incomplete.insert("session.title".into());}
@@ -294,7 +327,8 @@ impl Agent {
                             if let Some(label)=record["data"]["model"]["name"].as_str().filter(|s|s.len()<=512){session["model"]["label"]=json!(label);}
                             if let Some(effort)=record["data"]["thinkingLevel"].as_str().filter(|s|s.len()<=64){session["model"]["effort"]=json!(effort);}
                         }
-                        if let Some(cwd)=record["data"]["cwd"].as_str().filter(|s|s.len()<=4096){session["cwd"]=json!(cwd);}
+                        if let Some(cwd)=record["data"]["cwd"].as_str().filter(|s|!s.is_empty() && s.len()<=4096).or(self.launch_cwd.as_deref()){session["cwd"]=json!(cwd);}
+                        if self.session.as_ref().is_some_and(|prior|prior["model"]!=session["model"]){self.invalidate_usage();}
                         self.session=Some(session);
                         self.store("session","current",self.session.clone().unwrap(),false);
                     }else{self.incomplete.insert("session".into());}
@@ -310,6 +344,7 @@ impl Agent {
                 _=>{}
             },
         }
+        if self.incomplete.contains("items"){self.journal.set_coverage(Coverage::Tail);}
         self.refresh();
     }
 }

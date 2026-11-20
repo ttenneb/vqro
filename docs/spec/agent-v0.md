@@ -120,6 +120,16 @@ Adapters publish only what the runtime reports, including estimates labelled as 
   reporting only the context window publishes `context: {window}` with `used` absent: occupancy stays unknown,
   never derived from last-turn token totals.
 
+Pi's Rust bridge publishes the known controlled-launch working directory as `session.cwd` unless native state
+reports another directory. Its coalesced read-only `get_session_stats` observations supply the native
+`contextUsage` window/nullable occupancy and input/output/cache token totals, fenced by session/observation epoch
+and metadata revision. Pi1.5.2's aggregate cost is a bare number without retained currency or reported/estimated
+basis; the bridge omits `usage.cost` and marks `usage.cost` incomplete rather than guessing billing semantics or
+publishing a private cost mirror. Native user-message timestamps become `at_ms`; uncorrelated native messages
+still have no inferred core origin/delivery. A newly evidenced empty native session starts `all_retained`; a
+loaded/unknown history starts `tail`, and pruning, omissions or protocol gaps downgrade coverage to `tail`.
+A new observation epoch or native command ACK alone never proves complete native history.
+
 ### 2.4 Capabilities, versioning, common arguments
 
 - The provider declares `agent {v: 0, modules}` and each op at `provider.register`: the upper bound. Each resource

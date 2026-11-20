@@ -155,8 +155,12 @@ for line in sys.stdin.buffer:
         # Pi runs these as prompt text "/name args" (templates, skills, extension commands).
         reply(command, {"commands": [{"name": "fixture-template", "description": "Fixture prompt template", "source": "prompt"},
                                      {"name": "skill:fixture", "description": "Fixture skill", "source": "skill"}]})
-    elif kind in {"get_messages", "get_session_stats"}:
-        reply(command, {"messages": [], "commands": [], "tokens": {"total": 0}, "cost": 0})
+    elif kind == "get_messages":
+        reply(command, {"messages": [], "commands": []})
+    elif kind == "get_session_stats":
+        # Pi1.5.2 shape: context occupancy may be unknown; aggregate cost has no currency/basis.
+        reply(command, {"sessionId": f"fixture-{session}", "tokens": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0},
+                        "contextUsage": {"tokens": None, "contextWindow": 4096, "percent": None}, "cost": 0})
     elif kind == "prompt":
         message = command.get("message")
         if message == "crash":

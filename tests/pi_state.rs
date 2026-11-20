@@ -181,3 +181,59 @@ fn missing_idle_evidence_and_oversized_native_output_are_explicit() {
     assert!(m.journal.entity_bytes()<=state::ENTITY_TOTAL);
     event(&mut a,json!({"type":"agent_settled","aborted":true}));assert!(a.completion.is_none(),"settled without a run is not completion evidence");
 }
+
+fn native_session(agent:&mut Agent,id:&str,count:Value){event(agent,json!({"type":"response","command":"get_state","success":true,"data":{"sessionId":id,"messageCount":count,"model":{"id":"fixture","contextWindow":4096},"isStreaming":false,"isCompacting":false}}));}
+fn coverage(agent:&Agent)->Value{serde_json::from_str::<Value>(String::from_utf8(agent.journal.snapshot()).unwrap().lines().next().unwrap()).unwrap()["coverage"].clone()}
+fn stats()->Value{json!({"sessionId":"s1","tokens":{"input":11,"output":2,"cacheRead":3,"cacheWrite":4,"total":99999},"contextUsage":{"tokens":null,"contextWindow":4096,"percent":null},"cost":0.0123})}
+fn usage(agent:&mut Agent,data:Option<&Value>){let epoch=agent.epoch().to_owned();agent.usage_result(&epoch,agent.usage_revision(),data);}
+
+#[test]
+fn native_user_timestamp_never_invents_a_sender_or_delivery(){
+    let mut a=make();event(&mut a,json!({"type":"message_end","message":{"role":"user","timestamp":1795190400123u64,"content":"literal","origin":{"principal":"owner","kind":"human"}}}));
+    let rows=entities(&a,"message");let user=&rows[0]["value"];
+    assert_eq!(user["at_ms"],1795190400123u64);assert_eq!(user["content"][0]["text"],"literal");
+    assert!(user.get("origin").is_none());assert!(user.get("delivery").is_none());
+    for timestamp in [Value::Null,json!(-1),json!("1795190400123"),json!(1u64<<53)]{
+        let mut a=make();event(&mut a,json!({"type":"message_end","message":{"role":"user","timestamp":timestamp,"content":"literal"}}));assert!(entities(&a,"message")[0]["value"].get("at_ms").is_none());
+    }
+}
+#[test]
+fn session_cwd_is_native_or_the_known_controlled_launch_directory(){
+    let mut a=Agent::with_cwd("private".into(),Signals::new(),"/private/launch".into());native_session(&mut a,"s1",json!(0));
+    assert_eq!(a.session.as_ref().unwrap()["cwd"],"/private/launch");
+    assert_eq!(entities(&a,"session")[0]["value"]["cwd"],"/private/launch");
+    assert_eq!(a.facts("pi","/private/launch")["data"]["agent"]["session"]["cwd"],"/private/launch");
+    event(&mut a,json!({"type":"response","command":"get_state","success":true,"data":{"sessionId":"s1","cwd":"/native/reported"}}));assert_eq!(a.session.as_ref().unwrap()["cwd"],"/native/reported");
+}
+#[test]
+fn native_usage_preserves_unknown_occupancy_and_unknown_cost_denominations(){
+    let mut a=make();native_session(&mut a,"s1",json!(0));usage(&mut a,Some(&stats()));
+    let facts=a.facts("pi","private");let value=&facts["data"]["agent"]["usage"];
+    assert_eq!(value["context"],json!({"window":4096}));assert_eq!(value["tokens"],json!({"input":11,"output":2,"cache_read":3,"cache_write":4}));
+    assert!(value.get("cost").is_none());assert!(value.get("_pi_cost").is_none());assert!(a.incomplete.contains("usage.cost"));
+    let mut data=stats();data["contextUsage"]["tokens"]=json!(123);usage(&mut a,Some(&data));assert_eq!(a.facts("pi","private")["data"]["agent"]["usage"]["context"]["used"],123);
+    data.as_object_mut().unwrap().remove("contextUsage");usage(&mut a,Some(&data));assert_eq!(a.facts("pi","private")["data"]["agent"]["usage"]["context"],json!({"window":4096}),"never substitute cumulative tokens for occupancy");
+    usage(&mut a,None);assert!(a.facts("pi","private")["data"]["agent"]["usage"].is_null());
+}
+#[test]
+fn stale_session_or_revision_usage_cannot_overwrite_a_newer_snapshot(){
+    let mut a=make();native_session(&mut a,"s1",json!(0));let epoch=a.epoch().to_owned();let old=a.usage_revision();
+    a.configuration_pending(true);a.usage_result(&epoch,old,Some(&stats()));assert!(a.facts("pi","private")["data"]["agent"]["usage"].is_null());
+    a.configuration_pending(false);usage(&mut a,Some(&stats()));let good=a.facts("pi","private")["data"]["agent"]["usage"].clone();
+    let mut late=stats();late["tokens"]["input"]=json!(888);a.usage_result(&epoch,old,Some(&late));assert_eq!(a.facts("pi","private")["data"]["agent"]["usage"],good);
+    native_session(&mut a,"s2",json!(0));a.usage_result(&epoch,old,Some(&late));usage(&mut a,Some(&late));assert!(a.facts("pi","private")["data"]["agent"]["usage"].is_null(),"foreign session data is not current usage");
+}
+#[test]
+fn full_history_requires_an_evidenced_empty_native_session(){
+    let mut a=Agent::new("private".into(),Signals::new());assert_eq!(coverage(&a),"tail");
+    native_session(&mut a,"s1",json!(0));assert_eq!(coverage(&a),"all_retained");assert_eq!(a.facts("pi","private")["data"]["agent"]["items"]["coverage"],coverage(&a));
+    native_session(&mut a,"loaded",json!(3));assert_eq!(coverage(&a),"tail");native_session(&mut a,"loaded",json!(0));assert_eq!(coverage(&a),"tail","zero at a later observation is not proof of earlier completeness");
+    native_session(&mut a,"new",json!(0));assert_eq!(coverage(&a),"all_retained");let epoch=a.epoch().to_owned();a.ensure_session_epoch(&epoch);assert_eq!(coverage(&a),"tail","new observation epoch/command ACK alone does not prove history");
+}
+#[test]
+fn pruning_or_omission_downgrades_full_history_but_new_empty_session_recovers(){
+    let mut a=make();native_session(&mut a,"fresh",json!(0));assert_eq!(coverage(&a),"all_retained");
+    for _ in 0..600{message(&mut a,&"x".repeat(1500),"stop");}assert_eq!(coverage(&a),"tail");assert_eq!(a.facts("pi","private")["data"]["agent"]["items"]["coverage"],"tail");
+    native_session(&mut a,"fresh",json!(0));assert_eq!(coverage(&a),"tail");native_session(&mut a,"next",json!(0));assert_eq!(coverage(&a),"all_retained");
+    message(&mut a,&"x".repeat(100000),"stop");assert_eq!(coverage(&a),"tail");native_session(&mut a,"after-omission",json!(0));assert_eq!(coverage(&a),"all_retained");
+}

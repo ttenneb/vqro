@@ -559,6 +559,16 @@ class E2E:
         self.log.append({'bridge_profile': 'default-rust-agent-v0', 'agent': rid})
         facts = self.resource(rid)['data']['agent']
         assert facts['v'] == 0 and facts['caps']['agent']['v'] == 0, facts
+        assert facts['session']['cwd'] == str(self.root/'work'), facts
+        assert facts['items']['coverage'] == 'all_retained', facts  # the fixture reports an empty native session
+        if not self.args.real_pi_metadata:
+            usage = self.wait(lambda: self.resource(rid)['data']['agent'].get('usage'), 'native session statistics facts')
+            assert usage['context'] == {'window': 4096}, usage  # null native occupancy stays unknown
+            assert usage['tokens'] == {'input': 0, 'output': 0, 'cache_read': 0, 'cache_write': 0}, usage
+            assert 'cost' not in usage and '_pi_cost' not in usage, usage
+            assert 'usage.cost' in self.resource(rid)['data']['agent']['incomplete']
+            self.log.append({'native_usage_facts': 'PASS', 'cost': 'omitted: native currency/basis unavailable',
+                             'session_cwd': facts['session']['cwd'], 'fresh_history': facts['items']['coverage']})
         before_epoch = facts['epoch']
         if self.args.real_pi_metadata:
             def real_models():
