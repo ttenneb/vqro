@@ -1121,7 +1121,9 @@ Illustrative row (inside an enhanced panel/page):
 ### Client rendering under load
 
 The TUI coalesces background invalidations to a 60 fps frame budget; input-triggered UI changes remain immediate
-and keyboard input takes priority over queued background work. Total fps can therefore exceed 60 while typing.
+and keyboard input takes priority over queued background work. Output of the stream just typed into, within 100 ms
+of the input (the program's echo or answer to a key), is drawn at once like the key itself, not held for the
+frame budget (typing echo: about 23 ms before, about 6 ms after; `tests/latency_typing.py`). Total fps can therefore exceed 60 while typing.
 All resource events and terminal bytes are still consumed in order: drawing is coalesced, not protocol data.
 Merged panel values and flattened rows are reused while content and page/filter/expansion remain unchanged;
 entry/live/snapshot updates invalidate caches. Selection/scroll, current geometry, theme and icons stay fresh.

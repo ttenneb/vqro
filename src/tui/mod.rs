@@ -296,6 +296,8 @@ struct App {
     stream_view: HashMap<u64, String>,
     early: HashMap<u64, Vec<Vec<u8>>>,
     early_closed: HashMap<u64, String>,
+    /// The stream last typed into and when: its output right after is an echo, drawn at once (`echo`).
+    typed: Option<(u64, std::time::Instant)>,
     leaves: Vec<String>,
     focus: usize,
     overlay: Option<Overlay>,
@@ -407,6 +409,11 @@ fn recovery_snapshot(hello: &Value, notice: &str) -> Value {
         "commands":crate::core::BUILTINS.iter().map(|(name,title)| json!({"name":name,"title":title,"available":true,"owner":"core"})).collect::<Vec<_>>()})
 }
 
+/// How long after typing into a stream its output counts as the key's echo (drawn at once). Beyond it,
+/// output is background and coalesced to the frame budget, so a program streaming after Enter can't
+/// make every chunk a frame.
+const ECHO_WINDOW: std::time::Duration = std::time::Duration::from_millis(100);
+
 const SNAPSHOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 fn snapshot_transient(error: &crate::rpc::RpcError) -> bool {
@@ -497,6 +504,7 @@ pub async fn run(socket: &Path) -> Result<()> {
             }
             let input = next_input(&app, &mut incoming, &mut rx, &mut keys, &mut reconnecting, frames.deadline(dirty)).await?;
             let key_input = matches!(input, UiInput::Key(_));
+            let echo = matches!(&input, UiInput::Incoming(Some(m)) if app.echo(m));
             dirty |= match input {
                 UiInput::Incoming(m) => match m {
                     Some(m) => { probe.incoming(&m); app.on_incoming(m); true }
@@ -533,7 +541,7 @@ pub async fn run(socket: &Path) -> Result<()> {
                 app.on_incoming(m);
                 dirty = true;
             }
-            interactive = key_input && dirty;
+            interactive = (key_input || echo) && dirty;
             // Richer key reports while the prefix menu is open; "disambiguate" only while the focused
             // program asked for extended keys (so Shift-Enter and the like can reach it). Otherwise the
             // outer terminal's keyboard reporting is left as it was.
@@ -613,7 +621,7 @@ impl App {
     fn new(peer: Peer, tx: mpsc::UnboundedSender<Msg>) -> Self {
         Self {
             peer, tx, ws: Workspace::default(), safe_selected: BTreeSet::new(),
-            terms: HashMap::new(), stream_view: HashMap::new(), early: HashMap::new(), early_closed: HashMap::new(),
+            terms: HashMap::new(), stream_view: HashMap::new(), early: HashMap::new(), early_closed: HashMap::new(), typed: None,
             leaves: Vec::new(), focus: 0, overlay: None, pstate: HashMap::new(),
             filtering: None, toast: None, bells: HashMap::new(), cursor_style: vt100::CursorStyle::Default, cursor_sent: vt100::CursorStyle::Default, panel_values: Mutex::new(HashMap::new()), panel_dependencies: Mutex::new(HashMap::new()), hit: Hit::default(),
             drag: None, overrides: HashMap::new(), mouse_owner: None, mouse_on: true,
@@ -639,6 +647,7 @@ impl App {
     fn reconnected(&mut self, peer: Peer, snap: &Value) {
         self.peer = peer;
         self.connected = true;
+        self.typed = None; // stream ids belong to a connection
         self.terms.clear();
         self.stream_view.clear();
         self.early.clear();
@@ -663,6 +672,14 @@ impl App {
     fn safe_mode_changed(&mut self, on: bool, was: bool) {
         if on && !was { self.open_safe_chooser(); }
         if !on && matches!(&self.overlay,Some(Overlay::Popup{view,..}) if view==SAFE_MODE_VIEW) { self.overlay=None; }
+    }
+
+    /// Output of the stream just typed into, shortly after the input: the program's echo or answer to a
+    /// key. Drawn like a key press (at once), not held for the background frame budget.
+    fn echo(&self, m: &Incoming) -> bool {
+        let Some((sid, at)) = self.typed else { return false };
+        matches!(m, Incoming::Notification { method, params } if method == "stream.data" && params["stream"].as_u64() == Some(sid))
+            && at.elapsed() < ECHO_WINDOW
     }
 
     fn on_incoming(&mut self, m: Incoming) {
@@ -963,6 +980,7 @@ impl App {
     /// Input for a stream, in order. Direct, unless a paste is still being sent on that stream: then
     /// it queues behind the paste so keys never overtake it.
     fn send_input(&mut self, sid: u64, bytes: Vec<u8>) {
+        self.typed = Some((sid, std::time::Instant::now()));
         let view = self.stream_view.get(&sid).cloned().unwrap_or_default();
         if let Some((tx, queued)) = self.input_queues.get_mut(&view) {
             if tx.send(bytes.clone()).is_ok() {
@@ -4069,6 +4087,19 @@ mod tests {
         assert_eq!(paste_bytes("a\nb\n", true), b"\x1b[200~a\nb\n\x1b[201~".to_vec());
         // A paste that contains the end marker must not end the bracket and run the rest as typed input.
         assert_eq!(paste_bytes("x\x1b[201~rm -rf ~\n", true), b"\x1b[200~xrm -rf ~\n\x1b[201~".to_vec());
+    }
+
+    #[tokio::test]
+    async fn output_right_after_typing_into_its_stream_is_an_echo_drawn_at_once() {
+        let (mut app, _) = app();
+        let data = |sid: u64| Incoming::Notification { method: "stream.data".into(), params: json!({"stream": sid, "data": "eA=="}) };
+        assert!(!app.echo(&data(7)), "nothing typed yet");
+        app.send_input(7, b"x".to_vec());
+        assert!(app.echo(&data(7)));
+        assert!(!app.echo(&data(8)), "another pane's output stays background");
+        assert!(!app.echo(&Incoming::Notification { method: "stream.closed".into(), params: json!({"stream": 7}) }));
+        app.typed = Some((7, std::time::Instant::now() - ECHO_WINDOW));
+        assert!(!app.echo(&data(7)), "a program streaming after the key is background again");
     }
 
     #[test]
