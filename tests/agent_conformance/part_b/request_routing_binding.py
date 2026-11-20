@@ -92,11 +92,11 @@ class PublicRequestRouting:
         # These real manifests are staged before restarting the private core. No
         # dependencies are stripped, and no default-installed extension is used.
         for name, descriptor in self.config.get("manifests", {}).items():
-            if name not in ("agents", "pi", "herdr"): raise FixtureFailed("unexpected routing fixture manifest")
+            if name not in ("agents", "pi", "herdr", "tabs"): raise FixtureFailed("unexpected routing fixture manifest")
             original = pinned_artifact(descriptor)
             shutil.copyfile(original, ctx.root / "ext/manifests" / (name + ".json"))
-        if not all((ctx.root / "ext/manifests" / (name + ".json")).is_file() for name in ("agents", "pi")):
-            raise HarnessGap("real agents and Pi manifests are required by the routing witness")
+        if not all((ctx.root / "ext/manifests" / (name + ".json")).is_file() for name in ("agents", "pi", "tabs")):
+            raise HarnessGap("real agents, Pi and tabs manifests are required by the routing witness")
         # Only the backend's derived sockets need a short path. Every endpoint is
         # still private; the native oracle reconnects facts only, never input.
         parent = Path(self.config.get("runtime_parent", ""))
@@ -112,6 +112,9 @@ class PublicRequestRouting:
         commands = (await ctx.peer.call("command.list"))["commands"]
         ctx.check(any(row["name"] == "coord.request_route" for row in commands),
             "mandatory routing command exists on the explicitly pinned target", commands=commands)
+        # agents.show/pi.new navigate through the real tabs.show public command;
+        # loading only their publishers is not a complete visible-client fixture.
+        await self.enable("tabs", "interface", "tabs.py")
         await self.enable("agents", "management", "agents.py")
         self.prepared = True
 

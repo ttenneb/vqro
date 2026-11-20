@@ -497,6 +497,7 @@ async def exact_recorded_coordinator_and_visible_fallback(ctx):
     await ctx.native.call("add", ref="a2")
     await ctx.wait_agents(3)
     await ctx.native_set(2, principal="worker:q2-other")
+    await member(ctx, 1, "q2-project")
     await member(ctx, 0, "q2-project", coordinator)
     await ctx.grant("q2-coordinator-answer", "worker:q2-coordinator", ["answer"], "agent:" + requester)
     await ctx.grant("q2-other-answer", "worker:q2-other", ["answer"], "agent:" + requester)
@@ -531,6 +532,7 @@ async def both_routes_and_first_valid_answer_race(ctx):
     requester, coordinator = ctx.agents[0]["id"], ctx.agents[1]["id"]
     await routing_binding(ctx, "configure", agent=requester, route="both", peer=ctx.peer)
     await ctx.native_set(1, principal="worker:q3-coordinator")
+    await member(ctx, 1, "q3-project")
     await member(ctx, 0, "q3-project", coordinator)
     controllers = [ctx.peer, await ctx.connect("worker:q3-coordinator"), await ctx.connect("worker:q3-other")]
     for suffix in ("coordinator", "other"):

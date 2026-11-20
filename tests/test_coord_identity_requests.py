@@ -6,7 +6,7 @@ from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, call, patch
 import agent_conformance.part_b.identity_request_cases as cases
 from agent_conformance.results import CheckFailed, FixtureFailed, HarnessGap
 from agent_conformance.wire import RpcError
@@ -141,8 +141,9 @@ class RoutingAndResponseIntegrityTests(unittest.IsolatedAsyncioTestCase):
             if q["request"] == "q2-exact":
                 return {"mail": [{"to": "r2", "agent": "r1", "epoch": "e7", **q}], "human": []}
             return {"mail": [], "human": [{"reason": "unit observed fallback"}]}
-        with patch.object(cases, "routing_binding", binding), patch.object(cases, "publish_question", question), patch.object(cases, "member", AsyncMock()):
+        with patch.object(cases, "routing_binding", binding), patch.object(cases, "publish_question", question), patch.object(cases, "member", AsyncMock()) as memberships:
             await cases.exact_recorded_coordinator_and_visible_fallback(ctx)
+        self.assertEqual(memberships.await_args_list[:2], [call(ctx, 1, "q2-project"), call(ctx, 0, "q2-project", "r2")])
         ctx.native_set.assert_any_await(1, lifecycle="ended")
         lifecycles = [call.kwargs["lifecycle"] for call in ctx.native_set.await_args_list if "lifecycle" in call.kwargs]
         self.assertEqual(lifecycles, ["ended"], "the same ended incarnation is never resurrected")
@@ -181,8 +182,9 @@ class RoutingAndResponseIntegrityTests(unittest.IsolatedAsyncioTestCase):
                     connect=AsyncMock(return_value=peer), native_set=AsyncMock(), grant=AsyncMock(), scope=AsyncMock(),
                     resources=resources, native=SimpleNamespace(records=lambda kind: responses),
                     operation=AsyncMock(return_value="op"), command=command, check=check, wait=wait)
-                with patch.object(cases, "routing_binding", binding), patch.object(cases, "publish_question", question), patch.object(cases, "member", AsyncMock()):
+                with patch.object(cases, "routing_binding", binding), patch.object(cases, "publish_question", question), patch.object(cases, "member", AsyncMock()) as memberships:
                     await cases.both_routes_and_first_valid_answer_race(ctx)
+                self.assertEqual(memberships.await_args_list[:2], [call(ctx, 1, "q3-project"), call(ctx, 0, "q3-project", "r2")])
                 self.assertEqual(sent, [epoch] * 3)
                 self.assertEqual(len(responses), 1)
 

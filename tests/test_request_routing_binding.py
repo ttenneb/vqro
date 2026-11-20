@@ -2,9 +2,14 @@
 # Copyright 2026 Bennett Garcia
 """Public-observation checker controls with response doubles, not runtime grades."""
 from copy import deepcopy
+import hashlib
 import json
+from pathlib import Path
+import shutil
+import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest.mock import AsyncMock, call
 
 from agent_conformance.part_b.context import PublicCoordination
 from agent_conformance.part_b.identity_request_cases import mail_matches_request
@@ -119,6 +124,36 @@ class PayloadControls(unittest.TestCase):
     def test_recursive_waiting_row_is_actual_panel_data(self):
         self.assertEqual(waiting_rows({"items": [{"children": [{"id": "waiting", "text": "native question"}]}]})[0]["text"], "native question")
         self.assertEqual(waiting_rows({"items": [{"id": "other"}]}), [])
+
+
+class SetupControls(unittest.IsolatedAsyncioTestCase):
+    async def test_real_tabs_manifest_and_command_are_ready_before_agents_show(self):
+        # Filesystem/restart/activation doubles only, not a target startup grade.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ctx = Context(); ctx.root = root / "case"
+            (ctx.root / "ext/manifests").mkdir(parents=True)
+            ctx.backend = SimpleNamespace(env={})
+            descriptors = {}
+            for name in ("agents", "pi", "tabs"):
+                source = root / (name + ".json")
+                source.write_text(json.dumps({"name": name}))
+                descriptors[name] = {"path": str(source), "sha256": hashlib.sha256(source.read_bytes()).hexdigest()}
+            ctx.manifest["request_routing"].update(runtime_parent=str(root), manifests=descriptors)
+            async def restarted(**kwargs):
+                self.assertEqual(kwargs, {"crash": False})
+                self.assertTrue(all((ctx.root / "ext/manifests" / (name + ".json")).is_file() for name in descriptors))
+                binding.enable.assert_not_awaited()
+            ctx.restart = AsyncMock(side_effect=restarted)
+            ctx.peer = SimpleNamespace(call=AsyncMock(return_value={"commands": [{"name": "coord.request_route"}]}))
+            binding = PublicRequestRouting(ctx); binding.enable = AsyncMock()
+            try:
+                await binding.prepare()
+                self.assertEqual(binding.enable.await_args_list,
+                    [call("tabs", "interface", "tabs.py"), call("agents", "management", "agents.py")])
+                self.assertTrue(binding.prepared)
+            finally:
+                if binding.native_root and binding.native_root.exists(): shutil.rmtree(binding.native_root)
 
 
 class CompleteObserverControls(unittest.IsolatedAsyncioTestCase):
