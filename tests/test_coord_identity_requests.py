@@ -127,7 +127,8 @@ class RoutingAndResponseIntegrityTests(unittest.IsolatedAsyncioTestCase):
         # Complete semantic helper with response doubles, never runtime evidence.
         def check(ok, message, **_):
             if not ok: raise CheckFailed(message)
-        ctx = SimpleNamespace(agents=[{"id": "r1"}, {"id": "r2"}], check=check,
+        ctx = SimpleNamespace(agents=[{"id": "r1"}, {"id": "r2"}, {"id": "r3"}], check=check,
+            native=SimpleNamespace(call=AsyncMock()), wait_agents=AsyncMock(), scope=AsyncMock(),
             native_set=AsyncMock(), grant=AsyncMock(), operation=AsyncMock(return_value="op"),
             command=AsyncMock(), resources=AsyncMock(return_value=[{"id": "r1", "data": {"agent": {"epoch": "e7"}}}]),
             peer=SimpleNamespace(call=AsyncMock(return_value={"entries": {"doc/agents/grants/q2-coordinator-answer": {"version": 1}}})))
@@ -142,7 +143,12 @@ class RoutingAndResponseIntegrityTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(cases, "routing_binding", binding), patch.object(cases, "publish_question", question), patch.object(cases, "member", AsyncMock()):
             await cases.exact_recorded_coordinator_and_visible_fallback(ctx)
         ctx.native_set.assert_any_await(1, lifecycle="ended")
-        self.assertFalse(any(call.kwargs.get("lifecycle") == "end" for call in ctx.native_set.await_args_list))
+        lifecycles = [call.kwargs["lifecycle"] for call in ctx.native_set.await_args_list if "lifecycle" in call.kwargs]
+        self.assertEqual(lifecycles, ["ended"], "the same ended incarnation is never resurrected")
+        ctx.native.call.assert_awaited_once_with("add", ref="a2")
+        ctx.native_set.assert_any_await(2, principal="worker:q2-other")
+        ctx.scope.assert_awaited_once_with("resume", "agent:r2")
+        ctx.grant.assert_any_await("q2-ended-answer", "worker:q2-coordinator", ["answer"], "agent:r1")
 
     def context(self, counts):
         records = iter(counts)

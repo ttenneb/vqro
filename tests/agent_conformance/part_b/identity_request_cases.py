@@ -477,9 +477,13 @@ async def exact_recorded_coordinator_and_visible_fallback(ctx):
     requester, coordinator = ctx.agents[0]["id"], ctx.agents[1]["id"]
     await routing_binding(ctx, "configure", agent=requester, route="coordinator", peer=ctx.peer)
     await ctx.native_set(1, principal="worker:q2-coordinator")
+    await ctx.native.call("add", ref="a2")
+    await ctx.wait_agents(3)
+    await ctx.native_set(2, principal="worker:q2-other")
     await member(ctx, 0, "q2-project", coordinator)
     await ctx.grant("q2-coordinator-answer", "worker:q2-coordinator", ["answer"], "agent:" + requester)
     await ctx.grant("q2-other-answer", "worker:q2-other", ["answer"], "agent:" + requester)
+    await ctx.scope("resume", "agent:" + coordinator)
     question = await publish_question(ctx, "q2-exact", expires_at_ms=int(time.time() * 1000) + 60000)
     observed = await routing_binding(ctx, "observe", agent=requester, question=question)
     epoch = next(row for row in await ctx.resources() if row["id"] == requester)["data"]["agent"]["epoch"]
@@ -487,9 +491,13 @@ async def exact_recorded_coordinator_and_visible_fallback(ctx):
               mail_matches_request(observed["mail"][0], requester, question, epoch),
               "request mail names exact agent/epoch/id/revision/scope and only the recorded answer-granted coordinator")
     ctx.check(not observed["human"], "valid coordinator-only route does not also show a human request notice")
-    for scenario in ("missing_coordinator", "ended_coordinator", "missing_answer_grant"):
+    # Native end is irreversible for this incarnation. Revoke while live, then
+    # restore valid answer standing under a fresh grant before testing end last.
+    for scenario in ("missing_coordinator", "missing_answer_grant", "ended_coordinator"):
         await member(ctx, 0, "q2-project", None if scenario == "missing_coordinator" else coordinator)
-        await ctx.native_set(1, lifecycle="ended" if scenario == "ended_coordinator" else "live")
+        if scenario == "ended_coordinator":
+            await ctx.grant("q2-ended-answer", "worker:q2-coordinator", ["answer"], "agent:" + requester)
+            await ctx.native_set(1, lifecycle="ended")
         if scenario == "missing_answer_grant":
             entry = (await ctx.peer.call("workspace.snapshot"))["entries"]["doc/agents/grants/q2-coordinator-answer"]
             await ctx.command("grants", {"op": await ctx.operation(), "id": "q2-coordinator-answer", "value": None, "expect": entry["version"]})
@@ -508,6 +516,7 @@ async def both_routes_and_first_valid_answer_race(ctx):
     controllers = [ctx.peer, await ctx.connect("worker:q3-coordinator"), await ctx.connect("worker:q3-other")]
     for suffix in ("coordinator", "other"):
         await ctx.grant("q3-" + suffix, "worker:q3-" + suffix, ["answer"], "agent:" + requester)
+    await ctx.scope("resume", "agent:" + coordinator)
     question = await publish_question(ctx, "q3-race", expires_at_ms=int(time.time() * 1000) + 60000)
     routed = await routing_binding(ctx, "observe", agent=requester, question=question)
     epoch = next(row for row in await ctx.resources() if row["id"] == requester)["data"]["agent"]["epoch"]
