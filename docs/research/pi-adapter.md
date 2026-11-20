@@ -91,6 +91,20 @@ Native CLI resume arguments remain available at launch. Optional resume/fork/lis
 history paging are not declared here: the native RPC does not expose bounded all-session/history discovery or a
 proven paginated cut. No filesystem discovery or guessed session/entry IDs is substituted.
 
+## Temporary transcript and terminal fallback
+Until the generic item renderer is available, data.views references one owned agent-rN panel. Declaration uses the
+existing instance/ref bridge marker, scoped resource.list/workspace.get and a CAS transaction; a foreign marker or
+lost CAS race is never overwritten or published. No full workspace snapshot or duplicate status view.
+
+The panel is derived from canonical message/tool/notice entities, not a second retained transcript document.
+Text is a128-row/16KiB tail, under32KiB encoded; omissions are visible and terminal controls are removed. Only
+changed transcript content is published, so queue-only updates do not resend it. Final content publication is
+bounded before fenced native end evidence. Native retry/compaction notices are system-role entities, not replay.
+
+An independent TTY monitor redraws native status, queue/dialog summaries and the same derived tail even when core
+is unavailable. Its raw-write thread has one latest-frame slot and never holds Rust's global stdout lock. A stalled
+terminal cannot block the native reader or process shutdown; it is never joined at exit. No colour escapes.
+
 ## Tool principal environment (G11)
 The owned child inherits only VQRO_SOCKET and VQRO_PRINCIPAL from the VQRO namespace, unchanged; supervision
 credentials/configuration and every HERDR variable stay excluded. The launcher assigns the principal, not rN.

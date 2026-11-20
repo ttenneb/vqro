@@ -15,7 +15,7 @@ pub struct Agent {
     pub incomplete:BTreeSet<String>,
     pub receipts:BTreeMap<String,Value>,
     pub queue:Option<Value>,pub queue_version:u64,
-    pub tool_principal_env:bool,
+    pub tool_principal_env:bool,pub view:Option<String>,pub view_error:Option<String>,
     pub configuration:super::configuration::Configuration,pub commands:super::commands::Commands,
     pub requests:super::requests::Requests,ui_cancels:Vec<(String,Value)>,ui_unconfirmed:BTreeSet<String>,pub ui_overflow:bool,
     receipt_order:VecDeque<String>,
@@ -32,7 +32,7 @@ impl Agent {
         let boot=bytes.iter().map(|byte|format!("{byte:02x}")).collect::<String>();
         let mut journal=ItemJournal::new(format!("{boot}.e1"),JournalConfig {max_entities:ENTITY_COUNT,max_entity_bytes:ENTITY_TOTAL,snapshot_buffer_bytes:1024*1024,..Default::default()});
         journal.set_coverage(Coverage::Tail);
-        let mut agent=Self {journal,signals,incomplete:BTreeSet::new(),receipts:BTreeMap::new(),queue:None,queue_version:0,tool_principal_env:false,configuration:Default::default(),commands:Default::default(),requests:Default::default(),ui_cancels:Vec::new(),ui_unconfirmed:BTreeSet::new(),ui_overflow:false,receipt_order:VecDeque::new(),history:VecDeque::new(),tools:HashMap::new(),current_message:None,
+        let mut agent=Self {journal,signals,incomplete:BTreeSet::new(),receipts:BTreeMap::new(),queue:None,queue_version:0,tool_principal_env:false,view:None,view_error:None,configuration:Default::default(),commands:Default::default(),requests:Default::default(),ui_cancels:Vec::new(),ui_unconfirmed:BTreeSet::new(),ui_overflow:false,receipt_order:VecDeque::new(),history:VecDeque::new(),tools:HashMap::new(),current_message:None,
             position:0,serial:0,epoch_number:1,instance,boot,session:None,session_pending:false,run:None,completion:None,reason:"unknown".into(),error:None,exit:None,caps:Value::Null};
         agent.refresh();agent
     }
@@ -90,7 +90,7 @@ impl Agent {
                 "host":{"id":format!("{}.child",self.boot),"provider":provider,"instance":self.instance,"incarnation":"","kind":"process","owns_lifecycle":true},
                 "session":if self.session_pending {None}else{self.session.as_ref()},"epoch":self.epoch(),"caps":self.caps,"completion":self.completion,"queue":self.queue,"requests":self.request_summaries(),"background":null,
                 "config":self.configuration.options(),"commands":self.commands.facts(),"usage":null,"incomplete":self.incomplete,
-                "items":{"retain_bytes":131072,"entities":ENTITY_COUNT,"entity_bytes":ENTITY_TOTAL,"snapshot_buffer_bytes":1048576,"coverage":"tail"}}}});
+                "items":{"retain_bytes":131072,"entities":ENTITY_COUNT,"entity_bytes":ENTITY_TOTAL,"snapshot_buffer_bytes":1048576,"coverage":"tail"}},"views":self.view.iter().collect::<Vec<_>>(),"view_error":self.view_error}});
         if self.commands.incomplete{facts["data"]["agent"]["incomplete"].as_array_mut().unwrap().push(json!("commands"));}
         if self.configuration.incomplete {facts["data"]["agent"]["incomplete"].as_array_mut().unwrap().push(json!("config.models_or_levels"));}
         // Optional UI catalogs never displace requests/current state or exceed the64KiB facts contract.
@@ -102,6 +102,18 @@ impl Agent {
     }
     pub fn ensure_session_epoch(&mut self,prior:&str){if self.epoch()==prior{self.new_session_epoch();if let Some(session)=self.session.clone(){self.store("session","current",session,false);}self.refresh();}}
     pub fn configuration_pending(&mut self,pending:bool){self.configuration.pending=pending;if !pending{self.session_pending=false;}self.configuration.rebuild(&self.signals.current().metadata);self.refresh();}
+    pub fn transcript(&self)->Value{
+        let entities=self.history.iter().filter(|(kind,_)|matches!(kind.as_str(),"message"|"tool"|"_ui")).filter_map(|(kind,id)|self.journal.entity(kind,id).map(|(_,value)|(kind.as_str(),value))).collect();
+        super::panel::transcript(entities,self.incomplete.contains("items") || self.incomplete.contains("native"))
+    }
+    fn runtime_notice(&mut self,record:&Value){
+        self.position+=1;let id=self.next("notice");let kind=record["type"].as_str().unwrap_or("native notice");
+        let detail=record["errorMessage"].as_str().or_else(||record["finalError"].as_str()).unwrap_or("");
+        let mut text=match kind{"auto_retry_start"=>"Native retry scheduled","auto_retry_end"=>"Native retry ended","auto_compaction_start"=>"Native compaction started","auto_compaction_end"=>"Native compaction ended",_=>"Native notice"}.to_string();
+        if let Some(attempt)=record["attempt"].as_u64(){text+=&format!(" (attempt {attempt})");}if let Some(delay)=record["delayMs"].as_u64(){text+=&format!(" after {delay}ms");}
+        if let Some(success)=record["success"].as_bool(){text+=if success{"; success"}else{"; failed"};}if !detail.is_empty(){text+=&format!(": {}",detail.chars().take(1024).collect::<String>());}
+        self.store("message",&id,json!({"position":self.position,"role":"system","content":[{"type":"text","text":text}],"final":true,"native":{"type":kind,"attempt":record["attempt"],"delayMs":record["delayMs"],"success":record["success"]}}),true);
+    }
     pub fn refresh(&mut self) {
         let mut caps=self.declarations();
         let rev=self.caps["rev"].as_u64().unwrap_or(0);
@@ -160,7 +172,8 @@ impl Agent {
                 self.store("request",&id,json!({"request":id,"revision":1,"method":"_unrepresentable","title":reason,"scope":{"operation":format!("ui-{id}")},"status":"cancelled","incomplete":true}),true);
                 self.queue_ui_cancel(id,native);self.incomplete.insert("native_ui".into());
             }
-            super::requests::Incoming::Notice {id,value}=>{
+            super::requests::Incoming::Notice {id,mut value}=>{
+                self.position+=1;value["position"]=json!(self.position);
                 if vqro::limits::encoded_bytes(&value)<=ENTITY_BYTES{self.store("_ui",&id,value,true);}else{self.incomplete.insert("native_ui".into());}
             }
         }
@@ -253,6 +266,7 @@ impl Agent {
             Event::ProtocolError(_)=>{self.incomplete.insert("native".into());},
             Event::Record(record)=>match record["type"].as_str() {
                 Some("extension_ui_request")=>self.ui(record),
+                Some("auto_retry_start"|"auto_retry_end"|"auto_compaction_start"|"auto_compaction_end")=>self.runtime_notice(record),
                 Some("queue_update")=>{
                     self.queue=super::queue::summary(record);self.queue_version=self.queue_version.wrapping_add(1);
                     if self.queue.is_none(){self.incomplete.insert("queue".into());}else{self.incomplete.remove("queue");}

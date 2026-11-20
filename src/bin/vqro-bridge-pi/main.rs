@@ -8,6 +8,8 @@ mod queue;
 mod requests;
 mod configuration;
 mod commands;
+mod panel;
+mod views;
 use std::collections::HashMap;
 use std::sync::{Arc,Mutex,OnceLock};
 use std::time::Duration;
@@ -29,7 +31,7 @@ struct Args {
     #[arg(long)] cwd:Option<std::path::PathBuf>,
     #[arg(last=true,required=true)] native:Vec<String>,
 }
-struct Shared {agent:Mutex<Agent>,native:OnceLock<Native>,starts:OnceLock<Starts>,changed:Notify,cwd:String,provider_name:String,ui_slots:Arc<tokio::sync::Semaphore>}
+struct Shared {agent:Mutex<Agent>,fallback:panel::Fallback,connected:std::sync::atomic::AtomicBool,native:OnceLock<Native>,starts:OnceLock<Starts>,changed:Notify,cwd:String,provider_name:String,ui_slots:Arc<tokio::sync::Semaphore>}
 impl Shared {
     fn facts(&self,name:&str)->Value {self.agent.lock().unwrap().facts(name,&self.cwd)}
     fn wake(&self) {self.changed.notify_waiters();}
@@ -61,7 +63,7 @@ async fn main()->Result<()> {
     let argv=controlled(args.native)?;
     let cwd=args.cwd.unwrap_or(std::env::current_dir()?);
     let signals=admission::Signals::new();
-    let shared=Arc::new(Shared {agent:Mutex::new(Agent::new(instance.clone(),signals.clone())),native:OnceLock::new(),starts:OnceLock::new(),changed:Notify::new(),cwd:cwd.to_string_lossy().into_owned(),provider_name:name.clone(),ui_slots:Arc::new(tokio::sync::Semaphore::new(24))});
+    let shared=Arc::new(Shared {agent:Mutex::new(Agent::new(instance.clone(),signals.clone())),fallback:panel::Fallback::tty(),connected:std::sync::atomic::AtomicBool::new(false),native:OnceLock::new(),starts:OnceLock::new(),changed:Notify::new(),cwd:cwd.to_string_lossy().into_owned(),provider_name:name.clone(),ui_slots:Arc::new(tokio::sync::Semaphore::new(24))});
     let weak=Arc::downgrade(&shared);
     let native=Native::spawn(&argv,&cwd,&std::env::vars().collect::<HashMap<_,_>>(),Arc::new(move|event|{
         if let Some(shared)=weak.upgrade(){
@@ -71,6 +73,7 @@ async fn main()->Result<()> {
         }
     })).await?;
     let _=shared.native.set(native.clone());let _=shared.starts.set(Starts::new(native.clone(),signals));
+    if shared.fallback.enabled(){tokio::spawn(monitor(shared.clone()));}
     let startup=native.call("get_state",json!({}),Duration::from_secs(5)).await;
     if !matches!(startup,Ok(ref reply) if reply.success && reply.data.is_object()) {
         native.stop();let _=tokio::time::timeout(Duration::from_secs(2),native.exited()).await;
@@ -106,9 +109,16 @@ async fn main()->Result<()> {
                 }
                 if registrations>0{shared.agent.lock().unwrap().cancel_requests("reconnect_not_verifiable");drive_ui_cancels(&shared);}
                 registrations+=1;
-                match provider.full_sync(vec![shared.facts(&name)]).await {
+                let setup=async{
+                    {let mut agent=shared.agent.lock().unwrap();agent.view=None;agent.view_error=None;}
+                    provider.full_sync(vec![shared.facts(&name)]).await?;
+                    let view=views::claim(&provider,&name,&instance).await?;
+                    {let mut agent=shared.agent.lock().unwrap();agent.view=view.view;agent.view_error=view.error;}
+                    provider.upsert(shared.facts(&name)).await
+                }.await;
+                match setup {
                     Ok(())=>{
-                        healthy=Some(Instant::now());
+                        healthy=Some(Instant::now());shared.connected.store(true,std::sync::atomic::Ordering::Relaxed);shared.wake();
                         let publish=tokio::spawn(publish(shared.clone(),provider.clone(),name.clone()));
                         loop {
                             tokio::select! {
@@ -132,7 +142,7 @@ async fn main()->Result<()> {
                     }
                     Err(error)=>{if definitive(&error){native.stop();anyhow::bail!("registration setup refused: {error}");}}
                 }
-                provider.close();
+                shared.connected.store(false,std::sync::atomic::Ordering::Relaxed);shared.wake();provider.close();
             }
             Err(error)=>{
                 if definitive(&error){native.stop();let _=tokio::time::timeout(Duration::from_secs(2),native.exited()).await;anyhow::bail!("runtime registration refused: {error}");}
@@ -150,6 +160,8 @@ async fn main()->Result<()> {
     Ok(())
 }
 async fn announce_end(shared:&Shared,provider:&Provider,name:&str) {
+    let view={let agent=shared.agent.lock().unwrap();agent.view.as_ref().map(|view|(view.clone(),agent.transcript()))};
+    if let Some((view,content))=view{if !matches!(tokio::time::timeout(Duration::from_secs(1),provider.call("view.publish",json!({"view":view,"content":content}))).await,Ok(Ok(_))){eprintln!("Pi ended; final transcript publication unconfirmed");}}
     match tokio::time::timeout(Duration::from_secs(5),retirement::retire(provider,shared.facts(name),name)).await {
         Ok(Ok(()))=>{},Ok(Err(error))=>eprintln!("Pi ended; end evidence not confirmed: {error}"),
         Err(_)=>eprintln!("Pi ended; end evidence not confirmed before core deadline"),
@@ -159,13 +171,29 @@ fn definitive(error:&ProviderError)->bool {
     if error.remote && ((error.kind=="forbidden" && error.data["reason"]=="safe_mode") || error.kind=="durability_unconfirmed"){return false;}
     error.remote || !matches!(error.kind.as_str(),"unavailable"|"timeout")
 }
+async fn monitor(shared:Arc<Shared>){
+    let mut signals=shared.agent.lock().unwrap().signals.changes();
+    loop{
+        let wake=shared.changed.notified();tokio::pin!(wake);wake.as_mut().enable();let _=signals.borrow_and_update();
+        let (mut facts,content)={let agent=shared.agent.lock().unwrap();(agent.facts(&shared.provider_name,&shared.cwd),agent.transcript())};
+        facts["_core_connected"]=json!(shared.connected.load(std::sync::atomic::Ordering::Relaxed));shared.fallback.show(&facts,&content);
+        if !shared.native.get().unwrap().alive(){break;}
+        tokio::select!{_=wake=>{},result=signals.changed()=>{if result.is_err(){break;}},_=shared.native.get().unwrap().exited()=>{}}
+    }
+}
 async fn publish(shared:Arc<Shared>,provider:Provider,name:String) {
-    let mut signals=shared.agent.lock().unwrap().signals.changes();let mut last=shared.facts(&name);
+    let mut signals=shared.agent.lock().unwrap().signals.changes();let mut last=shared.facts(&name);let mut last_content=None;
     loop {
         let wake=shared.changed.notified();tokio::pin!(wake);wake.as_mut().enable();
-        tokio::select! {_=wake=>{},result=signals.changed()=>{if result.is_err(){break;}},_=provider.closed()=>break}
-        let facts={let mut agent=shared.agent.lock().unwrap();agent.refresh();agent.facts(&name,&shared.cwd)};
+        let _=signals.borrow_and_update();
+        let (facts,view,content)={let mut agent=shared.agent.lock().unwrap();agent.refresh();(agent.facts(&name,&shared.cwd),agent.view.clone(),agent.transcript())};
         if facts!=last {if provider.upsert(facts.clone()).await.is_err(){break;}last=facts;}
+        if let Some(view)=view{if last_content.as_ref()!=Some(&content){
+            match provider.call("view.publish",json!({"view":view,"content":content})).await{
+                Ok(_)=>last_content=Some(content),Err(error)=>{let mut agent=shared.agent.lock().unwrap();agent.view=None;agent.view_error=Some(format!("Transcript view unavailable ({}); use its backend terminal.",error.kind));drop(agent);shared.wake();}
+            }
+        }}
+        tokio::select! {_=wake=>{},result=signals.changed()=>{if result.is_err(){break;}},_=provider.closed()=>break}
     }
 }
 async fn viewer(shared:Arc<Shared>,mut stream:ProviderStream,mut cursor:ItemCursor) {

@@ -6,6 +6,7 @@
 #[allow(dead_code)] #[path="../src/bin/vqro-bridge-pi/requests.rs"] mod requests;
 #[allow(dead_code)] #[path="../src/bin/vqro-bridge-pi/configuration.rs"] mod configuration;
 #[allow(dead_code)] #[path="../src/bin/vqro-bridge-pi/commands.rs"] mod commands;
+#[allow(dead_code)] #[path="../src/bin/vqro-bridge-pi/panel.rs"] mod panel;
 #[path="../src/bin/vqro-bridge-pi/state.rs"] mod state;
 use admission::Signals;
 use native::{Event,Exit};
@@ -118,6 +119,14 @@ fn pending_dialogs_survive_pruning_and_dispatched_answers_do_not_invent_idle(){
     metadata(&mut a,"s1","one-at-a-time");assert_eq!(a.state(),"unknown","metadata alone is not an answer-resolution witness");
     a.answer_fenced(&id);assert_eq!(a.state(),"idle");
     assert_eq!(a.journal.entity("request",&id).unwrap().1["native"]["response"],"dispatched");
+}
+
+#[test]
+fn fallback_is_derived_from_the_journal_and_native_retries_are_system_notices(){
+    let mut a=make();message(&mut a,"native output","stop");event(&mut a,json!({"type":"auto_retry_start","attempt":2,"delayMs":125,"errorMessage":"native failure"}));
+    let panel=a.transcript();assert!(panel.to_string().contains("assistant> native output"));assert!(panel.to_string().contains("system> Native retry scheduled (attempt 2) after 125ms"));
+    let notice=entities(&a,"message").into_iter().find(|row|row["value"]["role"]=="system").unwrap();let id=notice["id"].as_str().unwrap();a.journal.remove("message",id).unwrap();assert!(!a.transcript().to_string().contains("Native retry scheduled"),"fallback cannot retain its own copy after canonical removal");
+    a.view=Some("agent-r1".into());assert_eq!(a.facts("pi","private")["data"]["views"],json!(["agent-r1"]));
 }
 
 #[test]
