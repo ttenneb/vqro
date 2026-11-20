@@ -448,6 +448,16 @@ mod tests {
             }
             then = t.get("then");
         }
+        if let Some(pt) = x.get("pinned_then") {
+            e.set_scroll_offset(pt["offset"].as_u64().unwrap() as usize);
+            e.process(pt["input"].as_str().unwrap().as_bytes());
+            check(&format!("pinned view inside history (offset {} of {})", e.scroll_offset(), e.scrollback_len()), json!(e.scroll_offset() <= e.scrollback_len()), &json!(true));
+            e.set_scroll_offset(0);
+        }
+        for want in x["row0_has"].as_array().into_iter().flatten() {
+            let row: String = e.row_text(e.scrolled()).map(|t| t.0.into_iter().collect()).unwrap_or_default();
+            check(&format!("row 0 {row:?} has {want}"), json!(row.contains(want.as_str().unwrap())), &json!(true));
+        }
         if let Some(al) = x.get("after_live") {
             e.set_scroll_offset(1);
             e.set_scroll_offset(0);

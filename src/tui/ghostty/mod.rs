@@ -117,6 +117,8 @@ struct Notifications {
 }
 
 const MAX_OSC: usize = 4096;
+/// The longest grapheme cluster read whole (codepoints); longer ones show their base codepoint.
+const MAX_GRAPHEME: usize = 1024;
 
 impl Notifications {
     fn feed(&mut self, bytes: &[u8], out: &mut Vec<Effect>) {
@@ -273,11 +275,25 @@ impl Ghostty {
         let mut wide = ffi::GhosttyCellWide_GHOSTTY_CELL_WIDE_NARROW;
         // SAFETY: a cell value and an out-pointer of its documented type.
         unsafe { ffi::ghostty_cell_get(raw, ffi::GhosttyCellData_GHOSTTY_CELL_DATA_WIDE, (&mut wide as *mut ffi::GhosttyCellWide).cast()) }.ok().ok()?;
-        let mut cps = [0u32; 16];
+        // The cell's whole grapheme cluster: a small buffer first; when the library says it needs more, a buffer of
+        // that size (bounded); if that still fails, the cell's base codepoint. A cell is never blanked.
+        let mut cps = vec![0u32; 16];
         let mut n = 0usize;
-        // SAFETY: a buffer of `cps.len()` u32; on OUT_OF_SPACE nothing is written past it.
-        let res = unsafe { ffi::ghostty_grid_ref_graphemes(&r, cps.as_mut_ptr(), cps.len(), &mut n) };
-        let text: String = if res == ffi::GhosttyResult_GHOSTTY_SUCCESS { cps[..n.min(cps.len())].iter().filter_map(|c| char::from_u32(*c)).collect() } else { String::new() };
+        // SAFETY: a buffer of `cps.len()` u32; on OUT_OF_SPACE nothing is written past it and `n` is the need.
+        let mut res = unsafe { ffi::ghostty_grid_ref_graphemes(&r, cps.as_mut_ptr(), cps.len(), &mut n) };
+        if res == ffi::GhosttyResult_GHOSTTY_OUT_OF_SPACE && n > cps.len() && n <= MAX_GRAPHEME {
+            cps = vec![0u32; n];
+            // SAFETY: as above, with a buffer of the size the library asked for.
+            res = unsafe { ffi::ghostty_grid_ref_graphemes(&r, cps.as_mut_ptr(), cps.len(), &mut n) };
+        }
+        let text: String = if res == ffi::GhosttyResult_GHOSTTY_SUCCESS {
+            cps[..n.min(cps.len())].iter().filter_map(|c| char::from_u32(*c)).collect()
+        } else {
+            let mut cp = 0u32;
+            // SAFETY: a cell value and a u32 out-pointer, the documented type of CELL_DATA_CODEPOINT.
+            let _ = unsafe { ffi::ghostty_cell_get(raw, ffi::GhosttyCellData_GHOSTTY_CELL_DATA_CODEPOINT, (&mut cp as *mut u32).cast()) };
+            char::from_u32(cp).filter(|c| *c != '\0').map(String::from).unwrap_or_default()
+        };
         let style = with_style.then(|| {
             let mut s = ffi::GhosttyStyle { size: mem::size_of::<ffi::GhosttyStyle>(), ..Default::default() };
             // SAFETY: `r` is fresh and `s` is a sized style struct.
@@ -390,12 +406,16 @@ impl Engine for Ghostty {
         // In pieces small enough that the tracked bottom row can't scroll out of the whole history within one piece
         // (a byte scrolls at most one row, bar CSI S), so every dropped row is counted.
         for piece in bytes.chunks((self.scrollback / 2).max(256)) {
+            if piece.is_empty() { continue; }
             let was_alternate = self.alternate_screen();
             // SAFETY: a live terminal and a byte slice; the library accepts any bytes. Callbacks run during this call
             // and only touch `collected`.
             unsafe { ffi::ghostty_terminal_vt_write(self.raw, piece.as_ptr(), piece.len()) };
             self.count_dropped(was_alternate);
         }
+        // A view pinned on history that has since passed beyond the exposed lines moves to the oldest exposed line
+        // (the rows it showed are no longer history the user can reach).
+        if self.scroll_offset() > self.exposed() { self.set_scroll_offset(self.exposed()); }
         let c = &mut *self.collected;
         if mem::take(&mut c.bells) > 0 && !self.effects.contains(&Effect::Bell) && self.effects.len() < MAX_EFFECTS { self.effects.push(Effect::Bell); }
         for data in c.clipboard.drain(..) {
