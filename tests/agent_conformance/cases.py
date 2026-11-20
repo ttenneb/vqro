@@ -986,7 +986,10 @@ async def stalled_viewer_isolation(ctx):
         check(stalled.reducer.cursor == paused_cursor, "paused fixture advanced its applied cursor", component="harness")
     finally:
         transport.resume_reading()
-    await stalled.peer.wait(lambda: stalled.closed is not None or stalled.peer.failure is not None, timeout=5)
+    try:
+        await stalled.peer.wait(lambda: stalled.closed is not None or stalled.peer.failure is not None, timeout=5)
+    except asyncio.TimeoutError as error:
+        raise HarnessGap("O7 paced pressure did not produce a stalled-attachment retirement witness") from error
     stalled_attachment_witness(first, second, stalled)
     # Retirement is stream.closed/slow_consumer, not socket EOF (coordinator ruling).
     snapshot = await stalled.peer.call("workspace.snapshot")
