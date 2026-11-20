@@ -128,6 +128,30 @@ class ItemViewTests(unittest.TestCase):
                                          "field": "/x", "text": "y"}))
         self.assertEqual((appended.errors["unknown_entity"], appended.seq), (1, 0))
 
+    def test_a_record_that_cannot_be_applied_whole_is_a_loss_and_never_moves_the_cursor(self):
+        """Parity with spike-rev-a's Rust fix: validate before advancing; anything unappliable breaks the view."""
+        def fresh():
+            view, producer = ItemView(max_entity_bytes=600), Producer()
+            view.feed(snapshot() + producer.put("m1", message("a")))
+            return view
+        cases = {
+            "bad base64": {"field": "/native/raw", "bytes": "!!not base64"},
+            "no such field": {"field": "/content/9/text", "text": "x"},
+            "both payloads": {"field": "/content/0/text", "text": "x", "bytes": "AA=="},
+            "over the bound": {"field": "/content/0/text", "text": "x" * 1000},
+        }
+        for name, extra in cases.items():
+            view = fresh()
+            view.feed(line({"op": "append", "seq": 2, "kind": "message", "id": "m1", "base": 1, "rev": 2, **extra}))
+            self.assertEqual((view.broken, view.after()["seq"]), (True, 1), name)
+            self.assertEqual(view.entities[("message", "m1")][1]["content"][0]["text"], "a", name)
+        view = fresh()
+        view.feed(line({"op": "put", "seq": 2, "kind": "message", "id": "m2", "rev": 1, "value": message("y" * 1000)}))
+        self.assertEqual((view.broken, view.seq, ("message", "m2") in view.entities), (True, 1, False), "an oversized put")
+        view = fresh()
+        view.feed(line({"op": "frobnicate", "seq": 2, "kind": "message", "id": "m1", "rev": 2}))
+        self.assertEqual((view.broken, view.seq), (True, 1), "an unknown op")
+
     def test_bounds_and_bad_lines(self):
         view = ItemView(max_record_bytes=64)
         view.feed(b"x" * 70)
