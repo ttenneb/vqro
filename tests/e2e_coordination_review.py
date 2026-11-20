@@ -501,6 +501,39 @@ def case_archive():
     return {'verified_free': True, 'missing_artifact_unknown': True}
 
 
+def case_recipe_history():
+    calls = []
+    def handle(method, params):
+        operation = params['op']; calls.append(operation)
+        if operation == 'agent.send':
+            return {'outcome': 'rejected', 'error': {'kind': 'busy', 'message': 'competing start'},
+                    'data': {'opaque': 'x' * 20000}}
+        return {'outcome': 'observed', 'data': {'opaque': 'y' * 20000}}
+    facts = native('running')
+    facts['caps'].update({'agent.send': {'modes': {'start': {'busy': 'reject'}},
+        'origin': [{'as': 'attributed_user', 'role': 'user', 'frame': 'sender_header'}]},
+        'agent.queue': {'actions': ['clear']},
+        'agent.interrupt': {'pending': 'unknown', 'scope': 'foreground', 'waits': 'idle'}})
+    rid = agent('recipe-history', facts, handler=handle)
+    scope('pause')
+    o = op('i11-recipe')
+    args = {'op': o, 'submission': o, 'to': rid, 'mode': 'preempt', 'strategy': 'interrupt_then_start',
+            'content': [{'type': 'text', 'text': 'partial recipe content'}]}
+    delivery = cmd('inbox.send', args)['delivery']
+    scope('resume')
+    def settled():
+        row = cmd('inbox.get', {'delivery': delivery})
+        return row if row.get('state') == 'partial' and row.get('incomplete') else None
+    record = wait(settled)
+    expected = [('agent.queue', 'observed'), ('agent.interrupt', 'observed'), ('agent.send', 'rejected')]
+    assert [(s['op'], s['outcome']) for s in record['attempt']['steps']] == expected, record
+    assert record['result']['native']['error_kind'] == 'busy', record
+    assert calls == [op for op, _ in expected], calls
+    repeated = cmd('inbox.send', dict(args, op=op('i11-repeat')))
+    assert repeated['delivery'] == delivery and len(calls) == 3, (repeated, calls)
+    return {'all_step_outcomes': expected, 'compacted': True, 'native_writes': len(calls), 'duplicate_recreated': False}
+
+
 def case_pause_reporting():
     calls, entered, released = [], threading.Event(), threading.Event()
     def handle(method, params):
@@ -692,7 +725,7 @@ def case_archive_abort():
 
 CASES = {'brick': case_brick, 'idle': case_idle, 'membership': case_membership, 'identity': case_identity, 'reconcile': case_reconcile, 'names': case_names,
          'rawcycle': case_rawcycle, 'invalid_declaration': case_invalid_declaration,
-         'window': case_window, 'handover': case_handover, 'archive': case_archive, 'queue_epoch': case_queue_epoch, 'handover_withdrawn': case_handover_withdrawn, 'archive_abort': case_archive_abort, 'handover_archive': case_handover_archive, 'pause_reporting': case_pause_reporting}
+         'window': case_window, 'handover': case_handover, 'archive': case_archive, 'queue_epoch': case_queue_epoch, 'handover_withdrawn': case_handover_withdrawn, 'archive_abort': case_archive_abort, 'handover_archive': case_handover_archive, 'pause_reporting': case_pause_reporting, 'recipe_history': case_recipe_history}
 core = None
 try:
     core = subprocess.Popen([str(BIN), 'serve', '--fake'], env=ENV, cwd=ROOT, stdout=open(ROOT / 'core.log', 'wb'), stderr=subprocess.STDOUT)

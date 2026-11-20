@@ -682,7 +682,7 @@ no separate refusal-recovery margin is needed.
 | gate | 128 B | agents | 25,600 | 25,600 | 25,600 |
 | operation-window result or refusal (compact: state, outcome, receipt stage, error kind, ids) + fingerprint | 256 B | window `W` (1024) | 262,144 | 262,144 | 262,144 |
 | settled index entry (delivery → outcome) | 64 B | 1024 | 65,536 | 65,536 | 65,536 |
-| final record, compact (metadata, attempt, compact result; content dropped) | 1 KiB | 256 retained | 262,144 | 262,144 | 262,144 |
+| final record, compact (metadata, attempt and every step outcome, compact result; content dropped) | 1 KiB | 256 retained | 262,144 | 262,144 | 262,144 |
 | handover plan | 4 KiB | 16 open | 65,536 | 65,536 | 65,536 |
 | archive manifest (pending archive) | 4 KiB | 4 | 16,384 | 16,384 | 16,384 |
 | future archive metadata funding (frozen/exporting plan; 8 KiB / 2 records after export) | 16 KiB / 4 records | 4 plans | 65,536 | 65,536 | 65,536 |
@@ -700,7 +700,12 @@ Bounds are on the **encoded** size, not raw string limits (an identity of legal 
 open record reserves a **compact outcome** per attempt and per recipe step (steps × 1 KiB) at admission, and admission
 is refused `quota` if the reservation doesn't fit. A compact outcome is at most 1 KiB: state, receipt stage, outcome
 kind, error kind, native op, byte size and sha256 of the full native result, and `incomplete: true` whenever native
-data did not fit; an explicit, marked bound, never silent truncation. The full native result is returned unchanged
+data did not fit; an explicit, marked bound, never silent truncation. Settled recipe history keeps every issued
+step's `{op, outcome}` under `attempt.steps`, including prerequisite successes before a refused input. If an
+already-incomplete final record still exceeds 1 KiB, only its opaque `submission` literal may become the explicit
+`submission_hash: sha256([principal, submission])` marker (the existing submission-index key). Full principal,
+intent fingerprint, attempt ID and every step outcome remain; duplicate lookup recognizes the hash even after
+window-index expiry or restart, never recreating input. The 1 KiB limit is unchanged. The full native result is returned unchanged
 only to the live caller (`native`) and stays retrievable only where the adapter retains it (`agent.receipt`, native
 records). A late reply always fits its reservation by construction; if even the compact form cannot be written (a
 store failure), the attempt stays `unknown` and visible for attention, never resent. Beyond the declared size,

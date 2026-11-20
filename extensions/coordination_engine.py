@@ -497,7 +497,8 @@ class Coordinator:
                     raise CoordinationError("conflict", "submission id reused for different intent")
                 saved = work.get("message/" + submitted["delivery"])
                 return {"state": saved["state"] if saved else "unknown", "delivery": submitted["delivery"]}
-            prior = next((r for r in self.records() if r["from"]["principal"] == principal and r["submission"] == submission), None)
+            prior = next((r for r in self.records() if r["from"]["principal"] == principal
+                          and (r.get("submission") == submission or r.get("submission_hash") == submission_key)), None)
             if prior:
                 if prior.get("intent") != digest({key: value for key, value in args.items() if key != "op"}):
                     raise CoordinationError("conflict", "submission id reused for different intent")
@@ -1832,15 +1833,20 @@ class Coordinator:
             compact.update(to={"agent": value["to"]["agent"]}, **{"from": {"principal": value["from"]["principal"]}},
                            incomplete=True, final_seq=value.get("final_seq", row["version"]),
                            content_hash=digest(value.get("content", [])),
-                           attempt={"id": (value.get("attempt") or {}).get("id")},
+                           attempt={"id": (value.get("attempt") or {}).get("id"),
+                                    "steps": [{"op": step["op"], "outcome": step["outcome"]}
+                                              for step in (value.get("attempt") or {}).get("steps", [])]},
                            result={"state": result.get("state", value["state"]), "native": result.get("native"),
                                    "receipt": result.get("receipt"), "incomplete": True})
             if value.get("handed_over_from"):
                 compact["handed_over_from"] = {"agent": value["handed_over_from"]["agent"]}
             if encoded(compact) > 1024:
                 compact.pop("content_hash", None)
-                compact.pop("attempt", None)
                 compact["result"] = {"state": value["state"], "sha256": digest(result), "incomplete": True}
+            if encoded(compact) > 1024 and "submission" in compact:
+                # Keep every observed step and its attempt identity. Only the
+                # opaque submission literal may become its existing lookup key.
+                compact["submission_hash"] = digest([compact["from"]["principal"], compact.pop("submission")])
             if encoded(compact) > 1024:
                 raise CoordinationError("too_large", "compact final metadata exceeds its explicit bound; original retained")
             work.put(key, compact)
