@@ -107,6 +107,15 @@ current state; they carry no per-token stream position.
 preserved, never mapped to success. Coarse mapping: `running` → `working`, `requires_action` → `blocked`, idle after
 `error` → `error`, else `idle`.
 
+**Optional view facts.** All fields below are optional; absent means unknown, never zero, empty or inferred.
+Adapters publish only what the runtime reports, including estimates labelled as such by the runtime:
+- `session.cwd?`: string, as reported by the runtime, not the viewer's or bridge process's working directory.
+- `session.model? {id, label?, effort?}`: read-only facts. Changing it still uses `agent.configure` on an advertised
+  config option with `category: "model"`; a fact is not a write interface.
+- `usage? {context?: {used, window, limit?}, tokens?: {input, output, cache_read?, cache_write?},
+  cost?: {amount, currency, basis: "reported" | "estimated", plan?}, at_ms?}`. Unavailable sections are omitted;
+  consumers preserve the currency and basis and never invent cost from token counts or pricing tables.
+
 ### 2.4 Capabilities, versioning, common arguments
 
 - The provider declares `agent {v: 0, modules}` and each op at `provider.register`: the upper bound. Each resource
@@ -191,7 +200,8 @@ A mode says when the runtime takes input relative to current work. Every declare
 `args {v, caps_rev?, mode, content, delivery, origin, quoted?, render?, key?, guard?, cause?, correlation?}`; result
 `{receipt:
 {delivery, stage, native?, run?}}`. `content` is **always an array of typed blocks**, each with a `type` field, e.g.
-`"content": [{"type": "text", "text": "go"}]`; never a bare string or a single object. Block types: `text {text}`,
+`"content": [{"type": "text", "text": "go"}]`; never a bare string or a single object. Block types: `text {text,
+format?: "plain" | "markdown"}` (per block; default `plain`, unknown or unsupported formats render as plain text),
 `image {mime, data}`, `audio {mime, data}`, `resource_link {uri, name?, mime?}`, `resource {uri, mime?, text | data}`.
 The adapter declares `content {types: [...], shape: "ordered" | "text_then_media"}`: `ordered` accepts any sequence
 of the declared types; `text_then_media` (Pi) accepts only zero or one text block followed by zero or more media
@@ -312,11 +322,14 @@ A per-viewer credited stream of JSON records (core addition §9.1). P3 confirmed
 **Entity kinds** (unknown kinds preserved and shown generically; `native` holds lossless extras; `thought` is only
 reasoning the runtime exposes for display):
 - `state` (id `current`): `state`, `run?`, `completion?`, `background?`.
-- `message`: `position`, `role: user|assistant|thought|coordination`, `content`, `final`, `delivery?`, `origin?`,
-  `cause?`, `participants? {sender_session, recipient_session, sender_message?, recipient_message?}` (native
-  inter-session messages: observation only).
+- `message`: `position`, `role: user|assistant|thought|coordination|system`, `content`, `final`, `delivery?`, `origin?`,
+  `at_ms?`, `cause?`, `participants? {sender_session, recipient_session, sender_message?, recipient_message?}` (native
+  inter-session messages: observation only). `system` is for runtime/vqro notices, distinct from `coordination`;
+  this observation role never authorizes a sender to inject system-role input (§3.2).
 - `tool`: `position`, `title`, `status: pending|running|completed|failed|cancelled`, `input?`, `content?`,
-  `locations?`, `diff?`, `terminal?` (a display-terminal id, §6.6).
+  `locations?`, `diff?`, `terminal?` (a display-terminal id, §6.6), `started_ms?`, `ended_ms?`.
+- `run`: id is the run referenced by `state.run`; `started_ms?`, `ended_ms?`. Run/tool times and message `at_ms`
+  are optional, evidenced timestamps; absence is unknown, never inferred from arrival time or completion order.
 - `terminal` (display terminal): `output` (a bytes field: base64 in a `put`, decoded-byte `append` with `bytes`),
   `exit? {code?, reason?}`,
   `cols?`, `rows?`.

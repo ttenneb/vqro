@@ -47,7 +47,7 @@ equality, and every exercised behaviour must lie within the resource's current c
 | per mode: `busy`, `idle` (`start \| reject \| park`), `point`, `batch`, `batch_at`, `preflight` | `agent.send.modes` | D1–D5, D9, D12, D13 |
 | `content {types, shape}`, `correlation`, `keys {scope, retention}`, `guards`, `receipts.retain`, `literal`, `handled`, `origin` | `agent.send` | C8, D6–D8, D14–D16 |
 | `pending`, `scope`, `waits` | `agent.interrupt` | D10 |
-| `items` bounds (per entity and aggregate), `retain_bytes`; snapshot coverage | `agent`, snapshot begin | O1–O12 |
+| `items` bounds (per entity and aggregate), `retain_bytes`; snapshot coverage | `agent`, snapshot begin | O1–O13 |
 | request `methods`, `scopes`, `background_requests`, answer acknowledgement | `agent.respond` | R1–R7 |
 | module actions (queue, session, config, command, history, object, display terminals) | each op | M1–M7 |
 | `covers`, `waits`; per-call reply `covers`, `covers_evidence` when requested-only | `agent.stop` | L2 |
@@ -77,7 +77,10 @@ with its `provenance`; no link is ever inferred; request `q1` on two endpoints a
 restart stay distinct through their `endpoint`/`epoch` and `boot` qualifiers. C10 endpoint model, by
 `caps.host.endpoints`: with `"many"`, one server host with three endpoints shows one `host.id` for all three and each
 endpoint keeps its own `rN`; with `"one"` the multi-endpoint scenario is not-applicable. Session switch keeping `rN`
-is tested in M2.
+is tested in M2. C11 optional view facts: runtime-reported usage preserves context, token/cache counts, currency,
+cost basis and plan; absent sections stay unknown, never zero or locally priced estimates. Session cwd/model/effort
+match native reports, never the bridge/viewer's cwd or a guessed model. Model changes still go through the
+advertised model-category config option, not a facts write.
 
 **D. Delivery.** D1–D5 each declared mode × {idle, busy}: the declared edge happens at the declared point (ledger
 records the insertion point), or `busy`/`unsupported` with an empty ledger; `batch: one|all` honoured; no fallback,
@@ -118,7 +121,11 @@ current state and pending requests survive pruning. O10 retained memory stays wi
 `retention`; a stalled viewer holding all 200 of its streams loses them together and harms nobody; an unknown gap
 reason ends the stream. O12 producer append bounds: a small append whose resulting whole snapshot `put` exceeds
 the record bound returns `too_large`, leaving entity, revision and `seq` unchanged; both text and decoded-byte
-appends are covered. Adapters record how they handle this refusal without silently losing content.
+appends are covered. Adapters record how they handle this refusal without silently losing content. O13 optional
+view metadata: plain/default, markdown and unknown text formats render independently per block (unknown falls back
+to plain). Runtime/vqro notices use role `system`, distinct from `coordination`, without upgrading a send's authority.
+Tool/run `started_ms`/`ended_ms` and message `at_ms` match supplied evidence; missing times remain unknown, not
+filled from observation order or the viewer's clock.
 
 **R. Requests.** R1 a request appears in facts and stream with its scope; `requires_action` when it blocks. R2 two
 simultaneous answers: exactly one native response; stale revision, foreign epoch, expired, no longer pending, dead

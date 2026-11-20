@@ -500,6 +500,10 @@ replaced when the Pi bridge is ported.
   `not_authorized` and nothing is applied. The current unattributed command is a known v0 gap.
 - Every `agent.stop` reply's data includes per-call `covers`, never wider than declared. When the adapter cannot
   evidence effective coverage, `covers_evidence: "requested"` marks requested scope only, not proof of stopped work.
+- Agent-view facts may carry runtime-reported usage (context, tokens/cache, cost with currency and reported/estimated
+  basis), session cwd and read-only model/effort. Tools/runs may carry start/end times and messages an `at_ms`;
+  absent values stay unknown, never inferred. Text format is per block (`plain` default or `markdown`, fallback
+  plain). Runtime/vqro notices use message role `system`, not `coordination`; send authority is unchanged.
 
 **Human answers (2026-11-19, CONFIRMED).**
 - **AS1, pause:** "vqro stops delivery": paused means vqro sends, hands out and wakes nothing until resumed; an agent
