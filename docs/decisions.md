@@ -523,6 +523,11 @@ replaced when the Pi bridge is ported.
   The core lifts bounded cause/correlation into effect metadata/audits with args unchanged, required typed
   qualifiers, and provenance/unknown bounded fields preserved exactly; no inference or provenance upgrade.
   Cause ≤ 4 KiB, known strings ≤ 256 bytes, depth ≤ 64; correlation is non-empty and ≤ 256 bytes.
+- Authorization of `doc/principals/*` writes uses the connection's actor, not its effective/delegated principal;
+  delegation/callbacks cannot extend another principal's delegation or form chains. A hand-started agent inherits
+  its human-opened shell's `VQRO_PRINCIPAL` by design; the launcher supplies a tagged agent principal.
+  Callback proofs use `invocation`; the legacy `on_behalf_of` proof form is refused (explicit principal delegation
+  through `on_behalf_of: P` remains).
 
 **Human answers (2026-11-19, CONFIRMED).**
 - **AS1, pause:** "vqro stops delivery": paused means vqro sends, hands out and wakes nothing until resumed; an agent
@@ -542,8 +547,9 @@ replaced when the Pi bridge is ported.
 - **AS6, principals:** "Default from connection": the principal defaults from the connection vqro already knows (the
   TUI is the owner, launcher-tagged panes are their agents), a declared label is recorded alongside and grants
   nothing, and acting for another principal needs an explicit delegation (a core row
-  `doc/principals/delegations/<id> = {from, to, until_ms?, note?}`, exact principals, written only by `from` or the
-  owner). The owner is `doc/principals/owner`, written only by the owner after an audited bootstrap. A live command
+  `doc/principals/delegations/<id> = {from, to, until_ms?, note?}`, exact principals, written only by actor `from`
+  or the owner actor, never merely by an effective/delegated principal). The owner is `doc/principals/owner`,
+  written only by the owner actor after an audited bootstrap. A live command
   invocation proof carries the invoking call's effective principal and original initiator separately, for that
   callback only. This refines decision 5's "each call declares its principal".
 

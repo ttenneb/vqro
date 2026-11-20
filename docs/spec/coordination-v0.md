@@ -66,25 +66,31 @@ the generic keys below (`doc/principals/…`) and never reads coordination grant
   app-server) passes a per-endpoint tag to each tool it runs where the runtime evidences which endpoint ran it;
   otherwise its calls resolve to the host's own principal (`host:<id>`), never to one of its endpoints by guess. A
   call with nothing known is `undeclared`: accepted for raw and recovery primitives, never the owner, no coordination
-  grants, no default `u`.
+  grants, no default `u`. An agent started by hand inside a human-opened shell inherits that shell's principal
+  (`VQRO_PRINCIPAL`, possibly the owner) by design; its process or app name does not retag it. Use the launcher
+  to obtain a launcher-tagged agent principal.
 - **Callback proofs** travel in the `invocation` request field (an opaque proof). A live invocation proof captures
   the invoking call's effective principal and its original initiator separately; writes made under the proof carry
   that effective principal and that initiator. Example: A holds a B→A delegation and invokes `on_behalf_of` B; the
   handler's writes have effective principal B, initiator A (and `author`/`actor` the handler's extension); `u` by B
   undoes them, `u` by A does not. Propagation is scoped, as in D24: it lasts only for that callback and gives the
-  handler no standing ability. Only an explicit `on_behalf_of` needs a delegation row.
+  handler no standing ability. Only an explicit `on_behalf_of` needs a delegation row. The legacy
+  `on_behalf_of: <callback proof>` form is refused: callbacks use `invocation`; `on_behalf_of` names only an
+  exact principal under the delegation rule below.
 - **Delegation** `(pending C2)`: `on_behalf_of` carries only the target principal P. The core admits it only if a
   row `doc/principals/delegations/<id> = {"from": P, "to": <actor>, "until_ms"?, "note"?}` exists and is unexpired:
   `to` may act on behalf of `from`. Exact principals only: no wildcards and no chains in v0. Rows are ordinary
   attributed configuration. The core records `actor`, `initiator` and the effective `principal` P; what P may do is
   still checked by the coordination extension's own grants. A row carries no per-right or per-target scope in v0: `to`
   acts as `from` for everything until `until_ms`. Scoped delegation is a possible later extension.
-- **Write ownership** (enforced by the core at commit prepare, against the state before the transaction and the
-  request's fixed principal; creates, replacements, deletes and reverts alike): only the owner writes
-  `doc/principals/owner`. For `doc/principals/delegations/<id>`, a create needs the new row's `from` (or the owner); a
-  delete or a revert needs the existing row's `from` (or the owner); a replacement needs both the existing and the new
-  row's `from` (or the owner), so only the owner can change a row's `from`. Rows written in a transaction grant nothing
-  within it. Initializing the owner is an audited system bootstrap, not a `u` target.
+- **Write ownership** for `doc/principals/*` is enforced by the core at commit prepare against the state before
+  the transaction and the request's fixed **actor** (the connection's own principal), never its effective/delegated
+  principal; creates, replacements, deletes and reverts alike. Only the owner actor writes `doc/principals/owner`.
+  For `doc/principals/delegations/<id>`, a create needs the actor to be the new row's `from` (or the owner); a delete
+  or revert needs the existing row's `from` (or the owner); a replacement needs both existing and new `from`
+  (or the owner), so only the owner actor can change `from`. A delegation or callback proof never lets a delegate
+  extend another principal's delegation or create a chain. Rows written in a transaction grant nothing within it.
+  Initializing the owner is an audited system bootstrap, not a `u` target.
 - **Times** are integer Unix epoch milliseconds in fields ending `_ms`, as in the core (`until_ms`, `expires_at_ms`,
   `last_seen_ms`).
 - **`u` acts for the presser's effective principal** and selects the latest transaction whose `principal` equals it:

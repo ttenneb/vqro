@@ -286,8 +286,9 @@ action, frozen at one membership revision, with paged results.
 
 **G. Principals and grants.** P2's prototype (`proto/principal-undo` f12f4e2, gate 29/29) passes G2, G3 (owner and
 additive grants), G5, G6 and G10; G1, G9, G11 and G12 are `(pending C2)`. G1 the default principal comes from the
-connection's known identity (TUI → owner, a spawned pane → its launcher's agent principal); a declared label is
-recorded separately and never changes it. G2 a pane's CLI writes as Alice, Bob writes later, Alice's TUI `u` removes
+connection's known identity (TUI → owner, a spawned pane → its launcher's agent principal); a hand-started agent
+in a human-opened shell inherits that shell's `VQRO_PRINCIPAL` (including owner), not a guessed agent identity.
+A declared label is recorded separately and never changes it. G2 a pane's CLI writes as Alice, Bob writes later, Alice's TUI `u` removes
 only Alice's change; another principal's change is revertable by explicit id and stays attributed. G3 additive union,
 expiry, team and project subjects; no grant → `no_grant`; the owner holds all rights. G4 the resolved strategy is
 checked at claim. G5 a raw call with no principal is accepted, recorded `undeclared` (never owner), holds no grants
@@ -303,14 +304,18 @@ through Q) is refused; the row has no per-right or per-target scope, and what W 
 coordination grants; two callers using the same local
 op id through E stay separate; combined: W, acting `on_behalf_of: P`, invokes E's command, and E's writes during the
 callback record `author` E, `actor` E, `initiator` W, `principal` P; P's `u` undoes them, W's and E's do not; E has no
-standing ability afterwards.
+standing ability afterwards. An opaque callback proof in legacy `on_behalf_of` is refused; `invocation` remains
+the callback proof field, while explicit `on_behalf_of: P` uses the delegation row rule.
 G11 shared host: tools run for two endpoints on one app-server host resolve to their own endpoint tags when evidenced,
 else to `host:<id>`, never to the host's first endpoint; `host:<id>` acts for an endpoint's principal only through a
 delegation row with `on_behalf_of`. G12 write ownership, checked against the state before the
-transaction: a non-owner's write, delete or revert of `doc/principals/owner` is refused; W cannot create `{from: P, to:
+transaction and the connection's **actor**, never its effective/delegated principal: a non-owner actor's write,
+delete or revert of `doc/principals/owner` is refused; W cannot create `{from: P, to:
 W}`, cannot replace its own `{from: W, to: W}` with `{from: P, to: W}`, and cannot overwrite P's row by changing
 `from` to W; deleting or reverting a row needs its existing `from` or the owner; a row created in a transaction grants
-nothing within it; the owner's
+nothing within it. Even when acting for P/owner through a delegation or callback, actor W/E cannot create,
+replace, delete, extend or revert P's delegation rows or write the owner row on that effective principal's authority;
+only its own actor ownership (or the owner actor) permits the write. The owner's
 bootstrap is audited and not a `u` target; an expired `until_ms` row admits nothing. G10 a grant query is not
 authority: a coordinated operation
 with a missing, unknown or revoked grant dispatches zero native writes; raw primitives still work.
