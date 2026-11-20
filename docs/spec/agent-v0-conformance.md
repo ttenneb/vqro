@@ -42,7 +42,7 @@ equality, and every exercised behaviour must lie within the resource's current c
 
 | Declaration | Where | Checked by |
 |---|---|---|
-| `agent {v, modules}`, ops | `provider.register` | C1 |
+| `agent {v, modules}` (`modules` an object map name → `{v, …}`; a list is invalid), ops | `provider.register` | C1 |
 | per-resource `caps` with `rev`; `caps.host {kind, endpoints}`; facts `host` with `owns_lifecycle` | `data.agent` | C2, C10, D9 |
 | per mode: `busy`, `idle` (`start \| reject \| park`), `point`, `batch`, `batch_at`, `preflight` | `agent.send.modes` | D1–D5, D9, D12, D13 |
 | `content {types, shape}`, `correlation`, `keys {scope, retention}`, `guards`, `receipts.retain`, `literal`, `handled`, `origin` | `agent.send` | C8, D6–D8, D14–D16 |

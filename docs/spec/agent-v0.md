@@ -113,6 +113,14 @@ preserved, never mapped to success. Coarse mapping: `running` → `working`, `re
   publishes its restriction in `data.agent.caps` with a `rev`, republished whenever a runtime setting changes what a
   declaration means (a queue mode, say). A declaration covers only input the runtime has not yet accepted; where the
   runtime applies its current setting at consumption (Pi), the declaration says so (`batch_at: consume`).
+- **`modules`** is an object map from module name to its descriptor, never a list. Names are those of §6: `queue`,
+  `sessions`, `config`, `history`, `children`, `terminals`, `stop`, and `_`-prefixed names for implementation-specific
+  modules. Each value is at least `{"v": <module version>}`; an absent name means not supported. A module's ops
+  (`agent.queue`, `agent.stop`, …) are still declared individually.
+
+  ```jsonc
+  "agent": {"v": 0, "modules": {"queue": {"v": 0}, "sessions": {"v": 0}, "config": {"v": 0}, "stop": {"v": 0}}}
+  ```
 - **Provider bound vs resource caps.** The provider's declaration has the same structure as resource caps but is a
   superset descriptor: every enumerated field holds the **set** of values any of its resources may publish, every
   numeric limit the **maximum**, every boolean `true` if any resource may be true. A resource's caps give **one**
