@@ -143,13 +143,19 @@ class PublicCoordination(PublicImplementation):
         return await (peer or self.peer).call("command.invoke", {"name": "coord." + name, "args": args or {}}, timeout=8)
 
     async def wait_command(self, name, predicate, *, args=None):
+        last=None
         async def ready():
+            nonlocal last
             try: row = await self.command(name, args)
             except RpcError as error:
                 if error.kind == "not_found": return None
                 raise
+            last=row
             return row if predicate(row) else None
-        return await self.wait(ready, label="coord." + name)
+        try: return await self.wait(ready, label="coord." + name)
+        except CheckFailed:
+            self.evidence.append({"kind":"unmet_public_observation","command":name,"args":args,"last":last})
+            raise
 
     async def operation(self, suffix="op"):
         self.serial += 1

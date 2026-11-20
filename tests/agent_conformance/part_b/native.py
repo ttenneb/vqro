@@ -88,7 +88,7 @@ class Native:
         self.provider, self.root = provider, root
         self.agents, self.plans, self.barriers = {}, {}, {}
         self.queues, self.receipts, self.items, self.drafts = {}, {}, {}, {}
-        self.pull_entries,self.pull_pending,self.context_pending={},{},{}
+        self.pull_entries,self.pull_pending,self.context_pending,self.host_members={},{},{},{}
         self.serial = 0
         self.ledger = root / "native.jsonl"
         self.server = None
@@ -98,7 +98,7 @@ class Native:
         self.provider = provider
         provider.oracle = self
         provider.open_stream = self.open_terminal
-        for op in ("agent.send", "agent.interrupt", "agent.queue", "agent.respond", "agent.stop", "agent.receipt"):
+        for op in ("agent.send", "agent.interrupt", "agent.queue", "agent.respond", "agent.stop", "agent.receipt", "terminal.kill"):
             provider.effect(op)(lambda effect, args, op=op: self.effect(op, effect, args))
 
     def append(self, kind, **fields):
@@ -201,6 +201,14 @@ class Native:
             from vqro_provider import ProviderError
             raise ProviderError("stale", "fake endpoint incarnation changed")
         witness = None
+        if op=="terminal.kill":
+            witness=await self.provider.call("operational.get",{"domain":"coord","key":"operational/coord/control"})
+            self.append("invoke",op=op,effect=effect.id,ref=effect.ref,args=deepcopy(args),control_witness=witness)
+            for ref in self.host_members.get(effect.ref,[])+[effect.ref]:
+                native=self.agents[ref]["data"]["agent"];native["lifecycle"]="ended";self.agents[ref]["state"]="finished"
+                await self.publish(ref)
+            self.append("host_terminated",ref=effect.ref,members=self.host_members.get(effect.ref,[]))
+            return {"outcome":"observed","data":{"native_host":"ended"}}
         if args.get("delivery"):
             try: witness = await self.provider.call("operational.get", {"domain": "coord", "key": "operational/coord/message/" + args["delivery"]})
             except Exception as error: witness = {"read_error": {"kind": getattr(error, "kind", "transport"), "message": str(error)}}
@@ -288,6 +296,8 @@ class Native:
 
     async def control(self, request):
         verb = request.get("verb")
+        if verb == "bind-host":
+            self.host_members[request["ref"]]=list(request["members"]);return {"bound":True}
         if verb == "state": return {"agents": self.agents, "ledger_seq": self.serial,
             "registration": {k: v for k, v in self.provider.registration.items() if "token" not in k}}
         if verb == "add": return await self.add(request["ref"], **request.get("fields", {}))
@@ -401,6 +411,7 @@ async def main():
     capabilities["items.stream"]={"retain_bytes":131072,"entities":512,"entity_bytes":524288}
     capabilities["terminal.output"]={"raw":True}
     capabilities["terminal.input"]={"stream":True,"effect":False}
+    capabilities["terminal.kill"]={}
     native, provider = None, None
     credential = os.environ.get("VQRO_BRIDGE_TOKEN")
     try:

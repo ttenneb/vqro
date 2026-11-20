@@ -78,6 +78,94 @@ async def claim_precedes_native(ctx):
               component="core",disk_witness=calls[0].get("disk_witness"))
 
 
+@case("I7")
+async def held_start_does_not_block_other_lanes(ctx):
+    await ctx.native_set(0,state="running",run="existing-run")
+    start=await ctx.send(mode="start",text="held start")
+    others=[]
+    for mode in ("boundary","admit","preempt"):
+        fields={"expires_at_ms":int(time.time()*1000)+60000} if mode=="preempt" else {}
+        others.append(await ctx.send(mode=mode,text=mode,send_new=True,**fields))
+    await ctx.scope("resume")
+    for row in others: await settled(ctx,row["delivery"])
+    ctx.check(not invocations(ctx,delivery=start["delivery"]) and all(len(invocations(ctx,delivery=row["delivery"]))==1 for row in others),
+              "busy start lane does not block boundary, admit or preempt")
+    reply=await ctx.command("control",{"op":await ctx.operation(),"action":"interrupt","target":ctx.agents[0]["id"],"args":{"v":0}})
+    ctx.check(reply["state"] in ("accepted","observed","dispatched") and invocations(ctx,op="agent.interrupt"),"control is admitted without waiting for held start")
+
+
+@case("I8")
+async def busy_retry_has_fresh_attempts_and_a_bound(ctx):
+    expiry=int(time.time()*1000)+60000;guard={"session":"s1"}
+    await ctx.native.call("plan",ref=ctx.agents[0]["backend_ref"],op="agent.send",plan={"result":{"outcome":"rejected","error":{"kind":"busy","message":"native busy at its serialized preflight"}}})
+    sent=await ctx.send(guard=guard,expires_at_ms=expiry);await ctx.scope("resume")
+    for count in (1,2,3):
+        await ctx.wait(lambda:len(invocations(ctx,delivery=sent["delivery"]))>=count,label="bounded busy attempt")
+        if count<3:
+            observed=await ctx.wait_command("inbox.get",lambda row:row.get("state") in ("held","unknown","rejected"),args={"delivery":sent["delivery"]})
+            ctx.check(observed["state"]=="held" and observed.get("reason")=="agent_busy","definite native busy returns held, not unknown",record=observed)
+            await asyncio.sleep(.15)
+            ctx.check(len(invocations(ctx,delivery=sent["delivery"]))==count,"busy retry waits for a later idle generation, never polls hot")
+            await native_idle(ctx)
+    record=await ctx.wait_command("inbox.get",lambda row:row.get("state")=="rejected",args={"delivery":sent["delivery"]})
+    calls=invocations(ctx,delivery=sent["delivery"])
+    ids=[call["witness"]["entry"]["value"]["attempt"]["id"] for call in calls]
+    witnesses=[call["witness"]["entry"]["value"] for call in calls]
+    ctx.check(len(ids)==len(set(ids))==3 and all(row["guard"]==guard and row["expires_at_ms"]==expiry and row["to"]==witnesses[0]["to"] for row in witnesses),
+              "three fresh durable attempts preserve exact target guard and original expiry",record=record)
+    await ctx.native.call("plan",ref=ctx.agents[1]["backend_ref"],op="agent.send",plan={"before":"stale-session"})
+    stale=await ctx.send(target=ctx.agents[1]["id"],guard={"session":"s1"})
+    await ctx.scope("resume","agent:"+ctx.agents[1]["id"])
+    await ctx.wait(lambda:invocations(ctx,delivery=stale["delivery"]),label="stale runtime guard race")
+    await ctx.native_set(1,session={"id":"s2"},epoch="e2")
+    await ctx.native.call("release",barrier="stale-session")
+    await held(ctx,stale["delivery"],"stale_guard")
+    await ctx.scope("resume","agent:"+ctx.agents[1]["id"])
+    ctx.check(not any(row.get("delivery")==stale["delivery"] for row in ctx.native.records("model_request")),"stale session is held for review, never unguarded input")
+
+
+@case("G4")
+async def resolved_strategy_right_is_rechecked_at_claim(ctx):
+    principal="strategy-sender";worker=await ctx.connect(principal);scope="agent:"+ctx.agents[0]["id"]
+    await ctx.grant("requested-mode",principal,["send:preempt"],scope)
+    await ctx.grant("resolved-strategy",principal,["send:interrupt_then_start"],scope)
+    await ctx.grant("strategy-steps",principal,["queue","interrupt","send:start"],scope)
+    sent=await ctx.send(peer=worker,mode="preempt",strategy="interrupt_then_start",expires_at_ms=int(time.time()*1000)+60000)
+    async def replace(identifier,value):
+        entry=(await ctx.peer.call("workspace.snapshot"))["entries"]["doc/agents/grants/"+identifier]
+        await ctx.command("grants",{"op":await ctx.operation(),"id":identifier,"expect":entry["version"],"value":value})
+    await replace("resolved-strategy",{"who":"other-sender","on":scope,"can":["send:interrupt_then_start"]})
+    await ctx.scope("resume");await held(ctx,sent["delivery"],"no_grant")
+    ctx.check(not invocations(ctx,delivery=sent["delivery"]),"requested mode grant cannot replace revoked resolved-strategy grant at claim")
+    await ctx.scope("pause")
+    await replace("resolved-strategy",{"who":principal,"on":scope,"can":["send:interrupt_then_start"]})
+    await replace("strategy-steps",{"who":principal,"on":scope,"can":["queue","send:start"]})
+    await ctx.scope("resume");await held(ctx,sent["delivery"],"no_grant")
+    ctx.check(not invocations(ctx,delivery=sent["delivery"]),"each composed step is separately reauthorized before native invocation")
+
+
+@case("I20")
+async def quotes_never_impersonate_the_sender(ctx):
+    principal="agent-A";sender=await ctx.connect(principal)
+    await ctx.native.call("add-many",count=3);await ctx.wait_agents(3)
+    await ctx.native_set(0,principal=principal)
+    await ctx.grant("A-only-start",principal,["send:start"])
+    quote={"principal":"owner","kind":"human"}
+    sent=await ctx.send(target=ctx.agents[1]["id"],peer=sender,quoted=quote,render=["attributed_user"],text="A's quoted instruction")
+    record=await ctx.get(sent["delivery"])
+    await ctx.scope("resume","agent:"+ctx.agents[1]["id"]);await settled(ctx,sent["delivery"])
+    model=next(row for row in ctx.native.records("model_request") if row.get("delivery")==sent["delivery"])
+    ctx.check(record["origin"]["principal"]==principal and record["origin"]["kind"]=="agent" and
+              model["role"]=="user" and model["sender"]["principal"]==principal and model["quoted_claim"]==quote,
+              "effective sender remains A; model receives owner quote only as a claim",model=model)
+    caps=deepcopy(ctx.agents[2]["data"]["agent"]["caps"]);caps["rev"]+=1;caps["agent.send"]["origin"]=[]
+    await ctx.native_set(2,caps=caps)
+    unsupported=await ctx.send(target=ctx.agents[2]["id"],peer=sender,quoted=quote,render=["attributed_user"])
+    await ctx.scope("resume","agent:"+ctx.agents[2]["id"])
+    await held(ctx,unsupported["delivery"],"origin_unsupported")
+    ctx.check(not invocations(ctx,delivery=unsupported["delivery"]),"no declared accepted rendering means hold, never strip sender attribution")
+
+
 @case("I15")
 async def resolve_requires_standing(ctx):
     worker = await ctx.connect("worker:no-grants")
@@ -795,6 +883,81 @@ async def handle_grants_pin_both_ends(ctx):
         ctx.assertions+=sub.assertions
     finally:
         await sub.close();ctx.evidence.extend(sub.evidence)
+
+
+async def policy_tombstone(ctx,agent):
+    snapshot=await ctx.peer.call("operational.snapshot",{"domain":"coord"})
+    for entry in snapshot["entries"].values():
+        value=entry.get("value")
+        if isinstance(value,dict) and isinstance(value.get(agent),dict) and value[agent].get("agent")==agent:
+            return value[agent]
+    return None
+
+
+@case("L5")
+async def stop_closes_admission_and_confirms_exact_host(ctx):
+    caps=deepcopy(ctx.agents[0]["data"]["agent"]["caps"]);caps.pop("agent.stop");caps["rev"]+=1
+    await ctx.native_set(0,caps=caps);await ctx.scope("resume")
+    stopped=await ctx.command("control",{"op":await ctx.operation(),"action":"stop","target":ctx.agents[0]["id"],"args":{"v":0}})
+    ctx.check(stopped["state"]=="partial" and stopped.get("native") is None,"undeclared stop closes admission but never claims native termination",reply=stopped)
+    sent=await ctx.send();await held(ctx,sent["delivery"],"paused")
+    process=await ctx.command("control",{"action":"inspect","target":ctx.agents[0]["id"]})
+    ctx.check(process.get("confirm_host") is None and not process["graceful"],"process host without core termination route offers no guessed kill")
+    await ctx.rejected("control",{"op":await ctx.operation(),"action":"stop","target":ctx.agents[0]["id"],"args":{"v":0,"how":"host_kill"}},{"unsupported"})
+    host=await terminal(ctx,marker=False)
+    descriptor={"id":"owned-fake-host","kind":"terminal","resource":host["id"],"incarnation":host["incarnation"],"owns_lifecycle":True}
+    await ctx.native.call("bind-host",ref=host["backend_ref"],members=[row["backend_ref"] for row in ctx.agents[:2]])
+    await ctx.native_set(0,host=descriptor);await ctx.native_set(1,host=descriptor)
+    await ctx.scope("resume","agent:"+ctx.agents[1]["id"])
+    preview=await ctx.command("control",{"action":"inspect","target":ctx.agents[0]["id"]})
+    confirmation=preview["confirm_host"]
+    ctx.check(set(confirmation["endpoints"])=={row["id"] for row in ctx.agents[:2]} and bool(preview.get("warning")),
+              "host kill preview includes every observed served endpoint and unreported-work warning",preview=preview)
+    wrong=dict(confirmation,incarnation="changed-host")
+    await ctx.rejected("control",{"op":await ctx.operation(),"action":"stop","target":ctx.agents[0]["id"],"args":{"v":0,"how":"host_kill"},"confirm_host":wrong},{"conflict"})
+    ctx.check(not ctx.native.records("host_terminated"),"unconfirmed host identity never invokes termination")
+    result=await ctx.command("control",{"op":await ctx.operation(),"action":"stop","target":ctx.agents[0]["id"],"args":{"v":0,"how":"host_kill"},"confirm_host":confirmation})
+    calls=invocations(ctx,op="terminal.kill")
+    ctx.check(len(calls)==1 and len(ctx.native.records("host_terminated"))==1,"only explicit exact confirmation invokes declared termination once",reply=result)
+    gates=calls[0]["control_witness"]["entry"]["value"]["gates"]
+    ctx.check(all(gates.get(agent) is False for agent in confirmation["endpoints"]),"real protected store has closed all served gates before native host termination")
+    ctx.check(not invocations(ctx,delivery=sent["delivery"]),"closed pending input is not rerouted or physically resent")
+
+
+@case("L9")
+async def retirement_is_not_native_end(ctx):
+    sent=await ctx.send();await ctx.native_set(0,lifecycle="disconnected")
+    retired=await ctx.command("control",{"op":await ctx.operation(),"action":"retire","target":ctx.agents[0]["id"],"args":{"reason":"routing retirement, not kill"}})
+    ctx.check(retired["state"]=="retired" and retired["execution"]=="unknown" and retired.get("native") is None,
+              "administrative retirement reports unknown native execution, never ended",reply=retired)
+    await ctx.scope("resume")
+    await held(ctx,sent["delivery"],"agent_retired")
+    ctx.check(not invocations(ctx,delivery=sent["delivery"]),"routing remains stopped after explicit resume of retired endpoint")
+    await ctx.native_set(0,lifecycle="ended")
+    async def ended():
+        stone=await policy_tombstone(ctx,ctx.agents[0]["id"])
+        return stone if stone and stone.get("lifecycle")=="ended" else None
+    stone=await ctx.wait(ended,label="native end evidence after retirement")
+    ctx.check(stone.get("last_evidence")=="native_ended","only later native evidence makes retired endpoint ended",tombstone=stone)
+
+
+@case("L6")
+async def ended_targets_preserve_pending_and_unknown(ctx):
+    pending=await ctx.send(text="pending at native end")
+    uncertain=await ctx.send(target=ctx.agents[1]["id"],text="claimed without reply")
+    await ctx.native.call("plan",ref=ctx.agents[1]["backend_ref"],op="agent.send",plan={"after":"end-without-result"})
+    await ctx.scope("resume","agent:"+ctx.agents[1]["id"])
+    await ctx.wait(lambda:invocations(ctx,delivery=uncertain["delivery"]),label="native applied before held result")
+    ctx.check((await ctx.get(uncertain["delivery"]))["state"]=="claimed","end fixture has an outstanding claim without outcome")
+    await ctx.native_set(0,lifecycle="ended");await ctx.native_set(1,lifecycle="ended")
+    unknown=await ctx.wait_command("inbox.get",lambda row:row.get("state")=="unknown",args={"delivery":uncertain["delivery"]})
+    ctx.check(unknown["to"]["agent"]==ctx.agents[1]["id"],"end never reroutes an uncertain claim")
+    await ctx.rejected("inbox.send",{"op":await ctx.operation(),"submission":await ctx.operation(),"to":ctx.agents[0]["id"],
+        "mode":"start","content":[{"type":"text","text":"must reject ended handle"}],"send_new":True},{"agent_ended","ended","too_late","not_found"})
+    record=await ctx.get(pending["delivery"])
+    ctx.check(record["state"]=="held" and record.get("reason")=="agent_ended","pending remains held with explicit ended reason",record=record)
+    ctx.check(not invocations(ctx,delivery=pending["delivery"]) and len(invocations(ctx,delivery=uncertain["delivery"]))==1,
+              "neither held nor uncertain input is resent at native end")
 
 
 @case("H2")
