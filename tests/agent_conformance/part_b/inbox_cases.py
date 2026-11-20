@@ -8,17 +8,19 @@ from ..wire import RpcError
 
 
 @case("I5")
-async def pending_mutation_claim_races(ctx):
+async def pending_mutation_claim_races(ctx,priority=False):
     editor=await ctx.connect("owner");winners=set()
     for withdraw in (False,True):
         for ordering in ("edit-first","claim-first","concurrent"):
             await ctx.scope("pause");await native_idle(ctx)
             barrier="claim-race-"+str(withdraw)
             await ctx.native.call("plan",ref=ctx.agents[0]["backend_ref"],op="agent.send",plan={"before":barrier} if ordering=="claim-first" else {})
-            sent=await ctx.send(text="old payload");record=await ctx.get(sent["delivery"])
+            sent=await ctx.send(text="old payload",priority="low" if priority else "normal");record=await ctx.get(sent["delivery"])
             command="inbox.withdraw" if withdraw else "inbox.edit"
             change={"op":await ctx.operation(),"delivery":sent["delivery"],"expect":record["revision"]}
-            if not withdraw: change["content"]=[{"type":"text","text":"new payload"}]
+            if not withdraw:
+                change["content"]=[{"type":"text","text":"new payload"}]
+                if priority: change["priority"]="high"
             async def update():
                 try: await ctx.command(command,change,peer=editor);return True
                 except RpcError as error:
@@ -39,6 +41,9 @@ async def pending_mutation_claim_races(ctx):
                 await settled(ctx,sent["delivery"]);calls=invocations(ctx,delivery=sent["delivery"])
                 expected="new payload" if edited and not withdraw else "old payload"
                 ctx.check(len(calls)==1 and calls[0]["args"]["content"]==[{"type":"text","text":expected}],"one linearization winner determines the sole native payload")
+                if priority:
+                    expected_priority="high" if edited and not withdraw else "low"
+                    ctx.check(calls[0]["disk_witness"]["entry"]["value"]["priority"]==expected_priority,"priority edit and claim have the same durable winner")
     ctx.check(winners=={True,False},"both winners exercised, not only a lucky race outcome")
 
 
