@@ -7,7 +7,7 @@ import traceback
 
 from .cases import HANDLERS
 from .core import PublicImplementation
-from .results import CheckFailed, HarnessGap, NotDeclared, Result, declared, declared_module, markdown, report
+from .results import CheckFailed, HarnessGap, NotApplicable, NotDeclared, Result, declared, declared_module, markdown, report
 
 
 def validate_manifest(value):
@@ -27,7 +27,7 @@ def validate_manifest(value):
 async def run_case(case, root, manifest, vqro, hc, *, factory=PublicImplementation, handlers=None):
     """Factory injection is for harness self-tests, never an adapter profile."""
     start, ctx, declarations, evidence = time.monotonic(), None, {}, []
-    status, component, detail = "fail", "harness", "case did not complete"
+    status, component, detail, reason = "fail", "harness", "case did not complete", None
     try:
         script = ({"script": [], "consume_input": True} if case.id == "D14" else
                   {"script": [], "abort_inserts_steering": True} if case.id == "D10" else None)
@@ -52,9 +52,14 @@ async def run_case(case, root, manifest, vqro, hc, *, factory=PublicImplementati
             declarations["resource"] = facts.get("caps", {})
         await handler(ctx)
         status, component, detail = "pass", None, "public-wire assertions passed"
+    except NotApplicable as error:
+        status, component, detail = "not-applicable", None, str(error)
+        declarations["exclusion"] = {"path": error.path, "actual": error.actual}
     except NotDeclared as error:
         status, component, detail = "unsupported-declared", None, str(error)
         declarations["omission"] = {"path": error.path, "actual": error.actual}
+    except HarnessGap as error:
+        status, component, detail, reason = "fail", "harness", str(error), "harness_gap"
     except CheckFailed as error:
         status, component, detail = "fail", error.component, str(error)
     except Exception as error:
@@ -71,7 +76,7 @@ async def run_case(case, root, manifest, vqro, hc, *, factory=PublicImplementati
                 evidence.append({"kind": "result_before_cleanup_failure", **original})
                 status, component, detail = "fail", "cleanup", f"owned-root cleanup failed: {error}"
     result = Result(case.id, case.title, status, component, detail, evidence, declarations,
-                    round((time.monotonic() - start) * 1000), str(root))
+                    round((time.monotonic() - start) * 1000), str(root), reason=reason)
     Path(root).mkdir(parents=True, exist_ok=True)
     (Path(root) / "result.json").write_text(json.dumps(result.json(), ensure_ascii=False, indent=2) + "\n")
     return result

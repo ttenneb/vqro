@@ -306,8 +306,8 @@ async def endpoint_model(ctx):
             topology = declaration.get("endpoints")
             if topology == "one":
                 check(len(endpoints) == 1, "one-endpoint host actually publishes multiple endpoints")
-                ctx.evidence.append({"kind": "subcase", "case": "C10.shared_three_endpoints", "applicability": "not-applicable",
-                                     "declaration": {"host.endpoints": "one"}, "host": host})
+                ctx.evidence.append({"kind": "subcase", "case": "C10.shared_three_endpoints", "status": "not-applicable",
+                                     "exclusion": {"path": "host.endpoints", "actual": "one"}, "host": host})
             elif topology == "many":
                 if ctx.endpoint_count < 3:
                     raise HarnessGap("C10 many-endpoint fixture manifest must request at least three endpoints")
@@ -551,8 +551,8 @@ async def guarded_input(ctx):
         rejection(result, kinds=("unsupported",) if strength == "none" else ("stale",))
         check(not ctx.native.writes(mark), "locally stale/unsupported guard wrote to native runtime")
     if guards.get("run") != "runtime":
-        ctx.evidence.append({"kind": "subcase", "case": "D11.atomic_native_race", "applicability": "not-applicable",
-                             "declaration": {"guards.run": guards.get("run", "none")}})
+        ctx.evidence.append({"kind": "subcase", "case": "D11.atomic_native_race", "status": "not-applicable",
+                             "exclusion": {"path": "agent.send.guards.run", "actual": guards.get("run", "none")}})
         return
     await ctx.native.call("turn", state="start")
     active = await ctx.wait_facts(lambda f: f.get("state") == "running" and f.get("run"))
@@ -1160,8 +1160,9 @@ async def stop_evidence(ctx):
     await lifecycle_wait(ctx, ended, "no native endpoint end evidence after stop")
     ctx.evidence.append({"kind": "stop_end", "native_pid": pid, "result": result,
                          "final_resource": ctx.resource_cache[rid], "removed": ctx.removed.get(rid)})
-    matching = [event["data"] for event in ctx.events if event.get("type") == "effect"
-                and event.get("data", {}).get("op") == "agent.stop" and event["data"].get("outcome") != "rejected"]
+    matching = {event["data"].get("effect") for event in ctx.events if event.get("type") == "effect"
+                and event.get("data", {}).get("op") == "agent.stop"
+                and event["data"].get("outcome") in ("accepted", "observed", "dispatched", "indeterminate")}
     check(len(matching) == 1, "stop effect was duplicated")
 
 

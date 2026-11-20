@@ -16,7 +16,7 @@ from agent_conformance.core import PublicImplementation
 from agent_conformance.runtime import Runtime
 from agent_conformance.cases import declarations, restriction, schema_example
 from agent_conformance.content import compare_content, examples, png, wav
-from agent_conformance.results import CASES, BY_ID, Case, CheckFailed, FixtureFailed, Result, markdown, report, select_cases
+from agent_conformance.results import CASES, BY_ID, Case, CheckFailed, FixtureFailed, NotApplicable, Result, markdown, report, select_cases
 from agent_conformance.runner import run_case
 from agent_conformance.wire import ItemReducer, Peer, RpcError, WireFailure
 
@@ -357,6 +357,19 @@ class ResultTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             Result("D1", "test", "unsupported-declared")
 
+    def test_not_applicable_requires_the_named_excluding_declaration(self):
+        for declarations in ({}, {"exclusion": {"path": "host.kind"}}):
+            with self.assertRaises(ValueError):
+                Result("C10", "excluded", "not-applicable", declarations=declarations)
+
+    def test_not_applicable_never_counts_as_a_pass(self):
+        result = Result("C10", "excluded", "not-applicable",
+                        declarations={"exclusion": {"path": "host.kind", "actual": "server"}})
+        document = report({"name": "test-only"}, [result], select_cases(["C10"]))
+        self.assertEqual(document["summary"]["not-applicable"], 1)
+        self.assertEqual(document["summary"]["pass"], 0)
+        self.assertFalse(document["passed_selection"])
+
     def test_provider_superset_uses_enum_sets_and_numeric_maxima(self):
         upper = {"modes": {"settle": {"batch": ["one", "all"], "idle": ["start"]}}, "retention": 512, "native": True}
         lower = {"modes": {"settle": {"batch": "one", "idle": "start"}}, "retention": 256, "native": False}
@@ -491,6 +504,13 @@ class ClassificationTests(unittest.IsolatedAsyncioTestCase):
         result = await run_case(BY_ID["M6"], self.root, self.manifest, Path("/vqro"), Path("/hc"),
                                 factory=self.factory(modules={"children": {"v": 0}}), handlers={})
         self.assertEqual((result.status, result.component), ("fail", "harness"))
+
+    async def test_declaration_selection_exclusion_is_not_a_harness_gap(self):
+        async def excluded(ctx):
+            raise NotApplicable("host.endpoints", "one")
+        result = await self.run_one(factory=self.factory(), handlers={"D6": excluded})
+        self.assertEqual(result.status, "not-applicable")
+        self.assertEqual(result.declarations["exclusion"], {"path": "host.endpoints", "actual": "one"})
 
     async def test_fixture_failure_is_not_capability_omission(self):
         result = await self.run_one(factory=self.factory(startup_error=FixtureFailed("no fake control")), handlers={})

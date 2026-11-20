@@ -84,7 +84,7 @@ private core/backend per case, and writes `results.json`, `results.md`, per-case
 always name all omitted cases. Leaving `--cases` out includes all 55 Part A groups;
 currently unimplemented applicable handlers fail as `component:harness`.
 
-Current executable slice: C1–C3, C5, C7–C10, D1–D15, O1/O4/O5/O6/O8,
+Current executable slice: C1–C5, C7–C10, D1–D15, O1/O4–O10,
 R1–R5, M1/M2 and L1–L4. Applicable C9/R2/R4/L3 and several optional declared
 branches still report a visible harness gap after their partial checks. Core
 causality loss and missing stop reply coverage are separate implementation failures.
@@ -102,9 +102,12 @@ unsupported feature or an extra top-level result status.
 
 ## Results / honesty
 
-Each case produces exactly `pass`, `fail`, or `unsupported-declared`, alongside
-capabilities/versions, native/composed provenance, limits and evidence refs.
-Only absence of an **optional declared capability** permits unsupported-declared.
+Each case/subcase produces `pass`, `fail`, `unsupported-declared` or
+`not-applicable`, alongside capabilities/versions, native/composed provenance,
+limits and evidence refs. Only absence of an **optional declared capability**
+permits unsupported-declared. Declaration-selected exclusions use not-applicable
+and include their explicit excluding declaration; they never count as a pass.
+Unimplemented applicable branches remain fail with reason `harness_gap`.
 A missing runner implementation, unavailable fixture control, start failure,
 mandatory-core gap or unsupported protocol plumbing is `fail` with component
 `harness`, `fixture`, `core`, or `adapter`; none becomes a fake capability skip.

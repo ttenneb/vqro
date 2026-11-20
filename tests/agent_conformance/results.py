@@ -19,6 +19,13 @@ class FixtureFailed(CheckFailed):
         super().__init__(message, component="fixture")
 
 
+class NotApplicable(Exception):
+    """Declaration-selected exclusion, never a missing fixture or handler."""
+    def __init__(self, path, actual):
+        self.path, self.actual = path, actual
+        super().__init__(f"case excluded by declaration: {path} ({actual!r})")
+
+
 class NotDeclared(Exception):
     """Only an explicit missing optional declaration, never an execution error."""
     def __init__(self, path, actual=None):
@@ -143,12 +150,17 @@ class Result:
     declarations: dict = field(default_factory=dict)
     duration_ms: int = 0
     fixture_root: str | None = None
+    reason: str | None = None
 
     def __post_init__(self):
-        if self.status not in ("pass", "fail", "unsupported-declared"):
+        if self.status not in ("pass", "fail", "unsupported-declared", "not-applicable"):
             raise ValueError("unknown conformance result status")
         if self.status == "unsupported-declared" and not self.declarations:
             raise ValueError("unsupported-declared needs the omitted capability declaration")
+        if self.status == "not-applicable":
+            exclusion = self.declarations.get("exclusion")
+            if not isinstance(exclusion, dict) or not exclusion.get("path") or "actual" not in exclusion:
+                raise ValueError("not-applicable needs its explicit excluding declaration")
 
     def json(self):
         return asdict(self)
@@ -168,8 +180,8 @@ def report(implementation, results, selected, *, part="A", inventory=CASES):
             "not_selected": [ident for ident in expected if ident not in selected_ids],
             "fixture_native": True, "real_runtime_certification": False,
             "summary": {status: sum(row.status == status for row in results)
-                        for status in ("pass", "fail", "unsupported-declared")},
-            "passed_selection": bool(results) and not failed and executed == selected_ids,
+                        for status in ("pass", "fail", "unsupported-declared", "not-applicable")},
+            "passed_selection": any(row.status == "pass" for row in results) and not failed and executed == selected_ids,
             "results": [row.json() for row in results]}
 
 
