@@ -246,21 +246,20 @@ the window returns its historical result or `expired_operation` and **never crea
 Result eviction never makes an id admissible again. The window governs call ids only: a pending record stays editable
 by its `delivery`. `coord.inbox.op {op}` returns the result or `unknown`, never "did not happen".
 
-The window also caches well-formed refusals (validation, grant and quota), subject to the protected recovery margin
-below. For a **cached** refusal, an identical repeat returns the original compact refusal even if grants or capacity
-changed; retrying under changed conditions needs a new `op`. Malformed calls and calls from an undeclared principal
-occupy no slot. Cached refusal entries have a fixed small bound (§10); the full message appears only in the live
-reply. Slot preflight and refusal persistence use the same existing control/recovery path: the 10% reserve excluding
-archive-only escrow, not content capacity or the normal-ledger 64 KiB / 16-record control-intent headroom; no new pool.
+The window also caches well-formed refusals (validation, grant and quota) only within the existing normal/control-intent
+storage ceiling (§10). For a **cached** refusal, an identical repeat returns the original compact refusal even if
+grants or capacity changed; retrying under changed conditions needs a new `op`. Malformed calls and calls from an
+undeclared principal occupy no slot. Cached failures retain kind/fingerprint in a fixed small entry; the full message
+appears only in the live reply. Slot preflight and refusal persistence use the same normal/control-intent ceiling;
+refusals **never borrow the recovery reserve**, and no new pool is added.
 
-Refusal slots may consume that reserve **only down to a protected recovery margin** sized to always fund the owner's
-recovery: at least one maximum workspace-scope pause plus resume, with archive funding/escrow preserved as in §6.1.
-The operation-window bound alone is not enough to protect recovery. If caching a refusal would cross this margin,
-return the refusal **live and explicitly marked uncached**, without persisting its result; never turn this into
-persistent pre-evaluation `busy`. The cached-refusal repeat guarantee does not apply to that uncached result; a repeat
-may be evaluated afresh, without relaxing existing operation-identity or native-attempt replay fences. A quota refusal
-thus remains reportable at the durable content budget. A genuinely full operation window still refuses `busy`
-**before evaluation**; content saturation or preserving the recovery margin alone does not make the window full.
+At that ceiling, return the actual refusal live with **`uncached: true`**, without persisting its result, **close the
+operation epoch and advertise the new window**. The old `op` is then `expired_operation` even after grants or capacity
+change or a restart; it can never be admitted later. No-recreation has no exception for uncached refusals. A new id in
+the new window is required for another evaluation. At the durable content budget the live refusal is still `quota`,
+not persistent pre-evaluation `busy`. A genuinely full operation window still refuses `busy` **before evaluation**;
+content saturation or inability to cache a refusal alone does not make the window full. Recovery space stays entirely
+for owner recovery (including workspace pause/resume and archive, §6.1), not refusal caching.
 
 | Command | Effect |
 |---|---|
@@ -651,9 +650,10 @@ recovery reserve keeps its full size; its last **64 KiB / 16 records are archive
 for other recovery controls. This archive-only share is a defensive margin, not a second proved exhaustion case:
 the known-metadata negative control was already covered by retaining only **16 scope receipts**. Archive plans
 also fund their future metadata (§6.1); this charge is separate from their actual retained manifest/plan bytes.
-Refusal caching must additionally leave a protected recovery margin sufficient for at least one maximum workspace
-pause plus resume, with existing archive funding preserved (§5.3). A window's worth of refusals must not exhaust
-owner recovery. Below that margin refusals remain live but explicitly uncached, not additional durable charges.
+Refusals never use the recovery reserve: compact failures are cached only within the existing normal/control-intent
+ceiling. At that ceiling they are returned live with `uncached: true`; the epoch closes, a new window is advertised,
+and the old id remains permanently fenced (§5.3). The entire recovery reserve remains for recovery, including owner
+workspace pause/resume and the existing archive escrow/future funding; no separate refusal-recovery margin is needed.
 
 | Retained item | Bound each | Count | `B` = 2 MiB, 200 agents | `B` = 4 MiB | `B` = 8 MiB |
 |---|---|---|---|---|---|
