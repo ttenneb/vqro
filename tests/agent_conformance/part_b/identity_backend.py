@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 import subprocess
 import shutil
+import tempfile
 
 from ..results import CheckFailed, FixtureFailed
 from .context import PublicCoordination
@@ -48,24 +49,28 @@ async def backend_child_environment(parent):
     pins = parent.manifest.get("identity_backend", {})
     herdr, hc = pinned_artifact(pins.get("herdr")), pinned_artifact(pins.get("hc"))
     manifest = pinned_artifact(pins.get("manifest"))
-    ctx = PublicCoordination(parent.root / "b", parent.manifest, parent.vqro)
+    ctx = PublicCoordination(parent.root / "b", parent.manifest, parent.vqro, hc=hc)
     # Both runner and shared context intentionally freeze only coord's manifest.
     # Pin/stage this real provider manifest explicitly, never strip dependencies.
     shutil.copyfile(manifest, ctx.root / "ext/manifests/herdr.json")
     ctx.metadata["herdr_manifest_sha256"] = hashlib.sha256(manifest.read_bytes()).hexdigest()
-    hc_socket = ctx.root / "h"
-    if len(str(hc_socket).encode()) > 103: raise FixtureFailed("G14 private HC socket exceeds portable bound")
-    if hc_socket.exists(): raise FixtureFailed("G14 private HC endpoint already exists; never adopt it")
-    runtime = ctx.root / "xr"
-    runtime.mkdir(mode=0o700, exist_ok=True)
-    state = ctx.root / "hs"
-    state.mkdir(mode=0o700, exist_ok=True)
-    # HC derives an additional session-suffixed socket (observed native 109-byte
-    # rejection with 'g14-private'); a one-character private session fits <103 bytes.
-    ctx.backend.env.update(HC_SOCKET=str(hc_socket), HC_SESSION="g",
-        XDG_RUNTIME_DIR=str(runtime), XDG_STATE_HOME=str(state),
+    base = Path(pins.get("runtime_parent", ""))
+    if not base.is_absolute() or not base.is_dir():
+        raise FixtureFailed("G14 needs an explicit private-scratch parent for short native sockets")
+    native_root = Path(tempfile.mkdtemp(prefix="g14-", dir=base))
+    if len(str(native_root).encode()) > 64:
+        shutil.rmtree(native_root)
+        raise FixtureFailed("G14 native root exceeds its reserved derived-socket budget")
+    for name in ("home", "config", "run", "state"): (native_root / name).mkdir(mode=0o700)
+    hc_socket = native_root / "h"
+    runtime, state = native_root / "run", native_root / "state"
+    # HC's session-suffixed socket still measured 108 bytes with a one-character
+    # session under a long case root. Keep all native HOME/XDG paths short instead.
+    ctx.backend.env.update(HOME=str(native_root / "home"), XDG_CONFIG_HOME=str(native_root / "config"),
+        HC_SOCKET=str(hc_socket), HC_SESSION="g", XDG_RUNTIME_DIR=str(runtime), XDG_STATE_HOME=str(state),
         VQRO_PRINCIPAL="worker:must-not-leak")
     if any(key.startswith("HERDR_") for key in ctx.backend.env):
+        shutil.rmtree(native_root)
         raise FixtureFailed("G14 inherited real Herdr environment")
     artifact = ctx.root / "backend-env.json"
     script = ctx.root / "backend-env.py"
@@ -124,6 +129,7 @@ async def backend_child_environment(parent):
             "native_terminal_count_after_forget": len(native_before_stop.get("terminals", []))})
     except BaseException as error:
         primary_error = error
+        ctx.evidence.append({"kind": "backend_fixture_primary_error", "type": type(error).__name__, "detail": str(error)[:2048]})
     finally:
         if rid is not None and not removed and not forget_attempted:
             try:
@@ -149,10 +155,10 @@ async def backend_child_environment(parent):
             try: await ctx.close()
             except Exception as error: cleanup_error = error
         if not cleanup_error:
-            shutil.rmtree(state)  # only this disposable service's state, after owned processes stop
+            shutil.rmtree(native_root)  # only the fresh private service root, after owned processes stop
         ctx.evidence.append({"kind": "executing_backend_cleanup", "removed_exact_terminal": removed,
-            "private_socket": str(hc_socket), "private_hc_state_removed": not state.exists(),
-            "cleanup_error": type(cleanup_error).__name__ if cleanup_error else None})
+            "private_socket": str(hc_socket), "private_hc_root": str(native_root), "private_hc_state_removed": not native_root.exists(),
+            "cleanup_error": str(cleanup_error)[:2048] if cleanup_error else None})
         parent.assertions += ctx.assertions
         parent.evidence.append({"kind": "executing_backend_fixture", "evidence": ctx.evidence})
     if cleanup_error: raise FixtureFailed("owned executing backend cleanup did not complete") from cleanup_error
