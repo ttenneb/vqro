@@ -332,8 +332,17 @@ def case_rawcycle():
                                   'expect': preview['expect']}, clients[principal])
             assert result['state'] == 'accepted', result
             selected[target] = result['selected']
-    known = {row['id'] for row in owner.call('workspace.snapshot')['resources']
+    snapshot = owner.call('workspace.snapshot')
+    known = {row['id'] for row in snapshot['resources']
              if row.get('kind') == 'agent' or (row.get('status') or {}).get('app')}
+    # Ordinary membership survives backend removal: those tombstones remain in
+    # workspace recovery selection even though the resource census omits them.
+    for key, entry in snapshot['entries'].items():
+        if key.startswith('doc/agents/members/'):
+            known.add(key.rsplit('/', 1)[1])
+            parent = (entry.get('value') or {}).get('reports_to')
+            if parent:
+                known.add(parent)
     assert selected['workspace'] == len(known) and selected['project:broken'] == 2 and selected[f'agent:{b}'] == 1, selected
     try:
         cmd('scope', {'action': 'preview', 'scope': f'team:{a}'})
