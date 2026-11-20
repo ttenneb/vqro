@@ -2,12 +2,24 @@
 # Copyright 2026 Bennett Garcia
 """Native framing checker inversions, not public qualification."""
 import unittest
-from agent_conformance.part_b.native_framing_case import first_message, framed, take_point
+import tempfile
+from pathlib import Path
+from agent_conformance.part_b.native_framing_case import first_message, framed, take_point, module_tree_digest
 from agent_conformance.results import FixtureFailed
 from coord_harness import pull_declaration
 
 
 class NativeFrames(unittest.TestCase):
+    def test_native_module_seal_changes_with_dependency_bytes(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "dependency.js"
+            path.write_text("first")
+            before = module_tree_digest(root)
+            path.write_text("second")
+            self.assertNotEqual(before, module_tree_digest(root))
+            (Path(root) / "escape").symlink_to("/usr/bin/python3")
+            with self.assertRaises(FixtureFailed): module_tree_digest(root)
+
     def test_actual_wire_not_truncated_summary(self):
         message = {"role": "user", "content": [{"type": "tool_result", "content": [{"type": "text", "text": "token"}]}]}
         self.assertEqual(first_message([{"n": 1, "wire": {"messages": [message]}}], "token")[1], message)

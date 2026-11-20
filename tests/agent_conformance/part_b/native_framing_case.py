@@ -22,6 +22,30 @@ from ..results import FixtureFailed
 TESTS = Path(__file__).resolve().parents[2]
 
 
+def module_tree_digest(root):
+    """Seal the native JS dependency closure, not merely its tiny CLI launcher."""
+    root = Path(root).resolve()
+    if not root.is_dir():
+        raise FixtureFailed("native module closure is not a directory")
+    digest = hashlib.sha256()
+    total = count = 0
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink():
+            if not path.resolve().is_relative_to(root):
+                raise FixtureFailed("native dependency link escapes its declared closure")
+            payload = os.readlink(path).encode()
+        elif path.is_file():
+            total += path.stat().st_size
+            count += 1
+            if total > 2 * 1024 ** 3 or count > 100000:
+                raise FixtureFailed("native module closure exceeds the fixture seal bound")
+            payload = hashlib.sha256(path.read_bytes()).digest()
+        else:
+            continue
+        digest.update(path.relative_to(root).as_posix().encode() + b"\0" + payload + b"\0")
+    return digest.hexdigest()
+
+
 def texts(value):
     if isinstance(value, str):
         return value
@@ -112,6 +136,10 @@ def take_point(journal, delivery):
 async def native_framing_and_precision(ctx):
     config = ctx.manifest.get("native_pull") or {}
     pins = {name: pinned_artifact(config.get(name)) for name in ("node", "pi", "claude", "hook")}
+    modules = config.get("pi_modules") or {}
+    module_root = Path(modules.get("path", ""))
+    if not module_root.is_absolute() or module_tree_digest(module_root) != modules.get("sha256"):
+        raise FixtureFailed("native Pi dependency closure pin is missing or changed")
     parent = Path(config.get("runtime_parent", ""))
     if not parent.is_absolute() or not parent.is_dir():
         raise FixtureFailed("T15 requires an explicit private-scratch native runtime parent")
@@ -180,5 +208,6 @@ async def native_framing_and_precision(ctx):
                       "a real human-prompt race makes no unsafe start claim and preserves the boundary contract", race=race)
             ctx.check(not any("MSG-BUSY-I3" in json.dumps(row.get("wire")) for row in models),
                       "a plugin unable to preserve approximate-idle start makes no model input")
+    ctx.check(module_tree_digest(module_root) == modules["sha256"], "native Pi dependency closure stayed frozen")
     ctx.check(all(hashlib.sha256(Path(path).read_bytes()).hexdigest() == digest for path, digest in hashes.items()),
               "native fixture source stayed unchanged across all path captures")
