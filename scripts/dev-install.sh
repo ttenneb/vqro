@@ -35,7 +35,7 @@ done
 # Atomic replace: a running binary keeps its old inode. The provider programs (backends run as
 # extensions: vqro-herdr, vqro-tmux) go next to vqro, where the default extensions find them.
 for bin in vqro-herdr vqro-tmux vqro-bridge-pi vqro; do
-  install -m 755 "target/release/$bin" "$HOME/.local/bin/.$bin.new"
+  install -m 755 "$TARGET/release/$bin" "$HOME/.local/bin/.$bin.new"
   mv -f "$HOME/.local/bin/.$bin.new" "$HOME/.local/bin/$bin"
   cmp -s "$TARGET/release/$bin" "$HOME/.local/bin/$bin" || { echo "dev-install: $bin differs from $TARGET/release/$bin after install" >&2; exit 1; }
 done
