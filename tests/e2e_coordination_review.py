@@ -32,7 +32,8 @@ class RPCError(Exception):
 
 
 class Client:
-    def __init__(self, identity=None):
+    def __init__(self, identity=None, handler=None):
+        self.handler = handler
         self.sock = socket.socket(socket.AF_UNIX); self.sock.connect(str(ROOT / 'p'))
         self.file = self.sock.makefile('rb'); self.lock = threading.Lock(); self.cv = threading.Condition()
         self.next, self.replies, self.closed = 0, {}, False
@@ -46,7 +47,14 @@ class Client:
             for line in self.file:
                 msg = json.loads(line)
                 if 'method' in msg and 'id' in msg:
-                    self.send({'jsonrpc': '2.0', 'id': msg['id'], 'error': {'code': -32000, 'message': 'no', 'data': {'kind': 'unsupported'}}})
+                    if self.handler:
+                        try:
+                            result = self.handler(msg['method'], msg.get('params') or {})
+                            self.send({'jsonrpc': '2.0', 'id': msg['id'], 'result': result})
+                        except Exception as error:
+                            self.send({'jsonrpc': '2.0', 'id': msg['id'], 'error': {'code': -32000, 'message': str(error), 'data': {'kind': 'backend'}}})
+                    else:
+                        self.send({'jsonrpc': '2.0', 'id': msg['id'], 'error': {'code': -32000, 'message': 'no', 'data': {'kind': 'unsupported'}}})
                 elif 'method' not in msg:
                     with self.cv: self.replies[msg['id']] = msg; self.cv.notify_all()
         except (OSError, ValueError):
@@ -103,18 +111,21 @@ def raw_set(key, value):
 
 
 PROVIDERS = []
+GEN = {}
 
 
-def agent(ref, native, name=None, instance='stable', incarnation='i1'):
+def agent(ref, native, name=None, instance='stable', incarnation='i1', handler=None):
     name = name or ('k2-' + ref)
     """Register (once per name) a fake backend and publish one agent resource; return its rid."""
-    peer = Client()
+    peer = Client(handler=handler)
     reg = peer.call('provider.register', {'name': name, 'role': 'backend', 'instance': instance,
-        'software': {'name': 'fake', 'version': '0'}, 'provider_version': '0', 'capabilities': {'agent': {}}})
+        'software': {'name': 'fake', 'version': '0'}, 'provider_version': '0',
+        'capabilities': {'agent': {}, **({'agent.send': {}} if handler else {})}})
     facts = {'ref': ref, 'incarnation': incarnation, 'kind': 'agent', 'state': 'live',
              'status': {'state': native.get('state', 'idle'), 'app': 'fake'}, 'data': {'agent': native}}
     peer.call('provider.sync', {'generation': reg['generation'], 'resources': [facts], 'final': True})
     PROVIDERS.append(peer)
+    GEN[ref] = (peer, reg['generation'], facts)
     return wait(lambda: next((r['id'] for r in owner.call('workspace.snapshot')['resources']
                               if r.get('provider') == name and r.get('backend_ref') == ref), None))
 
@@ -284,7 +295,192 @@ def case_brick():
     return out
 
 
-CASES = {'brick': case_brick, 'idle': case_idle, 'membership': case_membership, 'identity': case_identity, 'reconcile': case_reconcile, 'names': case_names}
+def case_rawcycle():
+    pull = {'points': {'tool': {'precision': 'exact'}}, 'insert': 'user', 'evidence': 'entry'}
+    a = agent('raw-a', native(principal='p:forest-native'))
+    b = agent('raw-b', native(pull=pull))
+    raw_set(f'doc/agents/members/{a}', {'project': 'broken', 'reports_to': b})
+    raw_set(f'doc/agents/members/{b}', {'project': 'broken', 'reports_to': a})
+    for tag, who, on in [('recovery', 'p:recovery', '*'), ('project-only', 'p:project-only', 'project:broken'),
+                          ('exact-only', 'p:exact-only', f'agent:{b}'), ('team-only', 'p:team-only', f'team:{a}'),
+                          ('team-subject', f'team:{a}', f'agent:{b}')]:
+        raw_set(f'doc/agents/grants/{tag}', {'who': who, 'on': on,
+                'can': ['pause', 'resume', 'send:start', 'receive']})
+    status = wait(lambda: (s if not (s := cmd('status'))['configuration']['membership_valid'] else None))
+    assert 'cycle' in json.dumps(status['configuration']) and a in json.dumps(status['configuration']), status
+    sent = []
+    clients = {}
+    for principal in ('p:recovery', 'p:project-only', 'p:exact-only'):
+        client = clients[principal] = Client({'kind': 'principal', 'principal': principal})
+        o = op(principal)
+        result = cmd('inbox.send', {'op': o, 'submission': o, 'to': b, 'mode': 'start', 'send_new': True,
+                     'content': [{'type': 'text', 'text': principal}]}, client)
+        assert result['state'] in ('recorded', 'held'), result
+        sent.append(result['delivery'])
+    selected = {}
+    for target, principal in [('workspace', 'p:recovery'), ('project:broken', 'p:project-only'), (f'agent:{b}', 'p:exact-only')]:
+        for action in ('pause', 'resume'):
+            preview = cmd('scope', {'action': 'preview', 'scope': target})
+            result = cmd('scope', {'op': op(target + action), 'action': action, 'scope': target,
+                                  'expect': preview['expect']}, clients[principal])
+            assert result['state'] == 'accepted', result
+            selected[target] = result['selected']
+    known = {row['id'] for row in owner.call('workspace.snapshot')['resources']
+             if row.get('kind') == 'agent' or (row.get('status') or {}).get('app')}
+    assert selected['workspace'] == len(known) and selected['project:broken'] == 2 and selected[f'agent:{b}'] == 1, selected
+    try:
+        cmd('scope', {'action': 'preview', 'scope': f'team:{a}'})
+        raise AssertionError('invalid team scope was expanded')
+    except RPCError as error:
+        assert error.kind == 'membership_invalid' and 'cycle' in str(error), str(error)
+    for principal in ('p:team-only', 'p:forest-native'):
+        client = Client({'kind': 'principal', 'principal': principal})
+        try:
+            o = op('blocked-team')
+            cmd('inbox.send', {'op': o, 'submission': o, 'to': b, 'mode': 'start', 'send_new': True,
+                               'content': [{'type': 'text', 'text': 'must not expand team'}]}, client)
+            raise AssertionError('invalid team grant authorized a send')
+        except RPCError as error:
+            assert error.kind == 'membership_invalid' and 'cycle' in str(error), str(error)
+    cmd('inbox.reconcile', {'op': op('raw-reconcile'), 'agent': b, 'consumer': 'raw-consumer', 'records': []}, clients['p:recovery'])
+    o = op('raw-pull-send')
+    delivery = cmd('inbox.send', {'op': o, 'submission': o, 'to': b, 'mode': 'admit', 'send_new': True,
+                                'content': [{'type': 'text', 'text': 'pull remains usable'}]})['delivery']
+    took = cmd('inbox.take', {'op': op('raw-pull'), 'agent': b, 'consumer': 'raw-consumer', 'at': 'tool'}, clients['p:recovery'])
+    assert [r['delivery'] for r in took['records']] == [delivery], took
+    # The durable cycle remains exactly as written: no quiet repair.
+    assert owner.call('workspace.get', {'key': f'doc/agents/members/{a}'})['value']['reports_to'] == b
+    assert owner.call('workspace.get', {'key': f'doc/agents/members/{b}'})['value']['reports_to'] == a
+    return {'selected': selected, 'direct_sends': len(sent), 'pull_claims': 1, 'team_denied': 2,
+            'cycle_visible': True, 'raw_cycle_preserved': True}
+
+
+def case_invalid_declaration():
+    rid = agent('bad-point-list', native(pull={'points': ['tool'], 'insert': 'user', 'evidence': 'entry'}))
+    scope('resume')
+    cmd('inbox.reconcile', {'op': op('list-reconcile'), 'agent': rid, 'consumer': 'list-consumer', 'records': []})
+    try:
+        cmd('inbox.take', {'op': op('list-take'), 'agent': rid, 'consumer': 'list-consumer', 'at': 'tool'})
+        raise AssertionError('list points silently accepted')
+    except RPCError as error:
+        assert error.kind == 'invalid' and 'declaration_invalid' in str(error), str(error)
+        return {'explicit_invalid_declaration': True}
+
+
+def case_window():
+    rid = agent('window', native(pull={'points': {'tool': {'precision': 'exact'}}, 'insert': 'user', 'evidence': 'entry'}))
+    scope('resume')
+    sent_op = op('window-send')
+    sent = cmd('inbox.send', {'op': sent_op, 'submission': sent_op, 'to': rid, 'mode': 'admit',
+                            'content': [{'type': 'text', 'text': 'lost take'}]})
+    cmd('inbox.reconcile', {'op': op('window-rec'), 'agent': rid, 'consumer': 'window-c', 'records': []})
+    take_op = op('window-take')
+    took = cmd('inbox.take', {'op': take_op, 'agent': rid, 'consumer': 'window-c', 'at': 'tool'})
+    assert len(took['records']) == 1, took
+    original = took['records'][0]
+    epoch = cmd('inbox.window')['epoch']
+    count = 0
+    while cmd('inbox.window')['epoch'] == epoch and count < 1300:
+        try:
+            cmd('inbox.report', {'op': op('rotate'), 'delivery': 'd:missing', 'claim': 'x', 'stage': 'read'})
+        except RPCError:
+            pass
+        count += 1
+    assert cmd('inbox.window')['epoch'] != epoch, count
+    for _ in range(64):
+        try:
+            cmd('inbox.report', {'op': op('compact'), 'delivery': 'd:missing', 'claim': 'x', 'stage': 'read'})
+        except RPCError:
+            pass
+    history = cmd('inbox.op', {'op': take_op})
+    assert history['records'] == [] and len(history['claims']) == 1, history
+    assert history['claims'][0]['delivery'] == sent['delivery'] and history['claims'][0]['claim'] == original['claim'], history
+    assert cmd('inbox.get', {'delivery': sent['delivery']})['state'] == 'claimed'
+    try:
+        cmd('inbox.take', {'op': take_op, 'agent': rid, 'consumer': 'window-c', 'at': 'tool'})
+        raise AssertionError('expired take replay was accepted')
+    except RPCError as error:
+        assert error.kind == 'expired_operation', str(error)
+    return {'refusals_to_rotate': count, 'history_claims': 1, 'content_replayed': False}
+
+
+def case_handover():
+    received = []
+    def handle(method, params):
+        assert method == 'effect.invoke' and params['op'] == 'agent.send', (method, params)
+        origin = params['args']['origin']
+        assert origin['principal'] == params['principal'] and origin['actor'] == params['actor'], (origin, params)
+        assert origin['sender']['principal'] == 'owner' and origin['sender']['provenance'] == 'inbox-record', origin
+        received.append(params['args'])
+        return {'outcome': 'accepted', 'data': {'receipt': {'stage': 'admitted'}}}
+    dst_native = native()
+    dst_native['session'] = {'id': 's2'}
+    dst_native['caps']['agent.send'] = {'modes': {'start': {'busy': 'reject'}},
+        'origin': [{'as': 'attributed_user', 'role': 'user', 'frame': 'sender_header'}]}
+    dst = agent('successor', dst_native, handler=handle)
+    def prepare(ref, stages=None):
+        src = agent(ref, native())
+        scope('pause')
+        o = op(ref)
+        sent = cmd('inbox.send', {'op': o, 'submission': o, 'to': src, 'mode': 'start',
+                                'content': [{'type': 'text', 'text': ref}]})
+        peer, generation, facts = GEN[ref]
+        facts['data']['agent']['lifecycle'] = 'ended'
+        peer.call('provider.sync', {'generation': generation, 'resources': [facts], 'final': True})
+        wait(lambda: cmd('inbox.get', {'delivery': sent['delivery']})['reason'] == 'agent_ended')
+        args = {'op': op('handover'), 'from': {'agent': src, 'incarnation': 'i1'},
+                'to': {'agent': dst, 'incarnation': 'i1'}, 'deliveries': [sent['delivery']]}
+        if stages:
+            args['bind'] = stages
+        return src, sent, cmd('handover', args)['plan']
+    src, sent, plan = prepare('predecessor')
+    completed = cmd('handover', {'op': op('complete'), 'action': 'complete', 'plan': plan})
+    assert completed['state'] == 'completed', completed
+    record = cmd('inbox.get', {'delivery': sent['delivery']})
+    assert record['to']['session'] == 's2' and record['handed_over_from']['session'] == 's1', record
+    assert not received, received
+    scope('resume')
+    wait(lambda: cmd('inbox.get', {'delivery': sent['delivery']})['state'] == 'accepted')
+    assert len(received) == 1 and received[0]['guard']['session'] == 's2', received
+    stages = [{'handle': '@accepted-before-abort', 'agent': dst, 'expect': 0},
+              {'handle': '@bad-before-abort', 'agent': dst, 'expect': 99}]
+    src2, second, plan2 = prepare('abort-predecessor', stages)
+    cmd('handover', {'op': op('good-stage'), 'action': 'stage', 'plan': plan2, 'stage': 0})
+    try:
+        cmd('handover', {'op': op('bad-stage'), 'action': 'stage', 'plan': plan2, 'stage': 1})
+        raise AssertionError('bad stage accepted')
+    except RPCError as error:
+        assert error.kind == 'conflict', str(error)
+    aborted = cmd('handover', {'op': op('abort'), 'action': 'abort', 'plan': plan2})
+    assert aborted['state'] == 'aborted' and aborted['configuration'] == 'not_reverted', aborted
+    restored = cmd('inbox.get', {'delivery': second['delivery']})
+    assert restored['to']['agent'] == src2 and restored['state'] == 'held' and not restored.get('handover_plan'), restored
+    assert owner.call('workspace.get', {'key': 'doc/agents/names/@accepted-before-abort'})['value']['agent'] == dst
+    assert len(received) == 1, received
+    return {'successor_session': 's2', 'native_writes': 1, 'sender_provenance': 'inbox-record',
+            'transport_matches_core': True, 'abort_restores_held': True, 'accepted_config_not_reverted': True}
+
+
+def case_archive():
+    rid = agent('archive', native())
+    scope('pause')
+    o = op('archive-send')
+    sent = cmd('inbox.send', {'op': o, 'submission': o, 'to': rid, 'mode': 'start',
+                            'content': [{'type': 'text', 'text': 'archive evidence'}]})
+    destination = ROOT / 'archive'; destination.mkdir(mode=0o700)
+    plan = cmd('inbox.archive', {'op': op('freeze'), 'agents': [rid], 'destination': str(destination)})['archive']
+    cmd('inbox.archive', {'op': op('export'), 'action': 'export', 'archive': plan})
+    freed = cmd('inbox.archive', {'op': op('free'), 'action': 'free', 'archive': plan})
+    assert freed['state'] == 'completed' and len(freed['freed']) == 1, freed
+    assert cmd('inbox.get', {'delivery': sent['delivery']})['state'] == 'archived'
+    Path(freed['locator']).unlink()  # this test created the private artifact
+    assert cmd('inbox.get', {'delivery': sent['delivery']})['state'] == 'unknown'
+    return {'verified_free': True, 'missing_artifact_unknown': True}
+
+
+CASES = {'brick': case_brick, 'idle': case_idle, 'membership': case_membership, 'identity': case_identity, 'reconcile': case_reconcile, 'names': case_names,
+         'rawcycle': case_rawcycle, 'invalid_declaration': case_invalid_declaration,
+         'window': case_window, 'handover': case_handover, 'archive': case_archive}
 core = None
 try:
     core = subprocess.Popen([str(BIN), 'serve', '--fake'], env=ENV, cwd=ROOT, stdout=open(ROOT / 'core.log', 'wb'), stderr=subprocess.STDOUT)

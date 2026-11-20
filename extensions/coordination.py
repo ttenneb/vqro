@@ -169,6 +169,15 @@ class CoordinationService:
             return copy.deepcopy(self.ext.providers)
 
     def invoke(self, target, operation, args, deadline_ms):
+        if operation == "agent.send":
+            args = copy.deepcopy(args)
+            origin = args.setdefault("origin", {})
+            # Autonomous native workers use this connection, not a borrowed
+            # callback principal. The core's hello result is authoritative.
+            identity = getattr(self.ext, "info", {})
+            origin.update(principal=identity.get("principal") or "undeclared",
+                          actor=identity.get("actor") or "undeclared", kind="tool")
+            origin.pop("agent", None)
         return self.rpc("resource.invoke", {"resource": target, "op": operation, "args": args, "deadline_ms": deadline_ms})
 
     def config_apply(self, ops, context):
@@ -248,7 +257,8 @@ class CoordinationService:
                                "quotas": asdict(QuotaLimits(domain_bytes=self.store.byte_limit, scope_capacity=SCOPE_CAPACITY))},
                     "identity_cache": {"owner": "core", "capacity": None, "incomplete": True},
                     "receipts": self.items.status(), "maintenance": self.engine.maintenance_error if self.engine else None,
-                    "limits_confirmed": self.engine is not None, "attention": self.engine.attention_summary() if self.engine else None}
+                    "limits_confirmed": self.engine is not None, "configuration": self.engine.configuration_status() if self.engine else None,
+                    "attention": self.engine.attention_summary() if self.engine else None}
         if self.engine is None and command in ("inbox.get", "inbox.list", "inbox.peek", "inbox.op") and self.read_only_rows is not None:
             return self.read_only(command, args, principal=callback_context(params)["principal"])
         if self.engine is None:

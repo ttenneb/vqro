@@ -116,9 +116,14 @@ class IdentityAndScopes(Fixture):
 
     def test_cycles_and_cross_project_parent_are_invalid(self):
         self.entries[MEMBERS + "r1"]["value"]["reports_to"] = "r3"
-        self.rejects("invalid", self.policy)
+        p = self.policy()
+        self.assertIn("cycle", p.membership_error["message"])
+        self.assertEqual(set(p.scope("workspace")), p.agents)
+        self.rejects("membership_invalid", p.scope, "team:r1")
         self.entries[MEMBERS + "r1"]["value"]["reports_to"] = "r4"
-        self.rejects("invalid", self.policy)
+        p = self.policy()
+        self.assertIn("project", p.membership_error["message"])
+        self.rejects("membership_invalid", p.scope, "team:r1")
 
     def test_membership_revision_changes_with_versions_not_names(self):
         old = self.policy().membership_revision

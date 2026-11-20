@@ -278,6 +278,7 @@ class EngineTests(unittest.TestCase):
         sent = self.send()
         self.resources["r1"]["data"]["agent"]["lifecycle"] = "ended"
         self.resources["r2"] = resource("r2")
+        self.resources["r2"]["data"]["agent"]["session"] = {"id": "s2"}
         self.resume()
         transferred = self.engine.handover({"op": self.op(), "from": {"agent": "r1", "incarnation": "i1"},
                                             "to": {"agent": "r2", "incarnation": "i1"}, "deliveries": [sent["delivery"]]}, OWNER)
@@ -288,6 +289,7 @@ class EngineTests(unittest.TestCase):
         self.engine.dispatch_one("r2")
         self.assertEqual(len(self.ledger), 1)
         self.assertEqual(self.ledger[0][0], "r2")
+        self.assertEqual(self.ledger[0][2]["guard"]["session"], "s2")
         self.assertEqual(self.engine.get(sent["delivery"])["handed_over_from"]["agent"], "r1")
 
     def test_native_end_evidence_supersedes_an_administrative_retirement(self):

@@ -247,6 +247,7 @@ if [ "$MODE" = full ]; then
   done
   step history-budget history_budget
   step e2e-providers "${CLEAN[@]}" python3 tests/e2e_providers.py "$TARGET"
+  step e2e-coordination-review "${CLEAN[@]}" python3 tests/e2e_coordination_review.py --binary "$TARGET/debug/vqro"
   step e2e-tui-providers "${CLEAN[@]}" python3 tests/e2e_tui_providers.py "$TARGET"
   step e2e-tui-paste-dropdown "${CLEAN[@]}" python3 tests/e2e_tui_paste_dropdown.py "$TARGET"
   step e2e-tui-sidebar-tree "${CLEAN[@]}" python3 tests/e2e_tui_sidebar_tree.py "$TARGET"

@@ -62,6 +62,7 @@ class FakeExtension:
                                  "data": {"agent": {"v": 0, "state": "idle", "session": {"id": "s1"}, "lifecycle": "live",
                                                      "caps": {"agent.send": {"modes": {"start": {}}, "origin": [{"as": "attributed_user"}]}}}}}}
         self.providers = {}
+        self.info = {"principal": "extension:fixture-coord", "actor": "extension:fixture-coord"}
         self.epoch = "core-boot"
         self.cache_lock = threading.RLock()
         self.vqro = FakeRPC(self, available=available)

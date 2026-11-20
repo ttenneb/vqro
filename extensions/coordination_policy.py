@@ -156,6 +156,7 @@ class Policy:
         self.owner = self._value(OWNER)
         self.names = {}
         self.members = {}
+        self.membership_errors = []
         self.grants = []
         self.markers = set()
         for key, entry in self.entries.items():
@@ -171,7 +172,17 @@ class Policy:
                     _string(value["principal"], "principal", 256)
                 self.names[handle] = value
             elif key.startswith(MEMBERS):
-                self.members[_agent(key[len(MEMBERS):])] = _member(value)
+                try:
+                    self.members[_agent(key[len(MEMBERS):])] = _member(value)
+                except PolicyError as error:
+                    self.membership_errors.append({"key": key, "message": str(error), "kind": error.kind})
+                    # Preserve raw configuration, not repaired edges. Independent
+                    # project/exact/workspace selection can still use known IDs.
+                    try:
+                        rid = _agent(key[len(MEMBERS):])
+                        self.members[rid] = copy.deepcopy(value) if isinstance(value, dict) else {}
+                    except PolicyError:
+                        pass
             elif key.startswith(GRANTS):
                 self._validate_grant(value)
                 self.grants.append(value)
@@ -184,7 +195,12 @@ class Policy:
             counts[row["agent"]] = counts.get(row["agent"], 0) + 1
         if any(count > 4 for count in counts.values()):
             _fail("quota", "at most four handles per agent")
-        self._validate_forest(self.members)
+        if not self.membership_errors:
+            try:
+                self._validate_forest(self.members)
+            except PolicyError as error:
+                self.membership_errors.append({"message": str(error), "kind": error.kind, "details": error.data})
+        self.membership_error = self.membership_errors[0] if self.membership_errors else None
         membership_versions = [(k, e.get("version")) for k, e in sorted(self.entries.items())
                                if k.startswith(MEMBERS) or k == MEMBERSHIP_REVISION]
         self.membership_revision = hashlib.sha256(encoded(membership_versions)).hexdigest()
@@ -217,12 +233,15 @@ class Policy:
     def _validate_forest(members):
         done = set()
         for start in members:
-            path = set()
+            path, chain = set(), []
             node = start
             while node is not None and node not in done:
                 if node in path:
-                    _fail("invalid", "membership cycle")
+                    cycle = chain[chain.index(node):] + [node]
+                    _fail("invalid", "membership cycle: " + " -> ".join(cycle[:16]),
+                          cycle=cycle[:64], incomplete=len(cycle) > 64)
                 path.add(node)
+                chain.append(node)
                 row = members[node]
                 parent = row["reports_to"]
                 if parent is not None:
@@ -234,6 +253,8 @@ class Policy:
             done.update(path)
 
     def _subtree(self, root, members=None):
+        if members is None and self.membership_error:
+            _fail("membership_invalid", self.membership_error["message"], configuration=self.membership_error)
         members = self.members if members is None else members
         children = {}
         for rid, row in members.items():
@@ -281,7 +302,7 @@ class Policy:
             chosen = set(self.agents)
         elif isinstance(scope, str) and scope.startswith("project:"):
             project = _string(scope[8:], "project")
-            chosen = {rid for rid, row in self.members.items() if row["project"] == project}
+            chosen = {rid for rid, row in self.members.items() if row.get("project") == project}
         elif isinstance(scope, str) and scope.startswith("team:"):
             root = _agent(scope[5:])
             if root not in self.agents:
@@ -295,6 +316,10 @@ class Policy:
             _fail("invalid", "invalid scope")
         if len(chosen) > capacity:
             _fail("quota", "scope capacity exceeded", capacity=capacity)
+        if self.membership_error:
+            # Selection for these scopes did not consult reporting edges. Invalid
+            # forest ordering cannot omit a known endpoint or block recovery.
+            return sorted(chosen)
         # All parent links were validated at construction. Iterative DFS avoids
         # Python recursion limits even for adversarially deep but legal teams.
         roots = sorted(rid for rid in chosen if self.members.get(rid, {}).get("reports_to") not in chosen)
@@ -358,6 +383,8 @@ class Policy:
 
     def _contains(self, container, requested):
         """Structural containment: a leaf today does not authorize a future team."""
+        if self.membership_error and (container.startswith("team:") or requested.startswith("team:")):
+            return False
         if container == "*" or container == requested:
             return True
         if requested == "*" or requested.startswith("@"):
@@ -415,8 +442,29 @@ class Policy:
         rid = self._target(target)
         return self._has_scope(principal, right, "agent:" + rid)
 
+    def team_grant_blocked(self, principal, right, target):
+        if not self.membership_error:
+            return False
+        requested = target if target.startswith(("agent:", "team:", "project:")) or target == "*" else "agent:" + self._target(target)
+        for row in self.grants:
+            if row.get("until_ms") is not None and row["until_ms"] <= self.now_ms:
+                continue
+            if right not in row["can"] and not (right.startswith("send:") and "send:*" in row["can"]):
+                continue
+            team_who, team_on = row["who"].startswith("team:"), row["on"].startswith("team:")
+            if not (team_who or team_on):
+                continue
+            if not team_who and not self._subject_matches(row["who"], principal):
+                continue
+            if not team_on and not self._contains(row["on"], requested):
+                continue
+            return True
+        return False
+
     def require(self, principal, right, target):
         if not self.has(principal, right, target):
+            if self.team_grant_blocked(principal, right, target):
+                _fail("membership_invalid", self.membership_error["message"], configuration=self.membership_error)
             _fail("no_grant", "coordination right not granted", right=right, target=target)
 
     def validate_send(self, args):
@@ -637,6 +685,8 @@ class Policy:
             _fail("not_found", "unknown grant")
         if value is not None:
             self._validate_grant(value)
+            if self.membership_error and any(value[field].startswith("team:") for field in ("who", "on")):
+                _fail("membership_invalid", self.membership_error["message"], configuration=self.membership_error)
             value = copy.deepcopy(value)
             # Public commands pin aliases at issuance; a later name rebind never
             # transfers an existing grant. Team/project membership stays dynamic.

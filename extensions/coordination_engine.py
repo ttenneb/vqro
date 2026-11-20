@@ -217,6 +217,14 @@ class Coordinator:
     def _bucket(self, principal, op):
         return "ops/" + str(int(digest([principal, op])[:8], 16) % OP_BUCKETS)
 
+    def configuration_status(self):
+        try:
+            policy = self.policy()
+            return {"membership_valid": not policy.membership_error,
+                    "membership_errors": policy.membership_errors[:8], "incomplete": len(policy.membership_errors) > 8}
+        except PolicyError as error:
+            return {"valid": False, "error": {"kind": error.kind, "message": str(error)[:1024]}}
+
     def attention_summary(self):
         rows = self.store.view()
         messages = [{"delivery": row["value"]["delivery"], "agent": row["value"]["to"]["agent"], "state": row["value"]["state"]}
@@ -240,6 +248,14 @@ class Coordinator:
                 unresolved = self.store.get("external/" + digest([principal, op]))
                 if unresolved:
                     return dict(unresolved["value"], window=self.window(), historical=True)
+                take_key = digest([principal, op])
+                retained = [record for record in self.records()
+                            if (record.get("attempt") or {}).get("take") == take_key]
+                if retained:
+                    return {"state": "claimed" if any(r["state"] == "claimed" for r in retained) else "unknown",
+                            "claims": [{"delivery": r["delivery"], "claim": r["attempt"]["claim"], "state": r["state"]}
+                                       for r in retained if r["attempt"].get("claim")],
+                            "records": [], "historical": True, "window": self.window()}
                 return {"state": "unknown", "window": self.window()}
             result = copy.deepcopy(saved["result"])
             if result.get("take"):
@@ -480,7 +496,8 @@ class Coordinator:
             sender["kind"] = "agent" if sender_agent else context.get("kind", "tool")
             if sender_agent:
                 sender["agent"] = sender_agent
-            origin = {"principal": principal, "actor": context.get("actor", principal), "kind": sender["kind"]}
+            origin = {"principal": principal, "actor": context.get("actor", principal), "kind": sender["kind"],
+                      "sender": dict(copy.deepcopy(sender), provenance="inbox-record")}
             if sender_agent:
                 origin["agent"] = sender_agent
             payload = {key: normalized[key] for key in ("mode", "content", "expires_at_ms", "priority") if key in normalized}
@@ -689,7 +706,7 @@ class Coordinator:
             return "ordering_unknown"
         right = "send:" + (record.get("strategy") or record["mode"])
         if not policy.allowed(record["from"]["principal"], right, agent):
-            return "no_grant"
+            return "membership_invalid" if policy.team_grant_blocked(record["from"]["principal"], right, agent) else "no_grant"
         if record.get("strategy") == "interrupt_then_start" and not all(
                 policy.allowed(record["from"]["principal"], step_right, agent)
                 for step_right in ("queue", "interrupt", "send:start")):
@@ -706,7 +723,7 @@ class Coordinator:
             points = declaration.get("points")
             point = points.get(at) if isinstance(points, dict) else None
             if not isinstance(point, dict) or point.get("precision") not in ("exact", "approximate"):
-                return "integration_unavailable"
+                return "declaration_invalid"
             if declaration.get("insert") == "context" and "context" not in (record.get("render") or []):
                 return "origin_unsupported"
             modes = {"turn": {"boundary"}, "settle": {"boundary", "settle"},
@@ -896,7 +913,8 @@ class Coordinator:
 
     def _send_args(self, record, mode):
         return {"v": 0, "mode": mode, "content": record["content"], "delivery": record["delivery"],
-                "origin": record["origin"], "quoted": record.get("quoted"), "render": record.get("render"),
+                "origin": dict(copy.deepcopy(record["origin"]), sender=dict(copy.deepcopy(record["from"]), provenance="inbox-record")),
+                "quoted": record.get("quoted"), "render": record.get("render"),
                 "key": record.get("key"), "guard": dict(record.get("guard") or {}, session=record["attempt"]["session"]),
                 "cause": record.get("cause"), "correlation": record.get("correlation")}
 
@@ -1000,6 +1018,14 @@ class Coordinator:
             max_bytes = args.get("max_bytes", policy.limits.content_bytes)
             if type(max_bytes) is not int or not 1 <= max_bytes <= 256 * 1024:
                 raise CoordinationError("invalid", "max_bytes must be 1..262144 UTF-8 content bytes")
+            _, pull_native = self._facts(agent)
+            pull_resource = self.resources().get(agent, {})
+            declaration = pull_native.get("pull") or pull_resource.get("pull")
+            if declaration:
+                points = declaration.get("points") if isinstance(declaration, dict) else None
+                if (not isinstance(points, dict) or any(not isinstance(point, dict)
+                        or point.get("precision") not in ("exact", "approximate") for point in points.values())):
+                    raise CoordinationError("invalid", "declaration_invalid: pull.points must map points to exact/approximate precision")
             consumer, at = args.get("consumer"), args.get("at")
             if at not in ("turn", "settle", "idle", "tool"):
                 raise CoordinationError("invalid", "take must name a declared safe point")
@@ -1050,6 +1076,11 @@ class Coordinator:
                 claimed["attempt"]["take"] = digest([context["principal"], args["op"]])
                 work.put("message/" + claimed["delivery"], claimed)
                 row = {key: claimed.get(key) for key in ("delivery", "from", "origin", "quoted", "render", "mode", "priority", "content")}
+                row["origin"] = {"principal": context["principal"], "actor": context.get("actor", context["principal"]),
+                                 "kind": context.get("kind", "tool"),
+                                 "sender": dict(copy.deepcopy(claimed["from"]), provenance="inbox-record")}
+                if context.get("agent"):
+                    row["origin"]["agent"] = context["agent"]
                 row["claim"] = claimed["attempt"]["claim"]
                 if encoded(supplied + [row]) > 250 * 1024 or changed_bytes() > 112 * 1024:
                     work.changes.pop("message/" + claimed["delivery"], None)
@@ -1364,10 +1395,32 @@ class Coordinator:
         if args.get("action") == "stage":
             return self._handover_stage(args, context)
         def transfer(work, policy):
+            if args.get("action") == "abort":
+                plan_id = str(args.get("plan"))
+                plan = work.get("plan/" + plan_id)
+                if not plan:
+                    raise CoordinationError("not_found", "unknown handover plan")
+                if plan["state"] in ("completed", "aborted"):
+                    raise CoordinationError("conflict", "handover is already final")
+                for target in (plan["from"], plan["to"]):
+                    policy.require(context["principal"], "handover", target["agent"])
+                for delivery in plan["deliveries"]:
+                    record = self._record(work, delivery)
+                    if record.get("handover_plan") != plan_id or record["state"] not in PENDING:
+                        raise CoordinationError("conflict", "handover record changed")
+                    record["to"] = copy.deepcopy(record["handed_over_from"])
+                    record.pop("handover_plan")
+                    record.update(state="held", reason="handover_aborted")
+                    work.put("message/" + delivery, record)
+                plan.update(state="aborted", aborted_ms=self.clock(), configuration="not_reverted")
+                work.put("plan/" + plan_id, plan)
+                return {"state": "aborted", "plan": plan_id, "configuration": "not_reverted"}
             if args.get("action") == "complete":
                 plan = work.get("plan/" + str(args.get("plan")))
                 if not plan:
                     raise CoordinationError("not_found", "unknown handover plan")
+                if plan["state"] == "aborted":
+                    raise CoordinationError("conflict", "handover was aborted")
                 destination = plan["to"]
                 policy.require(context["principal"], "handover", destination["agent"])
                 resource, native = self._facts(destination["agent"])
@@ -1375,14 +1428,17 @@ class Coordinator:
                     raise CoordinationError("conflict", "successor changed or ended")
                 if any(stage["state"] != "accepted" for stage in plan["stages"]):
                     raise CoordinationError("conflict", "handover still has unfinished or uncertain ordinary stages")
+                successor_session = (native.get("session") or {}).get("id")
                 for delivery in plan["deliveries"]:
                     record = self._record(work, delivery)
                     if record.get("handover_plan") != args["plan"] or record["state"] not in PENDING:
                         raise CoordinationError("conflict", "handover record changed")
                     record.pop("handover_plan")
+                    record["to"]["session"] = successor_session
                     record["reason"] = "paused" if destination["agent"] not in self.permits else "awaiting_route"
                     work.put("message/" + delivery, record)
                 plan["state"] = "completed"
+                plan["to"]["session"] = successor_session
                 work.put("plan/" + args["plan"], plan)
                 return {"state": "completed", "plan": args["plan"], "_after": lambda: self._wake(destination["agent"])}
             source, destination = args.get("from"), args.get("to")
@@ -1446,6 +1502,8 @@ class Coordinator:
             if not plan_row or type(index) is not int or not 0 <= index < len(plan_row["value"]["stages"]):
                 raise CoordinationError("invalid", "inspect the handover stage first")
             plan = plan_row["value"]
+            if plan["state"] == "aborted":
+                raise CoordinationError("conflict", "handover was aborted")
             self.policy().require(context["principal"], "handover", plan["to"]["agent"])
             stage = plan["stages"][index]
             if any(before["state"] != "accepted" for before in plan["stages"][:index]):

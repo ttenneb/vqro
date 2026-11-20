@@ -31,8 +31,9 @@ class ReviewRegressions(unittest.TestCase):
         f.setup_pull()
         f.resources['r1']['data']['agent']['pull']['points'] = {'idle': {'precision': 'future'}}
         sent = f.send()
-        result = f.engine.take({'op': f.op(), 'agent': 'r1', 'consumer': 'c1', 'at': 'idle'}, fixtures.OWNER)
-        self.assertEqual(result['records'], [])
+        with self.assertRaises(PolicyError) as failure:
+            f.engine.take({'op': f.op(), 'agent': 'r1', 'consumer': 'c1', 'at': 'idle'}, fixtures.OWNER)
+        self.assertIn('declaration_invalid', str(failure.exception))
         self.assertIsNone(f.engine.get(sent['delivery'])['attempt'])
 
     def test_disjoint_membership_updates_cas_one_forest_revision(self):
