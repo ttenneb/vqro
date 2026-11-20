@@ -254,14 +254,16 @@ appears only in the live reply. Slot preflight and refusal-result persistence us
 caching uses **neither the normal 64 KiB / 16-record control-intent headroom nor the recovery reserve**. No growing
 refusal-result pool is added.
 
-At that ceiling, return the actual refusal live with **`uncached: true`**, without persisting its result, and **fence
-its principal-scoped op id** in a fixed, small ring of refused-op digests. The ring is reserved once at startup from
-the existing control budget, not grown by refusals. A fenced id returns `expired_operation` even while the epoch stays
-open. The operation epoch **closes only when the fence ring is full**; advertise the new window and close the old epoch
-before purging its fences. Thus the old `op` stays expired after grants/capacity change, ring overflow or restart;
-it can never be admitted later. No-recreation has no uncached exception. Another evaluation requires a fresh id in
-the currently advertised window. At the durable content budget the live refusal is still `quota`,
-not persistent pre-evaluation `busy`. A genuinely full operation window still refuses `busy` **before evaluation**;
+At that ceiling, return the actual refusal live with **`uncached: true`**, marked fenced with the current window,
+without persisting its result, and **fence only its principal-scoped op id** in a bounded, in-memory **current-epoch**
+set of refused-op digests. Cached decisions plus fences count together toward the operation-window bound **W**
+(1,024); there is no per-entry eviction, startup-reserved ring or new persistent pool. Other callers keep their epoch.
+A fenced id returns `expired_operation` even while that epoch stays open or rights/space change. Only when the
+combined window is full does the epoch **durably rotate**, purging old result caches and clearing fences; advertise
+the new window. **Restart durably rotates the epoch before any admission**, so losing volatile fences cannot make
+old ids admissible. There is no previous-epoch admission grace. No-recreation has no uncached exception; another
+evaluation requires a fresh id in the currently advertised window. At the durable content budget the live refusal
+is still `quota`, not persistent pre-evaluation `busy`. A genuinely full operation window still refuses `busy` **before evaluation**;
 content saturation or inability to cache a refusal alone does not make the window full. Recovery space stays entirely
 for owner recovery (including workspace pause/resume and archive, §6.1), not refusal caching.
 
@@ -656,9 +658,11 @@ the known-metadata negative control was already covered by retaining only **16 s
 also fund their future metadata (§6.1); this charge is separate from their actual retained manifest/plan bytes.
 Refusal-result caching uses neither the normal 64 KiB / 16-record control-intent headroom nor the recovery reserve:
 compact failures are cached only below the existing content ceiling. At that ceiling return them live with
-`uncached: true` and fence their ids in the fixed, startup-reserved control-budget ring (§5.3). Only a full ring closes
-the epoch and advertises a new window before its fences are purged; old ids stay permanently fenced. The recovery
-reserve remains for recovery, including owner workspace pause/resume and the existing archive escrow/future funding; no separate refusal-recovery margin is needed.
+`uncached: true` and fence their ids in the in-memory current-epoch set (§5.3), counted with cached decisions toward
+W. No per-entry eviction or persistent fence pool is added. A full combined window durably rotates the epoch and
+clears fences; restart durably rotates it before any admission, keeping old ids permanently inadmissible. The recovery
+reserve remains for recovery, including owner workspace pause/resume and existing archive escrow/future funding;
+no separate refusal-recovery margin is needed.
 
 | Retained item | Bound each | Count | `B` = 2 MiB, 200 agents | `B` = 4 MiB | `B` = 8 MiB |
 |---|---|---|---|---|---|

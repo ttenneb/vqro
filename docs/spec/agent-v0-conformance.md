@@ -265,9 +265,12 @@ for one fake agent; the rest need the full extension.
   result persistence use the same existing content ceiling; caching uses neither the normal 64 KiB / 16-record
   control-intent headroom nor the recovery reserve. Cached failures retain kind/fingerprint in a fixed small entry;
   full messages stay only in live replies. At that ceiling return the actual refusal live with `uncached: true` and
-  fence its id in a fixed, small, startup-reserved control-budget ring. The epoch closes only when that ring is full,
-  advertising the new window before purging old fences. Repeat the old `op` while its epoch is open, after a
-  grant/capacity change, ring overflow and restart: `expired_operation`, never another admission or native attempt.
+  mark it fenced with the current window and put its id digest in the bounded in-memory current-epoch set. Cached
+  decisions plus fences count toward W (1,024), with no per-entry eviction or new persistent pool. Other callers keep
+  their epoch; only a full combined window durably rotates it, purging old caches/clearing fences. Restart durably
+  rotates the epoch before any admission. Repeat the old `op` while its epoch is open, after a grant/capacity change,
+  full-window rotation and restart: `expired_operation`, never another admission or native attempt; no previous-epoch
+  admission grace.
   No-recreation has no uncached exception. Another evaluation requires a fresh id in the currently advertised window.
   Genuine full-window `busy` still precedes evaluation; inability to cache a refusal alone is not a full window.
 - I11 composition: Pi gets only `interrupt_then_start` (clear, abort, start), never `preempt`; with exclusive writers
@@ -447,14 +450,15 @@ instance, 4 handles) stay within 2 KiB and 3 KiB; a native result larger than th
 size, sha256 and `incomplete: true`, with the full result only in the live reply and `agent.receipt`. L8 at the
 durable budget, after GC, operation-window eviction and alias growth: a new send with an available window slot is
 refused `quota`, cached only below the content ceiling, otherwise returned live with `uncached: true`
-and a fenced op id; only a full fence ring closes the epoch and advertises a new window. Content saturation must not
+and a fenced op id in the current in-memory epoch; only a full combined decision/fence window durably rotates it. Content saturation must not
 instead yield pre-evaluation `busy`. Flood a
 73-agent workspace with 2,600 `no_grant` refusals from an ungranted principal: result caching consumes neither normal
 control-intent headroom nor recovery reserve;
 the owner's workspace pause plus resume and existing archive funding/escrow remain usable. For an uncached refusal,
-repeat the old id after grants/capacity change, ring overflow and restart: `expired_operation`, never re-created.
-Run a concurrent refusal flood with30 owner pause/resume pairs: all owner calls are accepted, or any misses have a
-bounded, documented rate tied to the ring size, not epoch churn on every refusal. A late native
+repeat the old id after grants/capacity change, full-window rotation and restart: `expired_operation`, never re-created;
+restart must durably rotate the epoch before admission, not merely discard volatile fences. Run a concurrent refusal
+flood with30 owner pause/resume pairs: all owner calls are accepted, or any misses have a bounded, documented rate
+tied to W, not epoch churn on every refusal. A late native
 reply to an already admitted record still records its outcome (its space was reserved at admission); agent
 registration still succeeds; an explicit `coord.inbox.archive` exports and frees space. L9 an explicit `retire` of a
 disconnected agent shows `retired` with native execution unknown, never `ended`; routing stops; later end evidence

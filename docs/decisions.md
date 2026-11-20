@@ -593,16 +593,18 @@ replaced when the Pi bridge is ported.
 - Final refusal-result caching uses **neither the normal 64 KiB / 16-record control-intent headroom nor the recovery
   reserve**. Compact cached failures retain kind and fingerprint only below the existing content ceiling; full
   messages stay in the live reply. Slot preflight and refusal persistence use that same ceiling; no new pool.
-  At the ceiling return the actual refusal live with `uncached: true` and fence its principal-scoped op id in a fixed,
-  small digest ring, reserved once at startup from the existing control budget, not a growing result pool. The epoch
-  closes only when that ring is full; advertise the new window and close the old epoch before purging its fences.
-  The id returns `expired_operation` while the epoch is open and after grants/capacity change, overflow or restart;
-  no-recreation has no uncached exception. Another evaluation needs a fresh id in the currently advertised window. This supersedes both the recovery-funded proposal
+  At the ceiling return the actual refusal live with `uncached: true`, fenced and the current window; fence only its
+  principal-scoped op id in a bounded in-memory current-epoch digest set. Cached decisions plus fences count toward
+  W (1,024); no per-entry eviction, startup-reserved ring or new persistent pool. Other callers retain their epoch.
+  Only a full combined window durably rotates the epoch, purging old result caches/clearing fences. Restart durably
+  rotates it before any admission, so volatile fence loss cannot re-admit an id. Fenced ids remain expired even after
+  rights/space change, full-window rotation or restart; no previous-epoch admission grace or no-recreation exception.
+  Another evaluation needs a fresh id in the currently advertised window. This supersedes both the recovery-funded proposal
   and its protected-margin variant: a window bound alone did not protect recovery. Recovery reserve stays entirely
   for owner recovery (workspace pause/resume and archive). At the durable content budget the live refusal remains
   `quota`; genuine full-window pre-evaluation `busy` remains I10. L8 includes 73 agents and 2,600 `no_grant` refusals
   with owner recovery still available; concurrent flood plus30 owner pause/resume pairs must all succeed, or misses
-  have a bounded documented rate tied to ring size. No per-refusal epoch churn, reinterpretation of busy or synthetic
+  have a bounded documented rate tied to W. No per-refusal epoch churn, reinterpretation of busy or synthetic
   quota pass.
 
 **Human answers (2026-11-19, CONFIRMED).**
@@ -634,7 +636,8 @@ replaced when the Pi bridge is ported.
   rebinding transfers nothing. Team/project selectors remain dynamic over recorded membership.
 - The operation window caches well-formed refusals as well as successes; changed conditions need a new op id for
   a cached result. The later batch8 content-ceiling rule returns further refusals live with `uncached: true` and fences
-  the id in a fixed ring; the epoch closes only when the ring is full, keeping old ids permanently fenced. Malformed and undeclared-principal calls take no slot; a full window
+  the id in a current-epoch memory set counted with cached decisions toward W; only a full window durably rotates
+  the epoch, and restart rotates it durably before admission, keeping old ids permanently fenced. Malformed and undeclared-principal calls take no slot; a full window
   refuses `busy` before evaluation.
 - Pull takes declare accepted content types; unsupported mail stays held for that consumer rather than churning
   through claims. Counts-only wakes include a revision so edits cannot disappear behind unchanged-count suppression.
