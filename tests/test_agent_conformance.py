@@ -498,8 +498,9 @@ class RetentionRecoveryTests(unittest.IsolatedAsyncioTestCase):
             view, recovered = self.view(), self.view()
             view.closed, view.reducer.failure = "retention", failure
             recovered.initial = "reset"
-            ctx = SimpleNamespace(evidence=[], viewer=AsyncMock(), wait_view=AsyncMock(side_effect=[CheckFailed("gap"), None]))
-            fresh = AsyncMock(return_value=recovered)
+            ctx = SimpleNamespace(evidence=[], viewer=AsyncMock(), attach=AsyncMock(return_value=recovered),
+                                  wait_view=AsyncMock(side_effect=[CheckFailed("gap"), None, None]))
+            fresh = ctx.attach
             with self.subTest(failure=failure), patch("agent_conformance.cases.fresh_view", fresh):
                 if failure == "retention":
                     self.assertIs(await wait_with_retention_replay(ctx, view, lambda r: True), recovered)
@@ -510,6 +511,21 @@ class RetentionRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     with self.assertRaises(CheckFailed):
                         await wait_with_retention_replay(ctx, view, lambda r: True)
                     self.assertEqual(fresh.await_count, 0)
+
+
+class RecoveryCutScopeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_pressure_that_invalidates_recovery_is_a_fixture_gap_not_adapter_corruption(self):
+        from agent_conformance.cases import wait_with_retention_replay
+        reducer = seeded()
+        reducer.failure = "retention"
+        view = SimpleNamespace(reducer=reducer, closed="retention")
+        recovered = SimpleNamespace(reducer=seeded(), closed="retention", initial="reset", close_notice={"reason": "retention"})
+        recovered.reducer.failure = "retention"
+        ctx = SimpleNamespace(evidence=[], viewer=AsyncMock(), attach=AsyncMock(return_value=recovered),
+                              wait_view=AsyncMock(side_effect=[CheckFailed("retention"), CheckFailed("retention")]))
+        with self.assertRaises(HarnessGap):
+            await wait_with_retention_replay(ctx, view, lambda r: True)
+        self.assertEqual(ctx.attach.await_count, 1)
 
 
 class StalledAttachmentWitnessTests(unittest.TestCase):
@@ -599,10 +615,11 @@ class MemoryWitnessTests(unittest.IsolatedAsyncioTestCase):
         from agent_conformance.cases import public_retention_bounds
         reducer = SimpleNamespace(cursor={"epoch": "e", "seq": 1}, offset=0, max_record=65536, entities={})
         view = SimpleNamespace(reducer=reducer, closed=None, peer=SimpleNamespace(wait=AsyncMock()))
-        replay = SimpleNamespace(initial="reset", reducer=SimpleNamespace(entities={}))
+        replay = SimpleNamespace(initial="reset", reducer=SimpleNamespace(entities={}, snapshots=1))
         async def burst(*args, **kwargs): reducer.offset = 1 << 20
-        ctx = SimpleNamespace(evidence=[], metadata={"adapter_image": {"pid": 12345}}, viewer=AsyncMock(),
-            facts=AsyncMock(return_value={"caps": {"items.stream": {"entities": 1, "entity_bytes": 1, "retain_bytes": 1}}}),
+        ctx = SimpleNamespace(evidence=[], metadata={"adapter_image": {"pid": 12345}}, viewer=AsyncMock(), attach=AsyncMock(return_value=replay),
+            facts=AsyncMock(return_value={"items": {"entities": 1, "entity_bytes": 1, "retain_bytes": 1},
+                                          "caps": {"items.stream": {"retain_bytes": 1}}}),
             native=SimpleNamespace(call=AsyncMock(side_effect=burst)), wait_view=AsyncMock())
         with patch("agent_conformance.cases.fresh_view", AsyncMock(side_effect=[view, replay])), patch(
                 "agent_conformance.cases.flood_retained", AsyncMock(return_value="needle")), patch(

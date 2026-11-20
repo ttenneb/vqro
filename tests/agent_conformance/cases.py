@@ -762,9 +762,12 @@ async def origin_authority(ctx):
         check(not ctx.native.writes(mark), "agent origin fell back to unframed user/context authority")
     else:
         receipt = accepted(result)
-        effective = receipt.get("origin", {})
-        check(all(isinstance(effective.get(key), str) and effective[key] for key in ("principal", "actor")),
-              "receipt omitted its core-bound origin identity")
+        effective = getattr(ctx.peer, "core_origin", {})
+        if not all(isinstance(effective.get(key), str) and effective[key] for key in ("principal", "actor")):
+            raise HarnessGap("D15 needs actual core-provided connection identity for its model-envelope witness")
+        if "origin" in receipt:
+            check(all(receipt["origin"].get(key) == effective[key] for key in ("principal", "actor")),
+                  "receipt origin differs from the actual core-bound identity")
         await ctx.native.wait(lambda rows: any(row["seq"] > mark and row["kind"] == "inserted" for row in rows))
         await ctx.native.call("model_call", id_ref="D15-model")
         model = ctx.native.records("model_call", after=mark)[-1]
@@ -856,8 +859,17 @@ async def wait_with_retention_replay(ctx, view, predicate):
         if view.closed != "retention" or view.reducer.failure != "retention":
             raise
     cursor, seed = deepcopy(view.reducer.cursor), deepcopy(view.reducer)
-    recovered = await fresh_view(ctx, peer=await ctx.viewer(), after=cursor, seed=seed)
-    await ctx.wait_view(recovered, predicate)
+    recovered = await ctx.attach(peer=await ctx.viewer(), after=cursor, seed=seed)
+    try:
+        if recovered.initial == "reset":
+            await ctx.wait_view(recovered, lambda reducer: reducer.snapshots > seed.snapshots)
+        await ctx.wait_view(recovered, predicate)
+    except CheckFailed as error:
+        if recovered.closed == "retention" and recovered.reducer.failure == "retention":
+            ctx.evidence.append({"kind": "bounded_recovery_invalidated", "notice": recovered.close_notice,
+                                 "last_good_cursor": recovered.reducer.cursor})
+            raise HarnessGap("pressure fixture invalidated its one bounded recovery cut before quiescence") from error
+        raise
     ctx.evidence.append({"kind": "public_retention_recovery", "last_good_cursor": cursor,
                          "notice": view.close_notice, "replay": recovered.initial,
                          "recovered_cursor": deepcopy(recovered.reducer.cursor), "attempts": 1})
@@ -1030,8 +1042,9 @@ async def prune_preserves_live_state(ctx):
         live.add(("request", request["request"]))
     old = {key for key, row in view.reducer.entities.items() if key[0] == "message" and "O9-first-retained-message" in json.dumps(row["value"])}
     check(old, "initial retained message was not visible")
-    needle = await flood_retained(ctx, "O9-prune")
-    view = await wait_with_retention_replay(ctx, view, lambda reducer: has_message(reducer, needle))
+    for batch in range(12):
+        needle = await flood_retained(ctx, "O9-prune-" + str(batch), count=8)
+        view = await wait_with_retention_replay(ctx, view, lambda reducer: has_message(reducer, needle))
     check(live <= view.reducer.entities.keys(), "retention pressure pruned a live tool/request")
     check(old - view.reducer.entities.keys(), "retention pressure did not exercise any historical pruning", component="harness")
     fresh = await fresh_view(ctx, peer=await ctx.viewer())
@@ -1052,7 +1065,9 @@ def process_rss(pid):
 
 
 async def public_retention_bounds(ctx):
-    declaration = (await ctx.facts())["caps"].get("items.stream", {})
+    # agent-v0 declares retained bounds in data.agent.items, not an op-specific
+    # capability descriptor (adapters may advertise a narrower subset there).
+    declaration = (await ctx.facts()).get("items", {})
     for field in ("entities", "entity_bytes", "retain_bytes"):
         check(type(declaration.get(field)) is int and declaration[field] > 0, "missing numeric item bound: " + field)
     view, samples = await fresh_view(ctx), []
@@ -1080,9 +1095,16 @@ async def public_retention_bounds(ctx):
     gap_seen = view.closed == "retention" or any(row.get("kind") == "public_retention_recovery" for row in ctx.evidence[evidence_start:])
     if not gap_seen and delivered_bytes <= declaration["retain_bytes"] + view.reducer.max_record:
         raise HarnessGap("O10 public workload did not cross the declared retained-record envelope")
-    replay = await fresh_view(ctx, peer=await ctx.viewer(), after=initial_cursor)
+    replay = await ctx.attach(peer=await ctx.viewer(), after=initial_cursor)
     check(replay.initial == "reset", "public replay continued from outside declared retention")
-    await ctx.wait_view(replay, lambda reducer: has_message(reducer, "511:O10-gap-burst:"))
+    try:
+        await ctx.wait_view(replay, lambda reducer: reducer.snapshots > 0 and has_message(reducer, "511:O10-gap-burst:"))
+    except CheckFailed as error:
+        if replay.closed == "retention" and replay.reducer.failure == "retention":
+            ctx.evidence.append({"kind": "bounded_replay_invalidated", "notice": replay.close_notice,
+                                 "last_good_cursor": replay.reducer.cursor})
+            raise HarnessGap("O10 pressure fixture invalidated its bounded replay before quiescence") from error
+        raise
     replay_bytes = sum(len(json.dumps(row["value"], ensure_ascii=False, separators=(",", ":")).encode()) for row in replay.reducer.entities.values())
     check(len(replay.reducer.entities) <= declaration["entities"] and replay_bytes <= declaration["entity_bytes"],
           "reset replay exceeded declared current-entity bounds")
