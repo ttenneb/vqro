@@ -15,6 +15,7 @@ resumes the endpoint's gate (a new coordination owner starts with every gate clo
 """
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -30,8 +31,19 @@ def txt(s):
 class Harness:
     PLUGIN = "p:plugin"  # the plugin's principal (k2core: bound by VQRO_PRINCIPAL at the plugin's hello)
 
-    def __init__(self, root, vqro, *, inbox="fake", coord_ext=None):
+    def __init__(self, root, vqro, *, inbox="fake", coord_ext=None, startup_s=60):
         self.root, self.kind, self.vqro = root, inbox, vqro
+        self.procs = []
+        try:
+            self.start(coord_ext, startup_s)
+        except BaseException:
+            # A failed start must not leave the core (or the extensions it supervises) running: nobody would stop
+            # them, because the caller never gets a Harness to call stop() on.
+            self.stop()
+            raise
+
+    def start(self, coord_ext, startup_s):
+        root, inbox, vqro = self.root, self.kind, self.vqro
         os.makedirs(root, exist_ok=True)
         self.sock = os.path.join(root, "v.sock")
         self.inbox_log = os.path.join(root, "inbox.jsonl")
@@ -43,9 +55,11 @@ class Harness:
             os.makedirs(os.path.join(root, d), mode=0o700, exist_ok=True)
         if inbox == "k2core":
             self.env["VQRO_EXTENSIONS_DIR"] = self.k2_extensions(coord_ext)
-        self.procs = []
+        end = time.time() + startup_s
         self.spawn([vqro, "serve", "--fake"], env=self.env, stdout=open(os.path.join(root, "core.log"), "w"), stderr=subprocess.STDOUT)
         while not os.path.exists(self.sock):
+            if time.time() > end or self.procs[0].poll() is not None:
+                raise RuntimeError(f"core did not start (exit {self.procs[0].poll()}); see {root}/core.log")
             time.sleep(0.05)
         if inbox == "k2":
             self.spawn([sys.executable, os.path.join(HERE, "fixtures", "coord_k2.py")], env=dict(self.env, COORD_EXT=coord_ext),
@@ -54,7 +68,6 @@ class Harness:
             self.spawn([sys.executable, os.path.join(HERE, "fixtures", "fake_inbox.py"), self.inbox_log],
                        env=dict(self.env, VQRO_EXT_PATH=os.path.join(HERE, "..", "extensions")), stderr=open(os.path.join(root, "inbox.err"), "w"))
         self.c = Client(self.sock, owner=inbox == "k2core")
-        end = time.time() + 60
         self.wait_commands(end)
         if inbox == "k2core":
             while self.c.cmd("coord.status").get("state") != "ready" and time.time() < end:
@@ -75,11 +88,13 @@ class Harness:
             p.wait()
         if os.path.exists(self.sock):
             os.unlink(self.sock)
-        self.procs[0] = subprocess.Popen([self.vqro, "serve", "--fake"], env=self.env, stdout=open(os.path.join(self.root, "core2.log"), "w"), stderr=subprocess.STDOUT)
+        self.procs[0] = subprocess.Popen([self.vqro, "serve", "--fake"], env=self.env, stdout=open(os.path.join(self.root, "core2.log"), "w"),
+                                         stderr=subprocess.STDOUT, start_new_session=True)
         while not os.path.exists(self.sock):
             time.sleep(0.05)
         self.procs[1] = subprocess.Popen([sys.executable, os.path.join(HERE, "fixtures", "fake_inbox.py"), self.inbox_log],
-                                         env=dict(self.env, VQRO_EXT_PATH=os.path.join(HERE, "..", "extensions")), stderr=open(os.path.join(self.root, "inbox2.err"), "w"))
+                                         env=dict(self.env, VQRO_EXT_PATH=os.path.join(HERE, "..", "extensions")), stderr=open(os.path.join(self.root, "inbox2.err"), "w"),
+                                         start_new_session=True)
         self.c = Client(self.sock)
         self.wait_commands(time.time() + 60)
         for rid, pull in self.declared.items():  # the launcher's declarations are workspace state, not inbox state
@@ -114,15 +129,19 @@ class Harness:
         return dest
 
     def spawn(self, argv, **kw):
-        p = subprocess.Popen(argv, **kw)
+        """Each process leads its own group, so stop() also reaches what it started (the core's extensions)."""
+        p = subprocess.Popen(argv, start_new_session=True, **kw)
         self.procs.append(p)
         return p
 
     def stop(self):
         for p in self.procs:
-            if p.poll() is None:
-                p.kill()
-                p.wait()
+            try:
+                os.killpg(p.pid, signal.SIGKILL)  # the whole group, even if its leader already exited
+            except (ProcessLookupError, PermissionError):
+                if p.poll() is None:  # not a group leader (a process a test added): just the process
+                    p.kill()
+            p.wait()
 
     def op(self):
         self.n += 1
