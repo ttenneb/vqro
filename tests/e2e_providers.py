@@ -123,6 +123,26 @@ def wait(pred, timeout=20, step=0.2):
     return None
 
 
+def log_tail(path, n=20):
+    try:
+        with open(path, errors="replace") as f:
+            return "".join(f.readlines()[-n:]).rstrip("\n") or "<empty>"
+    except OSError as error:
+        return f"<{error}>"
+
+
+def diagnose(c, name):
+    """Evidence for a failed backend-restart check, printed before the root is kept (diag-c2-providers.md)."""
+    try:
+        state = c.call("extension.list")["extensions"].get(name)
+        status = json.dumps({k: state.get(k) for k in ("status", "display_status", "crashes", "crashes_total", "last_exit", "enabled")} if state else None)
+    except Exception as error:
+        status = f"<extension.list failed: {error}>"
+    print(f"  diag {name} extension: {status}", flush=True)
+    for path in (f"{R}/st/ext-{name}.log", f"{R}/serve.log"):
+        print(f"  diag tail {path}:\n" + "\n".join("    " + line for line in log_tail(path).splitlines()), flush=True)
+
+
 def providers(c):
     return c.call("workspace.snapshot")["providers"]
 
@@ -219,14 +239,16 @@ try:
         time.sleep(1)
         tmux("new-session", "-d", "-s", "work", "-x", "100", "-y", "30", "/bin/sh", start=True)
         new = wait(lambda: (lambda p: p if p.get("state") == "connected" and p["instance"] != instances["tmux"] else None)(providers(c)["tmux"]), 40)
-        check("tmux: backend restart -> provider registers a new instance", bool(new), json.dumps(providers(c).get("tmux"))[:300])
+        if not check("tmux: backend restart -> provider registers a new instance", bool(new), json.dumps(providers(c).get("tmux"))[:300]):
+            diagnose(c, "tmux")
         check("tmux: old resource id retired", not any(x["id"] == rid for x in resources(c)))
     if "herdr" in keep:
         rid = keep["herdr"]
         hc("server", "stop")
         shutil.rmtree(f"{R}/xst/herdr-core/e2e", ignore_errors=True)
         new = wait(lambda: (lambda p: p if p.get("state") == "connected" and p["instance"] != instances["herdr"] else None)(providers(c)["herdr"]), 40)
-        check("herdr: wiped backend -> provider registers a new instance", bool(new), json.dumps(providers(c).get("herdr"))[:300])
+        if not check("herdr: wiped backend -> provider registers a new instance", bool(new), json.dumps(providers(c).get("herdr"))[:300]):
+            diagnose(c, "herdr")
         check("herdr: old resource id retired", not any(x["id"] == rid for x in resources(c)))
 finally:
     for p in procs:
@@ -246,10 +268,21 @@ finally:
                     left.append(pid)
             except OSError:
                 pass
-    check("nothing left running", not left, " ".join(left))
+    if not check("nothing left running", not left, " ".join(left)):
+        for pid in left:
+            try:
+                cmdline = open(f"/proc/{pid}/cmdline", "rb").read().replace(b"\0", b" ").decode(errors="replace").strip()
+            except OSError as error:
+                cmdline = f"<{error}>"
+            print(f"  diag left {pid}: {cmdline[:300]}", flush=True)
     for pid in left:
         os.kill(int(pid), 9)
     print(f"root {R}; passed {sum(results)} failed {len(results) - sum(results)}")
-    if os.environ.get("E2E_KEEP") is None:
+    # A failed run (a FAIL or an exception) keeps its root (serve.log, st/ext-*.log) for diagnosis; only
+    # processes are stopped.
+    failed = not all(results) or sys.exc_info()[0] is not None
+    if not failed and os.environ.get("E2E_KEEP") is None:
         shutil.rmtree(R, ignore_errors=True)
+    elif failed:
+        print(f"kept failed run root {R} (remove it when done)", flush=True)
 sys.exit(0 if all(results) else 1)
