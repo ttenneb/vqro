@@ -178,9 +178,11 @@ async def staged_successor_handover(ctx):
         await settled(ctx, delivery)
         ctx.check(len(invocations(ctx, delivery=delivery)) == 1, "later explicit resume dispatches moved intent exactly once")
 
-    # Genuine claimed cut, followed by native application with lost reply. Retire
-    # routing only: it permits a handover predecessor without changing native life.
-    await ctx.native.call("plan", ref=other["backend_ref"], op="agent.send", plan={"before": "i13-claimed", "drop_reply": True})
+    # Genuine claimed cut, then actual native application with its reply held.
+    # Later native end makes the outstanding claim unknown without disconnecting
+    # the shared provider (which would also make our destination unavailable).
+    await ctx.native.call("plan", ref=other["backend_ref"], op="agent.send",
+        plan={"before": "i13-claimed", "after": "i13-after-apply"})
     claimed = await ctx.send(target=other["id"], mode="admit", send_new=True, text="I13 claimed then unknown")
     sibling = await ctx.send(target=other["id"], mode="admit", send_new=True, text="I13 pending sibling must not partially move")
     await ctx.scope("resume", "agent:" + other["id"])
@@ -188,16 +190,21 @@ async def staged_successor_handover(ctx):
     retired = await ctx.command("control", {"op": await ctx.operation("i13-retire"), "target": other["id"], "action": "retire", "args": {}})
     ctx.check(retired.get("state") == "retired" and retired.get("execution") == "unknown" and retired.get("native") is None,
         "predecessor routing is actually retired without inventing native end", reply=retired)
+    released = False
     try:
         await refusal_preserves(ctx, other, destination, [sibling["delivery"], claimed["delivery"]], "claimed")
-    finally:
         await ctx.native.call("release", barrier="i13-claimed")
-    unknown = await ctx.wait_command("inbox.get", lambda row: row.get("state") == "unknown", args={"delivery": claimed["delivery"]})
-    # Lost native reply disconnects the shared host. Observe an available successor
-    # again, so unknown refusal cannot pass merely because the destination is absent.
-    await ctx.wait_agents(3)
-    ctx.check(all(any(row["id"] == old["id"] and row["incarnation"] == old["incarnation"] for row in ctx.agents)
-        for old in (source, destination, other)), "host reconnect retains the exact inspected endpoint identities")
-    await refusal_preserves(ctx, other, destination, [sibling["delivery"], claimed["delivery"]], "unknown")
-    ctx.check(len(invocations(ctx, delivery=claimed["delivery"])) == 1 and not invocations(ctx, delivery=sibling["delivery"]),
-        "claimed/unknown handover refusal never replays input or dispatches its pending sibling", unknown=unknown)
+        released = True
+        await ctx.wait(lambda: [row for row in ctx.native.records("applied") if row.get("args", {}).get("delivery") == claimed["delivery"]],
+            label="actual native application before end with reply held")
+        await ctx.native_set(2, lifecycle="ended")
+        unknown = await ctx.wait_command("inbox.get", lambda row: row.get("state") == "unknown", args={"delivery": claimed["delivery"]})
+        await ctx.wait_agents(3)
+        ctx.check(all(any(row["id"] == old["id"] and row["incarnation"] == old["incarnation"] for row in ctx.agents)
+            for old in (source, destination, other)), "available endpoints retain the exact inspected identities at unknown refusal")
+        await refusal_preserves(ctx, other, destination, [sibling["delivery"], claimed["delivery"]], "unknown")
+        ctx.check(len(invocations(ctx, delivery=claimed["delivery"])) == 1 and not invocations(ctx, delivery=sibling["delivery"]),
+            "claimed/unknown handover refusal never replays input or dispatches its pending sibling", unknown=unknown)
+    finally:
+        if not released: await ctx.native.call("release", barrier="i13-claimed")
+        await ctx.native.call("release", barrier="i13-after-apply")
