@@ -164,7 +164,10 @@ def message_rows(eid, value, names, receipts, show_time=True, fold=None):
         head.append(RECEIPT.get(receipts[delivery], plain(str(receipts[delivery]))))
     if value.get("final") is False:
         head.append("writing…")
-    rows = [{"type": "header", "id": "m:" + eid, "text": " · ".join(head), **({"style": style} if style else {})}]
+    # The sender line is selectable and copies the whole message (client.copy, bound to y in the pane).
+    whole = text_of(value)
+    rows = [{"type": "text", "focusable": True, "id": "m:" + eid, "text": " · ".join(head), "style": style or "bold",
+             **({"copy": whole} if whole else {})}]
     quoted = value.get("quoted")
     if isinstance(quoted, dict) and quoted.get("label"):
         rows.append({"type": "text", "style": "dim", "text": "quoting " + clip(plain(str(quoted["label"])), 256) + " (claimed)"})
@@ -188,7 +191,11 @@ def tool_row(eid, value):
             line = f":{loc['line']}" if type(loc.get("line")) is int else ""
             children.append({"type": "text", "style": "accent", "text": clip(plain(loc["path"] + line), 1024)})
     children += content_rows(value.get("content"), None, TOOL_LINES)
+    output = text_of(value)
+    raw_input = value.get("input")
+    copy = output or (raw_input if isinstance(raw_input, str) else json.dumps(raw_input, ensure_ascii=False, indent=1) if "input" in value else None)
     return {"id": "t:" + eid, "text": f"{TOOL_ICON.get(status, '?')} " + clip(plain(str(value.get("title") or "tool")), 512),
+            **({"copy": copy} if copy else {}),
             "description": " · ".join(x for x in (status, took) if x), "style": "error" if status == "failed" else None,
             "children": children, "expanded": True}
 

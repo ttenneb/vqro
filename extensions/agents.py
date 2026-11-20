@@ -207,6 +207,22 @@ def panel_key(key):
 
 
 # Owned per-agent derived views, longest prefix first ("agents-" would also match the others).
+# Keys in an agent pane without the prefix (AS10b/AS10 keyboard flow; D29 pane-scoped bindings). All are ordinary
+# bindings, so Settings → Keys and keymap profiles can change them; the prefix key always comes first.
+AGENT_PANE = {"resource_kind": "agent"}
+PANE_KEYS = {
+    "binding/agents.copy": {"key": "y", "scope": "pane", "when": AGENT_PANE, "command": "client.copy",
+                            "label": "copy the selected message or tool output"},
+    "binding/agents.compose": {"key": "i", "scope": "pane", "when": AGENT_PANE, "command": "client.composer",
+                               "args": {"action": "focus"}, "label": "write a message"},
+    **{f"binding/agents.toggle.{kind}": {"key": key, "scope": "pane", "when": AGENT_PANE, "command": "agents.view",
+                                         "args": {"set": kind, "value": "cycle"}, "label": f"{kind}: show / summary / hide"}
+       for kind, key in (("thinking", "t"), ("tools", "T"), ("system", "s"))},
+    "binding/agents.send.steer": {"key": "M-s", "scope": "composer", "when": AGENT_PANE, "command": "client.composer",
+                                  "args": {"action": "send", "set": {"mode": "boundary"}}, "label": "send as steer"},
+    "binding/agents.send.follow_up": {"key": "M-f", "scope": "composer", "when": AGENT_PANE, "command": "client.composer",
+                                      "args": {"action": "send", "set": {"mode": "settle"}}, "label": "send as follow-up"},
+}
 VIEW_DEFAULTS = "doc/settings/agents"  # {"view": {...}}: defaults for new agent panes (agent_transcript.view_settings)
 VIEW_PANE = "doc/agents/view/"  # + rid: this agent pane's own view settings (AS10d: per pane, workspace defaults)
 OWNED_PREFIXES = ("view/agents-requests-", "view/agents-settings-", "view/agents-stop-", "view/agents-send-", "view/agents-")
@@ -299,7 +315,8 @@ class Agents:
                                                   "label": "prompt agent", "when": {"resource_kind": "agent"}},
                         # Prefix P (Shift-p): Agent settings for the agent in the focused pane.
                         "binding/agents.config": {"key": "P", "command": "agents.config", "label": "agent settings",
-                                                  "when": {"resource_kind": "agent"}}}
+                                                  "when": {"resource_kind": "agent"}},
+                        **PANE_KEYS}
         declarations.update(self.declarations())
         # Provider inventory may not be restored yet. Referenced panels must
         # remain valid across extension disable/re-enable and core restart.
@@ -418,7 +435,10 @@ class Agents:
         r = self.agent(args, inspect=True)
         rid, what, value = r["id"], args.get("set"), args.get("value")
         current = self.view_of(rid)
-        if what in agent_transcript.KINDS and value in agent_transcript.MODES:
+        if what in agent_transcript.KINDS and value == "cycle":  # the pane keys: show -> summary -> hide -> show
+            modes = agent_transcript.MODES
+            change = {what: modes[(modes.index(current[what]) + 1) % len(modes)]}
+        elif what in agent_transcript.KINDS and value in agent_transcript.MODES:
             change = {what: value}
         elif what == "density" and value in ("detailed", "compact"):
             change = {"density": value}
@@ -1155,7 +1175,7 @@ class Agents:
             c = self.conversations[r["id"]]
             with c.lock:
                 seen = agent_transcript.senders(c.view.entities, agent_transcript.Names(self.ext.resources, r["id"]))
-            content = {"title": title, "follow": True, "toolbar": self.view_toolbar(r["id"], self.view_of(r["id"]), seen), "items": [
+            content = {"title": title, "follow": True, "search": True, "toolbar": self.view_toolbar(r["id"], self.view_of(r["id"]), seen), "items": [
                 {"text": title, "badges": [{"text": status(r), "style": "dim"}]}, *conversation, *self.bottom_rows(r),
                 agent_transcript.facts_footer(agent_facts(r), plain(str(r.get("name") or r["id"])))]}
         elif sources:

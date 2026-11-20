@@ -48,7 +48,7 @@ class TranscriptRows(unittest.TestCase):
         return agent_transcript.rows({k: (1, v) for k, v in entities.items()}, names, coverage)
 
     def test_senders_come_from_the_recorded_origin_in_order(self):
-        headers = [r["text"] for r in self.rows() if r.get("type") == "header"]
+        headers = [r["text"] for r in self.rows() if str(r.get("id", "")).startswith("m:")]
         self.assertEqual(headers[0].split(" · ")[0], "Human (undeclared)", "as recorded, never inferred to be the viewer")
         self.assertIn("in the conversation", headers[0], "the delivery's receipt stage")
         self.assertEqual(headers[1:], ["Pi", "Message from vqro-lead (agent r7)", "Thinking", "Pi · writing…"])
@@ -113,7 +113,7 @@ class ViewSettings(unittest.TestCase):
 
     def test_defaults_show_everything(self):
         self.assertEqual(agent_transcript.view_settings(), agent_transcript.DEFAULT_VIEW)
-        self.assertTrue(any(r.get("type") == "header" and r["text"].startswith("Thinking · ") for r in self.rows()))
+        self.assertTrue(any(str(r.get("id", "")).startswith("m:") and r["text"].startswith("Thinking · ") for r in self.rows()))
 
     def test_summary_replaces_a_kind_with_a_configurable_expandable_line(self):
         rows = self.rows(thinking="summary", tools="summary")
@@ -141,7 +141,7 @@ class ViewSettings(unittest.TestCase):
                                        "origin": {"kind": "human"}, "content": text("\n".join(f"line {n}" for n in range(60)))}
                 for i in range(2)}
         rows = agent_transcript.rows({k: (1, v) for k, v in long.items()}, names, None, agent_transcript.view_settings({"density": "compact"}))
-        headers = [r["text"] for r in rows if r.get("type") == "header"]
+        headers = [r["text"] for r in rows if str(r.get("id", "")).startswith("m:")]
         self.assertEqual(headers, ["Human (undeclared) · " + agent_transcript.when(1_763_600_000_000), "Human (undeclared)"],
                          "time only when the sender changes")
         fold = next(r for r in rows if r.get("text") == "… 20 more lines")
@@ -313,6 +313,27 @@ class AgentPane(unittest.TestCase):
         self.agents.flush_conversations()
         self.assertFalse(self.agents.conversations["r2"].too_big)
         self.assertEqual(self.attaches()[-1], {"resource": "r2", "items": {}}, "a fresh attach")
+
+    def test_pane_keys_copy_fields_and_search(self):
+        """S3/S4: keys without the prefix (scoped to agent panes), copy fields, search over collapsed rows."""
+        keys = {k: self.core.value(k) for k in self.core.entries if k.startswith("binding/agents.") and k != "binding/agents.list"}
+        scoped = {v["key"]: (v.get("scope"), v["command"], v.get("args")) for v in keys.values() if v.get("scope")}
+        self.assertEqual(scoped["y"], ("pane", "client.copy", None))
+        self.assertEqual(scoped["i"], ("pane", "client.composer", {"action": "focus"}))
+        self.assertEqual(scoped["t"], ("pane", "agents.view", {"set": "thinking", "value": "cycle"}))
+        self.assertEqual(scoped["M-s"], ("composer", "client.composer", {"action": "send", "set": {"mode": "boundary"}}))
+        self.assertTrue(all(v["when"] == {"resource_kind": "agent"} for v in keys.values() if v.get("scope")))
+        self.feed(snapshot(CONVERSATION))
+        content = self.core.live["agents-r2"]
+        self.assertTrue(content["search"])
+        sender = next(r for r in content["items"] if r.get("id") == "m:m2")
+        self.assertEqual((sender["focusable"], sender["copy"]), (True, "Let me look.\nFirst the CI log."))
+        group = next(r for r in content["items"] if str(r.get("id", "")).startswith("g:"))
+        self.assertEqual(group["children"][1]["copy"].splitlines()[0], "l0", "a tool row copies its output")
+        self.assertEqual(json.loads(group["children"][0]["copy"]), {"path": "ci.yml"}, "or its input when there is no output")
+        for expected in ("summary", "hide", "show"):
+            self.core.handlers["agents.view"]({"context": {"view": "agents-r2"}, "set": "thinking", "value": "cycle"})
+            self.assertEqual(self.agents.view_of("r2")["thinking"], expected)
 
     def test_a_failed_attach_is_retried_later_not_in_a_loop(self):
         self.core.fail_attach = True
