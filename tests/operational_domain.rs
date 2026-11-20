@@ -54,7 +54,7 @@ async fn snapshot_pages_and_replayed_events_share_the_global_capture_fence() {
  assert_eq!(control.call("operational.list",json!({"domain":"state","after":second["next"],"revision":snapshot["revision"]})).await.unwrap_err().kind(),"conflict");
  let(observer,mut events)=f.peer().await;observer.call("events.subscribe",json!({"epoch":snapshot["epoch"],"from":snapshot["seq"],"types":["operational"]})).await.unwrap();
  let event=tokio::time::timeout(Duration::from_secs(2),events.recv()).await.unwrap().unwrap();
- let params=match event {vqro::rpc::Incoming::Notification{params,..}=>params,_=>panic!("notification")};assert_eq!(params["data"]["txn"],receipt["txn"]);assert_eq!(params["type"],"operational");assert_eq!(params["data"]["author"],"ext:owner");
+ let params=match event {vqro::rpc::Incoming::Notification{params,..}=>params,_=>panic!("notification")};assert_eq!(params["data"]["txn"],receipt["txn"]);assert_eq!(params["type"],"operational");assert!(params["data"]["author"].as_str().unwrap().starts_with("client:"));assert_eq!(params["data"]["actor"],"extension:owner");assert_eq!(params["data"]["principal"],"extension:owner");
  observer.close();control.call("core.shutdown",json!({})).await.unwrap();
 }
 #[tokio::test]

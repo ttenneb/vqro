@@ -203,12 +203,12 @@ The existing generation fence is checked at dispatch and irreversible writer adm
 complete/adopt normally after owner retirement; they are not replayed. Reopening by a new generation of the same
 extension preserves state. A stale connection never revives when the author/name is reused.
 
-- `operational.register {name,bytes?,on_behalf_of?}`: one extension-chosen domain per owner; default2MiB/1024
+- `operational.register {name,bytes?,invocation?,on_behalf_of?}`: one extension-chosen domain per owner; default2MiB/1024
   records, minimum128KiB, maximum8MiB/4096 records (record cap scales proportionally). Sixteen domains and32MiB
   total DECLARED capacity. Growth is atomic within those limits. Shrink retains the larger current capacity and
   reports `capacity_request:{requested,applied,outcome:"shrink_refused"}`. Omitted bytes retains the declaration.
   Register/reopen explicitly confirms the complete file and advances its revision; reads never trigger writes.
-- `operational.apply {domain,ops,control?:false,note?,on_behalf_of?}`: standard set/delete/CAS,1..64 distinct keys,
+- `operational.apply {domain,ops,control?:false,note?,invocation?,on_behalf_of?}`: standard set/delete/CAS,1..64 distinct keys,
   ≤256KiB request, depth64; full keys `operational/<domain>/<nonempty suffix>` (≤512 UTF-8 bytes). Mixed domains
   or workspace keys reject whole. Normal growth cannot consume the last10% of bytes/records; control/recovery
   may use it. A fixed64KiB header/audit reservation inside the budget prevents audit growth blocking deletion.
@@ -221,7 +221,8 @@ extension preserves state. A stale connection never revives when the author/name
 
 Replies identify domain/owner/revision, charged bytes/count, limits, global epoch/seq. Mutations return txn,
 undoable:false and changed key versions. Only `operational` events are published, never workspace entries/history;
-those events share global sequence/cursor recovery and contain the actual adopted transaction, attribution and
+those events share global sequence/cursor recovery and contain the actual adopted transaction, canonical
+`author`/`actor`/`principal`/`initiator`/`label` attribution and
 changed values. `durability_unconfirmed` includes domain/txn/epoch/seq, adopts/publishes actual state and is never
 permission to invoke/replay an effect. Other clean failures adopt nothing. Domain audit retains only the last
 transaction metadata (no preimages/undo), including writer epoch and supervised generation.

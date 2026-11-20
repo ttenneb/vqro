@@ -255,7 +255,7 @@ mod tests {
         {let c=core.lock().unwrap();
             for (control,count,label) in [(false,2,"n"),(true,8,"c")] {for n in 0..count {
                 let author=format!("{label}{n}");let key=format!("doc/{author}");
-                let prepare=Box::new(move|_:&Core|Ok(Plan {owner:None,action:Action::Apply {author,on_behalf_of:None,note:None,ops:vec![Op::Set {key,value:serde_json::json!(1),expect:None}]},after_adopt:None}));
+                let prepare=Box::new(move|_:&Core|Ok(Plan {owner:None,action:Action::Apply {author,attribution:crate::principal::Attribution::default(),on_behalf_of:None,note:None,ops:vec![Op::Set {key,value:serde_json::json!(1),expect:None}]},after_adopt:None}));
                 receipts.push(c.committer.enqueue_kind(&core,512,prepare,control,false).unwrap());
             }}
         }
@@ -284,7 +284,7 @@ mod tests {
             let until=std::time::Instant::now()+std::time::Duration::from_secs(5);
             let owner=loop {if let Ok(token)=std::fs::read_to_string(&token_path) {if let Some(owner)=crate::ext::authenticate(&core.lock().unwrap(),"owner",&token){break owner;}}assert!(std::time::Instant::now()<until);tokio::time::sleep(std::time::Duration::from_millis(5)).await;};
             let registration_owner=owner.clone();submit_operational(&core,256,true,move|c|Ok(Plan {owner:Some(registration_owner.clone()),action:Action::Operational {domain:Box::new(c.operational.prepare("state",&registration_owner.name,None)?),author:"ext:owner".into(),attribution:crate::principal::Attribution::default(),on_behalf_of:None,note:None,ops:None,control:true},after_adopt:None})).await.unwrap();
-            let blocker=if !dispatched {let c=core.lock().unwrap();Some(c.committer.enqueue(&core,512,Box::new(|_|Ok(Plan {owner:None,action:Action::Apply {author:"fixture".into(),on_behalf_of:None,note:None,ops:vec![Op::Set {key:"doc/block".into(),value:serde_json::json!(1),expect:None}]},after_adopt:None}))).unwrap())}else{None};
+            let blocker=if !dispatched {let c=core.lock().unwrap();Some(c.committer.enqueue(&core,512,Box::new(|_|Ok(Plan {owner:None,action:Action::Apply {author:"fixture".into(),attribution:crate::principal::Attribution::default(),on_behalf_of:None,note:None,ops:vec![Op::Set {key:"doc/block".into(),value:serde_json::json!(1),expect:None}]},after_adopt:None}))).unwrap())}else{None};
             if !dispatched {tokio::time::timeout(std::time::Duration::from_secs(2),entered.notified()).await.unwrap();}
             let c=core.clone();let owner2=owner.clone();let request=tokio::spawn(async move {submit_operational(&c,512,true,move|c|Ok(Plan {owner:Some(owner2.clone()),action:Action::Operational {domain:Box::new(c.operational.prepare("state",&owner2.name,None)?),author:"ext:owner".into(),attribution:crate::principal::Attribution::default(),on_behalf_of:None,note:Some("claim".into()),ops:Some(vec![Op::Set {key:"operational/state/a".into(),value:serde_json::json!({"phase":"claimed"}),expect:Some(0)}]),control:true},after_adopt:None})).await});
             if dispatched {tokio::time::timeout(std::time::Duration::from_secs(2),entered.notified()).await.unwrap();}else{let until=std::time::Instant::now()+std::time::Duration::from_secs(2);while core.lock().unwrap().committer.pending()<2 {assert!(std::time::Instant::now()<until,"operational request not queued");tokio::task::yield_now().await;}}

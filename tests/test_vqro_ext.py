@@ -73,15 +73,17 @@ class InvocationAttribution(unittest.TestCase):
         def handler(method, args):
             vqro.call("workspace.apply", params)
             vqro.call("workspace.revert", {"txn": 1})
+            vqro.call("operational.register", {"name": "state"})
+            vqro.call("operational.apply", {"domain": "state", "ops": []})
             vqro.call("command.invoke", {"name": "nested"})
             vqro.call("workspace.snapshot")
         vqro, messages = self.vqro(handler)
         vqro._dispatch({"id": 100, "method": "command.invoke", "params": {"invocation": "proof"}})
         requests = [msg for msg in messages if "method" in msg]
-        self.assertEqual([msg["params"].get("invocation") for msg in requests], ["proof", "proof", "proof", None])
-        self.assertNotIn("on_behalf_of", params)
+        self.assertEqual([msg["params"].get("invocation") for msg in requests], ["proof", "proof", "proof", "proof", "proof", None])
+        self.assertNotIn("invocation", params)
         vqro.call("workspace.apply", params)
-        self.assertNotIn("on_behalf_of", messages[-1]["params"], "scope ends with reply")
+        self.assertNotIn("invocation", messages[-1]["params"], "scope ends with reply")
 
     def test_nested_commands_inherit_the_invoking_window_layout_unless_given_one(self):
         def handler(method, args):

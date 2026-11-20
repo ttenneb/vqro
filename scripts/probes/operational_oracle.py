@@ -174,7 +174,7 @@ def run_checks(binary,out):
                 if fault=='claim-unconfirmed':
                     until=time.monotonic()+2
                     while True:
-                        f.peer.call('hello',{'client':'event-barrier'})
+                        f.peer.call('workspace.get',{'key':'doc/event-barrier'})
                         events=[e['params'] for e in f.peer.events if e.get('method')=='event' and e.get('params',{}).get('type')=='operational']
                         if events or time.monotonic()>until: break
                         time.sleep(.01)

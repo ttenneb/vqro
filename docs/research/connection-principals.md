@@ -63,8 +63,17 @@ core guesses endpoint identity from timing, process ancestry, names or pane plac
   its native handler runs. `tests/test_vqro_ext.py` checks scoped/concurrent proof propagation and no background leak.
 - `tests/undo_attribution.rs --include-ignored`: real private Settings/theme callbacks and actual pane -> CLI ->
   Alice TUI u restore Alice's work while preserving Bob's later change. Private native tmux only; no live sessions.
+- `tests/principal_operational.rs`: combined C1+C2 supervised callback stores and publishes effective B / initiator A
+  with actual extension actor, without global history or persistent proof. Register/apply retain C1 ownership,
+  separate files, queue lanes, snapshot pools, history:false rejection and irreversible-admission semantics.
+  The C1 native-ledger crash/claim oracle also passes; its event barrier is an ordinary read, not an identity reset.
 - `tests/provider_wire.rs`: host principal follows the existing bootstrap host through restart, not endpoint labels.
 - `tests/test_manifest_deps.py`: only generic owner/delegation documents are core-owned; agent grants are not.
+
+The first full run exposed a Pi exit/gone race and retry-status observation on existing main 6d477c5 as well as
+C2. Independent review reproduced the blocked-drain cancellation mechanism on both trees. The coordinator owns
+those product fixes separately; C2 does not claim to fix them. The retained first failure is not silently discarded
+because a later complete run passed. C2's stale retag/legacy-attribution fixture expectations were corrected.
 
 These are Linux/Python 3.14 fixtures and fake-native attribution oracles, not security, production throughput,
 model behavior or native consumption evidence. Full release-gate evidence belongs in the C2 handoff after the
