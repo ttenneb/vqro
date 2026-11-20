@@ -514,9 +514,13 @@ hints in the SAME candidate/write even when no active facts remain. Authoritativ
 reserved identities too: a definitely ended/replaced identity cannot reclaim its old rN after restart. Only cached-forget creates hints. A clean
 write failure changes neither active mappings nor reservations; uncertain post-rename adoption updates both and
 requires the existing durability confirmation, never replay. Reappearance consumes its hint only after actual
-adoption. Old files without the optional reservations array load unchanged; malformed/duplicate/reserved-active
-collisions fail closed instead of rebinding authority. `workspace.snapshot.identity_reservations` reports count,
-encoded bytes, limits and `persistent:true` (not private RSS). This is identity bookkeeping only: no pause, membership,
+adoption. Old files without the optional reservations array load unchanged. A malformed/duplicate/oversized/active-colliding
+optional cache is discarded WITH a persistent recovery notice; readable numeric rN values and the existing allocation
+high-water remain reserved, so recovery cannot reuse old ids. Healthy active mappings and safe-mode/read-only startup
+remain available. Startup does not rewrite the original; the next successful identity write confirms the recovered
+state/notice. Whole identity-file syntax/I/O failure remains strict: no unseen high-water is guessed.
+`workspace.snapshot.identity_reservations` reports count, encoded bytes, limits, actual file-backed `persistent`,
+`durability_confirmed` and `recovery_notice` (not private RSS). This is identity bookkeeping only: no pause, membership,
 grants, mail or execution state is inferred/changed. Extensions still own restart-held/paused policy.
 
 This is not a fallback for native `resource.forget`; older cores

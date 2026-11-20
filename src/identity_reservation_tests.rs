@@ -40,10 +40,10 @@ fn clean_and_uncertain_writes_keep_durable_reservations_aligned_with_actual_adop
  }
 }
 #[test]
-fn legacy_maps_load_without_reservations_and_unsafe_cache_rows_fail_closed() {
+fn legacy_maps_load_and_unsafe_optional_cache_rows_drop_with_a_report() {
  let root=tempfile::tempdir().unwrap();let path=root.path().join("resources.json");let i=identity(0);
  std::fs::write(&path,serde_json::json!({"next":2,"ids":{"r1":{"identity":i,"retired":false}}}).to_string()).unwrap();let map=IdentityMap::open(Some(path.clone())).unwrap();assert!(map.active("r1"));assert_eq!(map.state.reservations.identities.len(),0);
  for rows in [serde_json::json!([{"identity":i,"id":"r1"}]),serde_json::json!([{"identity":i,"id":"r3"},{"identity":i,"id":"r4"}]),serde_json::json!([{"identity":i,"id":"not-an-id"}])] {
-  std::fs::write(&path,serde_json::json!({"next":2,"ids":{"r1":{"identity":i,"retired":false}},"reservations":rows}).to_string()).unwrap();assert!(IdentityMap::open(Some(path.clone())).is_err());
+  std::fs::write(&path,serde_json::json!({"next":2,"ids":{"r1":{"identity":i,"retired":false}},"reservations":rows}).to_string()).unwrap();let map=IdentityMap::open(Some(path.clone())).unwrap();assert!(map.active("r1"));assert_eq!(map.state.reservations.identities.len(),0);assert!(map.reservation_stats()["recovery_notice"].is_string());
  }
 }

@@ -664,10 +664,10 @@ impl Core {
                 self.providers.get_mut(name).unwrap().register(info.clone());
                 if let Some(pending) = self.pending_facts.get_mut(name) { pending.retain(|_, (instance, _)| instance == &info.instance); }
                 self.refresh_pending_admission();
-                if self.identities.has_provider(name){match self.identities.retire_provider_except(name,&info.instance) {
+                match self.identities.retire_provider_except(name,&info.instance) {
                     Ok((ids, error)) => { self.retire_visible(ids, "replaced"); if let Some(error) = error { self.identity_error(name, error); } }
                     Err(error) => { self.identity_error(name, error); }
-                }}
+                }
                 self.provider_event(name);
             }
             AdapterEvent::Connected(up, error) => {

@@ -3,6 +3,16 @@ use super::*;
 use serde_json::json;
 fn ident()->Identity {Identity {provider:"backend".into(),instance:"host".into(),reference:"endpoint".into(),incarnation:"lineage".into()}}
 #[test]
+fn core_registration_retires_reserved_only_ids_on_instance_change() {
+ use crate::{core::Core,adapter::{AdapterHandle,AdapterEvent},store::Store};
+ let mut core=Core::new(Store::in_memory(),None,std::path::PathBuf::from("unused"),false).unwrap();
+ let install=|core:&mut Core,instance:&str|{let(tx,_rx)=tokio::sync::mpsc::unbounded_channel();core.install_provider(AdapterHandle{name:"runtime".into(),session:None,context:None,capabilities:json!({}),cmds:tx},false,false).unwrap();core.on_adapter_event("runtime",AdapterEvent::Registered(ProviderInfo{connection:1,instance:instance.into(),role:"runtime".into(),software:json!({"name":"fixture","version":"1"})}));};
+ install(&mut core,"old-host");let fact=||serde_json::from_value(json!({"backend_ref":"endpoint","incarnation":"lineage","kind":"agent","state":"live"})).unwrap();let old=core.upsert_resource("runtime",fact()).unwrap();
+ core.on_adapter_event("runtime",AdapterEvent::Connected(false,None));core.forget_cached_resource(&old).unwrap();assert_eq!(core.capture_snapshot().into_value()["identity_reservations"]["count"],1);
+ install(&mut core,"new-host");assert_eq!(core.capture_snapshot().into_value()["identity_reservations"]["count"],0);
+ install(&mut core,"old-host");assert_ne!(core.upsert_resource("runtime",fact()).unwrap(),old);
+}
+#[test]
 fn explicit_native_retirement_invalidates_existing_reservation_across_restart() {
  let root=tempfile::tempdir().unwrap();let path=root.path().join("resources.json");let i=ident();
  let old={let mut map=IdentityMap::open(Some(path.clone())).unwrap();let old=map.identify(i.clone()).unwrap().id;map.forget_cached(&i).unwrap();assert_eq!(map.retire(|candidate|candidate==&i).unwrap().0,vec![old.clone()]);old};
