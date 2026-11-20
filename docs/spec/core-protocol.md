@@ -66,6 +66,8 @@ lets mutation handlers flush replies before extensions/providers/peers stop; exp
 not a clean write failure or a remote-read acknowledgement. An in-progress filesystem call cannot be safely cancelled.
 A portable process-held `.workspace.lock` is acquired before state is read and retained by dispatched writer
 snapshots: replacement startup is refused while an old write can still replace state, even after socket cleanup.
+A starting core waits up to 3 s for the lock (polling): a stopping core's last writer, or a child forked while the
+lock was open (it shares the lock until its exec), lets go within that window; a lock still held after it fails.
 `ensure_core` reports the held state immediately instead of spawning a failing core and silently polling its socket.
 On upgrade from an older build without this lock, wait for that older process to exit before replacement startup.
 The core then closes extension lifetime pipes (1.5s grace, then kill/reap, inside a2s supervisor bound), stops
