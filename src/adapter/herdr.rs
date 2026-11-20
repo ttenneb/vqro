@@ -469,7 +469,14 @@ fn handle_notification(
                             rec["state"] = json!("finished");
                             merge(rec, &data);
                         }
-                        "lost" | "keep" | "title" | "labels" | "size" | "turn" => merge(rec, &data),
+                        "lost" | "keep" | "title" | "labels" | "size" => merge(rec, &data),
+                        // A turn event's `state` is the agent's (blocked, done…), not the terminal's lifecycle
+                        // state (live/finished): merging it made every later update for the terminal invalid.
+                        "turn" => {
+                            if let Some(turn) = data.get("turn") {
+                                rec["turn"] = turn.clone();
+                            }
+                        }
                         "foreground" => rec["foreground"] = data.clone(),
                         "status" => rec["status"] = data.get("status").cloned().unwrap_or(Value::Null),
                         _ => return,
@@ -630,6 +637,24 @@ mod qa_tests {
         assert_eq!(facts(records.get("rohan/t7").unwrap()).backend_ref, old_ref);
         assert_eq!(facts(records.get("rohan/t7").unwrap()).incarnation, "1");
         assert!(receiver.try_recv().is_err());
+    }
+    #[test]
+    fn a_turn_event_keeps_the_terminal_live_so_later_status_reaches_vqro() {
+        // herdr-core's own sequence for an agent that reports working, blocked, then done (hc events).
+        let mut records = inventory(&json!({"terminals":[{"address":"t1","created_ms":1,"state":"live"}]}));
+        let (events, mut receiver) = mpsc::unbounded_channel();
+        for (ty, data) in [("status", json!({"status":{"app":"e2e","state":"blocked"}})), ("turn", json!({"state":"blocked","turn":1})),
+                           ("status", json!({"status":{"app":"e2e","state":"done"}}))] {
+            handle_notification("fixture", "event", json!({"terminal":"t1","type":ty,"data":data}), &mut records, &events);
+        }
+        let mut last = None;
+        while let Ok(event) = receiver.try_recv() {
+            if let (_, AdapterEvent::Upsert(f)) = event { last = Some(f); }
+        }
+        let last = last.expect("upserts");
+        assert_eq!(last.state, "live");
+        assert_eq!(last.status["state"], "done");
+        assert_eq!(records["t1"]["turn"], 1);
     }
     #[test]
     fn unknown_remote_identity_is_not_published_as_an_alias() {
