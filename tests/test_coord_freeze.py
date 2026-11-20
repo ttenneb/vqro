@@ -16,12 +16,15 @@ class TargetClosure(unittest.TestCase):
             (source / 'manifests').mkdir(parents=True)
             for name, content in [('coordination.py', '# fixture'), ('manifests/coord.json', '{}'),
                                   ('manifests/agents.json', '{"name":"agents"}'),
-                                  ('defaults.json', '{"extensions":[]}')]:
+                                  ('defaults.json', '{"extensions":[]}'),
+                                  ('pi_bridge/host.py', '# nested runtime dependency'),
+                                  ('pi_bridge/schema.json', '{}')]:
+                (source / name).parent.mkdir(parents=True, exist_ok=True)
                 (source / name).write_text(content)
             core = root / 'core'
             core.write_bytes(b'nonexecuted fixture')
             pinned, _ = freeze(root / 'capture', {'extensions': str(source)}, core)
-            for name in ('manifests/agents.json', 'defaults.json'):
+            for name in ('manifests/agents.json', 'defaults.json', 'pi_bridge/host.py', 'pi_bridge/schema.json'):
                 captured = Path(pinned['extensions']) / name
                 before = captured.read_bytes()
                 self.assertEqual(hashlib.sha256(before).hexdigest(), pinned['target_sha256'][name])

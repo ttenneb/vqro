@@ -93,11 +93,11 @@ async def run_case(case, root, manifest, vqro, hc=None, *, factory=PublicCoordin
 def freeze(root, manifest, vqro):
     """One source/binary pin for the entire table, never a moving checkout per row."""
     root = Path(root); source = Path(manifest["extensions"]); frozen = root/"target"
-    paths = [*sorted(source.glob("*.py")), *sorted(source.glob("manifests/*.json"))]
+    paths = sorted(path for path in source.rglob("*") if path.is_file())
     if not (source/"manifests/coord.json").is_file(): raise FixtureFailed("target coord manifest absent")
-    if (source/"defaults.json").is_file(): paths.append(source/"defaults.json")
     hashes = {}
     for path in paths:
+        if path.is_symlink(): raise FixtureFailed("target closure must not read a symbolic link: " + str(path))
         relative = path.relative_to(source); destination = frozen/relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         data = path.read_bytes(); destination.write_bytes(data)
