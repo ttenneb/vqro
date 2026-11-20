@@ -1,7 +1,7 @@
 //! Encode mouse events for terminal programs that asked for them (xterm mouse protocols).
 
 use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use vt100::{MouseProtocolEncoding, MouseProtocolMode};
+use super::emulator::{MouseEncoding as MouseProtocolEncoding, MouseMode as MouseProtocolMode};
 
 /// Bytes to send to the program for this event at cell (col, row) inside its view (0-based),
 /// or None if the program's mouse mode doesn't want it.

@@ -24,7 +24,9 @@ mod mouse;
 mod panel;
 mod compose;
 mod probe;
+mod emulator;
 mod scrollback;
+use emulator::{CursorShape, Effect, Emulator};
 mod frame_budget;
 mod theme;
 
@@ -37,7 +39,7 @@ use base64::Engine;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
@@ -79,59 +81,10 @@ fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
     out
 }
 
-/// What a program asked of the terminal beyond drawing, collected while parsing its output and passed on to the
-/// outer terminal after (never mid-frame): clipboard writes (OSC 52), bells, desktop notifications (OSC 9, OSC 777).
-/// Clipboard reads (OSC 52 `?`) are never answered: a program could read what the user copied elsewhere.
-#[derive(Default)]
-struct Effects {
-    out: Vec<Effect>,
-    /// Rows the full scrollback dropped (normal screen): with the kept rows, the numbering of `scrollback::Pos`.
-    dropped: usize,
-}
-
-#[derive(Debug, PartialEq)]
-enum Effect {
-    /// The selection names (`c`, `p`, ...) and base64 data, as the program sent them.
-    Clipboard(Vec<u8>, Vec<u8>),
-    Bell,
-    /// A whole notification OSC body (`9;text` or `777;notify;title;body`), passed on verbatim.
-    Notify(Vec<u8>),
-}
-
-/// Bounds what one parse may queue: a program can't flood the outer terminal or the client's memory.
-const MAX_EFFECTS: usize = 64;
-const MAX_CLIPBOARD_B64: usize = 1 << 20;
-
-impl Effects {
-    fn push(&mut self, e: Effect) {
-        if self.out.len() < MAX_EFFECTS && !(e == Effect::Bell && self.out.contains(&Effect::Bell)) { self.out.push(e); }
-    }
-}
-
-impl vt100::Callbacks for Effects {
-    fn audible_bell(&mut self, _: &mut vt100::Screen) { self.push(Effect::Bell); }
-    fn on_scroll(&mut self, _: vt100::capture::RowContents<'_>, alternate: bool) {
-        if !alternate { self.dropped += 1; }
-    }
-    fn copy_to_clipboard(&mut self, _: &mut vt100::Screen, ty: &[u8], data: &[u8]) {
-        if data.len() <= MAX_CLIPBOARD_B64 { self.push(Effect::Clipboard(ty.to_vec(), data.to_vec())); }
-    }
-    fn unhandled_osc(&mut self, _: &mut vt100::Screen, params: &[&[u8]]) {
-        // OSC 9 is a notification unless it is ConEmu's progress (`9;4;...`), which the outer terminal may also
-        // show but which is too chatty to pass on from every pane; OSC 777 only for `notify`.
-        let notify = match params {
-            [b"9", rest @ ..] => !rest.is_empty() && rest[0] != b"4",
-            [b"777", b"notify", ..] => true,
-            _ => false,
-        };
-        if notify && params.iter().map(|p| p.len() + 1).sum::<usize>() <= 4096 { self.push(Effect::Notify(params.join(&b';'))); }
-    }
-}
-
 struct Term {
     resource: String,
     stream: Option<u64>,
-    parser: vt100::Parser<Effects>,
+    emu: Emulator,
     size: (u16, u16),
     attaching: bool,
     closed: Option<String>,
@@ -142,10 +95,10 @@ struct Term {
 }
 
 impl Term {
-    /// Program output: to the VT parser and the key-mode tracker.
+    /// Program output: to the emulator and the key-mode tracker.
     fn feed(&mut self, bytes: &[u8]) {
         self.modes.feed(bytes);
-        self.parser.process(bytes);
+        self.emu.process(bytes);
     }
 
     fn close(&mut self, reason: String) {
@@ -162,9 +115,9 @@ impl Term {
     fn begin_attach(&mut self) {
         self.attaching = true;
         self.closed = None;
-        // A gap invalidates VT parser state. Only the backend's new attach/history repaint can
+        // A gap invalidates the emulator's state. Only the backend's new attach/history repaint can
         // restore it; never concatenate an old partial escape sequence with a fresh stream.
-        self.parser = new_parser_with(self.size.0, self.size.1, self.parser.screen().scrollback_capacity());
+        self.emu = self.emu.fresh();
     }
 }
 
@@ -330,8 +283,8 @@ struct App {
     /// A popup whose view hasn't arrived yet: view, width, context, and until when it may still open.
     pending_popup: Option<(String, u16, Value, std::time::Instant)>,
     /// The cursor shape the focused terminal's program asked for, and the one last sent to the outer terminal.
-    cursor_style: vt100::CursorStyle,
-    cursor_sent: vt100::CursorStyle,
+    cursor_style: CursorShape,
+    cursor_sent: CursorShape,
     /// Merged immutable panel values; invalidate only on this view's entry/live update or snapshot.
     panel_values: Mutex<HashMap<String, Arc<Value>>>,
     panel_dependencies: Mutex<HashMap<String, HashSet<String>>>,
@@ -606,7 +559,7 @@ pub async fn run(socket: &Path) -> Result<()> {
     }
     // Every way out (quit, error, re-exec) passes here; pop before leaving the alternate screen.
     keys::enhance(keys::Enhance::Off);
-    if app.cursor_sent != vt100::CursorStyle::Default { let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::SetCursorStyle::DefaultUserShape); }
+    if app.cursor_sent != CursorShape::Default { let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::SetCursorStyle::DefaultUserShape); }
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture, crossterm::event::DisableBracketedPaste);
     ratatui::restore();
     if reexec {
@@ -652,7 +605,7 @@ impl App {
             peer, tx, ws: Workspace::default(), safe_selected: BTreeSet::new(), owner_unset:false,
             terms: HashMap::new(), stream_view: HashMap::new(), early: HashMap::new(), early_closed: HashMap::new(), typed: None,
             leaves: Vec::new(), focus: 0, overlay: None, pstate: HashMap::new(),
-            filtering: None, filter_detail: false, toast: None, bells: HashMap::new(), selections: HashMap::new(), selecting: None, last_press: None, scroll_mode: None, pending_popup: None, cursor_style: vt100::CursorStyle::Default, cursor_sent: vt100::CursorStyle::Default, panel_values: Mutex::new(HashMap::new()), panel_dependencies: Mutex::new(HashMap::new()), hit: Hit::default(),
+            filtering: None, filter_detail: false, toast: None, bells: HashMap::new(), selections: HashMap::new(), selecting: None, last_press: None, scroll_mode: None, pending_popup: None, cursor_style: CursorShape::Default, cursor_sent: CursorShape::Default, panel_values: Mutex::new(HashMap::new()), panel_dependencies: Mutex::new(HashMap::new()), hit: Hit::default(),
             drag: None, overrides: HashMap::new(), mouse_owner: None, mouse_on: true,
             under: None, input_queues: HashMap::new(), view_streams: Arc::default(), zoomed: None, autofocused: None, window: Window::default(), pending_focus: None, tab_press: None, link_click: None, repeat_until: None, focus_now: None, focus_last: None, seen: HashMap::new(), kbd_enhance: false,
             held: KeyModifiers::NONE, message: String::new(), key_hint: None,
@@ -755,7 +708,7 @@ impl App {
                 match self.stream_view.get(&sid).and_then(|v| self.terms.get_mut(v)) {
                     Some(t) => {
                         t.feed(&bytes);
-                        let effects = std::mem::take(&mut t.parser.callbacks_mut().out);
+                        let effects = t.emu.take_effects();
                         if !effects.is_empty() { let view = self.stream_view[&sid].clone(); self.pass_effects(&view, effects); }
                     }
                     None => {
@@ -984,7 +937,7 @@ impl App {
                             }
                             // Output from before the attach reply is the backend's history repaint: never re-run a
                             // copy, bell or notification from it.
-                            t.parser.callbacks_mut().out.clear();
+                            t.emu.take_effects();
                         }
                     }
                     Err(e) => t.close(e),
@@ -1026,7 +979,7 @@ impl App {
     fn send_to_focused(&mut self, bytes: Vec<u8>) {
         let Some(view) = self.leaves.get(self.focus).cloned() else { return };
         if let Some(t) = self.terms.get_mut(&view) {
-            t.parser.screen_mut().set_scrollback(0);
+            t.emu.set_scroll_offset(0);
             if let Some(sid) = t.stream {
                 self.send_input(sid, bytes);
             }
@@ -1059,8 +1012,8 @@ impl App {
             self.message = "paste not sent: the terminal is not attached".into();
             return;
         };
-        t.parser.screen_mut().set_scrollback(0);
-        let bytes = paste_bytes(text, t.parser.screen().bracketed_paste());
+        t.emu.set_scroll_offset(0);
+        let bytes = paste_bytes(text, t.emu.bracketed_paste());
         if bytes.len() > MAX_PASTE {
             self.message = format!("paste not sent: {} bytes is over the {} MiB limit", bytes.len(), MAX_PASTE / (1024 * 1024));
             return;
@@ -1168,7 +1121,7 @@ impl App {
         match self.view_kind(&view).as_str() {
             "terminal" => {
                 let Some(t) = self.terms.get(&view) else { return };
-                if let Some(bytes) = keys::encode(&k, t.parser.screen().application_cursor(), t.modes.extended()) {
+                if let Some(bytes) = keys::encode(&k, t.emu.application_cursor(), t.modes.extended()) {
                     self.selections.remove(&view);
                     self.send_to_focused(bytes);
                 }
@@ -1601,9 +1554,9 @@ impl App {
     fn selection_text(&mut self, view: &str) -> Option<String> {
         let sel = self.selections.get(view).filter(|s| s.dragged || s.unit != scrollback::Unit::Cell)?.clone();
         let t = self.terms.get_mut(view)?;
-        let scrolled = scrollback::scrolled(&t.parser, t.parser.callbacks().dropped);
+        let scrolled = t.emu.scrolled();
         let (a, b) = sel.ordered();
-        Some(scrollback::text(&mut t.parser, scrolled, a, b)).filter(|s| !s.is_empty())
+        Some(scrollback::text(&mut t.emu, scrolled, a, b)).filter(|s| !s.is_empty())
     }
 
     /// A mouse position in a terminal view's text, if it is inside the view.
@@ -1613,8 +1566,8 @@ impl App {
         let t = self.terms.get(view)?;
         let y = pos.y.clamp(inner.y, inner.bottom().saturating_sub(1)) - inner.y;
         let x = pos.x.clamp(inner.x, inner.right().saturating_sub(1)) - inner.x;
-        let scrolled = scrollback::scrolled(&t.parser, t.parser.callbacks().dropped);
-        Some(scrollback::Pos { row: scrollback::top(&t.parser, scrolled) + y as usize, col: x })
+        let scrolled = t.emu.scrolled();
+        Some(scrollback::Pos { row: scrollback::top(&t.emu, scrolled) + y as usize, col: x })
     }
 
     /// A left press in a terminal that vqro handles: start a selection (a double press selects a word, a triple
@@ -1631,8 +1584,8 @@ impl App {
         let mut sel = scrollback::Selection { anchor: p, head: p, unit, ..Default::default() };
         if unit != scrollback::Unit::Cell {
             if let Some(t) = self.terms.get_mut(view) {
-                let scrolled = scrollback::scrolled(&t.parser, t.parser.callbacks().dropped);
-                scrollback::widen(&mut t.parser, scrolled, &mut sel);
+                let scrolled = t.emu.scrolled();
+                scrollback::widen(&mut t.emu, scrolled, &mut sel);
             }
         }
         self.selections.insert(view.to_string(), sel);
@@ -1642,9 +1595,9 @@ impl App {
     /// The selecting drag moved: extend to the pointer (past the top or bottom edge, scroll a line that way).
     fn selection_drag(&mut self, view: &str, pos: Position) {
         if let (Some((_, _, inner)), Some(t)) = (self.hit.leaves.iter().find(|(v, _, _)| v == view).cloned(), self.terms.get_mut(view)) {
-            let at = t.parser.screen().scrollback();
-            if pos.y < inner.y { t.parser.screen_mut().set_scrollback(at + 1); }
-            else if pos.y >= inner.bottom() { t.parser.screen_mut().set_scrollback(at.saturating_sub(1)); }
+            let at = t.emu.scroll_offset();
+            if pos.y < inner.y { t.emu.set_scroll_offset(at + 1); }
+            else if pos.y >= inner.bottom() { t.emu.set_scroll_offset(at.saturating_sub(1)); }
         }
         let Some(p) = self.terminal_pos(view, pos, true) else { return };
         let Some(mut sel) = self.selections.get(view).cloned() else { return };
@@ -1652,8 +1605,8 @@ impl App {
         sel.dragged = true;
         if sel.unit != scrollback::Unit::Cell {
             if let Some(t) = self.terms.get_mut(view) {
-                let scrolled = scrollback::scrolled(&t.parser, t.parser.callbacks().dropped);
-                scrollback::widen(&mut t.parser, scrolled, &mut sel);
+                let scrolled = t.emu.scrolled();
+                scrollback::widen(&mut t.emu, scrolled, &mut sel);
             }
         }
         self.selections.insert(view.to_string(), sel);
@@ -1681,7 +1634,7 @@ impl App {
 
     fn leave_scroll_mode(&mut self) {
         if let Some(m) = self.scroll_mode.take() {
-            if let Some(t) = self.terms.get_mut(&m.view) { t.parser.screen_mut().set_scrollback(0); }
+            if let Some(t) = self.terms.get_mut(&m.view) { t.emu.set_scroll_offset(0); }
             self.message.clear();
         }
     }
@@ -1691,7 +1644,7 @@ impl App {
     fn on_scroll_key(&mut self, k: KeyEvent) {
         let Some(mut m) = self.scroll_mode.take() else { return };
         let Some(t) = self.terms.get_mut(&m.view) else { return };
-        let scrolled = scrollback::scrolled(&t.parser, t.parser.callbacks().dropped);
+        let scrolled = t.emu.scrolled();
         if m.typing {
             match k.code {
                 KeyCode::Esc => { m.typing = false; m.query.clear(); m.hits.clear(); }
@@ -1702,16 +1655,16 @@ impl App {
             }
             if !matches!(k.code, KeyCode::Enter | KeyCode::Esc) {
                 // Each change searches again and shows the nearest match at or above the bottom of the view.
-                m.hits = scrollback::search(&mut t.parser, scrolled, &m.query);
-                let bottom = scrollback::top(&t.parser, scrolled) + usize::from(t.parser.screen().size().0.get()) - 1;
+                m.hits = scrollback::search(&mut t.emu, scrolled, &m.query);
+                let bottom = scrollback::top(&t.emu, scrolled) + usize::from(t.emu.rows()) - 1;
                 m.at = m.hits.iter().rposition(|h| h.row <= bottom).unwrap_or(m.hits.len().saturating_sub(1));
-                if let Some(h) = m.hits.get(m.at) { scrollback::reveal(&mut t.parser, scrolled, h.row); }
+                if let Some(h) = m.hits.get(m.at) { scrollback::reveal(&mut t.emu, scrolled, h.row); }
             }
         } else {
-            let rows = usize::from(t.parser.screen().size().0.get());
-            let at = t.parser.screen().scrollback();
-            let len = t.parser.screen().scrollback_len();
-            let mut set = |to: usize| t.parser.screen_mut().set_scrollback(to.min(len));
+            let rows = usize::from(t.emu.rows());
+            let at = t.emu.scroll_offset();
+            let len = t.emu.scrollback_len();
+            let mut set = |to: usize| t.emu.set_scroll_offset(to.min(len));
             match (k.code, keys::name(&k).unwrap_or_default().as_str()) {
                 (KeyCode::Esc, _) | (_, "q") => { self.scroll_mode = Some(m); return self.leave_scroll_mode(); }
                 (KeyCode::Up, _) | (_, "k") => set(at + 1),
@@ -1725,7 +1678,7 @@ impl App {
                     let n = m.hits.len();
                     m.at = if keys::name(&k).as_deref() == Some("n") { (m.at + n - 1) % n } else { (m.at + 1) % n };
                     let row = m.hits[m.at].row;
-                    scrollback::reveal(&mut t.parser, scrolled, row);
+                    scrollback::reveal(&mut t.emu, scrolled, row);
                 }
                 (_, "y") => {
                     let view = m.view.clone();
@@ -1747,7 +1700,7 @@ impl App {
     fn scroll_status(&mut self) {
         let Some(m) = &self.scroll_mode else { return };
         let Some(t) = self.terms.get(&m.view) else { return };
-        let (at, len) = (t.parser.screen().scrollback(), t.parser.screen().scrollback_len());
+        let (at, len) = (t.emu.scroll_offset(), t.emu.scrollback_len());
         let found = if m.query.is_empty() { String::new() }
             else if m.hits.is_empty() { format!("  /{}: no match", m.query) }
             else { format!("  /{}  {} of {}  n/N", m.query, m.hits.len() - m.at, m.hits.len()) };
@@ -1837,7 +1790,7 @@ impl App {
         if is_prefix {
             // The prefix twice sends it to the program.
             self.overlay = None;
-            let (app_cursor, ext) = self.leaves.get(self.focus).and_then(|v| self.terms.get(v)).map(|t| (t.parser.screen().application_cursor(), t.modes.extended())).unwrap_or_default();
+            let (app_cursor, ext) = self.leaves.get(self.focus).and_then(|v| self.terms.get(v)).map(|t| (t.emu.application_cursor(), t.modes.extended())).unwrap_or_default();
             if let Some(bytes) = keys::encode(&k, app_cursor, ext) {
                 self.send_to_focused(bytes);
             }
@@ -2149,11 +2102,11 @@ impl App {
     /// wrapped are joined, so a long URL is whole).
     fn link_at(&mut self, view: &str, p: scrollback::Pos) -> Option<crate::ui_model::links::Link> {
         let t = self.terms.get_mut(view)?;
-        let scrolled = scrollback::scrolled(&t.parser, t.parser.callbacks().dropped);
-        let (first, last) = scrollback::line(&mut t.parser, scrolled, p.row);
+        let scrolled = t.emu.scrolled();
+        let (first, last) = scrollback::line(&mut t.emu, scrolled, p.row);
         let (mut text, mut cells) = (String::new(), Vec::new());
         for at in first.row..=last.row {
-            let Some((chars, starts, _)) = scrollback::row(&mut t.parser, scrolled, at) else { continue };
+            let Some((chars, starts, _)) = scrollback::row(&mut t.emu, scrolled, at) else { continue };
             for (c, col) in chars.into_iter().zip(starts) {
                 text.push(c);
                 cells.push((at, col, c));
@@ -2689,18 +2642,18 @@ impl App {
                         }
                         let Some(t) = self.terms.get_mut(&view) else { return false };
                         let arrows = self.ws.entries.get("doc/settings/tui").and_then(|s| s["wheel_arrows"].as_bool()).unwrap_or(true);
-                        if t.parser.screen().alternate_screen() && arrows {
+                        if t.emu.alternate_screen() && arrows {
                             // Full-screen program without mouse support: arrows scroll it.
                             let key = KeyEvent::new(if up { KeyCode::Up } else { KeyCode::Down }, KeyModifiers::NONE);
-                            let bytes = keys::encode(&key, t.parser.screen().application_cursor(), keys::Extended::Legacy).unwrap_or_default().repeat(3);
+                            let bytes = keys::encode(&key, t.emu.application_cursor(), keys::Extended::Legacy).unwrap_or_default().repeat(3);
                             if let Some(sid) = t.stream {
                                 self.send_input(sid, bytes);
                             }
                             false
                         } else {
-                            let cur = t.parser.screen().scrollback();
+                            let cur = t.emu.scroll_offset();
                             let next = if up { cur + 3 } else { cur.saturating_sub(3) };
-                            t.parser.screen_mut().set_scrollback(next);
+                            t.emu.set_scroll_offset(next);
                             self.scroll_status();
                             true
                         }
@@ -2806,10 +2759,10 @@ impl App {
     fn forward_mouse(&mut self, view: &str, m: &MouseEvent) -> bool {
         let Some((_, _, inner)) = self.hit.leaves.iter().find(|(v, _, _)| v == view).cloned() else { return false };
         let Some(t) = self.terms.get(view) else { return false };
-        let screen = t.parser.screen();
         let col = m.column.saturating_sub(inner.x).min(inner.width.saturating_sub(1));
         let row = m.row.saturating_sub(inner.y).min(inner.height.saturating_sub(1));
-        let Some(bytes) = mouse::encode(m, col, row, screen.mouse_protocol_mode(), screen.mouse_protocol_encoding()) else { return false };
+        let (mode, encoding) = t.emu.mouse();
+        let Some(bytes) = mouse::encode(m, col, row, mode, encoding) else { return false };
         if let Some(sid) = t.stream {
             self.send_input(sid, bytes);
         }
@@ -2957,7 +2910,7 @@ impl App {
         let [main, status] = Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(f.area());
         let mut hit = Hit::default();
         // Only a focused terminal's cursor carries its program's shape; anything else gets the user's default.
-        self.cursor_style = vt100::CursorStyle::Default;
+        self.cursor_style = CursorShape::Default;
         match self.active_layout() {
             Some((_, mut root)) => {
                 self.tab_marks(&mut root);
@@ -3031,7 +2984,7 @@ impl App {
         if let (Some(c), None) = (cursor, &self.overlay) {
             f.set_cursor_position(c);
         } else {
-            self.cursor_style = vt100::CursorStyle::Default;
+            self.cursor_style = CursorShape::Default;
         }
     }
 
@@ -3057,7 +3010,7 @@ impl App {
             "terminal" => {
                 let rid = v["resource"].as_str().unwrap_or("").to_string();
                 let res = self.ws.resources.get(&rid).cloned();
-                let scroll = self.terms.get(view).map(|t| t.parser.screen().scrollback()).unwrap_or(0);
+                let scroll = self.terms.get(view).map(|t| t.emu.scroll_offset()).unwrap_or(0);
                 let title = match &res {
                     Some(r) => {
                         let name = v["title"].as_str().map(String::from).or_else(|| resource_name(r)).unwrap_or_else(|| rid.clone());
@@ -3081,7 +3034,7 @@ impl App {
                 let t = self.terms.entry(view.to_string()).or_insert_with(|| Term {
                     resource: rid.clone(),
                     stream: None,
-                    parser: new_parser_with(inner.width, inner.height, lines),
+                    emu: Emulator::new(inner.width, inner.height, lines),
                     size: (inner.width, inner.height),
                     attaching: false,
                     closed: None,
@@ -3092,7 +3045,7 @@ impl App {
                         self.stream_view.remove(&sid);
                         self.peer.notify("stream.close", json!({"stream": sid}));
                     }
-                    *t = Term { resource: rid.clone(), stream: None, parser: new_parser_with(inner.width, inner.height, lines), size: (inner.width, inner.height), attaching: false, closed: None, retry_at: None, modes: Default::default() };
+                    *t = Term { resource: rid.clone(), stream: None, emu: Emulator::new(inner.width, inner.height, lines), size: (inner.width, inner.height), attaching: false, closed: None, retry_at: None, modes: Default::default() };
                 }
                 if !available && (t.stream.is_some() || t.attaching) {
                     if let Some(stream) = t.stream.take() {
@@ -3104,7 +3057,7 @@ impl App {
                 // While a border is being dragged, programs keep their size; they resize once on release.
                 if t.size != (inner.width, inner.height) && !dragging {
                     t.size = (inner.width, inner.height);
-                    t.parser.screen_mut().set_size(nz(inner.height), nz(inner.width));
+                    t.emu.resize(inner.width, inner.height);
                     if let Some(sid) = t.stream {
                         self.peer.notify("stream.resize", json!({"stream": sid, "cols": inner.width, "rows": inner.height}));
                     }
@@ -3114,7 +3067,7 @@ impl App {
                     let (peer, tx, view, rid) = (self.peer.clone(), self.tx.clone(), view.to_string(), rid.clone());
                     let (cols, rows) = (inner.width, inner.height);
                     let connection = self.connection;
-                    let history = t.parser.screen().scrollback_capacity();
+                    let history = t.emu.scrollback_capacity();
                     tokio::spawn(async move {
                         let result = peer
                             .call("resource.attach", json!({"resource": rid, "cols": cols, "rows": rows, "history": history}))
@@ -3124,10 +3077,10 @@ impl App {
                         let _ = tx.send(Msg::Attached { connection, view, resource: rid, result });
                     });
                 }
-                render_screen(f.buffer_mut(), inner, t.parser.screen());
+                t.emu.draw(f.buffer_mut(), inner);
                 // The selection and search matches, by row so they stay on their text while output scrolls.
-                let scrolled = scrollback::scrolled(&t.parser, t.parser.callbacks().dropped);
-                let top = scrollback::top(&t.parser, scrolled);
+                let scrolled = t.emu.scrolled();
+                let top = scrollback::top(&t.emu, scrolled);
                 let buf = f.buffer_mut();
                 if let Some(sel) = self.selections.get(view) {
                     for r in 0..inner.height {
@@ -3150,11 +3103,9 @@ impl App {
                     let line = Line::from(Span::styled(format!(" stream closed: {reason} "), pal.style(Some("warn"))));
                     f.render_widget(Paragraph::new(line), Rect { height: 1, ..inner });
                 }
-                let screen = t.parser.screen();
-                if focused && !screen.hide_cursor() && screen.scrollback() == 0 {
-                    let (r, c) = screen.cursor_position();
+                if let Some((r, c, shape)) = t.emu.cursor().filter(|_| focused) {
                     if r < inner.height && c < inner.width {
-                        self.cursor_style = screen.cursor_style();
+                        self.cursor_style = shape;
                         return Some((inner.x + c, inner.y + r));
                     }
                 }
@@ -3657,10 +3608,6 @@ fn menu_lines(items: &[Item], icons: &Icons) -> Vec<String> {
         .collect()
 }
 
-fn nz(n: u16) -> std::num::NonZeroU16 {
-    std::num::NonZeroU16::new(n.max(1)).unwrap()
-}
-
 /// A terminal's name: one the user gave, else the title its program set (OSC 0/2, as the backend reports it), else
 /// its command.
 fn resource_name(r: &Value) -> Option<String> {
@@ -3668,12 +3615,8 @@ fn resource_name(r: &Value) -> Option<String> {
 }
 
 #[cfg(test)]
-fn new_parser(cols: u16, rows: u16) -> vt100::Parser<Effects> {
-    new_parser_with(cols, rows, DEFAULT_SCROLLBACK)
-}
-
-fn new_parser_with(cols: u16, rows: u16, lines: usize) -> vt100::Parser<Effects> {
-    vt100::Parser::new_with_callbacks(nz(rows), nz(cols), lines, Effects::default())
+fn new_parser(cols: u16, rows: u16) -> Emulator {
+    Emulator::new(cols, rows, DEFAULT_SCROLLBACK)
 }
 
 /// Scrollback lines per terminal pane (`doc/settings/tui.scrollback_lines`): each line costs 32 bytes per column,
@@ -3694,17 +3637,16 @@ struct ScrollMode {
     at: usize,
 }
 
-fn cursor_shape(s: vt100::CursorStyle) -> crossterm::cursor::SetCursorStyle {
+fn cursor_shape(s: CursorShape) -> crossterm::cursor::SetCursorStyle {
     use crossterm::cursor::SetCursorStyle as C;
-    use vt100::CursorStyle as V;
     match s {
-        V::Default => C::DefaultUserShape,
-        V::BlinkBlock => C::BlinkingBlock,
-        V::SteadyBlock => C::SteadyBlock,
-        V::BlinkUnderline => C::BlinkingUnderScore,
-        V::SteadyUnderline => C::SteadyUnderScore,
-        V::BlinkVerticalBar => C::BlinkingBar,
-        V::SteadyVerticalBar => C::SteadyBar,
+        CursorShape::Default => C::DefaultUserShape,
+        CursorShape::BlinkBlock => C::BlinkingBlock,
+        CursorShape::SteadyBlock => C::SteadyBlock,
+        CursorShape::BlinkUnderline => C::BlinkingUnderScore,
+        CursorShape::SteadyUnderline => C::SteadyUnderScore,
+        CursorShape::BlinkBar => C::BlinkingBar,
+        CursorShape::SteadyBar => C::SteadyBar,
     }
 }
 
@@ -3714,48 +3656,6 @@ fn effect_bytes(e: &Effect) -> Vec<u8> {
         Effect::Clipboard(ty, data) => [b"\x1b]52;".as_slice(), ty, b";", data, b"\x07"].concat(),
         Effect::Bell => b"\x07".to_vec(),
         Effect::Notify(body) => [b"\x1b]".as_slice(), body, b"\x07"].concat(),
-    }
-}
-
-fn color(c: vt100::Color) -> Color {
-    match c {
-        vt100::Color::Default => Color::Reset,
-        vt100::Color::Idx(i) => Color::Indexed(i),
-        vt100::Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
-    }
-}
-
-fn render_screen(buf: &mut Buffer, area: Rect, screen: &vt100::Screen) {
-    let (rows, cols) = screen.size();
-    let (rows, cols) = (u16::from(rows), u16::from(cols));
-    for row in 0..rows.min(area.height) {
-        for col in 0..cols.min(area.width) {
-            let Some(cell) = screen.cell(row, col) else { continue };
-            if cell.is_wide_continuation() {
-                continue;
-            }
-            let mut style = Style::new().fg(color(cell.fgcolor())).bg(color(cell.bgcolor()));
-            if cell.bold() {
-                style = style.add_modifier(Modifier::BOLD);
-            }
-            if cell.dim() {
-                style = style.add_modifier(Modifier::DIM);
-            }
-            if cell.italic() {
-                style = style.add_modifier(Modifier::ITALIC);
-            }
-            if cell.underline() {
-                style = style.add_modifier(Modifier::UNDERLINED);
-            }
-            if cell.inverse() {
-                style = style.add_modifier(Modifier::REVERSED);
-            }
-            let text = cell.contents();
-            if let Some(out) = buf.cell_mut((area.x + col, area.y + row)) {
-                out.set_symbol(if text.is_empty() { " " } else { text });
-                out.set_style(style);
-            }
-        }
     }
 }
 
@@ -3774,29 +3674,29 @@ mod tests {
     fn program_effects_are_collected_bounded_and_passed_on_verbatim() {
         let mut p = new_parser(80, 24);
         p.process(b"a\x07b\x07\x1b]52;c;aGk=\x07\x1b]52;c;?\x07\x1b]9;done\x07\x1b]9;4;1;50\x07\x1b]777;notify;T;B\x07\x1b]777;other\x07\x1b]8;;http://x\x07");
-        let out = std::mem::take(&mut p.callbacks_mut().out);
+        let out = p.take_effects();
         assert_eq!(out, vec![Effect::Bell, Effect::Clipboard(b"c".to_vec(), b"aGk=".to_vec()), Effect::Notify(b"9;done".to_vec()), Effect::Notify(b"777;notify;T;B".to_vec())],
             "one bell per parse; clipboard reads and progress OSC 9;4 are not passed on");
         assert_eq!(effect_bytes(&out[1]), b"\x1b]52;c;aGk=\x07");
         assert_eq!(effect_bytes(&out[3]), b"\x1b]777;notify;T;B\x07");
         for _ in 0..100 { p.process(b"\x1b]9;x\x07"); }
-        assert_eq!(p.callbacks().out.len(), MAX_EFFECTS);
+        assert_eq!(p.take_effects().len(), emulator::MAX_EFFECTS);
         // Dim is drawn; the cursor shape a program sets is tracked for the outer terminal.
         let mut p = new_parser(10, 2);
         p.process(b"\x1b[2mD\x1b[5 q");
         let mut buf = Buffer::empty(Rect::new(0, 0, 10, 2));
-        render_screen(&mut buf, Rect::new(0, 0, 10, 2), p.screen());
+        p.draw(&mut buf, Rect::new(0, 0, 10, 2));
         assert!(buf[(0, 0)].modifier.contains(Modifier::DIM));
-        assert_eq!(p.screen().cursor_style(), vt100::CursorStyle::BlinkVerticalBar);
+        assert_eq!(p.cursor().map(|c| c.2), Some(CursorShape::BlinkBar));
     }
 
     #[tokio::test]
     async fn terminal_selection_scroll_mode_and_search() {
         let (mut app, _) = app();
         app.load(&json!({"epoch":"e","seq":1,"entries":{"view/v":{"value":{"kind":"terminal","resource":"r1"}}},"resources":[{"id":"r1","kind":"terminal","state":"live"}]}));
-        let mut parser = new_parser_with(20, 3, 100);
-        parser.process(b"one alpha\r\ntwo /tmp/x.log\r\nthree alpha\r\nfour\r\nfive alpha");
-        app.terms.insert("v".into(), Term { resource: "r1".into(), stream: None, parser, size: (20, 3), attaching: false, closed: None, retry_at: None, modes: Default::default() });
+        let mut emu = Emulator::new(20, 3, 100);
+        emu.process(b"one alpha\r\ntwo /tmp/x.log\r\nthree alpha\r\nfour\r\nfive alpha");
+        app.terms.insert("v".into(), Term { resource: "r1".into(), stream: None, emu, size: (20, 3), attaching: false, closed: None, retry_at: None, modes: Default::default() });
         app.leaves = vec!["v".into()];
         let inner = Rect::new(1, 1, 20, 3);
         app.hit.leaves = vec![("v".into(), Rect::new(0, 0, 22, 5), inner)];
@@ -3815,7 +3715,7 @@ mod tests {
         app.run_command("client.scroll", json!({}), json!({}), None);
         assert!(app.message.starts_with("scroll ↑0 of 2"), "{}", app.message);
         app.on_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
-        assert_eq!(app.terms["v"].parser.screen().scrollback(), 2, "g: the oldest line");
+        assert_eq!(app.terms["v"].emu.scroll_offset(), 2, "g: the oldest line");
         app.selection_press("v", at(6, 1)); app.selection_press("v", at(6, 1)); app.selection_release("v");
         assert_eq!(app.selection_text("v").as_deref(), Some("/tmp/x.log"));
         app.selection_press("v", at(6, 1)); app.selection_release("v");
@@ -3829,10 +3729,10 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
         app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
         assert!(app.message.contains("/ALPHA  3 of 3"), "{}", app.message);
-        assert_eq!(app.terms["v"].parser.screen().scrollback(), 2, "the oldest match is in view");
+        assert_eq!(app.terms["v"].emu.scroll_offset(), 2, "the oldest match is in view");
         app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(app.scroll_mode.is_none());
-        assert_eq!(app.terms["v"].parser.screen().scrollback(), 0, "leaving returns to the live screen");
+        assert_eq!(app.terms["v"].emu.scroll_offset(), 0, "leaving returns to the live screen");
         // The setting is bounded.
         app.ws.entries.insert("doc/settings/tui".into(), json!({"scrollback_lines": 10_000_000}));
         assert_eq!(app.scrollback_lines(), 20_000);
@@ -4316,7 +4216,7 @@ mod tests {
         let (mut app, _) = app();
         app.load(&snapshot(1, "x"));
         app.on_incoming(resource_event(2, json!({"id": "r1", "state": "live", "available": true, "status": null}), false));
-        app.terms.insert("view".into(), Term { resource: "r1".into(), stream: Some(9), parser: new_parser(80, 24), size: (80, 24), attaching: false, closed: None, retry_at: None, modes: Default::default() });
+        app.terms.insert("view".into(), Term { resource: "r1".into(), stream: Some(9), emu: new_parser(80, 24), size: (80, 24), attaching: false, closed: None, retry_at: None, modes: Default::default() });
         app.stream_view.insert(9, "view".into());
         app.on_incoming(resource_event(3, json!({"id": "r1", "available": false, "stale": true}), true));
         assert!(app.terms["view"].stream.is_none());
@@ -4355,7 +4255,7 @@ mod tests {
     #[tokio::test]
     async fn early_attach_buffer_overflow_is_a_gap_not_retained_bytes() {
         let (mut app, _) = app();
-        app.terms.insert("view".into(), Term { resource:"r1".into(), stream:None, parser:new_parser(80,24), size:(80,24), attaching:true, closed:None, retry_at:None, modes:Default::default() });
+        app.terms.insert("view".into(), Term { resource:"r1".into(), stream:None, emu:new_parser(80,24), size:(80,24), attaching:true, closed:None, retry_at:None, modes:Default::default() });
         let bytes = B64.encode(vec![b'x'; 65536]);
         for _ in 0..256 { app.on_incoming(Incoming::Notification { method:"stream.data".into(), params:json!({"stream":1,"data":bytes}) }); }
         assert!(!app.early.contains_key(&1));
@@ -4507,7 +4407,7 @@ mod tests {
         let (peer, _) = Peer::spawn(reader, writer);
         app.reconnected(peer, &snapshot(1, "current"));
         app.terms.insert("view".into(), Term {
-            resource: "r1".into(), stream: None, parser: new_parser(80, 24),
+            resource: "r1".into(), stream: None, emu: new_parser(80, 24),
             size: (80, 24), attaching: true, closed: None, retry_at: None, modes: Default::default(),
         });
         app.on_msg(Msg::Attached { connection: old_connection, view: "view".into(), resource: "r1".into(), result: Ok(1) });
@@ -4533,7 +4433,7 @@ mod tests {
         let snap = peer.call("workspace.snapshot", Value::Null).await.unwrap();
         let (mut app, mut messages) = app();
         app.terms.insert("term-r1".into(), Term {
-            resource: "r1".into(), stream: Some(99), parser: new_parser(80, 24),
+            resource: "r1".into(), stream: Some(99), emu: new_parser(80, 24),
             size: (80, 24), attaching: false, closed: None, retry_at: None, modes: Default::default(),
         });
         app.stream_view.insert(99, "term-r1".into());
@@ -4551,7 +4451,7 @@ mod tests {
                     Some(m) = incoming.recv() => app.on_incoming(m),
                     Some(m) = messages.recv() => app.on_msg(m),
                 }
-                if app.terms.values().any(|t| t.stream.is_some() && t.parser.screen().contents().contains("fake f1")) {
+                if app.terms.values().any(|t| t.stream.is_some() && t.emu.contents().contains("fake f1")) {
                     break;
                 }
             }
@@ -4572,7 +4472,7 @@ mod tests {
                     Some(m) = messages.recv() => app.on_msg(m),
                 }
                 let term = &app.terms["term-r1"];
-                if term.stream.is_some_and(|new| new != sid) && term.parser.screen().contents().contains("fake f1") { break; }
+                if term.stream.is_some_and(|new| new != sid) && term.emu.contents().contains("fake f1") { break; }
             }
         }).await.unwrap();
     }
@@ -4581,7 +4481,7 @@ mod tests {
     async fn closure_before_attach_reply_cannot_adopt_a_closed_stream() {
         let (mut app, _) = app();
         app.terms.insert("view".into(), Term {
-            resource: "r1".into(), stream: None, parser: new_parser(80, 24),
+            resource: "r1".into(), stream: None, emu: new_parser(80, 24),
             size: (80, 24), attaching: true, closed: None, retry_at: None, modes: Default::default(),
         });
         app.on_incoming(Incoming::Notification { method: "stream.closed".into(), params: json!({"stream": 7, "reason": {"reason": "slow_consumer"}}) });
@@ -4594,10 +4494,10 @@ mod tests {
     #[test]
     fn closed_live_terminal_retries_without_a_resource_event_and_resets_parser() {
         let mut term = Term {
-            resource: "r1".into(), stream: Some(1), parser: new_parser(80, 24),
+            resource: "r1".into(), stream: Some(1), emu: new_parser(80, 24),
             size: (80, 24), attaching: false, closed: None, retry_at: None, modes: Default::default(),
         };
-        term.parser.process(b"old\x1b[");
+        term.emu.process(b"old\x1b[");
         term.close("slow_consumer".into());
         let now = std::time::Instant::now();
         assert!(!term.can_attach(true, now), "retry is paced");
@@ -4606,8 +4506,8 @@ mod tests {
         term.begin_attach();
         assert!(term.attaching);
         assert!(term.closed.is_none());
-        term.parser.process(b"repaint");
-        assert_eq!(term.parser.screen().contents(), "repaint", "fresh attach cannot reuse old VT state");
+        term.emu.process(b"repaint");
+        assert_eq!(term.emu.contents(), "repaint", "fresh attach cannot reuse old VT state");
     }
 
     #[tokio::test]
