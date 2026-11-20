@@ -1,7 +1,7 @@
 # tier1: Claude Code and Pi agents with vqro's inbox plugin
 
-`tier1` adds two launch commands:
-- **New Claude agent** (`tier1.claude`; also the `+C` tab-bar button);
+`tier1` adds two launch commands (the command list; no tab-bar button):
+- **New Claude agent** (`tier1.claude`);
 - **New Pi agent (tier 1)** (`tier1.pi`).
 
 Each starts the runtime in a new backend terminal tab, as you would by hand. It also wires vqro's tier-1 pull plugin

@@ -80,10 +80,6 @@ class Tier1:
         for runtime, title in (("claude", "New Claude agent"), ("pi", "New Pi agent (tier 1)")):
             ext.command("tier1." + runtime, title + " (args: cwd)")(lambda args, runtime=runtime: self.launch(runtime, args))
         ext.on_event(self.changed)
-        ext.contribute({
-            "menu/tier1.claude": {"where": "tabbar", "label": "+", "icon_after": True,
-                                  "icon": {"name": "agent", "nerd": "\U000f06a9", "text": "C"}, "command": "tier1.claude", "order": 6},
-        })
         self.sweep()
 
     # -- launch -------------------------------------------------------------------------------------------------

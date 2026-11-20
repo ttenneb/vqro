@@ -196,7 +196,7 @@ try:
     check("Extensions page opens with static manifests", bool(open_settings()) and "Agent controls" in screen(), screen())
     wide = screen()
     print("CAPTURE extensions-wide\n" + wide, flush=True)
-    keys("/"); keys("pi", literal=True); keys("Enter")
+    keys("/"); keys("pi launcher", literal=True); keys("Enter")  # "pi" alone also matches tier1's New Pi agent
     check("manifest list search and count", bool(wait(lambda: f"1 of {BUILTIN_COUNT}" in screen() and "Pi launcher" in screen())))
     # Clicking a row selects details; only its checkbox or explicit keyboard activation changes state.
     row = next((i, line) for i, line in enumerate(screen().splitlines()) if "[x]" in line and "Pi launcher" in line)
@@ -216,7 +216,7 @@ try:
     check("restarted extension registered its settings command again", bool(wait(lambda: call("extension.list")["extensions"]["pi"]["generation"] >= before + 2
         and call("command.invoke", {"name": "pi.settings", "args": {}}))))
     open_settings()
-    keys("/"); keys("pi", literal=True); keys("Enter")
+    keys("/"); keys("pi launcher", literal=True); keys("Enter")  # "pi" alone also matches tier1's New Pi agent
     wait(lambda: f"1 of {BUILTIN_COUNT}" in screen() and "Extension settings" in screen())
     keys("Tab", "Right", "Right", "Enter")  # Turn off, Restart, Extension settings
     check("manifest settings_command opens its own settings", bool(wait(lambda: "Pi runtime argv" in screen())), screen())

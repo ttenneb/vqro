@@ -186,9 +186,11 @@ async fn coord_reaches_workspaces_that_applied_earlier_defaults_once() {
     let list: Value = serde_json::from_slice(&std::fs::read(bundled.join("defaults.json")).unwrap()).unwrap();
     let version = list["version"].as_u64().unwrap();
     let coord = list["extensions"].as_array().unwrap().iter().find(|e| e["name"] == "coord").unwrap();
-    assert_eq!(coord["since"].as_u64(), Some(version), "coord is declared at the newest defaults version");
+    let since = coord["since"].as_u64().unwrap();
+    assert_eq!(since, 7, "coord moved to since 7 (offered once to workspaces that applied v5/v6 without it)");
+    // A workspace from just before coord's version: everything declared earlier, without coord.
     let previous: Vec<Value> = list["extensions"].as_array().unwrap().iter()
-        .filter(|e| e["since"].as_u64().unwrap_or(1) < version && e["name"] != "coord").map(|e| e["name"].clone()).collect();
+        .filter(|e| e["since"].as_u64().unwrap_or(1) < since && e["name"] != "coord").map(|e| e["name"].clone()).collect();
 
     // A workspace at the previous version whose record never offered coord (the live case).
     let root = tempfile::Builder::new().prefix("pbx").tempdir_in("/tmp").unwrap();
@@ -196,7 +198,7 @@ async fn coord_reaches_workspaces_that_applied_earlier_defaults_once() {
         let (core, socket) = core(root.path(), "old", Some(&bundled));
         let (c, _, _) = client::connect(&socket, "t").await.unwrap();
         c.call("workspace.apply", json!({"ops": [{"op": "delete", "key": "extension/coord"},
-            {"op": "set", "key": "doc/vqro/defaults", "value": {"installed": previous, "from": bundled.to_string_lossy(), "version": version - 1}}]})).await.unwrap();
+            {"op": "set", "key": "doc/vqro/defaults", "value": {"installed": previous, "from": bundled.to_string_lossy(), "version": since - 1}}]})).await.unwrap();
         vqro::server::shutdown(&core).await;
     }
     let (core2, socket2) = core(root.path(), "upgraded", Some(&bundled));
@@ -228,7 +230,7 @@ async fn coord_reaches_workspaces_that_applied_earlier_defaults_once() {
         let mut offered = previous.clone();
         offered.push(json!("coord"));
         c.call("workspace.apply", json!({"ops": [{"op": "delete", "key": "extension/coord"},
-            {"op": "set", "key": "doc/vqro/defaults", "value": {"installed": offered, "from": bundled.to_string_lossy(), "version": version - 1}}]})).await.unwrap();
+            {"op": "set", "key": "doc/vqro/defaults", "value": {"installed": offered, "from": bundled.to_string_lossy(), "version": since - 1}}]})).await.unwrap();
         vqro::server::shutdown(&core).await;
     }
     let (core5, _) = core(removed.path(), "kept-removed", Some(&bundled));
