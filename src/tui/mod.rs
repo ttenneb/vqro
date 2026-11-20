@@ -1087,16 +1087,29 @@ impl App {
         let value = self.panel_value(view);
         let mut container = self.pstate.get(key).cloned().unwrap_or_default();
         let pages = panel::page_titles(&value).len();
-        if pages>0 && matches!(k.code,KeyCode::Char('[')|KeyCode::Char(']')) {
+        // Typing in a composer: every key edits the draft (below), none switches pages, filters or searches.
+        let typing = container.editing.is_some();
+        // An active search: n/N step through matches, Esc ends it (feature search).
+        if !typing && !container.search.is_empty() && matches!(k.code, KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc) {
+            if k.code == KeyCode::Esc { container.search.clear(); self.message.clear(); self.pstate.insert(key.into(), container); }
+            else { self.pstate.insert(key.into(), container); self.search_step(key, view, if k.code == KeyCode::Char('n') { 1 } else { -1 }); }
+            return true;
+        }
+        if !typing && pages>0 && matches!(k.code,KeyCode::Char('[')|KeyCode::Char(']')) {
             container.page=if k.code==KeyCode::Char(']'){(container.page+1)%pages}else{(container.page+pages-1)%pages};container.sel=0;container.top=0;container.detail_focus=false;
             self.pstate.insert(key.into(),container);return true;
         }
         if let Some((id,_))=panel::selected_detail(&value,&container) {
-            if matches!(k.code,KeyCode::Tab|KeyCode::BackTab) {
+            if !typing && matches!(k.code,KeyCode::Tab|KeyCode::BackTab) {
                 panel::sync_detail(&mut container,&id);container.detail_focus=!container.detail_focus;self.pstate.insert(key.into(),container);return true;
             }
         }
-        if k.code==KeyCode::Char('/') {container.detail_focus=false;self.pstate.insert(key.into(),container);self.filtering=Some(key.into());return true;}
+        if !typing && k.code==KeyCode::Char('/') {
+            // `/` searches panels that ask for it (`search: true`), else filters.
+            container.detail_focus=false;container.searching=value["search"]==true;
+            if container.searching { container.search.clear(); container.search_hit=0; }
+            self.pstate.insert(key.into(),container);self.filtering=Some(key.into());return true;
+        }
         let selected=panel::selected_detail(&value,&container);
         let in_detail=container.detail_focus && selected.is_some();
         let (value,mut st)=if in_detail {let(id,v)=selected.unwrap();panel::sync_detail(&mut container,&id);(Arc::new(v),*container.detail.take().unwrap_or_default())}else{(value,container.clone())};
@@ -1336,6 +1349,7 @@ impl App {
 
     fn on_filter_key(&mut self, k: KeyEvent) {
         let Some(key) = self.filtering.clone() else { return };
+        if self.pstate.get(&key).is_some_and(|s| s.searching) { return self.on_search_key(&key, k); }
         let st = self.pstate.entry(key).or_default();
         match k.code {
             KeyCode::Esc => {
@@ -1353,6 +1367,44 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Typing a search (feature search): each change jumps to the first match; Enter keeps it for n/N, Esc ends it.
+    fn on_search_key(&mut self, key: &str, k: KeyEvent) {
+        let st = self.pstate.entry(key.to_string()).or_default();
+        match k.code {
+            KeyCode::Esc => { st.search.clear(); st.searching = false; self.filtering = None; self.message.clear(); return; }
+            KeyCode::Enter => { st.searching = false; self.filtering = None; return; }
+            KeyCode::Backspace => { st.search.pop(); }
+            KeyCode::Char(c) => st.search.push(c),
+            _ => return,
+        }
+        st.search_hit = 0;
+        let view = self.panel_view_for(key);
+        self.search_step(key, &view, 0);
+    }
+
+    /// Show search match `search_hit + delta` (wrapping): open the rows around it and select it.
+    fn search_step(&mut self, key: &str, view: &str, delta: i64) {
+        let value = self.panel_value(view);
+        let st = self.pstate.entry(key.to_string()).or_default();
+        let hits = panel::search(&value, st, &st.search, panel::SUPPORTED);
+        if hits.is_empty() {
+            self.message = if st.search.is_empty() { String::new() } else { format!("/{}: no match", st.search) };
+            return;
+        }
+        let n = hits.len() as i64;
+        st.search_hit = (st.search_hit as i64 + delta).rem_euclid(n) as usize;
+        let (id, open) = &hits[st.search_hit];
+        for a in open { st.open.insert(a.clone(), true); }
+        if let Some(i) = panel::rows(&value, st).iter().position(|r| r.id == *id) { st.sel = i; st.manual_scroll = false; }
+        self.message = format!("/{}  {} of {}  n/N  Esc", st.search, st.search_hit + 1, n);
+    }
+
+    /// The view a panel state key shows (the key itself, or the popup's view).
+    fn panel_view_for(&self, key: &str) -> String {
+        if key == "@popup" { if let Some(Overlay::Popup { view, .. }) = &self.overlay { return view.clone(); } }
+        key.to_string()
     }
 
     fn on_popup_key(&mut self, k: KeyEvent) {
@@ -1773,6 +1825,8 @@ impl App {
                     }
                     "filter" => self.filtering = Some(key),
                     "clear_filter" => st.filter.clear(),
+                    "search" => { st.searching = true; st.search.clear(); st.search_hit = 0; self.filtering = Some(key); }
+                    "search_next" | "search_prev" => { let d = if args["action"] == "search_next" { 1 } else { -1 }; self.search_step(&key, &view, d); }
                     // Navigation for pane-scoped keys (D29): j/k, Home/End, next/previous matching row, expand.
                     action @ ("down" | "up" | "first" | "last" | "end" | "next" | "prev" | "toggle") => {
                         let rows = panel::rows(&value, st);
@@ -1789,6 +1843,29 @@ impl App {
                     }
                     "activate" => { let (key, view) = (key.clone(), view.clone()); self.panel_key(&key, &view, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), ctx.clone()); }
                     other => self.message = format!("client.panel: unknown action {other}"),
+                }
+            }
+            "client.copy" => {
+                // Copy `text`, or the selected row's `copy` (else its text), through the terminal (OSC 52). The
+                // terminal reports nothing back, so the notice says what was sent, not that it arrived.
+                let text = args["text"].as_str().map(String::from).or_else(|| {
+                    let key = ctx["panel"].as_str().map(String::from).or_else(|| self.hit.leaves.get(self.focus).map(|l| l.0.clone()))?;
+                    let view = ctx["panel_view"].as_str().map(String::from).unwrap_or_else(|| key.clone());
+                    let value = self.panel_value(&view);
+                    let st = self.pstate.get(&key).cloned().unwrap_or_default();
+                    let item = panel::rows(&value, &st).get(st.sel)?.item.clone();
+                    item["copy"].as_str().or(item["text"].as_str()).map(String::from)
+                });
+                match text {
+                    Some(t) => {
+                        use base64::Engine;
+                        use std::io::Write;
+                        let b64 = base64::engine::general_purpose::STANDARD.encode(t.as_bytes());
+                        let mut out = std::io::stdout();
+                        let _ = write!(out, "\x1b]52;c;{b64}\x07").and_then(|_| out.flush());
+                        self.message = format!("copy: sent {} characters to the terminal clipboard (OSC 52; some terminals ignore it)", t.chars().count());
+                    }
+                    None => self.message = "copy: nothing selected".into(),
                 }
             }
             "client.palette" => self.overlay = Some(Overlay::Palette { query: String::new(), sel: 0 }),
@@ -2512,7 +2589,7 @@ impl App {
 
     fn draw_status(&mut self, f: &mut Frame, area: Rect, pal: &Palette, icons: &Icons) {
         // Keyboard modes turn the bar into an input line, like a multiplexer's prompt.
-        let filtering = self.filtering.as_ref().map(|k| self.pstate.get(k).map(|s| s.filter.clone()).unwrap_or_default());
+        let filtering = self.filtering.as_ref().map(|k| self.pstate.get(k).map(|s| if s.searching { s.search.clone() } else { s.filter.clone() }).unwrap_or_default());
         let prompt = match &self.overlay {
             _ if filtering.is_some() => Some(("/".to_string(), filtering.clone().unwrap_or_default())),
             Some(Overlay::Prefix { .. }) => Some((self.key_labels(&self.prefix()), self.key_labels(&keys::held_words(self.held)))),
@@ -3171,6 +3248,10 @@ mod tests {
         app.panel_key("p","p",key(KeyCode::Enter,alt),json!({}));
         app.panel_key("p","p",key(KeyCode::Char('j'),KeyModifiers::CONTROL),json!({}));
         app.panel_key("p","p",key(KeyCode::Char('x'),none),json!({}));
+        // `/`, `[` and `]` are text while typing, not filter or page keys.
+        for c in "/[]".chars() { app.panel_key("p","p",key(KeyCode::Char(c),none),json!({})); }
+        assert!(app.filtering.is_none());
+        for _ in 0..3 { app.panel_key("p","p",key(KeyCode::Backspace,none),json!({})); }
         assert_eq!(app.pstate["p"].composers["c"].editor.string(),"hi\n\nx");
         // Esc leaves with the draft kept; the control chip sets a client-local value.
         app.panel_key("p","p",key(KeyCode::Esc,none),json!({}));
@@ -3200,6 +3281,26 @@ mod tests {
         assert_eq!(app.pstate["p"].sel,1);
         app.run_command("client.panel",json!({"action":"end"}),ctx.clone(),None);
         assert_eq!(app.pstate["p"].sel,4);
+        // Search (feature search): `/` on a panel with search: true, matches inside collapsed rows, n/N, Esc.
+        app.load(&json!({"epoch":"e","seq":3,"entries":{"view/p":{"value":{"kind":"panel","search":true,"items":[
+            {"text":"you: lockfile?"},{"id":"act","text":"Activity","children":[{"text":"cargo update lockfile"}]},{"text":"pi: done"}]}}}}));
+        app.pstate.insert("p".into(), panel::State::default());
+        app.panel_key("p","p",KeyEvent::new(KeyCode::Char('/'),KeyModifiers::NONE),json!({}));
+        assert_eq!(app.filtering.as_deref(),Some("p"));
+        for c in "lock".chars() { app.on_key(KeyEvent::new(KeyCode::Char(c),KeyModifiers::NONE)); }
+        assert_eq!((app.pstate["p"].sel, app.message.as_str()), (0, "/lock  1 of 2  n/N  Esc"));
+        app.on_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
+        assert!(app.filtering.is_none());
+        app.panel_key("p","p",KeyEvent::new(KeyCode::Char('n'),KeyModifiers::NONE),json!({}));
+        assert_eq!(app.pstate["p"].open.get("act"),Some(&true),"the match's collapsed block opens");
+        assert_eq!((app.pstate["p"].sel, app.message.as_str()), (2, "/lock  2 of 2  n/N  Esc"));
+        app.panel_key("p","p",KeyEvent::new(KeyCode::Char('n'),KeyModifiers::NONE),json!({}));
+        assert_eq!(app.pstate["p"].sel, 0, "n wraps");
+        app.panel_key("p","p",KeyEvent::new(KeyCode::Esc,KeyModifiers::NONE),json!({}));
+        assert!(app.pstate["p"].search.is_empty());
+        // client.copy with text: the notice reports what was sent.
+        app.run_command("client.copy",json!({"text":"héllo"}),json!({}),None);
+        assert!(app.message.starts_with("copy: sent 5 characters"), "{}", app.message);
         // A multi-line prompt: the shared editor in an overlay.
         app.activate_item(Item::from_entry(&json!({"command":"x.answer","input":"Answer","multiline":true})),json!({}),None);
         for c in "a".chars() { app.on_overlay_key(key(KeyCode::Char(c),none)); }

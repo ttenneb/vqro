@@ -1026,6 +1026,24 @@ New row types, components and view kinds are progressive enhancements: every cli
 - **`client.composer {action, panel?, row?, ...}`** (client-local): `focus` (start typing in the panel's composer),
   `set {arg, value}`, `send {set?: {arg: value}}` (set values, then send the draft). Bindings use it (for example
   send as steer).
+- While typing in a composer every key edits the draft: `/`, `[`, `]` and Tab-to-detail are text, not panel keys.
+  `follow` tracks the last selectable list row, never toolbar or `pin: "bottom"` rows; a selection on a pinned row
+  (the composer) stays there while the list keeps its end in view.
+
+### Copy and search (D29)
+
+- **`client.copy {text?}`** (client-local): copies `text`, or the selected row's `copy` field (else its `text`), to
+  the clipboard through the terminal (OSC 52). Terminals report nothing back, so the notice says what was sent
+  ("sent N characters … some terminals ignore it"), or that the terminal did not report support and nothing was
+  sent (OpenTUI checks). Bind it as a pane key (`y`); give rows a `copy` field when their shown text is not what to
+  copy (a whole message, a tool's output).
+- **`search: true`** on a panel (feature `search`): `/` searches instead of filtering. Each typed change jumps to
+  the first match; Enter keeps the search, `n`/`N` step to the next/previous match (wrapping), Esc ends it; the
+  status line shows `/query  2 of 5  n/N  Esc`. Matching is the filter's (text, detail, description, summary,
+  tags; case-insensitive) over every selectable row on the page, **collapsed rows included**: showing a match opens
+  the rows around it. Toolbar and bottom-pinned rows are not searched; an active filter still applies. Clients
+  without the feature filter on `/`, which still finds things. `client.panel {action: search | search_next |
+  search_prev}` do the same from bindings. `tests/fixtures/client/panels.json` (`state.search`) checks the matches.
 
 ### Optional list with detail (`list_detail`)
 

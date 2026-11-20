@@ -173,6 +173,19 @@ try:
     check("a composer-scoped key sends with its preset", bool(wait(lambda: any(c.get("text") == "quick note" and c.get("mode") == "auto" for c in e2e_echo.calls(f"{R}/echo.jsonl")), 10)), str(e2e_echo.calls(f"{R}/echo.jsonl")))
     keys("Escape"); time.sleep(0.6); keys("x")
     check("a pane-scoped key runs without the prefix while not typing", bool(wait(lambda: any(c.get("pane_key") == "x" for c in e2e_echo.calls(f"{R}/echo.jsonl")), 10)), screen())
+    # Search (search: true): `/` jumps to matches, opening collapsed blocks; n steps; a pane key copies the selection.
+    call("workspace.apply", {"note": "e2e search", "ops": [
+        {"op": "set", "key": "view/e2e-comp", "value": {"kind": "panel", "title": "Compose", "search": True, "items": [
+            {"text": "you: is the lockfile stale?"}, {"id": "act", "text": "Activity · 2 tools", "children": [{"text": "cargo update rewrote the lockfile", "copy": "COPIED-TEXT"}]},
+            {"type": "composer", "id": "c1", "text": "Message Pi", "pin": "bottom", "command": "e2e.echo", "placeholder": "Message Pi"}]}},
+        {"op": "set", "key": "binding/e2e.y", "value": {"key": "y", "scope": "pane", "command": "client.copy", "when": {"view": "e2e-comp"}}}]})
+    check("collapsed block starts closed", bool(wait(lambda: "Activity · 2 tools" in screen() and "rewrote" not in screen())), screen())
+    keys("/"); time.sleep(0.3); keys("lockfile", literal=True)
+    check("search shows the match count while typing", bool(wait(lambda: "1 of 2" in screen())), screen())
+    keys("Enter"); time.sleep(0.3); keys("n")
+    check("n opens the collapsed block holding the next match", bool(wait(lambda: "rewrote the lockfile" in screen() and "2 of 2" in screen())), screen())
+    keys("y")
+    check("a pane key copies the selected row (reports what the terminal took)", bool(wait(lambda: "copy: " in screen())), screen())
     echo.close()
     keys("C-g")
     check("prefix menu lists recovery actions", bool(wait(lambda: "undo last change" in screen() and "safe mode / recovery choices" in screen())), screen())

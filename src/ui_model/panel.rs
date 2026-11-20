@@ -30,6 +30,10 @@ pub struct State {
     pub composers: HashMap<String, super::composer::Composer>,
     /// The composer row being typed into (keys go to its editor), by row id.
     pub editing: Option<String>,
+    /// Search (feature search): the query (empty: none), whether it is being typed, and the match shown.
+    pub search: String,
+    pub searching: bool,
+    pub search_hit: usize,
     pub(crate) prepared: Option<Arc<Prepared>>,
 }
 
@@ -67,7 +71,7 @@ pub struct Flat {
 
 
 /// Panel features this client renders. A panel may list what it needs in `requires`.
-pub const SUPPORTED: &[&str] = &["items", "pages", "tree", "badges", "menu", "input", "description", "filter", "toolbar", "chips", "select", "options", "badge_color", "icon", "icon_names", "list_detail", "wrap", "embedded_views", "current_when", "follow", "markdown", "pin", "composer", "multiline"];
+pub const SUPPORTED: &[&str] = &["items", "pages", "tree", "badges", "menu", "input", "description", "filter", "toolbar", "chips", "select", "options", "badge_color", "icon", "icon_names", "list_detail", "wrap", "embedded_views", "current_when", "follow", "markdown", "pin", "composer", "multiline", "search"];
 
 /// Features a panel needs that this client lacks.
 pub fn missing(v: &Value) -> Vec<String> { missing_for(v, SUPPORTED) }
@@ -208,6 +212,32 @@ pub fn rows_for(v: &Value, st: &State, features: &[&str]) -> Vec<Flat> {
     let (bottom, list): (Vec<_>, Vec<_>) = shown(page_items(v, st), "", features).into_iter().partition(|(item, _)| pin && item["pin"] == "bottom");
     for (item, id) in list { one(item, id, 0, None, st, &f, features, false, &mut out); }
     for (item, id) in bottom { one(item, id, 0, None, st, "", features, true, &mut out); }
+    out
+}
+
+/// Search (feature `search`): every row on the current page whose text matches `query` (as the filter matches,
+/// case-insensitive), collapsed rows included, in display order, with the ids of the rows to open to show it.
+/// Toolbar rows and bottom-pinned rows are not searched; the text filter still applies.
+pub fn search(v: &Value, st: &State, query: &str, features: &[&str]) -> Vec<(String, Vec<String>)> {
+    let q = query.to_lowercase();
+    let f = st.filter.to_lowercase();
+    let mut out = Vec::new();
+    if q.is_empty() { return out; }
+    fn walk(items: Vec<(Value, String)>, path: &[String], q: &str, f: &str, features: &[&str], out: &mut Vec<(String, Vec<String>)>) {
+        for (item, id) in items {
+            if !f.is_empty() && !subtree_matches(&item, &id, f, features) { continue; }
+            if matches(&item, q) && selectable(&item) { out.push((id.clone(), path.to_vec())); }
+            let children = item["children"].as_array().map(|c| c.as_slice()).unwrap_or(&[]);
+            if !children.is_empty() {
+                let mut p = path.to_vec();
+                p.push(id.clone());
+                walk(shown(children, &format!("{id}/"), features), &p, q, f, features, out);
+            }
+        }
+    }
+    let pin = features.contains(&"pin");
+    let list: Vec<_> = shown(page_items(v, st), "", features).into_iter().filter(|(item, _)| !(pin && item["pin"] == "bottom")).collect();
+    walk(list, &[], &q, &f, features, &mut out);
     out
 }
 

@@ -48,7 +48,11 @@ fn panels_flatten_like_the_model() {
             "type": panel::kind(&r.item), "has_children": r.has_children, "expanded": r.expanded, "pinned": r.pinned,
             "selectable": panel::selectable(&r.item), "bottom": r.bottom, "chips": r.item.get("chips").map(|c| json!(c.as_array().into_iter().flatten().map(|c| c["text"].clone()).collect::<Vec<_>>()))})).collect();
         let enhancement = p["list_detail"].is_object().then(|| panel::missing_for(&p["list_detail"], panel::BASE_FEATURES).is_empty());
-        json!({"rows": rows, "missing": panel::missing_for(p, panel::BASE_FEATURES), "list_detail": enhancement})
+        let mut out = json!({"rows": rows, "missing": panel::missing_for(p, panel::BASE_FEATURES), "list_detail": enhancement});
+        if let Some(q) = s["search"].as_str() {
+            out["search"] = json!(panel::search(p, &state, q, features).into_iter().map(|(id, open)| json!({"id": id, "open": open})).collect::<Vec<_>>());
+        }
+        out
     });
 }
 

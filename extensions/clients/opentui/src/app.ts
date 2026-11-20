@@ -6,13 +6,13 @@ import { Peer, RpcError, type Json } from "./rpc";
 import { Palette } from "./theme";
 import { Terminals } from "./terminal";
 
-export const FEATURES = [...m.BASE_FEATURES, "icon_names", "current_when", "follow", "list_detail", "embedded_views", "markdown", "pin", "composer", "multiline"];
+export const FEATURES = [...m.BASE_FEATURES, "icon_names", "current_when", "follow", "list_detail", "embedded_views", "markdown", "pin", "composer", "multiline", "search"];
 export const PROFILES = ["base", "keys", "terminal"];
 const KINDS = ["panel", "terminal"];
 
 export interface Rect { x: number; y: number; w: number; h: number }
 interface Leaf { view: string; rect: Rect; inner: Rect; path: number[] }
-interface PState { sel: number; top: number; page: number; filter: string; open: Record<string, boolean>; chip: number; followEnd: number | null; manual: boolean; detailFocus: boolean; detailFor: string; composers: Map<string, m.Composer>; editing: string | null }
+interface PState { sel: number; top: number; page: number; filter: string; open: Record<string, boolean>; chip: number; followEnd: number | null; manual: boolean; detailFocus: boolean; detailFor: string; composers: Map<string, m.Composer>; editing: string | null; search: string; searchHit: number }
 type Overlay =
   | { kind: "prefix"; sel: number }
   | { kind: "palette"; query: string; sel: number }
@@ -20,7 +20,7 @@ type Overlay =
   | { kind: "input"; prompt: string; text: string; item: Json; ctx: Json; multi?: m.Editor }
   | { kind: "pick"; item: Json; ctx: Json; sel: number }
   | { kind: "popup"; view: string; width: number; ctx: Json }
-  | { kind: "filter"; key: string };
+  | { kind: "filter"; key: string; search?: string };  // search: typing a search in that view (feature search)
 type Hit = { rect: Rect; act: (e: MouseEvent) => void };
 
 const width = (s: string) => Bun.stringWidth(s);
@@ -296,6 +296,8 @@ export class App {
         if (!key) break;
         const st = this.state(key);
         if (args.action === "filter") this.overlay = { kind: "filter", key };
+        else if (args.action === "search") { st.search = ""; st.searchHit = 0; this.overlay = { kind: "filter", key, search: ctx.panel_view ?? key }; }
+        else if (args.action === "search_next" || args.action === "search_prev") this.searchStep(key, ctx.panel_view ?? key, args.action === "search_next" ? 1 : -1);
         else if (args.action === "clear_filter") st.filter = "";
         else if (args.action === "expand_all" || args.action === "collapse_all") {
           for (const r of m.rows(this.panelValue(ctx.panel_view ?? key), st.page, "", {}, FEATURES)) if (r.has_children) st.open[r.id] = args.action === "expand_all";
@@ -318,6 +320,24 @@ export class App {
         break;
       }
       case "client.composer": this.composerCommand(args, ctx); break;
+      case "client.copy": {
+        // `text`, or the selected row's `copy` (else its text), through the terminal (OSC 52); the terminal reports
+        // nothing back, so the notice says what was sent.
+        const str = (x: any): x is string => typeof x === "string";
+        let t: string | null = str(args.text) ? args.text : null;
+        if (t === null) {
+          const key = ctx.panel ?? this.leaves[this.focus]?.view;
+          const st = key ? this.pstate.get(key) : undefined;
+          const item = key && st ? m.rows(this.panelValue(ctx.panel_view ?? key), st.page, st.filter, st.open, FEATURES)[st.sel]?.item : undefined;
+          t = str(item?.copy) ? item.copy : str(item?.text) ? item.text : null;
+        }
+        if (t === null) { this.message = "copy: nothing selected"; break; }
+        // OpenTUI writes OSC 52 only when the terminal reported support; say which happened.
+        this.message = this.renderer.copyToClipboardOSC52(t)
+          ? `copy: sent ${[...t].length} characters to the terminal clipboard (OSC 52; some terminals ignore it)`
+          : "copy: this terminal did not report clipboard support (OSC 52); nothing sent";
+        break;
+      }
       case "client.none": break;
       default: this.message = `${name}: not supported by this client`;
     }
@@ -440,6 +460,16 @@ export class App {
       case "filter": {
         const st = this.pstate.get(o.key);
         if (!st) { this.overlay = this.under; return; }
+        if (o.search !== undefined) {  // a search: each change jumps to the first match; Enter keeps it for n/N
+          if (name === "Esc") { st.search = ""; this.message = ""; this.overlay = this.under; this.under = null; return; }
+          if (name === "Enter") { this.overlay = this.under; this.under = null; return; }
+          if (name === "Backspace") st.search = st.search.slice(0, -1);
+          else if ([...k.sequence].length === 1 && k.sequence >= " ") st.search += k.sequence;
+          else return;
+          st.searchHit = 0;
+          this.searchStep(o.key, o.search, 0);
+          return;
+        }
         if (name === "Esc") { st.filter = ""; this.overlay = this.under; this.under = null; }
         else if (name === "Enter") { this.overlay = this.under; this.under = null; }
         else if (name === "Backspace") st.filter = st.filter.slice(0, -1);
@@ -462,7 +492,7 @@ export class App {
 
   state(key: string): PState {
     let st = this.pstate.get(key);
-    if (!st) { st = { sel: 0, top: 0, page: 0, filter: "", open: {}, chip: 0, followEnd: null, manual: false, detailFocus: false, detailFor: "", composers: new Map(), editing: null }; this.pstate.set(key, st); }
+    if (!st) { st = { sel: 0, top: 0, page: 0, filter: "", open: {}, chip: 0, followEnd: null, manual: false, detailFocus: false, detailFor: "", composers: new Map(), editing: null, search: "", searchHit: 0 }; this.pstate.set(key, st); }
     return st;
   }
 
@@ -471,14 +501,27 @@ export class App {
     const st = this.state(key);
     // list_detail (core-protocol.md, Optional list with detail): Tab switches list/detail; keys go to the focused one.
     const detail = listDetailOn(value, st.page) ? this.selectedDetail(key, value) : null;
-    if (listDetailOn(value, st.page) && (name === "Tab" || name === "BackTab")) { st.detailFocus = !st.detailFocus && detail !== null; return; }
-    if (detail && st.detailFocus && !["[", "]", "/"].includes(name)) { this.valueKey(`${key}#detail`, detail.value, name, ctx); return; }
+    if (!st.editing && listDetailOn(value, st.page) && (name === "Tab" || name === "BackTab")) { st.detailFocus = !st.detailFocus && detail !== null; return; }
+    if (detail && st.detailFocus && !st.editing && !["[", "]", "/"].includes(name)) { this.valueKey(`${key}#detail`, detail.value, name, ctx); return; }
     if (!detail) st.detailFocus = false;
     this.valueKey(key, value, name, ctx);
   }
 
   /** The selected row's `detail_panel` (and its id) when the list_detail enhancement is on; a new row resets the
    *  detail's selection and scroll. */
+  /** Show search match `searchHit + delta` (wrapping): open the rows around it and select it. */
+  searchStep(key: string, view: string, delta: number, value: Json = this.panelValue(view)) {
+    const st = this.state(key);
+    const hits = m.search(value, st.search, st.page, st.filter, FEATURES);
+    if (!hits.length) { this.message = st.search ? `/${st.search}: no match` : ""; return; }
+    st.searchHit = (((st.searchHit + delta) % hits.length) + hits.length) % hits.length;
+    const [id, open] = hits[st.searchHit];
+    for (const a of open) st.open[a] = true;
+    const at = m.rows(value, st.page, st.filter, st.open, FEATURES).findIndex((r) => r.id === id);
+    if (at >= 0) { st.sel = at; st.manual = false; }
+    this.message = `/${st.search}  ${st.searchHit + 1} of ${hits.length}  n/N  Esc`;
+  }
+
   selectedDetail(key: string, value: Json): { id: string; value: Json } | null {
     const st = this.state(key);
     const rows = m.rows(value, st.page, st.filter, st.open, FEATURES);
@@ -555,6 +598,12 @@ export class App {
       }
       st.editing = null;
     }
+    // An active search: n/N step through matches, Esc ends it (feature search).
+    if (st.search && (name === "n" || name === "N" || name === "Esc")) {
+      if (name === "Esc") { st.search = ""; this.message = ""; }
+      else this.searchStep(key, ctx.panel_view ?? key, name === "n" ? 1 : -1, value);
+      return;
+    }
     const row = rows[st.sel];
     if (row && m.kind(row.item) === "composer") {
       const c = this.composerOf(st, row);
@@ -594,7 +643,10 @@ export class App {
         break;
       case "[": st.page = Math.max(0, st.page - 1); st.sel = 0; st.top = 0; break;
       case "]": st.page = Math.min(Math.max(0, (value.pages?.length ?? 1) - 1), st.page + 1); st.sel = 0; st.top = 0; break;
-      case "/": this.openOver({ kind: "filter", key }); break;
+      case "/":  // `/` searches panels that ask for it (`search: true`), else filters
+        if (value.search === true) { st.search = ""; st.searchHit = 0; this.openOver({ kind: "filter", key, search: ctx.panel_view ?? key }); }
+        else this.openOver({ kind: "filter", key });
+        break;
       case "m": if (row && Array.isArray(row.item.menu)) this.openOver({ kind: "menu", title: row.item.text ?? "", items: row.item.menu, ctx, sel: 0 }); break;
       case "Enter": case "Space": {
         if (!row || !m.selectable(row.item)) break;
@@ -786,7 +838,7 @@ export class Screen extends Renderable {
     let x = r.x + width(badge) + 1;
     if (a.overlay?.kind === "input" || a.overlay?.kind === "filter") {
       const o = a.overlay;
-      const line = o.kind === "input" ? (o.multi ? `${o.prompt}: (multi-line, above)` : `${o.prompt}: ${o.text}▏`) : `/${a.pstate.get(o.key)?.filter ?? ""}▏`;
+      const line = o.kind === "input" ? (o.multi ? `${o.prompt}: (multi-line, above)` : `${o.prompt}: ${o.text}▏`) : (o.search !== undefined ? `/${a.pstate.get(o.key)?.search ?? ""}▏  ${a.message}` : `/${a.pstate.get(o.key)?.filter ?? ""}▏`);
       text(buf, x, r.y, fit(line, r.w - x), p.color("prompt"));
       return;
     }

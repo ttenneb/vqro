@@ -18,7 +18,9 @@ test("panels", async () => {
       pinned: r.pinned, selectable: m.selectable(r.item), bottom: r.bottom, chips: "chips" in r.item ? r.item.chips.map((x: any) => x.text ?? null) : null,
     }));
     const enhancement = p.list_detail && typeof p.list_detail === "object" ? m.missingFor(p.list_detail, m.BASE_FEATURES).length === 0 : null;
-    expect({ rows: got, missing: m.missingFor(p, m.BASE_FEATURES), list_detail: enhancement }, c.name).toEqual(c.expect);
+    const want: any = { rows: got, missing: m.missingFor(p, m.BASE_FEATURES), list_detail: enhancement };
+    if (s.search !== undefined) want.search = m.search(p, s.search, s.page ?? 0, s.filter ?? "", c.features ?? m.BASE_FEATURES).map(([id, open]) => ({ id, open }));
+    expect(want, c.name).toEqual(c.expect);
   }
 });
 

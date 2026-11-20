@@ -174,6 +174,27 @@ def rows(value, page=0, filter="", open=None, features=BASE_FEATURES):
     return out
 
 
+def search(value, query, page=0, filter="", features=BASE_FEATURES):
+    """Search (feature search): matching selectable rows on the page, collapsed ones included, in display order, as
+    (id, ids to open). Toolbar and bottom-pinned rows are not searched; the filter still applies."""
+    q, f, out = query.lower(), filter.lower(), []
+    if not q:
+        return out
+
+    def walk(items, path):
+        for item, rid in items:
+            if f and not _subtree(item, rid, f, features):
+                continue
+            if _matches(item, q) and selectable(item):
+                out.append((rid, list(path)))
+            if item.get("children"):
+                walk(_shown(item["children"], rid + "/", features), path + [rid])
+
+    pin = "pin" in features
+    walk([(i, r) for i, r in _shown(page_items(value, page), "", features) if not (pin and i.get("pin") == "bottom")], [])
+    return out
+
+
 # ---- view-kind fallback -----------------------------------------------------------------------------------------
 
 def merged(view, entries, live):

@@ -140,6 +140,24 @@ export function rows(value: Json, page = 0, filter = "", open: Record<string, bo
   return out;
 }
 
+/** Search (feature search): matching selectable rows on the page, collapsed ones included, in display order, as
+ *  [id, ids to open]. Toolbar and bottom-pinned rows are not searched; the filter still applies. */
+export function search(value: Json, query: string, page = 0, filter = "", features = BASE_FEATURES): [string, string[]][] {
+  const q = query.toLowerCase(), f = filter.toLowerCase();
+  const out: [string, string[]][] = [];
+  if (!q) return out;
+  const walk = (items: [Json, string][], path: string[]) => {
+    for (const [item, rid] of items) {
+      if (f && !subtree(item, rid, f, features)) continue;
+      if (matches(item, q) && selectable(item)) out.push([rid, [...path]]);
+      if (Array.isArray(item.children) && item.children.length) walk(shownRows(item.children, rid + "/", features), [...path, rid]);
+    }
+  };
+  const pin = features.includes("pin");
+  walk(shownRows(pageItems(value, page), "", features).filter(([i]) => !(pin && i.pin === "bottom")), []);
+  return out;
+}
+
 /** The next (or previous) selectable row after `from` whose item has every field of `matching`; null if none. */
 export function findRow(rows: Row[], from: number, forward: boolean, matching: Json): number | null {
   const ok = (r: Row) => selectable(r.item) && (!isObj(matching) || Object.entries(matching).every(([k, v]) => JSON.stringify(r.item[k] ?? null) === JSON.stringify(v)));

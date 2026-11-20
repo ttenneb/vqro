@@ -1,6 +1,6 @@
 # Formatted text, a multi-line composer and bottom-pinned rows: design — 2026-11-19
 
-Status: being built in slices (slice 1 markdown and pin, slice 2 composer and multiline, slice 3 pane-scoped keys: done); for the agent UI (K3, spike-panel-1; mockup `k3-agent-view-mockup.md` section 11).
+Status: being built in slices (slice 1 markdown and pin, slice 2 composer and multiline, slice 3 pane-scoped keys, slice 4 copy and search: done); for the agent UI (K3, spike-panel-1; mockup `k3-agent-view-mockup.md` section 11).
 Generic panel primitives, usable by any
 extension, each an optional feature with a fallback every base client already renders (D29,
 `element-and-view-fallbacks.md`). Three clients implement them: the ratatui TUI, the Python text client and the
