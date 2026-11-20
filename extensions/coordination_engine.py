@@ -912,11 +912,12 @@ class Coordinator:
         return self._finish_attempt(record, outcomes, outcomes[-1]["native"], partial=False)
 
     def _send_args(self, record, mode):
-        return {"v": 0, "mode": mode, "content": record["content"], "delivery": record["delivery"],
+        args = {"v": 0, "mode": mode, "content": record["content"], "delivery": record["delivery"],
                 "origin": dict(copy.deepcopy(record["origin"]), sender=dict(copy.deepcopy(record["from"]), provenance="inbox-record")),
                 "quoted": record.get("quoted"), "render": record.get("render"),
                 "key": record.get("key"), "guard": dict(record.get("guard") or {}, session=record["attempt"]["session"]),
                 "cause": record.get("cause"), "correlation": record.get("correlation")}
+        return {key: value for key, value in args.items() if value is not None}
 
     @staticmethod
     def _rpc_outcome(error):

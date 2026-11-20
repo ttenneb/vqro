@@ -24,6 +24,17 @@ class QueueEpochTests(unittest.TestCase):
         self.assertEqual([op for op, _ in self.calls], ['agent.queue', 'agent.interrupt', 'agent.send'])
         self.assertEqual(self.calls[0][1]['epoch'], 'native-current-2')
 
+    def test_absent_optional_send_fields_are_omitted_not_encoded_as_null(self):
+        f = self.f
+        f.send()
+        f.resume()
+        f.engine.dispatch_one()
+        operation, args = self.calls[0]
+        self.assertEqual(operation, 'agent.send')
+        for field in ('cause', 'correlation', 'quoted', 'render', 'key'):
+            self.assertNotIn(field, args)
+        self.assertTrue(all(value is not None for value in args.values()))
+
     def test_explicit_queue_defaults_epoch_but_preserves_supplied_stale_guard(self):
         f = self.f
         accepted = f.engine.control({'op': f.op(), 'target': 'r1', 'action': 'queue', 'args': {'action': 'list'}}, fixtures.OWNER)
