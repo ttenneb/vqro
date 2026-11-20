@@ -512,6 +512,40 @@ class RetentionRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(fresh.await_count, 0)
 
 
+class CoreOriginBindingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_normal_origin_uses_only_its_connection_core_hello_identity(self):
+        ctx = object.__new__(PublicImplementation)
+        ctx.facts = AsyncMock(return_value={"caps": {"agent.send": {"modes": {"start": {}}}}})
+        ctx.delivery, ctx.invoke = lambda: "d1", AsyncMock(return_value={})
+        ctx.peer = SimpleNamespace(core_origin={"principal": "p1", "actor": "extension:coord", "initiator": "p2"})
+        await ctx.send("text", origin={"kind": "agent", "agent": "claimed-agent"})
+        self.assertEqual(ctx.invoke.call_args.args[1]["origin"], {"kind": "agent", "agent": "claimed-agent", "principal": "p1", "actor": "extension:coord", "initiator": "p2"})
+        ctx.peer = SimpleNamespace(author="owner", core_origin={})
+        await ctx.send("text")
+        self.assertEqual(ctx.invoke.call_args.args[1]["origin"], {"kind": "human"})
+
+
+class CausalItemWitnessTests(unittest.TestCase):
+    def test_uncorrelated_inserted_item_must_be_observed_without_attribution(self):
+        from agent_conformance.cases import inserted_causality_witness
+        item = (("message", "native-m1"), {"role": "user", "content": []})
+        for strength in ("none", "acceptance"):
+            self.assertTrue(inserted_causality_witness(strength, [item])["no_attribution_inferred"])
+        with self.assertRaises(CheckFailed): inserted_causality_witness("none", [])
+
+    def test_receipt_echo_cannot_hide_wrong_or_inferred_message_cause(self):
+        from agent_conformance.cases import inserted_causality_witness
+        for link in ({"cause": {"kind": "effect", "id": "wrong", "provenance": "inferred"}},
+                     {"delivery": "guessed-from-text"}, {"correlation": "guessed-from-order"}):
+            with self.subTest(link=link), self.assertRaises(CheckFailed):
+                inserted_causality_witness("none", [(("message", "m1"), {"role": "user", **link})])
+
+    def test_declared_native_correlation_needs_a_genuine_native_id_fixture(self):
+        from agent_conformance.cases import inserted_causality_witness
+        with self.assertRaises(HarnessGap):
+            inserted_causality_witness("native", [(("message", "m1"), {"delivery": "d1"})])
+
+
 class CommandWitnessTests(unittest.TestCase):
     def proof(self, args="exact instructions"):
         return ([{"command": "compact", "value": {"type": "compact", "id": "n1", "customInstructions": args}}],
@@ -709,7 +743,7 @@ class ClassificationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_known_incomplete_review_handlers_cannot_report_pass(self):
         async def partial(ctx): pass
-        for ident in ("O7", "C9"):
+        for ident in ("O7",):
             result = await run_case(Case(ident, "incomplete review witness"), Path(self.temp.name) / ident,
                 self.manifest, Path("/vqro"), Path("/hc"), factory=self.factory(), handlers={ident: partial})
             self.assertEqual((result.status, result.component, result.reason), ("fail", "harness", "harness_gap"))

@@ -25,7 +25,7 @@ def validate_manifest(value):
 
 
 # Until repaired and regression-tested, a partial handler cannot report green.
-REVIEW_GAPS = {"O7": "R3 stalled close and exact resume", "C9": "R5 inserted-message provenance"}
+REVIEW_GAPS = {"O7": "R3 stalled close and exact resume"}
 
 
 async def run_case(case, root, manifest, vqro, hc, *, factory=PublicImplementation, handlers=None):

@@ -298,9 +298,24 @@ async def literal_text(ctx):
         check(all(r.get("operation") == "send" for r in ctx.native.writes(mark)), "text caused an extra native control effect")
 
 
+def inserted_causality_witness(strength, messages):
+    check(messages, "causal send had no observed inserted user item")
+    if strength not in ("none", "acceptance"):
+        raise HarnessGap("C9 correlated insertion needs its native message-id witness fixture")
+    for key, value in messages:
+        check(all(field not in value for field in ("cause", "delivery", "correlation")),
+              "uncorrelated native insertion gained an inferred delivery/cause/thread link")
+    return {"correlation": strength, "items": [list(key) for key, _ in messages],
+            "native_link_unprovable": True, "no_attribution_inferred": True}
+
+
 async def causal_echo(ctx, cause):
     await ctx.native.call("turn", state="settled")
     await ctx.wait_facts(lambda f: f.get("state") == "idle")
+    declaration = await caps(ctx, "agent.send")
+    view = await fresh_view(ctx)
+    previous = {key for key, row in view.reducer.entities.items() if key[0] == "message" and row["value"].get("role") == "user"}
+    mark = ctx.native.mark()
     correlation = "C9-caller-thread"
     result = await ctx.send("C9-qualified-cause", cause=cause, correlation=correlation)
     receipt = accepted(result)
@@ -310,6 +325,16 @@ async def causal_echo(ctx, cause):
           "generic core effect audit dropped caller causality", component="core")
     check(receipt.get("cause") == cause and receipt.get("correlation") == correlation,
           "adapter receipt dropped/changed asserted caller causality")
+    await ctx.native.wait(lambda rows: any(row["seq"] > mark and row["kind"] == "inserted" for row in rows))
+    inserted = ctx.native.records("inserted", after=mark)
+    check(len(inserted) == 1, "causal send was not inserted exactly once", component="fixture")
+    await ctx.wait_view(view, lambda reducer: any(key not in previous and key[0] == "message" and row["value"].get("role") == "user"
+                                               for key, row in reducer.entities.items()))
+    messages = [(key, row["value"]) for key, row in view.reducer.entities.items()
+                if key not in previous and key[0] == "message" and row["value"].get("role") == "user"]
+    witness = inserted_causality_witness(declaration.get("correlation"), messages)
+    ctx.evidence.append({"kind": "inserted_causality", "native_insertion": inserted[0],
+                         "asserted_cause": cause, "receipt_delivery": receipt["delivery"], **witness})
     return receipt["cause"]
 
 

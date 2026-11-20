@@ -204,7 +204,9 @@ class PublicImplementation:
     async def viewer(self):
         peer = await Peer.connect(self.backend.env["VQRO_SOCKET"], max_record=8 << 20)
         self.peers.append(peer)
-        await peer.call("hello", {"client": "agent-conformance", "identity": {"kind": "owner"}})
+        hello = await peer.call("hello", {"client": "agent-conformance", "identity": {"kind": "owner"}})
+        peer.core_origin = {key: hello[key] for key in ("principal", "actor", "initiator")
+                            if isinstance(hello.get(key), str) and hello[key]}
         # Resource facts are read explicitly; do not queue token/fact events in
         # the generic viewer's diagnostic notification queue.
         peer.on("event", self._event)
@@ -338,8 +340,11 @@ class PublicImplementation:
         mode = mode or next((name for name in ("start", "admit") if name in modes), None)
         if mode is None:
             raise HarnessGap("scenario needs a start/admit mode but neither is declared")
-        # Principal/actor/initiator are core-bound, not invented fixture identities.
-        origin = {"kind": "human"}
+        # These are this connection's actual core hello fields, never identities
+        # inferred from a client label or principal spelling. Missing stays absent.
+        connection = peer or getattr(self, "peer", None)
+        origin = {"kind": "human", **getattr(connection, "core_origin", {})}
+        origin.update(args.pop("origin", {}))
         links = {key: value for key, value in (("cause", cause), ("correlation", correlation)) if value is not None}
         return await self.invoke("agent.send", {"mode": mode, "delivery": self.delivery(),
             "content": content if content is not None else [{"type": "text", "text": text}],
