@@ -516,7 +516,10 @@ write failure changes neither active mappings nor reservations; uncertain post-r
 requires the existing durability confirmation, never replay. Reappearance consumes its hint only after actual
 adoption. Old files without the optional reservations array load unchanged. A malformed/duplicate/oversized/active-colliding
 optional cache is discarded WITH a persistent recovery notice; readable numeric rN values and the existing allocation
-high-water remain reserved, so recovery cannot reuse old ids. Healthy active mappings and safe-mode/read-only startup
+high-water remain reserved, so recovery cannot reuse old ids. Invalid-cache scanning visits every string token without
+materializing objects (duplicate id fields cannot erase earlier values). If complete enumeration cannot be proved,
+fresh allocation is refused instead of guessing a lower high-water; `fresh_allocation:false` reports this. Healthy
+active mappings and safe-mode/read-only startup
 remain available. Startup does not rewrite the original; the next successful identity write confirms the recovered
 state/notice. Whole identity-file syntax/I/O failure remains strict: no unseen high-water is guessed.
 `workspace.snapshot.identity_reservations` reports count, encoded bytes, limits, actual file-backed `persistent`,

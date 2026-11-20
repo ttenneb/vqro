@@ -14,6 +14,8 @@ A clean write failure adopts neither active retirement/reappearance nor cache ch
 
 ## Evidence and limits
 
+The recovery delta review reproduced a new P1: a derived row parser rejected duplicate id fields before recording readable rNs, permitting a stale saved next to alias an old ID. Invalid-cache recovery now streams every JSON string token through serde without materializing maps; duplicates cannot overwrite/hide earlier values. Incomplete/deep traversal freezes fresh allocation (not safe-mode reads) rather than guessing. Both independent probes plus a healthy-native-reference regression are permanent;194 library tests pass before final gate/delta check.
+
 The reserved review also found a residual active-only guard in Core registration; the repair invokes the already-fast-pathed instance-retirement helper even for reserved-only providers, without changing provider reaping. Permanent Core registration, safe-mode malformed-cache, high-water recovery and in-memory persistence-report regressions accompany it.190 library tests pass before final delta review/gate.
 
 The reserved review reproduced a P1 in the first implementation: native end after cached-forget left the old hint reusable, including across restart. The repair invalidates matching hints atomically and makes the four independent probes permanent, plus instance-fast-path and clean/uncertain hint-only retirement checks in `src/identity_retirement_tests.rs`.185 library tests pass after that repair; its full gate/delta review are separately recorded in the handoff. Original passing36/36 does NOT by itself close this safety finding.

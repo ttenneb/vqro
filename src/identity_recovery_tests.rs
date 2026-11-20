@@ -23,6 +23,6 @@ fn memory_and_configured_persistence_are_reported_honestly() {
 #[test]
 fn unreadable_row_identity_and_overflow_cannot_reuse_a_readable_id() {
  let root=tempfile::tempdir().unwrap();let path=root.path().join("resources.json");
- let huge="[".repeat(150)+"0"+&"]".repeat(150);let bytes=format!("{{\"next\":1,\"ids\":{{}},\"reservations\":[{{\"identity\":{huge},\"id\":\"r999\"}}]}}");std::fs::write(&path,bytes).unwrap();let mut map=IdentityMap::open(Some(path.clone())).unwrap();assert_eq!(map.identify(identity()).unwrap().id,"r1000");
+ let huge="[".repeat(150)+"0"+&"]".repeat(150);let bytes=format!("{{\"next\":1,\"ids\":{{}},\"reservations\":[{{\"identity\":{huge},\"id\":\"r999\"}}]}}");std::fs::write(&path,bytes).unwrap();let mut map=IdentityMap::open(Some(path.clone())).unwrap();assert_eq!(map.reservation_stats()["fresh_allocation"],false);assert!(map.identify(identity()).is_err(),"incomplete deep traversal must fail closed for fresh IDs");
  std::fs::write(&path,serde_json::json!({"next":1,"ids":{},"reservations":[{"id":format!("r{}",u64::MAX)}]}).to_string()).unwrap();let mut map=IdentityMap::open(Some(path)).unwrap();assert!(map.reservation_stats()["recovery_notice"].is_string());assert!(map.identify(identity()).is_err(),"unreadable high-water must never wrap into reusable ids");
 }

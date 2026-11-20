@@ -194,6 +194,9 @@ mod identity_retirement_tests;
 #[cfg(test)]
 #[path="identity_recovery_tests.rs"]
 mod identity_recovery_tests;
+#[cfg(test)]
+#[path="identity_highwater_tests.rs"]
+mod identity_highwater_tests;
 
 pub const IDENTITY_RESERVATIONS:usize=4096;
 const RESERVATION_BYTES:usize=2048;
@@ -257,24 +260,33 @@ impl<'de> Deserialize<'de> for Reservations {
     }
 }
 
-/// Scan readable rN fields even when the optional cache cannot be materialized. No cache rows are retained.
+/// Conservatively scan EVERY string token in an invalid cache, including duplicate keys/values.
+/// No object/map materialization may erase earlier id occurrences. If traversal cannot finish within
+/// serde's recursion bound, fresh allocation is disabled rather than guessing an unseen high-water.
 fn reservation_high_water(raw:&serde_json::value::RawValue,next:&mut u64){
-    fn bump(raw:&serde_json::value::RawValue,next:&mut u64){
-        #[derive(Deserialize)]struct Id {#[serde(default)] id:Option<Box<serde_json::value::RawValue>>}
-        let id=serde_json::from_str::<Id>(raw.get()).ok().and_then(|row|row.id).and_then(|id|serde_json::from_str::<String>(id.get()).ok()).or_else(||serde_json::from_str::<String>(raw.get()).ok());
-        if let Some(number)=id.as_deref().and_then(|id|id.strip_prefix('r')).and_then(|n|n.parse::<u64>().ok()){*next=(*next).max(number.saturating_add(1));}
-    }
-    bump(raw,next);
     struct Scan<'a>(&'a mut u64);
+    impl Scan<'_>{fn token(&mut self,value:&str){if let Some(number)=value.strip_prefix('r').and_then(|n|n.parse::<u64>().ok()){*self.0=(*self.0).max(number.saturating_add(1));}}}
+    impl<'de> serde::de::DeserializeSeed<'de> for Scan<'_>{
+        type Value=();
+        fn deserialize<D:serde::Deserializer<'de>>(self,parser:D)->Result<(),D::Error>{parser.deserialize_any(self)}
+    }
     impl<'de> serde::de::Visitor<'de> for Scan<'_>{
         type Value=();
-        fn expecting(&self,f:&mut std::fmt::Formatter)->std::fmt::Result{f.write_str("reservation rows")}
-        fn visit_seq<A:serde::de::SeqAccess<'de>>(self,mut rows:A)->Result<(),A::Error>{
-            while let Some(row)=rows.next_element::<Box<serde_json::value::RawValue>>()? {bump(&row,self.0);}
-            Ok(())
+        fn expecting(&self,f:&mut std::fmt::Formatter)->std::fmt::Result{f.write_str("complete reservation-cache JSON")}
+        fn visit_map<A:serde::de::MapAccess<'de>>(mut self,mut fields:A)->Result<(),A::Error>{
+            while let Some(key)=fields.next_key::<String>()?{self.token(&key);fields.next_value_seed(Scan(self.0))?;}Ok(())
         }
+        fn visit_seq<A:serde::de::SeqAccess<'de>>(self,mut values:A)->Result<(),A::Error>{while values.next_element_seed(Scan(self.0))?.is_some(){}Ok(())}
+        fn visit_str<E:serde::de::Error>(mut self,value:&str)->Result<(),E>{self.token(value);Ok(())}
+        fn visit_string<E:serde::de::Error>(self,value:String)->Result<(),E>{self.visit_str(&value)}
+        fn visit_bool<E:serde::de::Error>(self,_:bool)->Result<(),E>{Ok(())}
+        fn visit_i64<E:serde::de::Error>(self,_:i64)->Result<(),E>{Ok(())}
+        fn visit_u64<E:serde::de::Error>(self,_:u64)->Result<(),E>{Ok(())}
+        fn visit_f64<E:serde::de::Error>(self,_:f64)->Result<(),E>{Ok(())}
+        fn visit_unit<E:serde::de::Error>(self)->Result<(),E>{Ok(())}
     }
-    let mut parser=serde_json::Deserializer::from_str(raw.get());let _=serde::de::Deserializer::deserialize_seq(&mut parser,Scan(next));
+    let mut parser=serde_json::Deserializer::from_str(raw.get());
+    if serde::de::DeserializeSeed::deserialize(Scan(next),&mut parser).is_err()||parser.end().is_err(){*next=u64::MAX;}
 }
 
 pub struct IdentityMap {
@@ -312,9 +324,8 @@ impl IdentityMap {
                 Ok(bytes) => {
                     let saved: File = serde_json::from_slice(&bytes)?;
                     state.next = saved.next.max(1);state.reservation_recovered=saved.reservation_recovered;
-                    reservation_high_water(&saved.reservations,&mut state.next);
                     let cache=serde_json::from_str::<Reservations>(saved.reservations.get()).ok().filter(|cache|cache.identities.values().all(|(id,_,_)|id.strip_prefix('r').and_then(|n|n.parse::<u64>().ok()).is_some_and(|n|n<u64::MAX)&&!saved.ids.contains_key(id)));
-                    match cache {Some(cache)=>state.reservations=cache,None=>state.reservation_recovered=true}
+                    match cache {Some(cache)=>{for(id,_,_)in cache.identities.values(){let number=id[1..].parse::<u64>().unwrap();state.next=state.next.max(number+1);}state.reservations=cache;},None=>{reservation_high_water(&saved.reservations,&mut state.next);state.reservation_recovered=true;}}
                     for (id, record) in saved.ids {
                         let record = match record {
                             Record::Current(record) => record,
@@ -427,7 +438,7 @@ impl IdentityMap {
         let batch=self.batch_inner(&[],|candidate|candidate==identity,true)?;
         Ok((batch.removed,batch.uncertain))
     }
-    pub fn reservation_stats(&self)->serde_json::Value {serde_json::json!({"count":self.state.reservations.identities.len(),"bytes":self.state.reservations.bytes,"max_entries":IDENTITY_RESERVATIONS,"max_entry_bytes":RESERVATION_BYTES,"persistent":self.path.is_some(),"durability_confirmed":self.path.is_some()&&!self.needs_sync,"recovery_notice":if self.state.reservation_recovered {Some("invalid identity reservation cache discarded; resource high-water preserved")}else{None}})}
+    pub fn reservation_stats(&self)->serde_json::Value {serde_json::json!({"count":self.state.reservations.identities.len(),"bytes":self.state.reservations.bytes,"max_entries":IDENTITY_RESERVATIONS,"max_entry_bytes":RESERVATION_BYTES,"persistent":self.path.is_some(),"durability_confirmed":self.path.is_some()&&!self.needs_sync,"fresh_allocation":self.state.next<u64::MAX,"recovery_notice":if self.state.reservation_recovered {Some("invalid identity reservation cache discarded; resource high-water preserved")}else{None}})}
     #[cfg(test)] pub(crate) fn writes(&self)->usize{self.writes}
     #[cfg(test)] pub(crate) fn set_writer(&mut self,writer:crate::store::DurableWriter){self.writer=writer;}
 }
