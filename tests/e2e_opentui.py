@@ -161,6 +161,13 @@ try:
     time.sleep(0.5)
     keys("hello there", literal=True); keys("M-Enter"); keys("second line", literal=True)
     check("autofocus: typing goes into the composer, Alt-Enter adds a line", bool(wait(lambda: "hello there" in screen() and "second line" in screen() and "2 lines" in screen())), screen())
+    # A click on a control while typing chooses it; it never sends the draft.
+    rows = screen().splitlines()
+    y = next(i for i, l in enumerate(rows) if "[steer]" in l)
+    x = rows[y].index("[steer]") + 2
+    keys(f"\x1b[<0;{x};{y + 1}M\x1b[<0;{x};{y + 1}m", literal=True)
+    check("a click on a control while typing chooses it and sends nothing", bool(wait(lambda: "[● steer]" in screen() and "hello there" in screen(), 10))
+          and not e2e_echo.calls(f"{R}/echo.jsonl"), screen())
     keys("Tab"); time.sleep(0.3); keys("Right"); time.sleep(0.3); keys("Enter"); time.sleep(0.3)
     check("a control sets this composer's value", bool(wait(lambda: "[● steer]" in screen())), screen())
     keys("Left"); keys("Left"); time.sleep(0.3); keys("Enter"); time.sleep(0.3); keys("Enter")

@@ -909,6 +909,16 @@ export class Screen extends Renderable {
     if (hit.chip !== undefined) st.chip = hit.chip;
     else if (m.kind(row.item) === "composer") st.chip = 0;  // the text area: click to type
     const toggle = m.kind(row.item) === "toggle" && e.x <= hit.x + 4;
+    // A composer: a click on a control or Send acts on it, never as a key for the draft being typed (that would
+    // send it); a click on the text while typing just keeps typing.
+    if (m.kind(row.item) === "composer" && st.editing) {
+      if (hit.chip === undefined) return;
+      const typing = st.editing;
+      st.editing = null;
+      if (e.button === 0) a.panelKey(key, _view, "Enter", ctx);
+      if (!st.editing) { st.editing = typing; st.chip = 0; }
+      return;
+    }
     if (hit.chip !== undefined || toggle || !row.item.detail_panel) {
       if (e.button === 2 && Array.isArray(row.item.menu)) a.openOver({ kind: "menu", title: row.item.text ?? "", items: row.item.menu, ctx, sel: 0 });
       else if (e.button === 0) a.panelKey(key, _view, "Enter", ctx);
@@ -1172,7 +1182,7 @@ function drawList(a: App, buf: OptimizedBuffer, area: Rect, key: string, value: 
   const line = (i: number, yy: number, limit: number) => {
     const r = rows[i];
     const comp: [m.Composer, boolean] | null = m.kind(r.item) === "composer" ? [a.composerOf(st, r), focused && st.editing === r.id] : null;
-    return drawRow(a, buf, { x: area.x, y: yy, w: area.w, h: limit - yy }, r, focused && i === st.sel, st.chip, (x, w, chip) => listed.hits.push({ y: yy, x, w, i, chip }), comp);
+    return drawRow(a, buf, { x: area.x, y: yy, w: area.w, h: limit - yy }, r, focused && i === st.sel, st.chip, (x, w, chip, hy) => listed.hits.push({ y: hy ?? yy, x, w, i, chip }), comp);
   };
   for (let i = 0; i < pinned && y < bottom; i++) y += line(i, y, bottom);
   const lineH = y < bottom ? facetLine(a, buf, area, y, value, st) : 0;
@@ -1329,7 +1339,7 @@ function composerButtons(row: Json): { arg: string; value?: Json; send?: boolean
 const composerHeight = (it: Json) => Math.min(12, Math.max(1, Number.isInteger(it.rows) ? it.rows : 3)) + 1;
 
 /** A composer: the draft (or placeholder) with a ▌ margin and the cursor, then controls, Send and a key hint. */
-function drawComposer(a: App, buf: OptimizedBuffer, r: Rect, it: Json, selected: boolean, chipSel: number, comp: [m.Composer, boolean] | null, hit: (x: number, w: number, chip?: number) => void): number {
+function drawComposer(a: App, buf: OptimizedBuffer, r: Rect, it: Json, selected: boolean, chipSel: number, comp: [m.Composer, boolean] | null, hit: (x: number, w: number, chip?: number, y?: number) => void): number {
   const p = a.pal;
   const [c, editing] = comp ?? [new m.Composer(it), false];
   const rowsN = Math.max(1, Math.min(r.h, composerHeight(it)) - 1);
@@ -1347,7 +1357,7 @@ function drawComposer(a: App, buf: OptimizedBuffer, r: Rect, it: Json, selected:
       const under = empty ? [...String(it.placeholder ?? "Message")][0] ?? " " : [...(lines[cl] ?? "")][cc] ?? " ";
       text(buf, r.x + 1 + Math.min(width(before), r.w - 2), y, under, empty ? p.color("dim") : p.color("text"), undefined, TextAttributes.INVERSE);
     }
-    hit(r.x, r.w);
+    hit(r.x, r.w, undefined, y);
   }
   if (rowsN >= r.h) return rowsN;
   const y = r.y + rowsN;
@@ -1360,7 +1370,7 @@ function drawComposer(a: App, buf: OptimizedBuffer, r: Rect, it: Json, selected:
     if (x + width(label) > r.x + r.w) return;
     const on = selected && !editing && chipSel === j + 1;
     text(buf, x, y, label, b.on(c.values) || b.send ? p.color("accent") : p.color("muted"), undefined, (on ? TextAttributes.INVERSE : 0) | (b.send ? TextAttributes.BOLD : 0));
-    hit(x, width(label), j + 1);
+    hit(x, width(label), j + 1, y);
     x += width(label) + 1;
   });
   const n = lines.length;
@@ -1369,7 +1379,8 @@ function drawComposer(a: App, buf: OptimizedBuffer, r: Rect, it: Json, selected:
   return rowsN + 1;
 }
 
-function drawRow(a: App, buf: OptimizedBuffer, r: Rect, row: m.Row, selected: boolean, chipSel: number, hit: (x: number, w: number, chip?: number) => void, comp: [m.Composer, boolean] | null = null): number {
+/** `hit(x, w, chip?, y?)` records a click target; `y` defaults to the row's first line (multi-line rows pass it). */
+function drawRow(a: App, buf: OptimizedBuffer, r: Rect, row: m.Row, selected: boolean, chipSel: number, hit: (x: number, w: number, chip?: number, y?: number) => void, comp: [m.Composer, boolean] | null = null): number {
   const p = a.pal;
   const it = row.item;
   const k = m.kind(it);

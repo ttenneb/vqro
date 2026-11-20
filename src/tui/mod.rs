@@ -2782,6 +2782,8 @@ impl App {
             self.pstate.insert(key.to_string(), save(container,st));
             return true;
         }
+        // A click on a composer's text while typing keeps typing (as a key, Enter would send the draft).
+        if st.editing.is_some() && rows.get(i).is_some_and(|r| panel::kind(&r.item) == "composer") { self.pstate.insert(key.to_string(), save(container,st)); return true; }
         self.pstate.insert(key.to_string(), save(container,st));
         if !in_detail && !toggle && button==MouseButton::Left && rows.get(i).is_some_and(|r|r.item["detail_panel"].is_object()){return true;}
         match button {
@@ -3943,6 +3945,12 @@ mod tests {
         assert_eq!(st.editing.as_deref(), Some("c"), "typing goes on");
         while let Ok(m) = rx.try_recv() { assert!(!matches!(m, Msg::ComposerSent { .. }), "nothing was sent"); }
         assert!(!app.message.starts_with("running "), "no command ran: {}", app.message);
+        // A click on the draft's text while typing keeps typing and sends nothing.
+        let text = find(&mut app, "abc");
+        app.message.clear();
+        app.panel_click("p", "p", text, MouseButton::Left, json!({}));
+        assert_eq!(app.pstate["p"].composers["c"].editor.string(), "abc");
+        assert!(app.message.is_empty(), "{}", app.message);
         // [Send] still sends.
         let send = find(&mut app, "[Send]");
         app.panel_click("p", "p", send, MouseButton::Left, json!({}));
