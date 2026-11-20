@@ -59,32 +59,21 @@ class RecoveryCapacityTests(unittest.TestCase):
                 f.engine.send(args, {'principal': principal, 'actor': principal, 'author': 'client:probe'})
             self.assertEqual(caught.exception.kind, 'quota',
                              (str(caught.exception), f.engine._reservation(f.store.view()), f.engine.window()))
-            self.assertEqual(f.engine.operation(principal, op)['reason'], 'quota')
+            return caught.exception
+        epochs = {f.engine.window()['epoch']}
         for phase in range(2):
             for n in range(4):
                 principal, op = 'p:new-' + str(phase) + '-' + str(n), f.op()
-                refused(principal, op)
-                refused(principal, op)  # the compact refusal remains idempotent
-            if phase == 0:
-                epoch = f.engine.window()['epoch']
-                principal, serial = 'p:concentrated', 0
-                bucket = f.engine._bucket(principal, epoch + ':concentrated-1')
-                existing = f.store.view().get(bucket, {'value': {}})['value']
-                available = 64 - sum(value.get('window') == epoch for value in existing.values())
-                for n in range(available + 1):
-                    while True:
-                        serial += 1
-                        op = epoch + ':concentrated-' + str(serial)
-                        candidate = f.engine._bucket(principal, op)
-                        if candidate == bucket:
-                            break
-                    if n < available:
-                        refused(principal, op)
-                    else:
-                        with self.assertRaises(PolicyError) as caught:
-                            f.engine.send({'op': op}, {'principal': principal})
-                        self.assertEqual(caught.exception.kind, 'busy')
-                self.assertNotEqual(f.engine.window()['epoch'], epoch)
+                error = refused(principal, op)
+                epochs.add(f.engine.window()['epoch'])
+                if error.data.get('uncached'):
+                    with self.assertRaises(PolicyError) as expired:
+                        f.engine.send({'op': op}, {'principal': principal})
+                    self.assertEqual(expired.exception.kind, 'expired_operation')
+                else:
+                    self.assertEqual(f.engine.operation(principal, op)['reason'], 'quota')
+                    refused(principal, op)
+        self.assertGreater(len(epochs), 1, 'uncached refusals close their operation epochs')
         self.assertEqual(len(f.ledger), native_count)
         self.assertTrue(f.engine.current)
         self.assertIsNone(f.engine.maintenance_error)

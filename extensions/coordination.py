@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from vqro_ext import Extension, VqroError
 from coordination_store import OperationalStore, StoreError
-from coordination_engine import (Coordinator, digest, SCOPE_CAPACITY, WINDOW,
+from coordination_engine import (Coordinator, digest, refusal_receipt, SCOPE_CAPACITY, WINDOW,
                                  CONTROL_ADMISSION_BYTES, CONTROL_ADMISSION_RECORDS, ARCHIVE_FUTURE_BYTES,
                                  ARCHIVE_ESCROW_BYTES, ARCHIVE_ESCROW_RECORDS, IDENTITY_SUMMARY_BYTES)
 from coordination_policy import PolicyError, bounded_page, QuotaLimits
@@ -287,6 +287,8 @@ class CoordinationService:
             for key, row in self.read_only_rows.items():
                 if key.startswith("ops/") and identity in row["value"]:
                     result = copy.deepcopy(row["value"][identity]["result"])
+                    if isinstance(result.get("refusal"), str):
+                        result = refusal_receipt(result["refusal"])
                     if result.get("delivery"):
                         return self.read_only("inbox.get", {"delivery": result["delivery"]}, principal=principal)
                     if result.get("state") == "claimed":

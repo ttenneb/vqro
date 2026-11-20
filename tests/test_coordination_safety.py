@@ -26,8 +26,8 @@ class SafetyTests(unittest.TestCase):
         with self.assertRaises(PolicyError) as repeated:
             f.engine.send(args, fixtures.WORKER)
         self.assertEqual(first.exception.kind, "no_grant")
-        self.assertEqual(str(first.exception), str(repeated.exception))
-        self.assertEqual(first.exception.data, repeated.exception.data)
+        self.assertEqual(repeated.exception.kind, first.exception.kind)
+        self.assertEqual(repeated.exception.data, {'cached': True, 'incomplete': True})
         self.assertEqual(f.engine.records(), [])
         self.assertEqual(f.engine.send(self.request(), fixtures.WORKER)["state"], "recorded")
 
@@ -40,10 +40,11 @@ class SafetyTests(unittest.TestCase):
         f.engine.policy = lambda: self.fail("a repeat must not evaluate current policy")
         with self.assertRaises(PolicyError) as repeated:
             f.engine.send(args, fixtures.OWNER)
-        self.assertEqual(repeated.exception.data, first.exception.data)
+        self.assertEqual(repeated.exception.kind, first.exception.kind)
+        self.assertTrue(repeated.exception.data['cached'])
         self.assertEqual(f.engine.operation(fixtures.OWNER["principal"], args["op"])["state"], "rejected")
 
-    def test_no_reply_slot_closes_window_busy_before_evaluation(self):
+    def test_no_reply_slot_returns_actual_uncached_refusal_and_closes_epoch(self):
         f = self.f
         original = f.engine._preflight_reservations
         def preflight(rows, before=None, **kwargs):
@@ -54,13 +55,39 @@ class SafetyTests(unittest.TestCase):
         f.engine._preflight_reservations = preflight
         op = f.op()
         epoch = f.engine.window()["epoch"]
+        def refuse(*args):
+            raise CoordinationError('no_grant', 'actual live refusal', {'detail': 1})
         with self.assertRaises(PolicyError) as failure:
-            f.engine._mutate("probe", {"op": op}, fixtures.OWNER, lambda *_: self.fail("evaluated without a slot"))
-        self.assertEqual(failure.exception.kind, "busy")
+            f.engine._mutate("probe", {"op": op}, fixtures.OWNER, refuse)
+        self.assertEqual(failure.exception.kind, "no_grant")
+        self.assertEqual(str(failure.exception), 'actual live refusal')
+        self.assertTrue(failure.exception.data['uncached'])
+        self.assertEqual(failure.exception.data['window'], f.engine.window())
         self.assertNotEqual(f.engine.window()["epoch"], epoch)
         with self.assertRaises(PolicyError) as expired:
             f.engine._mutate("probe", {"op": op}, fixtures.OWNER, lambda *_: self.fail("recreated a closed-window operation"))
         self.assertEqual(expired.exception.kind, "expired_operation")
+        self.assertEqual(f.ledger, [])
+
+    def test_genuinely_full_result_bucket_is_busy_before_evaluation(self):
+        f = self.f
+        epoch, serial = f.engine.window()['epoch'], 0
+        bucket = f.engine._bucket(fixtures.OWNER['principal'], epoch + ':1')
+        for n in range(65):
+            while True:
+                serial += 1
+                op = epoch + ':' + str(serial)
+                if f.engine._bucket(fixtures.OWNER['principal'], op) == bucket:
+                    break
+            with self.assertRaises(PolicyError) as result:
+                if n < 64:
+                    f.engine.report({'op': op, 'delivery': 'd:missing', 'claim': 'x', 'stage': 'read'}, fixtures.OWNER)
+                else:
+                    f.engine._mutate('probe', {'op': op}, fixtures.OWNER,
+                                     lambda *_: self.fail('evaluated a genuinely full result bucket'))
+            if n == 64:
+                self.assertEqual(result.exception.kind, 'busy')
+        self.assertNotEqual(f.engine.window()['epoch'], epoch)
         self.assertEqual(f.ledger, [])
 
     def test_malformed_operation_never_consumes_window_slot(self):

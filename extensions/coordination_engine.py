@@ -38,6 +38,10 @@ def nonce(prefix):
     return prefix + uuid.uuid4().hex
 
 
+def refusal_receipt(kind):
+    return {"state": "rejected", "reason": kind, "refusal": {"kind": kind, "incomplete": True}, "incomplete": True}
+
+
 class CoordinationError(PolicyError):
     pass
 
@@ -62,7 +66,7 @@ class Working:
     def delete(self, key):
         self.changes[key] = None
 
-    def commit(self, *, control=False, normal=False):
+    def commit(self, *, control=False, normal=False, refusal=False):
         ops = [{"op": "set", "key": key, "value": row["value"], "expect": self.version(key)} if row else
                {"op": "delete", "key": key, "expect": self.version(key)} for key, row in self.changes.items()]
         if ops:
@@ -72,7 +76,7 @@ class Working:
                     prospective[key] = {"version": max((r["version"] for r in self.rows.values()), default=0) + 1, "value": row["value"]}
                 else:
                     prospective.pop(key, None)
-            self.engine._preflight_reservations(prospective, self.rows, control=control, normal=normal, archive=self.archive)
+            self.engine._preflight_reservations(prospective, self.rows, control=control, normal=normal, archive=self.archive, refusal=refusal)
             return self.engine.store.apply(ops, control=control)
 
 
@@ -138,7 +142,11 @@ class Coordinator:
                 charge += IDENTITY_SUMMARY_BYTES
         return charge, records
 
-    def _preflight_reservations(self, rows, before, *, control, normal=False, archive=False):
+    def _preflight_reservations(self, rows, before, *, control, normal=False, archive=False, refusal=False):
+        # Refusals may use control I/O priority, but never grow into either the
+        # normal control-intent headroom or recovery/archive capacity.
+        if refusal:
+            control = False
         charge, count = self._reservation(rows)
         old_charge, old_count = self._reservation(before)
         byte_limit = self.store.byte_limit if control and not normal else self.store.byte_limit - (self.store.byte_limit + 9) // 10
@@ -258,7 +266,9 @@ class Coordinator:
                             "records": [], "historical": True, "window": self.window()}
                 return {"state": "unknown", "window": self.window()}
             result = copy.deepcopy(saved["result"])
-            if result.get("take"):
+            if isinstance(result.get("refusal"), str):
+                result = refusal_receipt(result["refusal"])
+            elif result.get("take"):
                 take_key = digest([principal, op])
                 claims = [{"delivery": record["delivery"], "claim": record["attempt"]["claim"]}
                           for record in self.records() if (record.get("attempt") or {}).get("take") == take_key]
@@ -295,6 +305,9 @@ class Coordinator:
                     raise CoordinationError("conflict", "operation id used for different intent")
                 refusal = saved["result"].get("refusal")
                 if refusal:
+                    if isinstance(refusal, str):
+                        raise CoordinationError(refusal, "cached refusal: " + refusal,
+                                                {"cached": True, "incomplete": True})
                     raise CoordinationError(refusal["kind"], refusal["message"], refusal["data"])
                 return self.operation(principal, op)
             meta = work.get("meta")
@@ -308,29 +321,20 @@ class Coordinator:
                 work.put("meta", meta)
                 work.commit(control=True)
                 raise CoordinationError("busy", "bounded result window closed before evaluation", {"window": self.window()})
-            # A refusal also needs a slot. Fund both its preflight and persistence
-            # from existing control/recovery capacity, not saturated content space.
-            # The same window bound and archive-only escrow still apply. Test the
-            # largest canonical refusal before consulting policy or the action.
+            # Refusal cache growth must leave all control/recovery headroom intact.
+            # A missing slot does not hide a definite refusal behind perpetual busy:
+            # evaluate without effects, then return it uncached and fence its epoch.
             trial = Working(self, archive=archive)
             self._cache_operation(trial, command, principal, op, fingerprint,
                                   {"state": "rejected", "reserved": " " * 2048}, compact=False)
             prospective = dict(trial.rows)
             for key, value in trial.changes.items():
                 prospective[key] = {"version": max((row["version"] for row in trial.rows.values()), default=0) + 1, "value": value["value"]}
+            cacheable = True
             try:
-                self._preflight_reservations(prospective, before=trial.rows, control=True, archive=archive)
+                self._preflight_reservations(prospective, before=trial.rows, control=True, archive=archive, refusal=True)
             except PolicyError:
-                meta["window_epoch"], meta["window_count"] = nonce("w:"), 0
-                work.put("meta", meta)
-                try:
-                    work.commit(control=True)
-                except StoreError:
-                    self.current = False
-                    self.permits.clear()
-                    raise
-                self._safe_maintain()
-                raise CoordinationError("busy", "result window closed before evaluation: no reply slot", {"window": self.window()})
+                cacheable = False
             failure, first, after, uncertain = None, None, None, None
             write_control = control
             try:
@@ -346,18 +350,8 @@ class Coordinator:
                     if uncertain and error.kind in ("durability_unconfirmed", "indeterminate", "timeout"):
                         uncertain()
                     raise
-                failure = self._bounded_refusal(error)
-                work = Working(self, archive=archive)  # discard all uncommitted requested changes
-                result = {"state": "rejected", "reason": failure["kind"], "refusal": failure}
-                self._cache_operation(work, command, principal, op, fingerprint, result, compact=False)
-                try:
-                    work.commit(control=True)
-                except (PolicyError, StoreError):
-                    # No refusal can be forgotten and later become an admission.
-                    # A fresh owner rolls the old window before doing anything.
-                    self.current = False
-                    self.permits.clear()
-                    raise
+                failure = self._remember_refusal(command, principal, op, fingerprint,
+                                                 self._bounded_refusal(error), archive=archive, cacheable=cacheable)
             if not failure and after:
                 after()
             if not failure and first:
@@ -367,6 +361,38 @@ class Coordinator:
                 raise CoordinationError(failure["kind"], failure["message"], failure["data"])
             result["window"] = self.window()
             return result
+
+    def _remember_refusal(self, command, principal, op, fingerprint, failure, *, archive, cacheable):
+        if cacheable:
+            work = Working(self, archive=archive)  # discard uncommitted requested changes
+            self._cache_operation(work, command, principal, op, fingerprint,
+                                  {"refusal": failure["kind"]}, compact=False)
+            try:
+                work.commit(control=True, refusal=True)
+                return failure
+            except (PolicyError, StoreError) as error:
+                if error.kind != "quota":
+                    self.current = False
+                    self.permits.clear()
+                    raise
+        # No result slot: report the real refusal live, but first close its epoch
+        # durably. The refused ID can never become an admission after a grant or
+        # capacity change. Old result caches may expire; unresolved evidence lives
+        # in message/external records, not these result buckets.
+        work = Working(self)
+        meta = work.get("meta")
+        meta["window_epoch"], meta["window_count"] = nonce("w:"), 0
+        work.put("meta", meta)
+        for key in work.rows:
+            if key.startswith("ops/"):
+                work.delete(key)
+        try:
+            work.commit(control=True)
+        except (PolicyError, StoreError):
+            self.current = False
+            self.permits.clear()
+            raise
+        return dict(failure, data=dict(failure["data"], uncached=True, window=self.window()))
 
     @staticmethod
     def _bounded_refusal(error):
