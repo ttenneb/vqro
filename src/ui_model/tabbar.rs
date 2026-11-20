@@ -115,34 +115,49 @@ pub fn tab_state(tab: &Value) -> Option<&'static str> {
 /// Marks on inactive tabs, most urgent first (the setting's `marks`, default off).
 pub const MARKS: [&str; 4] = ["blocked", "error", "done", "activity"];
 
-/// What a client remembers about a resource when its tab is shown: `{state, title}` (status state, program title).
+/// What a client remembers about a resource when its tab is shown: `{title}` (the program title), for `activity`.
 pub fn seen_of(resource: &Value) -> Value {
-    json!({"state": resource["status"]["state"], "title": resource["title"]})
+    json!({"title": resource["title"]})
 }
 
-/// The mark an inactive tab shows, from its resources now and what they were when the tab was last shown (`seen`,
-/// one `seen_of` snapshot per resource, null when never seen). With `marks` on: `blocked` while any agent there
-/// waits for you; `error` or `done` when one reached that state since; `activity` when a program title changed
-/// since. The most urgent wins (`MARKS`). Derived on draw, never written (core-protocol.md "Tab bar").
-pub fn tab_mark(setting: Option<&Value>, now: &[&Value], seen: &[&Value]) -> Option<&'static str> {
+/// The finish a resource update reaches: `done` or `error` when its status state turns into it (from `old`, the
+/// record before the update, or none). Clients latch it from every resource event until the resource's tab is shown,
+/// because a backend may report `done` only for a moment (herdr-core clears the status when the reporting command
+/// returns to the shell), so a client that looked only when drawing could miss it.
+pub fn reached(old: Option<&Value>, new: &Value) -> Option<&'static str> {
+    let was = old.and_then(|o| o["status"]["state"].as_str());
+    match new["status"]["state"].as_str() {
+        Some("done") if was != Some("done") => Some("done"),
+        Some("error") if was != Some("error") => Some("error"),
+        _ => None,
+    }
+}
+
+/// The more urgent of two latched finishes (`error` over `done`).
+pub fn latch(held: Option<&'static str>, new: &'static str) -> &'static str {
+    if held == Some("error") { "error" } else { new }
+}
+
+/// The mark an inactive tab shows (with the setting's `marks` on), from its resources now, what they were when the
+/// tab was last shown (`seen`, one `seen_of` per resource, null when never seen) and the finish each reached since
+/// (`reached`, latched by `reached`/`latch`, null for none): `blocked` while any agent there waits for you; `error`
+/// or `done` when one reached it since; `activity` when a program title changed since. The most urgent wins
+/// (`MARKS`). Derived on draw, never written (core-protocol.md "Tab bar").
+pub fn tab_mark(setting: Option<&Value>, now: &[&Value], seen: &[&Value], reached: &[Option<&str>]) -> Option<&'static str> {
     if setting.and_then(|s| s.get("marks")).and_then(Value::as_bool) != Some(true) {
         return None;
     }
-    let mark = |r: &Value, was: &Value| -> Option<&'static str> {
-        let state = r["status"]["state"].as_str();
-        if state == Some("blocked") {
+    let mark = |i: usize, r: &Value| -> Option<&'static str> {
+        if r["status"]["state"].as_str() == Some("blocked") {
             return Some("blocked");
         }
-        if was.is_null() {
-            return None;
+        match reached.get(i).copied().flatten() {
+            Some("error") => return Some("error"),
+            Some("done") => return Some("done"),
+            _ => {}
         }
-        match state {
-            Some(s @ ("error" | "done")) if was["state"].as_str() != Some(s) => Some(if s == "error" { "error" } else { "done" }),
-            _ if r["title"].is_string() && r["title"] != was["title"] => Some("activity"),
-            _ => None,
-        }
+        let was = seen.get(i).copied().unwrap_or(&Value::Null);
+        (!was.is_null() && r["title"].is_string() && r["title"] != was["title"]).then_some("activity")
     };
-    now.iter().enumerate()
-        .filter_map(|(i, r)| mark(r, seen.get(i).copied().unwrap_or(&Value::Null)))
-        .min_by_key(|m| MARKS.iter().position(|x| x == m))
+    now.iter().enumerate().filter_map(|(i, r)| mark(i, r)).min_by_key(|m| MARKS.iter().position(|x| x == m))
 }

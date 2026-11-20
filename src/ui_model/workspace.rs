@@ -47,6 +47,9 @@ pub struct Workspace {
     pub backend_notice: Option<String>,
     /// Live view content from `view.publish`, merged over the view entry.
     pub live: HashMap<String, Value>,
+    /// The finish (`done`/`error`) each resource reached since its tab was last shown (`tabbar::reached`), for tab
+    /// marks; a client removes a resource's entry when it shows the tab.
+    pub reached: HashMap<String, &'static str>,
 }
 
 pub fn strings(value: &Value) -> BTreeSet<String> { value.as_array().into_iter().flatten().filter_map(Value::as_str).map(String::from).collect() }
@@ -65,6 +68,8 @@ impl Workspace {
             }
         }
         self.resources = snap["resources"].as_array().into_iter().flatten().filter_map(|r| Some((r["id"].as_str()?.to_string(), r.clone()))).collect();
+        let resources = &self.resources;
+        self.reached.retain(|id, _| resources.contains_key(id));
         self.commands = snap["commands"].as_array().into_iter().flatten().filter_map(|c| Some((c["name"].as_str()?.to_string(), c.clone()))).collect();
         self.extensions = snap["extensions"].as_object().map(|o| o.iter().map(|(k, v)| (k.clone(), v.clone())).collect()).unwrap_or_default();
         let was_safe = self.safe_mode;
@@ -121,12 +126,16 @@ impl Workspace {
                     let available = record["available"].as_bool().unwrap_or(true);
                     let restored = available && self.resources.get(id).is_some_and(|old| old["available"] == false);
                     let live = record["state"] == "live";
+                    if let Some(r) = super::tabbar::reached(self.resources.get(id), &record) {
+                        let held = self.reached.get(id).copied();
+                        self.reached.insert(id.to_string(), super::tabbar::latch(held, r));
+                    }
                     self.resources.insert(id.to_string(), record);
                     out.push(Change::Resource { id: id.to_string(), available, live, restored });
                 }
             }
             "resource.removed" => {
-                if let Some(id) = d["id"].as_str() { self.resources.remove(id); }
+                if let Some(id) = d["id"].as_str() { self.resources.remove(id); self.reached.remove(id); }
             }
             "command" => {
                 if let Some(n) = d["name"].as_str() {
@@ -307,4 +316,28 @@ pub fn resolve(cands: &[(String, Value)]) -> HashMap<String, usize> {
         }
     }
     won
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn resource(ws: &mut Workspace, seq: u64, state: Value) {
+        ws.apply(&json!({"epoch": "", "seq": seq, "type": "resource", "data": {"id": "r1", "state": "live", "status": state}}));
+    }
+
+    #[test]
+    fn a_finish_is_latched_from_events_even_when_the_status_clears_at_once() {
+        // herdr-core: working, done, then null as soon as the reporting command returns to the shell.
+        let mut ws = Workspace::default();
+        resource(&mut ws, 1, json!({"state": "working"}));
+        resource(&mut ws, 2, json!({"state": "done"}));
+        resource(&mut ws, 3, Value::Null);
+        assert_eq!(ws.reached.get("r1"), Some(&"done"));
+        resource(&mut ws, 4, json!({"state": "error"}));
+        resource(&mut ws, 5, json!({"state": "done"}));
+        assert_eq!(ws.reached.get("r1"), Some(&"error"), "the more urgent finish is kept");
+        ws.apply(&json!({"epoch": "", "seq": 6, "type": "resource.removed", "data": {"id": "r1"}}));
+        assert!(ws.reached.is_empty());
+    }
 }

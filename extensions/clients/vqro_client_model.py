@@ -455,6 +455,8 @@ class Workspace:
         self.entries = {k: e.get("value") for k, e in (snap.get("entries") or {}).items()}
         self.versions = {k: e.get("version", 0) for k, e in (snap.get("entries") or {}).items()}
         self.resources = {r["id"]: r for r in snap.get("resources") or [] if isinstance(r.get("id"), str)}
+        # Finishes (done/error) resources reached since their tab was last shown (tab marks); kept across a reload.
+        self.reached = {k: v for k, v in getattr(self, "reached", {}).items() if k in self.resources}
         self.commands = {c["name"]: c for c in snap.get("commands") or [] if isinstance(c.get("name"), str)}
         self.extensions = dict(snap.get("extensions") or {})
         self.safe_mode = snap.get("safe_mode") is True
@@ -488,9 +490,13 @@ class Workspace:
                 if base is None:
                     return [("resync", None)]
                 record = dict(base, **d)
+            finish = reached(self.resources.get(record["id"]), record)
+            if finish:
+                self.reached[record["id"]] = latch(self.reached.get(record["id"]), finish)
             self.resources[record["id"]] = record
         elif t == "resource.removed":
             self.resources.pop(d.get("id"), None)
+            self.reached.pop(d.get("id"), None)
         elif t == "command":
             if d.get("available") is False:
                 self.commands.pop(d.get("name"), None)
@@ -818,28 +824,40 @@ TAB_MARKS = ["blocked", "error", "done", "activity"]
 
 
 def seen_of(resource):
-    """What a client remembers about a resource when its tab is shown (ui_model::tabbar::seen_of)."""
-    status = resource.get("status") if isinstance(resource.get("status"), dict) else {}
-    return {"state": status.get("state"), "title": resource.get("title")}
+    """What a client remembers about a resource when its tab is shown (ui_model::tabbar::seen_of): its title."""
+    return {"title": resource.get("title")}
 
 
-def tab_mark(setting, now, seen):
-    """The mark an inactive tab shows (ui_model::tabbar::tab_mark): blocked while an agent waits; error/done
-    reached since last shown; activity when a program title changed since. Off unless `marks` is true."""
+def _state(resource):
+    status = resource.get("status") if isinstance(resource, dict) and isinstance(resource.get("status"), dict) else {}
+    return status.get("state") if isinstance(status.get("state"), str) else None
+
+
+def reached(old, new):
+    """The finish an update reaches (ui_model::tabbar::reached): done/error when the status state turns into it."""
+    state, was = _state(new), _state(old)
+    return state if state in ("done", "error") and state != was else None
+
+
+def latch(held, new):
+    """The more urgent of two latched finishes (error over done)."""
+    return "error" if held == "error" else new
+
+
+def tab_mark(setting, now, seen, reached_since):
+    """The mark an inactive tab shows (ui_model::tabbar::tab_mark): blocked while an agent waits; error/done reached
+    since last shown (latched from events); activity when a program title changed since. Off unless `marks` is true."""
     if not (isinstance(setting, dict) and setting.get("marks") is True):
         return None
     found = []
     for i, r in enumerate(now):
         was = seen[i] if i < len(seen) else None
-        status = r.get("status") if isinstance(r.get("status"), dict) else {}
-        state = status.get("state") if isinstance(status.get("state"), str) else None
-        if state == "blocked":
+        finish = reached_since[i] if i < len(reached_since) else None
+        if _state(r) == "blocked":
             found.append("blocked")
-        elif not isinstance(was, dict):
-            continue
-        elif state in ("error", "done") and was.get("state") != state:
-            found.append(state)
-        elif isinstance(r.get("title"), str) and r.get("title") != was.get("title"):
+        elif finish in ("error", "done"):
+            found.append(finish)
+        elif isinstance(was, dict) and isinstance(r.get("title"), str) and r.get("title") != was.get("title"):
             found.append("activity")
     return min(found, key=TAB_MARKS.index) if found else None
 

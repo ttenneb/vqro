@@ -439,6 +439,8 @@ export class Workspace {
   resources = new Map<string, Json>(); commands = new Map<string, Json>(); extensions = new Map<string, Json>();
   safeMode = false; safeModeAllow = new Set<string>(); providerExtensions = new Set<string>();
   live = new Map<string, Json>(); backendNotice: string | null = null;
+  /** Finishes (done/error) resources reached since their tab was last shown (tab marks); kept across a reload. */
+  reached = new Map<string, string>();
 
   /** Replace the cache with a snapshot; returns whether safe mode was on before. */
   load(snap: Json): boolean {
@@ -486,11 +488,13 @@ export class Workspace {
         }
         const available = record.available !== false;
         const restored = available && this.resources.get(d.id)?.available === false;
+        const finish = reached(this.resources.get(d.id), record);
+        if (finish) this.reached.set(d.id, this.reached.get(d.id) === "error" ? "error" : finish);
         this.resources.set(d.id, record);
         out.push({ type: "resource", id: d.id, available, live: record.state === "live", restored });
         break;
       }
-      case "resource.removed": this.resources.delete(d.id); break;
+      case "resource.removed": this.resources.delete(d.id); this.reached.delete(d.id); break;
       case "command":
         if (d.available === false) this.commands.delete(d.name); else if (isStr(d.name)) this.commands.set(d.name, d);
         break;
@@ -975,21 +979,27 @@ export const TAB_MARKS = ["blocked", "error", "done", "activity"];
 
 /** What a client remembers about a resource when its tab is shown (ui_model::tabbar::seen_of). */
 export function seenOf(resource: Json): Json {
-  return { state: isObj(resource?.status) ? resource.status.state ?? null : null, title: resource?.title ?? null };
+  return { title: resource?.title ?? null };
+}
+
+const stateOf = (r: Json): string | null => isObj(r?.status) && typeof r.status.state === "string" ? r.status.state : null;
+
+/** The finish an update reaches (ui_model::tabbar::reached): done/error when the status state turns into it. */
+export function reached(old: Json, next: Json): string | null {
+  const state = stateOf(next);
+  return (state === "done" || state === "error") && state !== stateOf(old) ? state : null;
 }
 
 /** The mark an inactive tab shows (ui_model::tabbar::tab_mark): blocked while an agent waits; error/done reached
- * since last shown; activity when a program title changed since. Off unless `marks` is true. */
-export function tabMark(setting: Json, now: Json[], seen: Json[]): string | null {
+ * since last shown (latched from events); activity when a program title changed since. Off unless `marks` is true. */
+export function tabMark(setting: Json, now: Json[], seen: Json[], reachedSince: (string | null)[]): string | null {
   if (!(isObj(setting) && setting.marks === true)) return null;
   const found: string[] = [];
   now.forEach((r, i) => {
-    const was = seen[i];
-    const state = isObj(r?.status) && typeof r.status.state === "string" ? r.status.state : null;
-    if (state === "blocked") found.push("blocked");
-    else if (!isObj(was)) return;
-    else if ((state === "error" || state === "done") && was.state !== state) found.push(state);
-    else if (typeof r?.title === "string" && r.title !== was.title) found.push("activity");
+    const was = seen[i], finish = reachedSince[i] ?? null;
+    if (stateOf(r) === "blocked") found.push("blocked");
+    else if (finish === "error" || finish === "done") found.push(finish);
+    else if (isObj(was) && typeof r?.title === "string" && r.title !== was.title) found.push("activity");
   });
   return found.length ? found.sort((a, b) => TAB_MARKS.indexOf(a) - TAB_MARKS.indexOf(b))[0] : null;
 }

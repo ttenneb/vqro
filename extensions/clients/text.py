@@ -201,7 +201,10 @@ class TextClient:
                 for r in rids:
                     if i == active or r not in self.seen:
                         self.seen[r] = model.seen_of(self.ws.resources[r])
-                found = None if i == active else model.tab_mark(setting, [self.ws.resources[r] for r in rids], [self.seen[r] for r in rids])
+                    if i == active:
+                        self.ws.reached.pop(r, None)
+                found = None if i == active else model.tab_mark(setting, [self.ws.resources[r] for r in rids], [self.seen[r] for r in rids],
+                                                                [self.ws.reached.get(r) for r in rids])
                 return f" !{found}" if found else ""
             ended = lambda t: f" ({model.tab_state(t)})" if model.tab_state(t) else ""  # text's form of the dim style
             return "  " * depth + "tabs: " + "  ".join(f"[{model.tab_label(style, i, name(t)).strip()}{'*' if i == active else ''}{ended(t)}{mark(i, t)}]"

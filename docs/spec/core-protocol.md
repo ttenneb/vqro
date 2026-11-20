@@ -1305,16 +1305,19 @@ written by the tabs extension (`tabs.settings`) and read by every client (render
   their names. Clients derive it on every draw and never write it back (it changes too often for transactions).
 - **Ended tabs:** the tabs extension sets a tab's `state` to `ended` when all its programs ended, or `gone` when
   one was removed (and drops it when they are live again). Clients draw such a tab dim (inactive chip: `dim`
-  text; active chip: its fill with the terminal's dim attribute; the text client appends `(ended)`), the title
+  text; active chip: its fill with the terminal's dim attribute; the text client appends `(ended)` or `(gone)`), the title
   unchanged; unknown `state` values give no hint (`ui_model::tabbar::tab_state`, `tabstate.json`). Titles saved
   with the former ` [gone]`/` [ended]` suffix are stripped when the extension reconciles. Close ended tabs
   (`tabs.close_ended`) closes them as before.
-- **Marks** (`marks`, default off): an inactive tab shows one mark after its name, from its resources'
-  `status.state` and `title` now against what they were when the tab was last shown (client-local memory,
-  `seen_of`; never written): `blocked` (⚠, `warn`) while any agent there waits for you, `error` (✗, `error`) or
-  `done` (✓, `ok`) reached since, `activity` (•, `accent`) when a program title changed since; the most urgent wins.
-  Icon names `blocked`, `error`, `done`, `activity` let an icon set restyle them. Output and bells of hidden
-  terminals are not visible to clients (their streams are closed); a backend activity fact would add them.
+- **Marks** (`marks`, default off): an inactive tab shows one mark after its name: `blocked` (⚠, `warn`) while any
+  agent there waits for you (its `status.state` now); `error` (✗, `error`) or `done` (✓, `ok`) when one reached
+  that state since the tab was last shown; `activity` (•, `accent`) when a program title changed since (against
+  `seen_of`, remembered when the tab is shown). The most urgent wins. Finishes are latched from resource events
+  (`reached`: a status turning into `done`/`error`) and kept until the tab is shown, because a backend may report
+  them only for a moment (herdr-core clears the status when the reporting command returns to the shell). All of
+  it is client-local and never written. Icon names `blocked`, `error`, `done`, `activity` let an icon set restyle
+  them. Output and bells of hidden terminals are not visible to clients (their streams are closed); a backend
+  activity fact would add them. Conformance: `tabmark.json`, `tabreached.json`.
 - **Label** for tab *i* (1-based) titled *t*, padding included. After the name (default): ` t₁ `, ` t¹ `, ` t 1 `.
   Before it: ` ₁ t `, ` ¹t `, ` 1 t `, or the flat ` 1:t ` with `chips: false` and plain numbers. `none`: ` t `.
   Numbers past 9 use more digits (`₁₀`).

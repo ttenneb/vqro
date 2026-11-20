@@ -121,7 +121,11 @@ test("tab bar", async () => {
 });
 
 test("tab marks", async () => {
-  for (const c of (await fixture("tabmark.json")).cases) expect(m.tabMark(c.setting, c.now, c.seen), c.name).toEqual(c.expect);
+  for (const c of (await fixture("tabmark.json")).cases) expect(m.tabMark(c.setting, c.now, c.seen, c.reached), c.name).toEqual(c.expect);
+});
+
+test("tab finishes", async () => {
+  for (const c of (await fixture("tabreached.json")).cases) expect(m.reached(c.old, c.new), c.name).toEqual(c.expect);
 });
 
 test("tab states", async () => {

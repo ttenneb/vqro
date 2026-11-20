@@ -191,8 +191,14 @@ fn tab_marks_like_the_model() {
     check("tabmark.json", |case| {
         let now: Vec<&Value> = case["now"].as_array().unwrap().iter().collect();
         let seen: Vec<&Value> = case["seen"].as_array().unwrap().iter().collect();
-        json!(tabbar::tab_mark(case.get("setting"), &now, &seen))
+        let reached: Vec<Option<&str>> = case["reached"].as_array().unwrap().iter().map(|r| r.as_str()).collect();
+        json!(tabbar::tab_mark(case.get("setting"), &now, &seen, &reached))
     });
+}
+
+#[test]
+fn tab_finishes_like_the_model() {
+    check("tabreached.json", |case| json!(tabbar::reached(Some(&case["old"]).filter(|o| !o.is_null()), &case["new"])));
 }
 
 #[test]

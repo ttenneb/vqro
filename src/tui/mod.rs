@@ -2219,6 +2219,7 @@ impl App {
             if i == shown {
                 for r in &rids {
                     self.seen.insert(r.clone(), crate::ui_model::tabbar::seen_of(&self.ws.resources[r]));
+                    self.ws.reached.remove(r);
                 }
             } else {
                 for r in &rids {  // first sight: nothing happened yet
@@ -2226,7 +2227,8 @@ impl App {
                 }
                 let now: Vec<&Value> = rids.iter().map(|r| &self.ws.resources[r]).collect();
                 let seen: Vec<&Value> = rids.iter().map(|r| &self.seen[r]).collect();
-                if let Some(mark) = crate::ui_model::tabbar::tab_mark(setting.as_ref(), &now, &seen) {
+                let reached: Vec<Option<&str>> = rids.iter().map(|r| self.ws.reached.get(r).copied()).collect();
+                if let Some(mark) = crate::ui_model::tabbar::tab_mark(setting.as_ref(), &now, &seen, &reached) {
                     tab["mark"] = json!(mark);
                 }
             }

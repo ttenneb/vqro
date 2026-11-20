@@ -83,8 +83,12 @@ export class App {
     const walk = (n: Json) => { if (!isObj(n)) return; if (typeof n.view === "string") views.push(n.view); (n.children ?? []).forEach(walk); (n.tabs ?? []).forEach((t: Json) => walk(t?.node)); };
     walk(tab?.node);
     const rids = views.map((v) => this.ws.entries.get(`view/${v}`)?.resource).filter((r): r is string => typeof r === "string" && this.ws.resources.has(r));
-    for (const r of rids) if (shown || !this.seen.has(r)) this.seen.set(r, m.seenOf(this.ws.resources.get(r)));
-    return shown ? null : m.tabMark(this.ws.entries.get(m.TABS_ENTRY), rids.map((r) => this.ws.resources.get(r)), rids.map((r) => this.seen.get(r)));
+    for (const r of rids) {
+      if (shown || !this.seen.has(r)) this.seen.set(r, m.seenOf(this.ws.resources.get(r)));
+      if (shown) this.ws.reached.delete(r);
+    }
+    return shown ? null : m.tabMark(this.ws.entries.get(m.TABS_ENTRY), rids.map((r) => this.ws.resources.get(r)), rids.map((r) => this.seen.get(r)),
+      rids.map((r) => this.ws.reached.get(r) ?? null));
   }
   focusLast: string | null = null;
   hits: Hit[] = [];
