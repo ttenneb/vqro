@@ -53,6 +53,14 @@ core guesses endpoint identity from timing, process ancestry, names or pane plac
 
 ## Upgrade and review notes
 
+A standalone `Extension(name)` without explicit launcher configuration remains undeclared; it never synthesizes
+`extension:<name>`. A valid supervision token lets core derive that identity. This preserves unmanaged helper
+RPC/recovery while keeping the reserved-namespace guard intact (`tests/qa_limits.rs` real RPC regression).
+Generic SDK hellos also carry an explicitly configured supervisor name/token pair when the caller did not supply
+supervision fields; core authenticates the lifetime. This keeps managed public-primitive bootstrap probes (such as
+tmux state-location lookup) from sending an unverified prefix claim. Native tmux lifetime/wire and paired Python
+hello tests cover the distinction; no adapter-specific identity bypass is added.
+
 Old prototype SDKs must move live proofs from `on_behalf_of` to `invocation`; there is intentionally no ambiguous
 fallback. Old free claims are not backfilled: explicit revert by id remains available, but default u excludes them.
 Owner hellos resolve once; open TUIs reconnect after an owner transfer. Generic shells inherit the spawner's

@@ -68,6 +68,24 @@ class InvocationAttribution(unittest.TestCase):
         vqro._send = send
         return vqro, messages
 
+    def test_generic_hello_carries_configured_supervision_without_synthesizing_it(self):
+        from unittest.mock import patch
+        with patch.dict("os.environ", {"VQRO_EXTENSION":"managed", "VQRO_EXTENSION_TOKEN":"fixture-token", "VQRO_PRINCIPAL":"extension:managed"}, clear=True):
+            vqro, messages = self.vqro(None)
+            params = {"features":["fixture"]}
+            vqro.call("hello", params)
+            hello = messages[-1]["params"]
+            self.assertEqual((hello["extension"], hello["extension_token"]), ("managed", "fixture-token"))
+            self.assertEqual(hello["identity"], {"kind":"principal", "principal":"extension:managed"})
+            self.assertEqual(params, {"features":["fixture"]})
+            explicit = {"extension":"other", "extension_token":"explicit", "identity":{"kind":"principal", "principal":"explicit"}}
+            vqro.call("hello", explicit)
+            self.assertEqual(messages[-1]["params"], explicit)
+        with patch.dict("os.environ", {}, clear=True):
+            vqro, messages = self.vqro(None)
+            vqro.call("hello", {})
+            self.assertEqual(messages[-1]["params"], {})
+
     def test_command_context_covers_workspace_and_nested_calls_without_mutating_params(self):
         params = {"ops": []}
         def handler(method, args):

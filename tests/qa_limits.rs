@@ -40,6 +40,7 @@ async fn bounded_python_helper_still_consumes_real_rpc_notifications() {
     let script = r#"from vqro_ext import Extension
 import threading
 ext = Extension('qa-smoke')
+assert ext.info['actor'] == 'undeclared', 'an unsupervised helper must not synthesize a core-derived identity'
 seen = threading.Event()
 ext.on_event(lambda kind, data: seen.set() if kind == 'entries' else None)
 ext.vqro.call('events.subscribe', {'epoch':ext.epoch,'from':ext.seq})

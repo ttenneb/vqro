@@ -115,8 +115,13 @@ class Vqro:
         if params is None or isinstance(params, dict):
             params = dict(params or {})
             known = getattr(self, "principal", os.environ.get("VQRO_PRINCIPAL"))
-            if method == "hello" and known and known != "undeclared":
-                params.setdefault("identity", {"kind": "principal", "principal": known})
+            if method == "hello":
+                if "extension" not in params and "extension_token" not in params:
+                    name, token = os.environ.get("VQRO_EXTENSION"), os.environ.get("VQRO_EXTENSION_TOKEN")
+                    if name is not None and token is not None:
+                        params.update(extension=name, extension_token=token)
+                if known and known != "undeclared":
+                    params.setdefault("identity", {"kind": "principal", "principal": known})
         proof = getattr(getattr(self, "_command_context", None), "invocation", None)
         if proof is not None and method in ("workspace.apply", "workspace.revert", "operational.register", "operational.apply", "command.invoke", "resource.spawn", "resource.kill", "resource.invoke", "resource.forget", "resource.forget_cached", "resource.attach") and (params is None or isinstance(params, dict)):
             params = dict(params or {})
@@ -303,7 +308,7 @@ class Extension:
         self.providers = {}
         self.cache_lock = threading.RLock()
         self.vqro = Vqro(os.environ["VQRO_SOCKET"], self._handle, recover_notifications=True,
-                         principal=os.environ.get("VQRO_PRINCIPAL", f"extension:{self.name}"))
+                         principal=os.environ.get("VQRO_PRINCIPAL"))
         # A slow core delays startup (until run() subscribes); it must not burn the crash budget.
         # A dead connection still exits (the reader's EOF).
         self.vqro.name, self.vqro.patient = self.name, True
