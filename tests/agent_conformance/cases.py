@@ -2,6 +2,7 @@
 import asyncio
 from copy import deepcopy
 import json
+from pathlib import Path
 
 from .content import compare_content, examples
 from .results import CheckFailed, FixtureFailed, HarnessGap, NotDeclared, check, declared
@@ -779,6 +780,62 @@ async def stalled_viewer_isolation(ctx):
                              "fast_cursors": [first.reducer.cursor, second.reducer.cursor]})
     finally:
         transport.resume_reading()
+
+
+@case("O9")
+async def prune_preserves_live_state(ctx):
+    await ctx.native.call("retain", text="O9-first-retained-message")
+    await ctx.native.call("tool_call", id_ref="O9-live-tool", state="start")
+    request = None
+    if "agent.respond" in (await ctx.facts()).get("caps", {}):
+        _, request = await make_request(ctx, timeout_ms=60000)
+    view = await fresh_view(ctx)
+    await ctx.wait_view(view, lambda reducer: any(kind == "tool" and row["value"].get("status") == "running"
+                                                for (kind, _), row in reducer.entities.items()))
+    live = {key for key, row in view.reducer.entities.items() if key[0] == "tool" and row["value"].get("status") == "running"}
+    if request is not None:
+        live.add(("request", request["request"]))
+    old = {key for key, row in view.reducer.entities.items() if key[0] == "message" and "O9-first-retained-message" in json.dumps(row["value"])}
+    check(old, "initial retained message was not visible")
+    needle = await flood_retained(ctx, "O9-prune")
+    await ctx.wait_view(view, lambda reducer: has_message(reducer, needle))
+    check(live <= view.reducer.entities.keys(), "retention pressure pruned a live tool/request")
+    check(old - view.reducer.entities.keys(), "retention pressure did not exercise any historical pruning", component="harness")
+    fresh = await fresh_view(ctx, peer=await ctx.viewer())
+    check(live <= fresh.reducer.entities.keys(), "new snapshot lost the preserved live state")
+    check(fresh.reducer.coverage != "all_retained", "adapter pruned still-native-retained history but claimed all_retained")
+    ctx.evidence.append({"kind": "protected_live_state", "keys": [list(key) for key in sorted(live)],
+                         "coverage": fresh.reducer.coverage, "historical_pruning_observed": True})
+
+
+def process_rss(pid):
+    try:
+        for line in Path(f"/proc/{pid}/status").read_text().splitlines():
+            if line.startswith("VmRSS:"):
+                return int(line.split()[1]) * 1024
+    except FileNotFoundError:
+        pass
+    raise FixtureFailed("owned adapter process RSS unavailable")
+
+
+@case("O10")
+async def declared_retention_bounds(ctx):
+    declaration = (await ctx.facts())["caps"].get("items.stream", {})
+    for field in ("entities", "entity_bytes", "retain_bytes"):
+        check(type(declaration.get(field)) is int and declaration[field] > 0, "missing numeric item bound: " + field)
+    view, samples = await fresh_view(ctx), []
+    pid = ctx.metadata.get("adapter_image", {}).get("pid")
+    if not pid:
+        raise FixtureFailed("owned adapter PID missing from execution provenance")
+    for phase in range(4):
+        needle = await flood_retained(ctx, "O10-window-" + str(phase))
+        await ctx.wait_view(view, lambda reducer: has_message(reducer, needle))
+        check(len(view.reducer.entities) <= declaration["entities"], "retained entity count exceeded its declaration")
+        check(view.reducer.entity_bytes <= declaration["entity_bytes"], "retained entity bytes exceeded their declaration")
+        samples.append({"records": (phase + 1) * 96, "entities": len(view.reducer.entities),
+                        "entity_bytes": view.reducer.entity_bytes, "adapter_rss_bytes": process_rss(pid)})
+    ctx.evidence.append({"kind": "retention_pressure", "declared": declaration, "samples": samples,
+                         "native_payload_bytes": 4 * 96 * 8192, "rss_is_measurement_not_cross_runtime_slo": True})
 
 
 @case("O8")

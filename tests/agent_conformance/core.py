@@ -119,7 +119,7 @@ class PublicImplementation:
         shutil.copytree(HERE, self.fixture_dir, ignore=shutil.ignore_patterns("__pycache__"))
         native_fixtures = self.harness_dir / "fixtures"
         native_fixtures.mkdir()
-        for filename in ("fake_codex.py", "codex_control.py"):
+        for filename in ("fake_codex.py", "codex_control.py", "acp_conformance.py", "acp_conformance_model.py"):
             source = HERE.parent / "fixtures" / filename
             if source.is_file():
                 shutil.copy2(source, native_fixtures / filename)
@@ -128,6 +128,7 @@ class PublicImplementation:
                         "{control}": str(self.native.endpoint), "{ledger}": str(self.native.path),
                         "{script}": str(self.root / "script.json"), "{root}": str(self.root),
                         "{harness_root}": str(self.harness_dir), "{codex_fixture}": str(native_fixtures / "fake_codex.py"),
+                        "{acp_fixture}": str(native_fixtures / "acp_conformance.py"),
                         "{work}": str(self.root / "work")}
         self.argv = [placeholders.get(value, value) for value in manifest["argv"]]
         if not self.argv or not Path(self.argv[0]).is_absolute():
