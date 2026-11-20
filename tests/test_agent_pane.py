@@ -224,6 +224,19 @@ class TranscriptRows(unittest.TestCase):
         self.assertRegex(group["children"][0]["text"], r"^… \d+ earlier steps not shown here \(pane limit\)$")
         self.assertEqual(group["children"][-1]["text"], "✓ read   file-39.txt", "the newest step is kept")
 
+    def test_one_tool_with_thousands_of_arguments_stays_within_the_budget(self):
+        """vqro-lead-secondary #74 (probe-74-single-step-budget.py): a 35 KB entity with 3000 arguments rendered 200 KB."""
+        names = agent_transcript.Names({"r2": {"name": "Pi", "kind": "agent"}}, "r2")
+        for count in (10, 3000):
+            value = {"position": 1, "title": "custom_tool", "status": "completed", "input": {f"k{i}": 0 for i in range(count)}}
+            rows = agent_transcript.rows({("tool", "one"): (1, value)}, names, "all_retained")
+            self.assertLessEqual(len(json.dumps(rows, ensure_ascii=False).encode()), agent_transcript.BUDGET, count)
+            step = rows[0]["children"][0]
+            if count == 10:
+                self.assertEqual(len(step["children"]), 10, "small: every argument shown")
+            else:
+                self.assertRegex(step["children"][-1]["text"], r"^… \d+ more lines not shown here \(pane limit\)$")
+
     def test_hiding_tools_never_hides_the_thinking_between_them(self):
         """vqro-lead-secondary #74: Tools=hide with Thinking=show erased an intervening thought with no disclosure."""
         names = agent_transcript.Names({"r2": {"name": "Pi", "kind": "agent"}}, "r2")
