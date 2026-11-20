@@ -6,9 +6,43 @@ Only public coordination commands drive it, and only the fake native ledger is w
 endpoint actually received, target identity at invoke time, and no typed terminal input or second invocation
 (no replay). No coordination engine or store module is imported or asserted.
 """
-import asyncio
 
 from .cases import case, held, invocations, settled, terminal
+
+
+def plan_matches(recorded, source, destination, deliveries, *, state, stage):
+    """T9: the recorded plan names exactly this source/destination (ids and incarnations), delivery set and states."""
+    return (recorded.get("state") == state and recorded.get("from") == source
+            and {k: (recorded.get("to") or {}).get(k) for k in ("agent", "incarnation")} == destination
+            and sorted(recorded.get("deliveries") or []) == sorted(deliveries)
+            and [(st.get("kind"), st.get("state")) for st in recorded.get("stages") or []] == [("names", stage)])
+
+
+def lookup_names_plan(inspected, plan_id):
+    """T9: the handover op lookup is historical and returns exactly the recorded plan (never unknown or another plan)."""
+    return inspected.get("plan") == plan_id and inspected.get("historical") is True and inspected.get("state") in ("held", "completed")
+
+
+async def stored_plan(ctx, plan_id):
+    """The recorded handover plan, read through the public operational API (never a store import)."""
+    entry = (await ctx.peer.call("operational.get", {"domain": "coord", "key": "operational/coord/plan/" + plan_id})).get("entry")
+    return (entry or {}).get("value") or {}
+
+
+async def scheduling_barrier(ctx, endpoint, text):
+    """A harmless later settle through the same open destination: its durable claim and native invocation prove the
+    scheduler ran over that destination (settle is the last lane it considers); the endpoint is then made idle again so
+    the protected records keep their native eligibility. Returns the barrier delivery, which callers exclude."""
+    barrier = (await ctx.send(target=endpoint["id"], mode="settle", text=text, send_new=True))["delivery"]
+    await settled(ctx, barrier)
+    calls = invocations(ctx, delivery=barrier)
+    claim = (((calls[0].get("witness") or {}).get("entry") or {}).get("value") or {}) if calls else {}
+    ctx.check(len(calls) == 1 and calls[0]["ref"] == endpoint["backend_ref"] and claim.get("state") == "claimed"
+              and (claim.get("to") or {}).get("agent") == endpoint["id"],
+              "a later input through the same open destination was durably claimed and invoked (scheduler ran)",
+              barrier=barrier, claim=claim.get("to"))
+    await ctx.native.call("point", ref=endpoint["backend_ref"], point="idle")
+    return barrier
 
 
 async def structured_endpoint(ctx, ref):
@@ -50,19 +84,36 @@ async def plugin_endpoint_supersedes_marker_by_recorded_handover(ctx):
         "deliveries": list(sent.values()), "bind": [{"handle": "@t9-worker", "agent": plugin["id"], "expect": handle}]})
     ctx.check(plan.get("state") == "held" and plan.get("reason") == "handover_pending" and isinstance(plan.get("plan"), str),
               "the handover is recorded as a pending plan", reply=plan)
+    recorded = await stored_plan(ctx, plan["plan"])
+    source = {"agent": marker["id"], "incarnation": marker["incarnation"]}
+    destination = {"agent": plugin["id"], "incarnation": plugin["incarnation"]}
+    ctx.check(plan_matches(recorded, source, destination, sent.values(), state="pending", stage="pending"),
+              "the recorded plan names the exact source and destination ids and incarnations, delivery set and pending bind stage",
+              recorded=recorded)
     for delivery in sent.values():
         record = await held(ctx, delivery, "handover_pending")
+        came_from = record.get("handed_over_from") or {}
         ctx.check(record["to"]["agent"] == plugin["id"] and record["to"]["incarnation"] == plugin["incarnation"]
-                  and (record.get("handed_over_from") or {}).get("agent") == marker["id"],
-                  "the record now names the exact plugin endpoint and keeps the marker it came from", record=record)
-    await asyncio.sleep(.4)
-    ctx.check(not invocations(ctx) and not ctx.native.records("terminal_input"),
-              "a pending handover delivers nothing, even at an open destination")
+                  and came_from.get("agent") == marker["id"] and came_from.get("incarnation") == marker["incarnation"]
+                  and record.get("handover_plan") == plan["plan"],
+                  "the record names the exact plugin endpoint, the exact marker id and incarnation it came from, and the plan",
+                  record=record)
+    barriers = [await scheduling_barrier(ctx, plugin, "T9-barrier-while-pending")]
+    reasons = [(await ctx.get(delivery))["reason"] for delivery in sent.values()]
+    ctx.check(all(not invocations(ctx, delivery=delivery) for delivery in sent.values()) and not ctx.native.records("terminal_input")
+              and reasons == ["handover_pending"] * len(sent),
+              "a pending handover delivers nothing although the open destination's scheduler ran", reasons=reasons)
 
     stage = await ctx.command("handover", {"op": await ctx.operation(), "action": "stage", "plan": plan["plan"], "stage": 0})
     ctx.check(stage.get("state") == "accepted", "the handle rebind stage is accepted", reply=stage)
+    staged = await stored_plan(ctx, plan["plan"])
+    ctx.check(plan_matches(staged, source, destination, sent.values(), state="pending", stage="accepted"),
+              "the recorded bind stage is accepted while the plan is still pending", recorded=staged)
     done = await ctx.command("handover", {"op": await ctx.operation(), "action": "complete", "plan": plan["plan"]})
     ctx.check(done.get("state") == "completed", "the handover completes after every stage", reply=done)
+    completed = await stored_plan(ctx, plan["plan"])
+    ctx.check(plan_matches(completed, source, destination, sent.values(), state="completed", stage="accepted"),
+              "the recorded plan is completed for the same source, destination and delivery set", recorded=completed)
 
     # Delivery now reaches the plugin endpoint natively: exact payload, exact target, once each.
     for mode, delivery in sent.items():
@@ -84,13 +135,18 @@ async def plugin_endpoint_supersedes_marker_by_recorded_handover(ctx):
     after = invocations(ctx, delivery=later)
     ctx.check(len(after) == 1 and after[0]["ref"] == plugin["backend_ref"]
               and (await ctx.get(later))["to"]["agent"] == plugin["id"], "the rebound handle addresses the plugin endpoint")
-    # No replay: nothing reaches the terminal, and a further resume re-invokes nothing.
-    mark = ctx.native.mark()
+    # No replay: a further resume, then a later input the scheduler actually claims and invokes; still exactly one
+    # invocation per handed-over record and nothing typed into the terminal.
+    await ctx.native.call("point", ref=plugin["backend_ref"], point="idle")
     await ctx.scope("resume", "agent:" + plugin["id"])
-    await asyncio.sleep(.4)
-    ctx.check(not ctx.native.records("terminal_input") and not invocations(ctx, after=mark),
-              "no typed terminal input and no second invocation after the handover")
+    barriers.append(await scheduling_barrier(ctx, plugin, "T9-barrier-after-resume"))
+    counts = {delivery: len(invocations(ctx, delivery=delivery)) for delivery in [*sent.values(), later]}
+    ctx.check(all(count == 1 for count in counts.values()) and not ctx.native.records("terminal_input"),
+              "no typed terminal input and no second invocation after the handover, although the scheduler ran again",
+              counts=counts, barriers=barriers)
     inspected = await ctx.command("inbox.op", {"op": handover_op})
+    ctx.check(lookup_names_plan(inspected, plan["plan"]),
+              "the handover operation lookup returns the exact recorded plan", lookup=inspected)
     ctx.evidence.append({"kind": "t9_handover", "marker": marker["id"], "plugin": plugin["id"], "plan": plan["plan"],
                          "deliveries": list(sent.values()), "handover_op": inspected,
                          "native_invokes": [{"delivery": c["args"]["delivery"], "ref": c["ref"], "seq": c["seq"]}

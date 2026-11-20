@@ -359,3 +359,27 @@ class OrderingCheckerRegressions(unittest.TestCase):
         self.assertEqual(self.m.status_effects([{"type": "view.content", "data": {"view": "sidebar"}}]), [])
         self.assertEqual(self.m.status_effects([{"type": "view.content", "data": {"view": "agents.terminal_status"}}]),
                          ["view.content:agents.terminal_status"])
+
+
+class HandoverCheckerRegressions(unittest.TestCase):
+    """prim-agent-ux's T9 review (review-part-b-t9.md R2): the recorded plan and op lookup are graded exactly."""
+
+    def setUp(self):
+        from agent_conformance.part_b import endpoint_handover_cases as module
+        self.m = module
+        self.src, self.dst = {"agent": "r1", "incarnation": "i:a"}, {"agent": "r2", "incarnation": "i:b"}
+        self.plan = {"state": "pending", "from": self.src, "to": dict(self.dst), "deliveries": ["d:1", "d:2"],
+                     "stages": [{"kind": "names", "state": "pending"}]}
+
+    def test_lookup_unknown_or_wrong_plan_fails(self):
+        self.assertTrue(self.m.lookup_names_plan({"plan": "handover:x", "historical": True, "state": "held"}, "handover:x"))
+        self.assertFalse(self.m.lookup_names_plan({"state": "unknown", "plan": "wrong-plan"}, "handover:x"))
+        self.assertFalse(self.m.lookup_names_plan({"plan": "handover:x", "state": "unknown"}, "handover:x"))
+
+    def test_plan_identity_and_delivery_set_are_exact(self):
+        ok = lambda plan: self.m.plan_matches(plan, self.src, self.dst, ["d:2", "d:1"], state="pending", stage="pending")
+        self.assertTrue(ok(self.plan))
+        self.assertFalse(ok(dict(self.plan, **{"from": {"agent": "r1", "incarnation": "i:other"}})))
+        self.assertFalse(ok(dict(self.plan, deliveries=["d:1"])))
+        self.assertFalse(ok(dict(self.plan, deliveries=["d:1", "d:2", "d:3"])))
+        self.assertFalse(ok(dict(self.plan, stages=[{"kind": "names", "state": "accepted"}])))
