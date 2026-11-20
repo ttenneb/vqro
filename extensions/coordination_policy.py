@@ -16,6 +16,7 @@ import re
 
 NAMES = "doc/agents/names/"
 MEMBERS = "doc/agents/members/"
+MEMBERSHIP_REVISION = "doc/agents/membership-revision"
 GRANTS = "doc/agents/grants/"
 TERMINALS = "doc/agents/terminals/"
 OWNER = "doc/principals/owner"
@@ -185,7 +186,7 @@ class Policy:
             _fail("quota", "at most four handles per agent")
         self._validate_forest(self.members)
         membership_versions = [(k, e.get("version")) for k, e in sorted(self.entries.items())
-                               if k.startswith(MEMBERS)]
+                               if k.startswith(MEMBERS) or k == MEMBERSHIP_REVISION]
         self.membership_revision = hashlib.sha256(encoded(membership_versions)).hexdigest()
         self.agents = set(self.members) | self.markers | set(counts)
         for rid, resource in self.resources.items():
@@ -199,9 +200,8 @@ class Policy:
             principal = resource.get("principal") or (agent.get("principal") if isinstance(agent, dict) else None)
             if isinstance(principal, str) and principal:
                 self._principals[rid].add(principal)
-        for row in self.names.values():
-            if row.get("principal"):
-                self._principals[row["agent"]].add(row["principal"])
+        # A name's optional principal is an issuance-time alias only. Names
+        # cannot join a principal to an agent/team or change existing grants.
         self._principal_agents = {}
         for rid, principals in self._principals.items():
             for principal in principals:
@@ -348,6 +348,8 @@ class Policy:
         if selector.startswith("@"):
             binding = self.names.get(selector)
             principals = self._principals.get(binding["agent"], set()) if binding else set()
+            if binding and binding.get("principal") and binding["principal"] not in principals:
+                return False
             return len(principals) == 1 and principal in principals
         if selector.startswith(("team:", "project:")):
             return any(self._contains(selector, "agent:" + rid)
@@ -541,9 +543,10 @@ class Policy:
         return self._names_ops({"handle": handle, "agent": agent, "expect": expect,
                                 "principal": endpoint_principal}, principal)
 
-    def membership_ops(self, principal, agent, project, reports_to, *, expect):
+    def membership_ops(self, principal, agent, project, reports_to, *, expect, membership_revision=None):
         return self._membership_ops({"agent": agent, "project": project,
-                                     "reports_to": reports_to, "expect": expect}, principal)
+                                     "reports_to": reports_to, "expect": expect,
+                                     "membership_revision": membership_revision}, principal)
 
     def grant_ops(self, principal, identifier, value, *, expect):
         return self._grant_ops({"id": identifier, "value": value, "expect": expect}, principal)
@@ -612,7 +615,12 @@ class Policy:
         if len(candidate) > MAX_MEMBERS:
             _fail("quota", "membership row limit")
         self._validate_forest(candidate)
-        ops = [self._cas(MEMBERS + agent, new, args.get("expect"))]
+        # Every conforming forest mutation shares this CAS in the same ordinary
+        # workspace transaction. Disjoint member-row edits cannot both validate
+        # one snapshot and then introduce a cycle or cross-project parentage.
+        revision = hashlib.sha256(encoded(sorted(candidate.items()))).hexdigest()
+        ops = [self._cas(MEMBERSHIP_REVISION, {"revision": revision}, self._version(MEMBERSHIP_REVISION)),
+               self._cas(MEMBERS + agent, new, args.get("expect"))]
         for rid in subtree[1:]:
             if candidate[rid] != self.members[rid]:
                 ops.append(self._cas(MEMBERS + rid, candidate[rid], self._version(MEMBERS + rid)))
@@ -636,7 +644,12 @@ class Policy:
                 value["on"] = "agent:" + self._target(value["on"])
             if value["who"].startswith("@"):
                 rid = self._target(value["who"])
+                binding = self.names.get(value["who"], {})
                 principals = self._principals.get(rid, set())
+                if binding.get("principal"):
+                    if principals and binding["principal"] not in principals:
+                        _fail("invalid", "handle principal contradicts the native endpoint principal")
+                    principals = principals or {binding["principal"]}
                 if len(principals) != 1:
                     _fail("invalid", "handle has no unambiguous explicit principal binding")
                 value["who"] = next(iter(principals))

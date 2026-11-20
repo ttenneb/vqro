@@ -12,7 +12,7 @@ from vqro_ext import Extension, VqroError
 from coordination_store import OperationalStore, StoreError
 from coordination_engine import (Coordinator, digest, SCOPE_CAPACITY, WINDOW,
                                  CONTROL_ADMISSION_BYTES, CONTROL_ADMISSION_RECORDS, ARCHIVE_FUTURE_BYTES,
-                                 ARCHIVE_ESCROW_BYTES, ARCHIVE_ESCROW_RECORDS)
+                                 ARCHIVE_ESCROW_BYTES, ARCHIVE_ESCROW_RECORDS, IDENTITY_SUMMARY_BYTES)
 from coordination_policy import PolicyError, bounded_page, QuotaLimits
 from coordination_streams import ItemReceiptStreams
 from dataclasses import asdict
@@ -240,7 +240,7 @@ class CoordinationService:
                     "limits": {"scope_targets": SCOPE_CAPACITY, "page_items": 64, "take_items": 16,
                                "page_bytes": 262144, "operation_window": WINDOW,
                                "domain_bytes": self.store.byte_limit, "domain_records": self.store.record_limit,
-                               "control_reserve_percent": 10,
+                               "control_reserve_percent": 10, "identity_summary_bytes": IDENTITY_SUMMARY_BYTES,
                                "normal_control_headroom": {"bytes": CONTROL_ADMISSION_BYTES, "records": CONTROL_ADMISSION_RECORDS},
                                "archive_escrow": {"bytes": ARCHIVE_ESCROW_BYTES, "records": ARCHIVE_ESCROW_RECORDS, "within_control_reserve": True},
                                "archive_plan_future": {"bytes": ARCHIVE_FUTURE_BYTES, "records": 4,

@@ -69,7 +69,7 @@ class IdentityAndScopes(Fixture):
         p = self.policy(tombstones={"r2": {"lifecycle": "retired"}})
         self.rejects("retired", p.resolve_target, "@worker")
         self.assertEqual(len(p.names_ops("p:owner", "@new", "r4", expect=0)), 1)
-        self.assertEqual(len(p.membership_ops("p:owner", "r4", "q", None, expect=1)), 1)
+        self.assertEqual(len(p.membership_ops("p:owner", "r4", "q", None, expect=1)), 2)
         self.assertEqual(len(p.grant_ops("p:owner", "x", grant("p:b", ["resume"]), expect=0)), 1)
 
     def test_snapshot_does_not_change_when_caller_mutates_source(self):
@@ -234,8 +234,9 @@ class Configuration(Fixture):
     def test_move_changes_subtree_project_atomically_and_cas_each_changed_row(self):
         p = self.policy()
         ops = p.config_ops("coord.membership.set", {"agent": "r2", "project": "q", "reports_to": "r4", "expect": 1}, "p:owner")
-        self.assertEqual({op["key"] for op in ops}, {MEMBERS + "r2", MEMBERS + "r3"})
-        self.assertTrue(all(op["expect"] == 1 and op["value"]["project"] == "q" for op in ops))
+        self.assertEqual({op["key"] for op in ops}, {MEMBERS + "r2", MEMBERS + "r3", "doc/agents/membership-revision"})
+        self.assertTrue(all(op["expect"] == 1 and op["value"]["project"] == "q" for op in ops if op["key"].startswith(MEMBERS)))
+        self.assertEqual(ops[0]["expect"], 0)
         self.assertEqual(self.entries[MEMBERS + "r3"]["value"]["project"], "p")
 
     def test_move_cycle_missing_parent_and_stale_selection_refuse_whole(self):
@@ -251,7 +252,7 @@ class Configuration(Fixture):
     def test_ordinary_membership_changes_need_no_operational_capacity(self):
         p = self.policy(limits=QuotaLimits(domain_bytes=1, domain_records=1))
         ops = p.config_ops("coord.membership.set", {"agent": "r2", "project": "q", "reports_to": "r4", "expect": 1}, "p:owner")
-        self.assertEqual(len(ops), 2)
+        self.assertEqual(len(ops), 3)
 
     def test_worker_no_rights_cannot_self_resume_move_or_issue_grants(self):
         p = self.policy()

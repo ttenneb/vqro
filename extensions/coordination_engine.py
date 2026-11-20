@@ -27,6 +27,7 @@ CONTROL_ADMISSION_RECORDS = 16
 ARCHIVE_FUTURE_BYTES = 16 * 1024
 ARCHIVE_ESCROW_BYTES = 64 * 1024
 ARCHIVE_ESCROW_RECORDS = 16
+IDENTITY_SUMMARY_BYTES = 3 * 1024
 
 
 def digest(value):
@@ -130,11 +131,11 @@ class Coordinator:
                 charge += ARCHIVE_FUTURE_BYTES if value["state"] in ("frozen", "exporting") else ARCHIVE_FUTURE_BYTES // 2
                 records += 4 if value["state"] in ("frozen", "exporting") else 2
         summaries = {agent: value for key, row in rows.items() if key.startswith("agents/") for agent, value in row["value"].items()}
-        charge += sum(max(0, 2048 - encoded(value)) for value in summaries.values())
+        charge += sum(max(0, IDENTITY_SUMMARY_BYTES - encoded(value)) for value in summaries.values())
         gates = rows.get("control", {}).get("value", {}).get("gates", {})
         for agent in gates:
             if agent not in summaries:
-                charge += 2048
+                charge += IDENTITY_SUMMARY_BYTES
         return charge, records
 
     def _preflight_reservations(self, rows, before, *, control, normal=False, archive=False):
@@ -164,8 +165,16 @@ class Coordinator:
         return work.get(self._agent_key(agent), {}).get(agent, copy.deepcopy(default))
 
     def _agent_put(self, work, agent, value):
-        if encoded(value) > 2048:
-            raise CoordinationError("quota", "tombstone summary exceeds its reserved 2 KiB")
+        if encoded(value) > IDENTITY_SUMMARY_BYTES:
+            # Invalid/future oversized identity data cannot brick workspace pause.
+            # Keep explicit bounded evidence, never silently pretend it is a full
+            # identity, and hold input for this target only.
+            identity = value.get("identity", {})
+            value = {"agent": agent, "identity": {"bytes": encoded(identity), "sha256": digest(identity), "incomplete": True},
+                     "identity_incomplete": True, "summary_sha256": digest(value),
+                     "lifecycle": value.get("lifecycle", "unknown"), "handles": [],
+                     "last_seen_ms": value.get("last_seen_ms"), "last_evidence": value.get("last_evidence"),
+                     "held": value.get("held"), "unknown": value.get("unknown"), "membership_ref": None}
         page = work.get(self._agent_key(agent), {})
         page[agent] = value
         work.put(self._agent_key(agent), page)
@@ -215,8 +224,11 @@ class Coordinator:
         controls = [{"reference": key, "principal": row["value"].get("principal"), "caller": row["value"].get("caller"),
                      "command": row["value"].get("command"), "agent": row["value"].get("intent", {}).get("agent"), "state": row["value"]["state"]}
                     for key, row in rows.items() if key.startswith("external/") and row["value"]["state"] in ("claimed", "unknown", "partial")]
-        return {"messages": len(messages), "controls": len(controls), "items": (messages + controls)[:64],
-                "incomplete": len(messages) + len(controls) > 64}
+        identities = [{"agent": agent, "state": "held", "reason": "identity_unavailable"}
+                      for agent, summary in self.tombstones().items() if summary.get("identity_incomplete")]
+        return {"messages": len(messages), "controls": len(controls), "identities": len(identities),
+                "items": (messages + controls + identities)[:64],
+                "incomplete": len(messages) + len(controls) + len(identities) > 64}
 
     def _cached(self, work, principal, op):
         return work.get(self._bucket(principal, op), {}).get(digest([principal, op]))
@@ -649,6 +661,10 @@ class Coordinator:
             return "agent_ended"
         if agent not in self.permits or not self.current:
             return "paused"
+        if stone.get("identity_incomplete"):
+            return "identity_unavailable"
+        if (self.store.get("control") or {}).get("value", {}).get("reconciling", {}).get(agent):
+            return "reconciling"
         if record.get("review_required"):
             return "stale_guard"
         if not resource or resource.get("available") is False:
@@ -687,12 +703,16 @@ class Coordinator:
             declaration = native.get("pull") or resource.get("pull")
             if not declaration:
                 return "integration_unavailable"
-            if at not in declaration.get("points", []):
+            points = declaration.get("points")
+            point = points.get(at) if isinstance(points, dict) else None
+            if not isinstance(point, dict) or point.get("precision") not in ("exact", "approximate"):
                 return "integration_unavailable"
             if declaration.get("insert") == "context" and "context" not in (record.get("render") or []):
                 return "origin_unsupported"
             modes = {"turn": {"boundary"}, "settle": {"boundary", "settle"},
                      "idle": {"start", "boundary", "settle"}, "tool": {"admit"}}
+            if at == "idle" and point["precision"] == "approximate":
+                modes["idle"] = {"boundary", "settle"}
             if at == "tool" and declaration.get("tool_boundary"):
                 modes["tool"].add("boundary")
             return None if record["mode"] in modes.get(at, set()) else "unsupported_mode"
@@ -988,6 +1008,8 @@ class Coordinator:
             control = work.get("control")
             if control["consumers"].get(agent) != consumer:
                 raise CoordinationError("conflict", "consumer must reconcile before taking")
+            if control.get("reconciling", {}).get(agent):
+                return {"state": "held", "records": [], "held": "reconciling"}
             if agent not in self.permits:
                 return {"state": "held", "records": [], "held": "paused"}
             records = self.records()
@@ -1050,25 +1072,44 @@ class Coordinator:
             entries = args.get("records", [])
             if not isinstance(entries, list) or len(entries) > 64 or encoded(entries) > 256 * 1024:
                 raise CoordinationError("too_large", "reconciliation page exceeds its bound")
+            if (any(not isinstance(row, dict) or not isinstance(row.get("delivery"), str) for row in entries)
+                    or len({row["delivery"] for row in entries}) != len(entries)):
+                raise CoordinationError("invalid", "reconciliation needs distinct delivery references")
             proofs = {row["delivery"]: row.get("entry") for row in entries}
-            candidates = [r for r in self.records() if r["to"]["agent"] == agent and (r.get("attempt") or {}).get("consumer") and r["state"] in ("claimed", "unknown")]
-            if len(candidates) > 60:
-                raise CoordinationError("too_large", "reconcile exact bounded pages before replacing the consumer")
             _, native = self._facts(agent)
             resource = self.resources().get(agent, {})
             declaration = native.get("pull") or resource.get("pull") or {}
-            changed = []
+            candidates = sorted((r for r in self.records() if r["to"]["agent"] == agent
+                and (r.get("attempt") or {}).get("consumer")
+                and (r["state"] == "claimed" or r["state"] == "unknown"
+                     and bool(proofs.get(r["delivery"])) and declaration.get("evidence") == "entry")),
+                key=lambda row: (row["order"], row["delivery"]))
+            changed, change_bytes = [], 0
             for record in candidates:
                 entry = proofs.get(record["delivery"])
                 evidenced = bool(entry) and declaration.get("evidence") == "entry"
+                evidence = entry if evidenced else None
+                if evidenced and encoded(entry) > 1024:
+                    evidence = {"bytes": encoded(entry), "sha256": digest(entry), "incomplete": True}
                 record.update(state="inserted" if evidenced else "unknown", reason=None if evidenced else "consumer_restarted")
-                record["result"] = {"state": record["state"], "evidence": "entry" if evidenced else "none", "entry": entry if evidenced else None}
+                record["result"] = {"state": record["state"], "evidence": "entry" if evidenced else "none", "entry": evidence}
+                size = encoded(record)
+                if len(changed) >= 56 or change_bytes + size > 112 * 1024:
+                    break
                 work.put("message/" + record["delivery"], record)
+                change_bytes += size
                 changed.append({"delivery": record["delivery"], "state": record["state"]})
+            remaining = len(candidates) - len(changed)
             control = work.get("control")
-            control["consumers"][agent] = consumer
+            control["consumers"][agent] = consumer  # fences old reports on the first confirmed page
+            active = control.setdefault("reconciling", {})
+            if remaining:
+                active[agent] = consumer
+            else:
+                active.pop(agent, None)
             work.put("control", control)
-            return {"state": "reconciled", "records": changed}
+            return {"state": "reconciling" if remaining else "reconciled", "records": changed,
+                    "remaining": remaining, "next": candidates[len(changed)]["delivery"] if remaining else None}
         return self._mutate("inbox.reconcile", args, context, inspect, control=True)
 
     def report(self, args, context):
@@ -1188,7 +1229,8 @@ class Coordinator:
             if command == "names":
                 ops = policy.names_ops(principal, args.get("handle"), args.get("agent"), expect=args.get("expect"), endpoint_principal=args.get("endpoint_principal"))
             elif command == "membership":
-                ops = policy.membership_ops(principal, args.get("agent"), args.get("project"), args.get("reports_to"), expect=args.get("expect"))
+                ops = policy.membership_ops(principal, args.get("agent"), args.get("project"), args.get("reports_to"),
+                                            expect=args.get("expect"), membership_revision=args.get("membership_revision"))
             elif command == "grants":
                 ops = policy.grant_ops(principal, args.get("id"), args.get("value"), expect=args.get("expect"))
             else:

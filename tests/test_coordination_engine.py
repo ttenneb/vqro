@@ -183,7 +183,7 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(self.ledger[0][2]["delivery"], boundary["delivery"])
 
     def setup_pull(self, *, context=False):
-        self.resources["r1"]["data"]["agent"]["pull"] = {"points": ["turn", "settle", "idle", "tool"],
+        self.resources["r1"]["data"]["agent"]["pull"] = {"points": {point: {"precision": "exact"} for point in ("turn", "settle", "idle", "tool")},
                                                              "insert": "context" if context else "user", "evidence": "none" if context else "entry"}
         self.engine.reconcile({"op": self.op(), "agent": "r1", "consumer": "c1", "records": []}, OWNER)
         self.resume()
