@@ -390,8 +390,9 @@ def rows(entities, names, coverage=None, view=None):
             continue
         end_tools()
         if kind == "message":
-            if value.get("final") is not False and not content_rows(value.get("content")):
-                continue  # a finished message with nothing to show (an empty system notice): no bare label
+            if value.get("final") is not False and not content_rows(value.get("content")) \
+                    and not (isinstance(value.get("delivery"), str) and value["delivery"] in receipts):
+                continue  # a finished message with nothing to show and no delivery to report: no bare label
             label_, _, key = names.sender(value)
             role = value.get("role")
             show_time = not compact or key != last_sender

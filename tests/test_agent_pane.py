@@ -91,6 +91,10 @@ class TranscriptRows(unittest.TestCase):
                  ("message", "m1"): {"position": 2, "role": "assistant", "content": [], "final": False}}
         texts = [r.get("text") for r in self.rows(empty)]
         self.assertNotIn("System", texts)
+        sent = {**empty, ("message", "u1"): {"position": 3, "role": "user", "content": [], "final": True, "delivery": "d:1"},
+                ("receipt", "d:1"): {"delivery": "d:1", "stage": "inserted"}}
+        self.assertTrue(any("in the conversation" in (t or "") for t in [r.get("text") for r in self.rows(sent)]),
+                        "an empty message with a delivery receipt keeps its line")
         self.assertIn("Pi · writing…", texts, "a message still arriving keeps its line")
 
     def test_no_origin_is_never_you_and_another_human_is_named(self):
@@ -314,6 +318,7 @@ class AgentPane(unittest.TestCase):
         self.assertEqual((composer["pin"], composer["autofocus"], composer["submit"], composer["args"]),
                          ("bottom", True, "Enter", {"resource": "r2", "caps_rev": 2}))
         self.assertEqual([c["value"] for c in composer["controls"][0]["chips"]], ["auto", "boundary", "settle"], "steer before follow-up")
+        self.core.handlers["agents.send"](dict(composer["args"], mode="settle", text="later"))  # declared modes still send
         self.assertEqual(composer["fallback"]["multiline"], True)
         self.assertEqual(items[-1]["pin"], "bottom", "the facts line comes last")
         self.core.handlers["agents.send"](dict(composer["args"], mode="auto", text="go"))

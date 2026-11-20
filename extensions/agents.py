@@ -575,8 +575,9 @@ class Agents:
         if modes and r.get("available") and not ended(r):
             names = {"start": "start", "boundary": "steer", "settle": "follow-up", "admit": "admit (weaker)",
                      "preempt": "interrupt and send"}
+            # admit stays available to agents and the API (agents.send mode admit), not as a chip for the human (mockup).
             chips = [{"text": "auto", "value": "auto", "checked": True}] + [
-                {"text": names.get(m, m), "value": m} for m in modes if m != "start"]
+                {"text": names.get(m, m), "value": m} for m in modes if m not in ("start", "admit")]
             rows.append({"type": "composer", "id": "compose", "pin": "bottom", "text": "Message " + name,
                          "command": "agents.send", "args": {"resource": rid, "caps_rev": caps(r).get("rev")},
                          "placeholder": f"Write a message to {name}…", "rows": 3, "max_bytes": 65536, "submit": "Enter",
