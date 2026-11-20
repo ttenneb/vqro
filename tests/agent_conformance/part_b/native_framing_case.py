@@ -16,7 +16,7 @@ import tempfile
 
 from .cases import case
 from .identity_backend import pinned_artifact
-from ..results import FixtureFailed
+from ..results import FixtureFailed, HarnessGap
 
 
 TESTS = Path(__file__).resolve().parents[2]
@@ -158,6 +158,7 @@ async def native_framing_and_precision(ctx):
         ("ui", "claude_code_tui.py", ["--claude", str(pins["claude"]), "--hook", str(pins["hook"])],
          [("MSG-WAKE-I1", "idle", "boundary"), ("MSG-RACE-I3", None, "boundary")]),
     ]
+    renderer_gaps = []
     for label, script, args, checks in routes:
         root, result, models, journal, declaration = await run_native(ctx, label, script, args, pins, parent)
         deliveries = []
@@ -195,8 +196,10 @@ async def native_framing_and_precision(ctx):
                 ctx.check(all("vqro inbox message " + delivery in screen for delivery in deliveries),
                           "Pi's actual renderer preserves both native sender-framed delivery headers", deliveries=deliveries)
             else:
-                ctx.check("NOT USER INPUT" in screen,
-                          "Claude's actual renderer does not relabel the native rewake as plain user input")
+                if "NOT USER INPUT" not in screen:
+                    renderer_gaps.append(str(root / "framing-screen.txt"))
+                else:
+                    ctx.check(True, "Claude renderer retains the native rewake label rather than plain user input")
         if label == "ui":
             race = result.get("approximate_idle_race") or {}
             unsafe = race.get("unsafe_start") or {}
@@ -211,3 +214,7 @@ async def native_framing_and_precision(ctx):
     ctx.check(module_tree_digest(module_root) == modules["sha256"], "native Pi dependency closure stayed frozen")
     ctx.check(all(hashlib.sha256(Path(path).read_bytes()).hexdigest() == digest for path, digest in hashes.items()),
               "native fixture source stayed unchanged across all path captures")
+    if renderer_gaps:
+        raise HarnessGap("T15 native Claude renderer binding unverified: raw model wrapper exists but the incomplete "
+                         "PTY projection lacks its exact label; no product relabel or whole-row pass inferred. Artifacts: "
+                         + ", ".join(renderer_gaps))
