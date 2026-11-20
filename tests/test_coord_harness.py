@@ -155,5 +155,64 @@ class SilentPeerTests(unittest.TestCase):
             self.assertEqual([str(w.message) for w in caught if issubclass(w.category, ResourceWarning)], [])
 
 
+    def answering_peer(self, d, fragment_gap):
+        """A peer that answers hello with one valid reply line, sent whole (fragment_gap None) or in 8-byte fragments
+        `fragment_gap` seconds apart. Returns (path, thread, requests received)."""
+        path = os.path.join(d, "s.sock")
+        server = socket.socket(socket.AF_UNIX)
+        server.bind(path)
+        server.listen(1)
+        received = []
+
+        def peer():
+            try:
+                conn, _ = server.accept()
+                with conn:
+                    conn.settimeout(5)
+                    data = b""
+                    while b"\n" not in data:
+                        chunk = conn.recv(65536)
+                        if not chunk:
+                            return
+                        data += chunk
+                    received.append(data)
+                    reply = b'{"jsonrpc": "2.0", "id": 1, "result": {"you": "p:peer"}}\n'
+                    if fragment_gap is None:
+                        conn.sendall(reply)
+                    else:
+                        for start in range(0, len(reply), 8):
+                            conn.sendall(reply[start:start + 8])
+                            time.sleep(fragment_gap)
+            except OSError:
+                pass  # the client closed on its deadline
+            finally:
+                server.close()
+        thread = threading.Thread(target=peer, daemon=True)
+        thread.start()
+        return path, thread, received
+
+    def test_an_immediate_reply_is_accepted(self):
+        with tempfile.TemporaryDirectory(prefix="vq-silent-") as d:
+            path, thread, received = self.answering_peer(d, None)
+            client = Client(path, timeout=0.25)
+            client.close()
+            thread.join(6)
+            self.assertEqual(client.me, "p:peer")
+
+    def test_a_reply_dripped_past_the_deadline_times_out(self):
+        """Review of 04148cc5: fragments each within any per-receive timeout kept readline alive; a valid reply that
+        finished after the total deadline was accepted (0.601 s for a 0.25 s deadline). The total deadline holds."""
+        with tempfile.TemporaryDirectory(prefix="vq-silent-") as d:
+            path, thread, received = self.answering_peer(d, 0.075)  # ~7 fragments: about 0.5 s in all
+            started = time.monotonic()
+            with self.assertRaises(TimeoutError) as error:
+                Client(path, timeout=0.25)
+            elapsed = time.monotonic() - started
+            thread.join(6)
+            self.assertLess(elapsed, 0.4, "the dripped reply outlasted the total deadline")
+            self.assertIn("hello: no reply within 0.25 s", str(error.exception))
+            self.assertEqual(len(received), 1, "sent once, never retried")
+
+
 if __name__ == "__main__":
     unittest.main()

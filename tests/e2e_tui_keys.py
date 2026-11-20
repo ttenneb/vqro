@@ -46,23 +46,31 @@ CALL_TIMEOUT = 10  # seconds for one call (hello and reply) to the core: a silen
 
 
 def call(method, params=None):
-    """One request on its own connection, bounded by CALL_TIMEOUT (socket.timeout; inside wait() it counts as "not
-    yet"). Nothing is retried here."""
+    """One request on its own connection, bounded in total by CALL_TIMEOUT: the deadline is checked while each reply
+    line is framed, so neither silence nor a reply dripped past it can hold the run (TimeoutError; inside wait() it
+    counts as "not yet"). Nothing is retried here."""
     deadline = time.monotonic() + CALL_TIMEOUT
     with socket.socket(socket.AF_UNIX) as s:
         s.settimeout(CALL_TIMEOUT)
         s.connect(ENV["VQRO_SOCKET"])
-        with s.makefile("rwb", buffering=0) as f:
-            for i, (m, p) in enumerate([("hello", {"client": "e2e-keys"}), (method, params or {})]):
-                f.write((json.dumps({"jsonrpc": "2.0", "id": i, "method": m, "params": p}) + "\n").encode())
-                while True:
-                    s.settimeout(max(0.001, deadline - time.monotonic()))
-                    line = f.readline()
-                    if not line:
+        buf = bytearray()
+        for i, (m, p) in enumerate([("hello", {"client": "e2e-keys"}), (method, params or {})]):
+            s.sendall((json.dumps({"jsonrpc": "2.0", "id": i, "method": m, "params": p}) + "\n").encode())
+            while True:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"{method}: no reply within {CALL_TIMEOUT} s")
+                end = buf.find(b"\n")
+                if end < 0:
+                    s.settimeout(max(0.001, deadline - time.monotonic()))  # rechecked at the loop top
+                    chunk = s.recv(65536)
+                    if not chunk:
                         raise ConnectionError(f"{method}: core closed the connection")
-                    msg = json.loads(line)
-                    if msg.get("id") == i:
-                        break
+                    buf += chunk
+                    continue
+                msg = json.loads(bytes(buf[:end]))
+                del buf[:end + 1]
+                if msg.get("id") == i:
+                    break
     if "error" in msg:
         raise RuntimeError(f"{method}: {msg['error']}")
     return msg["result"]

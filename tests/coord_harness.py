@@ -259,15 +259,16 @@ CALL_TIMEOUT = 60.0  # seconds a harness call waits for its reply: generous, but
 
 
 class Client:
-    """A JSON-RPC client for tests. Every call has a deadline (`timeout`, default CALL_TIMEOUT): a peer that never
-    answers fails the call with TimeoutError and closes the connection; nothing is retried (the outcome is unknown)."""
+    """A JSON-RPC client for tests. Every call has a total deadline (`timeout`, default CALL_TIMEOUT), checked while
+    the reply is framed: a peer that never answers, or drips its reply past the deadline, fails the call with
+    TimeoutError and closes the connection; nothing is retried (the outcome is unknown)."""
 
     def __init__(self, sock, owner=False, principal=None, timeout=CALL_TIMEOUT, connect_timeout=None):
-        self.s = socket.socket(socket.AF_UNIX); self.f = None; self.n = 0; self.timeout = timeout
+        self.s = socket.socket(socket.AF_UNIX); self.buf = bytearray(); self.n = 0; self.timeout = timeout
         first = timeout if connect_timeout is None else connect_timeout  # connect and hello (a startup bound)
         try:
             self.s.settimeout(first)
-            self.s.connect(sock); self.f = self.s.makefile("rw")
+            self.s.connect(sock)
             identity = ({"kind": "principal", "principal": principal} if principal is not None else
                         {"kind": "owner"} if owner else None)
             hello = {"client": "tier1-test", **({"identity": identity} if identity is not None else {})}
@@ -277,12 +278,27 @@ class Client:
             raise
 
     def close(self):
-        for handle in (self.f, self.s):
-            try:
-                if handle is not None:
-                    handle.close()
-            except OSError:
-                pass
+        try:
+            self.s.close()
+        except OSError:
+            pass
+
+    def _line(self, deadline):
+        """The next newline-framed line by the absolute `deadline` (time.monotonic), or None when the peer closed.
+        The deadline is checked before every step, buffered data included, so a reply dripped in fragments (each
+        within any per-receive timeout) cannot outlast it."""
+        while True:
+            if time.monotonic() >= deadline:
+                raise TimeoutError
+            end = self.buf.find(b"\n")
+            if end >= 0:
+                line = bytes(self.buf[:end]); del self.buf[:end + 1]
+                return line
+            self.s.settimeout(max(0.001, deadline - time.monotonic()))  # rechecked above before any use
+            chunk = self.s.recv(65536)
+            if not chunk:
+                return None
+            self.buf += chunk
 
     def call(self, method, params, timeout=None):
         self.n += 1
@@ -290,11 +306,10 @@ class Client:
         deadline = time.monotonic() + limit
         try:
             self.s.settimeout(limit)
-            self.f.write(json.dumps({"jsonrpc": "2.0", "id": self.n, "method": method, "params": params}) + "\n"); self.f.flush()
+            self.s.sendall((json.dumps({"jsonrpc": "2.0", "id": self.n, "method": method, "params": params}) + "\n").encode())
             while True:
-                self.s.settimeout(max(0.001, deadline - time.monotonic()))
-                line = self.f.readline()
-                if not line:
+                line = self._line(deadline)
+                if line is None:
                     raise ConnectionError("core closed the connection")
                 row = json.loads(line)
                 if row.get("id") == self.n:
