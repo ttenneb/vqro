@@ -72,6 +72,7 @@ def main():
     root = Path(tempfile.mkdtemp(prefix="ao", dir=SCRATCH))
     procs = []
     failures = []
+    succeeded = False
     try:
         for d in ("home", "st", "ext", "run"):
             (root / d).mkdir()
@@ -89,6 +90,8 @@ def main():
             if sock.exists():
                 break
             time.sleep(0.05)
+        if not sock.exists():
+            raise AssertionError(f"core socket missing after unchanged startup deadline; exit={procs[0].poll()}; evidence={root}")
         (root / "probe.py").write_text(PROVIDER)
         out = open(root / "provider.out", "wb")
         procs.append(subprocess.Popen([sys.executable, str(root / "probe.py"), str(ROOT / "extensions")], env=env, stdout=out, stderr=subprocess.STDOUT))
@@ -119,6 +122,7 @@ def main():
                 if seen["recorded"]["actor"] != "extension:agents":
                     failures.append(f"recorded actor {seen['recorded']['actor']!r}, expected 'extension:agents'")
                 print(json.dumps(seen))
+        succeeded = not failures
     finally:
         try:
             rpc(sock, [("core.shutdown", {})])
@@ -128,7 +132,10 @@ def main():
         for p in procs:
             if p.poll() is None:
                 p.kill()
-        shutil.rmtree(root, ignore_errors=True)
+        if succeeded:
+            shutil.rmtree(root, ignore_errors=True)
+        else:
+            print(json.dumps({"evidence": str(root), "core_exit": procs[0].poll() if procs else None}), file=sys.stderr)
     print(json.dumps({"result": "pass" if not failures else "fail", "failures": failures}))
     sys.exit(1 if failures else 0)
 
