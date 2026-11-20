@@ -13,79 +13,38 @@ import argparse, fcntl, glob, json, os, pty, re, select, socket, struct, subproc
 ap = argparse.ArgumentParser()
 for k in ("vqro", "hook", "claude", "root"):
     ap.add_argument("--" + k, required=True)
+ap.add_argument("--inbox", choices=["fake", "k2"], default="fake")
+ap.add_argument("--coord-ext")
 a = ap.parse_args()
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+from coord_harness import Harness, txt  # noqa: E402
+
 root = a.root
-P = {k: os.path.join(root, k) for k in ("home", "cfg", "work", "xrun", "st", "noext", "hookstate")}
+P = {k: os.path.join(root, k) for k in ("home", "cfg", "work", "hookstate")}
 for d in P.values():
     os.makedirs(d, exist_ok=True)
-sock, model_log, inbox_log = (os.path.join(root, n) for n in ("v.sock", "model.jsonl", "inbox.jsonl"))
+model_log = os.path.join(root, "model.jsonl")
 port = 18810
-base = {"HOME": P["home"], "PATH": os.environ["PATH"], "XDG_RUNTIME_DIR": P["xrun"], "VQRO_STATE_DIR": P["st"],
-        "VQRO_SOCKET": sock, "VQRO_EXTENSIONS_DIR": P["noext"], "VQRO_HERDR": '["/bin/false"]',
-        "HC_SOCKET": os.path.join(root, "h.sock"), "HC_SESSION": "a3"}
-def txt(s):
-    return [{"type": "text", "text": s}]
-
-
-procs, results, fails = [], {}, []
-
-
-def _cleanup(*_):
-    for p in procs:
-        if p.poll() is None:
-            p.kill()
-    sys.exit(1)
-
-
+results, fails = {"inbox": a.inbox}, []
+h = Harness(root, a.vqro, inbox=a.inbox, coord_ext=a.coord_ext)
+procs = h.procs
 import atexit, signal  # noqa: E402
-atexit.register(lambda: [p.kill() for p in procs if p.poll() is None])
-signal.signal(signal.SIGTERM, _cleanup)
+atexit.register(h.stop)
+signal.signal(signal.SIGTERM, lambda *_: (h.stop(), sys.exit(1)))
 
 
 def check(name, ok, detail=""):
-    print(("PASS " if ok else "FAIL ") + name + ("" if ok else f"  ({detail})"), flush=True)
-    results[name] = {"ok": bool(ok), "detail": None if ok else detail}
+    print(("PASS " if ok else "FAIL ") + name + ("" if ok else f"  ({str(detail)[:600]})"), flush=True)
+    results[name] = {"ok": bool(ok), "detail": None if ok else str(detail)[:2000]}
     if not ok:
         fails.append(name)
 
 
-def spawn(argv, **kw):
-    p = subprocess.Popen(argv, **kw)
-    procs.append(p)
-    return p
-
-
-spawn([a.vqro, "serve", "--fake"], env=base, stdout=open(os.path.join(root, "core.log"), "w"), stderr=subprocess.STDOUT)
-while not os.path.exists(sock):
-    time.sleep(0.05)
-spawn([sys.executable, os.path.join(HERE, "fixtures", "fake_inbox.py"), inbox_log],
-      env=dict(base, VQRO_EXT_PATH=os.path.join(HERE, "..", "extensions")), stderr=open(os.path.join(root, "inbox.err"), "w"))
-spawn([sys.executable, os.path.join(HERE, "fixtures", "fake_anthropic.py"), "--port", str(port), "--log", model_log])
-
-
-class Client:
-    def __init__(self):
-        self.s = socket.socket(socket.AF_UNIX); self.s.connect(sock); self.f = self.s.makefile("rw"); self.n = 0
-        self.call("hello", {"client": "a3-tui"})
-
-    def call(self, method, params):
-        self.n += 1
-        self.f.write(json.dumps({"jsonrpc": "2.0", "id": self.n, "method": method, "params": params}) + "\n"); self.f.flush()
-        while True:
-            row = json.loads(self.f.readline())
-            if row.get("id") == self.n:
-                if "error" in row:
-                    raise RuntimeError(row["error"])
-                return row["result"]
-
-    def cmd(self, name, **args):
-        return self.call("command.invoke", {"name": name, "args": args})
-
-
-c = Client()
-while not any(x.get("name") == "inbox.take" for x in c.call("command.list", {})["commands"]):
-    time.sleep(0.1)
+h.spawn([sys.executable, os.path.join(HERE, "fixtures", "fake_anthropic.py"), "--port", str(port), "--log", model_log])
+AGENT = h.agent({"points": ["turn", "settle", "idle"], "insert": "context", "evidence": "none"})
+CTX = ["context"]
+base = dict(h.env, HOME=P["home"], PATH=os.environ["PATH"])
 settings = json.loads(subprocess.run([a.hook, "settings", os.path.abspath(a.hook)], capture_output=True, text=True).stdout)
 json.dump(settings, open(os.path.join(P["cfg"], "settings.json"), "w"), indent=1)
 key = "sk-ant-fake-key-for-a3-tests-0123456789"
@@ -93,7 +52,7 @@ json.dump({"hasCompletedOnboarding": True, "theme": "dark", "numStartups": 5,
            "customApiKeyResponses": {"approved": [key[-20:]], "rejected": []},
            "projects": {P["work"]: {"hasTrustDialogAccepted": True, "hasCompletedProjectOnboarding": True}}},
           open(os.path.join(P["cfg"], ".claude.json"), "w"))
-cenv = dict(base, CLAUDE_CONFIG_DIR=P["cfg"], VQRO_AGENT="r7", VQRO_CLAUDE_STATE=P["hookstate"], DISABLE_TELEMETRY="1",
+cenv = dict(base, CLAUDE_CONFIG_DIR=P["cfg"], VQRO_AGENT=AGENT, VQRO_CLAUDE_STATE=P["hookstate"], DISABLE_TELEMETRY="1",
             DISABLE_ERROR_REPORTING="1", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1", DISABLE_AUTOUPDATER="1",
             ANTHROPIC_BASE_URL=f"http://127.0.0.1:{port}", ANTHROPIC_API_KEY=key, TERM="xterm-256color")
 
@@ -165,7 +124,7 @@ DRAFT = "HUMAN DRAFT keep me 42"
 typed(DRAFT)
 pump(0.5)
 n_before = len(requests())
-d1 = c.cmd("inbox.send", to="r7", mode="start", content=txt("MSG-WAKE-I1: a teammate says the build is green"))["delivery"]
+d1 = h.send(AGENT, "start", txt("MSG-WAKE-I1: a teammate says the build is green"), render=CTX)
 woke = wait_for(lambda: first_request_with("MSG-WAKE-I1") is not None, 40)
 nreq = first_request_with("MSG-WAKE-I1")
 check("I1 a start message wakes the idle TUI session and reaches the model", woke and nreq == n_before + 1, {"n_before": n_before, "first": nreq})
@@ -188,8 +147,8 @@ sub = next((x for x in requests() if x["n"] == n_before2 + 1), None)
 results["I2_submitted"] = sub and last_user_text(sub)
 check("I2 the human draft is submitted byte-identical after the wake", results["I2_submitted"] == DRAFT, results["I2_submitted"])
 # Evidence is advanced when a later hook fires (the transcript is written asynchronously).
-results["I1_record"] = c.cmd("inbox.get", delivery=d1)
-check("I1 evidence: the woken message reaches read from the transcript (by the next hooks)", results["I1_record"].get("stage") == "read", results["I1_record"])
+results["I1_record"] = h.get(d1)
+check("I1 evidence: the woken message reaches read from the transcript (by the next hooks)", results["I1_record"].get("state") == "read", results["I1_record"])
 wait_for(lambda: len([e for e in hooklog() if e["event"] == "waiter_armed"]) >= 3, 30)
 pump(1.0)
 # I3: an armed waiter is retired by a new prompt; a message sent while busy is not taken by the waiter
@@ -199,10 +158,10 @@ typed("steps:1 sleep:3 second task"); os.write(fd, b"\r")
 # Claude Code ran UserPromptSubmit for this prompt.
 wait_for(lambda: sum(1 for e in hooklog() if e["event"] == "hook" and e["detail"].get("hook") == "UserPromptSubmit") > prompts, 15)
 wait_for(lambda: any(e["event"] == "waiter_retired" for e in hooklog()), 15)
-d2 = c.cmd("inbox.send", to="r7", mode="start", content=txt("MSG-BUSY-I3"))["delivery"]
+d2 = h.send(AGENT, "start", txt("MSG-BUSY-I3"), render=CTX)
 pump(1.0)
-state_busy = c.cmd("inbox.get", delivery=d2)["state"]
-check("I3 a new prompt retires the waiter; a start message stays held while busy", state_busy == "held"
+state_busy = h.get(d2)["state"]
+check("I3 a new prompt retires the waiter; a start message stays held while busy", state_busy in ("held", "recorded")
       and any(e["event"] == "waiter_retired" for e in hooklog()), {"state": state_busy, "events": [e["event"] for e in hooklog()][-8:]})
 wait_for(lambda: first_request_with("MSG-BUSY-I3") is not None, 40)
 check("I3 the held start message is delivered once the session is idle again", first_request_with("MSG-BUSY-I3") is not None)
@@ -256,12 +215,6 @@ try:
     os.kill(pid, 9); os.waitpid(pid, 0)
 except OSError:
     pass
-for p in procs:
-    if p.poll() is None:
-        p.terminate()
-        try:
-            p.wait(5)
-        except subprocess.TimeoutExpired:
-            p.kill()
+h.stop()
 print(f"{'FAILED' if fails else 'OK'}: {len(fails)} failures; root {root}")
 sys.exit(1 if fails else 0)

@@ -16,19 +16,25 @@ for k in ("vqro", "hook", "claude", "auth", "root"):
     ap.add_argument("--" + k, required=True)
 ap.add_argument("--model", default="haiku")
 ap.add_argument("--only", choices=["p", "tui"])
+ap.add_argument("--inbox", choices=["fake", "k2"], default="fake")
+ap.add_argument("--coord-ext")
 a = ap.parse_args()
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+from coord_harness import Harness, txt  # noqa: E402
+
 root = a.root
-P = {k: os.path.join(root, k) for k in ("work", "xrun", "st", "noext", "hookstate")}
+P = {k: os.path.join(root, k) for k in ("work", "hookstate")}
 for d in P.values():
     os.makedirs(d, exist_ok=True)
-sock, inbox_log = os.path.join(root, "v.sock"), os.path.join(root, "inbox.jsonl")
-base = {"HOME": os.path.join(root, "home-core"), "PATH": "/usr/bin:/bin", "XDG_RUNTIME_DIR": P["xrun"],
-        "VQRO_STATE_DIR": P["st"], "VQRO_SOCKET": sock, "VQRO_EXTENSIONS_DIR": P["noext"],
-        "VQRO_HERDR": '["/bin/false"]', "HC_SOCKET": os.path.join(root, "h.sock"), "HC_SESSION": "a3-smoke"}
-os.makedirs(base["HOME"], exist_ok=True)
-procs, results, fails = [], {"model": a.model}, []
+results, fails = {"model": a.model, "inbox": a.inbox}, []
 START = time.time()
+h = Harness(root, a.vqro, inbox=a.inbox, coord_ext=a.coord_ext)
+import atexit  # noqa: E402
+atexit.register(h.stop)
+procs = h.procs
+AGENT = h.agent({"points": ["turn", "settle", "idle"], "insert": "context", "evidence": "none"})
+CTX = ["context"]
 
 
 def check(name, ok, detail=""):
@@ -39,55 +45,18 @@ def check(name, ok, detail=""):
 
 
 def spawn(argv, **kw):
-    p = subprocess.Popen(argv, **kw)
-    procs.append(p)
-    return p
+    return h.spawn(argv, **kw)
 
 
-import atexit  # noqa: E402
-atexit.register(lambda: [p.kill() for p in procs if p.poll() is None])
-spawn([a.vqro, "serve", "--fake"], env=base, stdout=open(os.path.join(root, "core.log"), "w"), stderr=subprocess.STDOUT)
-while not os.path.exists(sock):
-    time.sleep(0.05)
-spawn([sys.executable, os.path.join(HERE, "fixtures", "fake_inbox.py"), inbox_log],
-      env=dict(base, VQRO_EXT_PATH=os.path.join(HERE, "..", "extensions")), stderr=open(os.path.join(root, "inbox.err"), "w"))
-
-
-class Client:
-    def __init__(self):
-        self.s = socket.socket(socket.AF_UNIX); self.s.connect(sock); self.f = self.s.makefile("rw"); self.n = 0
-        self.call("hello", {"client": "a3-smoke"})
-
-    def call(self, method, params):
-        self.n += 1
-        self.f.write(json.dumps({"jsonrpc": "2.0", "id": self.n, "method": method, "params": params}) + "\n"); self.f.flush()
-        while True:
-            row = json.loads(self.f.readline())
-            if row.get("id") == self.n:
-                if "error" in row:
-                    raise RuntimeError(row["error"])
-                return row["result"]
-
-    def cmd(self, name, **args):
-        return self.call("command.invoke", {"name": name, "args": args})
-
-
-c = Client()
-while not any(x.get("name") == "inbox.take" for x in c.call("command.list", {})["commands"]):
-    time.sleep(0.1)
 settings_file = os.path.join(root, "hooks-settings.json")
 open(settings_file, "w").write(subprocess.run([a.hook, "settings", os.path.abspath(a.hook)], capture_output=True, text=True).stdout)
 cenv = {"HOME": os.path.join(a.auth, "home"), "PATH": "/usr/bin:/bin", "CLAUDE_CONFIG_DIR": os.path.join(a.auth, "config"),
-        "XDG_RUNTIME_DIR": P["xrun"], "DISABLE_AUTOUPDATER": "1", "DISABLE_UPDATES": "1", "TERM": "xterm-256color",
-        "VQRO_SOCKET": sock, "VQRO_AGENT": "r7", "VQRO_CLAUDE_STATE": P["hookstate"]}
-
-
-def txt(s):
-    return [{"type": "text", "text": s}]
+        "XDG_RUNTIME_DIR": h.env["XDG_RUNTIME_DIR"], "DISABLE_AUTOUPDATER": "1", "DISABLE_UPDATES": "1", "TERM": "xterm-256color",
+        "VQRO_SOCKET": h.sock, "VQRO_AGENT": AGENT, "VQRO_CLAUDE_STATE": P["hookstate"]}
 
 
 def get(d):
-    return c.cmd("inbox.get", delivery=d)
+    return h.get(d)
 
 
 def hooklog():
@@ -95,8 +64,8 @@ def hooklog():
     return [json.loads(l) for l in open(path)] if os.path.exists(path) else []
 
 
-def statuses():
-    return [json.loads(l) for l in open(inbox_log) if '"event": "status"' in l] if os.path.exists(inbox_log) else []
+def hook_seen(name):
+    return any(e["event"] == "hook" and e["detail"].get("hook") == name for e in hooklog())
 
 
 def transcript_rows():
@@ -130,10 +99,9 @@ if a.only in (None, "p"):
                  "finished, use the Bash tool to run exactly: echo step-two . Then reply with one short line."],
                 cwd=P["work"], env=cenv, stdout=open(out, "w"), stderr=open(os.path.join(root, "run-p.err"), "w"))
     end = time.time() + 120
-    while time.time() < end and not any(s.get("source") == "PreToolUse" for s in statuses()):
+    while time.time() < end and not hook_seen("PreToolUse"):
         time.sleep(0.1)
-    b = c.cmd("inbox.send", to="r7", mode="boundary", content=txt("Teammate note for the vqro smoke test: please include "
-                                                                     "the word PINEAPPLE in your final reply."))["delivery"]
+    b = h.send(AGENT, "boundary", txt("Teammate note for the vqro smoke test: please include the word PINEAPPLE in your final reply."), render=CTX)
     run.wait(240)
     time.sleep(1)
     rows = [json.loads(l) for l in open(out) if l.strip()]
@@ -145,7 +113,7 @@ if a.only in (None, "p"):
     check("smoke -p: boundary message inserted as hook_additional_context and sent in a request",
           ("attachment", "hook_additional_context") in results["p"]["kinds_with_msg"]
           and ("api-request-blob", None) in results["p"]["kinds_with_msg"], results["p"])
-    check("smoke -p: evidence reached read", results["p"]["record"].get("stage") == "read", results["p"]["record"])
+    check("smoke -p: evidence reached read", results["p"]["record"].get("state") == "read", results["p"]["record"])
     results["p"]["model_mentions_message"] = "PINEAPPLE" in (final.get("result") or "")
     print(json.dumps({k: results["p"][k] for k in ("seconds", "cost_usd", "num_turns", "model_mentions_message", "assistant_requests")}), flush=True)
 
@@ -199,7 +167,7 @@ if a.only in (None, "tui"):
     armed = wait_for(lambda: any(e["event"] == "waiter_armed" for e in hooklog()), 120)
     check("smoke TUI: first turn ended and the idle waiter is armed", armed, plain()[-600:])
     pump(2)
-    s = c.cmd("inbox.send", to="r7", mode="start", content=txt("Teammate note for the vqro smoke test: reply with just the word MANGO."))["delivery"]
+    s = h.send(AGENT, "start", txt("Teammate note for the vqro smoke test: reply with just the word MANGO."), render=CTX)
     woke = wait_for(lambda: any("MANGO" in json.dumps(r) and r.get("type") == "assistant" for r in transcript_rows()), 120)
     pump(3)
     tr = transcript_rows()
@@ -212,11 +180,9 @@ if a.only in (None, "tui"):
     results["tui"] = {"record": get(s), "kinds_with_msg": kinds_with(tr, "reply with just the word MANGO"), "assistant_requests": n,
                       "usage": usage, "screen_tail": plain()[-800:]}
     check("smoke TUI: a start message wakes the idle session and the model answers it", woke, results["tui"])
-    print(json.dumps({"tui_requests": n, "usage": usage, "stage": results["tui"]["record"].get("stage")}), flush=True)
+    print(json.dumps({"tui_requests": n, "usage": usage, "state": results["tui"]["record"].get("state")}), flush=True)
 
 json.dump(results, open(os.path.join(root, "smoke-results.json"), "w"), indent=1, default=str)
-for p in procs:
-    if p.poll() is None:
-        p.kill()
+h.stop()
 print(f"{'FAILED' if fails else 'OK'}: {len(fails)} failures; root {root}")
 sys.exit(1 if fails else 0)

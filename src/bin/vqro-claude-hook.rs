@@ -14,14 +14,20 @@
 //! | `StopFailure`, `Notification` (`idle_prompt`) | — | status error / idle |
 //! | `SessionEnd` | — | last chance to turn transcript evidence into `inserted` / `read` |
 //!
-//! Insertion is `insert: context` (a system reminder), so a hand-off is reported `supplied`. When the transcript
-//! later shows the entry carrying the delivery id it is reported `inserted`, and `read` once a later assistant
-//! message completed. Hooks inside subagents (`agent_id`) are ignored: their context is not the agent's.
+//! The endpoint's declaration (written by its launcher in `doc/agents/terminals/<rN>`) is
+//! `pull {points: [turn, settle, idle], insert: context, evidence: none}`: a hand-off is a system reminder with no
+//! durable entry at that moment, reported `supplied`; `read` follows once the transcript shows the request that
+//! carried it and a finished assistant entry. Senders must accept `render: ["context"]`. Hooks inside subagents
+//! (`agent_id`) are ignored: their context is not the agent's.
+//!
+//! Wire: `coord.inbox.window/reconcile/take/report` (the default coordination extension) via `command.invoke`;
+//! mutation ops carry the window epoch. The idle waiter wakes on the `coord-status` view's `wake.pending[<rN>]`.
 //!
 //! Environment: `VQRO_SOCKET` (core endpoint), `VQRO_AGENT` (this agent's `rN`, injected by its launcher). Without
 //! both the plugin does nothing. Every failure is silent towards Claude Code (a hook must never break the session)
-//! and logged to the state directory. Status goes to `agents.terminal_status` (pending a standard status primitive:
-//! hooks have no controlling terminal and Claude Code's `terminalSequence` allowlist excludes OSC 7501).
+//! and logged to the state directory. Status: hooks have no controlling terminal and Claude Code's
+//! `terminalSequence` allowlist excludes OSC 7501, so tier-1 status needs a call the standard does not name yet; it
+//! is sent only to the command named by `VQRO_CLAUDE_STATUS_COMMAND`.
 
 #[cfg(unix)]
 fn main() {
@@ -48,6 +54,8 @@ mod unix {
     const CONTENT: &[&str] = &["text", "resource_link"];
     const CALL_MS: u64 = 3000;
     const MAX_CONTEXT: usize = 9000; // Claude Code moves >10,000 characters out to a file
+    /// The coordination extension's live status view; `wake.pending[<rN>]` is a count, never content.
+    const WAKE_VIEW: &str = "coord-status";
 
     struct Core {
         r: BufReader<UnixStream>,
@@ -96,9 +104,36 @@ mod unix {
             }
         }
 
-        /// An inbox command (`coordination-v0.md` §5.3) through the core's command registry.
-        fn inbox(&mut self, name: &str, args: Value) -> Result<Value, String> {
-            self.call("command.invoke", json!({"name": name, "args": args, "deadline_ms": CALL_MS}))
+        /// A coordination command (`coord.<name>`, the default coordination extension) through the core's command
+        /// registry.
+        fn coord(&mut self, name: &str, args: Value) -> Result<Value, String> {
+            self.call("command.invoke", json!({"name": format!("coord.{name}"), "args": args, "deadline_ms": CALL_MS}))
+        }
+
+        /// A coordination mutation: its `op` carries the current window epoch (cached per session). An
+        /// `expired_operation` created nothing, so one retry under a fresh epoch is safe.
+        fn mutate(&mut self, ctx: &Ctx, name: &str, mut args: Value) -> Result<Value, String> {
+            for attempt in 0..2 {
+                let mut epoch = ctx.with_state(|s| s.get("epoch").as_str().map(String::from)).unwrap_or_default();
+                if epoch.is_empty() {
+                    epoch = self.coord("inbox.window", json!({}))?.get("epoch").and_then(Value::as_str).unwrap_or("").to_string();
+                    ctx.with_state(|s| s.set("epoch", json!(epoch)));
+                }
+                args["op"] = json!(format!("{epoch}:{}:{}", ctx.session, random_hex()));
+                match self.coord(name, args.clone()) {
+                    Ok(reply) => {
+                        if let Some(e) = reply.pointer("/window/epoch").and_then(Value::as_str) {
+                            if e != epoch {
+                                ctx.with_state(|s| s.set("epoch", json!(e)));
+                            }
+                        }
+                        return Ok(reply);
+                    }
+                    Err(e) if attempt == 0 && e.contains("expired_operation") => ctx.with_state(|s| s.set("epoch", json!(""))),
+                    Err(e) => return Err(e),
+                }
+            }
+            Err("expired_operation twice".into())
         }
     }
 
@@ -251,18 +286,13 @@ mod unix {
 
     fn session_start(ctx: &Ctx, core: &mut Core) {
         let consumer = format!("claude:{}:{}", ctx.session, random_hex());
-        let transcript = ctx.input.get("transcript_path").and_then(Value::as_str).map(PathBuf::from);
-        let records: Vec<Value> = transcript
-            .map(|t| evidence(&t))
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(delivery, entry, _)| json!({"delivery": delivery, "entry": entry}))
-            .collect();
-        let op = format!("{consumer}:reconcile");
+        // Context insertion has no durable entry carrying the delivery at hand-off time, so the declaration is
+        // `evidence: none`: a new consumer proves nothing, and the inbox makes every open claim `unknown`.
         // Claude Code's native per-session inbox (an `admit` route, evaluated separately); recorded for diagnosis.
         ctx.log("session", json!({"consumer": consumer, "messaging_socket": std::env::var("CLAUDE_CODE_MESSAGING_SOCKET").ok(),
             "entrypoint": std::env::var("CLAUDE_CODE_ENTRYPOINT").ok()}));
-        match core.inbox("inbox.reconcile", json!({"op": op, "agent": ctx.agent, "consumer": consumer, "records": records})) {
+        ctx.with_state(|s| s.set("epoch", json!("")));
+        match core.mutate(ctx, "inbox.reconcile", json!({"agent": ctx.agent, "consumer": consumer, "records": []})) {
             Ok(r) => ctx.log("reconciled", r),
             Err(e) => ctx.log("reconcile_failed", json!(e)),
         }
@@ -278,24 +308,34 @@ mod unix {
     /// `supplied` for each record (the reminder is given to the runtime, with no durable record yet).
     fn take(ctx: &Ctx, core: &mut Core, at: &str) -> Option<String> {
         let consumer = ctx.with_state(|s| s.get("consumer").as_str().map(String::from))?;
-        let op = format!("{consumer}:take:{}", random_hex());
-        // Context insertion is text only: records with other block types stay held (`unsupported_content`) rather
-        // than being flattened or dropped.
-        let reply = match core.inbox("inbox.take", json!({"op": op, "agent": ctx.agent, "consumer": consumer, "at": at, "limit": TAKE_LIMIT, "content": CONTENT})) {
+        // `content` names the block types context insertion carries without loss (a proposed take filter; an inbox
+        // that ignores it may still hand over others, which are released uninserted, never flattened or dropped).
+        let reply = match core.mutate(ctx, "inbox.take", json!({"agent": ctx.agent, "consumer": consumer, "at": at, "limit": TAKE_LIMIT, "content": CONTENT})) {
             Ok(r) => r,
             Err(e) => {
-                ctx.log("take_failed", json!({"at": at, "op": op, "error": e}));
+                ctx.log("take_failed", json!({"at": at, "error": e}));
                 return None;
             }
         };
-        let records = reply.get("records").and_then(Value::as_array).cloned().unwrap_or_default();
+        let mut records = reply.get("records").and_then(Value::as_array).cloned().unwrap_or_default();
+        if records.is_empty() {
+            if let Some(held) = reply.get("held").and_then(Value::as_str) {
+                ctx.log("held", json!({"at": at, "held": held}));
+            }
+            return None;
+        }
+        let insertable = |r: &Value| r.get("content").and_then(Value::as_array).is_some_and(|b| b.iter().all(|b| b.get("type").and_then(Value::as_str).is_some_and(|t| CONTENT.contains(&t))));
+        for r in records.iter().filter(|r| !insertable(r)) {
+            report(ctx, core, r["delivery"].as_str().unwrap_or(""), &r["claim"], "released");
+        }
+        records.retain(insertable);
         if records.is_empty() {
             return None;
         }
         let mut text = String::new();
         for r in &records {
             let delivery = r.get("delivery").and_then(Value::as_str).unwrap_or("?");
-            let from = r.get("from").map(|v| v.as_str().map(String::from).unwrap_or_else(|| v.to_string())).unwrap_or_default();
+            let from = r.get("from").map(|v| v.as_str().or_else(|| v.get("principal").and_then(Value::as_str)).map(String::from).unwrap_or_else(|| v.to_string())).unwrap_or_default();
             let mode = r.get("mode").and_then(Value::as_str).unwrap_or("?");
             // Factual framing (Claude Code treats imperative out-of-band text as possible prompt injection).
             text.push_str(&format!("{MARK}{delivery} from {from} (mode {mode}, delivered by the vqro inbox):\n{}\n\n", content_text(r.get("content"))));
@@ -318,8 +358,7 @@ mod unix {
     }
 
     fn report(ctx: &Ctx, core: &mut Core, delivery: &str, claim: &Value, stage: &str) -> bool {
-        let op = format!("{delivery}:{stage}");
-        match core.inbox("inbox.report", json!({"op": op, "delivery": delivery, "claim": claim, "stage": stage})) {
+        match core.mutate(ctx, "inbox.report", json!({"delivery": delivery, "claim": claim, "stage": stage})) {
             Ok(_) => true,
             Err(e) => {
                 ctx.log("report_failed", json!({"delivery": delivery, "stage": stage, "error": e}));
@@ -328,8 +367,10 @@ mod unix {
         }
     }
 
-    /// Upgrade open hand-offs from transcript evidence: the entry carrying the delivery id → `inserted`; a later
-    /// completed assistant message → `read`. The transcript is written asynchronously, so absence proves nothing.
+    /// Upgrade `supplied` hand-offs to `read` from transcript evidence: a model-visible entry carrying the delivery
+    /// id, the request payload that carried it, then a finished assistant entry. The transcript is written
+    /// asynchronously, so absence proves nothing. (`inserted` is not reported: the declaration is `evidence: none`,
+    /// and `supplied` and `inserted` are separate evidence branches.)
     fn advance_evidence(ctx: &Ctx, core: &mut Core) {
         let Some(transcript) = ctx.input.get("transcript_path").and_then(Value::as_str) else { return };
         let open = ctx.with_state(|s| s.open());
@@ -341,11 +382,11 @@ mod unix {
         for mut o in open {
             let delivery = o["delivery"].as_str().unwrap_or("").to_string();
             if let Some((_, entry, read)) = seen.iter().find(|(d, _, _)| *d == delivery) {
-                if o["stage"] == "supplied" && report(ctx, core, &delivery, &o["claim"], "inserted") {
-                    ctx.log("inserted", json!({"delivery": delivery, "entry": entry}));
-                    o["stage"] = json!("inserted");
+                if o.get("entry").is_none() {
+                    ctx.log("in_transcript", json!({"delivery": delivery, "entry": entry}));
+                    o["entry"] = entry.clone();
                 }
-                if *read && o["stage"] == "inserted" && report(ctx, core, &delivery, &o["claim"], "read") {
+                if *read && report(ctx, core, &delivery, &o["claim"], "read") {
                     ctx.log("read", json!({"delivery": delivery}));
                     continue;
                 }
@@ -411,8 +452,10 @@ mod unix {
     }
 
     fn status(ctx: &Ctx, core: &mut Core, state: &str, event: &str) {
+        // No standard tier-1 status call exists yet (hooks cannot emit OSC 7501): opt-in, named by the launcher.
+        let Ok(command) = std::env::var("VQRO_CLAUDE_STATUS_COMMAND") else { return };
         let args = json!({"agent": ctx.agent, "state": state, "app": "claude", "source": event, "session": ctx.session});
-        if let Err(e) = core.inbox("agents.terminal_status", args) {
+        if let Err(e) = core.call("command.invoke", json!({"name": command, "args": args, "deadline_ms": CALL_MS})) {
             ctx.log("status_failed", json!({"state": state, "error": e}));
         }
     }
@@ -435,8 +478,7 @@ mod unix {
                 return 0;
             }
         };
-        let view = format!("inbox-wake-{}", ctx.agent);
-        if let Err(e) = core.call("events.subscribe", json!({"types": ["view.content"], "view_content": {"names": [view]}})) {
+        if let Err(e) = core.call("events.subscribe", json!({"types": ["view.content"], "view_content": {"names": [WAKE_VIEW]}})) {
             ctx.log("waiter_subscribe_failed", json!(e));
             return 0;
         }
@@ -460,13 +502,15 @@ mod unix {
                 }
             }
             // Wait for the next wake event; a short timeout re-checks retirement (no content is read).
+            let pending = |row: &Value| row.pointer("/params/data/content/wake/pending").and_then(|p| p.get(&ctx.agent)).and_then(Value::as_u64).unwrap_or(0) > 0;
             if !core.events.is_empty() {
-                woken = true;
+                woken = core.events.iter().any(pending);
+                core.events.clear();
             } else {
                 match core.read() {
                     Ok(row) => {
                         if row.get("method").and_then(Value::as_str) == Some("event") {
-                            woken = true;
+                            woken = pending(&row);
                         }
                     }
                     Err(e) if e == "timeout" => {}
