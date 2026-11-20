@@ -721,6 +721,21 @@ class AgentV0RequestDetailTests(unittest.TestCase):
         with self.assertRaises(VqroError):
             self.command("answer", resource="r2", request="q1", epoch="e7", revision=2, value="b")
 
+    def test_many_complete_requests_stay_within_the_live_value_cap(self):
+        """K3a N7 (spike-panel-2): 30 legal requests (< 64 KiB facts) must not expand past the core's 1 MiB cap."""
+        q = self.core.resources["r2"]["data"]["agent"]["requests"][0]
+        self.core.resources["r2"]["data"]["agent"]["requests"] = [
+            dict(q, request=f"q{n}", params={"message": "Question" + "\n" * 900}) for n in range(30)]
+        items = self.panel()
+        size = len(json.dumps(self.core.live["agents-requests-r2"], ensure_ascii=False).encode())
+        self.assertLessEqual(size, 1024 * 1024)
+        cancels = [row["args"] for row in items if row.get("args", {}).get("cancelled")]
+        self.assertEqual(len(cancels), 30, "every request can still be cancelled")
+        self.assertTrue(all(c["epoch"] == "e7" and c["revision"] == 2 for c in cancels), "cancels keep their fences")
+        approvable = [row["args"]["request"] for row in items if row.get("options")]
+        self.assertTrue(approvable and approvable == [f"q{n}" for n in range(len(approvable))], "the first ones whole, in order")
+        self.assertTrue(any("more requests don't fit here" in row.get("text", "") for row in items))
+
     def test_an_explicit_null_param_is_shown(self):
         q = self.core.resources["r2"]["data"]["agent"]["requests"][0]
         q["params"] = {"message": "Authorize access?", "expiry": None}

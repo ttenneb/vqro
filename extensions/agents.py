@@ -158,6 +158,34 @@ def legacy_parts(request):
         if key in detail]  # absent optional fields are skipped; an explicit null is shown
 
 
+REQUESTS_BYTES = 256 * 1024  # one requests popup, well under the core's 1 MiB live-value cap
+REQUESTS_CANCEL_MAX = 256
+
+
+def bounded_requests(rid, prefix, groups):
+    """The requests popup, bounded for every runtime (v0 and provider-v0): requests are shown whole, in order, while
+    they fit REQUESTS_BYTES; the rest are listed by Cancel only (bounded), never dropped silently. `groups` are
+    (rows, cancel_row) per request."""
+    items, size, rest = list(prefix), len(json.dumps(prefix).encode()), []
+    for rows, cancel in groups:
+        cost = len(json.dumps(rows + [cancel]).encode())  # ASCII-escaped: an over-count, never an under-count
+        if not rest and size + cost <= REQUESTS_BYTES:
+            items += rows + [cancel]
+            size += cost
+        else:
+            rest.append(cancel)
+    if rest:
+        items.append({"type": "text", "style": "warn", "text": f"{len(rest)} more requests don't fit here. Answer the ones "
+                      "above first (they then make room), or cancel these; nothing is answered for you:"})
+        items += rest[:REQUESTS_CANCEL_MAX]
+        if len(rest) > REQUESTS_CANCEL_MAX:
+            items.append({"type": "text", "style": "warn", "text": f"… and {len(rest) - REQUESTS_CANCEL_MAX} more."})
+    if not items:
+        items = [{"type": "text", "text": "No pending requests."}]
+    # `wrap` is required: a client that can't wrap would cut the question at the pane edge.
+    return {"title": "Requests: "+rid, "requires": ["menu", "input", "wrap"], "items": items}
+
+
 def owns_lifecycle(resource):
     """False only when the agent's facts say its host does not own the runtime's lifecycle (agent v0 section 1)."""
     host = agent_facts(resource).get("host")
@@ -616,7 +644,7 @@ class Agents:
                 and q.get("status", "pending") == "pending"] if isinstance(rows, list) else None
 
     def requests_panel_v0(self, r):
-        rid, items = r["id"], []
+        rid, items, groups = r["id"], [], []
         requests = self.requests_v0(r)
         if requests is None:
             requests = []
@@ -633,7 +661,6 @@ class Agents:
                    "command": "agents.answer", "args": args}
             params = q.get("params")
             shown, complete = disclosure(request_parts(q))
-            items.extend(shown)
             if not complete:
                 row = {"type": "text", "style": "warn", "text": "The request is too long to show here whole, so it can't be "
                        "approved; answer it in the agent's own screen. Cancel stays available."}
@@ -659,11 +686,9 @@ class Agents:
             else:
                 row = {"type": "text", "style": "warn", "text": label((q.get("title") or q["request"])+": "+str(method)
                        + " can't be answered from this panel; Cancel stays available.")}
-            items.extend([row, {"text": "Cancel "+label(q["request"]), "command": "agents.answer", "args": {**args, "cancelled": True}}])
-        if not items:
-            items = [{"type": "text", "text": "No pending requests."}]
-        # `wrap` is required: a client that can't wrap would cut the question at the pane edge.
-        return {"title": "Requests: "+rid, "requires": ["menu", "input", "wrap"], "items": items}
+            groups.append((shown + [row], {"text": "Cancel "+label(q["request"]), "command": "agents.answer",
+                                           "args": {**args, "cancelled": True}}))
+        return bounded_requests(rid, items, groups)
 
     def answer_v0(self, r, args):
         """agent.respond with the request's epoch and revision: a stale answer is refused by the adapter."""
@@ -702,7 +727,7 @@ class Agents:
     def requests_panel(self, r):
         if self.v0(r, "respond"):
             return self.requests_panel_v0(r)
-        items = []
+        items, groups = [], []
         requests = data(r).get("requests")
         if not isinstance(requests, list):
             requests = []
@@ -715,7 +740,6 @@ class Agents:
             row = {"text": "Answer: "+head(plain(request.get("prompt") or request["id"])), "description": label(str(kind)),
                    "command": "agents.answer", "args": args}
             shown, complete = disclosure(legacy_parts(request))
-            items.extend(shown)
             if not complete:
                 row = {"type": "text", "style": "warn", "text": "The request is too long to show here whole, so it can't be "
                        "approved; answer it in the agent's own screen. Cancel stays available."}
@@ -727,15 +751,9 @@ class Agents:
                 row["input"] = head(plain(request.get("prompt") or "Answer"))
             else:
                 row = {"type": "text", "text": label("Unsupported request kind: "+str(kind)), "style": "warn"}
-            items.extend([row, {"text": "Cancel "+label(request["id"]), "command": "agents.answer", "args": {**args, "cancelled": True}}])
-        if not items:
-            items = [{"type": "text", "text": "No pending requests."}]
-        content = {"title": "Requests: "+r["id"], "requires": ["menu", "input", "wrap"], "items": items}
-        if len(json.dumps(content).encode()) > 262144:
-            content["items"] = [{"type": "text", "style": "warn", "text": "Request details exceed the UI budget. Nothing answered; cancellation remains available."}]
-            content["items"] += [{"text": "Cancel "+label(q["id"]), "command": "agents.answer",
-                                  "args": {"resource": r["id"], "request": q["id"], "cancelled": True}} for q in requests]
-        return content
+            groups.append((shown + [row], {"text": "Cancel "+label(request["id"]), "command": "agents.answer",
+                                           "args": {**args, "cancelled": True}}))
+        return bounded_requests(r["id"], items, groups)
 
     def answer(self, args):
         """Answer a pending request. Approval needs the whole question to have been showable (disclosure)."""
