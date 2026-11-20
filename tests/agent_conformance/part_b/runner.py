@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Bennett Garcia
 """Receipted Part B runner; omissions/fixture failures cannot become successes."""
+import asyncio
+import asyncio
 import hashlib
 import json
 from pathlib import Path
@@ -36,6 +38,13 @@ def validate_manifest(value):
     return value
 
 
+CLEANUP_TIMEOUT=20
+
+
+def inventory_complete(rows,normative):
+    return bool(normative) and {row.case for row in rows}==set(normative) and len(rows)==len(normative)
+
+
 async def run_case(case, root, manifest, vqro, hc=None, *, factory=PublicCoordination, handlers=None):
     start = time.monotonic()
     context, evidence, declarations = None, [], {}
@@ -68,13 +77,13 @@ async def run_case(case, root, manifest, vqro, hc=None, *, factory=PublicCoordin
         if context is not None:
             evidence.extend(context.evidence)
             try:
-                await context.close()
+                await asyncio.wait_for(context.close(),CLEANUP_TIMEOUT)
                 # Cleanup evidence is appended by close, and is not optional proof.
                 evidence = list(context.evidence)
             except Exception as error:
                 evidence.append({"kind": "result_before_cleanup_failure", "status": status,
                                  "component": component, "detail": detail})
-                status, component, detail = "fail", "cleanup", f"owned fixture cleanup failed: {error}"
+                status, component, detail = "fail", "cleanup", f"owned fixture cleanup failed: {type(error).__name__}: {error}"
     result = Result(case.id, case.title, status, component, detail, evidence, declarations,
                     round((time.monotonic() - start) * 1000), str(root), reason=reason)
     Path(root).mkdir(parents=True, exist_ok=True)
@@ -103,6 +112,10 @@ def freeze(root, manifest, vqro):
         return str(destination)
     pinned = {**manifest,"source_extensions":str(source),"extensions":str(frozen),"target_sha256":hashes}
     pinned_vqro = binary(vqro,"vqro")
+    if manifest.get("legacy_core"):
+        pinned["legacy_core"]=binary(manifest["legacy_core"],"legacy-core")
+        if hashlib.sha256(Path(pinned["legacy_core"]).read_bytes()).hexdigest()!=manifest.get("legacy_core_sha256"):
+            raise FixtureFailed("historical core differs from the explicitly pinned legacy fixture")
     if manifest.get("core_driver"):
         pinned["core_driver"]=[binary(manifest["core_driver"][0],"core-driver"),*manifest["core_driver"][1:]]
     native=root/"native.py"; shutil.copy2(Path(__file__).with_name("native.py"),native)
@@ -117,6 +130,7 @@ def freeze(root, manifest, vqro):
             if "# Part B:" not in text or "## Running" not in text: raise HarnessGap("pinned conformance specification lacks Part B boundaries")
             text=text.split("# Part B:",1)[1].split("## Running",1)[0]
             normative=set(re.findall(r"\b[IHGTL][0-9]+\b",text))|{"S1"}
+            pinned["normative_cases"]=sorted(normative)
             if normative!={case.id for case in CASES}:
                 raise HarnessGap("Part B inventory differs from pinned normative specification: "+str(sorted(normative.symmetric_difference({case.id for case in CASES}))))
     return pinned,pinned_vqro
@@ -140,6 +154,8 @@ async def run_selection(root, manifest, selected, vqro, hc=None):
     document = report(metadata, rows, selected, part="B", inventory=CASES)
     document["subcase_not_applicable"] = sum(e.get("applicability") == "not-applicable"
         for row in rows for e in row.evidence)
+    document["complete_inventory"] = capture_error is None and inventory_complete(rows,manifest.get("normative_cases",[]))
+    document["normative_not_selected"] = sorted(set(manifest.get("normative_cases",[]))-{row.case for row in rows})
     document["qualification_complete"] = (document["complete_inventory"] and document["passed_selection"]
         and set(manifest.get("specs",{}))=={"agent","coordination","conformance"})
     (Path(root) / "results.json").write_text(json.dumps(document, ensure_ascii=False, indent=2) + "\n")

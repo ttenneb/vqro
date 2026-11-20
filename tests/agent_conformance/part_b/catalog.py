@@ -38,6 +38,8 @@ GROUPS = {
         "200-open burst/flood leaves declared control and answer headroom",
         "derived sender origin and unsupported rendering held",
         "eligible priority ordering, sender round-robin/FIFO and pending edit CAS",
+        "unknown predecessor blocks with visible ordering_unknown and explicit resolution",
+        "normal saturation preserves bounded controls and defensive archive-only funding",
     ),
     "H": (
         "crash before claim requires current-epoch resume",

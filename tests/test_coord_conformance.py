@@ -11,19 +11,36 @@ import unittest
 
 from agent_conformance.part_b.catalog import CASES, BY_ID, select_cases
 from agent_conformance.part_b.native import Native
-from agent_conformance.part_b.runner import run_case, validate_manifest
+from agent_conformance.part_b.runner import run_case, validate_manifest, inventory_complete
 from agent_conformance.results import FixtureFailed, HarnessGap, NotApplicable, report
+from unittest.mock import patch
 
 
 class Catalog(unittest.TestCase):
     def test_complete_part_b_inventory_and_no_silent_selection(self):
-        expected = [*(f"I{i}" for i in range(1,22)), *(f"H{i}" for i in range(1,17)),
+        expected = [*(f"I{i}" for i in range(1,24)), *(f"H{i}" for i in range(1,17)),
                     *(f"G{i}" for i in range(1,14)), *(f"T{i}" for i in range(1,15)),
                     *(f"L{i}" for i in range(5,12)), "S1"]
         self.assertEqual([case.id for case in CASES], expected)
-        self.assertEqual(len(BY_ID), 72)
+        self.assertEqual(len(BY_ID), 74)
         self.assertEqual([case.id for case in select_cases(["T1", "I1"])], ["I1", "T1"])
         with self.assertRaises(ValueError): select_cases(["I0"])
+
+    def test_inventory_needs_captured_normative_ids_not_a_literal_catalog_count(self):
+        rows=[SimpleNamespace(case=case.id) for case in CASES]
+        normative=[case.id for case in CASES]
+        self.assertTrue(inventory_complete(rows,normative))
+        self.assertFalse(inventory_complete(rows,[]))
+        self.assertFalse(inventory_complete(rows,normative+["I999"]))
+        self.assertFalse(inventory_complete(rows+[rows[0]],normative))
+
+    def test_assertions_always_retain_observed_result_before_failure(self):
+        from agent_conformance.part_b.context import PublicCoordination
+        from agent_conformance.results import CheckFailed
+        context=object.__new__(PublicCoordination);context.evidence=[];context.assertions=0
+        context.check(True,"observed actual witness")
+        with self.assertRaises(CheckFailed): context.check(False,"missing semantic witness")
+        self.assertEqual([item["passed"] for item in context.evidence],[True,False])
 
     def test_manifest_requires_explicit_target_and_sufficient_baseline(self):
         for value in ({}, {"name":"coord", "extensions":"ambient"},
@@ -98,8 +115,16 @@ class Runner(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row.evidence[0]["applicability"], "not-applicable")
         document = report({}, [row], [BY_ID["T10"]], part="B", inventory=CASES)
         self.assertFalse(document["complete_inventory"])
-        self.assertEqual(len(document["not_selected"]),71)
+        self.assertEqual(len(document["not_selected"]),73)
         self.assertEqual(document["summary"]["unsupported-declared"],0)
+
+    async def test_stalled_cleanup_is_bounded_and_never_passes(self):
+        class Stalled(Dummy):
+            async def close(self): await asyncio.Future()
+        async def probe(ctx): ctx.check(True,"observed")
+        with tempfile.TemporaryDirectory() as root, patch("agent_conformance.part_b.runner.CLEANUP_TIMEOUT",.02,create=True):
+            row=await asyncio.wait_for(run_case(BY_ID["I1"],Path(root)/"case",{},"/not/run",factory=Stalled,handlers={"I1":probe}),.3)
+        self.assertEqual((row.status,row.component),("fail","cleanup"))
 
     async def test_cleanup_failure_overrides_pass(self):
         async def probe(ctx): ctx.check(True,"observed")

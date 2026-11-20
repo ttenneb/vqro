@@ -96,7 +96,7 @@ class PublicCoordination(PublicImplementation):
 
     def check(self, condition, message, *, component="coordination", **evidence):
         self.assertions += 1
-        if evidence: self.evidence.append({"assertion": message, "passed":bool(condition), **evidence})
+        self.evidence.append({"kind":"assertion","assertion": message, "passed":bool(condition), **evidence})
         check(condition, message, component=component)
 
     async def start(self):
@@ -210,8 +210,8 @@ class PublicCoordination(PublicImplementation):
         (Path(self.backend.env["VQRO_STATE_DIR"])/"release-fault").touch()
 
     async def restart(self, *, crash=True, fault=None, wait_ready=True):
-        for peers in self.peers.values():
-            for peer in peers: await peer.close()
+        await asyncio.gather(*(asyncio.wait_for(peer.close(),2)
+            for peers in self.peers.values() for peer in peers))
         self.peers.clear()
         self.track_children()
         await asyncio.to_thread(self.backend.stop, crash)
@@ -226,8 +226,8 @@ class PublicCoordination(PublicImplementation):
 
     async def close(self):
         self.track_children()
-        for peers in self.peers.values():
-            for peer in peers: await peer.close()
+        closed=await asyncio.gather(*(asyncio.wait_for(peer.close(),2)
+            for peers in self.peers.values() for peer in peers),return_exceptions=True)
         if self.native_process is not None and self.native_process.poll() is None:
             self.native_process.terminate()
             try: await asyncio.to_thread(self.native_process.wait, 4)
@@ -237,3 +237,5 @@ class PublicCoordination(PublicImplementation):
         (self.root / "lifecycle.json").write_text(json.dumps(self.backend.log, ensure_ascii=False, indent=2))
         self.evidence.append({"kind": "cleanup", "owned_native_reaped": self.native_process is None or self.native_process.poll() is not None,
                               "tracked": self.backend.tracked, "private_environment": self.backend.env})
+        if any(isinstance(error,BaseException) for error in closed):
+            raise RuntimeError("owned peer close failed/timed out; native/core cleanup still attempted")
