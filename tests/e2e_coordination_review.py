@@ -606,7 +606,7 @@ def case_declarations():
     assert status['control_latency_ms'] == 3000, status
     conditions = status['control_latency_conditions']
     assert conditions['historical'] and not conditions['runtime_guarantee'] and not conditions['current_release_verified'], conditions
-    assert conditions['measurement']['samples'] == {'interrupt': 3, 'respond': 3}, conditions
+    assert conditions['measurement']['samples'] == {'interrupt': 80, 'respond': 80}, conditions
     return {'capacity': cache['capacity'], 'max_entry_bytes': cache['max_entry_bytes'],
             'control_latency_ms': 3000, 'historical_conditional_only': True, 'native_writes': 0}
 

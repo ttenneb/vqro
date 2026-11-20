@@ -37,19 +37,24 @@ def callback_context(params):
 CONTROL_LATENCY_MS = 3000
 CONTROL_LATENCY_CONDITIONS = {
     "kind": "conditional_measured_envelope", "historical": True,
-    "runtime_guarantee": False, "current_release_verified": False,
-    "rounding": "next whole second above observed maximum 2724.1 ms",
+    "runtime_guarantee": False, "current_release_verified": False, "verified_on_measured_pin_and_load": True,
+    "rounding": "next whole second above observed maxima, including earlier 2724.1 ms; load-dependent",
     "measurement": {
-        "case": "S1", "run": "b-hbof3nye", "core": "e026f6a", "coord": "a8968e9",
-        "core_sha256": "a0ef7a2c4ac1ded66fa3d5b820103ab399a7bc44176bf8c9c0e954aa5ac10d40",
-        "agents": 200, "terminals": 600, "streams": 600, "duration_seconds": 164,
-        "cpu_count": 8, "nice": 10, "native": "immediate fake provider; no model/runtime",
-        "load": "inbox and layout traffic, burst/flood and stream reconnect",
-        "samples": {"interrupt": 3, "respond": 3},
-        "max_ms": {"interrupt": 2244.6, "respond": 2724.1},
-        "boundary": "client coord.control reply; operation-window lookup and native fixture setup excluded",
-        "limitations": "historical small sample, shared host; neither a future SLO nor runtime completion guarantee",
+        "case": "S1", "runs": ["b-6cqcuh5h", "b-uhym7ktz"], "core": "ac140ac7", "coord": "ac140ac7",
+        "core_sha256": "d63096a959ba7288b83e7b256aae775af191d0364dd2aa6d2d262ce15fb407d4",
+        "agents": 200, "terminals": 600, "streams": 600, "stalled_streams": 200,
+        "measurement_phase_seconds": [82, 100], "cpu_count": 8, "nice": 10,
+        "load_average": [7.5, 9.2], "native": "immediate fake provider; no model/runtime",
+        "load": "steady inbox/layout traffic after three-viewer phase; full S1 burst/flood/reconnect also passed",
+        "samples": {"interrupt": 80, "respond": 80}, "samples_per_run_per_kind": 40,
+        "max_ms": {"interrupt": 2378.1, "respond": 1914.2},
+        "boundary": "client command.invoke coord.control reply; op-id read and next-request native_set excluded",
+        "harness": "ac140ac7 tests plus local uncommitted measurement phase; raw samples retained",
+        "limitations": "shared-host load-dependent measured envelope, not a future SLO or runtime completion guarantee",
     },
+    "earlier_s1_observation": {"core": "e026f6a", "coord": "a8968e9", "run": "b-hbof3nye",
+                               "samples": {"interrupt": 3, "respond": 3}, "load_average": [15, 28],
+                               "max_ms": {"interrupt": 2244.6, "respond": 2724.1}},
 }
 
 

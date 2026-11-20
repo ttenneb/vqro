@@ -658,12 +658,19 @@ bundled limit. The SDK's generic `snapshot_header` avoids a new full-snapshot RP
 
 `coord.status.control_latency_ms:3000` is a **conditional historical measured envelope**, rounded to the next whole
 second above2724.1ms. Its adjacent `control_latency_conditions` are part of the declaration, not optional marketing:
-S1 run`b-hbof3nye`, core/spec`e026f6a`, coordination`a8968e9`,600 terminals/200 agents/600 live item streams;
-164s of inbox/layout traffic, bursts/flood/reconnect;8 CPUs,nice10 on a shared host, immediate fake native, no model.
-Only3 interrupts+3 answers were sampled: maxima2244.6/2724.1ms (their reported p99 is the sample maximum, not a
-statistical tail estimate). The client times the `coord.control` reply; operation-window lookup and fixture setup
-are excluded. This is neither a future/current-release SLO nor a real-runtime completion guarantee;
-`current_release_verified:false` remains until separately qualified. The distinct I19 run`b-mqrpu571` observed
+S1 on main/core/coordination`ac140ac7` (core SHA256`d63096a959ba7288b83e7b256aae775af191d0364dd2aa6d2d262ce15fb407d4`),
+600 terminals/200 agents/600 healthy viewer streams plus200 stalled streams,8 CPUs(16–23),nice10, immediate fake
+native/no model. Runs`b-6cqcuh5h` and`b-uhym7ktz` add82/100s of steady inbox/layout traffic after the three-viewer
+phase,40 interrupts+40 answers each; the full S1 burst/flood/reconnect checks also pass. Pooled n80 per kind:
+interrupt p50/p95/max640.5/1713.0/2378.1ms, answer262.5/1604.5/1914.2ms. Nearest-rank p99 is each sample maximum,
+not a statistical tail estimate. Raw samples are retained; the measurement phase is a local uncommitted harness
+addition, not a product change. The client times `command.invoke coord.control` reply, including durable intent/
+outcome and core native invocation; the op-id read and next-request `native_set` are excluded. Shared-host load
+average7.5–9.2: **the envelope is load-dependent**. Earlier run`b-hbof3nye`, core/spec`e026f6a`/coord`a8968e9`,
+load15–28 and only3+3 samples, reached maxima2244.6/2724.1ms; it is separate supporting history, not pooled with
+these160 samples. This is neither a future/current-release SLO nor a real-runtime completion guarantee;
+`verified_on_measured_pin_and_load:true` records only that measured success; `current_release_verified:false`
+remains for a different/new candidate until separately qualified. The distinct I19 run`b-mqrpu571` observed
 max741.9ms over12 interrupt/answer calls during200 stream opens across4 connections plus inbox flood. That is a
 **different population**, not pooled with S1 or used to lower the declared envelope. Re-measurement may change it.
 

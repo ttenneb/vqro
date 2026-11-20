@@ -39,10 +39,13 @@ class DeclarationTests(unittest.TestCase):
         envelope = status['control_latency_conditions']
         self.assertTrue(envelope['historical']); self.assertFalse(envelope['runtime_guarantee'])
         self.assertFalse(envelope['current_release_verified'])
+        self.assertTrue(envelope['verified_on_measured_pin_and_load'])
         basis = envelope['measurement']
-        self.assertEqual(basis['core'], 'e026f6a'); self.assertEqual(basis['coord'], 'a8968e9')
+        self.assertEqual(basis['core'], 'ac140ac7'); self.assertEqual(basis['coord'], 'ac140ac7')
         self.assertEqual((basis['agents'], basis['streams'], basis['cpu_count'], basis['nice']), (200, 600, 8, 10))
-        self.assertEqual(basis['samples'], {'interrupt': 3, 'respond': 3})
-        self.assertEqual(basis['max_ms'], {'interrupt': 2244.6, 'respond': 2724.1})
+        self.assertEqual(basis['samples'], {'interrupt': 80, 'respond': 80})
+        self.assertEqual(basis['stalled_streams'], 200)
+        self.assertEqual(basis['max_ms'], {'interrupt': 2378.1, 'respond': 1914.2})
+        self.assertEqual(envelope['earlier_s1_observation']['samples'], {'interrupt': 3, 'respond': 3})
         envelope['measurement']['agents'] = -1
         self.assertEqual(self.fixture.callback('status', {})['control_latency_conditions']['measurement']['agents'], 200)
