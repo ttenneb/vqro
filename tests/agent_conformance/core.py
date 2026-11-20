@@ -111,12 +111,21 @@ class PublicImplementation:
         self.endpoint_count = manifest.get("endpoints", 1)
         self.serial = 0
         self.script = script or {"script": []}
-        self.fixture_dir = self.root / "fixtures"
+        self.harness_dir = self.root / "harness"
+        self.harness_dir.mkdir()
+        self.fixture_dir = self.harness_dir / "agent_conformance"
         shutil.copytree(HERE, self.fixture_dir, ignore=shutil.ignore_patterns("__pycache__"))
+        native_fixtures = self.harness_dir / "fixtures"
+        native_fixtures.mkdir()
+        for filename in ("fake_codex.py", "codex_control.py"):
+            source = HERE.parent / "fixtures" / filename
+            if source.is_file():
+                shutil.copy2(source, native_fixtures / filename)
         (self.root / "script.json").write_text(json.dumps(self.script) + "\n")
         placeholders = {"{python}": "/usr/bin/python3", "{fixture}": str(self.fixture_dir / "runtime.py"),
                         "{control}": str(self.native.endpoint), "{ledger}": str(self.native.path),
                         "{script}": str(self.root / "script.json"), "{root}": str(self.root),
+                        "{harness_root}": str(self.harness_dir), "{codex_fixture}": str(native_fixtures / "fake_codex.py"),
                         "{work}": str(self.root / "work")}
         self.argv = [placeholders.get(value, value) for value in manifest["argv"]]
         if not self.argv or not Path(self.argv[0]).is_absolute():
@@ -124,7 +133,9 @@ class PublicImplementation:
         self.metadata = {"name": manifest["name"], "kind": manifest.get("kind", "adapter"),
                          "declared_adapter_version": manifest.get("adapter_version", "unreported"),
                          "runtime": {"name": "scripted-native", "wire": manifest.get("wire", "pi"), "version": "fixture-v0",
-                                     "source_sha256": hashlib.sha256((self.fixture_dir / "runtime.py").read_bytes()).hexdigest()},
+                                     "source_sha256": hashlib.sha256((self.fixture_dir / "runtime.py").read_bytes()).hexdigest(),
+                                     "native_sources": {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+                                                        for path in native_fixtures.glob("*.py")}},
                          "provenance": "native adapter contract; only exercised native-ledger traces are verified",
                          "argv": self.argv}
 

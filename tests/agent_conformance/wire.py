@@ -175,6 +175,8 @@ class ItemReducer:
         self.max_record, self.max_entities = max_record, max_entities
         self.max_entity, self.max_bytes = max_entity, max_bytes
         self.entities, self.staged = {}, None
+        self.entity_sizes, self.staged_sizes = {}, None
+        self.entity_bytes, self.staged_bytes = 0, 0
         self.epoch, self.sequence = None, None
         self.coverage, self.session = None, None
         self.snapshot_epoch, self.snapshot_coverage, self.snapshot_session = None, None, None
@@ -191,10 +193,10 @@ class ItemReducer:
     def _size(value):
         return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode())
 
-    def _budget(self, target):
-        if len(target) > self.max_entities or sum(self._size(v) for v in target.values()) > self.max_bytes:
+    def _budget(self, count, changed_size, total):
+        if count > self.max_entities or total > self.max_bytes:
             raise WireFailure("item reconstruction exceeds the test viewer's declared bound")
-        if any(self._size(v) > self.max_entity for v in target.values()):
+        if changed_size > self.max_entity:
             raise WireFailure("item entity exceeds the 64 KiB bound")
 
     @staticmethod
@@ -267,7 +269,7 @@ class ItemReducer:
                     raise WireFailure("overlapping unfinished snapshots")
                 if not isinstance(row.get("epoch"), str) or row.get("coverage") not in ("all_retained", "tail", "state_only"):
                     raise WireFailure("snapshot lacks epoch/coverage")
-                self.staged = {}
+                self.staged, self.staged_sizes, self.staged_bytes = {}, {}, 0
                 self.snapshot_epoch, self.snapshot_coverage = row["epoch"], row["coverage"]
                 self.snapshot_session = row.get("session")
             elif phase == "end":
@@ -276,6 +278,8 @@ class ItemReducer:
                 if row.get("session") != self.snapshot_session:
                     raise WireFailure("snapshot end belongs to a different session")
                 self.entities, self.staged = self.staged, None
+                self.entity_sizes, self.staged_sizes = self.staged_sizes, None
+                self.entity_bytes, self.staged_bytes = self.staged_bytes, 0
                 self.epoch, self.coverage = self.snapshot_epoch, self.snapshot_coverage
                 self.sequence = row["seq"]
                 self.session = self.snapshot_session
@@ -305,7 +309,9 @@ class ItemReducer:
         previous = target.get(key)
         if previous is not None and rev <= previous["rev"]:
             raise WireFailure("entity revision did not increase")
-        candidate = deepcopy(target)
+        candidate = target.copy()  # copy only the changed entity, not every retained value
+        sizes = self.entity_sizes if self.staged is None else self.staged_sizes
+        total = self.entity_bytes if self.staged is None else self.staged_bytes
         if op == "put":
             if not isinstance(row.get("value"), dict):
                 raise WireFailure("put value is not an object")
@@ -330,16 +336,23 @@ class ItemReducer:
         elif op == "append":
             if previous is None or row.get("base") != previous["rev"]:
                 raise WireFailure("append base is a gap")
+            candidate[key] = deepcopy(previous)
             self._append(candidate[key], kind, row)
             candidate[key]["rev"] = rev
         else:
             candidate.pop(key, None)  # a tail/state-only viewer may not retain it
-        self._budget(candidate)
+        changed_size = self._size(candidate[key]) if key in candidate else 0
+        total += changed_size - sizes.get(key, 0)
+        self._budget(len(candidate), changed_size, total)
+        if key in candidate:
+            sizes[key] = changed_size
+        else:
+            sizes.pop(key, None)
         if self.staged is None:
-            self.entities = candidate
+            self.entities, self.entity_bytes = candidate, total
             self.sequence = row["seq"]
         else:
-            self.staged = candidate
+            self.staged, self.staged_bytes = candidate, total
 
     def feed(self, offset, data):
         if self.failure is not None:
@@ -359,7 +372,7 @@ class ItemReducer:
                 raise WireFailure("unterminated item exceeds 64 KiB")
         except (UnicodeError, ValueError, TypeError, RecursionError, WireFailure) as error:
             self.failure = str(error)
-            self.staged = None
+            self.staged, self.staged_sizes, self.staged_bytes = None, None, 0
             self.pending.clear()
 
     def stream_data(self, params):
@@ -367,15 +380,17 @@ class ItemReducer:
             data = base64.b64decode(params["data"], validate=True)
             if len(data) > 64 << 10:
                 raise WireFailure("stream frame exceeds 64 KiB")
-            self.feed(params["offset"], data)
+            # Viewer wire is stream.data {stream,data}; byte offsets and credit
+            # belong to the provider/core hop, not the ordinary viewer protocol.
+            self.feed(self.offset, data)
         except (KeyError, ValueError, WireFailure) as error:
             self.failure = str(error)
-            self.staged = None
+            self.staged, self.staged_sizes, self.staged_bytes = None, None, 0
 
     def ended(self, reason):
         # No partial line or snapshot survives a stream close, even unknown gaps.
         self.pending.clear()
-        self.staged = None
+        self.staged, self.staged_sizes, self.staged_bytes = None, None, 0
         if reason not in ("closed", "exited", "killed"):
             self.failure = str(reason)
 

@@ -275,9 +275,9 @@ class PeerTests(unittest.IsolatedAsyncioTestCase):
         async def server(reader, writer):
             await reader.readline()
             payload = b"".join(line(row) for row in (begin(), put(), end()))
-            for offset, byte in enumerate(payload):
+            for byte in payload:
                 writer.write(line({"jsonrpc": "2.0", "method": "stream.data", "params": {
-                    "stream": "s1", "offset": offset, "data": base64.b64encode(bytes([byte])).decode()}}))
+                    "stream": "s1", "data": base64.b64encode(bytes([byte])).decode()}}))
             await writer.drain()
         peer = await self.connect(server)
         peer.on("stream.data", reducer.stream_data)

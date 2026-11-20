@@ -69,7 +69,8 @@ bootstrap secrets and unrelated inherited environment values are not logged.
 
 Copy `pi.example.json` into your scratch directory and replace only the explicit
 adapter executable. Whole argv tokens `{python}`, `{fixture}`, `{control}`,
-`{ledger}`, `{script}`, `{root}` and `{work}` are substituted; other arguments stay
+`{ledger}`, `{script}`, `{root}`, `{work}`, `{codex_fixture}` and `{harness_root}`
+are substituted; other arguments stay
 literal (no shell expansion).
 
 ```
@@ -83,7 +84,7 @@ private core/backend per case, and writes `results.json`, `results.md`, per-case
 always name all omitted cases. Leaving `--cases` out includes all 55 Part A groups;
 currently unimplemented applicable handlers fail as `component:harness`.
 
-Current executable slice: C1, C2, C3, C5, C7, C8, C10, D6, D7, D12, D13, D14,
+Current executable slice: C1, C2, C3, C5, C7, C8, C10, D1–D7, D12, D13, D14,
 R1–R5, L1. Applicable R2/R4 still report a visible harness gap after their partial
 checks. This is an incremental harness release, **not complete Part A or Part B**.
 

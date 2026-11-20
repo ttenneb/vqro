@@ -258,6 +258,114 @@ async def endpoint_model(ctx):
     ctx.evidence.append({"kind": "endpoint_groups", "groups": {host: [r["id"] for r, _ in rows] for host, rows in groups.items()}})
 
 
+async def mode_matrix(ctx, mode):
+    profile = await mode_caps(ctx, mode)
+    if mode == "preempt":
+        raise HarnessGap("native preemption witness fixture not yet implemented")
+    if mode in ("boundary", "settle") and profile.get("batch") not in ("one", "all"):
+        raise HarnessGap("unknown native batch declaration")
+    if mode == "boundary" and profile.get("point") != "after_tool_calls":
+        raise HarnessGap("no timeline for declared boundary point " + repr(profile.get("point")))
+    if mode == "settle" and profile.get("point") not in ("would_stop", "settled"):
+        raise HarnessGap("no timeline for declared settle point " + repr(profile.get("point")))
+
+    async def point(index):
+        if mode == "boundary":
+            tool = "mode-current-tool" if index == 1 else f"mode-tool-{index}"
+            if index != 1:
+                await ctx.native.call("tool_call", id_ref=tool, state="start")
+            await ctx.native.call("tool_call", id_ref=tool, state="end")
+        elif mode == "settle":
+            await ctx.native.call("turn", state="end")
+            if profile["point"] == "settled":
+                await ctx.native.call("turn", state="settled")
+            await ctx.native.call("queue", mode="after", action="consume")
+            await ctx.native.call("turn", state="start")
+        await ctx.native.call("model_call", id_ref=f"mode-model-{index}")
+
+    await ctx.native.call("turn", state="settled")
+    await ctx.wait_facts(lambda f: f.get("state") == "idle")
+    mark = ctx.native.mark()
+    idle = await ctx.send("mode-idle-" + mode, mode)
+    edge = profile.get("idle", "start")
+    if edge == "reject":
+        rejection(idle, kinds=("busy", "unsupported"))
+        check(not ctx.native.writes(mark), "idle rejection performed native control")
+    elif edge in ("start", "park"):
+        accepted(idle)
+        await ctx.native.wait(lambda rows: any(r["seq"] > mark and r["kind"] == "input_received" for r in rows))
+        if edge == "park":
+            check(not (await ctx.native.call("state"))["active"], "idle park started work")
+            check(not ctx.native.records("inserted", after=mark), "idle park inserted immediately")
+            await ctx.native.call("turn", state="start")
+            await point(0)
+        else:
+            await ctx.native.wait(lambda rows: any(r["seq"] > mark and r["kind"] == "inserted" for r in rows))
+    else:
+        raise HarnessGap("unknown idle edge " + repr(edge))
+
+    await ctx.native.call("turn", state="settled")
+    await ctx.wait_facts(lambda f: f.get("state") == "idle")
+    await ctx.native.call("turn", state="start")
+    await ctx.wait_facts(lambda f: f.get("state") == "running")
+    if mode == "boundary":
+        await ctx.native.call("tool_call", id_ref="mode-current-tool", state="start")
+    mark = ctx.native.mark()
+    if mode == "start" or profile.get("busy") == "reject":
+        rejection(await ctx.send("mode-busy-rejected", mode), kinds=("busy", "unsupported"))
+        check(not ctx.native.writes(mark), "busy rejection wrote to native runtime")
+        return
+    count = 3 if mode in ("boundary", "settle") else 1
+    for index in range(count):
+        accepted(await ctx.send(f"mode-busy-{mode}-{index}", mode))
+    check(all(row.get("operation") == "send" for row in ctx.native.writes(mark)), "mode used an undeclared composition/fallback control")
+    if mode == "admit":
+        check(len(ctx.native.records("input_received", after=mark)) == 1, "admit duplicated/lost native acceptance")
+        return
+    check(not ctx.native.records("inserted", after=mark), "precise mode inserted before its native point")
+    remaining, step = count, 0
+    while remaining:
+        before = ctx.native.mark()
+        await point(step + 1)
+        inserted = ctx.native.records("inserted", after=before)
+        expected = min(remaining, 1 if profile["batch"] == "one" else count)
+        check(len(inserted) == expected, "native consume batch differs from declaration")
+        model = ctx.native.records("model_call", after=before)[-1]
+        check(all(row["seq"] < model["seq"] for row in inserted), "input arrived after its promised model boundary")
+        if mode == "boundary":
+            tool = ctx.native.records("tool_call", after=before)[-1]
+            check(all(tool["seq"] < row["seq"] for row in inserted), "boundary input arrived before tool completion")
+        remaining -= expected
+        step += 1
+    check(len(ctx.native.records("input_received", after=mark)) == count, "mode acceptance count changed")
+    ctx.evidence.append({"kind": "mode_edges", "mode": mode, "idle": edge, "batch": profile.get("batch"), "points": step})
+
+
+@case("D1")
+async def start_edges(ctx):
+    await mode_matrix(ctx, "start")
+
+
+@case("D2")
+async def admit_edges(ctx):
+    await mode_matrix(ctx, "admit")
+
+
+@case("D3")
+async def boundary_edges(ctx):
+    await mode_matrix(ctx, "boundary")
+
+
+@case("D4")
+async def settle_edges(ctx):
+    await mode_matrix(ctx, "settle")
+
+
+@case("D5")
+async def preempt_edges(ctx):
+    await mode_matrix(ctx, "preempt")
+
+
 @case("D6")
 async def unsupported_content(ctx):
     send = await caps(ctx, "agent.send")
