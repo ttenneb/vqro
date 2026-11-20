@@ -5,7 +5,7 @@ import asyncio
 import inspect
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from agent_conformance.part_b.context import PublicCoordination
 from agent_conformance.part_b.cases import settled
@@ -26,8 +26,23 @@ class ObservationContext:
 
     async def wait(self, predicate, *, label, timeout):
         self.wait_bounds.append(timeout)
-        # Short mock-only execution; production constants are asserted below, never changed by this fixture.
-        return await PublicCoordination.wait(self, predicate, label=label, timeout=min(timeout, .05))
+        # A logical clock permits one polling tick, then expires. The old 50ms
+        # wall-clock clamp could expire before the second read under parallel load.
+        ticks = 0
+
+        async def tick(_delay):
+            nonlocal ticks
+            ticks += 1
+            if ticks > 1:
+                raise asyncio.TimeoutError
+
+        async def deadline(awaitable, actual_timeout):
+            assert actual_timeout == timeout  # Exercise the production bound forwarding.
+            return await awaitable
+
+        with patch('agent_conformance.part_b.context.asyncio.sleep', side_effect=tick), \
+             patch('agent_conformance.part_b.context.asyncio.wait_for', side_effect=deadline):
+            return await PublicCoordination.wait(self, predicate, label=label, timeout=timeout)
 
 
 class WindowContext:
