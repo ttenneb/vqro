@@ -1,6 +1,6 @@
 {
   "name":"gestures", "title":"Mouse gestures", "version":"0.1.0", "license":"Apache-2.0", "author":"Bennett Garcia", "kind":"interface",
-  "summary":"Right-click menus, middle-click tab closing and dragging tabs to reorder them.",
+  "summary":"Right-click menus, middle-click tab closing and tab dragging.",
   "description":"Contributes mouse bindings for pane and tab menus, plus middle-click to close a tab and dragging a tab onto another to move it there. It uses the normal pane and tab commands rather than owning programs. Turn it off to remove these gestures; keyboard commands and the vqro recovery badge remain.",
   "requires":{"protocol":1},
   "works_with":[{"cap":"command/tabs.close","suggest":"tabs","without":"Middle-click does not close tabs"},
