@@ -28,6 +28,34 @@ def txt(s):
     return [{"type": "text", "text": s}]
 
 
+def pull_declaration(runtime):
+    """Launcher declarations for these pinned native plugin paths, not inferred precision."""
+    points = {point: {"precision": "exact"} for point in ("turn", "settle", "idle")}
+    if runtime == "pi":
+        framing = {point: {"role": "user", "frame": "sender_header"} for point in points}
+        return {"points": points, "insert": "user", "evidence": "entry", "framing": framing}
+    if runtime != "claude":
+        raise ValueError("unknown native pull fixture")
+    points["idle"]["precision"] = "approximate"
+    framing = {point: {"role": "user", "frame": "system-reminder", "authority": "above_user"}
+               for point in ("turn", "settle")}
+    framing["idle"] = {"role": "user", "frame": "SYSTEM NOTIFICATION - NOT USER INPUT", "authority": "above_user"}
+    return {"points": points, "insert": "context", "evidence": "none", "framing": framing}
+
+
+def finish_framing(harness, results, failures):
+    """Keep actual model logs and public declaration readbacks; callers grade them independently."""
+    declarations = []
+    for agent in harness.declarations:
+        row = harness.c.call("workspace.get", {"key": "doc/agents/terminals/" + agent})
+        declarations.append({"agent": agent, "entry": row})
+    results["public_declarations"] = declarations
+    with open(os.path.join(harness.root, "framing-result.json"), "w") as output:
+        json.dump(results, output, indent=2)
+    harness.stop()
+    raise SystemExit(1 if failures else 0)
+
+
 class Harness:
     PLUGIN = "p:plugin"  # the plugin's principal (k2core: bound by VQRO_PRINCIPAL at the plugin's hello)
 
@@ -56,6 +84,7 @@ class Harness:
         if inbox == "k2core":
             self.env["VQRO_EXTENSIONS_DIR"] = self.k2_extensions(coord_ext)
         end = time.time() + startup_s
+        self.declarations = {}
         self.spawn([vqro, "serve", "--fake"], env=self.env, stdout=open(os.path.join(root, "core.log"), "w"), stderr=subprocess.STDOUT)
         while not os.path.exists(self.sock):
             if time.time() > end or self.procs[0].poll() is not None:
@@ -67,6 +96,13 @@ class Harness:
         elif inbox == "fake":
             self.spawn([sys.executable, os.path.join(HERE, "fixtures", "fake_inbox.py"), self.inbox_log],
                        env=dict(self.env, VQRO_EXT_PATH=os.path.join(HERE, "..", "extensions")), stderr=open(os.path.join(root, "inbox.err"), "w"))
+        if inbox == "k2core":
+            # Product cores do not bootstrap an owner for a test. Use a real raw
+            # recovery transaction before requesting the configured owner identity.
+            bootstrap = Client(self.sock)
+            bootstrap.call("workspace.apply", {"ops": [{"op": "set", "key": "doc/principals/owner",
+                                                       "value": "p:owner"}], "note": "private native pull fixture owner"})
+            bootstrap.f.close(); bootstrap.s.close()
         self.c = Client(self.sock, owner=inbox == "k2core")
         self.wait_commands(end)
         if inbox == "k2core":
@@ -150,9 +186,9 @@ class Harness:
 
     def agent(self, pull):
         """A terminal endpoint (fake backend) declared for pull; returns its rN."""
-        # As a launcher does: tag the endpoint's terminal with the plugin's principal (VQRO_PRINCIPAL), which the core
-        # records as its resource.principal (C2) and which the plugin's own hello binds.
+        # As a launcher does: tag the endpoint with its real plugin principal.
         rid = self.c.call("resource.spawn", {"argv": ["sh"], "env": {"VQRO_PRINCIPAL": self.PLUGIN}})["resource"]["id"]
+        self.declarations[rid] = pull
         assert isinstance(pull.get("points"), dict), "pull.points is a map {point: {precision}} (coordination-v0 §7)"
         if self.kind == "fake":
             self.declared[rid] = pull

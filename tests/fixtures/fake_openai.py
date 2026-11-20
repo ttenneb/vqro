@@ -42,7 +42,7 @@ class H(BaseHTTPRequestHandler):
                  "kinds": [p.get("type") for p in m["content"]] if isinstance(m.get("content"), list) else ["text"],
                  **({"tool_calls": len(m["tool_calls"])} if m.get("tool_calls") else {})} for m in req.get("messages", [])]
         with open(args.log, "a") as f:
-            f.write(json.dumps({"n": n, "t": time.time(), "messages": msgs}) + "\n")
+            f.write(json.dumps({"n": n, "t": time.time(), "messages": msgs, "wire": req}) + "\n")
         ms = req["messages"]
         starts = [i for i, m in enumerate(ms) if m.get("role") == "user" and "steps:" in text_of(m.get("content"))]
         task = text_of(ms[starts[-1]]["content"]) if starts else ""

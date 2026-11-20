@@ -17,13 +17,14 @@ ap.add_argument("--vqro", required=True)
 ap.add_argument("--hook", required=True)
 ap.add_argument("--claude", required=True)
 ap.add_argument("--root")
+ap.add_argument("--framing-only", action="store_true", help="only native tool/Stop model-envelope witnesses")
 ap.add_argument("--model", default="claude-sonnet-4-5")
 ap.add_argument("--inbox", choices=["fake", "k2", "k2core"], default="fake")
 ap.add_argument("--coord-ext")
 a = ap.parse_args()
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from coord_harness import Harness, txt  # noqa: E402
+from coord_harness import Harness, txt, pull_declaration, finish_framing  # noqa: E402
 
 root = a.root or tempfile.mkdtemp(prefix="a3-cc-")
 os.makedirs(root, exist_ok=True)
@@ -118,6 +119,9 @@ results["A_B"]["boundary_insert_block"] = blk and next(b for b in blk["blocks"] 
 check("A inserted as context (system reminder), not as the user's prompt text", blk is not None and "system-reminder" in results["A_B"]["boundary_insert_block"], results["A_B"]["boundary_insert_block"])
 check("A evidence: supplied, then read from the transcript (request payload + finished answer)", get(b1).get("state") == "read", get(b1))
 check("B evidence by SessionEnd: read", get(s1).get("state") == "read", get(s1))
+
+if a.framing_only:
+    finish_framing(h, results, fails)
 
 # --- D: resume; an open claim with no transcript entry becomes unknown, never resent ---
 sessions = sorted(glob.glob(os.path.join(P["cfg"], "projects", "*", "*.jsonl")), key=os.path.getmtime)

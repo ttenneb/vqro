@@ -15,10 +15,11 @@ for k in ("vqro", "hook", "claude", "root"):
     ap.add_argument("--" + k, required=True)
 ap.add_argument("--inbox", choices=["fake", "k2", "k2core"], default="fake")
 ap.add_argument("--coord-ext")
+ap.add_argument("--framing-only", action="store_true", help="native rewake and human-prompt race witnesses only")
 a = ap.parse_args()
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from coord_harness import Harness, txt  # noqa: E402
+from coord_harness import Harness, txt, pull_declaration, finish_framing  # noqa: E402
 
 root = a.root
 P = {k: os.path.join(root, k) for k in ("home", "cfg", "work", "hookstate")}
@@ -124,10 +125,11 @@ DRAFT = "HUMAN DRAFT keep me 42"
 typed(DRAFT)
 pump(0.5)
 n_before = len(requests())
-d1 = h.send(AGENT, "settle", txt("MSG-WAKE-I1: a teammate says the build is green"), render=CTX)
+wake_mode = "boundary" if a.framing_only else "settle"
+d1 = h.send(AGENT, wake_mode, txt("MSG-WAKE-I1: a teammate says the build is green"), render=CTX)
 woke = wait_for(lambda: first_request_with("MSG-WAKE-I1") is not None, 40)
 nreq = first_request_with("MSG-WAKE-I1")
-check("I1 a settle message wakes the idle TUI session (approximate idle never serves start) and reaches the model", woke and nreq == n_before + 1, {"n_before": n_before, "first": nreq})
+check("I1 a safe message wakes approximate idle without serving start", woke and nreq == n_before + 1, {"n_before": n_before, "first": nreq})
 r = next((x for x in requests() if x["n"] == nreq), None)
 blk = r and next((b["text"] for m in r["messages"] for b in m["blocks"] if "MSG-WAKE-I1" in b["text"]), None)
 results["I1_insert_block"] = blk and blk[:400]
@@ -158,13 +160,59 @@ typed("steps:1 sleep:3 second task"); os.write(fd, b"\r")
 # Claude Code ran UserPromptSubmit for this prompt.
 wait_for(lambda: sum(1 for e in hooklog() if e["event"] == "hook" and e["detail"].get("hook") == "UserPromptSubmit") > prompts, 15)
 wait_for(lambda: any(e["event"] == "waiter_retired" for e in hooklog()), 15)
-d2 = h.send(AGENT, "settle", txt("MSG-BUSY-I3"), render=CTX)
+d2 = h.send(AGENT, "start" if a.framing_only else "settle", txt("MSG-BUSY-I3"), render=CTX)
 pump(1.0)
 state_busy = h.get(d2)["state"]
 check("I3 a new prompt retires the waiter; a settle message stays held while busy", state_busy in ("held", "recorded")
       and any(e["event"] == "waiter_retired" for e in hooklog()), {"state": state_busy, "events": [e["event"] for e in hooklog()][-8:]})
-wait_for(lambda: first_request_with("MSG-BUSY-I3") is not None, 40)
-check("I3 the held settle message is delivered at the next settle or idle point", first_request_with("MSG-BUSY-I3") is not None)
+if not a.framing_only:
+    wait_for(lambda: first_request_with("MSG-BUSY-I3") is not None, 40)
+    check("I3 the held settle message is delivered at the next settle or idle point", first_request_with("MSG-BUSY-I3") is not None)
+else:
+    wait_for(lambda: len([e for e in hooklog() if e["event"] == "waiter_armed"]) >= 4, 40)
+    unsafe = h.get(d2)
+    check("I3 approximate idle never claims an assumed-idle start", first_request_with("MSG-BUSY-I3") is None
+          and unsafe.get("state") in ("held", "recorded") and not unsafe.get("attempt"), unsafe)
+
+if a.framing_only:
+    # Actually race a pending boundary hint with submission of a prepared human
+    # prompt. Typing happens before the barrier; Enter and the public send race.
+    import threading
+    barrier = threading.Barrier(2)
+    raced = {}
+    def send_during_prompt():
+        try:
+            barrier.wait(timeout=5)
+            raced["delivery"] = h.send(AGENT, "boundary", txt("MSG-RACE-I3"), render=CTX)
+        except BaseException as error:
+            raced["error"] = repr(error)
+    typed("steps:1 sleep:2 T15 human prompt race")
+    thread = threading.Thread(target=send_during_prompt)
+    thread.start(); barrier.wait(timeout=5)
+    os.write(fd, b"\r")
+    thread.join(10)
+    check("I3 boundary send actually races human Enter", not thread.is_alive() and "delivery" in raced, raced)
+    arrived = wait_for(lambda: first_request_with("MSG-RACE-I3") is not None, 40)
+    race_record = h.get(raced["delivery"]) if "delivery" in raced else {}
+    unsafe = h.get(d2)
+    check("I3 race preserves boundary mode; approximate idle never claims start",
+          arrived and race_record.get("mode") == "boundary" and not unsafe.get("attempt")
+          and first_request_with("MSG-BUSY-I3") is None,
+          {"boundary": race_record, "unsafe_start": unsafe})
+    results["approximate_idle_race"] = {"boundary": race_record, "unsafe_start": unsafe,
+        "model_request": first_request_with("MSG-RACE-I3"), "send": raced,
+        "human_prompt": "T15 human prompt race"}
+    results["screen_tail"] = plain()[-8192:]
+    with open(os.path.join(root, "framing-screen.txt"), "w") as output:
+        output.write(plain())
+    # pty.fork made this exact child the session/process-group leader. Stop only
+    # that private group (including its hook waiters), and reap the direct child.
+    try: os.killpg(pid, signal.SIGKILL)
+    except ProcessLookupError: pass
+    try: os.waitpid(pid, 0)
+    except ChildProcessError: pass
+    os.close(fd)
+    finish_framing(h, results, fails)
 
 # --- I4/I5: Claude Code's native per-session inbox socket as an `admit` route (wire format from the 2.1.329 binary:
 # an optional auth line, then {"type":"user","message":{...}}). vqro cannot edit or withdraw after posting. ---

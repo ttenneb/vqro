@@ -55,7 +55,7 @@ class H(BaseHTTPRequestHandler):
         msgs = [{"role": m["role"], "blocks": blocks(m.get("content"))} for m in req.get("messages", [])]
         with open(args.log, "a") as f:
             f.write(json.dumps({"n": n, "t": time.time(), "stream": bool(req.get("stream")), "model": req.get("model"),
-                                "tools": len(req.get("tools") or []), "messages": msgs}) + "\n")
+                                "tools": len(req.get("tools") or []), "messages": msgs, "wire": req}) + "\n")
         # The task: newest user text with steps:N; count tool results after it.
         task_i, task = None, ""
         for i, m in enumerate(msgs):

@@ -16,6 +16,7 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--vqro", required=True)
 ap.add_argument("--pi", required=True, help="Pi CLI entry (dist/bundle/cli.js)")
 ap.add_argument("--root")
+ap.add_argument("--framing-only", action="store_true", help="only native turn/settle/idle paths; retain raw model witnesses")
 ap.add_argument("--inbox", choices=["fake", "k2", "k2core"], default="fake")
 ap.add_argument("--coord-ext", help="coord-ext checkout's extensions/ (for --inbox k2)")
 a = ap.parse_args()
@@ -24,7 +25,7 @@ PLUGIN = os.path.join(HERE, "..", "integrations", "pi", "vqro-pull.ts")
 FAULT_PLUGIN = os.path.join(HERE, "fixtures", "pi", "vqro-pull-faults.ts")  # test-only wrapper; the shipped plugin has no faults
 root = a.root or tempfile.mkdtemp(prefix="pi-pull-")
 sys.path.insert(0, HERE)
-from coord_harness import Harness, txt  # noqa: E402
+from coord_harness import Harness, txt, pull_declaration, finish_framing  # noqa: E402
 
 P = {k: os.path.join(root, k) for k in ("home", "agent", "sessions", "work")}
 for d in P.values():
@@ -195,6 +196,9 @@ check("U audio is never inserted or flattened: it stays held", get(u1)["state"] 
 h.edit(u1, txt("MSG-U now text"))
 pi.until(settled)
 pi.close()
+
+if a.framing_only:
+    finish_framing(h, results, fails)
 
 # --- E: crash after a durable take -> unknown on restart, never resent ---
 pi = Pi(fault="crash_after_take", resume=True)

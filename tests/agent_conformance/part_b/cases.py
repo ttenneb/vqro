@@ -1244,4 +1244,4 @@ async def readonly_boot_before_writes(ctx):
 
 # Registration of independently grouped probes; imported after their shared helpers exist.
 from . import inbox_cases, history_cases, priority_cases, scale_cases, archive_cases, lifecycle_cases, ordering_status_cases, control_epoch_cases, pull_followup_cases  # noqa: E402,F401
-from . import identity_request_cases  # noqa: E402,F401
+from . import identity_request_cases, native_framing_case  # noqa: E402,F401
