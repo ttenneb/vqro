@@ -452,7 +452,9 @@ class Bridge:
         after a timeout is safe. A loss leaves the agent cached as unavailable in vqro, so it is
         made visible on the fallback screen and returned to the caller."""
         try:
-            # Bounded: setup steps are provider calls with their own deadlines.
+            # Deliberately shorter than one setup call's deadline (30 s by default): shutdown stays bounded on a
+            # stalled core. Setup stops at its next checkpoint once closing; if it is still inside one call after
+            # 5 s, retirement is reported as not delivered and the agent stays cached as unavailable (honest).
             await asyncio.wait_for(self._setup.acquire(), 5)
         except TimeoutError:
             problem, unknown = "connection setup still in progress", False
