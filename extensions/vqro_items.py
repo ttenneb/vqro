@@ -13,6 +13,7 @@ more entity bytes than declared is an error, never unbounded growth.
 """
 import base64
 import binascii
+import copy
 import json
 
 MAX_RECORD_BYTES = 64 * 1024
@@ -206,26 +207,26 @@ class ItemView:
                 return self._loss("unknown_entity")
             if r.get("base") != current[0]:
                 return self._loss("stale_base")
-            target = _pointer(current[1], r.get("field"))
+            if ("text" in r) == ("bytes" in r):  # exactly one payload key, even if the other is null
+                return self._loss("bad_record")
+            candidate = copy.deepcopy(current[1])  # staged: nothing changes until the result is admitted
+            target = _pointer(candidate, r.get("field"))
             if target is None:
                 return self._loss("bad_record")
             node, at = target
-            before = node[at]
-            text, chunk = r.get("text"), r.get("bytes")
-            if isinstance(text, str) and chunk is None:
-                after = before + text
-            elif isinstance(chunk, str) and text is None:
+            if isinstance(r.get("text"), str):
+                node[at] += r["text"]
+            elif isinstance(r.get("bytes"), str):
                 try:  # bytes fields are one base64 buffer: decode, append, re-encode (never concatenate text)
-                    after = base64.b64encode(base64.b64decode(before, validate=True) + base64.b64decode(chunk, validate=True)).decode()
+                    node[at] = base64.b64encode(base64.b64decode(node[at], validate=True) + base64.b64decode(r["bytes"], validate=True)).decode()
                 except (binascii.Error, ValueError):
                     return self._loss("bad_record")
             else:
                 return self._loss("bad_record")
-            grown = self.entity_bytes + max(0, len(after.encode()) - len(before.encode()))
-            if grown > self.max_entity_bytes:
+            total = self._admit(self.entities, self.entity_bytes, key, candidate)  # encoded JSON bytes, escapes included
+            if total is None:
                 return self._loss("over_bound")
-            node[at], self.entity_bytes = after, grown
-            self.entities[key] = (rev, current[1])
+            self.entity_bytes, self.entities[key] = total, (rev, candidate)
         else:
             return self._loss("bad_record")
         self.seq = seq

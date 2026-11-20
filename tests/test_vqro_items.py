@@ -138,6 +138,9 @@ class ItemViewTests(unittest.TestCase):
             "bad base64": {"field": "/native/raw", "bytes": "!!not base64"},
             "no such field": {"field": "/content/9/text", "text": "x"},
             "both payloads": {"field": "/content/0/text", "text": "x", "bytes": "AA=="},
+            "text with a null bytes key": {"field": "/content/0/text", "text": "x", "bytes": None},
+            "neither payload": {"field": "/content/0/text"},
+            "escapes over the bound": {"field": "/content/0/text", "text": "\n" * 300},  # 300 raw bytes, 600 encoded
             "over the bound": {"field": "/content/0/text", "text": "x" * 1000},
         }
         for name, extra in cases.items():
