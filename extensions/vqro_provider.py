@@ -210,25 +210,37 @@ class Provider:
         if self._outgoing + len(wire) > self.limits.outgoing_bytes:
             raise ProviderError("overloaded", "outgoing byte bound full; not written")
         self._outgoing += len(wire)
-        wrote = False
+        charged = True
         try:
             deadline = deadline if deadline is not None else asyncio.get_running_loop().time() + self.limits.deadline
             async with asyncio.timeout_at(deadline):
                 async with self._writer_lock:
                     if self._closed.is_set():
                         raise ProviderError("unavailable", "connection closed")
-                    wrote = True
                     self.writer.write(wire)
-                    await self.writer.drain()
+                    # write() queued the whole line, so framing is intact whatever happens to
+                    # this caller. The flush outlives a cancelled caller and keeps the line
+                    # charged to the outgoing bound until the transport has taken it.
+                    flushed = asyncio.ensure_future(self.writer.drain())
+                    charged = False
+                    flushed.add_done_callback(lambda done, n=len(wire): self._flushed(done, n))
+                    await asyncio.shield(flushed)
         except asyncio.CancelledError:
-            if wrote:
-                self._disconnect("write cancelled; delivery unknown")
+            # Only this caller loses its answer. Closing the connection here would also drop
+            # later records, such as a bridge's resource.gone after its publisher was
+            # cancelled mid-drain.
             raise
         except (TimeoutError, OSError):
             self._disconnect("writer failed; delivery unknown")
             raise ProviderError("unavailable", "writer failed; delivery unknown") from None
         finally:
-            self._outgoing -= len(wire)
+            if charged:
+                self._outgoing -= len(wire)
+
+    def _flushed(self, done, size):
+        self._outgoing -= size
+        if not done.cancelled() and done.exception() is not None:
+            self._disconnect("writer failed; delivery unknown")
 
     async def call(self, method, params, timeout=None):
         timeout = self.limits.deadline if timeout is None else timeout

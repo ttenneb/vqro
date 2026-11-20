@@ -426,5 +426,73 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(facts(value), value)
 
 
+class CancelledWriteTests(unittest.IsolatedAsyncioTestCase):
+    """A caller cancelled while its line waits in drain() (a busy core) must not close the provider:
+    the line is already queued whole, and later records (a bridge's resource.gone) must still arrive."""
+
+    async def test_cancel_in_drain_keeps_the_connection_and_later_records(self):
+        left, right = socket.socketpair()
+        left.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+        right.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+        left.setblocking(False)
+        right.setblocking(False)
+        reader, writer = await asyncio.open_connection(sock=right, limit=4096)  # small: backpressure
+        reading = asyncio.Event()
+        reading.set()
+        rows = []
+
+        async def lines():
+            buffered = b""
+            while True:
+                while b"\n" not in buffered:
+                    await reading.wait()
+                    chunk = await reader.read(65536)
+                    if not chunk:
+                        return
+                    buffered += chunk
+                line, buffered = buffered.split(b"\n", 1)
+                yield line
+
+        async def core():
+            async for line in lines():
+                row = json.loads(line)
+                rows.append(row)
+                if row.get("method") == "hello":
+                    writer.write(json.dumps({"jsonrpc": "2.0", "id": row["id"], "result": {}}).encode() + b"\n")
+                elif row.get("method") == "provider.register":
+                    writer.write(json.dumps({"jsonrpc": "2.0", "id": row["id"], "result": {
+                        "provider": "pi-x", "generation": 7,
+                        "limits": {"stream_window_bytes": 262144, "max_record_bytes": 1048576}}}).encode() + b"\n")
+                    reading.clear()  # the core is busy now and stops reading this connection
+                await writer.drain()
+
+        task = asyncio.create_task(core())
+        provider = Provider("pi-x", "instance", {}, role="runtime", token="t")
+        try:
+            await provider.connect(sock=left)
+            big = {"blob": "x" * 900_000}
+            publish = asyncio.create_task(provider.call("view.publish", {"view": "agent-r1", "content": big}))
+            await asyncio.sleep(0.3)
+            self.assertFalse(publish.done(), "the write must be blocked in drain for this test to mean anything")
+            publish.cancel()  # Bridge.run() cleanup cancels its publisher
+            await asyncio.gather(publish, return_exceptions=True)
+            self.assertIsNone(provider.failure)
+            self.assertFalse(provider._closed.is_set())
+            gone = asyncio.create_task(provider.gone("agent", why={"reason": "exited", "exit_code": 23}))
+            reading.set()
+            await asyncio.wait_for(gone, 5)
+            while not any(r.get("method") == "resource.gone" for r in rows):
+                await asyncio.sleep(0.01)
+            methods = [r.get("method") for r in rows]
+            self.assertEqual(methods[-2:], ["view.publish", "resource.gone"], "whole, in order, nothing lost")
+            self.assertEqual(rows[-2]["params"]["content"], big)
+            self.assertEqual(provider._outgoing, 0)
+        finally:
+            await provider.close()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            writer.close()
+
+
 if __name__ == "__main__":
     unittest.main()
