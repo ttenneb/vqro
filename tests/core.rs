@@ -228,6 +228,75 @@ async fn stalled_socket_flood_closes_only_its_stream_explicitly() {
 }
 
 #[tokio::test]
+async fn slow_consumer_closes_the_writing_stream_and_spares_its_idle_sibling_and_other_connections() {
+    // O11, the per-stream rule within the shared connection budget: on a stalled connection only the stream that
+    // writes while the budget is full closes `slow_consumer`. Its idle sibling on the same connection stays open and
+    // usable, and another connection reading the same flooding resource is unaffected.
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let e = env();
+    let _core = start(e.socket.clone(), e.state.clone(), false, Backend::Fake, None).unwrap();
+    let (controller, _controller_rx) = connect(&e).await;
+    let flood = controller.call("resource.spawn", json!({"argv": ["flood", "--output-bytes-per-sec", "8000000"]})).await.unwrap()["resource"]["id"].clone();
+    let idle = controller.call("resource.spawn", json!({"argv": ["sh"]})).await.unwrap()["resource"]["id"].clone();
+    // Another connection reads the same flooding resource throughout.
+    let (watcher, mut watcher_rx) = connect(&e).await;
+    let watched = watcher.call("resource.attach", json!({"resource": flood})).await.unwrap()["stream"].clone();
+    let (watched_bytes, watched_closed) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicBool::new(false)));
+    let watch = {
+        let (bytes, closed, watched) = (watched_bytes.clone(), watched_closed.clone(), watched.clone());
+        tokio::spawn(async move {
+            while let Some(m) = watcher_rx.recv().await {
+                let Incoming::Notification { method, params } = m else { continue };
+                if method == "stream.data" && params["stream"] == watched { bytes.fetch_add(params["data"].as_str().map_or(0, str::len), Ordering::Relaxed); }
+                if method == "stream.closed" && params["stream"] == watched { closed.store(true, Ordering::Relaxed); }
+            }
+        })
+    };
+    // The stalled connection: two streams, not read at all until the writing one is closed.
+    let socket = tokio::net::UnixStream::connect(&e.socket).await.unwrap();
+    let (r, mut w) = socket.into_split();
+    let mut lines = BufReader::new(r).lines();
+    for (id, res) in [(1, &flood), (2, &idle)] {
+        let attach = json!({"jsonrpc": "2.0", "id": id, "method": "resource.attach", "params": {"resource": res, "cols": 80, "rows": 24}});
+        w.write_all(format!("{attach}\n").as_bytes()).await.unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let mut streams = std::collections::HashMap::new();
+    let closed = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let msg: Value = serde_json::from_str(&lines.next_line().await.unwrap().expect("connection stays open")).unwrap();
+            if let Some(id) = msg["id"].as_u64() { streams.insert(id, msg["result"]["stream"].clone()); }
+            if msg["method"] == "stream.closed" { return msg; }
+        }
+    }).await.expect("the writing stream was never closed");
+    assert_eq!(closed["params"]["reason"]["reason"], "slow_consumer");
+    assert_eq!(closed["params"]["stream"], streams[&1], "the closed stream is the writing one");
+    let watched_at_close = watched_bytes.load(Ordering::Relaxed);
+    // The idle sibling on the same connection still works: input is accepted, its echo arrives, it is never closed.
+    let sibling = streams[&2].clone();
+    let input = json!({"jsonrpc": "2.0", "id": 3, "method": "stream.input", "params": {"stream": sibling, "text": "sibling-ok"}});
+    w.write_all(format!("{input}\n").as_bytes()).await.unwrap();
+    let (mut echoed, mut replied) = (Vec::new(), false);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !(replied && echoed.windows(10).any(|x| x == b"sibling-ok")) {
+            let msg: Value = serde_json::from_str(&lines.next_line().await.unwrap().expect("connection stays open")).unwrap();
+            assert!(!(msg["method"] == "stream.closed" && msg["params"]["stream"] == sibling), "idle sibling closed: {msg}");
+            if msg["id"] == 3 { assert!(msg["error"].is_null(), "input refused: {msg}"); replied = true; }
+            if msg["method"] == "stream.data" && msg["params"]["stream"] == sibling {
+                echoed.extend(base64::engine::general_purpose::STANDARD.decode(msg["params"]["data"].as_str().unwrap()).unwrap());
+            }
+        }
+    }).await.expect("the idle sibling stopped working");
+    // The other connection's stream on the flooding resource stayed open and kept receiving after the close.
+    until(|| watched_bytes.load(Ordering::Relaxed) > watched_at_close + 64 * 1024).await;
+    watcher.call("stream.input", json!({"stream": watched, "text": "x"})).await.expect("the other connection's stream is open");
+    assert!(!watched_closed.load(Ordering::Relaxed), "another connection's stream was closed");
+    watch.abort();
+}
+
+#[tokio::test]
 async fn old_extension_disconnect_does_not_disable_replacement() {
     let e = env();
     let core = start(e.socket.clone(), e.state.clone(), false, Backend::Fake, None).unwrap();
