@@ -259,12 +259,16 @@ for one fake agent; the rest need the full extension.
   `unknown`, never resent.
 - I10 operation window: evict a settled record and its op result, then replay the original `send` and `report`: no
   new record, no native write; the same after a new `control_epoch`; same `op` other payload → `conflict`;
-  `coord.inbox.op` answers `unknown` when it doesn't know. Well-formed validation, grant and quota refusals are
-  cached and budgeted: after a grant or capacity change, the identical `op` returns its original refusal; a new
+  `coord.inbox.op` answers `unknown` when it doesn't know. Cached well-formed validation, grant and quota refusals
+  are budgeted: after a grant or capacity change, the identical `op` returns its original compact refusal; a new
   `op` is evaluated afresh. Malformed and undeclared-principal calls take no slot. Refusal-slot admission and
   persistence use the same existing control/recovery path (10% reserve minus archive escrow), not content capacity
-  or the normal-ledger 64 KiB / 16-record control-intent headroom. The window's own bound limits reserve consumption;
-  only a genuinely full window refuses `busy` before evaluating the call. Content saturation alone is not a full window.
+  or the normal-ledger 64 KiB / 16-record control-intent headroom. Cached entries have a fixed small bound; full
+  messages stay only in live replies. Caching stops at the protected owner-recovery margin: further refusals are
+  returned live, explicitly uncached, and consume no durable result slot, rather than producing persistent `busy`.
+  Their repeats may be evaluated afresh without weakening existing identity/replay fences. The window bound alone
+  is not a recovery guarantee; genuine full-window `busy` still precedes evaluation. Content saturation or preserving
+  the margin alone is not a full window.
 - I11 composition: Pi gets only `interrupt_then_start` (clear, abort, start), never `preempt`; with exclusive writers
   it succeeds; a steer after clear or a competing start is reported as partial with step outcomes; pause or deadline
   after the interrupt stops the input step; a definite prerequisite failure stops the recipe; no continuation after
@@ -441,8 +445,11 @@ are pruned oldest first; identities and summaries of maximum legal encoded size 
 instance, 4 handles) stay within 2 KiB and 3 KiB; a native result larger than the compact outcome is stored as its
 size, sha256 and `incomplete: true`, with the full result only in the live reply and `agent.receipt`. L8 at the
 durable budget, after GC, operation-window eviction and alias growth: a new send with an available window slot is
-refused `quota`, persisted through that control/recovery path with archive escrow untouched; content saturation must
-not instead yield pre-evaluation `busy`. A late native
+refused `quota`, cached through that control/recovery path only above the protected owner-recovery margin, otherwise
+returned live and explicitly uncached; content saturation must not instead yield pre-evaluation `busy`. Flood a
+73-agent workspace with 2,600 `no_grant` refusals from an ungranted principal: compact cached entries stop at the
+margin; any refusal that would cross it remains live/uncached, and the owner's maximum workspace pause plus resume
+still succeed; existing archive funding/escrow remain usable. A late native
 reply to an already admitted record still records its outcome (its space was reserved at admission); agent
 registration still succeeds; an explicit `coord.inbox.archive` exports and frees space. L9 an explicit `retire` of a
 disconnected agent shows `retired` with native execution unknown, never `ended`; routing stops; later end evidence

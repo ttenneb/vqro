@@ -591,12 +591,16 @@ replaced when the Pi bridge is ported.
 
 **Further implementation rulings (2026-11-20, spec batch 8).**
 - Compact refusal result slots use the existing control/recovery path (10% reserve minus archive-only escrow),
-  not content capacity or the normal-ledger 64 KiB / 16-record control-intent headroom; no new pool. Pre-evaluation
-  slot admission and refusal persistence use that same path; archive escrow stays untouched. At the durable
-  content budget a new well-formed send with a window slot reports `quota`, not `busy`. The window's own bound
-  limits refusal use of the reserve; only a genuinely full window returns pre-evaluation `busy`. I10 and L8 keep
-  these distinct: observed content-budget `busy` remains an L8 failure, not a fixture reinterpretation or synthetic
-  quota pass.
+  not content capacity or the normal-ledger 64 KiB / 16-record control-intent headroom; no new pool. Slot preflight
+  and refusal persistence use that same path, but only down to a protected recovery margin that always funds at
+  least one maximum owner workspace pause plus resume, with existing archive funding/escrow preserved. The earlier
+  assumption that the window bound alone protected recovery was wrong: 1,024 refusals can consume the usable reserve.
+  Cached entries have a fixed small bound; full messages stay in the live reply. Below the margin, return the
+  refusal live and explicitly uncached, not persistent `busy`; the cached-refusal repeat guarantee does not apply.
+  Existing identity/replay fences remain. At the durable content budget a well-formed send still reports `quota`;
+  genuine full-window pre-evaluation `busy` remains I10. L8 includes 73 agents and 2,600 `no_grant` refusals while
+  owner workspace pause/resume and archive recovery stay available. Observed content-budget `busy` remains a failure,
+  not a fixture reinterpretation or synthetic quota pass.
 
 **Human answers (2026-11-19, CONFIRMED).**
 - **AS1, pause:** "vqro stops delivery": paused means vqro sends, hands out and wakes nothing until resumed; an agent
@@ -625,8 +629,9 @@ replaced when the Pi bridge is ported.
 **Implementation rulings (2026-11-19, spec batch 1).**
 - Handle selectors in grants resolve once at issuance: targets to exact agents, subjects to their bound principals;
   rebinding transfers nothing. Team/project selectors remain dynamic over recorded membership.
-- The operation window caches well-formed refusals as well as successes; changed conditions need a new op id.
-  Malformed and undeclared-principal calls take no slot; a full window refuses `busy` before evaluation.
+- The operation window caches well-formed refusals as well as successes; changed conditions need a new op id for
+  a cached result. The later batch8 protected-recovery-margin exception returns further refusals live and explicitly
+  uncached. Malformed and undeclared-principal calls take no slot; a full window refuses `busy` before evaluation.
 - Pull takes declare accepted content types; unsupported mail stays held for that consumer rather than churning
   through claims. Counts-only wakes include a revision so edits cannot disappear behind unchanged-count suppression.
 - The default coordination extension declares **4 MiB** (generic core default 2 MiB). C1's measured 4 MiB workload
