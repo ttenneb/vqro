@@ -212,7 +212,10 @@ for one fake agent; the rest need the full extension.
   `unknown`, never resent.
 - I10 operation window: evict a settled record and its op result, then replay the original `send` and `report`: no
   new record, no native write; the same after a new `control_epoch`; same `op` other payload → `conflict`;
-  `coord.inbox.op` answers `unknown` when it doesn't know.
+  `coord.inbox.op` answers `unknown` when it doesn't know. Well-formed validation, grant and quota refusals are
+  cached and budgeted: after a grant or capacity change, the identical `op` returns its original refusal; a new
+  `op` is evaluated afresh. Malformed and undeclared-principal calls take no slot; a full window refuses `busy`
+  before evaluating the call.
 - I11 composition: Pi gets only `interrupt_then_start` (clear, abort, start), never `preempt`; with exclusive writers
   it succeeds; a steer after clear or a competing start is reported as partial with step outcomes; pause or deadline
   after the interrupt stops the input step; a definite prerequisite failure stops the recipe; no continuation after
@@ -282,6 +285,9 @@ nothing within it; the owner's
 bootstrap is audited and not a `u` target; an expired `until_ms` row admits nothing. G10 a grant query is not
 authority: a coordinated operation
 with a missing, unknown or revoked grant dispatches zero native writes; raw primitives still work.
+G13 handle grants pin both ends at issuance: grant on `@worker` to `@reviewer`, rebind both handles, and verify the
+right stays on the original exact agent for the original bound principal; the new bindings receive nothing. A
+subject handle without an unambiguous principal is refused. Team/project grants still follow recorded membership.
 
 **T. Pull** (P5; Pi pinned per run). T1 OSC 7501 and marker mapping; nothing typed into the terminal by default;
 without a plugin, records stay held `integration_unavailable`. T2 eligibility comes from the point: a `turn` take
@@ -292,10 +298,13 @@ the next model request. T3 an abort right after take leaves the message inserted
 take and insertion → `unknown`. T5 restart: `coord.inbox.reconcile` marks open claims `inserted` from the session
 entry carrying the delivery id, else `unknown`; it grants no claim; a later report from the old consumer is rejected;
 a repeated take returns history, never content. T6 a delayed report for claim C1 after release and re-take as C2 is
-rejected. T7 a paused target's take returns `held: paused`; the wake carries counts only. T8 edits up to the take
+rejected. T7 a paused target's take returns `held: paused`; the wake carries only counts and a revision. Editing
+held mail advances that revision and wakes the plugin even when counts are unchanged. T8 edits up to the take
 reach the model; later ones are `too_late`; a human draft in the editor is byte-identical afterwards. T9 a plugin
 endpoint supersedes the marker by a recorded handover. T10 `insert: context` with `evidence: none` reports `supplied`,
-never `inserted`, and is shown as context with its origin.
+never `inserted`, and is shown as context with its origin. T11 content filtering: with `accept: ["text"]`, a
+record containing an image stays held `unsupported_content` for that consumer through repeated safe points, with
+zero claims/releases; text-only mail remains eligible. A consumer accepting images may take it, without flattening.
 
 **L. Lifecycle policy.** L5 stop closes the gate first; without a declared `agent.stop`, `host_kill` is offered only
 when the host is a core resource of the bound incarnation with a declared termination primitive, after showing

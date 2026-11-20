@@ -124,6 +124,10 @@ matching unexpired grants; no denies, no order), changed through `coord.grants` 
  "on": "@worker-3" | "agent:r42" | "team:r7" | "project:p1" | "*", "until_ms": null}
 ```
 
+- Resolve handle selectors **once at grant issuance**: `on: @h` becomes exact `agent:rN`, and `who: @h` becomes
+  the handle's bound principal (reject if it has no unambiguous principal). Later rebindings transfer no rights;
+  the original handle may remain a display label. `team:` and `project:` selectors stay dynamic over recorded
+  membership, not over names.
 - Rights: `send:<mode>`, `send:*`, `send:interrupt_then_start`, `receive` (pull and report), `interrupt`, `answer`,
   `queue`, `session`, `configure`, `command`, `inbox.edit_any`, `recover`, `handover`, `names`, `membership`,
   `pause`, `resume`, `stop`, `grants.manage`. Acting for another principal is not a right here: it is a core
@@ -185,6 +189,11 @@ the window returns its historical result or `expired_operation` and **never crea
 Result eviction never makes an id admissible again. The window governs call ids only: a pending record stays editable
 by its `delivery`. `coord.inbox.op {op}` returns the result or `unknown`, never "did not happen".
 
+The window also caches well-formed refusals (validation, grant and quota): an identical repeat returns the original
+refusal even if grants or capacity changed; retrying under changed conditions needs a new `op`. Malformed calls and
+calls from an undeclared principal occupy no slot. If no slot is available, refuse `busy` **before evaluation**.
+Refusal entries are compact and charged to the operation-window budget (§10).
+
 | Command | Effect |
 |---|---|
 | `coord.inbox.send {op, submission, to, mode, strategy?, content, quoted?, render?, send_new?, …}` | grant and quota check, resolve `to` once, admit or reject atomically, return `delivery`; `pending_exists` while the sender already has a pending record for that target, unless `send_new: true`; `strategy: interrupt_then_start` selects that recipe (§5.7) |
@@ -242,7 +251,8 @@ Results use one **coordination envelope** `{state, reason?, attempt?: {id, steps
   so one sender cannot starve others. Quotas per sender per target and per sender overall (open records and bytes;
   `send_new` counts too) reject over the limit with `quota` `(pending K2 for numbers)`.
 - **Hold reasons** (always shown): `paused`, `agent_busy`, `agent_absent`, `agent_ended`, `agent_retired`,
-  `session_changed`, `stale_guard`, `unsupported_mode`, `origin_unsupported`, `integration_unavailable`, `no_grant`,
+  `session_changed`, `stale_guard`, `unsupported_mode`, `unsupported_content`, `origin_unsupported`,
+  `integration_unavailable`, `no_grant`,
   `quota`, `awaiting_route`, `handover_pending`, `claim_unconfirmed`, `ordering_unknown`.
 - **Mode resolution:** the native mode if declared. `start` with `busy: reject` waits for idle. `settle` without native
   settle waits for idle and goes as `start`, `held_by: vqro`. `boundary` without native support stays held. `preempt`
@@ -372,12 +382,15 @@ editor-empty evidence, reports `dispatched`, labels the mode unverified and obey
 - **Eligibility is the inbox's:** `turn` serves `boundary`; `settle` serves `boundary` and `settle`; `idle` serves
   `start`, `boundary` and `settle`; `tool` serves `admit`, plus `boundary` where declared an evidenced boundary.
   `preempt` is never pulled.
-- **Take:** `coord.inbox.take {op, agent, consumer, at, limit ≤ 16}` claims, as one batch, up to `limit` eligible
-  records in `order` within the page bound (the rest stay held), durably before replying, and returns `{records:
+- **Take:** `coord.inbox.take {op, agent, consumer, at, accept: [block types], limit ≤ 16}` claims, as one batch,
+  up to `limit` eligible records in `order` within the page bound (the rest stay held), durably before replying,
+  and returns `{records:
   [{delivery, from, origin, mode, content, claim}]}`. Each claim binds delivery and version, target and effective
   session, `control_epoch`, `consumer` and `at`. A paused, ended or unauthorized target returns `{records: [], held:
   <reason>}`. The plugin inserts every returned record at that point, in order, with its origin. A `turn` take may
-  extend the run by one request.
+  extend the run by one request. Every content block must have a type in `accept`; other records stay held
+  `unsupported_content` for that consumer, never claimed then released and reclaimed at each safe point. No block
+  is dropped or flattened.
 - **Report** `coord.inbox.report {op, delivery, claim, stage}` names the current claim and consumer and only moves
   forward; a stale claim is rejected unchanged. `inserted` (`evidence: entry` only), `supplied` (`insert: context,
   evidence: none`), `read`, `handled`, as in `agent-v0.md` §2.2. `released`: the plugin returned from the point
@@ -387,7 +400,9 @@ editor-empty evidence, reports `dispatched`, labels the mode unverified and obey
   [{delivery, entry?}]}`: a claim with a durable runtime entry carrying that delivery id becomes `inserted` on its
   original attempt; every other one becomes `unknown` (always with `evidence: none`). Reconcile grants no claim; later
   reports from the old consumer are rejected.
-- **Wake:** a pending count, never content, on admission, edit, resume and handover; none while paused.
+- **Wake:** pending counts and a revision, never content, on admission, edit, resume and handover; none while
+  paused. An edit of held mail advances the revision even when counts are unchanged, so unchanged-publication
+  suppression cannot lose the wake.
 - **Terminal agents.** A terminal is an agent target when it reports OSC 7501 with an `app` key or
   `doc/agents/terminals/<rid>` marks it; without a plugin its records stay held `integration_unavailable` and it stays
   usable by hand. A plugin's structured endpoint supersedes the marker by a recorded handover. Informative,
@@ -431,10 +446,12 @@ registers it: by default 2 MiB and 1024 records, at most 8 MiB with records scal
 10% reserved for control; the core admits at most 16 domains and 32 MiB in aggregate. The commit worker admits 128
 requests / 8 MiB on its normal lane plus 16 requests / 1 MiB on a control lane, with operational (inbox) work on the
 normal lane capped at 80 requests / 4 MiB so it cannot starve layout writes. The default coordination extension
-declares **2 MiB** and 1024 records: C1 measured 9000/9000 commits at 100 txn/s with 2 MiB, while 8 MiB is not
-certified at that rate on this host (8927/9000, layout p99 up to 1.27 s). 4 MiB is pending measurement; 8 MiB remains
-allowed capacity, not certified at 100 txn/s. Every retained item is charged at its
-encoded size:
+declares **4 MiB** and 1024 records (the generic core default remains 2 MiB). C1 measured 9000/9000 commits at
+100 txn/s with 4 MiB: operational p99 31.62–35.50 ms, layout p99 41.82–48.32 ms. This was three 30 s runs on a
+shared host with 90% operational / 10% layout transactions and an 8 MB layout workspace; the 2/8 MiB runs used a
+different base, so no controlled equivalence is claimed. The 2 MiB case also passed 9000/9000; 8 MiB remains allowed
+capacity, **not certified at 100 txn/s** (normal traffic 8927/9000, layout p99 up to 1.27 s). Every retained item is
+charged at its encoded size:
 
 | Retained item | Bound each | Count | `B` = 2 MiB, 200 agents | `B` = 4 MiB | `B` = 8 MiB |
 |---|---|---|---|---|---|
@@ -442,7 +459,7 @@ encoded size:
 | control and recovery reserve | | `ceil(B/10)` | 209,716 | 419,431 | 838,861 |
 | tombstone summary (encoded identity ≤ 2 KiB, ≤ 4 handles, evidence, counts, membership ref; legal maximum 2,503 B) | 3 KiB | agents with coordination state | 614,400 | 614,400 | 614,400 |
 | gate | 128 B | agents | 25,600 | 25,600 | 25,600 |
-| operation-window result (compact: state, outcome, receipt stage, error kind, ids) + fingerprint | 256 B | window `W` (1024) | 262,144 | 262,144 | 262,144 |
+| operation-window result or refusal (compact: state, outcome, receipt stage, error kind, ids) + fingerprint | 256 B | window `W` (1024) | 262,144 | 262,144 | 262,144 |
 | settled index entry (delivery → outcome) | 64 B | 1024 | 65,536 | 65,536 | 65,536 |
 | final record, compact (metadata, attempt, compact result; content dropped) | 1 KiB | 256 retained | 262,144 | 262,144 | 262,144 |
 | handover plan | 4 KiB | 16 open | 65,536 | 65,536 | 65,536 |
@@ -451,10 +468,10 @@ encoded size:
 | **fixed subtotal** | | | **1,718,068** | **1,927,783** | **2,347,213** |
 | open record: metadata 2 KiB + content ≤ 32 KiB + compact outcome reserved at admission 1 KiB (per step for a recipe) | ≤ 35 KiB | the rest | 379,084 left | 2,266,521 left | 6,041,395 left |
 
-C1 charges every domain a fixed 64 KiB audit/header reservation inside `B`. With 200 agents, the default 2 MiB domain
-leaves room for about 10 maximum-size open messages or 92 small ones (1 KiB content, 4 KiB charged), beyond which
-admission is refused `quota`; a 4 MiB domain about 63 or 553, and an 8 MiB domain about 168 or 1,474, under its
-4096-record ceiling. A record count is a ceiling, not room for that many maximum payloads.
+C1 charges every domain a fixed 64 KiB audit/header reservation inside `B`. With 200 agents, the default **4 MiB**
+domain leaves room for about **63 maximum-size open messages or 553 small ones** (1 KiB content, 4 KiB charged),
+beyond which admission is refused `quota`; a 2 MiB domain holds about 10 or 92, and an 8 MiB domain about 168 or
+1,474 under its 4096-record ceiling. A record count is a ceiling, not room for that many maximum payloads.
 Bounds are on the **encoded** size, not raw string limits (an identity of legal strings can encode to 1,989 B). Each
 open record reserves a **compact outcome** per attempt and per recipe step (steps × 1 KiB) at admission, and admission
 is refused `quota` if the reservation doesn't fit. A compact outcome is at most 1 KiB: state, receipt stage, outcome

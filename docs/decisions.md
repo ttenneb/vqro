@@ -515,6 +515,17 @@ replaced when the Pi bridge is ported.
   invocation proof carries the invoking call's effective principal and original initiator separately, for that
   callback only. This refines decision 5's "each call declares its principal".
 
+**Implementation rulings (2026-11-19, spec batch 1).**
+- Handle selectors in grants resolve once at issuance: targets to exact agents, subjects to their bound principals;
+  rebinding transfers nothing. Team/project selectors remain dynamic over recorded membership.
+- The operation window caches well-formed refusals as well as successes; changed conditions need a new op id.
+  Malformed and undeclared-principal calls take no slot; a full window refuses `busy` before evaluation.
+- Pull takes declare accepted content types; unsupported mail stays held for that consumer rather than churning
+  through claims. Counts-only wakes include a revision so edits cannot disappear behind unchanged-count suppression.
+- The default coordination extension declares **4 MiB** (generic core default 2 MiB). C1's measured 4 MiB workload
+  passed 9000/9000 at 100 txn/s (operational p99 32–36 ms, layout p99 42–48 ms); 8 MiB is not certified at that rate.
+  The capacity table charges the fixed 64 KiB domain metadata before payload space.
+
 Nothing is stable until Pi and the two other real runtimes pass conformance.
 
 ## D29. One declaration model for extension dependencies and client UI features (2026-11-19, CONFIRMED)
