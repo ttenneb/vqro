@@ -162,8 +162,20 @@ request, an entity, an effect) and `correlation` (a caller-chosen thread through
 qualified: entity and request ids by `endpoint` and `epoch`, effect ids by the core's `boot` epoch; delivery ids are
 global. `provenance` says who stands behind the link: `asserted` (supplied by a caller), `adapter` (the adapter
 proved it, e.g. it inserted this delivery) or `native` (runtime evidence). Callers may pass them on `agent.*` ops;
-adapters echo them on receipts and on the items they can prove the op produced; the core carries them on effects and
-effect events. Nothing is inferred from timing or text; absent means unknown.
+adapters echo them on receipts and on the items they can prove the op produced; the core carries them on effects,
+effect events and audits. Nothing is inferred from timing or text; absent means unknown.
+
+**Generic wire pin** `(C2 core-causality; core-protocol.md, Resources)`. `resource.invoke` accepts explicit `cause`
+and `correlation` in its root params or in `args`. If a field is present in both, the JSON values must match;
+otherwise reject `invalid` before dispatch. The core lifts them into effect metadata/audits while leaving `args`
+unchanged. It preserves provenance exactly, never upgrades it, and never invents a link.
+
+`cause` is an object requiring string `kind`, `id` and `provenance`. For kind `entity` or `request`, string
+`endpoint` and `epoch` are also required; kind `effect` requires string `boot`. These are presence/type checks,
+not proof that the referenced object exists or that the caller has authority. Unknown enum values and extra
+bounded fields pass unchanged. The whole cause is at most 4 KiB encoded, known string fields at most 256 bytes,
+and depth at most 64. `correlation` is a non-empty string of at most 256 bytes. These generic wire bounds do not
+relax the referenced entity's own id contract.
 
 ## 3. Interaction
 

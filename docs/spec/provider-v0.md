@@ -165,7 +165,7 @@ follows acceptance by the core's bounded writer, not a viewer acknowledgement.
 ## 5. Effects and outcomes (D10)
 
 Public calls stay resource-centric: `resource.spawn {provider?, kind, ...}`, `resource.kill`, and one generic
-`resource.invoke {resource, op, args, deadline_ms?}` for any declared capability (`agent.steer`, ...). The core checks
+`resource.invoke {resource, op, args, deadline_ms?, cause?, correlation?}` for any declared capability (`agent.steer`, ...). The core checks
 `op` against the owning provider's capabilities (`unsupported` otherwise) and forwards it:
 
 ```jsonc
@@ -184,6 +184,11 @@ Public calls stay resource-centric: `resource.spawn {provider?, kind, ...}`, `re
 | `rejected` | the layer below refused it; no effect |
 | `indeterminate` | sent, but the answer was lost (deadline, disconnect); the effect may or may not have happened |
 
+- **Explicit causality** `(pending C2 core-causality)`: optional `cause` / `correlation` from `resource.invoke`
+  root params or `args` are lifted into `effect.invoke` metadata and audits, with `args` unchanged. Both forms,
+  when supplied, must match. The core validates bounded shape only and preserves provenance, unknown enum values
+  and extra bounded fields exactly; it never infers or upgrades a cause. Bounds/qualifiers are pinned in
+  `core-protocol.md`, Resources, and `agent-v0.md` §2.5.
 - **Deadlines.** Every forwarded call has one: the caller's `deadline_ms`, else a core default. When it expires the
   caller gets `timeout` with `outcome: "indeterminate"`. In v0 a late reply is ignored, as for forwarded commands
   (section 9.5); observers reconcile from resource facts. A published `effect.outcome` event is OPEN.
@@ -418,7 +423,7 @@ existing status consumers and partial resource events (`src/events.rs`) work unc
 
 | Method | Dir | Kind | Params | Result |
 |---|---|---|---|---|
-| `effect.invoke` | C→P | request | `generation`, `effect` (string), `op`, `ref?`, `incarnation?`, `args` (object), `deadline_ms` (integer) | `{outcome, data?, error?}` |
+| `effect.invoke` | C→P | request | `generation`, `effect` (string), `op`, `ref?`, `incarnation?`, `args` (object), `deadline_ms` (integer), `cause?`, `correlation?` (C2 causality pin, §5) | `{outcome, data?, error?}` |
 
 - `deadline_ms` is the **remaining** time at dispatch, 1–300000, always present; default 30000 (as forwarded
   commands). The provider converts it to a local monotonic deadline. The core owns the caller's deadline.

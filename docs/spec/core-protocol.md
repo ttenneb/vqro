@@ -446,7 +446,7 @@ and old layouts may show gone resources until explicitly repaired/reset. No iden
 | `resource.forget` | `resource`, `deadline_ms?` | `outcome: observed`, `effect`, `data` |
 | `resource.forget_cached` | `resource` | `outcome: observed`, `effect`, `data: {scope: "cached_facts", backend_effect: "none"}` |
 | `resource.attach` | `resource`, `cols`, `rows`, `history?` (lines of backend scrollback, an integer), `items?` (`{after?: {epoch, seq}}`: an item stream instead of terminal output), `deadline_ms?` | `outcome: accepted`, `effect`, `stream`, `initial` (`history`, `repaint` or `none`; item streams `continue` or `reset`), `epoch` (item streams) |
-| `resource.invoke` | `resource`, `op`, `args?` (object), `deadline_ms?` | `outcome`, `effect`, `data?`; capability-checked generic provider operation |
+| `resource.invoke` | `resource`, `op`, `args?` (object), `deadline_ms?`, `cause?`, `correlation?` (causality pin below) | `outcome`, `effect`, `data?`; capability-checked generic provider operation |
 | `stream.input` | `stream`, `data` (base64) or `text` | `outcome: dispatched` (also accepted as a notification) |
 | `stream.resize` | `stream`, `cols`, `rows` | |
 | `stream.close` | `stream` | |
@@ -459,6 +459,17 @@ can still be too large. Runtime bridges read their own provider/ref records; lau
 new host's agents without full snapshots. The Pi launcher reads its settings via `workspace.get` and polls only
 `resource.list {host}` after an observed spawn. Transient status-read failures may retry that read, never spawn;
 expiry/UI failure retains the observed host/result and offers the terminal fallback, not an apparent failed launch.
+
+**Explicit effect causality** `(pending C2 core-causality)`. On `resource.invoke`, a caller may supply `cause` and
+`correlation` in root params or `args`; if either field appears in both, its JSON values must match or the call is
+`invalid` before dispatch. The core lifts the fields into provider effect metadata and effect audits without
+changing `args`, upgrading provenance or inferring anything from text/timing.
+- `cause`: object with required string `kind`, `id`, `provenance`; for kind `entity`/`request`, string `endpoint` and
+  `epoch` are required, and for `effect`, string `boot`. Qualifiers are checked for presence/type only, not resolved
+  as evidence or authority. Unknown enums and extra bounded fields pass unchanged.
+- Bounds: cause ≤ 4 KiB encoded, known strings (`kind`, `id`, `provenance`, `endpoint`, `epoch`, `boot`) ≤ 256 bytes,
+  depth ≤ 64; `correlation` is a non-empty string ≤ 256 bytes. Invalid types, missing required fields and excess
+  bounds are `invalid`; provenance is preserved exactly, including unknown values.
 
 Spawn, kill and attach check declared capabilities and provider/resource availability before dispatch. Their default
 deadline is 30000 ms, override 1–300000 ms. Expiry is `timeout` with an indeterminate outcome; connection or resource

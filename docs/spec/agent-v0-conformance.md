@@ -83,7 +83,12 @@ reports `context: {window}` with no `used`; last-turn token totals never become 
 native thought-message usage preserve that same shape and only native reports; absent values are not apportioned
 from other usage. Session cwd/model/effort
 match native reports, never the bridge/viewer's cwd or a guessed model. Model changes still go through the
-advertised model-category config option, not a facts write.
+advertised model-category config option, not a facts write. C12 generic causality wire: root-only, args-only and
+matching dual `cause`/`correlation` arrive unchanged in effect metadata/audits, with args unchanged. Conflicting
+forms reject `invalid` before dispatch. Require string kind/id/provenance and the entity/request endpoint+epoch
+or effect boot qualifiers (presence/type only); do not resolve them as authority. Unknown enums, extra bounded
+fields and provenance pass unchanged. Exercise cause 4 KiB, known strings 256 bytes, depth 64, and non-empty
+correlation 256 bytes; invalid types, missing qualifiers and over-bound input reject without native writes.
 
 **D. Delivery.** D1–D5 each declared mode × {idle, busy}: the declared edge happens at the declared point (ledger
 records the insertion point), or `busy`/`unsupported` with an empty ledger; `batch: one|all` honoured; no fallback,

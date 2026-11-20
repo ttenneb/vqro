@@ -519,6 +519,10 @@ replaced when the Pi bridge is ported.
 - Optional usage on a run or native thought message uses the facts usage shape, only when the runtime reports it;
   absent means unknown. A reported context window alone is `{window}`, not invented occupancy: `used` may be
   absent and is never derived from last-turn token totals.
+- Generic causality may come from `resource.invoke` root params or args; dual forms must match or reject invalid.
+  The core lifts bounded cause/correlation into effect metadata/audits with args unchanged, required typed
+  qualifiers, and provenance/unknown bounded fields preserved exactly; no inference or provenance upgrade.
+  Cause ≤ 4 KiB, known strings ≤ 256 bytes, depth ≤ 64; correlation is non-empty and ≤ 256 bytes.
 
 **Human answers (2026-11-19, CONFIRMED).**
 - **AS1, pause:** "vqro stops delivery": paused means vqro sends, hands out and wakes nothing until resumed; an agent
