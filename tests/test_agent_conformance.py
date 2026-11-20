@@ -1,7 +1,11 @@
 """Harness self-tests, not adapter certification. No real services or models."""
 import asyncio
 import base64
+import io
 import json
+import struct
+import wave
+import zlib
 from pathlib import Path
 import sys
 import tempfile
@@ -9,6 +13,10 @@ import unittest
 from types import SimpleNamespace
 
 from agent_conformance.runtime import Runtime
+from agent_conformance.cases import declarations, restriction
+from agent_conformance.content import examples, png, wav
+from agent_conformance.results import CASES, BY_ID, CheckFailed, FixtureFailed, Result, report, select_cases
+from agent_conformance.runner import run_case
 from agent_conformance.wire import ItemReducer, Peer, RpcError, WireFailure
 
 RUNTIME = Path(__file__).parent / "agent_conformance/runtime.py"
@@ -278,6 +286,147 @@ class PeerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(reducer.failure)
 
 
+class ContentFixtureTests(unittest.TestCase):
+    def test_png_has_valid_chunks_crc_and_one_rgba_scanline(self):
+        data = png()
+        self.assertEqual(data[:8], b"\x89PNG\r\n\x1a\n")
+        cursor, tags = 8, []
+        while cursor < len(data):
+            size = struct.unpack(">I", data[cursor:cursor+4])[0]
+            tag, value = data[cursor+4:cursor+8], data[cursor+8:cursor+8+size]
+            crc = struct.unpack(">I", data[cursor+8+size:cursor+12+size])[0]
+            self.assertEqual(crc, zlib.crc32(tag + value))
+            tags.append(tag)
+            if tag == b"IDAT":
+                self.assertEqual(zlib.decompress(value), b"\x00" * 5)
+            cursor += 12 + size
+        self.assertEqual(tags, [b"IHDR", b"IDAT", b"IEND"])
+        self.assertEqual(cursor, len(data))
+
+    def test_audio_is_a_valid_small_pcm_wave_not_fake_base64(self):
+        with wave.open(io.BytesIO(wav()), "rb") as source:
+            self.assertEqual((source.getnchannels(), source.getsampwidth(), source.getframerate()), (1, 2, 8000))
+            self.assertEqual(source.readframes(8), b"\0\0" * 8)
+        for kind in ("image", "audio"):
+            self.assertTrue(base64.b64decode(examples()[kind]["data"], validate=True))
+
+
+class ResultTests(unittest.TestCase):
+    def test_complete_inventory_has_every_normative_group(self):
+        self.assertEqual(len(CASES), 55)
+        self.assertEqual(len(BY_ID), len(CASES))
+        self.assertIn("M8", BY_ID)
+        self.assertIn("O11", BY_ID)
+        with self.assertRaises(ValueError):
+            select_cases(["C99"])
+
+    def test_partial_pass_never_claims_complete_or_real_certification(self):
+        selected = select_cases(["C1"])
+        document = report({"name": "test-only"}, [Result("C1", "test", "pass")], selected)
+        self.assertTrue(document["passed_selection"])
+        self.assertFalse(document["complete_inventory"])
+        self.assertFalse(document["real_runtime_certification"])
+        self.assertEqual(len(document["not_selected"]), 54)
+
+    def test_unsupported_requires_a_real_omission_record(self):
+        with self.assertRaises(ValueError):
+            Result("D1", "test", "unsupported-declared")
+
+    def test_provider_superset_uses_enum_sets_and_numeric_maxima(self):
+        upper = {"modes": {"settle": {"batch": ["one", "all"], "idle": ["start"]}}, "retention": 512, "native": True}
+        lower = {"modes": {"settle": {"batch": "one", "idle": "start"}}, "retention": 256, "native": False}
+        self.assertTrue(restriction(lower, upper))
+        lower["modes"]["settle"]["batch"] = "all"
+        self.assertTrue(restriction(lower, upper))
+        self.assertFalse(restriction(lower, {}))  # empty is not unrestricted
+        self.assertFalse(restriction({"retention": 513}, upper))
+        self.assertFalse(restriction({"modes": {"start": {}}}, upper))
+        self.assertFalse(restriction({"batch": "one"}, {"batch": "one"}))
+
+
+class DeclarationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_valid_single_endpoint_declaration_and_provider_enum_sets_pass(self):
+        send = {"modes": {"start": {"busy": "reject", "preflight": "serialized"}},
+                "content": {"types": ["text", "image"], "shape": "text_then_media"},
+                "guards": {"session": "adapter", "run": "none"}, "receipts": {"retain": 256},
+                "correlation": "none", "literal": "controlled_launch", "handled": "none", "keys": None,
+                "origin": [{"as": "attributed_user", "role": "user", "frame": "sender_header"}]}
+        lower = {"host": {"kind": "terminal", "endpoints": "one"}, "agent.send": send, "items.stream": {}}
+        def upper(value):
+            if isinstance(value, dict):
+                return {key: upper(item) for key, item in value.items()}
+            if isinstance(value, list):
+                return [upper(item) if isinstance(item, dict) else item for item in value]
+            return [value] if isinstance(value, str) else value
+        provider = {"host": "r1", "capabilities": {"agent": {"v": 0, "modules": {"interaction": {}}}, **upper(lower)}}
+        facts = {"v": 0, "epoch": "e1", "state": "idle", "lifecycle": "live", "completion": None, "incomplete": [],
+                 "host": {"id": "r1", "kind": "terminal", "owns_lifecycle": True}, "caps": {"rev": 1, **lower}}
+        ctx = SimpleNamespace(host="r1", provider=provider, evidence=[],
+                              agents=[{"id": "r2", "status": {"state": "idle"}, "data": {"agent": facts}}])
+        await declarations(ctx)
+        self.assertTrue(ctx.evidence)
+        provider["capabilities"]["agent.send"] = {}
+        with self.assertRaisesRegex(CheckFailed, "exceeds"):
+            await declarations(ctx)
+
+
+class ClassificationTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="vq-k1-")
+        self.root = Path(self.temp.name) / "case"
+        self.manifest = {"name": "harness-self-test", "argv": ["/fixture"]}
+
+    async def asyncTearDown(self):
+        self.temp.cleanup()
+
+    def factory(self, *, declared_send=True, startup_error=None, cleanup_error=None):
+        class Fake:
+            def __init__(self, root, manifest, vqro, hc, script=None):
+                root.mkdir()
+                self.evidence, self.metadata = [], {"test": True}
+                self.provider = {"capabilities": {"agent": {"v": 0}}}
+                self.closed = False
+            async def start(self):
+                if startup_error:
+                    raise startup_error
+            async def facts(self):
+                return {"v": 0, "caps": {"agent.send": {}} if declared_send else {}}
+            async def close(self):
+                self.closed = True
+                if cleanup_error:
+                    raise cleanup_error
+        return Fake
+
+    async def run_one(self, **kwargs):
+        return await run_case(BY_ID["D6"], self.root, self.manifest, Path("/vqro"), Path("/hc"), **kwargs)
+
+    async def test_declared_but_unimplemented_is_harness_failure(self):
+        result = await self.run_one(factory=self.factory(), handlers={})
+        self.assertEqual((result.status, result.component), ("fail", "harness"))
+
+    async def test_only_absent_optional_declaration_is_unsupported(self):
+        result = await self.run_one(factory=self.factory(declared_send=False), handlers={})
+        self.assertEqual(result.status, "unsupported-declared")
+        self.assertEqual(result.declarations["omission"]["path"], "agent.send")
+
+    async def test_fixture_failure_is_not_capability_omission(self):
+        result = await self.run_one(factory=self.factory(startup_error=FixtureFailed("no fake control")), handlers={})
+        self.assertEqual((result.status, result.component), ("fail", "fixture"))
+
+    async def test_adapter_assertion_remains_adapter_failure(self):
+        async def overclaims(ctx):
+            raise CheckFailed("native success is not insertion")
+        result = await self.run_one(factory=self.factory(), handlers={"D6": overclaims})
+        self.assertEqual((result.status, result.component), ("fail", "adapter"))
+
+    async def test_cleanup_failure_cannot_be_hidden_by_passing_case(self):
+        async def passed(ctx):
+            return None
+        result = await self.run_one(factory=self.factory(cleanup_error=RuntimeError("owned child remains")), handlers={"D6": passed})
+        self.assertEqual((result.status, result.component), ("fail", "cleanup"))
+        self.assertEqual(result.evidence[-1]["status"], "pass")
+
+
 class NativeFixtureTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="vq-k1-")
@@ -363,6 +512,13 @@ class NativeFixtureTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(ready["bootstrap_in_child"])
         self.assertFalse(ready["herdr_in_child"])
         self.assertEqual(len(self.records("command")), 1)
+
+    async def test_native_image_bytes_are_preserved_in_independent_content_oracle(self):
+        image = examples()["image"]
+        reply = await self.native(type="prompt", message="", images=[
+            {"type": "image", "mimeType": image["mime"], "data": image["data"]}])
+        self.assertTrue(reply["success"])
+        self.assertEqual(self.records("input_received")[0]["content"], [image])
 
     async def test_idle_steer_is_parked_until_a_model_boundary(self):
         self.assertTrue((await self.native(type="steer", message="focus"))["success"])

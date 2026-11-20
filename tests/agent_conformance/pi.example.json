@@ -1,0 +1,12 @@
+{
+  "name": "pi-rust",
+  "kind": "adapter",
+  "adapter_version": "recorded from provider software plus build receipt",
+  "wire": "pi",
+  "endpoints": 1,
+  "argv": [
+    "/absolute/to/vqro-bridge-pi", "--", "{python}", "{fixture}",
+    "--wire", "pi", "--control", "{control}", "--ledger", "{ledger}",
+    "--script", "{script}", "--no-extensions", "--no-skills", "--no-prompt-templates"
+  ]
+}

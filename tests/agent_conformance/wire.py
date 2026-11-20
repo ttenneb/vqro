@@ -44,7 +44,7 @@ class Peer:
 
     @classmethod
     async def connect(cls, endpoint, **kwargs):
-        reader, writer = await asyncio.open_unix_connection(str(endpoint), limit=MAX_RECORD + 1)
+        reader, writer = await asyncio.open_unix_connection(str(endpoint), limit=kwargs.get("max_record", MAX_RECORD) + 1)
         return cls(reader, writer, **kwargs)
 
     def on(self, method, callback):
@@ -88,6 +88,9 @@ class Peer:
                         self.notifications.append((row, size))
                         self.notification_size += size
                 self._signal()
+                # Let an attach caller install its stream metadata before a
+                # buffered burst runs ahead into the bounded early-frame queue.
+                await asyncio.sleep(0)
         except asyncio.CancelledError:
             pass
         except (OSError, ValueError, TypeError, RecursionError, WireFailure) as error:

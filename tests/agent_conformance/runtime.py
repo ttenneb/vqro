@@ -176,7 +176,8 @@ class Runtime:
         if not isinstance(kind, str):
             raise ValueError("Pi command needs type")
         operation = "query" if kind in READS else "configure" if kind.startswith("set_") else OPERATIONS.get(kind, "unknown")
-        self.record("command", command=kind, operation=operation, effectful=kind not in READS, value=command)
+        self.record("command", command=kind, operation=operation, phase="preflight" if kind == "get_state" else None,
+                    effectful=kind not in READS, value=command)
         if kind == "get_state":
             await self.barrier("preflight")
             snapshot = {"sessionId": f"fixture-{self.session}", "sessionFile": str(self.args.ledger.parent / "fixture-session.jsonl"),
@@ -221,7 +222,11 @@ class Runtime:
             if kind == "prompt" and self.active and command.get("streamingBehavior") not in ("steer", "followUp"):
                 await self.reply(command, {"reason": "busy"}, False)
                 return
-            self.record("input_received", text=text, command=kind, active=self.active)
+            images = command.get("images", [])
+            content = ([{"type": "text", "text": text}] if text or not images else []) + [
+                {"type": "image", "mime": image.get("mimeType"), "data": image.get("data")} for image in images]
+            self.record("input_received", text=text, content=content, command=kind, active=self.active,
+                        session=f"fixture-{self.session}")
             await self.barrier("acceptance", "after")
             if text.startswith("/fixture-template") and not self.args.no_prompt_templates:
                 self.record("command_executed", name="fixture-template", text=text)
@@ -361,7 +366,9 @@ class Runtime:
             queue = self.steering if row["mode"] == "boundary" else self.follow_up
             images = self.steering_images if queue is self.steering else self.follow_up_images
             if row.get("action") == "consume":
-                count = min(row.get("count", len(queue)), len(queue))
+                name = "steering" if queue is self.steering else "follow_up"
+                native_count = len(queue) if self.queue_modes[name] == "all" else min(1, len(queue))
+                count = min(row.get("count", native_count), len(queue))
                 for _ in range(count):
                     await self.insert(queue.pop(0), "queue", images.pop(0))
             else:

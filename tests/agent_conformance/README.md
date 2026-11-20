@@ -65,6 +65,34 @@ replies. Each record has `seq,kind,ns,pid` and typed details: `command`,
 native input/control effects. Raw native arguments are retained for assertion;
 bootstrap secrets and unrelated inherited environment values are not logged.
 
+## Run the current slice
+
+Copy `pi.example.json` into your scratch directory and replace only the explicit
+adapter executable. Whole argv tokens `{python}`, `{fixture}`, `{control}`,
+`{ledger}`, `{script}`, `{root}` and `{work}` are substituted; other arguments stay
+literal (no shell expansion).
+
+```
+python3 tests/run_agent_conformance.py --run --implementation /absolute/target.json \
+  --vqro /absolute/vqro --hc /absolute/herdr-core --cases C1,C2,D6,D13
+```
+
+The runner re-execs in an empty-HOME user/network namespace, launches a fresh
+private core/backend per case, and writes `results.json`, `results.md`, per-case
+`result.json`, native ledger and PID/birth/cleanup receipts. Partial selections
+always name all omitted cases. Leaving `--cases` out includes all 55 Part A groups;
+currently unimplemented applicable handlers fail as `component:harness`.
+
+Current executable slice: C1, C2, C3, C5, C7, C8, C10, D6, D7, D12, D13, D14, L1.
+This is an incremental harness release, **not complete Part A or Part B**.
+
+Provider descriptors are supersets: enum values are sets, numeric limits maxima,
+boolean true permits resource true. Resource descriptors choose current values.
+An empty provider op object is not unrestricted. Content declares
+`{types:[...],shape:ordered|text_then_media}`. C10 records the many-endpoint branch
+as not-applicable for an explicitly one-endpoint host, without inventing an
+unsupported feature or an extra top-level result status.
+
 ## Results / honesty
 
 Each case produces exactly `pass`, `fail`, or `unsupported-declared`, alongside
