@@ -6,7 +6,7 @@ Usage: tests/e2e_opentui.py TARGET_DIR   (debug binaries in TARGET_DIR/debug)
 Skips (exit 77) when Bun or the client's node_modules are absent: the trial client is optional.
 Private /tmp root; stops only what it started.
 """
-import json, os, shutil, socket, subprocess, sys, tempfile, time
+import json, os, re, shutil, socket, subprocess, sys, tempfile, time
 
 TARGET = sys.argv[1]
 VQRO, PHERDR = (os.path.join(TARGET, "debug", b) for b in ("vqro", "vqro-herdr"))
@@ -68,6 +68,9 @@ def wait(pred, timeout=20):
             pass
         time.sleep(0.3)
     return None
+
+
+COUNT = re.compile(r"\d+ of \d+ · ")  # a list's "n of m · " footer, whatever the catalogue's size
 
 
 def screen():
@@ -190,7 +193,7 @@ try:
     keys("C-g")
     check("prefix menu lists recovery actions", bool(wait(lambda: "undo last change" in screen() and "safe mode / recovery choices" in screen())), screen())
     keys(",")
-    check("a command's popup reply shows Settings over the terminal", bool(wait(lambda: "Settings" in screen() and "Extensions" in screen() and " of 16 · " in screen())), screen())
+    check("a command's popup reply shows Settings over the terminal", bool(wait(lambda: "Settings" in screen() and "Extensions" in screen() and COUNT.search(screen()))), screen())
     # Find Tabs by search (the list's order is its own: flat, sortable), then switch it.
     keys("/"); time.sleep(0.2); keys("tabs", literal=True); keys("Enter"); time.sleep(0.3)
     keys("Space")
@@ -199,7 +202,7 @@ try:
     keys("Escape"); time.sleep(0.5)
     # list_detail: the selected extension's details beside the list; Tab moves into them.
     # The window is 90 columns now: the detail sits below the list (narrow layout).
-    check("list_detail shows the selected row's details with its actions", bool(wait(lambda: " of 16 · " in screen() and "Restart" in screen() and "View log" in screen()
+    check("list_detail shows the selected row's details with its actions", bool(wait(lambda: COUNT.search(screen()) and "Restart" in screen() and "View log" in screen()
         and any("[x] Tabs" in line for line in screen().splitlines()))), screen())
     keys("Tab"); time.sleep(0.3); keys("Enter")
     check("Tab focuses the detail; its first action runs from there", bool(wait(lambda: "Turn off Tabs: breaks" in screen())), screen())
