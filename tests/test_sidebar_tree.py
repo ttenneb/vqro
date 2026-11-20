@@ -202,6 +202,64 @@ class SidebarTree(unittest.TestCase):
         walk(rows)
         self.assertEqual(len(row_ids), len(set(row_ids)), "row ids stay unique for client selection")
 
+    def add_workspaces(self, n):
+        data = self.ext.live["workspaces"]["data"]
+        for i in range(n):
+            data.append({"path": f"/w/extra{i}", "name": f"extra {i}", "layout": f"ws-x{i}", "worktrees": []})
+            self.ext.resources[f"x{i}"] = term(f"x{i}", cwd=f"/w/extra{i}", name=f"extra shell {i}")
+
+    def test_a_tree_that_fits_one_page_is_published_whole_and_without_a_pager(self):
+        self.add_workspaces(5)
+        self.module["refresh"]()
+        content = dict(self.ext.published)["sidebar"]
+        self.assertEqual(content["page"]["count"], 1)
+        self.assertEqual(len(content["toolbar"]), 1, "no pager chips")
+        self.assertTrue(all("children" in row for row in content["items"] if row.get("id", "").startswith("ws:")))
+
+    def test_a_large_tree_collapses_places_that_are_not_open(self):
+        g = self.module["build"].__globals__
+        self.add_workspaces(30)
+        g["PAGE_BYTES"] = 4000  # force compaction for this small fixture
+        self.ext.entries["workspace/active"] = {"value": {"layout": "ws-a"}, "version": 1}
+        rows = self.build()
+        ws = {row["id"]: row for row in rows if row.get("id", "").startswith(("ws:", "layout:"))}
+        self.assertIn("children", ws["ws:" + WS], "the default workspace stays open")
+        self.assertNotIn("children", ws["ws:/w/extra3"])
+        self.assertEqual(ws["ws:/w/extra3"]["menu"], [{"label": "Expand here", "command": "sidebar.expand", "args": {"id": "ws:/w/extra3"}}])
+        self.assertIn({"label": "Collapse", "command": "sidebar.collapse", "args": {"id": "ws:" + WS}}, ws["ws:" + WS]["menu"])
+        self.module["expand_cmd"]({"id": "ws:/w/extra3"})
+        self.assertIn("children", find(self.build(), "ws:/w/extra3"))
+        self.module["collapse_cmd"]({"id": "ws:" + WS})
+        self.assertNotIn("children", find(self.build(), "ws:" + WS))
+        # Going there (it becomes the default again) opens it.
+        self.ext.entries["workspace/active"] = {"value": {"layout": "ws-x1"}, "version": 2}
+        self.build()
+        self.ext.entries["workspace/active"] = {"value": {"layout": "ws-a"}, "version": 3}
+        rows = self.build()
+        self.assertIn("children", find(rows, "ws:" + WS))
+        self.assertIn("children", find(rows, "ws:/w/extra1"), "recently shown places stay open (bounded)")
+        # A blocked terminal inside a collapsed place still counts in the status segment and its row's roll-up.
+        self.ext.resources["x7"]["status"] = {"state": "blocked"}
+        self.assertIn({"text": "1 blocked", "style": "warn"}, find(self.build(), "ws:/w/extra7")["badges"])
+        self.assertEqual(self.module["status_counts"](), {"blocked": 1})
+        g["PAGE_BYTES"] = 48 * 1024
+
+    def test_search_covers_every_row_with_its_place(self):
+        g = self.module["build"].__globals__
+        self.add_workspaces(30)
+        g["PAGE_BYTES"] = 4000
+        set_show(self.module, self.ext, tabs=False)  # search ignores what is hidden or collapsed
+        found, more = self.module["search_rows"]("EXTRA SHELL 2")
+        self.assertEqual([row["args"]["resource"] for row in found], ["x2"] + [f"x{i}" for i in range(20, 30)])
+        self.assertEqual(found[0]["description"], "extra 2 › Not in a tab")
+        self.assertEqual(more, 0)
+        found, _ = self.module["search_rows"]("run")
+        self.assertEqual([(row["command"], row["description"]) for row in found], [("sidebar.tab", "proj")])
+        self.assertEqual(self.module["search_cmd"]({"text": "shell"})["client"], {"popup": {"view": "sidebar.search", "width": 60}})
+        published = dict(self.ext.published)["sidebar.search"]
+        self.assertEqual(len([row for row in published["items"] if row.get("command")]), 30)
+        g["PAGE_BYTES"] = 48 * 1024
+
     def test_without_workspace_data_layouts_are_the_places(self):
         del self.ext.live["workspaces"]
         rows = self.build()

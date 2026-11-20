@@ -534,5 +534,10 @@ settings; the switches in both the sidebar's Show popup and Settings.
   with changes, hide detached); `workspaces` data gains `ahead` per worktree.
 - Settings shows extension pages published as live `settings.page.<name>` (generic); the sidebar publishes the
   same option rows there and in its Show popup, over one state.
-- Tests: `tests/test_sidebar_tree.py` (every level combination, worktree options, one state), settings page test,
-  updated `e2e_sidebar_scale` (row count) and `pi_provider_e2e` (agent is a pane of its tab).
+- Paging is no longer part of normal use (human: "why were sidebar pages added?"): a tree that fits one page
+  (48 KB) is published whole; a larger one shows places that are not open as single rows (the default and
+  recently shown ones stay open; Expand here/Collapse); byte-sized pages only at extreme scale (350 workspaces:
+  4 pages of single rows). The toolbar's "/" searches the whole tree (popup with each match's place).
+- Tests: `tests/test_sidebar_tree.py` (every level combination, worktree options, one state, compaction,
+  search), settings page test, TUI e2e `tests/e2e_tui_sidebar_tree.py`, updated `e2e_sidebar_scale` (collapsed
+  rows, search) and `pi_provider_e2e` (agent is a pane of its tab).

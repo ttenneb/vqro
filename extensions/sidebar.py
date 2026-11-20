@@ -22,11 +22,16 @@ Clicking a tab or layout shows that layout in the window you clicked in (the rep
 `{"client": {"layout"}}`), makes it the shared default for new windows (`workspace/active`) and selects
 the tab; clicking a resource shows it. Each window marks the layout it shows itself (`current_when`
 rows), since this content is shared. Showing/hiding the sidebar applies to every layout.
-Rows are live content (`view.publish`): not saved, not in history. Large trees use shared, bounded
-64-row pages, keeping folder ancestors and each agent/bridge group together. The page chips browse all
-rows; filtering is page-local and the view popup also offers the complete resource chooser.
+Rows are live content (`view.publish`): not saved, not in history, so each publication is bounded. A tree
+that fits one page (`PAGE_BYTES`) is published whole: no pager. A larger one first shows the places that are
+not open as single rows (open: the default workspace, the ones recently shown as default, or expanded by
+hand; "Expand here"/"Collapse" in row menus); only if that still does not fit are there pages (by bytes,
+keeping folder ancestors and each agent/bridge group together), the pager being the last resort at extreme
+scale. The toolbar's "/" searches every row of the whole tree (collapsed, hidden or on another page too)
+and lists matches with their place in a popup; the panel's own filter still narrows the visible rows.
 """
 import copy
+import json
 import os
 import sys
 import threading
@@ -82,7 +87,10 @@ last = [None, None, None, None]  # what was last published: sidebar, status segm
 SETTINGS_PAGE = "settings.page.sidebar"  # shown by the settings extension as a page (generic `settings.page.*`)
 refresh_pending = threading.Event()
 PUBLISH_INTERVAL = 0.5  # Coalesce status bursts into at most two sidebar updates/second.
-PAGE_SIZE = 64  # Bound each full live publication, including off-screen tree detail.
+PAGE_BYTES = 48 * 1024  # A page fills to about this many encoded bytes: one bounded publication (< 64 KiB with ancestors).
+OPEN_RECENT = 8  # Places last shown as the default stay open when the tree must be compacted.
+recent_places, expanded_places, collapsed_places = [], set(), set()  # derived view state of this run, not history
+last_active = [None]  # the default layout when `recent_places` was last updated
 page_state = [0, 1]  # Shared sidebar page and current page count; derived, never history.
 
 
@@ -208,6 +216,16 @@ def counts_of(rows):
                         counts[b["text"]] = counts.get(b["text"], 0) + 1
             walk(x.get("children", []))
     walk(rows)
+    return counts
+
+
+def status_counts():
+    """Blocked/working resources anywhere (also inside collapsed places or other pages)."""
+    counts = {}
+    for r in ext.resources.values():
+        state = status_of(r).get("state") if r.get("state") == "live" and r.get("available", True) else None
+        if state in ("blocked", "working"):
+            counts[state] = counts.get(state, 0) + 1
     return counts
 
 
@@ -391,9 +409,12 @@ def skip_hidden(rows, sh):
     return out
 
 
-def build():
-    """One tree: workspace → worktree → tab → pane, each level skippable; see `skip_hidden`."""
-    sh = show()
+def build(sh=None, compact=True):
+    """One tree: workspace → worktree → tab → pane, each level skippable; see `skip_hidden`.
+
+    `compact`: if the whole tree would not fit one page (`PAGE_BYTES`), workspaces and layouts that are
+    not open are published as single rows (see `collapse`), so typical use needs no pages."""
+    sh = sh or show()
     data = (ext.live.get("workspaces") or {}).get("data")
     hide_ended = (ext.value(PREFS) or {}).get("hide_ended", False)
     prefs = worktree_prefs()
@@ -421,9 +442,8 @@ def build():
         else:
             stray.append(row)
 
-    items = []
+    rows, layouts = [], []
     if data is not None:
-        rows = []
         for w, wts, cut in places:
             kids = tab_rows(w.get("layout"), hide_ended) + loose_group(w["path"], loose.get(w["path"], []))
             for t in wts:
@@ -455,6 +475,20 @@ def build():
             })
         claimed = {w.get("layout") for w in data} | {t.get("layout") for w in data for t in w.get("worktrees", [])}
         layouts = layout_rows(claimed, hide_ended)
+    else:
+        rows, layouts = [], layout_rows(set(), hide_ended)
+    note_active(rows + layouts)
+    items = assemble(rows, layouts, stray, data is not None, sh)
+    if compact and sh["workspaces"] and encoded(items) > PAGE_BYTES:
+        opened = open_places(rows + layouts)
+        items = assemble(collapse(rows, opened), collapse(layouts, opened), stray, data is not None, sh)
+    return items or [{"type": "text", "text": "nothing to show"}]
+
+
+def assemble(rows, layouts, stray, have_ws, sh):
+    """Headers and sections around the place rows, with hidden levels skipped."""
+    items = []
+    if have_ws:
         if sh["workspaces"]:
             items.append({"type": "header", "text": "Workspaces"})
         items += skip_hidden(rows, sh)
@@ -471,29 +505,81 @@ def build():
             items += stray
     else:
         # Without workspace data (extension off): every layout as a place, terminals in no tab after them.
-        items += skip_hidden(layout_rows(set(), hide_ended), sh)
+        items += skip_hidden(layouts, sh)
         if stray and (sh["stray"] or sh["panes"]):
             items.append({"type": "header", "text": "Terminals"})
             items += stray
-    if not items:
-        items = [{"type": "text", "text": "nothing to show"}]
     return items
 
 
-def paginate(items, page, size=PAGE_SIZE):
-    """Slice logical tree rows, retaining ancestor context and grouped bridge children.
+def encoded(value):
+    return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode())
 
-    A resource and its one bridge child are a unit. Folder ancestors can repeat
-    across pages; no resource is omitted, and per-page filtering is explicit.
+
+def note_active(places):
+    """Remember the places shown most recently as the default (bounded): they stay open when collapsing.
+    Only a change of the default counts, so collapsing the current place by hand sticks."""
+    active = active_layout_name()
+    if active == last_active[0]:
+        return
+    for row in places:
+        layouts = {row.get("current_when", {}).get("layout")} | {c.get("current_when", {}).get("layout") for c in row.get("children", [])}
+        if active and active in layouts:
+            if row["id"] in recent_places:
+                recent_places.remove(row["id"])
+            recent_places.insert(0, row["id"])
+            del recent_places[OPEN_RECENT:]
+            collapsed_places.discard(row["id"])  # going there opens it again
+            last_active[0] = active  # only once the place is known (workspace data may still be loading)
+            return
+
+
+def open_places(places):
+    known = {row["id"] for row in places}
+    return ((set(recent_places) | expanded_places) - collapsed_places) & known
+
+
+def collapse(places, opened):
+    """Places not open become one row (badges keep their roll-up); their menus can open or close them here."""
+    out = []
+    for row in places:
+        if row["id"] in opened:
+            out.append(dict(row, menu=(row.get("menu") or []) + [{"label": "Collapse", "command": "sidebar.collapse", "args": {"id": row["id"]}}]))
+            continue
+        # Small on purpose (hundreds of them at scale): its full menu comes back once it is open.
+        kept = {k: v for k, v in row.items() if k not in ("children", "expanded", "menu")}
+        kept["menu"] = [{"label": "Expand here", "command": "sidebar.expand", "args": {"id": row["id"]}}]
+        kept["_level"] = row.get("_level")
+        out.append(kept)
+    return out
+
+
+def paginate(items, page, budget=PAGE_BYTES):
+    """Slice logical tree rows into pages of about `budget` encoded bytes, keeping ancestor context.
+
+    A resource and its one bridge child are a unit. Folder ancestors can repeat across pages; no
+    resource is omitted. Typical trees are one page, so no pager shows; it is a last resort at scale.
     """
     def children(row):
         return [] if row.get("id", "").startswith("term:") else row.get("children", [])
-    def count(rows):
-        return sum((0 if row.get("type") == "header" else 1) + count(children(row)) for row in rows)
-    total = count(items)
-    pages = max(1, (total + size - 1) // size)
+    starts, sizes = [0], []
+    def measure(rows):
+        for row in rows:
+            if row.get("type") == "header":
+                continue
+            own = row if row.get("id", "").startswith("term:") else {k: v for k, v in row.items() if k != "children"}
+            sizes.append(encoded(own))
+            measure(children(row))
+    measure(items)
+    used = 0
+    for i, size in enumerate(sizes):
+        if used and used + size > budget:
+            starts.append(i)
+            used = 0
+        used += size
+    total, pages = len(sizes), len(starts)
     page = max(0, min(page, pages-1))
-    start, end = page*size, (page+1)*size
+    start, end = starts[page], (starts[page+1] if page+1 < pages else total)
     index = 0
     def window(rows):
         nonlocal index
@@ -522,7 +608,7 @@ def toolbar():
     short = SHORT.get(current_preset(), "custom")
     rows = [{"type": "chips", "chips": [
         {"text": f"Show: {short} ▾", "command": "sidebar.view"},
-        {"text": "", "icon": ICON["filter"], "command": "client.panel", "args": {"action": "filter"}},
+        {"text": "", "icon": ICON["filter"], "command": "sidebar.search", "input": "Search the sidebar"},
     ]}]
     if page_state[1] > 1:
         rows.append({"type": "chips", "chips": [
@@ -590,7 +676,7 @@ def refresh(*_):
                    "page": {"number": page_state[0]+1, "count": page_state[1], "rows": total}}
         view = view_panel()
         page = settings_page()
-        c = counts_of(all_items)
+        c = status_counts()
         seg = {"label": f"{c['blocked']} blocked", "icon": ICON["blocked"], "style": "warn"} if c.get("blocked") else {"label": ""}
     for index, name, value in ((0, "sidebar", content), (2, "sidebar.view", view), (1, "sidebar.status", seg), (3, SETTINGS_PAGE, page)):
         if value != last[index]:
@@ -770,6 +856,61 @@ def worktrees_more(args):
     refresh_pending.set()
 
 
+@ext.command("sidebar.expand", "Show a collapsed workspace's contents in the sidebar (args: id)")
+def expand_cmd(args):
+    with ext.cache_lock:
+        expanded_places.add(args.get("id"))
+        collapsed_places.discard(args.get("id"))
+    refresh_pending.set()
+
+
+@ext.command("sidebar.collapse", "Show a workspace as one row in a large sidebar (args: id)")
+def collapse_cmd(args):
+    with ext.cache_lock:
+        expanded_places.discard(args.get("id"))
+        collapsed_places.add(args.get("id"))
+    refresh_pending.set()
+
+
+SEARCH_LIMIT = 64
+
+
+def search_rows(query):
+    """Every row of the whole tree (all levels shown, nothing collapsed or paged) whose text matches."""
+    query = query.strip().lower()
+    with ext.cache_lock:
+        tree = build(sh=dict(SHOW_DEFAULT), compact=False)
+    found, more = [], 0
+    def walk(rows, trail):
+        nonlocal more
+        for row in rows:
+            if row.get("type") in ("header", "text"):
+                continue
+            text = str(row.get("text", ""))
+            if query in text.lower() and row.get("command"):
+                if len(found) < SEARCH_LIMIT:
+                    found.append({k: row[k] for k in ("text", "icon", "icon_style", "badges", "command", "args", "input") if k in row}
+                                 | ({"description": " › ".join(trail)} if trail else {}))
+                else:
+                    more += 1
+            walk(row.get("children", []), trail + [text])
+    walk(tree, [])
+    return found, more
+
+
+@ext.command("sidebar.search", "Search every sidebar row, collapsed and off-page ones too (args: text)")
+def search_cmd(args):
+    query = str(args.get("text") or "")
+    if not query.strip():
+        raise VqroError("type something to search for", "invalid")
+    found, more = search_rows(query)
+    items = found or [{"type": "text", "text": "No matches."}]
+    if more:
+        items.append({"type": "text", "style": "dim", "text": f"{more} more matches; search for something longer"})
+    ext.publish("sidebar.search", {"title": f"Search: {query.strip()}", "requires": ["badges", "icon"], "items": items})
+    return {"client": {"popup": {"view": "sidebar.search", "width": 60}}}
+
+
 @ext.command("sidebar.preset", "Choose what the sidebar shows (args: preset, or show: {...})")
 def preset(args):
     if isinstance(args.get("show"), dict):
@@ -786,6 +927,7 @@ if "binding/sidebar-toggle" in ext.entries:
 ext.contribute({
     "view/sidebar": {"kind": "panel", "title": "sidebar", "items": [{"type": "text", "text": "no content: the sidebar extension is starting or stopped"}]},
     "view/sidebar.view": {"kind": "panel", "title": "Sidebar view", "items": [{"type": "text", "text": "no content: the sidebar extension is stopped"}]},
+    "view/sidebar.search": {"kind": "panel", "title": "Search the sidebar", "items": [{"type": "text", "text": "no content: the sidebar extension is stopped"}]},
     "binding/sidebar.toggle": {"key": "s", "command": "sidebar.toggle", "label": "toggle sidebar"},
     "menu/sidebar.toggle": {"where": "status", "label": "sidebar", "icon": ICON["sidebar"], "command": "sidebar.toggle", "order": 10},
     "menu/sidebar.blocked": {"where": "status", "label": "", "view": "sidebar.status", "command": "sidebar.toggle", "order": 5},

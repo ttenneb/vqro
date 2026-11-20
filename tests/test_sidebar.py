@@ -129,16 +129,22 @@ class SidebarTests(unittest.TestCase):
         self.assertFalse(any(name == "sidebar" for name, _ in ext.published), "off-page detail does not invalidate the visible page")
 
     def test_pagination_keeps_every_resource_and_bridge_reachable_with_ancestor_context(self):
+        import json
         module = load()
         kids = [{"id": f"term:r{i}", "text": f"resource {i}"} for i in range(150)]
         kids[70]["children"] = [{"id": "term:bridge", "text": "Bridge terminal"}]
         rows = [{"type": "header", "text": "Workspaces"}, {"id": "ws:root", "text": "Root", "children": kids}]
+        self.assertEqual(module["paginate"](rows, 0)[1:4], (0, 1, 151), "a typical tree is one page: no pager")
+        budget = 2000  # bytes: forces several pages
+        _, _, pages, total = module["paginate"](rows, 0, budget)
+        self.assertGreater(pages, 2)
         found = set()
-        for page in range(3):
-            result, selected, pages, total = module["paginate"](rows, page)
-            self.assertEqual((selected, pages, total), (page, 3, 151))
+        for page in range(pages):
+            result, selected, _, _ = module["paginate"](rows, page, budget)
+            self.assertEqual(selected, page)
             self.assertEqual(result[0]["text"], "Workspaces")
             self.assertEqual(result[1]["id"], "ws:root")
+            self.assertLess(module["encoded"](result), budget + 200, "a page is about the budget, plus its ancestors")
             for row in result[1]["children"]:
                 found.add(row["id"])
                 found.update(child["id"] for child in row.get("children", []))

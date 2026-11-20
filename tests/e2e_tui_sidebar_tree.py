@@ -9,6 +9,7 @@ Checks three configurations and the Settings page, and saves their screens:
 - panes under workspaces, at most 2 worktrees: no tab rows, panes and the loose terminal under the workspace,
   the first two worktrees and "+2 more worktrees";
 - terminals only: a flat list (no workspace row);
+- the toolbar's search finds a terminal with its place;
 - Settings > Sidebar shows the same switches, checked as in the Show popup.
 
 Usage: tests/e2e_tui_sidebar_tree.py TARGET_DIR [CAPTURE_DIR]   (debug binaries in TARGET_DIR/debug)
@@ -144,6 +145,17 @@ try:
     text = save("1-everything")
     check("everything: workspace > tabs > panes, Not in a tab, worktrees, other terminals", bool(full), text)
     check("everything: tab rows marked ○/●", "● build" in text and "○" in sidebar_text(), text)
+
+    # Search: the toolbar's "/" asks for text and lists matching rows from the whole tree, with their place.
+    line = next(i for i, l in enumerate(screen().splitlines()) if "Show:" in l)
+    x = screen().splitlines()[line].index("/", 3) + 1
+    keys(f"\x1b[<0;{x};{line+1}M\x1b[<0;{x};{line+1}m", literal=True)
+    asked = wait(lambda: "Search the sidebar" in screen(), 5)
+    keys("loose", literal=True); keys("Enter")
+    listed = wait(lambda: "Search: loose" in screen() and "Not in a tab" in screen(), 5)
+    text = save("search")
+    check("search: / asks, then lists matches with their place", bool(asked) and bool(listed) and "proj" in text, text)
+    keys("Escape"); time.sleep(0.4)
 
     # 2. Panes under workspaces, at most 2 worktrees.
     invoke("sidebar.preset", {"preset": "panes under workspaces"})
