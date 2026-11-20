@@ -838,7 +838,7 @@ class Coordinator:
             except Exception as error:
                 coordinated = True
                 kind = getattr(error, "kind", "transport")
-                no_effect = kind in ("invalid", "unknown_method", "unsupported", "not_found", "stale_generation", "conflict", "forbidden", "overloaded")
+                no_effect = kind in ("invalid", "unknown_method", "unsupported", "not_found", "stale_generation", "conflict", "forbidden", "overloaded", "too_large")
                 result = {"outcome": "rejected" if no_effect else "indeterminate", "error": {"kind": kind, "message": str(error)[:1024]}}
             outcomes.append({"op": op, "outcome": result.get("outcome"),
                              "native": None if coordinated else result, "coordination": result if coordinated else None})
@@ -1097,7 +1097,7 @@ class Coordinator:
             coordinated = True  # there is no unchanged native result to return
             kind = getattr(error, "kind", "transport")
             no_effect = command == "coord.control" and (isinstance(error, PolicyError) or kind in (
-                "invalid", "unknown_method", "unsupported", "not_found", "stale_generation", "conflict", "forbidden", "overloaded"))
+                "invalid", "unknown_method", "unsupported", "not_found", "stale_generation", "conflict", "forbidden", "overloaded", "too_large"))
             native = {"outcome": "rejected" if no_effect else "indeterminate", "error": {"kind": kind, "message": str(error)[:1024]}}
         with self.lock:
             if not self.current:

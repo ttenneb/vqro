@@ -339,7 +339,8 @@ class CoordinationService:
                 if pending:
                     # A count hint is fenced by its epoch/revision, never authority
                     # to wake/insert; the plugin must still make a gated take.
-                    self.ext.publish("coord-status", {"wake": {"seq": sequence, "pending": pending},
+                    self.ext.publish("coord-status", {"items": [{"text": str(sum(pending.values())) + " pending inbox records; admission hints only"}],
+                                                      "wake": {"seq": sequence, "pending": pending},
                                                       "control_epoch": self.engine.control_epoch,
                                                       "control_revision": control["revision"],
                                                       "physical_suspension": False})
@@ -357,7 +358,7 @@ class CoordinationService:
         self.register()
         self.start_bootstrap()
         threading.Thread(target=self.work, daemon=True, name="coord-dispatch").start()
-        self.ext.contribute({"view/coord-status": {"kind": "document", "title": "Coordination"}})
+        self.ext.contribute({"view/coord-status": {"kind": "panel", "title": "Coordination", "items": []}})
         # Extension.run() would register/subscribe a second time before waiting.
         # Its transport reader, notifications and lifetime watcher already run.
         threading.Event().wait()

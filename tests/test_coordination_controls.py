@@ -102,6 +102,21 @@ class SharedHostTests(unittest.TestCase):
         self.assertEqual(result["coordination"]["error"]["kind"], "no_grant")
         self.assertEqual(f.ledger, [])
 
+    def test_core_too_large_is_definite_refusal_not_a_fabricated_native_reply(self):
+        f = self.f
+        def refuse(*args):
+            raise service_fixtures.VqroError("core admission refused the request", "too_large")
+        f.engine.invoke = refuse
+        control = f.engine.control({"op": f.op(), "target": "r1", "action": "interrupt"}, fixtures.OWNER)
+        self.assertEqual(control["state"], "rejected")
+        self.assertIsNone(control["native"])
+        f.send()
+        result = f.engine.dispatch_one()
+        self.assertEqual(result["state"], "rejected")
+        self.assertIsNone(result["native"])
+        self.assertEqual(result["attempt"]["steps"][0]["coordination"]["error"]["kind"], "too_large")
+        self.assertEqual(f.ledger, [])
+
     def test_unknown_stop_strategy_never_becomes_graceful_stop(self):
         f = self.f
         f.resources["r1"]["data"]["agent"]["caps"]["agent.stop"] = {}

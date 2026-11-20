@@ -223,7 +223,7 @@ class SettingsTests(unittest.TestCase):
         import json
         root=Path(__file__).resolve().parents[1]/"extensions"
         names={s["name"] for s in json.loads((root/"defaults.json").read_text())["extensions"]}
-        self.assertEqual(len(names),16)
+        self.assertEqual(len(names),17)
         for name in names:
             manifest=json.loads((root/"manifests"/(name+".json")).read_text())
             self.assertEqual(manifest["name"],name)
