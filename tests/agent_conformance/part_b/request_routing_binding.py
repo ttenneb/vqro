@@ -71,7 +71,12 @@ class PublicRequestRouting:
     def __init__(self, ctx):
         self.ctx = ctx
         self.config = ctx.manifest.get("request_routing")
-        if not isinstance(self.config, dict) or self.config.get("coord_revision") != ctx.manifest.get("coord_revision"):
+        target = ctx.manifest.get("coord_revision")
+        pinned = self.config.get("coord_revision") if isinstance(self.config, dict) else None
+        def full_revision(value):
+            return (type(value) is str and len(value) in (40, 64) and
+                    all(character in "0123456789abcdef" for character in value))
+        if not full_revision(target) or not full_revision(pinned) or pinned != target:
             raise HarnessGap("reviewed request-routing binding needs an exact immutable source/fixture pin")
         self.prepared = False
         self.launch_prepared = False
@@ -231,11 +236,16 @@ class PublicRequestRouting:
             mail = []
             for record in page["items"]:
                 tag = record.get("request_notice")
-                if not isinstance(tag, dict) or tag.get("agent") != agent or tag.get("key") not in keys: continue
                 calls = [row for row in ctx.native.records("invoke") if row.get("op") == "agent.send"
                     and row.get("args", {}).get("delivery") == record["delivery"]]
                 payload = native_notice(record.get("content"))
                 if payload is None and calls: payload = native_notice(calls[0].get("args", {}).get("content"))
+                tagged_current = isinstance(tag, dict) and tag.get("agent") == agent and tag.get("key") in keys
+                recognizable_current = payload is not None and payload.get("request") == question["request"]
+                if not tagged_current and not recognizable_current: continue
+                # A broken source tag cannot hide a recognizable current notice to
+                # an unrelated holder and turn its real effect into a no-mail PASS.
+                ctx.check(tagged_current, "recognizable current native notice has the exact source tag", record=record, payload=payload)
                 ctx.check(payload is not None, "current source-tagged notice has actual inspectable content", record=record, calls=calls)
                 ctx.check(match_mail(payload, agent, question, native.get("epoch")) and
                     payload.get("expires_at_ms") == question.get("expires_at_ms") and payload.get("question") == actual,

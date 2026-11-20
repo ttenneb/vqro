@@ -11,7 +11,7 @@ from agent_conformance.part_b.identity_request_cases import mail_matches_request
 from agent_conformance.part_b.request_routing_binding import (
     NOTICE_PREFIX, PublicRequestRouting, native_notice, route_key, waiting_rows,
 )
-from agent_conformance.results import CheckFailed, FixtureFailed
+from agent_conformance.results import CheckFailed, FixtureFailed, HarnessGap
 
 
 def question():
@@ -34,7 +34,7 @@ class Context:
     check = PublicCoordination.check
 
     def __init__(self, *, compact=False, fallback=False):
-        self.manifest = {"coord_revision": "pinned", "request_routing": {"coord_revision": "pinned"}}
+        self.manifest = {"coord_revision": "a" * 40, "request_routing": {"coord_revision": "a" * 40}}
         self.evidence, self.assertions = [], 0
         self.entry = {"version": 7, "value": {"route": "invalid-owned-probe" if fallback else "both"}}
         self.q = question()
@@ -104,6 +104,18 @@ class PayloadControls(unittest.TestCase):
         self.assertIsNone(native_notice([{ "type": "text", "text": NOTICE_PREFIX + "not JSON"}]))
         self.assertIsNone(native_notice(content(payload()) * 2))
 
+    def test_missing_empty_malformed_or_mismatched_pins_fail_before_effects(self):
+        pairs = [(None, None), ("", ""), (True, 1), ([], []), ({}, {}), ("a" * 39, "a" * 39),
+            ("g" * 40, "g" * 40), ("A" * 40, "A" * 40), ("a" * 40, None), ("a" * 40, "b" * 40)]
+        for target, pinned in pairs:
+            with self.subTest(target=target, pinned=pinned):
+                ctx = SimpleNamespace(manifest={"coord_revision": target, "request_routing": {"coord_revision": pinned}})
+                with self.assertRaises(HarnessGap): PublicRequestRouting(ctx)
+        for absent in ({}, {"coord_revision": "a" * 40}, {"coord_revision": "a" * 40, "request_routing": None}):
+            with self.subTest(manifest=absent), self.assertRaises(HarnessGap):
+                PublicRequestRouting(SimpleNamespace(manifest=absent))
+        self.assertIsNotNone(PublicRequestRouting(Context()))
+
     def test_recursive_waiting_row_is_actual_panel_data(self):
         self.assertEqual(waiting_rows({"items": [{"children": [{"id": "waiting", "text": "native question"}]}]})[0]["text"], "native question")
         self.assertEqual(waiting_rows({"items": [{"id": "other"}]}), [])
@@ -135,6 +147,27 @@ class CompleteObserverControls(unittest.IsolatedAsyncioTestCase):
         ctx = Context(fallback=True)
         ctx.records = [{"delivery": "bad", "request_notice": {"agent": "r1", "key": "source-current"}, "content": []}]
         with self.assertRaises(CheckFailed): await self.grade(ctx)
+
+    async def test_bad_or_missing_source_tag_cannot_hide_current_payload_to_another_holder(self):
+        for tag in ({"agent": "r1", "key": "wrong"}, {"agent": "other", "key": "source-current"},
+                    None, [], {"agent": "r1"}):
+            with self.subTest(tag=tag):
+                ctx = Context(fallback=True)
+                record = deepcopy(Context().records[0])
+                record["to"] = {"agent": "r3", "incarnation": "i:a2"}
+                if tag is None: record.pop("request_notice")
+                else: record["request_notice"] = tag
+                ctx.records = [record]
+                with self.assertRaises(CheckFailed): await self.grade(ctx)
+
+    async def test_old_different_question_notice_is_not_reclassified_as_current(self):
+        ctx = Context(fallback=True)
+        old = deepcopy(Context().records[0])
+        old["request_notice"]["key"] = "old-source"
+        old_payload = payload(); old_payload["request"] = "q-old"; old_payload["question"]["request"] = "q-old"
+        old["content"] = content(old_payload)
+        ctx.records = [old]
+        self.assertEqual((await self.grade(ctx))["mail"], [])
 
     async def test_wrong_current_ui_or_projection_or_truncation_is_not_visibility(self):
         for mutate in (lambda c: c.panel["items"][0]["children"][0].update(text="old question"),
