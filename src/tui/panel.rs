@@ -300,6 +300,11 @@ fn render_list(buf:&mut Buffer,mut area:Rect,v:&Arc<Value>,st:&mut State,focused
         }
     }
     top = top.min(total.saturating_sub(area.height as u32));
+    // Scrolled (wheel, PgUp/PgDn while typing) back down to the end of a following list: follow it again.
+    if st.manual_scroll && v["follow"] == true && top >= total.saturating_sub(area.height as u32) && st.top as u32 >= top {
+        st.manual_scroll = false;
+        st.follow_end = None;
+    }
     let mut area=area;
     if indicator && top>0 && area.height>2 {
         let header_at=|top:u32| {let mut offset=0;let mut header=None;for (r,h) in list.iter().zip(&heights){if offset>top{break;}if kind(&r.item)=="header"{header=r.item["text"].as_str();}offset+=*h;}header};

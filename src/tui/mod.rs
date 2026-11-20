@@ -1249,6 +1249,14 @@ impl App {
         let rows = panel::rows(&value, &st);
         // Composer (feature composer): while typing, keys edit its draft (the prefix was handled before).
         if let Some(id) = st.editing.clone() {
+            // PgUp/PgDn while typing scroll the conversation above the composer (the editor has no use for them).
+            if matches!(k.code, KeyCode::PageUp | KeyCode::PageDown) {
+                let page = st.page_step.max(1);
+                st.manual_scroll = true;
+                st.top = if k.code == KeyCode::PageUp { st.top.saturating_sub(page) } else { st.top.saturating_add(page) };
+                self.pstate.insert(key.to_string(), save(container, st));
+                return true;
+            }
             if let Some(item) = rows.iter().find(|r| r.id == id && panel::kind(&r.item) == "composer").map(|r| r.item.clone()) {
                 let name = keys::name(&k).unwrap_or_default();
                 let comp = st.composers.entry(id.clone()).or_insert_with(|| Composer::new(&item));
@@ -2697,7 +2705,16 @@ impl App {
     fn panel_scroll(&mut self,key:&str,view:&str,pos:Position,up:bool,ctx:Value) {
         let detail=self.hit.panels.get(key).and_then(|h|h.detail_area).is_some_and(|r|r.contains(pos));
         if detail {let root=self.pstate.entry(key.into()).or_default();root.detail_focus=true;let st=root.detail.get_or_insert_with(Box::default);st.manual_scroll=true;st.top=if up{st.top.saturating_sub(3)}else{st.top.saturating_add(3)};}
-        else {self.pstate.entry(key.into()).or_default().detail_focus=false;self.panel_key(key,view,KeyEvent::new(if up{KeyCode::Up}else{KeyCode::Down},KeyModifiers::NONE),ctx);}
+        else {
+            // The wheel scrolls the list's view, whatever has the keys: a composer being typed in (agent panes
+            // autofocus theirs) would otherwise take Up/Down and the conversation could not be scrolled. Scrolling
+            // stops `follow` until a key is pressed; scrolled back to the end, following resumes.
+            let _ = (view, ctx);
+            let st = self.pstate.entry(key.into()).or_default();
+            st.detail_focus = false;
+            st.manual_scroll = true;
+            st.top = if up { st.top.saturating_sub(3) } else { st.top.saturating_add(3) };
+        }
     }
 
     /// A click in a panel: page tabs, expanders, rows (left activates, right opens the row's menu).
@@ -3851,6 +3868,40 @@ mod tests {
         app.terms.get_mut("t").unwrap().attaching = false;
         draw(&mut app);
         assert!(app.message.is_empty(), "each fallback reason is reported once");
+    }
+
+    #[tokio::test]
+    async fn agent_panes_scroll_by_wheel_and_page_keys_while_the_composer_has_the_keys() {
+        let (mut app, _) = app();
+        let mut items: Vec<Value> = (0..60).map(|i| json!({"type":"text","wrap":true,"text":format!("message {i}")})).collect();
+        items.push(json!({"type":"composer","id":"c","text":"Message","pin":"bottom","autofocus":true,"command":"x"}));
+        app.load(&json!({"epoch":"e","seq":1,"entries":{"view/p":{"value":{"kind":"panel","follow":true,"items":items}}}}));
+        app.leaves = vec!["p".into()];
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 16)).unwrap();
+        let mut draw = |app: &mut App| -> String {
+            let mut out = String::new();
+            terminal.draw(|f| { app.draw_view(f, "p", Rect::new(0, 0, 40, 16), true, &Palette::default(), &Icons::new(None, false));
+                let b = f.buffer_mut(); out = (0..16).map(|y| (0..40).map(|x| b[(x, y)].symbol().to_string()).collect::<String>() + "\n").collect(); }).unwrap();
+            out
+        };
+        draw(&mut app);
+        app.pstate.get_mut("p").unwrap().editing = Some("c".into());  // typing in the composer (autofocus)
+        let screen = draw(&mut app);
+        assert!(screen.contains("message 59"), "following: the newest message shows\n{screen}");
+        // The wheel scrolls the conversation even though the composer has the keys.
+        for _ in 0..5 { app.panel_scroll("p", "p", Position { x: 5, y: 3 }, true, json!({})); }
+        let screen = draw(&mut app);
+        assert!(!screen.contains("message 59") && app.pstate["p"].editing.is_some(), "scrolled back, still typing\n{screen}");
+        // PgUp/PgDn while typing scroll it too.
+        let top = app.pstate["p"].top;
+        app.panel_key("p", "p", KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE), json!({}));
+        draw(&mut app);
+        assert!(app.pstate["p"].top < top, "PgUp scrolls up while typing");
+        // Back down to the end: following resumes.
+        for _ in 0..40 { app.panel_scroll("p", "p", Position { x: 5, y: 3 }, false, json!({})); }
+        draw(&mut app);
+        assert!(!app.pstate["p"].manual_scroll, "at the end it follows again");
+        assert!(draw(&mut app).contains("message 59"));
     }
 
     #[tokio::test]

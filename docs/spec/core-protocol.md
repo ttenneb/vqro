@@ -1150,7 +1150,9 @@ New row types, components and view kinds are progressive enhancements: every cli
   wins. On the row: Enter, Space or `i` starts typing; Left/Right walk the controls. `autofocus: true` starts
   typing when the pane gains focus. The text area starts at one line and grows with the draft up to `rows`. The
   key hint names the new-line key that works: Shift-Enter when the terminal reports it (the Rust TUI asks for
-  keyboard disambiguation while a composer or multi-line prompt is being typed in), else Alt-Enter; Ctrl-J always.
+  keyboard disambiguation while a composer or multi-line prompt is being typed in), else Alt-Enter; Ctrl-J always. While typing,
+  the wheel and PgUp/PgDn scroll the rows above the composer (the conversation); scrolling stops `follow` until a
+  key is typed or the view is back at the end.
 - **`client.composer {action, panel?, row?, ...}`** (client-local): `focus` (start typing in the panel's composer),
   `set {arg, value}`, `send {set?: {arg: value}}` (set values, then send the draft). Bindings use it (for example
   send as steer).
