@@ -77,11 +77,13 @@ impl Drop for Flight {
 pub struct Starts { native:Native,signals:Arc<Signals>,gate:Arc<tokio::sync::Mutex<()>> }
 impl Starts {
     pub fn new(native:Native,signals:Arc<Signals>) -> Self { Self { native,signals,gate:Arc::new(tokio::sync::Mutex::new(())) } }
-    pub async fn start(&self,args:Value,deadline:Instant,receipt:Receipt) -> Admission {
+    pub async fn start(&self,args:Value,deadline:Instant,receipt:Receipt) -> Admission { self.prompt(args,deadline,receipt,false).await }
+    pub async fn admit(&self,args:Value,deadline:Instant,receipt:Receipt) -> Admission { self.prompt(args,deadline,receipt,true).await }
+    async fn prompt(&self,args:Value,deadline:Instant,receipt:Receipt,allow_busy:bool) -> Admission {
         let Ok(guard) = self.gate.clone().try_lock_owned() else { return refuse("busy","a native start preflight is unresolved"); };
         let baseline = {
             let mut current = self.signals.current.lock().unwrap();
-            if !current.idle() { return refuse("busy","native idle is not established"); }
+            if current.ended || (!allow_busy && !current.idle()) { return refuse("busy","native idle is not established"); }
             current.preflights+=1;
             current.starts
         };
@@ -101,10 +103,10 @@ impl Starts {
             return match response { Ok(reply)=>Admission::Acknowledged { native,reply },Err(error)=>failure(error) };
         }
         if ticket.cancel_before_write() { return refuse("timeout","deadline before native dispatch"); }
-        let begun = ticket.write_begun();
+        let written = ticket.written();
         let this=self.clone();
         tokio::spawn(async move { this.finish(ticket,baseline,flight,receipt).await; });
-        if begun { Admission::Dispatched { native } } else { refuse("timeout","native record was cancelled before dispatch") }
+        if written { Admission::Dispatched { native } } else { Admission::Unknown(Error {kind:"timeout",message:"native write incomplete at deadline; outcome unknown".into(),may_have_acted:true}) }
     }
     async fn finish(&self,mut ticket:Ticket,baseline:u64,flight:Flight,receipt:Receipt) {
         let result = ticket.reply().await;
@@ -119,7 +121,7 @@ impl Starts {
         // Only a request AFTER the authoritative ACK can witness a handled-but-idle prompt.
         let metadata = self.native.call("get_state",json!({}),Duration::from_secs(2)).await;
         if let Ok(reply) = metadata {
-            if reply.success && reply.data["isStreaming"]==false && reply.data["isCompacting"]==false { return; }
+            if reply.success && (reply.data["isStreaming"]==true || (reply.data["isStreaming"]==false && reply.data["isCompacting"]==false)) { return; }
         }
         loop {
             let current=self.signals.current();

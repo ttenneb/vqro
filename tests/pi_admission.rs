@@ -94,6 +94,7 @@ async fn unresolved_preflight_is_busy_despite_idle_and_abort_ack() {
     assert_eq!(f.signals.current().preflights,1);
     assert_eq!(f.signals.current().streaming,Some(false));
     busy(f.send("must-not-write",500).await);
+    busy(f.starts.admit(json!({"message":"also-must-not-write","streamingBehavior":"followUp"}),Instant::now()+Duration::from_millis(500),Arc::new(|_,_|{})).await);
     assert!(f.native.call("abort",json!({}),Duration::from_secs(2)).await.unwrap().success);
     busy(f.send("still-must-not-write",500).await);
     assert_eq!(f.prompts(),1,"both later starts rejected before native writes");
@@ -104,6 +105,10 @@ async fn unresolved_preflight_is_busy_despite_idle_and_abort_ack() {
     assert_eq!(f.receipts.lock().unwrap().len(),1);
     assert!(f.receipts.lock().unwrap()[0].1.as_ref().unwrap().success);
     assert_eq!(f.prompts(),1,"late ACK never causes replay");
+    let admitted=f.starts.admit(json!({"message":"native-admission","streamingBehavior":"followUp"}),Instant::now()+Duration::from_millis(500),Arc::new(|_,_|{})).await;
+    assert!(matches!(admitted,Admission::Acknowledged {..}));f.fence().await;
+    busy(f.send("busy-run-start",500).await);
+    assert_eq!(f.prompts(),2,"admit uses the same preflight gate without holding it for the native run");
     f.close().await;
 }
 

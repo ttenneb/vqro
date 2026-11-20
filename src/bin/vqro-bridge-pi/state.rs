@@ -18,15 +18,17 @@ pub struct Agent {
     history:VecDeque<(String,String)>,
     tools:HashMap<String,String>,
     current_message:Option<String>,
-    position:u64,serial:u64,epoch_number:u64,instance:String,
+    position:u64,serial:u64,epoch_number:u64,instance:String,boot:String,
     pub session:Option<Value>,pub run:Option<String>,pub completion:Option<Value>,
     reason:String,error:Option<String>,exit:Option<Exit>,caps:Value,
 }
 impl Agent {
     pub fn new(instance:String,signals:Arc<Signals>)->Self {
-        let journal=ItemJournal::new(format!("{instance}.e1"),JournalConfig {max_entity_bytes:ENTITY_TOTAL,..Default::default()});
+        let mut bytes=[0u8;16];getrandom::fill(&mut bytes).expect("fresh observation epoch");
+        let boot=bytes.iter().map(|byte|format!("{byte:02x}")).collect::<String>();
+        let journal=ItemJournal::new(format!("{boot}.e1"),JournalConfig {max_entity_bytes:ENTITY_TOTAL,..Default::default()});
         let mut agent=Self {journal,signals,incomplete:BTreeSet::new(),receipts:BTreeMap::new(),receipt_order:VecDeque::new(),history:VecDeque::new(),tools:HashMap::new(),current_message:None,
-            position:0,serial:0,epoch_number:1,instance,session:None,run:None,completion:None,reason:"unknown".into(),error:None,exit:None,caps:Value::Null};
+            position:0,serial:0,epoch_number:1,instance,boot,session:None,run:None,completion:None,reason:"unknown".into(),error:None,exit:None,caps:Value::Null};
         agent.refresh();agent
     }
     fn next(&mut self,prefix:&str)->String {self.serial+=1;format!("{prefix}{}",self.serial)}
@@ -70,10 +72,10 @@ impl Agent {
     }
     pub fn facts(&self,provider:&str,cwd:&str)->Value {
         let phase=match self.state() {"running"=>"working","requires_action"=>"blocked","idle" if self.completion.as_ref().is_some_and(|c|c["reason"]=="error")=>"error","idle"=>"idle",_=>"working"};
-        json!({"ref":"agent","incarnation":"","kind":"agent","state":if self.exit.is_some(){"finished"}else{"live"},"name":"Pi","cwd":cwd,
+        json!({"ref":"agent","incarnation":"","kind":"agent","state":if self.exit.is_some(){"finished"}else{"live"},"name":"Pi","cwd":cwd,"exit":self.exit.as_ref().map(|exit|json!({"code":exit.code,"success":exit.success})),
             "status":{"phase":phase,"message":if self.exit.is_some(){"Pi ended"}else{self.state()}},
             "data":{"agent":{"v":0,"state":self.state(),"lifecycle":if self.exit.is_some(){"ended"}else{"live"},
-                "host":{"id":format!("{}.child",self.instance),"provider":provider,"instance":self.instance,"incarnation":"","kind":"process","owns_lifecycle":true},
+                "host":{"id":format!("{}.child",self.boot),"provider":provider,"instance":self.instance,"incarnation":"","kind":"process","owns_lifecycle":true},
                 "session":self.session,"epoch":self.epoch(),"caps":self.caps,"completion":self.completion,"queue":null,"requests":[],"background":null,
                 "config":[],"commands":[],"usage":null,"incomplete":self.incomplete,
                 "items":{"retain_bytes":131072,"entities":ENTITY_COUNT,"entity_bytes":ENTITY_TOTAL,"coverage":"tail"}}}})
@@ -182,7 +184,7 @@ impl Agent {
                 Some("response") if record["command"]=="get_state" && record["success"]==true=>{
                     if let Some(id)=record["data"]["sessionId"].as_str().filter(|id|!id.is_empty() && id.len()<=128) {
                         if self.session.as_ref().is_some_and(|session|session["id"]!=id) {
-                            self.epoch_number+=1;self.journal.new_epoch(format!("{}.e{}",self.instance,self.epoch_number));self.history.clear();self.tools.clear();self.current_message=None;self.run=None;self.completion=None;
+                            self.epoch_number+=1;self.journal.new_epoch(format!("{}.e{}",self.boot,self.epoch_number));self.history.clear();self.tools.clear();self.current_message=None;self.run=None;self.completion=None;
                         }
                         self.session=Some(json!({"id":id,"title":record["data"]["sessionName"]}));
                         self.store("session","current",self.session.clone().unwrap(),false);
