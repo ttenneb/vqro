@@ -847,6 +847,10 @@ class Tier1StatusTests(unittest.TestCase):
             self.assertIsNone(self.core.owner(), row)
             with self.assertRaises(VqroError):
                 self.report({"terminal": "r1", "app": "claude", "state": "idle", "seq": 1})
+        self.core.entries["doc/principals/owner"] = {"value": "own\u200der", "version": 3}  # a format char, core-valid
+        self.assertEqual(self.core.owner(), "own\u200der", "parity with the core: only whitespace and controls are refused")
+        self.core.entries["doc/principals/owner"] = {"value": "own\x07er", "version": 4}
+        self.assertIsNone(self.core.owner())
 
     def test_bad_reports_are_refused_to_the_caller_without_notices(self):
         for bad in ({"terminal": "r9", "app": "c", "state": "idle", "seq": 1}, {"terminal": "r1", "app": "", "seq": 1},

@@ -24,6 +24,7 @@ import sys
 import threading
 import time
 import traceback
+import unicodedata
 
 
 def _watch_lifetime():
@@ -552,7 +553,7 @@ class Extension:
         principal (1-256 bytes, no whitespace or controls, not `undeclared`, not core-assigned). Never guessed."""
         value = self.value("doc/principals/owner")
         if not isinstance(value, str) or not 0 < len(value.encode()) <= 256 or value == "undeclared" \
-                or any(c.isspace() or not c.isprintable() for c in value) \
+                or any(c.isspace() or unicodedata.category(c) == "Cc" for c in value) \
                 or value.startswith(("extension:", "host:", "system:")) or value == "system":
             return None
         return value
