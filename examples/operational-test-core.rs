@@ -1,4 +1,7 @@
 //! Test/measurement core with explicit durability gates. Not a production entrypoint.
+#[path = "support/operational_archive.rs"]
+mod archive_cuts;
+
 use serde_json::{json, Value};
 use std::{
     path::{Path, PathBuf},
@@ -100,7 +103,8 @@ async fn main() -> anyhow::Result<()> {
             "outcome-error",
             "outcome-unconfirmed"
         ]
-        .contains(&fault.as_str()),
+        .contains(&fault.as_str())
+            || archive_cuts::mode(&fault).is_some(),
         "unknown fault"
     );
     if args.len() == 3 && !state.join("workspace.json").exists() {
@@ -126,7 +130,9 @@ async fn main() -> anyhow::Result<()> {
                 return vqro::store::write_atomic(path, bytes);
             }
             let parsed: Value = serde_json::from_slice(bytes).unwrap();
-            let matched = if fault.starts_with("register-") {
+            let matched = if let Some((stage, _)) = archive_cuts::mode(&fault) {
+                archive_cuts::transition(path, &parsed, stage)
+            } else if fault.starts_with("register-") {
                 parsed["last"]["note"]
                     .as_str()
                     .is_some_and(|note| note.starts_with("operational.register"))
@@ -138,12 +144,14 @@ async fn main() -> anyhow::Result<()> {
             if !matched || once.swap(true, Ordering::AcqRel) {
                 return vqro::store::write_atomic(path, bytes);
             }
-            let phase = if fault.starts_with("register-") {
-                "before-register-write"
+            let phase = if let Some((stage, _)) = archive_cuts::mode(&fault) {
+                format!("before-archive-{stage}-write")
+            } else if fault.starts_with("register-") {
+                "before-register-write".to_owned()
             } else if fault.starts_with("outcome-") {
-                "before-outcome-write"
+                "before-outcome-write".to_owned()
             } else {
-                "before-claim-write"
+                "before-claim-write".to_owned()
             };
             std::fs::write(state.join("fault-boundary"), phase)?;
             if fault.ends_with("before") {
@@ -155,13 +163,24 @@ async fn main() -> anyhow::Result<()> {
                 return Err(std::io::Error::other("injected before rename").into());
             }
             vqro::store::write_atomic(path, bytes)?;
-            if fault == "claim-after" {
-                std::fs::write(state.join("fault-boundary"), "after-durable-before-receipt")?;
+            if fault == "claim-after"
+                || archive_cuts::mode(&fault).is_some_and(|(_, action)| action == "after")
+            {
+                let phase = archive_cuts::mode(&fault)
+                    .map(|(stage, _)| format!("after-durable-archive-{stage}-before-receipt"))
+                    .unwrap_or_else(|| "after-durable-before-receipt".to_owned());
+                std::fs::write(state.join("fault-boundary"), phase)?;
                 while !state.join("release-fault").exists() {
                     std::thread::sleep(Duration::from_millis(2));
                 }
             }
             if fault.ends_with("unconfirmed") {
+                if let Some((stage, _)) = archive_cuts::mode(&fault) {
+                    std::fs::write(
+                        state.join("fault-boundary"),
+                        format!("after-rename-archive-{stage}-unconfirmed"),
+                    )?;
+                }
                 let mut error = vqro::store::AtomicWriteError::from(std::io::Error::other(
                     "injected missing directory confirmation",
                 ));
