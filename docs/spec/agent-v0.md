@@ -339,6 +339,13 @@ A per-viewer credited stream of JSON records (core addition §9.1). P3 confirmed
   retention while attached ends the stream with gap reason `retention`; an unknown gap reason is a protocol error that
   still ends the stream. Adapters declare `items.retain_bytes` in facts. Optional `items.snapshot_buffer_bytes`
   is declared beside `retain_bytes`, `entities` and `entity_bytes`; absent means not declared, never zero.
+- **Incompatible stream.** A viewer rejecting a malformed record or unknown op (`bad_record`), or data beyond its
+  declared bounds (`over_bound`) must not reattach in a tight loop. The rejected record repeats on `continue`,
+  and an over-bound entity can repeat inside a reset snapshot too. Back off and report **incompatible stream**,
+  retaining the rejection detail: the viewer's limits may be below the producer's declared `items` facts, or
+  an unknown op may come from a newer producer. Do not automatically relax bounds, skip the record, advance
+  the last-good cursor or install a partial snapshot to appear recovered. Repeated unchanged rejections are
+  not progress; retry must wait through backoff or a compatibility change.
 - **Coverage.** Adapters declare each snapshot's coverage: `all_retained` (every retained entity), `tail` (only
   recent history, including when native history is missing) or `state_only` (current state and pending requests,
   no timeline). `tail`/`state_only` is never shown as complete; current state and pending requests survive pruning.

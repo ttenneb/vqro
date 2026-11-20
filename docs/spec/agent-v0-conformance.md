@@ -47,7 +47,7 @@ equality, and every exercised behaviour must lie within the resource's current c
 | per mode: `busy`, `idle` (`start \| reject \| park`), `point`, `batch`, `batch_at`, `preflight` | `agent.send.modes` | D1–D5, D9, D12, D13 |
 | `content {types, shape}`, `correlation`, `keys {scope, retention}`, `guards`, `receipts.retain`, `literal`, `handled`, `origin` | `agent.send` | C8, D6–D8, D14–D16 |
 | `pending`, `scope`, `waits` | `agent.interrupt` | D10 |
-| `items` bounds (per entity and aggregate), `retain_bytes`, optional `snapshot_buffer_bytes`; snapshot coverage | `agent`, snapshot begin | O1–O13 |
+| `items` bounds (per entity and aggregate), `retain_bytes`, optional `snapshot_buffer_bytes`; snapshot coverage | `agent`, snapshot begin | O1–O14 |
 | request `methods`, `scopes`, `background_requests`, answer acknowledgement | `agent.respond` | R1–R7 |
 | module actions (queue, session, config, command, history, object, display terminals) | each op | M1–M7 |
 | `covers`, `waits`; per-call reply `covers`, `covers_evidence` when requested-only | `agent.stop` | L2 |
@@ -140,7 +140,11 @@ appends are covered. Adapters record how they handle this refusal without silent
 view metadata: plain/default, markdown and unknown text formats render independently per block (unknown falls back
 to plain). Runtime/vqro notices use role `system`, distinct from `coordination`, without upgrading a send's authority.
 Tool/run `started_ms`/`ended_ms` and message `at_ms` match supplied evidence; missing times remain unknown, not
-filled from observation order or the viewer's clock.
+filled from observation order or the viewer's clock. O14 incompatible viewers: repeat `bad_record` or
+`over_bound` at the same continued position, and an over-bound entity in a reset snapshot. The viewer backs
+off, reports incompatible stream with the cause/limit mismatch, and never enters an immediate reattach loop,
+skips the record, advances its last-good cursor, relaxes bounds or installs a partial cut. An unknown newer op
+gets the same visible incompatibility handling; unchanged rejection is not counted as recovery.
 
 **R. Requests.** R1 a request appears in facts and stream with its scope; `requires_action` when it blocks. R2 two
 simultaneous answers: exactly one native response; stale revision, foreign epoch, expired, no longer pending, dead

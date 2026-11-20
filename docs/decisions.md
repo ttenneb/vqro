@@ -563,6 +563,10 @@ replaced when the Pi bridge is ported.
   Inside the full 10% recovery reserve, the final 64 KiB / 16 records are archive-only as a defensive margin,
   not a second proved counterexample. Scope receipts retain 16; accepted archive plans separately fund
   16 KiB / 4 future records (8 KiB / 2 after export), with at most four pending plans.
+- A viewer rejecting `bad_record`/`over_bound` reports incompatible stream and backs off, not a tight reattach
+  loop: continue repeats the record, and reset may repeat an over-bound entity. Never silently skip it, advance
+  the cursor, relax limits or install a partial cut; limits below producer facts and unknown newer ops remain
+  visible compatibility problems.
 
 **Human answers (2026-11-19, CONFIRMED).**
 - **AS1, pause:** "vqro stops delivery": paused means vqro sends, hands out and wakes nothing until resumed; an agent
