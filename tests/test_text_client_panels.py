@@ -43,5 +43,34 @@ class TextPanels(unittest.TestCase):
         self.assertEqual(c.handle("facet nope x"), ["facets here: kind"])
 
 
+class PopupAfterReply(unittest.TestCase):
+    def test_a_popup_shows_what_its_command_published_even_before_the_event_arrives(self):
+        """settings.open publishes fresh content, then replies with a popup; the view.content event can arrive
+        after the reply (and is applied only after the command line). The popup must show the fresh content."""
+        c = client({"title": "Settings", "items": [{"text": "stale row", "command": "x"}]})
+        c.ws.epoch, c.ws.seq = "e", 5
+        c.window = model.Window()
+        fresh = {"epoch": "e", "seq": 7, "entries": {"view/p": {"version": 2, "value": {"kind": "panel", "title": "Settings", "items": []}}},
+                 "live": {"p": {"items": [{"text": "fresh row", "command": "x"}]}}, "resources": []}
+        calls = []
+
+        class Core:
+            def call(self, method, params=None):
+                calls.append(method)
+                if method == "command.invoke":
+                    return {"client": {"popup": {"view": "p"}}}
+                if method == "workspace.snapshot":
+                    return fresh
+                raise AssertionError(method)
+        c.vqro, c.safe_selected, c.info = Core(), set(), {}
+        lines = c.handle("run settings.open")
+        self.assertTrue(any("fresh row" in l for l in lines), lines)
+        self.assertFalse(any("stale row" in l for l in lines), lines)
+        self.assertEqual(calls, ["command.invoke", "workspace.snapshot"])
+        # The event that carried the same content arrives late: already covered by the snapshot, so ignored.
+        self.assertEqual(c.ws.apply({"epoch": "e", "seq": 6, "type": "view.content", "data": {"view": "p", "content": {"items": [{"text": "stale row"}]}}}), [])
+        self.assertEqual(c.ws.live["p"]["items"][0]["text"], "fresh row")
+
+
 if __name__ == "__main__":
     unittest.main()

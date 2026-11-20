@@ -66,16 +66,21 @@ class TextClient:
     # ---- protocol -------------------------------------------------------------------------------------------
 
     def resync(self):
-        snap = self.vqro.call("workspace.snapshot")
-        with self.lock:
-            was = self.ws.load(snap)
-            self.safe_mode_changed(self.ws.safe_mode, was)
-            self.settle_window()
+        snap = self.load_snapshot()
         try:
             self.vqro.call("events.subscribe", {"from": snap["seq"], "epoch": snap["epoch"], "partial_resources": True})
         except VqroError as e:
             if e.kind != "conflict":  # already subscribed on this connection
                 raise
+
+    def load_snapshot(self):
+        """Replace the cache with a fresh snapshot (events up to its `seq` are then ignored as already applied)."""
+        snap = self.vqro.call("workspace.snapshot")
+        with self.lock:
+            was = self.ws.load(snap)
+            self.safe_mode_changed(self.ws.safe_mode, was)
+            self.settle_window()
+        return snap
 
     def on_message(self, method, params):
         if method == "missed":
@@ -386,13 +391,21 @@ class TextClient:
         except VqroError as e:
             return [f"{name}: {e} ({e.kind})"]
         out = [f"{name}: done"]
+        hints = (reply or {}).get("client") if isinstance(reply, dict) else None
         layout = model.reply_layout(name, reply)
+        if layout or isinstance(hints, dict):
+            # The reply shows something, which must include the command's own changes (a view it just published,
+            # entries it wrote). Their events can arrive after the reply and are applied only once this command
+            # line finishes (it holds the lock), so take a snapshot, which is newer than the reply.
+            try:
+                self.load_snapshot()
+            except VqroError as e:
+                out.append(f"(could not refresh after {name}: {e}; what follows may be out of date)")
         if layout:
             ok, changed = self.window.show(self.ws, layout)
             if ok and changed:
                 self.focus = 0
                 out.append(f"showing layout {layout}")
-        hints = (reply or {}).get("client") if isinstance(reply, dict) else None
         if isinstance(hints, dict):
             if hints.get("close"):
                 self.popup = None
