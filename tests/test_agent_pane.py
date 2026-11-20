@@ -43,10 +43,22 @@ CONVERSATION = {
 }
 
 
+def base(rows, features=()):
+    """What a client with only `features` shows (core-protocol "Fallbacks"): a row needing a missing feature becomes
+    its fallback (a row or a list of rows)."""
+    out = []
+    for row in rows:
+        if any(f not in features for f in row.get("requires", [])) and "fallback" in row:
+            out += base(row["fallback"] if isinstance(row["fallback"], list) else [row["fallback"]], features)
+        else:
+            out.append(row)
+    return out
+
+
 class TranscriptRows(unittest.TestCase):
     def rows(self, entities=CONVERSATION, coverage=None):
         names = agent_transcript.Names({"r2": {"name": "Pi"}, "r7": {"name": "vqro-lead", "kind": "agent", "principal": "p:lead"}}, "r2")
-        return agent_transcript.rows({k: (1, v) for k, v in entities.items()}, names, coverage)
+        return base(agent_transcript.rows({k: (1, v) for k, v in entities.items()}, names, coverage))
 
     def test_senders_come_from_the_recorded_origin_in_order(self):
         headers = [r["text"] for r in self.rows() if str(r.get("id", "")).startswith("m:")]
@@ -148,8 +160,40 @@ class TranscriptRows(unittest.TestCase):
                 ("message", "b"): {"position": 2, "role": "assistant", "final": True, "content": text("ok")}}
         rows = self.rows(long)
         texts = [r.get("text") for r in rows]
-        self.assertEqual(texts[:6], ["Message from vqro-lead (agent r7)", "point 0", "point 1", "point 2", "point 3", "5 more lines"])
+        self.assertEqual(texts[:6], ["Message from vqro-lead (agent r7)", "point 0", "point 1", "point 2", "point 3", "5 more lines"],
+                         "clients without the frame: the same fold, on plain rows")
+        names = agent_transcript.Names({"r2": {"name": "Pi"}, "r7": {"name": "vqro-lead", "kind": "agent", "principal": "p:lead"}}, "r2")
+        framed = agent_transcript.rows({k: (1, v) for k, v in long.items()}, names)[0]
+        self.assertEqual({k: framed[k] for k in ("type", "title", "fold", "requires")},
+                         {"type": "message", "title": "Message from vqro-lead (agent r7)", "fold": 4, "requires": ["message", "fold"]})
+        self.assertEqual(framed["body"], "\n".join(f"point {i}" for i in range(9)))
+        quoted = agent_transcript.rows({k: (1, v) for k, v in CONVERSATION.items() if k == ("message", "m3")}, names)[0]
+        self.assertEqual(quoted["title"], "Message from vqro-lead (agent r7) · quoting alice (claimed)")
+        self.assertEqual([r["text"] for r in base([quoted])], ["Message from vqro-lead (agent r7)", "quoting alice (claimed)", "Bump the lockfile too."],
+                         "the quote never counts toward the 4 lines")
         self.assertEqual(texts[6:8], ["", "Pi"], "a blank line between blocks")
+
+    def test_one_huge_tool_output_never_crowds_out_the_conversation(self):
+        """Review P2-1: the rest of an output is bounded, so the panel budget keeps the older conversation."""
+        huge = dict(CONVERSATION)
+        huge[("tool", "t2")] = dict(huge[("tool", "t2")], content=text("a b\n" * 16000))
+        rows = agent_transcript.rows({k: (1, v) for k, v in huge.items()},
+                                     agent_transcript.Names({"r2": {"name": "Pi"}}, "r2"))
+        self.assertLessEqual(len(json.dumps(rows).encode()), agent_transcript.BUDGET)
+        self.assertIn("Why is the build red?", [r.get("text") for r in rows], "the older conversation survives")
+        group = next(r for r in rows if r.get("text", "").startswith("Activity"))
+        rest = group["children"][1]["children"][-1]["children"]
+        self.assertEqual(len(rest), agent_transcript.HIDDEN_ROWS + 1)
+        self.assertTrue(rest[-1]["text"].endswith("more lines not shown here"))
+
+    def test_a_long_thinking_step_inside_activity_stays_readable(self):
+        """Review P2-2: a thought longer than its one line is all one expand away."""
+        long = "x" * 999
+        step = agent_transcript.thought_step("s", long)
+        self.assertEqual(len(step["text"].encode()), len(("┊ " + agent_transcript.clip(long, agent_transcript.STEP_BYTES)).encode()))
+        self.assertEqual(step["children"][0]["text"], "┊ " + long)
+        self.assertNotIn("children", agent_transcript.thought_step("s", "short"), "nothing more to open")
+        self.assertEqual([c["text"] for c in agent_transcript.thought_step("s", "one\ntwo")["children"]], ["┊ one", "┊ two"])
 
     def test_short_output_is_packed_and_placeholders_never_appear(self):
         listing = agent_transcript.output_rows("/w\n" + "\n".join(f"file{i}.md" for i in range(20)))
@@ -193,8 +237,8 @@ class ViewSettings(unittest.TestCase):
         entities = dict(CONVERSATION)
         entities[("message", "m4")] = dict(entities[("message", "m4")], at_ms=1_763_600_060_000,
                                            usage={"tokens": {"output": 1200}})
-        return agent_transcript.rows({k: (1, v) for k, v in entities.items()}, names, None,
-                                     agent_transcript.view_settings(view))
+        return base(agent_transcript.rows({k: (1, v) for k, v in entities.items()}, names, None,
+                                          agent_transcript.view_settings(view)))
 
     def find(self, rows, prefix):
         return next(r for r in rows if r.get("text", "").startswith(prefix))
@@ -232,7 +276,7 @@ class ViewSettings(unittest.TestCase):
         headers = [r["text"] for r in rows if str(r.get("id", "")).startswith("m:")]
         self.assertEqual(headers, ["Human (undeclared) · " + agent_transcript.when(1_763_600_000_000), "Human (undeclared)"],
                          "time only when the sender changes")
-        fold = next(r for r in rows if r.get("text") == "… 20 more lines")
+        fold = next(r for r in rows if r.get("text") == "20 more lines")
         self.assertEqual((fold["expanded"], len(fold["children"])), (False, 20))
 
     def test_invalid_settings_fall_back(self):
@@ -284,7 +328,7 @@ class AgentPane(unittest.TestCase):
         self.agents.flush_conversations()
 
     def texts(self):
-        return [r.get("text") for r in self.core.live["agents-r2"]["items"]]
+        return [r.get("text") for r in base(self.core.live["agents-r2"]["items"])]
 
     def test_an_agent_with_an_item_stream_shows_its_conversation_others_keep_todays_panel(self):
         self.assertEqual(self.attaches(), [{"resource": "r2", "items": {}}], "only the agent whose runtime streams items")

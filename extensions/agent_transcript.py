@@ -20,6 +20,9 @@ RECEIPT = {"recorded": "recorded", "held": "held", "admitted": "admitted", "queu
 MARKDOWN_ROW_BYTES = 60 * 1024  # under the 64 KiB per formatted row (core-protocol "Formatted text")
 LINE_BYTES = 4096  # one row; longer lines are cut with a mark (display only, never a request's question)
 TOOL_LINES = 12  # lines of a tool's output shown before "… N more lines" (redesign mockup)
+HIDDEN_ROWS, HIDDEN_BYTES = 200, 16 * 1024  # the rest of an output or a thought, one expand away
+STEP_BYTES = 300  # a thinking step inside an Activity shows this much of its first line
+FRAME_BYTES = 16 * 1024  # a framed message's body; longer ones stay plain rows (the panel budget counts both forms)
 OTHER_FOLD = 4  # another agent's (or person's) message folds after this many lines (reply-13)
 THOUGHT_LINES = 2  # thinking shows its first lines, then "▸ more" (the human's choice, reply-13)
 THOUGHT_BLOCKS = ("thought", "thinking")
@@ -136,6 +139,20 @@ def thought_text(value):
                      if isinstance(b, dict) and b.get("type") in THOUGHT_BLOCKS).strip()
 
 
+def hidden_rows(texts, style):
+    """The rows one expand away (the rest of a tool's output or of a thought), bounded so that one huge output can't
+    crowd the conversation out of the panel's budget: HIDDEN_ROWS rows or HIDDEN_BYTES, then a count of the rest."""
+    rows, size = [], 0
+    for i, line in enumerate(texts):
+        text = clip(plain(line))
+        size += len(text.encode())
+        if i >= HIDDEN_ROWS or size > HIDDEN_BYTES:
+            rows.append({"type": "text", "style": "dim", "text": f"… {len(texts) - i} more lines not shown here"})
+            break
+        rows.append({"type": "text", "wrap": True, "focusable": True, "style": style, "text": text})
+    return rows
+
+
 def thought_rows(eid, text, limit=THOUGHT_LINES):
     """Thinking as a dim block with a left rule: the first lines, then "▸ more" with the rest one expand away."""
     out = [line for line in text.split("\n") if line.strip()]
@@ -143,8 +160,7 @@ def thought_rows(eid, text, limit=THOUGHT_LINES):
             for line in out[:limit]]
     if len(out) > limit:
         rows.append({"id": "th:" + eid, "text": "more", "style": "dim", "expanded": False,  # clients draw the ▸
-                     "children": [{"type": "text", "wrap": True, "focusable": True, "style": "dim", "text": "┊ " + clip(plain(line))}
-                                  for line in out[limit:]]})
+                     "children": hidden_rows(["┊ " + line for line in out[limit:]], "dim")})
     return rows
 
 
@@ -244,15 +260,34 @@ def message_rows(eid, value, names, receipts, show_time=True, fold=None, thinkin
     if reasoning and thinking == "show":
         body = thought_rows(eid, reasoning)
     elif reasoning and thinking == "summary":
-        body = [{"id": "s:" + eid, "style": "dim", "expanded": False, "children": thought_rows(eid, reasoning, limit=10 ** 6),
+        body = [{"id": "s:" + eid, "style": "dim", "expanded": False,
+                 "children": hidden_rows(["┊ " + line for line in reasoning.split("\n") if line.strip()], "dim"),
                  "text": summary_text("Thinking", [value], fields)}]
     else:
         body = []  # hidden, or no reasoning
     body += content_rows(value.get("content"), body_style)
-    if fold and len(body) > fold:  # compact view: long messages fold, the rest one expand away
-        body = body[:fold] + [{"id": "f:" + eid, "text": f"… {len(body) - fold} more lines", "style": "dim",
+    if fold and len(body) > fold:  # long messages fold (compact view, other senders); the sender and quote stay
+        body = body[:fold] + [{"id": "f:" + eid, "text": f"{len(body) - fold} more lines", "style": "dim",
                                "children": body[fold:], "expanded": False}]
     return rows + body
+
+
+def framed(eid, value, plain_rows):
+    """Another sender's message as a framed block (feature `message`, folding after OTHER_FOLD lines); clients without
+    it show `plain_rows`. Text-only messages up to FRAME_BYTES; anything else stays plain rows."""
+    content = value.get("content") if isinstance(value.get("content"), list) else []
+    if not content or any(not isinstance(b, dict) or b.get("type") != "text" or not isinstance(b.get("text"), str) for b in content):
+        return plain_rows
+    body = "\n\n".join(ANSI.sub("", b["text"]) for b in content).strip("\n")
+    if not body or len(body.encode()) > FRAME_BYTES:
+        return plain_rows
+    head = plain_rows[0]
+    title = head["text"] + "".join(" · " + r["text"] for r in plain_rows[1:2] if str(r.get("text", "")).startswith("quoting "))
+    markdown = any(b.get("format") == "markdown" for b in content)
+    return [{"type": "message", "id": head["id"], "text": title, "title": title, "body": body,
+             **({"format": "markdown"} if markdown else {}), "fold": OTHER_FOLD, "focusable": True,
+             **({"copy": head["copy"]} if head.get("copy") else {}), **({"style": head["style"]} if head.get("style") not in (None, "bold") else {}),
+             "requires": ["message", "fold"], "fallback": plain_rows}]
 
 
 PRIMARY = {"bash": "command", "shell": "command", "read": "path", "edit": "path", "write": "path", "grep": "pattern",
@@ -323,8 +358,7 @@ def output_rows(text, limit=TOOL_LINES):
     rows = [{"type": "text", "wrap": True, "focusable": True, "style": "muted", "text": clip(plain(line))} for line in out[:limit]]
     if len(out) > limit:
         rows.append({"text": f"… {len(out) - limit} more lines", "style": "dim", "expanded": False,
-                     "children": [{"type": "text", "wrap": True, "focusable": True, "style": "muted", "text": clip(plain(line))}
-                                  for line in out[limit:]]})
+                     "children": hidden_rows(out[limit:], "muted")})
     return rows
 
 
@@ -366,16 +400,23 @@ def tool_row(eid, value, cwd=None):
             **({"children": children} if children else {}), "expanded": False}
 
 
+def thought_step(eid, text):
+    """The agent's thinking between two tool calls, inside an Activity: one dim line (its start); when there is more
+    than that line shows, all of it is one expand away."""
+    out = [line for line in text.split("\n") if line.strip()]
+    first = clip(plain(out[0].strip()), STEP_BYTES) if out else ""
+    row = {"id": "th:" + eid, "style": "dim", "text": "┊ " + first}
+    if len(out) > 1 or first != plain(out[0].strip()):
+        row.update(expanded=False, children=hidden_rows(["┊ " + line for line in out], "dim"))
+    return row
+
+
 def group_row(steps, cwd=None):
     """A run of tool calls as one Activity line (Pi style, collapsed): count, total time, failures; each tool with its
     status on the right. The agent's thinking between its calls (steps with no text of their own) sits inside, in order."""
     tools = [(eid, value) for eid, value in steps if "__thought__" not in value]
-    children = [{"id": "th:" + eid, "style": "dim", "expanded": False, "text": "┊ " + clip(plain(value["__thought__"].strip().split("\n")[0]), 300),
-                 "children": thought_rows(eid, value["__thought__"], limit=10 ** 6)[1:]} if "__thought__" in value
-                else tool_row(eid, value, cwd) for eid, value in steps]
-    for child in children:  # a one-line thought has nothing to open
-        if not child.get("children", True):
-            del child["children"]
+    children = [thought_step(eid, value["__thought__"]) if "__thought__" in value else tool_row(eid, value, cwd)
+                for eid, value in steps]
     starts = [v.get("started_ms") for _, v in tools if type(v.get("started_ms")) is int]
     ends = [v.get("ended_ms") for _, v in tools if type(v.get("ended_ms")) is int]
     took = duration(min(starts), max(ends)) if starts and ends else None
@@ -529,7 +570,7 @@ def rows(entities, names, coverage=None, view=None, cwd=None):
             tools.append((eid, value))
             continue
         if kind == "message" and value.get("role") == "assistant" and value.get("final") is not False \
-                and not content_rows(value.get("content")) and not names.sender(value)[2].startswith("human"):
+                and not content_rows(value.get("content")):
             # A step of the agent's work with no text of its own (thinking and tool calls): it continues the current
             # Activity instead of starting a labelled block.
             if thought_text(value) and view["thinking"] != "hide":
@@ -544,8 +585,9 @@ def rows(entities, names, coverage=None, view=None, cwd=None):
             role = value.get("role")
             show_time = not compact or key != last_sender
             last_sender = key
-            body = message_rows(eid, value, names, receipts, show_time, FOLD_LINES if compact else None,
-                                view["thinking"], view["summary"])
+            other = role not in ("thought", "system") and key not in ("agent", "you", "user", "human:undeclared")
+            fold = min(OTHER_FOLD, FOLD_LINES) if other and compact else OTHER_FOLD if other else FOLD_LINES if compact else None
+            body = message_rows(eid, value, names, receipts, show_time, fold, view["thinking"], view["summary"])
             if role == "thought":  # a separate thinking entity: the block alone, under the agent's last label
                 add("thinking", thought_rows(eid, thought_text(value)), "Thinking", [value], eid)
             elif role == "system":
@@ -556,13 +598,9 @@ def rows(entities, names, coverage=None, view=None, cwd=None):
                                 "children": body, "expanded": False}])
             else:
                 flush_hidden()
-                if key not in ("agent", "you", "user", "human:undeclared") and len(body) > OTHER_FOLD + 1:
-                    # Another sender's message folds after 4 lines (the human's choice, reply-13); the rest is one
-                    # expand away. (ui-owner's framed message row will draw this fold itself.)
-                    rest = body[1 + OTHER_FOLD:]
-                    body = body[:1 + OTHER_FOLD] + [{"id": "of:" + eid, "text": f"{len(rest)} more lines", "style": "dim",
-                                                     "expanded": False, "children": rest}]
-                blocks.append(body)
+                # Another sender's message: a framed block that folds after 4 lines (the human's Q3, reply-13); the
+                # plain rows (folded the same way) for clients without the frame.
+                blocks.append(framed(eid, value, body) if other else body)
         elif kind == "compaction":
             add("system", [{"type": "text", "style": "dim", "text": "· System · context compacted"}], "System · context compacted", [value], eid)
         else:  # plan: shown whole, generically
