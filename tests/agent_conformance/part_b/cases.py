@@ -731,8 +731,8 @@ async def context_evidence_never_claims_entry(ctx):
 @case("G11")
 async def shared_host_native_tool_provenance(ctx):
     for row in await ctx.resources():
-        value=(row.get("data") or {}).get("agent",{}).get("caps",{}).get("tool_principal")
-        path="resources."+row["id"]+".data.agent.caps.tool_principal"
+        value=(row.get("data") or {}).get("agent",{}).get("caps",{}).get("agent",{}).get("tool_principal")
+        path="resources."+row["id"]+".data.agent.caps.agent.tool_principal"
         if value!="env":
             ctx.evidence.append({"subcase":"endpoint-env-tool","status":"not-applicable","declaration":{"path":path,"actual":value}})
         else:
