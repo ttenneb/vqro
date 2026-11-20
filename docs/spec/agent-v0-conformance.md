@@ -51,7 +51,7 @@ equality, and every exercised behaviour must lie within the resource's current c
 | request `methods`, `scopes`, `background_requests`, answer acknowledgement | `agent.respond` | R1–R7 |
 | module actions (queue, session, config, command, history, object, display terminals) | each op | M1–M7 |
 | `covers`, `waits`; per-call reply `covers`, `covers_evidence` when requested-only | `agent.stop` | L2 |
-| `tool_principal: "env"` (absent = not provided) | `data.agent.caps` | G11 |
+| `agent.tool_principal: "env"` (absent = not provided); provider upper bound `["env"]` | `data.agent.caps`, provider agent descriptor | G11 |
 
 ## A2. Levels
 
@@ -317,7 +317,8 @@ callback record `author` E, `actor` E, `initiator` W, `principal` P; P's `u` und
 standing ability afterwards. An opaque callback proof in legacy `on_behalf_of` is refused; `invocation` remains
 the callback proof field, while explicit `on_behalf_of: P` uses the delegation row rule.
 G11 tool-process attribution: a tier-1 tool's CLI inherits the launcher-tagged pane principal. Select the
-headless per-endpoint environment case only for `caps.tool_principal: "env"`: each tool process receives its
+headless per-endpoint environment case only for `data.agent.caps.agent.tool_principal: "env"`: each tool
+process receives its
 own endpoint's launcher-tagged `VQRO_PRINCIPAL` and workspace `VQRO_SOCKET`. That id is independent of `rN`;
 a single-endpoint host passes its launcher-given values to the child, never an inherited human-shell owner
 principal under an `env` claim. With a many-endpoint host, tools from two endpoints

@@ -546,8 +546,8 @@ replaced when the Pi bridge is ported.
   role/frame/authority descriptors per safe point. Fixed native framing (including `NOT USER INPUT` on Claude
   rewake) is declared/shown, never silently upgraded. Approximate idle must preserve the record's boundary/settle
   contract if a human prompt wins the race; it never authorizes a start that assumes idle.
-- `caps.tool_principal: "env"` promises each tool-running process receives its own endpoint principal and socket
-  explicitly. Multi-endpoint hosts need native per-endpoint/thread environment support or a child per endpoint;
+- `data.agent.caps.agent.tool_principal: "env"` (provider upper bound `agent.tool_principal: ["env"]`) promises
+  each tool-running process receives its own endpoint principal and socket explicitly. Multi-endpoint hosts need native per-endpoint/thread environment support or a child per endpoint;
   otherwise the capability is absent and G11 records visible host attribution, never guessed or emulated tags.
   The principal is launcher-assigned independently of `rN`; a single-endpoint host forwards its launcher-given
   values, never claims that an owner inherited from a human shell is an endpoint's tagged principal.

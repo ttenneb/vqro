@@ -74,7 +74,8 @@ the generic keys below (`doc/principals/…`) and never reads coordination grant
   explicit, not ambient identity inheritance.
 - **Tool-process attribution** `(pending C2)`: the route is the environment of the process running the tool.
   For tier-1 agents, the launcher tags the agent's pane with `VQRO_PRINCIPAL`, so a tool's `vqro` CLI call
-  inherits that agent principal. Headless adapters declare `caps.tool_principal: "env"` only when each endpoint's
+  inherits that agent principal. Headless adapters declare `data.agent.caps.agent.tool_principal: "env"` only
+  when each endpoint's
   tool processes receive its own launcher-tagged principal and `VQRO_SOCKET` explicitly. The agent principal
   is a launcher-assigned id independent of `rN`. A single-endpoint host passes its own launcher-given principal
   and socket to its runtime child; an inherited owner principal from a human shell is not this route.
