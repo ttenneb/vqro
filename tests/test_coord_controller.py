@@ -22,6 +22,8 @@ class ControllerTimeout(unittest.TestCase):
     def journal(self, root, index, result):
         path = root / f'{index:02}' / 'result.json'
         path.parent.mkdir()
+        if result.fixture_root is None:
+            result.fixture_root = str(path.parent)
         path.write_text(json.dumps(result.json()))
 
     def test_missing_partial_and_wrong_identity_journals_never_become_pass_or_na(self):
@@ -57,6 +59,23 @@ class ControllerTimeout(unittest.TestCase):
                 self.assertTrue((root / 'results.json').is_file())
                 self.assertTrue((root / 'results.md').is_file())
                 self.assertTrue((root / 'parent-timeout.json').is_file())
+
+    def test_malformed_evidence_is_not_a_completed_case(self):
+        for evidence in (None, {}, 'invalid'):
+            with self.subTest(evidence=evidence), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self.journal(root, 0, Result('I1', 'first', 'pass', evidence=evidence))
+                document = write_controller_timeout(root, {}, self.cases, self.cases, 1800)
+                self.assertEqual(document['not_run'], ['I1', 'I2', 'I3'])
+                self.assertEqual(document['summary']['pass'], 0)
+
+    def test_same_case_journal_from_a_different_run_is_not_recovered(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.journal(root, 0, Result('I1', 'first', 'pass', fixture_root='/different-run/00'))
+            document = write_controller_timeout(root, {}, self.cases, self.cases, 1800)
+            self.assertEqual(document['not_run'], ['I1', 'I2', 'I3'])
+            self.assertEqual(document['summary']['pass'], 0)
 
     def test_only_a_completed_na_with_its_exclusion_is_retained(self):
         with tempfile.TemporaryDirectory() as directory:

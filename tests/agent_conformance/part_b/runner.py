@@ -98,11 +98,12 @@ def write_controller_timeout(root, manifest, selected, inventory, seconds):
         case_root = root / f"{index:02}"
         try:
             data = json.loads((case_root / "result.json").read_text())
-            if not isinstance(data, dict) or not isinstance(data.get("declarations", {}), dict):
-                raise ValueError("case journal and its declarations must be objects")
+            if (not isinstance(data, dict) or not isinstance(data.get("declarations", {}), dict)
+                    or not isinstance(data.get("evidence", []), list)):
+                raise ValueError("case journal/declarations must be objects and evidence must be a list")
             row = Result(**data)
-            if row.case != case.id:
-                raise ValueError("case journal identity does not match the selection")
+            if row.case != case.id or row.fixture_root != str(case_root):
+                raise ValueError("case journal identity/root does not match this selection")
         except (OSError, ValueError, TypeError) as error:
             not_run.append(case.id)
             row = Result(case.id, case.title, "fail", "harness", "not run: controller timeout",
