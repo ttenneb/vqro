@@ -638,21 +638,21 @@ class Coordinator:
             return "archive_pending"
         if record.get("handover_plan"):
             return "handover_pending"
-        if agent not in self.permits or not self.current:
-            return "paused"
-        if record.get("review_required"):
-            return "stale_guard"
         stone = (self.store.get(self._agent_key(agent)) or {}).get("value", {}).get(agent, {})
         if stone.get("lifecycle") == "retired":
             return "agent_retired"
         if stone.get("lifecycle") == "ended":
             return "agent_ended"
         resource, native = self._facts(agent)
-        if not resource or resource.get("available") is False:
-            return "agent_absent"
         lifecycle = native.get("lifecycle", "live")
         if lifecycle == "ended":
             return "agent_ended"
+        if agent not in self.permits or not self.current:
+            return "paused"
+        if record.get("review_required"):
+            return "stale_guard"
+        if not resource or resource.get("available") is False:
+            return "agent_absent"
         if lifecycle in ("stopping", "disconnected", "unknown"):
             return "agent_absent"
         if resource.get("incarnation", "") != record["to"]["incarnation"]:

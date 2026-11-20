@@ -120,6 +120,17 @@ class SafetyTests(unittest.TestCase):
             "receipt": {"delivery": sent["delivery"], "stage": "completed"}}]))
         self.assertEqual(f.engine.get(sent["delivery"])["state"], "held")
 
+    def test_known_native_end_is_visible_even_when_admission_was_already_paused(self):
+        f = self.f
+        sent = f.send()
+        self.assertEqual(f.engine.get(sent["delivery"])["reason"], "paused")
+        f.resources["r1"]["data"]["agent"]["lifecycle"] = "ended"
+        self.assertIsNone(f.engine.dispatch_one())
+        record = f.engine.get(sent["delivery"])
+        self.assertEqual(record["state"], "held")
+        self.assertEqual(record["reason"], "agent_ended")
+        self.assertEqual(f.ledger, [])
+
     def test_identity_summary_keeps_the_core_canonical_backend_reference(self):
         f = self.f
         f.resources["r1"].update(provider="native-fixture", instance="instance1", backend_ref="opaque/native/reference")
