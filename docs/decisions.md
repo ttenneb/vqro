@@ -686,3 +686,20 @@ features (2026-11-19), and chose per-command granularity, allow-with-warning and
 check (`scripts/check_manifest_deps.py`) keeps bundled manifests honest. Design: `research/declarations-and-ui-clients.md`.
 The OpenTUI client stays optional and separately installed, never bundled (human, 2026-11-19, Q-UI-5;
 `research/opentui-client-trial.md`).
+
+## D30. Terminal emulation through built-in engines; libghostty-vt first (2026-11-20, CONFIRMED)
+**Decision.** The Rust TUI draws terminal panes through one engine interface (`src/tui/emulator.rs`: `Engine`,
+`EngineKind`). The engines are built in and chosen in Settings (`doc/settings/tui.terminal_engine`). There are no
+runtime plug-ins. `libghostty` (Ghostty's libghostty-vt, vendored at c5a21edf and built with Zig 0.15.2) is the
+default, and `vt100` stays selectable and is the fallback. An engine that can't be selected or started is replaced
+by vt100 for that pane, with a notice. A crash inside a native engine can't be caught that way, so native engines
+keep their FFI defensive. One shared conformance suite (`tests/fixtures/client/engines.json`) has a baseline every
+engine must pass and fidelity extras each engine claims for itself; alacritty_terminal can join later through the
+same suite. Engines answer no terminal queries: the backend already does.
+**Why.** The human asked to switch to libghostty for fidelity: grapheme clusters, OSC 8, strikethrough and
+underline styles. They also asked for a switchable engine (Q-GH-1/3, 2026-11-20). Zig as a build dependency is
+fine (Q-GH-2).
+**Consequences.** Building needs Zig 0.15.2 (`ZIG`). `vendor/` holds the pinned source, herdr's two patches and
+the notice inventory (`scripts/check_vendor.py`, `vendor/notices.json`, rendered by `scripts/license_check.py`).
+The wrapper reuses herdr's patterns as an unvetted baseline that is audited independently (plan G8). Plan:
+`<private-notes>`.

@@ -1,0 +1,86 @@
+{
+  "about": "Non-Cargo third-party components linked into vqro: libghostty-vt and what its static library contains (see libghostty-vt.notices.md for how this list was taken). scripts/license_check.py checks every licence against the allowlist and every file against its sha256, and renders them into THIRD_PARTY_LICENSES.md.",
+  "components": [
+    {
+      "name": "libghostty-vt (Ghostty)",
+      "version": "1.3.2-HEAD c5a21edf",
+      "license": "MIT",
+      "where": "vendor/libghostty-vt (statically linked into the vqro binary)",
+      "source": "https://github.com/ghostty-org/ghostty at c5a21edfcbc2d5b46540ad91b7980aca31f5f1f3, via herdr a5c69bea",
+      "files": [
+        {
+          "path": "vendor/libghostty-vt/LICENSE",
+          "sha256": "386211873e5b7a02f663ae4d7adf96285999f91608f8f9f31fecfd0f4095e6f1"
+        }
+      ]
+    },
+    {
+      "name": "Google Highway",
+      "version": "1.2.0 (highway-66486a10)",
+      "license": "Apache-2.0 OR BSD-3-Clause",
+      "where": "Zig package, compiled into libghostty-vt",
+      "source": "https://deps.files.ghostty.org/highway-66486a10623fa0d72fe91260f96c892e41aceb06.tar.gz",
+      "files": [
+        {
+          "path": "vendor/notices/highway/LICENSE",
+          "sha256": "43070e2d4e532684de521b885f385d0841030efa2b1a20bafb76133a5e1379c1"
+        },
+        {
+          "path": "vendor/notices/highway/LICENSE-BSD3",
+          "sha256": "d25e82e26acd42ca3ccc9993622631163425b869b9e16284226d534cff6470f2"
+        }
+      ]
+    },
+    {
+      "name": "simdutf",
+      "version": "9.0.0",
+      "license": "Apache-2.0 OR MIT",
+      "where": "vendor/libghostty-vt/pkg/simdutf/vendor (amalgamation without a licence header), compiled into libghostty-vt",
+      "source": "https://github.com/simdutf/simdutf tag v9.0.0 (licence texts)",
+      "files": [
+        {
+          "path": "vendor/notices/simdutf/LICENSE-MIT",
+          "sha256": "fc8dbc04e03ad4efc08a647ffe7f995b811a95bc04c0e85a56d5277c6593fa5f"
+        },
+        {
+          "path": "vendor/notices/simdutf/LICENSE-APACHE",
+          "sha256": "3d34610fc6b5e1b0bfe4e2f36171c2d62c28ef05cb8d704f5a0073be41a43b3d"
+        }
+      ]
+    },
+    {
+      "name": "uucode",
+      "version": "0.2.0",
+      "license": "MIT AND Unicode-3.0",
+      "where": "Zig package; its Unicode tables are compiled into libghostty-vt",
+      "source": "https://github.com/jacobsandlund/uucode tag v0.2.0 (licences/), package uucode-0.2.0-ZZjBPqZVVABQepOqZHR7vV_NcaN-wats0IB6o-Exj6m9",
+      "files": [
+        {
+          "path": "vendor/notices/uucode/LICENSE.md",
+          "sha256": "312e901e142be2477b4ca859e9311f9e3f80d33372991759b7921c1893605f33"
+        },
+        {
+          "path": "vendor/notices/uucode/LICENSE_unicode",
+          "sha256": "1eda5a3b026870c737b22e8bcd4954338612c790db688242e003f41a4fa95175"
+        },
+        {
+          "path": "vendor/notices/uucode/LICENSE_Bjoern_Hoehrmann",
+          "sha256": "de219cece932aad5a817bf763393d8d149d378a15d2ad5320e3331eac07626dd"
+        }
+      ]
+    },
+    {
+      "name": "Zig compiler_rt",
+      "version": "Zig 0.15.2",
+      "license": "MIT",
+      "where": "Zig toolchain runtime library, linked into libghostty-vt",
+      "source": "https://ziglang.org (lib/compiler_rt; the toolchain's LICENSE)",
+      "files": [
+        {
+          "path": "vendor/notices/zig/LICENSE",
+          "sha256": "5c537d6853e005298a285d508cff9ac7192cea23576c840d485b2b586a7ff177"
+        }
+      ]
+    }
+  ]
+}

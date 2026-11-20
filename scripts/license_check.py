@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Offline SPDX policy and reproducible Cargo licence/notice inventory (stdlib only)."""
+"""Offline SPDX policy and reproducible licence/notice inventory (stdlib only): Cargo packages, plus the non-Cargo
+components vendored and linked into vqro (vendor/notices.json: libghostty-vt and what its static library holds)."""
 import argparse
 import hashlib
 import json
@@ -13,6 +14,7 @@ import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = "THIRD_PARTY_LICENSES.md"
+VENDORED = "vendor/notices.json"
 ALLOWED = frozenset({"Apache-2.0", "MIT", "ISC", "Zlib", "Unlicense",
     # Explicit maintainer approval, 2026-11-18; exceptions are not inferred from the base licence.
     "Unicode-3.0", "Unicode-DFS-2016", "WTFPL", "Apache-2.0 WITH LLVM-exception"})
@@ -118,9 +120,28 @@ def cargo_output(arguments):
         env={**os.environ, "CARGO_NET_OFFLINE": "true"}, capture_output=True, text=True, check=True, timeout=60).stdout
 
 
+def vendored(root, texts):
+    """The non-Cargo components: each licence within the allowlist, each text present with its recorded sha256."""
+    path = root / VENDORED
+    if not path.exists(): return []
+    out = []
+    for c in json.loads(path.read_text())["components"]:
+        choice = satisfying_licenses(c["license"])
+        if choice is None: raise ValueError(f"vendored licence outside allowlist: {c['name']}: {c['license']}")
+        if not c.get("files"): raise ValueError(f"vendored component without licence text: {c['name']}")
+        for f in c["files"]:
+            data = (root / f["path"]).read_bytes()
+            digest = hashlib.sha256(data).hexdigest()
+            if digest != f["sha256"]: raise ValueError(f"vendored licence text changed: {f['path']} (update {VENDORED})")
+            texts[digest] = data.decode("utf-8")
+        out.append({**c, "approved_choice": sorted(choice)})
+    return out
+
+
 def render(metadata):
     members = set(metadata["workspace_members"])
     texts = {}; records = []
+    vendored_records = vendored(ROOT, texts)
     for package in sorted(metadata["packages"], key=lambda p: (p["name"], p["version"], p.get("source") or "")):
         if package["id"] in members:
             if package.get("license") != "Apache-2.0": raise ValueError("workspace licence must be Apache-2.0")
@@ -157,6 +178,10 @@ def render(metadata):
         f"Packages: {len(records)}. Approved identifiers: {', '.join(sorted(ALLOWED))}; BSD-*.\n\n"]
     for record in records:
         result += [f"## {record['name']} {record['version']}\n\n", "```json\n", json.dumps(record, indent=2, ensure_ascii=False), "\n```\n\n"]
+    if vendored_records:
+        result.append(f"# Vendored and linked sources (not Cargo packages)\n\nFrom `{VENDORED}`; provenance in `vendor/libghostty-vt.notices.md`.\n\n")
+        for record in vendored_records:
+            result += [f"## {record['name']} {record['version']}\n\n", "```json\n", json.dumps(record, indent=2, ensure_ascii=False), "\n```\n\n"]
     result.append("# Licence and notice texts\n\nTexts are deduplicated by SHA-256 of original bytes.\n\n")
     for digest, text in sorted(texts.items()):
         fence = "`" * max(3, max((len(m.group())+1 for m in re.finditer(r"`+", text)), default=3))
