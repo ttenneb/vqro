@@ -114,13 +114,32 @@ unsupported feature or an extra top-level result status.
 
 O3/O11 may inherit the shared Rust producer/core checks instead of relaunching
 200 fake endpoints for every adapter. A target supplies `component_evidence`
-entries keyed by case: executed `adapter_image_sha256`, reviewed `producer_source`,
-`component`, a `receipt` and `unit_log` (`{path,sha256}`), and `required_tests`.
-Every artifact is checksummed and bounded to4MiB; a passing full receipt is
-required. O3 names snapshot-hold, unfinished-cut-overflow and reset-recovery
-regressions. Known counterexamples override an older green receipt. O11 also
-binds `core_image_sha256`, validates the200-stream scale `summary`, and requires
-reserved-budget/open, writing-stream closure and idle-sibling survival proofs.
+entries keyed by case: executed `adapter_image_sha256`, full40-hex
+`producer_source`, `component`, and checksummed `{path,sha256}` artifacts for
+`receipt`, `unit_log` and `build_manifest`. The build document has kind
+`vqro.component-build-v1` and `adapter`/`core` objects with executed image `sha256`
+and immutable `source_commit`. `source_files` maps those roles to the runtime
+source closure; the minimum dependencies in `evidence.CLOSURES` cannot be omitted.
+Git objects must exist in the default source repository or explicit `source_repo`.
+The tested and executed sources must match for each component file.
+
+`required_tests` must equal the exact semantic identifiers in `evidence.REGRESSIONS`,
+not arbitrary caller-chosen passing tests; `test_sources` supplies their fixed
+source locators. Each test definition must exist at the pinned commit, and its
+exact passing record must belong to the correct cargo test binary in that run.
+Artifacts are bounded to4MiB. The full receipt must parse, be all-pass and match
+the immutable source commit. A copied log must equal the original log named in
+that receipt; a detached snippet or absent original is a harness gap. Preserve
+these small original run logs when retiring build outputs. The build-source
+record is explicitly **asserted**, not cryptographic proof of compilation; image
+hashes, source equality, test existence and run-artifact identity are checked.
+
+Known counterexamples override an older green receipt. O11 also binds
+`core_image_sha256` and requires `scale_log` to match the receipt's item-stream
+step. That successful log must identify the output root containing the same
+checksummed200-stream `summary`; an independent synthetic summary cannot qualify.
+Reserved-budget/open, writing-stream closure and idle-sibling survival proofs
+must come from the same recorded cargo run, not stitched focused logs.
 The rule is per stream within one shared connection budget, not forced closure
 of idle sibling streams. Missing linkage/proofs are `fail/harness_gap`; these
 checks are explicitly inherited component evidence, never another runtime.
