@@ -398,7 +398,10 @@ zero claims/releases; text-only mail remains eligible. A consumer accepting imag
 T12 Claude Code context evidence: PostToolBatch/Stop and interactive rewake hand-offs report `supplied`, never
 `inserted`; `hook_success`, a tool result or a human quote of the hand-off never yields `read`. Only a correlated
 model-visible request plus normal completion may yield `read`; verify native framing on each path, including
-`NOT USER INPUT` on rewake. Non-interactive idle wake is not declared.
+`NOT USER INPUT` on rewake. Claude declares `pull.points.idle.precision: "approximate"`; its idle hook takes only
+`boundary`/`settle`, never `start`. Starting an idle Claude session uses an explicitly selected native session
+socket `admit` call or the human, with no implicit mode fallback. Pi's measured idle declares `precision: "exact"`.
+Non-interactive idle wake is not declared.
 
 T13 advisory terminal status: `agents.status` publishes OSC-shaped live data; unknown/missing states become
 `unknown`. Duplicate/lower sequence reports are ignored per terminal, even from a different app; invalid reports
@@ -419,8 +422,9 @@ T15 path framing/precision: every served point declares exact/approximate precis
 `pull.framing`. Check native model envelopes for turn, settle and idle independently, including Claude's rewake
 `NOT USER INPUT`; renderers never hide a path's actual role/authority or relabel it plain user input. At an
 approximate idle point, race a human prompt: the claimed record still meets its own boundary/settle contract,
-never an assumed-idle start. A plugin unable to preserve that contract makes no claim. Exact points retain their
-native guarantee; observation gaps are not interpreted as exactness.
+never an assumed-idle start. Offer a `start` record to an approximate idle hook: it stays unclaimed; it is not
+converted to `boundary`, `settle` or `admit`. A plugin unable to preserve the boundary/settle contract makes no
+claim. Exact points retain their native guarantee; observation gaps are not interpreted as exactness.
 
 **L. Lifecycle policy.** L5 stop closes the gate first; without a declared `agent.stop`, `host_kill` is offered only
 when the host is a core resource of the bound incarnation with a declared termination primitive, after showing

@@ -470,10 +470,11 @@ editor-empty evidence, reports `dispatched`, labels the mode unverified and obey
   fixed native wrappers, rather than claiming all paths have the same role or authority. The route must fit
   the sender's accepted rendering; framing never silently promotes authority or rewrites the recorded origin.
   Unknown framing is shown generically, not assumed to be plain user input.
-- **Eligibility is the inbox's:** `turn` serves `boundary`; `settle` serves `boundary` and `settle`; `idle` serves
-  `start`, `boundary` and `settle`; `tool` serves `admit`, plus `boundary` where declared an evidenced boundary.
-  `preempt` is never pulled. At **approximate idle**, a human prompt may have started work by the time insertion
-  occurs. Only records safe under their declared `boundary`/`settle` insertion contract may be taken there;
+- **Eligibility is the inbox's:** `turn` serves `boundary`; `settle` serves `boundary` and `settle`; **exact** `idle`
+  serves `start`, `boundary` and `settle`; **approximate** `idle` serves only `boundary` and `settle`, never `start`.
+  `tool` serves `admit`, plus `boundary` where declared an evidenced boundary. `preempt` is never pulled.
+  At **approximate idle**, a human prompt may have started work by the time insertion occurs. Only records safe
+  under their declared `boundary`/`settle` insertion contract may be taken there;
   preserve that mode if the agent is busy, never treat the take as `start` on an assumed idle runtime. If the
   plugin cannot maintain that contract it must not claim the record at that point.
 - **Take:** `coord.inbox.take {op, agent, consumer, at, accept: [block types], max_bytes, limit ≤ 16}` claims, as
@@ -508,10 +509,13 @@ editor-empty evidence, reports `dispatched`, labels the mode unverified and obey
 request containing that hand-off and normal completion evidence; hook success is never evidence. Framing differs
 by path: tool-result / Stop context uses native system-reminder framing; rewake is framed `SYSTEM NOTIFICATION -
 NOT USER INPUT`. These are per-path framing declarations, not permission to present a rewake as plain user
-input or upgrade its authority. Claude's hook-based idle point is approximate (it can race a human prompt);
-Pi's measured idle point is exact. Senders must accept the route's context rendering. Non-interactive Claude
-sessions do not support this idle wake.
-The native session inbox socket is a separate `admit` route without vqro-side edit after posting.
+input or upgrade its authority. Claude's hook-based idle declares **`pull.points.idle.precision: "approximate"`**
+(it can race a human prompt). Records pulled there retain their `boundary`/`settle` contracts; the hook never
+claims or handles them as `start`. Pi declares **`pull.points.idle.precision: "exact"`** for its measured idle point.
+Senders must accept the route's context rendering. Non-interactive Claude sessions do not support this idle wake.
+Starting activity in an idle Claude Code session uses its native session inbox socket (`admit`) or the human,
+not an assumed-idle hook start. That socket is a separate, explicitly selected `admit` route without vqro-side
+edit after posting; it does not turn a held `start` into `admit` or imply a conditional-start guarantee.
 
 ### 7.1 Advisory terminal status
 

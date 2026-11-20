@@ -585,6 +585,9 @@ replaced when the Pi bridge is ported.
   Verified like an extension token, it binds CLI calls to core-assigned `host:<rid>`, never a `hello` assertion or
   an endpoint guessed from placement. Human-opened shells never inherit it. G11 selects the shared-host branch
   on this route; it does not satisfy per-endpoint `tool_principal: "env"` or confer endpoint rights by itself.
+- Claude Code hook idle declares `pull.points.idle.precision: "approximate"`: only boundary/settle records are
+  pulled there, never start. Starting an idle session uses its native session socket via explicitly selected
+  `admit`, or the human, never an assumed-idle hook start or hidden mode fallback. Pi's measured idle is exact.
 
 **Human answers (2026-11-19, CONFIRMED).**
 - **AS1, pause:** "vqro stops delivery": paused means vqro sends, hands out and wakes nothing until resumed; an agent
