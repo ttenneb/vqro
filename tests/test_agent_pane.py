@@ -373,18 +373,25 @@ class AgentPane(unittest.TestCase):
         self.agents.event("resource.removed", {"id": "r2"})
         self.assertNotIn("r2", self.agents.conversations)
 
-    def test_view_chips_write_this_panes_settings_and_make_default_copies_them(self):
+    def gear(self):
+        """Open the pane's ⚙ popup; its rows."""
+        chip = self.core.live["agents-r2"]["toolbar"][0]["chips"][0]
+        reply = self.core.handlers[chip["command"]](dict(chip["args"]))
+        return self.core.live[reply["client"]["popup"]["view"]]["items"]
+
+    def test_view_filters_in_the_gear_write_this_panes_settings_and_make_default_copies_them(self):
         self.feed(snapshot(CONVERSATION))
-        toolbar = next(t for t in self.core.live["agents-r2"]["toolbar"] if any(c["text"].startswith("Thinking") for c in t.get("chips", [])))["chips"]
-        thinking = next(c for c in toolbar if c["text"] == "Thinking: show")
+        toolbar = self.gear()
+        thinking = next(c for c in toolbar if c.get("text") == "Thinking: show")
         self.core.handlers["agents.view"](dict(thinking["args"], value="hide"))
         self.assertEqual(self.core.value("doc/agents/view/r2"), {"thinking": "hide"})
-        senders = next(c for c in toolbar if c["text"] == "Senders: all")
+        senders = next(c for c in toolbar if c.get("text") == "Senders: all")
         self.assertIn("principal:p:lead", [o["value"] for o in senders["options"]])
         self.core.handlers["agents.view"](dict(senders["args"], value="principal:p:lead"))
         self.assertEqual(self.core.value("doc/agents/view/r2")["hidden_senders"], ["principal:p:lead"])
         self.agents.event("entries", {"changes": [{"key": "doc/agents/view/r2"}]})
         self.assertIn("· hidden: 1 thinking", self.texts())
+        self.assertIn("Thinking: hide", [r.get("text") for r in self.core.live["agents-pane-r2"]["items"]], "the open ⚙ follows")
         self.core.handlers["agents.view"]({"resource": "r2", "set": "defaults"})
         self.assertEqual(self.core.value("doc/settings/agents")["view"]["thinking"], "hide")
         self.assertNotIn("hidden_senders", self.core.value("doc/settings/agents")["view"], "senders are per pane")
@@ -413,16 +420,19 @@ class AgentPane(unittest.TestCase):
         pane = self.core.live["agents-r2"]
         items, toolbar = pane["items"], pane["toolbar"]
         self.assertEqual((pane["title"], pane["title_right"], pane["title_right_style"]), ("Pi r2 · ~/Projects/site", "● idle", "ok"))
-        self.assertEqual(len(toolbar), 1, "one line of chrome")
-        gear = toolbar[0]["chips"][0]
-        self.assertEqual((gear["text"], gear["command"]), ("⚙", "agents.pane"))
-        self.assertEqual([o["label"] for o in gear["options"]], ["Bridge terminal (pi-bridge-1)", "Stop agent…"])
-        self.assertFalse(any("Stop" in c["text"] for c in toolbar[0]["chips"]), "no Stop button")
+        self.assertEqual(toolbar, [{"type": "chips", "chips": [{"text": "⚙", "command": "agents.pane", "args": {"resource": "r2"}}]}],
+                         "one small settings button and nothing else (filters fold into it: the human, relay-11)")
         self.assertFalse(any(r.get("text") in ("Bridge terminal", "Agent settings…") for r in items), "no old panel rows")
+        gear = self.gear()
+        self.assertEqual([r.get("text") for r in gear], ["View", "Thinking: show", "Tools: show", "System: show", "Senders: all",
+                                                         "Layout: detailed", "Summary: time, tokens, tools",
+                                                         "Make these the default for agent panes", "Agent",
+                                                         "Bridge terminal (pi-bridge-1)", "Stop agent…"])
         self.core.calls.clear()
-        self.core.handlers["agents.pane"](dict(gear["args"], value="bridge"))
+        bridge, stop = gear[-2], gear[-1]
+        self.assertEqual(self.core.handlers[bridge["command"]](dict(bridge["args"]))["client"], {"close": True})
         self.assertEqual(self.core.calls[-1], ("tabs.show", {"resource": "r9"}))
-        reply = self.core.handlers["agents.pane"](dict(gear["args"], value="stop"))
+        reply = self.core.handlers[stop["command"]](dict(stop["args"]))
         self.assertTrue(reply["client"]["popup"]["view"].startswith("agents-stop-"), "Stop still asks first")
 
     def test_the_composer_offers_auto_and_the_declared_modes_and_sends(self):

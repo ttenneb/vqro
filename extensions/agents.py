@@ -339,6 +339,7 @@ class Agents:
         self.ext, self.lock = ext, threading.RLock()
         self.open_requests = set()
         self.open_settings = set()
+        self.open_pane, self.published_pane = set(), {}  # ⚙ popups shown (republished as the view or agent changes)
         self.published = {}  # Only current agents; suppress unchanged derived panel RPCs.
         # Conversations from item streams; a worker attaches, reattaches and republishes (coalesced).
         self.conversations, self.conv_lock, self.conv_event = {}, threading.Lock(), threading.Event()
@@ -357,7 +358,7 @@ class Agents:
                                 ("send", self.send, "Send a message in a declared delivery mode (args: mode?, text?)"),
                                 ("view", self.set_view, "Show, summarise or hide parts of an agent pane (args: set, value)"),
                                 ("stop", self.stop, "Stop an agent: kill its bridge terminal and the runtime in it (asks first)"),
-                                ("pane", self.pane_menu, "The agent pane's ⚙ menu (args: value = config | bridge | stop)"),
+                                ("pane", self.pane_menu, "The agent pane's ⚙ popup: view filters, settings, bridge terminal, stop"),
                                 ("forget", self.forget, "Forget an unavailable agent's cached facts (its process is not touched)")]:
             ext.command("agents."+name, title)(self.guarded(fn))
         for op, title in EFFECTS.items():
@@ -524,52 +525,62 @@ class Agents:
         self.ext.retrying(write)
         return {"ok": True}
 
-    def view_toolbar(self, r, view, seen):
-        """The pane's one line of chrome: ⚙ (the agent's settings, bridge terminal, stop), then one chip per kind (pick
-        show/summary/hide), senders, density and summary fields."""
-        rid, gear = r["id"], self.gear_chip(r)
-        def chip(text, what, options):
+    def view_rows(self, rid, view, seen):
+        """The pane's view filters, one row each (pick show/summary/hide, senders, density, summary fields)."""
+        def row(text, what, options):
             return {"text": text, "command": "agents.view", "args": {"resource": rid, "set": what}, "options": options}
         modes = [{"label": m, "value": m} for m in agent_transcript.MODES]
         hidden = view["hidden_senders"]
-        return [{"type": "chips", "chips": [
-            *([gear] if gear else []),
-            *[chip(f"{kind.capitalize()}: {view[kind]}", kind, modes) for kind in agent_transcript.KINDS],
-            chip("Senders: all" if not set(hidden) & set(seen) else f"Senders: {len(set(hidden) & set(seen))} hidden", "sender",
-                 [{"label": ("hidden: " if key in hidden else "shown: ") + name, "value": key} for key, name in seen.items()]
-                 or [{"label": "no senders yet", "value": ""}]),
-            chip(view["density"].capitalize(), "density", [{"label": d, "value": d} for d in ("detailed", "compact")]),
-            chip("Summary: " + (", ".join(view["summary"]) or "title only"), "summary",
-                 [{"label": ("✓ " if f in view["summary"] else "  ") + f, "value": f} for f in agent_transcript.SUMMARY_FIELDS]),
-            {"text": "Make default", "command": "agents.view", "args": {"resource": rid, "set": "defaults"}}]}]
+        return [
+            *[row(f"{kind.capitalize()}: {view[kind]}", kind, modes) for kind in agent_transcript.KINDS],
+            row("Senders: all" if not set(hidden) & set(seen) else f"Senders: {len(set(hidden) & set(seen))} hidden", "sender",
+                [{"label": ("hidden: " if key in hidden else "shown: ") + name, "value": key} for key, name in seen.items()]
+                or [{"label": "no senders yet", "value": ""}]),
+            row("Layout: " + view["density"], "density", [{"label": d, "value": d} for d in ("detailed", "compact")]),
+            row("Summary: " + (", ".join(view["summary"]) or "title only"), "summary",
+                [{"label": ("✓ " if f in view["summary"] else "  ") + f, "value": f} for f in agent_transcript.SUMMARY_FIELDS]),
+            {"text": "Make these the default for agent panes", "command": "agents.view", "args": {"resource": rid, "set": "defaults"}}]
 
-    def gear_chip(self, r):
-        """The pane's one settings button (the human, relay-11): ⚙ opens a menu with this agent's settings, its bridge
-        terminal and Stop (also in the pane menu, D15). None when there is nothing to offer."""
-        rid, options = r["id"], []
+    def gear_panel(self, r):
+        """The ⚙ popup (the human, relay-11: everything but the conversation and the message box lives here): the view
+        filters, then this agent's settings, its bridge terminal and Stop (also in the pane menu, D15)."""
+        rid = r["id"]
+        items = [{"type": "header", "text": "View"}]
+        c = self.conversations.get(rid)
+        if c is not None:
+            with c.lock:
+                seen = agent_transcript.senders(c.view.entities, agent_transcript.Names(self.ext.resources, rid, self.ext.owner()))
+            items += self.view_rows(rid, self.view_of(rid), seen)
+        else:
+            items.append({"type": "text", "style": "dim", "text": "This agent doesn't stream its conversation."})
+        items.append({"type": "header", "text": "Agent"})
         if self.has_settings(r) and r.get("available"):
-            options.append({"label": "Agent settings…", "value": "config"})
+            items.append({"text": "Agent settings…", "command": "agents.config", "args": {"resource": rid}})
         host = self.ext.resources.get(r.get("host"))
         if host and host.get("kind") == "terminal":
-            options.append({"label": "Bridge terminal (" + label(host.get("name") or host["id"], 60) + ")", "value": "bridge"})
+            items.append({"text": "Bridge terminal (" + label(host.get("name") or host["id"], 60) + ")", "command": "agents.pane",
+                          "args": {"resource": rid, "value": "bridge"}})
         if self.can_stop(r):
-            options.append({"label": "Stop agent…", "value": "stop"})
-        return {"text": "⚙", "command": "agents.pane", "args": {"resource": rid}, "options": options} if options else None
+            items.append({"text": "Stop agent…", "style": "warn", "command": "agents.stop", "args": {"resource": rid}})
+        return {"title": label(r.get("name") or "Agent") + " " + rid, "requires": ["menu"], "items": items}
 
     def pane_menu(self, args):
-        """What the ⚙ menu chose (`value`: config, bridge or stop)."""
-        choice = args.get("value")
-        if choice == "config":
-            return self.settings(args)
-        if choice == "stop":
-            return self.stop(args)
-        if choice == "bridge":
-            r = self.agent(args, inspect=True)
+        """agents.pane {resource}: open the ⚙ popup; {value: bridge}: show the agent's bridge terminal (from it)."""
+        self.ext.fresh()
+        r = self.agent(args, inspect=True)
+        if args.get("value") == "bridge":
             host = self.ext.resources.get(r.get("host"))
             if not host or host.get("kind") != "terminal":
                 raise VqroError("this agent has no bridge terminal", "not_found")
-            return self.ext.invoke("tabs.show", {"resource": host["id"]})
-        raise VqroError("unknown choice: " + label(str(choice), 40), "invalid")
+            result = self.ext.invoke("tabs.show", {"resource": host["id"]})
+            return {**(result if isinstance(result, dict) else {}), "client": {"close": True}}
+        target = "agents-pane-" + r["id"]
+        with self.lock:
+            self.open_pane.add(r["id"])
+            content = self.gear_panel(r)
+            self.ext.publish(target, content)
+            self.published_pane[r["id"]] = content
+        return {"client": {"popup": {"view": target, "width": 60}}}
 
     def frame(self, r):
         """The pane's frame: name · folder as the title, the live state at its right end (feature-free fallback: the
@@ -1342,11 +1353,9 @@ class Agents:
         conversation = self.conversation_rows(r)
         if conversation is not None:
             # The agent's own item stream: the conversation is drawn here (agent pane, K3 phase 2).
-            c = self.conversations[r["id"]]
-            with c.lock:
-                seen = agent_transcript.senders(c.view.entities, agent_transcript.Names(self.ext.resources, r["id"], self.ext.owner()))
             content = {**self.frame(r), "follow": True, "search": True,
-                       "toolbar": self.view_toolbar(r, self.view_of(r["id"]), seen),
+                       # One small ⚙ (the human, relay-11); the filters, settings, bridge terminal and Stop are in it.
+                       "toolbar": [{"type": "chips", "chips": [{"text": "⚙", "command": "agents.pane", "args": {"resource": r["id"]}}]}],
                        "items": [*conversation, *self.bottom_rows(r),
                 agent_transcript.facts_footer(agent_facts(r), plain(str(r.get("name") or r["id"])))]}
         elif sources:
@@ -1463,7 +1472,7 @@ class Agents:
             # client must already know: a view written by the same click can reach a client after the reply, and the
             # popup is then dropped ("popup: no view"). Opening a popup writes no workspace state.
             for popup, title in (("stop", "Stop agent"), ("requests", "Pending requests"), ("settings", "Agent settings"),
-                                 ("send", "Send to agent")):
+                                 ("send", "Send to agent"), ("pane", "Agent pane")):
                 entries[f"view/agents-{popup}-{rid}"] = {"kind": "panel", "title": f"{title} {rid}", "items": [
                     {"type": "text", "text": "Loading… (stays if the agents extension is not running)"}]}
             entries["menu/agents."+rid+".stop"] = {"where": "pane", "label": "Stop agent…", "command": "agents.stop",
@@ -1534,9 +1543,16 @@ class Agents:
             if self.published.get(rid) != content:
                 self.ext.publish(view(rid), content)
                 self.published[rid] = content
+            if rid in self.open_pane:
+                gear = self.gear_panel(resource)
+                if self.published_pane.get(rid) != gear:
+                    self.ext.publish("agents-pane-" + rid, gear)
+                    self.published_pane[rid] = gear
 
     def publish_gone(self, rid):
         self.published.pop(rid, None)
+        self.open_pane.discard(rid)
+        self.published_pane.pop(rid, None)
         entry = self.ext.entries.get("view/"+view(rid), {})
         if entry.get("value", {}).get("owner") == "agents":
             self.ext.publish(view(rid), {"items": [{"type": "text", "style": "warn", "text": "Agent gone (facts not currently available); no operation sent. Close this tab or use Close ended tabs."}]})
