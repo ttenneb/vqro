@@ -118,6 +118,18 @@ An independent TTY monitor redraws native status, queue/dialog summaries and the
 is unavailable. Its raw-write thread has one latest-frame slot and never holds Rust's global stdout lock. A stalled
 terminal cannot block the native reader or process shutdown; it is never joined at exit. No colour escapes.
 
+## Effective input origin (C2)
+Before admission or any native write, `agent.send` binds `origin.principal` to the core's effective principal
+(including exact delegation) and `origin.actor` to its recorded transport actor. Missing identities mean
+`undeclared`; a supplied mismatch is `forbidden`, not a relabelled/replayed input. Core `initiator` is retained
+separately as `origin.initiator`; a supplied conflicting initiator also refuses before write. Identity fields
+accept C2's256-byte bound. Caller-classified `kind`/`agent` remain unchanged and are explicitly listed in
+`origin.claimed`; native framing calls these asserted claims, never authority inferred from names/prefixes.
+Quoted provenance remains asserted and unchanged. Plain user rendering remains unsupported without verified
+owner evidence. Receipts retain the same bound origin; neither ACK nor identity binding proves insertion or
+handling. Private SDK/native tests prove spoofed principal/actor/initiator write nothing, and one delegated
+send yields exactly one native prompt with distinct effective sender/transport actor/initiator.
+
 ## Tool principal environment (G11)
 The owned child inherits only VQRO_SOCKET and VQRO_PRINCIPAL from the VQRO namespace, unchanged; supervision
 credentials/configuration and every HERDR variable stay excluded. The launcher assigns the principal, not rN.

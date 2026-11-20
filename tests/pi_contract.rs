@@ -74,9 +74,21 @@ fn bounded_images_ids_and_unrepresentable_fields_refuse() {
     args["content"][0]["data"]=json!("not-base64");refusal(&args,&context(),"invalid");
     args=input();args["content"][0]["annotation"]=json!("cannot be silently dropped");refusal(&args,&context(),"unsupported");
     args=input();args["unexpected_semantic_argument"]=json!(true);refusal(&args,&context(),"unsupported");
-    args=input();args["origin"]["principal"]=json!("雪".repeat(43));refusal(&args,&context(),"invalid");
+    args=input();args["origin"]["principal"]=json!("雪".repeat(86));refusal(&args,&context(),"invalid");
     args=input();args["content"][0]["text"]=json!("x".repeat(contract::input_bytes()));refusal(&args,&context(),"too_large");
     args=input();refusal(&args,&Context {literal:false,..context()},"unsupported");
+}
+
+#[test]
+fn effective_origin_uses_core_identity_and_keeps_role_claims_and_initiator_separate(){
+    let attribution:vqro::principal::Attribution=serde_json::from_value(json!({"principal":"p:sender","actor":"extension:coord","initiator":"p:original"})).unwrap();
+    let mut args=input();args["origin"]=json!({"principal":"p:sender","actor":"extension:coord","kind":"human","agent":"r99","claimed":[]});args["quoted"]=json!({"label":"asserted original","principal":"other"});
+    let bound=contract::bind_origin(&args,&attribution).unwrap();assert_eq!(bound["origin"]["initiator"],"p:original");assert_eq!(bound["origin"]["actor"],"extension:coord");assert_eq!(bound["origin"]["kind"],"human");assert_eq!(bound["origin"]["claimed"],json!(["kind","agent"]));assert_eq!(bound["quoted"],args["quoted"]);
+    let prepared=send(&bound,&context()).unwrap();assert!(prepared.args["message"].as_str().unwrap().contains("claimed fields are asserted"));assert_eq!(prepared.origin,bound["origin"]);
+    for field in ["principal","actor","initiator"]{let mut spoofed=bound.clone();spoofed["origin"][field]=json!("owner");assert_eq!(contract::bind_origin(&spoofed,&attribution).err().unwrap().kind,"forbidden");}
+    let mut unknown=input();unknown["origin"]=json!({"kind":"_"});let bound=contract::bind_origin(&unknown,&Default::default()).unwrap();assert_eq!(bound["origin"]["principal"],"undeclared");assert_eq!(bound["origin"]["actor"],"undeclared");assert!(bound["origin"].get("initiator").is_none());
+    assert_eq!(contract::bind_origin(&unknown,&attribution).err().unwrap().kind,"forbidden");
+    let long="p".repeat(256);unknown["origin"]["principal"]=json!(long);unknown["origin"]["actor"]=json!(long);let attribution=serde_json::from_value(json!({"principal":long,"actor":long})).unwrap();assert!(send(&contract::bind_origin(&unknown,&attribution).unwrap(),&context()).is_ok());
 }
 
 #[test]

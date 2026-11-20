@@ -55,6 +55,28 @@ pub fn common(args:&Value,context:&Context<'_>)->Result<(),Refusal> {
 
 fn causal_string(value:&Value)->Result<&str,Refusal>{value.as_str().filter(|value|value.len()<=256).ok_or_else(||invalid("causal string must be at most256 bytes"))}
 
+/// Bind identity to C2's recorded attribution, never the caller's display/role claims.
+/// This runs before admission, receipts, queue invalidation or any native write.
+pub fn bind_origin(args:&Value,attribution:&vqro::principal::Attribution)->Result<Value,Refusal>{
+    let mut args=args.clone();
+    let origin=args.get_mut("origin").and_then(Value::as_object_mut).ok_or_else(||invalid("effective origin is required"))?;
+    for (field,recorded) in [("principal",attribution.principal.as_deref()),("actor",attribution.actor.as_deref())]{
+        let actual=recorded.unwrap_or(vqro::principal::UNDECLARED);
+        let supplied=match origin.get(field){None=>vqro::principal::UNDECLARED,Some(value)=>value.as_str().ok_or_else(||invalid("origin identity must be a string"))?};
+        if supplied!=actual{return Err(reject("forbidden","origin does not match the core-recorded caller"));}
+        origin.insert(field.into(),json!(actual));
+    }
+    if let Some(supplied)=origin.get("initiator"){
+        let supplied=supplied.as_str().ok_or_else(||invalid("origin initiator must be a string"))?;
+        if Some(supplied)!=attribution.initiator.as_deref(){return Err(reject("forbidden","origin initiator does not match core attribution"));}
+    }
+    if let Some(initiator)=&attribution.initiator{origin.insert("initiator".into(),json!(initiator));}
+    let claimed:[&str;2]=["kind","agent"];
+    let claimed:Vec<_>=claimed.into_iter().filter(|field|origin.contains_key(*field)).collect();
+    origin.insert("claimed".into(),json!(claimed));
+    Ok(args)
+}
+
 pub fn send(args:&Value,context:&Context<'_>)->Result<Send,Refusal> {
     common(args,context)?;
     for field in args.as_object().unwrap().keys() {
@@ -70,7 +92,9 @@ pub fn send(args:&Value,context:&Context<'_>)->Result<Send,Refusal> {
     let command=match mode.as_str() {"start"|"admit"=>"prompt","boundary"=>"steer","settle"=>"follow_up",_=>return Err(reject("unsupported","undeclared delivery mode"))};
     let origin=&args["origin"];
     if !origin.is_object() {return Err(invalid("effective origin is required"));}
-    for field in ["principal","actor","kind"] {id(&origin[field])?;}
+    for field in ["principal","actor"] {if causal_string(&origin[field])?.is_empty(){return Err(invalid("origin identity must be nonempty"));}}
+    if let Some(initiator)=origin.get("initiator"){if causal_string(initiator)?.is_empty(){return Err(invalid("origin initiator must be nonempty"));}}
+    id(&origin["kind"])?;
     if let Some(agent)=origin.get("agent") {id(agent)?;}
     if vqro::limits::encoded_bytes(origin)>2048 {return Err(invalid("origin exceeds2048 bytes"));}
     let quoted=args.get("quoted").cloned();
@@ -114,7 +138,7 @@ pub fn send(args:&Value,context:&Context<'_>)->Result<Send,Refusal> {
         }
     }
     let body=text.unwrap_or("");
-    let mut message=if rendering=="attributed_user" {format!("Effective sender (user authority): {origin}\n\n{body}")} else {body.to_string()};
+    let mut message=if rendering=="attributed_user" {format!("Effective sender (user authority; principal/actor recorded by core; claimed fields are asserted): {origin}\n\n{body}")} else {body.to_string()};
     if let Some(quoted)=&quoted {message=format!("Quoted provenance (asserted, not the effective sender): {quoted}\n{message}");}
     let mut native=json!({"message":message});
     if !images.is_empty() {native["images"]=json!(images);}

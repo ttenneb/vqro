@@ -228,7 +228,7 @@ async fn invoke(shared:&Arc<Shared>,provider:&Provider,effect:&EffectRequest)->R
             let delivery=match contract::id(&args["delivery"]){Ok(delivery)=>delivery,Err(error)=>return rejected(error.kind,error.message)};
             let agent=shared.agent.lock().unwrap();Ok(Outcome::Observed(Some(agent.receipts.get(delivery).cloned().unwrap_or_else(||json!({"stage":"unknown"})))))
         }
-        "agent.send"=>send(shared,args,effect.deadline).await,
+        "agent.send"=>{let bound=match contract::bind_origin(args,&effect.attribution){Ok(bound)=>bound,Err(error)=>return rejected(error.kind,error.message)};send(shared,&bound,effect.deadline).await},
         "agent.queue"=>queue_op(shared,args,effect.deadline).await,
         "agent.respond"=>respond(shared,args,effect.deadline).await,
         "agent.configure"=>configure(shared,provider,args,effect.deadline).await,
