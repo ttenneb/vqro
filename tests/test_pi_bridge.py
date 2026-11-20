@@ -47,6 +47,26 @@ class PiBridgeTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             Limits(event_rows=0)
 
+    async def test_agent_start_ends_preflight_even_when_the_prompt_ack_arrived_first(self):
+        # The prompt ACK is read before agent_start, so prompt() leaves the clear to _confirm_start,
+        # which runs later. A turn that starts and settles in the same read must not report
+        # settled-but-working meanwhile (the retry-status race seen in the C2 gate).
+        client = PiRpcClient(Limits(), set())
+        client._facts["available"] = True
+        client._start_pending = True
+        client._status()
+        self.assertEqual(client.snapshot()["status"], "working")
+        for record in ({"type": "agent_start"}, {"type": "turn_start"},
+                       {"type": "auto_retry_start", "attempt": 1, "maxAttempts": 1, "delayMs": 0, "errorMessage": "x"},
+                       {"type": "message_end", "message": {"role": "assistant", "content": "ok", "stopReason": "stop"}},
+                       {"type": "auto_retry_end", "attempt": 1, "success": True},
+                       {"type": "agent_end", "messages": [], "willRetry": False}, {"type": "agent_settled"}):
+            client._record(record)
+        facts = client.snapshot()
+        self.assertEqual(facts["run"], {"active": False, "settled": True, "aborted": None})
+        self.assertFalse(facts["start_pending"])
+        self.assertEqual(facts["status"], "done")
+
     async def test_owned_exit_uses_native_notification_not_sleep_polling(self):
         with mock.patch("pi_bridge.client.asyncio.sleep",side_effect=AssertionError("owned exit polled")):
             owned=asyncio.create_task(self.client._owned_exit())

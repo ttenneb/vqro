@@ -458,6 +458,10 @@ class PiRpcClient:
             future.set_result(result)
         elif kind == "agent_start":
             self._starts += 1
+            # Pi has proved the start: preflight is over even if the prompt ACK arrived first and
+            # _confirm_start has not run yet (it still releases the start gate). Otherwise a turn
+            # that settles in the same read reports settled but "working".
+            self._start_pending = False
             if not (self._facts.get("retry") or {}).get("active"):
                 self._facts.update(failure=None, retry=None)
             self._facts["run"] = {"active": True, "settled": False, "aborted": None}
