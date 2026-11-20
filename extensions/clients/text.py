@@ -158,6 +158,8 @@ class TextClient:
         if tab:
             tab_path, tab_index, tabs = tab
             ctx.update(tab_path=tab_path, tab_index=tab_index, tab_title=(tabs[tab_index] or {}).get("title"))
+        if self.shown_of(view) != view:
+            ctx["shown_view"] = self.shown_of(view)
         return ctx
 
     def show(self):
@@ -193,16 +195,25 @@ class TextClient:
             lines.append("! safe mode is on: `safe` shows the recovery choices")
         return lines
 
+    def shown_of(self, view):
+        """The view drawn for `view`: itself, or its fallback when this client can't render it (D29)."""
+        if view == model.SAFE_MODE_VIEW:
+            return view
+        shown, _ = model.shown_view(view, lambda v: model.merged(v, self.ws.entries, self.ws.live),
+                                    lambda v: model.renders(v, ["panel", "terminal"], FEATURES))
+        return shown or view
+
     def kind_of(self, view):
         if view == model.SAFE_MODE_VIEW:
             return "panel"
-        return text_of((self.ws.entries.get(f"view/{view}") or {}).get("kind")) or "missing view"
+        return text_of((self.ws.entries.get(f"view/{self.shown_of(view)}") or {}).get("kind")) or "missing view"
 
     # ---- panels ---------------------------------------------------------------------------------------------
 
     def panel_value(self, view):
         if view == model.SAFE_MODE_VIEW:
             return model.safe_chooser(self.ws, self.safe_selected)
+        view = self.shown_of(view)
         value = dict(self.ws.entries.get(f"view/{view}") or {})
         live = self.ws.live.get(view)
         if isinstance(live, dict):
@@ -228,7 +239,7 @@ class TextClient:
         self.shown, self.listed = view, []
         title = self.view_title(view) if view != model.SAFE_MODE_VIEW else "Safe mode recovery"
         if kind == "terminal":
-            r = self.ws.resources.get((self.ws.entries.get(f"view/{view}") or {}).get("resource")) or {}
+            r = self.ws.resources.get((self.ws.entries.get(f"view/{self.shown_of(view)}") or {}).get("resource")) or {}
             return [f"{title}: terminal {text_of(r.get('id'))} ({text_of(r.get('state')) or 'unknown'}); this client does not show terminal contents"]
         if kind != "panel":
             return [f"{title}: view kind `{kind}` is not supported by this client"]
@@ -243,7 +254,7 @@ class TextClient:
             lines.append("pages: " + "  ".join(f"[{i + 1}:{text_of(p.get('title'))}{'*' if i == min(st['page'], len(pages) - 1) else ''}]" for i, p in enumerate(pages)))
         if st["filter"]:
             lines.append(f"filter: {st['filter']}")
-        for r in model.rows(value, st["page"], st["filter"], st["open"]):
+        for r in model.rows(value, st["page"], st["filter"], st["open"], FEATURES):
             # Only rows you can act on get a number.
             if model.selectable(r["item"]):
                 self.listed.append(r)

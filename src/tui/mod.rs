@@ -1004,8 +1004,18 @@ impl App {
         }
     }
 
+    /// The kind actually drawn for a view: its own, or its fallback's when this client can't render it.
     fn view_kind(&self, view: &str) -> String {
-        self.ws.entries.get(&format!("view/{view}")).and_then(|v| v["kind"].as_str()).unwrap_or("").to_string()
+        if view == SAFE_MODE_VIEW { return "panel".into(); }
+        let shown = self.shown_view(view).0.unwrap_or_else(|| view.to_string());
+        self.ws.entries.get(&format!("view/{shown}")).and_then(|v| v["kind"].as_str()).unwrap_or("").to_string()
+    }
+
+    /// View-kind fallback (D29): the view drawn for `view`, and the views its chain visited.
+    fn shown_view(&self, view: &str) -> (Option<String>, Vec<String>) {
+        let (entries, live) = (&self.ws.entries, &self.ws.live);
+        crate::ui_model::view::shown(view, &|id| crate::ui_model::view::merged(id, entries, live),
+            &|v| crate::ui_model::view::renders(v, &["terminal", "panel"], panel::SUPPORTED))
     }
 
     fn open_safe_chooser(&mut self) {
@@ -1023,7 +1033,10 @@ impl App {
     fn panel_value(&self, view: &str) -> Arc<Value> {
         if view==SAFE_MODE_VIEW { return Arc::new(self.safe_chooser_value()); }
         if let Some(value) = self.panel_values.lock().unwrap().get(view).cloned() { return value; }
-        let (mut v, deps) = compose::resolve(view, &self.ws.entries, &self.ws.live);
+        // A pane keeps its view id; its content may come from the view's fallback (D29).
+        let (shown, chain) = self.shown_view(view);
+        let (mut v, mut deps) = compose::resolve(shown.as_deref().unwrap_or(view), &self.ws.entries, &self.ws.live);
+        deps.extend(chain);
         self.panel_dependencies.lock().unwrap().insert(view.into(), deps);
         window::mark_current(&mut v, self.window.shown(&self.ws).as_deref());
         let v = Arc::new(v);
@@ -1495,6 +1508,8 @@ impl App {
             "layout": layout, "layout_version": version, "path": path,
             "view": view, "kind": v["kind"], "resource": resource, "resource_kind": resource_kind, "live": live, "title": self.view_title(view),
         });
+        // Drawn through its fallback (D29): commands still address the pane's own view.
+        if let Some(shown) = self.shown_view(view).0.filter(|s| s != view) { ctx["shown_view"] = json!(shown); }
         // The innermost tab holding this pane, so tab commands work from the keyboard too.
         if let Some((_, mut root)) = self.active_layout() {
             for depth in (0..path.len()).rev() {
@@ -2192,9 +2207,14 @@ impl App {
 
     fn draw_view(&mut self, f: &mut Frame, view: &str, rect: Rect, focused: bool, pal: &Palette, icons: &Icons) -> Option<(u16, u16)> {
         let border = pal.border(focused);
-        let Some(v) = self.ws.entries.get(&format!("view/{view}")).cloned() else {
+        let Some(original) = self.ws.entries.get(&format!("view/{view}")).cloned() else {
             f.render_widget(Paragraph::new(format!("view {view} is missing")).block(Block::bordered().border_style(border)), rect);
             return None;
+        };
+        // Draw the view's fallback when this client can't render it; the pane keeps the original view id.
+        let v = match self.shown_view(view).0 {
+            Some(shown) if shown != view => self.ws.entries.get(&format!("view/{shown}")).cloned().unwrap_or(original),
+            _ => original,
         };
         match v["kind"].as_str().unwrap_or("") {
             "terminal" => {
@@ -2917,6 +2937,25 @@ mod tests {
         assert!(app.safe_selected.contains("draft"));
         app.overlay=None;let mut later=snap.clone();later["epoch"]=json!("two");
         app.reconnected(app.peer.clone(),&later);assert!(app.overlay.is_none(),"reconnect must not steal focus");assert!(app.safe_selected.contains("draft"));
+    }
+
+    #[tokio::test]
+    async fn unknown_view_kinds_draw_their_fallback_and_follow_its_live_content() {
+        let (mut app,_) = app();
+        app.load(&json!({"epoch":"e","seq":1,"entries":{
+            "view/canvas":{"value":{"kind":"x.acme.canvas","fallback":"canvas.rows"}},
+            "view/canvas.rows":{"value":{"kind":"panel","items":[{"text":"static"}]}},
+            "view/odd":{"value":{"kind":"x.acme.odd"}}}}));
+        assert_eq!(app.view_kind("canvas"),"panel");
+        assert_eq!(app.panel_value("canvas")["items"][0]["text"],"static");
+        assert_eq!(app.view_kind("odd"),"x.acme.odd","no fallback: the labelled placeholder");
+        // Live content of the fallback view invalidates the pane that shows it.
+        app.on_event_record(&json!({"epoch":"e","seq":2,"type":"view.content","data":{"view":"canvas.rows","content":{"items":[{"text":"live"}]}}}));
+        assert_eq!(app.panel_value("canvas")["items"][0]["text"],"live");
+        // A newer client claims the kind; this one keeps the fallback, and the original changing is seen too.
+        app.on_event_record(&json!({"epoch":"e","seq":3,"type":"entries","data":{"author":"x","txn":1,"changes":[
+            {"key":"view/canvas","version":2,"value":{"kind":"panel","items":[{"text":"now a panel"}]}}]}}));
+        assert_eq!(app.panel_value("canvas")["items"][0]["text"],"now a panel");
     }
 
     #[tokio::test]

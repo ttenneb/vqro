@@ -78,8 +78,59 @@ def _matches(item, f):
     return f in hay.lower()
 
 
-def _subtree(item, f):
-    return _matches(item, f) or any(_subtree(c, f) for c in item.get("children") or [])
+ROW_TYPES = ["item", "toggle", "header", "separator", "text", "chips", "select"]
+MAX_CHAIN = 4
+
+
+def _native(item, features):
+    return (kind(item) in ROW_TYPES or kind(item) in features) and not missing_for(item, features)
+
+
+def _chips(item, features):
+    if kind(item) != "chips" or not isinstance(item.get("chips"), list):
+        return item
+    shown = []
+    for chip in item["chips"]:
+        for _ in range(4):
+            if not isinstance(chip, dict) or not missing_for(chip, features):
+                break
+            fb = chip.get("fallback")
+            if fb == "drop":
+                chip = None
+                break
+            if not isinstance(fb, dict):
+                break
+            chip = fb
+        if chip is not None:
+            shown.append(chip)
+    return dict(item, chips=shown)
+
+
+def expand(item, rid, features, depth=0):
+    """Element fallback: [(row, id)] shown for one item (D29)."""
+    own = item["id"] if isinstance(item.get("id"), str) else rid
+    if depth >= 4 or _native(item, features) or "fallback" not in item:
+        return [(_chips(item, features), own)]
+    fb = item["fallback"]
+    if fb == "drop":
+        return []
+    if isinstance(fb, dict):
+        return expand(fb, own, features, depth + 1)
+    if isinstance(fb, list):
+        out = []
+        for n, row in enumerate(fb):
+            if isinstance(row, dict):
+                out += expand(row, own if len(fb) == 1 else f"{own}~{n}", features, depth + 1)
+        return out
+    return [(_chips(item, features), own)]
+
+
+def _shown(items, prefix, features):
+    return [pair for i, item in enumerate(items) if isinstance(item, dict) for pair in expand(item, f"{prefix}{i}", features)]
+
+
+def _subtree(item, rid, f, features):
+    return _matches(item, f) or any(_subtree(c, cid, f, features) for c, cid in _shown(item.get("children") or [], rid + "/", features))
 
 
 def page_items(value, page=0):
@@ -91,16 +142,15 @@ def page_items(value, page=0):
     return value.get("items") or []
 
 
-def rows(value, page=0, filter="", open=None):
-    """Visible rows after toolbar, pages, tree expansion and filtering: dicts {item, depth, id, parent,
-    has_children, expanded, pinned}. `open` is the user's expansion by row id."""
+def rows(value, page=0, filter="", open=None, features=BASE_FEATURES):
+    """Visible rows after toolbar, pages, element fallbacks, tree expansion and filtering: dicts {item, depth, id,
+    parent, has_children, expanded, pinned}. `open` is the user's expansion by row id."""
     open, f, out = open or {}, filter.lower(), []
 
     def walk(items, depth, parent, prefix):
-        for i, item in enumerate(items):
-            if f and not _subtree(item, f):
+        for item, rid in _shown(items, prefix, features):
+            if f and not _subtree(item, rid, f, features):
                 continue
-            rid = item["id"] if isinstance(item.get("id"), str) else f"{prefix}{i}"
             children = item.get("children") or []
             expanded = bool(children) and (bool(f) or open.get(rid, item.get("expanded") is True))
             shown = {k: v for k, v in item.items() if k != "children"}
@@ -110,10 +160,40 @@ def rows(value, page=0, filter="", open=None):
             if expanded:
                 walk(children, depth + (kind(item) != "header"), me, rid + "/")
 
-    for i, item in enumerate(value.get("toolbar") or []):
-        out.append({"item": item, "depth": 0, "id": f"toolbar/{i}", "parent": None, "has_children": False, "expanded": False, "pinned": True})
+    for n, (item, _) in enumerate(_shown(value.get("toolbar") or [], "toolbar/", features)):
+        out.append({"item": item, "depth": 0, "id": f"toolbar/{n}", "parent": None, "has_children": False, "expanded": False, "pinned": True})
     walk(page_items(value, page), 0, None, "")
     return out
+
+
+# ---- view-kind fallback -----------------------------------------------------------------------------------------
+
+def merged(view, entries, live):
+    """A view's entry with its live content merged over it, or None (`entries` maps `view/<id>` to values)."""
+    v = entries.get(f"view/{view}")
+    if not isinstance(v, dict):
+        return None
+    return dict(v, **live[view]) if isinstance(live.get(view), dict) else dict(v)
+
+
+def renders(v, kinds, features):
+    return v.get("kind") in kinds and not missing_for(v, features)
+
+
+def shown_view(view, value, can_render):
+    """(view to draw or None for the placeholder, views visited) following `fallback` (D29)."""
+    chain, current = [], view
+    while len(chain) <= MAX_CHAIN and current not in chain:
+        chain.append(current)
+        v = value(current)
+        if v is None:
+            return None, chain
+        if can_render(v):
+            return current, chain
+        if not isinstance(v.get("fallback"), str):
+            return None, chain
+        current = v["fallback"]
+    return None, chain
 
 
 # ---- workspace cache and contributions ----------------------------------------------------------------------

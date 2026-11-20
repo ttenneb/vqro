@@ -721,13 +721,16 @@ what it renders in `hello {client, version, build?, profiles, features}`:
 - **`keys`**: the prefix key with the `C-g` fallback, binding precedence and `client.*` commands.
 - **Optional features** are the other ids (`badge_color`, `icon_names`, `list_detail`, `embedded_views`, `filter`,
   `current_when`,
-  or a third party's `x.<owner>.<name>@<major>`). Content using one must keep a fallback: scope it inside the
-  enhancement (as `list_detail` does) so the plain content remains, or accept that clients without it show the
-  panel's "missing" notice. Clients never tailor shared content per client: several clients view one workspace.
+  or a third party's `x.<owner>.<name>@<major>`). Content using one must keep a fallback: a row's or view's
+  `fallback` (below, "Fallbacks"), or a scoped enhancement (as `list_detail`) so the plain content remains;
+  otherwise clients without it show the panel's "missing" notice. A view kind is a feature too: a client claims
+  `x.acme.canvas@1` to render that kind. Clients never tailor shared content per client: several clients view
+  one workspace.
 
 The shared definitions are executable fixtures: `tests/fixtures/client/panels.json` (flattening, `requires`),
-`contributions.json` (menus, key and gesture precedence), `recovery.json` (prefix recovery rows, safe-mode
-chooser) and `window.json` (which layout a window shows, its invocation context, `current_when` marks). The Rust model (`src/ui_model`) and every bundled client are checked against them.
+`views.json` (view-kind fallbacks), `contributions.json` (menus, key and gesture precedence), `recovery.json`
+(prefix recovery rows, safe-mode chooser) and `window.json` (which layout a window shows, its invocation context,
+`current_when` marks). The Rust model (`src/ui_model`) and every bundled client are checked against them.
 
 `vqro ui [<client>]` starts a client (the core too, if needed). Without a name, or with `tui`, it runs the built-in
 terminal client, which is always present so recovery never depends on an optional client. Other clients are
@@ -838,7 +841,7 @@ and sets the prefix; the active profile is `doc/keys/profile`, and the list is l
   substring), the title shows "n of m", arrows/Enter/clicks act on the kept rows, Esc clears the text before
   closing. Client-only; extensions need nothing new. `toolbar: [row]` pins rows above the
   list. Clients handle `client.panel {action: expand_all|collapse_all|filter|clear_filter}` for the panel it came
-  from. Panels list needed features in `requires`. Unknown types render as plain items. Selection, expansion, page, filter and scroll are client
+  from. Panels list needed features in `requires`. Unknown types render as plain items, or as their `fallback` (Fallbacks). Selection, expansion, page, filter and scroll are client
   state. Styles are semantic names resolved through the theme (below): `bold`, `dim`, `muted`, `warn`, `error`, `ok`,
   `accent`, `plain`; unknown names render plain. A badge may also carry `color` (a theme colour value) to show a
   colour as data, e.g. a swatch (feature `badge_color`; clients without it show a neutral badge). Use styles for
@@ -852,6 +855,22 @@ and sets the prefix; the active profile is `doc/keys/profile`, and the list is l
   layout is "current" for everyone. A row with `current_when: {"layout": name}` is drawn as current (accent,
   a leading "current" badge) in a window that shows layout `name`, and plainly elsewhere and in clients
   without the feature (`current_when` in `requires` if a panel depends on it).
+
+### Fallbacks (D29)
+
+New row types, components and view kinds are progressive enhancements: every client shows something correct.
+- **Rows and chips.** A row may carry scoped `requires: [feature]` and `fallback`: a row, a list of rows, or
+  `"drop"`. A client that doesn't know the row's `type` (base types: item, toggle, header, separator, text, chips,
+  select; namespaced types like `x.acme.table` need their feature) or lacks a scoped feature shows the fallback
+  instead, applying the same rule (at most four levels). Without `fallback` the row stays a plain item, as before.
+  Fallbacks apply before flattening, so filtering, selection and counts see what is shown; a fallback row without
+  an `id` inherits the original's (`<id>~<n>` for list entries). A chip's fallback is a chip or `"drop"`.
+- **Views.** A view may carry `fallback: "<view id>"`. A client that can't render the view (unknown kind, or
+  unmet outer `requires`) draws the first renderable view along the `fallback` chain (at most four steps, no
+  cycles), else its labelled placeholder. Usually the fallback is a `panel` the extension publishes live, or a
+  `terminal` running a program that draws the same thing. The pane keeps its identity: `args.context.view` stays the
+  original id, with `shown_view` naming the view drawn. Popups and embedded references follow fallbacks too.
+- Manifests declare a kind as `works_with: ["ui/<kind>@<major>"]`, never `needs` (the fallback is mandatory).
 
 ### Optional list with detail (`list_detail`)
 

@@ -31,7 +31,8 @@ class Conformance(unittest.TestCase):
                 s, p = case["state"], case["panel"]
                 got = [{"id": r["id"], "depth": r["depth"], "text": r["item"].get("text"), "type": model.kind(r["item"]),
                         "has_children": r["has_children"], "expanded": r["expanded"], "pinned": r["pinned"],
-                        "selectable": model.selectable(r["item"])}
+                        "selectable": model.selectable(r["item"]),
+                        "chips": [c.get("text") for c in r["item"]["chips"]] if "chips" in r["item"] else None}
                        for r in model.rows(p, s.get("page", 0), s.get("filter", ""), s.get("open"))]
                 enhancement = None
                 if isinstance(p.get("list_detail"), dict):
@@ -87,6 +88,14 @@ class Conformance(unittest.TestCase):
                     out["shown"] = win.shown(ws)
                     got.append(out)
                 self.assertEqual(got, case["expect"])
+
+    def test_views(self):
+        doc = fixture("views.json")
+        for case in doc["cases"]:
+            with self.subTest(case["name"]):
+                shown, chain = model.shown_view(case["view"], lambda v: model.merged(v, doc["entries"], doc["live"]),
+                                                lambda v: model.renders(v, doc["kinds"], model.BASE_FEATURES))
+                self.assertEqual({"shown": shown, "chain": chain}, case["expect"])
 
     def test_key_names_follow_the_spec(self):
         for raw, want in (("C-space", "C-Space"), ("Ctrl-Shift-Left", "C-S-Left"), ("C-Q", "C-q"), ("S-a", None), ("Hyper-x", None),

@@ -43,7 +43,14 @@ pub fn resolve(view: &str, entries: &BTreeMap<String, Value>, live: &HashMap<Str
                 if row["type"] == "view" {
                     let source = row["view"].as_str().unwrap_or("");
                     self.deps.insert(source.into());
-                    let panel = value(source, self.entries, self.live);
+                    let mut panel = value(source, self.entries, self.live);
+                    // View-kind fallback (D29): a source this client can't render is embedded as its fallback panel.
+                    for _ in 0..crate::ui_model::view::MAX_CHAIN {
+                        if panel["kind"] == "panel" && super::panel::missing(&panel).is_empty() { break; }
+                        let Some(next) = panel["fallback"].as_str().map(String::from) else { break };
+                        self.deps.insert(next.clone());
+                        panel = value(&next, self.entries, self.live);
+                    }
                     if depth >= 8 || self.seen.contains(source) || panel["kind"] != "panel" || !panel["items"].is_array() || !super::panel::missing(&panel).is_empty() {
                         result.push(json!({"type":"text","style":"dim","text":row["text"].as_str().unwrap_or("Referenced panel unavailable or unsupported.")}));
                     } else {

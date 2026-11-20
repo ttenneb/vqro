@@ -99,39 +99,98 @@ fn matches(item: &Value, f: &str) -> bool {
     hay.to_lowercase().contains(f)
 }
 
-fn subtree_matches(item: &Value, f: &str) -> bool {
-    matches(item, f) || item["children"].as_array().map(|c| c.iter().any(|x| subtree_matches(x, f))).unwrap_or(false)
+/// Row types every client renders natively; anything else (including namespaced `x.<owner>.<name>` types) needs
+/// its feature claimed, else it is shown through its `fallback` or as a plain item.
+pub const ROW_TYPES: &[&str] = &["item", "toggle", "header", "separator", "text", "chips", "select"];
+
+fn native(item: &Value, features: &[&str]) -> bool {
+    let k = kind(item);
+    (ROW_TYPES.contains(&k) || features.contains(&k)) && missing_for(item, features).is_empty()
 }
 
-/// The rows to show, in order.
-pub fn rows(v: &Value, st: &State) -> Vec<Flat> {
+/// Element fallback (D29): a row this client can't render natively (unknown type, or unmet scoped `requires`)
+/// becomes its `fallback`: a row, a list of rows, or `"drop"`; without one it stays a plain item. Applied before
+/// flattening. A fallback row without an `id` inherits the original's (`<id>~<n>` for lists), so selection
+/// survives a client upgrade. At most four levels; chips follow the same rule (a chip's fallback is a chip).
+pub fn expand(item: &Value, id: &str, features: &[&str]) -> Vec<(Value, String)> {
+    fn go(item: &Value, id: &str, features: &[&str], depth: usize, out: &mut Vec<(Value, String)>) {
+        let own = item["id"].as_str().map(String::from).unwrap_or_else(|| id.to_string());
+        if depth >= 4 || native(item, features) || item.get("fallback").is_none() {
+            out.push((chips(item, features), own));
+            return;
+        }
+        match &item["fallback"] {
+            Value::String(s) if s == "drop" => {}
+            Value::Object(_) => go(&item["fallback"], &own, features, depth + 1, out),
+            Value::Array(list) => for (n, fb) in list.iter().enumerate() {
+                go(fb, &if list.len() == 1 { own.clone() } else { format!("{own}~{n}") }, features, depth + 1, out);
+            },
+            _ => out.push((chips(item, features), own)),
+        }
+    }
+    let mut out = Vec::new();
+    go(item, id, features, 0, &mut out);
+    out
+}
+
+fn chips(item: &Value, features: &[&str]) -> Value {
+    let Some(list) = item["chips"].as_array().filter(|_| kind(item) == "chips") else { return item.clone() };
+    let mut shown = Vec::new();
+    for chip in list {
+        let mut c = chip.clone();
+        for _ in 0..4 {
+            if missing_for(&c, features).is_empty() { break; }
+            match &c["fallback"] { Value::Object(_) => c = c["fallback"].clone(), Value::String(s) if s == "drop" => { c = Value::Null; break; } _ => break }
+        }
+        if !c.is_null() { shown.push(c); }
+    }
+    let mut out = item.clone();
+    out["chips"] = Value::Array(shown);
+    out
+}
+
+/// Rows as this client shows them: each item expanded through its fallback, with positional ids.
+fn shown(items: &[Value], prefix: &str, features: &[&str]) -> Vec<(Value, String)> {
+    items.iter().enumerate().flat_map(|(i, item)| expand(item, &format!("{prefix}{i}"), features)).collect()
+}
+
+fn subtree_matches(item: &Value, id: &str, f: &str, features: &[&str]) -> bool {
+    matches(item, f) || shown(item["children"].as_array().map(|c| c.as_slice()).unwrap_or(&[]), &format!("{id}/"), features).iter().any(|(c, cid)| subtree_matches(c, cid, f, features))
+}
+
+/// The rows to show, in order, for this client's features.
+pub fn rows(v: &Value, st: &State) -> Vec<Flat> { rows_for(v, st, SUPPORTED) }
+
+/// The rows a client rendering `features` shows: toolbar, page, tree expansion, filter and element fallbacks.
+pub fn rows_for(v: &Value, st: &State, features: &[&str]) -> Vec<Flat> {
     let f = st.filter.to_lowercase();
     let mut out = Vec::new();
-    fn walk(items: &[Value], depth: usize, parent: Option<usize>, prefix: &str, st: &State, f: &str, out: &mut Vec<Flat>) {
-        for (i, item) in items.iter().enumerate() {
-            if !f.is_empty() && !subtree_matches(item, f) {
+    #[allow(clippy::too_many_arguments)]
+    fn walk(items: &[Value], depth: usize, parent: Option<usize>, prefix: &str, st: &State, f: &str, features: &[&str], out: &mut Vec<Flat>) {
+        for (item, id) in shown(items, prefix, features) {
+            if !f.is_empty() && !subtree_matches(&item, &id, f, features) {
                 continue;
             }
-            let id = item["id"].as_str().map(String::from).unwrap_or_else(|| format!("{prefix}{i}"));
-            let children = item["children"].as_array().map(|c| c.as_slice()).unwrap_or(&[]);
+            let children = item["children"].as_array().cloned().unwrap_or_default();
             let has_children = !children.is_empty();
             // Filtering opens everything that matched below.
             let expanded = has_children && (!f.is_empty() || st.open.get(&id).copied().unwrap_or(item["expanded"] == true));
-            let mut shown = item.clone();
-            if let Some(o) = shown.as_object_mut() {
+            let mut row = item.clone();
+            if let Some(o) = row.as_object_mut() {
                 o.remove("children");
             }
             let me = out.len();
-            out.push(Flat { item: shown, depth, id: id.clone(), parent, has_children, expanded, pinned: false });
+            out.push(Flat { item: row, depth, id: id.clone(), parent, has_children, expanded, pinned: false });
             if expanded {
-                walk(children, depth + (kind(item)!="header") as usize, Some(me), &format!("{id}/"), st, f, out);
+                walk(&children, depth + (kind(&item)!="header") as usize, Some(me), &format!("{id}/"), st, f, features, out);
             }
         }
     }
-    for (i, item) in v["toolbar"].as_array().into_iter().flatten().enumerate() {
-        out.push(Flat { item: item.clone(), depth: 0, id: format!("toolbar/{i}"), parent: None, has_children: false, expanded: false, pinned: true });
+    let toolbar = v["toolbar"].as_array().map(|a| a.as_slice()).unwrap_or(&[]);
+    for (n, (item, _)) in shown(toolbar, "toolbar/", features).into_iter().enumerate() {
+        out.push(Flat { item, depth: 0, id: format!("toolbar/{n}"), parent: None, has_children: false, expanded: false, pinned: true });
     }
-    walk(page_items(v, st), 0, None, "", st, &f, &mut out);
+    walk(page_items(v, st), 0, None, "", st, &f, features, &mut out);
     out
 }
 
@@ -139,8 +198,7 @@ pub fn rows(v: &Value, st: &State) -> Vec<Flat> {
 pub fn parent_ids(v: &Value, st: &State) -> Vec<String> {
     let mut out = Vec::new();
     fn walk(items: &[Value], prefix: &str, out: &mut Vec<String>) {
-        for (i, item) in items.iter().enumerate() {
-            let id = item["id"].as_str().map(String::from).unwrap_or_else(|| format!("{prefix}{i}"));
+        for (item, id) in shown(items, prefix, SUPPORTED) {
             if let Some(c) = item["children"].as_array().filter(|c| !c.is_empty()) {
                 out.push(id.clone());
                 walk(c, &format!("{id}/"), out);

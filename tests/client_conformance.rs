@@ -3,7 +3,7 @@
 //! `clients/`) check themselves against the same files. `VQRO_FIXTURE_UPDATE=1 cargo test --test
 //! client_conformance` rewrites the `expect` fields from the model; review the diff before committing.
 use serde_json::{json, Value};
-use vqro::ui_model::{panel, recovery, window::{self, Settled, Window}, workspace::{resolve, Workspace}};
+use vqro::ui_model::{panel, recovery, view, window::{self, Settled, Window}, workspace::{resolve, Workspace}};
 
 fn fixture(name: &str) -> (std::path::PathBuf, Value) {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/client").join(name);
@@ -42,9 +42,9 @@ fn panels_flatten_like_the_model() {
         state.filter = s["filter"].as_str().unwrap_or("").to_string();
         state.open = s["open"].as_object().map(|o| o.iter().map(|(k, v)| (k.clone(), v == true)).collect()).unwrap_or_default();
         let p = &case["panel"];
-        let rows: Vec<Value> = panel::rows(p, &state).iter().map(|r| json!({"id": r.id, "depth": r.depth, "text": r.item["text"],
+        let rows: Vec<Value> = panel::rows_for(p, &state, panel::BASE_FEATURES).iter().map(|r| json!({"id": r.id, "depth": r.depth, "text": r.item["text"],
             "type": panel::kind(&r.item), "has_children": r.has_children, "expanded": r.expanded, "pinned": r.pinned,
-            "selectable": panel::selectable(&r.item)})).collect();
+            "selectable": panel::selectable(&r.item), "chips": r.item.get("chips").map(|c| json!(c.as_array().into_iter().flatten().map(|c| c["text"].clone()).collect::<Vec<_>>()))})).collect();
         let enhancement = p["list_detail"].is_object().then(|| panel::missing_for(&p["list_detail"], panel::BASE_FEATURES).is_empty());
         json!({"rows": rows, "missing": panel::missing_for(p, panel::BASE_FEATURES), "list_detail": enhancement})
     });
@@ -114,5 +114,18 @@ fn windows_show_their_own_layout_like_the_model() {
             out
         }).collect();
         json!(steps)
+    });
+}
+
+#[test]
+fn view_fallbacks_resolve_like_the_model() {
+    let (_, doc) = fixture("views.json");
+    let entries: std::collections::BTreeMap<String, Value> = doc["entries"].as_object().unwrap().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    let live: std::collections::HashMap<String, Value> = doc["live"].as_object().unwrap().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    let kinds: Vec<&str> = doc["kinds"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+    check("views.json", |case| {
+        let (shown, chain) = view::shown(case["view"].as_str().unwrap(), &|id| view::merged(id, &entries, &live),
+            &|v| view::renders(v, &kinds, panel::BASE_FEATURES));
+        json!({"shown": shown, "chain": chain})
     });
 }
