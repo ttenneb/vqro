@@ -153,8 +153,10 @@ fn install_defaults(store: &mut crate::store::Store, dir: &std::path::Path) {
     let mut names: Vec<Value> = recorded.as_ref().and_then(|r| r["installed"].as_array().cloned()).unwrap_or_default();
     for e in list["extensions"].as_array().into_iter().flatten() {
         let (Some(name), Some(argv)) = (e["name"].as_str(), e["argv"].as_array()) else { continue };
-        if e["since"].as_u64().unwrap_or(1) <= installed {
-            continue; // offered before: never re-add what the user removed
+        if e["since"].as_u64().unwrap_or(1) <= installed || names.iter().any(|n| n == name) {
+            // Offered before (by version, or recorded by name when an entry's `since` moved later, as coord's did):
+            // never re-add what the user removed.
+            continue;
         }
         let argv: Vec<Value> = argv
             .iter()

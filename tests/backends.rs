@@ -175,3 +175,64 @@ async fn every_spawn_gets_the_core_endpoint_but_not_a_bridge_token() {
     let (_, args) = seen.recv().await.unwrap();
     assert!(args["env"].as_object().is_none_or(|e| e.is_empty()), "{args}");
 }
+
+/// The real bundled defaults: a workspace that applied the previous defaults version before `coord` was declared
+/// gains it exactly once; a fresh workspace gets it; a workspace that was offered it and removed it is not
+/// re-offered. (`coord` first shipped as `since: 5` after workspaces had already applied v5, so it was never
+/// offered to them; it is now `since: 7`.)
+#[tokio::test]
+async fn coord_reaches_workspaces_that_applied_earlier_defaults_once() {
+    let bundled = Path::new(env!("CARGO_MANIFEST_DIR")).join("extensions");
+    let list: Value = serde_json::from_slice(&std::fs::read(bundled.join("defaults.json")).unwrap()).unwrap();
+    let version = list["version"].as_u64().unwrap();
+    let coord = list["extensions"].as_array().unwrap().iter().find(|e| e["name"] == "coord").unwrap();
+    assert_eq!(coord["since"].as_u64(), Some(version), "coord is declared at the newest defaults version");
+    let previous: Vec<Value> = list["extensions"].as_array().unwrap().iter()
+        .filter(|e| e["since"].as_u64().unwrap_or(1) < version && e["name"] != "coord").map(|e| e["name"].clone()).collect();
+
+    // A workspace at the previous version whose record never offered coord (the live case).
+    let root = tempfile::Builder::new().prefix("pbx").tempdir_in("/tmp").unwrap();
+    {
+        let (core, socket) = core(root.path(), "old", Some(&bundled));
+        let (c, _, _) = client::connect(&socket, "t").await.unwrap();
+        c.call("workspace.apply", json!({"ops": [{"op": "delete", "key": "extension/coord"},
+            {"op": "set", "key": "doc/vqro/defaults", "value": {"installed": previous, "from": bundled.to_string_lossy(), "version": version - 1}}]})).await.unwrap();
+        vqro::server::shutdown(&core).await;
+    }
+    let (core2, socket2) = core(root.path(), "upgraded", Some(&bundled));
+    let e = entries(&core2);
+    assert_eq!(e["extension/coord"]["value"]["argv"][1].as_str().map(|a| a.ends_with("coordination.py")), Some(true), "coord added on upgrade");
+    assert_eq!(e["doc/vqro/defaults"]["value"]["version"].as_u64(), Some(version));
+    assert!(e["doc/vqro/defaults"]["value"]["installed"].as_array().unwrap().iter().any(|n| n == "coord"));
+    let (c2, _, _) = client::connect(&socket2, "t").await.unwrap();
+    let txns = c2.call("workspace.history", json!({"limit": 100})).await.unwrap()["txns"].as_array().unwrap().len();
+    vqro::server::shutdown(&core2).await;
+    let (core3, socket3) = core(root.path(), "again", Some(&bundled));
+    assert!(entries(&core3)["extension/coord"].is_object());
+    let (c3, _, _) = client::connect(&socket3, "t").await.unwrap();
+    let after = c3.call("workspace.history", json!({"limit": 100})).await.unwrap()["txns"].as_array().unwrap().len();
+    assert_eq!(after, txns, "exactly once: a restart adds nothing");
+    vqro::server::shutdown(&core3).await;
+
+    // A fresh workspace gets it.
+    let fresh = tempfile::Builder::new().prefix("pbx").tempdir_in("/tmp").unwrap();
+    let (core4, _) = core(fresh.path(), "fresh", Some(&bundled));
+    assert!(entries(&core4)["extension/coord"].is_object(), "a fresh workspace installs coord");
+    vqro::server::shutdown(&core4).await;
+
+    // A workspace that was offered coord (recorded by name at the previous version) and removed it: not re-offered.
+    let removed = tempfile::Builder::new().prefix("pbx").tempdir_in("/tmp").unwrap();
+    {
+        let (core, socket) = core(removed.path(), "had", Some(&bundled));
+        let (c, _, _) = client::connect(&socket, "t").await.unwrap();
+        let mut offered = previous.clone();
+        offered.push(json!("coord"));
+        c.call("workspace.apply", json!({"ops": [{"op": "delete", "key": "extension/coord"},
+            {"op": "set", "key": "doc/vqro/defaults", "value": {"installed": offered, "from": bundled.to_string_lossy(), "version": version - 1}}]})).await.unwrap();
+        vqro::server::shutdown(&core).await;
+    }
+    let (core5, _) = core(removed.path(), "kept-removed", Some(&bundled));
+    let e = entries(&core5);
+    assert!(e["extension/coord"].is_null(), "a removed default is not re-offered when its `since` moves");
+    assert_eq!(e["doc/vqro/defaults"]["value"]["version"].as_u64(), Some(version));
+}

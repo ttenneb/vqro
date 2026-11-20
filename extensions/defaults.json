@@ -1,5 +1,5 @@
 {
-  "version": 6,
+  "version": 7,
   "extensions": [
     {
       "name": "tabs",
@@ -74,7 +74,7 @@
     },
     {
       "name": "coord",
-      "since": 5,
+      "since": 7,
       "argv": ["python3", "coordination.py"],
       "description": "Default coordination-v0 inbox, grants and scope controls. Requires protected operational state and resolved principals; missing support is visible and fails closed. No terminal typing or replay."
     },

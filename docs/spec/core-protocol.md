@@ -1343,8 +1343,9 @@ The status bar prioritizes this recovery warning over contributed status buttons
 backend is connected but the configured default is unavailable.
 Only unchanged installed defaults with an old absolute program path are normalized; custom/edited entries stay intact. `defaults.json` is versioned (`version`; entries may carry
 `since`). Each entry is offered once per state dir: all on first run; later, only entries newer than the recorded
-version. This is how existing installs gain new defaults (here herdr, tmux and the split Pi launcher). An entry that exists is left as it
-is, and a removed default stays removed. Client options live in `doc/settings/tui`, the theme in `doc/settings/theme`, the icon set in
+version and not already recorded by name in `doc/vqro/defaults.installed`. This is how existing installs gain new defaults
+(here herdr, tmux, the split Pi launcher, and `coord`, which moved to `since: 7` after workspaces had applied v5 without it).
+An entry that exists is left as it is, and a removed default stays removed, even when its `since` later moves. Client options live in `doc/settings/tui`, the theme in `doc/settings/theme`, the icon set in
 `doc/settings/icons`, the tab bar look in `doc/settings/tabs`.
 
 Extensions may add a page to Settings by publishing live content `settings.page.<name>` = `{title, items}` (ordinary
