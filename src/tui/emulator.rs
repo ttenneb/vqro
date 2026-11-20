@@ -481,3 +481,75 @@ mod tests {
         assert!(failures.is_empty(), "engine conformance:\n{}", failures.join("\n"));
     }
 }
+
+/// Input fuzz (libghostty plan G8): seeded random byte streams, heavy on escape sequences, interleaved with resizes,
+/// scrolling, history reads and drawing, against every engine. Checks nothing panics and the interface's invariants
+/// hold. `VQRO_FUZZ_ITERS` raises the default 300 rounds per engine; `VQRO_FUZZ_SEED` picks a seed.
+#[cfg(test)]
+mod fuzz {
+    use super::*;
+
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 { self.0 ^= self.0 << 13; self.0 ^= self.0 >> 7; self.0 ^= self.0 << 17; self.0 }
+        fn below(&mut self, n: u64) -> u64 { self.next() % n.max(1) }
+    }
+
+    const PIECES: &[&[u8]] = &[
+        b"\x1b[", b"\x1b]", b"\x1bP", b"\x1b\\", b"\x07", b"\x1bc", b"\x1b[?1049h", b"\x1b[?1049l", b"\x1b[2J", b"\x1b[3J",
+        b"\x1b[H", b"\x1b[1;1r", b"\x1b[r", b"\x1b[999S", b"\x1b[999T", b"\x1b[5 q", b"\x1b[38;2;1;2;3m", b"\x1b[4:3m",
+        b"\x1b]8;;http://x\x1b\\", b"\x1b]8;;\x1b\\", b"\x1b]52;c;aGk=\x07", b"\x1b]52;c;?\x07", b"\x1b]9;n\x07", b"\x1b]777;notify;a;b\x07",
+        b"\x1b]0;t\x07", b"\x1b[?2004h", b"\x1b[?1000h", b"\x1b[?1006h", b"\x1b[>1u", b"\x1b[<u", b"\r\n", b"\n", b"\t", b"\x08",
+        "漢".as_bytes(), "👩‍💻".as_bytes(), "🇯🇵".as_bytes(), "e\u{301}".as_bytes(), b"\xff\xfe", b"\xe2\x82", b"0123456789",
+        b"\x1b[;;;;;;;;;;;;;;;;;;;;;;;;;;;;m", b"\x1b[9999999999999999999999C", b"\x1b[?9999999h", b"\x1b[1000000@",
+    ];
+
+    fn stream(r: &mut Rng) -> Vec<u8> {
+        let mut out = Vec::new();
+        for _ in 0..r.below(64) + 1 {
+            match r.below(3) {
+                0 => out.extend_from_slice(PIECES[r.below(PIECES.len() as u64) as usize]),
+                1 => out.push(r.below(256) as u8),
+                _ => for _ in 0..r.below(80) { out.push(b' ' + r.below(95) as u8) },
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn engines_survive_random_input_and_keep_their_invariants() {
+        let iters: usize = std::env::var("VQRO_FUZZ_ITERS").ok().and_then(|v| v.parse().ok()).unwrap_or(300);
+        let seed: u64 = std::env::var("VQRO_FUZZ_SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(0x5eed_1234_abcd_ef01);
+        for kind in EngineKind::ALL {
+            let mut r = Rng(seed);
+            let mut e = Emulator::with_engine(kind, 40, 10, 50);
+            assert_eq!(e.engine(), kind);
+            for i in 0..iters {
+                e.process(&stream(&mut r));
+                assert!(e.take_effects().len() <= MAX_EFFECTS, "{} round {i}: effects bounded", kind.name());
+                match r.below(6) {
+                    0 => e.resize(1 + r.below(200) as u16, 1 + r.below(60) as u16),
+                    1 => e.set_scroll_offset(r.below(500) as usize),
+                    2 => e.set_scroll_offset(0),
+                    _ => {}
+                }
+                let (rows, cols) = (e.rows(), e.cols());
+                assert!(rows >= 1 && cols >= 1, "{} round {i}: a size", kind.name());
+                assert!(e.scroll_offset() <= e.scrollback_len().max(e.scroll_offset()), "{} round {i}", kind.name());
+                assert!(e.scrollback_len() <= e.scrollback_capacity().max(e.scrollback_len()), "{} round {i}", kind.name());
+                if let Some((cr, cc, _)) = e.cursor() { assert!(cr < rows && cc <= cols, "{} round {i}: cursor {cr},{cc} in {rows}x{cols}", kind.name()); }
+                let scrolled = e.scrolled();
+                for row in [0, scrolled.saturating_sub(1), scrolled, scrolled + usize::from(rows) - 1, scrolled + usize::from(rows) + 5] {
+                    if let Some((chars, starts, _)) = e.row_text(row) {
+                        assert_eq!(chars.len(), starts.len(), "{} round {i}", kind.name());
+                        assert!(starts.iter().all(|c| *c < cols), "{} round {i}: cells inside the row", kind.name());
+                    }
+                }
+                let _ = e.hyperlink_at(r.below(u64::from(rows)) as u16, r.below(u64::from(cols)) as u16);
+                let area = Rect::new(0, 0, cols, rows);
+                let mut buf = Buffer::empty(area);
+                e.draw(&mut buf, area);
+            }
+        }
+    }
+}
