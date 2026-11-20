@@ -2752,8 +2752,16 @@ impl App {
             let st=if in_detail{root.detail.get_or_insert_with(Box::default).as_mut()}else{root};
             st.sel = row;
             st.chip = chip;
+            // A composer's control (or Send) acts as that control, never as a key for the draft being typed: a click
+            // on [steer] while typing must choose steer, not send the draft. Typing goes on after a choice.
+            let typing = st.editing.take();
             if button == MouseButton::Left {
                 self.panel_key(key, view, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), ctx);
+            }
+            if let Some(id) = typing {
+                let root = self.pstate.entry(key.to_string()).or_default();
+                let st = if in_detail { root.detail.get_or_insert_with(Box::default).as_mut() } else { root };
+                if st.editing.is_none() { st.editing = Some(id); st.chip = 0; }
             }
             return true;
         }
@@ -3902,6 +3910,41 @@ mod tests {
         draw(&mut app);
         assert!(!app.pstate["p"].manual_scroll, "at the end it follows again");
         assert!(draw(&mut app).contains("message 59"));
+    }
+
+    #[tokio::test]
+    async fn clicking_a_composer_control_while_typing_chooses_it_and_never_sends() {
+        let (mut app, mut rx) = app();
+        app.load(&json!({"epoch":"e","seq":1,"entries":{"view/p":{"value":{"kind":"panel","items":[{"text":"conversation"},
+            {"type":"composer","id":"c","text":"Message","pin":"bottom","command":"agents.send",
+             "controls":[{"type":"chips","arg":"mode","chips":[{"text":"auto","value":"auto","checked":true},{"text":"steer","value":"steer"}]}]}]}}}}));
+        app.leaves = vec!["p".into()];
+        app.hit.leaves = vec![("p".into(), Rect::new(0, 0, 60, 10), Rect::new(1, 1, 58, 8))];
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 10)).unwrap();
+        let mut find = |app: &mut App, label: &str| -> Position {
+            let mut at = None;
+            terminal.draw(|f| { app.draw_view(f, "p", Rect::new(0, 0, 60, 10), true, &Palette::default(), &Icons::new(None, false));
+                let b = f.buffer_mut();
+                for y in 0..10 { let line: String = (0..60).map(|x| b[(x, y)].symbol().to_string()).collect();
+                    if let Some(x) = line.find(label) { at = Some(Position { x: line[..x].chars().count() as u16 + 1, y }); } } }).unwrap();
+            at.unwrap_or_else(|| panic!("{label} not drawn"))
+        };
+        find(&mut app, "steer");
+        let st = app.pstate.get_mut("p").unwrap();
+        st.editing = Some("c".into());
+        st.composers.entry("c".into()).or_insert_with(|| Composer::new(&json!({"type":"composer"}))).editor = crate::ui_model::composer::Editor::new("abc", None, None);
+        let steer = find(&mut app, "steer");
+        app.panel_click("p", "p", steer, MouseButton::Left, json!({}));
+        let st = &app.pstate["p"];
+        assert_eq!(st.composers["c"].values.get("mode"), Some(&json!("steer")), "the click chose steer");
+        assert_eq!(st.composers["c"].editor.string(), "abc", "the draft is kept");
+        assert_eq!(st.editing.as_deref(), Some("c"), "typing goes on");
+        while let Ok(m) = rx.try_recv() { assert!(!matches!(m, Msg::ComposerSent { .. }), "nothing was sent"); }
+        assert!(!app.message.starts_with("running "), "no command ran: {}", app.message);
+        // [Send] still sends.
+        let send = find(&mut app, "[Send]");
+        app.panel_click("p", "p", send, MouseButton::Left, json!({}));
+        assert!(app.message.starts_with("running agents.send"), "{}", app.message);
     }
 
     #[tokio::test]
