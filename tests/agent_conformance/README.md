@@ -144,6 +144,17 @@ The rule is per stream within one shared connection budget, not forced closure
 of idle sibling streams. Missing linkage/proofs are `fail/harness_gap`; these
 checks are explicitly inherited component evidence, never another runtime.
 
+O10 reports **two separate mandatory subcases**. `producer_accounting` inherits
+only the exact journal-envelope/one-record-floor and active-cut version/release
+regressions in `evidence.REGRESSIONS["O10"]`, through the same source/image/run
+checks. These measure encoded record/value charges and weak-Arc release on close,
+retention gap and the next epoch step; allocator/process/transport overhead is not
+mislabelled as journal bytes. `public_wire` checks current entity values/counts,
+an actual live `retention` gap and bounded reset replay. Rising RSS samples alone,
+or a reset without the live gap witness, cannot pass it. Both subcases must pass;
+missing evidence remains a visible harness failure. New accounting tests must be
+present in the exact SDK source linked to a target image before it can inherit.
+
 ## Results / honesty
 
 Each case/subcase produces `pass`, `fail`, `unsupported-declared` or

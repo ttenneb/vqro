@@ -470,6 +470,38 @@ class SchemaFixtureTests(unittest.TestCase):
                 schema_example(schema)
 
 
+class MemoryWitnessTests(unittest.IsolatedAsyncioTestCase):
+    async def test_rss_samples_and_small_entities_cannot_replace_public_gap_witness(self):
+        from agent_conformance.cases import public_retention_bounds
+        reducer = SimpleNamespace(cursor={"epoch": "e", "seq": 1}, offset=0, max_record=65536, entities={})
+        view = SimpleNamespace(reducer=reducer, closed=None, peer=SimpleNamespace(wait=AsyncMock()))
+        replay = SimpleNamespace(initial="reset", reducer=SimpleNamespace(entities={}))
+        async def burst(*args, **kwargs): reducer.offset = 1 << 20
+        ctx = SimpleNamespace(evidence=[], metadata={"adapter_image": {"pid": 12345}}, viewer=AsyncMock(),
+            facts=AsyncMock(return_value={"caps": {"items.stream": {"entities": 1, "entity_bytes": 1, "retain_bytes": 1}}}),
+            native=SimpleNamespace(call=AsyncMock(side_effect=burst)), wait_view=AsyncMock())
+        with patch("agent_conformance.cases.fresh_view", AsyncMock(side_effect=[view, replay])), patch(
+                "agent_conformance.cases.flood_retained", AsyncMock(return_value="needle")), patch(
+                "agent_conformance.cases.has_message", return_value=True), patch(
+                "agent_conformance.cases.process_rss", side_effect=[1 << 20, 100 << 20, 200 << 20, 300 << 20]):
+            with self.assertRaisesRegex(HarnessGap, "retention-gap witness not observed"):
+                await public_retention_bounds(ctx)
+        self.assertIsNone(ctx.evidence[-1]["live_gap"])
+
+    async def test_o10_needs_both_public_and_internal_accounting_witnesses(self):
+        from agent_conformance.cases import declared_retention_bounds
+        for failed in ("public_wire", "producer_accounting"):
+            ctx = SimpleNamespace(evidence=[])
+            public = AsyncMock(side_effect=HarnessGap("missing public gap") if failed == "public_wire" else None)
+            with self.subTest(failed=failed), patch("agent_conformance.cases.public_retention_bounds", public), patch(
+                    "agent_conformance.evidence.retained_memory_accounting", side_effect=HarnessGap("missing journal proof") if failed == "producer_accounting" else None):
+                with self.assertRaises(HarnessGap):
+                    await declared_retention_bounds(ctx)
+            self.assertEqual({row["case"]: row["status"] for row in ctx.evidence},
+                             {"O10.public_wire": "fail" if failed == "public_wire" else "pass",
+                              "O10.producer_accounting": "fail" if failed == "producer_accounting" else "pass"})
+
+
 class HandledDeclarationTests(unittest.IsolatedAsyncioTestCase):
     def context(self, stage="admitted", consumed=False):
         return SimpleNamespace(evidence=[], facts=AsyncMock(return_value={"caps": {"agent.send": {"handled": "none"}}}),

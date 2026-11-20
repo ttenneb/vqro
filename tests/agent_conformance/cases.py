@@ -965,12 +965,12 @@ def process_rss(pid):
     raise FixtureFailed("owned adapter process RSS unavailable")
 
 
-@case("O10")
-async def declared_retention_bounds(ctx):
+async def public_retention_bounds(ctx):
     declaration = (await ctx.facts())["caps"].get("items.stream", {})
     for field in ("entities", "entity_bytes", "retain_bytes"):
         check(type(declaration.get(field)) is int and declaration[field] > 0, "missing numeric item bound: " + field)
     view, samples = await fresh_view(ctx), []
+    initial_cursor, initial_bytes = deepcopy(view.reducer.cursor), view.reducer.offset
     pid = ctx.metadata.get("adapter_image", {}).get("pid")
     if not pid:
         raise FixtureFailed("owned adapter PID missing from execution provenance")
@@ -978,11 +978,52 @@ async def declared_retention_bounds(ctx):
         needle = await flood_retained(ctx, "O10-window-" + str(phase))
         await ctx.wait_view(view, lambda reducer: has_message(reducer, needle))
         check(len(view.reducer.entities) <= declaration["entities"], "retained entity count exceeded its declaration")
-        check(view.reducer.entity_bytes <= declaration["entity_bytes"], "retained entity bytes exceeded their declaration")
+        entity_bytes = sum(len(json.dumps(row["value"], ensure_ascii=False, separators=(",", ":")).encode()) for row in view.reducer.entities.values())
+        check(entity_bytes <= declaration["entity_bytes"], "retained entity bytes exceeded their declaration")
         samples.append({"records": (phase + 1) * 96, "entities": len(view.reducer.entities),
-                        "entity_bytes": view.reducer.entity_bytes, "adapter_rss_bytes": process_rss(pid)})
+                        "entity_bytes": entity_bytes, "adapter_rss_bytes": process_rss(pid)})
     ctx.evidence.append({"kind": "retention_pressure", "declared": declaration, "samples": samples,
                          "native_payload_bytes": 4 * 96 * 8192, "rss_is_measurement_not_cross_runtime_slo": True})
+    # One native burst can make the public cursor fall behind while native draining
+    # continues. A reset alone is not a witnessed live retention-gap notification.
+    await ctx.native.call("retain", count=512, text="O10-gap-burst:" + "y" * 8192, timeout=5)
+    await view.peer.wait(lambda: view.closed is not None or has_message(view.reducer, "511:O10-gap-burst:"), timeout=5)
+    last_good = deepcopy(view.reducer.cursor)
+    delivered_bytes = view.reducer.offset - initial_bytes
+    if view.closed != "retention" and delivered_bytes <= declaration["retain_bytes"] + view.reducer.max_record:
+        raise HarnessGap("O10 public workload did not cross the declared retained-record envelope")
+    replay = await fresh_view(ctx, peer=await ctx.viewer(), after=initial_cursor)
+    check(replay.initial == "reset", "public replay continued from outside declared retention")
+    await ctx.wait_view(replay, lambda reducer: has_message(reducer, "511:O10-gap-burst:"))
+    replay_bytes = sum(len(json.dumps(row["value"], ensure_ascii=False, separators=(",", ":")).encode()) for row in replay.reducer.entities.values())
+    check(len(replay.reducer.entities) <= declaration["entities"] and replay_bytes <= declaration["entity_bytes"],
+          "reset replay exceeded declared current-entity bounds")
+    ctx.evidence.append({"kind": "public_retention_replay", "expired_cursor": initial_cursor,
+                         "last_good_cursor": last_good, "live_gap": view.closed,
+                         "observed_wire_bytes": delivered_bytes, "replay": replay.initial,
+                         "replay_entities": len(replay.reducer.entities), "replay_entity_bytes": replay_bytes})
+    if view.closed != "retention":
+        raise HarnessGap("O10 public retention-gap witness not observed; bounded reset alone is insufficient")
+
+
+@case("O10")
+async def declared_retention_bounds(ctx):
+    from .evidence import retained_memory_accounting
+    failures = []
+    for name, probe in (("public_wire", public_retention_bounds), ("producer_accounting", None)):
+        try:
+            if probe is None:
+                retained_memory_accounting(ctx)
+            else:
+                await probe(ctx)
+        except Exception as error:
+            failures.append(error)
+            ctx.evidence.append({"kind": "subcase", "case": "O10." + name, "status": "fail",
+                                 "component": getattr(error, "component", "harness"), "detail": str(error)})
+        else:
+            ctx.evidence.append({"kind": "subcase", "case": "O10." + name, "status": "pass"})
+    if failures:
+        raise failures[0]
 
 
 @case("O8")

@@ -18,6 +18,10 @@ MAX_ARTIFACT = 4 << 20
 
 # Semantic regression identities are harness requirements, not caller-selected labels.
 REGRESSIONS = {
+    "O10": {
+        "journal_envelope_and_floor": ("provider_client::items::tests::journal_accounting_obeys_retention_buffer_and_one_record_floor", "src/provider_client/items.rs"),
+        "cut_versions_and_release": ("provider_client::items::tests::active_cut_accounting_releases_old_versions_on_close_gap_and_epoch_step", "src/provider_client/items.rs"),
+    },
     "O3": {
         "snapshot_hold": ("provider_client::items::tests::a_large_snapshot_is_streamed_in_pieces_and_its_post_cut_records_are_held", "src/provider_client/items.rs"),
         "overflow_before_next_piece": ("provider_client::items::tests::overflowing_an_unfinished_cut_gaps_before_more_pieces_and_installs_nothing", "src/provider_client/items.rs"),
@@ -35,6 +39,7 @@ REGRESSIONS = {
     },
 }
 CLOSURES = {
+    "O10": {"adapter": {"src/provider_client/items.rs"}},
     "O3": {"adapter": {"src/provider_client/items.rs"}},
     "L3": {"adapter": {"src/provider_client.rs"}, "core": {"src/provider.rs", "src/provider_wire.rs", "src/server.rs"}},
     "O11": {"adapter": {"src/provider_client.rs", "src/provider_client/items.rs"}, "core": {"src/rpc.rs", "src/server.rs", "src/provider_wire.rs"}},
@@ -203,6 +208,16 @@ def producer_overflow(ctx):
     row, receipt, repo, producer = component(ctx, "O3")
     regressions(row, receipt, repo, producer, "O3")
     inherited(ctx, "O3", row, receipt)
+
+
+def retained_memory_accounting(ctx):
+    row, receipt, repo, producer = component(ctx, "O10")
+    regressions(row, receipt, repo, producer, "O10")
+    inherited(ctx, "O10", row, receipt)
+    ctx.evidence.append({"kind": "producer_memory_accounting", "journal": "encoded retained record bytes",
+        "active_cuts": "encoded shared entity versions per cut; weak Arc release witnesses",
+        "release": ["close", "retention_gap", "next_step_after_epoch"],
+        "process_transport_allocator_overhead": "separate, not charged to these encoded-byte declarations"})
 
 
 def host_generation_fence(ctx):

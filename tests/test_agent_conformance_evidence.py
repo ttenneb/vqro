@@ -8,7 +8,7 @@ import tempfile
 from types import SimpleNamespace
 import unittest
 
-from agent_conformance.evidence import CLOSURES, REGRESSIONS, connection_scale, host_generation_fence, producer_overflow
+from agent_conformance.evidence import CLOSURES, REGRESSIONS, connection_scale, host_generation_fence, producer_overflow, retained_memory_accounting
 from agent_conformance.results import CheckFailed, HarnessGap
 
 NAMES = {ident: {key: name for key, (name, _) in rows.items()} for ident, rows in REGRESSIONS.items()}
@@ -113,7 +113,7 @@ class ComponentEvidenceTests(unittest.TestCase):
         self.assertEqual(result.exception.component, "producer")
 
     def test_empty_names_missing_commit_and_not_a_commit_are_refused_for_all_inheritance(self):
-        for ident, verifier in (("O3", producer_overflow), ("L3", host_generation_fence), ("O11", connection_scale)):
+        for ident, verifier in (("O3", producer_overflow), ("L3", host_generation_fence), ("O11", connection_scale), ("O10", retained_memory_accounting)):
             for corruption in ("empty", "commit", "source"):
                 with self.subTest(case=ident, corruption=corruption):
                     row = self.bundle(ident)
@@ -198,6 +198,14 @@ class ComponentEvidenceTests(unittest.TestCase):
         producer_overflow(self.ctx)
         self.assertTrue(self.ctx.evidence[-1]["not_a_separate_runtime"])
         self.assertIn("asserted", self.ctx.evidence[-1]["build_source_linkage"])
+
+    def test_o10_accounting_requires_both_internal_witnesses_and_reports_scope(self):
+        row = self.bundle("O10")
+        retained_memory_accounting(self.ctx)
+        self.assertEqual(self.ctx.evidence[-1]["release"], ["close", "retention_gap", "next_step_after_epoch"])
+        self.assertEqual(self.ctx.evidence[-2]["case"], "O10")
+        del row["required_tests"]["cut_versions_and_release"]
+        with self.assertRaises(HarnessGap): retained_memory_accounting(self.ctx)
 
     def test_host_fence_requires_both_exact_regressions(self):
         row = self.bundle("L3")
