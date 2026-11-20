@@ -7,7 +7,7 @@ import traceback
 
 from .cases import HANDLERS
 from .core import PublicImplementation
-from .results import CheckFailed, HarnessGap, NotApplicable, NotDeclared, Result, declared, declared_module, markdown, report
+from .results import CASES, CheckFailed, HarnessGap, NotApplicable, NotDeclared, Result, declared, declared_module, markdown, report
 
 
 def validate_manifest(value):
@@ -85,6 +85,12 @@ async def run_case(case, root, manifest, vqro, hc, *, factory=PublicImplementati
 
 
 async def run_selection(root, manifest, selected, vqro, hc):
+    from .inventory import main_contract
+    contract = main_contract()
+    if set(contract.ids) != {case.id for case in CASES}:
+        raise HarnessGap("Part A executable inventory differs from captured main contract")
+    Path(root).mkdir(parents=True, exist_ok=True)
+    (Path(root) / "normative-conformance.md").write_text(contract.text)
     rows = []
     for index, case in enumerate(selected):
         row = await run_case(case, Path(root) / f"{index:02}", manifest, vqro, hc)
@@ -95,7 +101,7 @@ async def run_selection(root, manifest, selected, vqro, hc):
     metadata = {key: value for key, value in manifest.items() if key != "argv"}
     metadata["launch_argv_template"] = manifest["argv"]
     metadata["versions_and_limits"] = [row.declarations.get("versions", {}) for row in rows if row.declarations]
-    document = report(metadata, rows, selected)
+    document = report(metadata, rows, selected, contract=contract)
     (Path(root) / "results.json").write_text(json.dumps(document, ensure_ascii=False, indent=2) + "\n")
     (Path(root) / "results.md").write_text(markdown(document))
     return document

@@ -2,6 +2,8 @@
 from dataclasses import asdict, dataclass, field
 import json
 
+from .inventory import main_contract
+
 
 class CheckFailed(AssertionError):
     def __init__(self, message, *, component="adapter"):
@@ -59,6 +61,8 @@ CASES = (
     Case("C8", "literal text and controlled launch", "agent.send"),
     Case("C9", "qualified causality", "agent.send"),
     Case("C10", "endpoint, session and shared host model"),
+    Case("C11", "native optional usage and session facts"),
+    Case("C12", "generic bounded causality wire forms", "agent.send"),
     Case("D1", "start at idle and busy", "agent.send"),
     Case("D2", "admit at idle and busy", "agent.send"),
     Case("D3", "boundary at idle and busy", "agent.send"),
@@ -74,6 +78,7 @@ CASES = (
     Case("D13", "serialized start preflight", "agent.send"),
     Case("D14", "hook-consumed input never overclaimed", "agent.send"),
     Case("D15", "origin and model-request authority", "agent.send"),
+    Case("D16", "declared content shape preserves block order", "agent.send"),
     Case("O1", "put append remove algebra"),
     Case("O2", "serialized snapshot cut"),
     Case("O3", "snapshot follow-on overflow is per viewer"),
@@ -85,6 +90,9 @@ CASES = (
     Case("O9", "coverage and pruning preserve live state"),
     Case("O10", "declared retained memory bounds"),
     Case("O11", "retention gaps and connection-wide closure"),
+    Case("O12", "producer append refusal preserves entity revision and sequence"),
+    Case("O13", "native view metadata formats roles and evidence times"),
+    Case("O14", "incompatible viewer backoff preserves last-good cursor"),
     Case("R1", "requests in facts and stream with scope", "agent.respond"),
     Case("R2", "first valid answer wins; stale answers reject", "agent.respond"),
     Case("R3", "answer acknowledgement precision", "agent.respond"),
@@ -166,22 +174,29 @@ class Result:
         return asdict(self)
 
 
-def report(implementation, results, selected, *, part="A", inventory=CASES):
+def report(implementation, results, selected, *, part="A", inventory=CASES, contract=None):
     if part not in ("A", "B"):
         raise ValueError("conformance part must be A or B")
-    expected = [case.id for case in inventory]
+    catalog = [case.id for case in inventory]
+    contract = (contract or main_contract()) if part == "A" else None
+    expected = contract.ids if contract is not None else catalog
+    inventory_matches = len(catalog) == len(set(catalog)) and set(catalog) == set(expected)
     executed = [row.case for row in results]
     selected_ids = [case.id for case in selected]
-    complete = selected_ids == expected and executed == expected
+    verified = contract.metadata()["main_verified"] if contract is not None else True
+    complete = verified and inventory_matches and selected_ids == expected and executed == expected
     failed = any(row.status == "fail" for row in results)
     # Fixtures and partial selections are never complete adapter certification.
     return {"schema": "vqro-conformance-result-v0", "part": part, "implementation": implementation,
             "complete_inventory": complete, "selected": selected_ids, "normative_cases": expected,
+            "normative_contract": contract.metadata() if contract is not None else None,
+            "inventory_missing": [ident for ident in expected if ident not in catalog],
+            "inventory_extra": [ident for ident in catalog if ident not in expected],
             "not_selected": [ident for ident in expected if ident not in selected_ids],
             "fixture_native": True, "real_runtime_certification": False,
             "summary": {status: sum(row.status == status for row in results)
                         for status in ("pass", "fail", "unsupported-declared", "not-applicable")},
-            "passed_selection": any(row.status == "pass" for row in results) and not failed and executed == selected_ids,
+            "passed_selection": inventory_matches and any(row.status == "pass" for row in results) and not failed and executed == selected_ids,
             "results": [row.json() for row in results]}
 
 

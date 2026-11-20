@@ -78,13 +78,22 @@ python3 tests/run_agent_conformance.py --run --implementation /absolute/target.j
   --vqro /absolute/vqro --hc /absolute/herdr-core --cases C1,C2,D6,D13
 ```
 
-The runner re-execs in an empty-HOME user/network namespace, launches a fresh
+The runner re-execs in an empty-HOME user/network/PID/mount namespace, launches a fresh
 private core/backend per case, and writes `results.json`, `results.md`, per-case
-`result.json`, native ledger and PID/birth/cleanup receipts. Partial selections
-always name all omitted cases. Leaving `--cases` out includes all 55 Part A groups;
+`result.json`, native ledger and PID/birth/cleanup receipts. Hard parent timeout
+kills the owned namespace, including detached children. Partial selections always
+name all omitted cases. Leaving `--cases` out includes all 61 Part A groups;
 currently unimplemented applicable handlers fail as `component:harness`.
 
-Current executable slice: C1–C10, D1–D15, O1–O11, R1–R7, M1–M4 and L1–L4.
+The normative IDs are parsed independently from the captured immutable `main`
+conformance document, saved as `normative-conformance.md` with commit/hash in the
+report. Catalog drift refuses fixture execution. Unverified source exports may run
+diagnostics but never assert current-main completeness. C11/C12/D16/O12/O13/O14
+are visible harness gaps until their runners exist.
+
+Handlers exist for C1–C10, D1–D15, O1–O11, R1–R7, M1–M4 and L1–L4.
+Independent review identified insufficient acceptance predicates in several of
+these handlers; their older diagnostic pass counts are not conformance proof.
 Some optional declared branches still have explicit harness gaps (including native
 preempt/keys, richer requests/configuration and a many-endpoint host rebind).
 Core causality forwarding and the old producer unfinished-cut overflow remain

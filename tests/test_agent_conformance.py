@@ -15,6 +15,7 @@ from types import SimpleNamespace
 
 from agent_conformance.core import PublicImplementation
 from agent_conformance.runtime import Runtime
+from agent_conformance.inventory import Contract, main_contract, part_a_ids
 from agent_conformance.cases import declarations, restriction, schema_example
 from agent_conformance.content import compare_content, examples, png, wav
 from agent_conformance.results import CASES, BY_ID, Case, CheckFailed, FixtureFailed, HarnessGap, NotApplicable, Result, markdown, report, select_cases
@@ -374,12 +375,36 @@ class ContentFixtureTests(unittest.TestCase):
 
 class ResultTests(unittest.TestCase):
     def test_complete_inventory_has_every_normative_group(self):
-        self.assertEqual(len(CASES), 55)
+        self.assertEqual([case.id for case in CASES], main_contract().ids)
+        self.assertEqual(len(CASES), 61)
         self.assertEqual(len(BY_ID), len(CASES))
         self.assertIn("M8", BY_ID)
         self.assertIn("O11", BY_ID)
         with self.assertRaises(ValueError):
             select_cases(["C99"])
+
+    def test_old_catalog_cannot_hide_six_missing_normative_cases(self):
+        missing = {"C11", "C12", "D16", "O12", "O13", "O14"}
+        old = [case for case in CASES if case.id not in missing]
+        rows = [Result(case.id, case.title, "pass") for case in old]
+        document = report({}, rows, old, inventory=old)
+        self.assertFalse(document["complete_inventory"])
+        self.assertFalse(document["passed_selection"])
+        self.assertEqual(set(document["inventory_missing"]), missing)
+        self.assertEqual(set(document["not_selected"]), missing)
+
+    def test_contract_ranges_and_unverified_exports(self):
+        text = "## A3. Tests\nC1–C12 D1–D16 O1–O14 R1–R7 M1–M8 L1–L4\n## A4. Done"
+        self.assertEqual(part_a_ids(text), [case.id for case in CASES])
+        contract = Contract(text, None, "bundled-unverified")
+        rows = [Result(case.id, case.title, "pass") for case in CASES]
+        document = report({}, rows, list(CASES), contract=contract)
+        self.assertFalse(document["complete_inventory"])
+        self.assertFalse(document["normative_contract"]["main_verified"])
+        with self.assertRaises(ValueError):
+            part_a_ids("no normative test boundaries")
+        with self.assertRaises(ValueError):
+            part_a_ids(text.replace("C1–C12", "C1–D12"))
 
     def test_partial_pass_never_claims_complete_or_real_certification(self):
         selected = select_cases(["C1"])
@@ -387,7 +412,7 @@ class ResultTests(unittest.TestCase):
         self.assertTrue(document["passed_selection"])
         self.assertFalse(document["complete_inventory"])
         self.assertFalse(document["real_runtime_certification"])
-        self.assertEqual(len(document["not_selected"]), 54)
+        self.assertEqual(len(document["not_selected"]), 60)
 
     def test_part_b_has_its_own_inventory_and_table_heading(self):
         inventory = (Case("I1", "durable claim"), Case("H1", "restart paused"))
@@ -552,6 +577,13 @@ class ClassificationTests(unittest.IsolatedAsyncioTestCase):
         result = await self.run_one(factory=self.factory(), handlers={})
         self.assertEqual((result.status, result.component), ("fail", "harness"))
         self.assertEqual(result.reason, "harness_gap")
+
+    async def test_new_normative_rows_stay_visible_as_harness_gaps(self):
+        for ident in ("C11", "C12", "D16", "O12", "O13", "O14"):
+            with self.subTest(case=ident):
+                result = await run_case(BY_ID[ident], Path(self.temp.name) / ident, self.manifest,
+                                        Path("/vqro"), Path("/hc"), factory=self.factory(), handlers={})
+                self.assertEqual((result.status, result.component, result.reason), ("fail", "harness", "harness_gap"))
 
     async def test_only_absent_optional_declaration_is_unsupported(self):
         result = await self.run_one(factory=self.factory(declared_send=False), handlers={})
