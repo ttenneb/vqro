@@ -464,11 +464,20 @@ export class App {
 
   // ---- mouse ------------------------------------------------------------------------------------------------------
 
+  /** The terminal view a press started in keeps its drag and release, even outside its pane. */
+  private mouseOwner: string | null = null;
+
   onMouse(e: MouseEvent) {
-    if (e.type === "scroll") {
-      const leaf = this.leaves.find((l) => inside(l.inner, e.x, e.y));
-      if (leaf && this.viewKind(leaf.view) === "terminal") this.terminals.scroll(leaf.view, e);
-      else if (leaf) { const st = this.state(leaf.view); st.manual = true; st.top = Math.max(0, st.top + (e.scroll?.direction === "up" ? -3 : 3)); }
+    // Terminals: the program gets the mouse when it asked for it (its own encoding); otherwise wheel is scrollback.
+    const owner = this.mouseOwner && (e.type === "drag" || e.type === "move" || e.type === "up" || e.type === "drag-end") ? this.mouseOwner : null;
+    const at = this.overlay ? -1 : this.leaves.findIndex((l) => inside(l.inner, e.x, e.y));
+    const view = owner ?? (at >= 0 ? this.leaves[at].view : null);
+    if (view && this.viewKind(view) === "terminal") {
+      if (e.type === "down") { this.focus = at; this.mouseOwner = view; }
+      if (e.type === "up" || e.type === "drag-end") this.mouseOwner = null;
+      if (this.terminals.mouse(view, e) || e.type !== "down") { this.redraw(); return; }
+    } else if (e.type === "scroll") {
+      if (at >= 0) { const st = this.state(this.leaves[at].view); st.manual = true; st.top = Math.max(0, st.top + (e.scroll?.direction === "up" ? -3 : 3)); }
       this.redraw();
       return;
     }
@@ -538,7 +547,12 @@ export class Screen extends Renderable {
         const on = i === active;
         text(buf, x, r.y, fit(label, r.x + r.w - x), on ? a.pal.color("tab_active_text") : a.pal.color("muted"), on ? a.pal.color("tab_active") : a.pal.color("tab_bar"));
         const rect = { x, y: r.y, w: width(label), h: 1 };
-        a.hits.push({ rect, act: () => a.tabTo(i + 1, { tab_path: path }) });
+        a.hits.push({ rect, act: (e) => {
+          const gesture = e.button === 2 ? a.ws.gesture("mouse.right", "tab") : e.button === 1 ? a.ws.gesture("mouse.middle", "tab") : null;
+          const w = a.win.context(a.ws);
+          if (gesture) a.activate(gesture, { layout: w.layout, layout_version: w.layout_version, tab_path: path, tab_index: i, tab_title: t?.title ?? null });
+          else a.tabTo(i + 1, { tab_path: path });
+        } });
         x += width(label);
       });
       if (path.length === 0 || !a.hits.some((h) => (h as any).tabbar)) {
@@ -565,7 +579,12 @@ export class Screen extends Renderable {
     if (kind === "panel") title = a.panelValue(leaf.view).title ?? title;
     if (kind === "terminal") title = a.terminals.title(leaf.view, title);
     text(buf, leaf.rect.x + 1, leaf.rect.y, fit(` ${clean(title)} `, leaf.rect.w - 2), border);
-    a.hits.push({ rect: leaf.rect, act: (e) => { a.focus = i; if (kind === "panel") this.click(leaf.view, leaf.view, e, a.ctxLeaf(i)); if (e.button === 2) a.clientCommand("client.menu", { where: "pane" }, a.ctxLeaf(i)); } });
+    a.hits.push({ rect: leaf.rect, act: (e) => {
+      a.focus = i;
+      if (kind === "panel") this.click(leaf.view, leaf.view, e, a.ctxLeaf(i));
+      const gesture = e.button === 2 ? a.ws.gesture("mouse.right", "pane") : e.button === 1 ? a.ws.gesture("mouse.middle", "pane") : null;
+      if (gesture) a.activate(gesture, a.ctxLeaf(i));  // what a gesture means comes from bindings (D17)
+    } });
     if (kind === "panel") drawPanel(a, buf, leaf.inner, leaf.view, leaf.view, focused);
     else if (kind !== "terminal") {
       const v = a.ws.entries.get(`view/${leaf.view}`);

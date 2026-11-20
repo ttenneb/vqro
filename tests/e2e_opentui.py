@@ -25,6 +25,10 @@ shutil.copytree(os.path.join(REPO, "extensions"), os.path.join(R, "ext"), ignore
 os.symlink(os.path.join(CLIENT, "node_modules"), os.path.join(R, "ext", "clients", "opentui", "node_modules"))  # 85 MB: share, don't copy
 for name, target in (("python3", shutil.which("python3") or "/usr/bin/python3"), ("bun", BUN)):
     os.symlink(target, os.path.join(R, "bin", name))
+with open(f"{R}/mouse.py", "w") as f:  # asks for SGR mouse reports, prints the first one it gets
+    f.write("import os, sys, termios, tty\nold = termios.tcgetattr(0)\nos.write(1, b'\\x1b[?1000h\\x1b[?1006hmouse-ready\\r\\n')\n"
+            "tty.setraw(0)\ndata = os.read(0, 64)\ntermios.tcsetattr(0, termios.TCSADRAIN, old)\n"
+            "os.write(1, b'\\x1b[?1000l\\x1b[?1006l')\nprint('got', repr(data.decode(errors='replace')))\n")
 ENV = {"HOME": f"{R}/home", "PATH": f"{R}/bin", "TERM": "xterm-256color", "SHELL": "/bin/sh", "VQRO_STATE_DIR": f"{R}/st",
        "VQRO_SOCKET": f"{R}/p.sock", "VQRO_EXTENSIONS_DIR": f"{R}/ext", "XDG_RUNTIME_DIR": f"{R}/run",
        "HC_SOCKET": f"{R}/hc.sock", "HC_SESSION": "ot", "LANG": "C.UTF-8"}
@@ -106,6 +110,13 @@ try:
         if sized:
             break
     check("pane size follows the window (stream.resize: 88x22 inside the border)", bool(sized), screen())
+    # Mouse: a program that asked for the mouse (SGR mode) receives a click in its own encoding.
+    keys("/usr/bin/clear; /usr/bin/python3 " + f"{R}/mouse.py", literal=True); keys("Enter")
+    wait(lambda: "mouse-ready" in screen(), 10)
+    lines = screen().splitlines()
+    y = next(i for i, l in enumerate(lines) if "mouse-ready" in l) + 1
+    keys(f"\x1b[<0;10;{y}M\x1b[<0;10;{y}m", literal=True)
+    check("a click reaches a program that asked for the mouse, in SGR encoding", bool(wait(lambda: "got '\\x1b[<0;" in screen(), 10)), screen())
     # The core restarts (an upgrade): the client reconnects, reattaches with a fresh repaint, and the shell lives on.
     call("core.shutdown")
     core.wait(15)

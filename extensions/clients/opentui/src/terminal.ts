@@ -72,6 +72,8 @@ export class Terminals {
     t.r = new EmbeddedTerminalRenderable(a.renderer, { cols, rows, width: cols, height: rows, position: "absolute", maxScrollback: 5000, zIndex: 1 });
     t.r.onData = (data, source) => { if (source === "input") this.send(t, data); };  // never answer queries as a viewer
     t.r.onScreenChange = () => a.redraw();
+    // Keys reach programs through the client (the prefix comes first), never through OpenTUI focus.
+    t.r.focus = () => {};
     a.renderer.root.add(t.r);
   }
 
@@ -181,9 +183,14 @@ export class Terminals {
     this.send(t, wrapped);
   }
 
-  scroll(view: string, e: MouseEvent) {
+  /** Offer a mouse event to the program: encoded in its mouse mode when it asked for the mouse (returns true);
+   *  without that, the wheel scrolls the emulator's scrollback and clicks are the client's. */
+  mouse(view: string, e: MouseEvent): boolean {
     const t = this.terms.get(view);
-    if (t) t.r.processMouseEvent(e);
+    const action = ({ down: "press", up: "release", move: "motion", drag: "motion", scroll: "press" } as Record<string, string>)[e.type];
+    if (!t || !action) return false;
+    (t.r as any).forwardMouse(e, action);  // OpenTUI's own encoder; it needs the event in screen coordinates
+    return e.defaultPrevented;
   }
 
   title(view: string, fallback: string): string {
