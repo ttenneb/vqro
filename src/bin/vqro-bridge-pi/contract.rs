@@ -71,7 +71,8 @@ pub fn bind_origin(args:&Value,attribution:&vqro::principal::Attribution)->Resul
         if Some(supplied)!=attribution.initiator.as_deref(){return Err(reject("forbidden","origin initiator does not match core attribution"));}
     }
     if let Some(initiator)=&attribution.initiator{origin.insert("initiator".into(),json!(initiator));}
-    let claimed:[&str;2]=["kind","agent"];
+    // The sender is coordination's inbox-record assertion, not the core transport identity.
+    let claimed:[&str;3]=["kind","agent","sender"];
     let claimed:Vec<_>=claimed.into_iter().filter(|field|origin.contains_key(*field)).collect();
     origin.insert("claimed".into(),json!(claimed));
     Ok(args)

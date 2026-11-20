@@ -125,7 +125,10 @@ Before admission or any native write, `agent.send` binds `origin.principal` to t
 separately as `origin.initiator`; a supplied conflicting initiator also refuses before write. Identity fields
 accept C2's256-byte bound. Caller-classified `kind`/`agent` remain unchanged and are explicitly listed in
 `origin.claimed`; native framing calls these asserted claims, never authority inferred from names/prefixes.
-Quoted provenance remains asserted and unchanged. Plain user rendering remains unsupported without verified
+On dispatched inbox mail, `origin.sender` retains coordination's original `from` with `provenance:"inbox-record"`
+and is also explicitly claimed. It is not equated with transport actor/initiator and is not end-to-end core
+proof of that original sender; this asynchronous provenance gap remains explicit. Quoted provenance remains
+asserted and unchanged. Plain user rendering remains unsupported without verified
 owner evidence. Receipts retain the same bound origin; neither ACK nor identity binding proves insertion or
 handling. Private SDK/native tests prove spoofed principal/actor/initiator write nothing, and one delegated
 send yields exactly one native prompt with distinct effective sender/transport actor/initiator.
