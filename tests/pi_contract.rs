@@ -78,3 +78,18 @@ fn bounded_images_ids_and_unrepresentable_fields_refuse() {
     args=input();args["content"][0]["text"]=json!("x".repeat(contract::input_bytes()));refusal(&args,&context(),"too_large");
     args=input();refusal(&args,&Context {literal:false,..context()},"unsupported");
 }
+
+#[test]
+fn text_formats_fall_back_to_plain_without_changing_literal_bytes(){
+    for format in ["plain","markdown","_future"]{let mut args=input();args["content"][0]["format"]=json!(format);let prepared=send(&args,&context()).unwrap();assert!(prepared.args["message"].as_str().unwrap().ends_with("/literal\nunchanged"));}
+    let mut args=input();args["content"][0]["format"]=json!({});refusal(&args,&context(),"invalid");
+}
+#[test]
+fn generic_causality_pin_preserves_bounded_unknowns_and_requires_known_qualifiers(){
+    let mut args=input();args["correlation"]=json!("c".repeat(256));args["cause"]=json!({"kind":"_future","id":"i".repeat(129),"provenance":"_future","extra":"x".repeat(2200)});
+    let prepared=send(&args,&context()).unwrap();assert_eq!(prepared.cause,Some(args["cause"].clone()));assert_eq!(prepared.correlation.unwrap().len(),256);
+    args["correlation"]=json!("c".repeat(257));refusal(&args,&context(),"invalid");args["correlation"]=json!("");refusal(&args,&context(),"invalid");args.as_object_mut().unwrap().remove("correlation");
+    for kind in ["entity","request","effect"]{args["cause"]=json!({"kind":kind,"id":"id","provenance":"asserted"});refusal(&args,&context(),"invalid");if kind=="effect"{args["cause"]["boot"]=json!("b");}else{args["cause"]["endpoint"]=json!("r1");args["cause"]["epoch"]=json!("e1");}assert!(send(&args,&context()).is_ok());}
+    args["cause"]=json!({"kind":"delivery","id":"id","provenance":"asserted","extra":"x".repeat(4100)});refusal(&args,&context(),"invalid");
+    let nested=(0..65).fold(Value::Null,|v,_|json!([v]));args["cause"]=json!({"kind":"_future","id":"id","provenance":"asserted","extra":nested});refusal(&args,&context(),"invalid");
+}

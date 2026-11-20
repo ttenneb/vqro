@@ -43,13 +43,17 @@ pub fn common(args:&Value,context:&Context<'_>)->Result<(),Refusal> {
     }
     if let Some(cause)=args.get("cause") {
         if !cause.is_object() {return Err(invalid("cause must be an object"));}
-        for field in ["kind","id","provenance"] {id(&cause[field])?;}
-        for field in ["endpoint","epoch","boot"] {if let Some(value)=cause.get(field) {id(value)?;}}
-        if vqro::limits::encoded_bytes(cause)>2048 {return Err(invalid("cause exceeds2048 bytes"));}
+        for field in ["kind","id","provenance"] {causal_string(&cause[field])?;}
+        for field in ["endpoint","epoch","boot"] {if let Some(value)=cause.get(field) {causal_string(value)?;}}
+        match cause["kind"].as_str(){Some("entity"|"request")=>{causal_string(&cause["endpoint"])?;causal_string(&cause["epoch"])?;},Some("effect")=>{causal_string(&cause["boot"])?;},_=>{}}
+        if vqro::limits::encoded_bytes(cause)>4096 {return Err(invalid("cause exceeds4096 bytes"));}
+        if vqro::limits::json_depth(cause,64).is_err(){return Err(invalid("cause exceeds64 container depth"));}
     }
-    if let Some(value)=args.get("correlation") {id(value)?;}
+    if let Some(value)=args.get("correlation") {if causal_string(value)?.is_empty(){return Err(invalid("correlation must be nonempty"));}}
     Ok(())
 }
+
+fn causal_string(value:&Value)->Result<&str,Refusal>{value.as_str().filter(|value|value.len()<=256).ok_or_else(||invalid("causal string must be at most256 bytes"))}
 
 pub fn send(args:&Value,context:&Context<'_>)->Result<Send,Refusal> {
     common(args,context)?;
@@ -86,12 +90,15 @@ pub fn send(args:&Value,context:&Context<'_>)->Result<Send,Refusal> {
     let mut text=None;let mut images=Vec::new();
     for (index,block) in blocks.iter().enumerate() {
         let fields=block.as_object().ok_or_else(||invalid("content block must be an object"))?;
-        let allowed: &[&str]=match block["type"].as_str() {Some("text")=>&["type","text"],Some("image")=>&["type","mime","data"],_=>&["type"]};
+        let allowed: &[&str]=match block["type"].as_str() {Some("text")=>&["type","text","format"],Some("image")=>&["type","mime","data"],_=>&["type"]};
         if fields.keys().any(|field|!allowed.contains(&field.as_str())) && matches!(block["type"].as_str(),Some("text"|"image")) {
             return Err(reject("unsupported","undeclared content block field"));
         }
         match block["type"].as_str() {
             Some("text")=>{
+                if block.get("format").is_some_and(|format|!format.is_string()){return Err(invalid("text format must be a string"));}
+                // Native RPC text is literal; plain/markdown/unknown presentation formats all fall
+                // back to the exact same plain bytes, never a command/template interpretation.
                 if index!=0 || text.is_some() {return Err(reject("unsupported","text_then_media requires at most one leading text block"));}
                 text=Some(block["text"].as_str().ok_or_else(||invalid("text block requires text"))?);
             }

@@ -63,7 +63,7 @@ pub fn transcript(mut entities:Vec<(&str,&Value)>,incomplete:bool)->Value{
                 if value.get("incomplete").is_some(){clipped=true;}
             }
             "tool"=>{let line=format!("{}: {}",value["title"].as_str().unwrap_or("tool"),value["status"].as_str().unwrap_or("unknown"));if !push(&mut rows,&mut remaining,&mut clipped,"tool> ",&line,Some("dim")){break;}},
-            "_ui" if value["method"]=="notify"=>{if let Some(text)=value["native"]["message"].as_str(){for line in text.lines().rev(){if !push(&mut rows,&mut remaining,&mut clipped,"system> ",line,Some("dim")){break 'entities;}}}},
+            "_ui" if value["method"]=="notify"=>{if let Some(text)=value["message"].as_str(){for line in text.lines().rev(){if !push(&mut rows,&mut remaining,&mut clipped,"system> ",line,Some("dim")){break 'entities;}}}},
             _=>{}
         }
     }

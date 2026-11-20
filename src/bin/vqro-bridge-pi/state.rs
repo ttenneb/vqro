@@ -9,6 +9,15 @@ use super::native::{Event,Exit};
 pub const ENTITY_BYTES:usize=60*1024; // Room for the whole snapshot/put envelope within64KiB.
 pub const ENTITY_COUNT:usize=512;
 pub const ENTITY_TOTAL:usize=512*1024;
+fn project_content(content:&Value)->Value{
+    if let Some(text)=content.as_str(){return json!([{"type":"text","text":text}]);}
+    if let Some(blocks)=content.as_array(){return Value::Array(blocks.iter().map(|block|{
+        let mut block=block.clone();
+        if block["type"]=="thinking"{let text=block["thinking"].clone();block.as_object_mut().unwrap().remove("thinking");block["type"]=json!("thought");block["text"]=text;}
+        if block["type"]=="image"{if let Some(mime)=block.get("mimeType").cloned(){block.as_object_mut().unwrap().remove("mimeType");block["mime"]=mime;}}
+        block
+    }).collect());}Value::Null
+}
 pub struct Agent {
     pub journal:ItemJournal,
     pub signals:Arc<Signals>,
@@ -204,14 +213,7 @@ impl Agent {
         }
     }
     fn message_value(&mut self,message:&Value,final_value:bool,position:u64)->Value {
-        let content=if let Some(text)=message["content"].as_str(){json!([{"type":"text","text":text}])}else if let Some(blocks)=message["content"].as_array(){
-            Value::Array(blocks.iter().map(|block|{
-                let mut block=block.clone();
-                if block["type"]=="thinking" {let text=block["thinking"].clone();block.as_object_mut().unwrap().remove("thinking");block["type"]=json!("thought");block["text"]=text;}
-                if block["type"]=="image" {if let Some(mime)=block.get("mimeType").cloned(){block.as_object_mut().unwrap().remove("mimeType");block["mime"]=mime;}}
-                block
-            }).collect())
-        }else{Value::Null};
+        let content=project_content(&message["content"]);
         let mut native=message.as_object().cloned().unwrap_or_default();native.remove("role");native.remove("content");
         let mut value=json!({"position":position,"role":message["role"],"content":content,"final":final_value,"native":native});
         if vqro::limits::encoded_bytes(&value)>ENTITY_BYTES {
@@ -251,7 +253,7 @@ impl Agent {
         let mut value=self.journal.entity("tool",&id).map(|(_,value)|value.clone()).unwrap_or_else(||json!({"position":self.position,"title":record["toolName"],"input":record["args"]}));
         value["status"]=json!(status);
         if let Some(result)=record.get("result").or_else(||record.get("partialResult")){
-            value["content"]=result["content"].clone();
+            value["content"]=project_content(&result["content"]);
             let mut extras=result.as_object().cloned().unwrap_or_default();extras.remove("content");value["native"]=json!(extras);
         }
         if vqro::limits::encoded_bytes(&value)>ENTITY_BYTES {self.incomplete.insert("items".into());value=json!({"position":value["position"],"title":record["toolName"],"status":status,"incomplete":["input","content"]});}

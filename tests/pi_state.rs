@@ -130,6 +130,15 @@ fn fallback_is_derived_from_the_journal_and_native_retries_are_system_notices(){
 }
 
 #[test]
+fn incremental_and_final_tool_media_use_the_same_standard_projection_as_messages(){
+    let mut a=make();event(&mut a,json!({"type":"tool_execution_start","toolCallId":"media","toolName":"image-tool","args":{}}));
+    for (kind,field) in [("tool_execution_update","partialResult"),("tool_execution_end","result")]{
+        let mut record=json!({"type":kind,"toolCallId":"media","toolName":"image-tool","isError":false});record[field]=json!({"content":[{"type":"image","mimeType":"image/png","data":"AQ==","extra":"preserved"}]});event(&mut a,record);
+        let tools=entities(&a,"tool");let block=&tools[0]["value"]["content"][0];assert_eq!(block["mime"],"image/png");assert!(block.get("mimeType").is_none());assert_eq!(block["data"],"AQ==");assert_eq!(block["extra"],"preserved");
+    }
+}
+
+#[test]
 fn unresolved_configuration_never_publishes_stale_batch_or_image_semantics(){
     let mut a=make();let rev=a.caps()["rev"].clone();assert!(a.caps()["agent.send"]["content"]["types"].as_array().unwrap().iter().any(|v|v=="image"));
     a.configuration_pending(true);assert_eq!(a.state(),"unknown");assert!(a.caps()["agent.send"]["modes"].get("boundary").is_none());
@@ -145,7 +154,7 @@ fn timed_dialog_cancel_is_once_and_notifications_are_not_questions(){
     let cancels=a.take_ui_cancels();assert_eq!(cancels.len(),1);assert!(a.take_ui_cancels().is_empty());assert_eq!(a.state(),"unknown");
     a.answer_fenced(&cancels[0].0);assert_eq!(a.state(),"idle");
     event(&mut a,json!({"type":"extension_ui_request","id":"notice","method":"notify","message":"FYI"}));
-    assert!(a.take_ui_cancels().is_empty());assert!(a.request_summaries().is_empty());
+    assert!(a.take_ui_cancels().is_empty());assert!(a.request_summaries().is_empty());assert!(a.transcript().to_string().contains("system> FYI"));
 }
 
 #[test]
