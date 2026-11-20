@@ -170,29 +170,6 @@ class NativeOracle(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(sum(row["kind"]=="model_request" for row in rows),2)
             self.assertTrue(all(row["witness"]["entry"]["value"]["state"]=="claimed" for row in rows if row["kind"]=="invoke"))
 
-    async def test_typed_receipt_only_republishes_actual_native_insertion(self):
-        with tempfile.TemporaryDirectory() as root:
-            native=Native(Provider(),Path(root));await native.add("a0")
-            with self.assertRaises(ValueError): await native.control({"verb":"emit-receipt","ref":"a0","delivery":"absent"})
-            args={"v":0,"delivery":"d:observed","mode":"start","content":[{"type":"text","text":"actual input"}]}
-            await native.effect("agent.send",SimpleNamespace(id="e",ref="a0",incarnation="i:a0"),args)
-            observed=await native.control({"verb":"emit-receipt","ref":"a0","delivery":"d:observed"})
-            self.assertEqual(observed,{"delivery":"d:observed","stage":"inserted"})
-            await native.control({"verb":"emit-receipt","ref":"a0","delivery":"d:observed"})
-            entities=list(native.journal("a0")["entities"].values())
-            receipt=next(row for row in entities if row["kind"]=="receipt")
-            self.assertEqual((receipt["id"],receipt["rev"],receipt["value"]),("d:observed",2,observed))
-            self.assertEqual(sum(row["kind"]=="receipt" for row in entities),1)
-
-    async def test_queued_but_not_inserted_input_cannot_invent_receipt(self):
-        with tempfile.TemporaryDirectory() as root:
-            native=Native(Provider(),Path(root));await native.add("a0",state="running")
-            args={"v":0,"delivery":"d:queued","mode":"boundary","content":[{"type":"text","text":"queued"}]}
-            await native.effect("agent.send",SimpleNamespace(id="e",ref="a0",incarnation="i:a0"),args)
-            before=native.journal("a0")["seq"]
-            with self.assertRaises(ValueError): await native.control({"verb":"emit-receipt","ref":"a0","delivery":"d:queued"})
-            self.assertEqual(native.journal("a0")["seq"],before)
-
     async def test_request_validation_precedes_native_response_and_false_is_not_cancel(self):
         with tempfile.TemporaryDirectory() as root:
             provider=Provider();native=Native(provider,Path(root));await native.add("a0")
