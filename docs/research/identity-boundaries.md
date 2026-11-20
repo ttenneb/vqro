@@ -36,3 +36,11 @@ validator. A native wire red recorded `system`; the new test covers reserved cas
 near-prefix/ordinary/undeclared tags. All17 cases plus2 existing lifecycle/unsupported-env tests pass. Explicit
 native env remains opaque/unmodified: invalid/reserved tags are not certified as known resource metadata. No
 new authority, rejection/replay of a native spawn, provider inference or changed identity lifetime is introduced.
+
+Subsequent explicit coordinator ruling extends the pinned Cf refusal to principal identifiers too, alongside
+existing Cc/whitespace/UTF8 bounds. This is a new identifier-domain rule, not a rewrite of the original G1
+label-only scope. Before the change U+00AD was accepted and a legacy ZWJ owner stayed known; the shared170-point
+name test and real hello/recovery test now pass. Invalid legacy rows are preserved, resolve owner-unset, reject
+raw typed assertions and permit only explicit bootstrap repair. Combining/variation names remain exact, not
+normalized. The seven focused owner/case/format/launcher tests pass with no warnings. Peer spike-panel-1 confirms
+its pending SDK owner() candidate f985573 already matches this domain and never supplies an inferred fallback.

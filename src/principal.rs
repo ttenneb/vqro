@@ -63,8 +63,8 @@ impl CallAuthor {pub fn effective(&self)->Option<&str>{self.attribution.effectiv
 pub enum Identity {Owner,Principal {principal:String}}
 
 pub fn validate(id:&str)->Result<(),RpcError> {
-    if id.is_empty() || id.len()>ID_BYTES || id.chars().any(|c|c.is_control()||c.is_whitespace()) || id.eq_ignore_ascii_case(UNDECLARED) || id.eq_ignore_ascii_case(OWNER_UNSET) {
-        return Err(RpcError::invalid("principal must be 1..=256 bytes without whitespace/control characters; undeclared and owner-unset are reserved"));
+    if id.is_empty() || id.len()>ID_BYTES || crate::limits::text_controls(id) || id.chars().any(char::is_whitespace) || id.eq_ignore_ascii_case(UNDECLARED) || id.eq_ignore_ascii_case(OWNER_UNSET) {
+        return Err(RpcError::invalid("principal must be 1..=256 bytes without whitespace/control/format characters; undeclared and owner-unset are reserved"));
     }
     Ok(())
 }

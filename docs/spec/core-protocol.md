@@ -52,7 +52,9 @@ ownership/collision hygiene, not persistent principal identities (D8/D24).
 ### Connection-known principals (AS6)
 
 This is accident-proof attribution, **not security** (D8); it creates no human/agent mode or new credential.
-Principals are opaque, case-sensitive strings of 1–256 UTF-8 bytes without whitespace/control characters.
+Principals are opaque, case-sensitive strings of 1–256 UTF-8 bytes without whitespace, Unicode Cc controls
+or the same pinned Unicode16 Cf format characters refused in labels. Ordinary combining/variation characters
+are not stripped or normalized. Invalid legacy owner names remain unresolved and require explicit recovery.
 `undeclared` is reserved for unknown identity. Display/client names never resolve identity. See also
 [coordination-v0 §3](coordination-v0.md#3-principals), which uses this generic seam but owns its own rights policy.
 
