@@ -954,6 +954,16 @@ async def flood_retained(ctx, prefix, *, count=96, size=8192):
     return f"{prefix}-{count - 1}:"
 
 
+def stalled_attachment_witness(first, second, stalled):
+    check(all(view.closed is None and view.peer.failure is None for view in (first, second)),
+          "a fast viewer was harmed by the stalled attachment")
+    if stalled.closed is None:
+        raise HarnessGap("O7 paced pressure did not retire the stalled attachment")
+    check(stalled.closed == "slow_consumer", "stalled attachment did not report its exhausted output budget")
+    check(stalled.peer.failure is None, "stalled attachment closed the RPC socket instead of only its stream")
+    check(stalled.reducer.failure == "slow_consumer", "prior item integrity error cannot be hidden by slow-consumer closure")
+
+
 @case("O7")
 async def stalled_viewer_isolation(ctx):
     first = await fresh_view(ctx)
@@ -961,18 +971,45 @@ async def stalled_viewer_isolation(ctx):
     stalled = await fresh_view(ctx, peer=await ctx.viewer())
     transport = stalled.peer.writer.transport
     transport.pause_reading()
+    paused_cursor = deepcopy(stalled.reducer.cursor)
+    fast_bytes_before = [first.reducer.offset, second.reducer.offset]
     started = asyncio.get_running_loop().time()
     try:
-        needle = await flood_retained(ctx, "O7-stall")
-        await ctx.wait_view(first, lambda reducer: has_message(reducer, needle))
-        await ctx.wait_view(second, lambda reducer: has_message(reducer, needle))
+        # The pinned core has a 1MiB stream-output budget. Pace >3MiB while
+        # observing both fast viewers every8 records; the old768KiB never filled it.
+        for batch in range(52):
+            needle = await flood_retained(ctx, "O7-stall-" + str(batch), count=8)
+            await ctx.wait_view(first, lambda reducer: has_message(reducer, needle))
+            await ctx.wait_view(second, lambda reducer: has_message(reducer, needle))
+            check(first.closed is None and second.closed is None, "fast attachment retired under paced native draining")
         check(not transport.is_reading(), "stalled viewer resumed reading during isolation", component="harness")
-        ctx.evidence.append({"kind": "stalled_viewer", "fast_viewers": 2, "stalled_viewers": 1,
-                             "native_records": 96, "payload_bytes": 96 * 8192,
-                             "elapsed_ms": round((asyncio.get_running_loop().time() - started) * 1000),
-                             "fast_cursors": [first.reducer.cursor, second.reducer.cursor]})
+        check(stalled.reducer.cursor == paused_cursor, "paused fixture advanced its applied cursor", component="harness")
     finally:
         transport.resume_reading()
+    await stalled.peer.wait(lambda: stalled.closed is not None or stalled.peer.failure is not None, timeout=5)
+    stalled_attachment_witness(first, second, stalled)
+    # Retirement is stream.closed/slow_consumer, not socket EOF (coordinator ruling).
+    snapshot = await stalled.peer.call("workspace.snapshot")
+    check(isinstance(snapshot.get("epoch"), str), "ordinary RPC socket did not survive its stalled attachment")
+    cursor, seed = deepcopy(stalled.reducer.cursor), deepcopy(stalled.reducer)
+    recovered = await fresh_view(ctx, peer=stalled.peer, after=cursor, seed=seed)
+    views = (first, second, recovered)
+    for attempt in range(3):
+        target = max(view.reducer.sequence for view in views)
+        for view in views:
+            await ctx.wait_view(view, lambda reducer: reducer.sequence >= target)
+        if len({(view.reducer.epoch, view.reducer.sequence) for view in views}) == 1:
+            break
+    check(all(view.reducer.cursor == recovered.reducer.cursor and view.reducer.entities == recovered.reducer.entities for view in (first, second)),
+          "reattached last-good cursor did not recover the exact fast-viewer state")
+    stalled_attachment_witness(first, second, stalled)
+    ctx.evidence.append({"kind": "stalled_attachment_recovery", "fast_viewers": 2, "native_records_requested": 416,
+                         "payload_bytes_requested": 416 * 8192,
+                         "observed_fast_wire_bytes": [view.reducer.offset - before for view, before in zip((first, second), fast_bytes_before)], "paused_cursor": paused_cursor, "last_good_cursor": cursor,
+                         "stream_reason": stalled.closed, "close_notice": stalled.close_notice,
+                         "rpc_socket_alive": True, "replay": recovered.initial, "recovered_cursor": recovered.reducer.cursor,
+                         "exact_fast_viewer_reconstruction": True,
+                         "elapsed_ms": round((asyncio.get_running_loop().time() - started) * 1000)})
 
 
 @case("O9")

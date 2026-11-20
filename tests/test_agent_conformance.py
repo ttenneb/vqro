@@ -512,6 +512,28 @@ class RetentionRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(fresh.await_count, 0)
 
 
+class StalledAttachmentWitnessTests(unittest.TestCase):
+    def view(self, reason=None, failure=None):
+        return SimpleNamespace(closed=reason, peer=SimpleNamespace(failure=failure), reducer=SimpleNamespace(failure=reason))
+
+    def test_no_retirement_is_not_a_pass_even_when_fast_viewers_advance(self):
+        from agent_conformance.cases import stalled_attachment_witness
+        with self.assertRaises(HarnessGap):
+            stalled_attachment_witness(self.view(), self.view(), self.view())
+
+    def test_only_stalled_stream_closes_socket_and_fast_views_stay_alive(self):
+        from agent_conformance.cases import stalled_attachment_witness
+        first, second, stalled = self.view(), self.view(), self.view("slow_consumer")
+        stalled_attachment_witness(first, second, stalled)
+        for bad in ("fast", "socket", "corruption"):
+            first, second, stalled = self.view(), self.view(), self.view("slow_consumer")
+            if bad == "fast": first.closed = "slow_consumer"
+            elif bad == "socket": stalled.peer.failure = WireFailure("EOF")
+            else: stalled.reducer.failure = "bad_record"
+            with self.subTest(bad=bad), self.assertRaises(CheckFailed):
+                stalled_attachment_witness(first, second, stalled)
+
+
 class CoreOriginBindingTests(unittest.IsolatedAsyncioTestCase):
     async def test_normal_origin_uses_only_its_connection_core_hello_identity(self):
         ctx = object.__new__(PublicImplementation)
@@ -743,12 +765,10 @@ class ClassificationTests(unittest.IsolatedAsyncioTestCase):
                                         Path("/vqro"), Path("/hc"), factory=self.factory(), handlers={})
                 self.assertEqual((result.status, result.component, result.reason), ("fail", "harness", "harness_gap"))
 
-    async def test_known_incomplete_review_handlers_cannot_report_pass(self):
-        async def partial(ctx): pass
-        for ident in ("O7",):
-            result = await run_case(Case(ident, "incomplete review witness"), Path(self.temp.name) / ident,
-                self.manifest, Path("/vqro"), Path("/hc"), factory=self.factory(), handlers={ident: partial})
-            self.assertEqual((result.status, result.component, result.reason), ("fail", "harness", "harness_gap"))
+    async def test_absent_observation_runner_remains_a_harness_failure(self):
+        result = await run_case(BY_ID["O7"], Path(self.temp.name) / "missing-observer", self.manifest,
+                                Path("/vqro"), Path("/hc"), factory=self.factory(), handlers={})
+        self.assertEqual((result.status, result.component, result.reason), ("fail", "harness", "harness_gap"))
 
     async def test_only_absent_optional_declaration_is_unsupported(self):
         result = await self.run_one(factory=self.factory(declared_send=False), handlers={})
