@@ -44,3 +44,9 @@ name test and real hello/recovery test now pass. Invalid legacy rows are preserv
 raw typed assertions and permit only explicit bootstrap repair. Combining/variation names remain exact, not
 normalized. The seven focused owner/case/format/launcher tests pass with no warnings. Peer spike-panel-1 confirms
 its pending SDK owner() candidate f985573 already matches this domain and never supplies an inferred fallback.
+
+Restart boundary is now explicit: resource.principal is in-memory launcher observation and becomes unknown/null
+for surviving terminals after a core restart. The K3 tier-1 status extension admits only a valid owner until
+relaunch supplies a new observed tag. It neither guesses owner from a terminal nor backfills from child/provider
+state. This documents the existing producer lifecycle and coordinator's extension-consumer ruling, not a new
+core permission/persistence mechanism; coordination-spec mirror is routed to its owner.

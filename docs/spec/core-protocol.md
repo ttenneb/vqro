@@ -546,6 +546,11 @@ and are not rewritten by duplicate spawn receipts. A new incarnation, unobserved
 unsupported environment, invalid tag, or core rehydration without recorded assignment has `principal:null`:
 no inferred backfill or new persistence/delivery promise. The bound is the normal principal string bound;
 `undeclared` is the explicit no-identity tag. This field is public in spawn/list/snapshot/resource events.
+Assignments are deliberately in-memory: **after every core restart**, existing terminal rows have unknown/null
+launcher principals until a new observed launch assignment. No restored registry/provider fact, surviving
+process environment or child report backfills them. The bundled tier-1 `agents.status` consumer fails closed:
+with an unknown/null or undeclared tag, only a valid workspace owner may report status until relaunch. This is
+extension policy over the observation, not additional core authority or a persistence guarantee.
 
 `resource.list` optionally filters by exact `provider`, `backend_ref`, vqro `id` and/or hosting-terminal `host`
 (AND), before serializing records.
