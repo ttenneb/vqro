@@ -550,11 +550,16 @@ class Extension:
 
     def owner(self):
         """The workspace owner principal (`doc/principals/owner`), or None when it is unset or not a valid assertable
-        principal (1-256 bytes, no whitespace or controls, not `undeclared`, not core-assigned). Never guessed."""
+        principal, never guessed. Mirrors the core's principal guard: 1-256 UTF-8 bytes; no whitespace, Unicode Cc
+        controls or Cf format characters (bidi, zero-width); not a reserved name, compared ASCII case-insensitively
+        (`undeclared`, `owner-unset`, `system`, `system:*`, `extension:*`, `host:*`)."""
         value = self.value("doc/principals/owner")
-        if not isinstance(value, str) or not 0 < len(value.encode()) <= 256 or value == "undeclared" \
-                or any(c.isspace() or unicodedata.category(c) == "Cc" for c in value) \
-                or value.startswith(("extension:", "host:", "system:")) or value == "system":
+        if not isinstance(value, str) or not 0 < len(value.encode()) <= 256:
+            return None
+        if any(c.isspace() or unicodedata.category(c) in ("Cc", "Cf") for c in value):
+            return None
+        folded = value.encode("ascii", "replace").decode().lower()  # ASCII case folding only
+        if folded in ("undeclared", "owner-unset", "system") or folded.startswith(("system:", "extension:", "host:")):
             return None
         return value
 

@@ -847,10 +847,14 @@ class Tier1StatusTests(unittest.TestCase):
             self.assertIsNone(self.core.owner(), row)
             with self.assertRaises(VqroError):
                 self.report({"terminal": "r1", "app": "claude", "state": "idle", "seq": 1})
-        self.core.entries["doc/principals/owner"] = {"value": "own\u200der", "version": 3}  # a format char, core-valid
-        self.assertEqual(self.core.owner(), "own\u200der", "parity with the core: only whitespace and controls are refused")
-        self.core.entries["doc/principals/owner"] = {"value": "own\x07er", "version": 4}
-        self.assertIsNone(self.core.owner())
+        # Parity with the core's principal guard: Cc controls and Cf format characters (bidi, zero-width) are refused,
+        # and reserved names compare ASCII case-insensitively; ordinary names stay case-sensitive.
+        for row in ("own\u200der", "own\u202eer", "own\x07er", "Undeclared", "OWNER-UNSET", "System", "HOST:r1", "Extension:x"):
+            self.core.entries["doc/principals/owner"] = {"value": row, "version": 3}
+            self.assertIsNone(self.core.owner(), repr(row))
+        for row in ("Alice", "owner", "systemd", "hosting", "é-owner"):
+            self.core.entries["doc/principals/owner"] = {"value": row, "version": 4}
+            self.assertEqual(self.core.owner(), row)
 
     def test_bad_reports_are_refused_to_the_caller_without_notices(self):
         for bad in ({"terminal": "r9", "app": "c", "state": "idle", "seq": 1}, {"terminal": "r1", "app": "", "seq": 1},
