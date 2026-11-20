@@ -271,6 +271,16 @@ if a.inbox == "fake":
         check(f"L lost take reply ({'window moved on' if rotate else 'same window'}): claims found by op and released, then delivered",
               recovered and released and got and h.get(lt)["state"] in ("inserted", "read"),
               {"recovered": plugin_events("take_recovered"), "state": h.get(lt)})
+# L2. a lost take whose recovery also fails (fake only): the op is kept and retried, so the claim is released and
+# the mail delivered without a restart (an inbox refuses every take while a claim is in flight)
+if a.inbox == "fake":
+    base_recovered = len(plugin_events("take_recovered"))
+    h.c.cmd("fixture.fault", take_delay_s=4.5, op_fail=1)
+    lt2 = h.send(AGENT, "start", txt("MSG-LOST-TWICE"))
+    got = wait_for(lambda: first_request_with("MSG-LOST-TWICE") is not None, 40)
+    check("L2 failed recovery is retried; then delivered", got and plugin_events("take_recovery_failed")
+          and len(plugin_events("take_recovered")) > base_recovered and h.get(lt2)["state"] in ("inserted", "read"),
+          {"failed": plugin_events("take_recovery_failed")[-1:], "state": h.get(lt2).get("state")})
 # P. print mode (`pi -p`) ends when its answer is done: the plugin's connection and timers never keep it running
 penv = dict(base, PI_CODING_AGENT_DIR=P["agent"], PI_OFFLINE="1", PI_SKIP_VERSION_CHECK="1", PI_TELEMETRY="0",
             VQRO_AGENT=AGENT, VQRO_PRINCIPAL=h.PLUGIN, VQRO_PULL_LOG=plugin_log)

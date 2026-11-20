@@ -257,6 +257,18 @@ if a.inbox == "fake":
               out == "" and state(lost) == "held" and any(e["event"] == "take_recovered" for e in hooklog()[-6:]), (h.get(lost), hooklog()[-4:]))
         rc, out, _ = hook("PostToolBatch", {"tool_calls": []})
         check(f"the released record is taken at the next point ({why})", lost in context(out), out)
+# 9d2. a lost take whose recovery also fails (fake only): the op is kept and recovery is retried at the next point
+# before anything is taken, so the claim is not stuck (an inbox refuses every take while a claim is in flight)
+if a.inbox == "fake":
+    h.c.cmd("fixture.fault", take_delay_s=4.5, op_fail=1)
+    stuck = h.send(AGENT, "boundary", txt("LOST reply, lost recovery"), render=CTX)
+    time.sleep(0.3)
+    rc, out, _ = hook("PostToolBatch", {"tool_calls": []})
+    kept = json.load(open(os.path.join(root, "hookstate", "s1.json"))).get("recover") or []
+    check("failed recovery: the op is kept, the claim not yet released", out == "" and len(kept) == 1 and state(stuck) == "claimed", (kept, state(stuck)))
+    rc, out, _ = hook("PostToolBatch", {"tool_calls": []})
+    kept = json.load(open(os.path.join(root, "hookstate", "s1.json"))).get("recover") or []
+    check("next point: recovery retried first, then the record is handed over", stuck in context(out) and not kept, (kept, state(stuck), out[:120]))
 # 9e. a record larger than this plugin hands over whole stays held (take max_bytes) and never blocks later mail.
 # The largest record taken renders within the budget even when it is all line breaks (quoting adds per line).
 # (take max_bytes is required: K2 has it from ab310ac)
@@ -288,7 +300,25 @@ if a.inbox == "fake":
           state(HEAD) == "held" and all(d in context(out) for d in NEXT) and HEAD not in out
           and any(e["event"] == "released" and e["detail"].get("why") == "too_large_ignored_max_bytes" for e in hooklog()),
           ([state(d) for d in [HEAD] + NEXT], out[:200]))
+    # with nothing else to hand over, the plugin backs off instead of taking and releasing it at every point
+    takes = lambda: sum(1 for l in open(h.inbox_log) if '"event": "take"' in l)
+    hook("PostToolBatch", {"tool_calls": []})  # takes HEAD alone, releases it, backs off
+    sf = os.path.join(root, "hookstate", "s1.json")
+    b1 = json.load(open(sf)).get("oversize_backoff_ms")
+    n0 = takes()
+    for _ in range(3):
+        hook("PostToolBatch", {"tool_calls": []})
+    check("ignored max_bytes, nothing else to take: back off (no take at the following points)", b1 == 2000 and takes() == n0, (b1, takes() - n0))
+    v = json.load(open(sf)); v["oversize_until_ms"] = 0; json.dump(v, open(sf, "w"))  # the backoff elapsed
+    hook("PostToolBatch", {"tool_calls": []})
+    check("...then one take, and the backoff doubles", takes() == n0 + 1 and json.load(open(sf)).get("oversize_backoff_ms") == 4000,
+          (takes() - n0, json.load(open(sf)).get("oversize_backoff_ms")))
     h.withdraw(HEAD)
+    v = json.load(open(sf)); v["oversize_until_ms"] = 0; json.dump(v, open(sf, "w"))
+    W2 = h.send(AGENT, "boundary", txt("after backoff"), render=CTX)
+    time.sleep(0.3)
+    rc, out, _ = hook("PostToolBatch", {"tool_calls": []})
+    check("a normal take resets the backoff", W2 in context(out) and json.load(open(sf)).get("oversize_backoff_ms") == 0, json.load(open(sf)).get("oversize_backoff_ms"))
     h.c.cmd("fixture.fault", no_max_bytes=False)
 # 9g. a failed window fetch sent no take: nothing is "recovered" (no inspection of an earlier, unrelated op)
 if a.inbox == "fake":

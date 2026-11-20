@@ -407,6 +407,8 @@ mod unix {
             s.set("busy", json!(true)); // not idle evidence: only Stop and the idle_prompt notification are
             s.set("open", json!([]));
             s.set("stop_continuations", json!(0));
+            s.set("recover", json!([])); // reconciliation settled every claim of the old consumer
+            s.set("oversize_until_ms", json!(0));
         });
         write_private(&pointer, &mark);
     }
@@ -435,6 +437,21 @@ mod unix {
         // (`unsupported_content`).
         // `max_bytes` (required) keeps records this plugin cannot hand over whole held (`too_large_for_consumer`):
         // they are never claimed, so they never block later mail.
+        // A lost take whose claims are not yet released keeps the inbox from claiming more (`claim_in_flight`):
+        // finish recovering it first, and take nothing until that succeeds.
+        let pending: Vec<String> = ctx.with_state(|s| s.get("recover").as_array().cloned().unwrap_or_default())
+            .iter().filter_map(|v| v.as_str().map(String::from)).collect();
+        if !pending.is_empty() {
+            let left: Vec<String> = pending.into_iter().filter(|op| !recover_take(ctx, op)).collect();
+            ctx.with_state(|s| s.set("recover", json!(left)));
+            if !left.is_empty() {
+                ctx.log("take_deferred", json!({"at": at, "recovering": left.len()}));
+                return None;
+            }
+        }
+        if backing_off(ctx) {
+            return None;
+        }
         let args = json!({"agent": ctx.agent, "consumer": consumer, "at": at, "limit": TAKE_LIMIT, "accept": CONTENT, "max_bytes": RECORD_MAX});
         let suffix = format!("{}:take:{}", ctx.session, random_hex());
         let reply = match core.mutate(ctx, "inbox.take", args, &suffix) {
@@ -442,7 +459,16 @@ mod unix {
             // Uncertain only if the take itself was sent (a failed window fetch sent nothing).
             Err(e) if uncertain(&e) && !core.last_op.is_empty() => {
                 let op = core.last_op.clone();
-                recover_take(ctx, &op, &e);
+                ctx.log("take_uncertain", json!({"error": e, "op": op}));
+                if !recover_take(ctx, &op) {
+                    // Remember it (bounded): the next point retries before taking anything.
+                    ctx.with_state(|s| {
+                        let mut ops = s.get("recover").as_array().cloned().unwrap_or_default();
+                        ops.push(json!(op));
+                        let skip = ops.len().saturating_sub(8);
+                        s.set("recover", json!(ops[skip..]));
+                    });
+                }
                 return None;
             }
             Err(e) => {
@@ -460,6 +486,7 @@ mod unix {
         let mut text = String::new();
         let mut taken = Vec::new();
         let mut full = false;
+        let mut oversized = 0;
         for r in &records {
             let delivery = r.get("delivery").and_then(Value::as_str).unwrap_or("").to_string();
             let insertable = r.get("content").and_then(Value::as_array).is_some_and(|b| b.iter().all(|b| b.get("type").and_then(Value::as_str).is_some_and(|t| CONTENT.contains(&t))));
@@ -473,6 +500,7 @@ mod unix {
             if nonce.is_none() || !insertable || alone_too_big || full || text.len() + piece.len() > MAX_CONTEXT {
                 // keep order among records that fit: nothing jumps ahead of one that only missed this batch
                 full |= insertable && nonce.is_some() && !alone_too_big;
+                oversized += usize::from(insertable && nonce.is_some() && alone_too_big);
                 let why = if nonce.is_none() { "no_randomness" } else if !insertable { "unsupported_content" }
                     else if alone_too_big { "too_large_ignored_max_bytes" } else { "context_limit" };
                 ctx.log("released", json!({"delivery": delivery, "why": why, "bytes": size}));
@@ -481,6 +509,22 @@ mod unix {
             }
             text.push_str(&piece);
             taken.push((delivery, r["claim"].clone(), nonce.unwrap_or_default()));
+        }
+        // An inbox that ignores max_bytes hands the same oversized record back at every point (a take and a
+        // release each time). While a take yields nothing else, back off: 2 s doubling to 60 s.
+        ctx.with_state(|s| {
+            let previous = s.get("oversize_backoff_ms").as_u64().unwrap_or(0);
+            if oversized > 0 && taken.is_empty() {
+                let ms = (previous * 2).clamp(2000, 60_000);
+                s.set("oversize_backoff_ms", json!(ms));
+                s.set("oversize_until_ms", json!(now_ms() as u64 + ms));
+            } else if previous > 0 {
+                s.set("oversize_backoff_ms", json!(0));
+                s.set("oversize_until_ms", json!(0));
+            }
+        });
+        if oversized > 0 {
+            ctx.log("max_bytes_ignored", json!({"oversized": oversized}));
         }
         if taken.is_empty() {
             return None;
@@ -491,22 +535,36 @@ mod unix {
 
     /// A take reply was lost: inspect that exact op on a fresh connection (`inbox.op`; never a new take, which a
     /// changed window epoch would make). It returns the claims the take made, never content; release them so the
-    /// mail stays deliverable instead of claimed until restart.
-    fn recover_take(ctx: &Ctx, op: &str, error: &str) {
-        ctx.log("take_uncertain", json!({"error": error, "op": op}));
-        let Ok(mut fresh) = Core::connect(&ctx.socket) else { return };
-        match fresh.coord("inbox.op", json!({"op": op})) {
-            Ok(reply) => {
-                let claims = reply.get("claims").and_then(Value::as_array).cloned().unwrap_or_default();
-                let records = reply.get("records").and_then(Value::as_array).cloned().unwrap_or_default();
-                for c in claims.iter().chain(records.iter()) {
-                    let delivery = c.get("delivery").and_then(Value::as_str).unwrap_or("");
-                    report(ctx, &mut fresh, delivery, &c["claim"], "released");
-                }
-                ctx.log("take_recovered", json!({"released": claims.len() + records.len()}));
+    /// mail stays deliverable instead of claimed until restart. `true` once settled: the claims are released (or
+    /// already settled), or the op made none; `false` to retry at the next point (the core or inbox did not answer).
+    fn recover_take(ctx: &Ctx, op: &str) -> bool {
+        let Ok(mut fresh) = Core::connect(&ctx.socket) else { return false };
+        let reply = match fresh.coord("inbox.op", json!({"op": op})) {
+            Ok(r) => r,
+            Err(e) => {
+                ctx.log("take_recovery_failed", json!({"op": op, "error": e}));
+                return !uncertain(&e); // a definite refusal will not change by retrying
             }
-            Err(e) => ctx.log("take_recovery_failed", json!(e)),
+        };
+        let claims = reply.get("claims").and_then(Value::as_array).cloned().unwrap_or_default();
+        let records = reply.get("records").and_then(Value::as_array).cloned().unwrap_or_default();
+        let mut settled = true;
+        for c in claims.iter().chain(records.iter()) {
+            let delivery = c.get("delivery").and_then(Value::as_str).unwrap_or("");
+            let suffix = format!("report:{delivery}:{}:released", c["claim"].as_str().unwrap_or(""));
+            match fresh.mutate(ctx, "inbox.report", json!({"delivery": delivery, "claim": c["claim"], "stage": "released"}), &suffix) {
+                Ok(_) => {}
+                Err(e) if uncertain(&e) => settled = false,
+                Err(e) => ctx.log("release_refused", json!({"delivery": delivery, "error": e})), // already settled
+            }
         }
+        ctx.log(if settled { "take_recovered" } else { "take_recovery_incomplete" }, json!({"op": op, "released": claims.len() + records.len()}));
+        settled
+    }
+
+    /// True while backing off from an inbox that ignores max_bytes (see `take`).
+    fn backing_off(ctx: &Ctx) -> bool {
+        ctx.with_state(|s| s.get("oversize_until_ms").as_u64().unwrap_or(0)) > now_ms() as u64
     }
 
     /// The plugin's own header, then the content as a quote: content cannot pose as a header.
@@ -665,6 +723,7 @@ mod unix {
         let mut backoff = Duration::from_millis(500);
         let mut core: Option<Core> = None;
         let mut woken = true; // take once when armed or reconnected, then only after a wake event: never poll
+        let mut retry = false; // ...except to finish a lost-take recovery or after an oversize backoff (every ~3 s)
         // Claude Code started this waiter; if it goes away (killed), nobody would read a rewake: exit.
         let parent = std::os::unix::process::parent_id();
         loop {
@@ -703,20 +762,22 @@ mod unix {
                     release(ctx, c, &handoff);
                     return 0;
                 }
+                // A pending recovery or an oversize backoff: try again later even without a new wake.
+                retry = backing_off(ctx) || ctx.with_state(|s| s.get("recover").as_array().is_some_and(|a| !a.is_empty()));
             }
             // Wait for the next wake event; a short timeout re-checks retirement (no content is read).
             let pending = |row: &Value| row.pointer("/params/data/content/wake/pending").and_then(|p| p.get(&ctx.agent)).and_then(Value::as_u64).unwrap_or(0) > 0;
             if !c.events.is_empty() {
-                woken = c.events.iter().any(pending);
+                woken = c.events.iter().any(pending) || retry;
                 c.events.clear();
             } else {
                 match c.read() {
                     Ok(row) => {
                         if row.get("method").and_then(Value::as_str) == Some("event") {
-                            woken = pending(&row);
+                            woken = pending(&row) || retry;
                         }
                     }
-                    Err(e) if e == "transport: timeout" => {}
+                    Err(e) if e == "transport: timeout" => woken |= retry,
                     Err(e) => {
                         ctx.log("waiter_lost_core", json!(e));
                         core = None;

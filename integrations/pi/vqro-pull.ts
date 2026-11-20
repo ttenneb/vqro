@@ -120,6 +120,8 @@ function plugin(pi: any, hooks: TestHooks) {
     if (!waiting.size) conn?.unref();
   }
   let reconnectTimer: NodeJS.Timeout | undefined;
+  let recoveryTimer: NodeJS.Timeout | undefined;
+  const recovering: string[] = []; // ops of lost takes whose claims are not yet released
   function scheduleReconnect() {
     if (stopped || reconnectTimer) return;
     const delay = backoff;
@@ -197,6 +199,7 @@ function plugin(pi: any, hooks: TestHooks) {
     claims.clear();
     unread.clear();
     inserting.clear();
+    recovering.length = 0; // reconciliation settles every claim of the old consumer
     const records = ctx.sessionManager.getEntries()
       .filter((e: any) => e.type === "custom_message" && e.customType === TYPE && e.details?.vqro?.delivery && e.id)
       .map((e: any) => ({ delivery: e.details.vqro.delivery, entry: e.id }))
@@ -232,14 +235,26 @@ function plugin(pi: any, hooks: TestHooks) {
   }
 
   async function take(at: string): Promise<Rec[]> {
-    if (!consumer || pending === 0) return []; // no inbox call at a safe point without mail
+    if (!consumer) return [];
     if (!conn) { void ensureConnected().catch(() => scheduleReconnect()); return []; }
+    // A lost take whose claims are not yet released keeps the inbox from claiming more (`claim_in_flight`):
+    // finish recovering it first, and take nothing until that succeeds.
+    if (recovering.length && !(await settleRecoveries())) return [];
+    if (pending === 0) return []; // no inbox call at a safe point without mail
     const args = { agent: AGENT, consumer, at, limit: LIMIT, accept: [...CONTENT] }; // K2: block types we can insert
     let reply: any;
     try {
       reply = await mutate("inbox.take", args, `${consumer}:take:${randomBytes(6).toString("hex")}`);
     } catch (e) {
-      if (uncertain(e)) await recoverTake((e as any).op, e);
+      if (uncertain(e)) {
+        const op: string | undefined = (e as any).op;
+        log("take_uncertain", { error: String(e), op });
+        if (op && !(await recoverTake(op))) {
+          recovering.push(op);
+          recovering.splice(0, Math.max(0, recovering.length - 8)); // bounded
+          scheduleRecoveryRetry();
+        }
+      }
       else if (String(e).includes("reconcile")) { log("consumer_fenced"); if (current) await reconcile(current).catch(() => {}); }
       else log("take_failed", { at, error: String(e) });
       return [];
@@ -259,18 +274,46 @@ function plugin(pi: any, hooks: TestHooks) {
 
   // A lost take reply: inspect that exact op (`inbox.op`, also after the window epoch moved on). It returns the claims
   // the take made, never content; release them so the mail stays deliverable instead of claimed until a restart.
-  async function recoverTake(op: string | undefined, error: unknown) {
-    log("take_uncertain", { error: String(error), op });
-    if (!op) return;
+  // true once settled: the claims are released (or already settled), or the op made none; false to retry later
+  // (the core or inbox did not answer). The op is kept until then, so the mail is never stuck claimed.
+  async function recoverTake(op: string): Promise<boolean> {
+    let reply: any;
     try {
       await ensureConnected();
-      const reply = await command("inbox.op", { op }); // inspect that exact op; never a new take
-      const claimed = [...(reply.claims ?? []), ...(reply.records ?? [])];
-      for (const c of claimed) await report(c.delivery, c.claim, "released");
-      log("take_recovered", { released: claimed.length });
+      reply = await command("inbox.op", { op }); // inspect that exact op; never a new take
     } catch (e) {
-      log("take_recovery_failed", { error: String(e) });
+      log("take_recovery_failed", { op, error: String(e) });
+      return !uncertain(e); // a definite refusal will not change by retrying
     }
+    let settled = true;
+    const claimed = [...(reply.claims ?? []), ...(reply.records ?? [])];
+    for (const c of claimed) {
+      try {
+        await mutate("inbox.report", { delivery: c.delivery, claim: c.claim, stage: "released" }, `report:${c.delivery}:${c.claim}:released`);
+      } catch (e) {
+        if (uncertain(e)) settled = false;
+        else log("release_refused", { delivery: c.delivery, error: String(e) }); // already settled
+      }
+    }
+    log(settled ? "take_recovered" : "take_recovery_incomplete", { op, released: claimed.length });
+    return settled;
+  }
+
+  async function settleRecoveries(): Promise<boolean> {
+    for (const op of [...recovering]) {
+      if (await recoverTake(op)) recovering.splice(recovering.indexOf(op), 1);
+    }
+    if (!recovering.length) return true;
+    log("take_deferred", { recovering: recovering.length });
+    scheduleRecoveryRetry();
+    return false;
+  }
+
+  // Retry a pending recovery even if no turn or wake comes (an idle session).
+  function scheduleRecoveryRetry() {
+    if (stopped || recoveryTimer) return;
+    recoveryTimer = setTimeout(() => { recoveryTimer = undefined; woken = true; void pullIdle(); }, 3000);
+    recoveryTimer.unref();
   }
 
   async function report(delivery: string, claim: string, stage: string) {
@@ -382,6 +425,7 @@ function plugin(pi: any, hooks: TestHooks) {
   pi.on("session_shutdown", async () => {
     stopped = true;
     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = undefined; }
+    if (recoveryTimer) { clearTimeout(recoveryTimer); recoveryTimer = undefined; }
     const c = conn;
     conn = undefined;
     c?.destroy();

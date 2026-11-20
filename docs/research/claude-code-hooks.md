@@ -134,6 +134,11 @@ did not change (an edit of a held record) would then never arrive. The wake cont
   take's claims, never content, and they are released. A new take is never sent instead: if the window epoch moved
   on, it would be a different op and claim nothing back. Tested with an injected 4.5 s reply delay, with and without
   a window change (fake inbox), for both plugins.
+  - **If the inspection or a release itself fails** (no answer), the op is kept: in the hook state for Claude, in memory
+    for Pi. Nothing is taken until recovery succeeds, because an inbox refuses every take while a claim is in flight.
+    The next point retries it, and so does the idle waiter or a 3 s timer when idle.
+  - A reconciliation (a new consumer) clears the list. Tested with a failed `coord.inbox.op` after a lost take, for
+    both plugins.
 - **Record size (Claude Code):**
   - `take {max_bytes: 5000}` (compact UTF-8 JSON bytes of the content, K2's filter). Larger records stay held
     `too_large_for_consumer` and are never claimed, so they never block later mail.
@@ -142,6 +147,9 @@ did not change (an edit of a held record) would then never arrive. The wake cont
     (tested).
   - `max_bytes` is required (K2 has it from ab310ac). If an inbox ignores it, a record that can never fit is released
     alone and the records behind it are handed over at the same point: it never starves them.
+  - While such a record is all a take yields, the plugin backs off: no take for 2 s, doubling to 60 s. That avoids a
+    take plus a release at every point. The backoff ends at the first normal take; new mail waits at most until it
+    expires.
 - **Context budget:** whole records only, up to 9,000 characters per hand-off. The rest are released in order and
   taken at later points.
 - **Content:** `take {accept: [...]}` (K2's filter). Claude accepts text; Pi accepts text and images. Other records
