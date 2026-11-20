@@ -5,6 +5,7 @@ mod contract;
 mod state;
 mod retirement;
 mod queue;
+mod requests;
 use std::collections::HashMap;
 use std::sync::{Arc,Mutex,OnceLock};
 use std::time::Duration;
@@ -26,7 +27,7 @@ struct Args {
     #[arg(long)] cwd:Option<std::path::PathBuf>,
     #[arg(last=true,required=true)] native:Vec<String>,
 }
-struct Shared {agent:Mutex<Agent>,native:OnceLock<Native>,starts:OnceLock<Starts>,changed:Notify,cwd:String}
+struct Shared {agent:Mutex<Agent>,native:OnceLock<Native>,starts:OnceLock<Starts>,changed:Notify,cwd:String,ui_slots:Arc<tokio::sync::Semaphore>}
 impl Shared {
     fn facts(&self,name:&str)->Value {self.agent.lock().unwrap().facts(name,&self.cwd)}
     fn wake(&self) {self.changed.notify_waiters();}
@@ -54,18 +55,13 @@ async fn main()->Result<()> {
     let argv=controlled(args.native)?;
     let cwd=args.cwd.unwrap_or(std::env::current_dir()?);
     let signals=admission::Signals::new();
-    let shared=Arc::new(Shared {agent:Mutex::new(Agent::new(instance.clone(),signals.clone())),native:OnceLock::new(),starts:OnceLock::new(),changed:Notify::new(),cwd:cwd.to_string_lossy().into_owned()});
+    let shared=Arc::new(Shared {agent:Mutex::new(Agent::new(instance.clone(),signals.clone())),native:OnceLock::new(),starts:OnceLock::new(),changed:Notify::new(),cwd:cwd.to_string_lossy().into_owned(),ui_slots:Arc::new(tokio::sync::Semaphore::new(24))});
     let weak=Arc::downgrade(&shared);
     let native=Native::spawn(&argv,&cwd,&std::env::vars().collect::<HashMap<_,_>>(),Arc::new(move|event|{
         if let Some(shared)=weak.upgrade(){
             if let native::Event::ProtocolError(message)=&event {eprintln!("Pi native protocol: {message}");}
-            let cancel=match &event {native::Event::Record(record) if record["type"]=="extension_ui_request" && record["id"].is_string()=>Some(record["id"].clone()),_=>None};
             let mut agent=shared.agent.lock().unwrap();agent.signals.observe(&event);agent.observe(&event);
-            if cancel.is_some(){agent.incomplete.insert("requests".into());}
-            drop(agent);shared.wake();
-            if let (Some(id),Some(native))=(cancel,shared.native.get()){
-                let native=native.clone();tokio::spawn(async move{if native.notify("extension_ui_response",json!({"id":id,"cancelled":true}),Instant::now()+Duration::from_secs(2)).await.is_err(){native.stop();}});
-            }
+            drop(agent);shared.wake();drive_ui_cancels(&shared);
         }
     })).await?;
     let _=shared.native.set(native.clone());let _=shared.starts.set(Starts::new(native.clone(),signals));
@@ -82,7 +78,7 @@ async fn main()->Result<()> {
     if std::env::var("VQRO_EXTENSION_LIFETIME").as_deref()==Ok("stdin") {
         let notify=life.clone();std::thread::spawn(move||{use std::io::Read;let mut buf=[0;4096];while matches!(std::io::stdin().read(&mut buf),Ok(n) if n>0){} notify.notify_one();});
     }
-    let mut credential=token;let mut failures=0u32;
+    let mut credential=token;let mut failures=0u32;let mut registrations=0u64;
     while native.alive() {
         let mut config=Config::new(&name,&instance,shared.agent.lock().unwrap().provider_capabilities());
         config.role="runtime".into();config.token=Some(credential.clone());config.max_effect_ids=2048;config.max_item_streams=4;config.max_streams=1;config.call_timeout=Duration::from_secs(5);
@@ -94,6 +90,8 @@ async fn main()->Result<()> {
             Ok((provider,mut requests))=>{
                 // Remember acknowledged rotation before any later sync/view setup can fail.
                 if let Some(token)=provider.resume_token(){credential=token.into();}
+                if registrations>0{shared.agent.lock().unwrap().cancel_requests("reconnect_not_verifiable");drive_ui_cancels(&shared);}
+                registrations+=1;
                 match provider.full_sync(vec![shared.facts(&name)]).await {
                     Ok(())=>{
                         healthy=Some(Instant::now());
@@ -183,6 +181,7 @@ async fn invoke(shared:&Arc<Shared>,effect:&EffectRequest)->Result<Outcome,Provi
         }
         "agent.send"=>send(shared,args,effect.deadline).await,
         "agent.queue"=>queue_op(shared,args,effect.deadline).await,
+        "agent.respond"=>respond(shared,args,effect.deadline).await,
         "agent.interrupt"=>{
             if shared.agent.lock().unwrap().signals.current().idle(){return Ok(Outcome::Observed(Some(json!({"noop":true}))));}
             let result=shared.native.get().unwrap().call("abort",json!({}),effect.deadline.saturating_duration_since(Instant::now())).await;
@@ -197,13 +196,14 @@ async fn invoke(shared:&Arc<Shared>,effect:&EffectRequest)->Result<Outcome,Provi
         }
         _=>rejected("unsupported","undeclared agent operation"),
     }
-fn stop_report(covers:&[Value],exit:Option<&native::Exit>)->Value {json!({"covers":covers,"covers_evidence":"requested","exit":exit.map(|exit|json!({"code":exit.code})),"pending":"unknown"})}
 }
+fn stop_report(covers:&[Value],exit:Option<&native::Exit>)->Value {json!({"covers":covers,"covers_evidence":"requested","exit":exit.map(|exit|json!({"code":exit.code})),"pending":"unknown"})}
 fn native_message(reply:&native::Reply)->String {reply.error.as_str().unwrap_or("native operation failed; outcome unknown").chars().take(1024).collect()}
 fn record_receipt(shared:&Shared,delivery:&str,value:Value){shared.agent.lock().unwrap().receipt(delivery,value);shared.wake();}
 async fn send(shared:&Arc<Shared>,args:&Value,deadline:Instant)->Result<Outcome,ProviderError> {
     let prepared={
         let agent=shared.agent.lock().unwrap();let current=agent.signals.current();
+        if args["mode"]=="start" && agent.state()!="idle"{return rejected("busy","endpoint is not evidenced idle");}
         if agent.caps()["agent.send"]["modes"].get(args["mode"].as_str().unwrap_or("")).is_none(){return rejected("unsupported","mode not in current capabilities");}
         let context=contract::Context {caps_rev:agent.caps()["rev"].as_u64().unwrap(),epoch:agent.epoch(),session:current.metadata["sessionId"].as_str(),owner_proven:false,
             images:agent.caps()["agent.send"]["content"]["types"].as_array().is_some_and(|types|types.iter().any(|kind|kind=="image")),literal:true};
@@ -233,6 +233,44 @@ async fn send(shared:&Arc<Shared>,args:&Value,deadline:Instant)->Result<Outcome,
         }
         Admission::Dispatched {native}=>{let mut value=base;value["stage"]=json!("dispatched");value["native"]=json!({"request":native});record_receipt(shared,&delivery,value.clone());Ok(Outcome::Dispatched(Some(json!({"receipt":value}))))}
         Admission::Refused(error)=>rejected(error.kind,error.message),Admission::Unknown(error)=>native_failure(error),
+    }
+}
+async fn ui_fence(shared:Arc<Shared>,native:Native,id:String) {
+    if matches!(native.call("get_state",json!({}),Duration::from_secs(2)).await,Ok(reply) if reply.success){shared.agent.lock().unwrap().answer_fenced(&id);shared.wake();}
+    else{eprintln!("Pi UI response resolution unverified; never replayed");}
+}
+fn drive_ui_cancels(shared:&Arc<Shared>){
+    let Some(native)=shared.native.get().cloned() else{return;};
+    let (actions,overflow)={let mut agent=shared.agent.lock().unwrap();(agent.take_ui_cancels(),agent.ui_overflow)};
+    if overflow{eprintln!("Pi UI observation/control bound exceeded");native.stop();return;}
+    for (id,wire_id) in actions{
+        if shared.agent.lock().unwrap().requests.would_cancel_another(&id,&wire_id){shared.agent.lock().unwrap().answer_fenced(&id);continue;}
+        let Ok(permit)=shared.ui_slots.clone().try_acquire_owned()else{native.stop();return;};
+        let (shared,native)=(shared.clone(),native.clone());
+        tokio::spawn(async move{let _permit=permit;
+            if native.notify("extension_ui_response",json!({"id":wire_id,"cancelled":true}),Instant::now()+Duration::from_secs(2)).await.is_ok(){
+                shared.agent.lock().unwrap().answer_written(&id,true);shared.wake();ui_fence(shared,native,id).await;
+            }else{native.stop();}
+        });
+    }
+}
+async fn respond(shared:&Arc<Shared>,args:&Value,deadline:Instant)->Result<Outcome,ProviderError>{
+    if args.get("epoch").is_none(){return rejected("invalid","answer requires epoch");}
+    let id=match contract::id(&args["request"]){Ok(id)=>id,Err(error)=>return rejected(error.kind,error.message)};
+    let Some(revision)=args["revision"].as_u64()else{return rejected("invalid","request revision required");};
+    let answer={let mut agent=shared.agent.lock().unwrap();
+        let Some((_,entity))=agent.journal.entity("request",id)else{return rejected("stale","request is not retained/pending");};let entity=entity.clone();
+        match agent.requests.claim(id,revision,&args["response"],&entity){Ok(answer)=>answer,Err(error)=>return rejected(error.kind,error.message)}
+    };
+    let native=shared.native.get().unwrap().clone();
+    match native.notify("extension_ui_response",answer.wire,deadline).await{
+        Ok(())=>{
+            shared.agent.lock().unwrap().answer_written(&answer.request,answer.cancelled);shared.wake();
+            if let Ok(permit)=shared.ui_slots.clone().try_acquire_owned(){let shared=shared.clone();let id=answer.request.clone();tokio::spawn(async move{let _permit=permit;ui_fence(shared,native,id).await;});}
+            Ok(Outcome::Dispatched(Some(json!({"request":answer.request,"revision":revision}))))
+        }
+        Err(error) if !error.may_have_acted=>{shared.agent.lock().unwrap().requests.rollback(&answer.request);native_failure(error)},
+        Err(error)=>{shared.agent.lock().unwrap().answer_written(&answer.request,answer.cancelled);shared.wake();native_failure(error)}
     }
 }
 async fn queue_op(shared:&Arc<Shared>,args:&Value,deadline:Instant)->Result<Outcome,ProviderError> {

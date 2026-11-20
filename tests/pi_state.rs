@@ -3,6 +3,7 @@
 #[allow(dead_code)] #[path="../src/bin/vqro-bridge-pi/admission.rs"] mod admission;
 #[allow(dead_code)] #[path="../src/bin/vqro-bridge-pi/contract.rs"] mod contract;
 #[allow(dead_code)] #[path="../src/bin/vqro-bridge-pi/queue.rs"] mod queue;
+#[allow(dead_code)] #[path="../src/bin/vqro-bridge-pi/requests.rs"] mod requests;
 #[path="../src/bin/vqro-bridge-pi/state.rs"] mod state;
 use admission::Signals;
 use native::{Event,Exit};
@@ -100,6 +101,31 @@ fn session_switch_changes_epoch_not_endpoint_or_receipt_lookup() {
     assert!(entities(&a,"message").is_empty());assert_eq!(a.receipts["d1"]["stage"],"admitted");
     assert_eq!(a.caps()["agent.send"]["modes"]["boundary"]["batch"],"all");
     assert_eq!(a.provider_capabilities()["agent.send"]["modes"]["boundary"]["batch"],json!(["one","all"]));
+}
+
+#[test]
+fn pending_dialogs_survive_pruning_and_dispatched_answers_do_not_invent_idle(){
+    let mut a=make();
+    event(&mut a,json!({"type":"extension_ui_request","id":"native-q","method":"select","title":"Choose","options":["one","two"]}));
+    let summaries=a.request_summaries();let id=summaries[0]["request"].as_str().unwrap().to_string();
+    assert_eq!(summaries[0]["choices"][1]["label"],"two");assert_eq!(a.state(),"requires_action");
+    for _ in 0..600{message(&mut a,&"x".repeat(1500),"stop");}
+    let entity=a.journal.entity("request",&id).unwrap().1.clone();
+    let answer=a.requests.claim(&id,1,&json!({"choice":"c0"}),&entity).unwrap();assert_eq!(answer.wire["value"],"one");
+    a.answer_written(&id,false);assert_eq!(a.state(),"unknown");assert!(a.request_summaries().is_empty());
+    metadata(&mut a,"s1","one-at-a-time");assert_eq!(a.state(),"unknown","metadata alone is not an answer-resolution witness");
+    a.answer_fenced(&id);assert_eq!(a.state(),"idle");
+    assert_eq!(a.journal.entity("request",&id).unwrap().1["native"]["response"],"dispatched");
+}
+
+#[test]
+fn timed_dialog_cancel_is_once_and_notifications_are_not_questions(){
+    let mut a=make();
+    event(&mut a,json!({"type":"extension_ui_request","id":"timed","method":"confirm","title":"T","message":"?","timeout":10}));
+    let cancels=a.take_ui_cancels();assert_eq!(cancels.len(),1);assert!(a.take_ui_cancels().is_empty());assert_eq!(a.state(),"unknown");
+    a.answer_fenced(&cancels[0].0);assert_eq!(a.state(),"idle");
+    event(&mut a,json!({"type":"extension_ui_request","id":"notice","method":"notify","message":"FYI"}));
+    assert!(a.take_ui_cancels().is_empty());assert!(a.request_summaries().is_empty());
 }
 
 #[test]

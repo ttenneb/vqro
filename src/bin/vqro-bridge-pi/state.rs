@@ -15,6 +15,7 @@ pub struct Agent {
     pub incomplete:BTreeSet<String>,
     pub receipts:BTreeMap<String,Value>,
     pub queue:Option<Value>,pub queue_version:u64,
+    pub requests:super::requests::Requests,ui_cancels:Vec<(String,Value)>,ui_unconfirmed:BTreeSet<String>,pub ui_overflow:bool,
     receipt_order:VecDeque<String>,
     history:VecDeque<(String,String)>,
     tools:HashMap<String,String>,
@@ -29,7 +30,7 @@ impl Agent {
         let boot=bytes.iter().map(|byte|format!("{byte:02x}")).collect::<String>();
         let mut journal=ItemJournal::new(format!("{boot}.e1"),JournalConfig {max_entities:ENTITY_COUNT,max_entity_bytes:ENTITY_TOTAL,snapshot_buffer_bytes:1024*1024,..Default::default()});
         journal.set_coverage(Coverage::Tail);
-        let mut agent=Self {journal,signals,incomplete:BTreeSet::new(),receipts:BTreeMap::new(),queue:None,queue_version:0,receipt_order:VecDeque::new(),history:VecDeque::new(),tools:HashMap::new(),current_message:None,
+        let mut agent=Self {journal,signals,incomplete:BTreeSet::new(),receipts:BTreeMap::new(),queue:None,queue_version:0,requests:Default::default(),ui_cancels:Vec::new(),ui_unconfirmed:BTreeSet::new(),ui_overflow:false,receipt_order:VecDeque::new(),history:VecDeque::new(),tools:HashMap::new(),current_message:None,
             position:0,serial:0,epoch_number:1,instance,boot,session:None,run:None,completion:None,reason:"unknown".into(),error:None,exit:None,caps:Value::Null};
         agent.refresh();agent
     }
@@ -39,7 +40,9 @@ impl Agent {
     pub fn state(&self)->&'static str {
         let current=self.signals.current();
         if self.exit.is_some() {"unknown"}
+        else if self.requests.ids().iter().any(|id|self.journal.entity("request",id).is_some_and(|(_,value)|value["status"]=="pending")){"requires_action"}
         else if current.run_active || current.streaming==Some(true) || current.compacting==Some(true) {"running"}
+        else if self.requests.has_unconfirmed() || !self.ui_unconfirmed.is_empty(){"unknown"}
         else if current.idle() {"idle"} else {"unknown"}
     }
     fn declarations(&self)->Value {
@@ -56,6 +59,7 @@ impl Agent {
                 "literal":"controlled_launch","origin":[{"as":"attributed_user","role":"user","frame":"sender_header"}],
                 "correlation":"none","handled":"none","keys":null,"guards":{"session":"adapter","run":"none"},"receipts":{"retain":256}},
             "agent.interrupt":{"pending":"unknown","scope":"foreground","waits":"none"},"agent.receipt":{},
+            "agent.respond":{"ack":"dispatched","methods":["choice","confirm","text"],"scopes":["operation"],"background_requests":false,"native_timeout":"unrepresentable_positive","max_pending":super::requests::MAX_PENDING,"request_bytes":super::requests::MAX_REQUEST_BYTES},
             "agent.stop":{"covers":["foreground","queued"],"waits":"exit"},
             "agent.queue":{"actions":["list","clear"],"ids":"none","removed":{"content":["text"],"media":"unknown"}},
             "items.stream":{"retain_bytes":131072,"entities":ENTITY_COUNT,"entity_bytes":ENTITY_TOTAL,"snapshot_buffer_bytes":1048576,"max_viewers":4}})
@@ -79,7 +83,7 @@ impl Agent {
             "status":{"state":phase},
             "data":{"agent":{"v":0,"state":self.state(),"lifecycle":if self.exit.is_some(){"ended"}else{"live"},
                 "host":{"id":format!("{}.child",self.boot),"provider":provider,"instance":self.instance,"incarnation":"","kind":"process","owns_lifecycle":true},
-                "session":self.session,"epoch":self.epoch(),"caps":self.caps,"completion":self.completion,"queue":self.queue,"requests":[],"background":null,
+                "session":self.session,"epoch":self.epoch(),"caps":self.caps,"completion":self.completion,"queue":self.queue,"requests":self.request_summaries(),"background":null,
                 "config":[],"commands":[],"usage":null,"incomplete":self.incomplete,
                 "items":{"retain_bytes":131072,"entities":ENTITY_COUNT,"entity_bytes":ENTITY_TOTAL,"snapshot_buffer_bytes":1048576,"coverage":"tail"}}}})
     }
@@ -101,13 +105,58 @@ impl Agent {
         while self.receipt_order.len()>256 {if let Some(old)=self.receipt_order.pop_front(){self.receipts.remove(&old);}}
         self.store("receipt",delivery,value,true);
     }
+    pub fn request_summaries(&self)->Vec<Value>{
+        self.requests.ids().iter().filter_map(|id|self.journal.entity("request",id).map(|(_,value)|value)).filter(|value|value["status"]=="pending").map(|value|{
+            let mut summary=json!({"request":value["request"],"revision":value["revision"],"method":value["method"],"title":value["title"],"status":value["status"],"incomplete":value["incomplete"]});
+            if let Some(choices)=value.get("choices"){summary["choices"]=choices.clone();}
+            if vqro::limits::encoded_bytes(&value["params"])<=2048{summary["params"]=value["params"].clone();}else{summary["incomplete"]=json!(["params"]);}
+            summary
+        }).collect()
+    }
+    fn queue_ui_cancel(&mut self,id:String,native:Value){if self.ui_unconfirmed.len()>=16{self.ui_overflow=true;self.incomplete.insert("native_ui".into());return;}self.ui_unconfirmed.insert(id.clone());self.ui_cancels.push((id,native));}
+    pub fn take_ui_cancels(&mut self)->Vec<(String,Value)>{std::mem::take(&mut self.ui_cancels)}
+    fn make_prunable(&mut self,kind:&str,id:&str){if !self.history.iter().any(|(k,i)|k==kind && i==id){self.history.push_back((kind.into(),id.into()));}}
+    pub fn answer_written(&mut self,id:&str,cancelled:bool){
+        if let Some((_,value))=self.journal.entity("request",id){let mut value=value.clone();value["status"]=json!(if cancelled{"cancelled"}else{"answered"});value["native"]["response"]=json!("dispatched");value["native"]["waiting"]=json!("unknown");self.store("request",id,value,false);}
+        self.refresh();
+    }
+    pub fn answer_fenced(&mut self,id:&str){
+        self.requests.finish(id);self.ui_unconfirmed.remove(id);
+        if let Some((_,value))=self.journal.entity("request",id){let mut value=value.clone();value["native"]["waiting"]=json!("not_waiting");self.store("request",id,value,false);self.make_prunable("request",id);}
+        self.refresh();
+    }
+    pub fn cancel_requests(&mut self,reason:&str){
+        for (id,native) in self.requests.cancel_all(){
+            if let Some((_,value))=self.journal.entity("request",&id){let mut value=value.clone();value["status"]=json!("cancelled");value["native"]["reason"]=json!(reason);value["native"]["waiting"]=json!("unknown");self.store("request",&id,value,false);self.make_prunable("request",&id);}
+            self.queue_ui_cancel(id,native);
+        }
+    }
+    fn ui(&mut self,record:&Value){
+        match self.requests.observe(record){
+            super::requests::Incoming::Dialog {id,value,replaced}=>{
+                if let Some(old)=replaced{if let Some((_,value))=self.journal.entity("request",&old){let mut value=value.clone();value["status"]=json!("expired");self.store("request",&old,value,false);self.make_prunable("request",&old);}}
+                self.store("request",&id,value,false);
+                if self.journal.entity("request",&id).is_none(){
+                    if let Some(native)=self.requests.cancel_one(&id){self.queue_ui_cancel(id,native);}self.incomplete.insert("requests".into());
+                }
+            }
+            super::requests::Incoming::Cancel {id,native,reason,replaced}=>{
+                if let Some(old)=replaced{if let Some((_,value))=self.journal.entity("request",&old){let mut value=value.clone();value["status"]=json!("expired");self.store("request",&old,value,false);self.make_prunable("request",&old);}}
+                self.store("request",&id,json!({"request":id,"revision":1,"method":"_unrepresentable","title":reason,"scope":{"operation":format!("ui-{id}")},"status":"cancelled","incomplete":true}),true);
+                self.queue_ui_cancel(id,native);self.incomplete.insert("native_ui".into());
+            }
+            super::requests::Incoming::Notice {id,value}=>{
+                if vqro::limits::encoded_bytes(&value)<=ENTITY_BYTES{self.store("_ui",&id,value,true);}else{self.incomplete.insert("native_ui".into());}
+            }
+        }
+    }
     pub fn invalidate_queue(&mut self) {self.queue=None;self.queue_version=self.queue_version.wrapping_add(1);}
     pub fn control_result(&mut self,id:&str,value:Value) {self.store("_control",id,value,true);}
     fn prune(&mut self,except:(&str,&str))->bool {
         let count=self.history.len();
         for _ in 0..count {
             let Some((kind,id))=self.history.pop_front() else {break;};
-            let active=self.current_message.as_deref()==Some(&id) || self.tools.values().any(|tool|tool==&id)
+            let active=self.current_message.as_deref()==Some(&id) || (except.0!="request" && self.tools.values().any(|tool|tool==&id))
                 || (kind=="receipt" && self.receipts.get(&id).is_some_and(|receipt|receipt["stage"]=="dispatched"));
             if (kind.as_str(),id.as_str())==except || active {self.history.push_back((kind,id));continue;}
             if self.journal.entity(&kind,&id).is_some() {let _=self.journal.remove(&kind,&id);return true;}
@@ -183,9 +232,12 @@ impl Agent {
     }
     pub fn observe(&mut self,event:&Event) {
         match event {
-            Event::Exited(exit)=>{self.exit=Some(exit.clone());self.run=None;},
+            Event::Exited(exit)=>{self.exit=Some(exit.clone());self.run=None;self.ui_unconfirmed.clear();
+                for id in self.requests.ids(){self.requests.finish(&id);if let Some((_,value))=self.journal.entity("request",&id){let mut value=value.clone();value["status"]=json!("expired");self.store("request",&id,value,false);self.make_prunable("request",&id);}}
+            },
             Event::ProtocolError(_)=>{self.incomplete.insert("native".into());},
             Event::Record(record)=>match record["type"].as_str() {
+                Some("extension_ui_request")=>self.ui(record),
                 Some("queue_update")=>{
                     self.queue=super::queue::summary(record);self.queue_version=self.queue_version.wrapping_add(1);
                     if self.queue.is_none(){self.incomplete.insert("queue".into());}else{self.incomplete.remove("queue");}
@@ -197,7 +249,7 @@ impl Agent {
                     }
                     if let Some(id)=record["data"]["sessionId"].as_str().filter(|id|!id.is_empty() && id.len()<=128) {
                         if self.session.as_ref().is_some_and(|session|session["id"]!=id) {
-                            self.epoch_number+=1;self.journal.new_epoch(format!("{}.e{}",self.boot,self.epoch_number));self.journal.set_coverage(Coverage::Tail);self.history.clear();self.tools.clear();self.current_message=None;self.run=None;self.completion=None;
+                            self.cancel_requests("epoch_changed");self.epoch_number+=1;self.journal.new_epoch(format!("{}.e{}",self.boot,self.epoch_number));self.journal.set_coverage(Coverage::Tail);self.history.clear();self.tools.clear();self.current_message=None;self.run=None;self.completion=None;
                         }
                         self.session=Some(json!({"id":id,"title":record["data"]["sessionName"]}));
                         self.store("session","current",self.session.clone().unwrap(),false);
