@@ -3,11 +3,12 @@ import asyncio
 import base64
 import binascii
 from collections import deque
-from vqro_provider import MAX_DATA, ProviderError, integer, maybe_await, reason
+from vqro_provider import MAX_DATA, ProviderError, integer, maybe_await, reason, _request_context
 
 
 class Stream:
-    def __init__(self, provider, params):
+    def __init__(self, provider, params, context=None):
+        self.author, self.actor, self.principal, self.initiator, self.label, self.cause, self.correlation = _request_context(params) if context is None else context
         self.provider, self.params = provider, params
         self.id, self.ref = params["stream"], params["ref"]
         self.incarnation = params["incarnation"]

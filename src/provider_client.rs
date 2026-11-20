@@ -298,6 +298,9 @@ impl Initial {
 }
 
 pub struct OpenRequest {
+    /// Core-supplied opener context; diagnostic metadata, not delegated authority.
+    pub author:String,
+    pub attribution:crate::principal::Attribution,
     pub stream: ProviderStream,
     pub cols: u16,
     pub rows: u16,
@@ -308,6 +311,8 @@ pub struct OpenRequest {
 }
 
 impl OpenRequest {
+    pub fn cause(&self)->Option<&Value>{self.attribution.causality.cause.as_ref()}
+    pub fn correlation(&self)->Option<&str>{self.attribution.causality.correlation.as_deref()}
     /// Reply to an item-stream open: `continue` (only for an open with `after` in this same epoch; records strictly
     /// after the viewer's cursor follow) or `reset` (`snapshot begin`, puts, `snapshot end` follow in-stream), with
     /// the current epoch (1-256 bytes; anything else is refused here as `invalid` and the stream is not opened).
@@ -1006,6 +1011,16 @@ fn open_responder(shared: &Arc<Shared>, id: &Value) -> Responder {
     Responder { shared: shared.clone(), id: id.clone(), done: false, effect:None, counted: false }
 }
 
+// Read only the known scalar context and bounded causal object: never serde-flatten the entire
+// effect/open (including its opaque args) into an intermediate attribution buffer.
+fn request_context(p:&Value)->Result<(String,crate::principal::Attribution),ProviderError> {
+    let scalar=|key:&str|match p.get(key){None|Some(Value::Null)=>Ok(None),Some(Value::String(value))=>Ok(Some(value.clone())),Some(_)=>Err(ProviderError::new("invalid",format!("{key} must be a string")))};
+    let author=match p.get("author"){None=>crate::principal::UNDECLARED.into(),Some(Value::String(author))=>author.clone(),Some(_)=>return Err(ProviderError::new("invalid","author must be a core author string"))};
+    let label=if p["label"].is_null(){None}else{crate::principal::diagnostic_label(p).map_err(|error|ProviderError::new(error.kind(),error.message.clone()))?};
+    let causality=crate::causality::Causality::parse(p).map_err(|error|ProviderError::new(error.kind(),error.message.clone()))?;
+    let attribution=crate::principal::Attribution{actor:scalar("actor")?,principal:scalar("principal")?,initiator:scalar("initiator")?,label,causality,authority:None};
+    Ok((author,attribution))
+}
 fn effect_request(id: &Value, p: &Value, shared: &Arc<Shared>, config: &Arc<Config>) -> Result<Request, ProviderError> {
     let (Some(effect), Some(op), Some(args)) = (p["effect"].as_str(), p["op"].as_str(), p.get("args").filter(|a| a.is_object())) else {
         return Err(ProviderError::new("invalid", "effect, op and args are required"));
@@ -1015,9 +1030,7 @@ fn effect_request(id: &Value, p: &Value, shared: &Arc<Shared>, config: &Arc<Conf
         return Err(ProviderError::new("invalid", "ref and incarnation must be strings"));
     }
     if !config.capabilities.contains_key(op) { return Err(ProviderError::new("unsupported",format!("op {op} is not a declared capability"))); }
-    let author=match p.get("author"){None=>crate::principal::UNDECLARED.into(),Some(Value::String(author))=>author.clone(),Some(_)=>return Err(ProviderError::new("invalid","author must be a core author string"))};
-    let mut attribution:crate::principal::Attribution=serde_json::from_value(p.clone()).map_err(|_|ProviderError::new("invalid","malformed effect attribution"))?;
-    attribution.causality=crate::causality::Causality::parse(p).map_err(|error|ProviderError::new(error.kind(),error.message.clone()))?;
+    let(author,attribution)=request_context(p)?;
     shared.effect_ids.lock().unwrap().begin(effect.to_string(),config.max_effect_ids)?;
     let mut response=responder(shared,id);
     response.effect=Some(effect.to_string());
@@ -1052,6 +1065,7 @@ fn open_request(id: &Value, p: &Value, shared: &Arc<Shared>, config: &Arc<Config
     let (Some(r), Some(inc)) = (p["ref"].as_str(), p["incarnation"].as_str()) else {
         return Err(ProviderError::new("invalid", "ref and incarnation required"));
     };
+    let(author,attribution)=request_context(p)?;
     {
         let streams = shared.streams.lock().unwrap();
         let open = streams.values().filter(|s| s.items == items.is_some()).count();
@@ -1070,6 +1084,7 @@ fn open_request(id: &Value, p: &Value, shared: &Arc<Shared>, config: &Arc<Config
     });
     shared.streams.lock().unwrap().insert(stream, inner.clone());
     Ok(Request::Open(OpenRequest {
+        author,attribution,
         stream: ProviderStream { id: stream, r#ref: r.into(), incarnation: inc.into(), inner, shared: shared.clone(), commands: rx },
         cols,
         rows,

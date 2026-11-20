@@ -434,8 +434,8 @@ existing status consumers and partial resource events (`src/events.rs`) work unc
   `correlation()` (and attribution.causality), Python `Effect.cause` / `correlation`. Absence is unknown, not an
   inferred link. Provenance labels are data, not a core certification of native evidence or authority; adapters echo
   links only onto the items/receipts they can prove the operation produced. Known causal strings reject control
-  characters. Attach records causal metadata in its core audit, but stream.open does not yet forward these fields
-  (accepted separate follow-up); effects sent through effect.invoke do.
+  and Unicode16 format characters. Attach records causal metadata in its core audit and forwards the same explicit
+  fields, plus full opener identity context, to stream.open for either channel; no callback cause/current boot is inferred.
 - Provider SDKs bind configured `VQRO_PRINCIPAL` through `hello.identity`, not per-call principal assertions.
   Without known configuration they are undeclared; a runtime's existing host bootstrap claim supplies its host
   principal when no other actor is known (`provider.register` returns `host` and resolved `actor`). A multi-endpoint
@@ -501,7 +501,7 @@ parameters remain ignorable; this adds no core sizing arbitration.
 
 | Method | Dir | Kind | Params | Result |
 |---|---|---|---|---|
-| `stream.open` | C→P | request | `generation`, `stream` (u64), `ref`, `incarnation`, `cols`, `rows`, `history_lines` (0 = none), `window_bytes`; item streams instead: `channel: "items"`, `after?` `{epoch, seq}`, `window_bytes` (no dimensions) | `{initial: "history"\|"repaint"\|"none"}`; item streams `{initial: "continue"\|"reset", epoch}` |
+| `stream.open` | C→P | request | `generation`, `stream` (u64), `ref`, `incarnation`, `cols`, `rows`, `history_lines` (0 = none), `window_bytes`, `author`, `actor`, `principal`, `initiator?`, `label?`, `cause?`, `correlation?`; item streams instead: `channel: "items"`, `after?` `{epoch, seq}`, `window_bytes` (no dimensions) | `{initial: "history"\|"repaint"\|"none"}`; item streams `{initial: "continue"\|"reset", epoch}` |
 | `stream.data` | P→C | notification | `generation`, `stream`, `offset` (u64), `data` (base64) | — |
 | `stream.gap` | P→C | notification | `generation`, `stream`, `offset`, `reason` (`{reason: "gap", gap: "backend_dropped"\|"paused"\|"viewer_slow"\|"retention"}`) | — |
 | `stream.closed` | P→C | notification | `generation`, `stream`, `reason` | — |
@@ -511,6 +511,12 @@ parameters remain ignorable; this adds no core sizing arbitration.
 | `stream.resize` | C→P | notification | `generation`, `stream`, `cols`, `rows` (1–9999) | — |
 | `stream.close` | C→P | notification | `generation`, `stream` | — |
 
+- **Opener context**, both channels: the same core-supplied author/actor/effective principal/initiator/label and
+  explicit cause/correlation as effect.invoke. It describes the opening request, not stream contents or standing
+  authority; missing legacy fields remain unknown. Rust exposes OpenRequest.author/attribution and cause()/correlation();
+  Python terminal streams expose author/actor/principal/initiator/label/cause/correlation (raw params remain available).
+  SDKs validate known context before open-id/native admission, retaining separate stream/effect budgets and native
+  channel support. Effect context parsing reads only known fields, not a serde-flatten buffer of opaque args.
 - **Item channel** (agent-v0 §4). A provider declaring `items.stream` gets `stream.open {channel: "items", after?}`
   and replies `continue` only if `after.epoch` is its current epoch and `after.seq + 1` is still retained (records
   follow from there), otherwise `reset` (an in-stream snapshot fence, then records after its cut), always with the

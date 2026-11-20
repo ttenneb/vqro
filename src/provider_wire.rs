@@ -543,6 +543,9 @@ impl WireProvider {
             None => json!({"generation": self.generation, "stream": id, "ref": reference, "incarnation": incarnation, "cols": cols, "rows": rows, "history_lines": history, "window_bytes": self.window}),
         };
         open["principal"]=json!(context.author.effective().unwrap_or(crate::principal::UNDECLARED));
+        open["author"]=json!(context.author.author);open["actor"]=json!(context.author.attribution.actor);
+        open["initiator"]=json!(context.author.attribution.initiator);open["label"]=json!(context.author.attribution.label);
+        context.author.attribution.causality.annotate(&mut open);
         let result = self.peer.call_reserved("stream.open", open, remaining).await;
         if Instant::now() >= context.deadline { return Err(AdapterError::Timeout("provider stream.open deadline expired; outcome indeterminate".into())); }
         let epoch = if items.is_some() { result.as_ref().ok().and_then(|r| r["epoch"].as_str()).filter(|e| !e.is_empty() && e.len() <= 256).map(String::from) } else { None };

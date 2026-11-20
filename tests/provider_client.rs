@@ -397,3 +397,21 @@ async fn oversized_record_from_core_is_a_protocol_error() {
     tokio::time::timeout(Duration::from_secs(2), p.closed()).await.unwrap();
     assert!(p.failure().unwrap().contains("1 MiB"));
 }
+
+#[tokio::test]
+async fn stream_context_is_validated_before_open_id_or_native_admission() {
+    let(_provider,mut rx,mut core)=registered().await;
+    let base=json!({"generation":7,"stream":7,"ref":"%1","incarnation":"one","cols":80,"rows":24,"history_lines":0,"window_bytes":10});
+    for invalid in [json!({"actor":7}),json!({"author":false}),json!({"label":"\u{200b}"}),json!({"cause":false}),json!({"correlation":""})] {
+        let mut params=base.clone();params.as_object_mut().unwrap().extend(invalid.as_object().unwrap().clone());
+        core.send(json!({"jsonrpc":"2.0","id":70,"method":"stream.open","params":params})).await;
+        let reply=tokio::select!{reply=core.recv()=>reply,request=rx.recv()=>panic!("invalid context reached native admission: {}",request.is_some())};
+        assert_eq!(reply["error"]["data"]["kind"],"invalid");
+    }
+    let cause=json!({"kind":"request","id":"local","endpoint":"prior","epoch":"old","provenance":"asserted"});
+    let mut params=base;params.as_object_mut().unwrap().extend(json!({"author":"actual-connection","actor":"extension:writer","principal":"bob","initiator":"alice","label":"display","cause":cause,"correlation":"thread"}).as_object().unwrap().clone());
+    core.send(json!({"jsonrpc":"2.0","id":71,"method":"stream.open","params":params})).await;
+    let Some(Request::Open(open))=rx.recv().await else{panic!("valid open")};
+    assert_eq!(open.author,"actual-connection");assert_eq!(open.attribution.actor.as_deref(),Some("extension:writer"));assert_eq!(open.attribution.principal.as_deref(),Some("bob"));assert_eq!(open.attribution.initiator.as_deref(),Some("alice"));assert_eq!(open.attribution.label.as_deref(),Some("display"));assert_eq!(open.cause(),Some(&cause));assert_eq!(open.correlation(),Some("thread"));
+    let stream=open.respond(Ok(Initial::None)).unwrap();assert_eq!(core.recv().await["result"]["initial"],"none");drop(stream);
+}

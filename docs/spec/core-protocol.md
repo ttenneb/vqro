@@ -564,7 +564,8 @@ expiry/UI failure retains the observed host/result and offers the terminal fallb
 **Explicit effect causality** (generic). On `resource.invoke`, a caller may supply `cause` and
 `correlation` in root params or `args`; if either field appears in both, its JSON values must match or the call is
 `invalid` before dispatch. The core lifts the fields into provider effect metadata and effect audits without
-changing `args`, upgrading provenance or inferring anything from text/timing.
+changing `args`, upgrading provenance or inferring anything from text/timing. Nested common metadata is checked
+for type/byte/depth bounds BEFORE cloning/lifting it; malformed large/deep values are not copied into root params.
 - `cause`: object with required string `kind`, `id`, `provenance`; for kind `entity`/`request`, string `endpoint` and
   `epoch` are required, and for `effect`, string `boot`. Qualifiers are checked for presence/type only, not resolved
   as evidence or authority. Unknown enums and extra bounded fields pass unchanged.
@@ -573,11 +574,14 @@ changing `args`, upgrading provenance or inferring anything from text/timing.
   exactly as diagnostic labels do (same Rust/Python rule, independent of the Python host UCD version); extra bounded JSON remains opaque. Invalid types, missing required fields and excess
   bounds are `invalid`; provenance is preserved exactly, including unknown values. The outer wire's independent
   size/depth admission can reject first.
+
 - Root metadata is accepted only by `resource.spawn`/`kill`/`attach`/`invoke`/`forget`/`forget_cached`,
   `workspace.apply`/`workspace.revert`/`workspace.owner.bootstrap`, and `operational.register`/`operational.apply`. Other request methods,
   including `command.invoke`, `stream.*` and `view.publish`, reject explicit root fields with `invalid` rather
   than silently dropping them. Arbitrary command/payload args remain opaque (only resource.invoke has common
-  causal op args). Attach records its effect audit link; stream.open forwarding remains a separate follow-up.
+  causal op args). Attach records its effect audit link and forwards the explicit links plus full opener
+  author/actor/effective principal/initiator/label to provider-bound stream.open (terminal or item channel).
+  That transport context is not an incoming caller's root stream.* field or new authority; legacy absence stays unknown.
 - Root `cause?` / `correlation?` are also recorded on `workspace.apply`/`workspace.revert` and
   `operational.register`/`operational.apply`: persisted with their existing audit and emitted on their existing
   entries/operational events. Operational metadata never enters workspace undo history. Prepare-time identity/proof

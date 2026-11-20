@@ -186,6 +186,23 @@ async def maybe_await(value):
     return await value if inspect.isawaitable(value) else value
 
 
+def _request_context(params):
+    """Core-supplied diagnostic context, not authority; validate before effect/open admission."""
+    provenance = [params.get(key) for key in ("author", "actor", "principal", "initiator", "label")]
+    if any(value is not None and not isinstance(value, str) for value in provenance):
+        raise ProviderError("invalid", "request provenance fields must be strings")
+    label = params.get("label")
+    if label is not None:
+        try:
+            valid = len(label.encode("utf-8")) <= 256 and not _text_controls(label)
+        except UnicodeError:
+            valid = False
+        if not valid:
+            raise ProviderError("invalid", "label must be a bounded string without control/format characters")
+    cause, correlation = causal_links(params)
+    return (*provenance, cause, correlation)
+
+
 class Provider:
     def __init__(self, name, instance, capabilities, *, role="backend", software=None,
                  provider_version="0.1.0", token=None, limits=None, principal=None):
@@ -479,20 +496,9 @@ class Provider:
             raise ProviderError("invalid", "ref must be a string")
         if not isinstance(params.get("incarnation", ""), str):
             raise ProviderError("invalid", "incarnation must be a string")
-        provenance = [params.get(key) for key in ("author", "actor", "principal", "initiator", "label")]
-        if any(value is not None and not isinstance(value, str) for value in provenance):
-            raise ProviderError("invalid", "effect provenance fields must be strings")
-        label = params.get("label")
-        if label is not None:
-            try:
-                valid = len(label.encode("utf-8")) <= 256 and not _text_controls(label)
-            except UnicodeError:
-                valid = False
-            if not valid:
-                raise ProviderError("invalid", "label must be a bounded string without control/format characters")
-        cause, correlation = causal_links(params)
+        context = _request_context(params)
         ctx = Effect(ident, op, params.get("ref"), params.get("incarnation", ""),
-                     asyncio.get_running_loop().time() + duration / 1000, *provenance, cause, correlation)
+                     asyncio.get_running_loop().time() + duration / 1000, *context)
         # Exactly one eventual reply, even after the core deadline. Never cancel
         # or retry a possibly dispatched backend effect merely because it expired.
         self._effect_ids.add(ident, self.limits.identities)
@@ -523,8 +529,9 @@ class Provider:
         integer(params.get("window_bytes"), 1, self.window)
         if not isinstance(params.get("ref"), str) or not isinstance(params.get("incarnation"), str):
             raise ProviderError("invalid", "ref/incarnation required")
+        context = _request_context(params)
         self._stream_ids.add(ident, self.limits.identities)
-        stream = Stream(self, params)
+        stream = Stream(self, params, context)
         self.streams[ident] = stream
         try:
             initial = await maybe_await(self.open_stream(stream))
