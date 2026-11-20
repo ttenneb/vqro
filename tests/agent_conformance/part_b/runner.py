@@ -2,7 +2,6 @@
 # Copyright 2026 Bennett Garcia
 """Receipted Part B runner; omissions/fixture failures cannot become successes."""
 import asyncio
-import asyncio
 import hashlib
 import json
 from pathlib import Path
@@ -13,7 +12,7 @@ import traceback
 
 from ..results import CheckFailed, FixtureFailed, HarnessGap, NotApplicable, Result, markdown, report
 from ..wire import RpcError
-from .catalog import CASES
+from .catalog import CASES, BY_ID, Case, cases_from_spec
 from .cases import HANDLERS
 from .context import PublicCoordination
 
@@ -126,17 +125,12 @@ def freeze(root, manifest, vqro):
         destination.parent.mkdir(exist_ok=True);destination.write_bytes(data)
         pinned["specs"][name]={"path":str(destination),"sha256":hashlib.sha256(data).hexdigest()}
         if name=="conformance":
-            text=data.decode()
-            if "# Part B:" not in text or "## Running" not in text: raise HarnessGap("pinned conformance specification lacks Part B boundaries")
-            text=text.split("# Part B:",1)[1].split("## Running",1)[0]
-            normative=set(re.findall(r"\b[IHGTL][0-9]+\b",text))|{"S1"}
-            pinned["normative_cases"]=sorted(normative)
-            if normative!={case.id for case in CASES}:
-                raise HarnessGap("Part B inventory differs from pinned normative specification: "+str(sorted(normative.symmetric_difference({case.id for case in CASES}))))
+            try: pinned["normative_cases"]=[case.id for case in cases_from_spec(data.decode())]
+            except ValueError as error: raise HarnessGap(str(error)) from error
     return pinned,pinned_vqro
 
 
-async def run_selection(root, manifest, selected, vqro, hc=None):
+async def run_selection(root, manifest, selected, vqro, hc=None, *, inventory=None):
     rows = []; capture_error = None
     try: manifest, vqro = freeze(root,manifest,vqro)
     except (CheckFailed,OSError) as error: capture_error = error
@@ -151,7 +145,9 @@ async def run_selection(root, manifest, selected, vqro, hc=None):
         print(json.dumps({"case": row.case, "status": row.status, "component": row.component,
                           "detail": row.detail}), flush=True)
     metadata = {**manifest, "real_runtime_certification": False, "fixture_native": True}
-    document = report(metadata, rows, selected, part="B", inventory=CASES)
+    if manifest.get("normative_cases"):
+        inventory=[BY_ID.get(identifier,Case(identifier,"normative "+identifier)) for identifier in manifest["normative_cases"]]
+    document = report(metadata, rows, selected, part="B", inventory=inventory if inventory is not None else CASES)
     document["subcase_not_applicable"] = sum(e.get("applicability") == "not-applicable"
         for row in rows for e in row.evidence)
     document["complete_inventory"] = capture_error is None and inventory_complete(rows,manifest.get("normative_cases",[]))

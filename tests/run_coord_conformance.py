@@ -10,7 +10,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 
-from agent_conformance.part_b.catalog import select_cases
+from agent_conformance.part_b.catalog import select_cases, cases_from_spec
 from agent_conformance.part_b.runner import run_selection, validate_manifest
 
 
@@ -28,7 +28,10 @@ def main():
     if not args.vqro.is_absolute(): parser.error("--vqro must be an explicit absolute executable")
     try:
         manifest = validate_manifest(json.loads(args.implementation.read_text()))
-        selected = select_cases(args.cases.split(",") if args.cases else None)
+        spec=manifest.get("specs",{}).get("conformance")
+        if spec is None: raise ValueError("explicit pinned conformance specification is required")
+        inventory=cases_from_spec(Path(spec).read_text())
+        selected = select_cases(args.cases.split(",") if args.cases else None,inventory)
     except (ValueError, OSError) as error: parser.error(str(error))
     if args.isolated_root is None:
         args.scratch_parent.mkdir(parents=True, exist_ok=True)
@@ -47,7 +50,7 @@ def main():
     if args.parent_net is None or args.parent_net == os.readlink("/proc/self/ns/net"):
         parser.error("private user/network namespace required")
     if any(key.startswith("HERDR_") for key in os.environ): parser.error("HERDR environment inherited")
-    document = asyncio.run(run_selection(args.isolated_root, manifest, selected, args.vqro))
+    document = asyncio.run(run_selection(args.isolated_root, manifest, selected, args.vqro,inventory=inventory))
     print(json.dumps({"summary": document["summary"], "qualification_complete": document["qualification_complete"],
                       "complete_inventory": document["complete_inventory"], "real_runtime_certification": False}))
     return 0 if document["passed_selection"] else 1

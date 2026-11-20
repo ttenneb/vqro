@@ -9,7 +9,7 @@ import tempfile
 from types import SimpleNamespace
 import unittest
 
-from agent_conformance.part_b.catalog import CASES, BY_ID, select_cases
+from agent_conformance.part_b.catalog import CASES, BY_ID, select_cases, cases_from_spec
 from agent_conformance.part_b.native import Native
 from agent_conformance.part_b.runner import run_case, validate_manifest, inventory_complete
 from agent_conformance.results import FixtureFailed, HarnessGap, NotApplicable, report
@@ -17,7 +17,7 @@ from unittest.mock import patch
 
 
 class Catalog(unittest.TestCase):
-    def test_complete_part_b_inventory_and_no_silent_selection(self):
+    def test_known_case_titles_and_no_silent_selection(self):
         expected = [*(f"I{i}" for i in range(1,24)), *(f"H{i}" for i in range(1,17)),
                     *(f"G{i}" for i in range(1,14)), *(f"T{i}" for i in range(1,15)),
                     *(f"L{i}" for i in range(5,12)), "S1"]
@@ -25,6 +25,13 @@ class Catalog(unittest.TestCase):
         self.assertEqual(len(BY_ID), 74)
         self.assertEqual([case.id for case in select_cases(["T1", "I1"])], ["I1", "T1"])
         with self.assertRaises(ValueError): select_cases(["I0"])
+
+    def test_spec_discovers_new_groups_ranges_and_does_not_count_prototype_or_session_ids(self):
+        text="# Part B:\n**I. Inbox.** I1 session S2; prototype P2.\n**Q. Requests.** Q1–Q4.\n**S. Scale.** combined.\n## Running\n"
+        rows=cases_from_spec(text)
+        self.assertEqual([row.id for row in rows],["I1","Q1","Q2","Q3","Q4","S1"])
+        self.assertEqual([row.id for row in select_cases(["Q4"],rows)],["Q4"])
+        with self.assertRaises(ValueError): cases_from_spec("# Part B:\n## Running")
 
     def test_inventory_needs_captured_normative_ids_not_a_literal_catalog_count(self):
         rows=[SimpleNamespace(case=case.id) for case in CASES]

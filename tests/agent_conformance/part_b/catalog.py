@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Bennett Garcia
-"""Complete Part B inventory. A missing executable probe is a harness failure.
+"""Known Part B titles; the executable inventory is derived from the pinned spec.
+A missing executable probe is a harness failure.
 
 Titles summarize selection only. Each executable probe must satisfy the full
 normative input/assertion set; the draft text, version and hash accompany runs.
 """
 from dataclasses import dataclass
+import re
 
 
 @dataclass(frozen=True)
@@ -108,11 +110,32 @@ CASES = tuple(Case(f"{group}{index}", title)
 BY_ID = {case.id: case for case in CASES}
 
 
-def select_cases(names=None):
-    if not names:
-        return list(CASES)
-    wanted = set(names)
-    unknown = wanted - BY_ID.keys()
-    if unknown:
-        raise ValueError(f"unknown Part B cases: {sorted(unknown)}")
-    return [case for case in CASES if case.id in wanted]
+def cases_from_spec(text):
+    """Derive groups as well as IDs, including newly introduced normative groups."""
+    if "# Part B:" not in text or "## Running" not in text:
+        raise ValueError("conformance document lacks Part B boundaries")
+    body=text.split("# Part B:",1)[1].split("## Running",1)[0]
+    headings=list(re.finditer(r"^\*\*([A-Z])\.\s",body,re.M))
+    if not headings: raise ValueError("conformance document has no normative case groups")
+    if len({match.group(1) for match in headings})!=len(headings): raise ValueError("duplicate normative case group")
+    cases=[]
+    for index,match in enumerate(headings):
+        group=match.group(1);section=body[match.end():headings[index+1].start() if index+1<len(headings) else len(body)]
+        numbers={int(n) for n in re.findall(r"\b"+group+r"([0-9]+)\b",section)}
+        for start,end in re.findall(r"\b"+group+r"([0-9]+)\s*[–-]\s*(?:"+group+r")?([0-9]+)\b",section):
+            start,end=int(start),int(end)
+            if end<start or end-start>10000: raise ValueError("invalid or unbounded normative case range")
+            numbers.update(range(start,end+1))
+        # A group without an inline numbered row is one case (the scale gate).
+        if not numbers: numbers={1}
+        cases.extend(BY_ID.get(group+str(n),Case(group+str(n),"normative "+group+str(n))) for n in sorted(numbers))
+    return tuple(cases)
+
+
+def select_cases(names=None,inventory=None):
+    inventory=CASES if inventory is None else inventory
+    known={case.id:case for case in inventory}
+    if not names: return list(inventory)
+    wanted=set(names);unknown=wanted-known.keys()
+    if unknown: raise ValueError(f"unknown Part B cases: {sorted(unknown)}")
+    return [case for case in inventory if case.id in wanted]
