@@ -97,7 +97,10 @@ def write_controller_timeout(root, manifest, selected, inventory, seconds):
     for index, case in enumerate(selected):
         case_root = root / f"{index:02}"
         try:
-            row = Result(**json.loads((case_root / "result.json").read_text()))
+            data = json.loads((case_root / "result.json").read_text())
+            if not isinstance(data, dict) or not isinstance(data.get("declarations", {}), dict):
+                raise ValueError("case journal and its declarations must be objects")
+            row = Result(**data)
             if row.case != case.id:
                 raise ValueError("case journal identity does not match the selection")
         except (OSError, ValueError, TypeError) as error:

@@ -44,6 +44,20 @@ class ControllerTimeout(unittest.TestCase):
             self.assertIn('not run: controller timeout', (root / 'results.md').read_text())
             self.assertTrue((root / 'parent-timeout.json').is_file())
 
+    def test_malformed_declarations_are_invalid_journals_not_reporting_crashes(self):
+        for declarations in (None, [], 'invalid'):
+            with self.subTest(declarations=declarations), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / '00').mkdir()
+                (root / '00/result.json').write_text(json.dumps({
+                    'case': 'I1', 'title': 'first', 'status': 'not-applicable', 'declarations': declarations}))
+                document = write_controller_timeout(root, {}, self.cases, self.cases, 1800)
+                self.assertEqual(document['not_run'], ['I1', 'I2', 'I3'])
+                self.assertEqual(document['summary']['fail'], 3)
+                self.assertTrue((root / 'results.json').is_file())
+                self.assertTrue((root / 'results.md').is_file())
+                self.assertTrue((root / 'parent-timeout.json').is_file())
+
     def test_only_a_completed_na_with_its_exclusion_is_retained(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
