@@ -695,8 +695,13 @@ impl App {
             "terminal" => self.message = "popup refused: terminals never pop up".into(),
             _ => {
                 self.pending_popup = None;
-                self.under = None;
-                self.pstate.insert("@popup".into(), panel::State::default());
+                // Asked again for the popup already shown (a second `settings.open`, a late reply): keep where the
+                // user is in it (filter, page, selection) instead of starting over.
+                let same = matches!(&self.overlay, Some(Overlay::Popup { view: shown, .. }) if *shown == view);
+                if !same {
+                    self.under = None;
+                    self.pstate.insert("@popup".into(), panel::State::default());
+                }
                 self.overlay = Some(Overlay::Popup { view, width, ctx });
                 if self.message.starts_with("opening ") { self.message.clear(); }
             }
@@ -3790,6 +3795,11 @@ mod tests {
         app.on_event(Event::FocusGained);
         assert!(app.pending_popup.is_none() && app.overlay.is_none());
         assert_eq!(app.message, "popup: no view never");
+        // Asked again for the popup already open (a late reply): the user's filter and place in it stay.
+        app.on_msg(Msg::Popup { view: "req".into(), width: 50, ctx: json!({}) });
+        app.pstate.get_mut("@popup").unwrap().filter = "ans".into();
+        app.on_msg(Msg::Popup { view: "req".into(), width: 60, ctx: json!({}) });
+        assert_eq!(app.pstate["@popup"].filter, "ans");
     }
 
     #[tokio::test]

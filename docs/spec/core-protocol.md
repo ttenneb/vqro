@@ -1020,7 +1020,8 @@ and sets the prefix; the active profile is `doc/keys/profile`, and the list is l
   before `focus`), or `{"client": {"focus": {"view": "view-id"}}}`. These fields may be combined.
   Per client and temporary; clients refuse terminal views as popups. A popup view the client doesn't know yet
   (the command wrote it, and the entries event travels apart from the reply) waits for the following events, up to
-  2 s or the user's next key, then opens; otherwise the client says `popup: no view <id>`. `focus` leaves zoom and focuses an already
+  2 s or the user's next key, then opens; otherwise the client says `popup: no view <id>`. Asking for the popup already shown keeps the user's
+  filter, page and selection in it. `focus` leaves zoom and focuses an already
   visible view after the command's layout changes; it never opens a view or changes another client's focus.
   Missing/hidden targets are ignored. Older clients ignore unknown reply fields. Extensions choose what to show;
   the focus mechanism is independent of resource/view kind. A drop-down, prompt or picker opened from a popup is

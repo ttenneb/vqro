@@ -128,7 +128,9 @@ export class App {
     else if (!kind) { this.message = `opening ${view}…`; this.pendingPopup = { view, width, ctx, until: Date.now() + POPUP_WAIT_MS }; }
     else {
       this.pendingPopup = null;
-      this.pstate.delete("@popup"); this.under = null; this.overlay = { kind: "popup", view, width, ctx };
+      // Asked again for the popup already shown (a late reply): keep the user's filter and place in it.
+      if (!(this.overlay?.kind === "popup" && this.overlay.view === view)) { this.pstate.delete("@popup"); this.under = null; }
+      this.overlay = { kind: "popup", view, width, ctx };
       if (this.message.startsWith("opening ")) this.message = "";
     }
   }
