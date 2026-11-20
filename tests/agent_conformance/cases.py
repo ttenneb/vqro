@@ -1209,13 +1209,8 @@ async def first_valid_answer(ctx):
 
 @case("R3")
 async def answer_ack_precision(ctx):
-    declaration = await caps(ctx, "agent.respond")
-    _, request = await make_request(ctx)
-    result = await answer(ctx, request, valid_response(request))
-    expected = declaration.get("ack")
-    if expected not in ("accepted", "dispatched"):
-        raise HarnessGap("unknown request acknowledgement declaration " + repr(expected))
-    check(result.get("outcome") == expected, f"answer acknowledgement over/underclaimed: {result}")
+    from .request_probes import answer_acknowledgement
+    await answer_acknowledgement(ctx)
 
 
 @case("R4")
@@ -1250,6 +1245,8 @@ async def unrepresentable_requests(ctx):
             check(not ctx.native.writes(mark), "an incomplete request was approved")
     ctx.evidence.append({"kind": "unrepresentable_request", "native_cancel_once": True,
                          "oversized_bytes": 70000, "no_new_approvable_request": True})
+    from .request_probes import positive_relative_timeout
+    await positive_relative_timeout(ctx)
 
 
 @case("R5")

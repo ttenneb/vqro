@@ -3,7 +3,8 @@
 
 Runs each probe in its own private public-core fixture, exactly as run_agent_conformance.py isolates a case
 (user/network/PID/mount namespace, empty HOME, kill-child), and writes the probe witnesses. It never emits a Part A
-table or a pass: R3/R4 stay quarantined in runner.REVIEW_GAPS until K1 integrates the probes.
+qualification table. Its diagnostic labels cover these probes only: R4 here is the additional timeout vector,
+not the existing unknown/oversized request vectors. Use the main runner for the integrated case.
 """
 import argparse
 import asyncio

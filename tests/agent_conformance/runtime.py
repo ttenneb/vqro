@@ -415,13 +415,14 @@ class Runtime:
             if ident in self.requests:
                 raise ValueError("native pending request identity reused")
             self.requests[ident] = dict(row)
-            self.record("request", request=ident, method=method)
             native_method = {"choice": "select", "text": "editor" if row.get("multiline") else "input"}.get(method, method)
             event = {"type": "extension_ui_request", "id": ident, "method": native_method,
                      "title": row.get("title", "Fixture question"), "message": row.get("message", ""),
                      "options": row.get("options", ["one", "two"])}
             if "timeout" in row:
                 event["timeout"] = row["timeout"]
+            self.record("request", request=ident, method=method, native_event=event,
+                        **({"timeout": event["timeout"]} if "timeout" in event else {}))
             await self.emit(event)
         elif verb == "session_switch":
             self.session += 1

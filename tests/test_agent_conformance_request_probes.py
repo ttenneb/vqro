@@ -23,7 +23,10 @@ class Ledger:
 
     async def call_fields(self, verb, params, *, timeout=2):
         assert verb == "request"
-        self.record("request", request=params["request"], method=params["method"])
+        event = {"type": "extension_ui_request", "id": params["request"], "method": params["method"]}
+        if "timeout" in params and not self.adapter.omit_timeout_witness: event["timeout"] = params["timeout"]
+        self.record("request", request=params["request"], method=params["method"], native_event=event,
+                    **({"timeout": params["timeout"]} if "timeout" in event else {}))
         await self.adapter.native_request(dict(params))
         return {}
 
@@ -48,11 +51,12 @@ class Adapter:
     """A Pi-shaped adapter: operation-scoped dialogs, answers dispatched without a native acknowledgement."""
     def __init__(self, *, ack="dispatched", native_timeout="unrepresentable_positive", outcome=None, handoffs=1,
                  ignore_timeout=False, auto_approve_timed=False, cancels=1, invent_expiry=False, keep_timed_pending=False,
-                 accept_repeat=False, native_ack=False):
+                 accept_repeat=False, native_ack=False, transient_approvable=False, omit_timeout_witness=False):
         self.ack, self.native_timeout, self.outcome = ack, native_timeout, outcome or ack
         self.handoffs, self.ignore_timeout, self.auto_approve_timed = handoffs, ignore_timeout, auto_approve_timed
         self.cancels, self.invent_expiry, self.keep_timed_pending = cancels, invent_expiry, keep_timed_pending
         self.accept_repeat, self.native_ack = accept_repeat, native_ack
+        self.transient_approvable, self.omit_timeout_witness = transient_approvable, omit_timeout_witness
         self.native = Ledger(self)
         self.requests, self.answered, self.ids = {}, set(), itertools.count(1)
         self.on_change = lambda: None  # the item stream pushes entity changes to live views
@@ -70,6 +74,10 @@ class Adapter:
             public["choices"] = [{"id": "c1", "label": "one"}]
         timed = isinstance(row.get("timeout"), int) and row["timeout"] > 0 and not self.ignore_timeout
         try:
+            if timed and self.transient_approvable:
+                self.requests[public["request"]] = dict(public)
+                self.on_change()
+                del self.requests[public["request"]]
             self.native_dialog(public, row, native_id, timed)
         finally:
             self.on_change()
@@ -136,7 +144,7 @@ class Context:
         pass
 
     async def attach(self, *, rid=None, peer=None, after=None, seed=None):
-        reducer = SimpleNamespace(entities={}, snapshots=1)
+        reducer = SimpleNamespace(entities={}, snapshots=1, sequence=0, trace=[], trace_dropped=0)
         view = SimpleNamespace(reducer=reducer, initial="reset", peer=peer)
         self.views = getattr(self, "views", []) + [view]
         self.refresh()
@@ -144,8 +152,18 @@ class Context:
 
     def refresh(self):
         for view in getattr(self, "views", []):
+            current = {}
             for q in self.adapter.requests.values():
-                view.reducer.entities[("request", q["request"])] = {"value": dict(q)}
+                key, value = ("request", q["request"]), dict(q)
+                current[key] = {"value": value}
+                if view.reducer.entities.get(key) != current[key]:
+                    view.reducer.sequence += 1
+                    view.reducer.trace.append({"op": "put", "kind": "request", "id": q["request"],
+                                               "seq": view.reducer.sequence, "value": value})
+            for kind, ident in view.reducer.entities.keys() - current.keys():
+                view.reducer.sequence += 1
+                view.reducer.trace.append({"op": "remove", "kind": kind, "id": ident, "seq": view.reducer.sequence})
+            view.reducer.entities = current
 
     async def wait_view(self, view, predicate, *, timeout=2):
         self.refresh()
@@ -215,6 +233,11 @@ class PositiveRelativeTimeoutTests(unittest.TestCase):
         self.assertEqual((na["status"], na["exclusion"]["path"], na["exclusion"]["actual"]),
                          ("not-applicable", "agent.respond.native_timeout", "absolute"))
 
+    def test_missing_native_timeout_witness_is_a_fixture_failure(self):
+        with self.assertRaisesRegex(CheckFailed, "fixture did not emit") as caught:
+            run(positive_relative_timeout, omit_timeout_witness=True)
+        self.assertEqual(caught.exception.component, "fixture")
+
     def test_omitted_timeout_handling_fails(self):
         with self.assertRaisesRegex(CheckFailed, "never answered|approvable"):
             run(positive_relative_timeout, ignore_timeout=True)
@@ -230,6 +253,10 @@ class PositiveRelativeTimeoutTests(unittest.TestCase):
     def test_invented_absolute_expiry_fails(self):
         with self.assertRaisesRegex(CheckFailed, "absolute expiry"):
             run(positive_relative_timeout, invent_expiry=True)
+
+    def test_transient_approvable_entity_cannot_hide_behind_final_removal(self):
+        with self.assertRaisesRegex(CheckFailed, "complete pending request"):
+            run(positive_relative_timeout, transient_approvable=True)
 
     def test_timed_dialog_left_pending_fails(self):
         with self.assertRaisesRegex(CheckFailed, "approvable"):

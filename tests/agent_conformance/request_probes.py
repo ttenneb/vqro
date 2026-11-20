@@ -116,10 +116,17 @@ async def positive_relative_timeout(ctx):
     view = await fresh_view(ctx)
     known = {key for key in view.reducer.entities if key[0] == "request"}
     pending_before = {row["request"] for row in (await ctx.facts()).get("requests", [])}
+    trace_cut = view.reducer.sequence
+    trace_dropped = view.reducer.trace_dropped
     timed_id = "R4-timed-" + ctx.delivery()
     mark = ctx.native.mark()
     await ctx.native.call_fields("request", {"request": timed_id, "method": method, "timeout": NATIVE_TIMEOUT_MS,
                                              "title": "R4 timed dialog"})
+    issued = [row for row in ctx.native.records("request", after=mark) if row.get("request") == timed_id]
+    check(len(issued) == 1 and issued[0].get("timeout") == NATIVE_TIMEOUT_MS
+          and issued[0].get("native_event", {}).get("id") == timed_id
+          and issued[0].get("native_event", {}).get("timeout") == NATIVE_TIMEOUT_MS,
+          "fixture did not emit the exact positive native relative timeout", component="fixture")
     answers = await settle_native(ctx, timed_id, mark)
     check(answers, "a dialog with a positive native timeout was never answered (not cancelled as unrepresentable)")
     check(len(answers) == 1, f"the timed dialog got {len(answers)} native responses")
@@ -129,10 +136,13 @@ async def positive_relative_timeout(ctx):
     facts = await ctx.facts()
     new_pending = {row["request"] for row in facts.get("requests", [])} - pending_before
     check(not new_pending, f"the timed dialog left an approvable public request: {sorted(new_pending)}")
+    check(view.reducer.trace_dropped == trace_dropped, "timed-dialog trace overflowed before its transient state could be checked", component="harness")
     appeared = [row["value"] for key, row in view.reducer.entities.items() if key[0] == "request" and key not in known]
-    for entity in appeared + [row for row in facts.get("requests", []) if row["request"] not in pending_before]:
+    transient = [row["value"] for row in view.reducer.trace if row.get("op") == "put" and row.get("kind") == "request"
+                 and ("request", row.get("id")) not in known and row.get("seq", -1) > trace_cut]
+    for entity in transient + appeared + [row for row in facts.get("requests", []) if row["request"] not in pending_before]:
         check("expires_at_ms" not in entity, "an absolute expiry was invented for a relative native timeout")
-        check(entity.get("status") != "pending" or entity.get("incomplete") not in (None, False),
+        check(entity.get("status") != "pending" or bool(entity.get("incomplete")),
               "the timed dialog is visible as a complete pending request")
         probe_mark = ctx.native.mark()
         rejection(await answer(ctx, entity, {"value": True}), kinds=("invalid", "stale"))
@@ -141,4 +151,5 @@ async def positive_relative_timeout(ctx):
                          "untimed_native_request": untimed_id, "untimed_native_answer_seq": untimed_seq,
                          "timed_native_request": timed_id, "native_relative_timeout_ms": NATIVE_TIMEOUT_MS,
                          "timed_native_cancel_seq": answers[0]["seq"], "native_responses": 1,
-                         "visible_transient_entities": len(appeared), "approvable_after": False})
+                         "native_timeout_request_seq": issued[0]["seq"], "native_event": issued[0]["native_event"],
+                         "visible_transient_entities": len(transient), "approvable_after": False})
