@@ -533,8 +533,10 @@ and old layouts may show gone resources until explicitly repaired/reset. No iden
 
 Terminal resource rows expose optional **`principal`**: a core-recorded launcher assignment, not the child's
 current identity or an authority/authentication proof. On an observed `resource.spawn`, core captures the valid
-final `VQRO_PRINCIPAL` tag sent to that exact returned native identity. An explicit launcher tag is preserved;
-otherwise a known ordinary spawner is inherited, while reserved extension/host/system defaults become
+final `VQRO_PRINCIPAL` tag sent to that exact returned native identity. An explicit native environment value is
+preserved, but is recorded here only if it passes the shared assertable-principal validator (no reserved
+system/extension/host namespaces or markers); exact `undeclared` is the no-identity exception. Otherwise, when
+no explicit tag is supplied, a known ordinary spawner is inherited, while reserved extension/host/system defaults become
 `undeclared` (user shells must not inherit a reserved assertion). Provider/OSC/child `principal` reports and
 opaque `data.principal` never populate or overwrite this core field. A sync arriving before the spawn receipt
 can establish the resource first; only that exact identity is filled. Known assignments survive fact refresh

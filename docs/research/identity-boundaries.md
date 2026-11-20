@@ -30,3 +30,9 @@ reserved-case and Unicode Rust/Python reds, plus green direct core/public SDK/wi
 review and exact commit receipts belong in the handoff; this note does not claim a pending gate passed. Stream
 attribution/attach context and causal clone/allocation/boundary polish remain the next separate group, followed by
 the lower-priority pinned shared-host tool context route. No live install, push, merge, model calls or human state.
+
+Review P3 follow-up: recorded explicit launcher tags now use validate_assertable, not merely the string-shape
+validator. A native wire red recorded `system`; the new test covers reserved case variants/markers and allowed
+near-prefix/ordinary/undeclared tags. All17 cases plus2 existing lifecycle/unsupported-env tests pass. Explicit
+native env remains opaque/unmodified: invalid/reserved tags are not certified as known resource metadata. No
+new authority, rejection/replay of a native spawn, provider inference or changed identity lifetime is introduced.

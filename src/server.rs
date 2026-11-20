@@ -896,7 +896,7 @@ async fn spawn(core: &Shared, author: &Caller, s: Spawn, attribution:Attribution
     for dimension in [s.cols, s.rows].into_iter().flatten() {
         if !(1..=9999).contains(&dimension) { return Err(provider::rejected("invalid", "spawn dimensions must be between 1 and 9999")); }
     }
-    let launcher_principal=env.get("VQRO_PRINCIPAL").filter(|id|id.as_str()==principal::UNDECLARED || principal::validate(id).is_ok()).cloned();
+    let launcher_principal=env.get("VQRO_PRINCIPAL").filter(|id|id.as_str()==principal::UNDECLARED || principal::validate_assertable(id).is_ok()).cloned();
     let (c, operation) = (core.clone(), route.clone());
     let (effect, id) = effect(core, author.into(), attribution, route, "resource.spawn", json!({"op":"terminal.spawn"}), deadline, |_| "observed", move |context| async move {
         let facts = operation.handle.for_effect(context).spawn(SpawnRequest { argv, cwd: s.cwd, name: s.name, env, cols: s.cols, rows: s.rows, placement: s.placement }).await.map_err(|e| e.rpc())?;
