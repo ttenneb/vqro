@@ -431,12 +431,15 @@ coordination envelope. It never waits behind inbox records and runs on reserved 
 `coord.inbox.archive {op, agents, destination}` (right `recover`) moves durable evidence out of the protected domain
 without ever losing it:
 1. **Freeze:** record a pending archive in the protected domain with the exact bounded set of records and their
-   versions. Records in the set are not changed except by evidence that arrives later (step 4).
+   versions. An open handover must complete or abort first; its members cannot be frozen. Records in the set are
+   not changed except by evidence that arrives later (step 4).
 2. **Export:** write a manifest (archive id, delivery ids, versions, content hash) and the records to the destination,
    and confirm it is durable (synced and read back against the hash).
 3. **Free:** one CAS against the frozen versions replaces the records with a compact archive marker `{archive,
    locator, manifest_hash, deliveries}`. A record whose version changed meanwhile (genuine newly observed receipt
    evidence) is left in place and reported. Intent edits and handover writes on frozen records are refused.
+   Completing/aborting a legacy handover skips and reports members already archived/freed, never recreates them,
+   and still transfers/restores its remaining pending members.
 4. Uncertain export, a failed write or a CAS conflict keeps the evidence and leaves the archive visibly pending;
    nothing is freed. Repeating the `op` inspects that archive, never exports a different set or frees blindly.
 5. **Abort:** the workspace owner's explicit `coord.inbox.archive {op, action: abort, archive}` records the caller,

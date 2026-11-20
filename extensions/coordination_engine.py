@@ -1437,8 +1437,12 @@ class Coordinator:
                     raise CoordinationError("conflict", "handover is already final")
                 for target in (plan["from"], plan["to"]):
                     policy.require(context["principal"], "handover", target["agent"])
+                skipped = []
                 for delivery in plan["deliveries"]:
-                    record = self._record(work, delivery)
+                    record = work.get("message/" + delivery)
+                    if record is None:
+                        skipped.append(delivery)  # legacy archive/free; never recreate intent
+                        continue
                     if self._archive_frozen("message/" + delivery):
                         raise CoordinationError("conflict", "delivery is frozen for explicit archive")
                     if record["state"] not in PENDING:
@@ -1452,9 +1456,9 @@ class Coordinator:
                     record.pop("handover_plan")
                     record.update(state="held", reason="handover_aborted")
                     work.put("message/" + delivery, record)
-                plan.update(state="aborted", aborted_ms=self.clock(), configuration="not_reverted")
+                plan.update(state="aborted", aborted_ms=self.clock(), configuration="not_reverted", skipped=skipped)
                 work.put("plan/" + plan_id, plan)
-                return {"state": "aborted", "plan": plan_id, "configuration": "not_reverted"}
+                return {"state": "aborted", "plan": plan_id, "configuration": "not_reverted", "skipped": skipped}
             if args.get("action") == "complete":
                 plan = work.get("plan/" + str(args.get("plan")))
                 if not plan:
@@ -1469,8 +1473,12 @@ class Coordinator:
                 if any(stage["state"] != "accepted" for stage in plan["stages"]):
                     raise CoordinationError("conflict", "handover still has unfinished or uncertain ordinary stages")
                 successor_session = (native.get("session") or {}).get("id")
+                skipped = []
                 for delivery in plan["deliveries"]:
-                    record = self._record(work, delivery)
+                    record = work.get("message/" + delivery)
+                    if record is None:
+                        skipped.append(delivery)
+                        continue
                     if self._archive_frozen("message/" + delivery):
                         raise CoordinationError("conflict", "delivery is frozen for explicit archive")
                     if record["state"] not in PENDING:
@@ -1486,8 +1494,9 @@ class Coordinator:
                     work.put("message/" + delivery, record)
                 plan["state"] = "completed"
                 plan["to"]["session"] = successor_session
+                plan["skipped"] = skipped
                 work.put("plan/" + args["plan"], plan)
-                return {"state": "completed", "plan": args["plan"], "_after": lambda: self._wake(destination["agent"])}
+                return {"state": "completed", "plan": args["plan"], "skipped": skipped, "_after": lambda: self._wake(destination["agent"])}
             source, destination = args.get("from"), args.get("to")
             if not isinstance(source, dict) or not isinstance(destination, dict):
                 raise CoordinationError("invalid", "handover needs exact predecessor and successor")
@@ -1872,6 +1881,9 @@ class Coordinator:
                         chosen[key] = row["version"]
                 if any(work.rows[key]["value"].get("state") == "claimed" for key in chosen):
                     raise CoordinationError("conflict", "an in-flight claim must settle or become unknown before archive")
+                if any(value.get("handover_plan") and work.get("plan/" + value["handover_plan"], {}).get("state")
+                       not in ("completed", "aborted") for value in (work.rows[key]["value"] for key in chosen)):
+                    raise CoordinationError("conflict", "an open handover must complete or abort before archive")
                 if len(chosen) > 48:
                     raise CoordinationError("too_large", "archive capacity is 48 records; inspect an explicit smaller delivery set")
                 if any(self._archive_frozen(key) for key in chosen):

@@ -447,7 +447,9 @@ still succeeds, its author's `u` and an explicit revert undo it, a scope action 
 recorded set, and the tombstone keeps only `{rN, revision}` as its reference. L11 archive: crash or uncertain
 durability at each step (after freeze, during export, after export before free) keeps every record; a genuine late
 receipt advances source evidence and prevents freeing its changed version; edits/handover writes on frozen records
-are refused. Owner-only recorded abort releases the freeze/plan slot without deleting source evidence or files;
+are refused. Freeze refuses members of an open handover. A legacy multi-record handover whose members were already
+archived/freed can complete or abort: missing members are skipped/reported without revival; remaining pending
+members transfer/restore normally. Owner-only recorded abort releases the freeze/plan slot without deleting source evidence or files;
 replanning exports the latest receipt. A finishing exporter cannot resurrect an aborted plan. A failed destination
 write frees nothing; a repeated archive `op` inspects the original archive; an archived delivery's lookup returns its
 locator, and a missing archive answers `unknown`.

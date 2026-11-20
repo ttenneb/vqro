@@ -569,6 +569,41 @@ def case_handover_withdrawn():
     return {'variants': results, 'nonpending_never_replayed': True}
 
 
+def case_handover_archive():
+    results = []
+    for action in ('complete', 'abort'):
+        ref = 'archive-handover-' + action
+        src = agent(ref, native()); dst = agent(ref + '-dst', native())
+        scope('pause')
+        deliveries = []
+        for n in range(2):
+            o = op(ref)
+            deliveries.append(cmd('inbox.send', {'op': o, 'submission': o, 'to': src, 'mode': 'start',
+                'send_new': True, 'content': [{'type': 'text', 'text': str(n)}]})['delivery'])
+        peer, generation, facts = GEN[ref]
+        facts['data']['agent']['lifecycle'] = 'ended'
+        peer.call('provider.sync', {'generation': generation, 'resources': [facts], 'final': True})
+        wait(lambda: cmd('inbox.get', {'delivery': deliveries[0]})['reason'] == 'agent_ended')
+        plan = cmd('handover', {'op': op(ref + '-plan'), 'from': {'agent': src, 'incarnation': 'i1'},
+            'to': {'agent': dst, 'incarnation': 'i1'}, 'deliveries': deliveries})['plan']
+        destination = ROOT / ref; destination.mkdir()
+        try:
+            cmd('inbox.archive', {'op': op('open-plan-freeze'), 'agents': [dst], 'destination': str(destination)})
+            raise AssertionError('archive accepted open handover members')
+        except RPCError as error:
+            assert error.kind == 'conflict' and 'handover' in str(error), str(error)
+        result = cmd('handover', {'op': op('finish-plan'), 'action': action, 'plan': plan})
+        assert result['state'] == ('completed' if action == 'complete' else 'aborted'), result
+        target = dst if action == 'complete' else src
+        archive = cmd('inbox.archive', {'op': op('finished-plan-freeze'), 'agents': [target],
+            'destination': str(destination)})['archive']
+        assert cmd('inbox.archive', {'op': op('finished-plan-export'), 'action': 'export', 'archive': archive})['state'] == 'accepted'
+        freed = cmd('inbox.archive', {'op': op('finished-plan-free'), 'action': 'free', 'archive': archive})
+        assert freed['state'] == 'completed' and len(freed['freed']) == 2, freed
+        results.append({'action': action, 'open_freeze_refused': True, 'freed_after_finish': 2})
+    return {'variants': results}
+
+
 def case_archive_abort():
     src = agent('archive-abort-source', native())
     dst = agent('archive-abort-destination', native())
@@ -614,7 +649,7 @@ def case_archive_abort():
 
 CASES = {'brick': case_brick, 'idle': case_idle, 'membership': case_membership, 'identity': case_identity, 'reconcile': case_reconcile, 'names': case_names,
          'rawcycle': case_rawcycle, 'invalid_declaration': case_invalid_declaration,
-         'window': case_window, 'handover': case_handover, 'archive': case_archive, 'queue_epoch': case_queue_epoch, 'handover_withdrawn': case_handover_withdrawn, 'archive_abort': case_archive_abort}
+         'window': case_window, 'handover': case_handover, 'archive': case_archive, 'queue_epoch': case_queue_epoch, 'handover_withdrawn': case_handover_withdrawn, 'archive_abort': case_archive_abort, 'handover_archive': case_handover_archive}
 core = None
 try:
     core = subprocess.Popen([str(BIN), 'serve', '--fake'], env=ENV, cwd=ROOT, stdout=open(ROOT / 'core.log', 'wb'), stderr=subprocess.STDOUT)
