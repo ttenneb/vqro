@@ -1,4 +1,5 @@
 import copy
+import copy
 import json
 from pathlib import Path
 import sys
@@ -323,7 +324,8 @@ class AgentsTests(unittest.TestCase):
     def stoppable(self):
         self.core.add_agent()
         self.core.resources["r1"] = {"id": "r1", "kind": "terminal", "name": "Other bridge", "state": "live",
-                                     "argv": ["python3", "launch.py"]}
+                                     "argv": ["python3", "launch.py"], "provider": "herdr"}
+        self.core.providers["herdr"] = {"name": "herdr", "capabilities": {"terminal.kill": {}}}
         self.agents.event("resource", {"id": "r2"})
 
     def test_stop_asks_first_then_kills_only_the_host_terminal_and_reports_the_outcome(self):
@@ -347,11 +349,11 @@ class AgentsTests(unittest.TestCase):
     def test_stop_refuses_a_changed_or_ended_host_and_explains_hostless_agents(self):
         self.stoppable()
         with self.assertRaises(VqroError) as caught:
-            self.command("stop", resource="r2", host="r9", confirm=True)
+            self.command("stop", resource="r2", how="host_kill", host="r9", serves=["r2"], confirm=True)
         self.assertEqual(caught.exception.kind, "conflict")
         self.core.resources["r1"]["state"] = "finished"
         with self.assertRaises(VqroError) as caught:
-            self.command("stop", resource="r2", host="r1", confirm=True)
+            self.command("stop", resource="r2", how="host_kill", host="r1", serves=["r2"], confirm=True)
         self.assertIn("already ended", str(caught.exception))
         del self.core.resources["r2"]["host"]
         with self.assertRaises(VqroError) as caught:
@@ -426,7 +428,8 @@ class AgentV0Tests(unittest.TestCase):
             "v": 0, "state": "idle", "epoch": "e7", "caps": {
                 "rev": 3, "agent.send": {"modes": {"start": {"busy": "reject"}, "settle": {"point": "would_stop"},
                                                      "admit": {}}},
-                "agent.queue": {"actions": ["list", "clear"]}, "agent.stop": {"covers": ["foreground", "queued"]}},
+                "agent.queue": {"actions": ["list", "clear"]}, "agent.stop": {"covers": ["foreground", "queued"]},
+                "agent.interrupt": {}, "agent.respond": {"methods": ["confirm", "permission", "text", "form"]}},
             "requests": [{"request": "q1", "revision": 2, "method": "confirm", "title": "Run it?"},
                          {"request": "q2", "revision": 1, "method": "permission", "title": "Push?",
                           "choices": [{"id": "allow_once", "label": "Allow"}, {"id": "reject_once", "label": "Reject"}]},
@@ -481,9 +484,14 @@ class AgentV0Tests(unittest.TestCase):
         self.command("answer", resource="r2")
         items = self.core.live["agents-requests-r2"]["items"]
         self.assertTrue(any("can't be approved" in row.get("text", "") for row in items))
-        self.command("answer", resource="r2", request="q1", value=True)
-        self.command("answer", resource="r2", request="q2", value="allow_once")
-        self.command("answer", resource="r2", request="q3", cancelled=True)
+        shown = {(row["args"]["request"], bool(row["args"].get("cancelled"))): row["args"] for row in items if row.get("command")}
+        self.assertEqual(shown[("q1", False)], {"resource": "r2", "request": "q1", "epoch": "e7", "revision": 2})
+        self.command("answer", **shown[("q1", False)], value=True)
+        self.command("answer", **shown[("q2", False)], value="allow_once")
+        self.command("answer", **shown[("q3", True)])
+        with self.assertRaises(VqroError) as caught:
+            self.command("answer", resource="r2", request="q1", value=True)
+        self.assertEqual(caught.exception.kind, "stale", "an answer without the shown epoch/revision is never sent")
         self.assertEqual([p["args"] for _, p in self.native()], [
             {"v": 0, "request": "q1", "response": {"value": True}, "revision": 2, "epoch": "e7"},
             {"v": 0, "request": "q2", "response": {"choice": "allow_once"}, "revision": 1, "epoch": "e7"},
@@ -491,7 +499,7 @@ class AgentV0Tests(unittest.TestCase):
         self.assertNotIn("Old", json.dumps(items), "only pending requests are offered")
         for bad in ({"request": "q4", "text": "late"}, {"request": "q3", "value": True}, {"request": "q2", "value": "always"}, {"request": "gone", "value": True}):
             with self.assertRaises(VqroError):
-                self.command("answer", resource="r2", **bad)
+                self.command("answer", resource="r2", epoch="e7", revision=1, **bad)
         self.assertEqual(len(self.native()), 3)
 
     def test_graceful_stop_is_offered_without_a_host_and_asks_first(self):
@@ -512,6 +520,107 @@ class AgentV0Tests(unittest.TestCase):
         self.core.resources["r2"]["data"]["agent"]["lifecycle"] = "stopping"
         self.agents.event("resource", {"id": "r2"})
         self.assertEqual(self.core.live["agents-list"]["items"][0]["description"], "stopping")
+
+
+class AgentV0ConsentTests(unittest.TestCase):
+    """Consent is to what was shown (K3a review probes, spike-panel-2): a popup row never rebinds to newer facts,
+    and nothing is inferred beyond the agent's own evidence. FakeCore records intent only; nothing native runs."""
+
+    setUp, command, native = AgentV0Tests.setUp, AgentV0Tests.command, AgentV0Tests.native
+
+    def facts(self):
+        return self.core.resources["r2"]["data"]["agent"]
+
+    def refused(self, kind, name, **args):
+        with self.assertRaises(VqroError) as caught:
+            self.command(name, **args)
+        self.assertEqual(caught.exception.kind, kind)
+        self.assertEqual(self.native(), [], "nothing sent")
+
+    def row(self, view, **match):
+        return copy.deepcopy(next(row for row in self.core.live[view]["items"] if row.get("command")
+                                  and all(row["args"].get(k) == v for k, v in match.items())))
+
+    def test_an_old_answer_is_not_rebound_to_a_revised_request(self):
+        self.command("answer", resource="r2")
+        row = self.row("agents-requests-r2", request="q1", cancelled=None)
+        self.facts()["requests"][0].update(revision=3, title="Destroy a different resource?")
+        self.refused("stale", "answer", **row["args"], value=True)
+        self.assertIn("Destroy", json.dumps(self.core.live["agents-requests-r2"]), "the open popup shows the new question")
+
+    def test_an_old_answer_is_not_rebound_to_a_new_epoch(self):
+        self.command("answer", resource="r2")
+        row = self.row("agents-requests-r2", request="q1", cancelled=None)
+        self.facts()["epoch"] = "e8"
+        self.refused("stale", "answer", **row["args"], value=True)
+        cancel = self.row("agents-requests-r2", request="q2", cancelled=True)
+        self.assertEqual(cancel["args"]["epoch"], "e8")
+
+    def test_a_confirmed_graceful_stop_never_widens_its_coverage(self):
+        self.command("stop", resource="r2")
+        row = self.row("agents-stop-r2", how="graceful")
+        self.facts()["caps"]["rev"] = 4
+        self.facts()["caps"]["agent.stop"]["covers"].append("children")
+        self.refused("stale", "stop", **row["args"])
+        self.assertIn("children", json.dumps(self.core.live["agents-stop-r2"]), "re-shown with the new coverage")
+
+    def test_a_mode_choice_keeps_the_caps_revision_it_was_shown(self):
+        self.facts()["state"] = "running"
+        self.command("prompt", resource="r2", text="go")
+        row = self.row("agents-send-r2", mode="settle")
+        self.assertEqual(row["args"]["caps_rev"], 3)
+        self.facts()["caps"]["rev"] = 4
+        self.facts()["caps"]["agent.send"]["modes"]["settle"]["point"] = "settled"
+        self.refused("stale", "send", **row["args"])
+
+    def host(self, owns=True):
+        self.core.providers["term"] = {"capabilities": {"terminal.kill": {}}}
+        self.core.resources["r1"] = {"id": "r1", "provider": "term", "kind": "terminal", "state": "live",
+                                     "available": True, "argv": ["server"]}
+        self.core.resources["r2"]["host"] = "r1"
+        self.facts()["host"] = {"id": "h1", "provider": "term", "instance": "x", "incarnation": "i1", "kind": "terminal",
+                                "resource": "r1", "owns_lifecycle": owns}
+
+    def test_host_kill_is_reconfirmed_when_the_host_serves_a_new_agent(self):
+        self.host()
+        self.command("stop", resource="r2")
+        row = self.row("agents-stop-r2", how="host_kill")
+        self.assertEqual(row["args"]["serves"], ["r2"])
+        self.core.resources["r3"] = dict(self.core.resources["r2"], id="r3", name="Not shown when consented")
+        self.refused("conflict", "stop", **row["args"])
+        self.assertIn("r3", json.dumps(self.core.live["agents-stop-r2"]), "the new agent is disclosed before any kill")
+
+    def test_an_unknown_stop_action_never_falls_through_to_a_kill(self):
+        self.host()
+        self.refused("invalid", "stop", resource="r2", how="future_graceful", host="r1", serves=["r2"], confirm=True)
+        self.refused("invalid", "stop", resource="r2", host="r1", serves=["r2"], confirm=True)
+
+    def test_a_non_owning_host_kill_does_not_promise_the_runtime_ends(self):
+        self.host(owns=False)
+        self.command("stop", resource="r2")
+        text = json.dumps(self.core.live["agents-stop-r2"])
+        self.assertNotIn("ends the agent's runtime process", text)
+        self.assertIn("may continue", text)
+        self.command("stop", **self.row("agents-stop-r2", how="host_kill")["args"])
+        self.assertIn("unknown until its runtime reports", self.core.notices[-1][0])
+
+    def test_missing_or_cut_state_is_not_idle_even_if_the_coarse_status_is_done(self):
+        del self.facts()["state"]
+        self.facts()["incomplete"] = ["state"]
+        self.core.resources["r2"]["status"] = {"state": "done"}
+        result = self.command("prompt", resource="r2", text="go")
+        self.assertEqual((result["client"]["popup"]["view"], self.native()), ("agents-send-r2", []))
+
+    def test_a_stopping_agent_is_not_idle(self):
+        self.facts()["lifecycle"] = "stopping"
+        result = self.command("prompt", resource="r2", text="go")
+        self.assertEqual((result["client"]["popup"]["view"], self.native()), ("agents-send-r2", []))
+
+    def test_the_provider_bound_does_not_enable_an_op_this_agent_lacks(self):
+        del self.facts()["caps"]["agent.interrupt"]
+        self.agents.event("resource", {"id": "r2"})
+        self.assertIsNone(self.core.value("menu/agents.r2.abort"))
+        self.refused("unsupported", "abort", resource="r2")
 
 
 class Tier1StatusTests(unittest.TestCase):

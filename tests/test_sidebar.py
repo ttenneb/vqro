@@ -85,18 +85,22 @@ class SidebarTests(unittest.TestCase):
     def test_agent_rows_offer_stop_and_say_why_they_are_unavailable(self):
         module = load(); ext = module["ext"]
         ext.resources = {
-            "r1": {"id": "r1", "kind": "terminal", "argv": ["python3"], "state": "live"},
+            "r1": {"id": "r1", "kind": "terminal", "argv": ["python3"], "state": "live", "provider": "herdr"},
             "r2": {"id": "r2", "kind": "agent", "name": "Other", "host": "r1", "state": "live", "available": False,
                    "provider": "pi-1"}}
-        ext.providers = {"pi-1": {"connected": False, "since": 1_800_000_000_000}}
+        herdr = {"herdr": {"capabilities": {"terminal.kill": {}}}}
+        ext.providers = {"pi-1": {"connected": False, "since": 1_800_000_000_000}, **herdr}
         agent = next(row for row in module["build"]() if row.get("args", {}).get("resource") == "r2")
         self.assertIn({"label": "Stop agent…", "command": "agents.stop", "args": {"resource": "r2"}}, agent["menu"])
         self.assertIn({"label": "Forget agent", "command": "agents.forget", "args": {"resource": "r2"}}, agent["menu"])
         self.assertEqual(len(agent["badges"]), 1)
         self.assertTrue(agent["badges"][0]["text"].startswith("unknown since "), agent["badges"])
-        ext.providers = {}
+        ext.providers = herdr
         agent = next(row for row in module["build"]() if row.get("args", {}).get("resource") == "r2")
         self.assertEqual(agent["badges"], [{"text": "unknown", "style": "warn"}])
+        ext.providers = {}  # the host's provider declares no terminal.kill: no Stop
+        agent = next(row for row in module["build"]() if row.get("args", {}).get("resource") == "r2")
+        self.assertNotIn("agents.stop", str(agent["menu"]))
         del ext.resources["r2"]["host"]  # hostless: no Stop, Forget remains
         agent = next(row for row in module["build"]() if row.get("args", {}).get("resource") == "r2")
         self.assertEqual([item["label"] for item in agent["menu"]], ["Show", "Forget agent"])

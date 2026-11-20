@@ -74,12 +74,19 @@ def mode_label(mode, descriptor):
 
 
 def busy(resource):
-    """Treat anything but evidenced idle as busy (agent v0 section 2.3)."""
-    state = agent_facts(resource).get("state")
-    if isinstance(state, str):
-        return state != "idle"
-    value = resource.get("status")
-    return not (isinstance(value, dict) and value.get("state") in ("idle", "done"))
+    """Only explicit, current idle evidence is idle (agent v0 sections 2.3, 7). A missing, cut or unknown state, or
+    a lifecycle other than live, counts as busy; the coarse OSC-compatible status is never used for a v0 agent."""
+    facts = agent_facts(resource)
+    incomplete = facts.get("incomplete")
+    if isinstance(incomplete, list) and "state" in incomplete:
+        return True
+    return facts.get("lifecycle", "live") != "live" or facts.get("state") != "idle"
+
+
+def owns_lifecycle(resource):
+    """False only when the agent's facts say its host does not own the runtime's lifecycle (agent v0 section 1)."""
+    host = agent_facts(resource).get("host")
+    return not (isinstance(host, dict) and host.get("owns_lifecycle") is False)
 
 
 def advertised(resource, field):
@@ -160,27 +167,50 @@ class Agents:
         """The provider declares the agent v0 op (`agent.send`, `agent.interrupt`, ...)."""
         return isinstance(self.provider_caps(resource).get("agent."+op), dict)
 
+    def endpoint(self, resource, op):
+        """This agent's own declaration of a v0 op (`data.agent.caps`), or None. The provider's declaration is only
+        the upper bound (agent v0 section 2.4): an op absent here is unsupported on this agent, never sent as legacy."""
+        value = caps(resource).get("agent."+op)
+        return value if self.v0(resource, op) and isinstance(value, dict) else None
+
+    def host_kill(self, r):
+        """The agent's live host terminal, when its provider declares terminal.kill; else None."""
+        host = host_of(self.ext.resources, r)
+        if host is None or ended(host):
+            return None
+        declared = self.ext.providers.get(host.get("provider"), {}).get("capabilities", {})
+        return host if isinstance(declared, dict) and isinstance(declared.get("terminal.kill"), dict) else None
+
+    def can_stop(self, r):
+        return not ended(r) and (self.host_kill(r) is not None or self.endpoint(r, "stop") is not None)
+
+    def served(self, hid):
+        """Every known agent the host terminal serves, as shown in the stop confirmation."""
+        return sorted(a["id"] for a in self.ext.resources.values() if a.get("kind") == "agent" and a.get("host") == hid
+                      and not ended(a))
+
     def modes(self, resource):
         """Delivery modes this agent declares in its own caps, in a fixed order; {} for legacy agents."""
-        if not self.v0(resource, "send"):
-            return {}
-        declared = (caps(resource).get("agent.send") or {}).get("modes")
+        declared = (self.endpoint(resource, "send") or {}).get("modes")
         declared = declared if isinstance(declared, dict) else {}
         return {m: declared[m] for m in MODE_ORDER if isinstance(declared.get(m), dict)}
 
     def supported(self, resource, op):
         if op in V0_OP and self.v0(resource, V0_OP[op]):
+            declared = self.endpoint(resource, V0_OP[op])
+            if declared is None:
+                return False
             if op in V0_MODE:
                 return V0_MODE[op] in self.modes(resource) or (op == "prompt" and bool(self.modes(resource)))
             if op == "clear_queue":
-                actions = (caps(resource).get("agent.queue") or {}).get("actions")
+                actions = declared.get("actions")
                 return isinstance(actions, list) and "clear" in actions
             return True
         return isinstance(self.provider_caps(resource).get("agent."+op), dict)
 
     def current_signature(self):
         return tuple(sorted((r["id"], tuple(op for op in EFFECTS if self.supported(r, op)), tuple(self.modes(r)),
-                             self.has_settings(r), self.v0(r, "stop"))
+                             self.has_settings(r), self.can_stop(r))
                             for r in self.ext.resources.values() if r.get("kind") == "agent"))
 
     def has_settings(self, r):
@@ -219,62 +249,92 @@ class Agents:
         return {"resource": r["id"], "view": view(r["id"]), "tab": result, "client": {"close": True, "focus": {"view": view(r["id"])}}}
 
     def stop(self, args):
-        """End an agent, after confirmation: gracefully when its runtime declares agent.stop (agent v0 section 6.7),
-        or by killing its host (bridge) terminal, whose end takes the runtime with it.
+        """End an agent, after confirmation: gracefully when it declares agent.stop (agent v0 section 6.7), or by
+        killing its host terminal when that terminal's provider declares terminal.kill.
 
-        The confirmation names everything the host terminal serves. Nothing escalates silently: a graceful stop
-        that the runtime refuses leaves the agent running, and the host kill is a separate, explicit choice.
+        Each choice is confirmed on what was shown: graceful stop on the caps revision and coverage, host kill on the
+        host and every agent it serves. A change re-shows the choice. Only `how: "graceful"` or `"host_kill"` act;
+        anything else is refused, and a graceful stop is never escalated to a kill.
         """
         self.ext.fresh()
         r = self.agent(args, inspect=True)
         rid, name = r["id"], label(r.get("name") or "Agent")
-        host = host_of(self.ext.resources, r)
-        graceful = self.v0(r, "stop") and r.get("available") and not ended(r)
-        if args.get("how") == "graceful" and args.get("confirm") is True:
-            if not graceful:
+        how = args.get("how")
+        if args.get("confirm") is True and how not in ("graceful", "host_kill"):
+            raise VqroError(f"unknown stop action {label(str(how), 40)}; nothing sent", "invalid")
+        declared = self.endpoint(r, "stop") if r.get("available") and not ended(r) else None
+        host = self.host_kill(r)
+        if args.get("confirm") is not True:
+            return self.stop_popup(r, declared, host)
+        if how == "graceful":
+            if declared is None:
                 raise VqroError(f"{name} {rid} declares no graceful stop or is unavailable; nothing sent", "unsupported")
-            covers = (caps(r).get("agent.stop") or {}).get("covers")
-            native = {**self.v0_args(r), "covers": covers if isinstance(covers, list) else []}
+            covers = declared.get("covers") if isinstance(declared.get("covers"), list) else []
+            if (args.get("caps_rev"), args.get("covers")) != (caps(r).get("rev"), covers):
+                self.stop_popup(r, declared, host)
+                raise VqroError(f"{name} {rid}: what a graceful stop covers changed since you confirmed; confirm again. "
+                                "Nothing sent.", "stale")
+            native = {"v": 0, "covers": covers, **({"caps_rev": args["caps_rev"]} if type(args["caps_rev"]) is int else {})}
             result = self.ext.vqro.call("resource.invoke", {"resource": rid, "op": "agent.stop", "args": native})
             outcome = result.get("outcome", "unknown")
             what = {"accepted": "stop accepted; it is ended only when the runtime reports its end",
                     "observed": "the runtime reports it ended"}.get(outcome, outcome+"; watch the agent's status")
             self.ext.notify(label(f"Stop {name} {rid}: {what}"), "ok" if outcome in ("accepted", "observed") else "warn")
             return {**result, "client": {"close": True}}
-        if host is None and not graceful:
-            why = ("its provider ("+label(str(r.get("provider")))+") runs it outside any vqro terminal" if not r.get("host")
-                   else "its bridge terminal "+label(str(r["host"]))+" is not known to vqro right now")
-            raise VqroError(f"{name} {rid} can't be stopped from vqro: {why}. Stop it where it runs; nothing sent.", "unsupported")
-        hid = host["id"] if host else None
-        if host is not None and ended(host) and not graceful:
-            raise VqroError(f"{name} {rid}: its bridge terminal {hid} has already ended; nothing to stop", "invalid")
-        if args.get("confirm") is not True:
-            items = []
-            if graceful:
-                covers = (caps(r).get("agent.stop") or {}).get("covers")
-                what = ", ".join(str(c) for c in covers) if isinstance(covers, list) and covers else "what the runtime decides"
-                items += [{"type": "text", "text": label(f"Graceful stop asks the runtime to end; it covers: {what}.", 300)},
-                          {"text": "Stop "+rid+" gracefully", "style": "warn", "command": "agents.stop",
-                           "args": {"resource": rid, "how": "graceful", "confirm": True}}]
-            if host is not None and not ended(host):
-                program = label(" ".join(str(a) for a in (host.get("argv") or [])[:3]) or host.get("name") or hid, 200)
-                served = [a["id"] for a in self.ext.resources.values() if a.get("kind") == "agent" and a.get("host") == hid]
-                items += [{"type": "text", "text": f"Killing terminal {hid} ({program}), the agent's bridge, ends the agent's runtime process inside it"
-                           + (" and every agent it serves: "+", ".join(served) if len(served) > 1 else "")
-                           + "; work in progress is interrupted."},
-                          {"text": "Stop agent "+rid+" (kill terminal "+hid+")", "style": "error", "command": "agents.stop",
-                           "args": {"resource": rid, "host": hid, "confirm": True}}]
-            items.append({"type": "text", "style": "warn", "text": "Undo can't bring it back, and nothing is resent. Esc cancels."})
-            self.ext.publish("agents-stop-"+rid, {"title": "Stop "+name+" "+rid+"?", "items": items})
-            return {"client": {"popup": {"view": "agents-stop-"+rid, "width": 76}}}
-        if host is None or args.get("host") != hid:
-            raise VqroError(f"{name} {rid}: its bridge terminal changed since you confirmed; confirm again. Nothing sent.", "conflict")
+        if host is None:
+            gone = host_of(self.ext.resources, r)
+            if gone is not None and ended(gone):
+                raise VqroError(f"{name} {rid}: its bridge terminal {gone['id']} has already ended; nothing to stop", "invalid")
+            raise VqroError(f"{name} {rid}: its host terminal can't be killed from vqro now; nothing sent.", "unsupported")
+        hid = host["id"]
+        if args.get("host") != hid or args.get("serves") != self.served(hid):
+            self.stop_popup(r, declared, host)
+            raise VqroError(f"{name} {rid}: its host terminal or the agents it serves changed since you confirmed; "
+                            "confirm again. Nothing sent.", "conflict")
         result = self.ext.vqro.call("resource.kill", {"resource": hid})
         outcome = result.get("outcome", "unknown")
-        what = {"accepted": "kill accepted; the agent is removed once its terminal ends",
-                "observed": "terminal ended"}.get(outcome, outcome+"; watch the agent's status")
+        if owns_lifecycle(r):
+            what = {"accepted": "kill accepted; the agent is removed once its terminal ends",
+                    "observed": "terminal ended"}.get(outcome, outcome+"; watch the agent's status")
+        else:
+            what = outcome+"; the agent's own end is unknown until its runtime reports it"
         self.ext.notify(label(f"Stop {name} {rid}: terminal {hid} {what}"), "ok" if outcome in ("accepted", "observed") else "warn")
         return {**result, "client": {"close": True}}
+
+    def stop_popup(self, r, declared, host):
+        rid, name = r["id"], label(r.get("name") or "Agent")
+        if declared is None and host is None:
+            hid = r.get("host")
+            why = ("its provider ("+label(str(r.get("provider")))+") runs it outside any vqro terminal" if not hid
+                   else "its bridge terminal "+label(str(hid))+" is not known to vqro, has ended or can't be killed")
+            raise VqroError(f"{name} {rid} can't be stopped from vqro: {why}. Stop it where it runs; nothing sent.", "unsupported")
+        items = []
+        if declared is not None:
+            covers = declared.get("covers") if isinstance(declared.get("covers"), list) else []
+            what = ", ".join(str(c) for c in covers) if covers else "nothing declared"
+            items += [{"type": "text", "text": label(f"Graceful stop asks the runtime to end; it covers: {what}.", 300)},
+                      {"text": "Stop "+rid+" gracefully", "style": "warn", "command": "agents.stop",
+                       "args": {"resource": rid, "how": "graceful", "confirm": True, "caps_rev": caps(r).get("rev"),
+                                "covers": covers}}]
+        if host is not None:
+            hid = host["id"]
+            program = label(" ".join(str(a) for a in (host.get("argv") or [])[:3]) or host.get("name") or hid, 200)
+            served = self.served(hid)
+            others = [a for a in served if a != rid]
+            if owns_lifecycle(r):
+                effect = (f"Killing terminal {hid} ({program}), the agent's bridge, ends the agent's runtime process inside it"
+                          + (" and every agent it serves: "+", ".join(served) if others else "")
+                          + "; work in progress is interrupted.")
+            else:
+                effect = (f"Killing terminal {hid} ({program}) ends only this agent's bridge"
+                          + (" for "+", ".join(served) if others else "")
+                          + ": its runtime runs elsewhere and may continue; its end stays unknown until it reports one.")
+            items += [{"type": "text", "text": effect},
+                      {"text": "Stop agent "+rid+" (kill terminal "+hid+")", "style": "error", "command": "agents.stop",
+                       "args": {"resource": rid, "how": "host_kill", "host": hid, "serves": served, "confirm": True}}]
+        items.append({"type": "text", "style": "warn", "text": "Undo can't bring it back, and nothing is resent. Esc cancels."})
+        self.ext.publish("agents-stop-"+rid, {"title": "Stop "+name+" "+rid+"?", "items": items})
+        return {"client": {"popup": {"view": "agents-stop-"+rid, "width": 76}}}
 
     def forget(self, args):
         """Explicit request only: drop an unavailable agent's cached facts (core resource.forget_cached).
@@ -334,7 +394,8 @@ class Agents:
         return {"v": 0, **({"caps_rev": rev} if type(rev) is int else {})}
 
     def send_mode(self, r, mode, text):
-        """One agent.send in exactly the chosen, declared mode (agent v0 section 3.2)."""
+        """One agent.send in exactly the chosen, declared mode (agent v0 section 3.2), fenced by the caps revision
+        it was chosen on."""
         if mode not in self.modes(r):
             raise VqroError("this agent does not declare that delivery mode; nothing sent", "unsupported")
         native = {**self.v0_args(r), "mode": mode, "content": [{"type": "text", "text": text}],
@@ -360,7 +421,8 @@ class Agents:
         items = [{"type": "text", "text": "The agent is busy. Choose how this message joins its work:" if busy(r)
                   else "Choose how to deliver this message:"}]
         for mode, descriptor in modes.items():
-            row = {"text": mode_label(mode, descriptor), "command": "agents.send", "args": {"resource": rid, "mode": mode}}
+            row = {"text": mode_label(mode, descriptor), "command": "agents.send",
+                   "args": {"resource": rid, "mode": mode, "caps_rev": caps(r).get("rev")}}
             if mode == "admit":
                 row["description"] = "weaker: the runtime decides when it reads it"
             if text is None:
@@ -384,6 +446,10 @@ class Agents:
             return self.choose_mode(r, text if isinstance(text, str) and text.strip() else None)
         if not isinstance(text, str) or not text.strip():
             raise VqroError("message must not be empty", "invalid")
+        if "caps_rev" in args and args["caps_rev"] != caps(r).get("rev"):
+            # Chosen from a popup whose declaration has changed: show the current choice, never rebind consent.
+            self.choose_mode(r, text)
+            raise VqroError("this agent's delivery modes changed since they were shown; choose again. Nothing sent.", "stale")
         return self.send_mode(r, mode, text)
 
     def report_status(self, args):
@@ -453,9 +519,14 @@ class Agents:
         if requests is None:
             requests = []
             items.append({"type": "text", "style": "warn", "text": "Request facts incomplete/unavailable; nothing assumed answered."})
+        epoch = agent_facts(r).get("epoch")
         for q in requests:
-            args = {"resource": rid, "request": q["request"]}
+            args = {"resource": rid, "request": q["request"], "epoch": epoch, "revision": q.get("revision")}
             method, choices = q.get("method"), q.get("choices")
+            if not isinstance(epoch, str) or type(q.get("revision")) is not int:
+                items.append({"type": "text", "style": "warn", "text": label((q.get("title") or q["request"])
+                              + ": no epoch or revision to answer against; answer it in the agent's own interface.")})
+                continue
             row = {"text": label(q.get("title") or q["request"]), "description": label(str(method)), "command": "agents.answer",
                    "args": args}
             if q.get("incomplete"):  # true or a non-empty list of cut fields
@@ -481,6 +552,15 @@ class Agents:
         request = next((q for q in self.requests_v0(r) or [] if q["request"] == args["request"]), None)
         if request is None:
             raise VqroError("that request is no longer pending; nothing sent", "not_found")
+        epoch = agent_facts(r).get("epoch")
+        if not isinstance(epoch, str) or type(request.get("revision")) is not int:
+            raise VqroError("this request has no epoch or revision to answer against; nothing sent", "invalid")
+        if (args.get("epoch"), args.get("revision")) != (epoch, request["revision"]):
+            # An answer is consent to the question shown: a revised or re-issued request is shown again, never
+            # answered with the old choice (agent v0 section 5).
+            if r["id"] in self.open_requests:
+                self.ext.publish("agents-requests-"+r["id"], self.requests_panel(r))
+            raise VqroError("the request changed since it was shown; check it again. Nothing sent.", "stale")
         method, choices = request.get("method"), request.get("choices")
         ids = [c.get("id") for c in choices if isinstance(c, dict)] if isinstance(choices, list) else []
         if args.get("cancelled") is True:
@@ -495,9 +575,8 @@ class Agents:
             response = {"value": args["text"]}
         else:
             raise VqroError("choose a valid answer for this request", "invalid")
-        native = {"v": 0, "request": request["request"], "response": response,
-                  **({"revision": request["revision"]} if type(request.get("revision")) is int else {}),
-                  **({"epoch": agent_facts(r)["epoch"]} if isinstance(agent_facts(r).get("epoch"), str) else {})}
+        native = {"v": 0, "request": request["request"], "response": response, "revision": args["revision"],
+                  "epoch": args["epoch"]}
         result = self.ext.vqro.call("resource.invoke", {"resource": r["id"], "op": "agent.respond", "args": native})
         self.outcome("answer", result)
         return {**result, "client": {"close": True}}
@@ -744,7 +823,7 @@ class Agents:
                           *([{"label": "Agent settings…", "command": "agents.config", "args": {"resource": r["id"]}}]
                             if self.has_settings(r) and r.get("available") else []),
                           *([{"label": "Stop agent…", "command": "agents.stop", "args": {"resource": r["id"]}}]
-                            if (host_of(self.ext.resources, r) is not None or self.v0(r, "stop")) and not ended(r) else []),
+                            if self.can_stop(r) else []),
                           *([{"label": "Forget agent", "command": "agents.forget", "args": {"resource": r["id"]}}]
                             if not r.get("available") and not ended(r) else [])]}
                 for r in self.ext.resources.values() if r.get("kind") == "agent"]

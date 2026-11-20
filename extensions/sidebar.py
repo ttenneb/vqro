@@ -92,6 +92,24 @@ def status_of(r):
     return tier1 if isinstance(tier1, dict) else {}
 
 
+def capability(provider, name):
+    declared = (ext.providers.get(provider) or {}).get("capabilities")
+    return isinstance(declared, dict) and isinstance(declared.get(name), dict)
+
+
+def host_killable(r):
+    """The agent's host is a live terminal whose provider declares terminal.kill."""
+    host = ext.resources.get(r.get("host")) or {}
+    return host.get("kind") == "terminal" and not ended(host) and capability(host.get("provider"), "terminal.kill")
+
+
+def declares_stop(r):
+    """The agent itself declares agent.stop (its own caps within its provider's bound, agent v0 section 2.4)."""
+    facts = (r.get("data") or {}).get("agent")
+    own = facts.get("caps") if isinstance(facts, dict) else None
+    return isinstance(own, dict) and isinstance(own.get("agent.stop"), dict) and capability(r.get("provider"), "agent.stop")
+
+
 def folder_of(r):
     """Short name of a terminal's current folder ("~" for home), or None."""
     cwd = r.get("cwd")
@@ -140,13 +158,10 @@ def term_row(rid, r, where=False):
             *([{"label": "Agent settings…", "command": "agents.config", "args": {"resource": rid}}]
               if r.get("kind") == "agent" and live and isinstance((r.get("data") or {}).get("agent"), dict)
               and (r["data"]["agent"].get("config") or r["data"]["agent"].get("commands")) else []),
-            # Agents with a bridge terminal, or whose runtime declares agent.stop (agent v0), can be stopped from
-            # vqro; the agents extension asks first.
+            # Agents with a killable bridge terminal, or that declare agent.stop themselves (agent v0), can be
+            # stopped from vqro; the agents extension asks first.
             *([{"label": "Stop agent…", "command": "agents.stop", "args": {"resource": rid}}]
-              if r.get("kind") == "agent" and not ended(r)
-              and ((ext.resources.get(r.get("host")) or {}).get("kind") == "terminal"
-                   or isinstance(((ext.providers.get(r.get("provider")) or {}).get("capabilities") or {}).get("agent.stop"), dict))
-              else []),
+              if r.get("kind") == "agent" and not ended(r) and (host_killable(r) or declares_stop(r)) else []),
             # Explicit only: retention never forgets an agent by time.
             *([{"label": "Forget agent", "command": "agents.forget", "args": {"resource": rid}}]
               if r.get("kind") == "agent" and not ended(r) and not r.get("available", True) else []),
