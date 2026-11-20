@@ -1,6 +1,7 @@
 """The tier-1 test harness (tests/coord_harness.py) never leaves a core or its extensions running when it fails to
 start. A stub core stands in for vqro: it starts a long-lived child (as the core starts its extensions) and then
 fails startup in a chosen way. No real core, model or network is used."""
+import gc
 import os
 from pathlib import Path
 import sys
@@ -8,6 +9,7 @@ import tempfile
 import textwrap
 import time
 import unittest
+import warnings
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from coord_harness import Harness  # noqa: E402
@@ -74,8 +76,14 @@ class StartupFailureTests(unittest.TestCase):
         stub.write_text(STUB.replace("{mode}", mode))
         stub.chmod(0o700)
         root = self.root / mode
-        with self.assertRaises(Exception):
-            Harness(str(root), str(stub), inbox="fake", **kwargs)
+        # Nothing the harness opened (log files, sockets, process handles) may be left for the GC to find.
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", ResourceWarning)
+            with self.assertRaises(Exception):
+                Harness(str(root), str(stub), inbox="fake", **kwargs)
+            gc.collect()
+        leaks = [str(w.message) for w in caught if issubclass(w.category, ResourceWarning)]
+        self.assertEqual(leaks, [], "a failed start leaves nothing open")
         core, child = map(int, (root / "st" / "pids").read_text().split())
         deadline = time.time() + 5
         return gone(core, deadline), gone(child, deadline)

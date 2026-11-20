@@ -70,25 +70,31 @@ class Harness:
             self.env["VQRO_EXTENSIONS_DIR"] = self.k2_extensions(coord_ext)
         end = time.time() + startup_s
         self.declarations = {}
-        self.spawn([vqro, "serve", "--fake"], env=self.env, stdout=open(os.path.join(root, "core.log"), "w"), stderr=subprocess.STDOUT)
+        # Each log file is the child's: the parent's copy is closed as soon as the child has it.
+        with open(os.path.join(root, "core.log"), "w") as log:
+            self.spawn([vqro, "serve", "--fake"], env=self.env, stdout=log, stderr=subprocess.STDOUT)
         while not os.path.exists(self.sock):
             if time.time() > end or self.procs[0].poll() is not None:
                 raise RuntimeError(f"core did not start (exit {self.procs[0].poll()}); see {root}/core.log")
             time.sleep(0.05)
         if inbox == "k2":
-            self.spawn([sys.executable, os.path.join(HERE, "fixtures", "coord_k2.py")], env=dict(self.env, COORD_EXT=coord_ext),
-                       stderr=open(os.path.join(root, "inbox.err"), "w"))
+            with open(os.path.join(root, "inbox.err"), "w") as log:
+                self.spawn([sys.executable, os.path.join(HERE, "fixtures", "coord_k2.py")], env=dict(self.env, COORD_EXT=coord_ext),
+                           stderr=log)
         elif inbox == "fake":
-            self.spawn([sys.executable, os.path.join(HERE, "fixtures", "fake_inbox.py"), self.inbox_log],
-                       env=dict(self.env, VQRO_EXT_PATH=os.path.join(HERE, "..", "extensions")), stderr=open(os.path.join(root, "inbox.err"), "w"))
+            with open(os.path.join(root, "inbox.err"), "w") as log:
+                self.spawn([sys.executable, os.path.join(HERE, "fixtures", "fake_inbox.py"), self.inbox_log],
+                           env=dict(self.env, VQRO_EXT_PATH=os.path.join(HERE, "..", "extensions")), stderr=log)
         if inbox == "k2core":
             # Resolve the core's actual bootstrapped owner, then configure this
             # fixture's owner through an authorized public transaction. A label
             # or an arbitrary ordinary principal confers no such standing.
             bootstrap = Client(self.sock, owner=True)
-            bootstrap.call("workspace.apply", {"ops": [{"op": "set", "key": "doc/principals/owner",
-                                                       "value": "p:owner"}], "note": "private native pull fixture owner"})
-            bootstrap.f.close(); bootstrap.s.close()
+            try:
+                bootstrap.call("workspace.apply", {"ops": [{"op": "set", "key": "doc/principals/owner",
+                                                           "value": "p:owner"}], "note": "private native pull fixture owner"})
+            finally:
+                bootstrap.close()
         self.c = Client(self.sock, owner=inbox == "k2core")
         self.wait_commands(end)
         if inbox == "k2core":
@@ -120,13 +126,16 @@ class Harness:
             p.wait()
         if os.path.exists(self.sock):
             os.unlink(self.sock)
-        self.procs[0] = subprocess.Popen([self.vqro, "serve", "--fake"], env=self.env, stdout=open(os.path.join(self.root, "core2.log"), "w"),
-                                         stderr=subprocess.STDOUT, start_new_session=True)
+        self.c.close()  # its core is gone
+        with open(os.path.join(self.root, "core2.log"), "w") as log:
+            self.procs[0] = subprocess.Popen([self.vqro, "serve", "--fake"], env=self.env, stdout=log,
+                                             stderr=subprocess.STDOUT, start_new_session=True)
         while not os.path.exists(self.sock):
             time.sleep(0.05)
-        self.procs[1] = subprocess.Popen([sys.executable, os.path.join(HERE, "fixtures", "fake_inbox.py"), self.inbox_log],
-                                         env=dict(self.env, VQRO_EXT_PATH=os.path.join(HERE, "..", "extensions")), stderr=open(os.path.join(self.root, "inbox2.err"), "w"),
-                                         start_new_session=True)
+        with open(os.path.join(self.root, "inbox2.err"), "w") as log:
+            self.procs[1] = subprocess.Popen([sys.executable, os.path.join(HERE, "fixtures", "fake_inbox.py"), self.inbox_log],
+                                             env=dict(self.env, VQRO_EXT_PATH=os.path.join(HERE, "..", "extensions")), stderr=log,
+                                             start_new_session=True)
         self.c = Client(self.sock)
         self.wait_commands(time.time() + 60)
         for rid, pull in self.declared.items():  # the launcher's declarations are workspace state, not inbox state
@@ -154,10 +163,12 @@ class Harness:
                 shutil.copy(os.path.join(coord_ext, name), dest)
         for name in ("coord", "agents"):
             shutil.copy(os.path.join(coord_ext, "manifests", name + ".json"), os.path.join(dest, "manifests"))
-        defaults = json.load(open(os.path.join(coord_ext, "defaults.json")))
+        with open(os.path.join(coord_ext, "defaults.json")) as file:
+            defaults = json.load(file)
         # coord (K2) and agents (K3: agents.status, the tier-1 status table); nothing else
         defaults["extensions"] = [e for e in defaults["extensions"] if e["name"] in ("coord", "agents")]
-        json.dump(defaults, open(os.path.join(dest, "defaults.json"), "w"))
+        with open(os.path.join(dest, "defaults.json"), "w") as file:
+            json.dump(defaults, file)
         return dest
 
     def spawn(self, argv, **kw):
@@ -167,6 +178,8 @@ class Harness:
         return p
 
     def stop(self):
+        if getattr(self, "c", None) is not None:
+            self.c.close()
         for p in self.procs:
             try:
                 os.killpg(p.pid, signal.SIGKILL)  # the whole group, even if its leader already exited
@@ -229,7 +242,8 @@ class Harness:
     def statuses(self):
         if not os.path.exists(self.inbox_log):
             return []
-        return [json.loads(l) for l in open(self.inbox_log) if '"event": "status"' in l]
+        with open(self.inbox_log) as file:
+            return [json.loads(l) for l in file if '"event": "status"' in l]
 
 
 class RpcFailure(RuntimeError):
@@ -240,17 +254,33 @@ class RpcFailure(RuntimeError):
 
 class Client:
     def __init__(self, sock, owner=False, principal=None):
-        self.s = socket.socket(socket.AF_UNIX); self.s.connect(sock); self.f = self.s.makefile("rw"); self.n = 0
-        identity = ({"kind": "principal", "principal": principal} if principal is not None else
-                    {"kind": "owner"} if owner else None)
-        hello = {"client": "tier1-test", **({"identity": identity} if identity is not None else {})}
-        self.me = self.call("hello", hello)["you"]
+        self.s = socket.socket(socket.AF_UNIX); self.f = None; self.n = 0
+        try:
+            self.s.connect(sock); self.f = self.s.makefile("rw")
+            identity = ({"kind": "principal", "principal": principal} if principal is not None else
+                        {"kind": "owner"} if owner else None)
+            hello = {"client": "tier1-test", **({"identity": identity} if identity is not None else {})}
+            self.me = self.call("hello", hello)["you"]
+        except BaseException:
+            self.close()  # a failed connect or hello leaves nothing open
+            raise
+
+    def close(self):
+        for handle in (self.f, self.s):
+            try:
+                if handle is not None:
+                    handle.close()
+            except OSError:
+                pass
 
     def call(self, method, params):
         self.n += 1
         self.f.write(json.dumps({"jsonrpc": "2.0", "id": self.n, "method": method, "params": params}) + "\n"); self.f.flush()
         while True:
-            row = json.loads(self.f.readline())
+            line = self.f.readline()
+            if not line:
+                raise ConnectionError("core closed the connection")
+            row = json.loads(line)
             if row.get("id") == self.n:
                 if "error" in row:
                     raise RpcFailure(row["error"])
