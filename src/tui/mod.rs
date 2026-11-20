@@ -1877,9 +1877,7 @@ impl App {
             return t.to_string();
         }
         let r = v["resource"].as_str().and_then(|r| self.ws.resources.get(r));
-        // A name the user gave, else the title the program set (OSC 0/2, reported by the backend), else its command.
-        let named = |r: &Value| r["name"].as_str().or_else(|| r["title"].as_str().filter(|t| !t.trim().is_empty())).or_else(|| r["argv"][0].as_str()).map(String::from);
-        r.and_then(named).unwrap_or_else(|| view.to_string())
+        r.and_then(resource_name).unwrap_or_else(|| view.to_string())
     }
 
     /// Run an item: prompt or pick first if it asks to.
@@ -2671,7 +2669,7 @@ impl App {
                 let scroll = self.terms.get(view).map(|t| t.parser.screen().scrollback()).unwrap_or(0);
                 let title = match &res {
                     Some(r) => {
-                        let name = v["title"].as_str().or_else(|| r["name"].as_str()).or_else(|| r["argv"][0].as_str()).unwrap_or(&rid).to_string();
+                        let name = v["title"].as_str().map(String::from).or_else(|| resource_name(r)).unwrap_or_else(|| rid.clone());
                         let status = r["status"]["state"].as_str().map(|s| format!(" [{s}]")).unwrap_or_default();
                         let fin = if r["available"] == false { " (unavailable)" } else if r["state"] == "finished" { " (finished)" } else { "" };
                         let sc = if scroll > 0 { format!(" ↑{scroll}") } else { String::new() };
@@ -3203,6 +3201,12 @@ fn nz(n: u16) -> std::num::NonZeroU16 {
     std::num::NonZeroU16::new(n.max(1)).unwrap()
 }
 
+/// A terminal's name: one the user gave, else the title its program set (OSC 0/2, as the backend reports it), else
+/// its command.
+fn resource_name(r: &Value) -> Option<String> {
+    r["name"].as_str().or_else(|| r["title"].as_str().filter(|t| !t.trim().is_empty())).or_else(|| r["argv"][0].as_str()).map(String::from)
+}
+
 fn new_parser(cols: u16, rows: u16) -> vt100::Parser<Effects> {
     vt100::Parser::new_with_callbacks(nz(rows), nz(cols), 2000, Effects::default())
 }
@@ -3309,6 +3313,13 @@ mod tests {
         app.load(&json!({"epoch":"e","seq":1,"entries":{"view/t":{"value":{"kind":"terminal","resource":"r1"}}},
             "resources":[{"id":"r1","kind":"terminal","state":"live","argv":["/bin/bash"],"title":"vim notes.md"}]}));
         assert_eq!(app.view_title("t"), "vim notes.md");
+        app.leaves = vec!["t".into()];
+        let backend = ratatui::backend::TestBackend::new(60, 6);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut buf = Buffer::empty(Rect::new(0, 0, 60, 6));
+        terminal.draw(|f| { app.draw_view(f, "t", Rect::new(0, 0, 60, 5), true, &Palette::default(), &Icons::new(None, false)); buf = f.buffer_mut().clone(); }).unwrap();
+        let top: String = (0..60).map(|x| buf[(x, 0)].symbol().to_string()).collect();
+        assert!(top.contains(" vim notes.md "), "the border shows the program's title: {top}");
         app.load(&json!({"epoch":"e","seq":2,"entries":{"view/t":{"value":{"kind":"terminal","resource":"r1"}}},
             "resources":[{"id":"r1","kind":"terminal","state":"live","argv":["/bin/bash"],"title":" ","name":"build"}]}));
         assert_eq!(app.view_title("t"), "build", "a name the user gave wins; a blank title is no title");
