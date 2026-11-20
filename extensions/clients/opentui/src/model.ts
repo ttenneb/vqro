@@ -209,18 +209,35 @@ export function sortLabel(value: Json, page = 0, sort: number | null = null): st
   return isObj(s) ? (s.label ?? s.key) : "given order";
 }
 
-/** Column widths in `width` cells (one-cell gaps): numbers fixed, absent the widest cell (capped at a third), "fill"
- *  shares what is left. */
+/** Column widths in `width` cells (one-cell gaps between shown columns): numbers fixed, absent the widest cell (capped
+ *  at a third), "fill" shares what is left. While a column with `min_width` would get less, the shown column with the
+ *  lowest `priority` is dropped (width 0); columns without `priority` are never dropped. */
 export function columnWidths(spec: Json[], shown: Row[], width: number): number[] {
   if (!spec.length) return [];
+  const on = spec.map(() => true);
+  for (;;) {
+    const w = widthsFor(spec, shown, width, on);
+    const short = spec.some((c, i) => on[i] && isInt(c?.min_width) && w[i] < c.min_width);
+    let victim = -1;
+    spec.forEach((c, i) => {
+      if (!on[i] || typeof c?.priority !== "number") return;
+      if (victim < 0 || c.priority < spec[victim].priority || (c.priority === spec[victim].priority && i > victim)) victim = i;
+    });
+    if (!short || victim < 0) return w;
+    on[victim] = false;
+  }
+}
+
+function widthsFor(spec: Json[], shown: Row[], width: number, on: boolean[]): number[] {
   const cell = (r: Row, i: number) => (Array.isArray(r.item.columns) && isStr(r.item.columns[i]) ? [...r.item.columns[i]].length : 0);
   const w: (number | null)[] = spec.map((c, i) => {
+    if (!on[i]) return 0;
     if (isInt(c?.width)) return c.width;
     if (c?.width === "fill") return null;
     return Math.max(1, Math.min(Math.floor(width / 3), Math.max(isStr(c?.label) ? [...c.label].length : 0, ...shown.map((r) => cell(r, i)))));
   });
   const fills = w.filter((x) => x === null).length;
-  const left = Math.max(0, width - w.reduce<number>((s, x) => s + (x ?? 0), 0) - (spec.length - 1));
+  const left = Math.max(0, width - w.reduce<number>((s, x) => s + (x ?? 0), 0) - (on.filter(Boolean).length - 1));
   let k = 0;
   return w.map((x) => (x === null ? Math.floor(left / Math.max(fills, 1)) + (k++ < left % Math.max(fills, 1) ? 1 : 0) : x));
 }

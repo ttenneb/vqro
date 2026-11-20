@@ -1211,10 +1211,12 @@ function facetLine(a: App, buf: OptimizedBuffer, area: Rect, y0: number, value: 
 
 /** Columns (feature columns): the cells padded to one layout for the pane, starting after the widest row prefix. */
 function columnText(cells: Json[], widths: number[], aligns: boolean[]): string {
-  return widths.map((w, i) => {
+  // Zero-width columns were dropped for width (min_width/priority).
+  return widths.flatMap((w, i) => {
+    if (w === 0) return [];
     const c = fit(clean(cells[i] ?? ""), w);
     const pad = " ".repeat(Math.max(0, w - width(c)));
-    return aligns[i] ? pad + c : c + pad;
+    return [aligns[i] ? pad + c : c + pad];
   }).join(" ").trimEnd();
 }
 

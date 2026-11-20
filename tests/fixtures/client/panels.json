@@ -3500,6 +3500,288 @@
         },
         "sort": 0
       }
+    },
+    {
+      "expect": {
+        "column_widths": [
+          19,
+          9,
+          10
+        ],
+        "list_detail": null,
+        "missing": [],
+        "rows": [
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "0",
+            "pinned": false,
+            "selectable": true,
+            "text": "Agent controls",
+            "type": "item"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "1",
+            "pinned": false,
+            "selectable": true,
+            "text": "Finished resource retention",
+            "type": "item"
+          }
+        ]
+      },
+      "features": [
+        "items",
+        "pages",
+        "tree",
+        "toolbar",
+        "badges",
+        "description",
+        "menu",
+        "input",
+        "options",
+        "select",
+        "chips",
+        "icon",
+        "wrap",
+        "facets",
+        "sort",
+        "columns",
+        "pin"
+      ],
+      "name": "columns degrade by width (40 cells): every column fits",
+      "panel": {
+        "columns": [
+          {
+            "label": "extension",
+            "min_width": 16,
+            "width": "fill"
+          },
+          {
+            "label": "id",
+            "priority": 1
+          },
+          {
+            "label": "kind",
+            "priority": 2
+          }
+        ],
+        "items": [
+          {
+            "columns": [
+              "Agent controls",
+              "agents",
+              "interface"
+            ],
+            "text": "Agent controls"
+          },
+          {
+            "columns": [
+              "Finished resource retention",
+              "retention",
+              "management"
+            ],
+            "text": "Finished resource retention"
+          }
+        ]
+      },
+      "state": {},
+      "width": 40
+    },
+    {
+      "expect": {
+        "column_widths": [
+          18,
+          0,
+          9
+        ],
+        "list_detail": null,
+        "missing": [],
+        "rows": [
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "0",
+            "pinned": false,
+            "selectable": true,
+            "text": "Agent controls",
+            "type": "item"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "1",
+            "pinned": false,
+            "selectable": true,
+            "text": "Finished resource retention",
+            "type": "item"
+          }
+        ]
+      },
+      "features": [
+        "items",
+        "pages",
+        "tree",
+        "toolbar",
+        "badges",
+        "description",
+        "menu",
+        "input",
+        "options",
+        "select",
+        "chips",
+        "icon",
+        "wrap",
+        "facets",
+        "sort",
+        "columns",
+        "pin"
+      ],
+      "name": "columns degrade by width (28 cells): id is dropped first",
+      "panel": {
+        "columns": [
+          {
+            "label": "extension",
+            "min_width": 16,
+            "width": "fill"
+          },
+          {
+            "label": "id",
+            "priority": 1
+          },
+          {
+            "label": "kind",
+            "priority": 2
+          }
+        ],
+        "items": [
+          {
+            "columns": [
+              "Agent controls",
+              "agents",
+              "interface"
+            ],
+            "text": "Agent controls"
+          },
+          {
+            "columns": [
+              "Finished resource retention",
+              "retention",
+              "management"
+            ],
+            "text": "Finished resource retention"
+          }
+        ]
+      },
+      "state": {},
+      "width": 28
+    },
+    {
+      "expect": {
+        "column_widths": [
+          20,
+          0,
+          0
+        ],
+        "list_detail": null,
+        "missing": [],
+        "rows": [
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "0",
+            "pinned": false,
+            "selectable": true,
+            "text": "Agent controls",
+            "type": "item"
+          },
+          {
+            "bottom": false,
+            "chips": null,
+            "depth": 0,
+            "expanded": false,
+            "has_children": false,
+            "id": "1",
+            "pinned": false,
+            "selectable": true,
+            "text": "Finished resource retention",
+            "type": "item"
+          }
+        ]
+      },
+      "features": [
+        "items",
+        "pages",
+        "tree",
+        "toolbar",
+        "badges",
+        "description",
+        "menu",
+        "input",
+        "options",
+        "select",
+        "chips",
+        "icon",
+        "wrap",
+        "facets",
+        "sort",
+        "columns",
+        "pin"
+      ],
+      "name": "columns degrade by width (20 cells): then kind; the title takes the width",
+      "panel": {
+        "columns": [
+          {
+            "label": "extension",
+            "min_width": 16,
+            "width": "fill"
+          },
+          {
+            "label": "id",
+            "priority": 1
+          },
+          {
+            "label": "kind",
+            "priority": 2
+          }
+        ],
+        "items": [
+          {
+            "columns": [
+              "Agent controls",
+              "agents",
+              "interface"
+            ],
+            "text": "Agent controls"
+          },
+          {
+            "columns": [
+              "Finished resource retention",
+              "retention",
+              "management"
+            ],
+            "text": "Finished resource retention"
+          }
+        ]
+      },
+      "state": {},
+      "width": 20
     }
   ]
 }

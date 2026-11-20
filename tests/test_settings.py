@@ -246,10 +246,10 @@ class SettingsTests(unittest.TestCase):
                           (["gpu","ability/x.gpu","needs"],{"relation":"needs","status":"not installed"})])
         runtime=pages["Runtime"]
         self.assertEqual(runtime["items"][0]["columns"],["Status","off"])
-        # The kind groups stay one switch away (the human's grouping choice).
-        module["ext_rows"].__globals__["GROUP_BY_KIND"]=True
-        grouped=module["ext_rows"](ext.states,set())
-        self.assertEqual(grouped[0]["type"],"header");self.assertEqual(len(grouped[0]["children"][0]["columns"]),2)
+        # A flat list (the human's choice); narrow panes drop id, then kind, before titles get under 16 cells.
+        page=module["extensions_page"](ext.states,set())
+        self.assertTrue(all(r.get("type")!="header" for r in page["items"]))
+        self.assertEqual([(c.get("min_width"),c.get("priority")) for c in page["columns"]],[(16,None),(None,1),(None,2)])
 
     def test_builtins_have_complete_readable_manifests(self):
         import json

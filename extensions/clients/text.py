@@ -303,6 +303,8 @@ class TextClient:
         """Cells padded (or cut with …) to this panel's column widths, one space apart (feature columns)."""
         out = []
         for i, w in enumerate(self.widths or []):
+            if w == 0:  # dropped for width (min_width/priority)
+                continue
             c = cells[i] if i < len(cells) else ""
             c = c if len(c) <= w else c[:max(w - 1, 0)] + "…"
             out.append(c.rjust(w) if i < len(self.aligns) and self.aligns[i] else c.ljust(w))

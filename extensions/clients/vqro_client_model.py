@@ -251,17 +251,32 @@ def sort_label(value, page=0, sort=None):
 
 
 def column_widths(spec, shown_rows, width):
-    """Column widths in `width` cells (one-cell gaps): numbers fixed, absent the widest cell (capped at a third),
-    "fill" shares what is left."""
+    """Column widths in `width` cells (one-cell gaps between shown columns): numbers fixed, absent the widest cell
+    (capped at a third), "fill" shares what is left. While a column with `min_width` would get less, the shown
+    column with the lowest `priority` is dropped (width 0); columns without `priority` are never dropped."""
     if not spec:
         return []
+    shown = [True] * len(spec)
+    while True:
+        w = _widths_for(spec, shown_rows, width, shown)
+        short = any(shown[i] and isinstance(c, dict) and isinstance(c.get("min_width"), int) and w[i] < c["min_width"] for i, c in enumerate(spec))
+        victims = [(c["priority"], -i, i) for i, c in enumerate(spec)
+                   if shown[i] and isinstance(c, dict) and isinstance(c.get("priority"), (int, float)) and not isinstance(c.get("priority"), bool)]
+        if not short or not victims:
+            return w
+        shown[min(victims)[2]] = False
+
+
+def _widths_for(spec, shown_rows, width, shown):
     def cell(r, i):
         c = r["item"].get("columns")
         return len(c[i]) if isinstance(c, list) and i < len(c) and isinstance(c[i], str) else 0
     w = []
     for i, c in enumerate(spec):
         cw = c.get("width") if isinstance(c, dict) else None
-        if isinstance(cw, int) and not isinstance(cw, bool):
+        if not shown[i]:
+            w.append(0)
+        elif isinstance(cw, int) and not isinstance(cw, bool):
             w.append(cw)
         elif cw == "fill":
             w.append(None)
@@ -269,7 +284,7 @@ def column_widths(spec, shown_rows, width):
             label = c.get("label") if isinstance(c, dict) and isinstance(c.get("label"), str) else ""
             w.append(max(1, min(width // 3, max([cell(r, i) for r in shown_rows] + [len(label)]))))
     fills = sum(1 for x in w if x is None)
-    left = max(0, width - sum(x for x in w if x is not None) - (len(spec) - 1))
+    left = max(0, width - sum(x for x in w if x is not None) - (sum(shown) - 1))
     k, out = 0, []
     for x in w:
         if x is None:

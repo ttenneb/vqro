@@ -441,10 +441,11 @@ fn column_layout(spec: &[Value], rows: &[Flat], width: u16, icons: &Icons) -> Co
 fn join_cells(cells: Vec<String>, widths: &[usize], aligns: &[bool]) -> String {
     let mut out = String::new();
     for (i, w) in widths.iter().enumerate() {
+        if *w == 0 { continue; }  // dropped for width (`min_width`/`priority`)
         let cell = cells.get(i).map(String::as_str).unwrap_or("");
         let cut = truncate(cell, *w);
         let pad = w.saturating_sub(icons::width(&cut) as usize);
-        if i > 0 { out.push(' '); }
+        if !out.is_empty() { out.push(' '); }
         if aligns.get(i) == Some(&true) { out.push_str(&" ".repeat(pad)); out.push_str(&cut); } else { out.push_str(&cut); out.push_str(&" ".repeat(pad)); }
     }
     out.trim_end().to_string()
@@ -728,6 +729,17 @@ mod tests {
         let plain=Arc::new(json!({"items":[{"text":"command · agents.abort","columns":["command","agents.abort"]}]}));
         let mut buf=Buffer::empty(area);render(&mut buf,area,&plain,&mut State::default(),true,&Palette::default(),&Icons::new(None,false),None);
         assert!((0..60).map(|x|buf[(x,0)].symbol().to_string()).collect::<String>().contains("command · agents.abort"));
+    }
+
+    #[test]
+    fn narrow_panes_drop_low_priority_columns_before_squeezing_the_title() {
+        let v=Arc::new(json!({"columns":[{"label":"extension","width":"fill","min_width":16},{"label":"id","priority":1},{"label":"kind","priority":2}],
+            "items":[{"text":"Finished resource retention","columns":["Finished resource retention","retention","management"]}]}));
+        let draw=|w:u16|{let area=Rect::new(0,0,w,4);let mut buf=Buffer::empty(area);render(&mut buf,area,&v,&mut State::default(),true,&Palette::default(),&Icons::new(None,false),None);
+            (0..4).map(|y|(0..w).map(|x|buf[(x,y)].symbol().to_string()).collect::<String>()).collect::<Vec<_>>().join("\n")};
+        let wide=draw(60);assert!(wide.contains("retention")&&wide.contains("management"),"{wide}");
+        let narrow=draw(34);assert!(!narrow.contains(" retention ")&&narrow.contains("management")&&narrow.contains("Finished resource"),"{narrow}");
+        let tight=draw(24);assert!(!tight.contains("management")&&tight.contains("Finished resource re"),"{tight}");
     }
 
     #[test]

@@ -203,7 +203,6 @@ def switch_options(states, name, on, deps):
 # Extensions page: a dense list (one row per extension: checkbox, title, id, kind, status chip) and a detail with
 # section pages, each a list with Show (facets) and Sort where useful (core-protocol.md, "Facets, sort and
 # columns"). All choices are per-window client state; nothing here is saved.
-GROUP_BY_KIND = False  # the human's choice (pending): False = flat list with a Kind column, True = kind groups
 STATUS_ORDER = {"failed": 0, "provider-not-connected": 1, "starting": 2, "stopped-by-safe-mode": 3, "off": 4, "running": 5}
 
 
@@ -368,7 +367,7 @@ def ext_rows(states, commands=None):
         shown = title if title == name else f"{title} ({name})"
         # One dense row: no description line (the summary stays searchable through `summary`/`tags`).
         rows.append({"id": "extension/"+name, "type": "toggle", "text": shown,
-            "columns": [title, name] + ([] if GROUP_BY_KIND else [kind]),
+            "columns": [title, name, kind],
             "checked": on, "summary": summary, "tags": [name, kind, summary, status],
             "facets": {"status": status, "kind": kind},
             "sort": {"name": title.lower(), "id": name, "kind": f"{kind}/{title.lower()}", "status": STATUS_ORDER.get(status, 9)},
@@ -380,22 +379,18 @@ def ext_rows(states, commands=None):
                      if not a.get("disabled") and not a.get("options")],
             "detail_panel": {"title": shown, "requires": ["items", "chips", "wrap", "pages"],
                              "toolbar": [{"type": "chips", "chips": actions}], "pages": pages}})
-    if not GROUP_BY_KIND:
-        return rows
-    groups = {}
-    for row in rows:
-        groups.setdefault(row["facets"]["kind"], []).append(row)
-    return [{"type": "header", "id": "kind/"+kind, "text": kind.replace("-", " ").title(),
-             "expanded": True, "children": groups[kind]} for kind in sorted(groups)]
+    return rows
 
 
 def extensions_page(states, commands):
-    """The Extensions page: Show by status (and kind), Sort, and title/id/kind columns over the dense rows."""
-    columns = [{"label": "extension", "width": "fill"}, {"label": "id"}] + ([] if GROUP_BY_KIND else [{"label": "kind"}])
+    """The Extensions page (the human's choice: a flat list, Kind a sortable column): Show by status and kind, Sort,
+    and title/id/kind columns over the dense rows. Narrow panes drop id, then kind, rather than squeeze titles under
+    16 cells; About still shows both."""
+    columns = [{"label": "extension", "width": "fill", "min_width": 16}, {"label": "id", "priority": 1}, {"label": "kind", "priority": 2}]
     return {"title": "Extensions", "list_detail": {"requires": ["list_detail"]}, "items": ext_rows(states, commands),
-            "facets": [{"key": "status", "label": "Show"}] + ([] if GROUP_BY_KIND else [{"key": "kind", "label": "Kind"}]),
-            "sorts": [{"key": "name", "label": "name"}, {"key": "status", "label": "status"}, {"key": "id", "label": "id"}]
-                     + ([] if GROUP_BY_KIND else [{"key": "kind", "label": "kind"}]),
+            "facets": [{"key": "status", "label": "Show"}, {"key": "kind", "label": "Kind"}],
+            "sorts": [{"key": "name", "label": "name"}, {"key": "status", "label": "status"}, {"key": "id", "label": "id"},
+                      {"key": "kind", "label": "kind"}],
             "columns": columns}
 
 
