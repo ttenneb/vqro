@@ -23,7 +23,7 @@ def send_caps():
             "settle": {"point": "settled", "idle": "start", "batch": "one", "batch_at": "consume"}, "preempt": {"busy": "replace"}},
             "guards": {"session": "runtime", "run": "runtime"},
             "content": {"types": ["text"], "shape": "ordered"}, "receipts": {"retain": 256},
-            "correlation": "none", "literal": "always", "handled": "none", "keys": None,
+            "correlation": "insertion", "literal": "always", "handled": "none", "keys": None,
             "origin": [{"as": "attributed_user", "role": "user", "frame": "sender_header"}]}
 
 
@@ -162,8 +162,11 @@ class Native:
 
     def item(self,ref,value):
         journal=self.journal(ref);journal["position"]+=1
-        entity={"op":"put","kind":"message","id":"m"+str(journal["position"]),"rev":1,
-                "value":dict(value,position=journal["position"])}
+        self.entity(ref,"message","m"+str(journal["position"]),dict(value,position=journal["position"]))
+
+    def entity(self,ref,kind,identifier,value):
+        journal=self.journal(ref);key=(kind,identifier);previous=journal["entities"].get(key)
+        entity={"op":"put","kind":kind,"id":identifier,"rev":previous["rev"]+1 if previous else 1,"value":deepcopy(value)}
         encoded=lambda row:json.dumps(row,ensure_ascii=False,separators=(",",":")).encode()+b"\n"
         if len(encoded(entity))>60000: raise RuntimeError("fake item exceeds declared record bound")
         def append(row):
@@ -171,11 +174,12 @@ class Native:
             journal["rows"].append((journal["seq"],data));journal["bytes"]+=len(data)
             while journal["bytes"]>131072:
                 _,old=journal["rows"].pop(0);journal["bytes"]-=len(old)
-        journal["entities"][entity["id"]]=entity;journal["entity_bytes"]+=len(encoded(entity))
+        if previous: journal["entity_bytes"]-=len(encoded(previous))
+        journal["entities"][key]=entity;journal["entity_bytes"]+=len(encoded(entity))
         while len(journal["entities"])>512 or journal["entity_bytes"]>524288:
             identifier=next(iter(journal["entities"]));removed=journal["entities"].pop(identifier)
             journal["entity_bytes"]-=len(encoded(removed))
-            append({"op":"remove","kind":removed["kind"],"id":identifier,"rev":2})
+            append({"op":"remove","kind":removed["kind"],"id":removed["id"],"rev":removed["rev"]+1})
         append(entity);journal["wake"].set()
 
     def insert(self, ref, args):
@@ -333,6 +337,14 @@ class Native:
             if len(self.context_pending[ref])>16: raise ValueError("context bound")
             self.append("context_supplied",ref=ref,records=deepcopy(request["records"]))
             return {"supplied":True}
+        if verb == "emit-receipt":
+            ref=request["ref"];delivery=request["delivery"]
+            observed=self.receipts.get(ref,{}).get(delivery)
+            if not observed or observed.get("stage")!="inserted":
+                raise ValueError("no native insertion evidence for this delivery")
+            self.entity(ref,"receipt",delivery,observed)
+            self.append("receipt_observation",ref=ref,receipt=deepcopy(observed))
+            return deepcopy(observed)
         if verb == "model":
             ref=request["ref"];entries=self.pull_pending[ref];context=self.context_pending[ref]
             self.append("model_request",ref=ref,deliveries=[row["delivery"] for row in entries],entries=deepcopy(entries),context=deepcopy(context))
