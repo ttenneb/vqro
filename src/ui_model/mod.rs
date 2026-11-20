@@ -9,6 +9,7 @@
 //! - `composer`: the composer row and multi-line prompts (editing, draft, controls).
 //! - `recovery`: the shared recovery content (prefix recovery rows and the safe-mode chooser).
 //! - `keys`: key names.
+//! - `links`: URLs and file paths in terminal rows (Ctrl-click, the pane menu's link).
 //! - `tabbar`: tab bar labels from the shared `doc/settings/tabs` setting (chips, number style).
 //! - `window`: which layout (workspace) a window shows, its invocation context and `current_when` marks.
 //! - this module: client profiles and UI features declared in `hello`.
@@ -17,6 +18,7 @@
 
 pub mod composer;
 pub mod keys;
+pub mod links;
 pub mod markdown;
 pub mod panel;
 pub mod recovery;

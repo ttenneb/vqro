@@ -59,7 +59,8 @@ listed); state-schema rollback; late crash 30 s after load (crash budget); 5 s s
   their popup, bracketed multi-line paste, a 200 KB paste on herdr and tmux), `e2e_tui_keys.py` (keys with
   modifiers like xterm; Shift-Enter for kitty-protocol and modifyOtherKeys programs), `e2e_tui_pane_basics.py` (tab
   move by key and by dragging a chip, program titles on tabs, rename key, last pane, swap, resize, layout preset,
-  break out, and the tmux profile's pane keys), `e2e_scale_herdr.py`, and the TUI smoke
+  break out, Ctrl-click on a URL and on `path:line`, the right-click link menu, binding `repeat`, and the tmux
+  profile's pane keys), `e2e_scale_herdr.py`, and the TUI smoke
   `e2e_tui_smoke.sh` (private herdr-core and vqro core; 30 MB flood, core restart reattach, quit while the core
   cannot start);
 - the default scale profile;

@@ -72,6 +72,9 @@ export class App {
   leaves: Leaf[] = [];
   /** The focused view at the last draw and the one before it (`client.focus {dir: "last"}`). */
   focusNow: string | null = null;
+  /** Until this time (ms), keys with a `repeat` binding run without the prefix (binding `repeat`). */
+  repeatUntil = 0;
+  armRepeat(b: Json) { if (b?.repeat === true && !this.overlay) this.repeatUntil = Date.now() + 600; }
   focusLast: string | null = null;
   hits: Hit[] = [];
   listed = new Map<string, { rows: m.Row[]; hits: { y: number; x: number; w: number; i: number; chip?: number }[]; area?: Rect }>();
@@ -409,6 +412,13 @@ export class App {
     // The prefix always wins (recovery): it cancels a prompt and reaches the prefix menu even while typing.
     if (isPrefix && o?.kind !== "prefix") { if (o?.kind === "input") this.closeOverlay(); this.overlay = { kind: "prefix", sel: 0 }; this.redraw(); return; }
     if (o) { this.overlayKey(o, name, k); this.redraw(); return; }
+    // After a `repeat` binding: its key (or another `repeat` key) runs again without the prefix for a moment.
+    const until = this.repeatUntil;
+    this.repeatUntil = 0;
+    if (!isPrefix && Date.now() < until) {
+      const b = this.ws.bindingFor(name, this.ctxLeaf(this.focus));
+      if (b?.repeat === true) { this.activate(b, this.ctxLeaf(this.focus)); this.armRepeat(b); this.redraw(); return; }
+    }
     const leaf = this.leaves[this.focus];
     if (leaf && this.viewKind(leaf.view) === "terminal") { this.terminals.key(leaf.view, k); return; }
     if (leaf && this.viewKind(leaf.view) === "panel") {
@@ -450,7 +460,7 @@ export class App {
           return;
         }
         const b = this.ws.bindingFor(name, this.ctxLeaf(this.focus));
-        if (b) { this.overlay = null; this.activate(b, this.ctxLeaf(this.focus)); return; }
+        if (b) { this.overlay = null; this.activate(b, this.ctxLeaf(this.focus)); this.armRepeat(b); return; }
         if (name === "Up" || name === "Down") { o.sel = list(rows.length, o.sel); return; }
         if (name === "Enter") { const r = rows[o.sel]; this.overlay = null; if (r) this.activate(r.binding, this.ctxLeaf(this.focus)); return; }
         this.overlay = null;

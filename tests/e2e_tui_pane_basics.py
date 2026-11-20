@@ -1,10 +1,12 @@
 #!/usr/bin/python3
-"""Opt-in TUI check: tab and pane management basics through the real `vqro tui`, keys and mouse.
+"""Opt-in TUI check: tab and pane management basics and terminal links through the real `vqro tui`, keys and mouse.
 
 On a private herdr-core: a tab shows its program's OSC title; prefix `<` moves a tab and dragging a tab chip
 onto another moves it back; `r` renames a tab; `h` splits, then `;` returns to the last pane, `}` swaps,
 Ctrl-Right resizes, Space applies a layout preset and `b` breaks a pane out to a tab; the tmux profile's `{`
-swaps too. Layout effects are read back from the core.
+swaps too. Links: Ctrl-click on a URL runs the opener, on `path:line` opens the editor in a split at that line,
+and a right-click offers "Open link"; a `repeat` binding (Ctrl-arrows resize) repeats without the prefix only
+for a moment. Layout effects are read back from the core.
 
 Usage: tests/e2e_tui_pane_basics.py TARGET_DIR   (debug binaries in TARGET_DIR/debug)
 Private /tmp root; nothing live is touched. Stops only what it started.
@@ -113,6 +115,21 @@ def click_drag(x0, x1, y):
         time.sleep(0.15)
 
 
+def click(x, y, button=0, mods=0):
+    """A press and release at a cell (0-based), as SGR mouse reports; mods 16 = Ctrl."""
+    code = button + mods
+    for seq in (f"\x1b[<{code};{x + 1};{y + 1}M", f"\x1b[<{code};{x + 1};{y + 1}m"):
+        subprocess.run([*HARNESS, "send-keys", "-l", seq])
+        time.sleep(0.15)
+
+
+def find(text, last=True):
+    """(x, y) of text on the screen (its last occurrence by default), or None."""
+    rows = screen().splitlines()
+    hits = [(line.index(text), y) for y, line in enumerate(rows) if text in line]
+    return (hits[-1] if last else hits[0]) if hits else None
+
+
 def side_of(text):
     """Which half of the screen a line containing text starts in ("left"/"right"), or None."""
     for line in screen().splitlines():
@@ -182,6 +199,39 @@ try:
     count = len(tabs()["tabs"])
     prefix("b")
     check("prefix b breaks the pane out to a tab of its own", wait(lambda: len(tabs()["tabs"]) == count + 1 and len(views(tabs()["tabs"][tabs()["active"]])) == 1), tabs())
+
+    # Links: a fake opener records what it is asked to open; the "editor" prints its arguments and waits.
+    opener = f"{R}/home/opener.sh"
+    with open(opener, "w") as f:
+        f.write(f"#!/bin/sh\nprintf '%s\\n' \"$@\" >> {R}/home/opened\n")
+    os.chmod(opener, 0o755)
+    call("workspace.apply", {"note": "e2e links", "ops": [{"op": "set", "key": "doc/settings/links", "value": {
+        "opener": [opener], "editor": ["/bin/sh", "-c", 'echo "EDITOR $*"; exec /usr/bin/sleep 120', "editor"]}}]})
+    keys(f"cd {R}/home && /usr/bin/mkdir -p sub && /usr/bin/touch sub/file.txt && /usr/bin/clear && echo https://example.org/zz see sub/file.txt:12", literal=True)
+    keys("Enter")
+    url = wait(lambda: find("https://example.org/zz see"))
+    click(url[0] + 5, url[1], mods=16)
+    check("Ctrl-click on a URL runs the opener with it", wait(lambda: open(f"{R}/home/opened").read() == "https://example.org/zz\n"),
+          os.path.exists(f"{R}/home/opened") and open(f"{R}/home/opened").read())
+    click(url[0] + 5, url[1], button=2)
+    check("right-click on a URL offers Open link", wait(lambda: "Open link" in screen()), screen())
+    keys("Escape")
+    path = wait(lambda: find("sub/file.txt:12"), 5)
+    if path is None:
+        print("NO PATH ON SCREEN\n" + screen(), flush=True)
+    click(path[0] + 3, path[1], mods=16)
+    check("Ctrl-click on path:line opens the editor at that line in a split", wait(lambda: f"EDITOR +12 {R}/home/sub/file.txt" in screen()
+          and len(views(tabs()["tabs"][tabs()["active"]])) == 2), screen())
+    print("CAPTURE links\n" + screen(), flush=True)
+    sizes = lambda: tabs()["tabs"][tabs()["active"]]["node"].get("sizes")
+    subprocess.run([*HARNESS, "send-keys", "C-g", "C-Left", "C-Left"])  # one burst: well inside the repeat window
+    check("a repeat binding repeats without the prefix", wait(lambda: sizes() == [400, 600]), sizes())
+    time.sleep(1.2)
+    keys("C-Left")
+    time.sleep(0.8)
+    check("after the repeat window the key goes to the program", sizes() == [400, 600], sizes())
+    prefix("x")  # close the editor pane (its program keeps running until the backend stops)
+    wait(lambda: len(views(tabs()["tabs"][tabs()["active"]])) == 1)
 
     # The tmux profile binds the same commands on tmux's keys.
     call("command.invoke", {"name": "keys.profile", "args": {"value": "tmux"}})

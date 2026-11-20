@@ -4,6 +4,7 @@
   "description":"Contributes mouse bindings for pane and tab menus, plus middle-click to close a tab and dragging a tab onto another to move it there. It uses the normal pane and tab commands rather than owning programs. Turn it off to remove these gestures; keyboard commands and the vqro recovery badge remain.",
   "requires":{"protocol":1},
   "works_with":[{"cap":"command/tabs.close","suggest":"tabs","without":"Middle-click does not close tabs"},
-                {"cap":"command/tabs.move","suggest":"tabs","without":"Dragging a tab does not move it"}],
-  "contributes":{"keys":["Right-click pane: pane menu","Right-click tab: tab menu","Middle-click tab: close tab","Drag a tab onto another: move it there"]}
+                {"cap":"command/tabs.move","suggest":"tabs","without":"Dragging a tab does not move it"},
+                {"cap":"command/links.open","suggest":"links","without":"Ctrl-click on a link does nothing"}],
+  "contributes":{"keys":["Right-click pane: pane menu","Right-click tab: tab menu","Middle-click tab: close tab","Drag a tab onto another: move it there","Ctrl-click a link in a terminal: open it"]}
 }

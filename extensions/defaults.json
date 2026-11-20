@@ -1,5 +1,5 @@
 {
-  "version": 5,
+  "version": 6,
   "extensions": [
     {
       "name": "tabs",
@@ -133,6 +133,15 @@
       ],
       "since": 5,
       "description": "In-app viewer for extension logs (core-host files); Settings offers it as View log."
+    },
+    {
+      "name": "links",
+      "argv": [
+        "python3",
+        "links.py"
+      ],
+      "since": 6,
+      "description": "Opens what you Ctrl-click in a terminal: URLs in the browser, files in an editor split. Off: links do nothing."
     }
   ]
 }

@@ -850,11 +850,16 @@ reconcile later with their full set (`exclusive=True`). Other runtimes should fo
   `icon_after: true` draws it right after the label with no space, for compact inline buttons (`+◆`; clients
   without it draw the icon before). `input` makes the client prompt for text (passed as `args.text`); `pick` makes it offer a choice (`args.picked`);
   `when` is matched field by field against the invocation context.
-- `binding/<id>`: `{key, command, args?, where?, label?, priority?, input?, prefill?, pick?, hidden?, when?}`. `key` is a prefix key
+- `binding/<id>`: `{key, command, args?, where?, label?, priority?, input?, prefill?, pick?, hidden?, when?, repeat?}`. `key` is a prefix key
   (`"n"`, `"Left"`, see Keys) or a gesture (`"mouse.right"`, `"mouse.middle"`) with `where` = `"pane"` or `"tab"`.
   `"mouse.drag"` with `where: "tab"`: a left press on a tab chip released over another chip of the same bar runs
   the command with the pressed tab's context plus `drop_index` (0-based, the chip it was dropped on); clients
-  without drag support simply never run it.
+  without drag support simply never run it. `"mouse.link"` with `where: "pane"`: Ctrl-click (press and release on
+  the same cell) on a link the client found in a terminal pane (see Links) runs the command with the pane's
+  context plus `link`.
+  `repeat: true` (prefix keys, like tmux's `-r`): after the binding runs from the prefix, for a short window
+  (the TUI: 600 ms, renewed by each use) a key whose binding also has `repeat` runs again without the prefix; any
+  other key ends the window and goes where it would have. Clients without it need the prefix each time.
   `input`, `prefill` and `pick` work as for menu items; `hidden` keeps a key out of the prefix menu (it still works).
   `when` (prefix keys) is matched against the focused pane's context exactly like a menu item's: a binding whose
   `when` does not hold is not a candidate there, so the key falls through to the next binding for it by the usual
@@ -877,7 +882,9 @@ reconcile later with their full set (`exclusive=True`). Other runtimes should fo
 - Clients add `args.context` when invoking from a place: `{layout, layout_version, path, view, kind, resource,
   resource_kind, live, title, tab_title?}` for a pane (`resource` is the view's `resource` field, for terminal views
   and any other view that names the resource it shows, such as agent panels; `resource_kind` is that resource's
-  `kind`, or null), `{layout, layout_version, tab_path, tab_index, tab_title}` for a tab.
+  `kind`, or null), `{layout, layout_version, tab_path, tab_index, tab_title}` for a tab. A pane context invoked at a
+  position over a link in a terminal (a right-click menu, `mouse.link`) adds `link` `{kind: "url"|"path", text,
+  line?, column?}` and `link_kind` (for `when: {"link_kind": "url"}`).
   `tab_title` is the current/innermost tab's title, or null when none exists. Use `layout_version` as `expect`.
 - Client-side commands (mechanism, never sent to the core): `client.menu {where}`, `client.prefix`, `client.palette`,
   `client.zoom` (toggle: the focused pane fills this window; per window, not workspace state; moving focus leaves it).
@@ -1252,6 +1259,21 @@ written by the tabs extension (`tabs.settings`) and read by every client (render
   (`where: "tab"`), prefix keys and the command list.
 - Dragging a tab chip onto another of the same bar runs the `mouse.drag` tab gesture (bundled: `tabs.move`, from the
   gestures extension); see `binding/<id>`.
+
+### Links
+
+Clients find plain URLs and file paths in the text of terminal panes (renderer-independent model `ui_model::links`;
+conformance `tests/fixtures/client/links.json`), reading a row joined with the rows the terminal wrapped into it.
+- **URL:** `http://`, `https://`, `file://`, `ftp://`, up to whitespace, a quote, `<`, `>`, `|` or a backtick;
+  trailing `.,;:!?` and closing brackets without an opener in the link are left out.
+- **Path:** a token with a `/` (`src/main.rs`, `/etc/hosts`, `~/x`, `./run.sh`), or a bare `name.ext` followed by
+  a line (`main.rs:12`); a trailing `:line` or `:line:column` becomes `line`/`column`. Never checked against a file
+  system (a client may run elsewhere).
+- Ctrl-click runs the `mouse.link` pane gesture; a right-click menu gets the link in its context. Opening is an
+  extension's choice: the bundled `links` extension sends URLs (and folders) to the platform opener (`xdg-open`,
+  `open`, `start`), and opens files in `$VISUAL`/`$EDITOR` (else `vi`) at `+line` in a split beside the pane
+  (`panes.split {argv, cwd}`), resolving relative paths against the terminal's `resource.cwd`. `doc/settings/links`
+  `{opener?, editor?}` (argv lists) overrides the programs. Nothing opens without the user's click.
 
 The bundled `themes` extension publishes its themes as live data `themes` and applies one with
 `themes.apply {name}`; settings shows them on its Theme page.

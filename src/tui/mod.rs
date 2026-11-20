@@ -61,6 +61,8 @@ const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STA
 const MAX_PASTE: usize = 4 * 1024 * 1024;
 const PASTE_CHUNK: usize = crate::adapter::MAX_STREAM_CHUNK;
 /// How long one chunk may keep meeting a full input queue (`overloaded`) before the paste stops.
+/// How long after a `repeat` binding its key (or another `repeat` key) works without the prefix; each use renews it.
+const REPEAT_WINDOW: std::time::Duration = std::time::Duration::from_millis(600);
 const PASTE_STALL: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// What to send for a paste: the text, wrapped in bracketed-paste markers when the program asked for
@@ -355,6 +357,11 @@ struct App {
     pending_focus: Option<String>,
     /// A tab chip pressed with the left button, while a `mouse.drag` tab gesture is bound.
     tab_press: Option<TabPress>,
+    /// After a `repeat` binding ran from the prefix: until this instant, a key with a `repeat` binding runs again
+    /// without the prefix (tmux's `-r`); any other key ends it and goes where it would have.
+    repeat_until: Option<std::time::Instant>,
+    /// The terminal whose selecting press had Ctrl: released without a drag over a link, it runs `mouse.link`.
+    link_click: Option<String>,
     /// The focused view at the last draw, and the one focused before it (`client.focus {dir: "last"}`).
     focus_now: Option<String>,
     focus_last: Option<String>,
@@ -645,7 +652,7 @@ impl App {
             leaves: Vec::new(), focus: 0, overlay: None, pstate: HashMap::new(),
             filtering: None, filter_detail: false, toast: None, bells: HashMap::new(), selections: HashMap::new(), selecting: None, last_press: None, scroll_mode: None, pending_popup: None, cursor_style: vt100::CursorStyle::Default, cursor_sent: vt100::CursorStyle::Default, panel_values: Mutex::new(HashMap::new()), panel_dependencies: Mutex::new(HashMap::new()), hit: Hit::default(),
             drag: None, overrides: HashMap::new(), mouse_owner: None, mouse_on: true,
-            under: None, input_queues: HashMap::new(), view_streams: Arc::default(), zoomed: None, autofocused: None, window: Window::default(), pending_focus: None, tab_press: None, focus_now: None, focus_last: None, kbd_enhance: false,
+            under: None, input_queues: HashMap::new(), view_streams: Arc::default(), zoomed: None, autofocused: None, window: Window::default(), pending_focus: None, tab_press: None, link_click: None, repeat_until: None, focus_now: None, focus_last: None, kbd_enhance: false,
             held: KeyModifiers::NONE, message: String::new(), key_hint: None,
             quit: false, connected: true, connection: 0,
             generation: 0, resyncing: false, buffered: Vec::new(), buffered_bytes: 0, recovery_only: false, retry_snapshot: None, snapshot_retries: 0,
@@ -1136,6 +1143,15 @@ impl App {
             Some(Overlay::Prefix { .. }) => return self.on_prefix_key(k, is_prefix),
             Some(_) => return self.on_overlay_key(k),
             None => {}
+        }
+        if let Some(until) = self.repeat_until.take() {
+            let repeat = keys::name(&k).filter(|_| std::time::Instant::now() < until && !is_prefix)
+                .and_then(|n| self.binding_for(&n, &self.ctx_leaf(self.focus))).filter(|b| b["repeat"] == true);
+            if let Some(b) = repeat {
+                self.run_binding(&b);
+                self.arm_repeat(&b);
+                return;
+            }
         }
         if is_prefix {
             self.overlay = Some(Overlay::Prefix { sel: 0 });
@@ -1640,9 +1656,14 @@ impl App {
     /// copied when `copy_on_select` is on (default).
     fn selection_release(&mut self, view: &str) {
         self.selecting = None;
+        let ctrl = self.link_click.take().as_deref() == Some(view);
         let Some(sel) = self.selections.get_mut(view) else { return };
         if !sel.dragged && sel.unit == scrollback::Unit::Cell {
+            let at = sel.anchor;
             self.selections.remove(view);
+            if ctrl {
+                self.open_link(view, at);
+            }
             return;
         }
         let copy = self.ws.entries.get("doc/settings/tui").and_then(|s| s["copy_on_select"].as_bool()).unwrap_or(true);
@@ -1821,6 +1842,7 @@ impl App {
         if let Some((n, b)) = name.as_deref().and_then(|n| Some((n, self.binding_for(n, &ctx)?))) {
             self.overlay = None;
             self.run_binding(&b);
+            self.arm_repeat(&b);
             // Echo what ran, unless the binding opened a prompt that owns the status line.
             if self.overlay.is_none() {
                 self.set_key_hint("", &format!("{} {n}",self.prefix()), &format!(" → {}",self.binding_label(&b)));
@@ -1847,6 +1869,13 @@ impl App {
     }
 
     /// Run a key binding on the focused pane (prompting or picking first if it asks to).
+    /// A `repeat` binding that ran (and opened nothing) keeps its keys live without the prefix for REPEAT_WINDOW.
+    fn arm_repeat(&mut self, b: &Value) {
+        if b["repeat"] == true && self.overlay.is_none() {
+            self.repeat_until = Some(std::time::Instant::now() + REPEAT_WINDOW);
+        }
+    }
+
     fn run_binding(&mut self, b: &Value) {
         let ctx = self.ctx_leaf(self.focus);
         let at = self.hit.leaves.get(self.focus).map(|(_, o, _)| Position { x: o.x + 1, y: o.y + 1 });
@@ -2095,6 +2124,47 @@ impl App {
         let mut ctx = json!({"layout": layout, "layout_version": version, "tab_path": path, "tab_index": i});
         ctx["tab_title"] = json!(self.tab_title(&ctx));
         ctx
+    }
+
+    /// A pane's context plus the link under a screen position, if any: `link` `{kind, text, line?, column?}` and
+    /// `link_kind`, so menu items can match `when: {"link_kind": "url"}`.
+    fn ctx_link(&mut self, idx: usize, pos: Position) -> Value {
+        let mut ctx = self.ctx_leaf(idx);
+        let view = self.hit.leaves.get(idx).map(|(v, _, _)| v.clone()).unwrap_or_default();
+        if let Some(link) = self.terminal_pos(&view, pos, false).and_then(|p| self.link_at(&view, p)) {
+            ctx["link"] = link.context();
+            ctx["link_kind"] = json!(link.kind);
+        }
+        ctx
+    }
+
+    /// The link (`ui_model::links`) at a cell of a terminal's text, read from its logical line (rows the terminal
+    /// wrapped are joined, so a long URL is whole).
+    fn link_at(&mut self, view: &str, p: scrollback::Pos) -> Option<crate::ui_model::links::Link> {
+        let t = self.terms.get_mut(view)?;
+        let scrolled = scrollback::scrolled(&t.parser, t.parser.callbacks().dropped);
+        let (first, last) = scrollback::line(&mut t.parser, scrolled, p.row);
+        let (mut text, mut cells) = (String::new(), Vec::new());
+        for at in first.row..=last.row {
+            let Some((chars, starts, _)) = scrollback::row(&mut t.parser, scrolled, at) else { continue };
+            for (c, col) in chars.into_iter().zip(starts) {
+                text.push(c);
+                cells.push((at, col, c));
+            }
+        }
+        let i = cells.iter().rposition(|&(r, col, c)| r == p.row && col <= p.col && p.col < col + icons::width(&c.to_string()).max(1))?;
+        crate::ui_model::links::at(&text, i)
+    }
+
+    /// Ctrl-click (no drag) in a terminal: run the `mouse.link` pane gesture when a link is at that cell.
+    fn open_link(&mut self, view: &str, at: scrollback::Pos) {
+        let Some(b) = self.gesture("mouse.link", "pane") else { return };
+        let Some(link) = self.link_at(view, at) else { return };
+        let Some(idx) = self.hit.leaves.iter().position(|(v, _, _)| v == view) else { return };
+        let mut ctx = self.ctx_leaf(idx);
+        ctx["link"] = link.context();
+        ctx["link_kind"] = json!(link.kind);
+        self.run_command(b["command"].as_str().unwrap_or(""), b["args"].clone(), ctx, None);
     }
 
     fn active_layout_key(&self) -> (Option<String>, Option<u64>) {
@@ -2544,7 +2614,7 @@ impl App {
                         return false;
                     }
                     if let Some(b) = self.gesture(g, "pane") {
-                        let ctx = self.ctx_leaf(idx);
+                        let ctx = self.ctx_link(idx, pos);
                         self.run_command(b["command"].as_str().unwrap_or(""), b["args"].clone(), ctx, Some(pos));
                     }
                     return true;
@@ -2557,6 +2627,7 @@ impl App {
                         if !force && self.forward_mouse(&view, &m) {
                             self.mouse_owner = Some(view);
                         } else if button == MouseButton::Left {
+                            self.link_click = m.modifiers.contains(KeyModifiers::CONTROL).then(|| view.clone());
                             self.selection_press(&view, pos);
                         }
                     }

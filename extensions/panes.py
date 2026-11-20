@@ -29,11 +29,14 @@ def target(args):
     return ctx, key, ctx.get("layout_version"), root
 
 
-@ext.command("panes.split", "Split a pane with a new shell in the layout's folder (args: dir = right | down)")
+@ext.command("panes.split", "Split a pane with a new shell in the layout's folder (args: dir = right | down; argv, cwd to start another program)")
 def split(args):
     ctx, key, ver, root = target(args)
-    folder = ext.layout_folder(args)  # the pane's layout's starting folder, if it names one
-    r = ext.vqro.call("resource.spawn", {"cwd": folder} if folder else {})["resource"]
+    folder = args.get("cwd") or ext.layout_folder(args)  # else the pane's layout's starting folder, if it names one
+    spawn = {"cwd": folder} if folder else {}
+    if isinstance(args.get("argv"), list) and args["argv"] and all(isinstance(a, str) for a in args["argv"]):
+        spawn["argv"] = args["argv"]
+    r = ext.vqro.call("resource.spawn", spawn)["resource"]
     view = f"term-{r['id']}"
     old = node_at(root, ctx["path"])
     new = {"split": "v" if args.get("dir") == "down" else "h", "children": [old, {"view": view}], "sizes": [1, 1]}
@@ -41,6 +44,8 @@ def split(args):
         {"op": "set", "key": f"view/{view}", "value": {"kind": "terminal", "resource": r["id"]}},
         {"op": "set", "key": key, "value": replace_at(root, ctx["path"], new), "expect": ver},
     ], "panes: split")
+    if "argv" in spawn:  # a program asked for (an editor): it gets the keys
+        return {"client": {"focus": {"view": view}}}
 
 
 @ext.command("panes.rename", "Rename a pane (args: text; empty resets)")
@@ -250,39 +255,50 @@ RESIZE_AXIS = {"left": "h", "right": "h", "up": "v", "down": "v"}
 
 @ext.command("panes.resize", "Move a pane's edge (args: dir = left | right | up | down, by = percent, default 5)")
 def resize(args):
-    """Like tmux resize-pane: the pane's right (bottom) divider moves that way, its left (top) one if it has none."""
-    ctx, key, ver, root = target(args)
-    root = copy.deepcopy(root)
+    """Like tmux resize-pane: the pane's right (bottom) divider moves that way, its left (top) one if it has none.
+
+    A step is relative, so it applies to the newest layout (retried on a concurrent change) as long as the same pane
+    is still at that path: repeated keys (binding `repeat`) arrive faster than the client sees each result."""
+    ctx = args.get("context") or {}
+    if "path" not in ctx or "layout" not in ctx:
+        raise VqroError("no pane here", "invalid")
     axis = RESIZE_AXIS.get(args.get("dir"))
     if axis is None:
         raise VqroError("resize left, right, up or down", "invalid")
     by = args.get("by", 5)
     if not isinstance(by, int) or not 1 <= by <= 50:
         raise VqroError("`by` is a whole percent from 1 to 50", "invalid")
-    path, scope = ctx["path"], scope_of(ctx)
-    for depth in range(len(path) - 1, len(scope) - 1, -1):
-        split = node_at(root, path[:depth])
-        if split.get("split") == axis and len(split["children"]) > 1:
-            break
-    else:
-        raise VqroError("no divider that way", "invalid")
-    n, c = len(split["children"]), path[depth]
-    d = c if c + 1 < n else c - 1  # the divider between children d and d + 1
-    sizes = split.get("sizes") if len(split.get("sizes") or []) == n else [1] * n
-    total = sum(sizes)
-    if total < 100:  # small weights such as [1, 1]: rescale so a step can be a few percent
-        sizes = [max(1, round(x * 1000 / total)) for x in sizes]
+    key, path, scope = f"layout/{ctx['layout']}", ctx["path"], scope_of(ctx)
+
+    def attempt():  # from the extension's cache; a conflict reloads it (ext.retrying)
+        root = copy.deepcopy(ext.value(key))
+        here = node_at(root, path) if root is not None else None
+        if here is None or (ctx.get("view") and here.get("view") != ctx["view"]):
+            raise VqroError("that pane moved; nothing resized", "conflict")
+        for depth in range(len(path) - 1, len(scope) - 1, -1):
+            split = node_at(root, path[:depth])
+            if split.get("split") == axis and len(split["children"]) > 1:
+                break
+        else:
+            raise VqroError("no divider that way", "invalid")
+        n, c = len(split["children"]), path[depth]
+        d = c if c + 1 < n else c - 1  # the divider between children d and d + 1
+        sizes = split.get("sizes") if len(split.get("sizes") or []) == n else [1] * n
         total = sum(sizes)
-    step = max(1, total * by // 100)
-    least = max(1, total // 20)
-    grow, shrink = (d, d + 1) if args["dir"] in ("right", "down") else (d + 1, d)
-    step = min(step, sizes[shrink] - least)
-    if step <= 0:
-        return None  # already as small as it goes
-    sizes[grow] += step
-    sizes[shrink] -= step
-    split["sizes"] = sizes
-    ext.apply([{"op": "set", "key": key, "value": root, "expect": ver}], "panes: resize")
+        if total < 100:  # small weights such as [1, 1]: rescale so a step can be a few percent
+            sizes = [max(1, round(x * 1000 / total)) for x in sizes]
+            total = sum(sizes)
+        step = max(1, total * by // 100)
+        least = max(1, total // 20)
+        grow, shrink = (d, d + 1) if args["dir"] in ("right", "down") else (d + 1, d)
+        step = min(step, sizes[shrink] - least)
+        if step <= 0:
+            return None  # already as small as it goes
+        sizes[grow] += step
+        sizes[shrink] -= step
+        split["sizes"] = sizes
+        ext.apply([{"op": "set", "key": key, "value": root, "expect": ext.version(key)}], "panes: resize")
+    return ext.retrying(attempt)
 
 
 PRESETS = ["even-h", "even-v", "main-v", "main-h", "tiled"]
@@ -368,7 +384,7 @@ ext.contribute({
     "binding/panes.break": {"key": "b", "command": "panes.break", "label": "break pane out to a tab"},
     "binding/panes.move": {"key": "M", "command": "panes.move", "label": "move pane to tab", "input": "Move pane to tab (1, 2, …)"},
     "binding/panes.layout": {"key": "Space", "command": "panes.layout", "args": {"preset": "next"}, "label": "next pane layout"},
-    **{f"binding/panes.resize-{d}": {"key": f"C-{d.capitalize()}", "command": "panes.resize", "args": {"dir": d}, "hidden": d != "left",
+    **{f"binding/panes.resize-{d}": {"key": f"C-{d.capitalize()}", "command": "panes.resize", "args": {"dir": d}, "hidden": d != "left", "repeat": True,
                                      "label": "resize pane (Ctrl-arrows)" if d == "left" else f"resize {d}"} for d in ("left", "right", "up", "down")},
 })
 ext.run()

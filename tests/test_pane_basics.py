@@ -115,6 +115,16 @@ class PaneBasics(unittest.TestCase):
             self.run_("panes.resize", {"dir": "right", "by": 50}, path=[1, 0, 0], view="a")
         self.assertEqual(self.tabs()["tabs"][0]["node"]["sizes"], [950, 50], "never below 5%")
 
+    def test_repeated_resizes_with_a_stale_version_each_take_a_step(self):
+        """Repeat keys arrive before the client sees each result: a resize applies to the newest layout."""
+        stale = self.ctx(path=[1, 0, 0], view="a")
+        for _ in range(2):
+            self.core.handlers["panes.resize"]({"dir": "right", "context": stale})
+        self.assertEqual(self.tabs()["tabs"][0]["node"]["sizes"], [850, 150])
+        self.run_("panes.swap", {"dir": "next"}, path=[1, 0, 0], view="a")  # another pane is at that path now
+        with self.assertRaises(Exception):
+            self.core.handlers["panes.resize"]({"dir": "right", "context": stale})
+
     # ---- presets ----
 
     def test_layout_presets_rebuild_the_tab_from_its_panes_and_cycle(self):

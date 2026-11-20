@@ -60,7 +60,7 @@ PROFILES = {
         "prev-tab": b("p", "client.tab", "previous tab", args={"to": "prev"}),
         **tab_digits(),
         "next-pane": b("o", "client.focus", "next pane", args={"dir": "next"}),
-        **{f"focus-{d}": b(d.capitalize(), "client.focus", f"pane {d}", args={"dir": d}, hidden=True)
+        **{f"focus-{d}": b(d.capitalize(), "client.focus", f"pane {d}", args={"dir": d}, hidden=True, repeat=True)
            for d in ("left", "right", "up", "down")},
         "rename-tab": b(",", "tabs.rename", "rename tab", input="Tab name", prefill={"context": "tab_title"}),
         "close-tab": b("&", "tabs.close", "close tab (programs keep running)"),
@@ -82,9 +82,9 @@ PROFILES = {
         "next-layout": b("Space", "panes.layout", "next pane layout", args={"preset": "next"}),
         **{f"layout-{n}": b(f"M-{n}", "panes.layout", f"layout {p}", args={"preset": p}, hidden=True)
            for n, p in enumerate(("even-h", "even-v", "main-h", "main-v", "tiled"), 1)},
-        **{f"resize-{d}": b(f"C-{d.capitalize()}", "panes.resize", f"resize {d}", args={"dir": d, "by": 2}, hidden=d != "left")
+        **{f"resize-{d}": b(f"C-{d.capitalize()}", "panes.resize", f"resize {d}", args={"dir": d, "by": 2}, hidden=d != "left", repeat=True)
            for d in ("left", "right", "up", "down")},
-        **{f"resize-{d}-more": b(f"M-{d.capitalize()}", "panes.resize", f"resize {d} more", args={"dir": d, "by": 10}, hidden=True)
+        **{f"resize-{d}-more": b(f"M-{d.capitalize()}", "panes.resize", f"resize {d} more", args={"dir": d, "by": 10}, hidden=True, repeat=True)
            for d in ("left", "right", "up", "down")},
     }},
     # GNU screen's default key bindings (`man screen`, "Default Key Bindings"), mapped onto vqro.
