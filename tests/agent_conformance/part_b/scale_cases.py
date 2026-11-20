@@ -9,6 +9,16 @@ from .cases import case, invocations, settled
 from ..wire import RpcError
 
 
+async def sub_coordination(ctx, name, agents):
+    """Private sub-fixture; callers own bounded close and retain its evidence."""
+    from copy import deepcopy
+    from .context import PublicCoordination
+    manifest=deepcopy(ctx.manifest);manifest["agents"]=agents
+    sub=PublicCoordination(ctx.root/name,manifest,ctx.vqro)
+    await sub.start()
+    return sub
+
+
 async def declared_limits(ctx):
     status = await ctx.command("status")
     limits = status.get("limits") or {}
