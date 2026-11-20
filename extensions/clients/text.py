@@ -49,6 +49,7 @@ class TextClient:
         self.ws = model.Workspace()
         self.window = model.Window()  # the layout (workspace) this client shows: its own, never shared state
         self.focus = 0
+        self.focus_last = None  # the pane focused before (client.focus {dir: last})
         self.shown = None          # the view whose rows were listed last (a pane's view or a popup)
         self.popup = None          # a view a command asked to show (reply hint), until closed
         self.state = {}            # per view: {page, filter, open}
@@ -145,6 +146,13 @@ class TextClient:
         r = self.ws.resources.get(v.get("resource")) or {}
         return text_of(r.get("name")) or text_of((r.get("argv") or [""])[0]) or view
 
+    def tab_resource(self, tab):
+        """The resource of a tab's only view (program titles), or None."""
+        node = (tab or {}).get("node") if isinstance(tab, dict) else None
+        view = node.get("view") if isinstance(node, dict) else None
+        v = self.ws.entries.get(f"view/{view}") if isinstance(view, str) else None
+        return self.ws.resources.get(v.get("resource")) if isinstance(v, dict) else None
+
     def ctx(self, index=None):
         """`args.context` for a pane, as every client sends it."""
         leaves = self.leaves()
@@ -175,8 +183,10 @@ class TextClient:
         def tabs_line(node, depth):
             tabs = node["tabs"]
             active = node.get("active", 0) if isinstance(node.get("active"), int) else 0
-            style = model.tab_style((self.ws.entries.get(model.TABS_ENTRY) or {}))
-            return "  " * depth + "tabs: " + "  ".join(f"[{model.tab_label(style, i, text_of((t or {}).get('title')) or 'tab').strip()}{'*' if i == active else ''}]"
+            setting = self.ws.entries.get(model.TABS_ENTRY)
+            style = model.tab_style(setting or {})
+            name = lambda t: model.tab_title(setting, text_of((t or {}).get("title")) or "tab", self.tab_resource(t))
+            return "  " * depth + "tabs: " + "  ".join(f"[{model.tab_label(style, i, name(t)).strip()}{'*' if i == active else ''}]"
                                                       for i, t in enumerate(tabs))
 
         def walk(node, depth):
@@ -356,8 +366,16 @@ class TextClient:
         if name in ("client.prefix", "client.menu"):
             return self.prefix() if name == "client.prefix" else self.menu_lines(args.get("where", "pane"))
         if name == "client.focus":
-            n = len(self.leaves()) or 1
-            self.focus = (self.focus + (1 if args.get("dir") != "prev" else -1)) % n
+            leaves = [leaf[0] for leaf in self.leaves()]
+            here = leaves[self.focus] if self.focus < len(leaves) else None
+            if args.get("dir") == "last":
+                if self.focus_last not in leaves:
+                    return ["no other pane was focused here"]
+                self.focus = leaves.index(self.focus_last)
+            else:
+                n = len(leaves) or 1
+                self.focus = (self.focus + (1 if args.get("dir") != "prev" else -1)) % n
+            self.focus_last = here
             return self.show()
         if name == "client.safe_mode":
             if self.ws.safe_mode:

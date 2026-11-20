@@ -238,6 +238,9 @@ struct Drag {
     sizes: Vec<u16>,
 }
 
+/// A left press on a tab chip, for the `mouse.drag` tab gesture: (tab group path, tab index).
+type TabPress = (Vec<usize>, usize);
+
 struct App {
     peer: Peer,
     tx: mpsc::UnboundedSender<Msg>,
@@ -281,6 +284,11 @@ struct App {
     window: Window,
     /// Focus this view on the next draw (after leaving zoom the leaves are recomputed).
     pending_focus: Option<String>,
+    /// A tab chip pressed with the left button, while a `mouse.drag` tab gesture is bound.
+    tab_press: Option<TabPress>,
+    /// The focused view at the last draw, and the one focused before it (`client.focus {dir: "last"}`).
+    focus_now: Option<String>,
+    focus_last: Option<String>,
     /// The terminal speaks the kitty keyboard protocol; used only while the prefix menu is open.
     kbd_enhance: bool,
     /// Modifiers held after the prefix (reported only with keyboard enhancement), shown live.
@@ -558,7 +566,7 @@ impl App {
             leaves: Vec::new(), focus: 0, overlay: None, pstate: HashMap::new(),
             filtering: None, toast: None, panel_values: Mutex::new(HashMap::new()), panel_dependencies: Mutex::new(HashMap::new()), hit: Hit::default(),
             drag: None, overrides: HashMap::new(), mouse_owner: None, mouse_on: true,
-            under: None, input_queues: HashMap::new(), view_streams: Arc::default(), zoomed: None, autofocused: None, window: Window::default(), pending_focus: None, kbd_enhance: false,
+            under: None, input_queues: HashMap::new(), view_streams: Arc::default(), zoomed: None, autofocused: None, window: Window::default(), pending_focus: None, tab_press: None, focus_now: None, focus_last: None, kbd_enhance: false,
             held: KeyModifiers::NONE, message: String::new(), key_hint: None,
             quit: false, connected: true, connection: 0,
             generation: 0, resyncing: false, buffered: Vec::new(), buffered_bytes: 0, recovery_only: false, retry_snapshot: None, snapshot_retries: 0,
@@ -1785,6 +1793,25 @@ impl App {
         }
     }
 
+    /// Replace each tab's title with the name it shows (`ui_model::tabbar::tab_title`: program titles).
+    fn shown_tab_titles(&self, node: &mut Value) {
+        let setting = self.ws.entries.get(crate::ui_model::tabbar::ENTRY);
+        if let Some(children) = node.get_mut("children").and_then(Value::as_array_mut) {
+            children.iter_mut().for_each(|c| self.shown_tab_titles(c));
+        }
+        let Some(tabs) = node.get_mut("tabs").and_then(Value::as_array_mut) else { return };
+        for tab in tabs {
+            let resource = tab["node"]["view"].as_str()
+                .and_then(|v| self.ws.entries.get(&format!("view/{v}")))
+                .and_then(|v| v["resource"].as_str())
+                .and_then(|r| self.ws.resources.get(r));
+            if let Some(title) = tab["title"].as_str() {
+                tab["title"] = json!(crate::ui_model::tabbar::tab_title(setting, title, resource));
+            }
+            self.shown_tab_titles(&mut tab["node"]);
+        }
+    }
+
     fn tab_title(&self, ctx: &Value) -> Option<String> {
         let (_, mut root) = self.active_layout()?;
         let path: Vec<usize> = ctx["tab_path"].as_array()?.iter().filter_map(|x| x.as_u64().map(|n| n as usize)).collect();
@@ -1918,7 +1945,8 @@ impl App {
         }
     }
 
-    /// `client.focus {dir}`: next/prev cycle panes; left/right/up/down go to the adjacent pane.
+    /// `client.focus {dir}`: next/prev cycle panes; left/right/up/down go to the adjacent pane; last goes back to
+    /// the pane focused before this one.
     fn focus_to(&mut self, dir: &str) {
         self.unzoom();
         let n = self.leaves.len().max(1);
@@ -1932,6 +1960,10 @@ impl App {
                     None => return,
                 }
             }
+            "last" => match self.focus_last.as_ref().and_then(|v| self.leaves.iter().position(|l| l == v)) {
+                Some(i) => i,
+                None => return self.message = "no other pane was focused here".into(),
+            },
             other => return self.message = format!("client.focus: unknown dir {other}"),
         };
     }
@@ -2067,6 +2099,25 @@ impl App {
             }
         }
 
+        // Dragging a tab chip: released over another chip of the same bar runs the `mouse.drag` tab gesture with
+        // the dragged tab's context plus `drop_index` (core-protocol.md, `binding/<id>`).
+        if let Some((path, from)) = self.tab_press.clone() {
+            match m.kind {
+                MouseEventKind::Drag(MouseButton::Left) => return false,
+                MouseEventKind::Up(_) => {
+                    self.tab_press = None;
+                    let drop = self.hit.tabs.iter().find(|(p, _, r)| *p == path && r.contains(pos)).map(|(_, i, _)| *i);
+                    if let (Some(to), Some(b)) = (drop.filter(|to| *to != from), self.gesture("mouse.drag", "tab")) {
+                        let mut ctx = self.ctx_tab(&path, from);
+                        ctx["drop_index"] = json!(to);
+                        self.run_command(b["command"].as_str().unwrap_or(""), b["args"].clone(), ctx, Some(pos));
+                    }
+                    return true;
+                }
+                _ => self.tab_press = None,
+            }
+        }
+
         // A program that took a press gets the rest of the gesture.
         if let Some(owner) = self.mouse_owner.clone() {
             if matches!(m.kind, MouseEventKind::Drag(_) | MouseEventKind::Up(_)) {
@@ -2102,7 +2153,12 @@ impl App {
                 };
                 if let Some((path, i, _)) = self.hit.tabs.iter().find(|(_, _, r)| r.contains(pos)).cloned() {
                     match gesture {
-                        None => self.select_tab(&path, i),
+                        None => {
+                            self.select_tab(&path, i);
+                            if self.gesture("mouse.drag", "tab").is_some() {
+                                self.tab_press = Some((path.clone(), i));
+                            }
+                        }
                         Some(g) => {
                             if let Some(b) = self.gesture(g, "tab") {
                                 let ctx = self.ctx_tab(&path, i);
@@ -2410,7 +2466,8 @@ impl App {
         let [main, status] = Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(f.area());
         let mut hit = Hit::default();
         match self.active_layout() {
-            Some((_, root)) => {
+            Some((_, mut root)) => {
+                self.shown_tab_titles(&mut root);
                 let tabbar = self.menu_items("tabbar", &json!({}));
                 let tabstyle = crate::ui_model::tabbar::Style::from_setting(self.ws.entries.get(crate::ui_model::tabbar::ENTRY));
                 match self.zoomed.clone() {
@@ -2450,6 +2507,10 @@ impl App {
         }
         if self.focus >= self.leaves.len() {
             self.focus = 0;
+        }
+        let now = self.leaves.get(self.focus).cloned();
+        if now.is_some() && now != self.focus_now {
+            self.focus_last = std::mem::replace(&mut self.focus_now, now);
         }
         self.autofocus();
         // Drop terminals no longer shown.

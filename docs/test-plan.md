@@ -57,7 +57,9 @@ listed); state-schema rollback; late crash 30 s after load (crash budget); 5 s s
   `provider_wire`, `provider_errors`;
 - the end-to-end scripts: `e2e_providers.py`, `e2e_tui_providers.py`, `e2e_tui_paste_dropdown.py` (drop-downs over
   their popup, bracketed multi-line paste, a 200 KB paste on herdr and tmux), `e2e_tui_keys.py` (keys with
-  modifiers like xterm; Shift-Enter for kitty-protocol and modifyOtherKeys programs), `e2e_scale_herdr.py`, and the TUI smoke
+  modifiers like xterm; Shift-Enter for kitty-protocol and modifyOtherKeys programs), `e2e_tui_pane_basics.py` (tab
+  move by key and by dragging a chip, program titles on tabs, rename key, last pane, swap, resize, layout preset,
+  break out, and the tmux profile's pane keys), `e2e_scale_herdr.py`, and the TUI smoke
   `e2e_tui_smoke.sh` (private herdr-core and vqro core; 30 MB flood, core restart reattach, quit while the core
   cannot start);
 - the default scale profile;
@@ -101,7 +103,7 @@ env -i HOME=$HOME PATH=$PATH cargo test --release --test scale -- --ignored --ex
 - Cleanup: the core is stopped as `vqro stop` does (SIGTERM, so it stops its extensions). Any process still carrying
   the run's `VQRO_SOCKET` is then killed, listed in the receipt (`cleanup`), and fails the test (`leaked_processes`,
   a real budget of 0). Socket and state live in a run directory under `$VQRO_SCALE_RUN_DIR` (default
-  `~/.local/share/herdr/scratch/vqro-scale`), which is removed afterwards.
+  `<private-notes>`), which is removed afterwards.
 - Abrupt core death previously orphaned extensions. Managed extensions now receive a reserved stdin lifetime
   pipe (`spec/core-protocol.md`, Extensions); EOF must exit the extension, independently of socket handling.
   `tests/ext_lifetime.rs` kills a real private `vqro serve --fake` with SIGKILL/SIGTERM and verifies a connected

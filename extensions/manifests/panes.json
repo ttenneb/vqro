@@ -1,10 +1,10 @@
 {
   "name":"panes", "title":"Panes", "version":"0.1.0", "license":"Apache-2.0", "author":"Bennett Garcia", "kind":"interface",
-  "summary":"Split, rename and close panes, or choose what they show.",
+  "summary":"Split, rename, close and rearrange panes, or choose what they show.",
   "description":"Adds pane layout commands and menus, including splitting with a new shell and showing another resource. Closing a pane leaves its program running; Kill program is a separate action. Turn this off to lose these pane commands and shortcuts, not the programs or the built-in recovery controls.",
   "requires":{"protocol":1},
-  "provides":["command/panes.split","command/panes.rename","command/panes.close","command/panes.kill","command/panes.show"],
+  "provides":["command/panes.split","command/panes.rename","command/panes.close","command/panes.kill","command/panes.show","command/panes.swap","command/panes.rotate","command/panes.break","command/panes.move","command/panes.resize","command/panes.layout"],
   "works_with":[{"cap":"ability/vqro.terminals","suggest":"herdr","without":"Split cannot start a shell; closing the only pane leaves the layout unchanged"},
                 {"cap":"command/agents.show","suggest":"agents","without":"An agent is shown as its bridge terminal"}],
-  "contributes":{"commands":["panes.split","panes.rename","panes.close","panes.kill","panes.show"],"keys":["Prefix h/v: split","Prefix x: close pane"],"menu_items":["Pane actions"]}
+  "contributes":{"commands":["panes.split","panes.rename","panes.close","panes.kill","panes.show","panes.swap","panes.rotate","panes.break","panes.move","panes.resize","panes.layout"],"keys":["Prefix h/v: split","Prefix x: close pane","Prefix ;: last pane","Prefix { }: swap panes","Prefix Ctrl-o: rotate panes","Prefix b: pane to a new tab","Prefix M: pane to another tab","Prefix Ctrl-arrows: resize","Prefix Space: next pane layout"],"menu_items":["Pane actions"]}
 }

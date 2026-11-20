@@ -183,6 +183,35 @@ def rename_tab(args):
     ext.apply([{"op": "set", "key": key, "value": root, "expect": ver}], "tabs: rename")
 
 
+@ext.command("tabs.move", "Move a tab (args: to = left | right | <n> counting from 1; a tab drag gives its drop place)")
+def move_tab(args):
+    key, ver, root, tabs, i = tab_target(args)
+    group = tabs["tabs"]
+    if not 0 <= i < len(group):
+        raise VqroError("that tab is gone", "conflict")
+    ctx = args.get("context") or {}
+    to = args.get("to", args.get("text"))
+    if to is None and isinstance(ctx.get("drop_index"), int):  # the generic mouse.drag gesture (core-protocol.md)
+        to = ctx["drop_index"] + 1
+    if to in ("left", "right"):
+        j = i - 1 if to == "left" else i + 1
+        if not 0 <= j < len(group):
+            return None  # already at that end: nothing to do
+    else:
+        try:
+            j = int(str(to).strip()) - 1
+        except ValueError:
+            raise VqroError("move the tab left, right or to a number from 1", "invalid") from None
+        if not 0 <= j < len(group):
+            raise VqroError(f"there are {len(group)} tabs; pick 1 to {len(group)}", "invalid")
+    if j == i:
+        return None
+    active = group[min(tabs.get("active", 0), len(group) - 1)]
+    group.insert(j, group.pop(i))
+    tabs["active"] = next(n for n, tab in enumerate(group) if tab is active)  # the shown tab stays shown
+    ext.apply([{"op": "set", "key": key, "value": root, "expect": ver}], "tabs: move")
+
+
 def prune_ended(node, shell, cwd=None):
     """Close wholly ended tabs, preserving mixed tabs. A group left with no tab gets a new shell tab
     (started in `cwd`, the layout's folder)."""
@@ -288,27 +317,31 @@ def settings_panel():
     numbers = current.get("numbers") if current.get("numbers") in dict(NUMBERS) else "subscript"
     position = current.get("position") if current.get("position") in dict(POSITIONS) else "after"
     chips = current.get("chips") if isinstance(current.get("chips"), bool) else True
+    program = current.get("program_titles") if isinstance(current.get("program_titles"), bool) else True
     return {"title": "Tabs", "requires": ["select"], "items": [
         {"type": "select", "text": "Number style", "value": numbers, "description": "the small number before each tab's name",
          "options": [{"label": label, "value": value} for value, label in NUMBERS], "command": "tabs.set", "args": {"field": "numbers"}},
         {"type": "select", "text": "Number position", "value": position, "description": "Liaison₁ (after) or ₁ Liaison (before)",
          "options": [{"label": label, "value": value} for value, label in POSITIONS], "command": "tabs.set", "args": {"field": "position"}},
         {"type": "select", "text": "Chips", "value": chips, "description": "padded tabs with a gap (off: the flat 1:name bar)",
-         "options": [{"label": "On", "value": True}, {"label": "Off", "value": False}], "command": "tabs.set", "args": {"field": "chips"}}]}
+         "options": [{"label": "On", "value": True}, {"label": "Off", "value": False}], "command": "tabs.set", "args": {"field": "chips"}},
+        {"type": "select", "text": "Program titles", "value": program,
+         "description": "a tab still named after its command (zsh) shows the program's own title; renamed tabs keep their names",
+         "options": [{"label": "On", "value": True}, {"label": "Off", "value": False}], "command": "tabs.set", "args": {"field": "program_titles"}}]}
 
 
-@ext.command("tabs.settings", "Tab bar settings (number style and position, chips)")
+@ext.command("tabs.settings", "Tab bar settings (number style and position, chips, program titles)")
 def tab_settings(args):
     ext.publish("tabs-settings", settings_panel())
     return {"client": {"popup": {"view": "tabs-settings", "width": 64}}}
 
 
-@ext.command("tabs.set", "Set a tab bar option (args: field numbers|position|chips, value)")
+@ext.command("tabs.set", "Set a tab bar option (args: field numbers|position|chips|program_titles, value)")
 def tab_set(args):
     field, value = args.get("field"), args.get("value")
     if not ((field == "numbers" and value in dict(NUMBERS)) or (field == "position" and value in dict(POSITIONS))
-            or (field == "chips" and isinstance(value, bool))):
-        raise VqroError("choose numbers subscript|superscript|plain|none, position after|before or chips true|false", "invalid")
+            or (field in ("chips", "program_titles") and isinstance(value, bool))):
+        raise VqroError("choose numbers subscript|superscript|plain|none, position after|before, chips or program_titles true|false", "invalid")
     def attempt():
         current = ext.value(TAB_SETTING)
         value_now = dict(current if isinstance(current, dict) else {}, **{field: value})
@@ -325,7 +358,13 @@ ext.contribute({
     "menu/tabs.close": {"where": "tab", "label": "Close tab", "command": "tabs.close", "order": 20},
     # The tab bar keeps only "+"; other actions live in menus and the command list.
     "menu/tabs.close-ended": {"where": "tab", "label": "Close ended tabs", "command": "tabs.close_ended", "order": 30},
+    "menu/tabs.move-left": {"where": "tab", "label": "Move tab left", "command": "tabs.move", "args": {"to": "left"}, "order": 15},
+    "menu/tabs.move-right": {"where": "tab", "label": "Move tab right", "command": "tabs.move", "args": {"to": "right"}, "order": 16},
     "binding/tabs.new": {"key": "n", "command": "tabs.open", "label": "new shell in a tab"},
+    "binding/tabs.rename": {"key": "r", "command": "tabs.rename", "label": "rename tab", "input": "Tab name", "prefill": {"context": "tab_title"}},
+    "binding/tabs.move-left": {"key": "<", "command": "tabs.move", "args": {"to": "left"}, "label": "move tab left"},
+    "binding/tabs.move-right": {"key": ">", "command": "tabs.move", "args": {"to": "right"}, "label": "move tab right"},
+    "binding/tabs.move-to": {"key": ".", "command": "tabs.move", "label": "move tab to number", "input": "Move tab to (1, 2, …)"},
 })
 resource_state("missed", {})
 ext.run()

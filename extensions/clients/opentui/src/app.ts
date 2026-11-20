@@ -68,6 +68,9 @@ export class App {
   message = "";
   toast: { text: string; style: string | null; until: number } | null = null;
   leaves: Leaf[] = [];
+  /** The focused view at the last draw and the one before it (`client.focus {dir: "last"}`). */
+  focusNow: string | null = null;
+  focusLast: string | null = null;
   hits: Hit[] = [];
   listed = new Map<string, { rows: m.Row[]; hits: { y: number; x: number; w: number; i: number; chip?: number }[]; area?: Rect }>();
   terminals: Terminals;
@@ -267,7 +270,11 @@ export class App {
       }
       case "client.focus": {
         const n = this.leaves.length || 1;
-        this.focus = (this.focus + (args.dir === "prev" ? n - 1 : 1)) % n;
+        if (args.dir === "last") {
+          const i = this.leaves.findIndex((l) => l.view === this.focusLast);
+          if (i < 0) { this.message = "no other pane was focused here"; break; }
+          this.focus = i;
+        } else this.focus = (this.focus + (args.dir === "prev" ? n - 1 : 1)) % n;
         this.zoomed = null;
         break;
       }
@@ -716,6 +723,8 @@ export class Screen extends Renderable {
     else this.walk(buf, root, body, [], leaves);
     a.leaves = leaves;
     if (a.focus >= leaves.length) a.focus = Math.max(0, leaves.length - 1);
+    const now = leaves[a.focus]?.view ?? null;
+    if (now !== null && now !== a.focusNow) { a.focusLast = a.focusNow; a.focusNow = now; }
     a.autofocus();
     const seen = new Set<string>();
     leaves.forEach((leaf, i) => { seen.add(leaf.view); this.pane(buf, leaf, i); });
@@ -750,7 +759,9 @@ export class Screen extends Renderable {
       const style = m.tabStyle(a.ws.entries.get(m.TABS_ENTRY));
       node.tabs.forEach((t: Json, i: number) => {
         if (i > 0 && style.chips) x += 1;
-        const label = m.tabLabel(style, i, clean(t?.title ?? "tab"));
+        const only = typeof t?.node?.view === "string" ? a.ws.entries.get(`view/${t.node.view}`) : null;
+        const shown = m.tabTitle(a.ws.entries.get(m.TABS_ENTRY), t?.title ?? "tab", only ? a.ws.resources.get(only.resource) ?? null : null);
+        const label = m.tabLabel(style, i, clean(shown));
         const on = i === active;
         const bg = on ? a.pal.color("tab_active") : style.chips ? a.pal.color("surface") : a.pal.color("tab_bar");
         text(buf, x, r.y, fit(label, r.x + r.w - x), on ? a.pal.color("tab_active_text") : a.pal.color("muted"), bg, on ? TextAttributes.BOLD : TextAttributes.NONE);

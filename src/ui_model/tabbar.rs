@@ -75,3 +75,31 @@ pub fn describe(setting: Option<&Value>, titles: &[&str], active: usize) -> Valu
     json!({"labels": titles.iter().enumerate().map(|(i, t)| style.label(i, t)).collect::<Vec<_>>(),
            "active": active, "gap": style.gap(), "chips": style.chips})
 }
+
+/// Longest program title a tab shows, in characters; longer ones end in `…`.
+pub const PROGRAM_TITLE_MAX: usize = 24;
+
+/// The name a tab shows. With the setting's `program_titles` (default on), a tab that still has its automatic name
+/// (the command of the one terminal it shows, as `tabs.open` named it, maybe with an ` [ended]` or ` [gone]` mark)
+/// shows that program's own title (`resource.title`, from OSC 0/2) instead, so shell tabs don't all read `zsh`.
+/// Renamed tabs and named resources keep their names. `resource` is the resource of the tab's only view, if any.
+/// Derived on every draw, never written back (titles change too often for transactions).
+pub fn tab_title(setting: Option<&Value>, title: &str, resource: Option<&Value>) -> String {
+    let on = setting.and_then(|s| s.get("program_titles")).and_then(Value::as_bool).unwrap_or(true);
+    let Some(r) = resource.filter(|_| on) else { return title.to_string() };
+    let program = r["title"].as_str().map(str::trim).filter(|t| !t.is_empty());
+    let named = r["name"].as_str().is_some_and(|n| !n.is_empty());
+    let command = r["argv"][0].as_str().map(|a| a.rsplit('/').next().unwrap_or(a));
+    let (base, mark) = [" [ended]", " [gone]"].iter().find_map(|m| title.strip_suffix(m).map(|b| (b, *m))).unwrap_or((title, ""));
+    match (program, named, command) {
+        (Some(program), false, Some(command)) if base == command => {
+            let short: String = if program.chars().count() > PROGRAM_TITLE_MAX {
+                program.chars().take(PROGRAM_TITLE_MAX - 1).chain(['…']).collect()
+            } else {
+                program.to_string()
+            };
+            format!("{short}{mark}")
+        }
+        _ => title.to_string(),
+    }
+}

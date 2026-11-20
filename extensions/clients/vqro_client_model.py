@@ -608,6 +608,31 @@ def tab_label(style, index, title):
     return f" {number}{joiner}{title} "
 
 
+PROGRAM_TITLE_MAX = 24
+
+
+def tab_title(setting, title, resource):
+    """The name a tab shows (ui_model::tabbar::tab_title): with `program_titles` (default on) a tab still named
+    after its only terminal's command shows the program's own title; renamed tabs and named resources keep theirs."""
+    on = setting.get("program_titles") if isinstance(setting, dict) and isinstance(setting.get("program_titles"), bool) else True
+    if not on or not isinstance(resource, dict):
+        return title
+    program = resource.get("title").strip() if isinstance(resource.get("title"), str) else ""
+    named = isinstance(resource.get("name"), str) and resource["name"] != ""
+    argv = resource.get("argv") if isinstance(resource.get("argv"), list) else []
+    command = argv[0].rsplit("/", 1)[-1] if argv and isinstance(argv[0], str) else None
+    base, mark = title, ""
+    for m in (" [ended]", " [gone]"):
+        if title.endswith(m):
+            base, mark = title[:-len(m)], m
+            break
+    if not program or named or command is None or base != command:
+        return title
+    if len(program) > PROGRAM_TITLE_MAX:
+        program = program[:PROGRAM_TITLE_MAX - 1] + "…"
+    return program + mark
+
+
 def tab_bar(setting, titles, active):
     style = tab_style(setting)
     return {"labels": [tab_label(style, i, t) for i, t in enumerate(titles)], "active": active,

@@ -167,6 +167,14 @@ fn composer_edits_like_the_model() {
 }
 
 #[test]
+fn tab_titles_like_the_model() {
+    check("tabtitle.json", |case| {
+        let resource = Some(&case["resource"]).filter(|r| !r.is_null());
+        json!(tabbar::tab_title(case.get("setting"), case["title"].as_str().unwrap(), resource))
+    });
+}
+
+#[test]
 fn tab_bar_labels_like_the_model() {
     check("tabbar.json", |case| {
         let titles: Vec<&str> = case["titles"].as_array().unwrap().iter().map(|t| t.as_str().unwrap()).collect();

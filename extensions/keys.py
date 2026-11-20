@@ -44,12 +44,13 @@ PROFILES = {
     # vqro: the client's defaults and the extensions' own keys, nothing added.
     "vqro": {"label": "vqro (C-g)", "prefix": "C-g", "keys": {}},
     # tmux's default prefix key table (`tmux list-keys -T prefix`), mapped onto vqro commands.
-    # Gaps (no vqro command): ! break-pane, ; last pane, l last window, { } swap panes, [ ] copy and
-    # paste, q display-panes (vqro's q quit stays), space/M-1..5 layouts, C-arrows resize, C-o
-    # rotate, $ ( ) rename/cycle sessions, . move window, f find, t clock, i info, ~ messages, D/L clients.
+    # Gaps (no vqro command): l last window, [ ] copy and paste, q display-panes (vqro's q quit stays),
+    # $ ( ) rename/cycle sessions, f find, t clock, i info, ~ messages, D/L clients.
     # Differences: x and & close without asking and keep the programs running; s switches workspace (a
     # tmux session), so the sidebar's own s is shadowed here (its status-bar button remains); d quits this UI,
-    # which is close to detaching because terminals live in the backend.
+    # which is close to detaching because terminals live in the backend. ! breaks the pane out as in tmux, so
+    # safe mode is reached from the prefix menu or the vqro badge. Resize steps are percentages (tmux uses
+    # cells): Ctrl-arrows 2%, Alt-arrows 10%. Layouts: M-1 even-h, M-2 even-v, M-3 main-h, M-4 main-v, M-5 tiled.
     "tmux": {"label": "tmux (C-b)", "prefix": "C-b", "keys": {
         "split-h": b("%", "panes.split", "split side by side", args=SPLIT_SIDE),
         "split-v": b('"', "panes.split", "split stacked", args=SPLIT_STACK),
@@ -70,6 +71,20 @@ PROFILES = {
         "commands": b(":", "client.palette", "all commands"),
         "keys": b("?", "client.prefix", "list keys"),
         "zoom": b("z", "client.zoom", "zoom pane (toggle)"),
+        "last-pane": b(";", "client.focus", "last pane", args={"dir": "last"}),
+        "swap-prev": b("{", "panes.swap", "swap with previous pane", args={"dir": "prev"}),
+        "swap-next": b("}", "panes.swap", "swap with next pane", args={"dir": "next"}),
+        "rotate": b("C-o", "panes.rotate", "rotate panes", args={"dir": "next"}),
+        "rotate-back": b("M-o", "panes.rotate", "rotate panes back", args={"dir": "prev"}, hidden=True),
+        "break": b("!", "panes.break", "break pane out to a tab"),
+        "move-tab": b(".", "tabs.move", "move tab to number", input="Move tab to (1, 2, …)"),
+        "next-layout": b("Space", "panes.layout", "next pane layout", args={"preset": "next"}),
+        **{f"layout-{n}": b(f"M-{n}", "panes.layout", f"layout {p}", args={"preset": p}, hidden=True)
+           for n, p in enumerate(("even-h", "even-v", "main-h", "main-v", "tiled"), 1)},
+        **{f"resize-{d}": b(f"C-{d.capitalize()}", "panes.resize", f"resize {d}", args={"dir": d, "by": 2}, hidden=d != "left")
+           for d in ("left", "right", "up", "down")},
+        **{f"resize-{d}-more": b(f"M-{d.capitalize()}", "panes.resize", f"resize {d} more", args={"dir": d, "by": 10}, hidden=True)
+           for d in ("left", "right", "up", "down")},
     }},
     # GNU screen's default key bindings (`man screen`, "Default Key Bindings"), mapped onto vqro.
     # Gaps: C-a (other window) and a (send C-a; here press C-a twice), w (window list in the message

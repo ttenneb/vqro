@@ -808,6 +808,24 @@ export function tabLabel(style: TabStyle, index: number, title: string): string 
   return ` ${number}${joiner}${title} `;
 }
 
+export const PROGRAM_TITLE_MAX = 24;
+
+/** The name a tab shows (ui_model::tabbar::tab_title): with `program_titles` (default on) a tab still named after its
+ * only terminal's command shows the program's own title; renamed tabs and named resources keep theirs. */
+export function tabTitle(setting: Json, title: string, resource: Json): string {
+  const on = isObj(setting) && typeof setting.program_titles === "boolean" ? setting.program_titles : true;
+  if (!on || !isObj(resource)) return title;
+  const program = typeof resource.title === "string" ? resource.title.trim() : "";
+  const named = typeof resource.name === "string" && resource.name !== "";
+  const argv0 = Array.isArray(resource.argv) && typeof resource.argv[0] === "string" ? resource.argv[0] : null;
+  const command = argv0 === null ? null : argv0.split("/").pop()!;
+  let base = title, mark = "";
+  for (const m of [" [ended]", " [gone]"]) if (title.endsWith(m)) { base = title.slice(0, -m.length); mark = m; break; }
+  if (!program || named || command === null || base !== command) return title;
+  const chars = [...program];
+  return (chars.length > PROGRAM_TITLE_MAX ? chars.slice(0, PROGRAM_TITLE_MAX - 1).join("") + "…" : program) + mark;
+}
+
 export function tabBar(setting: Json, titles: string[], active: number): Json {
   const style = tabStyle(setting);
   return { labels: titles.map((t, i) => tabLabel(style, i, t)), active, gap: style.chips ? 1 : 0, chips: style.chips };

@@ -812,6 +812,9 @@ reconcile later with their full set (`exclusive=True`). Other runtimes should fo
   `when` is matched field by field against the invocation context.
 - `binding/<id>`: `{key, command, args?, where?, label?, priority?, input?, prefill?, pick?, hidden?, when?}`. `key` is a prefix key
   (`"n"`, `"Left"`, see Keys) or a gesture (`"mouse.right"`, `"mouse.middle"`) with `where` = `"pane"` or `"tab"`.
+  `"mouse.drag"` with `where: "tab"`: a left press on a tab chip released over another chip of the same bar runs
+  the command with the pressed tab's context plus `drop_index` (0-based, the chip it was dropped on); clients
+  without drag support simply never run it.
   `input`, `prefill` and `pick` work as for menu items; `hidden` keeps a key out of the prefix menu (it still works).
   `when` (prefix keys) is matched against the focused pane's context exactly like a menu item's: a binding whose
   `when` does not hold is not a candidate there, so the key falls through to the next binding for it by the usual
@@ -839,7 +842,8 @@ reconcile later with their full set (`exclusive=True`). Other runtimes should fo
 - Client-side commands (mechanism, never sent to the core): `client.menu {where}`, `client.prefix`, `client.palette`,
   `client.zoom` (toggle: the focused pane fills this window; per window, not workspace state; moving focus leaves it).
 - More client-side commands, so bindings can reach what the prefix keys do: `client.focus {dir: next|prev|left|right|
-  up|down}` (directions pick the adjacent pane), `client.tab {to: next|prev|<n>}` (n counts from 1, in the tab group
+  up|down|last}` (directions pick the adjacent pane; `last` returns to the pane focused before this one, if it is
+  still shown), `client.tab {to: next|prev|<n>}` (n counts from 1, in the tab group
   holding the focused pane), `client.quit` (this UI only), `client.none` (does nothing: binds a key to nothing),
   `client.layout {name?}` (show that layout in this window only; without a name, the shared default). A
   client answers an unknown `client.*` command with a message and never sends it to the core.
@@ -1146,9 +1150,13 @@ Colours: a name (the 16 ANSI names such as `cyan`, `darkgray`, `lightblue`), `#R
 ### Tab bar
 
 A layout `tabs` node draws as a one-row tab bar. Its look is the shared setting `doc/settings/tabs`
-`{numbers?: "subscript"|"superscript"|"plain"|"none", position?: "after"|"before", chips?: bool}`, written by the
-tabs extension (`tabs.settings`)
-and read by every client (renderer-independent model: `ui_model::tabbar`; conformance: `tests/fixtures/client/tabbar.json`).
+`{numbers?: "subscript"|"superscript"|"plain"|"none", position?: "after"|"before", chips?: bool, program_titles?: bool}`,
+written by the tabs extension (`tabs.settings`) and read by every client (renderer-independent model:
+`ui_model::tabbar`; conformance: `tests/fixtures/client/tabbar.json`, `tabtitle.json`).
+- **Name** (`program_titles`, default on): a tab that still has its automatic name, the command of the one terminal
+  it shows (`zsh`, keeping an ` [ended]`/` [gone]` mark), shows that program's own title (`resource.title`, from
+  OSC 0/2) instead, cut to 24 characters with `…`. Renamed tabs, named resources and tabs showing several panes keep
+  their names. Clients derive it on every draw and never write it back (it changes too often for transactions).
 - **Label** for tab *i* (1-based) titled *t*, padding included. After the name (default): ` t₁ `, ` t¹ `, ` t 1 `.
   Before it: ` ₁ t `, ` ¹t `, ` 1 t `, or the flat ` 1:t ` with `chips: false` and plain numbers. `none`: ` t `.
   Numbers past 9 use more digits (`₁₀`).
@@ -1159,6 +1167,8 @@ and read by every client (renderer-independent model: `ui_model::tabbar`; confor
 - `menu/*` items with `where: "tabbar"` follow the labels after one gap. The bundled extensions keep only `+` (new tab)
   there: `+` (new tab) and the compact new-agent `+◆` (`icon_after`); their other actions live in the tab menu
   (`where: "tab"`), prefix keys and the command list.
+- Dragging a tab chip onto another of the same bar runs the `mouse.drag` tab gesture (bundled: `tabs.move`, from the
+  gestures extension); see `binding/<id>`.
 
 The bundled `themes` extension publishes its themes as live data `themes` and applies one with
 `themes.apply {name}`; settings shows them on its Theme page.
