@@ -90,6 +90,35 @@ async def run_case(case, root, manifest, vqro, hc=None, *, factory=PublicCoordin
     return result
 
 
+def write_controller_timeout(root, manifest, selected, inventory, seconds):
+    """After the owned namespace dies, preserve completed journals; never infer a missing result."""
+    root = Path(root)
+    rows, not_run = [], []
+    for index, case in enumerate(selected):
+        case_root = root / f"{index:02}"
+        try:
+            row = Result(**json.loads((case_root / "result.json").read_text()))
+            if row.case != case.id:
+                raise ValueError("case journal identity does not match the selection")
+        except (OSError, ValueError, TypeError) as error:
+            not_run.append(case.id)
+            row = Result(case.id, case.title, "fail", "harness", "not run: controller timeout",
+                         [{"kind": "controller_timeout", "seconds": seconds,
+                           "note": "case may have started but has no valid completed result", "journal_error": str(error)}],
+                         fixture_root=str(case_root), reason="controller_timeout")
+        rows.append(row)
+    document = report(manifest, rows, selected, part="B", inventory=inventory)
+    document.update(complete_inventory=False, qualification_complete=False, passed_selection=False,
+                    controller_timeout_seconds=seconds, not_run=not_run,
+                    controller_failure="whole-run deadline exceeded; owned PID namespace killed")
+    (root / "results.json").write_text(json.dumps(document, ensure_ascii=False, indent=2) + "\n")
+    (root / "results.md").write_text(markdown(document))
+    (root / "parent-timeout.json").write_text(json.dumps({
+        "status": "fail", "component": "cleanup", "detail": document["controller_failure"],
+        "controller_timeout_seconds": seconds, "complete_inventory": False, "not_run": not_run}) + "\n")
+    return document
+
+
 def freeze(root, manifest, vqro):
     """One source/binary pin for the entire table, never a moving checkout per row."""
     root = Path(root); source = Path(manifest["extensions"]); frozen = root/"target"
