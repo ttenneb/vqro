@@ -49,7 +49,7 @@ class Context:
                 "request": self.q["request"], "revision": self.q["revision"], "delivery": "d1", "state": "held"}]}
         self.panel = {"items": [{"children": [{"id": "waiting", "text": self.q["title"],
             "command": "agents.answer", "args": {"resource": "r1"},
-            "description": self.projection["fallback_reason"] or ""}]}]}
+            "description": "Invalid request route; human fallback · Enter: answer…" if fallback else ""}]}]}
         self.records = [] if fallback else [{"delivery": "d1", "state": "held", "attempt": None,
             "to": {"agent": "r2", "incarnation": "i:a1"}, "request_notice": {"agent": "r1", "key": "source-current"},
             "from": {"principal": "extension:coord", "actor": "extension:coord", "author": "client:managed"},
@@ -247,6 +247,14 @@ class CompleteObserverControls(unittest.IsolatedAsyncioTestCase):
             with self.subTest(command=command):
                 row["command"] = command
                 with self.assertRaises(CheckFailed): await self.grade(ctx)
+
+    async def test_malformed_visible_reason_is_actual_ui_text_not_an_internal_code(self):
+        ctx = Context(fallback=True)
+        row = ctx.panel["items"][0]["children"][0]
+        self.assertNotIn("invalid_request_route", row["description"])
+        self.assertEqual((await self.grade(ctx))["human"][0]["reason"], "invalid_request_route")
+        row["description"] = "human fallback without a specific reason"
+        with self.assertRaises(CheckFailed): await self.grade(ctx)
 
     async def test_actual_missing_and_malformed_human_rows_need_no_mail(self):
         result = await self.grade(Context(fallback=True))

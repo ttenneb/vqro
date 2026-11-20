@@ -24,6 +24,9 @@ from .identity_backend import pinned_artifact, empty_terminal_inventory
 ROUTE_PREFIX = "doc/agents/request-routes/"
 NOTICE_PREFIX = "Native request notice (not an answer):\n"
 ROUTES = {"human", "coordinator", "both"}
+# Actual public text in agents.py:request_presentation at the pinned target;
+# malformed raw configuration is rendered before the projection-code path.
+UI_REASON_TEXT = {"invalid_request_route": "Invalid request route; human fallback"}
 
 
 def route_key(agent):
@@ -218,6 +221,7 @@ class PublicRequestRouting:
             keys = projection.get("request_keys")
             if not isinstance(keys, list) or len(keys) != 1 or not all(isinstance(key, str) and key for key in keys): return None
             reason = projection.get("fallback_reason")
+            ctx.check(reason is None or isinstance(reason, str), "actual fallback reason has its public string/null shape", projection=projection)
             if reason == "notification_pending": return None
             waiting = waiting_rows(panel)
             human = []
@@ -227,7 +231,8 @@ class PublicRequestRouting:
                 args = row.get("args")
                 if (row.get("command") != "agents.answer" or not isinstance(args, dict) or args.get("resource") != agent or
                     question["title"] not in str(row.get("text", ""))): return None
-                if reason and str(reason) not in str(row.get("description", "")): return None
+                visible_reason = UI_REASON_TEXT.get(reason, reason)
+                if visible_reason and str(visible_reason) not in str(row.get("description", "")): return None
                 human = [dict(row, reason=reason, source_view="agents-" + agent)]
             elif waiting[0].get("command"):
                 # Coordinator-only still has a pinned non-actionable status row;
