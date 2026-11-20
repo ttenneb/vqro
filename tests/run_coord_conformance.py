@@ -38,14 +38,20 @@ def main():
         root = Path(tempfile.mkdtemp(prefix="b-", dir=args.scratch_parent))
         (root/".private-coord-conformance").touch(); (root/"home").mkdir()
         staged = root/"implementation.json"; staged.write_text(json.dumps(manifest, indent=2)+"\n")
-        command = ["/usr/bin/unshare", "-Urn", "/usr/bin/python3", str(Path(__file__).resolve()), "--run",
+        command = ["/usr/bin/unshare", "-Urnpmf", "--kill-child=KILL", "--mount-proc", "/usr/bin/python3", str(Path(__file__).resolve()), "--run",
             "--implementation", str(staged), "--vqro", str(args.vqro), "--isolated-root", str(root),
             "--parent-net", os.readlink("/proc/self/ns/net")]
         if args.cases: command += ["--cases", args.cases]
-        process = subprocess.run(command, cwd=root, env={"HOME": str(root/"home"), "PATH": "/usr/bin:/bin",
-            "LANG": "C.UTF-8", "PYTHONDONTWRITEBYTECODE": "1"})
-        print(json.dumps({"exit": process.returncode, "results": str(root/"results.json"), "table": str(root/"results.md")}))
-        return process.returncode
+        try:
+            process = subprocess.run(command, cwd=root, timeout=900, env={"HOME": str(root/"home"), "PATH": "/usr/bin:/bin",
+                "LANG": "C.UTF-8", "PYTHONDONTWRITEBYTECODE": "1"})
+            code=process.returncode
+        except subprocess.TimeoutExpired:
+            code=124
+            (root/"parent-timeout.json").write_text(json.dumps({"status":"fail","component":"cleanup",
+                "detail":"whole-run deadline exceeded; owned PID namespace killed","complete_inventory":False})+"\n")
+        print(json.dumps({"exit": code, "results": str(root/"results.json"), "table": str(root/"results.md")}))
+        return code
     if not (args.isolated_root/".private-coord-conformance").is_file(): parser.error("private-root marker missing")
     if args.parent_net is None or args.parent_net == os.readlink("/proc/self/ns/net"):
         parser.error("private user/network namespace required")
