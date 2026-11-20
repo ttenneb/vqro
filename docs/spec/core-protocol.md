@@ -892,6 +892,9 @@ Older clients ignore the extra objects; row `menu` actions can provide the same 
   with expanded children form groups and remain when descendants match. Headers/toolbars do not count as results.
 - Text rows may use `wrap:true` (feature `wrap`) for plain word-wrapped paragraphs and `focusable:true` for
   keyboard reading/scrolling; they remain inert unless they explicitly carry a command. Styles stay semantic.
+- A panel may carry `follow: true` (feature `follow`, e.g. a log tail): while the reader's selection is on the last
+  row, or before they move, new rows keep it on the last row; moving up or scrolling by hand stops following,
+  returning to the end resumes it. Clients without the feature show the same rows from the top.
 - Mouse wheel scrolls the detail text independently. A keyboard activation after manual scrolling first reveals
   its selection rather than invoking an off-screen action. The prefix menu remains reachable inside popups and
   while filtering, regardless of extension failure.
@@ -989,7 +992,7 @@ Icons page.
 On first run the core declares the extensions listed in `<extensions dir>/defaults.json` (`VQRO_EXTENSIONS_DIR`,
 default: the per-platform extensions directory, `~/.local/share/vqro/extensions` on Unix and
 `%LOCALAPPDATA%\vqro\extensions` on Windows, not implemented yet) and records `doc/vqro/defaults`, so removing one sticks. Bundled:
-`tabs`, `panes`, `gestures`, `workspaces`, `sidebar`, `themes`, `icons`, `keys`, `settings` (`extensions/`, helper
+`tabs`, `panes`, `gestures`, `workspaces`, `sidebar`, `themes`, `icons`, `keys`, `settings`, `logs` (`extensions/`, helper
 `vqro_ext.py`), and two backends as provider extensions (D21; human decision 2026-11-17):
 - `herdr`: `vqro-herdr --name herdr`, `kind: "provider"`, `default: true`. Terminals in herdr-core, reached with
   `$VQRO_HERDR` (JSON argv, e.g. `["ssh","box","hc","connect"]`, or a single literal executable), else `hc connect`.

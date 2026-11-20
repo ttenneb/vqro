@@ -70,6 +70,7 @@ def scan(files):
     files and the helper functions they use. A command reference is a string in command position: a `"command"`
     value in a dict literal or the first argument of `invoke`."""
     strings, live, registered, published, refs = set(), set(), set(), set(), set()
+    kinds = set()  # (view key, kind) of contributed views with a non-base kind and no fallback (D29)
     prefixes = set()  # ext.command("agents." + name): registered names known only by prefix
     seen = set()
 
@@ -91,6 +92,11 @@ def scan(files):
                         published.add(first.value)
             if isinstance(node, ast.Dict):
                 for k, v in zip(node.keys, node.values):
+                    if isinstance(k, ast.Constant) and isinstance(k.value, str) and k.value.startswith("view/") and isinstance(v, ast.Dict):
+                        fields = {f.value: x for f, x in zip(v.keys, v.values) if isinstance(f, ast.Constant)}
+                        kind = fields.get("kind")
+                        if isinstance(kind, ast.Constant) and kind.value not in ("panel", "terminal") and "fallback" not in fields:
+                            kinds.add((k.value, kind.value))
                     if isinstance(k, ast.Constant) and k.value == "command" and isinstance(v, ast.Constant) and isinstance(v.value, str):
                         refs.add(v.value)
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "invoke" and node.args:
@@ -117,7 +123,7 @@ def scan(files):
 
     for f in files:
         load(f)
-    return strings, live, registered, published, prefixes, refs
+    return strings, live, registered, published, prefixes, refs, kinds
 
 
 def main(argv=None):
@@ -166,7 +172,9 @@ def main(argv=None):
     for name, m in sorted(manifests.items()):
         if name not in scans:
             continue
-        strings, live, registered, published, prefixes, refs = scans[name]
+        strings, live, registered, published, prefixes, refs, kinds = scans[name]
+        for key, kind in sorted(kinds):
+            problems.append(f"{name}: {key} has kind {kind}, which base clients can't render, and no fallback view")
         own = {cap_key(c) for c in entries(m, "provides") if isinstance(c, str)}
         declared = {cap_key(c) for f in ("needs", "works_with") for c in entries(m, f) if isinstance(c, str)}
         uses = set()

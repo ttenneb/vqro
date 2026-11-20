@@ -206,6 +206,7 @@ fn render_list(buf:&mut Buffer,mut area:Rect,v:&Arc<Value>,st:&mut State,focused
         buf.set_string(area.x, area.y, msg, pal.style(Some("dim")));
         return;
     }
+    follow(v, rows, st);
     st.sel = st.sel.min(rows.len() - 1);
     if !selectable(&rows[st.sel].item) {
         st.sel = step(&rows, st.sel, 1);

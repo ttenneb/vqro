@@ -108,6 +108,25 @@ menu = [{"label": "Stop", "command": "agents.stop"}, {"label": "Doc", "text": "a
             rc, out = lint({"provides": ["command/agents.show", "command/agents.stop"]}, {"works_with": ["command/agents.stop"]})
             self.assertEqual(rc, 0, out)
 
+    def test_new_view_kinds_need_a_fallback(self):
+        source = '''
+from vqro_ext import Extension
+ext = Extension("canvas")
+ext.contribute({"view/canvas.a": {"kind": "canvas.native"}, "view/canvas.b": {"kind": "canvas.native", "fallback": "canvas.rows"},
+                "view/canvas.rows": {"kind": "panel", "items": []}})
+'''
+        with tempfile.TemporaryDirectory() as d:
+            os.mkdir(os.path.join(d, "manifests"))
+            write(os.path.join(d, "canvas.py"), source)
+            write(os.path.join(d, "defaults.json"), json.dumps({"extensions": [{"name": "canvas", "argv": ["python3", "canvas.py"]}]}))
+            write(os.path.join(d, "manifests", "canvas.json"), json.dumps({"name": "canvas", "provides": ["view/canvas.*"]}))
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = check_manifest_deps.main(["--extensions", d])
+        self.assertEqual(rc, 1)
+        self.assertIn("canvas: view/canvas.a has kind canvas.native, which base clients can't render, and no fallback view", out.getvalue())
+        self.assertNotIn("canvas.b", out.getvalue())
+
     def test_invalid_capability_names_fail(self):
         rc, out = self.run_lint({"tabs": {"provides": ["tabs.show"]}, "agents": {}})
         self.assertEqual(rc, 1)

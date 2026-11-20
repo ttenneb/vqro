@@ -24,6 +24,8 @@ pub struct State {
     pub detail_focus: bool,
     pub page_step: usize,
     pub manual_scroll: bool,
+    /// `follow`: the last row when the reader was last at the end (None: not yet shown).
+    pub follow_end: Option<usize>,
     pub(crate) prepared: Option<Arc<Prepared>>,
 }
 
@@ -59,7 +61,7 @@ pub struct Flat {
 
 
 /// Panel features this client renders. A panel may list what it needs in `requires`.
-pub const SUPPORTED: &[&str] = &["items", "pages", "tree", "badges", "menu", "input", "description", "filter", "toolbar", "chips", "select", "options", "badge_color", "icon", "icon_names", "list_detail", "wrap", "embedded_views", "current_when"];
+pub const SUPPORTED: &[&str] = &["items", "pages", "tree", "badges", "menu", "input", "description", "filter", "toolbar", "chips", "select", "options", "badge_color", "icon", "icon_names", "list_detail", "wrap", "embedded_views", "current_when", "follow"];
 
 /// Features a panel needs that this client lacks.
 pub fn missing(v: &Value) -> Vec<String> { missing_for(v, SUPPORTED) }
@@ -246,6 +248,20 @@ pub fn step(rows: &[Flat], from: usize, delta: i64) -> usize {
     last_ok.map(|x| x as usize).unwrap_or_else(|| first(rows))
 }
 
+/// A panel with `follow: true` (feature `follow`, e.g. a log tail): while the reader is at the last row (or
+/// hasn't moved yet), new rows keep the selection on the last row. Moving up or scrolling by hand stops it;
+/// returning to the end resumes it. Clients without the feature show the same rows from the top.
+pub fn follow(v: &Value, rows: &[Flat], st: &mut State) {
+    if v["follow"] != true || st.manual_scroll || rows.is_empty() {
+        return;
+    }
+    let end = last(rows);
+    if st.follow_end.is_none_or(|was| st.sel >= was) {
+        st.sel = end;
+    }
+    st.follow_end = Some(end);
+}
+
 pub fn first(rows: &[Flat]) -> usize {
     rows.iter().position(|r| selectable(&r.item)).unwrap_or(0)
 }
@@ -298,6 +314,22 @@ pub fn right(rows: &[Flat], st: &mut State) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn follow_keeps_the_end_while_the_reader_is_there() {
+        let panel = |n: usize| serde_json::json!({"follow": true, "items": (0..n).map(|i| serde_json::json!({"type": "text", "text": format!("line {i}"), "focusable": true})).collect::<Vec<_>>()});
+        let mut st = State::default();
+        let shown = |v: &Value, st: &mut State| { let r = rows(v, st); follow(v, &r, st); st.sel };
+        assert_eq!(shown(&panel(3), &mut st), 2, "starts at the end");
+        assert_eq!(shown(&panel(5), &mut st), 4, "new lines keep the end");
+        st.sel = 1;
+        assert_eq!(shown(&panel(8), &mut st), 1, "reading earlier lines stops following");
+        st.sel = 7;
+        assert_eq!(shown(&panel(9), &mut st), 8, "back at the end, follows again");
+        let mut plain = State::default();
+        let still = serde_json::json!({"items": [{"type": "text", "text": "a", "focusable": true}, {"type": "text", "text": "b", "focusable": true}]});
+        assert_eq!(shown(&still, &mut plain), 0, "without follow nothing moves");
+    }
 
     #[test]
     fn prepared_rows_reuse_only_when_value_and_shape_are_unchanged() {
