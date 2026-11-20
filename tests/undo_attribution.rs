@@ -158,6 +158,16 @@ impl TuiHarness {
         assert!(Command::new("/usr/bin/tmux").env_clear().args(["-N","-S"]).arg(&self.socket)
             .args(["send-keys","-t","undo:0.0",key]).status().unwrap().success());
     }
+    async fn quit_ui(&self,observer:&Peer) {
+        self.key("C-g");self.key("q");
+        let deadline=Instant::now()+Duration::from_secs(3);
+        loop {
+            let clients=observer.call("client.list",json!({})).await.unwrap();
+            if !clients["clients"].as_array().unwrap().iter().any(|client|client["client"]=="tui"){break;}
+            assert!(Instant::now()<deadline,"owned TUI exited before core shutdown");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
 }
 
 #[tokio::test]
@@ -186,8 +196,9 @@ async fn actual_tui_u_restores_a_real_theme_selected_from_settings() {
         assert!(Instant::now()<deadline,"TUI u restored the previous theme: {snapshot}");
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    drop(ui);
+    ui.quit_ui(&observer).await;
     fixture.stop(&observer).await;
+    drop(ui);
 }
 
 #[tokio::test]
@@ -236,7 +247,9 @@ async fn principal_from_spawned_pane_is_asserted_and_tui_u_only_undoes_its_press
     let rows=observer.call("workspace.history",json!({"limit":100})).await.unwrap();
     let reverted=rows["txns"].as_array().unwrap().iter().find(|txn|txn["reverts"]==pane_txn).unwrap();
     assert_eq!(reverted["principal"],"alice");assert_eq!(reverted["author"],ui_actual);
-    drop(ui);fixture.stop(&observer).await;
+    // Stop auto-reconnecting clients, then the provider, then its owned native server.
+    // Killing the server first lets the still-live provider recreate it after Drop.
+    ui.quit_ui(&observer).await;fixture.stop(&observer).await;drop(ui);
 }
 
 #[tokio::test]
