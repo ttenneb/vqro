@@ -7,6 +7,7 @@ protected move and a failed configuration stage. This is a positive scheduling
 witness, not a sleep, private store mutation or target-engine import.
 """
 from copy import deepcopy
+import time
 
 from ..wire import RpcError
 from .cases import case, held, settled, invocations
@@ -17,6 +18,14 @@ NAME_KEY = "doc/agents/names/" + HANDLE
 
 async def entries(ctx):
     return (await ctx.peer.call("workspace.snapshot"))["entries"]
+
+
+async def record(ctx, delivery):
+    # Public read-only primitive, not a store import or mutation. inbox.get is an
+    # intentionally compact projection and cannot witness retained content/guard.
+    value = await ctx.peer.call("operational.get", {"domain": "coord", "key": "operational/coord/message/" + delivery})
+    ctx.check(isinstance(value.get("entry"), dict), "actual protected record exists for the public handover witness")
+    return value["entry"]["value"]
 
 
 async def name(ctx, agent):
@@ -48,7 +57,7 @@ async def handover(ctx, **fields):
 
 
 async def pending_cut(ctx, deliveries, destination, *, reason="handover_pending"):
-    records = [await ctx.get(delivery) for delivery in deliveries]
+    records = [await record(ctx, delivery) for delivery in deliveries]
     ctx.check(all(row["state"] == "held" and row.get("reason") == reason and
         row["to"]["agent"] == destination and not row.get("attempt") for row in records),
         "moved records are held without any claim at the observed cut", records=records, reason=reason)
@@ -64,7 +73,7 @@ async def scheduling_witness(ctx, deliveries, destination, plan, label):
     sentinel = await ctx.send(target=destination, mode="admit", send_new=True, text="I13 scheduling witness: " + label)
     result = await settled(ctx, sentinel["delivery"])
     calls = invocations(ctx, delivery=sentinel["delivery"], op="agent.send")
-    ctx.check(result["state"] in ("admitted", "dispatched", "observed", "inserted") and len(calls) == 1,
+    ctx.check(result["state"] in ("accepted", "admitted", "dispatched", "observed", "inserted") and len(calls) == 1,
         "a real destination scheduling pass completes before the next handover stage", result=result, calls=calls)
     claim = ((calls[0].get("witness") or {}).get("entry") or {}).get("value", {})
     ctx.check(claim.get("state") == "claimed" and claim.get("delivery") == sentinel["delivery"],
@@ -87,11 +96,11 @@ async def refuses_complete(ctx, plan):
 
 
 async def refusal_preserves(ctx, source, destination, deliveries, expected_state):
-    before = [await ctx.get(delivery) for delivery in deliveries]
+    before = [await record(ctx, delivery) for delivery in deliveries]
     ctx.check(before[-1]["state"] == expected_state, "protected non-pending state really exists before move", record=before[-1])
     await ctx.rejected("handover", {"op": await ctx.operation("i13-nonpending"), "from": exact(source),
         "to": exact(destination), "deliveries": deliveries}, {"too_late"})
-    after = [await ctx.get(delivery) for delivery in deliveries]
+    after = [await record(ctx, delivery) for delivery in deliveries]
     ctx.check([row["to"] for row in after] == [row["to"] for row in before] and
         all(not row.get("handover_plan") for row in after) and after[-1]["state"] == expected_state,
         "mixed-list refusal never moves even its earlier pending record", before=before, after=after)
@@ -105,9 +114,13 @@ async def staged_successor_handover(ctx):
     sid, did = source["id"], destination["id"]
     await name(ctx, sid)
     await membership(ctx, did, "i13-initial")
-    moved = [(await ctx.send(mode="admit", send_new=True, text="I13 held intent " + str(index)))["delivery"] for index in range(2)]
+    expiry = int(time.time() * 1000) + 300000
+    moved = [(await ctx.send(mode="admit", send_new=True, guard={"session": "s1"}, expires_at_ms=expiry,
+        text="I13 held intent " + str(index)))["delivery"] for index in range(2)]
     for delivery in moved: await held(ctx, delivery, "paused")
-    original = [await ctx.get(delivery) for delivery in moved]
+    original = [await record(ctx, delivery) for delivery in moved]
+    ctx.check(all(row.get("guard") == {"session": "s1"} and row.get("expires_at_ms") == expiry and row.get("content")
+        and row.get("origin") for row in original), "preservation probes begin with real nonempty source constraints", records=original)
     resumed = await ctx.scope("resume", "agent:" + did)
     ctx.check(resumed.get("targets") == [did], "destination is explicitly open while source stays paused", reply=resumed)
     await ctx.native_set(0, lifecycle="ended")
