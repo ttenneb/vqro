@@ -4526,6 +4526,123 @@ mod tests {
         app.reconnected(app.peer.clone(),&later);assert!(app.overlay.is_none(),"reconnect must not steal focus");assert!(app.safe_selected.contains("draft"));
     }
 
+    /// Composer to wire, through the real key/paste path and a local peer that holds each reply until the test
+    /// answers: edits, newlines and pastes send nothing; Enter sends exactly one `command.invoke` with the draft;
+    /// an error keeps the draft; a late success never erases text typed after the send; a disconnect resends
+    /// nothing, before or after reconnecting.
+    #[tokio::test]
+    async fn composer_to_wire_sends_once_keeps_drafts_and_never_resends() {
+        let (a, b) = tokio::io::duplex(1 << 16);
+        let (ar, aw) = tokio::io::split(a); let (br, bw) = tokio::io::split(b);
+        let (client, _) = Peer::spawn(ar, aw); let (server, mut incoming) = Peer::spawn(br, bw);
+        let (req_tx, mut requests) = mpsc::unbounded_channel::<(Value, String, Value)>();
+        tokio::spawn(async move {
+            while let Some(m) = incoming.recv().await {
+                if let Incoming::Request { id, method, params } = m { let _ = req_tx.send((id, method, params)); }
+            }
+        });
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = App::new(client, tx);
+        let composer = json!({"type":"composer","id":"c","command":"agents.send","args":{"resource":"r2"},"autofocus":true,
+            "controls":[{"type":"chips","arg":"mode","chips":[{"text":"auto","value":"auto","checked":true},{"text":"steer","value":"steer"}]}]});
+        app.load(&json!({"epoch":"e","seq":1,"entries":{"view/p":{"value":{"kind":"panel","items":[{"text":"conversation"},composer]}}}}));
+        app.leaves = vec!["p".into()];
+        app.focus = 0;
+        let press = |app: &mut App, code: KeyCode, m: KeyModifiers| { app.on_event(Event::Key(KeyEvent::new(code, m))); };
+        // Expected events are awaited (bounded); "nothing sent" is checked after letting spawned calls run.
+        const WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+        async fn next(requests: &mut mpsc::UnboundedReceiver<(Value, String, Value)>) -> (Value, String, Value) {
+            tokio::time::timeout(WAIT, requests.recv()).await.expect("a call reaches the peer").expect("peer open")
+        }
+        async fn quiet(requests: &mut mpsc::UnboundedReceiver<(Value, String, Value)>) {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            assert!(requests.try_recv().is_err(), "no call was sent");
+        }
+        /// Hand the app every message up to the command's outcome (Done on success, Info on an error).
+        async fn outcome(app: &mut App, rx: &mut mpsc::UnboundedReceiver<Msg>) {
+            loop {
+                let m = tokio::time::timeout(WAIT, rx.recv()).await.expect("the reply reaches the app").expect("channel open");
+                let last = matches!(m, Msg::Done(_) | Msg::Info(_));
+                app.on_msg(m);
+                if last { return; }
+            }
+        }
+        let draft = |app: &App| app.pstate["p"].composers["c"].editor.string();
+        let none = KeyModifiers::NONE;
+
+        // Start typing, then edit: characters, Alt-Enter and Ctrl-j newlines, a multi-line paste, Backspace, Left.
+        press(&mut app, KeyCode::Down, none);
+        press(&mut app, KeyCode::Enter, none);
+        assert_eq!(app.pstate["p"].editing.as_deref(), Some("c"), "Enter on the composer row starts typing; it sends nothing");
+        for c in "hi".chars() { press(&mut app, KeyCode::Char(c), none); }
+        press(&mut app, KeyCode::Enter, KeyModifiers::ALT);
+        press(&mut app, KeyCode::Char('j'), KeyModifiers::CONTROL);
+        app.on_event(Event::Paste("line1\nline2\r\n".into()));
+        press(&mut app, KeyCode::Char('x'), none);
+        press(&mut app, KeyCode::Backspace, none);
+        press(&mut app, KeyCode::Left, none);
+        press(&mut app, KeyCode::Right, none);
+        quiet(&mut requests).await;  // editing, newlines and paste send nothing
+        let text = draft(&app);
+        assert!(text.starts_with("hi\n\nline1\nline2"), "{text:?}");
+
+        // Enter sends exactly one command.invoke with the composer's command, args, control value and text.
+        press(&mut app, KeyCode::Enter, none);
+        let (id, method, params) = next(&mut requests).await;
+        assert_eq!(method, "command.invoke");
+        assert_eq!(params["name"], "agents.send");
+        assert_eq!((&params["args"]["resource"], &params["args"]["mode"], params["args"]["text"].as_str()), (&json!("r2"), &json!("auto"), Some(text.as_str())));
+        quiet(&mut requests).await;  // exactly one call per Enter
+        assert_eq!(draft(&app), text, "the draft stays until the reply");
+
+        // An error reply keeps the draft and shows the error; nothing is retried.
+        server.respond(id, Err(crate::rpc::RpcError::new("failed", "agent busy")));
+        outcome(&mut app, &mut rx).await;
+        assert_eq!(draft(&app), text, "an error keeps the draft");
+        assert!(app.message.contains("agent busy"), "{}", app.message);
+        quiet(&mut requests).await;  // an error is not retried
+
+        // The user sends again (a deliberate second send), then keeps typing before the reply: the late success
+        // must not erase the newer text.
+        press(&mut app, KeyCode::Enter, none);
+        let (id, _, params) = next(&mut requests).await;
+        assert_eq!(params["args"]["text"].as_str(), Some(text.as_str()));
+        press(&mut app, KeyCode::Char('!'), none);
+        let newer = draft(&app);
+        assert_ne!(newer, text);
+        server.respond(id, Ok(json!({})));
+        outcome(&mut app, &mut rx).await;
+        assert_eq!(draft(&app), newer, "a late success keeps text typed after the send");
+        quiet(&mut requests).await;
+
+        // A success for an unchanged draft clears it (the counterpart that makes the case above meaningful).
+        press(&mut app, KeyCode::Enter, none);
+        let (id, _, params) = next(&mut requests).await;
+        assert_eq!(params["args"]["text"].as_str(), Some(newer.as_str()));
+        server.respond(id, Ok(json!({})));
+        outcome(&mut app, &mut rx).await;
+        assert_eq!(draft(&app), "", "a success clears the unchanged draft");
+
+        // Disconnect with a send in flight: the call fails, the draft stays, and reconnecting resends nothing.
+        for c in "last".chars() { press(&mut app, KeyCode::Char(c), none); }
+        press(&mut app, KeyCode::Enter, none);
+        let (_unanswered, method, _) = next(&mut requests).await;
+        assert_eq!(method, "command.invoke");
+        server.close();
+        outcome(&mut app, &mut rx).await;
+        assert!(app.message.starts_with("agents.send: "), "the lost reply is reported: {}", app.message);
+        assert_eq!(draft(&app), "last", "a lost reply keeps the draft");
+        let (a, b) = tokio::io::duplex(1 << 16);
+        let (ar, aw) = tokio::io::split(a); let (br, bw) = tokio::io::split(b);
+        let (client, _) = Peer::spawn(ar, aw); let (_server, mut incoming) = Peer::spawn(br, bw);
+        app.reconnected(client, &json!({"epoch":"e2","seq":1,"entries":{"view/p":{"value":{"kind":"panel","items":[{"text":"conversation"},composer]}}}}));
+        while let Ok(m) = rx.try_recv() { app.on_msg(m); }
+        while let Ok(Some(m)) = tokio::time::timeout(std::time::Duration::from_millis(100), incoming.recv()).await {
+            if let Incoming::Request { method, params, .. } = m { assert_ne!(method, "command.invoke", "reconnecting resent {params}"); }
+        }
+        assert_eq!(draft(&app), "last", "the draft survives reconnecting");
+    }
+
     #[tokio::test]
     async fn composer_rows_edit_choose_controls_and_multiline_prompts() {
         let (mut app,_) = app();
