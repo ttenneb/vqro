@@ -303,6 +303,7 @@ def inserted_causality_witness(strength, messages):
     if strength not in ("none", "acceptance"):
         raise HarnessGap("C9 correlated insertion needs its native message-id witness fixture")
     for key, value in messages:
+        check(value.get("final") is True, "inserted causality was checked before native user-item completion")
         check(all(field not in value for field in ("cause", "delivery", "correlation")),
               "uncorrelated native insertion gained an inferred delivery/cause/thread link")
     return {"correlation": strength, "items": [list(key) for key, _ in messages],
@@ -328,7 +329,7 @@ async def causal_echo(ctx, cause):
     await ctx.native.wait(lambda rows: any(row["seq"] > mark and row["kind"] == "inserted" for row in rows))
     inserted = ctx.native.records("inserted", after=mark)
     check(len(inserted) == 1, "causal send was not inserted exactly once", component="fixture")
-    await ctx.wait_view(view, lambda reducer: any(key not in previous and key[0] == "message" and row["value"].get("role") == "user"
+    await ctx.wait_view(view, lambda reducer: any(key not in previous and key[0] == "message" and row["value"].get("role") == "user" and row["value"].get("final") is True
                                                for key, row in reducer.entities.items()))
     messages = [(key, row["value"]) for key, row in view.reducer.entities.items()
                 if key not in previous and key[0] == "message" and row["value"].get("role") == "user"]

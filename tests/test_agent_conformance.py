@@ -528,17 +528,19 @@ class CoreOriginBindingTests(unittest.IsolatedAsyncioTestCase):
 class CausalItemWitnessTests(unittest.TestCase):
     def test_uncorrelated_inserted_item_must_be_observed_without_attribution(self):
         from agent_conformance.cases import inserted_causality_witness
-        item = (("message", "native-m1"), {"role": "user", "content": []})
+        item = (("message", "native-m1"), {"role": "user", "content": [], "final": True})
         for strength in ("none", "acceptance"):
             self.assertTrue(inserted_causality_witness(strength, [item])["no_attribution_inferred"])
         with self.assertRaises(CheckFailed): inserted_causality_witness("none", [])
+        with self.assertRaises(CheckFailed):
+            inserted_causality_witness("none", [(("message", "m1"), {"role": "user", "final": False})])
 
     def test_receipt_echo_cannot_hide_wrong_or_inferred_message_cause(self):
         from agent_conformance.cases import inserted_causality_witness
         for link in ({"cause": {"kind": "effect", "id": "wrong", "provenance": "inferred"}},
                      {"delivery": "guessed-from-text"}, {"correlation": "guessed-from-order"}):
             with self.subTest(link=link), self.assertRaises(CheckFailed):
-                inserted_causality_witness("none", [(("message", "m1"), {"role": "user", **link})])
+                inserted_causality_witness("none", [(("message", "m1"), {"role": "user", "final": True, **link})])
 
     def test_declared_native_correlation_needs_a_genuine_native_id_fixture(self):
         from agent_conformance.cases import inserted_causality_witness
