@@ -144,15 +144,24 @@ class TranscriptRows(unittest.TestCase):
         """Step 5 without row actions yet: the tool row's menu offers links.open for the files it names (AS10e)."""
         read = agent_transcript.tool_row("r", {"title": "read", "status": "completed", "input": {"path": "src/a.rs", "offset": 40, "limit": 10},
                                                "locations": [{"path": "/w/b.rs", "line": 4}]}, cwd="/w")
-        self.assertEqual([m["args"]["link"] for m in read["menu"]],
+        opens = [m for m in read["menu"] if m["command"] == "links.open"]
+        self.assertEqual([m["args"]["link"] for m in opens],
                          [{"kind": "path", "text": "/w/b.rs", "line": 4}, {"kind": "path", "text": "/w/src/a.rs", "line": 40}])
-        self.assertEqual({m["command"] for m in read["menu"]}, {"links.open"})
-        self.assertEqual(read["menu"][1]["label"], "Open a.rs:40 in editor")
-        self.assertNotIn("menu", agent_transcript.tool_row("r", {"title": "read", "input": {"path": "src/a.rs"}}),
+        self.assertEqual(read["menu"][-1], {"label": "Copy input", "command": "client.copy"})
+        self.assertEqual(agent_transcript.tool_row("e", {"title": "edit", "input": {"path": "/w/src/b.rs"}}, cwd="/w")["text"],
+                         "? edit   src/b.rs", "inside the agent's folder: relative")
+        self.assertEqual(read["actions"], [{"text": "open", "command": "links.open", "args": opens[0]["args"]},
+                                           {"text": "copy", "command": "client.copy"}], "visible [open] [copy]")
+        bash = agent_transcript.tool_row("b", {"title": "bash", "input": {"command": "ls"}, "content": text("a\nb")})
+        self.assertEqual(bash["actions"], [{"text": "copy", "command": "client.copy"}], "the client copies the row's copy field")
+        self.assertEqual(bash["menu"], [{"label": "Copy output", "command": "client.copy"}])
+        self.assertEqual(opens[1]["label"], "Open a.rs:40 in editor")
+        opened = lambda row: [m for m in row.get("menu", []) if m["command"] == "links.open"]
+        self.assertEqual(opened(agent_transcript.tool_row("r", {"title": "read", "input": {"path": "src/a.rs"}})), [],
                          "a relative path with no reported folder is never guessed")
-        self.assertNotIn("menu", agent_transcript.tool_row("r", {"title": "write", "input": {"path": "/w/x\nevil"}}, cwd="/w"))
+        self.assertEqual(opened(agent_transcript.tool_row("r", {"title": "write", "input": {"path": "/w/x\nevil"}}, cwd="/w")), [])
         many = agent_transcript.tool_row("r", {"title": "edit", "locations": [{"path": f"/w/{i}"} for i in range(9)]})
-        self.assertEqual(len(many["menu"]), agent_transcript.OPEN_ITEMS)
+        self.assertEqual(len([m for m in many["menu"] if m["command"] == "links.open"]), agent_transcript.OPEN_ITEMS)
 
     def test_another_senders_message_folds_after_4_lines_and_blocks_are_spaced(self):
         long = {("message", "a"): {"position": 1, "role": "user", "final": True, "origin": {"kind": "agent", "agent": "r7", "principal": "p:lead"},

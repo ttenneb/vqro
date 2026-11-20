@@ -373,6 +373,8 @@ def tool_row(eid, value, cwd=None):
     name = plain(str(value.get("title") or "tool"))
     args = value.get("input")
     main, used = primary_argument(name, args)
+    if isinstance(cwd, str) and len(cwd) > 1 and main.startswith(cwd.rstrip("/") + "/"):
+        main = main[len(cwd.rstrip("/")) + 1:]  # a path inside the agent's folder reads relative to it
     output = text_of(value)
     took = duration(value.get("started_ms"), value.get("ended_ms"))
     count = len([line for line in ANSI.sub("", output).split("\n")]) if output else 0
@@ -397,7 +399,12 @@ def tool_row(eid, value, cwd=None):
     menu = [{"label": "Open " + clip(plain(path.rsplit("/", 1)[-1]), 80) + (f":{line}" if line else "") + " in editor",
              "command": "links.open", "args": {"link": {"kind": "path", "text": path, **({"line": line} if line else {})}}}
             for path, line in files_of(name, args, value.get("locations"), cwd)]
-    return {"id": "t:" + eid, **({"menu": menu} if menu else {}), "text": f"{TOOL_ICON.get(status, '?')} {clip(name, 40)}" + (f"   {main}" if main else ""),
+    # Inline buttons (feature `actions`): [open] the first file, [copy] the output; the menu has the same for others.
+    actions = ([{"text": "open", "command": "links.open", "args": menu[0]["args"]}] if menu else []) + \
+              ([{"text": "copy", "command": "client.copy"}] if copy else [])
+    if copy:
+        menu.append({"label": "Copy " + ("output" if output else "input"), "command": "client.copy"})
+    return {"id": "t:" + eid, **({"menu": menu} if menu else {}), **({"actions": actions} if actions else {}), "text": f"{TOOL_ICON.get(status, '?')} {clip(name, 40)}" + (f"   {main}" if main else ""),
             "style": "error" if status == "failed" else None, **({"copy": copy} if copy else {}),
             **({"badges": [{"text": b, "style": "dim"} for b in badges]} if badges else {}),
             **({"description": "failed"} if status == "failed" else {}),
