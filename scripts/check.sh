@@ -138,7 +138,18 @@ run_steps() {
   for ((index=0; index<${#STEP_NAMES[@]}; index++)); do
     if [ "${STEP_NAMES[$index]}" = "$BUILD_STEP" ]; then prefix=$((index+1)); break; fi
   done
-  if [ "$prefix" -eq 0 ]; then echo "check: no $BUILD_STEP step registered" >&2; return 2; fi
+  if [ "$prefix" -eq 0 ]; then
+    echo "check: no $BUILD_STEP step registered" >&2
+    # A nonzero runner status alone is not the gate result: leave explicit failure rows for
+    # the receipt, including a guard row when there were no registered steps at all.
+    if [ "${#STEP_NAMES[@]}" -eq 0 ]; then STEP_NAMES=("$BUILD_STEP"); fi
+    for ((index=0; index<${#STEP_NAMES[@]}; index++)); do
+      printf 'not run: required %s step is not registered\n' "$BUILD_STEP" > "$LOGS/${STEP_NAMES[$index]}.log"
+      printf '%s\tFAIL\t0\t%s\n' "${STEP_NAMES[$index]}" "$LOGS/${STEP_NAMES[$index]}.log" > "$LOGS/step-$index.tsv"
+    done
+    show_ready
+    return 2
+  fi
   for ((index=0; index<prefix; index++)); do run_step "$index"; show_ready; done
   local build_result=FAIL ignored
   if ! IFS=$'\t' read -r ignored build_result ignored < "$LOGS/step-$((prefix-1)).tsv"; then

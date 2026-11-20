@@ -75,6 +75,29 @@ step cargo-test touch "$LOGS/sensitive-ran"
                     self.assertIn(name, receipt['failed'])
                     self.assertEqual((logs/f'{name}.log').read_text(), 'not run: build failed\n')
 
+    def test_missing_build_registration_fails_the_outer_gate_with_an_ordered_census(self):
+        cases = [
+            ('step licenses touch "$LOGS/license-ran"\nstep dependent touch "$LOGS/dependent-ran"',
+             ['licenses', 'dependent']),
+            ('step licenses touch "$LOGS/license-ran"\nstep renamed-build touch "$LOGS/build-ran"\nstep dependent touch "$LOGS/dependent-ran"',
+             ['licenses', 'renamed-build', 'dependent']),
+            ('', ['build-zero-warnings']),
+        ]
+        for mode in ('quick', 'full'):
+            for commands, expected in cases:
+                with self.subTest(mode=mode, registered=expected):
+                    result, receipt, logs = self.gate(commands, mode=mode)
+                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                    self.assertEqual(receipt['result'], 'fail')
+                    self.assertEqual(receipt['failed'], expected)
+                    self.assertEqual([s['name'] for s in receipt['steps']], expected)
+                    self.assertEqual(receipt['skipped'], [])
+                    self.assertFalse(list(logs.glob('*-ran')), 'invalid registration must not run any command')
+                    self.assertNotIn('PASS: 0/0', result.stdout)
+                    for step in receipt['steps']:
+                        self.assertEqual(step['result'], 'FAIL')
+                        self.assertIn('not registered', Path(step['log']).read_text())
+
     def test_skipped_build_does_not_qualify_dependent_steps(self):
         result, receipt, logs = self.gate('''
 step build-zero-warnings /bin/bash -c 'exit 77'
