@@ -10,6 +10,11 @@ Extensions are switched with the core's `vqro.extension.enable|disable`; client 
 extension's live data and applies one with its `themes.apply` command; the Icons page does the same with
 the `icons` extension (`icons.apply`), under the client's own Nerd Font choice. Every declared extension uses the
 same static manifest and runtime facts; built-in recovery can enable settings again if this page is turned off.
+
+Any extension can add its own page: it publishes live content `settings.page.<name>` = {title, items}
+(rows whose commands are its own, over its own state), and Settings shows it after Interface, so the
+same switches can live in the extension's own popup and here without a second copy of the state. The
+page goes away when the extension stops (its live content is cleared).
 """
 import os
 import sys
@@ -20,8 +25,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from vqro_ext import Extension, VqroError  # noqa: E402
 from vqro_display import label, key_labels
 
+PAGE_PREFIX = "settings.page."  # other extensions' own Settings pages (live content)
 ext = Extension("settings", event_types=["entries", "view.content", "extension", "provider", "safe_mode", "command"],
-                view_content={"names": ["themes", "icons", "keys"]})  # no resource events: not used here
+                view_content={"names": ["themes", "icons", "keys"], "prefixes": [PAGE_PREFIX]})  # no resource events: not used here
 TUI = "doc/settings/tui"
 THEME = "doc/settings/theme"
 ICONS = "doc/settings/icons"
@@ -442,9 +448,12 @@ def refresh(*_):
         {"type": "separator"},
         {"type": "text", "text": "Everything here is an extension; see docs/decisions.md D17."},
     ]
+    extra = [{"title": label(str(page.get("title") or name[len(PAGE_PREFIX):]), 40), "items": page.get("items") or []}
+             for name, page in sorted(ext.live.items()) if name.startswith(PAGE_PREFIX) and isinstance(page, dict)
+             and isinstance(page.get("items"), list)]
     ext.publish("settings", {"title": "Settings", "requires": ["pages", "menu", "input", "tree"], "pages": [
         {"title": "Extensions", "list_detail": {"requires": ["list_detail"]}, "items": ext_rows(states, commands)},
-        {"title": "Interface", "items": interface},
+        {"title": "Interface", "items": interface}, *extra,
         {"title": "Theme", "items": theme_rows()},
         {"title": "Icons", "items": icon_rows()},
         {"title": "Keys", "items": key_rows()},
@@ -454,7 +463,8 @@ def refresh(*_):
 
 @ext.on_event
 def on_event(t, d):
-    if t in ("extension", "provider", "missed", "safe_mode", "command") or (t == "view.content" and d.get("view") in ("themes", "icons", "keys")) \
+    if t in ("extension", "provider", "missed", "safe_mode", "command") or (t == "view.content" and (d.get("view") in ("themes", "icons", "keys")
+                                                                                                or str(d.get("view", "")).startswith(PAGE_PREFIX))) \
             or (t == "entries" and any(c["key"].startswith(("extension/", TUI, THEME, ICONS, "binding/")) for c in d["changes"])):
         refresh()
 

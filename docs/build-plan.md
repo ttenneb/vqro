@@ -496,3 +496,17 @@ Human decisions: new windows open on the workspace last switched to; prefix R re
 - Per-window marks with generic fields: rows `current_when {layout}`, status items `label_context`.
 - Tests: TUI unit tests, `tests/test_workspace_tabs.py`, `tests/test_vqro_ext.py`, two-window pty e2e
   `tests/e2e_tui_workspaces.py` (in `check.sh full`).
+
+## Sidebar as one configurable tree (2026-11-20)
+
+Human decisions Q-SB-1..3: one tree whose levels can be shown in any combination; all worktrees by default, with
+settings; the switches in both the sidebar's Show popup and Settings.
+- `sidebar`: workspace → worktree → tab → pane (terminal, agent with its bridge, panel), plus "Not in a tab" for a
+  folder's terminals no tab shows; other layouts and "Other terminals" as before. A hidden level's rows are
+  replaced by their children (`doc/settings/sidebar` `show`: workspaces, worktrees, tabs, panes, stray; the old
+  `terminals` key reads as `panes`). Worktree options (`worktrees`: limit per workspace with a "+N more" row, only
+  with changes, hide detached); `workspaces` data gains `ahead` per worktree.
+- Settings shows extension pages published as live `settings.page.<name>` (generic); the sidebar publishes the
+  same option rows there and in its Show popup, over one state.
+- Tests: `tests/test_sidebar_tree.py` (every level combination, worktree options, one state), settings page test,
+  updated `e2e_sidebar_scale` (row count) and `pi_provider_e2e` (agent is a pane of its tab).

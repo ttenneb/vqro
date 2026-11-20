@@ -1,10 +1,11 @@
 {
   "name":"sidebar", "title":"Sidebar", "version":"0.1.0", "license":"Apache-2.0", "author":"Bennett Garcia", "kind":"interface",
   "summary":"Browse terminals, agents and workspace activity.",
-  "description":"Publishes the live sidebar: workspaces with their tabs, other layouts, resource status and filtering controls; clicking a tab switches to it. It can show a resource in a tab or explicitly kill a terminal program. Turn it off to lose live sidebar content and its controls; saved layouts and backend-owned programs remain.",
+  "description":"Publishes the live sidebar as one tree: workspaces and their worktrees, tabs, and the panes in each tab, plus terminals in no tab; every level can be hidden. Its options are in the Show popup and in Settings. It can show a resource in a tab or explicitly kill a terminal program. Turn it off to lose live sidebar content and its controls; saved layouts and backend-owned programs remain.",
   "requires":{"protocol":1,"client_features":["items","tree","chips","menu"]},
   "provides":["command/sidebar.toggle","command/sidebar.view","command/sidebar.show","command/sidebar.kill","command/sidebar.preset","command/sidebar.page",
-              "command/sidebar.close_ended","command/sidebar.show_ended","command/sidebar.layout","command/sidebar.tab","view/sidebar","view/sidebar.view","doc/settings/sidebar"],
+              "command/sidebar.close_ended","command/sidebar.show_ended","command/sidebar.layout","command/sidebar.tab","command/sidebar.worktrees","command/sidebar.worktrees_more",
+              "view/sidebar","view/sidebar.view","data/settings.page.sidebar","doc/settings/sidebar"],
   "needs":[{"cap":"command/tabs.show","suggest":"tabs","why":"Show opens a terminal or agent in a tab"}],
   "works_with":[{"cap":"data/workspaces","suggest":"workspaces","without":"Terminals are listed without workspace and worktree groups"},
                 "command/workspaces.open","command/workspaces.shell","command/workspaces.add","command/workspaces.remove","command/workspaces.worktree","command/workspaces.refresh",
@@ -14,5 +15,5 @@
                 {"cap":"data/agents.terminal_status","suggest":"agents","without":"Agents without a terminal status sequence (Claude Code hooks) show no state"},
                 {"cap":"command/tabs.close_ended","suggest":"tabs","without":"Close ended items only hides them"}],
   "settings_command":"sidebar.view",
-  "contributes":{"commands":["sidebar.toggle","sidebar.view","sidebar.show","sidebar.layout","sidebar.tab","sidebar.kill","sidebar.preset","sidebar.page","sidebar.close_ended","sidebar.show_ended"],"keys":["Prefix s: toggle sidebar"],"menu_items":["Sidebar status controls"],"panels":["Sidebar","Sidebar view"],"settings":["doc/settings/sidebar"]}
+  "contributes":{"commands":["sidebar.toggle","sidebar.view","sidebar.show","sidebar.layout","sidebar.tab","sidebar.kill","sidebar.preset","sidebar.worktrees","sidebar.worktrees_more","sidebar.page","sidebar.close_ended","sidebar.show_ended"],"keys":["Prefix s: toggle sidebar"],"menu_items":["Sidebar status controls"],"panels":["Sidebar","Sidebar view","Settings page: Sidebar"],"settings":["doc/settings/sidebar"]}
 }

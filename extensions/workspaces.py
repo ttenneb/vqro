@@ -69,6 +69,14 @@ def worktrees(repo):
     return wts
 
 
+def ahead_of(wt, branch):
+    """{ahead: n}: commits in the worktree not on the repo's own branch (empty when unknown)."""
+    if not branch or branch == "(detached)":
+        return {}
+    out = git(wt["path"], "rev-list", "--count", f"{branch}..HEAD")
+    return {"ahead": int(out)} if out is not None and out.strip().isdigit() else {}
+
+
 def entries():
     return list((ext.value(LIST) or {}).get("items", []))
 
@@ -103,7 +111,8 @@ def scan():
                 item["path"] = top
                 item["branch"] = (main or {}).get("branch")
                 item["dirty"] = (main or {}).get("dirty")
-                item["worktrees"] = [dict(w, layout=layout_name(w["path"])) for w in wts if w is not main and not w.get("bare")]
+                item["worktrees"] = [dict(w, layout=layout_name(w["path"]), **ahead_of(w, item["branch"]))
+                                     for w in wts if w is not main and not w.get("bare")]
             # The layout this workspace's tabs live in (it may not exist until first opened).
             item["layout"] = layout_name(item["path"])
             data.append(item)

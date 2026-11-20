@@ -7,6 +7,7 @@
   "works_with":[{"cap":"data/themes","suggest":"themes","without":"The Theme page has no themes to choose"},"command/themes.apply","command/themes.accent",
                 {"cap":"data/icons","suggest":"icons","without":"The Icons page has no icon sets to choose"},"command/icons.apply",
                 {"cap":"data/keys","suggest":"keys","without":"The Keys page has no keymap profiles"},"command/keys.profile",
+                {"cap":"data/settings.page.*","without":"Extensions that offer a Settings page (Sidebar) are configured from their own popups only"},
                 {"cap":"command/logs.open","suggest":"logs","without":"No View log action; the log path is shown instead"}],
   "settings_command":"settings.open",
   "contributes":{"commands":["settings.open","settings.set","settings.toggle","settings.prefix","settings.switch"],"keys":["Prefix ,: Settings"],"menu_items":["Settings"],"panels":["Settings"],"settings":["doc/settings/tui"]}

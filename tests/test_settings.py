@@ -64,6 +64,22 @@ class SettingsTests(unittest.TestCase):
         broken=next(r for r in rows if r["id"]=="extension/broken")
         self.assertIn("fixture failure",str(broken["detail_panel"]))
 
+    def test_extension_pages_from_live_settings_page_content_follow_interface(self):
+        module=load();ext=module["ext"]
+        ext.live["settings.page.sidebar"]={"title":"Sidebar","items":[{"type":"toggle","text":"Tabs","checked":False,
+            "command":"sidebar.preset","args":{"show":{"tabs":True}}}]}
+        ext.live["settings.page.broken"]="not a page"
+        ext.live["unrelated"]={"title":"No","items":[]}
+        module["on_event"]("view.content",{"view":"settings.page.sidebar"})
+        pages=ext.published["settings"]["pages"]
+        titles=[p["title"] for p in pages]
+        self.assertEqual(titles[titles.index("Interface")+1],"Sidebar")
+        self.assertNotIn("No",titles)
+        self.assertEqual(pages[titles.index("Sidebar")]["items"],ext.live["settings.page.sidebar"]["items"],"the extension's own rows and state")
+        del ext.live["settings.page.sidebar"]
+        module["on_event"]("view.content",{"view":"settings.page.sidebar"})
+        self.assertNotIn("Sidebar",[p["title"] for p in ext.published["settings"]["pages"]],"gone when the extension stops")
+
     def test_recent_crashes_and_total_have_distinct_explicit_labels(self):
         module=load();ext=module["ext"]
         ext.states["broken"].update(crashes=0,crashes_total=7,crash_window_seconds=300)

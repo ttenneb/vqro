@@ -31,6 +31,13 @@ def identity(pid):
         return None
 
 
+def sidebar_rows(rows):
+    """Every sidebar row, depth first (the sidebar is one tree: places, tabs, panes)."""
+    for row in rows:
+        yield row
+        yield from sidebar_rows(row.get('children', []))
+
+
 def live(process):
     now = identity(process['pid']) if process else None
     return now and now['birth'] == process['birth'] and now['state'] != 'Z'
@@ -341,7 +348,7 @@ class E2E:
         # Wait for the coalesced sidebar snapshot, not merely any older sidebar rows.
         def current_rows():
             rows = self.snapshot().get('live', {}).get('sidebar', {}).get('items', [])
-            return rows if any(row.get('args', {}).get('resource') == rid for row in rows) else None
+            return rows if any(row.get('args', {}).get('resource') == rid for row in sidebar_rows(rows)) else None
         rows = self.wait(current_rows, 'sidebar agent row')
         def agent_line(i, line):
             # The agent's resource row, not a tab row (○/●) of a layout listing the same title.
@@ -365,12 +372,17 @@ class E2E:
             return second[1] if second and second[0] == first[0] else None
         screen = self.wait(settled_agent_screen, 'rendered, settled sidebar agent row')
         (self.root/'ui-sidebar-agent.txt').write_text(screen)
-        # The agent is a top-level row; its bridge is a collapsed child, not another terminal.
-        agent_row = next(row for row in rows if row.get('args', {}).get('resource') == rid)
+        rows = self.snapshot()['live']['sidebar']['items']  # the settled publication, bridge tab included
+        # The agent is a pane of its tab; its bridge is its collapsed child, and otherwise only the pane of the
+        # tab that shows the bridge terminal: never an unrelated terminal row.
+        agent_row = next(row for row in sidebar_rows(rows) if row.get('args', {}).get('resource') == rid)
         assert agent_row['children'][0]['args']['resource'] == host, rows
-        assert not any(row.get('args', {}).get('resource') == host for row in rows), rows
+        host_rows = [row['id'] for row in sidebar_rows(rows) if row.get('args', {}).get('resource') == host]
+        assert len(host_rows) == 2 and host_rows[0].split('@')[0] == 'term:'+host, host_rows
         line = next(i for i, line in enumerate(screen.splitlines()) if agent_line(i, line))
-        click = f'\x1b[<0;6;{line+1}M\x1b[<0;6;{line+1}m'.encode()
+        # On the row's text, not its expander (the agent is a pane, indented under its tab).
+        x = screen.splitlines()[line].index('Pi') + 2
+        click = f'\x1b[<0;{x};{line+1}M\x1b[<0;{x};{line+1}m'.encode()
         self.ui('send-keys', '-t', 'ui:0.0', '-H', *[f'{byte:02x}' for byte in click])
         self.ui_frame('sidebar-focused-agent', 'Ready for a prompt', 'Bridge terminal')
         self.ui('send-keys', '-t', 'ui:0.0', 'C-g', 'm')
@@ -396,9 +408,9 @@ class E2E:
         def cleaned():
             snap = self.snapshot()
             rows = snap.get('live', {}).get('sidebar', {}).get('items', [])
-            return not any(row.get('args', {}).get('resource') == host for row in rows)
+            return not any(row.get('args', {}).get('resource') == host for row in sidebar_rows(rows))
         self.wait(cleaned, 'ended host hidden after explicit cleanup')
-        self.ui_frame('cleaned-ended', 'Terminals')
+        self.ui_frame('cleaned-ended', 'main')
         self.log.append({'ended_ui': 'PASS', 'gone_agent': rid, 'ended_host': host, 'explicit_cleanup': True})
         self.stop_ui()
 

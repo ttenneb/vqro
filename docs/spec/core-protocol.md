@@ -1107,6 +1107,11 @@ version. This is how existing installs gain new defaults (here herdr, tmux and t
 is, and a removed default stays removed. Client options live in `doc/settings/tui`, the theme in `doc/settings/theme`, the icon set in
 `doc/settings/icons`.
 
+Extensions may add a page to Settings by publishing live content `settings.page.<name>` = `{title, items}` (ordinary
+rows whose commands are their own, over their own state); Settings lists such pages after Interface and drops a
+page when its publisher stops. The sidebar uses it for the same options as its Show popup (one tree, any level
+hidden; worktree limits), stored in `doc/settings/sidebar`.
+
 ## Extensions
 
 | Method | Result |

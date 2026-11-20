@@ -1,24 +1,27 @@
 #!/usr/bin/env python3
-"""vqro extension: the sidebar, one tree of workspaces → tabs, worktrees → terminals.
+"""vqro extension: the sidebar, one tree: workspace → worktree → tab → pane, plus "Not in a tab".
 
-Data comes from public sources only: resources (with their current folder) from the core, and the
-`workspaces` extension's live data. A terminal sits under the deepest workspace or worktree folder it is
-working in; terminals outside all of them are "other terminals". Status badges come from each
-terminal's OSC 7501 report and roll up to its parents.
+Data comes from public sources only: resources from the core, layouts (`layout/*`) and the `workspaces`
+extension's live data. Each workspace (and each of its git worktrees) has its own layout (named in the
+workspaces data); its tabs are listed in order, the selected one marked ●, and under each tab its panes:
+terminals and agents as resource rows (an agent carries its bridge terminal as a collapsed child), other
+panels by title. Terminals that no tab of any layout shows sit under the deepest workspace or worktree
+folder they work in, in a "Not in a tab" group; terminals in no listed folder and no tab are "Other
+terminals". Layouts no workspace claims (`main`, or every layout when the workspaces extension is off)
+are listed under "Layouts" like workspaces. Status badges come from each terminal's OSC 7501 report
+(or a tier-1 agent's live report) and roll up to its parents, each resource counted once.
 
-Tabs come from the layouts (`layout/*`): each workspace shows its layout's tabs (the `layout` named in
-the workspaces data), and layouts no workspace claims (`main`, or every layout when the workspaces
-extension is off) are listed under "Layouts", titled by their settings (`doc/layout/<name>`.title).
+Every level can be shown or hidden (`doc/settings/sidebar` `show`: workspaces, worktrees, tabs, panes,
+stray); a hidden level's rows are replaced by their children, so any combination works: panes straight
+under workspaces (tabs hidden), tabs without panes, or a flat list (workspaces hidden). Worktree options
+(`worktrees`: limit per workspace with a "+N more" row, only with changes, hide detached) narrow which
+worktrees are listed. The same rows appear in the Show popup (`sidebar.view`, from the toolbar's
+`Show: <preset> ▾` chip) and as this extension's Settings page (live `settings.page.sidebar`): one state.
+
 Clicking a tab or layout shows that layout in the window you clicked in (the reply's
 `{"client": {"layout"}}`), makes it the shared default for new windows (`workspace/active`) and selects
-the tab. Each window marks the layout it shows itself (`current_when` rows), since this content is
-shared. Showing/hiding the sidebar applies to every layout, so switching keeps it.
-
-What to show is a preference in `doc/settings/sidebar` (`show`: workspaces, worktrees, terminals,
-stray). The sidebar's pinned toolbar is one line so it fits a narrow sidebar: a `Show: <preset> ▾` chip
-naming what is shown, and `/` to filter. The chip opens the `sidebar.view` popup: show toggles,
-presets, and rarely used actions (refresh git state, add workspace). The popup is live content too,
-so its checks update in place while it is open.
+the tab; clicking a resource shows it. Each window marks the layout it shows itself (`current_when`
+rows), since this content is shared. Showing/hiding the sidebar applies to every layout.
 Rows are live content (`view.publish`): not saved, not in history. Large trees use shared, bounded
 64-row pages, keeping folder ancestors and each agent/bridge group together. The page chips browse all
 rows; filtering is page-local and the view popup also offers the complete resource chooser.
@@ -31,26 +34,33 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from vqro_ext import Extension, VqroError, views_in  # noqa: E402
-from vqro_views import ended, title, unknown_since
+from vqro_views import ended, title, unknown_since, view_resource
 
 # `provider` keeps the registry cache current: an unavailable agent shows when its provider disconnected.
 ext = Extension("sidebar", event_types=["entries", "resource", "resource.removed", "provider", "view.content"],
                 view_content={"names": ["workspaces", "agents.terminal_status"]})
 PREFS = "doc/settings/sidebar"
 LAYOUT_KEYS = ("layout/", "doc/layout/")  # tabs and their layouts' titles
-SHOW_DEFAULT = {"workspaces": True, "worktrees": True, "terminals": True, "stray": True}
+# One tree: workspace → worktree → tab → pane (+ "Not in a tab"). Each level can be hidden; its children
+# then move up. `stray`: terminals in no workspace folder and no tab.
+LEVELS = [("workspaces", "Workspaces", "workspace and layout rows"), ("worktrees", "Worktrees", "git worktrees under their repo"),
+          ("tabs", "Tabs", "each tab, and \"Not in a tab\""), ("panes", "Panes", "terminals, agents and panels"),
+          ("stray", "Other terminals", "in no workspace and no tab")]
+LEVEL_SWITCH = {"workspace": "workspaces", "worktree": "worktrees", "tab": "tabs", "pane": "panes"}
+SHOW_DEFAULT = {key: True for key, _, _ in LEVELS}
 PRESETS = {
-    "everything": {"workspaces": True, "worktrees": True, "terminals": True, "stray": True},
-    "workspaces only": {"workspaces": True, "worktrees": False, "terminals": False, "stray": False},
-    "workspaces and worktrees": {"workspaces": True, "worktrees": True, "terminals": False, "stray": False},
-    "worktrees and stray terminals": {"workspaces": True, "worktrees": True, "terminals": False, "stray": True},
-    "terminals only": {"workspaces": False, "worktrees": False, "terminals": True, "stray": True},
+    "everything": dict(SHOW_DEFAULT),
+    "panes under workspaces": dict(SHOW_DEFAULT, tabs=False),
+    "tabs only": dict(SHOW_DEFAULT, panes=False, stray=False),
+    "workspaces and worktrees": {"workspaces": True, "worktrees": True, "tabs": False, "panes": False, "stray": False},
+    "terminals only": {"workspaces": False, "worktrees": False, "tabs": False, "panes": True, "stray": True},
 }
 # Short names for the toolbar chip, so the current choice fits a ~24-column sidebar on one line.
-SHORT = {"everything": "all", "workspaces only": "workspaces", "workspaces and worktrees": "trees",
-         "worktrees and stray terminals": "trees+other", "terminals only": "terminals"}
-SHOW_LABELS = [("workspaces", "Workspaces", "folders you added"), ("worktrees", "Worktrees", "git worktrees"),
-               ("terminals", "Terminals", "in workspaces"), ("stray", "Other terminals", "elsewhere")]
+SHORT = {"everything": "all", "panes under workspaces": "no tabs", "tabs only": "tabs",
+         "workspaces and worktrees": "trees", "terminals only": "terminals"}
+WORKTREES_DEFAULT = {"limit": 0, "changed_only": False, "hide_detached": False}  # 0: no limit
+LIMITS = [0, 3, 5, 10, 20]
+expanded_worktrees = set()  # workspaces whose "+N more" was clicked this run (derived view state, not history)
 STATUS = {"working": "accent", "blocked": "warn", "error": "error", "done": "ok"}
 # What a row is, at a glance, by icon name (the active icon set draws it, D20). Without a set, Nerd Font
 # glyphs where the client has one, plain Unicode otherwise. The icon's style carries its state.
@@ -65,8 +75,11 @@ ICON = {
     "refresh": {"name": "refresh", "text": "↻"},
     "blocked": {"name": "blocked", "text": "⚠"},
     "sidebar": {"name": "sidebar", "text": "☰"},
+    "panel": {"name": "panel", "text": "▤"},
+    "loose": {"name": "loose", "text": "…"},
 }
-last = [None, None, None]  # what was last published: sidebar, status segment, view popup
+last = [None, None, None, None]  # what was last published: sidebar, status segment, view popup, settings page
+SETTINGS_PAGE = "settings.page.sidebar"  # shown by the settings extension as a page (generic `settings.page.*`)
 refresh_pending = threading.Event()
 PUBLISH_INTERVAL = 0.5  # Coalesce status bursts into at most two sidebar updates/second.
 PAGE_SIZE = 64  # Bound each full live publication, including off-screen tree detail.
@@ -74,7 +87,10 @@ page_state = [0, 1]  # Shared sidebar page and current page count; derived, neve
 
 
 def show():
-    return dict(SHOW_DEFAULT, **((ext.value(PREFS) or {}).get("show") or {}))
+    saved = dict((ext.value(PREFS) or {}).get("show") or {})
+    if "terminals" in saved and "panes" not in saved:
+        saved["panes"] = saved["terminals"]  # older preference name for what are now panes
+    return {key: bool(saved.get(key, default)) for key, default in SHOW_DEFAULT.items()}
 
 
 def current_preset():
@@ -179,11 +195,14 @@ def disconnected_badges(r):
 
 
 def counts_of(rows):
-    counts = {}
+    """Blocked/working resources beneath `rows`, each counted once even if several tabs show it."""
+    counts, seen = {}, set()
 
     def walk(rs):
         for x in rs:
-            if x.get("id", "").startswith("term:"):
+            rid = x.get("id", "")
+            if rid.startswith("term:") and rid.split("@")[0] not in seen:
+                seen.add(rid.split("@")[0])
                 for b in x.get("badges", []):
                     if b["text"] in ("blocked", "working"):
                         counts[b["text"]] = counts.get(b["text"], 0) + 1
@@ -203,12 +222,19 @@ def rollup(rows):
     return out
 
 
+def badged(badges):
+    """Rows carry `badges` only when there are some."""
+    return {"badges": badges} if badges else {}
+
+
 def git_badges(w):
     b = []
     if w.get("branch"):
         b.append({"text": w["branch"]})
     if w.get("dirty"):
         b.append({"text": f"±{w['dirty']}", "style": "warn"})
+    if w.get("ahead"):
+        b.append({"text": f"↑{w['ahead']}", "style": "accent"})
     return b
 
 
@@ -227,20 +253,88 @@ def active_layout_name():
     return (ext.value("workspace/active") or {}).get("layout")
 
 
-def tab_rows(name):
-    """One row per tab of layout `name`; the layout's selected tab is marked (●)."""
-    root = ext.value(f"layout/{name}")
+def layout_tabs(name):
+    """(tabs path, tabs node) of layout `name`, or (None, None)."""
+    root = ext.value(f"layout/{name}") if name else None
     found = first_tabs_path(root) if isinstance(root, dict) else None
-    if not found:
+    return found if found else (None, None)
+
+
+def shown_resources():
+    """Every resource a layout shows somewhere (any layout, any tab), so "Not in a tab" means exactly that."""
+    out = set()
+    for key, entry in ext.entries.items():
+        if key.startswith("layout/") and isinstance(entry.get("value"), dict):
+            for v in views_in(entry["value"]):
+                rid = view_resource(ext, v)
+                if rid:
+                    out.add(rid)
+    return out
+
+
+def resource_row(rid, where, place=""):
+    """A terminal or agent row (an agent carries its bridge terminal as a collapsed child). `place` keeps
+    ids unique when one resource is shown in several tabs; `term:<rid>` stays the prefix."""
+    r = ext.resources.get(rid)
+    if r is None:
+        return None
+    row = term_row(rid, r, where=where)
+    if place:
+        row["id"] = f"term:{rid}@{place}"
+    host = ext.resources.get(r.get("host")) if r.get("kind") == "agent" else None
+    if host and host.get("kind") == "terminal":
+        bridge = term_row(host["id"], host)
+        if place:
+            bridge["id"] = f"term:{host['id']}@{place}"
+        row["children"] = [bridge]
+        row["expanded"] = False
+    return row
+
+
+def pane_rows(name, path, index, tab, hide_ended):
+    """The panes of one tab: terminals and agents as resource rows, other panels by their title."""
+    rows, seen = [], set()
+    for v in views_in(tab.get("node") or {}):
+        if v in seen or v == "sidebar":
+            continue
+        seen.add(v)
+        rid = view_resource(ext, v)
+        if rid:
+            r = ext.resources.get(rid)
+            if r is None or (hide_ended and ended(r)):
+                continue
+            row = resource_row(rid, where=False, place=f"{name}/{index}/{v}")
+        else:
+            value = ext.value(f"view/{v}") or {}
+            row = {"id": f"pane:{name}/{index}/{v}", "text": value.get("title") or v, "icon": ICON["panel"], "icon_style": "muted",
+                   "command": "sidebar.tab", "args": {"layout": name, "path": path, "tab": index}}
+        if row:
+            rows.append(dict(row, _level="pane"))
+    return rows
+
+
+def tab_rows(name, hide_ended=False):
+    """One row per tab of layout `name` (the selected one marked ●), each holding its panes."""
+    path, tabs = layout_tabs(name)
+    if tabs is None:
         return []
-    path, tabs = found
     rows = []
     for i, tab in enumerate(tabs.get("tabs", [])):
         selected = i == tabs.get("active", 0)
-        rows.append({"id": f"tab:{name}:{i}", "text": tab.get("title") or f"tab {i+1}",
+        panes = pane_rows(name, path, i, tab, hide_ended)
+        rows.append({"id": f"tab:{name}:{i}", "text": tab.get("title") or f"tab {i+1}", "_level": "tab",
                      "icon": "●" if selected else "○", "icon_style": "accent" if selected else "dim",
+                     **badged(rollup(panes)), "children": panes, "expanded": True,
                      "command": "sidebar.tab", "args": {"layout": name, "path": path, "tab": i}})
     return rows
+
+
+def loose_group(key, rows):
+    """Terminals of a place that no tab shows. A tab-level row: hiding tabs moves them up."""
+    if not rows:
+        return []
+    return [{"id": f"loose:{key}", "text": "Not in a tab", "style": "dim", "icon": ICON["loose"], "icon_style": "dim",
+             "_level": "tab", **badged(rollup(rows)), "expanded": True, "children": rows}]
 
 
 def current_when(name):
@@ -248,100 +342,139 @@ def current_when(name):
     return {"current_when": {"layout": name}} if name else {}
 
 
-def layout_rows(claimed):
-    """Layouts no workspace claims (`main`, ...), each with its tabs."""
+def layout_rows(claimed, hide_ended=False):
+    """Layouts no workspace claims (`main`, ...), each with its tabs. Workspace-level rows."""
     names = sorted(k[len("layout/"):] for k in ext.entries if k.startswith("layout/") and k[len("layout/"):] not in claimed)
     rows = []
     for name in names:
         settings = ext.value(f"doc/layout/{name}") or {}
-        rows.append({"id": f"layout:{name}", "text": settings.get("title") or name, "expanded": True,
-                     "icon": ICON["folder"], "icon_style": "muted", **current_when(name), "children": tab_rows(name),
+        tabs = tab_rows(name, hide_ended)
+        rows.append({"id": f"layout:{name}", "text": settings.get("title") or name, "expanded": True, "_level": "workspace",
+                     "icon": ICON["folder"], "icon_style": "muted", **current_when(name), "children": tabs, **badged(rollup(tabs)),
                      "command": "sidebar.layout", "args": {"layout": name}})
     return rows
 
 
+def worktree_prefs():
+    return dict(WORKTREES_DEFAULT, **((ext.value(PREFS) or {}).get("worktrees") or {}))
+
+
+def visible_worktrees(w, prefs):
+    """The worktrees this workspace lists (settings: hide detached, only changed, limit) and how many are cut."""
+    wts = [t for t in w.get("worktrees", [])
+           if not (prefs["hide_detached"] and t.get("branch") == "(detached)")
+           and not (prefs["changed_only"] and not (t.get("dirty") or t.get("ahead")))]
+    limit = prefs["limit"]
+    if isinstance(limit, int) and limit > 0 and w["path"] not in expanded_worktrees and len(wts) > limit:
+        return wts[:limit], len(wts) - limit
+    return wts, 0
+
+
+def skip_hidden(rows, sh):
+    """Drop the internal level marks; a hidden level's row is replaced by its children (they move up).
+    Hidden panes go with their own children (an agent's bridge), and empty "Not in a tab" groups go."""
+    out = []
+    for row in rows:
+        level = row.get("_level")
+        row = {k: v for k, v in row.items() if k != "_level"}
+        if level == "pane" and not sh["panes"]:
+            continue
+        kids = skip_hidden(row["children"], sh) if level and "children" in row else row.get("children")
+        if level and not sh[LEVEL_SWITCH[level]]:
+            out.extend(kids or [])
+            continue
+        if level and "children" in row:
+            if row["id"].startswith("loose:") and not kids:
+                continue
+            row["children"] = kids
+        out.append(row)
+    return out
+
+
 def build():
+    """One tree: workspace → worktree → tab → pane, each level skippable; see `skip_hidden`."""
     sh = show()
     data = (ext.live.get("workspaces") or {}).get("data")
-    tree = data is not None and sh["workspaces"]
-    # Every folder a terminal can belong to; the deepest match wins.
-    homes = []
-    for w in data or []:
-        homes.append((os.path.realpath(w["path"]), ("ws", w["path"])))
-        for t in w.get("worktrees", []):
-            homes.append((os.path.realpath(t["path"]), ("wt", t["path"])))
-    homes.sort(key=lambda h: -len(h[0]))
-    # `placed`: terminals under a tree folder. `stray`: the rest in the tree, or the flat list without one,
-    # where Terminals still means "in workspaces" and Other "elsewhere" (all count when there's no data).
-    placed, stray = {}, []
-    agents = {r.get("host"): r for r in ext.resources.values() if r.get("kind") == "agent"}
     hide_ended = (ext.value(PREFS) or {}).get("hide_ended", False)
+    prefs = worktree_prefs()
+    shown = shown_resources()
+    agents = {r.get("host") for r in ext.resources.values() if r.get("kind") == "agent"}
+    # Folders a terminal in no tab can belong to (listed workspaces and worktrees); the deepest match wins.
+    places, homes = [], []
+    for w in data or []:
+        wts, cut = visible_worktrees(w, prefs)
+        places.append((w, wts, cut))
+        homes.append((os.path.realpath(w["path"]), w["path"]))
+        homes += [(os.path.realpath(t["path"]), t["path"]) for t in wts]
+    homes.sort(key=lambda h: -len(h[0]))
+    loose, stray = {}, []
     for rid, r in sorted(ext.resources.items(), key=lambda kv: int(kv[0][1:]) if kv[0][1:].isdigit() else 0):
-        if rid in agents or (hide_ended and ended(r)):
+        if rid in agents or rid in shown or (hide_ended and ended(r)):
             continue
-        row = term_row(rid, r, where=True)
         host = ext.resources.get(r.get("host")) if r.get("kind") == "agent" else None
-        if host and host.get("kind") == "terminal":
-            row["children"] = [term_row(host["id"], host)]
-            row["expanded"] = False
-        cwd = os.path.realpath(r.get("cwd") or (host or {}).get("cwd")) if r.get("cwd") or (host or {}).get("cwd") else None
-        home = next((k for p, k in homes if cwd and (cwd == p or cwd.startswith(p + os.sep))), None)
-        if tree and home:
-            placed.setdefault(home, []).append(row)
-        elif tree or data is None or sh["terminals" if home else "stray"]:
+        folder = r.get("cwd") or (host or {}).get("cwd")
+        cwd = os.path.realpath(folder) if folder else None
+        home = next((key for p, key in homes if cwd and (cwd == p or cwd.startswith(p + os.sep))), None)
+        row = resource_row(rid, where=True)
+        if home is not None and data is not None:
+            loose.setdefault(home, []).append(dict(row, _level="pane"))
+        else:
             stray.append(row)
 
     items = []
-    if tree:
-        items.append({"type": "header", "text": "Workspaces"})
-        for w in data:
-            kids = list(placed.get(("ws", w["path"]), [])) if sh["terminals"] else []
-            if sh["worktrees"]:
-                for t in w.get("worktrees", []):
-                    tt = placed.get(("wt", t["path"]), []) if sh["terminals"] else []
-                    kids.append({
-                        "id": f"wt:{t['path']}", "text": os.path.basename(t["path"].rstrip("/")), "expanded": True,
-                        "icon": ICON["worktree"], "icon_style": "warn" if t.get("dirty") else "accent",
-                        "badges": git_badges(t) + rollup(tt), **current_when(t.get("layout")),
-                        "children": (tab_rows(t["layout"]) if t.get("layout") else []) + tt,
-                        "command": "workspaces.open", "args": {"path": t["path"]},
-                        "menu": [{"label": "Switch to its tabs", "command": "workspaces.open", "args": {"path": t["path"]}},
-                                 {"label": "Open shell here", "command": "workspaces.shell", "args": {"path": t["path"]}}],
-                    })
+    if data is not None:
+        rows = []
+        for w, wts, cut in places:
+            kids = tab_rows(w.get("layout"), hide_ended) + loose_group(w["path"], loose.get(w["path"], []))
+            for t in wts:
+                inner = tab_rows(t.get("layout"), hide_ended) + loose_group(t["path"], loose.get(t["path"], []))
+                kids.append({
+                    "id": f"wt:{t['path']}", "text": os.path.basename(t["path"].rstrip("/")), "expanded": True, "_level": "worktree",
+                    "icon": ICON["worktree"], "icon_style": "warn" if t.get("dirty") else "accent",
+                    "badges": git_badges(t) + rollup(inner), **current_when(t.get("layout")), "children": inner,
+                    "command": "workspaces.open", "args": {"path": t["path"]},
+                    "menu": [{"label": "Switch to its tabs", "command": "workspaces.open", "args": {"path": t["path"]}},
+                             {"label": "Open shell here", "command": "workspaces.shell", "args": {"path": t["path"]}}],
+                })
+            if cut:
+                kids.append({"id": f"more:{w['path']}", "text": f"+{cut} more worktrees", "style": "dim", "_level": "worktree",
+                             "command": "sidebar.worktrees_more", "args": {"path": w["path"]}, "children": []})
             menu = [{"label": "Switch to its tabs", "command": "workspaces.open", "args": {"path": w["path"]}},
                     {"label": "Open shell here", "command": "workspaces.shell", "args": {"path": w["path"]}}]
             if w.get("git"):
                 menu.append({"label": "New worktree…", "command": "workspaces.worktree", "args": {"repo": w["path"]}, "input": "Branch name"})
             menu += [{"label": "Refresh git state", "command": "workspaces.refresh"},
                      {"label": "Remove from workspaces", "command": "workspaces.remove", "args": {"path": w["path"]}}]
-            items.append({
-                "id": f"ws:{w['path']}", "text": w["name"], "expanded": True,
+            rows.append({
+                "id": f"ws:{w['path']}", "text": w["name"], "expanded": True, "_level": "workspace",
                 "icon": ICON["repo" if w.get("git") else "folder"],
                 "icon_style": "error" if w.get("missing") else ("warn" if w.get("dirty") else "accent") if w.get("git") else "muted",
                 "style": "error" if w.get("missing") else "bold",
                 "badges": ([{"text": "missing", "style": "error"}] if w.get("missing") else git_badges(w)) + rollup(kids), **current_when(w.get("layout")),
-                "children": (tab_rows(w["layout"]) if w.get("layout") else []) + kids,
-                "command": "workspaces.open", "args": {"path": w["path"]}, "menu": menu,
+                "children": kids, "command": "workspaces.open", "args": {"path": w["path"]}, "menu": menu,
             })
-        items.append({"id": "add", "text": "add workspace…", "style": "dim", "icon": ICON["add"], "icon_style": "dim",
-                      "command": "workspaces.add", "input": "Folder path"})
         claimed = {w.get("layout") for w in data} | {t.get("layout") for w in data for t in w.get("worktrees", [])}
-        layouts = layout_rows(claimed)
+        layouts = layout_rows(claimed, hide_ended)
+        if sh["workspaces"]:
+            items.append({"type": "header", "text": "Workspaces"})
+        items += skip_hidden(rows, sh)
+        if sh["workspaces"]:
+            items.append({"id": "add", "text": "add workspace…", "style": "dim", "icon": ICON["add"], "icon_style": "dim",
+                          "command": "workspaces.add", "input": "Folder path"})
+        layouts = skip_hidden(layouts, sh)
         if layouts:
-            items.append({"type": "header", "text": "Layouts"})
+            if sh["workspaces"]:
+                items.append({"type": "header", "text": "Layouts"})
             items += layouts
         if sh["stray"] and stray:
             items.append({"type": "header", "text": "Other terminals"})
             items += stray
     else:
-        # Without workspace data (extension off), every layout and its tabs, so switching still works.
-        layouts = layout_rows(set()) if sh["workspaces"] else []
-        if layouts:
-            items.append({"type": "header", "text": "Layouts"})
-            items += layouts
-        if sh["terminals"] or sh["stray"]:
+        # Without workspace data (extension off): every layout as a place, terminals in no tab after them.
+        items += skip_hidden(layout_rows(set(), hide_ended), sh)
+        if stray and (sh["stray"] or sh["panes"]):
             items.append({"type": "header", "text": "Terminals"})
-            items += stray or [{"type": "text", "text": "no terminals"}]
+            items += stray
     if not items:
         items = [{"type": "text", "text": "nothing to show"}]
     return items
@@ -400,24 +533,36 @@ def toolbar():
     return rows
 
 
-def view_panel():
-    """The `sidebar.view` popup: show toggles, presets, then actions too rare for the toolbar."""
-    sh = show()
+def option_rows():
+    """The sidebar's options: shared by the Show popup and the Settings page (one state: doc/settings/sidebar)."""
+    sh, wt = show(), worktree_prefs()
     have_ws = ext.live.get("workspaces") is not None
     rows = [{"type": "header", "text": "Show"}]
-    for k, label, what in SHOW_LABELS:
-        row = {"type": "toggle", "text": label, "checked": bool(sh[k]), "detail": what,
+    for k, label, what in LEVELS:
+        row = {"type": "toggle", "text": label, "checked": sh[k], "detail": what,
                "command": "sidebar.preset", "args": {"show": {k: not sh[k]}}}
         # Say why a toggle can't matter right now instead of hiding it.
-        if not have_ws and k in ("workspaces", "worktrees"):
+        if not have_ws and k == "worktrees":
             row.update(disabled=True, detail="workspaces extension off")
-        elif k == "worktrees" and not sh["workspaces"]:
-            row.update(disabled=True, detail="needs Workspaces")
         rows.append(row)
-    rows += [{"type": "separator"}, {"type": "header", "text": "Presets"}]
+    rows += [{"type": "header", "text": "Worktrees"},
+             {"type": "select", "text": "Per workspace", "value": wt["limit"], "command": "sidebar.worktrees", "args": {"key": "limit"},
+              "options": [{"label": "all" if n == 0 else f"at most {n}", "value": n} for n in LIMITS]},
+             {"type": "toggle", "text": "Only with changes", "checked": bool(wt["changed_only"]), "detail": "uncommitted or ahead of the repo's branch",
+              "command": "sidebar.worktrees", "args": {"key": "changed_only", "value": not wt["changed_only"]}},
+             {"type": "toggle", "text": "Hide detached", "checked": bool(wt["hide_detached"]), "detail": "no branch checked out",
+              "command": "sidebar.worktrees", "args": {"key": "hide_detached", "value": not wt["hide_detached"]}},
+             {"type": "separator"}, {"type": "header", "text": "Presets"}]
     current = current_preset()
     rows += [{"text": ("● " if name == current else "○ ") + name, "style": "accent" if name == current else None,
               "command": "sidebar.preset", "args": {"preset": name}} for name in PRESETS]
+    return rows
+
+
+def view_panel():
+    """The `sidebar.view` popup: the options, then actions too rare for the toolbar."""
+    have_ws = ext.live.get("workspaces") is not None
+    rows = option_rows()
     rows += [{"type": "separator"},
              {"text": "Choose any resource…", "command": "sidebar.show", "pick": "resource"},
              {"type": "text", "text": "Filter applies to this page; the resource chooser lists all resources."},
@@ -431,6 +576,11 @@ def view_panel():
     return {"title": "Sidebar view", "items": rows}
 
 
+def settings_page():
+    """This extension's page in Settings (live `settings.page.sidebar`): the same rows as the Show popup."""
+    return {"title": "Sidebar", "items": option_rows()}
+
+
 def refresh(*_):
     # The worker reads a coherent cache, but never holds its lock across RPC/publication.
     with ext.cache_lock:
@@ -439,9 +589,10 @@ def refresh(*_):
         content = {"requires": ["tree", "badges", "menu", "toolbar", "chips", "icon", "icon_names"], "toolbar": toolbar(), "items": items,
                    "page": {"number": page_state[0]+1, "count": page_state[1], "rows": total}}
         view = view_panel()
+        page = settings_page()
         c = counts_of(all_items)
         seg = {"label": f"{c['blocked']} blocked", "icon": ICON["blocked"], "style": "warn"} if c.get("blocked") else {"label": ""}
-    for index, name, value in ((0, "sidebar", content), (2, "sidebar.view", view), (1, "sidebar.status", seg)):
+    for index, name, value in ((0, "sidebar", content), (2, "sidebar.view", view), (1, "sidebar.status", seg), (3, SETTINGS_PAGE, page)):
         if value != last[index]:
             ext.publish(name, value)
             last[index] = value
@@ -596,10 +747,33 @@ def kill(args):
     return ext.vqro.call("resource.kill", {"resource": args["resource"]})
 
 
+@ext.command("sidebar.worktrees", "Worktree listing options (args: key = limit | changed_only | hide_detached, value)")
+def worktrees_cmd(args):
+    key, value = args.get("key"), args.get("value")
+    if key == "limit" and type(value) is int and value >= 0:
+        pass
+    elif key in ("changed_only", "hide_detached") and type(value) is bool:
+        pass
+    else:
+        raise VqroError("key: limit (integer >= 0) or changed_only/hide_detached (true/false)", "invalid")
+    def attempt():
+        prefs = ext.value(PREFS) or {}
+        value_ = dict(prefs, worktrees=dict(prefs.get("worktrees") or {}, **{key: value}))
+        ext.apply([{"op": "set", "key": PREFS, "value": value_, "expect": ext.version(PREFS)}], "sidebar: worktrees")
+    ext.retrying(attempt)
+
+
+@ext.command("sidebar.worktrees_more", "List every worktree of one workspace in this session (args: path)")
+def worktrees_more(args):
+    with ext.cache_lock:
+        expanded_worktrees.add(args.get("path"))
+    refresh_pending.set()
+
+
 @ext.command("sidebar.preset", "Choose what the sidebar shows (args: preset, or show: {...})")
 def preset(args):
     if isinstance(args.get("show"), dict):
-        new = dict(show(), **args["show"])
+        new = dict(show(), **{k: bool(v) for k, v in args["show"].items() if k in SHOW_DEFAULT})
     elif any(args.get(k) in PRESETS for k in ("preset", "value", "text")):
         new = PRESETS[next(args[k] for k in ("preset", "value", "text") if args.get(k) in PRESETS)]
     else:

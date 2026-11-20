@@ -193,7 +193,8 @@ def run(args, root):
         receipt['initial_sidebar_bytes'] = len(json.dumps(initial).encode())
         receipt['pages'] = initial.get('page')
         if not args.baseline_sidebar:
-            assert initial.get('page', {}).get('rows') == 1151, 'startup fence must include all 800 resources and 350 folders'
+            # 350 folders, each with a "Not in a tab" group (no layouts here), 800 resources and the add row.
+            assert initial.get('page', {}).get('rows') == 1501, 'startup fence must include all 800 resources and 350 folders'
         for phase, fact in [('off_page', facts[150]), ('on_page', facts[0])]:
             before_count, before_bytes = fence['counts'], fence['bytes']
             before_content = fence['content']
