@@ -126,8 +126,10 @@ try:
     # 1. Settings drop-down over its popup (Keys page: Profile select).
     keys("C-g", ",")
     wait(lambda: "Settings" in screen() and "Extensions" in screen(), 10)
-    for _ in range(4):
-        keys("]")
+    for _ in range(10):  # to the Keys page, wherever extension pages (Sidebar) put it
+        if "Profile:" in screen():
+            break
+        keys("]"); time.sleep(0.4)
     keys_page = wait(lambda: "Profile:" in screen() and "Settings" in screen(), 10)
     check("Settings Keys page shows the Profile select", bool(keys_page), screen())
     keys("Enter")
