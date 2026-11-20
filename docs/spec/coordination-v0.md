@@ -250,13 +250,17 @@ The window also caches well-formed refusals (validation, grant and quota) only b
 (§10). For a **cached** refusal, an identical repeat returns the original compact refusal even if
 grants or capacity changed; retrying under changed conditions needs a new `op`. Malformed calls and calls from an
 undeclared principal occupy no slot. Cached failures retain kind/fingerprint in a fixed small entry; the full message
-appears only in the live reply. Slot preflight and refusal persistence use that same content ceiling; refusals use
-**neither the normal 64 KiB / 16-record control-intent headroom nor the recovery reserve**. No new pool is added.
+appears only in the live reply. Slot preflight and refusal-result persistence use that same content ceiling; result
+caching uses **neither the normal 64 KiB / 16-record control-intent headroom nor the recovery reserve**. No growing
+refusal-result pool is added.
 
-At that ceiling, return the actual refusal live with **`uncached: true`**, without persisting its result, **close the
-operation epoch and advertise the new window**. The old `op` is then `expired_operation` even after grants or capacity
-change or a restart; it can never be admitted later. No-recreation has no exception for uncached refusals. A new id in
-the new window is required for another evaluation. At the durable content budget the live refusal is still `quota`,
+At that ceiling, return the actual refusal live with **`uncached: true`**, without persisting its result, and **fence
+its principal-scoped op id** in a fixed, small ring of refused-op digests. The ring is reserved once at startup from
+the existing control budget, not grown by refusals. A fenced id returns `expired_operation` even while the epoch stays
+open. The operation epoch **closes only when the fence ring is full**; advertise the new window and close the old epoch
+before purging its fences. Thus the old `op` stays expired after grants/capacity change, ring overflow or restart;
+it can never be admitted later. No-recreation has no uncached exception. Another evaluation requires a fresh id in
+the currently advertised window. At the durable content budget the live refusal is still `quota`,
 not persistent pre-evaluation `busy`. A genuinely full operation window still refuses `busy` **before evaluation**;
 content saturation or inability to cache a refusal alone does not make the window full. Recovery space stays entirely
 for owner recovery (including workspace pause/resume and archive, §6.1), not refusal caching.
@@ -650,10 +654,11 @@ recovery reserve keeps its full size; its last **64 KiB / 16 records are archive
 for other recovery controls. This archive-only share is a defensive margin, not a second proved exhaustion case:
 the known-metadata negative control was already covered by retaining only **16 scope receipts**. Archive plans
 also fund their future metadata (§6.1); this charge is separate from their actual retained manifest/plan bytes.
-Refusals use neither the normal 64 KiB / 16-record control-intent headroom nor the recovery reserve: compact failures
-are cached only below the existing content ceiling. At that ceiling they are returned live with `uncached: true`;
-the epoch closes, a new window is advertised, and the old id remains permanently fenced (§5.3). The entire recovery reserve remains for recovery, including owner
-workspace pause/resume and the existing archive escrow/future funding; no separate refusal-recovery margin is needed.
+Refusal-result caching uses neither the normal 64 KiB / 16-record control-intent headroom nor the recovery reserve:
+compact failures are cached only below the existing content ceiling. At that ceiling return them live with
+`uncached: true` and fence their ids in the fixed, startup-reserved control-budget ring (§5.3). Only a full ring closes
+the epoch and advertises a new window before its fences are purged; old ids stay permanently fenced. The recovery
+reserve remains for recovery, including owner workspace pause/resume and the existing archive escrow/future funding; no separate refusal-recovery margin is needed.
 
 | Retained item | Bound each | Count | `B` = 2 MiB, 200 agents | `B` = 4 MiB | `B` = 8 MiB |
 |---|---|---|---|---|---|

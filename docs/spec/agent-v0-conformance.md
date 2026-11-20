@@ -262,12 +262,13 @@ for one fake agent; the rest need the full extension.
   `coord.inbox.op` answers `unknown` when it doesn't know. Cached well-formed validation, grant and quota refusals
   are budgeted: after a grant or capacity change, the identical `op` returns its original compact refusal; a new
   `op` is evaluated afresh. Malformed and undeclared-principal calls take no slot. Refusal-slot admission and
-  persistence use the same existing content ceiling; refusals use neither the normal 64 KiB / 16-record control-intent
-  headroom nor the recovery reserve.
-  Cached failures retain kind/fingerprint in a fixed small entry; full messages stay only in live replies. At that
-  ceiling return the actual refusal live with `uncached: true`, close the operation epoch and advertise the new window.
-  Repeat the old `op` after a grant/capacity change and restart: `expired_operation`, never another admission or native
-  attempt. No-recreation has no uncached exception. A fresh id in the new window is required for another evaluation.
+  result persistence use the same existing content ceiling; caching uses neither the normal 64 KiB / 16-record
+  control-intent headroom nor the recovery reserve. Cached failures retain kind/fingerprint in a fixed small entry;
+  full messages stay only in live replies. At that ceiling return the actual refusal live with `uncached: true` and
+  fence its id in a fixed, small, startup-reserved control-budget ring. The epoch closes only when that ring is full,
+  advertising the new window before purging old fences. Repeat the old `op` while its epoch is open, after a
+  grant/capacity change, ring overflow and restart: `expired_operation`, never another admission or native attempt.
+  No-recreation has no uncached exception. Another evaluation requires a fresh id in the currently advertised window.
   Genuine full-window `busy` still precedes evaluation; inability to cache a refusal alone is not a full window.
 - I11 composition: Pi gets only `interrupt_then_start` (clear, abort, start), never `preempt`; with exclusive writers
   it succeeds; a steer after clear or a competing start is reported as partial with step outcomes; pause or deadline
@@ -446,11 +447,14 @@ instance, 4 handles) stay within 2 KiB and 3 KiB; a native result larger than th
 size, sha256 and `incomplete: true`, with the full result only in the live reply and `agent.receipt`. L8 at the
 durable budget, after GC, operation-window eviction and alias growth: a new send with an available window slot is
 refused `quota`, cached only below the content ceiling, otherwise returned live with `uncached: true`
-and a new window after closing the old epoch; content saturation must not instead yield pre-evaluation `busy`. Flood a
-73-agent workspace with 2,600 `no_grant` refusals from an ungranted principal: refusals consume neither normal
+and a fenced op id; only a full fence ring closes the epoch and advertises a new window. Content saturation must not
+instead yield pre-evaluation `busy`. Flood a
+73-agent workspace with 2,600 `no_grant` refusals from an ungranted principal: result caching consumes neither normal
 control-intent headroom nor recovery reserve;
 the owner's workspace pause plus resume and existing archive funding/escrow remain usable. For an uncached refusal,
-repeat the old id after grants/capacity change: `expired_operation`, never re-created. A late native
+repeat the old id after grants/capacity change, ring overflow and restart: `expired_operation`, never re-created.
+Run a concurrent refusal flood with30 owner pause/resume pairs: all owner calls are accepted, or any misses have a
+bounded, documented rate tied to the ring size, not epoch churn on every refusal. A late native
 reply to an already admitted record still records its outcome (its space was reserved at admission); agent
 registration still succeeds; an explicit `coord.inbox.archive` exports and frees space. L9 an explicit `retire` of a
 disconnected agent shows `retired` with native execution unknown, never `ended`; routing stops; later end evidence
