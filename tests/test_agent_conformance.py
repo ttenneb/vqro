@@ -568,22 +568,54 @@ class CausalItemWitnessTests(unittest.TestCase):
         from agent_conformance.cases import inserted_causality_witness
         item = (("message", "native-m1"), {"role": "user", "content": [], "final": True})
         for strength in ("none", "acceptance"):
-            self.assertTrue(inserted_causality_witness(strength, [item])["no_attribution_inferred"])
-        with self.assertRaises(CheckFailed): inserted_causality_witness("none", [])
+            self.assertTrue(inserted_causality_witness(strength, [item], [])["no_attribution_inferred"])
+        with self.assertRaises(CheckFailed): inserted_causality_witness("none", [], [])
         with self.assertRaises(CheckFailed):
-            inserted_causality_witness("none", [(("message", "m1"), {"role": "user", "final": False})])
+            inserted_causality_witness("none", [(("message", "m1"), {"role": "user", "content": [], "final": False})], [])
 
     def test_receipt_echo_cannot_hide_wrong_or_inferred_message_cause(self):
         from agent_conformance.cases import inserted_causality_witness
         for link in ({"cause": {"kind": "effect", "id": "wrong", "provenance": "inferred"}},
                      {"delivery": "guessed-from-text"}, {"correlation": "guessed-from-order"}):
             with self.subTest(link=link), self.assertRaises(CheckFailed):
-                inserted_causality_witness("none", [(("message", "m1"), {"role": "user", "final": True, **link})])
+                inserted_causality_witness("none", [(("message", "m1"), {"role": "user", "content": [], "final": True, **link})], [])
 
     def test_declared_native_correlation_needs_a_genuine_native_id_fixture(self):
         from agent_conformance.cases import inserted_causality_witness
         with self.assertRaises(HarnessGap):
-            inserted_causality_witness("native", [(("message", "m1"), {"delivery": "d1"})])
+            inserted_causality_witness("native", [(("message", "m1"), {"delivery": "d1"})], [])
+
+    def test_unrelated_final_item_cannot_witness_this_send(self):
+        from agent_conformance.cases import inserted_causality_witness
+        expected = [{"type": "text", "text": "our native insertion"}]
+        unrelated = (("message", "other"), {"role": "user", "final": True,
+                                            "content": [{"type": "text", "text": "another sender"}]})
+        with self.assertRaisesRegex(CheckFailed, "matching its native insertion"):
+            inserted_causality_witness("none", [unrelated], expected)
+        ours = (("message", "ours"), {"role": "user", "final": True, "content": expected})
+        result = inserted_causality_witness("none", [unrelated, ours], expected)
+        self.assertEqual(result["items"], [["message", "ours"]])
+        self.assertTrue(result["native_link_unprovable"])
+
+    def test_partial_or_duplicate_payload_match_is_not_unambiguous(self):
+        from agent_conformance.cases import inserted_causality_witness
+        expected = [{"type": "text", "text": "exact native body"}]
+        partial = (("message", "p"), {"role": "user", "final": False, "content": expected})
+        first = (("message", "a"), {"role": "user", "final": True, "content": expected})
+        second = (("message", "b"), {"role": "user", "final": True, "content": expected})
+        for candidates in ([partial], [first, second]):
+            with self.subTest(candidates=candidates), self.assertRaises(CheckFailed):
+                inserted_causality_witness("acceptance", candidates, expected)
+
+    def test_native_content_witness_preserves_framing_and_block_order(self):
+        from agent_conformance.cases import native_insertion_content, inserted_causality_witness
+        expected = [{"type": "text", "text": "sender header"}, {"type": "text", "text": "literal body"}]
+        self.assertIs(native_insertion_content({"content": expected}), expected)
+        self.assertEqual(native_insertion_content({"text": "framed body"}), [{"type": "text", "text": "framed body"}])
+        with self.assertRaises(HarnessGap): native_insertion_content({"texts": ["not the canonical witness"]})
+        for wrong in (list(reversed(expected)), [{"type": "text", "text": "sender headerliteral body"}]):
+            with self.subTest(wrong=wrong), self.assertRaises(CheckFailed):
+                inserted_causality_witness("none", [(("message", "m"), {"role": "user", "final": True, "content": wrong})], expected)
 
 
 class CommandWitnessTests(unittest.TestCase):

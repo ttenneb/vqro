@@ -298,15 +298,26 @@ async def literal_text(ctx):
         check(all(r.get("operation") == "send" for r in ctx.native.writes(mark)), "text caused an extra native control effect")
 
 
-def inserted_causality_witness(strength, messages):
+def native_insertion_content(record):
+    content = record.get("content")
+    if isinstance(content, list):
+        return content
+    if isinstance(record.get("text"), str):
+        return [{"type": "text", "text": record["text"]}]
+    raise HarnessGap("C9 native insertion lacks its independent content witness")
+
+
+def inserted_causality_witness(strength, messages, native_content):
     check(messages, "causal send had no observed inserted user item")
     if strength not in ("none", "acceptance"):
         raise HarnessGap("C9 correlated insertion needs its native message-id witness fixture")
-    for key, value in messages:
-        check(value.get("final") is True, "inserted causality was checked before native user-item completion")
-        check(all(field not in value for field in ("cause", "delivery", "correlation")),
-              "uncorrelated native insertion gained an inferred delivery/cause/thread link")
-    return {"correlation": strength, "items": [list(key) for key, _ in messages],
+    matching = [(key, value) for key, value in messages
+                if value.get("final") is True and value.get("content") == native_content]
+    check(len(matching) == 1, "causal send needs exactly one final item matching its native insertion content")
+    check(all(field not in matching[0][1] for field in ("cause", "delivery", "correlation")),
+          "uncorrelated native insertion gained an inferred delivery/cause/thread link")
+    return {"correlation": strength, "items": [list(key) for key, _ in matching],
+            "content_match": "exact independent native insertion; not attribution",
             "native_link_unprovable": True, "no_attribution_inferred": True}
 
 
@@ -318,7 +329,8 @@ async def causal_echo(ctx, cause):
     previous = {key for key, row in view.reducer.entities.items() if key[0] == "message" and row["value"].get("role") == "user"}
     mark = ctx.native.mark()
     correlation = "C9-caller-thread"
-    result = await ctx.send("C9-qualified-cause", cause=cause, correlation=correlation)
+    content = [{"type": "text", "text": "C9-qualified-cause:" + ctx.delivery()}]
+    result = await ctx.send(content[0]["text"], content=content, cause=cause, correlation=correlation)
     receipt = accepted(result)
     event = (await audit_fence(ctx, result))["data"]
     ctx.evidence.append({"kind": "causality_echo", "expected": cause, "receipt": receipt, "effect_event": event})
@@ -329,11 +341,15 @@ async def causal_echo(ctx, cause):
     await ctx.native.wait(lambda rows: any(row["seq"] > mark and row["kind"] == "inserted" for row in rows))
     inserted = ctx.native.records("inserted", after=mark)
     check(len(inserted) == 1, "causal send was not inserted exactly once", component="fixture")
-    await ctx.wait_view(view, lambda reducer: any(key not in previous and key[0] == "message" and row["value"].get("role") == "user" and row["value"].get("final") is True
+    native_content = native_insertion_content(inserted[0])
+    framed = any(row.get("frame") == "sender_header" for row in declaration.get("origin", []))
+    compare_content(content, native_content, sender_header=framed)
+    await ctx.wait_view(view, lambda reducer: any(key not in previous and key[0] == "message" and row["value"].get("role") == "user"
+                                               and row["value"].get("final") is True and row["value"].get("content") == native_content
                                                for key, row in reducer.entities.items()))
     messages = [(key, row["value"]) for key, row in view.reducer.entities.items()
                 if key not in previous and key[0] == "message" and row["value"].get("role") == "user"]
-    witness = inserted_causality_witness(declaration.get("correlation"), messages)
+    witness = inserted_causality_witness(declaration.get("correlation"), messages, native_content)
     ctx.evidence.append({"kind": "inserted_causality", "native_insertion": inserted[0],
                          "asserted_cause": cause, "receipt_delivery": receipt["delivery"], **witness})
     return receipt["cause"]
