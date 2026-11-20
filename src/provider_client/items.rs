@@ -47,6 +47,23 @@ impl JournalConfig {
     }
 }
 
+/// What a snapshot claims to contain (agent-v0 §4 `coverage`). `tail` and `state_only` are never shown as complete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Coverage {
+    /// Every entity the adapter retains (the default).
+    AllRetained,
+    /// Only the recent part: older entities were pruned or native history is missing.
+    Tail,
+    /// Current state only (state, pending requests), no timeline.
+    StateOnly,
+}
+
+impl Coverage {
+    pub fn as_str(self) -> &'static str {
+        match self { Coverage::AllRetained => "all_retained", Coverage::Tail => "tail", Coverage::StateOnly => "state_only" }
+    }
+}
+
 struct Entity {
     rev: u64,
     value: Value,
@@ -62,6 +79,7 @@ pub struct ItemJournal {
     log_bytes: usize,
     entities: BTreeMap<(String, String), Entity>,
     entity_bytes: usize,
+    coverage: Coverage,
 }
 
 fn line(v: &Value) -> Vec<u8> {
@@ -83,7 +101,7 @@ fn string_at<'a>(value: &'a mut Value, field: &str) -> Result<&'a mut String, Pr
 
 impl ItemJournal {
     pub fn new(epoch: impl Into<String>, cfg: JournalConfig) -> Self {
-        ItemJournal { cfg, epoch: epoch.into(), seq: 0, log: VecDeque::new(), log_bytes: 0, entities: BTreeMap::new(), entity_bytes: 0 }
+        ItemJournal { cfg, epoch: epoch.into(), seq: 0, log: VecDeque::new(), log_bytes: 0, entities: BTreeMap::new(), entity_bytes: 0, coverage: Coverage::AllRetained }
     }
     pub fn epoch(&self) -> &str { &self.epoch }
     /// The last emitted `seq` (0 before any record in this epoch).
@@ -111,6 +129,26 @@ impl ItemJournal {
         self.log_bytes = 0;
         self.entities.clear();
         self.entity_bytes = 0;
+        self.coverage = Coverage::AllRetained;
+    }
+
+    /// What snapshots claim to contain from now on. Set `Tail` when native history is missing, `StateOnly` when only
+    /// current state is known. Reset to `AllRetained` by [`ItemJournal::new_epoch`].
+    pub fn set_coverage(&mut self, coverage: Coverage) { self.coverage = coverage; }
+    pub fn coverage(&self) -> Coverage { self.coverage }
+
+    /// Drop an old entity from what snapshots contain, without a `remove` record: viewers that already have it keep
+    /// it, later snapshots omit it, and coverage becomes `tail` (unless already `state_only`). Use it to stay under
+    /// the entity bounds; never for current state or pending requests (they must survive pruning).
+    pub fn prune(&mut self, kind: &str, id: &str) -> bool {
+        match self.entities.remove(&(kind.to_string(), id.to_string())) {
+            Some(e) => {
+                self.entity_bytes -= e.bytes;
+                if self.coverage == Coverage::AllRetained { self.coverage = Coverage::Tail; }
+                true
+            }
+            None => false,
+        }
     }
 
     fn check_ids(kind: &str, id: &str) -> Result<(), ProviderError> {
@@ -191,6 +229,9 @@ impl ItemJournal {
         let mut record = json!({"op": "append", "seq": 0, "kind": kind, "id": id, "base": base, "rev": base + 1, "field": field});
         for (k, v) in payload.as_object().unwrap() { record[k] = v.clone(); }
         self.fits(&record)?;
+        // The resulting entity is sent whole as a snapshot put: it must fit the record bound too, or a snapshot
+        // would carry an oversized line after many small appends.
+        self.fits(&json!({"op": "put", "seq": 0, "kind": kind, "id": id, "rev": base + 1, "value": value}))?;
         let bytes = serde_json::to_vec(&value).map(|v| v.len()).unwrap_or(0);
         self.charge(old, bytes)?;
         self.entity_bytes = self.entity_bytes - old + bytes;
@@ -212,7 +253,7 @@ impl ItemJournal {
 
     /// One serialized cut: `snapshot begin`, a `put` per entity (no `seq`), `snapshot end {seq}`.
     pub fn snapshot(&self) -> Vec<u8> {
-        let mut out = line(&json!({"op": "snapshot", "phase": "begin", "epoch": self.epoch, "coverage": "all_retained"}));
+        let mut out = line(&json!({"op": "snapshot", "phase": "begin", "epoch": self.epoch, "coverage": self.coverage.as_str()}));
         for ((kind, id), e) in &self.entities {
             out.extend(line(&json!({"op": "put", "kind": kind, "id": id, "rev": e.rev, "value": e.value})));
         }
@@ -629,6 +670,46 @@ mod tests {
         for i in 0..200 { j.put("m", &format!("i{}", i % 5), json!({"text": "z".repeat(100)})).unwrap(); }
         assert!(j.retained_bytes() <= 2048);
         assert!(j.first_retained() > 1);
+    }
+
+    #[test]
+    fn appends_never_grow_an_entity_past_one_snapshot_record() {
+        let mut j = ItemJournal::new("e1", JournalConfig::default());
+        j.put("message", "m", json!({"text": ""})).unwrap();
+        let chunk = "x".repeat(1000);
+        let mut refused = None;
+        for n in 0..100 {
+            if let Err(e) = j.append_text("message", "m", "/text", &chunk) { refused = Some((n, e.kind)); break; }
+        }
+        let (n, kind) = refused.expect("small appends must not grow an entity without bound");
+        assert_eq!(kind, "too_large");
+        assert!(n > 50 && n < 66, "refused at {n} KiB");
+        // Every line of a snapshot, the entity's whole put included, stays within 64 KiB.
+        assert!(j.snapshot().split(|b| *b == b'\n').all(|l| l.len() + 1 <= 64 * 1024));
+    }
+
+    #[test]
+    fn coverage_is_declared_and_pruning_marks_the_snapshot_tail() {
+        let mut j = ItemJournal::new("e1", JournalConfig::default());
+        j.put("state", "current", json!({"state": "idle"})).unwrap();
+        j.put("message", "old", json!({"text": "a"})).unwrap();
+        let begin = |j: &ItemJournal| -> Value { serde_json::from_slice(j.snapshot().split(|b| *b == b'\n').next().unwrap()).unwrap() };
+        assert_eq!(begin(&j)["coverage"], "all_retained");
+        let (mut live, mut salt) = (ItemView::new(), 3u64);
+        let mut c = j.open(None);
+        drain(&mut c, &j, &mut live, &mut salt);
+        assert!(j.prune("message", "old"));
+        assert_eq!(begin(&j)["coverage"], "tail");
+        assert!(j.entity("message", "old").is_none());
+        // A live viewer keeps what it has (no remove was emitted); a new viewer gets the tail without it.
+        assert!(live.entity("message", "old").is_some());
+        let mut fresh = ItemView::new();
+        fresh.feed(&j.snapshot());
+        assert!(fresh.entity("message", "old").is_none() && fresh.entity("state", "current").is_some());
+        j.set_coverage(Coverage::StateOnly);
+        assert_eq!(begin(&j)["coverage"], "state_only");
+        j.new_epoch("e2");
+        assert_eq!(j.coverage(), Coverage::AllRetained);
     }
 
     #[test]
