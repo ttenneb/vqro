@@ -46,17 +46,26 @@ class SettingsTests(unittest.TestCase):
         module=load();ext=module["ext"]
         page=ext.published["settings"]["pages"][0]
         self.assertEqual(page["list_detail"]["requires"],["list_detail"])
-        rows=[r for group in page["items"] for r in group["children"]]
+        rows=page["items"]
         self.assertEqual(len(rows),4)
         for row in rows:
             self.assertEqual(row["type"],"toggle")
             self.assertNotIn("disabled",row)
-            self.assertEqual(row["description"],"A searchable summary")
-            self.assertEqual(row["detail_panel"]["items"][0]["text"],"Readable even while not running")
+            self.assertNotIn("description",row,"one dense line per extension");self.assertEqual(row["summary"],"A searchable summary")
+            about=[r.get("text") for r in row["detail_panel"]["pages"][0]["items"]]
+            self.assertIn("Readable even while not running",about[:2])
+            if row["id"]=="extension/broken":self.assertEqual(about[0],"Failed: fixture failure (Runtime has the exit history)")
         own=next(r for r in rows if r["id"]=="extension/settings")
         self.assertEqual(own["command"],"vqro.extension.disable")
         third=next(r for r in rows if r["id"]=="extension/third-party")
         self.assertEqual(third["detail_panel"]["toolbar"][0]["chips"][-1]["command"],"demo.configure")
+        self.assertEqual(rows[0]["columns"],[rows[0]["text"].split(" (")[0],rows[0]["id"].split("/")[1],"interface"])
+        self.assertEqual(set(rows[0]["facets"]),{"status","kind"});self.assertEqual(set(rows[0]["sort"]),{"name","id","kind","status"})
+        self.assertEqual([f["key"] for f in page["facets"]],["status","kind"]);self.assertEqual([s["key"] for s in page["sorts"]],["name","status","id","kind"])
+        self.assertEqual([c.get("label") for c in page["columns"]],["extension","id","kind"])
+        detail=rows[0]["detail_panel"]
+        self.assertEqual([p["title"].split(" ")[0] for p in detail["pages"]],["About","Needs","Used","Provides","Runtime"])
+        self.assertIn({"key":"kind","label":"Show"},next(p for p in detail["pages"] if p["title"].startswith("Provides"))["facets"])
         off=next(r for r in rows if r["id"]=="extension/off")
         self.assertEqual(off["badges"][0]["text"],"off")
         self.assertEqual(off["command"],"vqro.extension.enable")
@@ -84,17 +93,17 @@ class SettingsTests(unittest.TestCase):
         module=load();ext=module["ext"]
         ext.states["broken"].update(crashes=0,crashes_total=7,crash_window_seconds=300)
         groups=module["ext_rows"](ext.states,{"demo.configure"})
-        broken=next(row for group in groups for row in group["children"] if row["id"]=="extension/broken")
+        broken=next(row for row in groups if row["id"]=="extension/broken")
         text=str(broken["detail_panel"])
-        self.assertIn("Recent crashes (last 300 s): 0",text)
-        self.assertIn("Total crashes this supervision: 7",text)
+        self.assertIn("Crashes (300 s): 0",text)
+        self.assertIn("Total crashes: 7",text)
         self.assertIn("fixture failure",text,"last-exit history remains available even when no recent crashes remain")
 
     def test_safe_mode_actions_use_session_allowance_not_saved_enabled(self):
         module=load();ext=module["ext"]
         ext.states["off"].update(safe_mode=True,allowed_in_safe_mode=False,display_status="off")
         groups=module["ext_rows"](ext.states,{"demo.configure"})
-        row=next(r for g in groups for r in g["children"] if r["id"]=="extension/off")
+        row=next(r for r in groups if r["id"]=="extension/off")
         self.assertEqual(row["command"],"vqro.safe_mode.allow")
         self.assertEqual(row["args"],{"name":"off","on":True})
         self.assertIn("normal enabled declaration is unchanged",str(row["detail_panel"]))
@@ -104,7 +113,7 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("provider",ext.event_types,"handler must actually receive provider-only changes")
         ext.states["third-party"].update(status="running",display_status="provider-not-connected")
         module["on_event"]("provider",{"name":"different-provider-name","state":{"connected":False}})
-        rows=[row for group in ext.published["settings"]["pages"][0]["items"] for row in group["children"]]
+        rows=ext.published["settings"]["pages"][0]["items"]
         row=next(row for row in rows if row["id"]=="extension/third-party")
         self.assertEqual(row["badges"],[{"text":"provider-not-connected","style":"warn"}])
         self.assertIn("Process: running",str(row["detail_panel"]))
@@ -150,9 +159,9 @@ class SettingsTests(unittest.TestCase):
             failure={"kind":"crash_budget","at_ms":at,"reason":"3 exits in 300 seconds","crashes":3,"window_seconds":300},
             last_exits=[{"at_ms":at-i*1000,"reason":f"exit-{i}"} for i in range(3)])
         groups=module["ext_rows"](ext.states,set())
-        row=next(r for group in groups for r in group["children"] if r["id"]=="extension/broken")
+        row=next(r for r in groups if r["id"]=="extension/broken")
         details=str(row["detail_panel"])
-        for text in ("Recent crashes (last 300 s): 0","Total crashes this supervision: 3","At failure: 3 exits",
+        for text in ("Crashes (300 s): 0","Total crashes: 3","At failure: 3 exits",
                      module["time_text"](at),"exit-2","Stopped until explicitly restarted","built-in failed/recover"):
             self.assertIn(text,details)
         action=next(c for c in row["detail_panel"]["toolbar"][0]["chips"] if c["command"]=="vqro.extension.restart")
@@ -173,7 +182,7 @@ class SettingsTests(unittest.TestCase):
         for user in ("third-party","settings"):
             ext.states[user]["dependencies"]={"status":"ok","needs":[],"works_with":[],"used_by":[]}
             ext.states[user]["dependencies"]["needs" if user=="third-party" else "works_with"]=[dict(need,status="satisfied")]
-        rows={r["id"]:r for g in module["ext_rows"](ext.states,set()) for r in g["children"]}
+        rows={r["id"]:r for r in module["ext_rows"](ext.states,set())}
         return module,ext,rows
 
     def test_turning_on_offers_needed_providers_in_one_confirmation(self):
@@ -185,7 +194,7 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("still needs gpu (not installed)",row["options"][1]["label"])
         self.assertIn({"text":"needs Tabs (off)","style":"warn"},row["badges"])
         detail=str(row["detail_panel"])
-        for text in ("'Needs'","Tabs: command/tabs.show (off) · opens panels","gpu: ability/x.gpu (not installed)","Client features missing in: text"):
+        for text in ("'Needs 2'","Tabs: command/tabs.show (off) · opens panels","gpu: ability/x.gpu (not installed)","Client features missing in: text"):
             self.assertIn(text,detail)
         chip=row["detail_panel"]["toolbar"][0]["chips"][0]
         self.assertEqual((chip["command"],chip["options"]),("settings.switch",row["options"]))
@@ -204,20 +213,43 @@ class SettingsTests(unittest.TestCase):
     def test_turning_off_warns_what_breaks_and_extensions_without_dependencies_switch_directly(self):
         module,ext,rows=self.dependency_fixture()
         ext.states["tabs"]["display_status"]="running";ext.entries["extension/tabs"]["value"]["enabled"]=True
-        rows={r["id"]:r for g in module["ext_rows"](ext.states,set()) for r in g["children"]}
+        rows={r["id"]:r for r in module["ext_rows"](ext.states,set())}
         row=rows["extension/tabs"]
         self.assertEqual(row["options"],[{"label":"Turn off Tabs: breaks Third-Party; limits Settings","value":"off"},{"label":"Cancel","value":"cancel"}])
         self.assertIn("Third-Party needs command/tabs.show (running)",str(row["detail_panel"]))
-        self.assertIn("command/tabs.show",str(row["detail_panel"]).split("'Provides'")[1])
+        self.assertIn("command/tabs.show",str(row["detail_panel"]).split("'Provides 1'")[1])
         module["switch"]({"name":"tabs","on":False,"value":"off"})
         self.assertEqual(ext.invoked,[("vqro.extension.disable",{"name":"tabs"})])
         self.assertEqual(rows["extension/broken"]["command"],"vqro.extension.disable")
         self.assertNotIn("options",rows["extension/broken"])
         # Only optional users left: they lose extras (shown under Used by), so no confirmation.
         ext.states["third-party"]["display_status"]="off"
-        rows={r["id"]:r for g in module["ext_rows"](ext.states,set()) for r in g["children"]}
+        rows={r["id"]:r for r in module["ext_rows"](ext.states,set())}
         self.assertEqual(rows["extension/tabs"]["command"],"vqro.extension.disable")
         self.assertNotIn("options",rows["extension/tabs"])
+
+    def test_sections_are_lists_with_facets_sorts_and_columns(self):
+        module,ext,rows=self.dependency_fixture()
+        ext.states["tabs"]["manifest"]["provides"]=["command/tabs.show","data/tabs","view/tab-*"]
+        rows={r["id"]:r for r in module["ext_rows"](ext.states,set())}
+        pages={p["title"].rsplit(" ",1)[0] if p["title"][-1].isdigit() else p["title"]:p for p in rows["extension/tabs"]["detail_panel"]["pages"]}
+        provides=pages["Provides"]
+        self.assertEqual(provides["title"],"Provides 3")
+        self.assertEqual([(r["columns"],r["facets"]["kind"]) for r in provides["items"]],
+                         [(["command","tabs.show"],"command"),(["data","tabs"],"data"),(["view","tab-*"],"view")])
+        used=pages["Used by"]
+        self.assertEqual(used["title"],"Used by 3")
+        self.assertEqual(sorted(r["facets"]["relation"] for r in used["items"]),["needs","needs","works with"])
+        needs={p["title"].rsplit(" ",1)[0]:p for p in rows["extension/off"]["detail_panel"]["pages"]}["Needs"]
+        self.assertEqual([(r["columns"][:3],r["facets"]) for r in needs["items"] if "facets" in r],
+                         [(["Tabs","command/tabs.show","needs"],{"relation":"needs","status":"off"}),
+                          (["gpu","ability/x.gpu","needs"],{"relation":"needs","status":"not installed"})])
+        runtime=pages["Runtime"]
+        self.assertEqual(runtime["items"][0]["columns"],["Status","off"])
+        # The kind groups stay one switch away (the human's grouping choice).
+        module["ext_rows"].__globals__["GROUP_BY_KIND"]=True
+        grouped=module["ext_rows"](ext.states,set())
+        self.assertEqual(grouped[0]["type"],"header");self.assertEqual(len(grouped[0]["children"][0]["columns"]),2)
 
     def test_builtins_have_complete_readable_manifests(self):
         import json

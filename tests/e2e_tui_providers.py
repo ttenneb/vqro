@@ -168,8 +168,11 @@ try:
     keys("C-g", ",")
     check("catalogue opens before typing its search", bool(wait(lambda:f"{BUILTIN_COUNT} of {BUILTIN_COUNT}" in screen() and "Agent controls" in screen())))
     keys("/"); keys("herdr", literal=True); keys("Enter")
+    # The detail's Runtime section (`[` from About wraps to the last section) shows the process separately.
+    keys("Tab", "[")
     check("catalogue separates disconnected provider from running process", bool(wait(lambda:
-        "provider-not-connected" in screen() and "Process: running" in screen())))
+        "provider-not-connected" in screen() and "Process" in screen() and "running" in screen().split("Process", 1)[1][:40])), screen())
+    keys("BTab")
     call("workspace.apply", {"ops":[{"op":"set","key":"extension/herdr","value":saved_herdr}]})
     check("backend notice and catalogue recover without reopening settings", bool(wait(lambda:
         call("extension.list")["extensions"]["herdr"]["display_status"] == "running" and
@@ -200,7 +203,7 @@ try:
     check("Home End and paging retain catalogue", bool(wait(lambda: f"{BUILTIN_COUNT} of {BUILTIN_COUNT}" in screen())))
     # Dependencies: turning off a needed extension warns once; turning on one with an off need offers it too.
     keys("/"); keys("tabs", literal=True); keys("Enter")
-    wait(lambda: f"1 of {BUILTIN_COUNT}" in screen() and "[x] Tabs (tabs)" in screen())
+    wait(lambda: f"1 of {BUILTIN_COUNT}" in screen() and "[x] Tabs" in screen())  # one dense row: title, id and kind columns
     keys("Space")
     check("turning off a needed extension warns what breaks", bool(wait(lambda: "Turn off Tabs: breaks" in screen() and "Sidebar" in screen())), screen())
     print("CAPTURE dependency-warning\n" + screen(), flush=True)
@@ -211,10 +214,12 @@ try:
     # The sidebar needs tabs.show (workspaces only works with tabs.open since each workspace has its own tabs).
     check("core reports the dependent's missing need", bool(wait(lambda: call("extension.list")["extensions"]["sidebar"]["dependencies"]["status"] == "missing")))
     keys("/"); keys("Escape"); keys("/"); keys("sidebar", literal=True); keys("Enter")
+    # The detail's Needs section lists each need as a row: provider, capability, relation, and its status chip.
+    keys("Tab", "]")
     check("dependents show a needs badge and the need in detail", bool(wait(lambda: f"1 of {BUILTIN_COUNT}" in screen() and "needs Tabs (off)" in screen()
-        and "Tabs: command/tabs.show (off)" in screen())), screen())
-    keys("Tab")  # detail: the Turn off chip is first; turn the sidebar off directly (nothing needs it)
-    keys("Enter")
+        and any("Tabs" in line and "command/tabs.show" in line and " off " in line for line in screen().splitlines()))), screen())
+    print("CAPTURE extension-needs\n" + screen(), flush=True)
+    keys("Enter")  # still in the detail: the Turn off chip is first; turn the sidebar off directly (nothing needs it)
     check("an extension nobody needs turns off without a warning", bool(wait(lambda: call("extension.list")["extensions"]["sidebar"]["display_status"] == "off")))
     check("Sidebar off state is rendered before toggling it back on", bool(wait(lambda: "[ ] Sidebar" in screen())))
     keys("BTab"); time.sleep(.3); keys("Space")
@@ -249,8 +254,8 @@ try:
     keys("Space")
     check("keyboard turns extension off", bool(wait(lambda: call("extension.list")["extensions"]["icons"]["display_status"] == "off")))
     check("disabled extension keeps static description", bool(wait(lambda: "saved icon set remains" in screen())))
-    wait(lambda: "[ ] Icons (icons)" in screen())
-    icon_row = next((i, line) for i, line in enumerate(screen().splitlines()) if "[ ] Icons (icons)" in line)
+    wait(lambda: "[ ] Icons" in screen())
+    icon_row = next((i, line) for i, line in enumerate(screen().splitlines()) if "[ ] Icons" in line)
     x = icon_row[1].index("[ ]") + 2; y = icon_row[0] + 1
     keys(f"\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m", literal=True)
     check("mouse checkbox turns extension on", bool(wait(lambda: call("extension.list")["extensions"]["icons"]["display_status"] == "running")))

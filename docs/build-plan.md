@@ -551,3 +551,18 @@ settings; the switches in both the sidebar's Show popup and Settings.
 - Tests: `tests/test_sidebar_tree.py` (every level combination, worktree options, one state, compaction,
   search), settings page test, TUI e2e `tests/e2e_tui_sidebar_tree.py`, updated `e2e_sidebar_scale` (collapsed
   rows, search) and `pi_provider_e2e` (agent is a pane of its tab).
+
+- Tests: `tests/test_sidebar_tree.py` (every level combination, worktree options, one state), settings page test,
+  updated `e2e_sidebar_scale` (row count) and `pi_provider_e2e` (agent is a pane of its tab).
+
+## Settings › Extensions: dense list, structured detail (2026-11-20)
+
+Human request: denser list without descriptions; the detail's information as proper paged lists with filters and
+sorts. Answers: section tabs, an id column, per-window choices (not saved), columns now; grouping pending.
+- Generic panel pieces (core-protocol.md, "Facets, sort and columns"; D29): `facets` (client-drawn Show line with
+  counts), `sorts` (stable, per sibling list, headers stay), `columns` (aligned cells, header line), all per-window
+  view state in the client model (Rust, Python, OpenTUI) with `panels.json` fixtures; the focused list_detail pane
+  is a full panel (its own pages, `/` filter, `f`/`s`, footer; `client.panel {pane?}`).
+- Settings: one dense row per extension (title, id, kind columns, status chip; Show by status and kind; sort by
+  name, status, id, kind); the detail has section pages About · Needs n · Used by n · Provides n · Runtime, each a
+  list with columns and, where useful, Show and Sort. `GROUP_BY_KIND` switches to kind groups (pending answer).

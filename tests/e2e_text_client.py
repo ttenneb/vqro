@@ -75,7 +75,8 @@ try:
     check("contributed menus resolve for the focused pane", "Rename tab" in out and "Close tab" in out, out)
     # Settings through its own command, then the dependency warning as pick-one options (D29).
     out = text("run settings.open; filter tabs")
-    check("a popup reply shows the panel", "== Settings" in out and "Tabs (tabs)" in out, out)
+    # One dense row per extension: title, id and kind as columns (feature columns).
+    check("a popup reply shows the panel", "== Settings" in out and any("Tabs" in l and " tabs " in l for l in out.splitlines()), out)
     check("turning off a needed extension is offered as one confirmation", "Turn off Tabs: breaks" in out, out)
     out = text("run settings.open; filter tabs; do 1 2")
     check("cancel switches nothing", call("extension.list")["extensions"]["tabs"]["display_status"] == "running", out)

@@ -200,45 +200,142 @@ def switch_options(states, name, on, deps):
     return [{"label": f"Turn off {title}: " + "; ".join(what), "value": "off"}, {"label": "Cancel", "value": "cancel"}]
 
 
-def dependency_details(states, name, deps):
-    """Needs / Works with / Used by / Provides sections for the detail panel."""
+# Extensions page: a dense list (one row per extension: checkbox, title, id, kind, status chip) and a detail with
+# section pages, each a list with Show (facets) and Sort where useful (core-protocol.md, "Facets, sort and
+# columns"). All choices are per-window client state; nothing here is saved.
+GROUP_BY_KIND = False  # the human's choice (pending): False = flat list with a Kind column, True = kind groups
+STATUS_ORDER = {"failed": 0, "provider-not-connected": 1, "starting": 2, "stopped-by-safe-mode": 3, "off": 4, "running": 5}
+
+
+def kv(key, value, style=None):
+    """A key: value fact as a two-column row (plain `key: value` text in clients without columns)."""
+    value = label(str(value), 4096)
+    row = {"id": "kv/" + key, "text": f"{key}: {value}", "columns": [key, value]}
+    if style:
+        row["style"] = style
+    return row
+
+
+def section(title, items, facets=None, sorts=None, columns=None, count=None):
+    page = {"title": title if count is None else f"{title} {count}", "items": items or [info_row("None.", "dim")]}
+    if facets:
+        page["facets"] = facets
+    if sorts:
+        page["sorts"] = sorts
+    if columns:
+        page["columns"] = columns
+    return page
+
+
+KV_COLUMNS = [{"width": 14}, {"width": "fill"}]
+
+
+def needs_page(states, deps):
     rows = []
-    if not isinstance(deps, dict):
-        return rows
-    for field, heading in (("needs", "Needs"), ("works_with", "Works with")):
-        items = [n for n in deps.get(field) or [] if isinstance(n, dict) and not str(n.get("cap", "")).startswith("ui/")]
-        if not items:
+    if isinstance(deps, dict):
+        for field, relation in (("needs", "needs"), ("works_with", "works with")):
+            for n in deps.get(field) or []:
+                if not isinstance(n, dict) or str(n.get("cap", "")).startswith("ui/"):
+                    continue
+                status = NEED_TEXT.get(n.get("status"), label(n.get("status") or "?"))
+                who, cap = need_who(states, n), label(n.get("cap", "?"))
+                note = n.get("why") or (n.get("without") and "without it: " + n["without"]) or ""
+                rows.append({"text": f"{who}: {cap} ({status})" + (" · " + label(note, 512) if note else ""),
+                             "columns": [who, cap, relation, label(note, 512)],
+                             "badges": [{"text": status, "style": NEED_STYLE.get(n.get("status"), "dim")}],
+                             "facets": {"relation": relation, "status": status},
+                             "sort": {"provider": who, "capability": cap, "status": STATUS_ORDER.get(n.get("status"), 9)}})
+        ui = [n for n in deps.get("needs") or [] if isinstance(n, dict) and str(n.get("cap", "")).startswith("ui/")]
+        lacking = sorted({c for n in ui for c in n.get("lacking_in") or []})
+        if lacking:
+            rows.append(info_row("Client features missing in: " + ", ".join(label(c) for c in lacking) + " (they show a fallback)", "warn"))
+    count = sum(1 for r in rows if "facets" in r)
+    return section("Needs", rows, [{"key": "relation", "label": "Show"}, {"key": "status", "label": "Status"}],
+                   [{"key": "provider", "label": "provider"}, {"key": "capability", "label": "capability"}, {"key": "status", "label": "status"}],
+                   [{"label": "provider", "width": 18}, {"label": "capability"}, {"label": "relation", "width": 10}, {"label": "why", "width": "fill"}], count)
+
+
+def used_by_page(states, deps):
+    rows = []
+    for u in (deps or {}).get("used_by") or [] if isinstance(deps, dict) else []:
+        user, cap = ext_title(states, u.get("name")), label(u.get("cap", "?"))
+        relation = "needs" if u.get("hard") else "works with"
+        status = u.get("display_status") or "unknown"
+        rows.append({"text": f"{user} {relation} {cap} ({status})", "columns": [user, cap, relation],
+                     "badges": [{"text": status, "style": STATUS_STYLE.get(status, "dim")}],
+                     "facets": {"relation": relation}, "sort": {"extension": user, "capability": cap}})
+    return section("Used by", rows, [{"key": "relation", "label": "Show"}],
+                   [{"key": "extension", "label": "extension"}, {"key": "capability", "label": "capability"}],
+                   [{"label": "extension", "width": 22}, {"label": "capability", "width": "fill"}, {"label": "relation", "width": 10}], len(rows))
+
+
+def provides_page(manifest):
+    rows = []
+    for cap in manifest.get("provides") or [] if isinstance(manifest.get("provides"), list) else []:
+        if not isinstance(cap, str):
             continue
-        rows.append({"type": "header", "text": heading})
-        for n in items:
-            status = n.get("status")
-            text = f"{need_who(states, n)}: {label(n.get('cap', '?'))} ({NEED_TEXT.get(status, label(status or '?'))})"
-            note = n.get("why") or (n.get("without") and "without it: " + n["without"])
-            rows.append(info_row(text + (" · " + label(note, 512) if note else ""), NEED_STYLE.get(status)))
-    ui = [n for n in deps.get("needs") or [] if isinstance(n, dict) and str(n.get("cap", "")).startswith("ui/")]
-    lacking = sorted({c for n in ui for c in n.get("lacking_in") or []})
-    if lacking:
-        rows.append(info_row("Client features missing in: " + ", ".join(label(c) for c in lacking) + " (they show a fallback)", "warn"))
-    users = deps.get("used_by") or []
-    if users:
-        rows.append({"type": "header", "text": "Used by"})
-        grouped = {}  # one row per user and kind of use, in first-seen order
-        for u in users:
-            grouped.setdefault((u.get("name"), bool(u.get("hard")), u.get("display_status")), []).append(label(u.get("cap", "?")))
-        for (user, hard, status), caps in grouped.items():
-            kind = "needs" if hard else "works with"
-            rows.append(info_row(f"{ext_title(states, user)} {kind} {', '.join(caps)} ({status or 'unknown'})"))
-    provides = ((states.get(name) or {}).get("manifest") or {}).get("provides")
-    if isinstance(provides, list) and provides:
-        rows += [{"type": "header", "text": "Provides"},
-                 info_row(", ".join(label(p) for p in provides if isinstance(p, str)))]
-    return rows
+        kind, _, name = label(cap).partition("/")
+        rows.append({"text": label(cap), "columns": [kind, name or kind], "facets": {"kind": kind},
+                     "sort": {"kind": f"{kind}/{name}", "name": name or kind}})
+    return section("Provides", rows, [{"key": "kind", "label": "Show"}],
+                   [{"key": "kind", "label": "kind, name"}, {"key": "name", "label": "name"}],
+                   [{"label": "kind", "width": 9}, {"label": "name", "width": "fill"}], len(rows))
+
+
+def runtime_page(state, status):
+    rows = [kv("Status", status, STATUS_STYLE.get(status)), kv("Process", state.get("status", "stopped")),
+            kv(f"Crashes ({state.get('crash_window_seconds', 300)} s)", state.get("crashes", 0)),
+            kv("Total crashes", state.get("crashes_total", "unavailable")),
+            kv("Last exit", state.get("last_exit") or "none recorded")]
+    failure = state.get("failure") or {}
+    if failure:
+        rows += [kv("Failure at", f"{time_text(failure.get('at_ms'))}: {failure.get('reason', 'unknown reason')}", "error"),
+                 kv("At failure", f"{failure.get('crashes', 0)} exits in {failure.get('window_seconds', 300)} s.")]
+    if state.get("status") == "failed":
+        rows.append(info_row("Stopped until explicitly restarted or changed. Use Restart here, or the built-in failed/recover badge and prefix menu; safe mode still controls admission.", "warn"))
+    exits = sorted(state.get("last_exits") or [], key=lambda e: e.get("at_ms") or 0, reverse=True)
+    rows += [kv(f"Exit {time_text(e.get('at_ms'))}", e.get("reason", "unknown"), "dim") for e in exits]
+    rows.append(info_row("Total crashes count this declaration in this core; removal or a core restart resets them.", "dim"))
+    return section("Runtime", rows, columns=[{"width": 22}, {"width": "fill"}])
+
+
+def about_page(name, state, manifest, value, kind, commands, safe):
+    rows = []
+    if state.get("status") == "failed" or state.get("display_status") == "failed":
+        # A failure is shown first, whichever section is open by default; Runtime has the history.
+        reason = (state.get("failure") or {}).get("reason") or state.get("last_exit") or "unknown reason"
+        rows.append(info_row(f"Failed: {reason} (Runtime has the exit history)", "error"))
+    rows.append(info_row(manifest_text(manifest, "description", value.get("description") or "No description provided.")))
+    if safe:
+        rows.append(info_row("Safe-mode session choice only; the normal enabled declaration is unchanged.", "warn"))
+    rows += [kv("Id", name), kv("Kind", kind), kv("Version", manifest_text(manifest, "version", "not provided"))]
+    for field in ("author", "license", "homepage"):
+        if manifest_text(manifest, field):
+            rows.append(kv(field.title(), manifest_text(manifest, field)))
+    rows.append(kv("Source", state.get("manifest_source") or "manifest not provided"))
+    if state.get("manifest_error"):
+        rows.append(kv("Manifest", state["manifest_error"], "warn"))
+    requires = manifest.get("requires")
+    if isinstance(requires, dict):
+        rows.append(kv("Protocol", requires.get("protocol", "not specified")))
+        features = requires.get("client_features")
+        if isinstance(features, list):
+            rows.append(kv("Client features", ", ".join(label(f) for f in features if isinstance(f, str))))
+    log_root = ext.info.get("state_dir")
+    viewer = "View log above" if "logs.open" in commands else "turn on Extension logs to read it here"
+    rows.append(kv("Log", f"{os.path.join(log_root, 'ext-'+name+'.log')} ({viewer})" if log_root else "location unavailable"))
+    contributes = manifest.get("contributes") or {}
+    if isinstance(contributes, dict) and any(isinstance(contributes.get(f), list) and contributes.get(f) for f in contributes):
+        rows.append({"type": "header", "text": "Contributes (manifest summary)", "expanded": True, "children": [
+            {"text": f"{field.replace('_', ' ')}: {label(s)}", "columns": [field.replace("_", " "), label(s)]}
+            for field in ("commands", "keys", "menu_items", "panels", "settings") for s in contributes.get(field) or [] if isinstance(s, str)]})
+    return section("About", rows, columns=KV_COLUMNS)
 
 
 def ext_rows(states, commands=None):
     """All declarations follow the same manifest-driven list/detail contract, including this extension."""
     commands = commands or set()
-    groups = {}
+    rows = []
     for key in sorted(k for k in ext.entries if k.startswith("extension/")):
         name = key.split("/", 1)[1]
         value = ext.value(key) or {}
@@ -249,7 +346,6 @@ def ext_rows(states, commands=None):
         manifest = state.get("manifest") or {}
         kind = manifest_text(manifest, "kind", value.get("kind", "other"))
         title = manifest_text(manifest, "title", name)
-        shown = title if title == name else f"{title} ({name})"
         summary = manifest_text(manifest, "summary", value.get("description") or "No summary provided.").replace("\n", " ")
         status = state.get("display_status") or ("off" if not on else {"running": "running", "failed": "failed", "safe_mode": "stopped-by-safe-mode", "disabled": "off"}.get(state.get("status"), "starting"))
         switch = "vqro.safe_mode.allow" if safe else "vqro.extension.disable" if on else "vqro.extension.enable"
@@ -267,62 +363,40 @@ def ext_rows(states, commands=None):
                             "disabled": status not in ("running", "provider-not-connected") or settings_command not in commands})
         if "logs.open" in commands:  # the logs extension's viewer, when it runs
             actions.append({"text": "View log", "command": "logs.open", "args": {"name": name}})
-        details = [info_row(manifest_text(manifest, "description", value.get("description") or "No description provided.")),
-                   {"type": "header", "text": "Runtime"},
-                   info_row(f"Status: {status}", STATUS_STYLE.get(status)),
-                   info_row(f"Process: {state.get('status', 'stopped')}"),
-                   info_row(f"Recent crashes (last {state.get('crash_window_seconds', 300)} s): {state.get('crashes', 0)}"),
-                   info_row(f"Total crashes this supervision: {state.get('crashes_total', 'unavailable')}"),
-                   info_row("Total is for this declaration in this core; removal or core restart resets it.", "dim"),
-                   info_row(f"Last exit: {state.get('last_exit') or 'none recorded'}")]
-        failure = state.get("failure") or {}
-        if failure:
-            details += [info_row(f"Failure at {time_text(failure.get('at_ms'))}: {failure.get('reason', 'unknown reason')}", "error"),
-                        info_row(f"At failure: {failure.get('crashes', 0)} exits in {failure.get('window_seconds', 300)} s.")]
-        if state.get("status") == "failed":
-            details.append(info_row("Stopped until explicitly restarted or changed. Use Restart here, or the built-in failed/recover badge and prefix menu; safe mode still controls admission.", "warn"))
-        for exit in state.get("last_exits") or []:
-            details.append(info_row(f"Exit {time_text(exit.get('at_ms'))}: {exit.get('reason', 'unknown')}", "dim"))
-        details += [{"type": "header", "text": "About"},
-                   info_row(f"Kind: {kind}"),
-                   info_row(f"Version: {manifest_text(manifest, 'version', 'not provided')}"),
-                   info_row(f"Source: {state.get('manifest_source') or 'manifest not provided'}")]
-        details[1:1] = dependency_details(states, name, deps)
-        if safe:
-            details.insert(1, info_row("Safe-mode session choice only; the normal enabled declaration is unchanged.", "warn"))
-        if state.get("manifest_error"):
-            details.append(info_row(f"Manifest: {state['manifest_error']}", "warn"))
-        for field in ("author", "license", "homepage"):
-            if manifest_text(manifest, field):
-                details.append(info_row(f"{field.title()}: {manifest_text(manifest, field)}"))
-        requires = manifest.get("requires")
-        if isinstance(requires, dict):
-            details.append(info_row(f"Requires protocol: {requires.get('protocol', 'not specified')}"))
-            features = requires.get("client_features")
-            if isinstance(features, list):
-                details.append(info_row("Client features: " + ", ".join(label(f) for f in features if isinstance(f, str))))
-        details.append({"type": "header", "text": "Contributes (manifest summary)"})
-        contributes = manifest.get("contributes") or {}
-        if isinstance(contributes, dict):
-            for field in ("commands", "keys", "menu_items", "panels", "settings"):
-                items = contributes.get(field)
-                if isinstance(items, list) and items:
-                    details.append(info_row(field.replace("_", " ").title() + ": " + ", ".join(label(s) for s in items if isinstance(s, str))))
-        log_root = ext.info.get("state_dir")
-        viewer = "View log above" if "logs.open" in commands else "turn on Extension logs to read it here"
-        details.append(info_row(f"Log: {os.path.join(log_root, 'ext-'+name+'.log')} ({viewer})" if log_root else "Log location unavailable."))
-        groups.setdefault(kind, []).append({"id": "extension/"+name, "type": "toggle", "text": shown,
-            "checked": on, "description": summary, "tags": [name, kind, summary],
+        pages = [about_page(name, state, manifest, value, kind, commands, safe), needs_page(states, deps),
+                 used_by_page(states, deps), provides_page(manifest), runtime_page(state, status)]
+        shown = title if title == name else f"{title} ({name})"
+        # One dense row: no description line (the summary stays searchable through `summary`/`tags`).
+        rows.append({"id": "extension/"+name, "type": "toggle", "text": shown,
+            "columns": [title, name] + ([] if GROUP_BY_KIND else [kind]),
+            "checked": on, "summary": summary, "tags": [name, kind, summary, status],
+            "facets": {"status": status, "kind": kind},
+            "sort": {"name": title.lower(), "id": name, "kind": f"{kind}/{title.lower()}", "status": STATUS_ORDER.get(status, 9)},
             "badges": [{"text": status, "style": STATUS_STYLE.get(status, "dim")}] + [
                 {"text": f"needs {need_who(states, n)} ({NEED_TEXT.get(n.get('status'), 'unavailable')})", "style": "warn"}
-                for n in unmet(deps)[:2]],
+                for n in unmet(deps)[:1]],
             **switch_row,
             "menu": [{"label": a["text"], "command": a["command"], "args": a.get("args", {})} for a in actions
                      if not a.get("disabled") and not a.get("options")],
-            "detail_panel": {"title": shown, "requires": ["items", "chips", "wrap"],
-                             "toolbar": [{"type": "chips", "chips": actions}], "items": details}})
+            "detail_panel": {"title": shown, "requires": ["items", "chips", "wrap", "pages"],
+                             "toolbar": [{"type": "chips", "chips": actions}], "pages": pages}})
+    if not GROUP_BY_KIND:
+        return rows
+    groups = {}
+    for row in rows:
+        groups.setdefault(row["facets"]["kind"], []).append(row)
     return [{"type": "header", "id": "kind/"+kind, "text": kind.replace("-", " ").title(),
              "expanded": True, "children": groups[kind]} for kind in sorted(groups)]
+
+
+def extensions_page(states, commands):
+    """The Extensions page: Show by status (and kind), Sort, and title/id/kind columns over the dense rows."""
+    columns = [{"label": "extension", "width": "fill"}, {"label": "id"}] + ([] if GROUP_BY_KIND else [{"label": "kind"}])
+    return {"title": "Extensions", "list_detail": {"requires": ["list_detail"]}, "items": ext_rows(states, commands),
+            "facets": [{"key": "status", "label": "Show"}] + ([] if GROUP_BY_KIND else [{"key": "kind", "label": "Kind"}]),
+            "sorts": [{"key": "name", "label": "name"}, {"key": "status", "label": "status"}, {"key": "id", "label": "id"}]
+                     + ([] if GROUP_BY_KIND else [{"key": "kind", "label": "kind"}]),
+            "columns": columns}
 
 
 # Keys page. Mirrors the client's key rules (src/tui/keys.rs, src/tui/mod.rs `rank`) to show
@@ -458,7 +532,7 @@ def refresh(*_):
              for name, page in sorted(ext.live.items()) if name.startswith(PAGE_PREFIX) and isinstance(page, dict)
              and isinstance(page.get("items"), list)]
     ext.publish("settings", {"title": "Settings", "requires": ["pages", "menu", "input", "tree"], "pages": [
-        {"title": "Extensions", "list_detail": {"requires": ["list_detail"]}, "items": ext_rows(states, commands)},
+        extensions_page(states, commands),
         {"title": "Interface", "items": interface}, *extra,
         {"title": "Theme", "items": theme_rows()},
         {"title": "Icons", "items": icon_rows()},
@@ -478,7 +552,7 @@ def on_event(t, d):
 @ext.command("settings.open", "Open settings")
 def open_settings(args):
     refresh()
-    return {"client": {"popup": {"view": "settings", "width": 112}}}
+    return {"client": {"popup": {"view": "settings", "width": 140}}}
 
 
 @ext.command("settings.set", "Set a client option (args: tui, value)")

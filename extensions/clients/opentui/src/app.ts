@@ -919,7 +919,9 @@ export class Screen extends Renderable {
       if (o.kind === "popup") {
         const value = a.panelValue(o.view);
         const w = Math.min(Math.max(30, o.width), W - 4);
-        const n = rowsOf(value, a.state("@popup")).length + (value.pages ? 2 : 0) + 3;
+        // A list_detail page wants room for both panes (as the TUI sizes it), whatever the filter leaves.
+        const st = a.state("@popup");
+        const n = listDetailOn(value, st.page) ? 28 + (value.pages ? 2 : 0) + 2 : rowsOf(value, st).length + (value.pages ? 2 : 0) + 3 + 3;
         const h = Math.min(Math.max(6, n), H - 3);
         const r = { x: Math.floor((W - w) / 2), y: Math.max(1, Math.floor((H - 1 - h) / 2)), w, h };
         box(buf, r, a.pal.color("border_focus"), a.pal.bg);
@@ -1111,7 +1113,8 @@ function drawList(a: App, buf: OptimizedBuffer, area: Rect, key: string, value: 
     // One layout for every row: cells start after the widest prefix and leave room for badges and detail.
     const data = rows.filter((r) => Array.isArray(r.item.columns));
     const prefix = (r: m.Row) => r.depth * 2 + 2 + (m.kind(r.item) === "toggle" ? 4 : 0) + (r.item.icon ? 3 : 0);
-    const suffix = (r: m.Row) => (typeof r.item.detail === "string" ? width(r.item.detail) + 1 : 0) + (Array.isArray(r.item.badges) ? r.item.badges.reduce((s: number, b: Json) => s + width(String(b?.text ?? "")) + 3, 0) : 0) + 1;
+    // Room for the detail and the first badge (further, rarer badges take room from that row's own cells).
+    const suffix = (r: m.Row) => (typeof r.item.detail === "string" ? width(r.item.detail) + 1 : 0) + (Array.isArray(r.item.badges) && r.item.badges.length ? width(String(r.item.badges[0]?.text ?? "")) + 3 : 0) + 1;
     const start = Math.max(1, ...data.map(prefix)), reserve = Math.max(1, ...data.map(suffix));
     const widths = m.columnWidths(spec, data, Math.max(1, area.w - 1 - start - reserve));
     const aligns = spec.map((c: Json) => c?.align === "right");
@@ -1174,17 +1177,20 @@ function cycleSort(value: Json, st: PState): number | null {
   return st.sort === null ? (n > 0 ? 0 : null) : st.sort + 1 < n ? st.sort + 1 : null;
 }
 
-/** The facet/sort line (features facets, sort): `Show: All n · value n …  Sort: label ▾`, clickable. Returns its height. */
-function facetLine(a: App, buf: OptimizedBuffer, area: Rect, y: number, value: Json, st: PState): number {
+/** The facet/sort line (features facets, sort): `Show: All n · value n …  Sort: label ▾`, clickable, wrapping onto
+ *  at most three lines. Returns its height. */
+function facetLine(a: App, buf: OptimizedBuffer, area: Rect, y0: number, value: Json, st: PState): number {
   const p = a.pal;
   const counts = m.facetCounts(value, st.page, st.filter, st.facets, FEATURES);
   const label = m.sortLabel(value, st.page, st.sort);
   if (!counts.length && label === null) return 0;
-  let x = area.x;
+  let x = area.x, y = y0;
+  const limit = Math.min(y0 + 3, area.y + area.h);
   const put = (s: string, fg: RGBA, bg?: RGBA, act?: () => void) => {
     const w = width(s);
-    if (x + w > area.x + area.w) return false;
-    text(buf, x, y, s, fg, bg);
+    if (x > area.x && x + w > area.x + area.w) { x = area.x; y += 1; }
+    if (y >= limit) return false;
+    text(buf, x, y, fit(s, area.x + area.w - x), fg, bg);
     if (act) a.hits.push({ rect: { x, y, w, h: 1 }, act });
     x += w;
     return true;
@@ -1200,7 +1206,7 @@ function facetLine(a: App, buf: OptimizedBuffer, area: Rect, y: number, value: J
     put("  ", p.color("text"));
   }
   if (label !== null) { put("Sort: ", p.color("muted")); put(` ${clean(label)} ▾ `, p.color("accent"), p.color("surface"), () => { st.sort = cycleSort(value, st); }); }
-  return 1;
+  return Math.min(y, limit - 1) - y0 + 1;
 }
 
 /** Columns (feature columns): the cells padded to one layout for the pane, starting after the widest row prefix. */

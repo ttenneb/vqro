@@ -177,7 +177,7 @@ pub fn render(buf: &mut Buffer, area: Rect, v: &Arc<Value>, st: &mut State, focu
         let selected=selected_detail(v,st);
         let wide=area.width>=96;
         let (list,detail)=if wide {let w=(area.width*2/5).max(36);(Rect{width:w,..area},Rect{x:area.x+w+1,width:area.width.saturating_sub(w+1),..area})}
-            else {let wanted=all.rows.iter().fold(1u16,|h,r|h.saturating_add(lines(&r.item,area.width,icons)));let h=(area.height/2).max(1).min(area.height).min(wanted);(Rect{height:h,..area},Rect{y:area.y+h+1,height:area.height.saturating_sub(h+1),..area})};
+            else {let wanted=all.rows.iter().fold(1u16,|h,r|h.saturating_add(lines(&r.item,area.width,icons))).saturating_add(chrome_lines(v,st,area.width,pal));let h=(area.height/2).max(1).min(area.height).min(wanted);(Rect{height:h,..area},Rect{y:area.y+h+1,height:area.height.saturating_sub(h+1),..area})};
         render_list(buf,list,v,st,focused&&!st.detail_focus,pal,icons,&mut hits,true,key_labels);
         if detail.height>1 {
             if wide {for y in area.y..area.bottom(){buf.set_string(detail.x-1,y,"│",pal.border(false));}}
@@ -232,8 +232,9 @@ fn render_list(buf:&mut Buffer,mut area:Rect,v:&Arc<Value>,st:&mut State,focused
         y += h;
     }
     // The facet/sort line (features `facets`, `sort`): client-drawn, below the toolbar.
-    let line_drawn = y < area.bottom() && facet_line(buf, Rect { x: area.x, y, width: area.width, height: 1 }, v, st, pal, hits);
-    if line_drawn { y += 1; }
+    let line_h = if y < area.bottom() { facet_line(buf, Rect { x: area.x, y, width: area.width, height: area.bottom() - y }, v, st, pal, hits) } else { 0 };
+    let line_drawn = line_h > 0;
+    y += line_h;
     // Columns (feature `columns`): one layout for every row of this pane, and a header line when labelled.
     let layout = declared(v, st, "columns").filter(|c| !c.is_empty()).map(|spec| column_layout(spec, rows, area.width.saturating_sub(1), icons));
     if let Some(l) = layout.as_ref().filter(|l| l.header.is_some()) {
@@ -349,37 +350,61 @@ fn hint_keys(v: &Value, st: &State) -> String {
     s
 }
 
-/// Draw `Show: All n · value n …   Sort: label` (features `facets`, `sort`). Returns whether it drew anything.
-fn facet_line(buf: &mut Buffer, row: Rect, v: &Value, st: &State, pal: &Palette, hits: &mut Hits) -> bool {
+/// The `Show: All n · value n …   Sort: label ▾` line (features `facets`, `sort`) as chips laid out in `width`,
+/// wrapping onto further lines: (dx, dy, text, style, what) where `what` is a facet (key, value) or the sort chip.
+type LineChip = (u16, u16, String, Style, Option<(String, Option<String>)>, bool);
+fn facet_chips(v: &Value, st: &State, width: u16, pal: &Palette) -> Vec<LineChip> {
     let counts = facet_counts(v, st, SUPPORTED);
     let sort = sort_label(v, st);
-    if counts.is_empty() && sort.is_none() { return false; }
-    let mut x = row.x;
-    let mut put = |text: &str, style: Style, x: &mut u16| -> Option<Rect> {
-        let w = icons::width(text);
-        if *x + w > row.right() { return None; }
-        buf.set_string(*x, row.y, text, style);
-        let r = Rect { x: *x, y: row.y, width: w, height: 1 };
-        *x += w;
-        Some(r)
+    let mut out: Vec<LineChip> = Vec::new();
+    let (mut x, mut y) = (0u16, 0u16);
+    let mut put = |text: String, style: Style, what: Option<(String, Option<String>)>, sort: bool, keep_with_next: bool, out: &mut Vec<LineChip>| {
+        let w = icons::width(&text);
+        if x > 0 && x + w > width && !keep_with_next { x = 0; y += 1; }
+        out.push((x, y, text, style, what, sort));
+        x += w;
     };
     for c in &counts {
-        put(&format!("{}: ", c.label), pal.style(Some("muted")), &mut x);
+        put(format!("{}: ", c.label), pal.style(Some("muted")), None, false, false, &mut out);
         let mut chips = vec![(None, "All".to_string(), c.all)];
         chips.extend(c.values.iter().map(|(v, l, n)| (Some(v.clone()), l.clone(), *n)));
         for (n, (value, label, count)) in chips.into_iter().enumerate() {
-            if n > 0 { put("·", pal.style(Some("dim")), &mut x); }
             let on = value == c.chosen;
             let style = if on { pal.badge(Some("accent")) } else if count == 0 { pal.style(Some("dim")) } else { pal.style(None) };
-            if let Some(r) = put(&format!(" {label} {count} "), style, &mut x) { hits.facets.push((r, c.key.clone(), value)); } else { break; }
+            if n > 0 { put("·".into(), pal.style(Some("dim")), None, false, false, &mut out); }
+            put(format!(" {label} {count} "), style, Some((c.key.clone(), value)), false, false, &mut out);
         }
-        put("  ", Style::new(), &mut x);
+        put("  ".into(), Style::new(), None, false, true, &mut out);
     }
     if let Some(label) = sort {
-        put("Sort: ", pal.style(Some("muted")), &mut x);
-        if let Some(r) = put(&format!(" {label} ▾ "), Style::new().fg(pal.accent).bg(pal.surface), &mut x) { hits.sort = Some(r); }
+        put("Sort: ".into(), pal.style(Some("muted")), None, false, false, &mut out);
+        put(format!(" {label} ▾ "), Style::new().fg(pal.accent).bg(pal.surface), None, true, true, &mut out);
     }
-    true
+    out
+}
+
+/// Lines a list spends above its rows on the facet/sort line, a column header and the rule below them.
+fn chrome_lines(v: &Value, st: &State, width: u16, pal: &Palette) -> u16 {
+    let facet = facet_chips(v, st, width, pal).last().map(|c| (c.1 + 1).min(3)).unwrap_or(0);
+    let header = declared(v, st, "columns").is_some_and(|c| c.iter().any(|x| x["label"].is_string())) as u16;
+    facet + header + (facet + header > 0) as u16
+}
+
+/// Draw the facet/sort line(s) from the top of `area` (at most three lines). Returns the lines used.
+fn facet_line(buf: &mut Buffer, area: Rect, v: &Value, st: &State, pal: &Palette, hits: &mut Hits) -> u16 {
+    let chips = facet_chips(v, st, area.width, pal);
+    let mut used = 0;
+    for (dx, dy, text, style, what, sort) in chips {
+        if dy >= 3 || area.y + dy >= area.bottom() { break; }
+        let x = area.x + dx;
+        let text = truncate(&text, area.right().saturating_sub(x) as usize);
+        buf.set_string(x, area.y + dy, &text, style);
+        let r = Rect { x, y: area.y + dy, width: icons::width(&text), height: 1 };
+        if let Some((key, value)) = what { hits.facets.push((r, key, value)); }
+        if sort { hits.sort = Some(r); }
+        used = used.max(dy + 1);
+    }
+    used
 }
 
 /// Where columns start and how wide they are, for one pane (feature `columns`).
@@ -393,11 +418,12 @@ fn prefix_width(r: &Flat, icons: &Icons) -> u16 {
     x
 }
 
-/// Cells after a row's text: its right-aligned detail and badges.
+/// Cells after a row's text that every row's columns leave room for: its right-aligned detail and first badge
+/// (further badges, rarer, take room from that row's own cells).
 fn suffix_width(item: &Value) -> u16 {
     let detail = item["detail"].as_str().map(|d| icons::width(d) + 1).unwrap_or(0);
-    let badges: u16 = item["badges"].as_array().into_iter().flatten().filter_map(|b| b["text"].as_str()).map(|t| icons::width(t) + 3).sum();
-    detail + badges + 1
+    let badge = item["badges"].get(0).and_then(|b| b["text"].as_str()).map(|t| icons::width(t) + 3).unwrap_or(0);
+    detail + badge + 1
 }
 
 fn column_layout(spec: &[Value], rows: &[Flat], width: u16, icons: &Icons) -> ColumnLayout {

@@ -191,9 +191,8 @@ try:
     check("prefix menu lists recovery actions", bool(wait(lambda: "undo last change" in screen() and "safe mode / recovery choices" in screen())), screen())
     keys(",")
     check("a command's popup reply shows Settings over the terminal", bool(wait(lambda: "Settings" in screen() and "Extensions" in screen() and " of 16 · " in screen())), screen())
-    for _ in range(7):
-        keys("Down")
-    time.sleep(0.3)
+    # Find Tabs by search (the list's order is its own: flat, sortable), then switch it.
+    keys("/"); time.sleep(0.2); keys("tabs", literal=True); keys("Enter"); time.sleep(0.3)
     keys("Space")
     check("dependency warning as a pick-one menu over the popup", bool(wait(lambda: "Turn off Tabs: breaks" in screen())), screen())
     # Escape followed at once by another key reads as Alt+key: pause like a person would.
