@@ -8,7 +8,7 @@ use super::native::{Error,Event,Native,Reply,Ticket};
 
 #[derive(Debug,Clone,Default)]
 pub struct Current {
-    pub metadata:Value,
+    pub metadata:Arc<Value>,
     pub streaming:Option<bool>,
     pub compacting:Option<bool>,
     pub run_active:bool,
@@ -41,7 +41,7 @@ impl Signals {
                 Some("auto_compaction_end") => current.compacting=Some(false),
                 Some("response") if record["command"]=="get_state" && record["success"]==true => {
                     if record["data"].is_object() {
-                        current.metadata=record["data"].clone();
+                        current.metadata=Arc::new(record["data"].clone());
                         current.streaming=record["data"]["isStreaming"].as_bool();
                         current.compacting=record["data"]["isCompacting"].as_bool();
                     }
@@ -86,6 +86,7 @@ impl Starts {
             current.starts
         };
         let flight = Flight { _guard:guard,signals:self.signals.clone() };
+        self.signals.changed.send_modify(|value|*value=value.wrapping_add(1));
         let mut ticket = match self.native.submit("prompt",args,deadline) {
             Ok(ticket)=>ticket,
             Err(error)=>return failure(error),
