@@ -166,6 +166,12 @@ class TranscriptRows(unittest.TestCase):
         many = agent_transcript.tool_row("r", {"title": "edit", "locations": [{"path": f"/w/{i}"} for i in range(9)]})
         self.assertEqual(len([m for m in many["menu"] if m["command"] == "links.open"]), agent_transcript.OPEN_ITEMS)
 
+    def test_an_empty_system_message_leaves_no_bare_label(self):
+        """The human's 16:44 screenshot: a stray "System" label at the top (Pi's system message, an empty text block)."""
+        empty = {("message", "s"): {"position": 1, "role": "system", "final": True, "content": text("")},
+                 ("message", "u"): {"position": 2, "role": "user", "final": True, "content": text("hello")}}
+        self.assertNotIn("System", [r.get("text") for r in self.rows(empty)])
+
     def test_the_agents_work_sits_in_its_labelled_block(self):
         """Mockup Screens A and C: an Activity continues the agent's block, or the reply's label moves above it."""
         texts = [r.get("text") for r in self.rows()]

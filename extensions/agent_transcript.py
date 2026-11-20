@@ -126,6 +126,8 @@ def content_rows(content, style=None, limit=None):
         kind = block.get("type")
         if kind in THOUGHT_BLOCKS or kind in TOOL_CALL_BLOCKS:
             continue  # thinking is its own block (thought_rows); a tool call is its tool line, never a placeholder
+        if kind == "text" and isinstance(block.get("text"), str) and not block["text"].strip():
+            continue  # an empty text block shows nothing (Pi's empty system message left a bare "System" label)
         if kind == "text" and isinstance(block.get("text"), str):
             # Plain is the default; only an explicit markdown block is rendered as markdown (agent-v0 section 3.2).
             markdown = block.get("format") == "markdown" and not limit
