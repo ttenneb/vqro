@@ -53,9 +53,12 @@ async def paused_take_and_same_count_edit_wake(ctx):
               and type(first.get("control_revision")) is int and isinstance(first.get("control_epoch"), str),
               "wake contains only the pending count and actual revisions, never authority or content", wake=first)
     mark = len(events)
+    # Resume legitimately updates held eligibility/revision; use its actual public
+    # version rather than replaying the earlier paused-record CAS token.
+    current = await ctx.get(sent["delivery"])
     final_text = "T7-open-edit-with-the-same-count"
     await ctx.command("inbox.edit", {"op": await ctx.operation(), "delivery": sent["delivery"],
-        "expect": edited["revision"], "content": [{"type": "text", "text": final_text}]})
+        "expect": current["revision"], "content": [{"type": "text", "text": final_text}]})
     async def changed_wake():
         candidates = target_wakes(events[mark:], target)
         return next((item for item in candidates if item["wake"].get("seq", -1) > wake["seq"]), None)
