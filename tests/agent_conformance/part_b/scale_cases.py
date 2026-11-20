@@ -588,6 +588,9 @@ async def combined_scale_gate(ctx):
         ctx.evidence.append({"kind": "s1_metrics", "core": sampler.summary(),
             "commit_ms": {name: {"p50": percentile(metrics[name], .5), "p99": percentile(metrics[name], .99), "n": len(metrics[name])}
                           for name in ("inbox_ms", "layout_ms", "control_ms", "answer_ms")},
+            "raw_ms": {name: [round(value, 1) for value in metrics[name]] for name in ("control_ms", "answer_ms")},
+            "percentile": "nearest rank, no interpolation: sorted[min(n-1, int(q*n))]",
+            "timed": "client round trip of the coord.control call only (op id fetched before the timer starts)",
             "events": metrics["events"], "missed": metrics["missed"][:8], "missed_count": len(metrics["missed"]),
             "occupancy": {"window": status.get("window"), "attention": status.get("attention")},
             "terminals": len(terminals), "item_streams_live": len(fresh), "stalled_streams": len(agents),
