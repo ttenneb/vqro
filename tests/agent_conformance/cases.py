@@ -190,6 +190,41 @@ async def state_evidence(ctx):
     ctx.evidence.append({"kind": "silence_window_ms", "value": 500})
 
 
+@case("C4")
+async def lost_reply_no_replay(ctx):
+    await ctx.native.call("pause_after", phase="acceptance")
+    caller = await ctx.viewer()
+    mark, pid = ctx.native.mark(), ctx.native.state["pid"]
+    pending = asyncio.create_task(ctx.send("C4-lost-public-reply", peer=caller, deadline_ms=1200))
+    try:
+        await ctx.native.wait(lambda rows: any(row["seq"] > mark and row["kind"] == "paused" and row.get("phase") == "acceptance" for row in rows))
+        await caller.close()
+        await asyncio.gather(pending, return_exceptions=True)
+        await ctx.native.call("release", phase="acceptance")
+        await ctx.native.wait(lambda rows: any(row["seq"] > mark and row["kind"] == "input_received" for row in rows))
+    finally:
+        await ctx.native.call("release", phase="all")
+        if not pending.done():
+            pending.cancel()
+        await asyncio.gather(pending, return_exceptions=True)
+    await ctx.restart_core()
+    await ctx.wait_facts(lambda f: f.get("state") == "running")
+    check((await ctx.native.call("state"))["pid"] == pid, "lost-reply recovery replaced native execution")
+    check(len([row for row in ctx.native.writes(mark) if row.get("operation") == "send"]) == 1,
+          "public reply loss replayed native input")
+    await ctx.native.call("drop_reply", operation="send")
+    mark = ctx.native.mark()
+    uncertain = await ctx.send("C4-lost-native-reply", "admit", deadline_ms=120)
+    check(uncertain.get("outcome") in ("dispatched", "indeterminate"), "missing native reply became definite acceptance/rejection")
+    await ctx.native.wait(lambda rows: any(row["seq"] > mark and row["kind"] == "input_received" for row in rows))
+    await ctx.restart_core()
+    await ctx.wait_facts(lambda f: f.get("state") == "running")
+    check(len([row for row in ctx.native.writes(mark) if row.get("operation") == "send"]) == 1,
+          "uncertain native send was automatically resent")
+    ctx.evidence.append({"kind": "lost_reply", "public_and_native": True, "native_send_writes_each": 1,
+                         "uncertain_result": uncertain})
+
+
 @case("C5")
 async def post_acceptance_failure(ctx):
     result = await ctx.send("C5-accepted-input")
@@ -717,6 +752,33 @@ async def viewer_order(ctx):
     common = left.keys() & right.keys()
     check(common and all(left[key] == right[key] for key in common), "viewers disagree about fixed timeline positions")
     check(sorted(common, key=left.get) == sorted(common, key=right.get), "viewer timeline orders differ")
+
+
+async def flood_retained(ctx, prefix, *, count=96, size=8192):
+    for index in range(count):
+        await ctx.native.call("retain", text=f"{prefix}-{index}:" + "x" * size)
+    return f"{prefix}-{count - 1}:"
+
+
+@case("O7")
+async def stalled_viewer_isolation(ctx):
+    first = await fresh_view(ctx)
+    second = await fresh_view(ctx, peer=await ctx.viewer())
+    stalled = await fresh_view(ctx, peer=await ctx.viewer())
+    transport = stalled.peer.writer.transport
+    transport.pause_reading()
+    started = asyncio.get_running_loop().time()
+    try:
+        needle = await flood_retained(ctx, "O7-stall")
+        await ctx.wait_view(first, lambda reducer: has_message(reducer, needle))
+        await ctx.wait_view(second, lambda reducer: has_message(reducer, needle))
+        check(not transport.is_reading(), "stalled viewer resumed reading during isolation", component="harness")
+        ctx.evidence.append({"kind": "stalled_viewer", "fast_viewers": 2, "stalled_viewers": 1,
+                             "native_records": 96, "payload_bytes": 96 * 8192,
+                             "elapsed_ms": round((asyncio.get_running_loop().time() - started) * 1000),
+                             "fast_cursors": [first.reducer.cursor, second.reducer.cursor]})
+    finally:
+        transport.resume_reading()
 
 
 @case("O8")
