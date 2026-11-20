@@ -92,6 +92,7 @@ class View:
     def __init__(self, peer, stream, reducer, initial, epoch):
         self.peer, self.stream, self.reducer = peer, stream, reducer
         self.initial, self.epoch, self.closed = initial, epoch, None
+        self.close_notice = None
 
 
 class PublicImplementation:
@@ -155,10 +156,12 @@ class PublicImplementation:
             return
         if method == "stream.data":
             view.reducer.stream_data(params)
-        else:
-            reason = params.get("reason", "unknown")
+        elif view.closed is None:
+            raw = deepcopy(params.get("reason", "unknown"))
+            reason = raw
             if isinstance(reason, dict):
-                reason = reason.get("reason", "unknown")
+                reason = reason.get("gap", "unknown") if method == "stream.gap" and reason.get("reason") == "gap" else reason.get("reason", "unknown")
+            view.close_notice = {"method": method, "reason": raw, "last_good_cursor": deepcopy(view.reducer.cursor)}
             view.closed = reason
             view.reducer.ended(reason)
 

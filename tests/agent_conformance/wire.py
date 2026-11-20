@@ -403,7 +403,7 @@ class ItemReducer:
         # No partial line or snapshot survives a stream close, even unknown gaps.
         self.pending.clear()
         self.staged, self.staged_sizes, self.staged_bytes = None, None, 0
-        if reason not in ("closed", "exited", "killed"):
+        if self.failure is None and reason not in ("closed", "exited", "killed"):
             self.failure = str(reason)
 
     @property

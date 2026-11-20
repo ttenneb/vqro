@@ -470,6 +470,48 @@ class SchemaFixtureTests(unittest.TestCase):
                 schema_example(schema)
 
 
+class RetentionRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    def view(self):
+        return SimpleNamespace(reducer=seeded(), closed=None, close_notice=None)
+
+    async def test_gap_kind_and_last_good_cursor_survive_following_closed_notice(self):
+        peer, view = object(), self.view()
+        ctx = object.__new__(PublicImplementation)
+        ctx.views = {(id(peer), "s"): view}
+        before = dict(view.reducer.cursor)
+        ctx._notice(peer, "stream.gap", {"stream": "s", "reason": {"reason": "gap", "gap": "retention"}})
+        ctx._notice(peer, "stream.closed", {"stream": "s", "reason": {"reason": "closed"}})
+        self.assertEqual(view.closed, "retention")
+        self.assertEqual(view.close_notice["last_good_cursor"], before)
+        self.assertEqual(view.close_notice["reason"], {"reason": "gap", "gap": "retention"})
+        self.assertEqual(view.reducer.cursor, before)
+
+    async def test_legal_gap_never_overwrites_prior_integrity_failure(self):
+        view = self.view()
+        view.reducer.failure = "bad_record"
+        view.reducer.ended("retention")
+        self.assertEqual(view.reducer.failure, "bad_record")
+
+    async def test_retention_replays_once_but_corruption_never_auto_replays(self):
+        from agent_conformance.cases import wait_with_retention_replay
+        for failure in ("retention", "bad_record"):
+            view, recovered = self.view(), self.view()
+            view.closed, view.reducer.failure = "retention", failure
+            recovered.initial = "reset"
+            ctx = SimpleNamespace(evidence=[], viewer=AsyncMock(), wait_view=AsyncMock(side_effect=[CheckFailed("gap"), None]))
+            fresh = AsyncMock(return_value=recovered)
+            with self.subTest(failure=failure), patch("agent_conformance.cases.fresh_view", fresh):
+                if failure == "retention":
+                    self.assertIs(await wait_with_retention_replay(ctx, view, lambda r: True), recovered)
+                    self.assertEqual(ctx.evidence[-1]["last_good_cursor"], view.reducer.cursor)
+                    self.assertEqual(ctx.evidence[-1]["attempts"], 1)
+                    self.assertEqual(fresh.await_count, 1)
+                else:
+                    with self.assertRaises(CheckFailed):
+                        await wait_with_retention_replay(ctx, view, lambda r: True)
+                    self.assertEqual(fresh.await_count, 0)
+
+
 class CommandWitnessTests(unittest.TestCase):
     def proof(self, args="exact instructions"):
         return ([{"command": "compact", "value": {"type": "compact", "id": "n1", "customInstructions": args}}],
