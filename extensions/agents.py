@@ -922,9 +922,9 @@ class Agents:
         # Only the terminal's own launcher-tagged principal (resource.principal, recorded by the core at spawn) or the
         # workspace owner may report its status. Unknown (null) or undeclared tags authorise nobody but the owner.
         caller = (self.ext.caller() or {}).get("principal")
-        tag = r.get("principal")
+        tag, owner = r.get("principal"), self.ext.owner()
         known = isinstance(tag, str) and tag != "undeclared"
-        if caller != self.ext.owner() and not (known and caller == tag):
+        if not (owner is not None and caller == owner) and not (known and caller == tag):
             raise VqroError(f"only {label(terminal, 64)}'s launcher-tagged principal or the workspace owner may report its "
                             "status; nothing recorded", "not_authorized")
         state = args.get("state") if args.get("state") in TIER1_STATES else "unknown"

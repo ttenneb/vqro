@@ -75,6 +75,17 @@ class TranscriptRows(unittest.TestCase):
         self.assertEqual(sender({"kind": "agent", "principal": "p:lead", "agent": "r8"}), "Message from vqro-lead (agent r7)",
                          "the recorded principal wins over a claimed agent id")
 
+    def test_a_shared_launcher_tag_names_nobody_and_no_owner_means_no_you(self):
+        """Review P2-2 and P2-1: an ambiguous tag shows the principal; without a valid owner nobody is "You"."""
+        names = agent_transcript.Names({"r7": {"name": "a", "kind": "agent", "principal": "p:host"},
+                                        "r8": {"name": "b", "kind": "agent", "principal": "p:host"},
+                                        "r9": {"name": "term", "kind": "terminal", "principal": "p:solo"},
+                                        "r10": {"name": "solo", "kind": "agent", "principal": "p:solo"}}, "r2", owner=None)
+        sender = lambda origin: names.sender({"role": "user", "origin": origin})[0]
+        self.assertEqual(sender({"kind": "agent", "principal": "p:host"}), "Message from p:host (claimed agent)")
+        self.assertEqual(sender({"kind": "agent", "principal": "p:solo"}), "Message from solo (agent r10)", "an agent over its terminal")
+        self.assertEqual(sender({"kind": "human", "principal": "owner"}), "Message from owner")
+
     def test_no_origin_is_never_you_and_another_human_is_named(self):
         bare = {("message", "m"): {"position": 1, "role": "user", "content": text("hi"), "final": True}}
         self.assertEqual(self.rows(bare)[0]["text"], "User")

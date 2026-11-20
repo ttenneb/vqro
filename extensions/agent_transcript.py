@@ -128,13 +128,22 @@ class Names:
         self._principals = None
 
     def by_principal(self, principal):
-        """The resource the launcher tagged with this principal (resource.principal), preferring an agent; else None."""
+        """The one resource the launcher tagged with this principal (resource.principal; an agent over its terminal),
+        or None when no single resource does."""
         if self._principals is None:
-            self._principals = {}
+            # Only a tag exactly one agent carries names it (a multi-endpoint host may tag several, or its terminal and
+            # its agent share one): an ambiguous tag names nobody, and the principal itself is shown.
+            holders = {}
             for rid, r in self.resources.items():
                 tag = r.get("principal") if isinstance(r, dict) else None
-                if isinstance(tag, str) and tag != "undeclared" and (tag not in self._principals or r.get("kind") == "agent"):
-                    self._principals[tag] = (rid, r)
+                if isinstance(tag, str) and tag != "undeclared":
+                    holders.setdefault(tag, []).append((rid, r))
+            self._principals = {}
+            for tag, found in holders.items():
+                agents = [h for h in found if h[1].get("kind") == "agent"]
+                pick = agents if agents else found
+                if len(pick) == 1:
+                    self._principals[tag] = pick[0]
         return self._principals.get(principal)
 
     def agent_name(self, rid):

@@ -548,9 +548,14 @@ class Extension:
         return getattr(context, "caller", None) if context is not None else None
 
     def owner(self):
-        """The workspace owner principal (`doc/principals/owner`, default "owner")."""
+        """The workspace owner principal (`doc/principals/owner`), or None when it is unset or not a valid assertable
+        principal (1-256 bytes, no whitespace or controls, not `undeclared`, not core-assigned). Never guessed."""
         value = self.value("doc/principals/owner")
-        return value if isinstance(value, str) and value else "owner"
+        if not isinstance(value, str) or not 0 < len(value.encode()) <= 256 or value == "undeclared" \
+                or any(c.isspace() or not c.isprintable() for c in value) \
+                or value.startswith(("extension:", "host:", "system:")) or value == "system":
+            return None
+        return value
 
     def value(self, key, default=None):
         e = self.entries.get(key)

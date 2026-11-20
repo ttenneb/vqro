@@ -835,6 +835,19 @@ class Tier1StatusTests(unittest.TestCase):
             self.report(dict(report, seq=5))
         self.assertEqual(self.agents.tier1["r1"]["seq"], 3)
 
+    def test_an_unset_or_invalid_owner_row_authorises_nobody_by_name(self):
+        """Review P2-1: never re-guess "owner" when the owner row is unset or not an assertable principal."""
+        self.core.resources["r1"]["principal"] = "p:hook"
+        self.core.caller_record = {"principal": "owner"}
+        for row in (None, "", "undeclared", "has space", "host:r1", "extension:agents"):
+            if row is None:
+                self.core.entries.pop("doc/principals/owner", None)
+            else:
+                self.core.entries["doc/principals/owner"] = {"value": row, "version": 2}
+            self.assertIsNone(self.core.owner(), row)
+            with self.assertRaises(VqroError):
+                self.report({"terminal": "r1", "app": "claude", "state": "idle", "seq": 1})
+
     def test_bad_reports_are_refused_to_the_caller_without_notices(self):
         for bad in ({"terminal": "r9", "app": "c", "state": "idle", "seq": 1}, {"terminal": "r1", "app": "", "seq": 1},
                     {"terminal": "r1", "app": "c", "state": "idle", "seq": -1}, {"terminal": "r1", "app": "c", "seq": "1"}):

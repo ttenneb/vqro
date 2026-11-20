@@ -18,6 +18,7 @@ class FakeCore:
         self.shells = []  # ids for plain shell spawns (resource.spawn without argv), consumed in order
         self.contributed = False
         self.sinks, self.fail_attach = {}, False
+        self.entries["doc/principals/owner"] = {"value": "owner", "version": 1}  # the core's owner row
         # The core's record of the current command's caller (D24); tests set another to act as someone else.
         self.caller_record = {"author": "client:1", "actor": "owner", "principal": "owner", "initiator": "owner"}
 
