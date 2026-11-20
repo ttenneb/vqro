@@ -538,6 +538,25 @@ compact entries per row/128B per entry. FIFO capacity is the core-reported ident
 extra reserve. Oldest entries drop when full, with a durable history-gap flag. Unknown/capacity-changed facts refuse
 automatic notices visibly rather than guessing a bound.
 
+Owner capacity recovery uses the existing `coord.request_route` command, workspace-wide rather than per-agent:
+`{action:"inspect_fences"}` returns opaque `revision`, current core `capacity`, `stored_capacity`, actual `entries`,
+`history_incomplete`, `generation`, `maintenance_pending` and `incomplete`; the same facts appear under
+`coord.status.request_routing.fences`. `{op,action:"reset_fences",expect:<revision>}` is **owner-only**, not a
+`configure`/`recover` grant. It acknowledges only current core-reported capacity (including zero), never a caller's
+number; unknown capacity or a stale snapshot refuses. This is protected operational metadata, not undoable route
+configuration, and uses existing normal-domain budget/control I/O priority, no native invocation or extra reserve.
+
+Recovery retains every fence on growth; on shrink it keeps the newest N and durably marks any history loss BEFORE
+bounded maintenance removes older entries (at most24 bucket writes per pass, within the existing atomic budget).
+There is no shadow table or reindexing. A `recorded` reply reports acknowledgement, not completed trimming;
+inspection shows actual remaining entries/pending work. Existing excess is bounded by the prior declared capacity
+and normal domain quota. No new automatic notices are admitted while overfull. Restart continues from the durable
+header; generation-fenced observations relearn after recovery, and a racing stale scan cannot admit from old proofs.
+The new generation can reconsider a never-admitted question refused under old capacity, using a fresh notice
+operation namespace; retained fences/full records still suppress already admitted questions. Generation0 keeps
+the original namespace unchanged. Repeated operation IDs observe history, never reset twice. No full inbox/native evidence, route/grant/gate or runtime
+request is cleared, answered or replayed by this action.
+
 A matching fenced revision is never automatically notified again. After FIFO loss, an unknown history is
 conservatively shown to the human: the router observes a baseline revision and routes only a subsequently observed
 newer revision. Those derived baselines are bounded by N and relearned after restart; losing one can delay a notice,

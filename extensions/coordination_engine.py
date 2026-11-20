@@ -537,7 +537,62 @@ class Coordinator:
         header = meta.get('notice_fences') or {}
         return {value[0]: value[1] for value in entries.values()}, bool(header.get('overflow')), entries
 
-    def _remember_notice(self, work, notice, *, after_gap=False):
+    def notice_fence_status(self, rows=None):
+        rows = self.store.view() if rows is None else rows
+        _, overflow, entries = self.notice_fences(rows)
+        header = (rows.get('meta') or {}).get('value', {}).get('notice_fences') or {}
+        capacity = getattr(self, 'notice_fence_capacity', None)
+        known = type(capacity) is int and capacity >= 0
+        return {'capacity': capacity if known else None, 'stored_capacity': header.get('capacity'),
+                'entries': len(entries), 'history_incomplete': overflow,
+                'generation': header.get('generation', 0), 'incomplete': not known,
+                'maintenance_pending': known and header.get('capacity') == capacity and len(entries) > capacity,
+                'revision': digest([header, capacity, sorted((key, row['version']) for key, row in rows.items()
+                                                           if key.startswith('notice-fences/'))])}
+
+    def reset_notice_fences(self, args, context):
+        def reset(work, policy):
+            if context['principal'] != policy.owner:
+                raise CoordinationError('no_grant', 'only the owner may acknowledge request fence capacity')
+            status = self.notice_fence_status(work.rows)
+            if status['incomplete']:
+                raise CoordinationError('unavailable', 'current core identity capacity is unknown')
+            if 'capacity' in args:
+                raise CoordinationError('invalid', 'fence capacity comes only from current core facts')
+            if not isinstance(args.get('expect'), str):
+                raise CoordinationError('invalid', 'inspect_fences revision is required')
+            if args['expect'] != status['revision']:
+                raise CoordinationError('conflict', 'request fence state or core capacity changed')
+            meta = work.get('meta')
+            header = dict(meta.get('notice_fences') or {})
+            lost = status['entries'] > status['capacity']
+            header.update(capacity=status['capacity'], next=header.get('next', 0),
+                          overflow=status['history_incomplete'] or lost, generation=status['generation'] + 1)
+            meta['notice_fences'] = header
+            work.put('meta', meta)
+            return {'state': 'recorded', 'capacity': status['capacity'], 'entries_before': status['entries'],
+                    'maintenance_pending': lost, 'history_incomplete': header['overflow'],
+                    'generation': header['generation'], 'native': None}
+        return self._mutate('coord.request_route.reset_fences', args, context, reset, control=True, normal=True)
+
+    def _trim_notice_fences(self, work, budget):
+        if budget <= 0:
+            return
+        status = self.notice_fence_status(work.rows)
+        if not status['maintenance_pending'] or not status['history_incomplete']:
+            return  # only acknowledged, durably marked history loss authorizes eviction
+        _, _, entries = self.notice_fences(work.rows)
+        discard = sorted(entries, key=lambda slot: entries[slot][2])[:len(entries) - status['capacity']]
+        buckets = {}
+        for slot in discard:
+            buckets.setdefault('notice-fences/' + str(slot // 64), []).append(str(slot))
+        for key, slots in list(buckets.items())[:budget]:
+            bucket = work.get(key)
+            for slot in slots:
+                bucket.pop(slot)
+            work.put(key, bucket) if bucket else work.delete(key)
+
+    def _remember_notice(self, work, notice, *, after_gap=False, generation=None):
         capacity = getattr(self, 'notice_fence_capacity', None)
         if type(capacity) is not int or capacity <= 0:
             raise CoordinationError('unavailable', 'identity cache capacity is unknown; automatic notice refused')
@@ -552,6 +607,10 @@ class Coordinator:
             raise CoordinationError('conflict', 'request notice history is incomplete; human fallback')
         meta = work.get('meta')
         header = dict(meta.get('notice_fences') or {})
+        if generation != header.get('generation', 0) and (generation is not None or header.get('generation', 0)):
+            raise CoordinationError('conflict', 'request fence recovery changed during observation')
+        if len(entries) > capacity:
+            raise CoordinationError('unavailable', 'request fence capacity recovery is still pending')
         if header.get('capacity', capacity) != capacity:
             raise CoordinationError('unavailable', 'request notice fence capacity changed; human review required')
         if previous:
@@ -571,10 +630,10 @@ class Coordinator:
             raise CoordinationError('too_large', 'request notice fence exceeds its compact bound')
         bucket[str(slot)] = value
         work.put(bucket_key, bucket)
-        meta['notice_fences'] = {'capacity': capacity, 'next': order + 1, 'overflow': overflow}
+        meta['notice_fences'] = dict(header, capacity=capacity, next=order + 1, overflow=overflow)
         work.put('meta', meta)
 
-    def send(self, args, context, *, request_notice=None, notice_after_gap=False):
+    def send(self, args, context, *, request_notice=None, notice_after_gap=False, notice_generation=None):
         def admit(work, policy):
             principal = context["principal"]
             submission = args.get("submission")
@@ -669,7 +728,7 @@ class Coordinator:
                 previous.update(state="superseded", reason="replaced_before_claim")
                 work.put("message/" + previous["delivery"], previous)
             if request_notice is not None:
-                self._remember_notice(work, request_notice, after_gap=notice_after_gap)
+                self._remember_notice(work, request_notice, after_gap=notice_after_gap, generation=notice_generation)
             work.put("message/" + delivery, record)
             epoch = work.get("meta")["window_epoch"]
             submissions = {key: value for key, value in submissions.items() if value["epoch"] == epoch}
@@ -2008,6 +2067,10 @@ class Coordinator:
                 break
             if key.startswith("result/") and key not in refs:
                 work.delete(key)
+        # Capacity acknowledgement publishes the history-gap before deleting
+        # anything. Keep newest fences in place; bounded pages survive restart
+        # without a shadow copy or a separate recovery pool.
+        self._trim_notice_fences(work, min(24, max(0, 60 - len(work.changes))))
         work.commit(control=True)
         if self.expire_ops:
             self.expire_ops = any(key.startswith("ops/") and any(value.get("window") != epoch for value in row["value"].values())

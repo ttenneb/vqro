@@ -302,6 +302,34 @@ def case_brick():
     return out
 
 
+def case_request_fence_reset():
+    preview = cmd('request_route', {'action': 'inspect_fences'})
+    declared = cmd('status')['identity_cache']['capacity']
+    assert not preview['incomplete'] and preview['capacity'] == declared, preview
+    raw_set('doc/agents/grants/fence-helper', {'who': 'p:fence-helper', 'on': '*', 'can': ['recover', 'configure']})
+    helper = Client({'kind': 'principal', 'principal': 'p:fence-helper'})
+    try:
+        cmd('request_route', {'op': op('not-owner'), 'action': 'reset_fences', 'expect': preview['revision']}, helper)
+        raise AssertionError('non-owner reset fence history')
+    except RPCError as error:
+        assert error.kind == 'no_grant', error
+    requested = {'op': op('owner-fences'), 'action': 'reset_fences', 'expect': preview['revision']}
+    result = cmd('request_route', requested)
+    assert result['state'] == 'recorded' and result['capacity'] == declared and result['native'] is None, result
+    current = cmd('request_route', {'action': 'inspect_fences'})
+    assert current['generation'] == preview['generation'] + 1 and current['entries'] == preview['entries'], current
+    assert cmd('request_route', requested)['historical']
+    assert cmd('request_route', {'action': 'inspect_fences'})['generation'] == current['generation']
+    try:
+        cmd('request_route', {**requested, 'op': op('stale-fences')})
+        raise AssertionError('stale fence revision was accepted')
+    except RPCError as error:
+        assert error.kind == 'conflict', error
+    assert cmd('status')['request_routing']['fences']['revision'] == current['revision']
+    return {'owner_only': True, 'actual_core_capacity': declared, 'cas_refused_stale': True,
+            'historical_no_second_reset': True, 'retained_entries': current['entries'], 'native': None}
+
+
 def case_membership_repair():
     native_calls = []
     def receive(method, params):
@@ -982,7 +1010,7 @@ def case_archive_abort():
 
 
 # Witness the bounded attention view before bulk uncertain-history fixtures fill it.
-CASES = {'membership_repair': case_membership_repair, 'request_routing': case_request_routing, 'ordering_visibility': case_ordering_visibility, 'brick': case_brick, 'idle': case_idle, 'membership': case_membership, 'identity': case_identity, 'reconcile': case_reconcile, 'names': case_names,
+CASES = {'request_fence_reset': case_request_fence_reset, 'membership_repair': case_membership_repair, 'request_routing': case_request_routing, 'ordering_visibility': case_ordering_visibility, 'brick': case_brick, 'idle': case_idle, 'membership': case_membership, 'identity': case_identity, 'reconcile': case_reconcile, 'names': case_names,
          'rawcycle': case_rawcycle, 'invalid_declaration': case_invalid_declaration,
          'window': case_window, 'handover': case_handover, 'archive': case_archive, 'queue_epoch': case_queue_epoch, 'handover_withdrawn': case_handover_withdrawn, 'archive_abort': case_archive_abort, 'handover_archive': case_handover_archive, 'pause_reporting': case_pause_reporting, 'recipe_history': case_recipe_history, 'compaction_identities': case_compaction_identities, 'declarations': case_declarations}
 core = None

@@ -86,6 +86,7 @@ class CoordinationService:
         self.next_request_scan = 0.0
         self.request_error = None
         self.request_baselines = OrderedDict()
+        self.request_fence_generation = None
         self.pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="coord-native")
         self.jobs = set()
         self.job_lock = threading.Lock()
@@ -324,7 +325,7 @@ class CoordinationService:
                     "identity_cache": self.identity_cache(),
                     "control_latency_ms": CONTROL_LATENCY_MS,
                     "control_latency_conditions": copy.deepcopy(CONTROL_LATENCY_CONDITIONS),
-                    "receipts": self.items.status(), "request_routing": {"error": self.request_error},
+                    "receipts": self.items.status(), "request_routing": self.request_routing_status(),
                     "maintenance": self.engine.maintenance_error if self.engine else None,
                     "limits_confirmed": self.engine is not None, "configuration": self.engine.configuration_status() if self.engine else None,
                     "attention": self.engine.attention_summary() if self.engine else None}
@@ -387,8 +388,25 @@ class CoordinationService:
             records = [record for record in records if Coordinator._sender_matches(record, args["sender"])]
         return bounded_page(records, page=args.get("page"), revision=digest(self.read_only_rows), key=lambda record: (record["order"], record["delivery"]))
 
+    def request_routing_status(self):
+        result = {'error': self.request_error, 'fences': None}
+        if self.engine is not None:
+            self.engine.notice_fence_capacity = self.identity_cache()['capacity']
+            try:
+                result['fences'] = self.engine.notice_fence_status()
+            except (PolicyError, StoreError) as error:
+                result['fences'] = {'incomplete': True, 'error': {'kind': error.kind, 'message': str(error)[:512]}}
+        return result
+
     def route(self, command, args, context):
         engine = self.engine
+        if command == 'request_route' and args.get('action') in ('inspect_fences', 'reset_fences'):
+            engine.notice_fence_capacity = self.identity_cache()['capacity']
+            if args['action'] == 'inspect_fences':
+                return engine.notice_fence_status()
+            result = engine.reset_notice_fences(args, context)
+            self.event.set()
+            return result
         if command == "inbox.window":
             return engine.window()
         if command == "inbox.op":
@@ -431,7 +449,14 @@ class CoordinationService:
         existing = {(r['request_notice']['key'], r['to']['agent']): r for r in records
                     if isinstance(r.get('request_notice'), dict) and isinstance(r['request_notice'].get('key'), str)}
         views, candidates, expected = {}, [], {}
-        fences, history_gap, _ = engine.notice_fences()
+        engine.notice_fence_capacity = self.identity_cache()['capacity']
+        fence_rows = engine.store.view()
+        fences, history_gap, fence_entries = engine.notice_fences(fence_rows)
+        fence_status = engine.notice_fence_status(fence_rows)
+        generation = fence_status['generation']
+        if generation != self.request_fence_generation:
+            self.request_baselines.clear()
+            self.request_fence_generation = generation
         capacity = getattr(engine, 'notice_fence_capacity', None)
         for agent, resource in policy.resources.items():
             native = native_facts(resource)
@@ -461,6 +486,9 @@ class CoordinationService:
                     if type(capacity) is not int or capacity <= 0:
                         view.update(human=True, fallback_reason='notice_fence_capacity_unknown')
                         continue
+                    if len(fence_entries) > capacity:
+                        view.update(human=True, fallback_reason='notice_fence_reset_pending')
+                        continue
                     identity = request_identity_key(resource, question)
                     revision = question['revision']
                     fenced = fences.get(identity)
@@ -489,7 +517,7 @@ class CoordinationService:
         for agent, resource, question, key, target, identity_key, after_gap in chosen:
             view = views[agent]
             epoch = engine.window()['epoch']
-            operation = epoch + ':request:' + digest([key, target])
+            operation = epoch + ':request:' + digest([key, target] if generation == 0 else [key, target, generation])
             facts = native_facts(resource)
             content = {'agent': agent, 'epoch': facts.get('epoch'), 'request': question['request'],
                        'revision': question['revision'], 'scope': copy.deepcopy(question['scope']),
@@ -499,7 +527,8 @@ class CoordinationService:
                                  json.dumps(content, ensure_ascii=False, sort_keys=True)}]}
             try:
                 result = engine.send(args, context, request_notice={'agent': agent, 'key': key,
-                                     'source_key': identity_key, 'revision': question['revision']}, notice_after_gap=after_gap)
+                                     'source_key': identity_key, 'revision': question['revision']}, notice_after_gap=after_gap,
+                                     notice_generation=generation)
                 view['notices'].append({'source_key': key, 'request': question['request'], 'revision': question['revision'], **result})
                 self.dispatch_dirty = True
             except (PolicyError, StoreError, VqroError) as error:
