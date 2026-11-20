@@ -360,6 +360,9 @@ impl ItemCursor {
     pub fn epoch(&self) -> &str { &self.epoch }
     /// The last `seq` this cursor has emitted (or the snapshot cut).
     pub fn seq(&self) -> u64 { self.seq }
+    /// Whether this cursor has snapshot pieces left to emit. A caller that charges retained cut
+    /// memory keeps its reservation through sending the final `Data` piece that makes this false.
+    pub fn snapshot_pending(&self) -> bool { self.snapshot.is_some() }
 
     /// Take one serialized cut of `j` (shared entity values) and pin the records after it.
     fn start_snapshot(&mut self, j: &mut ItemJournal) {
@@ -379,6 +382,13 @@ impl ItemCursor {
             // Session switch or journal loss: a new snapshot fences the new epoch, in-stream.
             self.start_snapshot(j);
         }
+        // A lost post-cut record invalidates an unfinished cut too: never emit its remaining
+        // pieces or end marker, which would let the viewer install a snapshot it cannot follow.
+        if self.epoch == j.epoch && self.seq < j.seq && self.seq + 1 < j.first_retained() {
+            self.snapshot = None;
+            self.pin = None;
+            return Next::Gap("retention");
+        }
         if let Some(snap) = self.snapshot.as_mut() {
             let mut out = snap.begin.take().unwrap_or_default();
             while snap.pos < snap.entities.len() && (out.is_empty() || out.len() < max_bytes) {
@@ -392,7 +402,6 @@ impl ItemCursor {
             }
             return Next::Data(out);
         }
-        if self.seq < j.seq && self.seq + 1 < j.first_retained() { self.pin = None; return Next::Gap("retention"); }
         let mut out = Vec::new();
         let from = self.seq;
         for (s, l) in j.log.iter().filter(|(s, _)| *s > from) {
@@ -610,6 +619,51 @@ impl ItemView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overflowing_an_unfinished_cut_gaps_before_more_pieces_and_installs_nothing() {
+        let mut j = ItemJournal::new("e", JournalConfig {
+            retain_bytes: 4096, snapshot_buffer_bytes: 4096, ..Default::default()
+        });
+        for n in 0..8 {
+            j.put("message", &format!("m{n}"), json!({"text":"x".repeat(2048)})).unwrap();
+        }
+        let mut cursor = j.open(None);
+        let mut view = ItemView::new();
+        let Next::Data(first) = cursor.next(&mut j, 1024) else { panic!("snapshot piece") };
+        view.feed(&first);
+        assert_eq!(view.snapshots, 0);
+        for n in 0..20 {
+            j.put("state", "current", json!({"n":n,"text":"y".repeat(2048)})).unwrap();
+        }
+        assert_eq!(cursor.next(&mut j, 1024), Next::Gap("retention"));
+        assert!(cursor.snapshot.is_none(), "release the retained cut on gap");
+        assert!(j.pins.lock().unwrap().is_empty(), "release its post-cut pin on gap");
+        view.stream_ended();
+        assert_eq!(view.snapshots, 0, "never install an overflowed cut");
+        assert!(view.is_empty());
+        assert_eq!(view.errors.total(), 0);
+    }
+
+    #[test]
+    fn snapshot_pending_covers_all_pieces_but_not_continuation() {
+        let mut j = ItemJournal::new("e", JournalConfig::default());
+        for n in 0..3 { j.put("message", &format!("m{n}"), json!({"text":"x".repeat(2048)})).unwrap(); }
+        let mut cursor = j.open(None);
+        let mut view = ItemView::new();
+        assert!(cursor.snapshot_pending());
+        for n in 0..3 {
+            let Next::Data(data) = cursor.next(&mut j, 1024) else { panic!("snapshot piece") };
+            view.feed(&data);
+            assert_eq!(cursor.snapshot_pending(), n < 2);
+            assert_eq!(view.snapshots, if n < 2 { 0 } else { 1 });
+        }
+        assert_eq!(cursor.next(&mut j, 1024), Next::Idle);
+        assert_eq!(view.errors.total(), 0);
+        let after = json!({"epoch":"e","seq":j.seq()});
+        let continued = j.open(Some(&after));
+        assert!(!continued.reset() && !continued.snapshot_pending());
+    }
 
     const TEXT: &[&str] = &["héllo ", "日本語 ", "🙂🚀 ", "naïve ", "Ω≈ç√ ", "ok "];
 
