@@ -107,9 +107,19 @@ class Harness:
         self.c = Client(self.sock, owner=inbox == "k2core")
         self.wait_commands(end)
         if inbox == "k2core":
-            while self.c.cmd("coord.status").get("state") != "ready" and time.time() < end:
-                time.sleep(0.2)
-            self.status = self.c.cmd("coord.status")
+            # Command registration is incremental; inbox.take can precede status.
+            # These are bounded read-only startup observations, never effect retries.
+            while time.time() < end:
+                try:
+                    self.status = self.c.cmd("coord.status")
+                    if self.status.get("state") == "ready":
+                        break
+                except RpcFailure as error:
+                    if error.kind not in ("not_found", "stale_generation"):
+                        raise
+                time.sleep(0.1)
+            else:
+                raise RuntimeError("managed coordination owner never became ready")
         self.n = 0
         self.declared = {}
         if inbox == "k2":
@@ -237,6 +247,12 @@ class Harness:
         return [json.loads(l) for l in open(self.inbox_log) if '"event": "status"' in l]
 
 
+class RpcFailure(RuntimeError):
+    def __init__(self, error):
+        self.kind = (error.get("data") or {}).get("kind", "unknown")
+        super().__init__(error)
+
+
 class Client:
     def __init__(self, sock, owner=False, principal=None):
         self.s = socket.socket(socket.AF_UNIX); self.s.connect(sock); self.f = self.s.makefile("rw"); self.n = 0
@@ -252,7 +268,7 @@ class Client:
             row = json.loads(self.f.readline())
             if row.get("id") == self.n:
                 if "error" in row:
-                    raise RuntimeError(row["error"])
+                    raise RpcFailure(row["error"])
                 return row["result"]
 
     def cmd(self, name, **args):
