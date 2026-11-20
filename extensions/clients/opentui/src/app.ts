@@ -1,0 +1,873 @@
+// The OpenTUI trial client: renders the workspace through the shared client model (model.ts). Base profile
+// (layout, panels, menus, prompts, recovery, safe-mode chooser) and `keys`; terminal views come from terminal.ts.
+import { Renderable, RGBA, TextAttributes, type CliRenderer, type KeyEvent, type MouseEvent, type OptimizedBuffer, type PasteEvent } from "@opentui/core";
+import * as m from "./model";
+import { Peer, RpcError, type Json } from "./rpc";
+import { Palette } from "./theme";
+import { Terminals } from "./terminal";
+
+export const FEATURES = [...m.BASE_FEATURES, "icon_names", "current_when", "follow"];
+export const PROFILES = ["base", "keys", "terminal"];
+const KINDS = ["panel", "terminal"];
+
+export interface Rect { x: number; y: number; w: number; h: number }
+interface Leaf { view: string; rect: Rect; inner: Rect; path: number[] }
+interface PState { sel: number; top: number; page: number; filter: string; open: Record<string, boolean>; chip: number; followEnd: number | null; manual: boolean }
+type Overlay =
+  | { kind: "prefix"; sel: number }
+  | { kind: "palette"; query: string; sel: number }
+  | { kind: "menu"; title: string; items: Json[]; ctx: Json; sel: number }
+  | { kind: "input"; prompt: string; text: string; item: Json; ctx: Json }
+  | { kind: "pick"; item: Json; ctx: Json; sel: number }
+  | { kind: "popup"; view: string; width: number; ctx: Json }
+  | { kind: "filter"; key: string };
+type Hit = { rect: Rect; act: (e: MouseEvent) => void };
+
+const width = (s: string) => Bun.stringWidth(s);
+/** Cut a string to at most `w` cells. */
+export function fit(s: string, w: number): string {
+  if (w <= 0) return "";
+  if (width(s) <= w) return s;
+  let out = "", used = 0;
+  for (const ch of s) { const cw = width(ch); if (used + cw > w - 1) break; out += ch; used += cw; }
+  return out + "…";
+}
+const clean = (s: any) => String(s ?? "").replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "").replace(/\n/g, " ");
+const isObj = (v: Json) => v !== null && typeof v === "object" && !Array.isArray(v);
+
+/** An OpenTUI key event as a vqro key name (core-protocol.md, Keys), or null. */
+export function keyName(k: KeyEvent): string | null {
+  const named: Record<string, string> = {
+    up: "Up", down: "Down", left: "Left", right: "Right", home: "Home", end: "End", pageup: "PageUp", pagedown: "PageDown",
+    insert: "Insert", delete: "Delete", return: "Enter", enter: "Enter", kpenter: "Enter", linefeed: "Enter", escape: "Esc",
+    backspace: "Backspace", space: "Space",
+  };
+  let base: string;
+  if (k.name === "tab") base = k.shift ? "BackTab" : "Tab";
+  else if (named[k.name]) base = named[k.name];
+  else if (/^f([1-9]|1[0-2])$/.test(k.name)) base = k.name.toUpperCase();
+  else if (!k.ctrl && !k.meta && [...k.sequence].length === 1 && k.sequence >= " ") base = k.sequence;
+  else if ([...k.name].length === 1) base = k.shift ? k.name.toUpperCase() : k.name;
+  else return null;
+  const shiftMod = k.shift && base.length > 1 && base !== "BackTab";
+  return m.normalize((k.ctrl ? "C-" : "") + (k.meta || k.option ? "M-" : "") + (shiftMod ? "S-" : "") + base);
+}
+
+export class App {
+  ws = new m.Workspace();
+  win = new m.Window();
+  peer!: Peer;
+  pal = new Palette(null, false);
+  focus = 0;
+  zoomed: string | null = null;
+  overlay: Overlay | null = null;
+  under: Overlay | null = null;      // a popup under a menu or prompt opened from it
+  pstate = new Map<string, PState>();
+  safeSelected = new Set<string>();
+  message = "";
+  toast: { text: string; style: string | null; until: number } | null = null;
+  leaves: Leaf[] = [];
+  hits: Hit[] = [];
+  listed = new Map<string, { rows: m.Row[]; hits: { y: number; x: number; w: number; i: number; chip?: number }[] }>();
+  terminals: Terminals;
+  quit = false;
+  private resyncing = false;
+
+  constructor(public renderer: CliRenderer, public screen: Screen, private socketPath: string) {
+    this.terminals = new Terminals(this);
+  }
+
+  // ---- protocol ---------------------------------------------------------------------------------------------------
+
+  async start() {
+    this.peer = await Peer.connect(this.socketPath, (method, params) => this.onNotify(method, params));
+    this.peer.onClose = () => { this.message = "core disconnected, reconnecting…"; this.terminals.reset(); this.redraw(); void this.reconnect(); };
+    await this.peer.call("hello", { client: "opentui", version: "0.1.0", profiles: PROFILES, features: FEATURES });
+    await this.resync();
+  }
+
+  /** Reconnect after the core restarts: a fresh snapshot, never replayed input (terminals reattach). */
+  private async reconnect() {
+    for (;;) {
+      await Bun.sleep(1000);
+      if (this.quit) return;
+      try { await this.start(); this.message = "reconnected"; this.redraw(); return; } catch { /* the core is not back yet */ }
+    }
+  }
+
+  async resync() {
+    if (this.resyncing) return;
+    this.resyncing = true;
+    try {
+      const snap = await this.peer.call("workspace.snapshot", {}, 10_000);
+      const was = this.ws.load(snap);
+      this.win.settle(this.ws);
+      this.safeModeChanged(this.ws.safeMode, was);
+      try { await this.peer.call("events.subscribe", { from: snap.seq, epoch: snap.epoch, partial_resources: true }); }
+      catch (e) { if (!(e instanceof RpcError && e.kind === "conflict")) throw e; }
+    } catch (e) { this.message = `snapshot failed: ${(e as Error).message}`; }
+    finally { this.resyncing = false; this.redraw(); }
+  }
+
+  onNotify(method: string, params: Json) {
+    if (method === "missed") { void this.resync(); return; }
+    if (method.startsWith("stream.")) { this.terminals.onStream(method, params); return; }
+    if (method !== "event") return;
+    for (const c of this.ws.apply(params)) {
+      switch (c.type) {
+        case "resync": void this.resync(); return;
+        case "entries": {
+          const s = this.win.settle(this.ws);
+          if (typeof s === "object" && "Closed" in s) this.message = `workspace ${s.Closed.was} was closed`;
+          if (!c.author.startsWith("ext:") && !c.author.startsWith("client:")) this.message = `workspace changed by ${c.author}`;
+          break;
+        }
+        case "resource": this.terminals.onResource(c.id, c.available, c.live, c.restored); break;
+        case "failed": this.message = `extension ${c.name} failed: ${c.reason}`; break;
+        case "safe_mode": this.safeModeChanged(c.on, c.was); break;
+        case "notify": this.toast = { text: c.text, style: c.style, until: Date.now() + 4000 }; setTimeout(() => this.redraw(), 4100); break;
+        case "backend": this.message = `backend ${c.name} disconnected: ${c.error}`; break;
+      }
+    }
+    this.redraw();
+  }
+
+  safeModeChanged(on: boolean, was: boolean) {
+    if (on && !was) { this.safeSelected = new Set(this.ws.safeModeAllow); this.pstate.delete("@popup"); this.overlay = { kind: "popup", view: m.SAFE_MODE_VIEW, width: 76, ctx: {} }; }
+    if (!on && this.overlay?.kind === "popup" && this.overlay.view === m.SAFE_MODE_VIEW) this.overlay = null;
+  }
+
+  redraw() { this.renderer.requestRender(); }
+
+  // ---- views and context ------------------------------------------------------------------------------------------
+
+  layoutRoot(): Json | null { const l = this.win.shown(this.ws); return l ? this.ws.entries.get(`layout/${l}`) ?? null : null; }
+
+  shownView(view: string): string | null {
+    if (view === m.SAFE_MODE_VIEW) return view;
+    return m.shownView(view, (id) => m.merged(id, this.ws.entries, this.ws.live), (v) => m.renders(v, KINDS, FEATURES))[0];
+  }
+
+  viewKind(view: string): string {
+    if (view === m.SAFE_MODE_VIEW) return "panel";
+    const shown = this.shownView(view) ?? view;
+    return this.ws.entries.get(`view/${shown}`)?.kind ?? "";
+  }
+
+  panelValue(view: string): Json {
+    if (view === m.SAFE_MODE_VIEW) return m.safeChooser(this.ws, this.safeSelected);
+    const shown = this.shownView(view) ?? view;
+    return m.markCurrent(m.merged(shown, this.ws.entries, this.ws.live) ?? {}, this.win.shown(this.ws));
+  }
+
+  viewTitle(view: string): string {
+    const v = this.ws.entries.get(`view/${view}`) ?? {};
+    if (typeof v.title === "string") return v.title;
+    const r = this.ws.resources.get(v.resource);
+    return r?.name ?? r?.argv?.[0] ?? view;
+  }
+
+  tabTitle(path: number[], index: number): string | null {
+    let n = this.layoutRoot();
+    for (const i of path) n = n?.children ? n.children[i] : n?.tabs ? n.tabs[i]?.node : null;
+    return n?.tabs?.[index]?.title ?? null;
+  }
+
+  ctxLeaf(i: number): Json {
+    const leaf = this.leaves[i];
+    if (!leaf) return this.win.invocationContext(this.ws, {});
+    const v = this.ws.entries.get(`view/${leaf.view}`) ?? {};
+    const r = typeof v.resource === "string" ? this.ws.resources.get(v.resource) : null;
+    const w = this.win.context(this.ws);
+    const ctx: Json = { layout: w.layout, layout_version: w.layout_version, path: leaf.path, view: leaf.view, kind: v.kind ?? null,
+      resource: v.resource ?? null, resource_kind: r?.kind ?? null, live: r?.state === "live", title: this.viewTitle(leaf.view), tab_title: null };
+    let n = this.layoutRoot();
+    for (let d = 0; d < leaf.path.length && n; d++) {
+      if (n.tabs) { ctx.tab_path = leaf.path.slice(0, d); ctx.tab_index = leaf.path[d]; ctx.tab_title = n.tabs[leaf.path[d]]?.title ?? null; }
+      n = n.children ? n.children[leaf.path[d]] : n.tabs ? n.tabs[leaf.path[d]]?.node : null;
+    }
+    const shown = this.shownView(leaf.view);
+    if (shown && shown !== leaf.view) ctx.shown_view = shown;
+    return ctx;
+  }
+
+  // ---- commands ---------------------------------------------------------------------------------------------------
+
+  /** Run an item (menu entry, binding, row): prompt, pick or options first when it asks. */
+  activate(item: Json, ctx: Json) {
+    if (Array.isArray(item.options)) {
+      this.openOver({ kind: "menu", title: item.text ?? "", ctx, sel: 0, items: item.options.map((o: Json) => ({
+        label: (o.value === item.value ? "● " : "  ") + (o.label ?? String(o.value)), command: item.command,
+        args: { ...(item.args ?? {}), value: o.value }, input: o.input, prefill: o.prefill ?? item.prefill })) });
+      return;
+    }
+    if (typeof item.input === "string") {
+      let text = "";
+      if (typeof item.prefill === "string") text = item.prefill;
+      else if (isObj(item.prefill) && typeof ctx[item.prefill.context] === "string") text = ctx[item.prefill.context];
+      this.openOver({ kind: "input", prompt: item.input, text, item, ctx });
+      return;
+    }
+    if (item.pick === "resource") { this.openOver({ kind: "pick", item, ctx, sel: 0 }); return; }
+    void this.run(item.command, item.args ?? {}, ctx);
+  }
+
+  openOver(o: Overlay) {
+    if (this.overlay?.kind === "popup") this.under = this.overlay;
+    this.overlay = o;
+  }
+
+  closeOverlay() { this.overlay = this.under; this.under = null; }
+
+  async run(name: string, args: Json, ctx: Json) {
+    if (!name) return;
+    if (name.startsWith("client.")) { this.clientCommand(name, args ?? {}, ctx); this.redraw(); return; }
+    this.message = `running ${name}…`;
+    this.redraw();
+    try {
+      const reply = await this.peer.call("command.invoke", { name, args: { ...(isObj(args) ? args : {}), context: this.win.invocationContext(this.ws, ctx) } });
+      const hints = reply?.client;
+      const layout = m.replyLayout(name, reply);
+      if (layout) this.win.show(this.ws, layout);
+      if (isObj(hints)) {
+        if (hints.close === true && this.overlay?.kind === "popup") this.overlay = null;
+        if (isObj(hints.popup) && typeof hints.popup.view === "string") {
+          const kind = this.viewKind(hints.popup.view);
+          if (kind === "terminal") this.message = "popup refused: terminals never pop up";
+          else if (!kind) this.message = `popup: no view ${hints.popup.view}`;
+          else { this.pstate.delete("@popup"); this.under = null; this.overlay = { kind: "popup", view: hints.popup.view, width: hints.popup.width ?? 60, ctx }; }
+        }
+        if (isObj(hints.focus) && typeof hints.focus.view === "string") {
+          this.zoomed = null;
+          setTimeout(() => { const i = this.leaves.findIndex((l) => l.view === hints.focus.view); if (i >= 0) this.focus = i; this.redraw(); }, 50);
+        }
+      }
+      if (this.message === `running ${name}…`) this.message = `${name}: done`;
+    } catch (e) {
+      this.message = `${name}: ${(e as Error).message}`;
+    }
+    this.redraw();
+  }
+
+  clientCommand(name: string, args: Json, ctx: Json) {
+    switch (name) {
+      case "client.prefix": this.overlay = { kind: "prefix", sel: 0 }; break;
+      case "client.palette": this.overlay = { kind: "palette", query: "", sel: 0 }; break;
+      case "client.menu": {
+        const place = args.where ?? "pane";
+        const items = this.ws.menuEntries(place, ctx);
+        if (!items.length) this.message = `no ${place} menu items (are their extensions on?)`;
+        else this.openOver({ kind: "menu", title: place, items, ctx, sel: 0 });
+        break;
+      }
+      case "client.focus": {
+        const n = this.leaves.length || 1;
+        this.focus = (this.focus + (args.dir === "prev" ? n - 1 : 1)) % n;
+        this.zoomed = null;
+        break;
+      }
+      case "client.tab": this.tabTo(args.to, ctx); break;
+      case "client.zoom": this.zoomed = this.zoomed ? null : this.leaves[this.focus]?.view ?? null; break;
+      case "client.layout": { const [ok, r] = this.win.clientLayout(this.ws, args); if (!ok) this.message = String(r); break; }
+      case "client.quit": this.quit = true; this.renderer.destroy(); process.exit(0);
+      case "client.safe_mode":
+        if (this.ws.safeMode) { this.pstate.delete("@popup"); this.overlay = { kind: "popup", view: m.SAFE_MODE_VIEW, width: 76, ctx: {} }; }
+        else void this.run("vqro.safe_mode", { on: true }, ctx);
+        break;
+      case "client.safe_mode.toggle": if (!this.safeSelected.delete(args.name)) this.safeSelected.add(args.name); break;
+      case "client.safe_mode.apply": void (async () => {
+        for (const key of this.ws.entries.keys()) {
+          if (!key.startsWith("extension/")) continue;
+          const n = key.slice(10);
+          try { await this.peer.call("command.invoke", { name: "vqro.safe_mode.allow", args: { name: n, on: this.safeSelected.has(n) } }); }
+          catch (e) { this.message = (e as Error).message; this.redraw(); return; }
+        }
+        this.message = "Safe-mode choices applied; enabled declarations were not changed";
+        this.redraw();
+      })(); break;
+      case "client.safe_mode.leave": void this.run("vqro.safe_mode", { on: false }, ctx); break;
+      case "client.panel": {
+        const key = ctx.panel;
+        const st = key && this.pstate.get(key);
+        if (!st) break;
+        if (args.action === "filter") this.overlay = { kind: "filter", key };
+        else if (args.action === "clear_filter") st.filter = "";
+        else if (args.action === "expand_all" || args.action === "collapse_all") {
+          for (const r of m.rows(this.panelValue(ctx.panel_view ?? key), st.page, "", {}, FEATURES)) if (r.has_children) st.open[r.id] = args.action === "expand_all";
+        }
+        break;
+      }
+      case "client.none": break;
+      default: this.message = `${name}: not supported by this client`;
+    }
+  }
+
+  tabTo(to: Json, ctx: Json) {
+    const path: number[] = ctx.tab_path ?? [];
+    const name = this.win.shown(this.ws);
+    const root = this.layoutRoot();
+    if (!name || !root) return;
+    const copy = structuredClone(root);
+    let n = copy;
+    for (const i of path) n = n.children ? n.children[i] : n.tabs[i].node;
+    if (!n?.tabs) return;
+    const count = n.tabs.length, cur = n.active ?? 0;
+    const next = to === "next" ? (cur + 1) % count : to === "prev" ? (cur + count - 1) % count : Number(to) - 1;
+    if (!(next >= 0 && next < count) || next === cur) return;
+    n.active = next;
+    void this.peer.call("workspace.apply", { note: "select tab", ops: [{ op: "set", key: `layout/${name}`, value: copy, expect: this.ws.versions.get(`layout/${name}`) }] })
+      .catch((e) => { this.message = (e as Error).message; this.redraw(); });
+  }
+
+  // ---- keys -------------------------------------------------------------------------------------------------------
+
+  prefixKey(): string { return m.normalize(String(this.ws.entries.get("doc/settings/tui")?.prefix ?? "")) ?? "C-g"; }
+  prefix(): string { const p = this.prefixKey(); return /^(C-|M-)/.test(p) || /^F\d+$/.test(p) ? p : "C-g"; }
+
+  onKey(k: KeyEvent) {
+    const name = keyName(k);
+    if (!name) return;
+    const o = this.overlay;
+    const isPrefix = name === this.prefix();
+    if (isPrefix && o?.kind !== "prefix" && o?.kind !== "input") { this.overlay = { kind: "prefix", sel: 0 }; this.redraw(); return; }
+    if (o) { this.overlayKey(o, name, k); this.redraw(); return; }
+    const leaf = this.leaves[this.focus];
+    if (leaf && this.viewKind(leaf.view) === "terminal") { this.terminals.key(leaf.view, k); return; }
+    if (leaf && this.viewKind(leaf.view) === "panel") this.panelKey(leaf.view, leaf.view, name, this.ctxLeaf(this.focus));
+    this.redraw();
+  }
+
+  onPaste(e: PasteEvent) {
+    const leaf = this.leaves[this.focus];
+    if (!this.overlay && leaf && this.viewKind(leaf.view) === "terminal") this.terminals.paste(leaf.view, e.bytes);
+    else if (this.overlay?.kind === "input") { this.overlay.text += new TextDecoder().decode(e.bytes).replace(/\n/g, " "); this.redraw(); }
+  }
+
+  overlayKey(o: Overlay, name: string, k: KeyEvent) {
+    const list = (n: number, sel: number) => name === "Up" ? Math.max(0, sel - 1) : name === "Down" ? Math.min(n - 1, sel + 1) : sel;
+    switch (o.kind) {
+      case "prefix": {
+        const rows = m.prefixRows(this.ws, this.ctxLeaf(this.focus));
+        if (name === this.prefix()) {  // twice: to the program
+          this.overlay = null;
+          const leaf = this.leaves[this.focus];
+          if (leaf && this.viewKind(leaf.view) === "terminal") this.terminals.key(leaf.view, k);
+          return;
+        }
+        const b = this.ws.bindingFor(name, this.ctxLeaf(this.focus));
+        if (b) { this.overlay = null; this.activate(b, this.ctxLeaf(this.focus)); return; }
+        if (name === "Up" || name === "Down") { o.sel = list(rows.length, o.sel); return; }
+        if (name === "Enter") { const r = rows[o.sel]; this.overlay = null; if (r) this.activate(r.binding, this.ctxLeaf(this.focus)); return; }
+        this.overlay = null;
+        if (name !== "Esc") this.message = `no binding for ${this.prefix()} ${name}`;
+        return;
+      }
+      case "palette": {
+        const names = this.paletteItems(o.query);
+        if (name === "Esc") this.overlay = null;
+        else if (name === "Enter") { this.overlay = null; if (names[o.sel]) void this.run(names[o.sel], {}, this.ctxLeaf(this.focus)); }
+        else if (name === "Up" || name === "Down") o.sel = list(names.length, o.sel);
+        else if (name === "Backspace") { o.query = o.query.slice(0, -1); o.sel = 0; }
+        else if ([...k.sequence].length === 1 && k.sequence >= " ") { o.query += k.sequence; o.sel = 0; }
+        return;
+      }
+      case "menu": {
+        if (name === "Esc") this.closeOverlay();
+        else if (name === "Up" || name === "Down") o.sel = list(o.items.length, o.sel);
+        else if (name === "Enter") { const it = o.items[o.sel]; this.closeOverlay(); if (it) this.activate({ ...it, options: undefined }, o.ctx); }
+        return;
+      }
+      case "pick": {
+        const res = [...this.ws.resources.values()];
+        if (name === "Esc") this.closeOverlay();
+        else if (name === "Up" || name === "Down") o.sel = list(res.length, o.sel);
+        else if (name === "Enter") { this.closeOverlay(); const r = res[o.sel]; if (r) void this.run(o.item.command, { ...(o.item.args ?? {}), picked: r.id }, o.ctx); }
+        return;
+      }
+      case "input": {
+        if (name === "Esc") this.closeOverlay();
+        else if (name === "Enter") { this.closeOverlay(); void this.run(o.item.command, { ...(o.item.args ?? {}), text: o.text }, o.ctx); }
+        else if (name === "Backspace") o.text = o.text.slice(0, -1);
+        else if ([...k.sequence].length === 1 && k.sequence >= " ") o.text += k.sequence;
+        return;
+      }
+      case "filter": {
+        const st = this.pstate.get(o.key);
+        if (!st) { this.overlay = this.under; return; }
+        if (name === "Esc") { st.filter = ""; this.overlay = this.under; this.under = null; }
+        else if (name === "Enter") { this.overlay = this.under; this.under = null; }
+        else if (name === "Backspace") st.filter = st.filter.slice(0, -1);
+        else if ([...k.sequence].length === 1 && k.sequence >= " ") { st.filter += k.sequence; st.sel = 0; st.top = 0; }
+        return;
+      }
+      case "popup": {
+        if (name === "Esc") { this.overlay = null; return; }
+        this.panelKey("@popup", o.view, name, { ...o.ctx, panel: "@popup", panel_view: o.view });
+        return;
+      }
+    }
+  }
+
+  paletteItems(query: string): string[] {
+    const q = query.toLowerCase();
+    return [...this.ws.commands.values()].filter((c) => c.available === true && (c.name.toLowerCase().includes(q) || String(c.title ?? "").toLowerCase().includes(q)))
+      .map((c) => c.name).sort();
+  }
+
+  state(key: string): PState {
+    let st = this.pstate.get(key);
+    if (!st) { st = { sel: 0, top: 0, page: 0, filter: "", open: {}, chip: 0, followEnd: null, manual: false }; this.pstate.set(key, st); }
+    return st;
+  }
+
+  panelKey(key: string, view: string, name: string, ctx: Json) {
+    const value = this.panelValue(view);
+    const st = this.state(key);
+    const rows = m.rows(value, st.page, st.filter, st.open, FEATURES);
+    const sel = (i: number) => rows.findIndex((r, j) => j >= i && m.selectable(r.item));
+    const step = (delta: number) => {
+      let i = st.sel;
+      for (let n = Math.abs(delta); n > 0;) { const j = i + Math.sign(delta); if (j < 0 || j >= rows.length) break; i = j; if (m.selectable(rows[i].item)) n--; }
+      if (rows[i] && m.selectable(rows[i].item)) st.sel = i;
+    };
+    st.manual = false;
+    const row = rows[st.sel];
+    switch (name) {
+      case "Up": case "k": step(-1); break;
+      case "Down": case "j": step(1); break;
+      case "PageUp": step(-10); break;
+      case "PageDown": step(10); break;
+      case "Home": st.sel = Math.max(0, sel(0)); break;
+      case "End": { for (let i = rows.length - 1; i >= 0; i--) if (m.selectable(rows[i].item)) { st.sel = i; break; } break; }
+      case "Left":
+        if (row && m.kind(row.item) === "chips") st.chip = Math.max(0, st.chip - 1);
+        else if (row?.has_children && row.expanded) st.open[row.id] = false;
+        else if (row && row.parent !== null) st.sel = row.parent;
+        break;
+      case "Right":
+        if (row && m.kind(row.item) === "chips") st.chip = Math.min((row.item.chips?.length ?? 1) - 1, st.chip + 1);
+        else if (row?.has_children && !row.expanded) st.open[row.id] = true;
+        break;
+      case "[": st.page = Math.max(0, st.page - 1); st.sel = 0; st.top = 0; break;
+      case "]": st.page = Math.min(Math.max(0, (value.pages?.length ?? 1) - 1), st.page + 1); st.sel = 0; st.top = 0; break;
+      case "/": this.openOver({ kind: "filter", key }); break;
+      case "m": if (row && Array.isArray(row.item.menu)) this.openOver({ kind: "menu", title: row.item.text ?? "", items: row.item.menu, ctx, sel: 0 }); break;
+      case "Enter": case "Space": {
+        if (!row || !m.selectable(row.item)) break;
+        const item = m.kind(row.item) === "chips" ? row.item.chips?.[st.chip] : row.item;
+        if (item && typeof item.command === "string" && item.disabled !== true) this.activate(item, ctx);
+        else if (row.has_children) st.open[row.id] = !row.expanded;
+        break;
+      }
+    }
+  }
+
+  // ---- mouse ------------------------------------------------------------------------------------------------------
+
+  onMouse(e: MouseEvent) {
+    if (e.type === "scroll") {
+      const leaf = this.leaves.find((l) => inside(l.inner, e.x, e.y));
+      if (leaf && this.viewKind(leaf.view) === "terminal") this.terminals.scroll(leaf.view, e);
+      else if (leaf) { const st = this.state(leaf.view); st.manual = true; st.top = Math.max(0, st.top + (e.scroll?.direction === "up" ? -3 : 3)); }
+      this.redraw();
+      return;
+    }
+    if (e.type !== "down") return;
+    for (let i = this.hits.length - 1; i >= 0; i--) if (inside(this.hits[i].rect, e.x, e.y)) { this.hits[i].act(e); this.redraw(); return; }
+    if (this.overlay && this.overlay.kind !== "input") { this.overlay = null; this.redraw(); }
+  }
+}
+
+/** Menus, prompts, the prefix menu and popups, drawn above terminal panes; it also receives the mouse. */
+export class Top extends Renderable {
+  app!: App;
+  protected renderSelf(buf: OptimizedBuffer) { if (this.app) this.app.screen.overlays(buf, this.width, this.height); }
+}
+
+const inside = (r: Rect, x: number, y: number) => x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h;
+
+/** The whole window: tab bars, panes, panels, status bar and overlays; terminals are separate renderables on top. */
+export class Screen extends Renderable {
+  app!: App;
+  protected renderSelf(buf: OptimizedBuffer) {
+    const a = this.app;
+    if (!a) return;
+    a.pal = new Palette(a.ws.entries.get("doc/settings/theme"), a.ws.safeMode);
+    a.hits = [];
+    const W = this.width, H = this.height;
+    buf.fillRect(0, 0, W, H, a.pal.bg);
+    const body: Rect = { x: 0, y: 0, w: W, h: Math.max(0, H - 1) };
+    const leaves: Leaf[] = [];
+    const root = a.layoutRoot();
+    if (!root) text(buf, 1, 1, "no workspace yet: Ctrl-g R resets the layout", a.pal.color("muted"));
+    else if (a.zoomed) leaves.push({ view: a.zoomed, rect: body, inner: inset(body), path: a.leaves.find((l) => l.view === a.zoomed)?.path ?? [] });
+    else this.walk(buf, root, body, [], leaves);
+    a.leaves = leaves;
+    if (a.focus >= leaves.length) a.focus = Math.max(0, leaves.length - 1);
+    const seen = new Set<string>();
+    leaves.forEach((leaf, i) => { seen.add(leaf.view); this.pane(buf, leaf, i); });
+    a.terminals.layout(leaves.filter((l) => a.viewKind(l.view) === "terminal"), a.overlay !== null && a.overlay.kind !== "input" && a.overlay.kind !== "filter");
+    this.status(buf, { x: 0, y: H - 1, w: W, h: 1 });
+  }
+
+  private walk(buf: OptimizedBuffer, node: Json, r: Rect, path: number[], out: Leaf[]) {
+    const a = this.app;
+    if (r.w <= 0 || r.h <= 0 || !isObj(node)) return;
+    if (typeof node.view === "string") { out.push({ view: node.view, rect: r, inner: inset(r), path }); return; }
+    if (Array.isArray(node.children) && node.children.length) {
+      const n = node.children.length;
+      const weights: number[] = Array.isArray(node.sizes) && node.sizes.length === n ? node.sizes.map((s: Json) => Math.max(1, Number(s) || 1)) : Array(n).fill(1);
+      const total = weights.reduce((x, y) => x + y, 0);
+      const side = node.split !== "v";
+      const span = side ? r.w : r.h;
+      let at = 0;
+      node.children.forEach((c: Json, i: number) => {
+        const len = i === n - 1 ? span - at : Math.round((span * weights[i]) / total);
+        const sub = side ? { x: r.x + at, y: r.y, w: len, h: r.h } : { x: r.x, y: r.y + at, w: r.w, h: len };
+        at += len;
+        this.walk(buf, c, sub, [...path, i], out);
+      });
+      return;
+    }
+    if (Array.isArray(node.tabs) && node.tabs.length) {
+      const active = Math.min(node.active ?? 0, node.tabs.length - 1);
+      buf.fillRect(r.x, r.y, r.w, 1, a.pal.color("tab_bar"));
+      let x = r.x;
+      node.tabs.forEach((t: Json, i: number) => {
+        const label = ` ${i + 1}:${clean(t?.title ?? "tab")} `;
+        const on = i === active;
+        text(buf, x, r.y, fit(label, r.x + r.w - x), on ? a.pal.color("tab_active_text") : a.pal.color("muted"), on ? a.pal.color("tab_active") : a.pal.color("tab_bar"));
+        const rect = { x, y: r.y, w: width(label), h: 1 };
+        a.hits.push({ rect, act: () => a.tabTo(i + 1, { tab_path: path }) });
+        x += width(label);
+      });
+      if (path.length === 0 || !a.hits.some((h) => (h as any).tabbar)) {
+        for (const item of a.ws.menuEntries("tabbar", a.win.invocationContext(a.ws, {}))) {
+          const label = ` ${iconText(a, item.icon)}${item.label ? (iconText(a, item.icon) ? " " : "") + item.label : ""} `;
+          if (x + width(label) > r.x + r.w) break;
+          text(buf, x, r.y, label, a.pal.color("accent"), a.pal.color("tab_bar"));
+          const hit: any = { rect: { x, y: r.y, w: width(label), h: 1 }, act: () => a.activate(item, a.win.invocationContext(a.ws, { tab_path: path })), tabbar: true };
+          a.hits.push(hit);
+          x += width(label);
+        }
+      }
+      this.walk(buf, node.tabs[active]?.node, { x: r.x, y: r.y + 1, w: r.w, h: r.h - 1 }, [...path, active], out);
+    }
+  }
+
+  private pane(buf: OptimizedBuffer, leaf: Leaf, i: number) {
+    const a = this.app;
+    const focused = i === a.focus && !a.overlay;
+    const border = focused ? a.pal.color("border_focus") : a.pal.color("border");
+    box(buf, leaf.rect, border, a.pal.bg);
+    const kind = a.viewKind(leaf.view);
+    let title = a.viewTitle(leaf.view);
+    if (kind === "panel") title = a.panelValue(leaf.view).title ?? title;
+    if (kind === "terminal") title = a.terminals.title(leaf.view, title);
+    text(buf, leaf.rect.x + 1, leaf.rect.y, fit(` ${clean(title)} `, leaf.rect.w - 2), border);
+    a.hits.push({ rect: leaf.rect, act: (e) => { a.focus = i; if (kind === "panel") this.click(leaf.view, leaf.view, e, a.ctxLeaf(i)); if (e.button === 2) a.clientCommand("client.menu", { where: "pane" }, a.ctxLeaf(i)); } });
+    if (kind === "panel") drawPanel(a, buf, leaf.inner, leaf.view, leaf.view, focused);
+    else if (kind !== "terminal") {
+      const v = a.ws.entries.get(`view/${leaf.view}`);
+      text(buf, leaf.inner.x, leaf.inner.y, fit(v ? `view ${leaf.view}: kind \`${v.kind}\` is not supported by this client` : `view ${leaf.view} is missing`, leaf.inner.w), a.pal.color("muted"));
+    }
+  }
+
+  private click(key: string, _view: string, e: MouseEvent, ctx: Json) {
+    const a = this.app;
+    const listed = a.listed.get(key);
+    const hit = listed?.hits.find((h) => h.y === e.y && e.x >= h.x && e.x < h.x + h.w);
+    if (!hit) return;
+    const st = a.state(key);
+    st.sel = hit.i;
+    if (hit.chip !== undefined) st.chip = hit.chip;
+    const row = listed!.rows[hit.i];
+    const toggle = m.kind(row.item) === "toggle" && e.x <= hit.x + 4;
+    if (hit.chip !== undefined || toggle || !row.item.detail_panel) {
+      if (e.button === 2 && Array.isArray(row.item.menu)) a.openOver({ kind: "menu", title: row.item.text ?? "", items: row.item.menu, ctx, sel: 0 });
+      else if (e.button === 0) a.panelKey(key, _view, "Enter", ctx);
+    }
+  }
+
+  private status(buf: OptimizedBuffer, r: Rect) {
+    const a = this.app;
+    const p = a.pal;
+    buf.fillRect(r.x, r.y, r.w, 1, p.bg);
+    const open = a.overlay?.kind === "prefix";
+    const badge = " vqro ▾ ";
+    text(buf, r.x, r.y, badge, open ? p.color("badge_text") : p.color("accent"), open ? p.color("prompt") : p.bg, TextAttributes.BOLD);
+    a.hits.push({ rect: { x: r.x, y: r.y, w: width(badge), h: 1 }, act: () => { a.overlay = a.overlay?.kind === "prefix" ? null : { kind: "prefix", sel: 0 }; } });
+    let x = r.x + width(badge) + 1;
+    if (a.overlay?.kind === "input" || a.overlay?.kind === "filter") {
+      const o = a.overlay;
+      const line = o.kind === "input" ? `${o.prompt}: ${o.text}▏` : `/${a.pstate.get(o.key)?.filter ?? ""}▏`;
+      text(buf, x, r.y, fit(line, r.w - x), p.color("prompt"));
+      return;
+    }
+    const failed = [...a.ws.extensions.values()].filter((s) => s?.status === "failed").length;
+    const notes: [string, string, () => void][] = [];
+    if (a.ws.safeMode) notes.push(["safe mode", "warn", () => a.clientCommand("client.safe_mode", {}, {})]);
+    if (failed) notes.push([`${failed} failed · recover`, "error", () => { a.overlay = { kind: "prefix", sel: 0 }; }]);
+    if (a.ws.backendNotice) notes.push([a.ws.backendNotice, "warn", () => a.clientCommand("client.safe_mode", {}, {})]);
+    for (const [label, style, act] of notes) {
+      text(buf, x, r.y, fit(label, r.w - x), p.color(style));
+      a.hits.push({ rect: { x, y: r.y, w: width(label), h: 1 }, act });
+      x += width(label) + 2;
+    }
+    const wctx = a.win.context(a.ws);
+    for (const item of a.ws.menuEntries("status", a.win.invocationContext(a.ws, {}))) {
+      let label = item.label ?? "";
+      let style = "muted";
+      if (typeof item.view === "string") { const live = a.ws.live.get(item.view); label = live?.label ?? ""; style = live?.style ?? style; if (!label) continue; }
+      if (typeof item.label_context === "string") label = String(wctx[item.label_context] ?? label);
+      const shown = `${iconText(a, item.icon)}${iconText(a, item.icon) && label ? " " : ""}${label}`;
+      if (x + width(shown) >= r.w) break;
+      text(buf, x, r.y, shown, p.color(style));
+      a.hits.push({ rect: { x, y: r.y, w: width(shown), h: 1 }, act: () => a.activate(item, a.win.invocationContext(a.ws, {})) });
+      x += width(shown) + 2;
+    }
+    const toast = a.toast && a.toast.until > Date.now() ? a.toast : null;
+    const msg = toast ? toast.text : a.message;
+    if (msg && x < r.w) text(buf, x, r.y, fit(clean(msg), r.w - x), p.color(toast?.style ?? "muted"));
+  }
+
+  overlays(buf: OptimizedBuffer, W: number, H: number) {
+    const a = this.app;
+    const stack = [a.under, a.overlay].filter(Boolean) as Overlay[];
+    for (const o of stack) {
+      if (o.kind === "popup") {
+        const value = a.panelValue(o.view);
+        const w = Math.min(Math.max(30, o.width), W - 4);
+        const n = m.rows(value, a.state("@popup").page, a.state("@popup").filter, a.state("@popup").open, FEATURES).length + (value.pages ? 2 : 0) + 3;
+        const h = Math.min(Math.max(6, n), H - 3);
+        const r = { x: Math.floor((W - w) / 2), y: Math.max(1, Math.floor((H - 1 - h) / 2)), w, h };
+        box(buf, r, a.pal.color("border_focus"), a.pal.bg);
+        text(buf, r.x + 1, r.y, fit(` ${clean(value.title ?? a.viewTitle(o.view))} `, w - 2), a.pal.color("border_focus"));
+        a.hits.push({ rect: r, act: (e) => this.click("@popup", o.view, e, { ...o.ctx, panel: "@popup", panel_view: o.view }) });
+        drawPanel(a, buf, inset(r), "@popup", o.view, a.overlay === o);
+        continue;
+      }
+      let title = "", items: string[] = [], sel = 0, acts: (() => void)[] = [];
+      if (o.kind === "prefix") {
+        const rows = m.prefixRows(a.ws, a.ctxLeaf(a.focus));
+        const kw = Math.max(2, ...rows.map((r) => width(r.key ?? "")));
+        title = ` vqro (${a.prefix()} then a key, or click) `;
+        items = rows.map((r) => ` ${(r.key ?? "·").padStart(kw)}  ${r.label}`);
+        acts = rows.map((r) => () => { a.overlay = null; a.activate(r.binding, a.ctxLeaf(a.focus)); });
+        sel = o.sel;
+      } else if (o.kind === "palette") {
+        const names = a.paletteItems(o.query);
+        title = ` commands: ${o.query}▏ `;
+        items = names.map((n) => ` ${n}  ${a.ws.commands.get(n)?.title ?? ""}`);
+        acts = names.map((n) => () => { a.overlay = null; void a.run(n, {}, a.ctxLeaf(a.focus)); });
+        sel = o.sel;
+      } else if (o.kind === "menu") {
+        title = ` ${clean(o.title)} `;
+        items = o.items.map((it) => ` ${iconText(a, it.icon)}${iconText(a, it.icon) ? " " : ""}${clean(it.label ?? it.text ?? "")}`);
+        acts = o.items.map((it) => () => { a.closeOverlay(); a.activate({ ...it, options: undefined }, o.ctx); });
+        sel = o.sel;
+      } else if (o.kind === "pick") {
+        const res = [...a.ws.resources.values()];
+        title = " pick a resource ";
+        items = res.map((r) => ` ${r.id}  ${r.name ?? r.argv?.[0] ?? ""}  ${r.state ?? ""}`);
+        acts = res.map((r) => () => { a.closeOverlay(); void a.run(o.item.command, { ...(o.item.args ?? {}), picked: r.id }, o.ctx); });
+        sel = o.sel;
+      } else continue;
+      const w = Math.min(W - 4, Math.max(width(title) + 2, ...items.map((s) => width(s) + 2), 24));
+      const h = Math.min(H - 3, items.length + 2);
+      const r = { x: Math.floor((W - w) / 2), y: Math.max(1, Math.floor((H - 1 - h) / 2)), w, h };
+      box(buf, r, a.pal.color("border_focus"), a.pal.bg);
+      text(buf, r.x + 1, r.y, fit(title, w - 2), a.pal.color("prompt"));
+      const top = Math.max(0, sel - (h - 3));
+      items.slice(top, top + h - 2).forEach((s, j) => {
+        const i = top + j, y = r.y + 1 + j;
+        const on = i === sel;
+        const [fg, bg] = on ? [a.pal.maybe("selection_text") ?? a.pal.bg, a.pal.maybe("selection") ?? a.pal.color("accent")] : [a.pal.color("text"), a.pal.bg];
+        buf.fillRect(r.x + 1, y, w - 2, 1, bg);
+        text(buf, r.x + 1, y, fit(s, w - 2), fg, bg);
+        a.hits.push({ rect: { x: r.x + 1, y, w: w - 2, h: 1 }, act: acts[i] });
+      });
+    }
+  }
+}
+
+function iconText(a: App, icon: Json): string {
+  if (typeof icon === "string") return icon;
+  if (!isObj(icon)) return "";
+  if (!a.ws.safeMode) {
+    const glyphs = a.ws.entries.get("doc/settings/icons")?.glyphs ?? {};
+    for (const n of Array.isArray(icon.name) ? icon.name : [icon.name]) {
+      const g = typeof n === "string" ? glyphs[n] : null;
+      if (typeof g === "string" && g && width(g) <= 2 && !/[\x00-\x1f]/.test(g)) return g;
+    }
+  }
+  return typeof icon.text === "string" ? icon.text : "";
+}
+
+export function text(buf: OptimizedBuffer, x: number, y: number, s: string, fg: RGBA, bg?: RGBA, attr = TextAttributes.NONE) {
+  if (s) buf.drawText(s, x, y, fg, bg, attr);
+}
+
+function inset(r: Rect): Rect { return { x: r.x + 1, y: r.y + 1, w: Math.max(0, r.w - 2), h: Math.max(0, r.h - 2) }; }
+
+function box(buf: OptimizedBuffer, r: Rect, fg: RGBA, bg: RGBA) {
+  if (r.w < 2 || r.h < 2) return;
+  buf.fillRect(r.x, r.y, r.w, r.h, bg);
+  const hz = "─".repeat(r.w - 2);
+  text(buf, r.x, r.y, "┌" + hz + "┐", fg, bg);
+  text(buf, r.x, r.y + r.h - 1, "└" + hz + "┘", fg, bg);
+  for (let y = r.y + 1; y < r.y + r.h - 1; y++) { text(buf, r.x, y, "│", fg, bg); text(buf, r.x + r.w - 1, y, "│", fg, bg); }
+}
+
+/** A panel: page bar, pinned toolbar, rows with selection and scrolling, descriptions, badges, chips, toggles. */
+function drawPanel(a: App, buf: OptimizedBuffer, area: Rect, key: string, view: string, focused: boolean) {
+  const p = a.pal;
+  const value = a.panelValue(view);
+  const missing = m.missingFor(value, FEATURES);
+  if (missing.length) {
+    text(buf, area.x, area.y, fit("This view needs a newer vqro UI", area.w), p.color("warn"));
+    text(buf, area.x, area.y + 1, fit(`(missing: ${missing.join(", ")})`, area.w), p.color("dim"));
+    return;
+  }
+  const st = a.state(key);
+  let y = area.y;
+  const bottom = area.y + area.h;
+  if (Array.isArray(value.pages) && value.pages.length) {
+    st.page = Math.min(st.page, value.pages.length - 1);
+    let x = area.x;
+    value.pages.forEach((pg: Json, i: number) => {
+      const label = ` ${clean(pg?.title ?? "page")} `;
+      text(buf, x, y, fit(label, area.x + area.w - x), i === st.page ? p.color("accent") : p.color("muted"), undefined, i === st.page ? TextAttributes.BOLD | TextAttributes.UNDERLINE : 0);
+      const page = i;
+      a.hits.push({ rect: { x, y, w: width(label), h: 1 }, act: () => { st.page = page; st.sel = 0; st.top = 0; } });
+      x += width(label) + 1;
+    });
+    y += 2;
+  }
+  const rows = m.rows(value, st.page, st.filter, st.open, FEATURES);
+  const listed = { rows, hits: [] as { y: number; x: number; w: number; i: number; chip?: number }[] };
+  a.listed.set(key, listed);
+  if (!rows.length) { text(buf, area.x, y, st.filter ? "(no matches)" : "(empty)", p.color("dim")); return; }
+  // follow: stay at the end while the reader is there (core-protocol.md, Optional list with detail).
+  if (value.follow === true && !st.manual) {
+    let end = 0;
+    for (let i = rows.length - 1; i >= 0; i--) if (m.selectable(rows[i].item)) { end = i; break; }
+    if (st.followEnd === null || st.sel >= st.followEnd) st.sel = end;
+    st.followEnd = end;
+  }
+  st.sel = Math.min(st.sel, rows.length - 1);
+  if (!m.selectable(rows[st.sel].item)) { const j = rows.findIndex((r, i) => i >= st.sel && m.selectable(r.item)); st.sel = j >= 0 ? j : rows.findIndex((r) => m.selectable(r.item)); if (st.sel < 0) st.sel = 0; }
+  const pinned = rows.filter((r) => r.pinned).length;
+  const line = (i: number, yy: number) => {
+    const r = rows[i];
+    const h = drawRow(a, buf, { x: area.x, y: yy, w: area.w, h: bottom - yy }, r, focused && i === st.sel, st.chip, (x, w, chip) => listed.hits.push({ y: yy, x, w, i, chip }));
+    return h;
+  };
+  for (let i = 0; i < pinned && y < bottom; i++) y += line(i, y);
+  if (pinned && y < bottom) { text(buf, area.x, y, "─".repeat(area.w), p.color("border")); y += 1; }
+  const visible = bottom - y;
+  const heights = rows.map((r) => rowHeight(r, area.w));
+  if (!st.manual) {
+    if (st.sel >= pinned && st.sel < st.top + pinned) st.top = st.sel - pinned;
+    let used = 0;
+    for (let i = st.top + pinned; i <= st.sel && i < rows.length; i++) used += heights[i];
+    while (st.sel >= pinned && used > visible && st.top + pinned < st.sel) { used -= heights[st.top + pinned]; st.top++; }
+  }
+  st.top = Math.max(0, Math.min(st.top, rows.length - pinned - 1));
+  for (let i = pinned + st.top; i < rows.length && y < bottom; i++) y += line(i, y);
+  if (rows.length - pinned > visible) {
+    const n = rows.length - pinned;
+    const thumb = Math.floor((st.top / Math.max(1, n)) * visible);
+    for (let yy = 0; yy < visible; yy++) text(buf, area.x + area.w - 1, bottom - visible + yy, yy === thumb ? "┃" : "│", yy === thumb ? p.color("accent") : p.color("border"));
+  }
+}
+
+const rowHeight = (r: m.Row, w: number) =>
+  m.kind(r.item) === "text" && r.item.wrap === true ? wrapText(clean2(r.item.text), Math.max(1, w - r.depth * 2)).length
+    : m.kind(r.item) === "separator" ? 1 : 1 + (typeof r.item.description === "string" && r.item.description ? 1 : 0);
+
+const clean2 = (s: any) => String(s ?? "").replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "");
+
+/** Word-wrap a paragraph (feature `wrap`); newlines start new lines, long words break. */
+export function wrapText(text: string, w: number): string[] {
+  const out: string[] = [];
+  for (const para of text.split("\n")) {
+    let line = "";
+    for (const word of para.split(/\s+/).filter(Boolean)) {
+      let piece = word;
+      while (width(piece) > w) { if (line) { out.push(line); line = ""; } out.push(fit(piece, w + 1).replace(/…$/, "").slice(0, w)); piece = piece.slice(w); }
+      if (!line) line = piece; else if (width(line) + 1 + width(piece) <= w) line += " " + piece; else { out.push(line); line = piece; }
+    }
+    out.push(line);
+  }
+  return out.length ? out : [""];
+}
+
+function drawRow(a: App, buf: OptimizedBuffer, r: Rect, row: m.Row, selected: boolean, chipSel: number, hit: (x: number, w: number, chip?: number) => void): number {
+  const p = a.pal;
+  const it = row.item;
+  const k = m.kind(it);
+  const indent = row.depth * 2;
+  let x = r.x + indent;
+  const end = r.x + r.w;
+  if (k === "separator") { text(buf, r.x, r.y, "─".repeat(r.w), p.color("border")); return 1; }
+  if (k === "text" && it.wrap === true) {
+    const lines = wrapText(clean2(it.text), Math.max(1, r.w - indent));
+    const [fg, attr] = p.style(it.style ?? "muted");
+    lines.slice(0, r.h).forEach((l, j) => {
+      if (selected) buf.fillRect(r.x, r.y + j, r.w, 1, p.maybe("selection") ?? p.bg);
+      const inverse = selected && !p.maybe("selection");
+      text(buf, x, r.y + j, l, selected && !inverse ? p.maybe("selection_text") ?? fg : fg, undefined, inverse ? attr | TextAttributes.INVERSE : attr);
+    });
+    hit(r.x, r.w);
+    return Math.min(lines.length, Math.max(1, r.h));
+  }
+  if (k === "chips") {
+    (Array.isArray(it.chips) ? it.chips : []).forEach((c: Json, j: number) => {
+      const label = ` ${iconText(a, c.icon)}${iconText(a, c.icon) && c.text ? " " : ""}${clean(c.text ?? "")}${Array.isArray(c.options) ? " ▾" : ""} `;
+      if (x + width(label) > end) return;
+      const on = selected && j === chipSel;
+      const bg = on ? p.maybe("selection") ?? p.color("accent") : c.checked ? p.color("accent") : p.color("surface");
+      const fg = on ? p.maybe("selection_text") ?? p.bg : c.checked ? p.color("badge_text") : p.style(c.style)[0];
+      text(buf, x, r.y, label, fg, bg);
+      hit(x, width(label), j);
+      x += width(label) + 1;
+    });
+    return 1;
+  }
+  let [fg, attr] = p.style(it.style ?? (it.disabled ? "dim" : k === "text" ? "muted" : null));
+  if (k === "header") { fg = p.color("accent"); attr = TextAttributes.BOLD; }
+  let bg: RGBA | undefined;
+  if (selected) {
+    bg = p.maybe("selection") ?? undefined;
+    if (bg) fg = p.maybe("selection_text") ?? fg; else attr |= TextAttributes.INVERSE;
+  }
+  if (selected) buf.fillRect(r.x, r.y, r.w, 1, bg ?? p.bg);
+  let label = "";
+  if (row.has_children && k !== "header") label += row.expanded ? "▾ " : "▸ ";
+  if (k === "toggle") label += it.checked ? "[x] " : "[ ] ";
+  const icon = iconText(a, it.icon);
+  if (icon) label += icon + " ";
+  label += clean(it.text);
+  if (k === "select") label += `: ${clean(it.options?.find((o: Json) => o.value === it.value)?.label ?? it.value)} ▾`;
+  else if (Array.isArray(it.options)) label += " ▾";
+  const badges: Json[] = Array.isArray(it.badges) ? it.badges : [];
+  const detail = typeof it.detail === "string" ? clean(it.detail) : "";
+  const badgeWidth = badges.reduce((n, b) => n + width(clean(b.text)) + 3, 0);
+  const room = Math.max(4, end - x - badgeWidth - (detail ? width(detail) + 2 : 0));
+  text(buf, x, r.y, fit(label, room), fg, bg, attr);
+  hit(r.x, r.w);
+  let bx = Math.min(end, x + width(fit(label, room)) + 2);
+  if (detail && bx + width(detail) <= end) { text(buf, bx, r.y, detail, p.style(it.detail_style ?? "dim")[0], bg); bx += width(detail) + 2; }
+  for (const b of badges) {
+    const t = ` ${clean(b.text)} `;
+    if (bx + width(t) > end) break;
+    text(buf, bx, r.y, t, p.color("badge_text"), b.style && b.style !== "dim" ? p.color(b.style) : p.color("badge"));
+    bx += width(t) + 1;
+  }
+  if (typeof it.description === "string" && it.description && r.h > 1) {
+    text(buf, r.x + indent + 2, r.y + 1, fit(clean(it.description), r.w - indent - 2), p.color("dim"));
+    return 2;
+  }
+  return 1;
+}

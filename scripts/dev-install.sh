@@ -12,7 +12,8 @@ mkdir -p "$HOME/.local/share/vqro/extensions/manifests"
 cp extensions/manifests/*.json "$HOME/.local/share/vqro/extensions/manifests/"
 # UI clients for `vqro ui <name>` (client manifests and programs; the built-in TUI needs none).
 mkdir -p "$HOME/.local/share/vqro/extensions/clients"
-cp extensions/clients/*.py extensions/clients/*.json "$HOME/.local/share/vqro/extensions/clients/"
+# The OpenTUI trial client (clients/opentui, needs Bun and its packages) is not installed; run it from the repo.
+cp extensions/clients/*.py extensions/clients/text.json "$HOME/.local/share/vqro/extensions/clients/"
 # Python extension packages live beside helpers. Only pi_bridge is replaced as
 # a whole: it is installed code, never session/config data; old modules must go.
 for source in extensions/*; do

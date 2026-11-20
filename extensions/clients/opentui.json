@@ -1,0 +1,11 @@
+{
+  "name": "opentui",
+  "kind": "client",
+  "title": "OpenTUI client (trial)",
+  "summary": "A trial terminal client on OpenTUI with Ghostty's terminal emulator: layout, panels, menus, recovery and terminals. Needs Bun and `bun install` in clients/opentui.",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "author": "Bennett Garcia",
+  "argv": ["bun", "opentui/src/main.ts"],
+  "profiles": ["base", "keys", "terminal"]
+}
