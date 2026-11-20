@@ -138,6 +138,12 @@ class ObservedWaits(unittest.IsolatedAsyncioTestCase):
             await roll_operation_window(ctx, object(), 'r1', attempts=2, check_every=1)
         self.assertEqual(ctx.evidence[-1]['after'], 'e1')
 
+    async def test_blank_admitted_identity_fails_even_when_the_epoch_would_change(self):
+        ctx = WindowContext([{'delivery': ''}], ['e1', 'e2', 'e2'])
+        with self.assertRaises(HarnessGap):
+            await roll_operation_window(ctx, object(), 'r1', attempts=1, check_every=1)
+        self.assertEqual(ctx.evidence, [])
+
     async def test_unrelated_refusals_and_unidentified_admissions_still_fail(self):
         ctx = WindowContext([refusal('no_grant')], ['e1'])
         with self.assertRaises(RpcError):

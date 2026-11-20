@@ -220,7 +220,7 @@ async def roll_operation_window(ctx, peer, target, *, attempts=2099, check_every
     for count in range(1, attempts + 1):
         try:
             reply = await ctx.send(peer=peer, target=target, mode="admit", text="p")
-            if not isinstance(reply, dict) or not isinstance(reply.get("delivery"), str):
+            if not isinstance(reply, dict) or not isinstance(reply.get("delivery"), str) or not reply["delivery"]:
                 raise HarnessGap("window probe returned no admitted delivery identity")
             admitted.append(reply["delivery"])
         except RpcError as error:
