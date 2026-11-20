@@ -22,7 +22,7 @@ MAX_ENTITY_BYTES = 512 * 1024
 
 ERRORS = ("duplicate", "missing", "stale_base", "unknown_entity", "bad_utf8", "bad_json", "bad_record",
           "out_of_snapshot", "oversize", "over_bound")
-LOSSY = ("missing", "stale_base", "over_bound", "unknown_entity")
+LOSSY = ("missing", "stale_base", "over_bound", "unknown_entity", "bad_record")  # as the Rust ItemView (7a8d0fd)
 
 
 def encoded_size(value):

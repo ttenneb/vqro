@@ -165,8 +165,11 @@ class ItemViewTests(unittest.TestCase):
         self.assertEqual(small.errors["over_bound"], 1)
         bad = ItemView()
         bad.feed(b"\xff\n{nope\n[1]\n" + line({"op": "put", "kind": "message", "id": "m"}))
-        self.assertEqual((bad.errors["bad_utf8"], bad.errors["bad_json"], bad.errors["bad_record"]), (1, 1, 2))
-        self.assertEqual(bad.errors["out_of_snapshot"], 0)
+        self.assertEqual((bad.errors["bad_utf8"], bad.errors["bad_json"], bad.errors["bad_record"]), (1, 1, 1))
+        self.assertTrue(bad.broken, "a malformed record is a loss: nothing after it applies until the stream ends")
+        envelope = ItemView()
+        envelope.feed(snapshot() + line({"op": "put", "seq": 1, "kind": "message", "id": 7, "rev": 1, "value": {}}))
+        self.assertEqual((envelope.broken, envelope.seq, envelope.errors["bad_record"]), (True, 0, 1), "a malformed live envelope")
 
     def test_notices_are_returned_and_never_stored(self):
         view = ItemView()
