@@ -80,6 +80,74 @@ fn outcome_transition(path: &Path, candidate: &Value) -> bool {
         })
 }
 
+fn wait_release(state: &Path) {
+    while !state.join("release-fault").exists() {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+// Marker publication is atomic and occurs only at the actual mode-specific cut.
+fn write_at_cut<F>(
+    state: &Path,
+    path: &Path,
+    bytes: &[u8],
+    fault: &str,
+    inner: F,
+) -> Result<(), vqro::store::AtomicWriteError>
+where
+    F: FnOnce(&Path, &[u8]) -> Result<(), vqro::store::AtomicWriteError>,
+{
+    let publish =
+        |phase: &str| vqro::store::write_atomic(&state.join("fault-boundary"), phase.as_bytes());
+    let after = fault == "claim-after"
+        || archive_cuts::mode(fault).is_some_and(|(_, action)| action == "after");
+    let unconfirmed = fault.ends_with("unconfirmed");
+    if !after && !unconfirmed {
+        let phase = if let Some((stage, _)) = archive_cuts::mode(fault) {
+            format!("before-archive-{stage}-write")
+        } else if fault.starts_with("register-") {
+            "before-register-write".to_owned()
+        } else if fault.starts_with("outcome-") {
+            "before-outcome-write".to_owned()
+        } else {
+            "before-claim-write".to_owned()
+        };
+        publish(&phase)?;
+        if fault.ends_with("before") {
+            wait_release(state);
+        }
+    }
+    if fault.ends_with("error") {
+        return Err(std::io::Error::other("injected before rename").into());
+    }
+    inner(path, bytes)?;
+    if after {
+        let phase = archive_cuts::mode(fault)
+            .map(|(stage, _)| format!("after-durable-archive-{stage}-before-receipt"))
+            .unwrap_or_else(|| "after-durable-before-receipt".to_owned());
+        publish(&phase)?;
+        wait_release(state);
+    }
+    if unconfirmed {
+        let phase = archive_cuts::mode(fault)
+            .map(|(stage, _)| format!("after-rename-archive-{stage}-unconfirmed"))
+            .unwrap_or_else(|| {
+                if fault.starts_with("outcome-") {
+                    "after-rename-outcome-unconfirmed".to_owned()
+                } else {
+                    "after-rename-claim-unconfirmed".to_owned()
+                }
+            });
+        publish(&phase)?;
+        let mut error = vqro::store::AtomicWriteError::from(std::io::Error::other(
+            "injected missing directory confirmation",
+        ));
+        error.renamed = true;
+        return Err(error);
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
@@ -144,50 +212,7 @@ async fn main() -> anyhow::Result<()> {
             if !matched || once.swap(true, Ordering::AcqRel) {
                 return vqro::store::write_atomic(path, bytes);
             }
-            let phase = if let Some((stage, _)) = archive_cuts::mode(&fault) {
-                format!("before-archive-{stage}-write")
-            } else if fault.starts_with("register-") {
-                "before-register-write".to_owned()
-            } else if fault.starts_with("outcome-") {
-                "before-outcome-write".to_owned()
-            } else {
-                "before-claim-write".to_owned()
-            };
-            std::fs::write(state.join("fault-boundary"), phase)?;
-            if fault.ends_with("before") {
-                while !state.join("release-fault").exists() {
-                    std::thread::sleep(Duration::from_millis(2));
-                }
-            }
-            if fault.ends_with("error") {
-                return Err(std::io::Error::other("injected before rename").into());
-            }
-            vqro::store::write_atomic(path, bytes)?;
-            if fault == "claim-after"
-                || archive_cuts::mode(&fault).is_some_and(|(_, action)| action == "after")
-            {
-                let phase = archive_cuts::mode(&fault)
-                    .map(|(stage, _)| format!("after-durable-archive-{stage}-before-receipt"))
-                    .unwrap_or_else(|| "after-durable-before-receipt".to_owned());
-                std::fs::write(state.join("fault-boundary"), phase)?;
-                while !state.join("release-fault").exists() {
-                    std::thread::sleep(Duration::from_millis(2));
-                }
-            }
-            if fault.ends_with("unconfirmed") {
-                if let Some((stage, _)) = archive_cuts::mode(&fault) {
-                    std::fs::write(
-                        state.join("fault-boundary"),
-                        format!("after-rename-archive-{stage}-unconfirmed"),
-                    )?;
-                }
-                let mut error = vqro::store::AtomicWriteError::from(std::io::Error::other(
-                    "injected missing directory confirmation",
-                ));
-                error.renamed = true;
-                return Err(error);
-            }
-            Ok(())
+            write_at_cut(&state, path, bytes, &fault, vqro::store::write_atomic)
         }))
         .unwrap();
     std::fs::write(ready, "ready")?;
@@ -201,6 +226,91 @@ mod tests {
     use super::*;
     fn write(path: &Path, value: &Value) {
         std::fs::write(path, serde_json::to_vec(value).unwrap()).unwrap();
+    }
+    #[test]
+    fn delayed_inner_write_never_publishes_a_premature_marker() {
+        for fault in [
+            "claim-after",
+            "archive-freeze-after",
+            "archive-export-intent-after",
+            "archive-export-confirm-after",
+            "archive-free-after",
+            "claim-unconfirmed",
+            "outcome-unconfirmed",
+            "archive-export-confirm-unconfirmed",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let state = root.path().to_path_buf();
+            let path = state.join("domain.json");
+            std::fs::write(&path, b"old").unwrap();
+            std::fs::write(state.join("release-fault"), b"release").unwrap();
+            let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(0);
+            let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+            let child_state = state.clone();
+            let child_path = path.clone();
+            let worker = std::thread::spawn(move || {
+                write_at_cut(&child_state, &child_path, b"new", fault, |p, b| {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    vqro::store::write_atomic(p, b)
+                })
+            });
+            entered_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+            assert!(!state.join("fault-boundary").exists(), "premature {fault}");
+            assert_eq!(std::fs::read(&path).unwrap(), b"old");
+            release_tx.send(()).unwrap();
+            let result = worker.join().unwrap();
+            assert_eq!(result.is_err(), fault.ends_with("unconfirmed"));
+            assert_eq!(std::fs::read(&path).unwrap(), b"new");
+            let phase = std::fs::read_to_string(state.join("fault-boundary")).unwrap();
+            assert!(phase.starts_with("after-"), "wrong phase {fault}: {phase}");
+            assert!(!phase.is_empty());
+        }
+    }
+    fn outcome_case(before: Value, after: Value) -> bool {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("domain.json");
+        let key = "operational/coord/message/D";
+        write(&path, &json!({"entries":{key:{"value":before}}}));
+        outcome_transition(
+            &path,
+            &json!({"last":{"changes":[{"key":key}]},"entries":{key:{"value":after}}}),
+        )
+    }
+    fn recipe(state: &str, id: &str, steps: &[&str]) -> Value {
+        json!({"state":state,"attempt":{"id":id,"steps":steps.iter().map(|outcome|json!({"outcome":outcome})).collect::<Vec<_>>()}})
+    }
+    #[test]
+    fn next_unknown_recipe_step_is_not_an_outcome() {
+        assert!(!outcome_case(
+            recipe("claimed", "A", &["accepted"]),
+            recipe("claimed", "A", &["accepted", "unknown"])
+        ));
+    }
+    #[test]
+    fn known_prerequisite_before_recipe_tail_is_an_outcome() {
+        assert!(outcome_case(
+            recipe("claimed", "A", &["unknown"]),
+            recipe("claimed", "A", &["accepted", "unknown"])
+        ));
+    }
+    #[test]
+    fn final_recipe_result_is_an_outcome() {
+        assert!(outcome_case(
+            recipe("claimed", "A", &["accepted", "observed", "unknown"]),
+            recipe("accepted", "A", &["accepted", "observed", "accepted"])
+        ));
+    }
+    #[test]
+    fn recipe_needs_the_same_claimed_predecessor() {
+        assert!(!outcome_case(
+            recipe("recorded", "A", &["unknown"]),
+            recipe("accepted", "A", &["accepted"])
+        ));
+        assert!(!outcome_case(
+            recipe("claimed", "A", &["unknown"]),
+            recipe("accepted", "B", &["accepted"])
+        ));
     }
     #[test]
     fn real_claim_is_not_a_later_step_write() {
