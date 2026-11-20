@@ -377,15 +377,15 @@ class ContentFixtureTests(unittest.TestCase):
 class ResultTests(unittest.TestCase):
     def test_complete_inventory_has_every_normative_group(self):
         self.assertEqual([case.id for case in CASES], main_contract().ids)
-        self.assertEqual(len(CASES), 61)
+        self.assertEqual(len(CASES), 62)
         self.assertEqual(len(BY_ID), len(CASES))
         self.assertIn("M8", BY_ID)
         self.assertIn("O11", BY_ID)
         with self.assertRaises(ValueError):
             select_cases(["C99"])
 
-    def test_old_catalog_cannot_hide_six_missing_normative_cases(self):
-        missing = {"C11", "C12", "D16", "O12", "O13", "O14"}
+    def test_old_catalog_cannot_hide_missing_normative_cases(self):
+        missing = {"C11", "C12", "D16", "D17", "O12", "O13", "O14"}
         old = [case for case in CASES if case.id not in missing]
         rows = [Result(case.id, case.title, "pass") for case in old]
         document = report({}, rows, old, inventory=old)
@@ -395,7 +395,7 @@ class ResultTests(unittest.TestCase):
         self.assertEqual(set(document["not_selected"]), missing)
 
     def test_contract_ranges_and_unverified_exports(self):
-        text = "## A3. Tests\nC1–C12 D1–D16 O1–O14 R1–R7 M1–M8 L1–L4\n## A4. Done"
+        text = "## A3. Tests\nC1–C12 D1–D17 O1–O14 R1–R7 M1–M8 L1–L4\n## A4. Done"
         self.assertEqual(part_a_ids(text), [case.id for case in CASES])
         contract = Contract(text, None, "bundled-unverified")
         rows = [Result(case.id, case.title, "pass") for case in CASES]
@@ -413,7 +413,7 @@ class ResultTests(unittest.TestCase):
         self.assertTrue(document["passed_selection"])
         self.assertFalse(document["complete_inventory"])
         self.assertFalse(document["real_runtime_certification"])
-        self.assertEqual(len(document["not_selected"]), 60)
+        self.assertEqual(len(document["not_selected"]), 61)
 
     def test_part_b_has_its_own_inventory_and_table_heading(self):
         inventory = (Case("I1", "durable claim"), Case("H1", "restart paused"))
@@ -468,6 +468,30 @@ class SchemaFixtureTests(unittest.TestCase):
                        {"type": "string", "pattern": "[0-9]+"}):
             with self.subTest(schema=schema), self.assertRaises(CheckFailed):
                 schema_example(schema)
+
+
+class CommandWitnessTests(unittest.TestCase):
+    def proof(self, args="exact instructions"):
+        return ([{"command": "compact", "value": {"type": "compact", "id": "n1", "customInstructions": args}}],
+                [{"name": "compact", "request": "n1", "custom_instructions": args}],
+                [{"command": "compact", "request": "n1", "success": True}])
+
+    def test_exact_native_command_arguments_execution_and_result_are_required(self):
+        from agent_conformance.cases import command_witness
+        writes, executions, replies = self.proof()
+        self.assertEqual(command_witness("pi", "compact", "exact instructions", writes, executions, replies)["native_request"], "n1")
+        for part in ("operation", "args", "execution", "result"):
+            writes, executions, replies = self.proof()
+            if part == "operation": writes = [{"operation": "send", "text": "WRONG - not compact"}]
+            elif part == "args": writes[0]["value"]["customInstructions"] = "different"
+            elif part == "execution": executions = []
+            else: replies[0]["request"] = "another-command"
+            with self.subTest(part=part), self.assertRaises(CheckFailed):
+                command_witness("pi", "compact", "exact instructions", writes, executions, replies)
+
+    def test_unimplemented_native_command_driver_is_a_harness_gap(self):
+        from agent_conformance.cases import native_command_expectation
+        with self.assertRaises(HarnessGap): native_command_expectation("acp", "compact", "")
 
 
 class MemoryWitnessTests(unittest.IsolatedAsyncioTestCase):
@@ -635,7 +659,7 @@ class ClassificationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.reason, "harness_gap")
 
     async def test_new_normative_rows_stay_visible_as_harness_gaps(self):
-        for ident in ("C11", "C12", "D16", "O12", "O13", "O14"):
+        for ident in ("C11", "C12", "D16", "D17", "O12", "O13", "O14"):
             with self.subTest(case=ident):
                 result = await run_case(BY_ID[ident], Path(self.temp.name) / ident, self.manifest,
                                         Path("/vqro"), Path("/hc"), factory=self.factory(), handlers={})
@@ -772,6 +796,13 @@ class NativeFixtureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(compacted["data"]["summary"], "Fixture-only compaction summary")
         self.assertEqual([row["name"] for row in self.records("command_executed")], ["cycle_model", "compact"])
         self.assertFalse(self.records("input_received"))
+        self.assertEqual([row["request"] for row in self.records("command_executed")], [cycled["id"], compacted["id"]])
+        before = await self.control("state")
+        created = await self.native(type="new_session")
+        after = await self.control("state")
+        self.assertNotEqual(before["session"], after["session"])
+        self.assertEqual(self.records("command_executed")[-1], {**self.records("command_executed")[-1],
+            "name": "new_session", "request": created["id"], "session": after["session"]})
 
     async def test_admission_is_not_insertion_and_native_environment_is_private(self):
         await self.control("pause_before", phase="insertion")

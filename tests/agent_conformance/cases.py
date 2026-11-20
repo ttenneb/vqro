@@ -1326,6 +1326,30 @@ async def audit_fence(ctx, result):
         raise CheckFailed("final effect audit was not delivered", component="core") from error
 
 
+def native_command_expectation(wire, name, args):
+    if wire != "pi" or name not in ("new_session", "cycle_model", "compact"):
+        raise HarnessGap("advertised command needs its native command/result fixture: " + name)
+    return name, {"customInstructions": args} if name == "compact" else {}
+
+
+def command_witness(wire, name, args, writes, executions, replies):
+    expected, payload = native_command_expectation(wire, name, args)
+    check(len(writes) == 1, "advertised command did not produce exactly its native mutation")
+    actual = writes[0].get("value", {})
+    check(writes[0].get("command") == expected and actual.get("type") == expected,
+          "advertised command dispatched a different native operation")
+    check({key: value for key, value in actual.items() if key not in ("type", "id")} == payload,
+          "advertised command changed its native arguments")
+    request = actual.get("id")
+    matched = [row for row in executions if row.get("name") == expected and row.get("request") == request]
+    check(len(matched) == 1, "advertised command lacks its exact native execution witness")
+    if name == "compact":
+        check(matched[0].get("custom_instructions") == args, "native compact executed with different instructions")
+    check(any(row.get("command") == expected and row.get("request") == request and row.get("success") is True for row in replies),
+          "advertised command lacks a matching successful native result")
+    return {"native_command": expected, "native_args": payload, "native_request": request, "execution": matched[0]}
+
+
 @case("M4")
 async def advertised_commands(ctx):
     await caps(ctx, "agent.command")
@@ -1339,11 +1363,39 @@ async def advertised_commands(ctx):
     for command in commands:
         await ctx.native.call("turn", state="settled")
         await ctx.wait_facts(lambda f: f.get("state") == "idle")
+        name = command["name"]
+        args = "fixture compact instructions; preserve   spacing" if name == "compact" else ""
+        native_command_expectation(ctx.manifest.get("wire", "pi"), name, args)
+        before = await ctx.native.call("state")
         mark = ctx.native.mark()
-        result = await ctx.invoke("agent.command", {"name": command["name"], "args": ""})
-        check(result.get("outcome") in ("observed", "accepted", "dispatched"), "advertised command was not dispatched: " + command["name"])
-        check(ctx.native.writes(mark), "command acknowledged without any native control effect")
-        executed.append({"name": command["name"], "outcome": result["outcome"], "native_writes": ctx.native.writes(mark)})
+        result = await ctx.invoke("agent.command", {"name": name, "args": args})
+        check(result.get("outcome") in ("observed", "accepted", "dispatched"), "advertised command was not dispatched: " + name)
+        await ctx.native.wait(lambda rows: any(row.get("seq", 0) > mark and row.get("kind") == "native_reply" and row.get("command") == name for row in rows))
+        witness = command_witness(ctx.manifest.get("wire", "pi"), name, args, ctx.native.writes(mark),
+                                  ctx.native.records("command_executed", after=mark), ctx.native.records("native_reply", after=mark))
+        if name == "new_session":
+            after = await ctx.native.call("state")
+            check(before["session"] != after["session"] == witness["execution"].get("session"), "native new-session command did not change its session")
+        executed.append({"name": name, "args": args, "outcome": result["outcome"], **witness})
+    if commands:
+        facts = await ctx.facts()
+        send = facts.get("caps", {}).get("agent.send")
+        if isinstance(send, dict) and send.get("literal") in ("native", "controlled_launch"):
+            await ctx.native.call("turn", state="settled")
+            await ctx.wait_facts(lambda f: f.get("state") == "idle")
+            text = "/" + commands[0]["name"]
+            mark = ctx.native.mark()
+            accepted(await ctx.send(text))
+            await ctx.native.wait(lambda rows: any(row.get("seq", 0) > mark and row.get("kind") == "input_received" for row in rows))
+            inputs = ctx.native.records("input_received", after=mark)
+            check(len(inputs) == 1 and inputs[0].get("text") == text, "slash send did not remain literal native input")
+            check(not ctx.native.records("command_executed", after=mark), "literal slash send executed a native command")
+        else:
+            ctx.evidence.append({"kind": "subcase", "case": "M4.literal_slash", "status": "not-applicable",
+                                 "exclusion": {"path": "agent.send.literal", "actual": send.get("literal") if isinstance(send, dict) else None}})
+    else:
+        ctx.evidence.append({"kind": "subcase", "case": "M4.advertised_positive", "status": "not-applicable",
+                             "exclusion": {"path": "commands", "actual": []}})
     ctx.evidence.append({"kind": "advertised_commands", "commands": executed, "unknown_rejected_before_native": True})
 
 

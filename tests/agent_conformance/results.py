@@ -79,6 +79,7 @@ CASES = (
     Case("D14", "hook-consumed input never overclaimed", "agent.send"),
     Case("D15", "origin and model-request authority", "agent.send"),
     Case("D16", "declared content shape preserves block order", "agent.send"),
+    Case("D17", "core-bound principal actor initiator and asserted origin", "agent.send"),
     Case("O1", "put append remove algebra"),
     Case("O2", "serialized snapshot cut"),
     Case("O3", "snapshot follow-on overflow is per viewer"),

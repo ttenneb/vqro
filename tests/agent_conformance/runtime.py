@@ -298,10 +298,10 @@ class Runtime:
         elif kind == "cycle_model":
             ident = "fixture-large" if self.model["id"] == "fixture-small" else "fixture-small"
             self.model = dict(MODEL, id=ident, name="Fixture Large" if ident == "fixture-large" else "Fixture Small")
-            self.record("command_executed", name="cycle_model")
+            self.record("command_executed", name="cycle_model", request=command.get("id"))
             await self.reply(command, {"model": self.model, "thinkingLevel": self.thinking, "isScoped": False})
         elif kind == "compact":
-            self.record("command_executed", name="compact", custom_instructions=command.get("customInstructions"))
+            self.record("command_executed", name="compact", request=command.get("id"), custom_instructions=command.get("customInstructions"))
             await self.reply(command, {"summary": "Fixture-only compaction summary", "firstKeptEntryId": self.entries[0]["id"] if self.entries else "fixture-start",
                                        "tokensBefore": 100, "estimatedTokensAfter": 20})
         elif kind == "set_model":
@@ -325,6 +325,7 @@ class Runtime:
             self.follow_up_images.clear()
             self.active = False
             self.native_turn = False
+            self.record("command_executed", name=kind, request=command.get("id"), session=f"fixture-{self.session}")
             await self.reply(command, {"cancelled": False})
         else:
             await self.reply(command, {"reason": "unknown native command"}, False)

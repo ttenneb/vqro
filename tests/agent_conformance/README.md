@@ -82,13 +82,13 @@ The runner re-execs in an empty-HOME user/network/PID/mount namespace, launches 
 private core/backend per case, and writes `results.json`, `results.md`, per-case
 `result.json`, native ledger and PID/birth/cleanup receipts. Hard parent timeout
 kills the owned namespace, including detached children. Partial selections always
-name all omitted cases. Leaving `--cases` out includes all 61 Part A groups;
+name all omitted cases. Leaving `--cases` out includes all 62 Part A groups;
 currently unimplemented applicable handlers fail as `component:harness`.
 
 The normative IDs are parsed independently from the captured immutable `main`
 conformance document, saved as `normative-conformance.md` with commit/hash in the
 report. Catalog drift refuses fixture execution. Unverified source exports may run
-diagnostics but never assert current-main completeness. C11/C12/D16/O12/O13/O14
+diagnostics but never assert current-main completeness. C11/C12/D16/D17/O12/O13/O14
 are visible harness gaps until their runners exist.
 
 Handlers exist for C1–C10, D1–D15, O1–O11, R1–R7, M1–M4 and L1–L4.
