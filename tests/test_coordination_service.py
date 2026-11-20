@@ -99,7 +99,7 @@ class ServiceTests(unittest.TestCase):
     def test_registers_only_owned_coord_commands_and_one_protected_domain(self):
         self.assertEqual(set(self.ext.handlers), {"coord." + name for name in COMMANDS})
         registers = [params for method, params in self.ext.vqro.calls if method == "operational.register"]
-        self.assertEqual(registers, [{"name": "coord", "bytes": 8 * 1024 * 1024}])
+        self.assertEqual(registers, [{"name": "coord", "bytes": 4 * 1024 * 1024}])
         self.assertFalse(any(method == "workspace.apply" for method, _ in self.ext.vqro.calls))
 
     def test_core_callback_principal_not_body_or_label_is_authority(self):

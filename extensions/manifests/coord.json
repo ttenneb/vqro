@@ -9,7 +9,7 @@
     "command/coord.inbox.archive", "command/coord.handover", "command/coord.scope", "command/coord.control",
     "command/coord.names", "command/coord.grants", "command/coord.membership.set", "command/coord.status",
     "doc/agents/names/*", "doc/agents/members/*", "doc/agents/grants/*", "doc/agents/terminals/*", "view/coord-status"],
-  "needs": [{"cap": "ability/vqro.operational", "why": "Requires the generic protected, separately persisted operational domain; unavailable cores fail closed."},
+  "needs": [{"cap": "ability/vqro.operational-domains@1", "why": "Requires the generic protected, separately persisted operational domain; unavailable cores fail closed."},
             {"cap": "ability/vqro.principals", "why": "Requires core-resolved callback principals; undeclared calls never gain coordination rights."}],
   "works_with": [{"cap": "ability/vqro.agents", "suggest": "pi", "why": "Native agent endpoints supply declared delivery and control operations."},
                  {"cap": "command/agents.show", "suggest": "agents", "why": "Optional agent UI displays the inbox and scope state."}],

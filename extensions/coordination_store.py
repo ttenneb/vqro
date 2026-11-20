@@ -9,7 +9,7 @@ import json
 import threading
 
 DOMAIN = "coord"
-DOMAIN_BYTES = 2 * 1024 * 1024  # C1 qualified 2 MiB at 100 txn/s; never shard owners.
+DOMAIN_BYTES = 4 * 1024 * 1024  # C1 qualified 4 MiB at 100 txn/s; never shard owners.
 DOMAIN_RECORDS = 1024
 CONTROL_RESERVE = 0.10
 PAGE_ITEMS = 64
