@@ -74,9 +74,13 @@ class TextClient:
                 raise
 
     def load_snapshot(self):
-        """Replace the cache with a fresh snapshot (events up to its `seq` are then ignored as already applied)."""
+        """Replace the cache with a fresh snapshot (events up to its `seq` are then ignored as already applied).
+        Snapshots can be taken concurrently (a background resync and a command's refresh); one older than the cache
+        (same epoch, lower seq) is dropped, so a late reply never rolls back newer state."""
         snap = self.vqro.call("workspace.snapshot")
         with self.lock:
+            if snap.get("epoch") == self.ws.epoch and snap.get("seq", 0) < self.ws.seq:
+                return snap
             was = self.ws.load(snap)
             self.safe_mode_changed(self.ws.safe_mode, was)
             self.settle_window()

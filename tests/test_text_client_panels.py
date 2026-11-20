@@ -1,6 +1,7 @@
 """The text client's panel listing: facet/sort lines, columns and their commands (no socket, no core)."""
 import os
 import sys
+import threading
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -70,6 +71,48 @@ class PopupAfterReply(unittest.TestCase):
         # The event that carried the same content arrives late: already covered by the snapshot, so ignored.
         self.assertEqual(c.ws.apply({"epoch": "e", "seq": 6, "type": "view.content", "data": {"view": "p", "content": {"items": [{"text": "stale row"}]}}}), [])
         self.assertEqual(c.ws.live["p"]["items"][0]["text"], "fresh row")
+
+    def test_an_older_snapshot_never_replaces_a_newer_one(self):
+        """A background resync's snapshot (seq 6) that returns after a command's refresh (seq 8) is dropped, so the
+        popup's fresh content stays (found by the secondary lead's shadow review)."""
+        started, release = threading.Event(), threading.Event()
+
+        def snap(seq, label):
+            return {"epoch": "e", "seq": seq, "entries": {"view/p": {"version": seq, "value": {"kind": "panel", "items": []}}},
+                    "live": {"p": {"items": [{"text": label, "command": "x"}]}}, "resources": []}
+
+        class Core:
+            def call(self, method, params=None):
+                if method == "command.invoke":
+                    return {"client": {"popup": {"view": "p"}}}
+                if method == "workspace.snapshot":
+                    if threading.current_thread().name == "old-resync":
+                        started.set()
+                        self_test.assertTrue(release.wait(5))
+                        return snap(6, "older resync content")
+                    return snap(8, "fresh post-command content")
+                if method == "events.subscribe":
+                    return {}
+                raise AssertionError(method)
+        self_test = self
+        c = client({"title": "Settings", "items": [{"text": "initial", "command": "x"}]})
+        c.ws.epoch, c.ws.seq = "e", 5
+        c.vqro, c.safe_selected, c.info = Core(), set(), {}
+        old = threading.Thread(target=c.resync, name="old-resync")
+        old.start()
+        self.assertTrue(started.wait(5))
+        try:
+            lines = c.handle("run settings.open")
+        finally:
+            release.set()
+        old.join(5)
+        self.assertFalse(old.is_alive())
+        self.assertTrue(any("fresh post-command content" in l for l in lines), lines)
+        self.assertEqual((c.ws.seq, c.ws.live["p"]["items"][0]["text"]), (8, "fresh post-command content"))
+        # A newer epoch (a restarted core) always replaces the cache, whatever its seq.
+        c.vqro.call = lambda method, params=None: {"epoch": "f", "seq": 1, "entries": {}, "live": {}, "resources": []}
+        c.load_snapshot()
+        self.assertEqual((c.ws.epoch, c.ws.seq), ("f", 1))
 
 
 if __name__ == "__main__":
