@@ -431,11 +431,16 @@ The reply is `{ok: true, applied: true}`, or `{ok: true, applied: false, reason:
 arguments, a missing/ended terminal or the 4096-report bound are refused to the caller only, without a notice.
 Sequence is not scoped to a reporting process or incarnation; a restarted reporter must advance it. Reports live
 only in extension memory, disappear when the terminal ends or is removed, and do not survive an extension restart.
-This advisory channel is not an authority boundary: the implemented command does not authenticate the reporter.
+**Reporter ownership** `(pending C2)`: once callers carry a principal, only the terminal's own launcher-tagged
+principal or the workspace owner may report for it; other callers get `not_authorized`, never an applied report.
+The current command does not authenticate the reporter: any caller can report for any terminal. This is a known
+v0 gap, not evidence of ownership or a security boundary.
 
 Live data `agents.terminal_status` is `{data: {<terminal>: {app, state, seq, at_ms, status}}}`, where `at_ms` is
 receipt time and `status` is OSC 7501-shaped `{app, state}`: `running` → `working`, `requires_action` → `blocked`,
-`idle` / `unknown` unchanged. Publications may coalesce reports with unchanged app/state; this is not a report log.
+`idle` / `unknown` unchanged. Publish only when app/state changes or a report is dropped. Stored sequence advances
+on every applied report; published `seq` and `at_ms` may lag the last accepted report. A publication contains all
+current rows, so another terminal's change can refresh them too. This is not a report log.
 The sidebar uses this fallback **only without the terminal's own OSC status**. No report means unknown, not idle;
 a report alone proves neither delivery, a model read nor lifecycle end.
 

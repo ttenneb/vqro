@@ -321,7 +321,11 @@ model-visible request plus normal completion may yield `read`; verify native fra
 T13 advisory terminal status: `agents.status` publishes OSC-shaped live data; unknown/missing states become
 `unknown`. Duplicate/lower sequence reports are ignored per terminal, even from a different app; invalid reports
 produce no notice or native effect. Reports are bounded, dropped at terminal end/removal and lost on extension
-restart. The sidebar prefers terminal OSC status and falls back only without it; no report never implies idle.
+restart. Stored sequence advances for unchanged state/app without a publication; published `seq`/`at_ms` may lag
+until a publication (including another terminal's change). The sidebar prefers terminal OSC status and falls back
+only without it; no report never
+implies idle. Reporter ownership `(pending C2)`: the terminal's launcher-tagged principal and owner may report;
+other principals get `not_authorized` without applying a report.
 
 **L. Lifecycle policy.** L5 stop closes the gate first; without a declared `agent.stop`, `host_kill` is offered only
 when the host is a core resource of the bound incarnation with a declared termination primitive, after showing
