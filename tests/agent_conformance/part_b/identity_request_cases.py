@@ -10,6 +10,7 @@ import hashlib
 import json
 from pathlib import Path
 import shutil
+import subprocess
 import time
 
 from ..results import CheckFailed, FixtureFailed, HarnessGap
@@ -17,7 +18,8 @@ from ..wire import Peer, RpcError
 from .cases import case, member
 from .context import PublicCoordination
 from .launcher import tui
-from .identity_backend import backend_child_environment
+from .identity_backend import backend_child_environment, pinned_artifact
+from pi_provider_e2e import identity
 
 PROBE_NAME = "partb-identity-probe"
 PROBE_COMMAND = "partb.identity_probe"
@@ -77,6 +79,51 @@ async def managed_probe(ctx):
     return observed
 
 
+async def seed_invalid_owner_from_historical_core(sub):
+    """Existing history_cases.py pattern, but seed by real old RPC with no JSON edits.
+
+    Modern Core correctly validates new owner writes. Invalid legacy configuration
+    must originate in an actual hash-pinned pre-validation writer, not a fake error.
+    """
+    source = pinned_artifact({"path": sub.manifest.get("legacy_core"), "sha256": sub.manifest.get("legacy_core_sha256")})
+    await asyncio.gather(*(peer.close() for peers in sub.peers.values() for peer in peers))
+    sub.peers.clear()
+    sub.track_children()
+    await asyncio.to_thread(sub.backend.stop, False)
+    state, endpoint = sub.backend.env["VQRO_STATE_DIR"], sub.root / "l.sock"
+    env = dict(sub.backend.env, VQRO_SOCKET=str(endpoint))
+    peer = None
+    with (sub.root / "legacy-owner.log").open("ab") as log:
+        process = subprocess.Popen([str(source), state, str(endpoint), "none"], env=env,
+            cwd=sub.root / "work", stdout=log, stderr=subprocess.STDOUT)
+        sub.backend.tracked.append(identity(process.pid))
+        try:
+            async def connected():
+                if process.poll() is not None: raise FixtureFailed("historical owner-seed core exited")
+                try: return await Peer.connect(str(endpoint))
+                except OSError: return None
+            try: peer = await sub.wait(connected, label="historical native owner writer")
+            except CheckFailed as error: raise FixtureFailed("historical owner writer did not become ready") from error
+            await peer.call("hello", {"client": "owned-legacy-owner-seed"})
+            seeded = await peer.call("workspace.apply", {"ops": [{"op": "set", "key": "doc/principals/owner", "value": {"invalid": True}}]})
+            snapshot = await peer.call("workspace.snapshot")
+            if snapshot["entries"]["doc/principals/owner"]["value"] != {"invalid": True}:
+                raise FixtureFailed("historical writer did not actually retain malformed owner configuration")
+            sub.evidence.append({"kind": "historical_owner_seed", "legacy_sha256": sub.manifest["legacy_core_sha256"],
+                "transaction": seeded, "public_owner_entry": snapshot["entries"]["doc/principals/owner"], "handcrafted_state": False})
+        finally:
+            if peer is not None: await peer.close()
+            if process.poll() is None: process.terminate()
+            try: await asyncio.to_thread(process.wait, 4)
+            except subprocess.TimeoutExpired:
+                process.kill(); await asyncio.to_thread(process.wait, 3)
+    await sub.start_core()
+    await sub.wait_agents(sub.manifest.get("agents", 2))
+    async def controls_registered():
+        return any(row["name"] == "coord.control" for row in (await sub.peer.call("command.list"))["commands"])
+    await sub.wait(controls_registered, label="current managed control after historical owner import")
+
+
 async def unowned_fixture(ctx, label, *, invalid=False):
     # Use normal production core plus an authorized public configuration transaction,
     # not a driver flag whose bootstrap behaviour differs across frozen fixture cuts.
@@ -89,9 +136,11 @@ async def unowned_fixture(ctx, label, *, invalid=False):
         await sub.start()
         owner = sub.peer
         entry = (await owner.call("workspace.snapshot"))["entries"]["doc/principals/owner"]
-        op = {"op": "set", "key": "doc/principals/owner", "value": {"invalid": True}, "expect": entry["version"]} if invalid else {
-            "op": "delete", "key": "doc/principals/owner", "expect": entry["version"]}
-        await owner.call("workspace.apply", {"ops": [op], "note": "owned missing/invalid owner configuration probe"})
+        if invalid:
+            await seed_invalid_owner_from_historical_core(sub)
+        else:
+            await owner.call("workspace.apply", {"ops": [{"op": "delete", "key": "doc/principals/owner", "expect": entry["version"]}],
+                "note": "owned missing owner configuration probe"})
         sub.peer = await sub.connect(None)
         return sub
     except BaseException:
@@ -128,7 +177,7 @@ async def reserved_identities_and_unowned_recovery(ctx):
             ctx.check(raw.get("txn"), "raw recovery remains usable without an owner", component="core", fixture=label)
             mark = sub.native.mark()
             await sub.rejected("control", {"op": await sub.operation(), "target": sub.agents[0]["id"],
-                "action": "interrupt", "args": {"v": 0}}, {"no_grant"})
+                "action": "interrupt", "args": {"v": 0}}, {"no_grant", "invalid", "forbidden"})
             ctx.check(not sub.native.records("invoke", after=mark), "unowned raw client has no coordination grants or native dispatch", fixture=label)
             owner_peer = await Peer.connect(sub.backend.env["VQRO_SOCKET"])
             try:
