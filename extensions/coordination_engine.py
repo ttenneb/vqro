@@ -190,11 +190,12 @@ class Coordinator:
         return "ops/" + str(int(digest([principal, op])[:8], 16) % OP_BUCKETS)
 
     def attention_summary(self):
-        messages = [{"delivery": record["delivery"], "agent": record["to"]["agent"], "state": record["state"]}
-                    for record in self.records() if record["state"] in ("unknown", "claimed", "partial")]
+        rows = self.store.view()
+        messages = [{"delivery": row["value"]["delivery"], "agent": row["value"]["to"]["agent"], "state": row["value"]["state"]}
+                    for key, row in rows.items() if key.startswith("message/") and row["value"]["state"] in ("unknown", "claimed", "partial")]
         controls = [{"reference": key, "principal": row["value"].get("principal"), "caller": row["value"].get("caller"),
                      "command": row["value"].get("command"), "agent": row["value"].get("intent", {}).get("agent"), "state": row["value"]["state"]}
-                    for key, row in self.store.view().items() if key.startswith("external/") and row["value"]["state"] in ("claimed", "unknown", "partial")]
+                    for key, row in rows.items() if key.startswith("external/") and row["value"]["state"] in ("claimed", "unknown", "partial")]
         return {"messages": len(messages), "controls": len(controls), "items": (messages + controls)[:64],
                 "incomplete": len(messages) + len(controls) > 64}
 
@@ -828,15 +829,21 @@ class Coordinator:
                 now["attempt"]["steps"] = self._compact_steps(outcomes) + [{"op": op, "outcome": "unknown"}]
                 work.put("message/" + record["delivery"], now)
                 work.commit(control=True)
+            coordinated = False
             try:
                 result = self.invoke(target, op, args, max(1, int((deadline - time.monotonic()) * 1000)))
                 if not isinstance(result, dict) or result.get("outcome") not in ("accepted", "observed", "dispatched", "rejected", "indeterminate"):
-                    result = {"outcome": "indeterminate", "error": {"kind": "invalid_native_result"}}
+                    coordinated = True
+                    result = {"outcome": "indeterminate", "error": {"kind": "invalid_native_result"}, "raw_native": result}
             except Exception as error:
-                result = {"outcome": "indeterminate", "error": {"kind": getattr(error, "kind", "transport"), "message": str(error)[:1024]}}
-            outcomes.append({"op": op, "outcome": result.get("outcome"), "native": result})
+                coordinated = True
+                kind = getattr(error, "kind", "transport")
+                no_effect = kind in ("invalid", "unknown_method", "unsupported", "not_found", "stale_generation", "conflict", "forbidden", "overloaded")
+                result = {"outcome": "rejected" if no_effect else "indeterminate", "error": {"kind": kind, "message": str(error)[:1024]}}
+            outcomes.append({"op": op, "outcome": result.get("outcome"),
+                             "native": None if coordinated else result, "coordination": result if coordinated else None})
             if result["outcome"] not in ("accepted", "observed", "dispatched"):
-                return self._finish_attempt(record, outcomes, result, partial=len(outcomes) > 1)
+                return self._finish_attempt(record, outcomes, result, partial=len(outcomes) > 1, coordinated=coordinated)
             if result["outcome"] == "dispatched" and len(steps) > 1 and op != "agent.send":
                 # No acknowledgement that a prerequisite completed: do not run its tail.
                 return self._finish_attempt(record, outcomes, result, partial=True)
@@ -863,7 +870,9 @@ class Coordinator:
         return compact
 
     def _compact_steps(self, steps):
-        return [{"op": step["op"], "outcome": step["outcome"], "native": self._compact(step["native"], step["op"])}
+        return [{"op": step["op"], "outcome": step["outcome"],
+                 "native" if step.get("native") is not None else "coordination":
+                 self._compact(step["native"] if step.get("native") is not None else step["coordination"], step["op"])}
                 for step in steps]
 
     def _finish_attempt(self, original, outcomes, native, *, partial, coordinated=False):
@@ -1070,8 +1079,8 @@ class Coordinator:
                            "from": {name: context.get(name) for name in ("principal", "actor", "author", "initiator", "label")},
                            "control_epoch": self.control_epoch, "attempt": {"id": nonce("a:"), "steps": []}})
             def close():
-                if intent.get("close_gate"):
-                    self.permits.discard(intent["close_gate"])
+                gates = intent.get("close_gates") or ([intent["close_gate"]] if intent.get("close_gate") else [])
+                self.permits.difference_update(gates)
             return {"state": "claimed", "result_ref": key, "_after": close, "_uncertain": close}
         result = self._mutate(command, args, context, begin, control=True)
         if result.get("historical"):
@@ -1081,18 +1090,23 @@ class Coordinator:
             if not self.current or row["value"]["control_epoch"] != self.control_epoch:
                 return {"state": "unknown", "reason": "owner_replaced", "window": self.window()}
             intent = row["value"]["intent"]
+        coordinated = False
         try:
             native = execute(intent)
         except Exception as error:
-            native = {"outcome": "indeterminate", "error": {"kind": getattr(error, "kind", "transport"), "message": str(error)[:1024]}}
+            coordinated = True  # there is no unchanged native result to return
+            kind = getattr(error, "kind", "transport")
+            no_effect = command == "coord.control" and (isinstance(error, PolicyError) or kind in (
+                "invalid", "unknown_method", "unsupported", "not_found", "stale_generation", "conflict", "forbidden", "overloaded"))
+            native = {"outcome": "rejected" if no_effect else "indeterminate", "error": {"kind": kind, "message": str(error)[:1024]}}
         with self.lock:
             if not self.current:
                 return {"state": "unknown", "reason": "owner_replaced"}
             work = Working(self)
             record = work.get(key)
             outcome = native.get("outcome", "accepted")
-            native_kind = command == "coord.control" and intent.get("op") is not None
-            evidence = self._compact(native, command)
+            native_kind = command == "coord.control" and intent.get("op") is not None and not coordinated
+            evidence = self._compact(native, intent.get("op") or command)
             state = "unknown" if outcome == "indeterminate" else outcome
             if intent.get("close_gate") and outcome == "rejected":
                 state = "partial"  # admission closed, even though native stop had no effect
@@ -1100,7 +1114,7 @@ class Coordinator:
                           coordination={"gate": "closed"} if intent.get("close_gate") else None)
             if not native_kind:
                 record["coordination"] = evidence
-            record["attempt"]["steps"] = [{"op": command, "outcome": outcome}]
+            record["attempt"]["steps"] = [{"op": intent.get("op") or command, "outcome": outcome}]
             work.put(key, record)
             bucket_key = self._bucket(context["principal"], args["op"])
             bucket = work.get(bucket_key, {})
@@ -1132,21 +1146,54 @@ class Coordinator:
             return {"outcome": "accepted", "data": result}
         return self._external("coord." + command, args, context, prepare, execute)
 
+    def _host_kill_preview(self, agent):
+        resources = self.resources()
+        resource = resources.get(agent, {})
+        host = ((resource.get("data") or {}).get("agent") or {}).get("host") or {}
+        target = resources.get(host.get("resource"))
+        caps = self.providers().get((target or {}).get("provider"), {}).get("capabilities", {})
+        route = caps.get("terminal.kill")
+        if (not target or target.get("available") is False or target.get("incarnation") != host.get("incarnation")
+                or not isinstance(route, dict) or route.get("effect") is False):
+            raise CoordinationError("unsupported", "no declared exact host termination route; never escalate silently")
+        def served(endpoint):
+            return ((((endpoint.get("data") or {}).get("agent") or {}).get("host")) or {}).get("resource")
+        affected = sorted({agent} | {rid for rid, endpoint in resources.items()
+                           if endpoint.get("kind") == "agent" and served(endpoint) == host["resource"]})
+        if len(affected) > SCOPE_CAPACITY:
+            raise CoordinationError("quota", "host endpoint selection exceeds declared scope capacity")
+        return {"resource": host["resource"], "incarnation": host["incarnation"], "endpoints": affected}
+
     def control(self, args, context):
         action = args.get("action")
+        if action == "inspect":
+            policy = self.policy()
+            agent = policy.resolve_target(args.get("target"))
+            policy.require(context["principal"], "stop", agent)
+            resource, native = self._facts(agent)
+            try:
+                host = self._host_kill_preview(agent)
+            except PolicyError:
+                host = None
+            return {"state": "preview", "agent": agent, "graceful": "agent.stop" in self._caps(resource or {}, native),
+                    "confirm_host": host, "warning": "Host kill affects all host work, including unreported work; endpoint list is an observed snapshot."}
         actions = {"interrupt": ("interrupt", "agent.interrupt"), "respond": ("answer", "agent.respond"),
                    "queue": ("queue", "agent.queue"), "session": ("session", "agent.session"),
                    "configure": ("configure", "agent.configure"), "command": ("command", "agent.command"),
                    "object": ("command", "agent.object"), "stop": ("stop", "agent.stop"), "retire": ("stop", None)}
-        if action not in actions:
-            raise CoordinationError("invalid", "unknown control action")
         if action == "retire":
             def administrative(work, policy):
                 agent = policy.resolve_target(args.get("target"))
                 policy.require(context["principal"], "stop", agent)
                 self._ensure_agent(work, agent, policy)
                 stone = self._agent_get(work, agent)
-                stone.update(lifecycle="retired", retired={"by": context["principal"], "reason": (args.get("args") or {}).get("reason")})
+                options = args.get("args") if args.get("args") is not None else {}
+                if not isinstance(options, dict):
+                    raise CoordinationError("invalid", "retire args must be an object")
+                reason = options.get("reason")
+                if reason is not None and (not isinstance(reason, str) or len(reason.encode()) > 512):
+                    raise CoordinationError("invalid", "retire reason must be bounded text")
+                stone.update(lifecycle="retired", retired={"by": context["principal"], "reason": reason})
                 self._agent_put(work, agent, stone)
                 control = work.get("control")
                 control["gates"][agent] = False
@@ -1155,8 +1202,15 @@ class Coordinator:
                 close = lambda: self.permits.discard(agent)
                 return {"state": "retired", "execution": "unknown", "native": None, "_after": close, "_uncertain": close}
             return self._mutate("coord.control", args, context, administrative, control=True)
-        right, operation = actions[action]
+        right, operation = actions.get(action, (None, None))
         def prepare(work, policy):
+            if right is None:
+                raise CoordinationError("invalid", "unknown control action")
+            if args.get("args") is not None and not isinstance(args["args"], dict):
+                raise CoordinationError("invalid", "native control args must be an object")
+            version = (args.get("args") or {}).get("v", 0)
+            if type(version) is not int or version != 0:
+                raise CoordinationError("unsupported", "native control version is unsupported")
             agent = policy.resolve_target(args.get("target"))
             policy.require(context["principal"], right, agent)
             resource, native = self._facts(agent)
@@ -1172,29 +1226,40 @@ class Coordinator:
             method, target = operation, agent
             native_args = dict(args.get("args") or {}, v=0)
             caps = self._caps(resource, native)
-            if action == "stop" and native_args.pop("how", "graceful") == "host_kill":
-                host = native.get("host") or {}
-                host_resource = self.resources().get(host.get("resource"))
-                host_caps = self.providers().get((host_resource or {}).get("provider"), {}).get("capabilities", {})
-                if (not host_resource or host_resource.get("incarnation") != host.get("incarnation")
-                        or "terminal.kill" not in host_caps):
-                    raise CoordinationError("unsupported", "no declared exact host termination route; never escalate silently")
-                if args.get("confirm_host") != host.get("resource"):
-                    raise CoordinationError("conflict", "inspect and explicitly confirm every endpoint served by this host")
-                method, target, native_args = "terminal.kill", host["resource"], {}
+            how = native_args.pop("how", "graceful") if action == "stop" else None
+            if action == "stop" and how not in ("graceful", "host_kill"):
+                raise CoordinationError("unsupported", "unknown stop strategy; no weaker fallback")
+            confirmation, close_gates = None, [agent] if action == "stop" else []
+            if action == "stop" and how == "host_kill":
+                confirmation = self._host_kill_preview(agent)
+                if args.get("confirm_host") != confirmation:
+                    raise CoordinationError("conflict", "inspect and explicitly confirm the exact host/endpoint snapshot")
+                close_gates = confirmation["endpoints"]
+                for endpoint in close_gates:
+                    policy.require(context["principal"], "stop", endpoint)
+                    self._ensure_agent(work, endpoint, policy)
+                    control["gates"][endpoint] = False
+                work.put("control", control)
+                method, target, native_args = "terminal.kill", confirmation["resource"], {}
             elif operation is not None and operation not in caps:
                 if action == "stop":
                     method = None
                 else:
                     raise CoordinationError("unsupported", "native control is undeclared")
             return {"agent": agent, "target": target, "incarnation": resource.get("incarnation"), "op": method, "args": native_args,
-                    "close_gate": agent if action in ("stop", "retire") else None}
+                    "close_gate": agent if action == "stop" else None, "close_gates": close_gates,
+                    "host_confirmation": confirmation, "right": right}
         def execute(intent):
             if intent["op"] is None:
-                return {"outcome": "rejected", "error": {"kind": "unsupported"}, "data": {"gate": "closed", "native_stop": "not_invoked", "execution": "unknown"}}
+                raise CoordinationError("unsupported", "admission closed; native stop was not invoked; execution remains unknown")
             resource, _ = self._facts(intent["agent"])
             if not resource or resource.get("incarnation") != intent["incarnation"]:
-                return {"outcome": "rejected", "error": {"kind": "stale"}}
+                raise CoordinationError("stale", "endpoint changed before native control")
+            policy = self.policy()
+            for endpoint in intent.get("close_gates") or [intent["agent"]]:
+                policy.require(context["principal"], intent["right"], endpoint)
+            if intent.get("host_confirmation") and self._host_kill_preview(intent["agent"]) != intent["host_confirmation"]:
+                raise CoordinationError("stale", "host/endpoint snapshot changed before termination")
             return self.invoke(intent["target"], intent["op"], intent["args"], 5000)
         return self._external("coord.control", args, context, prepare, execute)
 

@@ -231,8 +231,8 @@ class CoordinationService:
         if not isinstance(args, dict):
             raise VqroError("coordination arguments must be an object", "invalid")
         if command == "status":
-            return {"state": "ready" if self.engine else "unavailable" if self.bootstrap_done.is_set() else "initializing",
-                    "reason": self.unavailable, "bootstrap": self.bootstrap_state,
+            return {"state": "ready" if self.engine and self.engine.current else "unavailable" if self.bootstrap_done.is_set() else "initializing",
+                    "reason": self.unavailable or ("owner fenced" if self.engine and not self.engine.current else None), "bootstrap": self.bootstrap_state,
                     "physical_suspension": False, "window": self.engine.window() if self.engine else None,
                     "recovery_readable": self.read_only_rows is not None,
                     "limits": {"scope_targets": SCOPE_CAPACITY, "page_items": 64, "take_items": 16,
@@ -241,7 +241,8 @@ class CoordinationService:
                                "control_reserve_percent": 10,
                                "quotas": asdict(QuotaLimits(domain_bytes=self.store.byte_limit, scope_capacity=SCOPE_CAPACITY))},
                     "identity_cache": {"owner": "core", "capacity": None, "incomplete": True},
-                    "receipts": self.items.status(), "maintenance": self.engine.maintenance_error if self.engine else None}
+                    "receipts": self.items.status(), "maintenance": self.engine.maintenance_error if self.engine else None,
+                    "limits_confirmed": self.engine is not None, "attention": self.engine.attention_summary() if self.engine else None}
         if self.engine is None and command in ("inbox.get", "inbox.list", "inbox.peek") and self.read_only_rows is not None:
             return self.read_only(command, args)
         if self.engine is None:
@@ -291,6 +292,8 @@ class CoordinationService:
             return engine.listing(args)
         if command == "scope" and args.get("action") in ("inspect", "preview"):
             return engine.scope_preview(args.get("scope", "workspace"))
+        if command == "control" and args.get("action") == "inspect":
+            return engine.control(args, context)
         if command == "scope" and args.get("action") == "result":
             return engine.scope_result(args.get("receipt"), args.get("page"))
         if command == "inbox.archive":
