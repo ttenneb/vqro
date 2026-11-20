@@ -19,6 +19,7 @@ from .cases import case, member
 from .context import PublicCoordination
 from .launcher import tui
 from .identity_backend import backend_child_environment, pinned_artifact
+from .request_routing_binding import request_routing_case
 from pi_provider_e2e import identity
 
 PROBE_NAME = "partb-identity-probe"
@@ -332,7 +333,7 @@ async def delegated_managed_callbacks_preserve_actor_and_initiator(ctx):
 
 async def publish_question(ctx, identifier, *, revision=1, session="s1", expires_at_ms=None):
     question = {"request": identifier, "revision": revision, "scope": {"session": session},
-        "status": "pending", "method": "confirm", "title": "Owned native confirmation",
+        "status": "pending", "method": "confirm", "title": "Owned native confirmation: " + identifier,
         "params": {}, "incomplete": False}
     if expires_at_ms is not None: question["expires_at_ms"] = expires_at_ms
     await ctx.native_set(0, requests=[question])
@@ -405,19 +406,18 @@ async def native_request_fences_expiry_and_revoked_answer(ctx):
 async def routing_binding(ctx, operation, **params):
     """One isolated config/launch/UI binding, NOT a proposed production wire schema.
 
-    K2's owner and coordinator explicitly confirmed that these two pinned targets do
-    not implement AS10c or define its public config/launcher key yet. Grade that known
-    mandatory absence as fail, never unsupported-declared. The semantic tests below
-    must not invent a doc key or a launcher receipt to make coverage appear green.
-
-    A future binding must return normalized *observations* of public transactions,
-    real launches, inbox records and UI notices; it must not implement routing itself.
-    Unknown targets require a reviewed binding, not this pinned-target verdict.
+    These two historical pinned targets were confirmed without AS10c. Preserve
+    their mandatory absence verdict, never unsupported-declared. A newer target
+    requires an explicit matching source/fixture pin and the real approved public
+    request-routes, request_route, pi.new, inbox and live-view surfaces. Unknown
+    unbound targets cannot inherit the historical verdict. The separate adapter
+    only observes public transactions/launches/notices; it never implements routing.
     """
     revision = ctx.manifest.get("coord_revision")
     known_without_routing = {"c67f818f7cee0b6832948c1e403f361bf576315b", "fe8e3d02c31fb78abfdc8d1616f2067e963a58e4"}
     if revision not in known_without_routing:
-        raise HarnessGap("request-routing public binding must be defined/reviewed for this target")
+        from .request_routing_binding import route_operation
+        return await route_operation(ctx, operation, mail_matches_request, **params)
     commands = (await ctx.peer.call("command.list"))["commands"]
     ctx.evidence.append({"kind": "required_request_routing_missing", "coord_revision": revision,
         "spec": "coordination-v0 section 6.2", "binding_step": operation,
@@ -428,8 +428,10 @@ async def routing_binding(ctx, operation, **params):
 
 
 @case("Q1")
+@request_routing_case
 async def route_launch_defaults_and_attributed_config(ctx):
-    # Return shapes below are normalized harness witnesses, not invented wire keys.
+    # Return shapes below are normalized actual public observations, not wire keys.
+    await routing_binding(ctx, "ensure")
     human = await routing_binding(ctx, "launch", launcher=ctx.peer, role="owner")
     ctx.check(human["route"] == "human" and human["launch_evidence"], "actual owner launch records human route")
     coordinator = await ctx.connect("worker:q1-coordinator")
@@ -447,6 +449,19 @@ async def route_launch_defaults_and_attributed_config(ctx):
     await ctx.peer.call("workspace.revert", {"txn": configured["transaction"]["id"]})
     restored = await routing_binding(ctx, "inspect", agent=human["agent"])
     ctx.check(restored["route"] == "both", "undo restores the actual previous route configuration")
+    requester = ctx.agents[0]["id"]
+    await routing_binding(ctx, "configure", agent=requester, route="both", peer=ctx.peer)
+    for scenario, value in (("missing", None), ("malformed", {"route": "invalid-owned-probe"})):
+        before = await routing_binding(ctx, "raw_configure", agent=requester, value=value)
+        question = await publish_question(ctx, "q1-" + scenario, expires_at_ms=int(time.time() * 1000) + 60000)
+        visible = await routing_binding(ctx, "observe", agent=requester, question=question)
+        ctx.check(not visible["mail"] and len(visible["human"]) == 1,
+            "missing/malformed public route shows this native question to the human", scenario=scenario, observation=visible)
+        if scenario == "malformed":
+            ctx.check(visible["human"][0].get("reason") == "invalid_request_route",
+                "malformed route has actual visible fallback reason", observation=visible)
+        after = await routing_binding(ctx, "inspect", agent=requester)
+        ctx.check(after["entry"] == before["entry"], "recovery does not silently repair raw missing/malformed config", scenario=scenario)
 
 
 def mail_matches_request(mail, agent, question, epoch):
@@ -473,7 +488,9 @@ def mail_matches_request(mail, agent, question, epoch):
 
 
 @case("Q2")
+@request_routing_case
 async def exact_recorded_coordinator_and_visible_fallback(ctx):
+    await routing_binding(ctx, "ensure")
     requester, coordinator = ctx.agents[0]["id"], ctx.agents[1]["id"]
     await routing_binding(ctx, "configure", agent=requester, route="coordinator", peer=ctx.peer)
     await ctx.native_set(1, principal="worker:q2-coordinator")
@@ -508,7 +525,9 @@ async def exact_recorded_coordinator_and_visible_fallback(ctx):
 
 
 @case("Q3")
+@request_routing_case
 async def both_routes_and_first_valid_answer_race(ctx):
+    await routing_binding(ctx, "ensure")
     requester, coordinator = ctx.agents[0]["id"], ctx.agents[1]["id"]
     await routing_binding(ctx, "configure", agent=requester, route="both", peer=ctx.peer)
     await ctx.native_set(1, principal="worker:q3-coordinator")
@@ -523,7 +542,7 @@ async def both_routes_and_first_valid_answer_race(ctx):
     ctx.check(routed["human"] and len(routed["mail"]) == 1 and routed["mail"][0]["to"] == coordinator and
               mail_matches_request(routed["mail"][0], requester, question, epoch), "both route has actual human notice and exact coordinator mail")
     before = len(ctx.native.records("native_response"))
-    results = await asyncio.gather(*(respond(ctx, question, peer=peer) for peer in controllers), return_exceptions=True)
+    results = await asyncio.gather(*(respond(ctx, question, peer=peer, epoch=epoch) for peer in controllers), return_exceptions=True)
     ctx.check(len(ctx.native.records("native_response")) == before + 1, "racing valid controllers produce exactly one actual native response", replies=[str(row) for row in results])
     for peer in controllers:
         async def sees_answered():

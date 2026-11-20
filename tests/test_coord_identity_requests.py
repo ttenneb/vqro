@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 import agent_conformance.part_b.identity_request_cases as cases
 from agent_conformance.results import CheckFailed, FixtureFailed, HarnessGap
+from agent_conformance.wire import RpcError
 from agent_conformance.part_b.identity_backend import IDENTITY_KEYS, child_identity_is_scrubbed, empty_terminal_inventory, pinned_artifact
 from agent_conformance.part_b.identity_request_cases import (
     PROBE_NAME, callback_attribution_is_actual, managed_principal_is_bound_not_inherited,
@@ -149,6 +150,41 @@ class RoutingAndResponseIntegrityTests(unittest.IsolatedAsyncioTestCase):
         ctx.native_set.assert_any_await(2, principal="worker:q2-other")
         ctx.scope.assert_awaited_once_with("resume", "agent:r2")
         ctx.grant.assert_any_await("q2-ended-answer", "worker:q2-coordinator", ["answer"], "agent:r1")
+
+    async def test_complete_q3_uses_observed_epoch_for_every_real_response_argument(self):
+        # Keep the actual respond() argument construction; double only public/native replies.
+        for epoch in ("e1", "e7"):
+            with self.subTest(epoch=epoch):
+                responses, sent = [], []
+                async def command(name, params, **_):
+                    self.assertEqual(name, "control")
+                    sent.append(params["args"]["epoch"])
+                    if params["args"]["epoch"] != epoch or responses:
+                        raise RpcError({"message": "stale", "data": {"kind": "stale"}})
+                    responses.append({"answered": True})
+                    return {"state": "observed"}
+                async def resource_list(*_, **__):
+                    return {"resources": [{"id": "r1", "data": {"agent": {"epoch": epoch, "requests": [
+                        {"request": "q3-race", "status": "answered" if responses else "pending"}]}}}]}
+                async def resources(): return (await resource_list())["resources"]
+                async def binding(_ctx, operation, **params):
+                    if operation != "observe": return {}
+                    return {"human": [{"reason": "unit observed"}], "mail": [
+                        {"to": "r2", "agent": "r1", "epoch": epoch, **params["question"]}]}
+                async def question(_ctx, identifier, **_):
+                    return {"request": identifier, "revision": 1, "scope": {"session": "s1"}}
+                def check(ok, message, **_):
+                    if not ok: raise CheckFailed(message)
+                async def wait(predicate, **_): self.assertTrue(await predicate())
+                peer = SimpleNamespace(call=AsyncMock(side_effect=resource_list))
+                ctx = SimpleNamespace(agents=[{"id": "r1"}, {"id": "r2"}], peer=peer,
+                    connect=AsyncMock(return_value=peer), native_set=AsyncMock(), grant=AsyncMock(), scope=AsyncMock(),
+                    resources=resources, native=SimpleNamespace(records=lambda kind: responses),
+                    operation=AsyncMock(return_value="op"), command=command, check=check, wait=wait)
+                with patch.object(cases, "routing_binding", binding), patch.object(cases, "publish_question", question), patch.object(cases, "member", AsyncMock()):
+                    await cases.both_routes_and_first_valid_answer_race(ctx)
+                self.assertEqual(sent, [epoch] * 3)
+                self.assertEqual(len(responses), 1)
 
     def context(self, counts):
         records = iter(counts)
