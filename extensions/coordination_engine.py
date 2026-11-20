@@ -308,8 +308,10 @@ class Coordinator:
                 work.put("meta", meta)
                 work.commit(control=True)
                 raise CoordinationError("busy", "bounded result window closed before evaluation", {"window": self.window()})
-            # A refusal also needs a slot. Test room for the largest canonical
-            # refusal before consulting policy or evaluating the requested action.
+            # A refusal also needs a slot. Fund both its preflight and persistence
+            # from existing control/recovery capacity, not saturated content space.
+            # The same window bound and archive-only escrow still apply. Test the
+            # largest canonical refusal before consulting policy or the action.
             trial = Working(self, archive=archive)
             self._cache_operation(trial, command, principal, op, fingerprint,
                                   {"state": "rejected", "reserved": " " * 2048}, compact=False)
@@ -317,7 +319,7 @@ class Coordinator:
             for key, value in trial.changes.items():
                 prospective[key] = {"version": max((row["version"] for row in trial.rows.values()), default=0) + 1, "value": value["value"]}
             try:
-                self._preflight_reservations(prospective, before=trial.rows, control=control, archive=archive)
+                self._preflight_reservations(prospective, before=trial.rows, control=True, archive=archive)
             except PolicyError:
                 meta["window_epoch"], meta["window_count"] = nonce("w:"), 0
                 work.put("meta", meta)
@@ -349,7 +351,7 @@ class Coordinator:
                 result = {"state": "rejected", "reason": failure["kind"], "refusal": failure}
                 self._cache_operation(work, command, principal, op, fingerprint, result, compact=False)
                 try:
-                    work.commit(control=control)
+                    work.commit(control=True)
                 except (PolicyError, StoreError):
                     # No refusal can be forgotten and later become an admission.
                     # A fresh owner rolls the old window before doing anything.

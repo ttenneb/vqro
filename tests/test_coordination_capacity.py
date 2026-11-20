@@ -34,6 +34,61 @@ class RecoveryCapacityTests(unittest.TestCase):
         self.assertEqual(result['state'], 'accepted')
         self.assertEqual([(target, operation) for target, operation, _ in f.ledger], [('r1', 'agent.interrupt')])
 
+    def test_saturated_normal_ledger_reports_cached_quota_before_and_after_window_roll(self):
+        f = fixtures.EngineTests(); f.setUp()
+        f.resources['r2'] = fixtures.resource('r2')
+        f.config['doc/agents/grants/senders'] = {'version': 1, 'value': {'who': '*', 'can': ['send:start'], 'on': '*'}}
+        for resource in f.resources.values():
+            resource['data']['agent']['caps']['agent.command'] = {}
+        f.engine.invoke = lambda target, operation, args, deadline: f.ledger.append((target, operation, args)) or {'outcome': 'indeterminate'}
+        for size in (180000, 30000, 4000, 0):
+            for _ in range(256):
+                try:
+                    f.engine.control({'op': f.op(), 'target': 'r2', 'action': 'command',
+                                      'args': {'name': 'fixture', 'args': 'x' * size}}, fixtures.OWNER)
+                except PolicyError as error:
+                    self.assertEqual(error.kind, 'quota')
+                    break
+        charge, _ = f.engine._reservation(f.store.view())
+        self.assertGreater(charge, f.store.byte_limit * .9 - 65536)
+        native_count = len(f.ledger)
+        def refused(principal, op):
+            args = {'op': op, 'submission': op, 'to': 'r1', 'mode': 'start',
+                    'content': [{'type': 'text', 'text': 'x'}]}
+            with self.assertRaises(PolicyError) as caught:
+                f.engine.send(args, {'principal': principal, 'actor': principal, 'author': 'client:probe'})
+            self.assertEqual(caught.exception.kind, 'quota',
+                             (str(caught.exception), f.engine._reservation(f.store.view()), f.engine.window()))
+            self.assertEqual(f.engine.operation(principal, op)['reason'], 'quota')
+        for phase in range(2):
+            for n in range(4):
+                principal, op = 'p:new-' + str(phase) + '-' + str(n), f.op()
+                refused(principal, op)
+                refused(principal, op)  # the compact refusal remains idempotent
+            if phase == 0:
+                epoch = f.engine.window()['epoch']
+                principal, serial = 'p:concentrated', 0
+                bucket = f.engine._bucket(principal, epoch + ':concentrated-1')
+                existing = f.store.view().get(bucket, {'value': {}})['value']
+                available = 64 - sum(value.get('window') == epoch for value in existing.values())
+                for n in range(available + 1):
+                    while True:
+                        serial += 1
+                        op = epoch + ':concentrated-' + str(serial)
+                        candidate = f.engine._bucket(principal, op)
+                        if candidate == bucket:
+                            break
+                    if n < available:
+                        refused(principal, op)
+                    else:
+                        with self.assertRaises(PolicyError) as caught:
+                            f.engine.send({'op': op}, {'principal': principal})
+                        self.assertEqual(caught.exception.kind, 'busy')
+                self.assertNotEqual(f.engine.window()['epoch'], epoch)
+        self.assertEqual(len(f.ledger), native_count)
+        self.assertTrue(f.engine.current)
+        self.assertIsNone(f.engine.maintenance_error)
+
     def test_known_control_metadata_cannot_take_the_last_archive_record_slots(self):
         f = fixtures.EngineTests()
         f.setUp()
