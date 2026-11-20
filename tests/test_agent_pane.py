@@ -401,26 +401,37 @@ class AgentPane(unittest.TestCase):
         self.feed(snapshot(CONVERSATION))
         return self.core.live["agents-r2"]["items"]
 
-    def test_one_header_line_with_the_agents_controls_in_its_menu(self):
-        """relay-8: the conversation pane has one header line (name · folder · state), not the old panel rows."""
+    def test_no_header_line_one_gear_button_and_the_state_in_the_frame(self):
+        """relay-11 (the human): no name line inside the pane, one small ⚙ for settings, bridge terminal and Stop; the
+        frame carries name · folder and the state."""
         self.core.resources["r9"] = {"id": "r9", "kind": "terminal", "name": "pi-bridge-1", "state": "live", "provider": "herdr"}
         self.core.providers["herdr"] = {"name": "herdr", "capabilities": {"terminal.kill": {}}}
         self.core.resources["r2"]["host"] = "r9"
         self.core.resources["r2"]["data"] = {"agent": {"v": 0, "state": "idle", "lifecycle": "live", "session": {"cwd": "~/Projects/site"}}}
         self.agents.event("resource", {"id": "r2"})
         self.feed(snapshot(CONVERSATION))
-        items, toolbar = self.core.live["agents-r2"]["items"], self.core.live["agents-r2"]["toolbar"]
-        self.assertEqual((toolbar[0]["id"], toolbar[0]["text"]), ("header", "Pi r2 · ~/Projects/site"), "pinned at the top")
-        self.assertEqual([m["label"] for m in toolbar[0]["menu"]], ["Bridge terminal (pi-bridge-1)", "Stop agent…"])
-        self.assertEqual([c["text"] for c in toolbar[1]["chips"]], ["Stop…", "⋯ Bridge terminal"], "visible buttons (mockup)")
+        pane = self.core.live["agents-r2"]
+        items, toolbar = pane["items"], pane["toolbar"]
+        self.assertEqual((pane["title"], pane["title_right"], pane["title_right_style"]), ("Pi r2 · ~/Projects/site", "● idle", "ok"))
+        self.assertEqual(len(toolbar), 1, "one line of chrome")
+        gear = toolbar[0]["chips"][0]
+        self.assertEqual((gear["text"], gear["command"]), ("⚙", "agents.pane"))
+        self.assertEqual([o["label"] for o in gear["options"]], ["Bridge terminal (pi-bridge-1)", "Stop agent…"])
+        self.assertFalse(any("Stop" in c["text"] for c in toolbar[0]["chips"]), "no Stop button")
         self.assertFalse(any(r.get("text") in ("Bridge terminal", "Agent settings…") for r in items), "no old panel rows")
+        self.core.calls.clear()
+        self.core.handlers["agents.pane"](dict(gear["args"], value="bridge"))
+        self.assertEqual(self.core.calls[-1], ("tabs.show", {"resource": "r9"}))
+        reply = self.core.handlers["agents.pane"](dict(gear["args"], value="stop"))
+        self.assertTrue(reply["client"]["popup"]["view"].startswith("agents-stop-"), "Stop still asks first")
 
     def test_the_composer_offers_auto_and_the_declared_modes_and_sends(self):
         items = self.make_v0()
         composer = next(r for r in items if r.get("type") == "composer")
         self.assertEqual((composer["pin"], composer["autofocus"], composer["submit"], composer["args"]),
                          ("bottom", True, "Enter", {"resource": "r2", "caps_rev": 2}))
-        self.assertEqual([c["value"] for c in composer["controls"][0]["chips"]], ["auto", "boundary", "settle"], "steer before follow-up")
+        self.assertEqual((composer["controls"][0]["type"], composer["controls"][0]["value"]), ("select", "auto"), "one input-settings button")
+        self.assertEqual([c["value"] for c in composer["controls"][0]["options"]], ["auto", "boundary", "settle"], "steer before follow-up")
         self.core.handlers["agents.send"](dict(composer["args"], mode="settle", text="later"))  # declared modes still send
         self.assertEqual(composer["fallback"]["multiline"], True)
         self.assertEqual(items[-1]["pin"], "bottom", "the facts line comes last")
@@ -438,7 +449,7 @@ class AgentPane(unittest.TestCase):
         self.agents.event("resource", {"id": "r2"})
         self.feed(snapshot(CONVERSATION))
         composer = next(r for r in self.core.live["agents-r2"]["items"] if r.get("type") == "composer")
-        self.assertEqual([c["value"] for c in composer["controls"][0]["chips"]], ["auto"])
+        self.assertEqual([c["value"] for c in composer["controls"][0]["options"]], ["auto"])
         self.assertEqual(composer["rows"], 8, "grows up to about a third of the pane")
         reply = self.core.handlers["agents.send"](dict(composer["args"], mode="auto", text="hi"))
         rows = [r for r in self.core.live[reply["client"]["popup"]["view"]]["items"] if r.get("command") == "agents.send"]

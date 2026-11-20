@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Runtime-neutral agent panels and native capability-driven controls. No launcher."""
 import json
+import os
 from pathlib import Path
 import sys
 import threading
@@ -356,6 +357,7 @@ class Agents:
                                 ("send", self.send, "Send a message in a declared delivery mode (args: mode?, text?)"),
                                 ("view", self.set_view, "Show, summarise or hide parts of an agent pane (args: set, value)"),
                                 ("stop", self.stop, "Stop an agent: kill its bridge terminal and the runtime in it (asks first)"),
+                                ("pane", self.pane_menu, "The agent pane's ⚙ menu (args: value = config | bridge | stop)"),
                                 ("forget", self.forget, "Forget an unavailable agent's cached facts (its process is not touched)")]:
             ext.command("agents."+name, title)(self.guarded(fn))
         for op, title in EFFECTS.items():
@@ -522,13 +524,16 @@ class Agents:
         self.ext.retrying(write)
         return {"ok": True}
 
-    def view_toolbar(self, rid, view, seen):
-        """The pane's quick controls: one chip per kind (pick show/summary/hide), senders, density and summary fields."""
+    def view_toolbar(self, r, view, seen):
+        """The pane's one line of chrome: ⚙ (the agent's settings, bridge terminal, stop), then one chip per kind (pick
+        show/summary/hide), senders, density and summary fields."""
+        rid, gear = r["id"], self.gear_chip(r)
         def chip(text, what, options):
             return {"text": text, "command": "agents.view", "args": {"resource": rid, "set": what}, "options": options}
         modes = [{"label": m, "value": m} for m in agent_transcript.MODES]
         hidden = view["hidden_senders"]
         return [{"type": "chips", "chips": [
+            *([gear] if gear else []),
             *[chip(f"{kind.capitalize()}: {view[kind]}", kind, modes) for kind in agent_transcript.KINDS],
             chip("Senders: all" if not set(hidden) & set(seen) else f"Senders: {len(set(hidden) & set(seen))} hidden", "sender",
                  [{"label": ("hidden: " if key in hidden else "shown: ") + name, "value": key} for key, name in seen.items()]
@@ -538,35 +543,47 @@ class Agents:
                  [{"label": ("✓ " if f in view["summary"] else "  ") + f, "value": f} for f in agent_transcript.SUMMARY_FIELDS]),
             {"text": "Make default", "command": "agents.view", "args": {"resource": rid, "set": "defaults"}}]}]
 
-    def header_row(self, r):
-        """The agent pane's one header line (mockup §1): name · folder · live state, with the agent's controls in the
-        row's menu (settings, its bridge terminal, stop). Only what the agent reports; nothing guessed."""
-        rid, name = r["id"], plain(str(r.get("name") or r["id"]))
-        session = agent_facts(r).get("session") if isinstance(agent_facts(r).get("session"), dict) else {}
-        folder = session.get("cwd") if isinstance(session.get("cwd"), str) else None
-        menu = []
+    def gear_chip(self, r):
+        """The pane's one settings button (the human, relay-11): ⚙ opens a menu with this agent's settings, its bridge
+        terminal and Stop (also in the pane menu, D15). None when there is nothing to offer."""
+        rid, options = r["id"], []
         if self.has_settings(r) and r.get("available"):
-            menu.append({"label": "Agent settings…", "command": "agents.config", "args": {"resource": rid}})
+            options.append({"label": "Agent settings…", "value": "config"})
         host = self.ext.resources.get(r.get("host"))
         if host and host.get("kind") == "terminal":
-            menu.append({"label": "Bridge terminal (" + label(host.get("name") or host["id"], 60) + ")", "command": "tabs.show",
-                         "args": {"resource": host["id"]}})
+            options.append({"label": "Bridge terminal (" + label(host.get("name") or host["id"], 60) + ")", "value": "bridge"})
         if self.can_stop(r):
-            menu.append({"label": "Stop agent…", "command": "agents.stop", "args": {"resource": rid}})
-        return {"id": "header", "text": " · ".join([f"{name} {rid}"] + ([head(plain(folder), 120)] if folder else [])),
-                "style": "bold", "badges": [{"text": status(r), "style": "dim"}], **({"menu": menu} if menu else {})}
+            options.append({"label": "Stop agent…", "value": "stop"})
+        return {"text": "⚙", "command": "agents.pane", "args": {"resource": rid}, "options": options} if options else None
 
-    def action_chips(self, r):
-        """The header's controls as visible buttons (mockup §1: Stop… ⚙ ⋯); the header row's menu has the same."""
-        rid, chips = r["id"], []
-        if self.can_stop(r):
-            chips.append({"text": "Stop…", "command": "agents.stop", "args": {"resource": rid}, "style": "warn"})
-        if self.has_settings(r) and r.get("available"):
-            chips.append({"text": "⚙ Settings", "command": "agents.config", "args": {"resource": rid}})
-        host = self.ext.resources.get(r.get("host"))
-        if host and host.get("kind") == "terminal":
-            chips.append({"text": "⋯ Bridge terminal", "command": "tabs.show", "args": {"resource": host["id"]}})
-        return [{"type": "chips", "chips": chips}] if chips else []
+    def pane_menu(self, args):
+        """What the ⚙ menu chose (`value`: config, bridge or stop)."""
+        choice = args.get("value")
+        if choice == "config":
+            return self.settings(args)
+        if choice == "stop":
+            return self.stop(args)
+        if choice == "bridge":
+            r = self.agent(args, inspect=True)
+            host = self.ext.resources.get(r.get("host"))
+            if not host or host.get("kind") != "terminal":
+                raise VqroError("this agent has no bridge terminal", "not_found")
+            return self.ext.invoke("tabs.show", {"resource": host["id"]})
+        raise VqroError("unknown choice: " + label(str(choice), 40), "invalid")
+
+    def frame(self, r):
+        """The pane's frame: name · folder as the title, the live state at its right end (feature-free fallback: the
+        plain title). Only what the agent reports; nothing guessed."""
+        name = label(r.get("name") or r.get("title") or "Agent") + " " + r["id"]
+        session = agent_facts(r).get("session") if isinstance(agent_facts(r).get("session"), dict) else {}
+        folder = session.get("cwd") if isinstance(session.get("cwd"), str) and session["cwd"] else None
+        if folder:
+            home = os.path.expanduser("~")
+            folder = "~" + folder[len(home):] if home not in ("", "/") and (folder == home or folder.startswith(home + "/")) else folder
+        state = status(r)
+        style = "warn" if ended(r) or agent_facts(r).get("lifecycle") not in (None, "live") else "ok" if state == "idle" else "accent"
+        return {"title": " · ".join([name] + ([head(plain(folder), 80)] if folder else [])),
+                "title_right": "● " + state, "title_right_style": style}
 
     def request_presentation(self, r, waiting):
         configured = self.ext.value(REQUEST_ROUTES + r['id'])
@@ -617,13 +634,14 @@ class Agents:
             names = {"start": "start", "boundary": "steer", "settle": "follow-up", "admit": "admit (weaker)",
                      "preempt": "interrupt and send"}
             # admit stays available to agents and the API (agents.send mode admit), not as a chip for the human (mockup).
-            chips = [{"text": "auto", "value": "auto", "checked": True}] + [
-                {"text": names.get(m, m), "value": m} for m in modes if m not in ("start", "admit")]
+            options = [{"label": "auto", "value": "auto"}] + [
+                {"label": names.get(m, m), "value": m} for m in modes if m not in ("start", "admit")]
             rows.append({"type": "composer", "id": "compose", "pin": "bottom", "text": "Message " + name,
                          "command": "agents.send", "args": {"resource": rid, "caps_rev": caps(r).get("rev")},
                          "placeholder": f"Write a message to {name}…", "rows": COMPOSER_ROWS, "max_bytes": 65536, "submit": "Enter",
                          "autofocus": True, "requires": ["composer"],
-                         "controls": [{"type": "chips", "arg": "mode", "text": "Mode", "chips": chips}],
+                         # One input-settings button (the human, relay-11): the delivery mode now, more input options later.
+                         "controls": [{"type": "select", "arg": "mode", "text": "Input", "value": "auto", "options": options}],
                          "fallback": {"text": f"Message {name}…", "command": "agents.send",
                                       "args": {"resource": rid, "mode": "auto"}, "input": "Message", "multiline": True}})
         return rows
@@ -1327,8 +1345,8 @@ class Agents:
             c = self.conversations[r["id"]]
             with c.lock:
                 seen = agent_transcript.senders(c.view.entities, agent_transcript.Names(self.ext.resources, r["id"], self.ext.owner()))
-            content = {"title": title, "follow": True, "search": True,
-                       "toolbar": [self.header_row(r), *self.action_chips(r), *self.view_toolbar(r["id"], self.view_of(r["id"]), seen)],
+            content = {**self.frame(r), "follow": True, "search": True,
+                       "toolbar": self.view_toolbar(r, self.view_of(r["id"]), seen),
                        "items": [*conversation, *self.bottom_rows(r),
                 agent_transcript.facts_footer(agent_facts(r), plain(str(r.get("name") or r["id"])))]}
         elif sources:

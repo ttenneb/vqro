@@ -82,6 +82,10 @@ def duration(start, end):
     return f"{seconds:.1f}s" if seconds < 10 else f"{seconds:.0f}s" if seconds < 120 else f"{seconds / 60:.0f}m"
 
 
+def plural(n):
+    return "line" if n == 1 else "lines"
+
+
 def lines(text, style=None, limit=None):
     """Wrapped text rows, one per line (control-safe); `limit` keeps the first lines and says how many more."""
     out = str(text).split("\n")
@@ -90,7 +94,7 @@ def lines(text, style=None, limit=None):
     rows = [{"type": "text", "wrap": True, "focusable": True, "text": clip(plain(line)), **({"style": style} if style else {})}
             for line in (out[:limit] if more else out)]
     if more:
-        rows.append({"type": "text", "style": "dim", "text": f"… {more} more lines"})
+        rows.append({"type": "text", "style": "dim", "text": f"… {more} more {plural(more)}"})
     return rows
 
 
@@ -147,7 +151,7 @@ def hidden_rows(texts, style):
         text = clip(plain(line))
         size += len(text.encode())
         if i >= HIDDEN_ROWS or size > HIDDEN_BYTES:
-            rows.append({"type": "text", "style": "dim", "text": f"… {len(texts) - i} more lines not shown here"})
+            rows.append({"type": "text", "style": "dim", "text": f"… {len(texts) - i} more {plural(len(texts) - i)} not shown here"})
             break
         rows.append({"type": "text", "wrap": True, "focusable": True, "style": style, "text": text})
     return rows
@@ -267,7 +271,7 @@ def message_rows(eid, value, names, receipts, show_time=True, fold=None, thinkin
         body = []  # hidden, or no reasoning
     body += content_rows(value.get("content"), body_style)
     if fold and len(body) > fold:  # long messages fold (compact view, other senders); the sender and quote stay
-        body = body[:fold] + [{"id": "f:" + eid, "text": f"{len(body) - fold} more lines", "style": "dim",
+        body = body[:fold] + [{"id": "f:" + eid, "text": f"{len(body) - fold} more {plural(len(body) - fold)}", "style": "dim",
                                "children": body[fold:], "expanded": False}]
     return rows + body
 
@@ -357,7 +361,7 @@ def output_rows(text, limit=TOOL_LINES):
         out = packed + ([row] if row else [])
     rows = [{"type": "text", "wrap": True, "focusable": True, "style": "muted", "text": clip(plain(line))} for line in out[:limit]]
     if len(out) > limit:
-        rows.append({"text": f"… {len(out) - limit} more lines", "style": "dim", "expanded": False,
+        rows.append({"text": f"… {len(out) - limit} more {plural(len(out) - limit)}", "style": "dim", "expanded": False,
                      "children": hidden_rows(out[limit:], "muted")})
     return rows
 
