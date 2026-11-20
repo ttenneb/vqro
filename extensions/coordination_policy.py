@@ -129,7 +129,9 @@ def record_charge(record, limits=None):
     limits = limits or QuotaLimits()
     content = len(encoded(record.get("content", [])))
     steps = _integer(record.get("outcome_steps", 1), "outcome_steps", 1, 3)
-    return max(len(encoded(record)), content + limits.metadata_bytes + steps * limits.outcome_bytes)
+    # Existing derived metadata is not unused outcome headroom. Reserve the
+    # future compact step evidence in addition to the larger actual/floor base.
+    return max(len(encoded(record)), content + limits.metadata_bytes) + steps * limits.outcome_bytes
 
 
 class Policy:

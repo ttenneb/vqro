@@ -322,6 +322,13 @@ class Admission(Fixture):
         self.rejects("quota", check_admission, [], "p:a", "r1", content,
                      outcome_steps=3, reserved_bytes=1000, limits=limits)
 
+    def test_actual_metadata_above_floor_still_reserves_each_future_outcome(self):
+        record = mail(outcome_steps=3, derived_attribution="x" * 5000)
+        self.assertGreater(len(encoded(record)), len(encoded(record["content"])) + 2048)
+        self.assertEqual(record_charge(record), len(encoded(record)) + 3 * 1024)
+        record["outcome_steps"] = 1
+        self.assertEqual(record_charge(record), len(encoded(record)) + 1024)
+
     def test_admission_total_occupancy_does_not_double_charge_records(self):
         rows = [mail()]
         limits = QuotaLimits(domain_bytes=10000)
