@@ -596,6 +596,21 @@ def case_recipe_history(principal=None):
             'duplicate_recreated': False, 'principal_hash': marked}
 
 
+def case_declarations():
+    status = cmd('status')
+    snapshot = owner.call('workspace.snapshot')
+    stats, cache = snapshot['identity_reservations'], status['identity_cache']
+    assert cache['capacity'] == stats['max_entries'] and cache['max_entry_bytes'] == stats['max_entry_bytes'], (cache, stats)
+    assert cache['source_epoch'] == snapshot['epoch'] and not cache['incomplete'], cache
+    assert cache['source'] == 'workspace.snapshot.identity_reservations' and 'count' not in cache, cache
+    assert status['control_latency_ms'] == 3000, status
+    conditions = status['control_latency_conditions']
+    assert conditions['historical'] and not conditions['runtime_guarantee'] and not conditions['current_release_verified'], conditions
+    assert conditions['measurement']['samples'] == {'interrupt': 3, 'respond': 3}, conditions
+    return {'capacity': cache['capacity'], 'max_entry_bytes': cache['max_entry_bytes'],
+            'control_latency_ms': 3000, 'historical_conditional_only': True, 'native_writes': 0}
+
+
 def case_compaction_identities():
     result = {}
     for label, character in (('quotes', '"'), ('backslashes', '\\'), ('plain', 'x')):
@@ -799,7 +814,7 @@ def case_archive_abort():
 # Witness the bounded attention view before bulk uncertain-history fixtures fill it.
 CASES = {'ordering_visibility': case_ordering_visibility, 'brick': case_brick, 'idle': case_idle, 'membership': case_membership, 'identity': case_identity, 'reconcile': case_reconcile, 'names': case_names,
          'rawcycle': case_rawcycle, 'invalid_declaration': case_invalid_declaration,
-         'window': case_window, 'handover': case_handover, 'archive': case_archive, 'queue_epoch': case_queue_epoch, 'handover_withdrawn': case_handover_withdrawn, 'archive_abort': case_archive_abort, 'handover_archive': case_handover_archive, 'pause_reporting': case_pause_reporting, 'recipe_history': case_recipe_history, 'compaction_identities': case_compaction_identities}
+         'window': case_window, 'handover': case_handover, 'archive': case_archive, 'queue_epoch': case_queue_epoch, 'handover_withdrawn': case_handover_withdrawn, 'archive_abort': case_archive_abort, 'handover_archive': case_handover_archive, 'pause_reporting': case_pause_reporting, 'recipe_history': case_recipe_history, 'compaction_identities': case_compaction_identities, 'declarations': case_declarations}
 core = None
 try:
     core = subprocess.Popen([str(BIN), 'serve', '--fake'], env=ENV, cwd=ROOT, stdout=open(ROOT / 'core.log', 'wb'), stderr=subprocess.STDOUT)

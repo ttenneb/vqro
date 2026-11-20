@@ -33,6 +33,26 @@ def callback_context(params):
             "initiator": params.get("initiator"), "label": params.get("label"), "kind": "tool"}
 
 
+# Coordinator-approved historical measured envelope, not a native runtime deadline.
+CONTROL_LATENCY_MS = 3000
+CONTROL_LATENCY_CONDITIONS = {
+    "kind": "conditional_measured_envelope", "historical": True,
+    "runtime_guarantee": False, "current_release_verified": False,
+    "rounding": "next whole second above observed maximum 2724.1 ms",
+    "measurement": {
+        "case": "S1", "run": "b-hbof3nye", "core": "e026f6a", "coord": "a8968e9",
+        "core_sha256": "a0ef7a2c4ac1ded66fa3d5b820103ab399a7bc44176bf8c9c0e954aa5ac10d40",
+        "agents": 200, "terminals": 600, "streams": 600, "duration_seconds": 164,
+        "cpu_count": 8, "nice": 10, "native": "immediate fake provider; no model/runtime",
+        "load": "inbox and layout traffic, burst/flood and stream reconnect",
+        "samples": {"interrupt": 3, "respond": 3},
+        "max_ms": {"interrupt": 2244.6, "respond": 2724.1},
+        "boundary": "client coord.control reply; operation-window lookup and native fixture setup excluded",
+        "limitations": "historical small sample, shared host; neither a future SLO nor runtime completion guarantee",
+    },
+}
+
+
 class CoordinationService:
     def __init__(self, ext, *, defer_bootstrap=False):
         self.ext = ext
@@ -243,6 +263,23 @@ class CoordinationService:
                 self.jobs.add(job)
             job.add_done_callback(self._job_finished)
 
+    def identity_cache(self):
+        """Project limits from the SDK's current-epoch public snapshot, never guess."""
+        result = {"owner": "core", "capacity": None, "incomplete": True,
+                  "source": "workspace.snapshot.identity_reservations"}
+        with self.ext.cache_lock:
+            header = getattr(self.ext, "snapshot_header", {})
+            if not isinstance(header, dict) or header.get("epoch") != self.ext.epoch:
+                return result
+            stats = header.get("identity_reservations")
+            if not isinstance(stats, dict):
+                return result
+            capacity, entry_bytes = stats.get("max_entries"), stats.get("max_entry_bytes")
+            if type(capacity) is not int or capacity < 0 or type(entry_bytes) is not int or entry_bytes <= 0:
+                return result
+            return dict(result, capacity=capacity, max_entry_bytes=entry_bytes, incomplete=False,
+                        source_epoch=header["epoch"], source_seq=header.get("seq"))
+
     def handle(self, method, params):
         if self.items.handle(method, params):
             return None
@@ -268,7 +305,9 @@ class CoordinationService:
                                "archive_plan_future": {"bytes": ARCHIVE_FUTURE_BYTES, "records": 4,
                                                        "exported_bytes": ARCHIVE_FUTURE_BYTES // 2, "exported_records": 2},
                                "quotas": asdict(QuotaLimits(domain_bytes=self.store.byte_limit, scope_capacity=SCOPE_CAPACITY))},
-                    "identity_cache": {"owner": "core", "capacity": None, "incomplete": True},
+                    "identity_cache": self.identity_cache(),
+                    "control_latency_ms": CONTROL_LATENCY_MS,
+                    "control_latency_conditions": copy.deepcopy(CONTROL_LATENCY_CONDITIONS),
                     "receipts": self.items.status(), "maintenance": self.engine.maintenance_error if self.engine else None,
                     "limits_confirmed": self.engine is not None, "configuration": self.engine.configuration_status() if self.engine else None,
                     "attention": self.engine.attention_summary() if self.engine else None}

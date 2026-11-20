@@ -650,6 +650,23 @@ inferred from timing or text; absent means unknown.
 
 ## 10. Bounds and capacity
 
+**Published declarations.** `coord.status.identity_cache` projects `capacity` from the current core snapshot's
+`identity_reservations.max_entries`, and `max_entry_bytes` from the corresponding core field. The bundled core
+reports4096/2048, not a coordination-owned second cache. `source_epoch`/`source_seq` identify that snapshot; occupancy
+is not presented as live. Missing/malformed/other-epoch facts remain `capacity:null,incomplete:true`, never a guessed
+bundled limit. The SDK's generic `snapshot_header` avoids a new full-snapshot RPC on a status read.
+
+`coord.status.control_latency_ms:3000` is a **conditional historical measured envelope**, rounded to the next whole
+second above2724.1ms. Its adjacent `control_latency_conditions` are part of the declaration, not optional marketing:
+S1 run`b-hbof3nye`, core/spec`e026f6a`, coordination`a8968e9`,600 terminals/200 agents/600 live item streams;
+164s of inbox/layout traffic, bursts/flood/reconnect;8 CPUs,nice10 on a shared host, immediate fake native, no model.
+Only3 interrupts+3 answers were sampled: maxima2244.6/2724.1ms (their reported p99 is the sample maximum, not a
+statistical tail estimate). The client times the `coord.control` reply; operation-window lookup and fixture setup
+are excluded. This is neither a future/current-release SLO nor a real-runtime completion guarantee;
+`current_release_verified:false` remains until separately qualified. The distinct I19 run`b-mqrpu571` observed
+max741.9ms over12 interrupt/answer calls during200 stream opens across4 connections plus inbox flood. That is a
+**different population**, not pooled with S1 or used to lower the declared envelope. Re-measurement may change it.
+
 Every read and action is bounded by count, bytes and work: indexed lookups, bounded traversal, size preflight;
 oversized atomic actions are rejected before any change; read-only recovery works before any migration-triggering
 write.
