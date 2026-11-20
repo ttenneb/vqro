@@ -341,6 +341,8 @@ class OrderingCheckerRegressions(unittest.TestCase):
         self.assertFalse(self.m.operator_view_names([{"items": [{"delivery": "d:pred", "state": "unknown"}]}], "d:succ", "d:pred"))
         named = {"items": [{"delivery": "d:succ", "reason": "ordering_unknown", "predecessor": "d:pred"}]}
         self.assertTrue(self.m.operator_view_names([{}, named], "d:succ", "d:pred"))
+        legend = {"legend": ["ordering_unknown"], "items": [{"delivery": "d:succ", "reason": "paused", "predecessor": "d:pred"}]}
+        self.assertFalse(self.m.operator_view_names([legend], "d:succ", "d:pred"))
 
     def test_l10_extra_frozen_target_fails(self):
         frozen = {"targets": ["r-mover"], "receipt": "x"}

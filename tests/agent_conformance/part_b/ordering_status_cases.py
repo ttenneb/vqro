@@ -27,10 +27,19 @@ def receipts_isolated(rows):
 def operator_view_names(surfaces, successor, predecessor):
     """I22: some operator surface shows the successor held ordering_unknown together with the predecessor's id.
     A surface that names neither (for example empty attention) fails."""
+    def rows(node):
+        if isinstance(node, dict):
+            yield node
+            for value in node.values(): yield from rows(value)
+        elif isinstance(node, list):
+            for value in node: yield from rows(value)
+    # Bound to one row: the row that names the successor must itself carry ordering_unknown and the predecessor
+    # (a legend elsewhere saying ordering_unknown while the successor's row says paused does not count).
     for surface in surfaces:
-        text = json.dumps(surface)
-        if successor in text and predecessor in text and "ordering_unknown" in text:
-            return True
+        for row in rows(surface):
+            own = [value for value in row.values() if not isinstance(value, (dict, list))]
+            if successor in own and "ordering_unknown" in own and predecessor in json.dumps(row):
+                return True
     return False
 
 
@@ -134,9 +143,9 @@ async def shared_submission_ids_stay_per_principal(ctx):
     await ctx.native_set(0, caps=caps)
     # Changing caps reattaches coordination's receipt stream for this agent; wait until it is attached again.
     await ctx.wait(lambda: _receipts_attached(ctx), label="coordination receipt stream attached", timeout=20)
-    # The native reply reports only `admitted`; each actual insertion stores the higher `inserted` receipt, published late.
-    await ctx.native.call("plan", ref=ctx.agents[0]["backend_ref"], op="agent.send",
-                          plan={"result": {"outcome": "accepted", "data": {"receipt": {"stage": "admitted"}}}})
+    # The runtime is running, so both admits queue: the native's own replies carry {delivery, stage: admitted}
+    # (agent-v0 result shape). Each later idle point actually inserts one queued delivery and stores `inserted`.
+    await ctx.native_set(0, state="running", run="i17-run")
     await ctx.scope("resume", "agent:" + target)
     rows = []
     for name, delivery in (("i17-alice", alice), ("i17-bob", bob)):
@@ -144,6 +153,8 @@ async def shared_submission_ids_stay_per_principal(ctx):
         calls = invocations(ctx, delivery=delivery)
         ctx.check(len(calls) == 1 and calls[0]["args"]["content"] == [{"type": "text", "text": "edited by " + name}]
                   and record["from"]["principal"] == name, "each delivery's native input stays its own", principal=name, state=record["state"])
+    for name, delivery in (("i17-alice", alice), ("i17-bob", bob)):
+        await ctx.native.call("point", ref=ctx.agents[0]["backend_ref"], point="idle")
         compacted = "final_seq" in await ctx.get(delivery)
         published = None
         try: published = await ctx.native.call("publish-receipt", ref=ctx.agents[0]["backend_ref"], delivery=delivery)
@@ -383,6 +394,18 @@ async def advisory_terminal_status(ctx):
     unreported = sidebar_entry(a)
     ctx.check(unreported is None or "idle" not in json.dumps(unreported.get("badges")),
               "no report never shows idle in the sidebar", entry=unreported)
+    async def fence():
+        return {"native": len(ctx.native.records("invoke")), "events": len(views.events),
+                "history": (await ctx.peer.call("workspace.history", {"limit": 1}))["txns"][-1]["id"]}
+    async def fenced(start, label):
+        """Valid and foreign reports are live-only: no core effect or notice, no native call, no workspace transaction."""
+        effects = [kind for kind in status_effects(views.events[start["events"]:]) if not kind.startswith("view.content")]
+        native = len(ctx.native.records("invoke")) - start["native"]
+        history = (await ctx.peer.call("workspace.history", {"limit": 1}))["txns"][-1]["id"]
+        ctx.check(not effects and native == 0 and history == start["history"],
+                  label + ": no core effect, native call or durable write", effects=effects, native_calls=native,
+                  history=[start["history"], history])
+    valid_fence = await fence()
     reply = await report(a, "claude", "requires_action", 5)
     await table_has(lambda t: t.get(a, {}).get("seq") == 5, "first report published")
     entry = views.table()[a]
@@ -391,6 +414,7 @@ async def advisory_terminal_status(ctx):
     await ctx.wait(lambda: (views.content.get("sidebar.status") or {}).get("label") == "1 blocked", label="sidebar falls back to the report", timeout=10)
     ctx.check((views.content.get("sidebar.status") or {}).get("label") == "1 blocked",
               "without OSC status the sidebar falls back to the tier-1 report (1 blocked)", status=views.content.get("sidebar.status"))
+    await fenced(valid_fence, "the first valid report")
     # With OSC status the sidebar prefers it: a blocked report for a terminal whose OSC status says working adds no block.
     osc = (await ctx.peer.call("resource.spawn", {"argv": ["agent", "--status-every-ms", "600000", "--status-phase-ms", "50"]}))["resource"]["id"]
     async def osc_working():
@@ -450,6 +474,7 @@ async def advisory_terminal_status(ctx):
     await table_has(lambda t: t.get(a, {}).get("seq") == 7, "another terminal's change publishes the lagging seq")
     ctx.check(views.table()[a]["seq"] == 7, "the lagging published seq catches up on another terminal's publication")
     # Concurrent publication never lets an older table overwrite a newer one.
+    concurrent_fence = await fence()
     start = len(views.events)
     await asyncio.gather(*(report(b, "app", ("idle", "running")[n % 2], 10 + n) for n in range(40)))
     await asyncio.sleep(.5)
@@ -461,13 +486,16 @@ async def advisory_terminal_status(ctx):
     ctx.check(published == sorted(published) and views.table()[b]["state"] == "running" and probe.get("seq") == 49
               and probe.get("applied") is False, "concurrent reports never publish an older table after a newer one",
               published=published, final=views.table()[b], stored=probe)
+    await fenced(concurrent_fence, "40 concurrent valid reports")
     # Reporter ownership (spec marks it pending C2; the integrator grades it): another principal's report must be refused
     # not_authorized without applying. Graded last so the remaining clauses are still witnessed.
     other = await ctx.connect("t13-other")
+    foreign_fence = await fence()
     before_other = dict(views.table().get(c, {}))
     try: owner_check = await report(c, "intruder", "requires_action", 50, peer=other)
     except RpcError as error: owner_check = {"refused": error.kind}
     await asyncio.sleep(.3)
+    await fenced(foreign_fence, "a foreign principal's report")
     # The terminal's launcher-tagged principal may report: the launcher supplies VQRO_PRINCIPAL at spawn (core-protocol
     # generic spawn), and that principal connects with it as its hello identity.
     launched = (await ctx.peer.call("resource.spawn", {"argv": ["sh"], "env": {"VQRO_PRINCIPAL": "t13-launched"}}, timeout=30))["resource"]["id"]
