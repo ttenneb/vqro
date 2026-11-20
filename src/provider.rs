@@ -46,16 +46,19 @@ pub struct Provider {
     /// Additional validated wire registration metadata (version, effective limits, runtime host).
     pub metadata: Value,
     pub owner: Option<crate::ext::Owner>,
+    // Private, opt-in registration credential. Never part of metadata/list/history or persistence.
+    pub(crate) host_context_token:Option<String>,
     pub health: watch::Sender<Health>,
 }
 
 impl Provider {
     pub fn new(handle: AdapterHandle, source: u64, generation: u64) -> Self {
         let (health, _) = watch::channel(Health { connected: false, generation, instance: String::new() });
-        Self { registration_bytes:0,handle, info: None, source, generation, since: crate::store::now_ms(), error: None, synced: false, metadata: json!({}), owner:None, health }
+        Self { registration_bytes:0,handle, info: None, source, generation, since: crate::store::now_ms(), error: None, synced: false, metadata: json!({}), owner:None, host_context_token:None, health }
     }
 
     pub fn register(&mut self, info: ProviderInfo) {
+        self.host_context_token=None;
         self.generation += 1;
         self.since = crate::store::now_ms();
         self.error = None;
@@ -66,6 +69,7 @@ impl Provider {
     }
 
     pub fn disconnect(&mut self, error: Option<String>) {
+        self.host_context_token=None;
         let mut health = self.health.borrow().clone();
         health.connected = false;
         self.health.send_replace(health);
@@ -96,6 +100,31 @@ impl Provider {
         }
         Ok(Route { handle: self.handle.clone(), health: self.health.subscribe(), generation: self.generation, instance: self.health.borrow().instance.clone(), resource: None, target: None, owner:self.owner.clone() })
     }
+}
+
+/// A verified tool connection is fenced to the exact opt-in provider registration, not an endpoint.
+#[derive(Clone,Debug)]
+pub struct HostContext {provider:String,generation:u64,host:String,health:watch::Receiver<Health>,resource:watch::Receiver<bool>,owner:Option<crate::ext::Owner>}
+impl HostContext {
+    pub(crate) fn actor(&self)->String{format!("host:{}",self.host)}
+    pub fn is_live(&self)->bool{
+        let health=self.health.borrow();health.connected && health.generation==self.generation && *self.resource.borrow() && self.owner.as_ref().is_none_or(|owner|owner.is_live())
+    }
+    pub(crate) fn valid(&self,core:&crate::core::Core)->bool {
+        self.is_live() && core.has_resource_identity(&self.host) && core.providers.get(&self.provider).is_some_and(|provider|
+            provider.generation==self.generation && provider.health.borrow().connected &&
+            provider.metadata["host"].as_str()==Some(self.host.as_str()) &&
+            provider.owner.as_ref().is_none_or(|owner|crate::ext::owner_valid(core,owner)))
+    }
+}
+pub(crate) fn authenticate_host_context(core:&crate::core::Core,token:&str)->Option<HostContext>{
+    if token.is_empty(){return None}
+    core.providers.iter().find_map(|(name,provider)|{
+        if provider.host_context_token.as_deref()!=Some(token){return None}
+        let host=provider.metadata["host"].as_str()?;
+        let context=HostContext{provider:name.clone(),generation:provider.generation,host:host.into(),health:provider.health.subscribe(),resource:core.resources.get(host)?.lifetime(),owner:provider.owner.clone()};
+        context.valid(core).then_some(context)
+    })
 }
 
 #[derive(Clone)]

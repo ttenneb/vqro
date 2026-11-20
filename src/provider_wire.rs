@@ -52,6 +52,7 @@ struct Registration {
     capabilities: BTreeMap<String, Value>,
     #[serde(default)] limits: Limits,
     token: Option<String>,
+    #[serde(default)] host_context:bool,
 }
 #[derive(Deserialize, serde::Serialize)] struct Software { name: String, version: String }
 #[derive(Deserialize)]
@@ -184,6 +185,8 @@ impl Connection {
             || !r.capabilities.values().all(Value::is_object) || r.limits.max_streams == 0 || r.limits.stream_window_bytes == 0 {
             return Err(invalid("invalid provider registration, capabilities or limits"));
         }
+        if r.host_context && r.role!="runtime"{return Err(invalid("host_context requires a registered runtime host"));}
+        let host_context=if r.host_context {Some(crate::bridge_tokens::random_token()?)}else{None};
         let claim = if r.role == "runtime" { Some(crate::bridge_tokens::claim(core, &self.peer, r.token.as_deref().ok_or_else(|| RpcError::new("forbidden", "runtime provider requires a token"))?).await?) } else { None };
         let host = claim.as_ref().map(|claim| claim.host.clone());
         self.peer.set_max_record_bytes(MAX_RECORD_BYTES)?;
@@ -224,6 +227,7 @@ impl Connection {
         c.providers.get_mut(&r.name).unwrap().owner=owner.clone();
         c.on_adapter_event(&r.name,adapter::AdapterEvent::Registered(info));
         let generation=c.providers[&r.name].generation;
+        c.providers.get_mut(&r.name).unwrap().host_context_token=host_context.clone();
         if let Some(owner) = owner { c.provider_extensions.insert(owner.name); }
         // Registered already published this exact state (including compatibility alias).
         let health = c.providers[&r.name].health.subscribe();
@@ -241,6 +245,7 @@ impl Connection {
             "max_streams": r.limits.max_streams.min(512), "max_item_streams": r.limits.max_item_streams.min(MAX_ITEM_STREAMS)}});
         if let Some(token) = resume_token { result["resume_token"] = json!(token); }
         if let Some(host)=host {result["host"]=json!(host);}
+        if let Some(token)=host_context {result["host_context"]=json!(token);}
         Ok(result)
     }
     pub fn sync(&self, core: &Shared, p: Value) -> RpcResult {

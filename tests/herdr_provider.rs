@@ -138,7 +138,7 @@ async fn start(hc: &Hc, tag: &str) -> (Core, Provider, Value, Vec<Value>) {
     cmd.args(["--hc", herdr_core().to_str().unwrap(), "--name", "herdr@test"]).env("VQRO_SOCKET", &endpoint)
         // Fixture-only supervisor identity: it must never reach an auto-started native service.
         .env("VQRO_PRINCIPAL","extension:herdr@test").env("VQRO_EXTENSION","herdr@test")
-        .env("VQRO_EXTENSION_TOKEN","fixture-only-token").env("VQRO_EXTENSION_LIFETIME","1");
+        .env("VQRO_EXTENSION_TOKEN","fixture-only-token").env("VQRO_EXTENSION_LIFETIME","1").env("VQRO_HOST_CONTEXT","fixture-only-host-context");
     let provider = Provider(cmd.spawn().unwrap());
     let (sock, _) = tokio::time::timeout(Duration::from_secs(15), listener.accept()).await.unwrap().unwrap();
     let (r, w) = sock.into_split();
@@ -167,7 +167,7 @@ async fn backend_autostart_does_not_inherit_supervisor_identity() {
     let result=hc.hc(&["run","--bg","--no-parent","/bin/sh","-c",&format!("/usr/bin/env > {}; /bin/sleep 1",file.display())]);
     for _ in 0..200 {if file.exists(){break;}std::thread::sleep(Duration::from_millis(25));}
     let env=std::fs::read_to_string(&file).unwrap_or_else(|error|panic!("native terminal env: {error}; run={result}"));
-    for key in ["VQRO_PRINCIPAL","VQRO_EXTENSION","VQRO_EXTENSION_TOKEN","VQRO_EXTENSION_LIFETIME","VQRO_SOCKET"] {
+    for key in ["VQRO_PRINCIPAL","VQRO_EXTENSION","VQRO_EXTENSION_TOKEN","VQRO_EXTENSION_LIFETIME","VQRO_HOST_CONTEXT","VQRO_SOCKET"] {
         assert!(!env.lines().any(|line|line.starts_with(&format!("{key}="))),"supervisor identity leaked into native user terminal: {env}");
     }
 }

@@ -2,7 +2,7 @@
 use super::*;
 
 fn connection(id:u64,peer:Peer,wire:crate::provider_wire::Connection)->Arc<Conn> {
- Arc::new(Conn {id,peer,author:Mutex::new(format!("client:{id}")),actual_author:format!("client:test:{id}"),principal:Mutex::new(None),extension:Mutex::new(None),supervised:Mutex::new(None),streams:Mutex::new(HashMap::new()),next_stream:AtomicU64::new(1),subscribed:Mutex::new(false),requests:Arc::new(tokio::sync::Semaphore::new(crate::rpc::MAX_PENDING_CALLS)),control_requests:Arc::new(tokio::sync::Semaphore::new(crate::commit::CONTROL_REQUESTS)),mutations:Arc::new(tokio::sync::Semaphore::new(MUTATION_SLOTS)),wire})
+ Arc::new(Conn {id,peer,author:Mutex::new(format!("client:{id}")),actual_author:format!("client:test:{id}"),principal:Mutex::new(None),extension:Mutex::new(None),supervised:Mutex::new(None),host_context:Mutex::new(None),streams:Mutex::new(HashMap::new()),next_stream:AtomicU64::new(1),subscribed:Mutex::new(false),requests:Arc::new(tokio::sync::Semaphore::new(crate::rpc::MAX_PENDING_CALLS)),control_requests:Arc::new(tokio::sync::Semaphore::new(crate::commit::CONTROL_REQUESTS)),mutations:Arc::new(tokio::sync::Semaphore::new(MUTATION_SLOTS)),wire})
 }
 #[tokio::test]
 async fn provider_operational_list_and_snapshot_preserve_ordinary_recovery_pool() {

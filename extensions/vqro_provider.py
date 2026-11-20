@@ -205,9 +205,12 @@ def _request_context(params):
 
 class Provider:
     def __init__(self, name, instance, capabilities, *, role="backend", software=None,
-                 provider_version="0.1.0", token=None, limits=None, principal=None):
+                 provider_version="0.1.0", token=None, limits=None, principal=None, host_context=False):
         if not isinstance(capabilities, dict) or any(not isinstance(v, dict) for v in capabilities.values()):
             raise ValueError("capability values must be objects")
+        if type(host_context) is not bool:
+            raise ValueError("host_context must be boolean")
+        self.host_context = host_context
         self.name, self.instance, self.role = name, instance, role
         self.principal = os.environ.get("VQRO_PRINCIPAL") if principal is None else principal
         self.capabilities = capabilities
@@ -250,7 +253,7 @@ class Provider:
             await self.call("hello", {"extension": os.environ.get("VQRO_EXTENSION", self.name), "extension_token": os.environ.get("VQRO_EXTENSION_TOKEN")})
             params = {"name": self.name, "instance": self.instance, "role": self.role,
                       "software": self.software, "provider_version": self.provider_version,
-                      "capabilities": self.capabilities,
+                      "capabilities": self.capabilities, "host_context": self.host_context,
                       "limits": {"max_streams": self.limits.max_streams, "stream_window_bytes": self.window}}
             if self.token is not None:
                 params["token"] = self.token
@@ -263,6 +266,13 @@ class Provider:
         except BaseException:
             await self.close()
             raise
+
+    def tool_context_env(self, socket):
+        """Sensitive map for tool children ONLY, never human shells/services or endpoint attribution."""
+        token = self.registration.get("host_context")
+        if not isinstance(token, str) or not token:
+            return None
+        return {"VQRO_SOCKET": str(socket), "VQRO_SOCKET_SOURCE": "", "VQRO_PRINCIPAL": "undeclared", "VQRO_HOST_CONTEXT": token}
 
     def _spawn(self, coroutine):
         task = asyncio.create_task(coroutine)

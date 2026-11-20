@@ -20,9 +20,10 @@ pub struct Tokens {
     path: Option<PathBuf>,
 }
 pub struct Claim { pub host: String, pub resuming: bool }
-fn random() -> Result<String, RpcError> {
+/// Shared credential entropy only; callers choose their own lifetime/storage.
+pub(crate) fn random_token() -> Result<String, RpcError> {
     let mut bytes = [0u8; 32];
-    getrandom::fill(&mut bytes).map_err(|e| provider::rejected("io", format!("bridge token randomness: {e}")))?;
+    getrandom::fill(&mut bytes).map_err(|e| provider::rejected("io", format!("credential randomness: {e}")))?;
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 impl Tokens {
@@ -55,7 +56,7 @@ impl Tokens {
     }
     pub fn rotate(&mut self, token: &str, claim: &Claim, provider: &str, instance: &str) -> Result<String, RpcError> {
         if !self.valid_claim(token, claim, provider, instance) { return Err(RpcError::new("forbidden", "runtime token used or identity differs from its registration")); }
-        let next = random()?;
+        let next = random_token()?;
         let mut candidate = self.resumes.clone();
         // Keep exactly the presented credential and the newly issued one for this host.
         // Presenting current acknowledges receipt and retires the older previous credential;
@@ -91,7 +92,7 @@ impl Tokens {
 pub struct BridgeReservation { core: Weak<Mutex<Core>>, pub token: String, committed: bool }
 impl BridgeReservation {
     pub fn new(core: &Shared) -> Result<Self, RpcError> {
-        let token = random()?;
+        let token = random_token()?;
         let mut c = core.lock().unwrap();
         if c.bridge_tokens.pending.len() >= 1024 { return Err(provider::rejected("overloaded", "pending bridge token limit reached")); }
         c.bridge_tokens.pending.insert(token.clone(), watch::channel(State::Pending).0);

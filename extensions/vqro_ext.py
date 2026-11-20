@@ -77,6 +77,17 @@ def supervision_hello(params=None):
     return params
 
 
+def host_context_hello(params=None):
+    """Opt in for a host-launched tool, never overriding a selected principal or explicit context."""
+    params = dict(params or {})
+    known = os.environ.get("VQRO_PRINCIPAL")
+    if "identity" not in params and "host_context" not in params and known in (None, "undeclared"):
+        token = os.environ.get("VQRO_HOST_CONTEXT")
+        if token:
+            params["host_context"] = token
+    return params
+
+
 class Vqro:
     """JSON-RPC over lines. The core may send us requests (command.invoke) and notifications."""
 

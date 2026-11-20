@@ -60,6 +60,21 @@ pub struct CallAuthor {
     #[serde(flatten)] pub attribution:Attribution,
 }
 impl CallAuthor {pub fn effective(&self)->Option<&str>{self.attribution.effective()}}
+/// Connection-bound lifetime fence, never serialized as identity/proof metadata.
+#[derive(Clone,Debug)]
+pub enum CallerLifetime {Extension(crate::ext::Owner),Host(crate::provider::HostContext)}
+impl CallerLifetime {
+    pub fn is_live(&self)->bool{match self{Self::Extension(owner)=>owner.is_live(),Self::Host(host)=>host.is_live()}}
+    pub(crate) fn extension(&self)->Option<&crate::ext::Owner>{match self{Self::Extension(owner)=>Some(owner),Self::Host(_)=>None}}
+}
+pub(crate) fn check_lifetime(core:&crate::core::Core,lifetime:Option<&CallerLifetime>)->Result<(),RpcError>{
+    match lifetime {
+        Some(CallerLifetime::Extension(owner))=>crate::ext::check_owner(core,Some(owner)),
+        Some(CallerLifetime::Host(host)) if !host.valid(core)=>Err(crate::provider::rejected("stale_generation","host tool context ended; not dispatched")),
+        _=>Ok(()),
+    }
+}
+
 /// Same-user callers can deliberately configure this. A per-call display label cannot bind it.
 #[derive(Clone,Debug,Serialize,Deserialize)]
 #[serde(tag="kind",rename_all="snake_case",deny_unknown_fields)]

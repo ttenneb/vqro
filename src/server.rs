@@ -38,6 +38,7 @@ struct Conn {
     author: Mutex<String>,
     extension: Mutex<Option<String>>,
     supervised: Mutex<Option<crate::ext::Owner>>,
+    host_context:Mutex<Option<provider::HostContext>>,
     streams: Mutex<HashMap<u64, StreamBinding>>,
     next_stream: AtomicU64,
     subscribed: Mutex<bool>,
@@ -56,16 +57,22 @@ impl Conn {
         if known.as_ref().is_some_and(|known|known!=&actor){return Err(RpcError::new("conflict","connection identity is already bound; open a new connection to change it"));}
         *known=Some(actor);Ok(())
     }
-    fn caller(&self)->Caller { Caller { author:self.actual_author.clone(), owner:self.supervised.lock().unwrap().clone() } }
+    fn caller(&self)->Caller { Caller { author:self.actual_author.clone(), owner:self.supervised.lock().unwrap().clone(),host:self.host_context.lock().unwrap().clone() } }
 }
 
 /// Immutable request attribution. A shared author name is not a lifetime credential.
 #[derive(Clone, serde::Serialize)]
 #[serde(transparent)]
-struct Caller { author:String, #[serde(skip)] owner:Option<ext::Owner> }
+struct Caller { author:String, #[serde(skip)] owner:Option<ext::Owner>,#[serde(skip)] host:Option<provider::HostContext> }
 impl std::ops::Deref for Caller { type Target=str; fn deref(&self)->&str { &self.author } }
 impl From<&Caller> for Caller { fn from(caller:&Caller)->Self { caller.clone() } }
-impl Caller { fn check(&self,c:&Core)->Result<(),RpcError> { ext::check_owner(c,self.owner.as_ref()) } }
+impl Caller {
+fn lifetime(&self)->Option<principal::CallerLifetime>{self.owner.clone().map(principal::CallerLifetime::Extension).or_else(||self.host.clone().map(principal::CallerLifetime::Host))}
+fn check(&self,c:&Core)->Result<(),RpcError> {
+    ext::check_owner(c,self.owner.as_ref())?;
+    if self.host.as_ref().is_some_and(|host|!host.valid(c)){return Err(provider::rejected("stale_generation","host tool context ended; not dispatched"));}
+    Ok(())
+} }
 
 struct StreamBinding {
     input: crate::queue::Sender<StreamInput>,
@@ -282,6 +289,7 @@ pub async fn serve(core: Shared, listener: UnixListener) -> anyhow::Result<()> {
             author: Mutex::new(format!("client:{id}")),
             extension: Mutex::new(None),
             supervised: Mutex::new(None),
+            host_context:Mutex::new(None),
             streams: Mutex::new(HashMap::new()),
             next_stream: AtomicU64::new(1),
             subscribed: Mutex::new(false),
@@ -430,6 +438,7 @@ struct Hello {
     client: Option<String>,
     extension: Option<String>,
     extension_token: Option<String>,
+    host_context:Option<String>,
     version: Option<String>,
     /// Build identity (e.g. the binary's modification time), to spot out-of-date clients.
     build: Option<u64>,
@@ -563,7 +572,12 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, mut p: Value) -
                 (Some(name),Some(token))=>Some(ext::authenticate(&core.lock().unwrap(),name,token).ok_or_else(||RpcError::new("forbidden","invalid or expired supervised extension identity"))?),
                 _=>None,
             };
-            let actor={
+            let host_context=if let Some(token)=h.host_context.as_deref(){
+                if h.identity.is_some() || supervised.is_some(){return Err(RpcError::invalid("host context cannot be combined with another configured identity"));}
+                Some(provider::authenticate_host_context(&core.lock().unwrap(),token).ok_or_else(||RpcError::new("forbidden","invalid or expired host tool context"))?)
+            }else{None};
+            if conn.host_context.lock().unwrap().is_some() && host_context.is_none(){return Err(RpcError::new("conflict","a host tool connection cannot drop its lifetime context"));}
+            let actor=if let Some(host)=&host_context {host.actor()}else{
                 let mut c=core.lock().unwrap();
                 match principal::identity(&c.store,h.identity.as_ref(),supervised.as_ref().map(|owner|owner.name.as_str())) {
                     Ok(actor)=>actor,
@@ -577,6 +591,7 @@ async fn dispatch(core: &Shared, conn: &Arc<Conn>, method: &str, mut p: Value) -
             conn.bind_actor(actor)?;
             if conn.supervised.lock().unwrap().is_some() && supervised.is_none(){return Err(RpcError::new("conflict","a supervised connection cannot drop its lifetime identity"));}
             *conn.supervised.lock().unwrap()=supervised.clone();
+            *conn.host_context.lock().unwrap()=host_context;
             conn.wire.hello()?;
             if let Some(owner)=supervised {
                 *conn.author.lock().unwrap()=format!("ext:{}",owner.name);
@@ -855,7 +870,7 @@ async fn effect<T: Send + 'static, F>(
 where F: std::future::Future<Output = Result<T, RpcError>> + Send + 'static {
     if !route.valid() { return Err(provider::rejected("unavailable", "provider changed before dispatch")); }
     let id = { let mut c=core.lock().unwrap(); author.check(&c)?; c.effect_id() };
-    let context = crate::adapter::EffectContext { effect: id.clone(), deadline: std::time::Instant::now() + deadline, target: route.target.clone(),caller:author.owner.clone(),author:principal::CallAuthor{author:author.to_string(),attribution:attribution.clone().recorded()} };
+    let context = crate::adapter::EffectContext { effect: id.clone(), deadline: std::time::Instant::now() + deadline, target: route.target.clone(),caller:author.lifetime(),author:principal::CallAuthor{author:author.to_string(),attribution:attribution.clone().recorded()} };
     let result = crate::rpc::with_deadline(method, deadline, route.guard(work(context))).await;
     let outcome = match &result {
         Ok(value) => success(value),
@@ -1093,7 +1108,7 @@ fn undo_target(core:&Core,txn:Option<u64>,principal:Option<&str>)->Option<u64> {
     txn.or_else(||principal.and_then(|principal|core.store.latest_txn_matching(|txn|!txn.author.starts_with("system:") && txn.attribution.effective()==Some(principal))))
 }
 async fn revert(core: &Shared, author: &Caller, on_behalf_of: Option<Arc<str>>, txn: Option<u64>, attribution:Attribution) -> RpcResult {
-    let owner=author.owner.clone();
+    let owner=author.lifetime();
     if txn.is_none() && attribution.effective().is_none(){return Err(RpcError::invalid("default undo needs a connection-known principal; explicit transaction revert remains available"));}
     let author = author.to_string();
     // Reserve the currently known undo payload, without cloning it. A preceding queued
@@ -1101,7 +1116,7 @@ async fn revert(core: &Shared, author: &Caller, on_behalf_of: Option<Arc<str>>, 
     let known_bytes={let core=core.lock().unwrap();undo_target(&core,txn,attribution.effective()).and_then(|id|core.store.revert_bytes(id)).unwrap_or(0)};
     let bytes = known_bytes.saturating_add(crate::limits::encoded_bytes(&(&author, &attribution, on_behalf_of.as_deref()))).saturating_add(128);
     crate::commit::submit(core, bytes, move |c| {
-        ext::check_owner(c,owner.as_ref())?;
+        principal::check_lifetime(c,owner.as_ref())?;
         // Preserve the presser's scope, including command work started on their behalf.
         // Select only after preceding queued commits have been adopted.
         let attribution=principal::revalidate(c,&attribution)?;
@@ -1134,7 +1149,7 @@ async fn operational(core:&Shared,conn:&Arc<Conn>,caller:&Caller,method:&str,p:V
             let attribution=principal::revalidate(c,&attribution)?;
             if ops.is_some() {c.operational.get(&name)?;}
             let domain=c.operational.prepare(&name,&owner.name,declared_bytes)?;
-            Ok(crate::commit::Plan {owner:Some(owner),action:crate::commit::Action::Operational {domain:Box::new(domain),author,attribution,on_behalf_of:origin,note,ops,control},after_adopt:None})
+            Ok(crate::commit::Plan {owner:Some(principal::CallerLifetime::Extension(owner)),action:crate::commit::Action::Operational {domain:Box::new(domain),author,attribution,on_behalf_of:origin,note,ops,control},after_adopt:None})
         };
         return crate::commit::submit_operational(core,bytes,control,prepare).await;
     }
@@ -1181,10 +1196,10 @@ async fn apply_prepared(
 ) -> RpcResult {
     crate::store::validate_note(note.as_deref())?;
     let bytes = bytes.saturating_add(crate::limits::encoded_bytes(&(author, &attribution, on_behalf_of.as_deref(), &note)));
-    let owner=author.owner.clone();
+    let owner=author.lifetime();
     let author = author.to_string();
     crate::commit::submit(core, bytes, move |c| {
-        ext::check_owner(c,owner.as_ref())?;
+        principal::check_lifetime(c,owner.as_ref())?;
         let attribution=principal::revalidate(c,&attribution)?;
         let ops = ops(c)?;
         principal::validate_writes(&c.store,&attribution,&ops)?;
@@ -1203,10 +1218,10 @@ async fn bootstrap_owner(core:&Shared,caller:&Caller,p:Value,attribution:Attribu
     #[derive(Deserialize)] struct Bootstrap {principal:String}
     let request:Bootstrap=params(p)?;principal::validate_assertable(&request.principal)?;
     let(system_author,system_context)=principal::system_attribution()?;
-    let requester=caller.to_string();let owner=caller.owner.clone();
+    let requester=caller.to_string();let owner=caller.lifetime();
     let bytes=crate::limits::encoded_bytes(&(&request.principal,&attribution,&requester)).saturating_add(512);
     crate::commit::submit(core,bytes,move |c| {
-        ext::check_owner(c,owner.as_ref())?;
+        principal::check_lifetime(c,owner.as_ref())?;
         if principal::owner(&c.store).is_ok(){return Err(RpcError::new("conflict","workspace owner already exists; bootstrap refused"));}
         let context=principal::revalidate(c,&attribution)?;
         let mut system_context=system_context;
@@ -1227,7 +1242,7 @@ pub async fn invoke_as(core:&Shared,author:&str,principal:&str,name:&str,args:Va
     if principal!=principal::UNDECLARED{principal::validate(principal)?;}
     let attribution=Attribution::for_actor(principal,&mut json!({}))?;
     let context=crate::invocation::Context {attribution,..Default::default()};
-    invoke_deadline(core,&Caller{author:actual,owner:None},context,name,args,None).await
+    invoke_deadline(core,&Caller{author:actual,owner:None,host:None},context,name,args,None).await
 }
 
 async fn invoke_deadline(core: &Shared, author: &Caller, context: crate::invocation::Context, name: &str, args: Value, deadline_ms: Option<u64>) -> RpcResult {
@@ -1326,7 +1341,7 @@ async fn invoke_deadline(core: &Shared, author: &Caller, context: crate::invocat
                  cmd.connection.ok_or_else(|| RpcError::new("unavailable", "command has no owning connection"))?, c.invocations.clone(), cmd.lifetime.clone())
             };
             let scope = crate::invocation::enter_attributed(&invocations, connection, Some(context.attribution.effective().unwrap_or(principal::UNDECLARED)), context.attribution.initiator.as_deref(), &context, deadline)?;
-            if lifetime.as_ref().is_some_and(|o|!o.is_live()) || author.owner.as_ref().is_some_and(|o|!o.is_live()) {
+            if lifetime.as_ref().is_some_and(|o|!o.is_live()) || author.lifetime().as_ref().is_some_and(|o|!o.is_live()) {
                 return Err(provider::rejected("stale_generation","command owner or caller retired before dispatch"));
             }
             let result = peer.call_with_timeout("command.invoke", json!({"name": name, "args": args, "caller": author,

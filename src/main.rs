@@ -127,7 +127,7 @@ async fn ui(name: Option<String>, list: bool, args: Vec<String>) -> Result<()> {
 
 async fn connect_cli() -> Result<(vqro::rpc::Peer, vqro::rpc::IncomingReceiver, Value)> {
     let socket = paths::socket_path()?;
-    tokio::time::timeout(std::time::Duration::from_secs(2), client::connect(&socket, "cli")).await
+    tokio::time::timeout(std::time::Duration::from_secs(2), client::connect_tool(&socket, "cli")).await
         .map_err(|_| vqro::rpc::RpcError::new("timeout", "core hello deadline expired"))?
 }
 
@@ -147,7 +147,7 @@ async fn call(method: &str, params: Value) -> Result<()> {
 
 async fn stop() -> Result<()> {
     let request = tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        let (peer, _incoming, _) = client::connect(&paths::socket_path()?, "cli").await?;
+        let (peer, _incoming, _) = client::connect_tool(&paths::socket_path()?, "cli").await?;
         peer.call_with_timeout("core.shutdown", Value::Null, std::time::Duration::from_secs(1)).await.map_err(anyhow::Error::from)
     }).await;
     match request {

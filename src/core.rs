@@ -34,6 +34,7 @@ pub struct Resource {
 }
 
 impl Resource {
+    pub(crate) fn lifetime(&self)->watch::Receiver<bool>{self.life.subscribe()}
     pub fn to_json(&self) -> Value {serde_json::to_value(self).expect("resource JSON")}
 }
 impl serde::Serialize for Resource {

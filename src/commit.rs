@@ -20,7 +20,7 @@ pub(crate) enum Action {
 }
 pub(crate) struct Plan {
     pub action: Action,
-    pub owner:Option<crate::ext::Owner>,
+    pub owner:Option<crate::principal::CallerLifetime>,
     /// Policy stays with the caller; the worker owns adoption hooks so receipt cancellation
     /// cannot suppress necessary runtime reconciliation after a durable state change.
     pub after_adopt: Option<fn(&Shared)>,
@@ -174,10 +174,10 @@ async fn run(core:Weak<Mutex<Core>>, queue:Receiver,control_queue:Receiver,cance
         let writer = {
             let c=core.lock().unwrap();
             if let Action::Operational {domain,..}=&plan.action {
-                if plan.owner.as_ref().is_none_or(|owner|owner.name!=domain.owner) {let _=receipt.send(Err(rejected("forbidden","operational commit requires its verified extension owner")));continue;}
+                if plan.owner.as_ref().and_then(|owner|owner.extension()).is_none_or(|owner|owner.name!=domain.owner) {let _=receipt.send(Err(rejected("forbidden","operational commit requires its verified extension owner")));continue;}
             }
-            if let Err(error)=crate::ext::check_owner(&c,plan.owner.as_ref()) { let _=receipt.send(Err(error)); continue; }
-            let epoch=c.epoch.clone();let generation=plan.owner.as_ref().map(|owner|owner.generation).unwrap_or(0);
+            if let Err(error)=crate::principal::check_lifetime(&c,plan.owner.as_ref()) { let _=receipt.send(Err(error)); continue; }
+            let epoch=c.epoch.clone();let generation=plan.owner.as_ref().and_then(|owner|owner.extension()).map(|owner|owner.generation).unwrap_or(0);
             // Irreversible writer admission and lifetime retirement share this mutex. After
             // this point the candidate MUST be adopted/reported normally, even if its owner exits.
             tokio::task::spawn_blocking(move || {
@@ -283,10 +283,10 @@ mod tests {
             core.lock().unwrap().manifest_catalog.root=root.path().join("empty");crate::ext::reconcile(&core);
             let until=std::time::Instant::now()+std::time::Duration::from_secs(5);
             let owner=loop {if let Ok(token)=std::fs::read_to_string(&token_path) {if let Some(owner)=crate::ext::authenticate(&core.lock().unwrap(),"owner",&token){break owner;}}assert!(std::time::Instant::now()<until);tokio::time::sleep(std::time::Duration::from_millis(5)).await;};
-            let registration_owner=owner.clone();submit_operational(&core,256,true,move|c|Ok(Plan {owner:Some(registration_owner.clone()),action:Action::Operational {domain:Box::new(c.operational.prepare("state",&registration_owner.name,None)?),author:"ext:owner".into(),attribution:crate::principal::Attribution::default(),on_behalf_of:None,note:None,ops:None,control:true},after_adopt:None})).await.unwrap();
+            let registration_owner=owner.clone();submit_operational(&core,256,true,move|c|Ok(Plan {owner:Some(crate::principal::CallerLifetime::Extension(registration_owner.clone())),action:Action::Operational {domain:Box::new(c.operational.prepare("state",&registration_owner.name,None)?),author:"ext:owner".into(),attribution:crate::principal::Attribution::default(),on_behalf_of:None,note:None,ops:None,control:true},after_adopt:None})).await.unwrap();
             let blocker=if !dispatched {let c=core.lock().unwrap();Some(c.committer.enqueue(&core,512,Box::new(|_|Ok(Plan {owner:None,action:Action::Apply {author:"fixture".into(),attribution:crate::principal::Attribution::default(),on_behalf_of:None,note:None,ops:vec![Op::Set {key:"doc/block".into(),value:serde_json::json!(1),expect:None}]},after_adopt:None}))).unwrap())}else{None};
             if !dispatched {tokio::time::timeout(std::time::Duration::from_secs(2),entered.notified()).await.unwrap();}
-            let c=core.clone();let owner2=owner.clone();let request=tokio::spawn(async move {submit_operational(&c,512,true,move|c|Ok(Plan {owner:Some(owner2.clone()),action:Action::Operational {domain:Box::new(c.operational.prepare("state",&owner2.name,None)?),author:"ext:owner".into(),attribution:crate::principal::Attribution::default(),on_behalf_of:None,note:Some("claim".into()),ops:Some(vec![Op::Set {key:"operational/state/a".into(),value:serde_json::json!({"phase":"claimed"}),expect:Some(0)}]),control:true},after_adopt:None})).await});
+            let c=core.clone();let owner2=owner.clone();let request=tokio::spawn(async move {submit_operational(&c,512,true,move|c|Ok(Plan {owner:Some(crate::principal::CallerLifetime::Extension(owner2.clone())),action:Action::Operational {domain:Box::new(c.operational.prepare("state",&owner2.name,None)?),author:"ext:owner".into(),attribution:crate::principal::Attribution::default(),on_behalf_of:None,note:Some("claim".into()),ops:Some(vec![Op::Set {key:"operational/state/a".into(),value:serde_json::json!({"phase":"claimed"}),expect:Some(0)}]),control:true},after_adopt:None})).await});
             if dispatched {tokio::time::timeout(std::time::Duration::from_secs(2),entered.notified()).await.unwrap();}else{let until=std::time::Instant::now()+std::time::Duration::from_secs(2);while core.lock().unwrap().committer.pending()<2 {assert!(std::time::Instant::now()<until,"operational request not queued");tokio::task::yield_now().await;}}
             crate::ext::stop_all(&core);assert!(!owner.is_live());*gate.0.lock().unwrap()=true;gate.1.notify_all();
             if let Some(blocker)=blocker {blocker.await.unwrap().unwrap();}

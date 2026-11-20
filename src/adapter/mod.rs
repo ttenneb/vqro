@@ -152,13 +152,15 @@ pub struct StreamEnd {
     pub _permit: Option<OwnedSemaphorePermit>,
 }
 
+pub use crate::principal::CallerLifetime;
+
 #[derive(Clone)]
 pub struct EffectContext {
     pub effect: String,
     pub deadline: Instant,
     pub target: Option<(String, String)>,
     /// Rechecked at the adapter's native dispatch seam, not just RPC admission.
-    pub caller: Option<crate::ext::Owner>,
+    pub caller: Option<CallerLifetime>,
     pub author:crate::principal::CallAuthor,
 }
 

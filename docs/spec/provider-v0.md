@@ -344,7 +344,7 @@ This section is the implementable contract; where sections 1–6 differ, this wi
 
 | Method | Dir | Kind | Params | Result |
 |---|---|---|---|---|
-| `provider.register` | P→C | request | `name`, `role` (`backend`\|`runtime`), `instance` (string), `software {name, version}`, `provider_version`, `capabilities` (object), `limits? {max_streams?, max_item_streams?, stream_window_bytes?}`, `token?` (required for `runtime`) | `{provider, generation, limits: {stream_window_bytes, max_record_bytes, max_streams, max_item_streams}}` (the granted values) |
+| `provider.register` | P→C | request | `name`, `role` (`backend`\|`runtime`), `instance` (string), `software {name, version}`, `provider_version`, `capabilities` (object), `limits? {max_streams?, max_item_streams?, stream_window_bytes?}`, `token?` (required for `runtime`), `host_context?` (boolean, default false, runtime only) | `{provider, generation, host_context?: <private opaque tool token>, limits: {stream_window_bytes, max_record_bytes, max_streams, max_item_streams}}` (the granted values) |
 | `provider.sync` | P→C | request | `generation`, `resources: [Facts]`, `final` (bool) | `{}` once applied |
 | `resource.upsert` | P→C | notification | `generation`, `facts: Facts` | — |
 | `resource.gone` | P→C | notification | `generation`, `ref`, `incarnation`, `reason` | — |
@@ -392,6 +392,13 @@ This section is the implementable contract; where sections 1–6 differ, this wi
   expose an awaitable "written to socket", never "applied by core".
 
 The Rust SDK's `Provider::registration()` exposes the acknowledged register result, including unknown metadata;
+`host_context:true` is a separate opt-in for host-launched tool children (core-protocol principal section/G11).
+The private registration reply may include `host_context`; it is NOT the bootstrap/resume credential, never
+published/persisted and valid only for this registration/host/owner lifetime. Rust/Python provider SDKs expose
+`tool_context_env(socket)` only when granted: export that sensitive map to tools, never human shells/services.
+Generic SDK clients need explicit `host_context_hello`; CLI uses the tool route without overriding another selected
+identity. This grants no endpoint environment capability/delegation rights; absence stays unsupported/unknown.
+
 `resume_token()` exposes a nonempty opaque runtime credential when present (§9.6). Clones share that immutable
 reply, and a later sync/setup failure does not erase the observed credential. Backend replies without one return
 `None`. This is access to evidence already received, not persistence, retry or replay; callers must not log the

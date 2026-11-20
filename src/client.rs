@@ -11,6 +11,18 @@ use crate::rpc::{IncomingReceiver, Peer};
 pub async fn connect(socket: &Path, client: &str) -> Result<(Peer, IncomingReceiver, Value)> {
     connect_with(socket,json!({"client":client,"version":env!("CARGO_PKG_VERSION"),"build":build_stamp()})).await
 }
+/// CLI/tool entry point. Ordinary SDK/UI connections never adopt a host credential implicitly.
+pub async fn connect_tool(socket:&Path,client:&str)->Result<(Peer,IncomingReceiver,Value)>{
+    connect_with(socket,host_context_hello(json!({"client":client,"version":env!("CARGO_PKG_VERSION"),"build":build_stamp()}))).await
+}
+/// Explicitly use tool-host context only when no other configured identity is selected.
+pub fn host_context_hello(mut hello:Value)->Value{
+    let configured=std::env::var("VQRO_PRINCIPAL").ok().is_some_and(|p|p!=crate::principal::UNDECLARED);
+    if hello.is_object() && hello.get("identity").is_none() && hello.get("host_context").is_none() && !configured {
+        if let Ok(token)=std::env::var("VQRO_HOST_CONTEXT"){if !token.is_empty(){hello["host_context"]=json!(token);}}
+    }
+    hello
+}
 pub async fn connect_as(socket:&Path,client:&str,principal:&str)->Result<(Peer,IncomingReceiver,Value)> {
     connect_with_identity(socket,client,Some(crate::principal::Identity::Principal{principal:principal.into()})).await
 }
@@ -55,7 +67,7 @@ pub async fn ensure_core() -> Result<()> {
     let log = std::fs::OpenOptions::new().create(true).append(true).open(state.join("serve.log"))?;
     let mut cmd = std::process::Command::new(executable_path()?);
     // A UI's own window state never reaches the core it starts.
-    cmd.env_remove("VQRO_TUI_LAYOUT");
+    cmd.env_remove("VQRO_TUI_LAYOUT").env_remove("VQRO_HOST_CONTEXT");
     cmd.arg("serve").stdin(std::process::Stdio::null()).stdout(log.try_clone()?).stderr(log);
     #[cfg(unix)]
     {

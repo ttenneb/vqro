@@ -135,7 +135,7 @@ async fn session(
 ) -> anyhow::Result<()> {
     let mut child = Command::new(&argv[0])
         // A backend may auto-start its own service: neither credentials nor identity belong to its user terminals.
-        .env_remove("VQRO_PRINCIPAL")
+        .env_remove("VQRO_PRINCIPAL").env_remove("VQRO_HOST_CONTEXT")
         .env_remove("VQRO_EXTENSION_TOKEN").env_remove("VQRO_EXTENSION_LIFETIME").env_remove("VQRO_EXTENSION")
         .env_remove("VQRO_STATE_DIR").env_remove("VQRO_EXTENSIONS_DIR").env_remove("VQRO_SOCKET").env_remove("VQRO_SOCKET_SOURCE")
         .args(&argv[1..])

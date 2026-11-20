@@ -68,7 +68,7 @@ impl ProviderError {
 fn diagnostic_data(value: &Value, secrets: &mut Vec<String>) -> Value {
     match value {
         Value::Object(object) => Value::Object(object.iter().map(|(key, value)| {
-            let value = if matches!(key.as_str(), "resume_token" | "token" | "extension_token" | "bridge_token") {
+            let value = if matches!(key.as_str(), "resume_token" | "token" | "extension_token" | "bridge_token" | "host_context") {
                 if let Some(secret) = value.as_str().filter(|s| !s.is_empty()) { secrets.push(secret.into()); }
                 json!("[redacted]")
             } else { diagnostic_data(value, secrets) };
@@ -131,6 +131,8 @@ pub struct Config {
     pub stream_window_bytes: u64,
     /// Runtime bridges only.
     pub token: Option<String>,
+    /// Runtime-only opt-in to a registration-bound credential exported explicitly to tool children.
+    pub host_context:bool,
     /// Name sent in `hello {extension}`; default `$VQRO_EXTENSION`, else `name`.
     pub extension: Option<String>,
     /// Deadline for this provider's own calls (hello, register, sync).
@@ -168,6 +170,7 @@ impl Config {
             max_item_streams: 1024,
             stream_window_bytes: MAX_WINDOW,
             token: None,
+            host_context:false,
             extension: None,
             call_timeout: Duration::from_secs(30),
             max_in_flight: 64,
@@ -692,7 +695,7 @@ impl Provider {
         let mut params = json!({
             "name": self.config.name, "role": self.config.role, "instance": self.config.instance,
             "software": self.config.software, "provider_version": self.config.provider_version,
-            "capabilities": self.config.capabilities,
+            "capabilities": self.config.capabilities,"host_context":self.config.host_context,
             "limits": {"max_streams": self.config.max_streams, "max_item_streams": self.config.max_item_streams, "stream_window_bytes": self.window},
         });
         if let Some(t) = &self.config.token {
@@ -725,6 +728,12 @@ impl Provider {
         self.registration["resume_token"].as_str().filter(|token| !token.is_empty())
     }
 
+    /// Sensitive map for tools ONLY, never human shells or services. Clears inherited owner identity.
+    /// It does not supply endpoint attribution and must not be logged or persisted.
+    pub fn tool_context_env(&self,socket:&str)->Option<std::collections::BTreeMap<String,String>>{
+        let token=self.registration["host_context"].as_str().filter(|token|!token.is_empty())?;
+        Some(std::collections::BTreeMap::from([("VQRO_SOCKET".into(),socket.into()),("VQRO_SOCKET_SOURCE".into(),String::new()),("VQRO_PRINCIPAL".into(),crate::principal::UNDECLARED.into()),("VQRO_HOST_CONTEXT".into(),token.into())]))
+    }
     pub fn generation(&self) -> u64 {
         self.shared.generation()
     }

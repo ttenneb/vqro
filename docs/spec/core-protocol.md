@@ -81,6 +81,22 @@ provider may export a verifiable host-context token only to tool children it lau
 token, it binds their CLI calls to core-assigned `host:<rid>`, never a caller's `hello.identity` host assertion.
 Human-opened shells never inherit that token. Without verified context or another configured identity, ordinary
 clients remain `undeclared`. This shared-host route does not claim per-endpoint tool attribution (G11).
+
+Concrete opt-in: a runtime's `provider.register {host_context:true}` returns private `host_context` (opaque token)
+only on that registration reply; default is false and backends cannot request it. It is distinct from the runtime
+bootstrap/resume token, never persisted or published in snapshots/metadata. `hello {host_context:token}` verifies
+that exact provider generation, host resource and supervised-owner lifetime, deriving `host:<rid>` in core; it is
+not `hello.identity`, cannot combine another selected identity, and cannot be dropped on a bound tool connection.
+Invalid/retired tokens fail explicitly, never downgrade to owner or infer an endpoint. Queued work is fenced at
+existing serialized/native dispatch seams; an already-admitted irreversible writer is reported/adopted normally.
+
+Rust/Python provider SDKs opt in with `host_context:true` and expose sensitive `tool_context_env(socket)` for
+**tool children only**: `VQRO_HOST_CONTEXT`, explicit `VQRO_SOCKET`, cleared `VQRO_SOCKET_SOURCE` and
+`VQRO_PRINCIPAL=undeclared` (discarding inherited human-owner identity). Never export this map to human shells,
+services or generic subprocesses, log it or persist it. SDK `host_context_hello` is explicit; generic SDK/UI
+connections do not adopt the variable. CLI tool entry uses it only without another selected principal; an explicit
+endpoint principal remains the separate evidenced `env` route. Older cores returning no token yield no tool map.
+No endpoint `tool_principal: "env"` capability, delegation right or persistence guarantee is created by this route.
 A bound connection cannot be retagged by another hello; open a new connection to deliberately change configured identity.
 
 Requests may declare diagnostic `label` (at most 256 UTF-8 bytes, no Unicode Cc controls or Unicode16 Cf

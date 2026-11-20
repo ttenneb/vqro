@@ -173,6 +173,7 @@ pub fn reconcile(core: &Shared) {
         cmd.args(&argv[1..])
             .env("VQRO_SOCKET", &socket)
             .env_remove("VQRO_SOCKET_SOURCE")
+            .env_remove("VQRO_HOST_CONTEXT")
             .env("VQRO_EXTENSION", &name)
             .env("VQRO_PRINCIPAL", format!("extension:{name}"))
             .env("VQRO_EXTENSION_TOKEN", &rt.token)
