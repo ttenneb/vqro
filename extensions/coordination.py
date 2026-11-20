@@ -328,7 +328,7 @@ class CoordinationService:
         if args.get("target"):
             records = [record for record in records if record["to"]["agent"] == args["target"].removeprefix("agent:")]
         if args.get("sender"):
-            records = [record for record in records if record["from"]["principal"] == args["sender"]]
+            records = [record for record in records if Coordinator._sender_matches(record, args["sender"])]
         return bounded_page(records, page=args.get("page"), revision=digest(self.read_only_rows), key=lambda record: (record["order"], record["delivery"]))
 
     def route(self, command, args, context):

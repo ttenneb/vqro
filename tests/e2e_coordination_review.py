@@ -545,12 +545,13 @@ def case_ordering_visibility():
             'authorized_resolution_rechecks_pause': True, 'native_writes': len(calls)}
 
 
-def case_recipe_history():
+def case_recipe_history(principal=None):
     calls = []
+    error_kind = 'busy' + 'k' * 124 if principal is not None else 'busy'
     def handle(method, params):
         operation = params['op']; calls.append(operation)
         if operation == 'agent.send':
-            return {'outcome': 'rejected', 'error': {'kind': 'busy', 'message': 'competing start'},
+            return {'outcome': 'rejected', 'error': {'kind': error_kind, 'message': 'competing start'},
                     'data': {'opaque': 'x' * 20000}}
         return {'outcome': 'observed', 'data': {'opaque': 'y' * 20000}}
     facts = native('running')
@@ -558,12 +559,18 @@ def case_recipe_history():
         'origin': [{'as': 'attributed_user', 'role': 'user', 'frame': 'sender_header'}]},
         'agent.queue': {'actions': ['clear']},
         'agent.interrupt': {'pending': 'unknown', 'scope': 'foreground', 'waits': 'idle'}})
-    rid = agent('recipe-history', facts, handler=handle)
+    rid = agent('recipe-history-' + str(len(PROVIDERS)), facts, handler=handle)
+    sender = owner
+    if principal is not None:
+        sender = Client({'kind': 'principal', 'principal': principal})
+        raw_set('doc/agents/grants/history-' + rid, {'who': principal, 'on': 'agent:' + rid,
+                'can': ['send:interrupt_then_start', 'queue', 'interrupt', 'send:start']})
     scope('pause')
     o = op('i11-recipe')
-    args = {'op': o, 'submission': o, 'to': rid, 'mode': 'preempt', 'strategy': 'interrupt_then_start',
+    args = {'op': o, 'submission': o.ljust(256, 's') if principal is not None else o,
+            'to': rid, 'mode': 'preempt', 'strategy': 'interrupt_then_start',
             'content': [{'type': 'text', 'text': 'partial recipe content'}]}
-    delivery = cmd('inbox.send', args)['delivery']
+    delivery = cmd('inbox.send', args, sender)['delivery']
     scope('resume')
     def settled():
         row = cmd('inbox.get', {'delivery': delivery})
@@ -571,11 +578,33 @@ def case_recipe_history():
     record = wait(settled)
     expected = [('agent.queue', 'observed'), ('agent.interrupt', 'observed'), ('agent.send', 'rejected')]
     assert [(s['op'], s['outcome']) for s in record['attempt']['steps']] == expected, record
-    assert record['result']['native']['error_kind'] == 'busy', record
+    if principal is None:
+        assert record['result']['native']['error_kind'] == error_kind, record
+    else:
+        assert record['result']['incomplete'], record
     assert calls == [op for op, _ in expected], calls
-    repeated = cmd('inbox.send', dict(args, op=op('i11-repeat')))
+    repeated = cmd('inbox.send', dict(args, op=op('i11-repeat')), sender)
     assert repeated['delivery'] == delivery and len(calls) == 3, (repeated, calls)
-    return {'all_step_outcomes': expected, 'compacted': True, 'native_writes': len(calls), 'duplicate_recreated': False}
+    marked = 'principal_hash' in record['from']
+    if principal is not None:
+        listed = cmd('inbox.list', {'sender': principal})['items']
+        assert [r['delivery'] for r in listed] == [delivery], listed
+        if marked:
+            assert cmd('inbox.list', {'sender': record['from']['principal_hash']})['items'] == []
+        assert cmd('status')['maintenance'] is None
+    return {'all_step_outcomes': expected, 'compacted': True, 'native_writes': len(calls),
+            'duplicate_recreated': False, 'principal_hash': marked}
+
+
+def case_compaction_identities():
+    result = {}
+    for label, character in (('quotes', '"'), ('backslashes', '\\'), ('plain', 'x')):
+        principal = 'p:' + character * 254
+        assert len(principal.encode()) == 256
+        result[label] = case_recipe_history(principal)
+        if label != 'plain':
+            assert result[label]['principal_hash'], result
+    return {'identities': result, 'native_writes': 9, 'maintenance_error': None}
 
 
 def case_pause_reporting():
@@ -770,7 +799,7 @@ def case_archive_abort():
 # Witness the bounded attention view before bulk uncertain-history fixtures fill it.
 CASES = {'ordering_visibility': case_ordering_visibility, 'brick': case_brick, 'idle': case_idle, 'membership': case_membership, 'identity': case_identity, 'reconcile': case_reconcile, 'names': case_names,
          'rawcycle': case_rawcycle, 'invalid_declaration': case_invalid_declaration,
-         'window': case_window, 'handover': case_handover, 'archive': case_archive, 'queue_epoch': case_queue_epoch, 'handover_withdrawn': case_handover_withdrawn, 'archive_abort': case_archive_abort, 'handover_archive': case_handover_archive, 'pause_reporting': case_pause_reporting, 'recipe_history': case_recipe_history}
+         'window': case_window, 'handover': case_handover, 'archive': case_archive, 'queue_epoch': case_queue_epoch, 'handover_withdrawn': case_handover_withdrawn, 'archive_abort': case_archive_abort, 'handover_archive': case_handover_archive, 'pause_reporting': case_pause_reporting, 'recipe_history': case_recipe_history, 'compaction_identities': case_compaction_identities}
 core = None
 try:
     core = subprocess.Popen([str(BIN), 'serve', '--fake'], env=ENV, cwd=ROOT, stdout=open(ROOT / 'core.log', 'wb'), stderr=subprocess.STDOUT)

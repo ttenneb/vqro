@@ -8,13 +8,13 @@ from coordination_store import encoded
 
 
 class RecipeHistoryTests(unittest.TestCase):
-    def recipe(self, *, large_metadata=False, final_outcome='rejected'):
+    def recipe(self, *, large_metadata=False, final_outcome='rejected', principal_override=None):
         f = fixtures.EngineTests(); f.setUp()
         facts = f.resources['r1']['data']['agent']
         facts['state'] = 'running'
         facts['caps'].update({'agent.queue': {'actions': ['clear']},
             'agent.interrupt': {'waits': 'idle', 'pending': 'unknown', 'scope': 'foreground'}})
-        principal = 'p:' + 'x' * 254 if large_metadata else fixtures.OWNER['principal']
+        principal = principal_override if principal_override is not None else ('p:' + 'x' * 254 if large_metadata else fixtures.OWNER['principal'])
         caller = {'principal': principal, 'actor': principal, 'author': 'client:recipe'}
         f.config['doc/agents/grants/recipe'] = {'version': 1, 'value': {'who': principal, 'on': 'agent:r1',
             'can': ['send:interrupt_then_start', 'queue', 'interrupt', 'send:start']}}

@@ -710,9 +710,15 @@ kind, error kind, native op, byte size and sha256 of the full native result, and
 data did not fit; an explicit, marked bound, never silent truncation. Settled recipe history keeps every issued
 step's `{op, outcome}` under `attempt.steps`, including prerequisite successes before a refused input. If an
 already-incomplete final record still exceeds 1 KiB, only its opaque `submission` literal may become the explicit
-`submission_hash: sha256([principal, submission])` marker (the existing submission-index key). Full principal,
-intent fingerprint, attempt ID and every step outcome remain; duplicate lookup recognizes the hash even after
-window-index expiry or restart, never recreating input. The 1 KiB limit is unchanged. The full native result is returned unchanged
+`submission_hash: sha256([principal, submission])` marker (the existing submission-index key). If JSON-encoded
+principal metadata still does not fit (legal quotes/backslashes can expand beyond its UTF-8 byte length), final inbox
+metadata may further use `from: {principal_hash: sha256(canonical_json(principal))}`; compact control metadata uses `principal_hash`.
+Intent fingerprint, attempt ID and every step outcome remain. Sender filtering/access and retained duplicate lookup
+match the original authenticated principal against this marker, never treat the hash string as another principal,
+and recognize the submission hash even after window-index expiry or restart, never recreating input. The 1 KiB
+limit is unchanged. A record still too large is retained unchanged and skipped, not allowed to abort other history
+compaction/GC. `status.maintenance` reports `compaction_incomplete`, count and at most64 record references (marked
+incomplete beyond that); representable records still compact. Core attribution and live principals are unchanged. The full native result is returned unchanged
 only to the live caller (`native`) and stays retrievable only where the adapter retains it (`agent.receipt`, native
 records). A late reply always fits its reservation by construction; if even the compact form cannot be written (a
 store failure), the attempt stays `unknown` and visible for attention, never resent. Beyond the declared size,

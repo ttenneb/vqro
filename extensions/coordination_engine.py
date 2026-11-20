@@ -462,10 +462,17 @@ class Coordinator:
             row.update(state="unknown", reason=self.attention[delivery])
         return row
 
+    @staticmethod
+    def _sender_matches(record, principal):
+        sender = record.get("from") or {}
+        if sender.get("principal") is not None:
+            return sender["principal"] == principal
+        return sender.get("principal_hash") is not None and sender["principal_hash"] == digest(principal)
+
     def _pending_access(self, record, policy, principal):
         if self._archive_frozen("message/" + record["delivery"]):
             raise CoordinationError("conflict", "delivery is frozen for explicit archive")
-        if principal != record["from"]["principal"]:
+        if not self._sender_matches(record, principal):
             policy.require(principal, "inbox.edit_any", record["to"]["agent"])
         if record["state"] not in PENDING:
             raise CoordinationError("too_late", "delivery was claimed or disposed; input cannot be recalled")
@@ -502,7 +509,7 @@ class Coordinator:
                     raise CoordinationError("conflict", "submission id reused for different intent")
                 saved = work.get("message/" + submitted["delivery"])
                 return {"state": saved["state"] if saved else "unknown", "delivery": submitted["delivery"]}
-            prior = next((r for r in self.records() if r["from"]["principal"] == principal
+            prior = next((r for r in self.records() if self._sender_matches(r, principal)
                           and (r.get("submission") == submission or r.get("submission_hash") == submission_key)), None)
             if prior:
                 if prior.get("intent") != digest({key: value for key, value in args.items() if key != "op"}):
@@ -623,7 +630,8 @@ class Coordinator:
     def _ordering_heads(records):
         heads = {}
         for record in records:
-            if record["state"] == "unknown" and record.get("mode") is not None:
+            if (record["state"] == "unknown" and record.get("mode") is not None
+                    and (record.get("from") or {}).get("principal") is not None):
                 lane = (record["to"]["agent"], record["from"]["principal"], record["mode"])
                 candidate = (record["order"], record["delivery"])
                 if lane not in heads or candidate < heads[lane]:
@@ -632,7 +640,7 @@ class Coordinator:
 
     @staticmethod
     def _ordering_predecessor(record, heads):
-        if record.get("mode") is None:
+        if record.get("mode") is None or (record.get("from") or {}).get("principal") is None:
             return None  # partial historical recovery rows do not establish a lane
         head = heads.get((record["to"]["agent"], record["from"]["principal"], record["mode"]))
         return head[1] if head and head[0] < record["order"] else None
@@ -666,7 +674,7 @@ class Coordinator:
             target = self.policy().resolve_target(args["target"])
             rows = [r for r in rows if r["to"]["agent"] == target]
         if args.get("sender"):
-            rows = [r for r in rows if r["from"]["principal"] == args["sender"]]
+            rows = [r for r in rows if self._sender_matches(r, args["sender"])]
         if args.get("state"):
             rows = [r for r in rows if r["state"] == args["state"]]
         revision = digest([[(r["delivery"], self.store.get("message/" + r["delivery"])["version"]) for r in rows],
@@ -1293,7 +1301,7 @@ class Coordinator:
         def judge(work, policy):
             record = self._record(work, args.get("delivery"))
             principal, agent = context["principal"], record["to"]["agent"]
-            if principal != record["from"]["principal"] and not policy.allowed(principal, "receive", agent):
+            if not self._sender_matches(record, principal) and not policy.allowed(principal, "receive", agent):
                 policy.require(principal, "recover", agent)
             if record["state"] != "unknown" or args.get("as") not in ("delivered", "not_delivered"):
                 raise CoordinationError("invalid", "resolution judges an unknown record only")
@@ -1791,8 +1799,7 @@ class Coordinator:
     def _safe_maintain(self):
         with self.lock:
             try:
-                self.maintenance()
-                self.maintenance_error = None
+                self.maintenance_error = self.maintenance()
             except (StoreError, PolicyError) as error:
                 self.maintenance_error = {"kind": getattr(error, "kind", "unknown"), "message": str(error)[:512]}
 
@@ -1845,11 +1852,14 @@ class Coordinator:
         if settled != work.get("settled", {}):
             work.put("settled", settled)
         # Compact retained native outcomes, not active pull tokens or unknown claims.
+        oversized = []
         for _, key, row in finals[excess:]:
             if len(work.changes) >= 45:
                 break
             value = row["value"]
             if value.get("incomplete"):
+                if encoded(value) > 1024:
+                    oversized.append(key)
                 continue
             if key.startswith("external/"):
                 intent = value.get("intent") or {}
@@ -1858,8 +1868,11 @@ class Coordinator:
                                incomplete=True, final_seq=value.get("final_seq", row["version"]))
                 if encoded(compact) > 1024:
                     compact["intent"] = {"agent": intent.get("agent")}
+                if encoded(compact) > 1024 and isinstance(compact.get("principal"), str):
+                    compact["principal_hash"] = digest(compact.pop("principal"))
                 if encoded(compact) > 1024:
-                    raise CoordinationError("too_large", "compact control metadata exceeds its bound; original retained")
+                    oversized.append(key)
+                    continue
                 work.put(key, compact)
                 continue
             result = value.get("result") or {}
@@ -1882,7 +1895,10 @@ class Coordinator:
                 # opaque submission literal may become its existing lookup key.
                 compact["submission_hash"] = digest([compact["from"]["principal"], compact.pop("submission")])
             if encoded(compact) > 1024:
-                raise CoordinationError("too_large", "compact final metadata exceeds its explicit bound; original retained")
+                compact["from"] = {"principal_hash": digest(value["from"]["principal"])}
+            if encoded(compact) > 1024:
+                oversized.append(key)
+                continue
             work.put(key, compact)
         refs = {entry["result"].get("result_ref") for key, row in work.rows.items() if key.startswith("ops/")
                 for entry in row["value"].values() if isinstance(entry.get("result"), dict)}
@@ -1895,6 +1911,9 @@ class Coordinator:
         if self.expire_ops:
             self.expire_ops = any(key.startswith("ops/") and any(value.get("window") != epoch for value in row["value"].values())
                                   for key, row in self.store.view().items())
+        if oversized:
+            return {"kind": "compaction_incomplete", "message": str(len(oversized)) + " oversized records retained; other history processed",
+                    "records": oversized[:64], "count": len(oversized), "incomplete": len(oversized) > 64}
 
     def _archive_frozen(self, key):
         return any(key in row["value"].get("frozen", {}) for name, row in self.store.view().items()
