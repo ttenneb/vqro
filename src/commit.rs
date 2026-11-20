@@ -346,7 +346,8 @@ mod tests {
         *gate.0.lock().unwrap()=true;gate.1.notify_all();
         first.await.unwrap().unwrap();
         assert!(core.lock().unwrap().safe_mode,"late active completion must still run adoption hook");
-        assert!(crate::store::Store::open_locked(root.path().join("workspace.json")).is_ok(),"late adoption must not re-pin the stopped core's fence");
+        let replacement=crate::store::Store::open_locked(root.path().join("workspace.json"));
+        assert!(replacement.is_ok(),"late adoption must not re-pin the stopped core's fence: {:?}",replacement.as_ref().err());
         assert_eq!(crate::store::Store::open(root.path().join("workspace.json")).unwrap().history(10).len(),1,"queued work must never be replayed");
     }
     #[test]

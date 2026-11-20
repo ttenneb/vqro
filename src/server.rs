@@ -25,6 +25,10 @@ pub const CONNECTION_SEND_BUFFER: usize = 16 * 1024;
 const MUTATION_SLOTS:usize=crate::rpc::MAX_PENDING_CALLS+crate::commit::CONTROL_REQUESTS;
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
+#[cfg(test)]
+#[path="operational_read_tests.rs"]
+mod operational_read_tests;
+
 struct Conn {
     id: u64,
     peer: Peer,
@@ -1066,7 +1070,9 @@ async fn operational(core:&Shared,conn:&Arc<Conn>,caller:&Caller,method:&str,p:V
         if !key.starts_with(&op::prefix(&name)) {return Err(provider::rejected("forbidden","key is outside the operational domain"));}
         let entry=domain.entries.get(&key).cloned();drop(c);metadata["key"]=json!(key);metadata["entry"]=json!(entry);return Ok(metadata);
     }
-    (metadata,domain.entries.clone(),domain.last.clone(),c.snapshot_slots.clone())
+    // Public operational reads preserve the same reserved recovery-pool boundary as workspace snapshots.
+    let slots=if conn.wire.is_provider(){c.provider_snapshot_slots.clone()}else{c.snapshot_slots.clone()};
+    (metadata,domain.entries.clone(),domain.last.clone(),slots)
     };
     let slot=tokio::time::timeout(std::time::Duration::from_millis(250),slots.acquire_owned()).await.map_err(|_|provider::rejected("overloaded","operational snapshot construction busy"))?.map_err(|_|provider::rejected("unavailable","snapshot construction stopped"))?;
     let snapshot=method=="operational.snapshot";
