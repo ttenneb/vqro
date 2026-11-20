@@ -173,7 +173,7 @@ async def run_native(ctx, label, script, args, pins, parent):
     argv = ["/usr/bin/unshare", "-mnpf", "--kill-child=KILL", "--mount-proc", "/bin/bash", "-c",
             'mount -t tmpfs -o size=256m,mode=1777 tmpfs /tmp && ip link set lo up && exec "$@"',
             "native-pull", sys.executable, str(TESTS / script), "--vqro", str(ctx.vqro),
-            "--root", str(root), "--inbox", "k2core", "--coord-ext", str(ctx.root / "ext"),
+            "--root", str(root), "--inbox", "k2core", "--coord-ext", str(ctx.manifest["extensions"]),
             "--framing-only", *args]
     with log.open("wb") as output:
         process = await asyncio.create_subprocess_exec(*argv, env=env, stdin=asyncio.subprocess.DEVNULL,
