@@ -1,25 +1,19 @@
-//! Prototype P3 viewer: one client connection that attaches the item stream of every agent of a provider,
-//! reconstructs each agent's entities and checks every record. Evidence, not product.
-//!
-//! Checks per stream: contiguous `seq` within an epoch (a lower one is a duplicate, a higher one a fabricated
-//! gap), append `base` equals the entity's current `rev` (else stale), the hash `h` of the value after each
-//! record matches (else fabricated/stale history), lines decode as UTF-8 JSON across arbitrary byte splits.
-//! A `stream.gap`/`stream.closed` reattaches with `after: {epoch, seq}`; `continue` keeps the state, `reset`
-//! replaces it from the in-stream snapshot. `--stall` attaches everything and then never reads its socket.
-//! Prints a stats line every 10 s and, at the end (`--seconds`), per-agent digests to `--out`.
+//! A checking viewer for the item-stream gate (`tests/e2e_item_streams.py`): one client connection that attaches the
+//! item stream (agent-v0 §4) of every agent of a provider and reconstructs each with the SDK's [`ItemView`]
+//! (installs snapshots only at `end`; counts duplicate, missing, stale-base, unknown-entity, UTF-8/JSON and framing
+//! errors across arbitrary byte splits). A `stream.gap`/`stream.closed` reattaches with the view's `after`;
+//! `continue` keeps the state, `reset` replaces it from the in-stream snapshot. Attaches are windowed (at most 64 in
+//! flight, under the core's 128 requests per connection). `--stall` attaches everything and then never reads its
+//! socket. Prints a stats line every 10 s and, at the end (`--seconds`), per-agent digests to `--out`.
 use base64::Engine;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use vqro::provider_client::items::{ItemView, ViewErrors};
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
-fn fnv(s: &str) -> String {
-    let mut h: u64 = 0xcbf29ce484222325;
-    for b in s.as_bytes() { h ^= *b as u64; h = h.wrapping_mul(0x100000001b3); }
-    format!("{h:016x}")
-}
 fn now_ms() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64 }
 fn arg(name: &str, default: &str) -> String {
     let a: Vec<String> = std::env::args().collect();
@@ -28,97 +22,47 @@ fn arg(name: &str, default: &str) -> String {
 
 #[derive(Default)]
 struct View {
-    epoch: Option<String>,
-    seq: u64,
-    /// Puts of a snapshot being received; installed only at `snapshot end` (agent-v0 §4).
-    pending: Option<(String, BTreeMap<String, (u64, String)>)>,
-    entities: BTreeMap<String, (u64, String)>,
-    buf: Vec<u8>,
+    view: ItemView,
     stream: Option<u64>,
+    epoch_seen: Option<String>,
 }
 
+/// Connection-level counters; integrity errors are summed from every view at the end.
 #[derive(Default, serde::Serialize)]
 struct Counters {
     records: u64, bytes: u64, opens_reset: u64, opens_continue: u64, in_stream_resets: u64, gaps: u64, closed: u64,
-    reattach: u64, attach_errors: u64,
-    duplicate: u64, missing: u64, stale_base: u64, hash_mismatch: u64, bad_utf8: u64, bad_json: u64, unknown_entity: u64, out_of_snapshot: u64,
+    reattach: u64, attach_errors: u64, rpc_bad_json: u64,
+    #[serde(flatten)]
+    errors: ViewErrors,
 }
 
 impl View {
-    fn digest(&self) -> String {
-        let mut all = String::new();
-        for (id, (rev, v)) in &self.entities { all.push_str(&format!("{id}:{rev}:{};", fnv(v))); }
-        fnv(&all)
-    }
     fn feed(&mut self, data: &[u8], c: &mut Counters, lat: &mut Vec<u32>) {
-        self.buf.extend_from_slice(data);
         c.bytes += data.len() as u64;
-        while let Some(pos) = self.buf.iter().position(|b| *b == b'\n') {
-            let line: Vec<u8> = self.buf.drain(..=pos).collect();
-            let Ok(text) = std::str::from_utf8(&line[..line.len() - 1]) else { c.bad_utf8 += 1; continue };
-            let Ok(r) = serde_json::from_str::<Value>(text) else {
-                c.bad_json += 1;
-                if c.bad_json <= 5 { eprintln!("BADJSON stream {:?} seq {} len {}: {:?}", self.stream, self.seq, text.len(), &text[..text.len().min(300)]); }
-                continue
-            };
-            self.apply(&r, c, lat);
+        let before = self.view.records;
+        self.view.feed_records(data, |r| {
+            if let Some(ts) = r["value"]["native"]["ts"].as_u64() { lat.push(now_ms().saturating_sub(ts) as u32); }
+        });
+        c.records += self.view.records - before;
+        // An installed snapshot with a different epoch than the one this viewer last saw: an in-stream reset.
+        if let Some(e) = self.view.epoch() {
+            if self.epoch_seen.as_deref().is_some_and(|old| old != e) { c.in_stream_resets += 1; }
+            self.epoch_seen = Some(e.to_string());
         }
     }
-    fn apply(&mut self, r: &Value, c: &mut Counters, lat: &mut Vec<u32>) {
-        let op = r["type"].as_str().unwrap_or("");
-        let id = r["id"].as_str().unwrap_or("").to_string();
-        if op == "snapshot" {
-            match r["phase"].as_str() {
-                Some("begin") => self.pending = Some((r["epoch"].as_str().unwrap_or("").to_string(), BTreeMap::new())),
-                Some("end") => match self.pending.take() {
-                    // Install only now: the new epoch, every entity and the cut's `seq`.
-                    Some((epoch, entities)) => {
-                        if self.epoch.is_some() && self.epoch.as_deref() != Some(epoch.as_str()) { c.in_stream_resets += 1; }
-                        self.epoch = Some(epoch);
-                        self.entities = entities;
-                        self.seq = r["seq"].as_u64().unwrap_or(0);
-                    }
-                    None => c.out_of_snapshot += 1,
-                },
-                _ => c.out_of_snapshot += 1,
-            }
-            return;
-        }
-        if let Some((_, entities)) = self.pending.as_mut() {
-            // Snapshot puts carry no seq; anything else inside a snapshot is a protocol error.
-            if op != "put" || r.get("seq").is_some() { c.out_of_snapshot += 1; return; }
-            let v = r["value"].as_str().unwrap_or("").to_string();
-            if r["h"].as_str() != Some(&fnv(&v)) { c.hash_mismatch += 1; }
-            entities.insert(id, (r["rev"].as_u64().unwrap_or(0), v));
-            return;
-        }
-        {
-            let seq = r["seq"].as_u64().unwrap_or(0);
-            if seq <= self.seq { c.duplicate += 1; return; }
-            if seq != self.seq + 1 { c.missing += 1; if c.missing <= 5 { eprintln!("MISSING stream {:?} expected {} got {}", self.stream, self.seq + 1, seq); } }
-            self.seq = seq;
-            c.records += 1;
-            if let Some(ts) = r["ts"].as_u64() { lat.push(now_ms().saturating_sub(ts) as u32); }
-        }
-        match op {
-            "put" => {
-                let v = r["value"].as_str().unwrap_or("").to_string();
-                if r["h"].as_str() != Some(&fnv(&v)) { c.hash_mismatch += 1; }
-                self.entities.insert(id, (r["rev"].as_u64().unwrap_or(0), v));
-            }
-            "append" => match self.entities.get_mut(&id) {
-                None => c.unknown_entity += 1,
-                Some((rev, v)) => {
-                    if r["base"].as_u64() != Some(*rev) { c.stale_base += 1; return; }
-                    v.push_str(r["text"].as_str().unwrap_or(""));
-                    *rev = r["rev"].as_u64().unwrap_or(*rev + 1);
-                    if r["h"].as_str() != Some(&fnv(v)) { c.hash_mismatch += 1; }
-                }
-            },
-            "remove" => { if self.entities.remove(&id).is_none() { c.unknown_entity += 1; } }
-            _ => {}
-        }
+    fn after(&self) -> Value {
+        let a = self.view.after();
+        if a.is_null() { json!({}) } else { json!({"after": a}) }
     }
+}
+
+fn sum_errors(views: &HashMap<String, View>) -> ViewErrors {
+    views.values().fold(ViewErrors::default(), |mut a, v| {
+        let e = &v.view.errors;
+        a.duplicate += e.duplicate; a.missing += e.missing; a.stale_base += e.stale_base; a.unknown_entity += e.unknown_entity;
+        a.bad_utf8 += e.bad_utf8; a.bad_json += e.bad_json; a.bad_record += e.bad_record; a.out_of_snapshot += e.out_of_snapshot;
+        a
+    })
 }
 
 fn pct(v: &mut [u32], q: f64) -> u32 { if v.is_empty() { return 0 } v.sort_unstable(); v[((v.len() as f64 * q) as usize).min(v.len() - 1)] }
@@ -194,8 +138,7 @@ async fn main() {
                 queue.extend(due);
                 while pending.len() < 64 {
                     let Some(res) = queue.pop_front() else { break };
-                    let v = &views[&res];
-                    let after = v.epoch.as_ref().map(|e| json!({"after": {"epoch": e, "seq": v.seq}})).unwrap_or(json!({}));
+                    let after = views[&res].after();
                     let id = send("resource.attach", json!({"resource": res, "items": after}), &mut wbuf);
                     pending.insert(id, res);
                 }
@@ -204,7 +147,7 @@ async fn main() {
             }
         };
         if n == 0 { eprintln!("{name}: core closed"); break; }
-        let m: Value = match serde_json::from_str(&line) { Ok(m) => m, Err(_) => { c.bad_json += 1; continue } };
+        let m: Value = match serde_json::from_str(&line) { Ok(m) => m, Err(_) => { c.rpc_bad_json += 1; continue } };
         if let Some(id) = m["id"].as_u64() {
             if let Some(res) = pending.remove(&id) {
                 if let Some(sid) = m["result"]["stream"].as_u64() {
@@ -234,10 +177,9 @@ async fn main() {
                     if m == "stream.gap" { c.gaps += 1 } else { c.closed += 1 }
                     if let Some(res) = by_stream.remove(&sid) {
                         let v = views.get_mut(&res).unwrap();
-                        // A partial line from the old stream is never stitched onto a new one.
-                        v.buf.clear();
+                        // A partial line or an unfinished snapshot is never carried onto a new stream.
+                        v.view.stream_ended();
                         v.stream = None;
-                        v.pending = None; // an unfinished snapshot is never installed; continue from the last installed cut
                         c.reattach += 1;
                         queue.push_back(res); // windowed like every attach: never a burst past the request limit
                     }
@@ -249,8 +191,7 @@ async fn main() {
         // last installed cursor, or from nothing.
         while pending.len() < 64 {
             let Some(res) = queue.pop_front() else { break };
-            let v = &views[&res];
-            let after = v.epoch.as_ref().map(|e| json!({"after": {"epoch": e, "seq": v.seq}})).unwrap_or(json!({}));
+            let after = views[&res].after();
             let id = send("resource.attach", json!({"resource": res, "items": after}), &mut wbuf);
             pending.insert(id, res);
         }
@@ -265,11 +206,13 @@ async fn main() {
         if report.elapsed() >= Duration::from_secs(10) {
             report = Instant::now();
             let (p50, p99, mx) = (pct(&mut lat, 0.5), pct(&mut lat, 0.99), lat.iter().copied().max().unwrap_or(0));
+            c.errors = sum_errors(&views);
             println!("{}", json!({"viewer": name, "t_s": t0.elapsed().as_secs(), "lat_ms": {"n": lat.len(), "p50": p50, "p99": p99, "max": mx}, "counters": c}));
             lat.clear();
         }
     }
-    let digests: BTreeMap<&String, Value> = views.iter().map(|(k, v)| (k, json!({"epoch": v.epoch, "seq": v.seq, "digest": v.digest(), "entities": v.entities.len(), "attached": v.stream.is_some()}))).collect();
+    c.errors = sum_errors(&views);
+    let digests: BTreeMap<&String, Value> = views.iter().map(|(k, v)| (k, json!({"epoch": v.view.epoch(), "seq": v.view.seq(), "digest": v.view.digest(), "entities": v.view.len(), "attached": v.stream.is_some()}))).collect();
     println!("{}", json!({"viewer": name, "final": true, "counters": c}));
     if !out.is_empty() { std::fs::write(&out, serde_json::to_vec_pretty(&json!({"viewer": name, "counters": c, "agents": digests})).unwrap()).unwrap(); }
 }

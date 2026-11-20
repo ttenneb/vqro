@@ -129,7 +129,7 @@ try:
     stalled = (OUT / "stalled.out").read_text() if (OUT / "stalled.out").exists() else ""
     summary["stalled_attached"] = next((int(l.split("attached ")[1].split()[0]) for l in stalled.splitlines() if "attached " in l), None)
     (OUT / "summary.json").write_text(json.dumps(summary, indent=1)); log("summary", json.dumps({k: v["identical_to_runtime"] for k, v in summary.items() if isinstance(v, dict)}))
-    BAD = ("duplicate", "missing", "stale_base", "hash_mismatch", "bad_utf8", "bad_json", "unknown_entity", "out_of_snapshot")
+    BAD = ("duplicate", "missing", "stale_base", "unknown_entity", "bad_utf8", "bad_json", "bad_record", "out_of_snapshot", "rpc_bad_json")
     failures = [f"{v}: {s['identical_to_runtime']}/{s['agents']} identical" for v, s in summary.items() if isinstance(s, dict) and s["identical_to_runtime"] != s["agents"]]
     failures += [f"{v}: {k}={s['counters'][k]}" for v, s in summary.items() if isinstance(s, dict) for k in BAD if s["counters"].get(k)]
     if "--no-stall" not in sys.argv and summary["stalled_attached"] != AGENTS: failures.append(f"stalled viewer attached {summary['stalled_attached']} of {AGENTS}")
