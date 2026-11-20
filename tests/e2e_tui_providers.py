@@ -153,6 +153,7 @@ try:
     check("the warning does not switch anything by itself", call("extension.list")["extensions"]["tabs"]["enabled"] is True)
     keys("Enter")
     check("confirmed warning turns it off", bool(wait(lambda: call("extension.list")["extensions"]["tabs"]["display_status"] == "off")))
+    check("turn-off confirmation closes before changing the list filter", bool(wait(lambda: "Turn off Tabs: breaks" not in screen())))
     # The sidebar needs tabs.show (workspaces only works with tabs.open since each workspace has its own tabs).
     check("core reports the dependent's missing need", bool(wait(lambda: call("extension.list")["extensions"]["sidebar"]["dependencies"]["status"] == "missing")))
     keys("/"); keys("Escape"); keys("/"); keys("sidebar", literal=True); keys("Enter")
@@ -161,11 +162,14 @@ try:
     keys("Tab")  # detail: the Turn off chip is first; turn the sidebar off directly (nothing needs it)
     keys("Enter")
     check("an extension nobody needs turns off without a warning", bool(wait(lambda: call("extension.list")["extensions"]["sidebar"]["display_status"] == "off")))
+    check("Sidebar off state is rendered before toggling it back on", bool(wait(lambda: "[ ] Sidebar" in screen())))
     keys("BTab"); time.sleep(.3); keys("Space")
     check("turning on offers the needed extension in one confirmation", bool(wait(lambda: "Turn on Sidebar and Tabs" in screen())), screen())
     print("CAPTURE dependency-offer\n" + screen(), flush=True)
     keys("Enter")
     check("confirmed offer turns both on", bool(wait(lambda: all(call("extension.list")["extensions"][n]["display_status"] == "running" for n in ("tabs", "sidebar")))))
+    # Another RPC can observe running before the TUI receives/applies its confirmation result.
+    check("confirmation closes before the next catalogue action", bool(wait(lambda: "Turn on Sidebar and Tabs" not in screen())))
     keys("/"); keys("Escape")
     # Extension logs (review P2): a view of its own kind drawn through its fallback panel, following new lines.
     with open(f"{R}/st/ext-tabs.log", "a") as log:
@@ -186,7 +190,9 @@ try:
     keys("Escape")
     keys("C-g", ",")
     wait(lambda: "16 of 16" in screen())
-    keys("/"); keys("icons", literal=True); keys("Enter", "Space")
+    keys("/"); keys("icons", literal=True); keys("Enter")
+    check("Icons search and details are ready before keyboard activation", bool(wait(lambda: "/icons" in screen() and "[x] Icons (icons)" in screen() and "Publishes icon sets" in screen())))
+    keys("Space")
     check("keyboard turns extension off", bool(wait(lambda: call("extension.list")["extensions"]["icons"]["display_status"] == "off")))
     check("disabled extension keeps static description", bool(wait(lambda: "saved icon set remains" in screen())))
     wait(lambda: "[ ] Icons (icons)" in screen())
