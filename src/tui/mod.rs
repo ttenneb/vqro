@@ -3826,7 +3826,12 @@ fn cursor_shape(s: CursorShape) -> crossterm::cursor::SetCursorStyle {
 
 /// The bytes that pass a program's effect on to the outer terminal.
 fn effect_bytes(e: &Effect) -> Vec<u8> {
+    // Whatever the engine, nothing with a control byte in it reaches the outer terminal: such a byte could end the
+    // sequence and start another (ghostty-audit P1-1, defence in depth).
+    let control = |b: &[u8]| b.iter().any(|c| *c < 0x20 || *c == 0x7f);
     match e {
+        Effect::Clipboard(ty, data) if control(ty) || control(data) => Vec::new(),
+        Effect::Notify(body) if control(body) => Vec::new(),
         Effect::Clipboard(ty, data) => [b"\x1b]52;".as_slice(), ty, b";", data, b"\x07"].concat(),
         Effect::Bell => b"\x07".to_vec(),
         Effect::Notify(body) => [b"\x1b]".as_slice(), body, b"\x07"].concat(),

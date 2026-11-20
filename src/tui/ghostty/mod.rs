@@ -131,13 +131,20 @@ impl Notifications {
                 Some(body) => {
                     let end = b == 0x07 || (self.esc && b == b'\\');
                     if end {
-                        if self.esc { body.pop(); } // the ESC of ESC \
                         let body = self.osc.take().unwrap_or_default();
                         if let Some(e) = notification(&body) { if out.len() < MAX_EFFECTS { out.push(e); } }
                         self.esc = false;
                         continue;
                     }
+                    if self.esc {
+                        // ESC followed by anything but `\` ends the string unterminated, as the terminal's parser
+                        // does (ghostty-audit P1-1): no notification, and this byte may start a new OSC.
+                        self.osc = (b == b']').then(Vec::new);
+                        self.esc = b == 0x1b;
+                        continue;
+                    }
                     if b == 0x18 || b == 0x1a { self.osc = None; } // CAN / SUB cancel
+                    else if b == 0x1b {} // perhaps the start of ESC \
                     else if body.len() < MAX_OSC { body.push(b); } else { self.osc = None; }
                     self.esc = b == 0x1b;
                 }
@@ -149,6 +156,8 @@ impl Notifications {
 /// OSC 9 is a notification unless it is ConEmu's progress (`9;4;...`) or names a directory (`9;9;...`); OSC 777
 /// only for `notify`. Same rule as the vt100 engine.
 fn notification(body: &[u8]) -> Option<Effect> {
+    // The body goes to the outer terminal as it is: never with control bytes in it.
+    if body.iter().any(|b| *b < 0x20 || *b == 0x7f) { return None; }
     let mut parts = body.split(|b| *b == b';');
     match (parts.next(), parts.next()) {
         (Some(b"9"), Some(rest)) if !rest.is_empty() && rest != b"4" && rest != b"9" => Some(Effect::Notify(body.to_vec())),
@@ -576,5 +585,21 @@ mod tests {
         assert_eq!(c.chosen, Some(6));
         c.feed(b"\x1bc");
         assert_eq!(c.chosen, None, "a full reset (RIS) restores the user's cursor");
+    }
+
+    /// ghostty-audit P1-1: an OSC ends at an ESC not followed by `\`, as the terminal's parser ends it, so a program
+    /// can't carry escape sequences through a notification to the user's terminal.
+    #[test]
+    fn a_notification_never_carries_escapes_or_controls() {
+        let mut n = Notifications::default();
+        let mut out = Vec::new();
+        n.feed(b"\x1b]9;hi\x1b[2J\x1b]52;c;?\x07", &mut out);
+        n.feed(b"\x1b]9;a\rb\x07\x1b]9;tab\there\x07\x1b]9;del\x7f\x07", &mut out);
+        assert_eq!(out, vec![], "unterminated before ESC [, then OSC 52 (not a notification), then control bytes");
+        n.feed(b"\x1b]9;one\x1b\x1b]9;two\x07", &mut out);
+        assert_eq!(out, vec![Effect::Notify(b"9;two".to_vec())], "ESC ESC ] starts a new OSC");
+        let mut g = Ghostty::new(40, 4, 100).unwrap();
+        g.process(b"\x1b]9;hi\x1b[2J\x1b]52;c;?\x07");
+        assert!(g.take_effects().is_empty());
     }
 }
