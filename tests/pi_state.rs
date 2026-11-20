@@ -50,7 +50,7 @@ fn errors_unknown_reasons_and_native_end_are_not_fabricated_success() {
     let mut a=make();event(&mut a,json!({"type":"agent_start"}));
     event(&mut a,json!({"type":"message_end","message":{"role":"assistant","content":[],"stopReason":"error","errorMessage":"native failure"}}));
     event(&mut a,json!({"type":"agent_settled","aborted":false}));
-    assert_eq!(a.facts("pi","private")["status"]["phase"],"error");
+    assert_eq!(a.facts("pi","private")["status"]["state"],"error");
     assert_eq!(a.completion.as_ref().unwrap()["error"]["message"],"native failure");
     event(&mut a,json!({"type":"agent_start"}));message(&mut a,"unknown","_native_new_reason");event(&mut a,json!({"type":"agent_settled"}));
     assert_eq!(a.completion.as_ref().unwrap()["reason"],"_native_new_reason");
@@ -89,6 +89,8 @@ fn session_switch_changes_epoch_not_endpoint_or_receipt_lookup() {
 #[test]
 fn missing_idle_evidence_and_oversized_native_output_are_explicit() {
     let mut a=Agent::new("private".into(),Signals::new());assert_eq!(a.state(),"unknown");
+    assert_eq!(a.facts("pi","private")["status"]["state"],"working");
+    assert!(a.facts("pi","private")["status"].get("phase").is_none());
     let mut m=make();message(&mut m,&"x".repeat(100000),"stop");
     let messages=entities(&m,"message");assert_eq!(messages[0]["value"]["incomplete"],json!(["content"]));
     assert!(m.incomplete.contains("items"));

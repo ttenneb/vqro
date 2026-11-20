@@ -74,7 +74,7 @@ impl Agent {
     pub fn facts(&self,provider:&str,cwd:&str)->Value {
         let phase=match self.state() {"running"=>"working","requires_action"=>"blocked","idle" if self.completion.as_ref().is_some_and(|c|c["reason"]=="error")=>"error","idle"=>"idle",_=>"working"};
         json!({"ref":"agent","incarnation":"","kind":"agent","state":if self.exit.is_some(){"finished"}else{"live"},"name":"Pi","cwd":cwd,"exit":self.exit.as_ref().map(|exit|json!({"code":exit.code,"success":exit.success})),
-            "status":{"phase":phase,"message":if self.exit.is_some(){"Pi ended"}else{self.state()}},
+            "status":{"state":phase},
             "data":{"agent":{"v":0,"state":self.state(),"lifecycle":if self.exit.is_some(){"ended"}else{"live"},
                 "host":{"id":format!("{}.child",self.boot),"provider":provider,"instance":self.instance,"incarnation":"","kind":"process","owns_lifecycle":true},
                 "session":self.session,"epoch":self.epoch(),"caps":self.caps,"completion":self.completion,"queue":null,"requests":[],"background":null,
