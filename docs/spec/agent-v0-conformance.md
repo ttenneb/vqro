@@ -321,7 +321,9 @@ W}`, cannot replace its own `{from: W, to: W}` with `{from: P, to: W}`, and cann
 nothing within it. Even when acting for P/owner through a delegation or callback, actor W/E cannot create,
 replace, delete, extend or revert P's delegation rows or write the owner row on that effective principal's authority;
 only its own actor ownership (or the owner actor) permits the write. The owner's
-bootstrap is audited and not a `u` target; an expired `until_ms` row admits nothing. G10 a grant query is not
+bootstrap is audited and not a `u` target; an expired `until_ms` row admits nothing. An owner-invoked extension
+cannot manage the owner key or rows whose `from` is another principal; direct owner TUI/CLI management works,
+while rows owned by the extension's own actor still follow the same ownership rules. G10 a grant query is not
 authority: a coordinated operation
 with a missing, unknown or revoked grant dispatches zero native writes; raw primitives still work.
 G13 handle grants pin both ends at issuance: grant on `@worker` to `@reviewer`, rebind both handles, and verify the

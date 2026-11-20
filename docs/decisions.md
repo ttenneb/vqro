@@ -537,6 +537,9 @@ replaced when the Pi bridge is ported.
   ungranted routing falls back visibly to human. Route never auto-approves or weakens native response fences.
 
 **Further implementation rulings (2026-11-19, spec batch 4).**
+- An owner invocation does not lend its actor's authority to an extension: owner/other-principal delegation rows
+  and the owner key are managed directly by the owner through TUI/CLI in v0. Extension-owned rows keep the
+  extension actor's existing ownership rights.
 - An unknown-predecessor stall is operator-visible: held `ordering_unknown` includes the blocking delivery id in
   views and bounded lookups/lists. Visibility is not resolution, negative evidence or permission to replay.
 

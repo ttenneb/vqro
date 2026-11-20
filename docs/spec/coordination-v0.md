@@ -94,6 +94,11 @@ the generic keys below (`doc/principals/…`) and never reads coordination grant
   (or the owner), so only the owner actor can change `from`. A delegation or callback proof never lets a delegate
   extend another principal's delegation or create a chain. Rows written in a transaction grant nothing within it.
   Initializing the owner is an audited system bootstrap, not a `u` target.
+- **Managing principals in v0.** An extension command invoked by the owner is still the extension's actor. The
+  owner's invocation gives it no authority to create or change the owner key or delegation rows whose `from`
+  is the owner (or any principal other than that extension). The owner manages those directly through TUI/CLI,
+  not by lending authority to an extension command. Rows whose `from` is the extension's own principal remain
+  governed by the actor-ownership rule above.
 - **Times** are integer Unix epoch milliseconds in fields ending `_ms`, as in the core (`until_ms`, `expires_at_ms`,
   `last_seen_ms`).
 - **`u` acts for the presser's effective principal** and selects the latest transaction whose `principal` equals it:
