@@ -5,6 +5,7 @@
 #[allow(dead_code)] #[path="../src/bin/vqro-bridge-pi/queue.rs"] mod queue;
 #[allow(dead_code)] #[path="../src/bin/vqro-bridge-pi/requests.rs"] mod requests;
 #[allow(dead_code)] #[path="../src/bin/vqro-bridge-pi/configuration.rs"] mod configuration;
+#[allow(dead_code)] #[path="../src/bin/vqro-bridge-pi/commands.rs"] mod commands;
 #[path="../src/bin/vqro-bridge-pi/state.rs"] mod state;
 use admission::Signals;
 use native::{Event,Exit};

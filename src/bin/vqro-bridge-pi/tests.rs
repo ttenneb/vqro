@@ -29,7 +29,11 @@ for line in sys.stdin:
   while not (root/'go').exists():time.sleep(.002)
   if {apply}:state['steeringMode']=row['mode']
  if row['type']=='new_session':state['sessionId']='fixture-next'
- data=state if row['type']=='get_state' else {{}}
+ if row['type']=='cycle_model':state['model']={{'provider':'p','id':'two','name':'Two','input':['text','image'],'headers':{{'Authorization':'fixture-secret'}}}}
+ if row['type']=='get_state':data=state
+ elif row['type']=='cycle_model':data={{'model':state['model'],'thinkingLevel':'low'}}
+ elif row['type']=='compact':data={{'summary':'Native summary','firstKeptEntryId':'entry','tokensBefore':123}}
+ else:data={{}}
  print(json.dumps({{'type':'response','id':row['id'],'command':row['type'],'success':True,'data':data}}),flush=True)
 "#,root=json!(root.to_string_lossy()),apply=if apply{"True"}else{"False"});
     let weak=Arc::downgrade(&shared);
@@ -71,6 +75,29 @@ async fn new_session_keeps_endpoint_and_host_and_fences_one_new_epoch_before_rep
         {let agent=shared.agent.lock().unwrap();assert!(agent.journal.entity("message","old").is_none());assert!(agent.journal.entity("session","current").is_some());assert!(agent.receipts.contains_key("prior-delivery"));}
         dispose(&shared,&provider).await;
     }
+}
+#[tokio::test]
+async fn builtin_commands_use_native_rpc_readback_fence_and_no_model_header_leak(){
+    for name in ["cycle_model","compact"]{
+        let root=tempfile::tempdir().unwrap();let (shared,provider,mut core)=fixture(root.path(),true).await;
+        let (s,p)=(shared.clone(),provider.clone());let task=tokio::spawn(async move{command(&s,&p,&json!({"name":name}),Instant::now()+Duration::from_secs(3)).await});
+        let facts=core.recv().await;assert_eq!(facts["method"],"resource.upsert");assert!(!facts.to_string().contains("fixture-secret"));
+        if name=="cycle_model"{assert_eq!(facts["params"]["facts"]["data"]["agent"]["session"]["model"]["id"],"two");}
+        let fence=core.recv().await;assert_eq!(fence["method"],"resource.list");assert!(!task.is_finished());core.reply(&fence,json!({"resources":[]})).await;
+        let Outcome::Observed(Some(data))=task.await.unwrap().unwrap()else{panic!("reported command result");};assert!(!data.to_string().contains("fixture-secret"));
+        let ledger=std::fs::read_to_string(root.path().join("ledger")).unwrap();let rows:Vec<Value>=ledger.lines().map(|line|serde_json::from_str(line).unwrap()).collect();assert_eq!(rows.iter().filter(|row|row["type"]==name).count(),1);assert!(!rows.iter().any(|row|row["type"]=="prompt"));
+        dispose(&shared,&provider).await;
+    }
+}
+#[tokio::test]
+async fn explicit_native_prompt_command_shares_start_gate_and_is_only_accepted(){
+    let root=tempfile::tempdir().unwrap();let (shared,provider,_core)=fixture(root.path(),true).await;
+    shared.agent.lock().unwrap().commands.observe(&json!({"commands":[{"name":"example"}]}));
+    let guard=shared.starts.get().unwrap().session_guard().unwrap();assert!(matches!(command(&shared,&provider,&json!({"name":"example"}),Instant::now()+Duration::from_secs(1)).await.unwrap(),Outcome::Rejected{kind,..} if kind=="busy"));assert!(!root.path().join("ledger").exists());drop(guard);
+    assert!(matches!(command(&shared,&provider,&json!({"name":"example","args":"exact\nargs"}),Instant::now()+Duration::from_secs(2)).await.unwrap(),Outcome::Accepted(_)));
+    let signals=shared.agent.lock().unwrap().signals.clone();let mut changed=signals.changes();tokio::time::timeout(Duration::from_secs(2),async{loop{if signals.current().preflights==0{break;}changed.changed().await.unwrap();}}).await.unwrap();
+    let ledger=std::fs::read_to_string(root.path().join("ledger")).unwrap();let rows:Vec<Value>=ledger.lines().map(|line|serde_json::from_str(line).unwrap()).collect();assert_eq!(rows.iter().filter(|row|row["type"]=="prompt").count(),1);assert_eq!(rows.iter().find(|row|row["type"]=="prompt").unwrap()["message"],"/example exact\nargs");
+    dispose(&shared,&provider).await;
 }
 #[tokio::test]
 async fn setter_ack_without_matching_readback_is_only_accepted_and_waits_for_core_fence(){

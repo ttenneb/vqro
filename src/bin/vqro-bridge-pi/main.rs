@@ -7,6 +7,7 @@ mod retirement;
 mod queue;
 mod requests;
 mod configuration;
+mod commands;
 use std::collections::HashMap;
 use std::sync::{Arc,Mutex,OnceLock};
 use std::time::Duration;
@@ -189,6 +190,7 @@ async fn invoke(shared:&Arc<Shared>,provider:&Provider,effect:&EffectRequest)->R
         "agent.respond"=>respond(shared,args,effect.deadline).await,
         "agent.configure"=>configure(shared,provider,args,effect.deadline).await,
         "agent.session"=>session_new(shared,provider,args,effect.deadline).await,
+        "agent.command"=>command(shared,provider,args,effect.deadline).await,
         "agent.interrupt"=>{
             if shared.agent.lock().unwrap().signals.current().idle(){return Ok(Outcome::Observed(Some(json!({"noop":true}))));}
             let result=shared.native.get().unwrap().call("abort",json!({}),effect.deadline.saturating_duration_since(Instant::now())).await;
@@ -247,20 +249,26 @@ async fn publish_fenced(shared:&Shared,provider:&Provider)->Result<(),ProviderEr
     provider.upsert(shared.facts(&shared.provider_name)).await?;
     provider.call("resource.list",json!({"provider":shared.provider_name,"backend_ref":"agent"})).await?;Ok(())
 }
-enum Mutation {Configure(configuration::Change),NewSession {before:Option<String>,epoch:String,guard:Option<tokio::sync::OwnedMutexGuard<()>>}}
+enum Mutation {Configure(configuration::Change),NewSession {before:Option<String>,epoch:String,guard:Option<tokio::sync::OwnedMutexGuard<()>>},Command {name:String,command:&'static str,args:Value,operation:String,guard:Option<tokio::sync::OwnedMutexGuard<()>>}}
 impl Mutation {
-    fn request(&self)->(&str,Value){match self{Self::Configure(change)=>(change.command,change.args.clone()),Self::NewSession{..}=>("new_session",json!({}))}}
-    fn id(&self)->&str{match self{Self::Configure(change)=>&change.id,Self::NewSession{..}=>"session.new"}}
-    fn release_guard(&mut self){if let Self::NewSession{guard,..}=self{guard.take();}}
+    fn request(&self)->(&str,Value){match self{Self::Configure(change)=>(change.command,change.args.clone()),Self::NewSession{..}=>("new_session",json!({})),Self::Command{command,args,..}=>(command,args.clone())}}
+    fn id(&self)->&str{match self{Self::Configure(change)=>&change.id,Self::NewSession{..}=>"session.new",Self::Command{name,..}=>name}}
+    fn operation(&self)->Option<&str>{if let Self::Command{operation,..}=self{Some(operation)}else{None}}
+    fn release_guard(&mut self){match self{Self::NewSession{guard,..}|Self::Command{guard,..}=>{guard.take();},_=>{}}}
 }
 async fn finish_mutation(shared:Arc<Shared>,provider:Provider,mut change:Mutation,reply:Result<native::Reply,native::Error>)->Result<Outcome,ProviderError>{
     let reply=match reply{Ok(reply)=>reply,Err(error) if !error.may_have_acted=>{let mut agent=shared.agent.lock().unwrap();change.release_guard();agent.configuration_pending(false);drop(agent);shared.wake();return rejected(error.kind,error.message);},Err(error)=>{shared.agent.lock().unwrap().incomplete.insert("config".into());shared.wake();return Err(ProviderError::new("backend",format!("native mutation outcome unknown: {error}")));}};
     // An ACK is not the reported value. Keep this one bounded workflow alive after the caller deadline,
     // including a late native reply; never retry the setter and never expose stale model/batch semantics.
     let native=shared.native.get().unwrap();
-    if matches!(&change,Mutation::Configure(change) if change.command=="set_model"){
+    let command_data=match &change{Mutation::Command{command,..}=>commands::safe_result(command,&reply.data),_=>Value::Null};
+    if matches!(&change,Mutation::Configure(change) if change.command=="set_model") || matches!(&change,Mutation::Command{command:"cycle_model",..}){
         let levels=match native.submit("get_available_thinking_levels",json!({}),Instant::now()+Duration::from_secs(3)){Ok(mut ticket)=>ticket.reply().await,Err(error)=>Err(error)};
         if !matches!(levels,Ok(ref reply) if reply.success){shared.agent.lock().unwrap().configuration.observe_levels(&Value::Null);}
+    }
+    if let Mutation::Command{name,operation,..}=&change{
+        let result=if vqro::limits::encoded_bytes(&command_data)<=48*1024{json!({"result":command_data})}else{json!({"incomplete":["result"]})};
+        shared.agent.lock().unwrap().control_result(operation,json!({"command":name,"native_success":reply.success,"native":result}));shared.wake();
     }
     let read=match native.submit("get_state",json!({}),Instant::now()+Duration::from_secs(3)){
         Ok(mut ticket)=>ticket.reply().await,
@@ -273,6 +281,7 @@ async fn finish_mutation(shared:Arc<Shared>,provider:Provider,mut change:Mutatio
     let (observed,data)={let mut agent=shared.agent.lock().unwrap();change.release_guard();agent.configuration_pending(false);
         match &change{
             Mutation::Configure(change)=>{let observed=agent.configuration.matches(change);(observed,json!({"id":change.id,"value":change.value,"value_evidence":if observed{"reported"}else{"not_matched"}}))},
+            Mutation::Command{name,command,operation,..}=>{let mut data=json!({"name":name,"operation":operation});if vqro::limits::encoded_bytes(&command_data)<=48*1024{data["result"]=command_data.clone();}else{data["incomplete"]=json!(["result"]);} (commands::observed_result(command,&reply.data),data)},
             Mutation::NewSession{before,epoch,..}=>{
                 let current=agent.session.as_ref().and_then(|session|session["id"].as_str());
                 let changed=current.is_some() && current!=before.as_deref() && reply.data["cancelled"]!=true;
@@ -306,8 +315,40 @@ async fn session_new(shared:&Arc<Shared>,provider:&Provider,args:&Value,deadline
         let change=Mutation::NewSession {before:agent.session.as_ref().and_then(|session|session["id"].as_str()).map(str::to_string),epoch:agent.epoch().into(),guard:Some(guard)};agent.session_pending=true;agent.configuration_pending(true);change
     };shared.wake();dispatch_mutation(shared,provider,change,deadline).await
 }
+async fn command(shared:&Arc<Shared>,provider:&Provider,args:&Value,deadline:Instant)->Result<Outcome,ProviderError>{
+    let name=match contract::id(&args["name"]){Ok(name)=>name,Err(error)=>return rejected(error.kind,error.message)};
+    if args.as_object().unwrap().keys().any(|key|!["v","caps_rev","epoch","guard","cause","correlation","name","args"].contains(&key.as_str())){return rejected("unsupported","undeclared command arguments");}
+    let prepared={let agent=shared.agent.lock().unwrap();
+        if agent.configuration.pending{return rejected("busy","native mutation is unresolved");}
+        if !agent.facts(&shared.provider_name,&shared.cwd)["data"]["agent"]["commands"].as_array().is_some_and(|rows|rows.iter().any(|row|row["name"]==name)){return rejected("unsupported","command is not currently advertised");}
+        match agent.commands.prepare(name,args.get("args")){Ok(prepared)=>prepared,Err(error)=>return rejected(error.kind,error.message)}
+    };
+    match prepared{
+        commands::Prepared::NewSession=>session_new(shared,provider,&json!({"action":"new"}),deadline).await,
+        commands::Prepared::Rpc{name,command,args}=>{
+            if Instant::now()>=deadline{return rejected("timeout","command deadline elapsed before write");}
+            let guard=match shared.starts.get().unwrap().session_guard(){Ok(guard)=>guard,Err(error)=>return rejected(error.kind,error.message)};
+            {let mut agent=shared.agent.lock().unwrap();if agent.configuration.pending{return rejected("busy","native mutation is unresolved");}agent.configuration_pending(true);}shared.wake();
+            dispatch_mutation(shared,provider,Mutation::Command{name,command,args,operation:format!("command-{}",fresh()),guard:Some(guard)},deadline).await
+        }
+        commands::Prepared::Prompt{message}=>{
+            let operation=format!("command-{}",fresh());let weak=Arc::downgrade(shared);let op=operation.clone();let command_name=name.to_string();
+            let receipt:admission::Receipt=Arc::new(move|native,result|{if let Some(shared)=weak.upgrade(){
+                let mut value=json!({"command":command_name,"native_id":native});
+                match result{Ok(reply)=>{value["native_success"]=json!(reply.success);if vqro::limits::encoded_bytes(&reply.data)<=48*1024{value["result"]=reply.data;}else{value["incomplete"]=json!(["result"]);}},Err(error)=>{value["outcome"]=json!("unknown");value["error"]=json!(error.kind);}}
+                shared.agent.lock().unwrap().control_result(&op,value);shared.wake();
+            }});
+            match shared.starts.get().unwrap().admit(json!({"message":message}),deadline,receipt).await{
+                Admission::Acknowledged{reply,..} if reply.success=>Ok(Outcome::Accepted(Some(json!({"name":name,"operation":operation})))),
+                Admission::Acknowledged{reply,..}=>Err(ProviderError::new("backend",native_message(&reply))),
+                Admission::Dispatched{..}=>Ok(Outcome::Dispatched(Some(json!({"name":name,"operation":operation})))),
+                Admission::Refused(error)=>rejected(error.kind,error.message),Admission::Unknown(error)=>native_failure(error),
+            }
+        }
+    }
+}
 async fn dispatch_mutation(shared:&Arc<Shared>,provider:&Provider,mut change:Mutation,deadline:Instant)->Result<Outcome,ProviderError>{
-    let id=change.id().to_string();let (command,args)=change.request();
+    let id=change.id().to_string();let operation=change.operation().map(str::to_string);let (command,args)=change.request();
     let native=shared.native.get().unwrap();
     let mut ticket=match native.submit(command,args,deadline){Ok(ticket)=>ticket,Err(error)=>{let mut agent=shared.agent.lock().unwrap();change.release_guard();agent.configuration_pending(false);drop(agent);shared.wake();return native_failure(error);}};
     let reply=tokio::select!{biased;reply=ticket.reply()=>Some(reply),_=tokio::time::sleep_until(deadline)=>None};
@@ -319,8 +360,8 @@ async fn dispatch_mutation(shared:&Arc<Shared>,provider:&Provider,mut change:Mut
     });
     match tokio::time::timeout_at(deadline,result).await{
         Ok(Ok(result))=>result,Ok(Err(_))=>Err(ProviderError::new("backend","native mutation workflow failed; outcome unknown")),
-        Err(_) if acknowledged=>Ok(Outcome::Accepted(Some(json!({"id":id,"value_evidence":"unknown"})))),
-        Err(_) if written=>Ok(Outcome::Dispatched(Some(json!({"id":id,"value_evidence":"unknown"})))),
+        Err(_) if acknowledged=>Ok(Outcome::Accepted(Some(json!({"id":id,"operation":operation,"value_evidence":"unknown"})))),
+        Err(_) if written=>Ok(Outcome::Dispatched(Some(json!({"id":id,"operation":operation,"value_evidence":"unknown"})))),
         Err(_)=>Err(ProviderError::new("backend","native mutation write incomplete at deadline; outcome unknown")),
     }
 }

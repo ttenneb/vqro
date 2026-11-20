@@ -69,6 +69,16 @@ Private native subprocess/SDK tests cover a late ACK past the caller deadline, n
 setter refusal, fresh facts/fence delivery, and successful ACK with mismatching readback remaining only accepted.
 Pure tests cover actual metadata containers/arrays, native model IDs, revisions, allowed values and catalog cuts.
 
+## Explicit commands
+Preserves the Python bridge's new_session/cycle_model/compact controls and up to64 native advertised names.
+Invocation is only agent.command; sends never enter this dispatcher. Unknown names, typed/non-string/over-bound
+arguments and unexpected arguments to no-argument builtins reject before write. Explicit native prompt commands
+share the existing start/admit preflight guard; their ACK stays accepted, not handled. Compact and cycle_model use
+their native RPCs, read back state and fence facts; only a recognizable native result is observed. Compact tests
+use the fake native process, never a paid model call. Late bounded results are canonical _control observations.
+Native cycle_model results are projected to safe model identity/label/thinking fields; raw configured model headers
+are never published in reply data or retained item records.
+
 ## Sessions in the initial declaration
 `agent.session:new` preserves the Python bridge's native new_session control. It neither prompts nor changes the
 endpoint/owning host. The current session and one new epoch are read back and fenced into core facts before an
