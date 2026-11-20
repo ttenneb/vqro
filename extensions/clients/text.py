@@ -21,7 +21,8 @@ sys.path.insert(1, os.path.dirname(HERE))  # vqro_ext.py beside the bundled exte
 import vqro_client_model as model  # noqa: E402
 from vqro_ext import Vqro, VqroError  # noqa: E402
 
-FEATURES = model.BASE_FEATURES + ["icon_names", "current_when", "markdown", "pin", "composer", "multiline", "facets", "sort", "columns"]
+FEATURES = model.BASE_FEATURES + ["icon_names", "current_when", "markdown", "pin", "composer", "multiline", "facets", "sort", "columns",
+                                  "message", "fold"]
 WIDTH = 100  # formatted text is laid out at this width
 HELP = """commands (numbers refer to the last listing):
   show                    this client's layout (workspace): tabs and numbered panes (* = focused)
@@ -326,7 +327,7 @@ class TextClient:
             # Only rows you can act on get a number.
             if model.selectable(r["item"]):
                 self.listed.append(r)
-            lines.append(self.row_line(len(self.listed), r))
+            lines.append(self.row_line(len(self.listed), r, st["open"].get(r["id"], r["item"].get("expanded") is True)))
         return lines
 
     def cells(self, cells):
@@ -340,8 +341,28 @@ class TextClient:
             out.append(c.rjust(w) if i < len(self.aligns) and self.aligns[i] else c.ljust(w))
         return " ".join(out).rstrip()
 
-    def row_line(self, n, r):
+    def row_line(self, n, r, open_=False):
         item, pad = r["item"], "  " * r["depth"]
+        k0 = model.kind(item)
+        if k0 == "message" or (k0 == "text" and model.fold(item) is not None):
+            # A message block (framed) or a folding text row: its lines, the first `fold` until `expand <row>`.
+            message = k0 == "message"
+            body = text_of(item.get("body") if message and item.get("body") is not None else item.get("text"))
+            width = WIDTH - 7 - len(pad)
+            if item.get("format") == "markdown":
+                shown = ["".join(t for t, _ in line) for line in model.markdown_lines(body, width)]
+            else:
+                shown = [l[i:i + width] or "" for l in body.split("\n") for i in range(0, max(len(l), 1), width)]
+            label = model.fold_label(item, len(shown), open_)
+            n_shown = len(shown) if open_ or model.fold(item) is None else model.fold(item)
+            out = [f"{pad}{n:>3}. " + (f"┏━ {text_of(item.get('title') or item.get('text'))}" if message else shown[0] if shown else "")]
+            rest = shown[:n_shown] if message else shown[1:n_shown]
+            out += [pad + "     " + ("┃ " if message else "") + l for l in rest]
+            if label:
+                out.append(pad + "     " + ("┃ " if message else "") + label + f"  ({'collapse' if open_ else 'expand'} {n})")
+            if message:
+                out.append(pad + "     ┗━")
+            return "\n".join(out)
         if getattr(self, "widths", None) and isinstance(item.get("columns"), list):
             item = dict(item, text=self.cells([text_of(c) for c in item["columns"]]))
         k = model.kind(item)

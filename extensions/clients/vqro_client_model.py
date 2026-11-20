@@ -63,7 +63,23 @@ def kind(item):
 
 def selectable(item):
     k = kind(item)
-    return (k not in ("header", "separator", "text") or (k == "text" and item.get("focusable") is True)) and item.get("disabled") is not True
+    return (k not in ("header", "separator", "text") or (k == "text" and (item.get("focusable") is True or fold(item) is not None))) \
+        and item.get("disabled") is not True
+
+
+def fold(item):
+    """`fold: N` on a text row or message block (feature fold): its first N lines show until unfolded."""
+    n = item.get("fold")
+    if kind(item) in ("text", "message") and isinstance(n, int) and not isinstance(n, bool) and n >= 0:
+        return min(max(n, 1), 10000)
+    return None
+
+
+def fold_label(item, total, open_):
+    n = fold(item)
+    if n is None or total <= n:
+        return None
+    return "▾ less" if open_ else f"▸ {total - n} more line{'' if total - n == 1 else 's'}"
 
 
 def missing_for(value, features):
@@ -74,6 +90,7 @@ def missing_for(value, features):
 
 def _matches(item, f):
     hay = " ".join(str(item.get(k) or "") for k in ("text", "detail", "description", "summary"))
+    hay += " " + " ".join(str(item.get(k) or "") for k in ("title", "body"))
     hay += " " + " ".join(t for t in item.get("tags") or [] if isinstance(t, str))
     return f in hay.lower()
 

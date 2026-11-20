@@ -2791,7 +2791,9 @@ impl App {
         st.sel = i;st.manual_scroll=false;
         if expander.is_some() {
             if let Some(r) = rows.get(i) {
-                st.open.insert(r.id.clone(), !r.expanded);
+                // A tree row opens or closes; a folding row (its "▸ N more lines" / "▾ less" line) unfolds or folds.
+                let open = if !r.has_children && panel::fold(&r.item).is_some() { !panel::unfolded(r, &st) } else { !r.expanded };
+                st.open.insert(r.id.clone(), open);
             }
             self.pstate.insert(key.to_string(), save(container,st));
             return true;
@@ -3980,6 +3982,40 @@ mod tests {
         let send = find(&mut app, "[Send]");
         app.panel_click("p", "p", send, MouseButton::Left, json!({}));
         assert!(app.message.starts_with("running agents.send"), "{}", app.message);
+    }
+
+    #[tokio::test]
+    async fn message_blocks_are_framed_and_long_text_folds() {
+        let (mut app, _) = app();
+        app.load(&json!({"epoch":"e","seq":1,"entries":{"view/p":{"value":{"kind":"panel","items":[
+            {"type":"text","text":"Pi · 21:08","style":"bold"},
+            {"type":"text","id":"think","text":"one\ntwo\nthree\nfour","wrap":true,"fold":2,"style":"dim"},
+            {"type":"message","id":"m","text":"Message from coord","title":"Message from coord · 21:11 · follow-up","body":"a\nb\nc\nd\ne\nf","fold":4}]}}}}));
+        app.leaves = vec!["p".into()];
+        app.hit.leaves = vec![("p".into(), Rect::new(0, 0, 50, 20), Rect::new(1, 1, 48, 18))];
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(50, 20)).unwrap();
+        let mut draw = |app: &mut App| -> Vec<String> {
+            let mut out = Vec::new();
+            terminal.draw(|f| { app.draw_view(f, "p", Rect::new(0, 0, 50, 20), true, &Palette::default(), &Icons::new(None, false));
+                let b = f.buffer_mut(); out = (0..20).map(|y| (0..50).map(|x| b[(x, y)].symbol().to_string()).collect::<String>()).collect(); }).unwrap();
+            out
+        };
+        let screen = draw(&mut app);
+        let has = |s: &[String], t: &str| s.iter().any(|l| l.contains(t));
+        assert!(has(&screen, "┏━ Message from coord · 21:11 · follow-up") && has(&screen, "┃ d") && !has(&screen, "┃ e") && has(&screen, "┃ ▸ 2 more lines") && has(&screen, "┗━"), "{screen:#?}");
+        assert!(has(&screen, "two") && !has(&screen, "three") && has(&screen, "▸ 2 more lines"), "the text row shows 2 lines and its fold line");
+        // A click on a fold line unfolds that row; again folds it.
+        let y = screen.iter().position(|l| l.contains("┃ ▸ 2 more lines")).unwrap() as u16;
+        let x = screen[y as usize].find("▸").map(|i| screen[y as usize][..i].chars().count() as u16).unwrap();
+        app.panel_click("p", "p", Position { x, y }, MouseButton::Left, json!({}));
+        let screen = draw(&mut app);
+        assert!(has(&screen, "┃ f") && has(&screen, "┃ ▾ less"), "{screen:#?}");
+        // Enter on the selected folding text row unfolds it too.
+        let st = app.pstate.get_mut("p").unwrap();
+        st.sel = 1;
+        app.panel_key("p", "p", KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), json!({}));
+        let screen = draw(&mut app);
+        assert!(has(&screen, "four"), "{screen:#?}");
     }
 
     #[tokio::test]

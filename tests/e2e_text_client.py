@@ -114,6 +114,13 @@ try:
     sent = wait(lambda: e2e_echo.calls(f"{R}/echo.jsonl"), 10)
     check("composer sends text with new lines and the chosen control", bool(sent) and sent[-1] == {"resource": "r2", "mode": "steer", "text": "first\nsecond", "context": sent[-1].get("context")}, sent)
     echo.close()
+    # A message block is framed and folds after `fold` lines; `expand <row>` shows it whole.
+    call("workspace.apply", {"note": "e2e message", "ops": [{"op": "set", "key": "view/e2e-msg", "value": {"kind": "panel", "items": [
+        {"type": "message", "text": "Message from coord", "title": "Message from coord · 21:11", "body": "a\nb\nc\nd\ne\nf", "fold": 4}]}}]})
+    out = text("view e2e-msg")
+    check("a message block is framed and folded", "┏━ Message from coord · 21:11" in out and "┃ d" in out and "┃ e" not in out and "▸ 2 more lines" in out, out)
+    out = text("view e2e-msg; expand 1")
+    check("expand shows the whole message", "┃ f" in out and "▾ less" in out, out)
     # Recovery: safe mode, the shared chooser, session allowance, leave.
     text("p 5")
     check("prefix row enters safe mode", wait(lambda: call("workspace.snapshot").get("safe_mode") is True))

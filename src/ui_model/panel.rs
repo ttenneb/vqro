@@ -89,7 +89,7 @@ pub struct Flat {
 
 
 /// Panel features this client renders. A panel may list what it needs in `requires`.
-pub const SUPPORTED: &[&str] = &["items", "pages", "tree", "badges", "menu", "input", "description", "filter", "toolbar", "chips", "select", "options", "badge_color", "icon", "icon_names", "list_detail", "wrap", "embedded_views", "current_when", "follow", "markdown", "pin", "composer", "multiline", "search", "facets", "sort", "columns"];
+pub const SUPPORTED: &[&str] = &["items", "pages", "tree", "badges", "menu", "input", "description", "filter", "toolbar", "chips", "select", "options", "badge_color", "icon", "icon_names", "list_detail", "wrap", "embedded_views", "current_when", "follow", "markdown", "pin", "composer", "multiline", "search", "facets", "sort", "columns", "message", "fold"];
 
 /// Features a panel needs that this client lacks.
 pub fn missing(v: &Value) -> Vec<String> { missing_for(v, SUPPORTED) }
@@ -110,7 +110,27 @@ pub fn kind(item: &Value) -> &str {
 
 pub fn selectable(item: &Value) -> bool {
     if kind(item) == "composer" { return true; }
-    (!matches!(kind(item), "header" | "separator" | "text") || kind(item)=="text" && item["focusable"]==true) && item["disabled"] != true
+    (!matches!(kind(item), "header" | "separator" | "text") || kind(item)=="text" && (item["focusable"]==true || fold(item).is_some())) && item["disabled"] != true
+}
+
+/// Rows that fold (feature `fold`): a text row or `message` block with `fold: N` shows its first N lines and
+/// "▸ M more lines" until unfolded (Enter, Space, →, or a click on that line); "▾ less" folds it again.
+pub fn fold(item: &Value) -> Option<usize> {
+    if !matches!(kind(item), "text" | "message") { return None; }
+    item["fold"].as_u64().map(|n| n.clamp(1, 10_000) as usize)
+}
+
+/// Whether a foldable row is shown whole: the user's choice, else the row's `expanded`.
+pub fn unfolded(r: &Flat, st: &State) -> bool {
+    st.open.get(&r.id).copied().unwrap_or(r.item["expanded"] == true)
+}
+
+/// The fold line a row shows after its first `fold` of `total` lines: "▸ N more lines" folded, "▾ less" unfolded,
+/// none when everything fits.
+pub fn fold_label(item: &Value, total: usize, open: bool) -> Option<String> {
+    let n = fold(item)?;
+    if total <= n { return None; }
+    Some(if open { "▾ less".to_string() } else { format!("▸ {} more line{}", total - n, if total - n == 1 { "" } else { "s" }) })
 }
 
 pub fn page_titles(v: &Value) -> Vec<String> {
@@ -126,7 +146,7 @@ fn page_items<'a>(v: &'a Value, st: &State) -> &'a [Value] {
 }
 
 fn matches(item: &Value, f: &str) -> bool {
-    let hay = format!("{} {} {} {} {}", item["text"].as_str().unwrap_or(""), item["detail"].as_str().unwrap_or(""), item["description"].as_str().unwrap_or(""),item["summary"].as_str().unwrap_or(""),item["tags"].as_array().into_iter().flatten().filter_map(Value::as_str).collect::<Vec<_>>().join(" "));
+    let hay = format!("{} {} {} {} {} {} {}", item["text"].as_str().unwrap_or(""), item["detail"].as_str().unwrap_or(""), item["description"].as_str().unwrap_or(""),item["summary"].as_str().unwrap_or(""),item["tags"].as_array().into_iter().flatten().filter_map(Value::as_str).collect::<Vec<_>>().join(" "), item["title"].as_str().unwrap_or(""), item["body"].as_str().unwrap_or(""));
     hay.to_lowercase().contains(f)
 }
 
@@ -571,6 +591,9 @@ pub fn activate(rows: &[Flat], st: &mut State, i: usize) -> Option<Value> {
     }
     if r.has_children {
         st.open.insert(r.id.clone(), !r.expanded);
+    } else if fold(&r.item).is_some() {
+        let open = unfolded(r, st);
+        st.open.insert(r.id.clone(), !open);
     }
     None
 }
@@ -580,6 +603,8 @@ pub fn left(rows: &[Flat], st: &mut State) {
     let Some(r) = rows.get(st.sel) else { return };
     if r.has_children && r.expanded {
         st.open.insert(r.id.clone(), false);
+    } else if fold(&r.item).is_some() && unfolded(r, st) {
+        st.open.insert(r.id.clone(), false);
     } else if let Some(p) = r.parent {
         st.sel = p;
     }
@@ -588,6 +613,8 @@ pub fn left(rows: &[Flat], st: &mut State) {
 pub fn right(rows: &[Flat], st: &mut State) {
     let Some(r) = rows.get(st.sel) else { return };
     if r.has_children && !r.expanded {
+        st.open.insert(r.id.clone(), true);
+    } else if fold(&r.item).is_some() && !unfolded(r, st) {
         st.open.insert(r.id.clone(), true);
     } else if r.has_children && st.sel + 1 < rows.len() {
         st.sel += 1;

@@ -95,13 +95,44 @@ fn chip_layout(item: &Value, width: u16, icons: &Icons) -> Vec<(u16, u16, u16)> 
     out
 }
 
-/// A row's height; a composer's follows its draft (it grows as you type, up to its `rows`).
+/// A row's height; a composer's follows its draft (it grows as you type, up to its `rows`); a folding row's its
+/// shown lines.
 fn row_lines(r: &Flat, st: &State, width: u16, icons: &Icons) -> u16 {
     if kind(&r.item) == "composer" {
         let draft = st.composers.get(&r.id).map(|c| c.editor.lines().0.len()).unwrap_or(1);
         return crate::ui_model::panel::composer_height_for(&r.item, draft);
     }
+    if kind(&r.item) == "message" || fold(&r.item).is_some() {
+        return block_lines(&r.item, width, r.depth, unfolded(r, st)).len().clamp(1, u16::MAX as usize) as u16;
+    }
     lines(&r.item, width, icons)
+}
+
+/// A text row's or message block's text as lines of (text, style tag), before folding: markdown through the shared
+/// layout (feature markdown), else wrapped (messages always wrap) or one line.
+fn body_lines(item: &Value, width: u16) -> Vec<crate::ui_model::markdown::Line> {
+    let message = kind(item) == "message";
+    let text = if message { item["body"].as_str().or(item["text"].as_str()) } else { item["text"].as_str() }.unwrap_or("");
+    if item["format"] == "markdown" { return crate::ui_model::markdown::lines(text, width as usize); }
+    if message || item["wrap"] == true { return wrap_text(text, width).into_iter().map(|l| vec![(l, "")]).collect(); }
+    vec![vec![(text.to_string(), "")]]
+}
+
+/// Every line a text row (with `fold`) or message block draws, as (text, style tag, kind): the frame of a message
+/// ("top", "side", "bottom"), its body, and the fold line ("fold"). Tags: markdown's, or "" plain.
+fn block_lines(item: &Value, width: u16, depth: usize, open: bool) -> Vec<(crate::ui_model::markdown::Line, &'static str)> {
+    let message = kind(item) == "message";
+    let inner = width.saturating_sub((depth * 2) as u16 + if message { 2 } else { 0 }).max(1);
+    let body = body_lines(item, inner);
+    let total = body.len();
+    let label = fold_label(item, total, open);
+    let shown = match (fold(item), open) { (Some(n), false) => n.min(total), _ => total };
+    let mut out: Vec<(crate::ui_model::markdown::Line, &'static str)> = Vec::new();
+    if message { out.push((vec![(item["title"].as_str().or(item["text"].as_str()).unwrap_or("").to_string(), "")], "top")); }
+    out.extend(body.into_iter().take(shown).map(|l| (l, if message { "side" } else { "" })));
+    if let Some(l) = label { out.push((vec![(l, "")], "fold")); }
+    if message { out.push((Vec::new(), "bottom")); }
+    out
 }
 
 fn lines(item: &Value, width: u16, icons: &Icons) -> u16 {
@@ -237,7 +268,7 @@ fn render_list(buf:&mut Buffer,mut area:Rect,v:&Arc<Value>,st:&mut State,focused
         if h == 0 {
             break;
         }
-        draw_row(buf, Rect { x: area.x, y, width: area.width, height: h }, r, focused && i == st.sel, st.chip, i, 0, hits, pal, icons, composer_of(st, r, focused));
+        draw_row(buf, Rect { x: area.x, y, width: area.width, height: h }, r, focused && i == st.sel, st.chip, i, 0, hits, pal, icons, composer_of(st, r, focused), unfolded(r, st));
         y += h;
     }
     // The facet/sort line (features `facets`, `sort`): client-drawn, below the toolbar.
@@ -272,7 +303,7 @@ fn render_list(buf:&mut Buffer,mut area:Rect,v:&Arc<Value>,st:&mut State,focused
             if h == 0 {
                 break;
             }
-            draw_row(buf, Rect { x: area.x, y: by, width: area.width, height: h }, r, focused && i == st.sel, st.chip, i, 0, hits, pal, icons, composer_of(st, r, focused));
+            draw_row(buf, Rect { x: area.x, y: by, width: area.width, height: h }, r, focused && i == st.sel, st.chip, i, 0, hits, pal, icons, composer_of(st, r, focused), unfolded(r, st));
             by += h;
         }
     }
@@ -332,7 +363,7 @@ fn render_list(buf:&mut Buffer,mut area:Rect,v:&Arc<Value>,st:&mut State,focused
         if y >= body.bottom() {
             break;
         }
-        draw_row(buf, Rect { x: body.x, y, width: body.width, height: (h-skip).min((body.bottom() - y) as u32) as u16 }, r, focused && i == st.sel, st.chip, i, skip.min(u16::MAX as u32) as u16, hits, pal, icons, composer_of(st, r, focused));
+        draw_row(buf, Rect { x: body.x, y, width: body.width, height: (h-skip).min((body.bottom() - y) as u32) as u16 }, r, focused && i == st.sel, st.chip, i, skip.min(u16::MAX as u32) as u16, hits, pal, icons, composer_of(st, r, focused), unfolded(r, st));
     }
 
     if scrollbar {
@@ -555,9 +586,58 @@ fn draw_composer(buf: &mut Buffer, row: Rect, item: &Value, selected: bool, chip
     if x + hw < row.right() { buf.set_string(row.right() - hw, y, &hint, pal.style(Some("dim"))); }
 }
 
+/// A text row with `fold`, or a `message` block: a heavy frame (accent) with the title, the body (markdown or
+/// wrapped), and the fold line, which toggles on a click.
 #[allow(clippy::too_many_arguments)]
-fn draw_row(buf: &mut Buffer, row: Rect, r: &Flat, selected: bool, chip: usize, i: usize, skip:u16, hits: &mut Hits, pal: &Palette, icons: &Icons, comp: Option<(&crate::ui_model::composer::Composer, bool)>) {
+fn draw_block(buf: &mut Buffer, row: Rect, r: &Flat, selected: bool, i: usize, skip: u16, hits: &mut Hits, pal: &Palette, open: bool) {
+    let item = &r.item;
+    let indent = (r.depth * 2) as u16;
+    let x0 = row.x + indent;
+    let w = row.width.saturating_sub(indent);
+    let message = kind(item) == "message";
+    let frame = if item["style"].is_string() { text_style(item, pal) } else { pal.style(Some("accent")) };
+    let base = if message || item["format"] == "markdown" { Style::new().fg(pal.text) } else if item["style"].is_string() { text_style(item, pal) } else { pal.style(Some("muted")) };
+    if selectable(item) { hits.rows.push((row, i)); }
+    for (dy, (line, part)) in block_lines(item, row.width, r.depth, open).into_iter().skip(skip as usize).take(row.height as usize).enumerate() {
+        let y = row.y + dy as u16;
+        let mut x = x0;
+        let pre = |s: &str, x: &mut u16, buf: &mut Buffer| { buf.set_string(*x, y, s, frame); *x += icons::width(s); };
+        match part {
+            "top" => {
+                let title = line.first().map(|s| s.0.as_str()).unwrap_or("");
+                let t = truncate(&format!("┏━ {title} "), w as usize);
+                let style = if selected { pal.selected() } else { frame.add_modifier(Modifier::BOLD) };
+                buf.set_string(x, y, &t, style);
+                let used = icons::width(&t);
+                if used < w { buf.set_string(x + used, y, "━".repeat((w - used) as usize), frame); }
+                continue;
+            }
+            "bottom" => { buf.set_string(x, y, format!("┗{}", "━".repeat(w.saturating_sub(1) as usize)), frame); continue; }
+            "side" => pre("┃ ", &mut x, buf),
+            "fold" => {
+                if message { pre("┃ ", &mut x, buf); }
+                let label = line.first().map(|s| s.0.as_str()).unwrap_or("");
+                buf.set_string(x, y, truncate(label, row.right().saturating_sub(x) as usize), pal.style(Some("accent")));
+                hits.expanders.push((Rect { x, y, width: icons::width(label).min(row.right().saturating_sub(x)), height: 1 }, i));
+                continue;
+            }
+            _ => {}
+        }
+        for (t, st) in line {
+            let style = match st { "h" => base.patch(pal.style(Some("accent"))).add_modifier(Modifier::BOLD), "b" => base.add_modifier(Modifier::BOLD), "c" | "pre" => base.patch(pal.style(Some("muted"))), _ => base };
+            let style = if selected && !message { style.patch(pal.selected()) } else { style };
+            let room = row.right().saturating_sub(x) as usize;
+            if room == 0 { break; }
+            buf.set_string(x, y, truncate(&t, room), style);
+            x = x.saturating_add(icons::width(&t));
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_row(buf: &mut Buffer, row: Rect, r: &Flat, selected: bool, chip: usize, i: usize, skip:u16, hits: &mut Hits, pal: &Palette, icons: &Icons, comp: Option<(&crate::ui_model::composer::Composer, bool)>, open: bool) {
     if kind(&r.item) == "composer" { return draw_composer(buf, row, &r.item, selected, chip, i, hits, pal, comp); }
+    if kind(&r.item) == "message" || fold(&r.item).is_some() { return draw_block(buf, row, r, selected, i, skip, hits, pal, open); }
     let item = &r.item;
     let w = row.width as usize;
     let y = row.y;

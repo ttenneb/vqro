@@ -58,7 +58,19 @@ export function normalize(name: string): string | null {
 
 export const kind = (item: Json): string => (isStr(item?.type) ? item.type : "item");
 export const selectable = (item: Json): boolean =>
-  (!["header", "separator", "text"].includes(kind(item)) || (kind(item) === "text" && item.focusable === true)) && item.disabled !== true;
+  (!["header", "separator", "text"].includes(kind(item)) || (kind(item) === "text" && (item.focusable === true || fold(item) !== null))) && item.disabled !== true;
+
+/** `fold: N` on a text row or message block (feature fold): its first N lines show until unfolded. */
+export function fold(item: Json): number | null {
+  if (!["text", "message"].includes(kind(item)) || !Number.isInteger(item.fold) || item.fold < 0) return null;
+  return Math.min(Math.max(item.fold, 1), 10000);
+}
+
+export function foldLabel(item: Json, total: number, open: boolean): string | null {
+  const n = fold(item);
+  if (n === null || total <= n) return null;
+  return open ? "▾ less" : `▸ ${total - n} more line${total - n === 1 ? "" : "s"}`;
+}
 
 export function missingFor(value: Json, features: string[]): string[] {
   const req = Array.isArray(value?.requires) ? value.requires : [];
@@ -66,7 +78,7 @@ export function missingFor(value: Json, features: string[]): string[] {
 }
 
 function matches(item: Json, f: string): boolean {
-  const hay = ["text", "detail", "description", "summary"].map((k) => (item[k] == null ? "" : String(item[k]))).join(" ")
+  const hay = ["text", "detail", "description", "summary", "title", "body"].map((k) => (item[k] == null ? "" : String(item[k]))).join(" ")
     + " " + (Array.isArray(item.tags) ? item.tags.filter(isStr).join(" ") : "");
   return hay.toLowerCase().includes(f);
 }

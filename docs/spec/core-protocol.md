@@ -1121,6 +1121,22 @@ New row types, components and view kinds are progressive enhancements: every cli
   original id, with `shown_view` naming the view drawn. Popups and embedded references follow fallbacks too.
 - Manifests declare a kind as `works_with: ["ui/<kind>@<major>"]`, never `needs` (the fallback is mandatory).
 
+### Message blocks and folding (D29)
+
+- **`message` rows** (feature `message`): `{type: "message", text, title?, body?, format?: "markdown", style?, fold?,
+  copy?}`. They show a framed block: a heavy rule with `title` (else `text`), then `body` (markdown or wrapped) on a
+  `┃` margin, then a closing rule. The frame is drawn in the row's `style`, default `accent`. Use it to set apart
+  messages from other senders; ordinary messages stay plain text rows. A message row is selectable; Enter folds or
+  unfolds it, and `copy` is what `client.copy` takes. Clients without the feature show the row's `fallback` (give
+  one: today's plain rows), else a plain item with `text`.
+- **`fold: N`** (feature `fold`) on a text row (wrapped or markdown) or a message: the client shows the first N
+  lines and then "▸ M more lines". Enter, Space, → or a click on that line unfolds; "▾ less", ← or Enter folds
+  again. Unfolded is client state per row id, initially the row's `expanded`. A folding text row is selectable.
+  Clients without the feature show the whole text.
+- Search and filter also match a message's `title` and `body`. `tests/fixtures/client/panels.json` checks
+  selectability and matching. The Rust TUI implements both features; the text client too (`expand <row>`); the
+  OpenTUI client draws messages whole (no `fold`).
+
 ### Formatted text and bottom-pinned rows (D29)
 
 - **`format: "markdown"`** on a `text` row (feature `markdown`): a fixed subset, `#` to `###` headings, paragraphs,

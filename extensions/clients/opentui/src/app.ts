@@ -6,7 +6,7 @@ import { Peer, RpcError, type Json } from "./rpc";
 import { Palette } from "./theme";
 import { Terminals } from "./terminal";
 
-export const FEATURES = [...m.BASE_FEATURES, "icon_names", "current_when", "follow", "list_detail", "embedded_views", "markdown", "pin", "composer", "multiline", "search", "facets", "sort", "columns"];
+export const FEATURES = [...m.BASE_FEATURES, "icon_names", "current_when", "follow", "list_detail", "embedded_views", "markdown", "pin", "composer", "multiline", "search", "facets", "sort", "columns", "message"];
 export const PROFILES = ["base", "keys", "terminal"];
 const KINDS = ["panel", "terminal"];
 
@@ -1302,8 +1302,16 @@ function columnText(cells: Json[], widths: number[], aligns: boolean[]): string 
   }).join(" ").trimEnd();
 }
 
+/** A message block's body lines (markdown flattened, else wrapped), inside its "┃ " margin. This client shows
+ *  them whole: it doesn't claim feature `fold`. */
+const messageBody = (it: Json, w: number): string[] => {
+  const body = clean2(it.body ?? it.text);
+  return it.format === "markdown" ? m.markdownLines(body, Math.max(1, w)).map((l) => l.map(([t]) => t).join("")) : wrapText(body, Math.max(1, w));
+};
+
 const rowHeight = (r: m.Row, w: number) =>
   m.kind(r.item) === "composer" ? composerHeight(r.item)
+    : m.kind(r.item) === "message" ? messageBody(r.item, w - r.depth * 2 - 2).length + 2
     : m.kind(r.item) === "text" && r.item.format === "markdown" ? Math.max(1, m.markdownLines(clean2(r.item.text), Math.max(1, w - r.depth * 2)).length)
     : m.kind(r.item) === "text" && r.item.wrap === true ? wrapText(clean2(r.item.text), Math.max(1, w - r.depth * 2)).length
     : m.kind(r.item) === "separator" ? 1 : 1 + (typeof r.item.description === "string" && r.item.description ? 1 : 0);
@@ -1389,6 +1397,20 @@ function drawRow(a: App, buf: OptimizedBuffer, r: Rect, row: m.Row, selected: bo
   const end = r.x + r.w;
   if (k === "composer") return drawComposer(a, buf, r, it, selected, chipSel, comp, hit);
   if (k === "separator") { text(buf, r.x, r.y, "─".repeat(r.w), p.color("border")); return 1; }
+  if (k === "message") {
+    // A message from someone else (feature message): a heavy frame with its title, then the body.
+    const frame = p.color(it.style ?? "accent");
+    const body = messageBody(it, r.w - indent - 2);
+    const lines = [`┏━ ${clean(it.title ?? it.text ?? "")} `, ...body.map((l) => `┃ ${l}`), "┗"];
+    lines.slice(0, r.h).forEach((l, j) => {
+      const fill = j === 0 || j === lines.length - 1 ? "━".repeat(Math.max(0, r.w - indent - width(l))) : "";
+      const attr = j === 0 ? TextAttributes.BOLD | (selected ? TextAttributes.INVERSE : 0) : 0;
+      text(buf, x, r.y + j, fit(j === 0 || j === lines.length - 1 ? l + fill : l, r.w - indent), j === 0 || j === lines.length - 1 ? frame : p.color("text"), undefined, attr);
+      if (j > 0 && j < lines.length - 1) text(buf, x, r.y + j, "┃", frame);
+    });
+    hit(r.x, r.w);
+    return Math.min(lines.length, Math.max(1, r.h));
+  }
   if (k === "text" && it.format === "markdown") {
     // Formatted text (feature markdown): the shared layout, styled through the palette.
     const lines = m.markdownLines(clean2(it.text), Math.max(1, r.w - indent));
