@@ -22,7 +22,7 @@ LINE_BYTES = 4096  # one row; longer lines are cut with a mark (display only, ne
 TOOL_LINES = 12  # lines of a tool's output shown before "… N more lines" (redesign mockup)
 HIDDEN_ROWS, HIDDEN_BYTES = 200, 16 * 1024  # the rest of an output or a thought, one expand away
 STEP_BYTES = 300  # a thinking step inside an Activity shows this much of its first line
-FRAME_BYTES = 16 * 1024  # a framed message's body; longer ones stay plain rows (the panel budget counts both forms)
+FRAME_BYTES = 8 * 1024  # a framed message's body; longer ones stay plain rows (the panel budget counts both forms)
 OTHER_FOLD = 4  # another agent's (or person's) message folds after this many lines (reply-13)
 THOUGHT_LINES = 2  # thinking shows its first lines, then "▸ more" (the human's choice, reply-13)
 THOUGHT_BLOCKS = ("thought", "thinking")
@@ -373,8 +373,8 @@ def tool_row(eid, value, cwd=None):
     name = plain(str(value.get("title") or "tool"))
     args = value.get("input")
     main, used = primary_argument(name, args)
-    if isinstance(cwd, str) and len(cwd) > 1 and main.startswith(cwd.rstrip("/") + "/"):
-        main = main[len(cwd.rstrip("/")) + 1:]  # a path inside the agent's folder reads relative to it
+    if used & set(FILE_ARGS) and isinstance(cwd, str) and len(cwd) > 1 and main.startswith(cwd.rstrip("/") + "/"):
+        main = main[len(cwd.rstrip("/")) + 1:]  # a path argument inside the agent's folder reads relative to it
     output = text_of(value)
     took = duration(value.get("started_ms"), value.get("ended_ms"))
     count = len([line for line in ANSI.sub("", output).split("\n")]) if output else 0

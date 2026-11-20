@@ -150,6 +150,8 @@ class TranscriptRows(unittest.TestCase):
         self.assertEqual(read["menu"][-1], {"label": "Copy input", "command": "client.copy"})
         self.assertEqual(agent_transcript.tool_row("e", {"title": "edit", "input": {"path": "/w/src/b.rs"}}, cwd="/w")["text"],
                          "? edit   src/b.rs", "inside the agent's folder: relative")
+        self.assertEqual(agent_transcript.tool_row("b", {"title": "bash", "input": {"command": "/w/deploy.sh --prod"}}, cwd="/w")["text"],
+                         "? bash   /w/deploy.sh --prod", "a command is never rewritten")
         self.assertEqual(read["actions"], [{"text": "open", "command": "links.open", "args": opens[0]["args"]},
                                            {"text": "copy", "command": "client.copy"}], "visible [open] [copy]")
         bash = agent_transcript.tool_row("b", {"title": "bash", "input": {"command": "ls"}, "content": text("a\nb")})
