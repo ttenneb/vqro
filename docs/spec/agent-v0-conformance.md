@@ -64,54 +64,56 @@ Levels describe usable combinations; module claims are separate ("I + queue + se
 
 ## A3. Tests
 
-**C. Core.** C1 registration and declarations. C2 per-resource caps narrower than the provider map, a stale `caps_rev`
+A case definition starts with its bold case label; plain IDs are references.
+
+**C. Core.** **C1** registration and declarations. **C2** per-resource caps narrower than the provider map, a stale `caps_rev`
 or `epoch`, an unknown action, or a precondition the adapter cannot check as declared: all reject before any native
-write. C3 state transitions match the script; silence never yields `idle`; unknown states render busy. C4 lost reply →
-`indeterminate`; the ledger shows one delivery, including across adapter and core restarts. C5 failure after
-acceptance is a completion; the earlier `accepted` stands. C6 facts over their bound are cut with `incomplete`, never
-silently. C7 core restart while the runtime works: same `rN`, facts resync, no input resent. C8 literal text: slash
+write. **C3** state transitions match the script; silence never yields `idle`; unknown states render busy. **C4** lost reply →
+`indeterminate`; the ledger shows one delivery, including across adapter and core restarts. **C5** failure after
+acceptance is a completion; the earlier `accepted` stands. **C6** facts over their bound are cut with `incomplete`, never
+silently. **C7** core restart while the runtime works: same `rN`, facts resync, no input resent. **C8** literal text: slash
 text, control characters and Enter have no side effects; only text the adapter declared it cannot send literally is
 rejected; `literal: controlled_launch` holds only for a launch without expanders or interceptors (Pi: `/command` and
-`/template` run or expand under ordinary config; `expandPromptTemplates: false` is ignored). C9 causality: a `cause`
+`/template` run or expand under ordinary config; `expandPromptTemplates: false` is ignored). **C9** causality: a `cause`
 passed on `agent.send` comes back on the receipt and on the inserted message only when the adapter can prove the link,
 with its `provenance`; no link is ever inferred; request `q1` on two endpoints and an effect id reused after a core
-restart stay distinct through their `endpoint`/`epoch` and `boot` qualifiers. C10 endpoint model, by
+restart stay distinct through their `endpoint`/`epoch` and `boot` qualifiers. **C10** endpoint model, by
 `caps.host.endpoints`: with `"many"`, one server host with three endpoints shows one `host.id` for all three and each
 endpoint keeps its own `rN`; with `"one"` the multi-endpoint scenario is not-applicable. Session switch keeping `rN`
-is tested in M2. C11 optional view facts: runtime-reported usage preserves context, token/cache counts, currency,
+is tested in M2. **C11** optional view facts: runtime-reported usage preserves context, token/cache counts, currency,
 cost basis and plan; absent sections stay unknown, never zero or locally priced estimates. A window-only runtime
 reports `context: {window}` with no `used`; last-turn token totals never become context occupancy. Optional run and
 native thought-message usage preserve that same shape and only native reports; absent values are not apportioned
 from other usage. Session cwd/model/effort
 match native reports, never the bridge/viewer's cwd or a guessed model. Model changes still go through the
-advertised model-category config option, not a facts write. C12 generic causality wire: root-only, args-only and
+advertised model-category config option, not a facts write. **C12** generic causality wire: root-only, args-only and
 matching dual `cause`/`correlation` arrive unchanged in effect metadata/audits, with args unchanged. Conflicting
 forms reject `invalid` before dispatch. Require string kind/id/provenance and the entity/request endpoint+epoch
 or effect boot qualifiers (presence/type only); do not resolve them as authority. Unknown enums, extra bounded
 fields and provenance pass unchanged. Exercise cause 4 KiB, known strings 256 bytes, depth 64, and non-empty
 correlation 256 bytes; invalid types, missing qualifiers and over-bound input reject without native writes.
 
-**D. Delivery.** D1–D5 each declared mode × {idle, busy}: the declared edge happens at the declared point (ledger
+**D. Delivery.** **D1–D5** each declared mode × {idle, busy}: the declared edge happens at the declared point (ledger
 records the insertion point), or `busy`/`unsupported` with an empty ledger; `batch: one|all` honoured; no fallback,
-`admit` included. D6 undeclared content rejects before native write. D7 receipts: a native acknowledgement maps to
+`admit` included. **D6** undeclared content rejects before native write. **D7** receipts: a native acknowledgement maps to
 `admitted` (Pi's `success: true` included); `inserted` only with correlated native evidence; under `correlation:
-none` observed user messages carry no `delivery`. D8 keys: same key twice (in flight, after insertion, across an
+none` observed user messages carry no `delivery`. **D8** keys: same key twice (in flight, after insertion, across an
 adapter restart, other session, past retention) gives what `keys` declares; a key never deduplicates a tool effect.
-D9 changing a runtime setting (Pi steering or follow-up mode) republishes `caps`; with `batch_at: consume`, three
-steers accepted under one-at-a-time and then switched to all land in one request (and the reverse splits them). D10
+**D9** changing a runtime setting (Pi steering or follow-up mode) republishes `caps`; with `batch_at: consume`, three
+steers accepted under one-at-a-time and then switched to all land in one request (and the reverse splits them). **D10**
 interrupt per `pending`/`scope`/`waits`; idle interrupt is a no-op; Pi declares `pending: unknown` (a steer can enter
-the session during a tool abort with no model request; follow-ups stay parked). D11 guards: stale session/run rejects
-before native write; `runtime` vs `adapter` strength distinguished under two concurrent controllers. D12 idle `park`:
-a Pi steer or follow-up sent while idle is parked, not started. D13 start preflight: two overlapping starts are
+the session during a tool abort with no model request; follow-ups stay parked). **D11** guards: stale session/run rejects
+before native write; `runtime` vs `adapter` strength distinguished under two concurrent controllers. **D12** idle `park`:
+a Pi steer or follow-up sent while idle is parked, not started. **D13** start preflight: two overlapping starts are
 serialized (one preflight in flight); a native settled event while a preflight is gated is no completion; interrupt
-does not cancel a gated preflight. D14 `handled: none`: a hook-consumed Pi input is `admitted`, never `handled` or
-`inserted`. D15 origin, asserted against the model-request envelope (not a UI badge): content with `origin.kind:
+does not cancel a gated preflight. **D14** `handled: none`: a hook-consumed Pi input is `admitted`, never `handled` or
+`inserted`. **D15** origin, asserted against the model-request envelope (not a UI badge): content with `origin.kind:
 agent` arrives in the declared role, framed with its sender, never as plain user, system or developer text; `quoted`
 provenance is shown as a claim; a user-role-only runtime and a context-hook runtime each use only renderings the call's
-`render` accepts (`context` only when named); nothing acceptable → `unsupported`. D16 content shape: with `shape:
+`render` accepts (`context` only when named); nothing acceptable → `unsupported`. **D16** content shape: with `shape:
 "text_then_media"` (Pi), `[text, image]` and `[image]` pass, and `[image, text]` and `[text, image, text]` are rejected
 `unsupported` with an empty ledger; nothing is reordered, flattened or concatenated; with `ordered`, any sequence of
-the declared types passes in order. D17 core-bound origin: invoke with core effective principal P, transport actor
+the declared types passes in order. **D17** core-bound origin: invoke with core effective principal P, transport actor
 `extension:coord`, and initiator W. Supplied `origin` must identify P/`extension:coord`/W separately; substituting W
 for actor, changing principal or changing initiator rejects `forbidden` with an empty native ledger. Missing core
 identity stays `undeclared`, never owner or a caller's assertion. Caller-classified `kind`/`agent` remain asserted
@@ -123,71 +125,71 @@ attestation. An autonomous dispatch's current core principal/initiator are not r
 no end-to-end core proof or implicit delegation is claimed.
 
 **O. Observation** (P3 prototype `proto/item-stream` fc1dd12 passes O1–O10 at 200 agents × 3 viewers; O11 untested).
-O1 put/append/remove algebra; append with a wrong `base` is a gap, never applied. O2 snapshot cut, through two public
+**O1** put/append/remove algebra; append with a wrong `base` is a gap, never applied. **O2** snapshot cut, through two public
 viewers: a large snapshot is sent while entities (an old A, a new B) keep changing; each viewer reconstructs at its
 own cut, the second cut included, equal to the adapter's state at that cut, with every later change exactly once; the
-overlap evidence is kept. O3 producer-side follow-on overflow (that viewer gets a gap and installs nothing; others
+overlap evidence is kept. **O3** producer-side follow-on overflow (that viewer gets a gap and installs nothing; others
 continue) is tested deterministically in the shared Rust item producer's unit tests (C3); an adapter using that
-producer inherits the evidence, and its result records which producer it uses. O4 `after` outside retention or a
-foreign epoch → `reset`, never a silent join. O5 a session switch on an open stream: a new `snapshot begin` with the
+producer inherits the evidence, and its result records which producer it uses. **O4** `after` outside retention or a
+foreign epoch → `reset`, never a silent join. **O5** a session switch on an open stream: a new `snapshot begin` with the
 new epoch precedes any new-epoch record (or the stream closes); a viewer at old `seq` 500 never ignores new records as
-duplicates. O6 two viewers attaching at different times show the same timeline order (by `position`). O7 three
+duplicates. **O6** two viewers attaching at different times show the same timeline order (by `position`). **O7** three
 viewers, one stalled: only the stalled stream closes (`slow_consumer`); its connection, its other streams and
 other viewers stay open. Native draining continues; the viewer reattaches from its last applied record.
-O8 JSONL lines split across frames and UTF-8 boundaries. O9 coverage `tail`/`state_only` never shown as complete;
-current state and pending requests survive pruning. O10 retained memory stays within the declared bounds: measure
+**O8** JSONL lines split across frames and UTF-8 boundaries. **O9** coverage `tail`/`state_only` never shown as complete;
+current state and pending requests survive pruning. **O10** retained memory stays within the declared bounds: measure
 journal `max(retain_bytes + snapshot_buffer_bytes, max_record_bytes)` (the one-record floor) and old shared
 entity versions held by active snapshot cuts, current
 entities and adapter/transport overhead separately. A mid-snapshot cursor may retain up to `entity_bytes` of old
 versions; include that per cursor and verify release on close/gap or the next cursor step after epoch change.
 Optional `items.snapshot_buffer_bytes` exposes the configured buffer; absence means not declared, not zero.
-P3's journal plateau of 26.2 MB is not an all-in slow-viewer cap (agent-v0 §8). O11 (C3 covers attached retention
+P3's journal plateau of 26.2 MB is not an all-in slow-viewer cap (agent-v0 §8). **O11** (C3 covers attached retention
 gaps and a 200-stream stall) a viewer draining steadily but slower than generation gets gap reason `retention`;
 a stalled viewer holding all 200 streams loses them together and harms nobody; an unknown gap reason ends the
-stream. O12 producer append bounds: a small append whose resulting whole snapshot `put` exceeds
+stream. **O12** producer append bounds: a small append whose resulting whole snapshot `put` exceeds
 the record bound returns `too_large`, leaving entity, revision and `seq` unchanged; both text and decoded-byte
-appends are covered. Adapters record how they handle this refusal without silently losing content. O13 optional
+appends are covered. Adapters record how they handle this refusal without silently losing content. **O13** optional
 view metadata: plain/default, markdown and unknown text formats render independently per block (unknown falls back
 to plain). Runtime/vqro notices use role `system`, distinct from `coordination`, without upgrading a send's authority.
 Tool/run `started_ms`/`ended_ms` and message `at_ms` match supplied evidence; missing times remain unknown, not
-filled from observation order or the viewer's clock. O14 incompatible viewers: repeat `bad_record` or
+filled from observation order or the viewer's clock. **O14** incompatible viewers: repeat `bad_record` or
 `over_bound` at the same continued position, and an over-bound entity in a reset snapshot. The viewer backs
 off, reports incompatible stream with the cause/limit mismatch, and never enters an immediate reattach loop,
 skips the record, advances its last-good cursor, relaxes bounds or installs a partial cut. An unknown newer op
 gets the same visible incompatibility handling; unchanged rejection is not counted as recovery.
 
-**R. Requests.** R1 a request appears in facts and stream with its scope; `requires_action` when it blocks. R2 two
+**R. Requests.** **R1** a request appears in facts and stream with its scope; `requires_action` when it blocks. **R2** two
 simultaneous answers: exactly one native response; stale revision, foreign epoch, expired, no longer pending, dead
-scope or invalid response → rejected before native write. R3 `accepted` only with native ack, else `dispatched`. R4
+scope or invalid response → rejected before native write. **R3** `accepted` only with native ack, else `dispatched`. **R4**
 unrepresentable or unknown methods cancelled once, never auto-approved; `incomplete` never approvable. For Pi, a
 dialog with a positive native relative timeout is cancelled once as unrepresentable (no fabricated absolute expiry);
-an untimed dialog remains answerable. R5 explicit
-cancel for permission, choice, confirm and text is distinct from denial, false and empty text. R6 requests are tested
+an untimed dialog remains answerable. **R5** explicit
+cancel for permission, choice, confirm and text is distinct from denial, false and empty text. **R6** requests are tested
 only in the declared `scopes`; with `background_requests: true`, a background request and a foreground permission are
 pending and interrupt withdraws only the one the runtime stops waiting on; with `false` that scenario is
-not-applicable. R7 reconnect verifies, reissues or cancels pending requests; an authentication request before any
+not-applicable. **R7** reconnect verifies, reissues or cancels pending requests; an authentication request before any
 session is operation-scoped. Pi's native UI dialogs have distinct adapter-minted operation scopes, never guessed
 session/run associations, and `background_requests: false`; their answers remain `dispatched` without a native ack.
 
-**M. Modules.** M1 native queue list/clear/withdraw/replace as declared; clear returns content once; null ids allow no
-per-item ops; an emptied queue never yields `inserted`. M2 sessions: `new` on a sessionless endpoint; switch keeps `rN`
+**M. Modules.** **M1** native queue list/clear/withdraw/replace as declared; clear returns content once; null ids allow no
+per-item ops; an emptied queue never yields `inserted`. **M2** sessions: `new` on a sessionless endpoint; switch keeps `rN`
 and starts an epoch; resume sends no prompt; fork at an invalid position rejects; results appear in facts before the
-reply. M3 config: `observed` only after the runtime reports the value; a stale `rev` or a value outside `choices`
+reply. **M3** config: `observed` only after the runtime reports the value; a stale `rev` or a value outside `choices`
 rejects before native write; a runtime-side change republishes the list and, if it alters a declaration, bumps
-`caps.rev`. M4 commands: only advertised names run; slash text in a send stays literal. M5 history: pages from one
-frozen cut with coverage; the last page's live cursor continues the stream with no gap or overlap. M6 children have
-their own `caps`; nothing is inferred from the root; object cancel affects one item. M7 display terminal output (bytes)
-appends and exit; a display terminal is not treated as a backend terminal. M8 byte-safe append: chunks `/w==` then
+`caps.rev`. **M4** commands: only advertised names run; slash text in a send stays literal. **M5** history: pages from one
+frozen cut with coverage; the last page's live cursor continues the stream with no gap or overlap. **M6** children have
+their own `caps`; nothing is inferred from the root; object cancel affects one item. **M7** display terminal output (bytes)
+appends and exit; a display terminal is not treated as a backend terminal. **M8** byte-safe append: chunks `/w==` then
 `AA==` give the bytes `ff 00` (never the string `/w==AA==`); 1-, 2- and 3-byte chunks across padding boundaries and
 non-UTF-8 output reconstruct exactly, through a snapshot `put` and live continuation; a `text` append on a bytes field
 is rejected as a gap.
 
-**L. Lifecycle evidence.** L1 interrupt ends the turn only; stop ends the endpoint. L2 `agent.stop` is invoked once
+**L. Lifecycle evidence.** **L1** interrupt ends the turn only; stop ends the endpoint. **L2** `agent.stop` is invoked once
 and its reply data includes this call's `covers`, equal to or narrower than declared and never wider. If effective
 coverage is not natively evidenced, `covers_evidence: "requested"` is present and no stopped-work claim is inferred.
-`ended` only after end evidence; a refused stop returns to `live`. L3 the host terminal of
+`ended` only after end evidence; a refused stop returns to `live`. **L3** the host terminal of
 a bridge that declares `owns_lifecycle` finishes → `ended`; an app-server host that does not declare it disappears →
-its endpoints `unknown`, never `ended`; a late end event from an old host incarnation ends nothing. L4 a bridge
+its endpoints `unknown`, never `ended`; a late end event from an old host incarnation ends nothing. **L4** a bridge
 disconnect with no end evidence is `disconnected`, never `ended`; a reconnect never undoes `ended`; an idle completion
 is never end evidence. An observed exit from the bound owning host terminal is end evidence, permitting cache
 cleanup; it never relabels the endpoint `retired` or `unknown`.
