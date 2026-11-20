@@ -229,12 +229,13 @@ export function columnWidths(spec: Json[], shown: Row[], width: number): number[
 }
 
 function widthsFor(spec: Json[], shown: Row[], width: number, on: boolean[]): number[] {
-  const cell = (r: Row, i: number) => (Array.isArray(r.item.columns) && isStr(r.item.columns[i]) ? [...r.item.columns[i]].length : 0);
+  // Terminal cells, not characters: wide (CJK, emoji) text takes two each.
+  const cell = (r: Row, i: number) => (Array.isArray(r.item.columns) && isStr(r.item.columns[i]) ? Bun.stringWidth(r.item.columns[i]) : 0);
   const w: (number | null)[] = spec.map((c, i) => {
     if (!on[i]) return 0;
     if (isInt(c?.width)) return c.width;
     if (c?.width === "fill") return null;
-    return Math.max(1, Math.min(Math.floor(width / 3), Math.max(isStr(c?.label) ? [...c.label].length : 0, ...shown.map((r) => cell(r, i)))));
+    return Math.max(1, Math.min(Math.floor(width / 3), Math.max(isStr(c?.label) ? Bun.stringWidth(c.label) : 0, ...shown.map((r) => cell(r, i)))));
   });
   const fills = w.filter((x) => x === null).length;
   const left = Math.max(0, width - w.reduce<number>((s, x) => s + (x ?? 0), 0) - (on.filter(Boolean).length - 1));

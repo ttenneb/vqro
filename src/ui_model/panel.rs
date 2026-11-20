@@ -343,6 +343,7 @@ pub fn column_widths(spec: &[Value], rows: &[Flat], width: usize) -> Vec<usize> 
     let mut shown = vec![true; n];
     loop {
         let w = widths_for(spec, rows, width, &shown);
+        // A column that gets less than its `min_width` drops the lowest-priority shown column, which may be itself.
         let short = spec.iter().enumerate().any(|(i, c)| shown[i] && c["min_width"].as_u64().is_some_and(|m| w[i] < m as usize));
         let victim = spec.iter().enumerate().filter(|(i, c)| shown[*i] && c["priority"].is_number())
             .min_by(|a, b| a.1["priority"].as_f64().partial_cmp(&b.1["priority"].as_f64()).unwrap_or(Ordering::Equal).then(b.0.cmp(&a.0)))
@@ -352,11 +353,13 @@ pub fn column_widths(spec: &[Value], rows: &[Flat], width: usize) -> Vec<usize> 
 }
 
 fn widths_for(spec: &[Value], rows: &[Flat], width: usize, shown: &[bool]) -> Vec<usize> {
-    let cell = |r: &Flat, i: usize| r.item["columns"].get(i).and_then(Value::as_str).map(|s| s.chars().count()).unwrap_or(0);
+    // Terminal cells, not characters: wide (CJK, emoji) text takes two each.
+    let cells = |s: &str| unicode_width::UnicodeWidthStr::width(s);
+    let cell = |r: &Flat, i: usize| r.item["columns"].get(i).and_then(Value::as_str).map(cells).unwrap_or(0);
     let mut w: Vec<Option<usize>> = spec.iter().enumerate().map(|(i, c)| if !shown[i] { Some(0) } else { match &c["width"] {
         Value::Number(x) => x.as_u64().map(|x| x as usize),
         Value::String(s) if s == "fill" => None,
-        _ => Some(rows.iter().map(|r| cell(r, i)).chain(std::iter::once(c["label"].as_str().map(|l| l.chars().count()).unwrap_or(0))).max().unwrap_or(0).min(width / 3).max(1)),
+        _ => Some(rows.iter().map(|r| cell(r, i)).chain(std::iter::once(c["label"].as_str().map(cells).unwrap_or(0))).max().unwrap_or(0).min(width / 3).max(1)),
     } }).collect();
     let visible = shown.iter().filter(|s| **s).count();
     let fixed: usize = w.iter().flatten().sum::<usize>() + visible.saturating_sub(1);

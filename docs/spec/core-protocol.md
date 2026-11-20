@@ -1182,11 +1182,13 @@ given rows in clients without the feature. Fixtures: `tests/fixtures/client/pane
   strings compare case-insensitively, `desc` reverses keyed rows, and rows without the key stay last. The client
   shows `Sort: <label>` in the same line; `s` cycles; `client.panel {action: "sort", key?}` chooses (no key: given).
 - **Columns** (feature `columns`): `columns: [{label?, width?: cells | "fill", align?: "left"|"right",
-  min_width?, priority?}]` on the panel; rows carry `columns: [text…]`. Widths: a number is fixed, absent is the
-  widest cell or label (at most a third of the width), `"fill"` columns share the rest; one-cell gaps; long cells
-  are truncated with `…`; badges still go at the right edge. **Columns degrade by width:** while a column with
-  `min_width` would get less, the shown column with the lowest `priority` is dropped (columns without `priority`
-  never are), so a narrow pane keeps a readable title rather than squeezing every column. A header line shows when any column has a label. `text` stays required and is what clients
+  min_width?, priority?}]` on the panel; rows carry `columns: [text…]`. Widths are terminal cells (wide CJK and
+  emoji characters take two): a number is fixed, absent is the widest cell or label (at most a third of the width),
+  `"fill"` columns share the rest; one-cell gaps; long cells are truncated with `…`; badges still go at the right
+  edge. **Columns degrade by width:** while a column with `min_width` (a non-negative integer) would get less, the
+  shown column with the lowest `priority` (a number) is dropped, the rightmost first among equals; that may be the
+  short column itself. Columns without `priority` are never dropped, so a short column with nothing left to drop
+  stays short. A narrow pane thus keeps a readable title rather than squeezing every column. A header line shows when any column has a label. `text` stays required and is what clients
   without the feature show, so write it as a readable join (`"command · agents.abort"`).
 
 Illustrative panel:
