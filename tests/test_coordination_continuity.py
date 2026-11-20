@@ -70,6 +70,31 @@ class ContinuityTests(unittest.TestCase):
             f.engine.handover({'op': f.op(), 'action': 'stage', 'plan': plan, 'stage': 1}, fixtures.OWNER)
         self.assertEqual(f.ledger, [])
 
+    def test_complete_and_abort_skip_withdrawn_members_without_stranding_pending(self):
+        for action, withdrawn_count in [('complete', 1), ('abort', 1), ('abort', 2), ('complete', 2)]:
+            with self.subTest(action=action, withdrawn=withdrawn_count):
+                f = fixtures.EngineTests(); f.setUp()
+                deliveries = [f.send(send_new=True)['delivery'] for _ in range(2)]
+                f.resources['r1']['data']['agent']['lifecycle'] = 'ended'
+                f.resources['r2'] = fixtures.resource('r2')
+                f.resources['r2']['data']['agent']['session'] = {'id': 's2'}
+                plan = f.engine.handover({'op': f.op(), 'from': {'agent': 'r1', 'incarnation': 'i1'},
+                    'to': {'agent': 'r2', 'incarnation': 'i1'}, 'deliveries': deliveries}, fixtures.OWNER)['plan']
+                for delivery in deliveries[:withdrawn_count]:
+                    f.engine.edit({'op': f.op(), 'delivery': delivery,
+                                   'expect': f.engine.get(delivery)['revision']}, fixtures.OWNER, withdraw=True)
+                result = f.engine.handover({'op': f.op(), 'action': action, 'plan': plan}, fixtures.OWNER)
+                self.assertEqual(result['state'], 'completed' if action == 'complete' else 'aborted')
+                for n, delivery in enumerate(deliveries):
+                    record = f.engine.get(delivery)
+                    self.assertNotIn('handover_plan', record)
+                    if n < withdrawn_count:
+                        self.assertEqual(record['state'], 'withdrawn')
+                    else:
+                        self.assertEqual(record['state'], 'held')
+                        self.assertEqual(record['to']['agent'], 'r2' if action == 'complete' else 'r1')
+                self.assertEqual(f.ledger, [])
+
     def test_native_transport_identity_is_hello_while_sender_is_inbox_record(self):
         ext = FakeExtension()
         service = CoordinationService(ext)

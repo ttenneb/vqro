@@ -1409,7 +1409,12 @@ class Coordinator:
                     policy.require(context["principal"], "handover", target["agent"])
                 for delivery in plan["deliveries"]:
                     record = self._record(work, delivery)
-                    if record.get("handover_plan") != plan_id or record["state"] not in PENDING:
+                    if record["state"] not in PENDING:
+                        if record.get("handover_plan") == plan_id:
+                            record.pop("handover_plan")
+                            work.put("message/" + delivery, record)
+                        continue
+                    if record.get("handover_plan") != plan_id:
                         raise CoordinationError("conflict", "handover record changed")
                     record["to"] = copy.deepcopy(record["handed_over_from"])
                     record.pop("handover_plan")
@@ -1434,7 +1439,12 @@ class Coordinator:
                 successor_session = (native.get("session") or {}).get("id")
                 for delivery in plan["deliveries"]:
                     record = self._record(work, delivery)
-                    if record.get("handover_plan") != args["plan"] or record["state"] not in PENDING:
+                    if record["state"] not in PENDING:
+                        if record.get("handover_plan") == args["plan"]:
+                            record.pop("handover_plan")
+                            work.put("message/" + delivery, record)
+                        continue
+                    if record.get("handover_plan") != args["plan"]:
                         raise CoordinationError("conflict", "handover record changed")
                     record.pop("handover_plan")
                     record["to"]["session"] = successor_session

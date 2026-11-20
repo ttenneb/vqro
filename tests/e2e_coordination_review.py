@@ -519,9 +519,43 @@ def case_queue_epoch():
     return {'native_recipe_steps': 3, 'queue_epoch': 'e1', 'explicit_stale_preserved': True}
 
 
+def case_handover_withdrawn():
+    results = []
+    for action, withdrawn_count in [('complete', 1), ('abort', 1), ('abort', 2), ('complete', 2)]:
+        tag = action + str(withdrawn_count)
+        src = agent('withdraw-src-' + tag, native())
+        dst = agent('withdraw-dst-' + tag, dict(native(), session={'id': 's2'}))
+        scope('pause')
+        deliveries = []
+        for n in range(2):
+            o = op('withdraw-source')
+            deliveries.append(cmd('inbox.send', {'op': o, 'submission': o, 'to': src, 'mode': 'start', 'send_new': True,
+                                'content': [{'type': 'text', 'text': str(n)}]})['delivery'])
+        peer, generation, facts = GEN['withdraw-src-' + tag]
+        facts['data']['agent']['lifecycle'] = 'ended'
+        peer.call('provider.sync', {'generation': generation, 'resources': [facts], 'final': True})
+        wait(lambda: cmd('inbox.get', {'delivery': deliveries[0]})['reason'] == 'agent_ended')
+        plan = cmd('handover', {'op': op('withdraw-plan'), 'from': {'agent': src, 'incarnation': 'i1'},
+                   'to': {'agent': dst, 'incarnation': 'i1'}, 'deliveries': deliveries})['plan']
+        for delivery in deliveries[:withdrawn_count]:
+            record = cmd('inbox.get', {'delivery': delivery})
+            cmd('inbox.withdraw', {'op': op('withdraw-mid-plan'), 'delivery': delivery, 'expect': record['revision']})
+        result = cmd('handover', {'op': op('finalize-withdrawn'), 'action': action, 'plan': plan})
+        assert result['state'] == ('completed' if action == 'complete' else 'aborted'), result
+        for n, delivery in enumerate(deliveries):
+            record = cmd('inbox.get', {'delivery': delivery})
+            assert not record.get('handover_plan'), record
+            if n < withdrawn_count:
+                assert record['state'] == 'withdrawn', record
+            else:
+                assert record['state'] == 'held' and record['to']['agent'] == (dst if action == 'complete' else src), record
+        results.append({'action': action, 'withdrawn': withdrawn_count, 'final': result['state']})
+    return {'variants': results, 'nonpending_never_replayed': True}
+
+
 CASES = {'brick': case_brick, 'idle': case_idle, 'membership': case_membership, 'identity': case_identity, 'reconcile': case_reconcile, 'names': case_names,
          'rawcycle': case_rawcycle, 'invalid_declaration': case_invalid_declaration,
-         'window': case_window, 'handover': case_handover, 'archive': case_archive, 'queue_epoch': case_queue_epoch}
+         'window': case_window, 'handover': case_handover, 'archive': case_archive, 'queue_epoch': case_queue_epoch, 'handover_withdrawn': case_handover_withdrawn}
 core = None
 try:
     core = subprocess.Popen([str(BIN), 'serve', '--fake'], env=ENV, cwd=ROOT, stdout=open(ROOT / 'core.log', 'wb'), stderr=subprocess.STDOUT)
