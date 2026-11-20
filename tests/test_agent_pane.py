@@ -90,6 +90,60 @@ class TranscriptRows(unittest.TestCase):
         self.assertIn("[image: image/png]", texts)
 
 
+class ViewSettings(unittest.TestCase):
+    """AS10: nothing hidden by default; each kind shown, summarised (expandable) or hidden with a count left."""
+
+    def rows(self, **view):
+        names = agent_transcript.Names({"r2": {"name": "Pi"}, "r7": {"name": "vqro-lead"}}, "r2")
+        entities = dict(CONVERSATION)
+        entities[("message", "m4")] = dict(entities[("message", "m4")], at_ms=1_763_600_060_000,
+                                           usage={"tokens": {"output": 1200}})
+        return agent_transcript.rows({k: (1, v) for k, v in entities.items()}, names, None,
+                                     agent_transcript.view_settings(view))
+
+    def find(self, rows, prefix):
+        return next(r for r in rows if r.get("text", "").startswith(prefix))
+
+    def test_defaults_show_everything(self):
+        self.assertEqual(agent_transcript.view_settings(), agent_transcript.DEFAULT_VIEW)
+        self.assertTrue(any(r.get("type") == "header" and r["text"].startswith("Thinking · ") for r in self.rows()))
+
+    def test_summary_replaces_a_kind_with_a_configurable_expandable_line(self):
+        rows = self.rows(thinking="summary", tools="summary")
+        thinking = self.find(rows, "▸ Thinking")
+        self.assertEqual(thinking["text"], "▸ Thinking · " + agent_transcript.when(1_763_600_060_000) + " · 1.2k tokens")
+        self.assertFalse(thinking["expanded"])
+        self.assertIn("Config change, not code.", [c.get("text") for c in thinking["children"]], "one expand away")
+        tools = self.find(rows, "▸ Activity")
+        self.assertEqual((tools["text"], tools["expanded"]), ("▸ Activity · 4.8s · 2 tools", False))
+        lines = self.rows(thinking="summary", summary=["lines", "words"])
+        self.assertEqual(self.find(lines, "▸ Thinking")["text"], "▸ Thinking · 1 lines · Config change, not code.…")
+
+    def test_hide_leaves_a_count_and_senders_can_be_folded(self):
+        rows = self.rows(thinking="hide", tools="hide")
+        texts = [r.get("text") for r in rows]
+        self.assertIn("· hidden: 2 tools", texts)
+        self.assertIn("· hidden: 1 thinking", texts)
+        self.assertFalse(any(t and t.startswith("Activity") for t in texts))
+        folded = self.find(self.rows(hidden_senders=["agent:r7"]), "▸ Message from vqro-lead")
+        self.assertFalse(folded["expanded"])
+
+    def test_compact_collapses_tools_folds_long_messages_and_drops_repeat_times(self):
+        names = agent_transcript.Names({}, "r2")
+        long = {("message", f"m{i}"): {"position": i, "role": "user", "at_ms": 1_763_600_000_000, "final": True,
+                                       "origin": {"kind": "human"}, "content": text("\n".join(f"line {n}" for n in range(60)))}
+                for i in range(2)}
+        rows = agent_transcript.rows({k: (1, v) for k, v in long.items()}, names, None, agent_transcript.view_settings({"density": "compact"}))
+        headers = [r["text"] for r in rows if r.get("type") == "header"]
+        self.assertEqual(headers, ["You · " + agent_transcript.when(1_763_600_000_000), "You"], "time only when the sender changes")
+        fold = next(r for r in rows if r.get("text") == "… 20 more lines")
+        self.assertEqual((fold["expanded"], len(fold["children"])), (False, 20))
+
+    def test_invalid_settings_fall_back(self):
+        view = agent_transcript.view_settings({"thinking": "explode", "summary": ["time", "bogus"], "density": 3})
+        self.assertEqual((view["thinking"], view["summary"], view["density"]), ("show", ["time"], "detailed"))
+
+
 class FormattingAndFacts(unittest.TestCase):
     def test_only_blocks_marked_markdown_are_formatted_and_they_stay_whole(self):
         names = agent_transcript.Names({}, "r2")
@@ -173,6 +227,24 @@ class AgentPane(unittest.TestCase):
         del self.core.resources["r2"]
         self.agents.event("resource.removed", {"id": "r2"})
         self.assertNotIn("r2", self.agents.conversations)
+
+    def test_view_chips_write_this_panes_settings_and_make_default_copies_them(self):
+        self.feed(snapshot(CONVERSATION))
+        toolbar = self.core.live["agents-r2"]["toolbar"][0]["chips"]
+        thinking = next(c for c in toolbar if c["text"] == "Thinking: show")
+        self.core.handlers["agents.view"](dict(thinking["args"], value="hide"))
+        self.assertEqual(self.core.value("doc/agents/view/r2"), {"thinking": "hide"})
+        senders = next(c for c in toolbar if c["text"] == "Senders: all")
+        self.assertIn("agent:r7", [o["value"] for o in senders["options"]])
+        self.core.handlers["agents.view"](dict(senders["args"], value="agent:r7"))
+        self.assertEqual(self.core.value("doc/agents/view/r2")["hidden_senders"], ["agent:r7"])
+        self.agents.event("entries", {"changes": [{"key": "doc/agents/view/r2"}]})
+        self.assertIn("· hidden: 1 thinking", self.texts())
+        self.core.handlers["agents.view"]({"resource": "r2", "set": "defaults"})
+        self.assertEqual(self.core.value("doc/settings/agents")["view"]["thinking"], "hide")
+        self.assertNotIn("hidden_senders", self.core.value("doc/settings/agents")["view"], "senders are per pane")
+        with self.assertRaises(Exception):
+            self.core.handlers["agents.view"]({"resource": "r2", "set": "thinking", "value": "explode"})
 
     def test_a_failed_attach_is_retried_later_not_in_a_loop(self):
         self.core.fail_attach = True

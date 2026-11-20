@@ -18,6 +18,33 @@ MARKDOWN_ROW_BYTES = 60 * 1024  # under the 64 KiB per formatted row (core-proto
 LINE_BYTES = 4096  # one row; longer lines are cut with a mark (display only, never a request's question)
 TOOL_LINES = 20  # lines of a tool's input or output shown before "… N more lines"
 BUDGET = 160 * 1024  # encoded bytes of the conversation in one panel; older blocks give way first
+FOLD_LINES = 40  # compact view: longer messages fold after this many lines
+
+# View settings (AS10: nothing hidden by default; per pane, with workspace defaults). Each kind is shown, replaced by a
+# one-line summary (expandable), or hidden with a count left in its place.
+KINDS = ("thinking", "tools", "system")
+MODES = ("show", "summary", "hide")
+SUMMARY_FIELDS = ("time", "tokens", "tools", "lines", "words", "files")
+DEFAULT_VIEW = {"thinking": "show", "tools": "show", "system": "show", "summary": ["time", "tokens", "tools"],
+                "density": "detailed", "hidden_senders": []}
+
+
+def view_settings(*layers):
+    """Workspace defaults, then this pane's overrides; anything invalid falls back to the default."""
+    out = dict(DEFAULT_VIEW)
+    for layer in layers:
+        if not isinstance(layer, dict):
+            continue
+        for kind in KINDS:
+            if layer.get(kind) in MODES:
+                out[kind] = layer[kind]
+        if isinstance(layer.get("summary"), list):
+            out["summary"] = [f for f in SUMMARY_FIELDS if f in layer["summary"]]
+        if layer.get("density") in ("detailed", "compact"):
+            out["density"] = layer["density"]
+        if isinstance(layer.get("hidden_senders"), list):
+            out["hidden_senders"] = [k for k in layer["hidden_senders"] if isinstance(k, str)][:64]
+    return out
 
 
 def clip(text, size=LINE_BYTES):
@@ -92,28 +119,38 @@ class Names:
         return plain(str(r.get("name") or rid))
 
     def sender(self, value):
+        """(label, style, key): the key names the sender for filtering (you, agent, agent:rN, human:p, user)."""
         role = value.get("role")
         if role == "assistant":
-            return self.agent_name(self.agent), None
+            return self.agent_name(self.agent), None, "agent"
         if role in ROLE_LABEL:
-            return ROLE_LABEL[role], "dim" if role in ("thought", "system") else None
+            return ROLE_LABEL[role], "dim" if role in ("thought", "system") else None, role
         origin = value.get("origin") if isinstance(value.get("origin"), dict) else {}
         if origin.get("kind") == "agent" or origin.get("agent"):
             rid = origin.get("agent")
             name = self.agent_name(rid) if isinstance(rid, str) else plain(str(origin.get("principal") or "an agent"))
-            return f"Message from {name}" + (f" (agent {plain(rid)})" if isinstance(rid, str) else ""), "accent"
+            return (f"Message from {name}" + (f" (agent {plain(rid)})" if isinstance(rid, str) else ""), "accent",
+                    "agent:" + (rid if isinstance(rid, str) else str(origin.get("principal"))))
         principal = origin.get("principal")
         if origin.get("kind") == "human" and principal in (None, "undeclared", self.owner):
-            return "You", "bold"
+            return "You", "bold", "you"
         if isinstance(principal, str):
-            return "Message from " + plain(principal), "accent"
-        return "User", "bold"  # no recorded origin: never assumed to be you
+            return "Message from " + plain(principal), "accent", "human:" + principal
+        return "User", "bold", "user"  # no recorded origin: never assumed to be you
+
+    def sender_name(self, key):
+        """A short name for a sender key, for the senders filter."""
+        if key == "agent":
+            return self.agent_name(self.agent)
+        if key.startswith("agent:"):
+            return self.agent_name(key[6:])
+        return {"you": "You", "user": "User (no origin)"}.get(key, plain(key.split(":", 1)[-1]))
 
 
-def message_rows(eid, value, names, receipts):
-    sender, style = names.sender(value)
+def message_rows(eid, value, names, receipts, show_time=True, fold=None):
+    sender, style, _ = names.sender(value)
     head = [sender]
-    if when(value.get("at_ms")):
+    if show_time and when(value.get("at_ms")):
         head.append(when(value["at_ms"]))
     delivery = value.get("delivery")
     if isinstance(delivery, str) and delivery in receipts:
@@ -125,8 +162,11 @@ def message_rows(eid, value, names, receipts):
     if isinstance(quoted, dict) and quoted.get("label"):
         rows.append({"type": "text", "style": "dim", "text": "quoting " + clip(plain(str(quoted["label"])), 256) + " (claimed)"})
     body_style = "dim" if value.get("role") in ("thought", "system") else None
-    rows += content_rows(value.get("content"), body_style)
-    return rows
+    body = content_rows(value.get("content"), body_style)
+    if fold and len(body) > fold:  # compact view: long messages fold, the rest one expand away
+        body = body[:fold] + [{"id": "f:" + eid, "text": f"… {len(body) - fold} more lines", "style": "dim",
+                               "children": body[fold:], "expanded": False}]
+    return rows + body
 
 
 def tool_row(eid, value):
@@ -164,6 +204,16 @@ def amount(n):
     return f"{n / 1_000_000:.1f}M" if n >= 1_000_000 else f"{n / 1000:.0f}k" if n >= 10_000 else f"{n / 1000:.1f}k" if n >= 1000 else str(n)
 
 
+def senders(entities, names):
+    """Every sender seen in the conversation (for the filter), in first-seen order."""
+    seen = {}
+    for (kind, _), (_, value) in sorted(entities.items(), key=lambda kv: (kv[1][1].get("position", 0) if isinstance(kv[1][1], dict) else 0)):
+        if kind == "message" and isinstance(value, dict) and value.get("role") not in ("thought", "system"):
+            key = names.sender(value)[2]
+            seen.setdefault(key, names.sender_name(key))
+    return seen
+
+
 def facts_footer(facts, name):
     """One line of the agent's own facts (agent-v0 "Optional view facts"): folder, name, model, context, tokens, cost.
     Only what the agent reports; an absent fact is left out, never guessed or derived."""
@@ -193,30 +243,121 @@ def facts_footer(facts, name):
     return {"type": "text", "pin": "bottom", "style": "dim", "text": clip(plain(" · ".join(parts)), 1024)}
 
 
-def rows(entities, names, coverage=None):
+def tokens_of(value):
+    tokens = (value.get("usage") or {}).get("tokens") if isinstance(value.get("usage"), dict) else None
+    total = sum(n for n in (tokens or {}).values() if type(n) is int) if isinstance(tokens, dict) else 0
+    return total or None
+
+
+def text_of(value):
+    content = value.get("content") if isinstance(value.get("content"), list) else []
+    return "\n".join(b["text"] for b in content if isinstance(b, dict) and isinstance(b.get("text"), str))
+
+
+def summary_text(title, values, fields, tools=None):
+    """The one-line stand-in for a hidden block: its title and the chosen fields, each only if known."""
+    parts = [title]
+    if "time" in fields:
+        starts = [v.get("started_ms") for v in values if type(v.get("started_ms")) is int]
+        ends = [v.get("ended_ms") for v in values if type(v.get("ended_ms")) is int]
+        took = duration(min(starts), max(ends)) if starts and ends else None
+        at = when(values[0].get("at_ms"))
+        parts += [x for x in (took or at,) if x]
+    if "tokens" in fields:
+        total = sum(t for t in (tokens_of(v) for v in values) if t)
+        parts += [f"{amount(total)} tokens"] if total else []
+    if "tools" in fields and tools:
+        parts.append(f"{tools} tool" + ("s" if tools != 1 else ""))
+    if "lines" in fields:
+        n = sum(text_of(v).count("\n") + 1 for v in values if text_of(v))
+        parts += [f"{n} lines"] if n else []
+    if "files" in fields:
+        files = {loc["path"] for v in values for loc in (v.get("locations") or []) if isinstance(loc, dict) and isinstance(loc.get("path"), str)}
+        parts += [f"{len(files)} files"] if files else []
+    if "words" in fields:
+        first = " ".join(text_of(values[0]).split()[:8])
+        parts += [clip(plain(first), 160) + "…"] if first else []
+    return "▸ " + " · ".join(parts)
+
+
+def rows(entities, names, coverage=None, view=None):
     """Panel rows for an agent's conversation, oldest first, bounded to BUDGET encoded bytes (newest kept).
-    `entities` maps (kind, id) to (rev, value) as in vqro_items.ItemView."""
+    `entities` maps (kind, id) to (rev, value) as in vqro_items.ItemView; `view` is view_settings()."""
+    view = view or view_settings()
+    compact = view["density"] == "compact"
     receipts = {eid: v.get("stage") for (kind, eid), (_, v) in entities.items()
                 if kind == "receipt" and isinstance(v, dict) and isinstance(v.get("stage"), str)}
     timeline = sorted(((v.get("position"), kind, eid, v) for (kind, eid), (_, v) in entities.items()
                        if isinstance(v, dict) and type(v.get("position")) is int and kind in ("message", "tool", "plan", "compaction")),
                       key=lambda t: (t[0], t[1], t[2]))
-    blocks, tools = [], []
+    blocks, tools, hidden, last_sender = [], [], {}, None
+
+    def flush_hidden():
+        if hidden:
+            blocks.append([{"type": "text", "style": "dim", "text": "· hidden: " + ", ".join(f"{n} {k}" for k, n in hidden.items())}])
+            hidden.clear()
+
+    def add(kind, rows_, title, values, eid, tool_count=None):
+        """A block of a kind the view may show, summarise or hide."""
+        mode = view.get(kind, "show")
+        if mode == "hide":
+            hidden[kind] = hidden.get(kind, 0) + (tool_count or 1)
+            return
+        flush_hidden()
+        if mode == "summary":
+            rows_ = [{"id": "s:" + eid, "text": summary_text(title, values, view["summary"], tool_count),
+                      "style": "dim", "children": rows_, "expanded": False}]
+        blocks.append(rows_)
+
+    def end_tools():
+        """A run of tool calls: one Activity group. Summary collapses it under a summary line; the group row itself
+        already stands in for its calls."""
+        if not tools:
+            return
+        mode = view["tools"]
+        if mode == "hide":
+            hidden["tools"] = hidden.get("tools", 0) + len(tools)
+        else:
+            flush_hidden()
+            group = group_row(tools)
+            if compact or mode == "summary":
+                group["expanded"] = False
+                for child in group["children"]:
+                    child["expanded"] = False
+            if mode == "summary":
+                group["text"], group["style"] = summary_text("Activity", [v for _, v in tools], view["summary"], len(tools)), "dim"
+            blocks.append([group])
+        tools.clear()
+
     for _, kind, eid, value in timeline:
         if kind == "tool":
             tools.append((eid, value))
             continue
-        if tools:
-            blocks.append([group_row(tools)])
-            tools = []
+        end_tools()
         if kind == "message":
-            blocks.append(message_rows(eid, value, names, receipts))
+            label_, _, key = names.sender(value)
+            role = value.get("role")
+            show_time = not compact or key != last_sender
+            last_sender = key
+            body = message_rows(eid, value, names, receipts, show_time, FOLD_LINES if compact else None)
+            if role == "thought":
+                add("thinking", body, "Thinking", [value], eid)
+            elif role == "system":
+                add("system", body, "System", [value], eid)
+            elif key in view["hidden_senders"]:
+                flush_hidden()
+                blocks.append([{"id": "h:" + eid, "text": "▸ " + label_ + " (sender hidden)", "style": "dim",
+                                "children": body, "expanded": False}])
+            else:
+                flush_hidden()
+                blocks.append(body)
         elif kind == "compaction":
-            blocks.append([{"type": "text", "style": "dim", "text": "· System · context compacted"}])
+            add("system", [{"type": "text", "style": "dim", "text": "· System · context compacted"}], "System · context compacted", [value], eid)
         else:  # plan: shown whole, generically
+            flush_hidden()
             blocks.append([{"type": "header", "text": "Plan"}] + lines(json.dumps(value.get("entries", value), ensure_ascii=False, indent=1), "muted", 40))
-    if tools:
-        blocks.append([group_row(tools)])
+    end_tools()
+    flush_hidden()
     out, size, dropped = [], 0, 0
     for block in reversed(blocks):
         cost = len(json.dumps(block, ensure_ascii=False).encode())

@@ -207,6 +207,8 @@ def panel_key(key):
 
 
 # Owned per-agent derived views, longest prefix first ("agents-" would also match the others).
+VIEW_DEFAULTS = "doc/settings/agents"  # {"view": {...}}: defaults for new agent panes (agent_transcript.view_settings)
+VIEW_PANE = "doc/agents/view/"  # + rid: this agent pane's own view settings (AS10d: per pane, workspace defaults)
 OWNED_PREFIXES = ("view/agents-requests-", "view/agents-settings-", "view/agents-stop-", "view/agents-send-", "view/agents-")
 
 
@@ -271,6 +273,7 @@ class Agents:
                                 ("configure", self.configure, "Change an agent setting (args: id, value)"),
                                 ("command", self.command, "Run an agent command (args: name, text?)"),
                                 ("send", self.send, "Send a message in a declared delivery mode (args: mode?, text?)"),
+                                ("view", self.set_view, "Show, summarise or hide parts of an agent pane (args: set, value)"),
                                 ("stop", self.stop, "Stop an agent: kill its bridge terminal and the runtime in it (asks first)"),
                                 ("forget", self.forget, "Forget an unavailable agent's cached facts (its process is not touched)")]:
             ext.command("agents."+name, title)(self.guarded(fn))
@@ -386,6 +389,60 @@ class Agents:
             except Exception as error:  # report, keep the worker alive
                 print(f"agents: conversation update failed: {error}", file=sys.stderr, flush=True)
 
+    def view_of(self, rid):
+        defaults = self.ext.value(VIEW_DEFAULTS)
+        return agent_transcript.view_settings(defaults.get("view") if isinstance(defaults, dict) else None,
+                                              self.ext.value(VIEW_PANE + rid))
+
+    def set_view(self, args):
+        """agents.view {resource, set, value}: one view setting of this agent pane (a workspace setting, so it is
+        undoable). `set` is thinking|tools|system (show|summary|hide), density, sender (toggles that sender),
+        summary (toggles a summary field), or defaults (this pane's settings become the default for new panes)."""
+        r = self.agent(args, inspect=True)
+        rid, what, value = r["id"], args.get("set"), args.get("value")
+        current = self.view_of(rid)
+        if what in agent_transcript.KINDS and value in agent_transcript.MODES:
+            change = {what: value}
+        elif what == "density" and value in ("detailed", "compact"):
+            change = {"density": value}
+        elif what == "sender" and isinstance(value, str):
+            hidden = [k for k in current["hidden_senders"] if k != value] + ([] if value in current["hidden_senders"] else [value])
+            change = {"hidden_senders": hidden}
+        elif what == "summary" and value in agent_transcript.SUMMARY_FIELDS:
+            fields = current["summary"]
+            change = {"summary": [f for f in fields if f != value] + ([] if value in fields else [value])}
+        elif what == "defaults":
+            key, entry = VIEW_DEFAULTS, {"view": {k: v for k, v in current.items() if k != "hidden_senders"}}
+            self.ext.retrying(lambda: self.ext.apply([{"op": "set", "key": key, "value": entry, "expect": self.ext.version(key)}],
+                                                     "agents: default view for agent panes"))
+            return {"ok": True}
+        else:
+            raise VqroError("unknown view setting; nothing changed", "invalid")
+        key = VIEW_PANE + rid
+
+        def write():
+            own = self.ext.value(key) if isinstance(self.ext.value(key), dict) else {}
+            return self.ext.apply([{"op": "set", "key": key, "value": {**own, **change}, "expect": self.ext.version(key)}],
+                                  "agents: agent pane view")
+        self.ext.retrying(write)
+        return {"ok": True}
+
+    def view_toolbar(self, rid, view, seen):
+        """The pane's quick controls: one chip per kind (pick show/summary/hide), senders, density and summary fields."""
+        def chip(text, what, options):
+            return {"text": text, "command": "agents.view", "args": {"resource": rid, "set": what}, "options": options}
+        modes = [{"label": m, "value": m} for m in agent_transcript.MODES]
+        hidden = view["hidden_senders"]
+        return [{"type": "chips", "chips": [
+            *[chip(f"{kind.capitalize()}: {view[kind]}", kind, modes) for kind in agent_transcript.KINDS],
+            chip("Senders: all" if not set(hidden) & set(seen) else f"Senders: {len(set(hidden) & set(seen))} hidden", "sender",
+                 [{"label": ("hidden: " if key in hidden else "shown: ") + name, "value": key} for key, name in seen.items()]
+                 or [{"label": "no senders yet", "value": ""}]),
+            chip(view["density"].capitalize(), "density", [{"label": d, "value": d} for d in ("detailed", "compact")]),
+            chip("Summary: " + (", ".join(view["summary"]) or "title only"), "summary",
+                 [{"label": ("✓ " if f in view["summary"] else "  ") + f, "value": f} for f in agent_transcript.SUMMARY_FIELDS]),
+            {"text": "Make default", "command": "agents.view", "args": {"resource": rid, "set": "defaults"}}]}]
+
     def conversation_rows(self, r):
         """The agent's conversation as rows, or None when it has no item stream (today's panel stays)."""
         c = self.conversations.get(r["id"])
@@ -396,7 +453,7 @@ class Agents:
         with c.lock:
             if c.view.epoch is None:
                 return [{"type": "text", "style": "dim", "text": "Loading the conversation…"}]
-            out = agent_transcript.rows(c.view.entities, names, c.view.coverage)
+            out = agent_transcript.rows(c.view.entities, names, c.view.coverage, self.view_of(r["id"]))
         if c.stream is None and r.get("available") is not False:
             out.append({"type": "text", "style": "dim", "text": "Reconnecting to the conversation…"})
         return out or [{"type": "text", "style": "dim", "text": "No messages yet."}]
@@ -1027,7 +1084,10 @@ class Agents:
         conversation = self.conversation_rows(r)
         if conversation is not None:
             # The agent's own item stream: the conversation is drawn here (agent pane, K3 phase 2).
-            content = {"title": title, "follow": True, "items": [
+            c = self.conversations[r["id"]]
+            with c.lock:
+                seen = agent_transcript.senders(c.view.entities, agent_transcript.Names(self.ext.resources, r["id"]))
+            content = {"title": title, "follow": True, "toolbar": self.view_toolbar(r["id"], self.view_of(r["id"]), seen), "items": [
                 {"text": title, "badges": [{"text": status(r), "style": "dim"}]}, *conversation,
                 agent_transcript.facts_footer(agent_facts(r), plain(str(r.get("name") or r["id"])))]}
         elif sources:
@@ -1223,6 +1283,15 @@ class Agents:
             self.refresh(prune_views=kind in ("entries", "resource.removed", "missed"))
             if kind != "entries":
                 self.sync_conversations()
+            else:  # a pane's view settings or the defaults changed: redraw those panes
+                keys = [c.get("key", "") for c in event.get("changes") or [] if isinstance(c, dict)]
+                if VIEW_DEFAULTS in keys:
+                    self.publish_panels([self.ext.resources[rid] for rid in self.conversations if rid in self.ext.resources])
+                else:
+                    for key in keys:
+                        r = self.ext.resources.get(key[len(VIEW_PANE):]) if key.startswith(VIEW_PANE) else None
+                        if r is not None:
+                            self.publish_panel(r)
             if kind in ("resource", "resource.removed", "missed") and self.tier1:
                 self.prune_tier1()
             if kind == "entries":
