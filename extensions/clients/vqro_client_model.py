@@ -725,3 +725,123 @@ def markdown_lines(text, width):
                 shown = "  " + l
                 out.append([(_md_cut(shown, w) if _width(shown) > w else shown, "pre")])
     return out
+
+
+# ---- composer and multi-line prompts (features composer, multiline) --------------------------------------------
+
+DEFAULT_MAX_BYTES, MAX_BYTES = 16 * 1024, 64 * 1024
+
+
+class Editor:
+    """A multi-line text buffer with a cursor (a character index); key handling shared by every client."""
+
+    def __init__(self, text="", max_bytes=None, submit=None):
+        self.text = list(text)
+        self.cursor = len(self.text)
+        self.max_bytes = min(int(max_bytes), MAX_BYTES) if isinstance(max_bytes, int) and not isinstance(max_bytes, bool) else DEFAULT_MAX_BYTES
+        self.submit_ctrl = submit == "C-Enter"
+
+    def string(self):
+        return "".join(self.text)
+
+    def insert(self, s):
+        s = s.replace("\r\n", "\n").replace("\r", "\n").replace("\t", "    ")
+        clean = [c for c in s if c == "\n" or _ud.category(c) != "Cc"]
+        if not clean:
+            return "ignored"
+        if len(self.string().encode()) + len("".join(clean).encode()) > self.max_bytes:
+            return "refused"
+        self.text[self.cursor:self.cursor] = clean
+        self.cursor += len(clean)
+        return "edit"
+
+    def _start(self, at):
+        i = at
+        while i > 0 and self.text[i - 1] != "\n":
+            i -= 1
+        return i
+
+    def _end(self, at):
+        i = at
+        while i < len(self.text) and self.text[i] != "\n":
+            i += 1
+        return i
+
+    def key(self, key):
+        if (key == "Enter" and not self.submit_ctrl) or (key == "C-Enter" and self.submit_ctrl):
+            return "ignored" if not self.string().strip() else "submit"
+        if key in ("Enter", "S-Enter", "M-Enter", "C-j"):
+            return self.insert("\n")
+        if key == "Esc":
+            return "leave"
+        if key == "Backspace":
+            if self.cursor == 0:
+                return "ignored"
+            self.cursor -= 1
+            del self.text[self.cursor]
+            return "edit"
+        if key == "Delete":
+            if self.cursor >= len(self.text):
+                return "ignored"
+            del self.text[self.cursor]
+            return "edit"
+        if key == "Left":
+            if self.cursor == 0:
+                return "ignored"
+            self.cursor -= 1
+            return "edit"
+        if key == "Right":
+            if self.cursor >= len(self.text):
+                return "ignored"
+            self.cursor += 1
+            return "edit"
+        if key == "Home":
+            self.cursor = self._start(self.cursor)
+            return "edit"
+        if key == "End":
+            self.cursor = self._end(self.cursor)
+            return "edit"
+        if key in ("Up", "Down"):
+            start = self._start(self.cursor)
+            column = self.cursor - start
+            if key == "Up":
+                if start == 0:
+                    return "ignored"
+                target = self._start(start - 1)
+            else:
+                end = self._end(self.cursor)
+                if end >= len(self.text):
+                    return "ignored"
+                target = end + 1
+            self.cursor = min(target + column, self._end(target))
+            return "edit"
+        if key == "Space":
+            return self.insert(" ")
+        if len(key) == 1:
+            return self.insert(key)
+        return "ignored"
+
+
+def composer_controls(row):
+    return [c for c in row.get("controls") or [] if isinstance(c, dict) and isinstance(c.get("arg"), str) and c.get("type") in ("select", "chips")]
+
+
+class Composer:
+    """A composer row's client-local state: draft, cursor and control values, until Send."""
+
+    def __init__(self, row):
+        self.values = {}
+        for c in composer_controls(row):
+            if c.get("type") == "chips":
+                self.values[c["arg"]] = next((x.get("value") for x in c.get("chips") or [] if isinstance(x, dict) and x.get("checked") is True), None)
+            else:
+                self.values[c["arg"]] = c.get("value")
+        self.editor = Editor(row.get("prefill") if isinstance(row.get("prefill"), str) else "", row.get("max_bytes"), row.get("submit"))
+
+    def submit_args(self, row):
+        args = dict(row["args"]) if isinstance(row.get("args"), dict) else {}
+        for k, v in self.values.items():
+            if v is not None:
+                args[k] = v
+        args["text"] = self.editor.string()
+        return args

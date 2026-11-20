@@ -6,18 +6,18 @@ import { Peer, RpcError, type Json } from "./rpc";
 import { Palette } from "./theme";
 import { Terminals } from "./terminal";
 
-export const FEATURES = [...m.BASE_FEATURES, "icon_names", "current_when", "follow", "list_detail", "embedded_views", "markdown", "pin"];
+export const FEATURES = [...m.BASE_FEATURES, "icon_names", "current_when", "follow", "list_detail", "embedded_views", "markdown", "pin", "composer", "multiline"];
 export const PROFILES = ["base", "keys", "terminal"];
 const KINDS = ["panel", "terminal"];
 
 export interface Rect { x: number; y: number; w: number; h: number }
 interface Leaf { view: string; rect: Rect; inner: Rect; path: number[] }
-interface PState { sel: number; top: number; page: number; filter: string; open: Record<string, boolean>; chip: number; followEnd: number | null; manual: boolean; detailFocus: boolean; detailFor: string }
+interface PState { sel: number; top: number; page: number; filter: string; open: Record<string, boolean>; chip: number; followEnd: number | null; manual: boolean; detailFocus: boolean; detailFor: string; composers: Map<string, m.Composer>; editing: string | null }
 type Overlay =
   | { kind: "prefix"; sel: number }
   | { kind: "palette"; query: string; sel: number }
   | { kind: "menu"; title: string; items: Json[]; ctx: Json; sel: number }
-  | { kind: "input"; prompt: string; text: string; item: Json; ctx: Json }
+  | { kind: "input"; prompt: string; text: string; item: Json; ctx: Json; multi?: m.Editor }
   | { kind: "pick"; item: Json; ctx: Json; sel: number }
   | { kind: "popup"; view: string; width: number; ctx: Json }
   | { kind: "filter"; key: string };
@@ -39,10 +39,11 @@ const isObj = (v: Json) => v !== null && typeof v === "object" && !Array.isArray
 export function keyName(k: KeyEvent): string | null {
   const named: Record<string, string> = {
     up: "Up", down: "Down", left: "Left", right: "Right", home: "Home", end: "End", pageup: "PageUp", pagedown: "PageDown",
-    insert: "Insert", delete: "Delete", return: "Enter", enter: "Enter", kpenter: "Enter", linefeed: "Enter", escape: "Esc",
+    insert: "Insert", delete: "Delete", return: "Enter", enter: "Enter", kpenter: "Enter", escape: "Esc",
     backspace: "Backspace", space: "Space",
   };
   let base: string;
+  if (k.name === "linefeed") return "C-j";  // Ctrl-J: a new line in composers and multi-line prompts
   if (k.name === "tab") base = k.shift ? "BackTab" : "Tab";
   else if (named[k.name]) base = named[k.name];
   else if (/^f([1-9]|1[0-2])$/.test(k.name)) base = k.name.toUpperCase();
@@ -206,7 +207,7 @@ export class App {
       let text = "";
       if (typeof item.prefill === "string") text = item.prefill;
       else if (isObj(item.prefill) && typeof ctx[item.prefill.context] === "string") text = ctx[item.prefill.context];
-      this.openOver({ kind: "input", prompt: item.input, text, item, ctx });
+      this.openOver({ kind: "input", prompt: item.input, text, item, ctx, multi: item.multiline === true ? new m.Editor(text, item.max_bytes) : undefined });
       return;
     }
     if (item.pick === "resource") { this.openOver({ kind: "pick", item, ctx, sel: 0 }); return; }
@@ -220,9 +221,9 @@ export class App {
 
   closeOverlay() { this.overlay = this.under; this.under = null; }
 
-  async run(name: string, args: Json, ctx: Json) {
-    if (!name) return;
-    if (name.startsWith("client.")) { this.clientCommand(name, args ?? {}, ctx); this.redraw(); return; }
+  async run(name: string, args: Json, ctx: Json): Promise<boolean> {
+    if (!name) return false;
+    if (name.startsWith("client.")) { this.clientCommand(name, args ?? {}, ctx); this.redraw(); return true; }
     this.message = `running ${name}…`;
     this.redraw();
     try {
@@ -246,8 +247,11 @@ export class App {
       if (this.message === `running ${name}…`) this.message = `${name}: done`;
     } catch (e) {
       this.message = `${name}: ${(e as Error).message}`;
+      this.redraw();
+      return false;
     }
     this.redraw();
+    return true;
   }
 
   clientCommand(name: string, args: Json, ctx: Json) {
@@ -298,6 +302,7 @@ export class App {
         }
         break;
       }
+      case "client.composer": this.composerCommand(args, ctx); break;
       case "client.none": break;
       default: this.message = `${name}: not supported by this client`;
     }
@@ -330,7 +335,8 @@ export class App {
     if (!name) return;
     const o = this.overlay;
     const isPrefix = name === this.prefix();
-    if (isPrefix && o?.kind !== "prefix" && o?.kind !== "input") { this.overlay = { kind: "prefix", sel: 0 }; this.redraw(); return; }
+    // The prefix always wins (recovery): it cancels a prompt and reaches the prefix menu even while typing.
+    if (isPrefix && o?.kind !== "prefix") { if (o?.kind === "input") this.closeOverlay(); this.overlay = { kind: "prefix", sel: 0 }; this.redraw(); return; }
     if (o) { this.overlayKey(o, name, k); this.redraw(); return; }
     const leaf = this.leaves[this.focus];
     if (leaf && this.viewKind(leaf.view) === "terminal") { this.terminals.key(leaf.view, k); return; }
@@ -341,7 +347,17 @@ export class App {
   onPaste(e: PasteEvent) {
     const leaf = this.leaves[this.focus];
     if (!this.overlay && leaf && this.viewKind(leaf.view) === "terminal") this.terminals.paste(leaf.view, e.bytes);
-    else if (this.overlay?.kind === "input") { this.overlay.text += new TextDecoder().decode(e.bytes).replace(/\n/g, " "); this.redraw(); }
+    else if (this.overlay?.kind === "input") {
+      const text = new TextDecoder().decode(e.bytes);
+      if (this.overlay.multi) { if (this.overlay.multi.insert(text) === "refused") this.message = "paste refused: over the prompt's size limit"; }
+      else this.overlay.text += text.replace(/\n/g, " ");
+      this.redraw();
+    } else if (!this.overlay && leaf) {
+      const st = this.pstate.get(leaf.view);
+      const c = st?.editing ? st.composers.get(st.editing) : undefined;
+      if (c && c.editor.insert(new TextDecoder().decode(e.bytes)) === "refused") this.message = "paste refused: over the composer's size limit";
+      this.redraw();
+    }
   }
 
   overlayKey(o: Overlay, name: string, k: KeyEvent) {
@@ -386,6 +402,13 @@ export class App {
         return;
       }
       case "input": {
+        if (o.multi) {  // a multi-line prompt (feature multiline): the shared editor
+          const outcome = o.multi.key(name === "Space" ? " " : name);
+          if (outcome === "submit") { this.closeOverlay(); void this.run(o.item.command, { ...(o.item.args ?? {}), text: o.multi.string() }, o.ctx); }
+          else if (outcome === "leave") this.closeOverlay();
+          else if (outcome === "refused") this.message = "too long: the prompt's size limit";
+          return;
+        }
         if (name === "Esc") this.closeOverlay();
         else if (name === "Enter") { this.closeOverlay(); void this.run(o.item.command, { ...(o.item.args ?? {}), text: o.text }, o.ctx); }
         else if (name === "Backspace") o.text = o.text.slice(0, -1);
@@ -417,7 +440,7 @@ export class App {
 
   state(key: string): PState {
     let st = this.pstate.get(key);
-    if (!st) { st = { sel: 0, top: 0, page: 0, filter: "", open: {}, chip: 0, followEnd: null, manual: false, detailFocus: false, detailFor: "" }; this.pstate.set(key, st); }
+    if (!st) { st = { sel: 0, top: 0, page: 0, filter: "", open: {}, chip: 0, followEnd: null, manual: false, detailFocus: false, detailFor: "", composers: new Map(), editing: null }; this.pstate.set(key, st); }
     return st;
   }
 
@@ -444,6 +467,48 @@ export class App {
     return { id: row.id, value: row.item.detail_panel };
   }
 
+  composerOf(st: PState, row: m.Row): m.Composer {
+    let c = st.composers.get(row.id);
+    if (!c) { c = new m.Composer(row.item); st.composers.set(row.id, c); }
+    return c;
+  }
+
+  /** Send a composer's draft; it is cleared only after a successful reply (on an error it stays). */
+  sendComposer(key: string, row: m.Row, c: m.Composer, ctx: Json) {
+    if (typeof row.item.command !== "string") { this.message = "composer has no command"; return; }
+    const args = c.submitArgs(row.item), sent = c.editor.string();
+    void this.run(row.item.command, args, ctx).then((ok) => { if (ok && c.editor.string() === sent) { c.editor = new m.Editor("", row.item.max_bytes, row.item.submit); this.redraw(); } });
+  }
+
+  /** `client.composer {action: set {panel, row, arg, value} | focus | send {set?}}` (client-local). */
+  composerCommand(args: Json, ctx: Json) {
+    const key = args.panel ?? ctx.panel ?? this.leaves[this.focus]?.view;
+    if (!key) return;
+    const view = ctx.panel_view ?? (key === "@popup" && this.overlay?.kind === "popup" ? this.overlay.view : key);
+    const st = this.state(key);
+    const rows = m.rows(this.panelValue(view), st.page, st.filter, st.open, FEATURES);
+    const at = rows.findIndex((r) => m.kind(r.item) === "composer" && (args.row == null || args.row === r.id));
+    if (at < 0) { this.message = "no composer here"; return; }
+    const c = this.composerOf(st, rows[at]);
+    if (isObj(args.set)) Object.assign(c.values, args.set);
+    if (args.action === "set") c.values[args.arg] = args.value;
+    else if (args.action === "send") { if (c.editor.string().trim()) this.sendComposer(key, rows[at], c, ctx); else this.message = "nothing to send"; }
+    else { st.sel = at; st.editing = rows[at].id; st.chip = 0; }
+  }
+
+  /** Composer `autofocus`: when a pane gains focus, typing goes straight into its composer. */
+  private autofocused: string | null = null;
+  autofocus() {
+    const view = this.leaves[this.focus]?.view;
+    if (!view || view === this.autofocused) return;
+    this.autofocused = view;
+    if (this.viewKind(view) !== "panel") return;
+    const st = this.state(view);
+    const rows = m.rows(this.panelValue(view), st.page, st.filter, st.open, FEATURES);
+    const at = rows.findIndex((r) => m.kind(r.item) === "composer" && r.item.autofocus === true);
+    if (at >= 0) { st.sel = at; st.editing = rows[at].id; }
+  }
+
   valueKey(key: string, value: Json, name: string, ctx: Json) {
     const st = this.state(key);
     const rows = m.rows(value, st.page, st.filter, st.open, FEATURES);
@@ -454,7 +519,41 @@ export class App {
       if (rows[i] && m.selectable(rows[i].item)) st.sel = i;
     };
     st.manual = false;
+    // Composer (feature composer): while typing, keys edit its draft (the prefix was handled before).
+    if (st.editing) {
+      const r = rows.find((x) => x.id === st.editing && m.kind(x.item) === "composer");
+      if (r) {
+        const c = this.composerOf(st, r);
+        if (name === "Tab") { st.editing = null; st.chip = 1; return; }
+        const outcome = c.editor.key(name === "Space" ? " " : name);
+        if (outcome === "submit") this.sendComposer(key, r, c, ctx);
+        else if (outcome === "leave") st.editing = null;
+        else if (outcome === "refused") this.message = "too long: the composer's size limit";
+        return;
+      }
+      st.editing = null;
+    }
     const row = rows[st.sel];
+    if (row && m.kind(row.item) === "composer") {
+      const c = this.composerOf(st, row);
+      const buttons = composerButtons(row.item);
+      if (name === "Left") { st.chip = Math.max(0, st.chip - 1); return; }
+      if (name === "Right") { st.chip = Math.min(buttons.length, st.chip + 1); return; }
+      if ((name === "Enter" || name === "Space" || name === "i") && st.chip === 0) { st.editing = row.id; return; }
+      if (name === "Enter" || name === "Space") {
+        const b = buttons[st.chip - 1];
+        if (!b) return;
+        if (b.send) { if (c.editor.string().trim()) this.sendComposer(key, row, c, ctx); else this.message = "nothing to send"; }
+        else if (b.value !== undefined) c.values[b.arg] = b.value;
+        else {  // a select control: pick a value for this composer only (client-local until Send)
+          const ctl = m.composerControls(row.item).find((x) => x.arg === b.arg);
+          this.openOver({ kind: "menu", title: ctl?.text ?? b.arg, ctx, sel: 0, items: (ctl?.options ?? []).map((o: Json) => ({
+            label: (o.value === c.values[b.arg] ? "● " : "  ") + (o.label ?? String(o.value)), command: "client.composer",
+            args: { action: "set", panel: key, row: row.id, arg: b.arg, value: o.value } })) });
+        }
+        return;
+      }
+    }
     switch (name) {
       case "Up": case "k": step(-1); break;
       case "Down": case "j": step(1); break;
@@ -543,6 +642,7 @@ export class Screen extends Renderable {
     else this.walk(buf, root, body, [], leaves);
     a.leaves = leaves;
     if (a.focus >= leaves.length) a.focus = Math.max(0, leaves.length - 1);
+    a.autofocus();
     const seen = new Set<string>();
     leaves.forEach((leaf, i) => { seen.add(leaf.view); this.pane(buf, leaf, i); });
     a.terminals.layout(leaves.filter((l) => a.viewKind(l.view) === "terminal"), a.overlay !== null && a.overlay.kind !== "input" && a.overlay.kind !== "filter");
@@ -643,8 +743,9 @@ export class Screen extends Renderable {
     if (!hit) return;
     const st = a.state(key);
     st.sel = hit.i;
-    if (hit.chip !== undefined) st.chip = hit.chip;
     const row = listed!.rows[hit.i];
+    if (hit.chip !== undefined) st.chip = hit.chip;
+    else if (m.kind(row.item) === "composer") st.chip = 0;  // the text area: click to type
     const toggle = m.kind(row.item) === "toggle" && e.x <= hit.x + 4;
     if (hit.chip !== undefined || toggle || !row.item.detail_panel) {
       if (e.button === 2 && Array.isArray(row.item.menu)) a.openOver({ kind: "menu", title: row.item.text ?? "", items: row.item.menu, ctx, sel: 0 });
@@ -663,7 +764,7 @@ export class Screen extends Renderable {
     let x = r.x + width(badge) + 1;
     if (a.overlay?.kind === "input" || a.overlay?.kind === "filter") {
       const o = a.overlay;
-      const line = o.kind === "input" ? `${o.prompt}: ${o.text}▏` : `/${a.pstate.get(o.key)?.filter ?? ""}▏`;
+      const line = o.kind === "input" ? (o.multi ? `${o.prompt}: (multi-line, above)` : `${o.prompt}: ${o.text}▏`) : `/${a.pstate.get(o.key)?.filter ?? ""}▏`;
       text(buf, x, r.y, fit(line, r.w - x), p.color("prompt"));
       return;
     }
@@ -698,6 +799,19 @@ export class Screen extends Renderable {
     const a = this.app;
     const stack = [a.under, a.overlay].filter(Boolean) as Overlay[];
     for (const o of stack) {
+      if (o.kind === "input" && o.multi) {  // a multi-line prompt: a box above the status bar
+        const [lines, [cl, cc]] = o.multi.lines();
+        const w = Math.max(10, Math.min(100, W - 4)), rowsN = Math.max(3, Math.min(10, lines.length));
+        const r = { x: Math.floor((W - w) / 2), y: Math.max(0, H - rowsN - 3), w, h: rowsN + 2 };
+        box(buf, r, a.pal.color("prompt"), a.pal.bg);
+        text(buf, r.x + 1, r.y, fit(` ${clean(o.prompt)} `, w - 2), a.pal.color("prompt"));
+        text(buf, r.x + 1, r.y + r.h - 1, fit(" Enter send · Alt-Enter new line · Escape cancel ", w - 2), a.pal.color("dim"));
+        const first = Math.max(0, cl - (rowsN - 1));
+        lines.slice(first, first + rowsN).forEach((l, j) => text(buf, r.x + 1, r.y + 1 + j, fit(l, w - 2), a.pal.color("text")));
+        const before = [...(lines[cl] ?? "")].slice(0, cc).join("");
+        text(buf, r.x + 1 + Math.min(width(before), w - 3), r.y + 1 + cl - first, [...(lines[cl] ?? "")][cc] ?? " ", a.pal.color("text"), undefined, TextAttributes.INVERSE);
+        continue;
+      }
       if (o.kind === "popup") {
         const value = a.panelValue(o.view);
         const w = Math.min(Math.max(30, o.width), W - 4);
@@ -868,7 +982,8 @@ function drawList(a: App, buf: OptimizedBuffer, area: Rect, key: string, value: 
   const pinned = rows.filter((r) => r.pinned).length;
   const line = (i: number, yy: number, limit: number) => {
     const r = rows[i];
-    return drawRow(a, buf, { x: area.x, y: yy, w: area.w, h: limit - yy }, r, focused && i === st.sel, st.chip, (x, w, chip) => listed.hits.push({ y: yy, x, w, i, chip }));
+    const comp: [m.Composer, boolean] | null = m.kind(r.item) === "composer" ? [a.composerOf(st, r), focused && st.editing === r.id] : null;
+    return drawRow(a, buf, { x: area.x, y: yy, w: area.w, h: limit - yy }, r, focused && i === st.sel, st.chip, (x, w, chip) => listed.hits.push({ y: yy, x, w, i, chip }), comp);
   };
   for (let i = 0; i < pinned && y < bottom; i++) y += line(i, y, bottom);
   if (pinned && y < bottom) { text(buf, area.x, y, "─".repeat(area.w), p.color("border")); y += 1; }
@@ -900,7 +1015,8 @@ function drawList(a: App, buf: OptimizedBuffer, area: Rect, key: string, value: 
 }
 
 const rowHeight = (r: m.Row, w: number) =>
-  m.kind(r.item) === "text" && r.item.format === "markdown" ? Math.max(1, m.markdownLines(clean2(r.item.text), Math.max(1, w - r.depth * 2)).length)
+  m.kind(r.item) === "composer" ? composerHeight(r.item)
+    : m.kind(r.item) === "text" && r.item.format === "markdown" ? Math.max(1, m.markdownLines(clean2(r.item.text), Math.max(1, w - r.depth * 2)).length)
     : m.kind(r.item) === "text" && r.item.wrap === true ? wrapText(clean2(r.item.text), Math.max(1, w - r.depth * 2)).length
     : m.kind(r.item) === "separator" ? 1 : 1 + (typeof r.item.description === "string" && r.item.description ? 1 : 0);
 
@@ -921,13 +1037,68 @@ export function wrapText(text: string, w: number): string[] {
   return out.length ? out : [""];
 }
 
-function drawRow(a: App, buf: OptimizedBuffer, r: Rect, row: m.Row, selected: boolean, chipSel: number, hit: (x: number, w: number, chip?: number) => void): number {
+/** A composer's control-line buttons: each control's choices (a select is one button), then Send. */
+function composerButtons(row: Json): { arg: string; value?: Json; send?: boolean; label: string; on: (v: Record<string, Json>) => boolean }[] {
+  const out: { arg: string; value?: Json; send?: boolean; label: string; on: (v: Record<string, Json>) => boolean }[] = [];
+  for (const c of m.composerControls(row)) {
+    if (c.type === "chips") for (const ch of c.chips ?? []) out.push({ arg: c.arg, value: ch.value, label: String(ch.text ?? ch.value), on: (v) => v[c.arg] === ch.value });
+    else out.push({ arg: c.arg, label: String(c.text ?? c.arg), on: () => false });
+  }
+  out.push({ arg: "", send: true, label: "[Send]", on: () => false });
+  return out;
+}
+
+const composerHeight = (it: Json) => Math.min(12, Math.max(1, Number.isInteger(it.rows) ? it.rows : 3)) + 1;
+
+/** A composer: the draft (or placeholder) with a ▌ margin and the cursor, then controls, Send and a key hint. */
+function drawComposer(a: App, buf: OptimizedBuffer, r: Rect, it: Json, selected: boolean, chipSel: number, comp: [m.Composer, boolean] | null, hit: (x: number, w: number, chip?: number) => void): number {
+  const p = a.pal;
+  const [c, editing] = comp ?? [new m.Composer(it), false];
+  const rowsN = Math.max(1, Math.min(r.h, composerHeight(it)) - 1);
+  const [lines, [cl, cc]] = c.editor.lines();
+  const first = Math.max(0, cl - (rowsN - 1));
+  const empty = c.editor.text.length === 0;
+  for (let dy = 0; dy < rowsN; dy++) {
+    const y = r.y + dy;
+    text(buf, r.x, y, "▌", editing ? p.color("prompt") : selected ? p.color("border_focus") : p.color("border"));
+    if (empty && dy === 0) text(buf, r.x + 1, y, fit(clean(it.placeholder ?? "Message"), r.w - 2), p.color("dim"));
+    else if (lines[first + dy] !== undefined) text(buf, r.x + 1, y, fit(lines[first + dy], r.w - 2), p.color("text"));
+    if (editing && first + dy === cl) {
+      const before = [...(lines[cl] ?? "")].slice(0, cc).join("");
+      // On an empty draft the cursor sits on the placeholder's first letter, which stays readable.
+      const under = empty ? [...String(it.placeholder ?? "Message")][0] ?? " " : [...(lines[cl] ?? "")][cc] ?? " ";
+      text(buf, r.x + 1 + Math.min(width(before), r.w - 2), y, under, empty ? p.color("dim") : p.color("text"), undefined, TextAttributes.INVERSE);
+    }
+    hit(r.x, r.w);
+  }
+  if (rowsN >= r.h) return rowsN;
+  const y = r.y + rowsN;
+  let x = r.x + 1;
+  composerButtons(it).forEach((b, j) => {
+    const sel = c.values[b.arg];
+    const ctl = m.composerControls(it).find((x) => x.arg === b.arg);
+    const label = b.send ? b.label : b.value !== undefined ? `[${b.on(c.values) ? "● " : ""}${b.label}]`
+      : `${b.label}: ${ctl?.options?.find((o: Json) => o.value === sel)?.label ?? sel ?? ""} ▾`;
+    if (x + width(label) > r.x + r.w) return;
+    const on = selected && !editing && chipSel === j + 1;
+    text(buf, x, y, label, b.on(c.values) || b.send ? p.color("accent") : p.color("muted"), undefined, (on ? TextAttributes.INVERSE : 0) | (b.send ? TextAttributes.BOLD : 0));
+    hit(x, width(label), j + 1);
+    x += width(label) + 1;
+  });
+  const n = lines.length;
+  const hint = `${n} line${n === 1 ? "" : "s"} · ${it.submit === "C-Enter" ? "Ctrl-Enter send · Enter new line" : "Enter send · Alt-Enter new line"}`;
+  if (x + width(hint) < r.x + r.w) text(buf, r.x + r.w - width(hint), y, hint, p.color("dim"));
+  return rowsN + 1;
+}
+
+function drawRow(a: App, buf: OptimizedBuffer, r: Rect, row: m.Row, selected: boolean, chipSel: number, hit: (x: number, w: number, chip?: number) => void, comp: [m.Composer, boolean] | null = null): number {
   const p = a.pal;
   const it = row.item;
   const k = m.kind(it);
   const indent = row.depth * 2;
   let x = r.x + indent;
   const end = r.x + r.w;
+  if (k === "composer") return drawComposer(a, buf, r, it, selected, chipSel, comp, hit);
   if (k === "separator") { text(buf, r.x, r.y, "─".repeat(r.w), p.color("border")); return 1; }
   if (k === "text" && it.format === "markdown") {
     // Formatted text (feature markdown): the shared layout, styled through the palette.

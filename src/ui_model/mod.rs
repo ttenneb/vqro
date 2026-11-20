@@ -6,6 +6,7 @@
 //! - `panel`: panel flattening (pages, tree, filter, toolbar), selection steps, `requires` and element fallbacks.
 //! - `view`: view-kind fallbacks.
 //! - `markdown`: formatted text rows (`format: "markdown"`).
+//! - `composer`: the composer row and multi-line prompts (editing, draft, controls).
 //! - `recovery`: the shared recovery content (prefix recovery rows and the safe-mode chooser).
 //! - `keys`: key names.
 //! - `window`: which layout (workspace) a window shows, its invocation context and `current_when` marks.
@@ -13,6 +14,7 @@
 //!
 //! Nothing here imports a terminal or rendering library.
 
+pub mod composer;
 pub mod keys;
 pub mod markdown;
 pub mod panel;

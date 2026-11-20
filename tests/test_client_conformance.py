@@ -103,6 +103,25 @@ class Conformance(unittest.TestCase):
                 got = [[list(span) for span in line] for line in model.markdown_lines(case["text"], case["width"])]
                 self.assertEqual(got, case["expect"])
 
+    def test_composer(self):
+        for case in fixture("composer.json")["cases"]:
+            with self.subTest(case["name"]):
+                row, c, outcomes, args = case["row"], None, [], None
+                c = model.Composer(row)
+                for key in case["keys"]:
+                    if key.startswith("paste:"):
+                        outcome = c.editor.insert(key[6:])
+                    elif key.startswith("set:"):
+                        k, v = key[4:].split("=", 1)
+                        c.values[k] = v
+                        outcome = "edit"
+                    else:
+                        outcome = c.editor.key(key)
+                    if outcome == "submit":
+                        args = c.submit_args(row)
+                    outcomes.append(outcome)
+                self.assertEqual({"outcomes": outcomes, "text": c.editor.string(), "cursor": c.editor.cursor, "args": args}, case["expect"])
+
     def test_key_names_follow_the_spec(self):
         for raw, want in (("C-space", "C-Space"), ("Ctrl-Shift-Left", "C-S-Left"), ("C-Q", "C-q"), ("S-a", None), ("Hyper-x", None),
                           ("f12", "F12"), ("F13", None), ("C--", "C--"), ("M-x", "M-x"), (" ", "Space"), ("BackTab", "BackTab")):

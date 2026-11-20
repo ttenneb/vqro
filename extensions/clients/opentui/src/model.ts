@@ -657,3 +657,83 @@ export function markdownLines(text: string, width: number): Span[][] {
   }
   return out;
 }
+
+// ---- composer and multi-line prompts (features composer, multiline) ---------------------------------------------
+
+export const DEFAULT_MAX_BYTES = 16 * 1024, MAX_BYTES = 64 * 1024;
+export type Outcome = "edit" | "submit" | "leave" | "refused" | "ignored";
+const utf8 = (s: string) => new TextEncoder().encode(s).length;
+
+/** A multi-line text buffer with a cursor (a character index); key handling shared by every client. */
+export class Editor {
+  text: string[];
+  cursor: number;
+  maxBytes: number;
+  submitCtrl: boolean;
+  constructor(text = "", maxBytes?: Json, submit?: Json) {
+    this.text = [...text];
+    this.cursor = this.text.length;
+    this.maxBytes = isInt(maxBytes) ? Math.min(maxBytes, MAX_BYTES) : DEFAULT_MAX_BYTES;
+    this.submitCtrl = submit === "C-Enter";
+  }
+  string() { return this.text.join(""); }
+  insert(s: string): Outcome {
+    const clean = [...s.replace(/\r\n/g, "\n").replace(/\r/g, "\n").replace(/\t/g, "    ")].filter((c) => c === "\n" || !/\p{Cc}/u.test(c));
+    if (!clean.length) return "ignored";
+    if (utf8(this.string()) + utf8(clean.join("")) > this.maxBytes) return "refused";
+    this.text.splice(this.cursor, 0, ...clean);
+    this.cursor += clean.length;
+    return "edit";
+  }
+  private start(at: number) { while (at > 0 && this.text[at - 1] !== "\n") at--; return at; }
+  private end(at: number) { while (at < this.text.length && this.text[at] !== "\n") at++; return at; }
+  key(key: string): Outcome {
+    if ((key === "Enter" && !this.submitCtrl) || (key === "C-Enter" && this.submitCtrl)) return this.string().trim() ? "submit" : "ignored";
+    switch (key) {
+      case "Enter": case "S-Enter": case "M-Enter": case "C-j": return this.insert("\n");
+      case "Esc": return "leave";
+      case "Backspace": if (!this.cursor) return "ignored"; this.cursor--; this.text.splice(this.cursor, 1); return "edit";
+      case "Delete": if (this.cursor >= this.text.length) return "ignored"; this.text.splice(this.cursor, 1); return "edit";
+      case "Left": if (!this.cursor) return "ignored"; this.cursor--; return "edit";
+      case "Right": if (this.cursor >= this.text.length) return "ignored"; this.cursor++; return "edit";
+      case "Home": this.cursor = this.start(this.cursor); return "edit";
+      case "End": this.cursor = this.end(this.cursor); return "edit";
+      case "Up": case "Down": {
+        const start = this.start(this.cursor), column = this.cursor - start;
+        let target: number;
+        if (key === "Up") { if (!start) return "ignored"; target = this.start(start - 1); }
+        else { const end = this.end(this.cursor); if (end >= this.text.length) return "ignored"; target = end + 1; }
+        this.cursor = Math.min(target + column, this.end(target));
+        return "edit";
+      }
+      case "Space": return this.insert(" ");
+    }
+    return [...key].length === 1 ? this.insert(key) : "ignored";
+  }
+  /** Lines and the cursor's [line, column], for drawing. */
+  lines(): [string[], [number, number]] {
+    const before = this.text.slice(0, this.cursor);
+    return [this.string().split("\n"), [before.filter((c) => c === "\n").length, this.cursor - this.start(this.cursor)]];
+  }
+}
+
+export const composerControls = (row: Json): Json[] =>
+  (Array.isArray(row.controls) ? row.controls : []).filter((c: Json) => isObj(c) && isStr(c.arg) && (c.type === "select" || c.type === "chips"));
+
+/** A composer row's client-local state: draft, cursor and control values, until Send. */
+export class Composer {
+  values: Record<string, Json> = {};
+  editor: Editor;
+  constructor(row: Json) {
+    for (const c of composerControls(row)) {
+      this.values[c.arg] = c.type === "chips" ? ((c.chips ?? []).find((x: Json) => isObj(x) && x.checked === true)?.value ?? null) : c.value ?? null;
+    }
+    this.editor = new Editor(isStr(row.prefill) ? row.prefill : "", row.max_bytes, row.submit);
+  }
+  submitArgs(row: Json): Json {
+    const args: Json = isObj(row.args) ? { ...row.args } : {};
+    for (const [k, v] of Object.entries(this.values)) if (v != null) args[k] = v;
+    args.text = this.editor.string();
+    return args;
+  }
+}

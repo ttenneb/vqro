@@ -107,3 +107,19 @@ test("embedded views are read-only, cycle-bounded and never attach terminals", (
 test("markdown", async () => {
   for (const c of (await fixture("markdown.json")).cases) expect(m.markdownLines(c.text, c.width), c.name).toEqual(c.expect);
 });
+
+test("composer", async () => {
+  for (const c of (await fixture("composer.json")).cases) {
+    const comp = new m.Composer(c.row), outcomes: string[] = [];
+    let args: any = null;
+    for (const key of c.keys as string[]) {
+      let outcome: string;
+      if (key.startsWith("paste:")) outcome = comp.editor.insert(key.slice(6));
+      else if (key.startsWith("set:")) { const [k, v] = key.slice(4).split("="); comp.values[k] = v; outcome = "edit"; }
+      else outcome = comp.editor.key(key);
+      if (outcome === "submit") args = comp.submitArgs(c.row);
+      outcomes.push(outcome);
+    }
+    expect({ outcomes, text: comp.editor.string(), cursor: comp.editor.cursor, args }, c.name).toEqual(c.expect);
+  }
+});

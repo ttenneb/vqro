@@ -144,6 +144,27 @@ try:
     call("command.invoke", {"name": "tabs.show", "args": {"view": "e2e-md", "title": "Formatted"}})
     check("markdown: heading, inline code and list markers render without markup", bool(wait(lambda: "Plan heading" in screen() and "Run cargo test then ship" in screen() and "• second point" in screen() and "**" not in screen())), screen())
     check("pin bottom: the pinned row stays visible below a long list", bool(wait(lambda: "Messages: 2 waiting" in screen() and "filler 39" not in screen())), screen())
+    # Composer (feature composer): autofocus, multi-line typing, a control, Send through Enter.
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import e2e_echo
+    echo = e2e_echo.start(ENV["VQRO_SOCKET"], f"{R}/echo.jsonl")
+    call("workspace.apply", {"note": "e2e composer", "ops": [{"op": "set", "key": "view/e2e-comp", "value": {"kind": "panel", "title": "Compose", "items": [
+        {"text": "conversation row"},
+        {"type": "composer", "id": "c1", "text": "Message Pi", "pin": "bottom", "autofocus": True, "command": "e2e.echo", "args": {"resource": "r2"}, "placeholder": "Message Pi",
+         "controls": [{"type": "chips", "arg": "mode", "chips": [{"text": "auto", "value": "auto", "checked": True}, {"text": "steer", "value": "steer"}]}],
+         "fallback": {"text": "Message Pi…", "command": "e2e.echo", "input": "Message", "multiline": True}}]}}]})
+    call("command.invoke", {"name": "tabs.show", "args": {"view": "e2e-comp", "title": "Compose"}})
+    check("composer shows its placeholder, controls and key hint", bool(wait(lambda: "Message Pi" in screen() and "[● auto]" in screen() and "Enter send" in screen())), screen())
+    time.sleep(0.5)
+    keys("hello there", literal=True); keys("M-Enter"); keys("second line", literal=True)
+    check("autofocus: typing goes into the composer, Alt-Enter adds a line", bool(wait(lambda: "hello there" in screen() and "second line" in screen() and "2 lines" in screen())), screen())
+    keys("Tab"); time.sleep(0.3); keys("Right"); time.sleep(0.3); keys("Enter"); time.sleep(0.3)
+    check("a control sets this composer's value", bool(wait(lambda: "[● steer]" in screen())), screen())
+    keys("Left"); keys("Left"); time.sleep(0.3); keys("Enter"); time.sleep(0.3); keys("Enter")
+    sent = wait(lambda: e2e_echo.calls(f"{R}/echo.jsonl"), 10)
+    check("Enter sends text, controls and args; the draft clears after the reply", bool(sent) and sent[-1].get("text") == "hello there\nsecond line" and sent[-1].get("mode") == "steer"
+          and sent[-1].get("resource") == "r2" and bool(wait(lambda: "hello there" not in screen())), f"{sent} {screen()}")
+    echo.close()
     keys("C-g")
     check("prefix menu lists recovery actions", bool(wait(lambda: "undo last change" in screen() and "safe mode / recovery choices" in screen())), screen())
     keys(",")

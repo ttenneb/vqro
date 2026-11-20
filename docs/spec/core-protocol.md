@@ -935,6 +935,26 @@ New row types, components and view kinds are progressive enhancements: every cli
   list, in order, never scrolled away (at most half the panel) and never hidden by the filter; they stay selectable.
   Clients without the feature show them where they are, so producers put them at the end of `items`.
 
+### Composer and multi-line prompts (D29)
+
+- **`multiline: true`** on anything with `input` (feature `multiline`), with optional `max_bytes` (default 16 KiB,
+  at most 64 KiB): clients with the feature open a multi-line editor; others their one-line prompt.
+- **A composer row** (feature `composer`): `{type: "composer", id, text, command, args?, placeholder?, prefill?, rows?
+  (1-12, default 3), max_bytes?, submit?: "Enter" | "C-Enter", autofocus?, controls?: [select | chips row with an
+  `arg`], fallback?}`. `text` describes it for base clients; give a `fallback` (an item with `input` and
+  `multiline: true`) so they can still send. Clients draw the draft (or placeholder) and a control line: each
+  control's choices (a select opens its options; a chips row shows each chip, the checked one is the default) and
+  Send. Choices and the draft are client-local per row `id` until Send, which invokes `command` with `args`, the
+  controls' values (by `arg`) and `text`; the draft clears only after a successful reply. Keys while typing
+  (`tests/fixtures/client/composer.json`): Enter sends (`submit: "C-Enter"` swaps), Shift-Enter (where the terminal
+  reports it), Alt-Enter and Ctrl-J add a line, arrows/Home/End move, Backspace/Delete edit, Esc leaves with the
+  draft kept, Tab moves to the controls; a paste is inserted (refused whole over `max_bytes`); the prefix key always
+  wins. On the row: Enter, Space or `i` starts typing; Left/Right walk the controls. `autofocus: true` starts
+  typing when the pane gains focus.
+- **`client.composer {action, panel?, row?, ...}`** (client-local): `focus` (start typing in the panel's composer),
+  `set {arg, value}`, `send {set?: {arg: value}}` (set values, then send the draft). Bindings use it (for example
+  send as steer).
+
 ### Optional list with detail (`list_detail`)
 
 Any panel, or individual page, may carry `list_detail: {requires: ["list_detail"]}`. Its ordinary `items`

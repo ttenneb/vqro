@@ -48,6 +48,7 @@ use crate::rpc::{Incoming, Peer};
 use crate::ui_model::recovery::{self, PrefixRow, SAFE_MODE_VIEW};
 use crate::ui_model::window::{self, Settled, Window};
 use crate::ui_model::workspace::{Change, Workspace};
+use crate::ui_model::composer::{Composer, Editor, Outcome};
 use icons::Icons;
 use theme::Palette;
 
@@ -122,7 +123,7 @@ enum Overlay {
     /// `query` filters it once it is long (see `SEARCHABLE`); `sel` indexes the filtered rows.
     Menu { items: Vec<Item>, ctx: Value, sel: usize, at: Position, query: String },
     /// One line of text for an item that declared `input`.
-    Input { prompt: String, text: String, item: Item, ctx: Value },
+    Input { prompt: String, text: String, item: Item, ctx: Value, multi: Option<Editor> },
     /// Choose a resource for an item that declared `pick: "resource"`. Filtered like `Menu`.
     Pick { sel: usize, item: Item, ctx: Value, query: String },
     /// An extension's view shown on top, at its request (never a terminal).
@@ -158,6 +159,9 @@ struct Item {
     prefill: Value,
     /// For status items: take the label from this window's context (`layout`, `layout_title`).
     label_context: Option<String>,
+    /// A multi-line prompt (feature multiline), and its size limit in bytes.
+    multiline: bool,
+    max_bytes: Option<u64>,
 }
 
 
@@ -173,6 +177,8 @@ impl Item {
             view: v["view"].as_str().map(String::from),
             prefill: v["prefill"].clone(),
             label_context: v["label_context"].as_str().map(String::from),
+            multiline: v["multiline"] == true,
+            max_bytes: v["max_bytes"].as_u64(),
         }
     }
 }
@@ -182,6 +188,8 @@ enum Msg {
     Info(String),
     /// A command finished: say so unless something newer took the status line.
     Done(String),
+    /// A composer's send succeeded: clear its draft if it still holds the sent text.
+    ComposerSent { key: String, row: String, text: String },
     Snapshot { generation: u64, result: crate::rpc::RpcResult },
     ClearOverrides,
     /// A command's reply asked this client to show a view as a popup.
@@ -264,6 +272,8 @@ struct App {
     view_streams: Arc<Mutex<HashMap<String, u64>>>,
     /// The pane shown alone (`client.zoom`): this window's presentation only, never workspace state.
     zoomed: Option<String>,
+    /// The focused view composer `autofocus` last looked at (it acts once per focus change).
+    autofocused: Option<String>,
     /// The layout (workspace) this window shows: window state, never workspace state (`ui_model::window`).
     window: Window,
     /// Focus this view on the next draw (after leaving zoom the leaves are recomputed).
@@ -543,7 +553,7 @@ impl App {
             leaves: Vec::new(), focus: 0, overlay: None, pstate: HashMap::new(),
             filtering: None, toast: None, panel_values: Mutex::new(HashMap::new()), panel_dependencies: Mutex::new(HashMap::new()), hit: Hit::default(),
             drag: None, overrides: HashMap::new(), mouse_owner: None, mouse_on: true,
-            under: None, input_queues: HashMap::new(), view_streams: Arc::default(), zoomed: None, window: Window::default(), pending_focus: None, kbd_enhance: false,
+            under: None, input_queues: HashMap::new(), view_streams: Arc::default(), zoomed: None, autofocused: None, window: Window::default(), pending_focus: None, kbd_enhance: false,
             held: KeyModifiers::NONE, message: String::new(), key_hint: None,
             quit: false, connected: true, connection: 0,
             generation: 0, resyncing: false, buffered: Vec::new(), buffered_bytes: 0, recovery_only: false, retry_snapshot: None, snapshot_retries: 0,
@@ -763,6 +773,11 @@ impl App {
                 }
             }
             Msg::ClearOverrides => self.overrides.clear(),
+            Msg::ComposerSent { key, row, text } => {
+                if let Some(c) = self.pstate.get_mut(&key).and_then(|st| st.composers.get_mut(&row)) {
+                    if c.editor.string() == text { c.editor.text.clear(); c.editor.cursor = 0; }
+                }
+            }
             Msg::Popup { view, width, ctx } => {
                 match self.view_kind(&view).as_str() {
                     "" => self.message = format!("popup: no view {view}"),
@@ -851,8 +866,8 @@ impl App {
             }
             Event::Mouse(m) => self.on_mouse(m),
             Event::Paste(text) => {
-                self.paste(&text);
-                false
+                if !self.paste_text(&text) { self.paste(&text); }
+                true
             }
             Event::Resize(..) => true,
             _ => false,
@@ -1077,6 +1092,61 @@ impl App {
         // A wheel-scrolled pane may have moved its selection out of view: reveal before activating.
         if was_scrolling && matches!(k.code,KeyCode::Enter|KeyCode::Char(' ')){self.pstate.insert(key.into(),save(container,st));return true;}
         let rows = panel::rows(&value, &st);
+        // Composer (feature composer): while typing, keys edit its draft (the prefix was handled before).
+        if let Some(id) = st.editing.clone() {
+            if let Some(item) = rows.iter().find(|r| r.id == id && panel::kind(&r.item) == "composer").map(|r| r.item.clone()) {
+                let name = keys::name(&k).unwrap_or_default();
+                let comp = st.composers.entry(id.clone()).or_insert_with(|| Composer::new(&item));
+                let mut send = None;
+                if name == "Tab" { st.editing = None; st.chip = 1; }
+                else {
+                    match comp.editor.key(&name) {
+                        Outcome::Submit => send = Some(comp.submit_args(&item)),
+                        Outcome::Leave => st.editing = None,
+                        Outcome::Refused => self.message = "too long: the composer's size limit".into(),
+                        _ => {}
+                    }
+                }
+                self.pstate.insert(key.to_string(), save(container, st));
+                if let Some(args) = send { self.send_composer(key, &id, &item, args, ctx); }
+                return true;
+            }
+            st.editing = None;
+        }
+        if let Some(r) = rows.get(st.sel).filter(|r| panel::kind(&r.item) == "composer") {
+            let (item, id) = (r.item.clone(), r.id.clone());
+            let buttons = crate::ui_model::composer::buttons(&item);
+            st.composers.entry(id.clone()).or_insert_with(|| Composer::new(&item));
+            let mut handled = true;
+            match k.code {
+                KeyCode::Left => st.chip = st.chip.saturating_sub(1),
+                KeyCode::Right => st.chip = (st.chip + 1).min(buttons.len()),
+                KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Char('i') if st.chip == 0 => { st.editing = Some(id.clone()); }
+                KeyCode::Enter | KeyCode::Char(' ') => {
+                    let (arg, value) = buttons.get(st.chip - 1).cloned().unwrap_or_default();
+                    let pos = self.row_position(key, st.sel);
+                    let comp = st.composers.get_mut(&id).unwrap();
+                    if arg.is_empty() {
+                        let args = comp.submit_args(&item);
+                        let empty = comp.editor.string().trim().is_empty();
+                        self.pstate.insert(key.to_string(), save(container, st));
+                        if empty { self.message = "nothing to send".into(); } else { self.send_composer(key, &id, &item, args, ctx); }
+                        return true;
+                    } else if let Some(v) = value {
+                        comp.values.insert(arg, v);
+                    } else if let Some(ctl) = crate::ui_model::composer::controls(&item).into_iter().find(|c| c["arg"] == arg.as_str()) {
+                        // A select control: pick a value for this composer only (client-local until Send).
+                        let menu = json!({"command": "client.composer", "args": {"action": "set", "panel": key, "row": id, "arg": arg},
+                            "value": comp.values.get(&arg).cloned().unwrap_or(Value::Null), "options": ctl["options"].clone()});
+                        self.pstate.insert(key.to_string(), save(container, st));
+                        self.options_menu(&menu, ctx, pos);
+                        return true;
+                    }
+                }
+                _ => handled = false,
+            }
+            if handled { self.pstate.insert(key.to_string(), save(container, st)); return true; }
+        }
         let mut run = None;
         let chips = rows.get(st.sel).filter(|r| panel::kind(&r.item) == "chips").map(|r| r.item["chips"].as_array().map(|a| a.len()).unwrap_or(0));
         match k.code {
@@ -1130,6 +1200,74 @@ impl App {
         true
     }
 
+    /// Send a composer's draft: its command with args, control values and text; the draft is cleared only after
+    /// a successful reply (on an error it stays, and the error is shown).
+    fn send_composer(&mut self, key: &str, id: &str, item: &Value, args: Value, ctx: Value) {
+        let Some(command) = item["command"].as_str().map(String::from) else { self.message = "composer has no command".into(); return };
+        let after = Msg::ComposerSent { key: key.into(), row: id.into(), text: args["text"].as_str().unwrap_or("").into() };
+        let args = with_arg(&args, "context", ctx);
+        self.invoke_then(&command, args, Some(after));
+    }
+
+    /// `client.composer {action: set {panel, row, arg, value} | focus | send {set?}}` (client-local).
+    fn composer_command(&mut self, args: &Value, ctx: &Value) {
+        let key = args["panel"].as_str().or_else(|| ctx["panel"].as_str()).or_else(|| self.leaves.get(self.focus).map(String::as_str)).unwrap_or("").to_string();
+        let view = ctx["panel_view"].as_str().unwrap_or(&key).to_string();
+        let value = self.panel_value(&view);
+        let mut st = self.pstate.get(&key).cloned().unwrap_or_default();
+        let rows = panel::rows(&value, &st);
+        let Some((at, r)) = rows.iter().enumerate().find(|(_, r)| panel::kind(&r.item) == "composer" && args["row"].as_str().is_none_or(|id| id == r.id)) else {
+            self.message = "no composer here".into();
+            return;
+        };
+        let (item, id) = (r.item.clone(), r.id.clone());
+        let comp = st.composers.entry(id.clone()).or_insert_with(|| Composer::new(&item));
+        for (k, v) in args["set"].as_object().into_iter().flatten() { comp.values.insert(k.clone(), v.clone()); }
+        let mut send = None;
+        match args["action"].as_str().unwrap_or("focus") {
+            "set" => { if let Some(arg) = args["arg"].as_str() { comp.values.insert(arg.into(), args["value"].clone()); } }
+            "send" => { if comp.editor.string().trim().is_empty() { self.message = "nothing to send".into(); } else { send = Some(comp.submit_args(&item)); } }
+            _ => { st.sel = at; st.editing = Some(id.clone()); st.chip = 0; }
+        }
+        self.pstate.insert(key.clone(), st);
+        if let Some(a) = send { self.send_composer(&key, &id, &item, a, ctx.clone()); }
+    }
+
+    /// Composer `autofocus`: when a pane gains focus, typing goes straight into its composer.
+    fn autofocus(&mut self) {
+        let Some(view) = self.leaves.get(self.focus).cloned() else { return };
+        if self.autofocused.as_deref() == Some(view.as_str()) { return; }
+        self.autofocused = Some(view.clone());
+        if self.view_kind(&view) != "panel" { return; }
+        let value = self.panel_value(&view);
+        let mut st = self.pstate.get(&view).cloned().unwrap_or_default();
+        let rows = panel::rows(&value, &st);
+        if let Some((at, r)) = rows.iter().enumerate().find(|(_, r)| panel::kind(&r.item) == "composer" && r.item["autofocus"] == true) {
+            st.sel = at;
+            st.editing = Some(r.id.clone());
+            self.pstate.insert(view, st);
+        }
+    }
+
+    /// Paste into the multi-line prompt or the composer being typed into; true when it went there.
+    fn paste_text(&mut self, text: &str) -> bool {
+        if let Some(Overlay::Input { multi, text: line, .. }) = self.overlay.as_mut() {
+            match multi {
+                Some(ed) => { if ed.insert(text) == Outcome::Refused { self.message = "paste refused: over the prompt's size limit".into(); } }
+                None => line.push_str(&text.replace(['\n', '\r'], " ")),
+            }
+            return true;
+        }
+        if self.overlay.is_some() { return false; }
+        let Some(view) = self.leaves.get(self.focus).cloned() else { return false };
+        let Some(st) = self.pstate.get_mut(&view) else { return false };
+        let Some(id) = st.editing.clone() else { return false };
+        match st.composers.get_mut(&id) {
+            Some(c) => { if c.editor.insert(text) == Outcome::Refused { self.message = "paste refused: over the composer's size limit".into(); } true }
+            None => false,
+        }
+    }
+
     /// Where a panel row was drawn, for anchoring dropdowns under it.
     fn row_position(&self, key: &str, row: usize) -> Option<Position> {
         let root_hits = self.hit.panels.get(key)?;
@@ -1161,6 +1299,8 @@ impl App {
                     view: None,
                     prefill: o.get("prefill").or_else(|| item.get("prefill")).cloned().unwrap_or(Value::Null),
                     label_context: None,
+                    multiline: o["multiline"] == true || item["multiline"] == true,
+                    max_bytes: item["max_bytes"].as_u64(),
                 }
             })
             .collect();
@@ -1413,6 +1553,22 @@ impl App {
     }
 
     fn on_overlay_key(&mut self, k: KeyEvent) {
+        // A multi-line prompt (feature multiline): the shared editor; Enter sends, Alt-Enter/Ctrl-J add a line.
+        if let Some(Overlay::Input { multi: Some(ed), item, ctx, .. }) = self.overlay.as_mut() {
+            let Some(name) = keys::name(&k) else { return };
+            match ed.key(&name) {
+                Outcome::Submit => {
+                    let (args, ctx, command) = (with_arg(&item.args, "text", json!(ed.string())), ctx.clone(), item.command.clone());
+                    self.overlay = None;
+                    self.restore_under();
+                    self.run_command(&command, args, ctx, None);
+                }
+                Outcome::Leave => { self.overlay = None; self.restore_under(); }
+                Outcome::Refused => self.message = "too long: the prompt's size limit".into(),
+                _ => {}
+            }
+            return;
+        }
         // A long menu or picker: typing filters it, Backspace edits, Esc clears the query first.
         if self.pick_list().is_some() {
             let searchable = self.pick_searchable();
@@ -1551,7 +1707,8 @@ impl App {
         if let Some(prompt) = item.input.clone() {
             // Input is empty unless its author explicitly supplies text or a context source.
             let text = item.prefill.as_str().or_else(|| item.prefill["context"].as_str().and_then(|field| ctx[field].as_str())).unwrap_or_default().to_string();
-            self.open_over(Overlay::Input { prompt, text, item, ctx });
+            let multi = item.multiline.then(|| Editor::new(&text, item.max_bytes, None));
+            self.open_over(Overlay::Input { prompt, text, item, ctx, multi });
         } else if item.pick.as_deref() == Some("resource") {
             self.open_over(Overlay::Pick { sel: 0, item, ctx, query: String::new() });
         } else {
@@ -1633,6 +1790,7 @@ impl App {
                 Ok(false) => {}
                 Err(message) => self.message = message,
             },
+            "client.composer" => self.composer_command(&args, &ctx),
             "client.none" => {}
             // Never sent to the core: a client that doesn't know one says so.
             other if other.starts_with("client.") => self.message = format!("{other}: not supported by this client"),
@@ -2040,7 +2198,10 @@ impl App {
             .collect()
     }
 
-    fn invoke(&mut self, name: &str, args: Value) {
+    fn invoke(&mut self, name: &str, args: Value) { self.invoke_then(name, args, None) }
+
+    /// Invoke a command; `after` is delivered when it succeeds.
+    fn invoke_then(&mut self, name: &str, args: Value, after: Option<Msg>) {
         let (peer, tx, name) = (self.peer.clone(), self.tx.clone(), name.to_string());
         self.message = format!("running {name}…");
         tokio::spawn(async move {
@@ -2062,6 +2223,7 @@ impl App {
                     if let Some(view) = r["client"]["focus"]["view"].as_str() {
                         let _ = tx.send(Msg::FocusView(view.to_string()));
                     }
+                    if let Some(after) = after { let _ = tx.send(after); }
                     let _ = tx.send(Msg::Done(name));
                 }
                 Err(e) => {
@@ -2179,6 +2341,7 @@ impl App {
         if self.focus >= self.leaves.len() {
             self.focus = 0;
         }
+        self.autofocus();
         // Drop terminals no longer shown.
         let gone: Vec<String> = self.terms.keys().filter(|v| !self.leaves.contains(v)).cloned().collect();
         for v in gone {
@@ -2326,6 +2489,7 @@ impl App {
             _ if filtering.is_some() => Some(("/".to_string(), filtering.clone().unwrap_or_default())),
             Some(Overlay::Prefix { .. }) => Some((self.key_labels(&self.prefix()), self.key_labels(&keys::held_words(self.held)))),
             Some(Overlay::Palette { query, .. }) => Some((":".to_string(), query.clone())),
+            Some(Overlay::Input { prompt, multi: Some(_), .. }) => Some((format!("{prompt}:"), "(multi-line, above)".to_string())),
             Some(Overlay::Input { prompt, text, .. }) => Some((format!("{prompt}:"), text.clone())),
             _ => None,
         };
@@ -2445,6 +2609,30 @@ impl App {
             self.draw_popup(f, area, pal, icons, &view, width);
         }
         self.draw_menu_overlay(f, area, pal, icons);
+        self.draw_editor(f, area, pal);
+    }
+
+    /// A multi-line prompt (feature multiline): a box above the status bar with the draft and the cursor.
+    fn draw_editor(&mut self, f: &mut Frame, area: Rect, pal: &Palette) {
+        let Some(Overlay::Input { prompt, multi: Some(ed), .. }) = &self.overlay else { return };
+        let (lines, (cl, cc)) = ed.lines();
+        let w = area.width.saturating_sub(4).clamp(10, 100);
+        let rows = (lines.len() as u16).clamp(3, 10);
+        let r = Rect { x: area.x + (area.width.saturating_sub(w)) / 2, y: area.bottom().saturating_sub(rows + 3), width: w, height: rows + 2 };
+        f.render_widget(Clear, r);
+        let block = Block::bordered().title(format!(" {prompt} ")).title_bottom(" Enter send · Alt-Enter new line · Escape cancel ").border_style(Style::new().fg(pal.prompt));
+        let inner = block.inner(r);
+        f.render_widget(block, r);
+        let first = cl.saturating_sub(inner.height as usize - 1);
+        let buf = f.buffer_mut();
+        for (dy, line) in lines.iter().skip(first).take(inner.height as usize).enumerate() {
+            buf.set_string(inner.x, inner.y + dy as u16, icons::truncate(line, inner.width as usize), Style::new().fg(pal.text));
+        }
+        let before: String = lines.get(cl).map(|l| l.chars().take(cc).collect()).unwrap_or_default();
+        let x = inner.x + icons::width(&before).min(inner.width.saturating_sub(1));
+        let y = inner.y + (cl - first) as u16;
+        let under = lines.get(cl).and_then(|l| l.chars().nth(cc)).map(String::from).unwrap_or(" ".into());
+        buf.set_string(x, y, under, Style::new().add_modifier(Modifier::REVERSED));
     }
 
     fn draw_popup(&mut self, f: &mut Frame, area: Rect, pal: &Palette, icons: &Icons, view: &str, width: u16) {
@@ -2937,6 +3125,48 @@ mod tests {
         assert!(app.safe_selected.contains("draft"));
         app.overlay=None;let mut later=snap.clone();later["epoch"]=json!("two");
         app.reconnected(app.peer.clone(),&later);assert!(app.overlay.is_none(),"reconnect must not steal focus");assert!(app.safe_selected.contains("draft"));
+    }
+
+    #[tokio::test]
+    async fn composer_rows_edit_choose_controls_and_multiline_prompts() {
+        let (mut app,_) = app();
+        let composer = json!({"type":"composer","id":"c","command":"x.send","args":{"to":"r2"},"autofocus":true,
+            "controls":[{"type":"chips","arg":"mode","chips":[{"text":"auto","value":"auto","checked":true},{"text":"steer","value":"steer"}]}]});
+        app.load(&json!({"epoch":"e","seq":1,"entries":{"view/p":{"value":{"kind":"panel","items":[{"text":"msg"},composer]}}}}));
+        let key = |c: KeyCode, m: KeyModifiers| KeyEvent::new(c, m);
+        let (none, alt) = (KeyModifiers::NONE, KeyModifiers::ALT);
+        // Not editing yet: Enter on the composer row starts typing.
+        app.panel_key("p","p",key(KeyCode::Down,none),json!({}));
+        app.panel_key("p","p",key(KeyCode::Enter,none),json!({}));
+        assert_eq!(app.pstate["p"].editing.as_deref(),Some("c"));
+        for c in "hi".chars() { app.panel_key("p","p",key(KeyCode::Char(c),none),json!({})); }
+        app.panel_key("p","p",key(KeyCode::Enter,alt),json!({}));
+        app.panel_key("p","p",key(KeyCode::Char('j'),KeyModifiers::CONTROL),json!({}));
+        app.panel_key("p","p",key(KeyCode::Char('x'),none),json!({}));
+        assert_eq!(app.pstate["p"].composers["c"].editor.string(),"hi\n\nx");
+        // Esc leaves with the draft kept; the control chip sets a client-local value.
+        app.panel_key("p","p",key(KeyCode::Esc,none),json!({}));
+        assert!(app.pstate["p"].editing.is_none());
+        app.panel_key("p","p",key(KeyCode::Right,none),json!({}));
+        app.panel_key("p","p",key(KeyCode::Right,none),json!({}));
+        app.panel_key("p","p",key(KeyCode::Enter,none),json!({}));
+        let comp=&app.pstate["p"].composers["c"];
+        assert_eq!(comp.values["mode"],"steer");
+        assert_eq!(comp.submit_args(&composer),json!({"to":"r2","mode":"steer","text":"hi\n\nx"}));
+        // client.composer (bindings use it): set and focus.
+        app.run_command("client.composer",json!({"action":"set","panel":"p","arg":"mode","value":"auto"}),json!({}),None);
+        assert_eq!(app.pstate["p"].composers["c"].values["mode"],"auto");
+        app.run_command("client.composer",json!({"panel":"p"}),json!({}),None);
+        assert_eq!(app.pstate["p"].editing.as_deref(),Some("c"));
+        assert!(app.paste_text("pasted\ntwo") || app.leaves.is_empty(), "paste goes to the composer being typed into (when its pane is focused)");
+        // A multi-line prompt: the shared editor in an overlay.
+        app.activate_item(Item::from_entry(&json!({"command":"x.answer","input":"Answer","multiline":true})),json!({}),None);
+        for c in "a".chars() { app.on_overlay_key(key(KeyCode::Char(c),none)); }
+        app.on_overlay_key(key(KeyCode::Enter,alt));
+        app.on_overlay_key(key(KeyCode::Char('b'),none));
+        assert!(matches!(&app.overlay,Some(Overlay::Input{multi:Some(ed),..}) if ed.string()=="a\nb"));
+        app.on_overlay_key(key(KeyCode::Esc,none));
+        assert!(app.overlay.is_none());
     }
 
     #[tokio::test]

@@ -26,6 +26,10 @@ pub struct State {
     pub manual_scroll: bool,
     /// `follow`: the last row when the reader was last at the end (None: not yet shown).
     pub follow_end: Option<usize>,
+    /// Composer rows' client-local drafts and control values, by row id (feature `composer`).
+    pub composers: HashMap<String, super::composer::Composer>,
+    /// The composer row being typed into (keys go to its editor), by row id.
+    pub editing: Option<String>,
     pub(crate) prepared: Option<Arc<Prepared>>,
 }
 
@@ -63,7 +67,7 @@ pub struct Flat {
 
 
 /// Panel features this client renders. A panel may list what it needs in `requires`.
-pub const SUPPORTED: &[&str] = &["items", "pages", "tree", "badges", "menu", "input", "description", "filter", "toolbar", "chips", "select", "options", "badge_color", "icon", "icon_names", "list_detail", "wrap", "embedded_views", "current_when", "follow", "markdown", "pin"];
+pub const SUPPORTED: &[&str] = &["items", "pages", "tree", "badges", "menu", "input", "description", "filter", "toolbar", "chips", "select", "options", "badge_color", "icon", "icon_names", "list_detail", "wrap", "embedded_views", "current_when", "follow", "markdown", "pin", "composer", "multiline"];
 
 /// Features a panel needs that this client lacks.
 pub fn missing(v: &Value) -> Vec<String> { missing_for(v, SUPPORTED) }
@@ -83,6 +87,7 @@ pub fn kind(item: &Value) -> &str {
 }
 
 pub fn selectable(item: &Value) -> bool {
+    if kind(item) == "composer" { return true; }
     (!matches!(kind(item), "header" | "separator" | "text") || kind(item)=="text" && item["focusable"]==true) && item["disabled"] != true
 }
 
@@ -106,6 +111,9 @@ fn matches(item: &Value, f: &str) -> bool {
 /// Row types every client renders natively; anything else (including namespaced `x.<owner>.<name>` types) needs
 /// its feature claimed, else it is shown through its `fallback` or as a plain item.
 pub const ROW_TYPES: &[&str] = &["item", "toggle", "header", "separator", "text", "chips", "select"];
+
+/// A composer row's height: its text lines (`rows`, default 3, 1-12) and the control line.
+pub fn composer_height(item: &Value) -> u16 { item["rows"].as_u64().unwrap_or(3).clamp(1, 12) as u16 + 1 }
 
 fn native(item: &Value, features: &[&str]) -> bool {
     let k = kind(item);

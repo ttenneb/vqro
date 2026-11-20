@@ -3,7 +3,7 @@
 //! `clients/`) check themselves against the same files. `VQRO_FIXTURE_UPDATE=1 cargo test --test
 //! client_conformance` rewrites the `expect` fields from the model; review the diff before committing.
 use serde_json::{json, Value};
-use vqro::ui_model::{markdown, panel, recovery, view, window::{self, Settled, Window}, workspace::{resolve, Workspace}};
+use vqro::ui_model::{composer, markdown, panel, recovery, view, window::{self, Settled, Window}, workspace::{resolve, Workspace}};
 
 fn fixture(name: &str) -> (std::path::PathBuf, Value) {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/client").join(name);
@@ -137,5 +137,23 @@ fn markdown_lays_out_like_the_model() {
     check("markdown.json", |case| {
         let lines = markdown::lines(case["text"].as_str().unwrap(), case["width"].as_u64().unwrap() as usize);
         json!(lines.iter().map(|l| l.iter().map(|(t, s)| json!([t, s])).collect::<Vec<_>>()).collect::<Vec<_>>())
+    });
+}
+
+#[test]
+fn composer_edits_like_the_model() {
+    check("composer.json", |case| {
+        let row = &case["row"];
+        let mut c = composer::Composer::new(row);
+        let mut outcomes = Vec::new();
+        let mut args = Value::Null;
+        for key in case["keys"].as_array().unwrap().iter().filter_map(Value::as_str) {
+            let outcome = if let Some(text) = key.strip_prefix("paste:") { c.editor.insert(text) }
+                else if let Some(set) = key.strip_prefix("set:") { let (k, v) = set.split_once('=').unwrap(); c.values.insert(k.into(), json!(v)); composer::Outcome::Edited }
+                else { c.editor.key(key) };
+            if outcome == composer::Outcome::Submit { args = c.submit_args(row); }
+            outcomes.push(outcome.name());
+        }
+        json!({"outcomes": outcomes, "text": c.editor.string(), "cursor": c.editor.cursor, "args": args})
     });
 }

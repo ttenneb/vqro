@@ -90,6 +90,7 @@ fn chip_layout(item: &Value, width: u16, icons: &Icons) -> Vec<(u16, u16, u16)> 
 }
 
 fn lines(item: &Value, width: u16, icons: &Icons) -> u16 {
+    if kind(item)=="composer" {return composer_height(item);}
     if kind(item)=="text" && item["format"]=="markdown" {return crate::ui_model::markdown::lines(item["text"].as_str().unwrap_or(""),width as usize).len().clamp(1,u16::MAX as usize) as u16;}
     if kind(item)=="text" && item["wrap"]==true {return wrap_text(item["text"].as_str().unwrap_or(""),width).len().min(u16::MAX as usize) as u16;}
     if kind(item) == "chips" {
@@ -221,7 +222,7 @@ fn render_list(buf:&mut Buffer,mut area:Rect,v:&Arc<Value>,st:&mut State,focused
         if h == 0 {
             break;
         }
-        draw_row(buf, Rect { x: area.x, y, width: area.width, height: h }, r, focused && i == st.sel, st.chip, i, 0, hits, pal, icons);
+        draw_row(buf, Rect { x: area.x, y, width: area.width, height: h }, r, focused && i == st.sel, st.chip, i, 0, hits, pal, icons, composer_of(st, r, focused));
         y += h;
     }
     if pinned > 0 && y < area.bottom() {
@@ -242,7 +243,7 @@ fn render_list(buf:&mut Buffer,mut area:Rect,v:&Arc<Value>,st:&mut State,focused
             if h == 0 {
                 break;
             }
-            draw_row(buf, Rect { x: area.x, y: by, width: area.width, height: h }, r, focused && i == st.sel, st.chip, i, 0, hits, pal, icons);
+            draw_row(buf, Rect { x: area.x, y: by, width: area.width, height: h }, r, focused && i == st.sel, st.chip, i, 0, hits, pal, icons, composer_of(st, r, focused));
             by += h;
         }
     }
@@ -295,7 +296,7 @@ fn render_list(buf:&mut Buffer,mut area:Rect,v:&Arc<Value>,st:&mut State,focused
         if y >= body.bottom() {
             break;
         }
-        draw_row(buf, Rect { x: body.x, y, width: body.width, height: (h-skip).min((body.bottom() - y) as u32) as u16 }, r, focused && i == st.sel, st.chip, i, skip.min(u16::MAX as u32) as u16, hits, pal, icons);
+        draw_row(buf, Rect { x: body.x, y, width: body.width, height: (h-skip).min((body.bottom() - y) as u32) as u16 }, r, focused && i == st.sel, st.chip, i, skip.min(u16::MAX as u32) as u16, hits, pal, icons, composer_of(st, r, focused));
     }
 
     if scrollbar {
@@ -318,8 +319,80 @@ fn render_list(buf:&mut Buffer,mut area:Rect,v:&Arc<Value>,st:&mut State,focused
     }
 }
 
+/// A composer row's state and whether it is being typed into (in a focused panel).
+fn composer_of<'a>(st: &'a State, r: &Flat, focused: bool) -> Option<(&'a crate::ui_model::composer::Composer, bool)> {
+    if kind(&r.item) != "composer" { return None; }
+    st.composers.get(&r.id).map(|c| (c, focused && st.editing.as_deref() == Some(r.id.as_str())))
+}
+
+/// A composer: the draft (or placeholder) with a `▌` margin and the cursor, then controls, Send and a key hint.
 #[allow(clippy::too_many_arguments)]
-fn draw_row(buf: &mut Buffer, row: Rect, r: &Flat, selected: bool, chip: usize, i: usize, skip:u16, hits: &mut Hits, pal: &Palette, icons: &Icons) {
+fn draw_composer(buf: &mut Buffer, row: Rect, item: &Value, selected: bool, chip: usize, i: usize, hits: &mut Hits, pal: &Palette, comp: Option<(&crate::ui_model::composer::Composer, bool)>) {
+    use crate::ui_model::composer;
+    let fresh;
+    let (c, editing) = match comp { Some(c) => c, None => { fresh = composer::Composer::new(item); (&fresh, false) } };
+    let text_rows = row.height.saturating_sub(1).max(1);
+    let (lines, (cl, cc)) = c.editor.lines();
+    let first = cl.saturating_sub(text_rows as usize - 1);
+    let margin = if editing { Style::new().fg(pal.prompt) } else { pal.border(selected) };
+    let empty = c.editor.text.is_empty();
+    for dy in 0..text_rows {
+        let y = row.y + dy;
+        buf.set_string(row.x, y, "▌", margin);
+        if empty && dy == 0 {
+            buf.set_string(row.x + 1, y, truncate(item["placeholder"].as_str().unwrap_or("Message"), row.width.saturating_sub(2) as usize), pal.style(Some("dim")));
+        } else if let Some(line) = lines.get(first + dy as usize) {
+            buf.set_string(row.x + 1, y, truncate(line, row.width.saturating_sub(2) as usize), Style::new().fg(pal.text));
+        }
+        if editing && first + dy as usize == cl {
+            let before: String = lines.get(cl).map(|l| l.chars().take(cc).collect()).unwrap_or_default();
+            let x = row.x + 1 + icons::width(&before).min(row.width.saturating_sub(2));
+            // On an empty draft the cursor sits on the placeholder's first letter, which stays readable.
+            let under = if empty { item["placeholder"].as_str().unwrap_or("Message").chars().next().map(String::from) } else { lines.get(cl).and_then(|l| l.chars().nth(cc)).map(String::from) };
+            buf.set_string(x, y, under.unwrap_or(" ".into()), Style::new().add_modifier(Modifier::REVERSED));
+        }
+    }
+    hits.rows.push((Rect { height: text_rows, ..row }, i));
+    // Control line: each control's choices, then Send; the hint fills what is left.
+    let y = row.y + text_rows;
+    if y >= row.bottom() { return; }
+    let mut x = row.x + 1;
+    let controls = composer::controls(item);
+    let mut b = 0usize;
+    let mut button = |label: String, style: Style, x: &mut u16, buf: &mut Buffer, hits: &mut Hits| {
+        let on = selected && !editing && chip == b + 1;
+        let style = if on { style.add_modifier(Modifier::REVERSED | Modifier::BOLD) } else { style };
+        let w = icons::width(&label).min(row.right().saturating_sub(*x));
+        if w > 0 { buf.set_string(*x, y, truncate(&label, w as usize), style); hits.chips.push((Rect { x: *x, y, width: w, height: 1 }, i, b + 1)); }
+        *x = x.saturating_add(w + 1);
+        b += 1;
+    };
+    for ctl in &controls {
+        let arg = ctl["arg"].as_str().unwrap_or("");
+        let value = c.values.get(arg).cloned().unwrap_or(Value::Null);
+        if ctl["type"] == "chips" {
+            if let Some(label) = ctl["text"].as_str() { let l = format!("{label}:"); buf.set_string(x, y, &l, pal.style(Some("muted"))); x += icons::width(&l) + 1; }
+            for chipv in ctl["chips"].as_array().into_iter().flatten() {
+                let on = chipv["value"] == value;
+                let label = format!("[{}{}]", if on { "● " } else { "" }, chipv["text"].as_str().unwrap_or(""));
+                button(label, if on { pal.style(Some("accent")) } else { pal.style(Some("muted")) }, &mut x, buf, hits);
+            }
+        } else {
+            let shown = ctl["options"].as_array().and_then(|o| o.iter().find(|x| x["value"] == value)).and_then(|x| x["label"].as_str()).map(String::from).or_else(|| value.as_str().map(String::from)).unwrap_or_default();
+            button(format!("{}: {shown} ▾", ctl["text"].as_str().unwrap_or(arg)), pal.style(Some("accent")), &mut x, buf, hits);
+        }
+    }
+    button("[Send]".into(), pal.style(Some("accent")).add_modifier(Modifier::BOLD), &mut x, buf, hits);
+    let n = lines.len();
+    let send = if item["submit"] == "C-Enter" { "Ctrl-Enter send · Enter new line" } else { "Enter send · Alt-Enter new line" };
+    let hint = format!("{n} line{} · {send}", if n == 1 { "" } else { "s" });
+    let hw = icons::width(&hint);
+    if x + hw < row.right() { buf.set_string(row.right() - hw, y, &hint, pal.style(Some("dim"))); }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_row(buf: &mut Buffer, row: Rect, r: &Flat, selected: bool, chip: usize, i: usize, skip:u16, hits: &mut Hits, pal: &Palette, icons: &Icons, comp: Option<(&crate::ui_model::composer::Composer, bool)>) {
+    if kind(&r.item) == "composer" { return draw_composer(buf, row, &r.item, selected, chip, i, hits, pal, comp); }
     let item = &r.item;
     let w = row.width as usize;
     let y = row.y;

@@ -100,6 +100,19 @@ try:
     out = text("view e2e-md")
     check("markdown text shows the shared layout without markup", "Plan heading" in out and "Run x and go" in out and "• one" in out and "**" not in out, out)
     check("pinned rows come last, after a divider", out.index("===") < out.index("Messages bar") and out.index("last row") < out.index("==="), out)
+    # Composer: `do <row> text` sends the text with the controls' values (`set` changes one).
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import e2e_echo
+    echo = e2e_echo.start(ENV["VQRO_SOCKET"], f"{R}/echo.jsonl")
+    call("workspace.apply", {"note": "e2e composer", "ops": [{"op": "set", "key": "view/e2e-comp", "value": {"kind": "panel", "items": [
+        {"type": "composer", "id": "c1", "text": "Message Pi", "command": "e2e.echo", "args": {"resource": "r2"}, "placeholder": "Message Pi",
+         "controls": [{"type": "chips", "arg": "mode", "chips": [{"text": "auto", "value": "auto", "checked": True}, {"text": "steer", "value": "steer"}]}]}]}}]})
+    out = text("view e2e-comp")
+    check("composer row lists its controls", "[composer] Message Pi" in out and "mode=auto" in out, out)
+    text("view e2e-comp; set 1 mode steer; do 1 first\\nsecond")
+    sent = wait(lambda: e2e_echo.calls(f"{R}/echo.jsonl"), 10)
+    check("composer sends text with new lines and the chosen control", bool(sent) and sent[-1] == {"resource": "r2", "mode": "steer", "text": "first\nsecond", "context": sent[-1].get("context")}, sent)
+    echo.close()
     # Recovery: safe mode, the shared chooser, session allowance, leave.
     text("p 5")
     check("prefix row enters safe mode", wait(lambda: call("workspace.snapshot").get("safe_mode") is True))

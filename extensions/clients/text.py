@@ -21,13 +21,15 @@ sys.path.insert(1, os.path.dirname(HERE))  # vqro_ext.py beside the bundled exte
 import vqro_client_model as model  # noqa: E402
 from vqro_ext import Vqro, VqroError  # noqa: E402
 
-FEATURES = model.BASE_FEATURES + ["icon_names", "current_when", "markdown", "pin"]
+FEATURES = model.BASE_FEATURES + ["icon_names", "current_when", "markdown", "pin", "composer", "multiline"]
 WIDTH = 100  # formatted text is laid out at this width
 HELP = """commands (numbers refer to the last listing):
   show                    this client's layout (workspace): tabs and numbered panes (* = focused)
   focus <pane>            focus a pane; `view` then shows it
   view [<pane>|<view id>] a pane's content: panel rows numbered; terminals are named only
-  do <row>[.<chip>] [<value or text>]   activate a row (or chip) of the shown panel
+  do <row>[.<chip>] [<value or text>]   activate a row (or chip) of the shown panel; on a composer, send the text
+                          (`\\n` is a new line in composers and multi-line prompts)
+  set <row> <arg> <value> choose a composer control's value (kept here until sent)
   page <n> | filter <text> | expand <row> | collapse <row>     panel display state
   menu <pane|tab|tabbar|status> [<n>]  contributed menu items for the focused pane, or run one
   p [<n>]                 the prefix menu: key bindings and recovery (always available); run row n
@@ -53,6 +55,7 @@ class TextClient:
         self.listed = []           # the last numbered rows of `self.shown`
         self.menu = []             # the last listed menu/prefix rows: (label, binding)
         self.safe_selected = set()
+        self.composers = {}           # (view, composer row id) -> client-local control values
         self.vqro = Vqro(socket_path, self.on_message, recover_notifications=True)
         self.info = self.vqro.call("hello", model_hello())
         self.resync()
@@ -271,6 +274,11 @@ class TextClient:
         k = model.kind(item)
         if k == "separator":
             return f"{pad}    ---"
+        if k == "composer":
+            values = self.composer(r)["values"] if self.shown else {}
+            controls = "  ".join(f"{c['arg']}={values.get(c['arg'])}" for c in model.composer_controls(item))
+            return (f"{pad}{n:>3}. [composer] {text_of(item.get('placeholder')) or 'Message'}" + (f"  ({controls})" if controls else "")
+                    + "  (do <row> <text> sends; set <row> <arg> <value>)")
         if k == "text" and item.get("format") == "markdown":  # formatted text: the shared layout, as plain lines
             shown = ["".join(t for t, _ in line) for line in model.markdown_lines(text_of(item.get("text")), WIDTH - 5 - len(pad))]
             first = f"{pad}{n:>3}. " if model.selectable(item) else f"{pad}     "
@@ -392,6 +400,8 @@ class TextClient:
                 return [f"no chip {spec}"]
         elif not model.selectable(item):
             return [f"row {row} is not selectable"]
+        if model.kind(item) == "composer":
+            return self.compose(r, rest)
         if not isinstance(item.get("command"), str):
             if r["has_children"] and not chip:
                 self.state[self.shown]["open"][r["id"]] = not r["expanded"]
@@ -413,7 +423,7 @@ class TextClient:
         elif item.get("input"):
             if not rest:
                 return [f"asks: {item['input']} (give it after the row number)"]
-            args["text"] = rest
+            args["text"] = rest.replace("\\n", "\n") if item.get("multiline") is True else rest
         elif item.get("pick") == "resource":
             if rest not in self.ws.resources:
                 return ["pick a resource id: " + ", ".join(sorted(self.ws.resources))]
@@ -422,6 +432,29 @@ class TextClient:
         if self.shown and self.shown == self.popup:
             ctx = dict(ctx, panel=self.shown, panel_view=self.shown)
         return self.invoke(item["command"], args, ctx)
+
+    def composer(self, r):
+        """A composer row's client-local state (draft, control values), kept per view and row id until sent."""
+        key = (self.shown, r["id"])
+        state = self.composers.get(key)
+        if state is None:
+            c = model.Composer(r["item"])
+            state = self.composers[key] = {"values": c.values}
+        return state
+
+    def compose(self, r, rest):
+        """Send a composer row's text (with its controls' current values); nothing is sent without text."""
+        item = r["item"]
+        if not rest.strip():
+            return [f"composer: give the text after the row number (`\\n` for a new line); `set` chooses {', '.join(c['arg'] for c in model.composer_controls(item)) or 'controls'}"]
+        c = model.Composer(item)
+        c.values.update(self.composer(r)["values"])
+        if c.editor.insert(rest.replace("\\n", "\n")) == "refused":
+            return ["too long: over the composer's size limit; nothing sent"]
+        if not isinstance(item.get("command"), str):
+            return ["this composer has no command"]
+        ctx = self.ctx()
+        return self.invoke(item["command"], c.submit_args(item), ctx)
 
     def menu_lines(self, place, run=None):
         ctx = self.ctx()
@@ -516,6 +549,15 @@ class TextClient:
             if cmd == "do":
                 spec, _, arg = rest.partition(" ")
                 return self.activate(spec, arg.strip())
+            if cmd == "set":
+                parts = rest.split(None, 2)
+                if len(parts) < 3 or not parts[0].isdigit() or not 0 < int(parts[0]) <= len(self.listed):
+                    return ["set <row> <arg> <value>"]
+                r = self.listed[int(parts[0]) - 1]
+                if model.kind(r["item"]) != "composer":
+                    return [f"row {parts[0]} is not a composer"]
+                self.composer(r)["values"][parts[1]] = parts[2]
+                return self.view_lines(self.shown)
             if cmd in ("page", "filter", "expand", "collapse"):
                 if not self.shown:
                     return ["`view` a panel first"]
