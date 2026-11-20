@@ -17,6 +17,48 @@ def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
 
 
+def receipts_isolated(rows):
+    """I17: every (delivery, record) pair carries a projected receipt naming exactly its own delivery, and the
+    deliveries differ. Crossed but individually valid receipt envelopes fail."""
+    deliveries = [delivery for delivery, _ in rows]
+    return len(set(deliveries)) == len(deliveries) and all(
+        ((record.get("result") or {}).get("receipt") or {}).get("delivery") == delivery for delivery, record in rows)
+
+
+def operator_view_names(surfaces, successor, predecessor):
+    """I22: some operator surface shows the successor held ordering_unknown together with the predecessor's id.
+    A surface that names neither (for example empty attention) fails."""
+    for surface in surfaces:
+        text = json.dumps(surface)
+        if successor in text and predecessor in text and "ordering_unknown" in text:
+            return True
+    return False
+
+
+def frozen_set_kept(initial, *replays):
+    """L10: every replay of the frozen scope action reports exactly the recorded target set (no extra or missing
+    target, same receipt)."""
+    return all(sorted(replay.get("targets") or []) == sorted(initial.get("targets") or [])
+               and replay.get("receipt") == initial.get("receipt") for replay in replays)
+
+
+def status_effects(events):
+    """T13: public events that a status report must not cause: core effects, notifications and status publications."""
+    found = []
+    for event in events:
+        kind = event.get("type")
+        data = event.get("data") if isinstance(event.get("data"), dict) else event
+        if kind == "effect" or "notif" in str(kind) or (kind == "view.content" and data.get("view") == "agents.terminal_status"):
+            found.append(kind if kind != "view.content" else "view.content:agents.terminal_status")
+    return found
+
+
+async def _receipts_attached(ctx):
+    receipts = (await ctx.command("status")).get("receipts") or {}
+    ctx.evidence.append({"kind": "receipt_stream_status", "receipts": receipts})
+    return receipts.get("configured", 0) >= 1 and receipts.get("attached", 0) == receipts.get("configured")
+
+
 async def operation(ctx, suffix="op"):
     """An op id in the current window; the serial is taken before the await so concurrent callers never share one."""
     ctx.serial += 1
@@ -83,14 +125,37 @@ async def shared_submission_ids_stay_per_principal(ctx):
                                                   "content": [{"type": "text", "text": "edited by " + name}]}, peer=peers[name])
         ctx.check(edited.get("delivery") == delivery, "a pending record stays editable by its sender after the window rolled",
                   principal=name, reply=edited)
-    # Receipts: each native invocation and outcome carries its own delivery and content.
+    # Receipts: each native input, outcome and typed receipt carries its own delivery. The agent declares insertion
+    # correlation and the native publishes the receipt it stored for each actual insertion.
+    from copy import deepcopy
+    row = next(r for r in await ctx.resources() if r["id"] == target)
+    caps = deepcopy(row["data"]["agent"]["caps"]); caps["agent.send"]["correlation"] = "insertion"; caps["rev"] = caps.get("rev", 1) + 1
+    await ctx.native_set(0, caps=caps)
+    # Changing caps reattaches coordination's receipt stream for this agent; wait until it is attached again.
+    await ctx.wait(lambda: _receipts_attached(ctx), label="coordination receipt stream attached", timeout=20)
+    # The native reply reports only `admitted`; each actual insertion stores the higher `inserted` receipt, published late.
+    await ctx.native.call("plan", ref=ctx.agents[0]["backend_ref"], op="agent.send",
+                          plan={"result": {"outcome": "accepted", "data": {"receipt": {"stage": "admitted"}}}})
     await ctx.scope("resume", "agent:" + target)
+    rows = []
     for name, delivery in (("i17-alice", alice), ("i17-bob", bob)):
         record = await settled(ctx, delivery)
         calls = invocations(ctx, delivery=delivery)
         ctx.check(len(calls) == 1 and calls[0]["args"]["content"] == [{"type": "text", "text": "edited by " + name}]
-                  and record["from"]["principal"] == name and (record.get("result") or {}).get("native"),
-                  "each delivery's native input, outcome and receipt stay its own", principal=name, state=record["state"])
+                  and record["from"]["principal"] == name, "each delivery's native input stays its own", principal=name, state=record["state"])
+        compacted = "final_seq" in await ctx.get(delivery)
+        published = None
+        try: published = await ctx.native.call("publish-receipt", ref=ctx.agents[0]["backend_ref"], delivery=delivery)
+        except Exception as error: published = {"error": str(error)}  # e.g. a queued (never inserted) delivery
+        try:
+            record = await ctx.wait_command("inbox.get", lambda r: (r.get("result") or {}).get("receipt"), args={"delivery": delivery})
+        except Exception:
+            record = await ctx.get(delivery)  # graded below: a missing receipt cannot witness isolation
+        ctx.evidence.append({"kind": "i17_receipt", "delivery": delivery, "compacted_before_publish": compacted,
+                             "published": published, "receipt": (record.get("result") or {}).get("receipt")})
+        rows.append((delivery, record))
+    ctx.check(receipts_isolated(rows), "each delivery's typed receipt names exactly its own delivery",
+              receipts={delivery: (record.get("result") or {}).get("receipt") for delivery, record in rows})
 
 
 async def tombstone(sub, agent):
@@ -149,14 +214,24 @@ async def membership_is_ordinary_configuration(ctx):
                 return row and row["value"] == old
             await sub.wait(restored, label="author u restores the old membership", timeout=15)
         ctx.check((await membership(sub, mover))["value"] == old, "the author's u undoes the move with the domain full")
+        # A member added to the project after the freeze (and after the author's u, so u undoes the move): a recomputed
+        # selection would include it, the frozen one never.
+        latecomer = sub.agents[0]["id"]
+        late = await membership(sub, latecomer)
+        await sub.peer.call("workspace.apply", {"ops": [{"op": "set", "key": "doc/agents/members/" + latecomer,
+            "value": {"project": "l10-new", "reports_to": None}, "expect": late["version"] if late else 0}]})
         replay = await sub.command("inbox.op", {"op": op})
-        ctx.check(mover in (replay.get("targets") or []), "the scope action frozen before the undo keeps its recorded set", replay=replay)
         # An explicit revert also undoes a move.
         current = await membership(sub, mover)
         again = await sub.peer.call("workspace.apply", {"ops": [{"op": "set", "key": "doc/agents/members/" + mover,
                                                                  "value": {"project": "l10-newer", "reports_to": None}, "expect": current["version"]}]})
         await sub.peer.call("workspace.revert", {"txn": again["txn"]})
         ctx.check((await membership(sub, mover))["value"] == old, "an explicit revert undoes the move with the domain full", txn=again["txn"])
+        replay_after_revert = await sub.command("inbox.op", {"op": op})
+        ctx.check(frozen_set_kept(frozen, replay, replay_after_revert) and latecomer not in (replay.get("targets") or []),
+                  "the scope action frozen before the undo keeps exactly its recorded set (after u and after revert)",
+                  frozen=frozen.get("targets"), after_undo=replay.get("targets"), after_revert=replay_after_revert.get("targets"),
+                  latecomer=latecomer)
         stone = await tombstone(sub, mover)
         version = (await membership(sub, mover))["version"]
         # The reference is refreshed by K2's lifecycle sweep, so its revision may lag the live config; L10 constrains
@@ -179,6 +254,10 @@ async def unknown_predecessor_blocks_visibly(ctx):
     plus the predecessor's delivery id; observation neither resolves nor resends it; an explicit authorized resolution
     lets scheduling re-evaluate the successor's other checks and never replays the predecessor."""
     target, ref = ctx.agents[0]["id"], ctx.agents[0]["backend_ref"]
+    operator = LiveViews()  # the coordination operator view (K2's coord-status), from a public subscription
+    watcher = await ctx.connect("owner")
+    watcher.on("event", operator.on_event)
+    await watcher.call("events.subscribe", {"view_content": {"names": ["coord-status"]}})
     await ctx.grant("i22-sender", "i22-sender", ["send:admit"], "agent:" + target)
     sender, other = await ctx.connect("i22-sender"), await ctx.connect("i22-other")
     async def send(text):
@@ -196,9 +275,12 @@ async def unknown_predecessor_blocks_visibly(ctx):
     held_row = await ctx.wait_command("inbox.get", lambda r: r.get("reason") == "ordering_unknown", args={"delivery": successor})
     listed = next((row for row in (await ctx.command("inbox.list", {"target": target}))["items"] if row["delivery"] == successor), {})
     attention = (await ctx.command("status")).get("attention") or {}
+    surfaces = [attention, operator.content.get("coord-status")]
     ctx.check(held_row["state"] == "held" and listed.get("reason") == "ordering_unknown",
               "get and list show the successor held ordering_unknown", get=held_row.get("reason"), listed=listed.get("reason"))
     # Graded last so the remaining clauses are still witnessed when this one fails.
+    ctx.evidence.append({"kind": "i22_operator_view", "named": operator_view_names(surfaces, successor, predecessor),
+                         "attention": surfaces[0], "coord_status": surfaces[1]})
     names_predecessor = {"get": predecessor in json.dumps(held_row), "list": predecessor in json.dumps(listed),
                          "attention": predecessor in json.dumps(attention)}
     # Observation does not resolve or resend.
@@ -227,6 +309,9 @@ async def unknown_predecessor_blocks_visibly(ctx):
               "the successor is dispatched once and the predecessor is never replayed", state=done["state"])
     ctx.check(names_predecessor["get"] and names_predecessor["list"],
               "get and list name the unknown predecessor's delivery id", names=names_predecessor, get=held_row, listed=listed)
+    ctx.check(operator_view_names(surfaces, successor, predecessor),
+              "an operator view shows the successor held ordering_unknown with the predecessor's id",
+              attention=surfaces[0], coord_status=surfaces[1])
 
 
 class LiveViews:
@@ -278,6 +363,19 @@ async def advisory_terminal_status(ctx):
     # No report never implies idle (sidebar), then OSC-shaped live data with state mapping.
     await asyncio.sleep(.3)
     ctx.check(a not in views.table(), "no report publishes no state for a terminal")
+    def sidebar_entry(terminal):
+        found = []
+        def walk(node):
+            if isinstance(node, dict):
+                if terminal in json.dumps(node, ensure_ascii=False) and "badges" in node: found.append(node)
+                for value in node.values(): walk(value)
+            elif isinstance(node, list):
+                for value in node: walk(value)
+        walk(views.content.get("sidebar"))
+        return found[-1] if found else None
+    unreported = sidebar_entry(a)
+    ctx.check(unreported is None or "idle" not in json.dumps(unreported.get("badges")),
+              "no report never shows idle in the sidebar", entry=unreported)
     reply = await report(a, "claude", "requires_action", 5)
     await table_has(lambda t: t.get(a, {}).get("seq") == 5, "first report published")
     entry = views.table()[a]
@@ -310,11 +408,10 @@ async def advisory_terminal_status(ctx):
     ctx.check(views.table()[a]["app"] == "claude" and views.table()[a]["state"] == "requires_action", "the ignored reports changed nothing")
     # Invalid reports: refused, nothing published, no notice, no native effect; a huge seq cannot poison later reports.
     before_events, before_seq = len(views.events), views.table()[a]["seq"]
+    native_before = len(ctx.native.records("invoke"))
+    history_before = (await ctx.peer.call("workspace.history", {"limit": 1}))["txns"][-1]["id"]
     def effects_since(start):
-        rows = views.events[start:]
-        return [e.get("type") if e.get("type") != "view.content" else "view.content:" + str((e.get("data") or e).get("view")) for e in rows
-                if e.get("type") != "view.content" and "notif" in str(e.get("type")) or
-                (e.get("type") == "view.content" and (e.get("data") or e).get("view") == "agents.terminal_status")]
+        return status_effects(views.events[start:])
     invalid = [("x" * 65, "app", "idle", 9), (a, "", "idle", 9), (a, "a" * 65, "idle", 9), (a, "bad\x07app", "idle", 9),
                (a, "app", "idle", -1), (a, "app", "idle", 2 ** 53), (a, "app", "idle", 10 ** 100), (a, "app", "idle", 1.5)]
     kinds = []
@@ -324,9 +421,13 @@ async def advisory_terminal_status(ctx):
         except RpcError as error:
             kinds.append(error.kind)
     await asyncio.sleep(.3)
-    ctx.check(all(kind == "invalid" for kind in kinds) and views.table()[a]["seq"] == before_seq and not effects_since(before_events),
-              "invalid reports are refused with no publication, notice or effect", kinds=kinds, effects=effects_since(before_events),
-              other_events=[e.get("type") for e in views.events[before_events:]])
+    native_after = len(ctx.native.records("invoke"))
+    history_after = (await ctx.peer.call("workspace.history", {"limit": 1}))["txns"][-1]["id"]
+    ctx.check(all(kind == "invalid" for kind in kinds) and views.table()[a]["seq"] == before_seq and not effects_since(before_events)
+              and native_after == native_before and history_after == history_before,
+              "invalid reports are refused with no publication, notice, core effect, native call or durable write",
+              kinds=kinds, effects=effects_since(before_events), native_calls=native_after - native_before,
+              history=[history_before, history_after], other_events=[e.get("type") for e in views.events[before_events:]])
     later = await report(a, "claude", "running", 6)
     await table_has(lambda t: t.get(a, {}).get("seq") == 6, "a valid later report after a huge invalid seq")
     ctx.check(later.get("applied") is True, "a huge invalid seq cannot poison a later valid report")

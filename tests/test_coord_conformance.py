@@ -320,3 +320,38 @@ class NativeOracle(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OrderingCheckerRegressions(unittest.TestCase):
+    """prim-agent-ux's review counterexamples (review-part-b-ordering.md R2-R5) must fail the ordering checkers."""
+
+    def setUp(self):
+        from agent_conformance.part_b import ordering_status_cases as module
+        self.m = module
+
+    def test_i17_crossed_valid_receipt_envelopes_fail(self):
+        alice = {"result": {"receipt": {"delivery": "d:alice", "stage": "inserted"}}}
+        bob = {"result": {"receipt": {"delivery": "d:bob", "stage": "inserted"}}}
+        self.assertTrue(self.m.receipts_isolated([("d:alice", alice), ("d:bob", bob)]))
+        self.assertFalse(self.m.receipts_isolated([("d:alice", bob), ("d:bob", alice)]))
+        self.assertFalse(self.m.receipts_isolated([("d:alice", {"result": {"native": {"outcome": "accepted"}}}), ("d:bob", bob)]))
+
+    def test_i22_missing_operator_view_fails(self):
+        self.assertFalse(self.m.operator_view_names([{}, None], "d:succ", "d:pred"))
+        self.assertFalse(self.m.operator_view_names([{"items": [{"delivery": "d:pred", "state": "unknown"}]}], "d:succ", "d:pred"))
+        named = {"items": [{"delivery": "d:succ", "reason": "ordering_unknown", "predecessor": "d:pred"}]}
+        self.assertTrue(self.m.operator_view_names([{}, named], "d:succ", "d:pred"))
+
+    def test_l10_extra_frozen_target_fails(self):
+        frozen = {"targets": ["r-mover"], "receipt": "x"}
+        self.assertTrue(self.m.frozen_set_kept(frozen, {"targets": ["r-mover"], "receipt": "x"}))
+        self.assertFalse(self.m.frozen_set_kept(frozen, {"targets": ["r-mover", "r-unselected"], "receipt": "x"}))
+        self.assertFalse(self.m.frozen_set_kept(frozen, {"targets": [], "receipt": "x"}))
+        self.assertFalse(self.m.frozen_set_kept(frozen, {"targets": ["r-mover"], "receipt": "y"}))
+
+    def test_t13_public_effect_events_are_seen(self):
+        effect = {"type": "effect", "data": {"op": "agent.send", "outcome": "accepted"}}
+        self.assertEqual(self.m.status_effects([effect]), ["effect"])
+        self.assertEqual(self.m.status_effects([{"type": "view.content", "data": {"view": "sidebar"}}]), [])
+        self.assertEqual(self.m.status_effects([{"type": "view.content", "data": {"view": "agents.terminal_status"}}]),
+                         ["view.content:agents.terminal_status"])
