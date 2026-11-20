@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import sys
 import threading
+import time
 import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -19,6 +20,10 @@ EFFECTS = {"prompt": "Prompt", "steer": "Steer", "follow_up": "Follow-up", "abor
 V0_MODE = {"prompt": "start", "steer": "boundary", "follow_up": "settle"}
 V0_OP = {"prompt": "send", "steer": "send", "follow_up": "send", "abort": "interrupt", "clear_queue": "queue",
          "answer": "respond"}
+# Tier-1 status (agents.status): a plugin without a tty (Claude Code hooks) reports its own terminal's state.
+# Lossy like OSC 7501: kept in memory, last writer by seq, gone with the terminal or an extension restart.
+TIER1_STATES = {"idle": "idle", "running": "working", "requires_action": "blocked", "unknown": "unknown"}
+TIER1_MAX = 4096
 MODE_ORDER = ("start", "boundary", "settle", "admit", "preempt")
 MODE_SHORT = {"start": "Prompt", "boundary": "Steer", "settle": "Queue", "admit": "Admit", "preempt": "Interrupt and send"}
 RECEIPT_TEXT = {"admitted": "admitted; where it landed is unknown", "queued": "held by the runtime",
@@ -112,6 +117,9 @@ class Agents:
         self.open_settings = set()
         self.published = {}  # Only current agents; suppress unchanged derived panel RPCs.
         self.list_open = False
+        self.tier1 = {}  # terminal id -> {app, state, seq, at_ms, status}
+        self.tier1_lock = threading.Lock()
+        ext.command("agents.status", "Report a tier-1 agent's state for its terminal (args: terminal, app, state, seq)")(self.report_status)
         for name, fn, title in [("list", self.list_agents, "Show agents"), ("show", self.show, "Show an agent in a tab"),
                                 ("config", self.settings, "Agent settings and commands (popup)"),
                                 ("configure", self.configure, "Change an agent setting (args: id, value)"),
@@ -377,6 +385,56 @@ class Agents:
         if not isinstance(text, str) or not text.strip():
             raise VqroError("message must not be empty", "invalid")
         return self.send_mode(r, mode, text)
+
+    def report_status(self, args):
+        """agents.status {terminal, app, state, seq}: a tier-1 plugin's report for its own terminal.
+
+        Published as live data `agents.terminal_status` ({data: {terminal: {app, state, seq, at_ms, status}}}), where
+        `status` is OSC 7501-shaped for readers of terminal status. Lossy and advisory: an unknown state value
+        becomes `unknown`, a report with seq not above the last one is ignored, and nothing is kept across a
+        restart of this extension. Not attributed: any caller can report for any terminal until callers carry
+        a principal (C2). Errors go to the caller only, never to a notice.
+        """
+        terminal, app, seq = args.get("terminal"), args.get("app"), args.get("seq")
+        if not isinstance(terminal, str) or not terminal:
+            raise VqroError("terminal must be a resource id", "invalid")
+        if not isinstance(app, str) or not app or len(app) > 64:
+            raise VqroError("app must be a non-empty string of at most 64 characters", "invalid")
+        if type(seq) is not int or seq < 0:
+            raise VqroError("seq must be a non-negative integer (Unix epoch ms recommended)", "invalid")
+        r = self.ext.resources.get(terminal)
+        if r is None:
+            self.ext.fresh()
+            r = self.ext.resources.get(terminal)
+        if r is None or r.get("kind", "terminal") != "terminal" or ended(r):
+            raise VqroError(f"{label(terminal, 64)} is not a live terminal; nothing recorded", "not_found")
+        state = args.get("state") if args.get("state") in TIER1_STATES else "unknown"
+        with self.tier1_lock:
+            previous = self.tier1.get(terminal)
+            if previous is not None and seq <= previous["seq"]:
+                return {"ok": True, "applied": False, "reason": "stale", "seq": previous["seq"]}
+            if previous is None and len(self.tier1) >= TIER1_MAX:
+                raise VqroError("too many reporting terminals; nothing recorded", "overloaded")
+            entry = {"app": app, "state": state, "seq": seq, "at_ms": int(time.time() * 1000),
+                     "status": {"state": TIER1_STATES[state], "app": app}}
+            self.tier1[terminal] = entry
+            changed = previous is None or (previous["state"], previous["app"]) != (state, app)
+        if changed:
+            self.publish_tier1()
+        return {"ok": True, "applied": True}
+
+    def publish_tier1(self):
+        with self.tier1_lock:
+            data = {rid: dict(entry) for rid, entry in self.tier1.items()}
+        self.ext.publish("agents.terminal_status", {"data": data})
+
+    def prune_tier1(self):
+        with self.tier1_lock:
+            gone = [rid for rid in self.tier1 if rid not in self.ext.resources or ended(self.ext.resources[rid])]
+            for rid in gone:
+                del self.tier1[rid]
+        if gone:
+            self.publish_tier1()
 
     def outcome(self, op, result):
         outcome = result.get("outcome", "unknown")
@@ -796,6 +854,8 @@ class Agents:
     def event(self, kind, event):
         if kind in ("entries", "resource", "resource.removed", "provider", "missed"):
             self.refresh(prune_views=kind in ("entries", "resource.removed", "missed"))
+            if kind in ("resource", "resource.removed", "missed") and self.tier1:
+                self.prune_tier1()
             if kind == "entries":
                 return
             changed = event.get("id") if kind in ("resource", "resource.removed") else None

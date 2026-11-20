@@ -35,7 +35,7 @@ from vqro_views import ended, title, unknown_since
 
 # `provider` keeps the registry cache current: an unavailable agent shows when its provider disconnected.
 ext = Extension("sidebar", event_types=["entries", "resource", "resource.removed", "provider", "view.content"],
-                view_content={"names": ["workspaces"]})
+                view_content={"names": ["workspaces", "agents.terminal_status"]})
 PREFS = "doc/settings/sidebar"
 LAYOUT_KEYS = ("layout/", "doc/layout/")  # tabs and their layouts' titles
 SHOW_DEFAULT = {"workspaces": True, "worktrees": True, "terminals": True, "stray": True}
@@ -82,8 +82,14 @@ def current_preset():
 
 
 def status_of(r):
+    """The terminal's OSC 7501 status; without one, a tier-1 agent's report via live data `agents.terminal_status` (lossy, advisory)."""
     st = r.get("status")
-    return st if isinstance(st, dict) else {}
+    if isinstance(st, dict) and st:
+        return st
+    reports = (ext.live.get("agents.terminal_status") or {}).get("data")
+    report = reports.get(r.get("id")) if isinstance(reports, dict) else None
+    tier1 = report.get("status") if isinstance(report, dict) else None
+    return tier1 if isinstance(tier1, dict) else {}
 
 
 def folder_of(r):
@@ -444,7 +450,7 @@ def refresh_worker():
 
 @ext.on_event
 def on_event(t, d):
-    if t in ("resource", "resource.removed", "provider", "missed") or (t == "view.content" and d.get("view") == "workspaces") \
+    if t in ("resource", "resource.removed", "provider", "missed") or (t == "view.content" and d.get("view") in ("workspaces", "agents.terminal_status")) \
             or (t == "entries" and any(c["key"] in (PREFS, "workspace/active") or c["key"].startswith(LAYOUT_KEYS)
                                        for c in d["changes"])):
         refresh_pending.set()

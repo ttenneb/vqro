@@ -11,6 +11,7 @@
                 {"cap":"command/agents.config","suggest":"agents","without":"No Agent settings action on agent rows"},
                 {"cap":"command/agents.stop","suggest":"agents","without":"No Stop agent action on agent rows"},
                 {"cap":"command/agents.forget","suggest":"agents","without":"No Forget agent action on unavailable agent rows"},
+                {"cap":"data/agents.terminal_status","suggest":"agents","without":"Agents without a terminal status sequence (Claude Code hooks) show no state"},
                 {"cap":"command/tabs.close_ended","suggest":"tabs","without":"Close ended items only hides them"}],
   "settings_command":"sidebar.view",
   "contributes":{"commands":["sidebar.toggle","sidebar.view","sidebar.show","sidebar.layout","sidebar.tab","sidebar.kill","sidebar.preset","sidebar.page","sidebar.close_ended","sidebar.show_ended"],"keys":["Prefix s: toggle sidebar"],"menu_items":["Sidebar status controls"],"panels":["Sidebar","Sidebar view"],"settings":["doc/settings/sidebar"]}

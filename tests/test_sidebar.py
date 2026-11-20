@@ -45,6 +45,19 @@ def load():
 
 
 class SidebarTests(unittest.TestCase):
+    def test_tier1_status_shows_only_where_the_terminal_reports_none(self):
+        module = load(); ext = module["ext"]
+        ext.resources = {
+            "r1": {"id": "r1", "kind": "terminal", "argv": ["claude"], "state": "live"},
+            "r3": {"id": "r3", "kind": "terminal", "argv": ["pi"], "state": "live", "status": {"state": "idle"}}}
+        ext.live["agents.terminal_status"] = {"data": {
+            "r1": {"app": "claude", "state": "requires_action", "seq": 5, "status": {"state": "blocked", "app": "claude"}},
+            "r3": {"app": "pi", "state": "running", "seq": 9, "status": {"state": "working", "app": "pi"}}}}
+        rows = module["build"]()
+        row = lambda rid: next(x for x in rows if x.get("args", {}).get("resource") == rid)
+        self.assertIn({"text": "blocked", "style": "warn"}, row("r1")["badges"])
+        self.assertIn({"text": "idle", "style": None}, row("r3")["badges"], "the terminal's own OSC 7501 status wins")
+
     def test_agents_group_their_bridge_and_ended_items_are_marked(self):
         module = load(); ext = module["ext"]
         ext.resources = {

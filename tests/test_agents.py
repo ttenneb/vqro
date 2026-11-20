@@ -514,6 +514,37 @@ class AgentV0Tests(unittest.TestCase):
         self.assertEqual(self.core.live["agents-list"]["items"][0]["description"], "stopping")
 
 
+class Tier1StatusTests(unittest.TestCase):
+    def setUp(self):
+        self.core = FakeCore()
+        self.agents = Agents(self.core)
+        self.core.resources["r1"] = {"id": "r1", "kind": "terminal", "state": "live", "argv": ["claude"]}
+        self.report = self.core.handlers["agents.status"]
+
+    def test_reports_publish_osc_shaped_status_last_writer_by_seq(self):
+        self.assertEqual(self.report({"terminal": "r1", "app": "claude", "state": "running", "seq": 10})["applied"], True)
+        entry = self.core.live["agents.terminal_status"]["data"]["r1"]
+        self.assertEqual((entry["state"], entry["status"]), ("running", {"state": "working", "app": "claude"}))
+        self.assertEqual(self.report({"terminal": "r1", "app": "claude", "state": "idle", "seq": 10})["reason"], "stale")
+        self.report({"terminal": "r1", "app": "claude", "state": "sparkling", "seq": 11})
+        self.assertEqual(self.core.live["agents.terminal_status"]["data"]["r1"]["state"], "unknown", "no state without evidence")
+        self.assertEqual([m for m, _ in self.core.calls if m.startswith("resource.")], [], "advisory: nothing native")
+
+    def test_bad_reports_are_refused_to_the_caller_without_notices(self):
+        for bad in ({"terminal": "r9", "app": "c", "state": "idle", "seq": 1}, {"terminal": "r1", "app": "", "seq": 1},
+                    {"terminal": "r1", "app": "c", "state": "idle", "seq": -1}, {"terminal": "r1", "app": "c", "seq": "1"}):
+            with self.assertRaises(VqroError):
+                self.report(bad)
+        self.assertEqual(self.core.notices, [])
+        self.assertNotIn("agents.terminal_status", self.core.live)
+
+    def test_an_ended_or_removed_terminal_drops_its_report(self):
+        self.report({"terminal": "r1", "app": "claude", "state": "idle", "seq": 1})
+        del self.core.resources["r1"]
+        self.agents.event("resource.removed", {"id": "r1"})
+        self.assertEqual(self.core.live["agents.terminal_status"]["data"], {})
+
+
 class ProviderCache(unittest.TestCase):
     def test_snapshot_events_and_snapshot_without_providers(self):
         ext = Extension.__new__(Extension)
