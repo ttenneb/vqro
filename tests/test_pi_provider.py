@@ -487,6 +487,27 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.core.resources)
         self.assertIsNone(bridge.retirement_problem)
 
+    async def test_pi_exit_during_registration_retires_without_publishing_a_live_agent(self):
+        # Resuming after a core restart: vqro still caches the agent (unavailable) while the bridge
+        # re-registers. Pi exits before the registration reply. Shutdown must wait for setup, never
+        # let setup sync a live agent once closing, and retire the cached agent on the registered
+        # connection (it used to skip retirement silently because the generation was unknown).
+        self.core.resources["r7"] = {"ref": "agent", "kind": "agent", "state": "live", "id": "r7",
+                                     "backend_ref": "agent", "provider": "pi-test", "available": False}
+        self.core.allow_register.clear()
+        bridge = await self.start(ready=False)
+        await asyncio.wait_for(self.core.registered.wait(), 3)
+        bridge.pi.process.kill()
+        await asyncio.sleep(.3)  # cleanup is now waiting for setup to reach a checkpoint
+        self.core.allow_register.set()
+        ended = await asyncio.wait_for(self.task, 5)
+        self.assertEqual(ended["reason"], "exited")
+        await self.core.wait(lambda: bool(self.core.notes("resource.gone")))
+        self.assertEqual(self.core.notes("provider.sync"), [], "no live agent published while closing")
+        self.assertEqual(self.core.notes("resource.upsert"), [])
+        self.assertFalse(self.core.resources)
+        self.assertIsNone(bridge.retirement_problem)
+
     async def test_undeliverable_retirement_is_retried_once_then_reported(self):
         class Stub:
             def __init__(self, failures):
@@ -495,20 +516,36 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 self.calls += 1
                 if self.calls <= self.failures:
                     raise ProviderError("timeout", "answer deadline; delivery unknown")
+        def bare(provider, rid="r7"):
+            bridge = Bridge.__new__(Bridge)
+            bridge.provider, bridge._setup, bridge.rid, bridge.connections = provider, asyncio.Lock(), rid, 1
+            bridge.failure = bridge.retirement_problem = None
+            return bridge
         for failures, calls, reported in ((1, 2, False), (2, 2, True)):
-            bridge = mock.Mock(provider=Stub(failures), connected=True, failure=None, retirement_problem=None)
+            bridge = bare(Stub(failures))
             problem = await Bridge._retire(bridge, {"reason": "exited", "exit_code": 23})
             self.assertEqual(bridge.provider.calls, calls)
             self.assertEqual(problem is not None, reported)
             if reported:
-                self.assertIn("not delivered", bridge.failure)
+                # A timed-out write may have reached the core: unconfirmed, never "not delivered".
+                self.assertIn("delivery unconfirmed", bridge.failure)
                 self.assertEqual(bridge.retirement_problem, problem)
         # A disconnected provider is reported at once, without pretending to send.
-        bridge = mock.Mock(provider=Stub(0), connected=False, failure="provider connection closed", retirement_problem=None)
+        stub = Stub(0)
+        stub.failure = "provider connection closed"
+        bridge = bare(stub)
         problem = await Bridge._retire(bridge, {"reason": "exited", "exit_code": 23})
         self.assertEqual(bridge.provider.calls, 0)
         self.assertIn("provider connection closed", problem)
         self.assertIn("not delivered", bridge.failure)
+        # A published agent whose provider never registered (again) is reported, not skipped.
+        stub = Stub(0)
+        stub.generation = None
+        bridge = bare(stub)
+        self.assertIn("not registered", await Bridge._retire(bridge, {"reason": "exited"}))
+        bridge = bare(Stub(0), rid=None)
+        bridge.provider.generation, bridge.connections = None, 0
+        self.assertIsNone(await Bridge._retire(bridge, {"reason": "exited"}), "nothing was ever published")
 
     async def test_core_disconnect_preserves_pi_when_endpoint_is_unavailable(self):
         bridge = await self.start()

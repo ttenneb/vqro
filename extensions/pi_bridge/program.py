@@ -78,6 +78,9 @@ class Bridge:
         self._publish_now = asyncio.Event()
         self._control_task = None
         self._publishing = None
+        # Connection setup (register, sync, views) and shutdown retirement never interleave: shutdown
+        # waits for setup to reach a checkpoint, and setup publishes nothing once closing.
+        self._setup = asyncio.Lock()
         self.retirement_problem = None  # why resource.gone could not be delivered, if it could not
         self.fallback = fallback or Fallback()
         self.interval, self.pi_limits = interval, pi_limits
@@ -184,6 +187,12 @@ class Bridge:
             self._credential = token if isinstance(token, str) and token else None
 
     async def _connect(self, provider):
+        async with self._setup:
+            if self.closing:
+                return  # shutdown began before registering: nothing to publish or retire here
+            await self._setup_connection(provider)
+
+    async def _setup_connection(self, provider):
         if self.connector is not None:
             await self.connector(provider)
         else:
@@ -192,9 +201,15 @@ class Bridge:
         self._remember(provider)
         if self._credential is None:
             raise ProviderError("backend", "core omitted required resume_token; cannot resume")
+        if self.closing:
+            # Registered but not yet synced: never publish a live agent now. Control keeps this
+            # connection open (wait_closed) so shutdown can retire the agent on it.
+            return
         self.view_problem = None
         initial = self.facts()
         await provider.full_sync([initial])
+        if self.closing:
+            return  # synced; shutdown retires it as soon as setup releases
         scoped = await provider.call("resource.list", {"provider": provider.name, "backend_ref": "agent"})
         resources = [r for r in scoped.get("resources", [])
                      if r.get("provider") == provider.name and r.get("backend_ref") == "agent" and r.get("kind") == "agent"]
@@ -436,21 +451,42 @@ class Bridge:
         Retirement is idempotent (it names an identity, it is not runtime input), so one retry
         after a timeout is safe. A loss leaves the agent cached as unavailable in vqro, so it is
         made visible on the fallback screen and returned to the caller."""
-        if self.provider.generation is None:
-            return None
-        problem = None
-        for _ in range(2):
-            if not self.connected or self.provider.failure is not None:
-                problem = "provider disconnected: " + str(self.provider.failure or self.failure or "not connected")
-                break
+        try:
+            # Bounded: setup steps are provider calls with their own deadlines.
+            await asyncio.wait_for(self._setup.acquire(), 5)
+        except TimeoutError:
+            problem, unknown = "connection setup still in progress", False
+        else:
             try:
-                await asyncio.wait_for(self.provider.gone("agent", why=why), 1)
-                return None
-            except (TimeoutError, ProviderError) as error:
-                problem = str(error) or type(error).__name__
-        self.retirement_problem = tail(plain("agent retirement (resource.gone) not delivered: " + problem), 1024)
+                problem, unknown = await self._send_gone(why)
+            finally:
+                self._setup.release()
+        if problem is None:
+            return None
+        verdict = "delivery unconfirmed" if unknown else "not delivered"
+        self.retirement_problem = tail(plain(f"agent retirement (resource.gone) {verdict}: " + problem), 1024)
         self.failure = self.retirement_problem if not self.failure else self.failure + "; " + self.retirement_problem
         return self.retirement_problem
+
+    async def _send_gone(self, why):
+        """(problem, unknown): problem is None once a gone was written. A registered provider
+        retires even before its UI-ready `connected` (setup stopped at a closing checkpoint)."""
+        provider = self.provider
+        if provider.generation is None:
+            if self.rid is None and not self.connections:
+                return None, False  # this bridge never published an agent
+            return "not registered with the core", False
+        problem, unknown = None, False
+        for _ in range(2):
+            if provider.failure is not None:
+                return "provider disconnected: " + str(provider.failure), unknown
+            try:
+                await asyncio.wait_for(provider.gone("agent", why=why), 1)
+                return None, False  # written; the core's processing is not acknowledged
+            except (TimeoutError, ProviderError) as error:
+                # A timed-out write may already have reached the core: unknown, never "not sent".
+                problem, unknown = str(error) or type(error).__name__, True
+        return problem, unknown
 
     async def run(self, stop=None):
         stop = stop or asyncio.Event()
