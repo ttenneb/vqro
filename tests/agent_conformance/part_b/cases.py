@@ -596,7 +596,11 @@ async def terminal(ctx,*,pull=None,marker=True):
     return row
 
 
-def user_pull(): return {"points":["turn","settle","idle","tool"],"insert":"user","evidence":"entry","tool_boundary":True}
+def user_pull():
+    points = ("turn", "settle", "idle", "tool")
+    return {"points": {point: {"precision": "exact"} for point in points},
+            "framing": {point: {"role": "user"} for point in points},
+            "insert": "user", "evidence": "entry", "tool_boundary": True}
 
 
 async def consumer(ctx,row,name="consumer-1",records=None):
@@ -801,7 +805,10 @@ async def delayed_old_report_cannot_change_new_claim(ctx):
 
 @case("T10")
 async def context_evidence_never_claims_entry(ctx):
-    declaration={"points":["turn","settle","idle"],"insert":"context","evidence":"none"}
+    points = ("turn", "settle", "idle")
+    declaration={"points": {point: {"precision": "exact"} for point in points},
+                 "framing": {point: {"role": "context"} for point in points},
+                 "insert":"context","evidence":"none"}
     row=await terminal(ctx,pull=declaration);await consumer(ctx,row)
     sent=await ctx.send(target=row["id"],mode="boundary",render=["context"],text="context with actual sender")
     await ctx.scope("resume","agent:"+row["id"]);batch=await take(ctx,row)
@@ -1236,4 +1243,4 @@ async def readonly_boot_before_writes(ctx):
 
 
 # Registration of independently grouped probes; imported after their shared helpers exist.
-from . import inbox_cases, history_cases, priority_cases, scale_cases, archive_cases, lifecycle_cases, ordering_status_cases, control_epoch_cases  # noqa: E402,F401
+from . import inbox_cases, history_cases, priority_cases, scale_cases, archive_cases, lifecycle_cases, ordering_status_cases, control_epoch_cases, pull_followup_cases  # noqa: E402,F401
