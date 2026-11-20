@@ -204,8 +204,14 @@ function plugin(pi: any, hooks: TestHooks) {
       .filter((e: any) => e.type === "custom_message" && e.customType === TYPE && e.details?.vqro?.delivery && e.id)
       .map((e: any) => ({ delivery: e.details.vqro.delivery, entry: e.id }))
       .slice(-64);
-    const result = await mutate("inbox.reconcile", { agent: AGENT, consumer, records }, `${consumer}:reconcile`);
-    log("reconciled", { consumer, records: result.records });
+    // Bounded pages: follow `state: reconciling` until the inbox says `reconciled` (each page settles more claims).
+    const changed: any[] = [];
+    for (let page = 0; page < 64; page++) {
+      const result = await mutate("inbox.reconcile", { agent: AGENT, consumer, records }, `${consumer}:reconcile:${page}`);
+      changed.push(...(result.records ?? []));
+      if (result.state !== "reconciling") return log("reconciled", { consumer, records: changed, pages: page + 1 });
+    }
+    throw new Error("reconcile: still reconciling after 64 pages");
   }
 
   async function status(state: string, source: string) {

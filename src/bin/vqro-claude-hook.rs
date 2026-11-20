@@ -398,9 +398,22 @@ mod unix {
             "entrypoint": std::env::var("CLAUDE_CODE_ENTRYPOINT").ok()}));
         ctx.with_state(|s| s.set("epoch", json!("")));
         // `evidence: none`: a new consumer proves nothing; the inbox makes every open claim `unknown`.
-        match core.mutate(ctx, "inbox.reconcile", json!({"agent": ctx.agent, "consumer": consumer, "records": []}), &format!("{consumer}:reconcile")) {
-            Ok(r) => ctx.log("reconciled", r),
-            Err(e) => ctx.log("reconcile_failed", json!(e)),
+        // Bounded pages: follow `state: reconciling` until the inbox says `reconciled` (each page settles more claims).
+        let mut changed = Vec::new();
+        for page in 0..64 {
+            match core.mutate(ctx, "inbox.reconcile", json!({"agent": ctx.agent, "consumer": consumer, "records": []}), &format!("{consumer}:reconcile:{page}")) {
+                Ok(r) => {
+                    changed.extend(r.get("records").and_then(Value::as_array).cloned().unwrap_or_default());
+                    if r.get("state").and_then(Value::as_str) != Some("reconciling") {
+                        ctx.log("reconciled", json!({"records": changed, "pages": page + 1}));
+                        break;
+                    }
+                }
+                Err(e) => {
+                    ctx.log("reconcile_failed", json!({"page": page, "error": e}));
+                    break;
+                }
+            }
         }
         ctx.with_state(|s| {
             s.set("consumer", json!(consumer));

@@ -164,6 +164,9 @@ did not change (an edit of a held record) would then never arrive. The wake cont
     session, whose transcript no longer grows, so it stays `supplied` and is never upgraded to `read`.
   - Hand-offs open in the cleared session stay `supplied` (their context is gone, so they are never `read`).
   - Mail keeps flowing in the new session (tested).
+- **Reconciliation pages:** a new consumer follows `state: reconciling` page by page (same consumer, one op per
+  page, at most 64) until the inbox answers `reconciled`. Tested with a paged fake (Claude: 1 claim per page; Pi:
+  extra pages).
 - **Reconnects:**
   - The Claude idle waiter reconnects with backoff.
   - The Pi plugin reconnects and resubscribes after a core restart, and reconciles again when its consumer is

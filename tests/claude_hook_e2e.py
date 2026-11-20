@@ -212,6 +212,20 @@ except RuntimeError as e:
 check("old consumer's late report after reconcile is rejected", "stale" in late or "conflict" in late, late)
 # An unknown blocks later same-sender/mode input (ordering_unknown) until a principal judges it.
 h.c.cmd("coord.inbox.resolve", op=h.op(), delivery=b3, **{"as": "not_delivered"})
+# 9a. reconciliation in pages (fake only: 1 claim per page): the plugin follows `reconciling` until `reconciled`
+if a.inbox == "fake":
+    old = json.load(open(os.path.join(root, "hookstate", "s1.json")))["consumer"]
+    paged = [h.send(AGENT, "boundary", txt(f"PAGED{i}"), render=CTX) for i in range(3)]
+    time.sleep(0.3)
+    h.c.cmd("coord.inbox.take", op=h.op(), agent=AGENT, consumer=old, at="turn", limit=16)  # claimed, never handed over
+    h.c.cmd("fixture.fault", reconcile_page=1)
+    hook("SessionStart", {"source": "resume"})
+    h.c.cmd("fixture.fault", reconcile_page=1 << 30)
+    rec = [e for e in hooklog() if e["event"] == "reconciled"][-1]["detail"]
+    check("paged reconcile is followed to the end: every open claim settled", rec.get("pages", 0) >= 3 and all(state(d) == "unknown" for d in paged),
+          (rec.get("pages"), [state(d) for d in paged]))
+    for d in paged:
+        h.c.cmd("coord.inbox.resolve", op=h.op(), delivery=d, **{"as": "not_delivered"})
 # 9b. compaction and /clear are not restarts: same consumer, open hand-offs stay supplied (no false unknown)
 before = json.load(open(os.path.join(root, "hookstate", "s1.json")))["consumer"]
 c1 = h.send(AGENT, "boundary", txt("C1 before compaction"), render=CTX)

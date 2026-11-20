@@ -7,7 +7,9 @@ call is appended to the log given as argv[1] (the test oracle). `tests/fixtures/
 `take {accept: [...], max_bytes}` (as K2: default `["text"]` and 32 KiB) names the block types a plugin can insert and
 the largest content it takes (compact UTF-8 JSON bytes); other records stay held `unsupported_content` or
 `too_large_for_consumer`. `max_bytes` is ignored while `fixture.fault {no_max_bytes}` is set (an older inbox); `{window_fail}` makes
-`coord.inbox.window` fail; `{op_fail: n}` fails the next n `coord.inbox.op` calls. A lost
+`coord.inbox.window` fail; `{op_fail: n}` fails the next n `coord.inbox.op` calls;
+`{reconcile_page: n}` settles at most n claims per `coord.inbox.reconcile` page; `{reconcile_extra: n}` adds n
+pages that settle nothing. A lost
 take reply is inspected with `coord.inbox.op {op}`: claims, never content. `agents.status` records tier-1 status reports (K3's command, not in this inbox).
 """
 import json, os, sys, threading, time
@@ -210,7 +212,20 @@ def report(args):
 def reconcile(args):
     agent, seen = args["agent"], {x["delivery"]: x.get("entry") for x in args.get("records", [])}
     consumers[agent] = args["consumer"]
-    changed = []
+    if FAULT.get("reconcile_extra", 0) > 0:  # a page that settled nothing yet (still reconciling)
+        FAULT["reconcile_extra"] -= 1
+        return {"state": "reconciling", "records": [], "remaining": 1}
+    changed, page = [], FAULT.get("reconcile_page", 1 << 30)  # as K2: bounded pages, `reconciling` until done
+    candidates = [r for r in records.values() if r["to"] == agent and r.get("consumer") != args["consumer"]
+                  and (r["state"] == "claimed" or r["state"] == "unknown" and seen.get(r["delivery"]))]
+    if len(candidates) > page:
+        for r in candidates[:page]:
+            evidenced = bool(seen.get(r["delivery"]))
+            r.update(state="inserted" if evidenced else "unknown", reason=None if evidenced else "consumer_restarted",
+                     evidence={"entry": seen.get(r["delivery"])} if evidenced else None, consumer=args["consumer"] + ":settled")
+            changed.append({"delivery": r["delivery"], "state": r["state"]})
+        log("reconcile", agent=agent, consumer=args["consumer"], records=changed, remaining=len(candidates) - page)
+        return {"state": "reconciling", "records": changed, "remaining": len(candidates) - page}
     for r in records.values():
         if r["to"] == agent and r["state"] in ("claimed", "unknown") and r.get("consumer"):
             evidenced = bool(seen.get(r["delivery"]))

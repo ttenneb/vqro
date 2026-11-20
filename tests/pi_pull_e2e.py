@@ -202,11 +202,15 @@ pi.ready()
 e1 = h.send(AGENT, "start", txt("MSG-CRASH-E"))
 pi.p.wait(20)
 crashed = get(e1)["state"]
+if a.inbox == "fake":
+    h.c.cmd("fixture.fault", reconcile_extra=2)  # the restart reconciles in 3 pages
 pi = Pi(resume=True)
 pi.ready()
 time.sleep(1)
 results["E"] = {"exit": procs[-2].returncode, "after_crash": crashed, "after_restart": get(e1)}
 check("E crash after take -> unknown, never sent", crashed == "claimed" and get(e1)["state"] == "unknown" and first_request_with("MSG-CRASH-E") is None, results["E"])
+if a.inbox == "fake":
+    check("E reconciliation pages are followed until reconciled", plugin_events("reconciled")[-1].get("pages") == 3, plugin_events("reconciled")[-1])
 # An unknown blocks later input of the same sender, mode and target (ordering_unknown) until a principal judges it.
 h.c.cmd("coord.inbox.resolve", op=h.op(), delivery=e1, **{"as": "not_delivered"})
 pi.close()
