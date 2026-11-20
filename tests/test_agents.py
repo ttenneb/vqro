@@ -452,7 +452,7 @@ class AgentV0Tests(unittest.TestCase):
         self.assertEqual((args["v"], args["caps_rev"], args["mode"]), (0, 3, "start"))
         self.assertEqual(args["content"], [{"type": "text", "text": "go"}], "always an array of typed blocks")
         self.assertTrue(args["delivery"].startswith("d:"))
-        self.assertEqual(args["origin"]["kind"], "human")
+        self.assertEqual(args["origin"], {"kind": "human"}, "identity is the core's record (C2); only the claim is ours")
         self.assertIsNone(self.core.value("menu/agents.r2.steer"), "boundary is not declared")
         self.assertIsNotNone(self.core.value("menu/agents.r2.send"))
         self.command("follow_up", resource="r2", text="later")

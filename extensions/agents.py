@@ -764,8 +764,10 @@ class Agents:
             raise VqroError("this agent does not declare that delivery mode; nothing sent", "unsupported")
         native = {**self.v0_args(r), "mode": mode, "content": [{"type": "text", "text": text}],
                   "delivery": "d:"+uuid.uuid4().hex,
-                  # The effective principal comes from the core once principals by connection land (C2).
-                  "origin": {"principal": "undeclared", "actor": "agents", "kind": "human"}}
+                  # Identity (principal, actor, initiator) is the core's record of this call (C2); the adapter binds it
+                  # and refuses any supplied value that differs (agent-v0 3.2). Only the classification is ours: a
+                  # claim that a person typed this, rendered as claimed.
+                  "origin": {"kind": "human"}}
         result = self.ext.vqro.call("resource.invoke", {"resource": r["id"], "op": "agent.send", "args": native})
         outcome = result.get("outcome", "unknown")
         receipt = (result.get("data") or {}).get("receipt") if isinstance(result.get("data"), dict) else None

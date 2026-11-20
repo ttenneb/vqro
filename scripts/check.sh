@@ -259,6 +259,7 @@ if [ "$MODE" = full ]; then
   step e2e-pi-provider "${CLEAN[@]}" python3 tests/pi_provider_e2e.py --run --large-workspace --probe-terminal-invoke --vqro "$TARGET/debug/vqro" --hc "$HOME/.local/bin/herdr-core"
   step e2e-agents-ui "${CLEAN[@]}" python3 tests/pi_provider_e2e.py --run --agents-ui --large-workspace --probe-terminal-invoke --vqro "$TARGET/debug/vqro" --hc "$HOME/.local/bin/herdr-core"
   step e2e-agent-stop "${CLEAN[@]}" python3 tests/e2e_agent_stop.py --run --vqro "$TARGET/debug/vqro" --hc "$HOME/.local/bin/herdr-core"
+  step e2e-agent-origin "${CLEAN[@]}" python3 tests/e2e_agent_origin.py --vqro "$TARGET/debug/vqro"
   step e2e-claude-hook "${CLEAN[@]}" python3 tests/claude_hook_e2e.py --vqro "$TARGET/debug/vqro" --hook "$TARGET/debug/vqro-claude-hook"
   step pi-bridge-memory "${CLEAN[@]}" python3 tests/pi_bridge_memory.py --report "$LOGS/pi-memory-receipt.json"
   step e2e-sidebar-scale "${CLEAN[@]}" python3 tests/e2e_sidebar_scale.py "$TARGET/debug/vqro" --receipt "$LOGS/sidebar-scale-receipt.json"
