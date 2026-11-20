@@ -140,7 +140,8 @@ pub fn composer_height(item: &Value) -> u16 { item["rows"].as_u64().unwrap_or(3)
 /// A composer's height with a draft of `draft_lines` lines: it starts at one text line and grows with the draft up to
 /// its `rows`, plus the control line.
 pub fn composer_height_for(item: &Value, draft_lines: usize) -> u16 {
-    (draft_lines.max(1) as u16).min(composer_height(item) - 1) + 1
+    // Clamp before narrowing: a legal 64 KiB draft can have 65,536+ lines, which would wrap a u16.
+    draft_lines.clamp(1, usize::from(composer_height(item) - 1)) as u16 + 1
 }
 
 fn native(item: &Value, features: &[&str]) -> bool {
@@ -597,6 +598,15 @@ pub fn right(rows: &[Flat], st: &mut State) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn composer_height_is_capped_for_drafts_past_u16_lines() {
+        let item = serde_json::json!({"type": "composer", "rows": 3});
+        for lines in [0usize, 1, 2, 3, 4, 65_535, 65_536, 65_537, 131_073, usize::MAX] {
+            let want = lines.clamp(1, 3) as u16 + 1;
+            assert_eq!(composer_height_for(&item, lines), want, "{lines} draft lines");
+        }
+    }
 
     #[test]
     fn follow_keeps_the_end_while_the_reader_is_there() {
