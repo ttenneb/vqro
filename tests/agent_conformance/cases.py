@@ -508,6 +508,7 @@ async def admission_not_insertion(ctx):
     await ctx.native.wait(lambda rows: any(r["kind"] == "inserted" for r in rows))
     view = await ctx.attach()
     await ctx.wait_view(view, lambda reducer: reducer.snapshots > 0)
+    await ctx.wait_view(view, lambda reducer: has_message(reducer, "D7-unique-uninserted"))
     if declaration.get("correlation") in ("none", "acceptance"):
         messages = [entity["value"] for (kind, _), entity in view.reducer.entities.items() if kind == "message"]
         check(any("D7-unique-uninserted" in json.dumps(value) for value in messages), "inserted user message not observed")
@@ -710,6 +711,8 @@ async def origin_authority(ctx):
               "quoted owner provenance was rendered as effective authority")
         ctx.evidence.append({"kind": "model_origin", "rendering": selected, "native_message": message})
     if "context" not in renderings:
+        await ctx.native.call("turn", state="settled")
+        await ctx.wait_facts(lambda f: f.get("state") == "idle")
         mark = ctx.native.mark()
         rejection(await ctx.send("D15-context-not-declared", origin=origin, render=["context"]), kinds=("unsupported",))
         check(not ctx.native.writes(mark), "context rendering used without a declaration")
@@ -1220,6 +1223,40 @@ async def audit_fence(ctx, result):
         return await ctx.peer.wait(final_event)
     except asyncio.TimeoutError as error:
         raise CheckFailed("final effect audit was not delivered", component="core") from error
+
+
+@case("M3")
+async def observed_configuration(ctx):
+    await caps(ctx, "agent.configure")
+    options = (await ctx.facts()).get("config", [])
+    if not options:
+        raise HarnessGap("configure is declared without a selectable native configuration fixture")
+    changed = []
+    for original in options:
+        facts = await ctx.facts()
+        option = next(row for row in facts.get("config", []) if row.get("id") == original["id"])
+        values = [row["value"] for row in option.get("choices", [])] if option.get("type") == "select" else [False, True] if option.get("type") == "boolean" else []
+        alternate = next((value for value in values if value != option.get("value")), None)
+        if alternate is None:
+            raise HarnessGap("M3 fixture needs an alternate for config type " + str(option.get("type")))
+        mark = ctx.native.mark()
+        rejection(await ctx.invoke("agent.configure", {"id": option["id"], "value": alternate, "rev": option["rev"] + 100}), kinds=("stale",))
+        rejection(await ctx.invoke("agent.configure", {"id": option["id"], "value": {"_invalid": True}, "rev": option["rev"]}), kinds=("invalid", "unsupported"))
+        check(not ctx.native.writes(mark), "stale/out-of-choice config reached native runtime")
+        result = await ctx.invoke("agent.configure", {"id": option["id"], "value": alternate, "rev": option["rev"]})
+        check(result.get("outcome") in ("observed", "accepted", "dispatched"), "declared config mutation failed")
+        audit = await audit_fence(ctx, result)
+        at_reply = ctx.facts_at_audit(ctx.agents[0]["id"], audit)
+        if result["outcome"] == "observed":
+            reported = next(row for row in at_reply.get("config", []) if row["id"] == option["id"])
+            check(reported.get("value") == alternate, "observed config reply preceded the native value publication")
+        fresh = await ctx.wait_facts(lambda f: any(row.get("id") == option["id"] and row.get("value") == alternate for row in f.get("config", [])))
+        before, after = deepcopy(facts["caps"]), deepcopy(fresh["caps"])
+        old_rev, new_rev = before.pop("rev"), after.pop("rev")
+        if before != after:
+            check(new_rev > old_rev, "a declaration meaning changed without caps.rev")
+        changed.append({"id": option["id"], "value": alternate, "outcome": result["outcome"], "caps_rev": new_rev})
+    ctx.evidence.append({"kind": "observed_config", "changes": changed})
 
 
 @case("M2")
