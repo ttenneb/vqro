@@ -101,8 +101,15 @@ def op(label):
 
 
 def scope(action):
-    preview = cmd('scope', {'action': 'preview', 'scope': 'workspace'})
-    return cmd('scope', {'op': op(action), 'action': action, 'scope': 'workspace', 'expect': preview['expect']})
+    # Provider facts may finish arriving between the two RPCs. A rejected stale
+    # preview made no gate change; obtain a new cut and a new operation ID.
+    for attempt in range(4):
+        preview = cmd('scope', {'action': 'preview', 'scope': 'workspace'})
+        try:
+            return cmd('scope', {'op': op(action), 'action': action, 'scope': 'workspace', 'expect': preview['expect']})
+        except RPCError as error:
+            if error.kind != 'conflict' or 'scope preview is stale' not in str(error) or attempt == 3:
+                raise
 
 
 def raw_set(key, value):
