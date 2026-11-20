@@ -1013,6 +1013,17 @@ impl App {
             }
             "panel" => {
                 let ctx = self.ctx_leaf(self.focus);
+                // Pane- and composer-scoped bindings (D29): keys without the prefix, before the panel's own keys.
+                if let Some(name) = keys::name(&k) {
+                    let typing = self.pstate.get(&view).is_some_and(|s| s.editing.is_some());
+                    if let Some(b) = self.ws.scoped_binding(&name, if typing { "composer" } else { "pane" }, &ctx) {
+                        let mut c = ctx.clone();
+                        c["panel"] = json!(view);
+                        c["panel_view"] = json!(view);
+                        self.activate_item(Item::from_entry(&b), c, None);
+                        return;
+                    }
+                }
                 self.panel_key(&view.clone(), &view, k, ctx);
             }
             _ => {}
@@ -1760,6 +1771,21 @@ impl App {
                     }
                     "filter" => self.filtering = Some(key),
                     "clear_filter" => st.filter.clear(),
+                    // Navigation for pane-scoped keys (D29): j/k, Home/End, next/previous matching row, expand.
+                    action @ ("down" | "up" | "first" | "last" | "end" | "next" | "prev" | "toggle") => {
+                        let rows = panel::rows(&value, st);
+                        st.manual_scroll = false;
+                        match action {
+                            "down" => st.sel = panel::step(&rows, st.sel, 1),
+                            "up" => st.sel = panel::step(&rows, st.sel, -1),
+                            "first" => st.sel = panel::first(&rows),
+                            "last" => st.sel = panel::last(&rows),
+                            "end" => { st.sel = panel::last(&rows); st.follow_end = None; }
+                            "next" | "prev" => if let Some(i) = panel::find_row(&rows, st.sel, action == "next", &args["match"]) { st.sel = i; },
+                            _ => if let Some(r) = rows.get(st.sel).filter(|r| r.has_children) { st.open.insert(r.id.clone(), !r.expanded); },
+                        }
+                    }
+                    "activate" => { let (key, view) = (key.clone(), view.clone()); self.panel_key(&key, &view, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), ctx.clone()); }
                     other => self.message = format!("client.panel: unknown action {other}"),
                 }
             }
@@ -3159,6 +3185,19 @@ mod tests {
         app.run_command("client.composer",json!({"panel":"p"}),json!({}),None);
         assert_eq!(app.pstate["p"].editing.as_deref(),Some("c"));
         assert!(app.paste_text("pasted\ntwo") || app.leaves.is_empty(), "paste goes to the composer being typed into (when its pane is focused)");
+        // client.panel navigation (what pane-scoped keys run): next/previous matching row, first/last.
+        app.load(&json!({"epoch":"e","seq":2,"entries":{"view/p":{"value":{"kind":"panel","items":[
+            {"text":"you: a","role":"user"},{"text":"pi: b"},{"text":"pi: c"},{"text":"you: d","role":"user"},{"text":"pi: e"}]}}}}));
+        app.pstate.insert("p".into(), panel::State::default());
+        let ctx = json!({"panel":"p","panel_view":"p"});
+        app.run_command("client.panel",json!({"action":"next","match":{"role":"user"}}),ctx.clone(),None);
+        assert_eq!(app.pstate["p"].sel,3);
+        app.run_command("client.panel",json!({"action":"prev","match":{"role":"user"}}),ctx.clone(),None);
+        assert_eq!(app.pstate["p"].sel,0);
+        app.run_command("client.panel",json!({"action":"down"}),ctx.clone(),None);
+        assert_eq!(app.pstate["p"].sel,1);
+        app.run_command("client.panel",json!({"action":"end"}),ctx.clone(),None);
+        assert_eq!(app.pstate["p"].sel,4);
         // A multi-line prompt: the shared editor in an overlay.
         app.activate_item(Item::from_entry(&json!({"command":"x.answer","input":"Answer","multiline":true})),json!({}),None);
         for c in "a".chars() { app.on_overlay_key(key(KeyCode::Char(c),none)); }

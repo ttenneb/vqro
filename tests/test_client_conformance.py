@@ -50,7 +50,10 @@ class Conformance(unittest.TestCase):
                 for key, place in case["gesture_queries"]:
                     b = ws.gesture(key, place)
                     gestures[f"{key} {place}"] = b.get("command") if b else None
-                self.assertEqual({"menus": menus, "keys": keys, "gestures": gestures}, case["expect"])
+                got = {"menus": menus, "keys": keys, "gestures": gestures}
+                if "scoped" in case:
+                    got["scoped"] = [(lambda b: b.get("command") if b else None)(ws.scoped_binding(k, sc, ctx)) for k, sc, ctx in case["scoped"]]
+                self.assertEqual(got, case["expect"])
 
     def test_recovery(self):
         for case in fixture("recovery.json")["cases"]:

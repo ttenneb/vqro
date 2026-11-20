@@ -140,6 +140,14 @@ export function rows(value: Json, page = 0, filter = "", open: Record<string, bo
   return out;
 }
 
+/** The next (or previous) selectable row after `from` whose item has every field of `matching`; null if none. */
+export function findRow(rows: Row[], from: number, forward: boolean, matching: Json): number | null {
+  const ok = (r: Row) => selectable(r.item) && (!isObj(matching) || Object.entries(matching).every(([k, v]) => JSON.stringify(r.item[k] ?? null) === JSON.stringify(v)));
+  if (forward) { for (let i = from + 1; i < rows.length; i++) if (ok(rows[i])) return i; }
+  else for (let i = Math.min(from, rows.length) - 1; i >= 0; i--) if (ok(rows[i])) return i;
+  return null;
+}
+
 // ---- view-kind fallback -----------------------------------------------------------------------------------------
 
 export function merged(view: string, entries: Map<string, Json>, live: Map<string, Json>): Json | null {
@@ -224,6 +232,9 @@ export function compose(view: string, entries: Map<string, Json>, live: Map<stri
 }
 
 // ---- workspace cache and contributions --------------------------------------------------------------------------
+
+/** A binding's scope: `prefix` (default), `pane` or `composer`. */
+export const scope = (b: Json): string => (isStr(b.scope) ? b.scope : "prefix");
 
 export const whenHolds = (entry: Json, ctx: Json) => !isObj(entry.when) || Object.entries(entry.when).every(([k, v]) => JSON.stringify(ctx?.[k] ?? null) === JSON.stringify(v));
 
@@ -376,8 +387,21 @@ export class Workspace {
   keyCandidates(ctx: Json): [string, Json][] {
     return [
       ...builtinBindings().map((b) => [BUILTIN + b.key, b] as [string, Json]),
-      ...this.sorted("binding/").filter(([, v]) => !String(v.key ?? "").startsWith("mouse.") && this.visible(v) && whenHolds(v, ctx)),
+      ...this.sorted("binding/").filter(([, v]) => scope(v) === "prefix" && !String(v.key ?? "").startsWith("mouse.") && this.visible(v) && whenHolds(v, ctx)),
     ];
+  }
+
+  /** The binding a key runs without the prefix: scope "pane" (not typing) or "composer" (typing); never in
+   *  terminal panes. */
+  scopedBinding(key: string, scopeName: string, ctx: Json): Json | null {
+    if (ctx?.kind === "terminal") return null;
+    let best: [[number, number, string], Json] | null = null;
+    for (const [k, b] of this.sorted("binding/")) {
+      if (scope(b) !== scopeName || !this.visible(b) || !whenHolds(b, ctx) || !isStr(b.key) || normalize(b.key) !== key) continue;
+      const r = rank(k, b);
+      if (!best || rankLess(r, best[0]) < 0) best = [r, b];
+    }
+    return best && best[1].command !== "client.none" ? best[1] : null;
   }
 
   bindingFor(key: string, ctx: Json): Json | null {

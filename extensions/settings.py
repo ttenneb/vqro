@@ -392,7 +392,8 @@ def key_rows():
     for k in sorted(k for k in ext.entries if k.startswith("binding/")):
         bv = ext.value(k)
         raw = bv.get("key", "?")
-        group = f"{raw} on {bv.get('where', 'pane')}" if raw.startswith("mouse.") else norm_key(raw) or raw
+        scope = bv.get("scope") if bv.get("scope") in ("pane", "composer") else None
+        group = f"{raw} on {bv.get('where', 'pane')}" if raw.startswith("mouse.") else (f"{scope}:" if scope else "") + (norm_key(raw) or raw)
         on = binding_on(bv, titles)
         groups.setdefault(group, []).append(((-int(bv.get("priority") or 0), 1, k), bv, on))
     for group in sorted(groups, key=lambda g: (g.startswith("mouse."), g)):
@@ -407,6 +408,9 @@ def key_rows():
                 what += " (only where " + ", ".join(f"{k.replace('_', ' ')} is {v}" for k, v in bv["when"].items()) + ")"
             if group.startswith("mouse."):
                 shown = group.replace("mouse.", "").replace(" on ", "-click on ")
+            elif group.startswith(("pane:", "composer:")):  # keys without the prefix (D29)
+                where, name = group.split(":", 1)
+                shown = f"{key_labels(name, mode)} ({'in the pane' if where == 'pane' else 'while typing'})"
             else:
                 shown = f"{prefix} {key_labels(group, mode)}"
             row = {"text": shown if n == 0 else "  ↳ " + shown, "detail": bv.get("owner") or "workspace", "description": what}

@@ -206,6 +206,12 @@ def shown_view(view, value, can_render):
 
 # ---- workspace cache and contributions ----------------------------------------------------------------------
 
+def scope(binding):
+    """`prefix` (default), `pane` or `composer`."""
+    s = binding.get("scope")
+    return s if isinstance(s, str) else "prefix"
+
+
 def when_holds(entry, ctx):
     when = entry.get("when")
     return not isinstance(when, dict) or all(ctx.get(k) == v for k, v in when.items())
@@ -329,8 +335,21 @@ class Workspace:
     def key_candidates(self, ctx):
         found = [(BUILTIN + b["key"], b) for b in builtin_bindings()]
         found += [(k, v) for k, v in sorted(self.entries.items()) if k.startswith("binding/") and isinstance(v, dict)
-                  and not str(v.get("key", "")).startswith("mouse.") and self.visible(v) and when_holds(v, ctx)]
+                  and scope(v) == "prefix" and not str(v.get("key", "")).startswith("mouse.") and self.visible(v) and when_holds(v, ctx)]
         return found
+
+    def scoped_binding(self, key, scope_name, ctx):
+        """The binding a key runs without the prefix: scope "pane" (not typing) or "composer" (typing); never in
+        terminal panes."""
+        if (ctx or {}).get("kind") == "terminal":
+            return None
+        found = [(rank(k, b), b) for k, b in self.entries.items() if k.startswith("binding/") and isinstance(b, dict)
+                 and scope(b) == scope_name and self.visible(b) and when_holds(b, ctx)
+                 and isinstance(b.get("key"), str) and normalize(b["key"]) == key]
+        if not found:
+            return None
+        b = min(found, key=lambda x: x[0])[1]
+        return None if b.get("command") == "client.none" else b
 
     def binding_for(self, key, ctx):
         cands = self.key_candidates(ctx)

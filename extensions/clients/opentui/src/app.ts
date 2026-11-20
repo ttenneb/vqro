@@ -293,12 +293,27 @@ export class App {
       case "client.safe_mode.leave": void this.run("vqro.safe_mode", { on: false }, ctx); break;
       case "client.panel": {
         const key = ctx.panel;
-        const st = key && this.pstate.get(key);
-        if (!st) break;
+        if (!key) break;
+        const st = this.state(key);
         if (args.action === "filter") this.overlay = { kind: "filter", key };
         else if (args.action === "clear_filter") st.filter = "";
         else if (args.action === "expand_all" || args.action === "collapse_all") {
           for (const r of m.rows(this.panelValue(ctx.panel_view ?? key), st.page, "", {}, FEATURES)) if (r.has_children) st.open[r.id] = args.action === "expand_all";
+        } else if (args.action === "activate") this.panelKey(key, ctx.panel_view ?? key, "Enter", ctx);
+        else {  // navigation for pane-scoped keys: down/up/first/last/end, next/prev matching row, toggle
+          const rows = m.rows(this.panelValue(ctx.panel_view ?? key), st.page, st.filter, st.open, FEATURES);
+          const sel = rows.map((r, i) => (m.selectable(r.item) ? i : -1)).filter((i) => i >= 0);
+          st.manual = false;
+          switch (args.action) {
+            case "down": st.sel = sel.find((i) => i > st.sel) ?? st.sel; break;
+            case "up": st.sel = [...sel].reverse().find((i) => i < st.sel) ?? st.sel; break;
+            case "first": st.sel = sel[0] ?? 0; break;
+            case "last": st.sel = sel[sel.length - 1] ?? 0; break;
+            case "end": st.sel = sel[sel.length - 1] ?? 0; st.followEnd = null; break;
+            case "next": case "prev": { const i = m.findRow(rows, st.sel, args.action === "next", args.match); if (i !== null) st.sel = i; break; }
+            case "toggle": { const r = rows[st.sel]; if (r?.has_children) st.open[r.id] = !r.expanded; break; }
+            default: this.message = `client.panel: unknown action ${args.action}`;
+          }
         }
         break;
       }
@@ -340,7 +355,14 @@ export class App {
     if (o) { this.overlayKey(o, name, k); this.redraw(); return; }
     const leaf = this.leaves[this.focus];
     if (leaf && this.viewKind(leaf.view) === "terminal") { this.terminals.key(leaf.view, k); return; }
-    if (leaf && this.viewKind(leaf.view) === "panel") this.panelKey(leaf.view, leaf.view, name, this.ctxLeaf(this.focus));
+    if (leaf && this.viewKind(leaf.view) === "panel") {
+      // Pane- and composer-scoped bindings (D29): keys without the prefix, before the panel's own keys.
+      const ctx = this.ctxLeaf(this.focus);
+      const typing = this.pstate.get(leaf.view)?.editing != null;
+      const b = this.ws.scopedBinding(name, typing ? "composer" : "pane", ctx);
+      if (b) this.activate(b, { ...ctx, panel: leaf.view, panel_view: leaf.view });
+      else this.panelKey(leaf.view, leaf.view, name, ctx);
+    }
     this.redraw();
   }
 

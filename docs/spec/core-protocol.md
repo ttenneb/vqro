@@ -732,6 +732,13 @@ reconcile later with their full set (`exclusive=True`). Other runtimes should fo
   pane-specific key never asks for text it cannot use. The prefix menu lists what each key does on the focused pane.
   Example: the agents extension binds `p` to `agents.prompt` with `when: {"resource_kind": "agent"}`; a keymap
   profile's `p` (priority 10, no `when`) still wins everywhere when selected.
+- **Keys without the prefix** (D29): `scope: "pane"` makes a binding act without the prefix while a pane it matches
+  (`when`, against the focused pane's context, e.g. `{"view": "agents-r2"}`) is focused and nothing is being typed;
+  `scope: "composer"` while typing in that pane's composer (e.g. `M-s` to send as steer:
+  `client.composer {action: "send", set: {mode: "steer"}}`). They rank like prefix keys (priority, then lowest id;
+  `client.none` unbinds, so keymap profiles override them), beat the panel's own keys, never apply in terminal panes
+  (their keys belong to the program), and never appear in the prefix menu. The prefix key always comes first.
+  `tests/fixtures/client/contributions.json` checks the resolution.
 - `prefill` explicitly supplies an input's initial text: a string, or `{"context": "field"}` to read a string
   from invocation context. Without it, inputs start empty; pane/tab titles and option `value` never implicitly
   become input text. Missing/unknown context fields or unsupported values produce empty input. Options may
@@ -891,7 +898,9 @@ and sets the prefix; the active profile is `doc/keys/profile`, and the list is l
   substring), the title shows "n of m", arrows/Enter/clicks act on the kept rows, Esc clears the text before
   closing. Client-only; extensions need nothing new. `toolbar: [row]` pins rows above the
   list. Clients handle `client.panel {action: expand_all|collapse_all|filter|clear_filter}` for the panel it came
-  from. Panels list needed features in `requires`. Unknown types render as plain items, or as their `fallback` (Fallbacks). Selection, expansion, page, filter and scroll are client
+  from, and, for pane-scoped keys, `down|up|first|last|end` (`end` also resumes `follow`), `toggle` (open/close the
+  selected row), `activate` (as Enter) and `next|prev` with `match: {field: value}` (the next/previous selectable
+  row whose item has those fields, e.g. `{"role": "user"}` for "next message from a person"; no wrap). Panels list needed features in `requires`. Unknown types render as plain items, or as their `fallback` (Fallbacks). Selection, expansion, page, filter and scroll are client
   state. Styles are semantic names resolved through the theme (below): `bold`, `dim`, `muted`, `warn`, `error`, `ok`,
   `accent`, `plain`; unknown names render plain. A badge may also carry `color` (a theme colour value) to show a
   colour as data, e.g. a swatch (feature `badge_color`; clients without it show a neutral badge). Use styles for

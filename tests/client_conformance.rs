@@ -68,7 +68,11 @@ fn contributions_resolve_like_the_model() {
             let (key, place) = (q[0].as_str().unwrap(), q[1].as_str().unwrap());
             (format!("{key} {place}"), ws.gesture(key, place).map(|b| b["command"].clone()).unwrap_or(Value::Null))
         }).collect();
-        json!({"menus": menus, "keys": keys, "gestures": gestures})
+        let scoped: Vec<Value> = case["scoped"].as_array().into_iter().flatten().map(|q| {
+            ws.scoped_binding(q[0].as_str().unwrap(), q[1].as_str().unwrap(), &q[2]).map(|b| b["command"].clone()).unwrap_or(Value::Null)
+        }).collect();
+        if case.get("scoped").is_some() { json!({"menus": menus, "keys": keys, "gestures": gestures, "scoped": scoped}) }
+        else { json!({"menus": menus, "keys": keys, "gestures": gestures}) }
     });
 }
 

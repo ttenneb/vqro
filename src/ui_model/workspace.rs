@@ -214,10 +214,24 @@ impl Workspace {
         found.extend(
             self.entries
                 .iter()
-                .filter(|(k, v)| k.starts_with("binding/") && !v["key"].as_str().unwrap_or("").starts_with("mouse.") && self.visible(v) && when_holds(v, ctx))
+                .filter(|(k, v)| k.starts_with("binding/") && scope(v) == "prefix" && !v["key"].as_str().unwrap_or("").starts_with("mouse.") && self.visible(v) && when_holds(v, ctx))
                 .map(|(k, v)| (k.clone(), v.clone())),
         );
         found
+    }
+
+    /// The binding a key runs without the prefix in a focused pane (D29): `scope: "pane"` while the reader is not
+    /// typing, `scope: "composer"` while typing in a composer. Matched like prefix keys (`when` against the pane's
+    /// context, then priority and lowest id); `client.none` unbinds. Never applied to terminal views, whose keys
+    /// belong to their programs; the prefix key always comes first.
+    pub fn scoped_binding(&self, key: &str, scope_name: &str, ctx: &Value) -> Option<Value> {
+        if ctx["kind"] == "terminal" { return None; }
+        self.entries.iter()
+            .filter(|(k, v)| k.starts_with("binding/") && scope(v) == scope_name && self.visible(v) && when_holds(v, ctx)
+                && v["key"].as_str().and_then(keys::normalize).as_deref() == Some(key))
+            .min_by_key(|(k, v)| rank(k, v))
+            .map(|(_, v)| v.clone())
+            .filter(|v| v["command"] != "client.none")
     }
 
     /// The binding a key (canonical name) runs in `ctx`, if any; `client.none` leaves the key unbound.
@@ -230,7 +244,7 @@ impl Workspace {
     /// A binding for this key that applies only elsewhere (its `when` does not hold in `ctx`).
     pub fn bound_elsewhere(&self, key: &str, ctx: &Value) -> Option<Value> {
         self.entries.iter()
-            .filter(|(k, v)| k.starts_with("binding/") && self.visible(v) && !when_holds(v, ctx))
+            .filter(|(k, v)| k.starts_with("binding/") && scope(v) == "prefix" && self.visible(v) && !when_holds(v, ctx))
             .find(|(_, v)| v["key"].as_str().and_then(keys::normalize).as_deref() == Some(key))
             .map(|(_, v)| v.clone())
     }
@@ -266,6 +280,9 @@ pub fn builtin_bindings() -> Vec<Value> {
     b.extend((1..=9).map(|n| json!({"key": n.to_string(), "command": "client.tab", "args": {"to": n}, "label": format!("tab {n}"), "hidden": true})));
     b
 }
+
+/// A binding's scope: `prefix` (default: after the prefix key), `pane` or `composer` (without the prefix).
+pub fn scope(v: &Value) -> &str { v["scope"].as_str().unwrap_or("prefix") }
 
 /// Whether an entry's `when` holds in a context: every field equal. No `when` always holds.
 pub fn when_holds(v: &Value, ctx: &Value) -> bool {

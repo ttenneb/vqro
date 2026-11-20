@@ -277,6 +277,13 @@ pub fn follow(v: &Value, rows: &[Flat], st: &mut State) {
     st.follow_end = Some(end);
 }
 
+/// The next (or previous) selectable row after `from` whose item has every field of `matching` (for example
+/// `{"role": "user"}`); None when there is none (no wrap). `client.panel {action: next|prev, match}`.
+pub fn find_row(rows: &[Flat], from: usize, forward: bool, matching: &Value) -> Option<usize> {
+    let ok = |r: &Flat| selectable(&r.item) && matching.as_object().is_none_or(|m| m.iter().all(|(k, v)| r.item[k] == *v));
+    if forward { (from + 1..rows.len()).find(|&i| ok(&rows[i])) } else { (0..from.min(rows.len())).rev().find(|&i| ok(&rows[i])) }
+}
+
 pub fn first(rows: &[Flat]) -> usize {
     rows.iter().position(|r| selectable(&r.item)).unwrap_or(0)
 }

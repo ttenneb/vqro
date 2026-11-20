@@ -38,7 +38,9 @@ test("contributions", async () => {
     const cands = ws.keyCandidates(c.ctx);
     const keys = Object.fromEntries([...m.resolve(cands)].map(([k, i]) => [k, cands[i][1].command === "client.none" ? null : cands[i][0]]));
     const gestures = Object.fromEntries(c.gesture_queries.map(([key, place]: [string, string]) => [`${key} ${place}`, ws.gesture(key, place)?.command ?? null]));
-    expect({ menus, keys, gestures }, c.name).toEqual(c.expect);
+    const got: any = { menus, keys, gestures };
+    if (c.scoped) got.scoped = c.scoped.map(([k, sc, ctx]: [string, string, any]) => ws.scopedBinding(k, sc, ctx)?.command ?? null);
+    expect(got, c.name).toEqual(c.expect);
   }
 });
 

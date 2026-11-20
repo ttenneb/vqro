@@ -164,6 +164,15 @@ try:
     sent = wait(lambda: e2e_echo.calls(f"{R}/echo.jsonl"), 10)
     check("Enter sends text, controls and args; the draft clears after the reply", bool(sent) and sent[-1].get("text") == "hello there\nsecond line" and sent[-1].get("mode") == "steer"
           and sent[-1].get("resource") == "r2" and bool(wait(lambda: "hello there" not in screen())), f"{sent} {screen()}")
+    # Scoped keys (no prefix): Alt-S while typing sends as steer; x in the pane (not typing) runs its binding.
+    call("workspace.apply", {"note": "e2e scoped keys", "ops": [
+        {"op": "set", "key": "binding/e2e.steer", "value": {"key": "M-s", "scope": "composer", "command": "client.composer", "args": {"action": "send", "set": {"mode": "auto"}}, "when": {"view": "e2e-comp"}}},
+        {"op": "set", "key": "binding/e2e.x", "value": {"key": "x", "scope": "pane", "command": "e2e.echo", "args": {"pane_key": "x"}, "when": {"view": "e2e-comp"}}}]})
+    time.sleep(0.5)
+    keys("quick note", literal=True); time.sleep(0.3); keys("M-s")
+    check("a composer-scoped key sends with its preset", bool(wait(lambda: any(c.get("text") == "quick note" and c.get("mode") == "auto" for c in e2e_echo.calls(f"{R}/echo.jsonl")), 10)), str(e2e_echo.calls(f"{R}/echo.jsonl")))
+    keys("Escape"); time.sleep(0.6); keys("x")
+    check("a pane-scoped key runs without the prefix while not typing", bool(wait(lambda: any(c.get("pane_key") == "x" for c in e2e_echo.calls(f"{R}/echo.jsonl")), 10)), screen())
     echo.close()
     keys("C-g")
     check("prefix menu lists recovery actions", bool(wait(lambda: "undo last change" in screen() and "safe mode / recovery choices" in screen())), screen())
