@@ -23,5 +23,4 @@ client.
 
 Versions (2026-11-19): Bun 1.4.2 (already user-local at `~/.local/bin/bun`), `@opentui/core` 0.9.5 (MIT; its
 Linux native library also contains FFmpeg, LGPL-2.1-or-later), TypeScript 7.0.2 and `@types/bun` 1.4.5 for
-`bun run check` only. Not yet: mouse forwarding to programs, `list_detail` (its plain-list fallback shows),
-`embedded_views`. End to end: `tests/e2e_opentui.py`.
+`bun run check` only. Not yet: `embedded_views`. End to end: `tests/e2e_opentui.py`.

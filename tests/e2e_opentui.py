@@ -132,13 +132,19 @@ try:
     keys("C-g")
     check("prefix menu lists recovery actions", bool(wait(lambda: "undo last change" in screen() and "safe mode / recovery choices" in screen())), screen())
     keys(",")
-    check("a command's popup reply shows Settings over the terminal", bool(wait(lambda: "Settings" in screen() and "Extensions" in screen() and "Tabs (tabs)" in screen())), screen())
+    check("a command's popup reply shows Settings over the terminal", bool(wait(lambda: "Settings" in screen() and "Extensions" in screen() and " of 16 · " in screen())), screen())
     for _ in range(7):
         keys("Down")
     time.sleep(0.3)
     keys("Space")
     check("dependency warning as a pick-one menu over the popup", bool(wait(lambda: "Turn off Tabs: breaks" in screen())), screen())
     # Escape followed at once by another key reads as Alt+key: pause like a person would.
+    keys("Escape"); time.sleep(0.5)
+    # list_detail: the selected extension's details beside the list; Tab moves into them.
+    # The window is 90 columns now: the detail sits below the list (narrow layout).
+    check("list_detail shows the selected row's details with its actions", bool(wait(lambda: " of 16 · " in screen() and "Restart   View log" in screen())), screen())
+    keys("Tab"); time.sleep(0.3); keys("Enter")
+    check("Tab focuses the detail; its first action runs from there", bool(wait(lambda: "Turn off Tabs: breaks" in screen())), screen())
     keys("Escape"); time.sleep(0.5); keys("Escape"); time.sleep(0.5)
     keys("C-g", "!")
     check("safe-mode chooser is the shared recovery content", bool(wait(lambda: "Safe mode recovery" in screen() and "Providers / backends" in screen(), 15)), screen())

@@ -6,13 +6,13 @@ import { Peer, RpcError, type Json } from "./rpc";
 import { Palette } from "./theme";
 import { Terminals } from "./terminal";
 
-export const FEATURES = [...m.BASE_FEATURES, "icon_names", "current_when", "follow"];
+export const FEATURES = [...m.BASE_FEATURES, "icon_names", "current_when", "follow", "list_detail"];
 export const PROFILES = ["base", "keys", "terminal"];
 const KINDS = ["panel", "terminal"];
 
 export interface Rect { x: number; y: number; w: number; h: number }
 interface Leaf { view: string; rect: Rect; inner: Rect; path: number[] }
-interface PState { sel: number; top: number; page: number; filter: string; open: Record<string, boolean>; chip: number; followEnd: number | null; manual: boolean }
+interface PState { sel: number; top: number; page: number; filter: string; open: Record<string, boolean>; chip: number; followEnd: number | null; manual: boolean; detailFocus: boolean; detailFor: string }
 type Overlay =
   | { kind: "prefix"; sel: number }
   | { kind: "palette"; query: string; sel: number }
@@ -68,7 +68,7 @@ export class App {
   toast: { text: string; style: string | null; until: number } | null = null;
   leaves: Leaf[] = [];
   hits: Hit[] = [];
-  listed = new Map<string, { rows: m.Row[]; hits: { y: number; x: number; w: number; i: number; chip?: number }[] }>();
+  listed = new Map<string, { rows: m.Row[]; hits: { y: number; x: number; w: number; i: number; chip?: number }[]; area?: Rect }>();
   terminals: Terminals;
   quit = false;
   private resyncing = false;
@@ -416,12 +416,34 @@ export class App {
 
   state(key: string): PState {
     let st = this.pstate.get(key);
-    if (!st) { st = { sel: 0, top: 0, page: 0, filter: "", open: {}, chip: 0, followEnd: null, manual: false }; this.pstate.set(key, st); }
+    if (!st) { st = { sel: 0, top: 0, page: 0, filter: "", open: {}, chip: 0, followEnd: null, manual: false, detailFocus: false, detailFor: "" }; this.pstate.set(key, st); }
     return st;
   }
 
   panelKey(key: string, view: string, name: string, ctx: Json) {
     const value = this.panelValue(view);
+    const st = this.state(key);
+    // list_detail (core-protocol.md, Optional list with detail): Tab switches list/detail; keys go to the focused one.
+    const detail = listDetailOn(value, st.page) ? this.selectedDetail(key, value) : null;
+    if (listDetailOn(value, st.page) && (name === "Tab" || name === "BackTab")) { st.detailFocus = !st.detailFocus && detail !== null; return; }
+    if (detail && st.detailFocus && !["[", "]", "/"].includes(name)) { this.valueKey(`${key}#detail`, detail.value, name, ctx); return; }
+    if (!detail) st.detailFocus = false;
+    this.valueKey(key, value, name, ctx);
+  }
+
+  /** The selected row's `detail_panel` (and its id) when the list_detail enhancement is on; a new row resets the
+   *  detail's selection and scroll. */
+  selectedDetail(key: string, value: Json): { id: string; value: Json } | null {
+    const st = this.state(key);
+    const rows = m.rows(value, st.page, st.filter, st.open, FEATURES);
+    const at = rows[st.sel] && m.selectable(rows[st.sel].item) ? st.sel : rows.findIndex((r) => m.selectable(r.item));
+    const row = rows[at];
+    if (!row || !isObj(row.item.detail_panel)) return null;
+    if (st.detailFor !== row.id) { st.detailFor = row.id; this.pstate.delete(`${key}#detail`); }
+    return { id: row.id, value: row.item.detail_panel };
+  }
+
+  valueKey(key: string, value: Json, name: string, ctx: Json) {
     const st = this.state(key);
     const rows = m.rows(value, st.page, st.filter, st.open, FEATURES);
     const sel = (i: number) => rows.findIndex((r, j) => j >= i && m.selectable(r.item));
@@ -477,7 +499,14 @@ export class App {
       if (e.type === "up" || e.type === "drag-end") this.mouseOwner = null;
       if (this.terminals.mouse(view, e) || e.type !== "down") { this.redraw(); return; }
     } else if (e.type === "scroll") {
-      if (at >= 0) { const st = this.state(this.leaves[at].view); st.manual = true; st.top = Math.max(0, st.top + (e.scroll?.direction === "up" ? -3 : 3)); }
+      // Panels: the list or, under the pointer, its detail scrolls by hand (independently).
+      const key = this.overlay?.kind === "popup" ? "@popup" : at >= 0 ? this.leaves[at].view : null;
+      if (key) {
+        const detail = this.listed.get(`${key}#detail`);
+        const st = this.state(detail?.area && inside(detail.area, e.x, e.y) ? `${key}#detail` : key);
+        st.manual = true;
+        st.top = Math.max(0, st.top + (e.scroll?.direction === "up" ? -3 : 3));
+      }
       this.redraw();
       return;
     }
@@ -594,7 +623,21 @@ export class Screen extends Renderable {
 
   private click(key: string, _view: string, e: MouseEvent, ctx: Json) {
     const a = this.app;
+    const detail = a.listed.get(`${key}#detail`);
+    const outer = a.state(key);
+    if (detail && detail.area && inside(detail.area, e.x, e.y)) {
+      outer.detailFocus = true;
+      const hit = detail.hits.find((h) => h.y === e.y && e.x >= h.x && e.x < h.x + h.w);
+      const dv = a.selectedDetail(key, a.panelValue(_view));
+      if (!hit || !dv) return;
+      const st = a.state(`${key}#detail`);
+      st.sel = hit.i;
+      if (hit.chip !== undefined) st.chip = hit.chip;
+      if (e.button === 0) a.valueKey(`${key}#detail`, dv.value, "Enter", ctx);
+      return;
+    }
     const listed = a.listed.get(key);
+    if (listed?.area && inside(listed.area, e.x, e.y)) outer.detailFocus = false;
     const hit = listed?.hits.find((h) => h.y === e.y && e.x >= h.x && e.x < h.x + h.w);
     if (!hit) return;
     const st = a.state(key);
@@ -740,8 +783,18 @@ function box(buf: OptimizedBuffer, r: Rect, fg: RGBA, bg: RGBA) {
 
 /** A panel: page bar, pinned toolbar, rows with selection and scrolling, descriptions, badges, chips, toggles. */
 function drawPanel(a: App, buf: OptimizedBuffer, area: Rect, key: string, view: string, focused: boolean) {
+  drawValue(a, buf, area, key, a.panelValue(view), focused);
+}
+
+const listDetailOn = (value: Json, page: number): boolean => {
+  const pg = Array.isArray(value.pages) && value.pages.length ? value.pages[Math.min(page, value.pages.length - 1)] : value;
+  const cfg = pg?.list_detail ?? value.list_detail;
+  return cfg === true || (isObj(cfg) && m.missingFor(cfg, FEATURES).length === 0);
+};
+
+/** A panel value: missing notice, page bar, filter line, then the list, or list and detail (list_detail). */
+function drawValue(a: App, buf: OptimizedBuffer, area: Rect, key: string, value: Json, focused: boolean) {
   const p = a.pal;
-  const value = a.panelValue(view);
   const missing = m.missingFor(value, FEATURES);
   if (missing.length) {
     text(buf, area.x, area.y, fit("This view needs a newer vqro UI", area.w), p.color("warn"));
@@ -750,7 +803,6 @@ function drawPanel(a: App, buf: OptimizedBuffer, area: Rect, key: string, view: 
   }
   const st = a.state(key);
   let y = area.y;
-  const bottom = area.y + area.h;
   if (Array.isArray(value.pages) && value.pages.length) {
     st.page = Math.min(st.page, value.pages.length - 1);
     let x = area.x;
@@ -763,8 +815,44 @@ function drawPanel(a: App, buf: OptimizedBuffer, area: Rect, key: string, view: 
     });
     y += 2;
   }
+  if (st.filter) { text(buf, area.x, y, fit(`/${st.filter}`, area.w), p.color("prompt")); y += 1; }
+  const body: Rect = { x: area.x, y, w: area.w, h: area.y + area.h - y };
+  if (body.h <= 0) return;
+  if (!listDetailOn(value, st.page)) { drawList(a, buf, body, key, value, focused, false); a.listed.delete(`${key}#detail`); return; }
+  const wide = body.w >= 96;
   const rows = m.rows(value, st.page, st.filter, st.open, FEATURES);
-  const listed = { rows, hits: [] as { y: number; x: number; w: number; i: number; chip?: number }[] };
+  const listH = Math.max(1, Math.min(Math.floor(body.h / 2), rows.reduce((h, r) => h + rowHeight(r, body.w), 1)));
+  const lw = Math.max(36, Math.floor((body.w * 2) / 5));
+  const list: Rect = wide ? { ...body, w: lw } : { ...body, h: listH };
+  const detail: Rect = wide ? { x: body.x + lw + 1, y: body.y, w: body.w - lw - 1, h: body.h } : { x: body.x, y: body.y + listH + 1, w: body.w, h: body.h - listH - 1 };
+  drawList(a, buf, list, key, value, focused && !st.detailFocus, true);
+  if (wide) for (let yy = body.y; yy < body.y + body.h; yy++) text(buf, detail.x - 1, yy, "│", p.color("border"));
+  else if (detail.h > 0) text(buf, body.x, detail.y - 1, "─".repeat(body.w), p.color("border"));
+  if (detail.h < 2) return;
+  const selected = a.selectedDetail(key, value);
+  if (!selected) { st.detailFocus = false; a.listed.delete(`${key}#detail`); text(buf, detail.x, detail.y, "Select an item for details", p.color("dim")); return; }
+  text(buf, detail.x, detail.y, fit(clean(selected.value.title ?? "Details"), detail.w), p.color("accent"), undefined, TextAttributes.BOLD);
+  const dbody = { x: detail.x, y: detail.y + 1, w: detail.w, h: detail.h - 1 };
+  drawValue(a, buf, dbody, `${key}#detail`, selected.value, focused && st.detailFocus);
+  const dl = a.listed.get(`${key}#detail`);
+  if (dl) dl.area = dbody;
+}
+
+/** The scrolling list of a panel: pinned toolbar, rows, selection, scrollbar and (list_detail) a count footer. */
+function drawList(a: App, buf: OptimizedBuffer, area: Rect, key: string, value: Json, focused: boolean, indicator: boolean) {
+  const p = a.pal;
+  const st = a.state(key);
+  let y = area.y;
+  let bottom = area.y + area.h;
+  if (indicator && area.h > 1) {
+    const rowsAll = m.rows(value, st.page, st.filter, st.open, FEATURES);
+    const n = rowsAll.filter((r) => m.selectable(r.item) && !r.pinned).length;
+    const total = st.filter ? m.rows(value, st.page, "", st.open, FEATURES).filter((r) => m.selectable(r.item) && !r.pinned).length : n;
+    bottom -= 1;
+    text(buf, area.x, bottom, fit(`${n} of ${total} · PgUp/PgDn · Tab: details`, area.w), p.color("dim"));
+  }
+  const rows = m.rows(value, st.page, st.filter, st.open, FEATURES);
+  const listed = { rows, hits: [] as { y: number; x: number; w: number; i: number; chip?: number }[], area };
   a.listed.set(key, listed);
   if (!rows.length) { text(buf, area.x, y, st.filter ? "(no matches)" : "(empty)", p.color("dim")); return; }
   // follow: stay at the end while the reader is there (core-protocol.md, Optional list with detail).
