@@ -507,10 +507,13 @@ class CoordinationService:
         for agent, view in views.items():
             if view['fallback_reason'] == 'notification_pending' and len(view['notices']) == expected.get(agent):
                 view.update(human=view['configured'] == 'both', fallback_reason=None)
+            # Own cleanup before I/O: publication can become live then raise,
+            # or a later view can fail before the scan reaches its end.
+            self.request_views.add(agent)
             self.ext.publish('coord-requests-' + agent, view)
         for agent in self.request_views - set(views):
             self.ext.publish('coord-requests-' + agent, None)
-        self.request_views = set(views)
+            self.request_views.discard(agent)
 
     def scan_requests(self):
         try:
@@ -519,12 +522,13 @@ class CoordinationService:
         except Exception as error:
             self.request_error = {'kind': getattr(error, 'kind', None) or 'routing_error', 'message': str(error)[:512]}
             self.ext.log('request routing attention:', self.request_error)
-            for agent in self.request_views:
+            for agent in tuple(self.request_views):
                 try:
                     self.ext.publish('coord-requests-' + agent, None)
                 except Exception:
-                    pass  # clearing derived UI is best effort, never a gate for dispatch
-            self.request_views.clear()
+                    pass  # retain failed clears for retry, never gate dispatch
+                else:
+                    self.request_views.discard(agent)
         finally:
             self.next_request_scan = time.monotonic() + 1.0
 
