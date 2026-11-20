@@ -1071,7 +1071,9 @@ async fn attach(core: &Shared, conn: &Arc<Conn>, a: Attach, attribution:Attribut
 }
 
 fn undo_target(core:&Core,txn:Option<u64>,principal:Option<&str>)->Option<u64> {
-    txn.or_else(||principal.and_then(|principal|core.store.latest_txn_matching(|txn|txn.attribution.effective()==Some(principal))))
+    // Actual system authors are core-generated, never a connection label/identity. Even an explicitly
+    // system-named workspace owner must not make bootstrap a default-u target; explicit revert stays raw.
+    txn.or_else(||principal.and_then(|principal|core.store.latest_txn_matching(|txn|!txn.author.starts_with("system:") && txn.attribution.effective()==Some(principal))))
 }
 async fn revert(core: &Shared, author: &Caller, on_behalf_of: Option<Arc<str>>, txn: Option<u64>, attribution:Attribution) -> RpcResult {
     let owner=author.owner.clone();

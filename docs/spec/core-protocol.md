@@ -100,7 +100,9 @@ at serialized commit prepare after preceding adopted commits; mixed writes rejec
 other keys is unaffected. `workspace.owner.bootstrap {principal}` is explicit raw recovery only while the owner
 row is missing/invalid: the serialized commit guard and CAS allow one initializer, never replacement of a valid
 owner. It creates an audited system transaction (logical initiator when known, actual requester in the note),
-retains causal metadata and is not an owner-u target. Existing startup bootstrap stays audited; a failed oversized
+retains causal metadata and is not an owner-u target. Default u excludes core-generated system authors even if
+an explicitly configured owner principal is named system; ordinary connection work retains normal undo/redo and
+explicit raw transaction revert remains available. Existing startup bootstrap stays audited; a failed oversized
 legacy repair leaves owner-unset rather than guessed authority. Supply the owner explicitly, then open a new
 connection; accepted/indeterminate writes are never replayed. Core never reads coordination grants (`doc/agents/grants`); there is no core
 `grants.check` or `coordination.invoke` stand-in.

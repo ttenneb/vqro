@@ -26,4 +26,9 @@ workspace too large for startup growth, then raw shrink + explicit repair. TUI t
 -> renderer and persistent safe-mode warning. Red receipts retain the old guessed owner/unknown method/missing UI
 notice; focused and release-gate results are reported in the handoff, not promised here.
 
+Post-green edge: the existing owner schema permits an explicitly system-named owner. A real RPC regression
+showed principal-only default-u selection could then undo bootstrap. Default selection now excludes actual
+core-generated system authors (not labels/claims); ordinary connection work and undo/redo still operate, and
+explicit raw revert is unchanged. This fixes system-work classification without inventing target-name policy.
+
 No new coordination policy, native execution guarantee, input replay, install, merge, push or live-state mutation.
