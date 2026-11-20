@@ -23,7 +23,12 @@ V0_OP = {"prompt": "send", "steer": "send", "follow_up": "send", "abort": "inter
 # Tier-1 status (agents.status): a plugin without a tty (Claude Code hooks) reports its own terminal's state.
 # Lossy like OSC 7501: kept in memory, last writer by seq, gone with the terminal or an extension restart.
 TIER1_STATES = {"idle": "idle", "running": "working", "requires_action": "blocked", "unknown": "unknown"}
-TIER1_MAX = 4096
+# Bounds keep the whole published table under the core's 1 MiB live-value cap (src/limits.rs): a worst-case entry
+# (64-char id, 64 printable 4-byte characters of app twice, maximum seq) encodes to 700 B, and 1024 of them fit
+# TIER1_BYTES with room to spare. The byte check at admission is the backstop.
+TIER1_MAX = 1024
+TIER1_BYTES = 1024 * 1024 - 64 * 1024
+TIER1_SEQ_MAX = 2 ** 53 - 1  # exact in every JSON reader
 MODE_ORDER = ("start", "boundary", "settle", "admit", "preempt")
 MODE_SHORT = {"start": "Prompt", "boundary": "Steer", "settle": "Queue", "admit": "Admit", "preempt": "Interrupt and send"}
 RECEIPT_TEXT = {"admitted": "admitted; where it landed is unknown", "queued": "held by the runtime",
@@ -75,12 +80,25 @@ def mode_label(mode, descriptor):
 
 def busy(resource):
     """Only explicit, current idle evidence is idle (agent v0 sections 2.3, 7). A missing, cut or unknown state, or
-    a lifecycle other than live, counts as busy; the coarse OSC-compatible status is never used for a v0 agent."""
+    a missing, cut or non-live lifecycle, counts as busy; the coarse OSC-compatible status is never used for a v0
+    agent."""
     facts = agent_facts(resource)
     incomplete = facts.get("incomplete")
-    if isinstance(incomplete, list) and "state" in incomplete:
+    if isinstance(incomplete, list) and ("state" in incomplete or "lifecycle" in incomplete):
         return True
-    return facts.get("lifecycle", "live") != "live" or facts.get("state") != "idle"
+    return facts.get("lifecycle") != "live" or facts.get("state") != "idle"
+
+
+def param_rows(params):
+    """A request's native details as read-only text, shown before any approval (agent v0 section 5)."""
+    rows = []
+    for key, value in params.items():  # bounded: a summary is at most 2 KiB, else incomplete
+        if key == "multiline":
+            continue  # a presentation hint, not part of the question
+        text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+        rows.append({"type": "text", "wrap": True, "style": "muted",
+                     "text": label(("" if key == "message" else key.replace("_", " ")+": ")+text, 2048)})
+    return rows
 
 
 def owns_lifecycle(resource):
@@ -125,7 +143,9 @@ class Agents:
         self.published = {}  # Only current agents; suppress unchanged derived panel RPCs.
         self.list_open = False
         self.tier1 = {}  # terminal id -> {app, state, seq, at_ms, status}
+        self.tier1_size = {}  # terminal id -> encoded bytes of its published entry
         self.tier1_lock = threading.Lock()
+        self.tier1_dirty = self.tier1_publishing = False
         ext.command("agents.status", "Report a tier-1 agent's state for its terminal (args: terminal, app, state, seq)")(self.report_status)
         for name, fn, title in [("list", self.list_agents, "Show agents"), ("show", self.show, "Show an agent in a tab"),
                                 ("config", self.settings, "Agent settings and commands (popup)"),
@@ -462,12 +482,12 @@ class Agents:
         a principal (C2). Errors go to the caller only, never to a notice.
         """
         terminal, app, seq = args.get("terminal"), args.get("app"), args.get("seq")
-        if not isinstance(terminal, str) or not terminal:
+        if not isinstance(terminal, str) or not terminal or len(terminal) > 64:
             raise VqroError("terminal must be a resource id", "invalid")
-        if not isinstance(app, str) or not app or len(app) > 64:
-            raise VqroError("app must be a non-empty string of at most 64 characters", "invalid")
-        if type(seq) is not int or seq < 0:
-            raise VqroError("seq must be a non-negative integer (Unix epoch ms recommended)", "invalid")
+        if not isinstance(app, str) or not app or len(app) > 64 or not app.isprintable():
+            raise VqroError("app must be 1 to 64 printable characters", "invalid")
+        if type(seq) is not int or not 0 <= seq <= TIER1_SEQ_MAX:
+            raise VqroError("seq must be an integer from 0 to 2^53-1 (Unix epoch ms recommended)", "invalid")
         r = self.ext.resources.get(terminal)
         if r is None:
             self.ext.fresh()
@@ -483,22 +503,44 @@ class Agents:
                 raise VqroError("too many reporting terminals; nothing recorded", "overloaded")
             entry = {"app": app, "state": state, "seq": seq, "at_ms": int(time.time() * 1000),
                      "status": {"state": TIER1_STATES[state], "app": app}}
-            self.tier1[terminal] = entry
+            size = len(json.dumps({terminal: entry}, ensure_ascii=False, separators=(",", ":")).encode())
+            if sum(self.tier1_size.values()) - self.tier1_size.get(terminal, 0) + size > TIER1_BYTES:
+                raise VqroError("the published status table would exceed its size bound; nothing recorded", "overloaded")
+            self.tier1[terminal], self.tier1_size[terminal] = entry, size
             changed = previous is None or (previous["state"], previous["app"]) != (state, app)
         if changed:
             self.publish_tier1()
         return {"ok": True, "applied": True}
 
     def publish_tier1(self):
+        """Publish the current table. One publisher at a time, always from a fresh snapshot: a report arriving
+        while another publishes marks the table dirty and that publisher sends it again, so an older snapshot
+        never lands after a newer one and no change is skipped."""
         with self.tier1_lock:
-            data = {rid: dict(entry) for rid, entry in self.tier1.items()}
-        self.ext.publish("agents.terminal_status", {"data": data})
+            self.tier1_dirty = True
+            if self.tier1_publishing:
+                return
+            self.tier1_publishing = True
+        try:
+            while True:
+                with self.tier1_lock:
+                    if not self.tier1_dirty:
+                        self.tier1_publishing = False
+                        return
+                    self.tier1_dirty = False
+                    data = {rid: dict(entry) for rid, entry in self.tier1.items()}
+                self.ext.publish("agents.terminal_status", {"data": data})
+        except BaseException:
+            with self.tier1_lock:
+                self.tier1_publishing, self.tier1_dirty = False, True  # the next report publishes again
+            raise
 
     def prune_tier1(self):
         with self.tier1_lock:
             gone = [rid for rid in self.tier1 if rid not in self.ext.resources or ended(self.ext.resources[rid])]
             for rid in gone:
                 del self.tier1[rid]
+                self.tier1_size.pop(rid, None)
         if gone:
             self.publish_tier1()
 
@@ -529,16 +571,30 @@ class Agents:
                 continue
             row = {"text": label(q.get("title") or q["request"]), "description": label(str(method)), "command": "agents.answer",
                    "args": args}
+            params = q.get("params")
+            if isinstance(params, dict):
+                items.extend(param_rows(params))
             if q.get("incomplete"):  # true or a non-empty list of cut fields
                 row = {"type": "text", "style": "warn", "text": label((q.get("title") or q["request"])
                        + ": details incomplete, so it can't be approved here; Cancel stays available.")}
+            elif not isinstance(params, dict):
+                # The native details (a confirmation's message, say) are the question: no approval without them.
+                row = {"type": "text", "style": "warn", "text": label((q.get("title") or q["request"])
+                       + ": details not available here, so it can't be approved; Cancel stays available.")}
             elif method == "confirm":
                 row["options"] = [{"label": "Yes", "value": True}, {"label": "No", "value": False}]
             elif method in ("choice", "permission") and isinstance(choices, list) and choices:
-                row["options"] = [{"label": label(str(c.get("label") or c.get("id")), 200), "value": c.get("id")}
+                row["options"] = [{"label": label(str(c.get("label") or c.get("id"))
+                                                  + (" ("+str(c["effect"]).replace("_", " ")+")" if isinstance(c.get("effect"), str) else ""), 200),
+                                   "value": c.get("id")}
                                   for c in choices if isinstance(c, dict) and isinstance(c.get("id"), str)]
             elif method == "text":
-                row["input"] = label(q.get("title") or "Answer")
+                row["input"] = label(params.get("placeholder") if isinstance(params.get("placeholder"), str)
+                                     else q.get("title") or "Answer")
+                if isinstance(params.get("prefill"), str):
+                    row["prefill"] = params["prefill"]
+                if params.get("multiline") is True:
+                    row["multiline"] = True  # clients without multi-line prompts take one line
             else:
                 row = {"type": "text", "style": "warn", "text": label((q.get("title") or q["request"])+": "+str(method)
                        + " can't be answered from this panel; Cancel stays available.")}
@@ -565,8 +621,8 @@ class Agents:
         ids = [c.get("id") for c in choices if isinstance(c, dict)] if isinstance(choices, list) else []
         if args.get("cancelled") is True:
             response = {"action": "cancel"}
-        elif request.get("incomplete"):
-            raise VqroError("request details are incomplete; only Cancel is possible", "invalid")
+        elif request.get("incomplete") or not isinstance(request.get("params"), dict):
+            raise VqroError("request details are incomplete or missing; only Cancel is possible", "invalid")
         elif method == "confirm" and type(args.get("value")) is bool:
             response = {"value": args["value"]}
         elif method in ("choice", "permission") and args.get("value") in ids:

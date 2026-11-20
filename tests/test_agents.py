@@ -425,13 +425,14 @@ class AgentV0Tests(unittest.TestCase):
         self.agents = Agents(self.core)
         self.core.add_agent()
         self.core.resources["r2"].update({"provider": "v0", "host": None, "data": {"agent": {
-            "v": 0, "state": "idle", "epoch": "e7", "caps": {
+            "v": 0, "state": "idle", "lifecycle": "live", "epoch": "e7", "caps": {
                 "rev": 3, "agent.send": {"modes": {"start": {"busy": "reject"}, "settle": {"point": "would_stop"},
                                                      "admit": {}}},
                 "agent.queue": {"actions": ["list", "clear"]}, "agent.stop": {"covers": ["foreground", "queued"]},
                 "agent.interrupt": {}, "agent.respond": {"methods": ["confirm", "permission", "text", "form"]}},
-            "requests": [{"request": "q1", "revision": 2, "method": "confirm", "title": "Run it?"},
-                         {"request": "q2", "revision": 1, "method": "permission", "title": "Push?",
+            "requests": [{"request": "q1", "revision": 2, "method": "confirm", "title": "Run it?",
+                          "params": {"message": "rm -rf build/ and rebuild"}},
+                         {"request": "q2", "revision": 1, "method": "permission", "title": "Push?", "params": {},
                           "choices": [{"id": "allow_once", "label": "Allow"}, {"id": "reject_once", "label": "Reject"}]},
                          {"request": "q3", "revision": 1, "method": "form", "title": "Details", "incomplete": ["params"]},
                          {"request": "q4", "revision": 1, "method": "text", "title": "Old", "status": "answered"}]}}})
@@ -623,6 +624,55 @@ class AgentV0ConsentTests(unittest.TestCase):
         self.refused("unsupported", "abort", resource="r2")
 
 
+class AgentV0RequestDetailTests(unittest.TestCase):
+    """A request's native details are the question: shown before any approval, or no approval (A1)."""
+    setUp, command, native = AgentV0Tests.setUp, AgentV0Tests.command, AgentV0Tests.native
+
+    def panel(self):
+        self.command("answer", resource="r2")
+        return self.core.live["agents-requests-r2"]["items"]
+
+    def test_a_confirmation_shows_its_message_before_yes(self):
+        items = self.panel()
+        texts = [row.get("text") for row in items]
+        message, yes = texts.index("rm -rf build/ and rebuild"), texts.index("Run it?")
+        self.assertLess(message, yes, "the native message comes before the row that approves")
+        self.assertEqual(items[yes]["options"][0], {"label": "Yes", "value": True})
+
+    def test_without_details_only_cancel_is_offered_and_approval_is_refused(self):
+        del self.core.resources["r2"]["data"]["agent"]["requests"][0]["params"]
+        items = self.panel()
+        self.assertFalse(any(row.get("options") for row in items if row.get("args", {}).get("request") == "q1"))
+        self.assertTrue(any("details not available" in row.get("text", "") for row in items))
+        with self.assertRaises(VqroError):
+            self.command("answer", resource="r2", request="q1", epoch="e7", revision=2, value=True)
+        self.command("answer", resource="r2", request="q1", epoch="e7", revision=2, cancelled=True)
+        self.assertEqual(self.native()[-1][1]["args"]["response"], {"action": "cancel"})
+
+    def test_text_requests_carry_prefill_and_multiline_and_choices_show_their_effect(self):
+        self.core.resources["r2"]["data"]["agent"]["requests"] = [
+            {"request": "q5", "revision": 1, "method": "text", "title": "Commit message",
+             "params": {"prefill": "fix: lint", "multiline": True, "placeholder": "Message"}},
+            {"request": "q6", "revision": 1, "method": "permission", "title": "Push?", "params": {"command": "git push"},
+             "choices": [{"id": "a", "label": "Allow", "effect": "allow_always"}]}]
+        items = self.panel()
+        text = next(row for row in items if row.get("input"))
+        self.assertEqual((text["input"], text["prefill"], text["multiline"]), ("Message", "fix: lint", True))
+        self.assertIn("command: git push", [row.get("text") for row in items])
+        push = next(row for row in items if row.get("options"))
+        self.assertEqual(push["options"], [{"label": "Allow (allow always)", "value": "a"}])
+
+    def test_a_cut_or_missing_lifecycle_is_not_idle(self):
+        facts = self.core.resources["r2"]["data"]["agent"]
+        del facts["lifecycle"]
+        facts["incomplete"] = ["lifecycle"]
+        result = self.command("prompt", resource="r2", text="go")
+        self.assertEqual((result["client"]["popup"]["view"], self.native()), ("agents-send-r2", []))
+        facts["incomplete"] = []
+        result = self.command("prompt", resource="r2", text="go")
+        self.assertEqual((result["client"]["popup"]["view"], self.native()), ("agents-send-r2", []))
+
+
 class Tier1StatusTests(unittest.TestCase):
     def setUp(self):
         self.core = FakeCore()
@@ -646,6 +696,66 @@ class Tier1StatusTests(unittest.TestCase):
                 self.report(bad)
         self.assertEqual(self.core.notices, [])
         self.assertNotIn("agents.terminal_status", self.core.live)
+
+    def test_a_late_publication_never_overwrites_a_newer_one(self):
+        """K3a delta N1: reports run concurrently; the visible table always ends at the newest state."""
+        entered, release, original, errors = threading.Event(), threading.Event(), self.core.publish, []
+
+        def publish(view, content):
+            if view == "agents.terminal_status" and content["data"]["r1"]["seq"] == 1:
+                entered.set()
+                self.assertTrue(release.wait(5))
+            return original(view, content)
+        self.core.publish = publish
+
+        def older():
+            try:
+                self.report({"terminal": "r1", "app": "hook", "state": "running", "seq": 1})
+            except BaseException as error:
+                errors.append(error)
+        thread = threading.Thread(target=older)
+        thread.start()
+        try:
+            self.assertTrue(entered.wait(5))
+            self.report({"terminal": "r1", "app": "hook", "state": "idle", "seq": 2})
+        finally:
+            release.set()
+            thread.join(5)
+        self.assertEqual(errors, [])
+        self.assertEqual(self.core.live["agents.terminal_status"]["data"]["r1"]["state"], "idle")
+        self.report({"terminal": "r1", "app": "hook", "state": "idle", "seq": 3})
+        self.assertEqual(self.core.live["agents.terminal_status"]["data"]["r1"]["state"], "idle")
+
+    def test_the_published_table_stays_under_the_live_value_cap(self):
+        """K3a delta N2: admission counts encoded bytes, so a full table still publishes (1 MiB core cap)."""
+        from agents import TIER1_BYTES
+        app = "\U0001F600" * 64
+        for n in range(1, 5000):
+            rid = f"r{n}"
+            self.core.resources[rid] = {"id": rid, "kind": "terminal", "state": "live", "argv": ["sh"]}
+            try:
+                self.report({"terminal": rid, "app": app, "state": "requires_action", "seq": 2_000_000_000_000})
+            except VqroError as error:
+                self.assertEqual(error.kind, "overloaded")
+                break
+        else:
+            self.fail("admission never refused")
+        self.assertGreater(n, 1000, "refused by a bound, not early")
+        size = len(json.dumps(self.core.live["agents.terminal_status"], ensure_ascii=False, separators=(",", ":")).encode())
+        self.assertLessEqual(size, 1024 * 1024)
+        self.assertNotIn(rid, self.agents.tier1, "a refused report leaves nothing behind")
+        self.assertLessEqual(sum(self.agents.tier1_size.values()), TIER1_BYTES)
+
+    def test_the_declared_count_of_worst_case_entries_fits_the_cap(self):
+        from agents import TIER1_MAX, TIER1_SEQ_MAX
+        app, rid = "\U0001F600" * 64, "r" + "9" * 63
+        entry = {"app": app, "state": "requires_action", "seq": TIER1_SEQ_MAX, "at_ms": 10 ** 13 - 1,
+                 "status": {"state": "blocked", "app": app}}
+        table = {"data": {rid[:-4] + f"{n:04d}": entry for n in range(TIER1_MAX)}}
+        self.assertLessEqual(len(json.dumps(table, ensure_ascii=False, separators=(",", ":")).encode()), 1024 * 1024)
+        for bad in ({"seq": TIER1_SEQ_MAX + 1}, {"app": "a\x1b[31m"}, {"terminal": "r" * 65}):
+            with self.assertRaises(VqroError):
+                self.report({"terminal": "r1", "app": "hook", "state": "idle", "seq": 1, **bad})
 
     def test_an_ended_or_removed_terminal_drops_its_report(self):
         self.report({"terminal": "r1", "app": "claude", "state": "idle", "seq": 1})
