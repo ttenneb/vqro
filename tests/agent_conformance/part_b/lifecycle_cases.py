@@ -165,6 +165,11 @@ async def identity_cache_and_tombstones(ctx):
               "core identity cache stays within its declared bound under churn and flood", stats=stats)
     if flood_size:
         ctx.check(stats["count"] == stats["max_entries"], "the flood filled the cache to its bound (eviction happened)", stats=stats)
+    # L7's N is the extension-declared identity-cache size: the actual cache count must stay within it too.
+    declared_n = cache.get("capacity") if isinstance(cache, dict) else None
+    if isinstance(declared_n, int) and not isinstance(declared_n, bool):
+        ctx.check(stats["count"] <= declared_n, "the actual identity-cache count stays within the extension-declared N",
+                  count=stats["count"], declared_n=declared_n, core_max_entries=stats["max_entries"])
 
     async def pruned():
         current = await tombstones(ctx)
