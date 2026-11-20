@@ -57,7 +57,10 @@ class StopE2E(base.E2E):
         self.start()
         native = ['/usr/bin/python3', str(REPO/'tests/fixtures/fake_pi.py'), '--bridge-e2e',
                   '--trace-file', str(self.root/'native.jsonl'), '--timing-file', str(self.root/'timing.jsonl')]
-        ops = [{'op': 'set', 'key': 'doc/settings/pi', 'value': {'runtimes': [{'name': 'fake', 'argv': native}]}}]
+        # Retention/confirmation coverage uses the explicit legacy fixture; the Rust-default
+        # profile and v0 stop receipt are exercised separately by pi_provider_e2e.py --rust-bridge.
+        ops = [{'op': 'set', 'key': 'doc/settings/pi', 'value': {'runtimes': [{'name': 'fake', 'argv': native,
+            'bridge_argv': ['/usr/bin/python3', '-I', str(self.root/'ext/pi_bridge/python_launch.py')]}]}}]
         argv = {name: ['/usr/bin/python3', str(self.root/'ext'/(name+'.py'))] for name in ('tabs', 'panes', 'agents', 'pi', 'sidebar', 'retention')}
         argv['retention'] += ['--grace', str(GRACE)]
         ops += [{'op': 'set', 'key': 'extension/'+name, 'value': {'enabled': True, 'argv': value}} for name, value in argv.items()]
