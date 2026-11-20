@@ -690,8 +690,8 @@ The OpenTUI client stays optional and separately installed, never bundled (human
 ## D30. Terminal emulation through built-in engines; libghostty-vt first (2026-11-20, CONFIRMED)
 **Decision.** The Rust TUI draws terminal panes through one engine interface (`src/tui/emulator.rs`: `Engine`,
 `EngineKind`). The engines are built in and chosen in Settings (`doc/settings/tui.terminal_engine`). There are no
-runtime plug-ins. `libghostty` (Ghostty's libghostty-vt, vendored at c5a21edf and built with Zig 0.15.2) is the
-default, and `vt100` stays selectable and is the fallback. An engine that can't be selected or started is replaced
+runtime plug-ins. `libghostty` (Ghostty's libghostty-vt, vendored at c5a21edf and built with Zig 0.15.2) becomes the
+default once its history behaves (plan G4); until then `vt100` is the default. vt100 stays selectable and is the fallback. An engine that can't be selected or started is replaced
 by vt100 for that pane, with a notice. A crash inside a native engine can't be caught that way, so native engines
 keep their FFI defensive. One shared conformance suite (`tests/fixtures/client/engines.json`) has a baseline every
 engine must pass and fidelity extras each engine claims for itself; alacritty_terminal can join later through the

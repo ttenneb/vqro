@@ -511,7 +511,7 @@ def refresh(*_):
                       "options":[{"label":"Full (Ctrl-g, Alt-x)","value":"full"},{"label":"Short (C-g, M-x)","value":"short"}],
                       "command":"settings.set", "args":{"tui":"key_labels"},
                       "description":"Display names only; configured key syntax stays unchanged."})
-    interface.append({"type": "select", "text": "Terminal engine", "value": t.get("terminal_engine", "libghostty"),
+    interface.append({"type": "select", "text": "Terminal engine", "value": t.get("terminal_engine", "vt100"),
                       "options": [{"label": "libghostty (Ghostty's emulator)", "value": "libghostty"},
                                   {"label": "vt100 (built-in fallback)", "value": "vt100"}],
                       "command": "settings.set", "args": {"tui": "terminal_engine"},

@@ -107,7 +107,9 @@ pub enum EngineKind {
 impl EngineKind {
     pub const ALL: [EngineKind; 2] = [EngineKind::Libghostty, EngineKind::Vt100];
     /// The engine used when the setting names none (or one this client doesn't know).
-    pub const DEFAULT: EngineKind = EngineKind::Libghostty;
+    /// vt100 until libghostty's history behaves (libghostty plan G4: line-count retention, selections across
+    /// eviction); libghostty is selectable meanwhile.
+    pub const DEFAULT: EngineKind = EngineKind::Vt100;
 
     pub fn name(self) -> &'static str {
         match self { EngineKind::Vt100 => "vt100", EngineKind::Libghostty => "libghostty" }

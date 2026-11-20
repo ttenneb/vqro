@@ -156,7 +156,8 @@ fn notification(body: &[u8]) -> Option<Effect> {
 }
 
 /// The cursor shape a program set with DECSCUSR (`CSI n SP q`), found in its bytes: libghostty-vt reports the
-/// shape but not whether the program chose it, and the user's own cursor must stay when it didn't.
+/// shape but not whether the program chose it, and the user's own cursor must stay when it didn't. A full reset
+/// (RIS, `ESC c`) gives the user's cursor back, as the vt100 engine does (neither engine resets it on DECSTR).
 #[derive(Default)]
 struct CursorSet {
     tail: Vec<u8>,
@@ -169,6 +170,11 @@ impl CursorSet {
         seen.extend_from_slice(bytes);
         let mut i = 0;
         while i + 1 < seen.len() {
+            if seen[i] == 0x1b && seen[i + 1] == b'c' {
+                self.chosen = None;
+                i += 2;
+                continue;
+            }
             if seen[i] == 0x1b && seen[i + 1] == b'[' {
                 let mut j = i + 2;
                 while j < seen.len() && seen[j].is_ascii_digit() && j - i < 6 { j += 1; }
@@ -487,5 +493,9 @@ mod tests {
         assert_eq!(c.chosen, Some(5), "split across writes");
         c.feed(b"\x1b[0 q");
         assert_eq!(c.chosen, None, "0 restores the user's own cursor");
+        c.feed(b"\x1b[6 q");
+        assert_eq!(c.chosen, Some(6));
+        c.feed(b"\x1bc");
+        assert_eq!(c.chosen, None, "a full reset (RIS) restores the user's cursor");
     }
 }
