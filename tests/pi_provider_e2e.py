@@ -38,6 +38,10 @@ def sidebar_rows(rows):
         yield from sidebar_rows(row.get('children', []))
 
 
+def args_rust(args):
+    return getattr(args, 'rust_bridge', False)
+
+
 def live(process):
     now = identity(process['pid']) if process else None
     return now and now['birth'] == process['birth'] and now['state'] != 'Z'
@@ -54,6 +58,8 @@ class E2E:
         r = self.root
         if args.agents_extension:
             (r/'empty/python3').symlink_to('/usr/bin/python3')  # host-resolved, private allowlist only
+        if getattr(args, 'rust_bridge', False):
+            (r/'empty/vqro-bridge-pi').symlink_to(args.vqro.parent/'vqro-bridge-pi')
         self.env = {'HOME': str(r/'home'), 'PATH': str(r/'empty'), 'LANG': 'C.UTF-8',
                     'XDG_CONFIG_HOME': str(r/'config'), 'XDG_STATE_HOME': str(r/'state'),
                     'XDG_RUNTIME_DIR': str(r/'run'), 'SHELL': '/bin/sh', 'TERM': 'xterm-256color',
@@ -83,7 +89,7 @@ class E2E:
         return self.command([str(self.args.hc), *args])
 
     def call(self, method, params=None, allow_error=False):
-        if self.args.agents_extension and method == 'resource.invoke' and (params or {}).get('op', '').startswith('agent.'):
+        if self.args.agents_extension and not args_rust(self.args) and method == 'resource.invoke' and (params or {}).get('op', '').startswith('agent.'):
             args = dict(params.get('args') or {}, resource=params['resource'])
             if 'message' in args:
                 args['text'] = args.pop('message')
@@ -507,6 +513,39 @@ class E2E:
     def trace(self):
         return [json.loads(line) for line in (self.root/'native.jsonl').read_text().splitlines()]
 
+    def rust_default_checks(self, rid, host, native_process):
+        self.log.append({'bridge_profile': 'default-rust-agent-v0', 'agent': rid})
+        facts = self.resource(rid)['data']['agent']
+        assert facts['v'] == 0 and facts['caps']['agent']['v'] == 0, facts
+        before_epoch = facts['epoch']
+        if self.args.real_pi_metadata:
+            def real_models():
+                options = self.resource(rid)['data']['agent']['config']
+                return next((option for option in options if option['id'] == 'model' and option.get('choices')), None)
+            models = self.wait(real_models, 'actual installed Pi model metadata response')
+            self.wait(lambda: any(option['id'] == 'thinking_level' for option in self.resource(rid)['data']['agent']['config']), 'actual installed Pi thinking-level metadata')
+            self.log.append({'real_pi1_model_choices_retained': len(models['choices']), 'runtime_version': json.loads((PACKAGE/'package.json').read_text())['version'], 'model_calls': 0})
+        if not self.args.real_pi_metadata:
+            origin = {'principal': 'undeclared', 'actor': 'undeclared', 'kind': 'coordination'}
+            def send(mode, text, delivery):
+                current = self.resource(rid)['data']['agent']
+                return self.invoke(rid, 'send', {'v': 0, 'epoch': current['epoch'], 'caps_rev': current['caps']['rev'],
+                    'mode': mode, 'delivery': delivery, 'content': [{'type': 'text', 'text': text}], 'origin': origin, 'render': ['attributed_user']})
+            send('start', 'rust-default-start', 'rust-default-start')
+            self.agent(rid, lambda r: r['data']['agent']['state'] == 'running')
+            self.invoke(rid, 'send', {'mode': 'start', 'delivery': 'must-not-write', 'content': [{'type': 'text', 'text': 'must-not-write'}], 'origin': origin, 'render': ['attributed_user']}, outcome='rejected')
+            send('boundary', 'rust-default-queued', 'rust-default-boundary')
+            self.invoke(rid, 'interrupt', {'v': 0})
+            self.agent(rid, lambda r: r['data']['agent']['state'] == 'idle')
+            self.wait(lambda: 'rust-default-queued' in json.dumps(self.snapshot().get('live', {}).get('agent-'+rid)), 'derived Rust transcript publication')
+            assert sum(row.get('type') == 'prompt' for row in self.trace()) == 1, self.trace()
+        current = self.resource(rid)['data']['agent']
+        self.invoke(rid, 'stop', {'v': 0, 'covers': current['caps']['agent.stop']['covers']}, outcome='observed')
+        self.wait(lambda: not live(native_process), 'owned Rust native exit')
+        ended = self.resource(rid)
+        assert ended is None or (ended['data']['agent']['lifecycle'] == 'ended' and ended['data']['agent']['epoch'] == before_epoch), ended
+        self.log.append({'rust_default_v0': 'PASS', 'real_pi_metadata': self.args.real_pi_metadata, 'no_replay': True, 'native_exit_observed': True, 'resource_absent_after_gone': ended is None})
+
     def run(self):
         self.command([str(self.args.hc), '--version'])
         started = self.hc('server', 'start')
@@ -550,7 +589,10 @@ class E2E:
                       '--trace-file', str(self.root/'native.jsonl'), '--timing-file', str(self.root/'timing.jsonl')]
         if self.args.agents_extension:
             assert not self.args.real_pi_metadata, 'extension E2E uses fake Pi only'
-            ops = [{'op': 'set', 'key': 'doc/settings/agents', 'value': {'runtimes': [{'name': 'fake', 'argv': native}]}}]
+            runtime = {'name': 'fake', 'argv': native}
+            if not args_rust(self.args):
+                runtime['bridge_argv'] = ['/usr/bin/python3', '-I', str(self.root/'ext/pi_bridge/python_launch.py')]
+            ops = [{'op': 'set', 'key': 'doc/settings/agents', 'value': {'runtimes': [runtime]}}]
             ops += [{'op': 'set', 'key': 'extension/'+name, 'value': {'enabled': True,
                     'argv': ['/usr/bin/python3', str(self.root/'ext'/(name+'.py'))]}}
                     for name in ('tabs', 'panes', 'agents', 'pi', 'sidebar')]
@@ -566,7 +608,7 @@ class E2E:
             self.tracked.extend(identity(int(pid)) for pid in children)
         else:
             spawned = self.call('resource.spawn', {'bridge': True, 'name': 'isolated-pi-provider',
-                    'argv': ['/usr/bin/python3', '-I', str(self.root/'ext/pi_bridge/launch.py'), '--', *native], 'cwd': str(self.root/'work'),
+                    'argv': ['/usr/bin/python3', '-I', str(self.root/'ext/pi_bridge'/('launch.py' if args_rust(self.args) else 'python_launch.py')), '--', *native], 'cwd': str(self.root/'work'),
                     'env': {'PI_CODING_AGENT_DIR': str(self.root/'agent'),
                             'PI_SKIP_VERSION_CHECK': '1'}})
         assert spawned['outcome'] == 'observed', spawned
@@ -596,6 +638,9 @@ class E2E:
         self.tracked.extend([bridge_process, native_process])
         if self.args.probe_terminal_invoke:
             self.probe_terminal_input(host)
+        if args_rust(self.args):
+            self.rust_default_checks(rid, host, native_process)
+            return
         if not self.args.real_pi_metadata:
             self.prompt_latency(rid)
             first = self.trace()[0]
@@ -712,6 +757,7 @@ def main():
     parser.add_argument('--vqro', type=Path, required=True)
     parser.add_argument('--hc', type=Path, required=True)
     parser.add_argument('--real-pi-metadata', action='store_true')
+    parser.add_argument('--rust-bridge', action='store_true', help='test the actual default Rust launcher/v0 profile, not the explicit legacy Python profile')
     parser.add_argument('--agents-extension', action='store_true', help='drive agents extension commands with fake Pi')
     parser.add_argument('--agents-ui', action='store_true', help='also drive a real TUI in private tmux with fake Pi')
     parser.add_argument('--probe-terminal-invoke', action='store_true', help='assert declared stream-only input rejects an unsupported effect')
@@ -736,6 +782,8 @@ def main():
                    '--parent-net', os.readlink('/proc/self/ns/net')]
         if args.real_pi_metadata:
             command.append('--real-pi-metadata')
+        if args.rust_bridge:
+            command.append('--rust-bridge')
         if args.probe_terminal_invoke:
             command.append('--probe-terminal-invoke')
         if args.agents_extension:

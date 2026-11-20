@@ -1,17 +1,29 @@
-# Local Pi runtime provider program
+# Backend-owned Pi bridge launch
+
+The default is the Rust `vqro-bridge-pi -- <literal native argv...>` agent-v0 adapter. The trusted
+`python3 -I /installed/pi_bridge/launch.py` shim execs that host-PATH binary without a shell or fallback. The
+installer includes it beside vqro; this change does not run an install. Rust explicitly selects RPC mode and
+controlled no-extension/skill/template discovery for its literal route. No initial prompt is sent.
+See [Rust declaration/evidence notes](../../docs/research/pi-adapter.md).
+
+To choose the legacy Python provider explicitly, set runtime bridge_argv to
+`["python3", "-I", "/installed/pi_bridge/python_launch.py"]`. Legacy regression tests name this profile explicitly;
+the default-Rust E2E exercises the actual default shim and the v0 API separately.
+
+## Explicit legacy Python provider
 
 Run as a backend terminal's program, never as a core-managed extension or process host:
 
 ```sh
-python3 -I /path/to/vqro/extensions/pi_bridge/launch.py -- \
+python3 -I /path/to/vqro/extensions/pi_bridge/python_launch.py -- \
   /absolute/path/to/node /absolute/path/to/pi/cli.js --mode rpc
 ```
 
 The Pi argv after `--` is mandatory and used verbatim. There is **no installed pi1 default**, runtime/provider
 selection, credential copying or automatic prompt. `-I` excludes the project cwd, `PYTHONPATH` and user site
 packages before bridge/stdlib imports; the launcher adds only its own trusted installation. Do not use plain
-`python -m pi_bridge` in an agent project. The default `pi` extension uses this installed launcher without exporting
-`PYTHONPATH`. Existing `bridge_argv`/`bridge_env` stay literal and configurable on the terminal host (for example,
+`python -m pi_bridge` in an agent project. The default `pi` extension uses the Rust shim; this legacy launcher is
+an explicit alternative, also without exporting `PYTHONPATH`. Existing `bridge_argv`/`bridge_env` stay literal and configurable on the terminal host (for example,
 `["py", "-3", "-I", "C:\\installed\\vqro\\extensions\\pi_bridge\\launch.py"]`); no shell or core-OS inference.
 A custom launcher is responsible for its own import isolation. `scripts/dev-install.sh` copies the package,
 including the launcher; this task does not run the installer.

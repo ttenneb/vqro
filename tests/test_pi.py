@@ -97,7 +97,8 @@ class PiTests(unittest.TestCase):
             with self.subTest(shadow=shadow), tempfile.TemporaryDirectory(prefix="bridge-import-") as project:
                 source=Path(project)/shadow;source.parent.mkdir(parents=True,exist_ok=True)
                 source.write_text("open('shadow-executed','w').write('bad')\nraise SystemExit('project module executed')\n")
-                env={"HOME":project,"PATH":os.environ.get("PATH",""),"PYTHONPATH":os.pathsep.join([project,EXTENSIONS])}
+                binary=Path(project)/"bin"/"vqro-bridge-pi";binary.parent.mkdir();binary.write_text("#!/bin/sh\nexit 0\n");binary.chmod(0o755)
+                env={"HOME":project,"PATH":str(binary.parent),"PYTHONPATH":os.pathsep.join([project,EXTENSIONS])}
                 result=subprocess.run([sys.executable,*default_bridge()[1:],"--help"],cwd=project,env=env,capture_output=True,text=True,timeout=5)
                 self.assertEqual(result.returncode,0,result.stderr)
                 self.assertFalse((Path(project)/"shadow-executed").exists())

@@ -1,8 +1,13 @@
-# Pi RPC runtime and bridge program
+# Pi RPC bridge launch and legacy Python client
 
-A stdlib-only, Python 3.11+ client for **Pi 1.5 RPC**, plus an isolated `python3 -I /installed/pi_bridge/launch.py`
-runtime provider program. Program launch, resume and view behavior: [PROGRAM.md](PROGRAM.md). The client API below remains
-independent of vqro; Pi's JSONL protocol is not JSON-RPC.
+The default trusted `python3 -I /installed/pi_bridge/launch.py` shim execs the terminal host's `vqro-bridge-pi`
+Rust binary. It must be installed/on the host PATH; failure never silently launches another implementation.
+The Rust adapter implements agent-v0 and bounded item streams ([declaration notes](../../docs/research/pi-adapter.md)).
+An explicit `python3 -I /installed/pi_bridge/python_launch.py` keeps the legacy Python provider available.
+Launch details: [PROGRAM.md](PROGRAM.md).
+
+The stdlib-only Python 3.11+ **Pi 1.5 RPC** client API below remains independent of vqro. Pi's JSONL protocol is
+not JSON-RPC. The remaining provider/client notes describe the explicit legacy implementation.
 
 The bridge runs **inside a backend-owned terminal**, instantiating the client over fresh child pipes.
 Do not instantiate it in vqro core or its extension supervisor. No PTY is used for Pi RPC. The program

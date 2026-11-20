@@ -1,11 +1,16 @@
-"""Installed bridge entry point: run with python -I launch.py, never from a project's import path."""
-from pathlib import Path
+"""Trusted host launcher: python -I launch.py execs the Rust Pi bridge, never project imports."""
+import os
 import sys
 
-# Isolated interpreter startup excludes cwd, PYTHONPATH and user site packages before any
-# bridge imports. Add only this trusted installation; do not alter the process environment.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from pi_bridge.__main__ import main
+
+def main():
+    try:
+        os.execvp("vqro-bridge-pi", ["vqro-bridge-pi", *sys.argv[1:]])
+    except OSError as error:
+        raise SystemExit("Cannot start vqro-bridge-pi on the terminal host: " + str(error)
+                         + ". Install the matching bridge or configure bridge_argv explicitly."
+                         + " The legacy Python entry is pi_bridge/python_launch.py.") from None
+
 
 if __name__ == "__main__":
     main()
