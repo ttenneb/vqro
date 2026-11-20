@@ -100,14 +100,15 @@ CASES = (
 BY_ID = {case.id: case for case in CASES}
 
 
-def select_cases(names=None):
+def select_cases(names=None, *, inventory=CASES):
     if not names:
-        return list(CASES)
+        return list(inventory)
     selected = set(names)
-    unknown = selected - BY_ID.keys()
+    known = {case.id for case in inventory}
+    unknown = selected - known
     if unknown:
         raise ValueError(f"unknown conformance cases: {sorted(unknown)}")
-    return [case for case in CASES if case.id in selected]
+    return [case for case in inventory if case.id in selected]
 
 
 def declared(caps, operation):
@@ -141,14 +142,16 @@ class Result:
         return asdict(self)
 
 
-def report(implementation, results, selected):
-    expected = [case.id for case in CASES]
+def report(implementation, results, selected, *, part="A", inventory=CASES):
+    if part not in ("A", "B"):
+        raise ValueError("conformance part must be A or B")
+    expected = [case.id for case in inventory]
     executed = [row.case for row in results]
     selected_ids = [case.id for case in selected]
     complete = selected_ids == expected and executed == expected
     failed = any(row.status == "fail" for row in results)
     # Fixtures and partial selections are never complete adapter certification.
-    return {"schema": "vqro-conformance-result-v0", "part": "A", "implementation": implementation,
+    return {"schema": "vqro-conformance-result-v0", "part": part, "implementation": implementation,
             "complete_inventory": complete, "selected": selected_ids, "normative_cases": expected,
             "not_selected": [ident for ident in expected if ident not in selected_ids],
             "fixture_native": True, "real_runtime_certification": False,
@@ -160,7 +163,7 @@ def report(implementation, results, selected):
 
 def markdown(document):
     clean = lambda value: str(value).replace("|", "\\|").replace("\n", " ")
-    rows = ["# Agent conformance (Part A)", "", "Native fixture only; not real-runtime certification.",
+    rows = [f"# Agent conformance (Part {document['part']})", "", "Fixtures only; not real-runtime certification.",
             f"Complete inventory executed: {document['complete_inventory']}. Missing selection: "
             + (", ".join(document["not_selected"]) or "none") + ".", "",
             "| Case | Result | Component | Detail |", "|---|---|---|---|"]

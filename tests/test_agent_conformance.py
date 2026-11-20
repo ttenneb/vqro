@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from agent_conformance.runtime import Runtime
 from agent_conformance.cases import declarations, restriction
 from agent_conformance.content import examples, png, wav
-from agent_conformance.results import CASES, BY_ID, CheckFailed, FixtureFailed, Result, report, select_cases
+from agent_conformance.results import CASES, BY_ID, Case, CheckFailed, FixtureFailed, Result, markdown, report, select_cases
 from agent_conformance.runner import run_case
 from agent_conformance.wire import ItemReducer, Peer, RpcError, WireFailure
 
@@ -327,6 +327,17 @@ class ResultTests(unittest.TestCase):
         self.assertFalse(document["complete_inventory"])
         self.assertFalse(document["real_runtime_certification"])
         self.assertEqual(len(document["not_selected"]), 54)
+
+    def test_part_b_has_its_own_inventory_and_table_heading(self):
+        inventory = (Case("I1", "durable claim"), Case("H1", "restart paused"))
+        selected = select_cases(["I1"], inventory=inventory)
+        document = report({"name": "coord-fixture"}, [Result("I1", "durable claim", "pass")], selected,
+                          part="B", inventory=inventory)
+        self.assertEqual(document["not_selected"], ["H1"])
+        self.assertFalse(document["complete_inventory"])
+        self.assertIn("Part B", markdown(document))
+        with self.assertRaises(ValueError):
+            select_cases(["C1"], inventory=inventory)
 
     def test_unsupported_requires_a_real_omission_record(self):
         with self.assertRaises(ValueError):
