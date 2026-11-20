@@ -430,13 +430,16 @@ The native session inbox socket is a separate `admit` route without vqro-side ed
 
 The agents extension provides `agents.status {terminal, app, state, seq}` for tier-1 hooks without a tty or an
 OSC 7501 path (Claude Code hooks, for example). This is lossy observation, not a coordination mutation or native
-effect. `terminal` names a live terminal resource; `app` is a non-empty string of at most 64 characters; `seq` is a
-non-negative integer (Unix epoch milliseconds recommended). `state` is `idle | running | requires_action | unknown`;
+effect. `terminal` names a live terminal resource with an id of at most 64 characters; `app` is 1–64 printable
+characters (no controls); `seq` is an integer from 0 to 2^53−1 (Unix epoch milliseconds recommended).
+`state` is `idle | running | requires_action | unknown`;
 an absent or unknown value becomes `unknown`, never inferred idle.
 
 Reports are last-writer-by-sequence **per terminal**, across apps: only `seq` strictly above the last report applies.
 The reply is `{ok: true, applied: true}`, or `{ok: true, applied: false, reason: "stale", seq: <last>}`. Invalid
-arguments, a missing/ended terminal or the 4096-report bound are refused to the caller only, without a notice.
+arguments and a missing/ended terminal are refused to the caller only, without a notice. At most 1024 terminals
+may report, with an additional 960 KiB encoded-table admission budget to fit the core's 1 MiB live-value cap;
+exceeding either bound returns `overloaded` and records nothing.
 Sequence is not scoped to a reporting process or incarnation; a restarted reporter must advance it. Reports live
 only in extension memory, disappear when the terminal ends or is removed, and do not survive an extension restart.
 **Reporter ownership** `(pending C2)`: once callers carry a principal, only the terminal's own launcher-tagged
@@ -448,7 +451,9 @@ Live data `agents.terminal_status` is `{data: {<terminal>: {app, state, seq, at_
 receipt time and `status` is OSC 7501-shaped `{app, state}`: `running` → `working`, `requires_action` → `blocked`,
 `idle` / `unknown` unchanged. Publish only when app/state changes or a report is dropped. Stored sequence advances
 on every applied report; published `seq` and `at_ms` may lag the last accepted report. A publication contains all
-current rows, so another terminal's change can refresh them too. This is not a report log.
+current rows, so another terminal's change can refresh them too. Only one publisher runs at a time, taking fresh
+snapshots and republishing changes that arrive during publication; an older table never overwrites a newer one.
+This is not a report log.
 The sidebar uses this fallback **only without the terminal's own OSC status**. No report means unknown, not idle;
 a report alone proves neither delivery, a model read nor lifecycle end.
 

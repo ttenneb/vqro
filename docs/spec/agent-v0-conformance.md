@@ -333,7 +333,10 @@ model-visible request plus normal completion may yield `read`; verify native fra
 
 T13 advisory terminal status: `agents.status` publishes OSC-shaped live data; unknown/missing states become
 `unknown`. Duplicate/lower sequence reports are ignored per terminal, even from a different app; invalid reports
-produce no notice or native effect. Reports are bounded, dropped at terminal end/removal and lost on extension
+produce no notice or native effect. Terminal ids are at most 64 characters, app is 1–64 printable characters,
+seq is 0..2^53−1: a huge sequence (including 10^100) is invalid and cannot poison later reports. Count over 1024
+or encoded-table size over 960 KiB returns `overloaded` without recording anything. Concurrent publication never
+lets an older table overwrite a newer one. Reports are dropped at terminal end/removal and lost on extension
 restart. Stored sequence advances for unchanged state/app without a publication; published `seq`/`at_ms` may lag
 until a publication (including another terminal's change). The sidebar prefers terminal OSC status and falls back
 only without it; no report never

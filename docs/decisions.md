@@ -497,7 +497,9 @@ replaced when the Pi bridge is ported.
   a terminal status path. Reports use last sequence per terminal and disappear on terminal end/removal or extension
   restart. The sidebar uses `agents.terminal_status` only when the terminal has no OSC status; unknown stays unknown.
   Reporter ownership `(pending C2)`: only the terminal's launcher-tagged principal or owner may report; others get
-  `not_authorized` and nothing is applied. The current unattributed command is a known v0 gap.
+  `not_authorized` and nothing is applied. The current unattributed command is a known v0 gap. Reports are bounded
+  by 1024 terminals and 960 KiB encoded data, printable app length 1–64, terminal id length ≤ 64, and seq 0..2^53−1;
+  refusal records nothing. Serialized fresh-snapshot publication prevents an older table overwriting a newer one.
 - Every `agent.stop` reply's data includes per-call `covers`, never wider than declared. When the adapter cannot
   evidence effective coverage, `covers_evidence: "requested"` marks requested scope only, not proof of stopped work.
 - Agent-view facts may carry runtime-reported usage (context, tokens/cache, cost with currency and reported/estimated
