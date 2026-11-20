@@ -133,6 +133,9 @@ async def staged_successor_handover(ctx):
     sid, did = source["id"], destination["id"]
     await name(ctx, sid)
     await membership(ctx, did, "i13-initial")
+    # Materialize the requested paused source through its public control action;
+    # an omitted default-closed gate is not an explicit persisted pause witness.
+    await ctx.scope("pause", "agent:" + sid)
     expiry = int(time.time() * 1000) + 300000
     moved = [(await ctx.send(mode="admit", send_new=True, guard={"session": "s1"}, expires_at_ms=expiry,
         text="I13 held intent " + str(index)))["delivery"] for index in range(2)]
