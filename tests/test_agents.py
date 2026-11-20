@@ -1,3 +1,4 @@
+import copy
 import json
 from pathlib import Path
 import sys
@@ -298,6 +299,19 @@ class AgentsTests(unittest.TestCase):
         self.core.resources["r2"]["data"]["agent"] = {"v": 0, "commands": [{"name": "x"}]}
         self.agents.event("resource", {"id": "r2"})
         self.assertIsNone(self.core.value("menu/agents.r2.settings"))
+
+    def test_a_stale_copy_never_overwrites_the_embedded_native_view(self):
+        # e2e-agents-ui flake: agents.show published the panel from its older snapshot (no views yet)
+        # after the event path had published the embedded view; nothing republished it afterwards.
+        self.core.add_agent()
+        self.core.resources["r2"]["data"]["views"] = []  # the bridge's first facts: no view declared yet
+        stale = copy.deepcopy(self.core.resources["r2"])
+        self.core.resources["r2"]["data"]["views"] = ["agent-r2"]
+        self.core.live["agent-r2"] = {"items": [{"text": "Ready for a prompt"}]}
+        self.agents.publish_panel(self.core.resources["r2"])
+        self.agents.publish_panel(stale)
+        rows = self.core.live["agents-r2"]["items"]
+        self.assertTrue(any(row.get("type") == "view" and row.get("view") == "agent-r2" for row in rows), rows)
 
     def test_activation_names_the_agent_of_kept_panels(self):
         core = FakeCore()

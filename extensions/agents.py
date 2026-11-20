@@ -520,10 +520,15 @@ class Agents:
 
     def publish_panel(self, resource):
         rid = resource["id"]
-        content = self.panel(resource)
-        if self.published.get(rid) != content:
-            self.ext.publish(view(rid), content)
-            self.published[rid] = content
+        # Commands (agents.show after its snapshot) and events both publish this panel. Read the
+        # resource from the cache inside the lock, so the last publication always uses the newest
+        # facts: an older copy can never overwrite the embedded native view with the fallback.
+        with self.lock:
+            resource = self.ext.resources.get(rid) or resource
+            content = self.panel(resource)
+            if self.published.get(rid) != content:
+                self.ext.publish(view(rid), content)
+                self.published[rid] = content
 
     def publish_gone(self, rid):
         self.published.pop(rid, None)
