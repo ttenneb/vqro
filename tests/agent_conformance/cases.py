@@ -374,27 +374,34 @@ async def serialized_preflight(ctx):
     profile = await mode_caps(ctx, "start")
     if profile.get("preflight") != "serialized":
         raise NotDeclared("agent.send.modes.start.preflight", profile.get("preflight"))
-    await ctx.native.call("turn", state="settled")
     idle = await ctx.wait_facts(lambda f: f.get("state") == "idle")
-    before_completion = idle.get("completion")
+    before_completion, before_run = idle.get("completion"), idle.get("run")
     second_peer = await ctx.viewer()
     mark = ctx.native.mark()
-    await ctx.native.call("pause_before", phase="preflight")
+    await ctx.native.call("pause_before", phase="acceptance")
     first = asyncio.create_task(ctx.send("D13-first", "start", deadline_ms=1500))
     interrupted = None
     try:
-        await ctx.native.wait(lambda rows: any(r["seq"] > mark and r["kind"] == "paused" and r.get("phase") == "preflight" for r in rows))
+        await ctx.native.wait(lambda rows: any(r["seq"] > mark and r["kind"] == "paused" and r.get("phase") == "acceptance" for r in rows))
         second = await ctx.send("D13-overlap", "start", peer=second_peer)
         rejection(second, kinds=("busy",))
-        queries = [r for r in ctx.native.records("command", after=mark) if r.get("phase") == "preflight"]
-        check(len(queries) == 1, "two native start preflights were in flight")
+        starts = ctx.native.records("command", after=mark, operation="send")
+        check(len(starts) == 1, "two unacknowledged native starts were in flight")
+        check(not ctx.native.records("input_received", after=mark), "fixture did not gate native acceptance", component="fixture")
         await ctx.native.call("turn", state="settled")
         if "agent.interrupt" in idle["caps"]:
             interrupted = asyncio.create_task(ctx.invoke("agent.interrupt", deadline_ms=1500))
+        if interrupted is not None:
+            try:
+                interrupt_result = await asyncio.wait_for(asyncio.shield(interrupted), .5)
+            except asyncio.TimeoutError as error:
+                raise CheckFailed("interrupt waited behind an unresolved start preflight") from error
+            check(interrupt_result.get("outcome") in ("accepted", "observed", "dispatched"), "interrupt failed while preflight was pending")
         await asyncio.sleep(.25)
-        check((await ctx.facts()).get("completion") == before_completion,
-              "settled event while preflight was gated fabricated completion")
-        await ctx.native.call("release", phase="preflight")
+        gated = await ctx.facts()
+        check(gated.get("completion") == before_completion and gated.get("run") == before_run,
+              "settled event while preflight was gated fabricated run/completion")
+        await ctx.native.call("release", phase="acceptance")
         result = await first
         check(result.get("outcome") in ("accepted", "dispatched"), "interrupt cancelled unresolved native start preflight")
         if interrupted is not None:
@@ -402,7 +409,7 @@ async def serialized_preflight(ctx):
         await ctx.native.wait(lambda rows: any(r["seq"] > mark and r["kind"] == "input_received" for r in rows))
         inputs = ctx.native.records("input_received", after=mark)
         check(len(inputs) == 1 and "D13-first" in inputs[0]["text"], "overlapping starts duplicated/lost the native input")
-        ctx.evidence.append({"kind": "serialized_start", "preflights": len(queries), "inputs": len(inputs),
+        ctx.evidence.append({"kind": "serialized_start", "unacknowledged_native_starts": len(starts), "inputs": len(inputs),
                              "settled_during_preflight": True, "interrupt_exercised": interrupted is not None})
     finally:
         await ctx.native.call("release", phase="all")
