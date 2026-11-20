@@ -170,6 +170,54 @@ class NativeOracle(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(sum(row["kind"]=="model_request" for row in rows),2)
             self.assertTrue(all(row["witness"]["entry"]["value"]["state"]=="claimed" for row in rows if row["kind"]=="invoke"))
 
+    async def test_publish_receipt_replays_only_the_stored_native_receipt(self):
+        with tempfile.TemporaryDirectory() as root:
+            provider=Provider();native=Native(provider,Path(root));await native.add("a0")
+            effect=SimpleNamespace(id="e1",ref="a0",incarnation="i:a0")
+            await native.effect("agent.send",effect,{"v":0,"delivery":"d:late","mode":"start",
+                "content":[{"type":"text","text":"literal"}],"origin":{"principal":"worker","actor":"worker","kind":"agent"}})
+            ledger=lambda:[json.loads(line) for line in native.ledger.read_text().splitlines()]
+            inserted=next(row["seq"] for row in ledger() if row["kind"]=="model_request" and row["delivery"]=="d:late")
+            journal=native.journal("a0")
+            first=await native.control({"verb":"publish-receipt","ref":"a0","delivery":"d:late"})
+            self.assertEqual(first,{"receipt":{"delivery":"d:late","stage":"inserted"},"rev":1,"model_request_seq":inserted})
+            row=json.loads(journal["rows"][-1][1])
+            self.assertEqual((row["op"],row["kind"],row["id"],row["rev"],row["value"]),
+                             ("put","receipt","d:late",1,{"delivery":"d:late","stage":"inserted"}))
+            second=await native.control({"verb":"publish-receipt","ref":"a0","delivery":"d:late"})
+            self.assertEqual(second["rev"],2)
+            encoded=lambda entity:len(json.dumps(entity,ensure_ascii=False,separators=(",",":")).encode())+1
+            self.assertEqual(journal["entity_bytes"],sum(map(encoded,journal["entities"].values())),"republish keeps byte accounting exact")
+            self.assertEqual(sum(1 for entity in journal["entities"].values() if entity["kind"]=="receipt"),1)
+            seq=journal["seq"]
+            with self.assertRaises(ValueError):
+                await native.control({"verb":"publish-receipt","ref":"a0","delivery":"d:never-sent"})
+            self.assertEqual(journal["seq"],seq,"an unknown delivery publishes nothing")
+            self.assertEqual([row["delivery"] for row in ledger() if row["kind"]=="receipt_published"],["d:late","d:late"])
+            self.assertEqual(sum(row["kind"]=="model_request" for row in ledger()),1,"publishing never sends or inserts again")
+
+    async def test_evicted_entity_remove_revision_exceeds_its_last_revision(self):
+        with tempfile.TemporaryDirectory() as root:
+            provider=Provider();native=Native(provider,Path(root));await native.add("a0")
+            native.publish_entity("a0",{"op":"put","kind":"receipt","id":"d:x","rev":3,"value":{"delivery":"d:x","stage":"read"}})
+            for index in range(600): native.item("a0",{"role":"user","content":[],"final":True})
+            removes=[json.loads(data) for _,data in native.journal("a0")["rows"] if json.loads(data)["op"]=="remove"]
+            receipt=[row for row in removes if row["id"]=="d:x"]
+            self.assertEqual([row["rev"] for row in receipt],[4])
+
+    async def test_control_error_reply_keeps_the_request_id(self):
+        from agent_conformance.core import Native as Client
+        from agent_conformance.results import FixtureFailed
+        with tempfile.TemporaryDirectory() as root:
+            provider=Provider();native=Native(provider,Path(root))
+            server=await asyncio.start_unix_server(native.connection,str(Path(root)/"n.sock"))
+            try:
+                with self.assertRaises(FixtureFailed) as caught:
+                    await Client(Path(root)/"n.sock",Path(root)/"native.jsonl").call("publish-receipt",ref="a0",delivery="d:none")
+                self.assertIn("no stored native receipt",str(caught.exception))
+            finally:
+                server.close();await server.wait_closed()
+
     async def test_request_validation_precedes_native_response_and_false_is_not_cancel(self):
         with tempfile.TemporaryDirectory() as root:
             provider=Provider();native=Native(provider,Path(root));await native.add("a0")

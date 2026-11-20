@@ -88,6 +88,7 @@ class Native:
         self.provider, self.root = provider, root
         self.agents, self.plans, self.barriers = {}, {}, {}
         self.queues, self.receipts, self.items, self.drafts = {}, {}, {}, {}
+        self.receipt_revisions = {}  # (ref, delivery) -> last published typed receipt entity revision
         self.pull_entries,self.pull_pending,self.context_pending,self.host_members={},{},{},{}
         self.serial = 0
         self.ledger = root / "native.jsonl"
@@ -162,8 +163,12 @@ class Native:
 
     def item(self,ref,value):
         journal=self.journal(ref);journal["position"]+=1
-        entity={"op":"put","kind":"message","id":"m"+str(journal["position"]),"rev":1,
-                "value":dict(value,position=journal["position"])}
+        self.publish_entity(ref,{"op":"put","kind":"message","id":"m"+str(journal["position"]),"rev":1,
+                                 "value":dict(value,position=journal["position"])})
+
+    def publish_entity(self,ref,entity):
+        """One put through the bounded item journal (agent-v0 §4 framing), retained for snapshots."""
+        journal=self.journal(ref)
         encoded=lambda row:json.dumps(row,ensure_ascii=False,separators=(",",":")).encode()+b"\n"
         if len(encoded(entity))>60000: raise RuntimeError("fake item exceeds declared record bound")
         def append(row):
@@ -171,11 +176,13 @@ class Native:
             journal["rows"].append((journal["seq"],data));journal["bytes"]+=len(data)
             while journal["bytes"]>131072:
                 _,old=journal["rows"].pop(0);journal["bytes"]-=len(old)
+        previous=journal["entities"].pop(entity["id"],None)
+        if previous is not None: journal["entity_bytes"]-=len(encoded(previous))
         journal["entities"][entity["id"]]=entity;journal["entity_bytes"]+=len(encoded(entity))
         while len(journal["entities"])>512 or journal["entity_bytes"]>524288:
             identifier=next(iter(journal["entities"]));removed=journal["entities"].pop(identifier)
             journal["entity_bytes"]-=len(encoded(removed))
-            append({"op":"remove","kind":removed["kind"],"id":identifier,"rev":2})
+            append({"op":"remove","kind":removed["kind"],"id":identifier,"rev":removed["rev"]+1})
         append(entity);journal["wake"].set()
 
     def insert(self, ref, args):
@@ -376,16 +383,38 @@ class Native:
             await self.provider.gone(row["ref"], row["incarnation"])
             return {"removed": True}
         if verb == "mark": return {"seq": self.serial}
+        if verb == "publish-receipt":
+            # Late typed receipt: publish exactly the receipt this fake native already stored for an actual insertion
+            # (Native.insert), as an agent-v0 §4 `receipt` entity (id = delivery). Never manufactures a stage.
+            ref, delivery = request.get("ref"), request.get("delivery")
+            stored = self.receipts.get(ref, {}).get(delivery) if isinstance(delivery, str) else None
+            if ref not in self.agents or stored is None:
+                raise ValueError("no stored native receipt for this ref and delivery")
+            linked = None
+            for line in self.ledger.read_text().splitlines():
+                row = json.loads(line)
+                if row.get("kind") == "model_request" and row.get("ref") == ref and row.get("delivery") == delivery:
+                    linked = row["seq"]
+            revision = self.receipt_revisions.get((ref, delivery), 0) + 1
+            value = deepcopy(stored)
+            self.publish_entity(ref, {"op": "put", "kind": "receipt", "id": delivery, "rev": revision, "value": value})
+            self.receipt_revisions[(ref, delivery)] = revision
+            self.append("receipt_published", ref=ref, delivery=delivery, stage=value.get("stage"), rev=revision,
+                        model_request_seq=linked)
+            return {"receipt": value, "rev": revision, "model_request_seq": linked}
         raise ValueError("unknown fixture control: " + str(verb))
 
     async def connection(self, reader, writer):
+        request = None
         try:
             raw = await asyncio.wait_for(reader.readline(), 3)
             if not raw.endswith(b"\n") or len(raw) > 1 << 20: raise ValueError("bounded LF control required")
             request = json.loads(raw)
             response = {"id": request.get("id"), "result": await self.control(request)}
         except Exception as error:
-            response = {"error": {"message": str(error)}}
+            # Keep the request id so the client reports the fixture's own error, not an id mismatch.
+            ident = request.get("id") if isinstance(request, dict) else None
+            response = {"id": ident, "error": {"message": str(error)}}
         try:
             writer.write(json.dumps(response).encode() + b"\n"); await writer.drain()
         finally:
