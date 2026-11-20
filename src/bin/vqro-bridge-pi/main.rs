@@ -3,6 +3,7 @@ mod native;
 mod admission;
 mod contract;
 mod state;
+mod retirement;
 use std::collections::HashMap;
 use std::sync::{Arc,Mutex,OnceLock};
 use std::time::Duration;
@@ -108,11 +109,10 @@ async fn main()->Result<()> {
                                     None=>break,
                                 },
                                 _=native.exited()=>{
-                                    let _=provider.full_sync(vec![shared.facts(&name)]).await;
-                                    // Let already-dispatched effect responders finish; no new native writes.
-                                    tokio::time::sleep(Duration::from_millis(100)).await;break;
+                                    announce_end(&shared,&provider,&name).await;
+                                    break;
                                 }
-                                _=life.notified()=>{native.stop();let _=tokio::time::timeout(Duration::from_secs(2),native.exited()).await;let _=provider.full_sync(vec![shared.facts(&name)]).await;break;}
+                                _=life.notified()=>{native.stop();if tokio::time::timeout(Duration::from_secs(2),native.exited()).await.is_ok(){announce_end(&shared,&provider,&name).await;}else{eprintln!("Pi stop pending; no native end evidence yet");}break;}
                             }
                         }
                         publish.abort();
@@ -135,6 +135,12 @@ async fn main()->Result<()> {
     native.stop();let _=tokio::time::timeout(Duration::from_secs(2),native.exited()).await;
     let (tail,total)=native.stderr_tail();eprintln!("Pi bridge ended; native pending {}; stderr retained {} of {total} bytes",native.pending(),tail.len());
     Ok(())
+}
+async fn announce_end(shared:&Shared,provider:&Provider,name:&str) {
+    match tokio::time::timeout(Duration::from_secs(5),retirement::retire(provider,shared.facts(name),name)).await {
+        Ok(Ok(()))=>{},Ok(Err(error))=>eprintln!("Pi ended; end evidence not confirmed: {error}"),
+        Err(_)=>eprintln!("Pi ended; end evidence not confirmed before core deadline"),
+    }
 }
 fn definitive(error:&ProviderError)->bool {
     if error.remote && ((error.kind=="forbidden" && error.data["reason"]=="safe_mode") || error.kind=="durability_unconfirmed"){return false;}
