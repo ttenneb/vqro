@@ -461,6 +461,17 @@ async def concurrent_send(ctx, *, peer, target, text, **fields):
                                            "content": [{"type": "text", "text": text}], **fields}, peer=peer)
 
 
+ADMITTED = ("accepted", "observed", "dispatched")
+
+
+def control_admissions_ok(samples):
+    """S1: every timed interrupt and answer was admitted (reply state) and caused exactly its own native effect (one
+    agent.interrupt on the interrupted agent; one native response to that exact request). A non-None reply that was
+    refused or had no native effect fails; so does having no sample of either kind."""
+    kinds = {sample["kind"] for sample in samples}
+    return {"interrupt", "answer"} <= kinds and all(sample.get("state") in ADMITTED and sample.get("native") == 1 for sample in samples)
+
+
 def percentile(values, fraction):
     values = sorted(values)
     return round(values[min(len(values) - 1, int(fraction * len(values)))], 1) if values else None
@@ -506,7 +517,7 @@ async def combined_scale_gate(ctx):
     is refused predictably and the stalled viewer harms no other viewer; CPU, RSS, commit p50/p99, events/missed,
     occupancy and control/answer latency are recorded."""
     sampler = CoreSampler(ctx.backend.core.pid); sampling = asyncio.ensure_future(sampler.run())
-    metrics = {"inbox_ms": [], "layout_ms": [], "control_ms": [], "answer_ms": [], "refusals": {}, "events": 0, "missed": []}
+    metrics = {"inbox_ms": [], "layout_ms": [], "control_ms": [], "answer_ms": [], "refusals": {}, "events": 0, "missed": [], "controls": []}
     monitor = await ctx.connect("owner")
     monitor.on("event", lambda value: metrics.__setitem__("events", metrics["events"] + 1))
     monitor.on("missed", lambda value: metrics["missed"].append(value))
@@ -557,10 +568,19 @@ async def combined_scale_gate(ctx):
                 await asyncio.gather(*(timed("inbox_ms", concurrent_send(ctx, peer=senders[k], target=agents[(n * 4 + k) % 200]["id"], send_new=True, text=f"steady {n}")) for k in range(4)),
                                      timed("layout_ms", ctx.peer.call("workspace.apply", {"ops": [{"op": "set", "key": f"doc/part-b/s1/{n % 64}", "value": n}]})))
                 if n % 10 == 0:
-                    await timed("control_ms", ctx.command("control", {"op": await operation(ctx), "action": "interrupt", "target": agents[1]["id"], "args": {"v": 0}}))
+                    interrupts = lambda: len([r for r in invocations(ctx, op="agent.interrupt") if r["ref"] == agents[1]["backend_ref"]])
+                    before = interrupts()
+                    reply = await timed("control_ms", ctx.command("control", {"op": await operation(ctx), "action": "interrupt", "target": agents[1]["id"], "args": {"v": 0}}))
+                    metrics["controls"].append({"kind": "interrupt", "state": (reply or {}).get("state"), "native": interrupts() - before})
+                    asked = f"s1q{answered}"
+                    responses = lambda: len([r for r in ctx.native.records("native_response") if r.get("request") == asked])
+                    before = responses()
                     reply = await timed("answer_ms", ctx.command("control", {"op": await operation(ctx), "action": "respond", "target": agents[0]["id"],
-                        "args": {"v": 0, "request": f"s1q{answered}", "epoch": "e1", "revision": 1, "response": {"value": True}}}))
-                    if reply is not None:
+                        "args": {"v": 0, "request": asked, "epoch": "e1", "revision": 1, "response": {"value": True}}}))
+                    sample = {"kind": "answer", "request": asked, "state": (reply or {}).get("state"), "native": responses() - before}
+                    metrics["controls"].append(sample)
+                    # Only an admitted answer that actually reached the native request moves on to the next request.
+                    if sample["state"] in ADMITTED and sample["native"] == 1:
                         answered += 1; await ctx.native_set(0, requests=[request(answered)], state="running")
                 await asyncio.sleep(1 / rate)
         await steady(15, 10)
@@ -608,6 +628,8 @@ async def combined_scale_gate(ctx):
         ctx.check(not any(key.startswith("layout_ms") for key in metrics["refusals"]), "every layout commit succeeded", refusals=metrics["refusals"])
         ctx.check(not any(key.startswith(("control_ms", "answer_ms")) for key in metrics["refusals"]) and metrics["answer_ms"],
                   "every interrupt and answer was admitted", refusals=metrics["refusals"])
+        ctx.check(control_admissions_ok(metrics["controls"]),
+                  "every interrupt and answer was admitted and caused exactly its own native effect", controls=metrics["controls"])
         examples = metrics.get("refusal_examples", {})
         ctx.check(all(key.endswith(":quota") or key.endswith(":overloaded") and "not dispatched" in examples.get(key, "")
                       for key in metrics["refusals"]),

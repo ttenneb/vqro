@@ -394,3 +394,17 @@ class HandoverCheckerRegressions(unittest.TestCase):
         self.assertFalse(self.m.barrier_invoked([call(incarnation="i:old")], endpoint, "d:bar"))
         self.assertFalse(self.m.barrier_invoked([call(delivery="d:other")], endpoint, "d:bar"))
         self.assertFalse(self.m.barrier_invoked([call(), call()], endpoint, "d:bar"))
+
+
+class ScaleControlCheckerRegressions(unittest.TestCase):
+    """S1: a non-None control reply is not admission; each needs its admitted state and its own native effect."""
+
+    def test_control_samples_need_admission_and_native_effect(self):
+        from agent_conformance.part_b.scale_cases import control_admissions_ok
+        good = [{"kind": "interrupt", "state": "accepted", "native": 1}, {"kind": "answer", "state": "accepted", "native": 1}]
+        self.assertTrue(control_admissions_ok(good))
+        self.assertFalse(control_admissions_ok([good[0], dict(good[1], state="rejected")]), "a refused answer with a reply")
+        self.assertFalse(control_admissions_ok([good[0], dict(good[1], native=0)]), "an admitted answer that reached no request")
+        self.assertFalse(control_admissions_ok([dict(good[0], native=2), good[1]]), "a duplicated native interrupt")
+        self.assertFalse(control_admissions_ok([dict(good[0], state=None), good[1]]), "an interrupt with no reply")
+        self.assertFalse(control_admissions_ok([good[0]]), "no answer sample at all")
