@@ -544,6 +544,12 @@ impl Drop for ProviderStream {
 
 type Pending = Mutex<HashMap<String, oneshot::Sender<Result<Value, ProviderError>>>>;
 
+// Removing a cancelled local waiter does not cancel an already queued/written request or resend it.
+struct PendingCall<'a> { pending: &'a Pending, id: &'a str }
+impl Drop for PendingCall<'_> {
+    fn drop(&mut self) { self.pending.lock().unwrap().remove(self.id); }
+}
+
 struct Shared {
     out: mpsc::UnboundedSender<(String, Option<OwnedSemaphorePermit>)>,
     budget: Arc<Semaphore>,
@@ -755,18 +761,13 @@ impl Provider {
         let id = format!("p-{}", self.shared.next_id.fetch_add(1, Ordering::Relaxed));
         let (tx, rx) = oneshot::channel();
         self.shared.pending.lock().unwrap().insert(id.clone(), tx);
+        let _pending = PendingCall { pending: &self.shared.pending, id: &id };
         let line = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}).to_string();
-        if let Err(e) = self.shared.send_line(line).await {
-            self.shared.pending.lock().unwrap().remove(&id);
-            return Err(e);
-        }
+        self.shared.send_line(line).await?;
         match tokio::time::timeout(self.config.call_timeout, rx).await {
             Ok(Ok(r)) => r,
             Ok(Err(_)) => Err(ProviderError::new("unavailable", "connection closed")),
-            Err(_) => {
-                self.shared.pending.lock().unwrap().remove(&id);
-                Err(ProviderError::new("timeout", "no answer before the deadline; delivery unknown, never resent"))
-            }
+            Err(_) => Err(ProviderError::new("timeout", "no answer before the deadline; delivery unknown, never resent")),
         }
     }
 
@@ -1174,6 +1175,45 @@ mod qa2_tests {
     fn shared() -> Arc<Shared> {
         let (out,_rx)=mpsc::unbounded_channel(); let (closed_tx,_)=watch::channel(false);
         Arc::new(Shared { out,budget:Arc::new(Semaphore::new(1024*1024)),outgoing_bytes:1024*1024,generation:AtomicU64::new(1),pending:Mutex::new(HashMap::new()),next_id:AtomicU64::new(1),closed:AtomicBool::new(false),closed_tx,failure:Mutex::new(None),streams:Mutex::new(HashMap::new()),stream_ids:Mutex::new(IdLedger::default()),effect_ids:Mutex::new(IdLedger::default()),in_flight:AtomicU64::new(0),granted_streams:AtomicU64::new(u64::MAX),granted_item_streams:AtomicU64::new(u64::MAX),sync_started:AtomicBool::new(false),max_record:AtomicU64::new(MAX_RECORD as u64) })
+    }
+    fn caller() -> (Provider, mpsc::UnboundedReceiver<(String, Option<OwnedSemaphorePermit>)>) {
+        let (out, rx) = mpsc::unbounded_channel();
+        let mut shared = shared(); Arc::get_mut(&mut shared).unwrap().out = out;
+        (Provider { shared, config: Arc::new(Config::new("test", "i", serde_json::Map::new())), window: 1024, registration: Arc::new(json!({})) }, rx)
+    }
+    #[tokio::test]
+    async fn cancelled_call_releases_waiter_while_waiting_for_write_budget() {
+        let (provider, mut rx) = caller();
+        let permit = provider.shared.budget.clone().acquire_many_owned(1024*1024).await.unwrap();
+        let mut call = Box::pin(provider.call("workspace.get", json!({"key":"owner"})));
+        tokio::select! { biased; result = &mut call => panic!("unexpected reply: {result:?}"), _ = std::future::ready(()) => {} }
+        assert_eq!(provider.shared.pending.lock().unwrap().len(), 1);
+        assert!(rx.try_recv().is_err());
+        drop(call);
+        assert!(provider.shared.pending.lock().unwrap().is_empty());
+        drop(permit);
+        assert!(rx.try_recv().is_err(), "cancelled before enqueue, never submitted later");
+    }
+    #[tokio::test]
+    async fn cancelled_calls_release_waiters_after_enqueue_without_replay() {
+        let (provider, mut rx) = caller();
+        for _ in 0..64 {
+            let mut call = Box::pin(provider.call("workspace.get", json!({"key":"owner"})));
+            let (line, permit) = tokio::select! { biased; result = &mut call => panic!("unexpected reply: {result:?}"), row = rx.recv() => row.unwrap() };
+            let id = serde_json::from_str::<Value>(&line).unwrap()["id"].as_str().unwrap().to_owned();
+            assert_eq!(provider.shared.pending.lock().unwrap().len(), 1);
+            drop(call);
+            assert!(provider.shared.pending.lock().unwrap().is_empty());
+            assert!(provider.shared.pending.lock().unwrap().remove(&id).is_none(), "late reply has no waiter");
+            drop(permit);
+            assert!(rx.try_recv().is_err(), "local cancellation never resends the request");
+        }
+        let mut call = Box::pin(provider.call("workspace.get", json!({"key":"fresh"})));
+        let (line, _) = tokio::select! { biased; result = &mut call => panic!("unexpected reply: {result:?}"), row = rx.recv() => row.unwrap() };
+        let id = serde_json::from_str::<Value>(&line).unwrap()["id"].as_str().unwrap().to_owned();
+        provider.shared.pending.lock().unwrap().remove(&id).unwrap().send(Ok(json!({"fresh":true}))).unwrap();
+        assert_eq!(call.await.unwrap(), json!({"fresh":true}));
+        assert!(provider.shared.pending.lock().unwrap().is_empty());
     }
     #[test]
     fn identity_eviction_never_forgets_active_ids() {
