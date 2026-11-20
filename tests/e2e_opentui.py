@@ -136,6 +136,14 @@ try:
          "items": [{"text": "own-row"}, {"type": "view", "view": "e2e-src", "readonly": True, "text": "source unavailable"}]}}]})
     call("command.invoke", {"name": "tabs.show", "args": {"view": "e2e-root", "title": "Composed"}})
     check("embedded_views: the referenced panel's rows show in place", bool(wait(lambda: "own-row" in screen() and "embedded-source-row" in screen())), screen())
+    # markdown text rows and pin: "bottom" rows (agent UI building blocks, D29).
+    call("workspace.apply", {"note": "e2e markdown", "ops": [{"op": "set", "key": "view/e2e-md", "value": {"kind": "panel", "title": "Formatted", "items": [
+        {"type": "text", "format": "markdown", "text": "## Plan heading\nRun `cargo test` then **ship**\n- first point\n- second point"},
+        *[{"text": f"filler {n}"} for n in range(40)],
+        {"text": "Messages: 2 waiting", "pin": "bottom"}]}}]})
+    call("command.invoke", {"name": "tabs.show", "args": {"view": "e2e-md", "title": "Formatted"}})
+    check("markdown: heading, inline code and list markers render without markup", bool(wait(lambda: "Plan heading" in screen() and "Run cargo test then ship" in screen() and "• second point" in screen() and "**" not in screen())), screen())
+    check("pin bottom: the pinned row stays visible below a long list", bool(wait(lambda: "Messages: 2 waiting" in screen() and "filler 39" not in screen())), screen())
     keys("C-g")
     check("prefix menu lists recovery actions", bool(wait(lambda: "undo last change" in screen() and "safe mode / recovery choices" in screen())), screen())
     keys(",")

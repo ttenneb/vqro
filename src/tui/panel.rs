@@ -90,6 +90,7 @@ fn chip_layout(item: &Value, width: u16, icons: &Icons) -> Vec<(u16, u16, u16)> 
 }
 
 fn lines(item: &Value, width: u16, icons: &Icons) -> u16 {
+    if kind(item)=="text" && item["format"]=="markdown" {return crate::ui_model::markdown::lines(item["text"].as_str().unwrap_or(""),width as usize).len().clamp(1,u16::MAX as usize) as u16;}
     if kind(item)=="text" && item["wrap"]==true {return wrap_text(item["text"].as_str().unwrap_or(""),width).len().min(u16::MAX as usize) as u16;}
     if kind(item) == "chips" {
         return chip_layout(item, width, icons).last().map(|c| c.1 + 1).unwrap_or(1);
@@ -227,17 +228,35 @@ fn render_list(buf:&mut Buffer,mut area:Rect,v:&Arc<Value>,st:&mut State,focused
         buf.set_string(area.x, y, "─".repeat(area.width as usize), pal.border(false));
         y += 1;
     }
-    let area = Rect { y, height: area.bottom().saturating_sub(y), ..area };
+    // `pin: "bottom"` rows (feature pin): below the list, never scrolled, at most half of what is left.
+    let first_bottom = rows.iter().position(|r| r.bottom).unwrap_or(rows.len());
+    let mut bottom_y = area.bottom();
+    if first_bottom < rows.len() && area.bottom() > y + 2 {
+        let wanted: u16 = rows[first_bottom..].iter().fold(1u16, |h, r| h.saturating_add(lines(&r.item, area.width, icons)));
+        let room = area.bottom() - y;
+        bottom_y = area.bottom() - wanted.min((room / 2).max(2));
+        buf.set_string(area.x, bottom_y, "─".repeat(area.width as usize), pal.border(false));
+        let mut by = bottom_y + 1;
+        for (i, r) in rows.iter().enumerate().skip(first_bottom) {
+            let h = lines(&r.item, area.width, icons).min(area.bottom().saturating_sub(by));
+            if h == 0 {
+                break;
+            }
+            draw_row(buf, Rect { x: area.x, y: by, width: area.width, height: h }, r, focused && i == st.sel, st.chip, i, 0, hits, pal, icons);
+            by += h;
+        }
+    }
+    let area = Rect { y, height: bottom_y.saturating_sub(y), ..area };
     if area.height == 0 {
         return;
     }
-    let list = &rows[pinned..];
+    let list = &rows[pinned..first_bottom];
 
     // Scroll so the selection is visible, in lines.
     let heights: Vec<u32> = list.iter().map(|r| lines(&r.item, area.width.saturating_sub(1), icons) as u32).collect();
     let total: u32 = heights.iter().sum();
     let mut top = st.top.min(u32::MAX as usize) as u32;
-    if st.sel >= pinned && !st.manual_scroll {
+    if st.sel >= pinned && st.sel < first_bottom && !st.manual_scroll {
         let s = st.sel - pinned;
         let sel_start: u32 = heights[..s].iter().sum();
         let sel_end = sel_start + heights[s];
@@ -254,7 +273,7 @@ fn render_list(buf:&mut Buffer,mut area:Rect,v:&Arc<Value>,st:&mut State,focused
         let header_at=|top:u32| {let mut offset=0;let mut header=None;for (r,h) in list.iter().zip(&heights){if offset>top{break;}if kind(&r.item)=="header"{header=r.item["text"].as_str();}offset+=*h;}header};
         if header_at(top).is_some() {
             let header_y=area.y;area.y+=1;area.height-=1;
-            if st.sel>=pinned && !st.manual_scroll {let s=st.sel-pinned;let start: u32=heights[..s].iter().sum();let end=start+heights[s];if end>top+area.height as u32{top=if heights[s]>area.height as u32{start}else{end.saturating_sub(area.height as u32)};}}
+            if st.sel>=pinned && st.sel<first_bottom && !st.manual_scroll {let s=st.sel-pinned;let start: u32=heights[..s].iter().sum();let end=start+heights[s];if end>top+area.height as u32{top=if heights[s]>area.height as u32{start}else{end.saturating_sub(area.height as u32)};}}
             if let Some(header)=header_at(top){buf.set_string(area.x,header_y,truncate(header,area.width as usize),pal.style(Some("accent")).add_modifier(Modifier::BOLD));}
         }
     }
@@ -350,6 +369,23 @@ fn draw_row(buf: &mut Buffer, row: Rect, r: &Flat, selected: bool, chip: usize, 
         }
         "separator" => buf.set_string(row.x, y, "─".repeat(w), pal.border(false)),
         "header" => buf.set_string(row.x + indent, y, truncate(text, w.saturating_sub(indent as usize)), pal.style(Some("accent")).add_modifier(Modifier::BOLD)),
+        "text" if item["format"]=="markdown" => {
+            // Formatted text (feature markdown): the shared layout, styled through the palette.
+            let base=if selected {pal.selected()}else if item["style"].is_string(){text_style(item,pal)}else{Style::new().fg(pal.text)};
+            if selectable(item){hits.rows.push((row,i));}
+            let lines=crate::ui_model::markdown::lines(text,row.width.saturating_sub(indent) as usize);
+            for (dy,line) in lines.iter().skip(skip as usize).take(row.height as usize).enumerate(){
+                let mut x=row.x+indent;
+                for (t,st) in line {
+                    let style=match *st {"h"=>base.patch(pal.style(Some("accent"))).add_modifier(Modifier::BOLD),"b"=>base.add_modifier(Modifier::BOLD),"c"|"pre"=>base.patch(pal.style(Some("muted"))),_=>base};
+                    let style=if selected {style.patch(pal.selected())}else{style};
+                    let room=(row.right().saturating_sub(x)) as usize;
+                    if room==0 {break;}
+                    buf.set_string(x,y+dy as u16,truncate(t,room),style);
+                    x=x.saturating_add(icons::width(t));
+                }
+            }
+        },
         "text" => {
             let style=if selected {pal.selected()}else if item["style"].is_string(){text_style(item,pal)}else{pal.style(Some("muted"))};
             if selectable(item){hits.rows.push((row,i));}
@@ -482,6 +518,23 @@ mod tests {
         assert_eq!(buffer[(0,0)].symbol(),"B");assert_eq!(buffer[(0,0)].fg,palette.accent);assert!(buffer[(0,0)].modifier.contains(Modifier::BOLD));
         let unsupported=json!({"list_detail":{"requires":["future-widget"]},"items":[{"text":"fallback"}]});
         assert!(!list_detail(&unsupported,&State::default()));assert!(missing(&unsupported).is_empty());
+    }
+
+    #[test]
+    fn markdown_rows_and_bottom_pinned_rows_render() {
+        let value=Arc::new(json!({"items":[
+            {"type":"text","format":"markdown","text":"## Plan\nRun `x` and **go**\n- one\n- two"},
+            {"text":"filler 1"},{"text":"filler 2"},{"text":"filler 3"},{"text":"filler 4"},{"text":"filler 5"},
+            {"text":"Messages: 2 waiting","pin":"bottom"}]}));
+        let area=Rect::new(0,0,30,10);let mut buf=Buffer::empty(area);let mut st=State::default();let pal=Palette::default();
+        render(&mut buf,area,&value,&mut st,false,&pal,&Icons::new(None,false),None);
+        let line=|y:u16|(0..29).map(|x|buf[(x,y)].symbol()).collect::<String>().trim_end().to_string();  // column 29: scrollbar
+        assert_eq!(line(0),"Plan");assert_eq!(buf[(0,0)].fg,pal.accent);assert!(buf[(0,0)].modifier.contains(Modifier::BOLD));
+        assert_eq!(line(2),"Run x and go");assert!(buf[(10,2)].modifier.contains(Modifier::BOLD));
+        assert_eq!(line(3),"");assert_eq!(line(4),"• one");assert_eq!(line(5),"• two");
+        assert_eq!(line(9).trim(),"Messages: 2 waiting","pinned at the bottom, never scrolled away");
+        assert!(line(8).starts_with("──"));
+        assert!((0..8).all(|y|!line(y).contains("Messages")));
     }
 
     #[test]

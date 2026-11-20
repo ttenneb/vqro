@@ -93,6 +93,13 @@ try:
         log.write("text-client-log-line\n")
     out = wait(lambda: (lambda o: o if "text-client-log-line" in o else None)(text('run logs.open {"name": "tabs"}')))
     check("a custom view kind is drawn through its fallback", out and "== Log: tabs" in out, out)
+    # Formatted text and bottom-pinned rows (agent UI building blocks).
+    call("workspace.apply", {"note": "e2e markdown", "ops": [{"op": "set", "key": "view/e2e-md", "value": {"kind": "panel", "items": [
+        {"type": "text", "format": "markdown", "text": "## Plan heading\nRun `x` and **go**\n- one"},
+        {"text": "Messages bar", "pin": "bottom"}, {"text": "last row"}]}}]})
+    out = text("view e2e-md")
+    check("markdown text shows the shared layout without markup", "Plan heading" in out and "Run x and go" in out and "• one" in out and "**" not in out, out)
+    check("pinned rows come last, after a divider", out.index("===") < out.index("Messages bar") and out.index("last row") < out.index("==="), out)
     # Recovery: safe mode, the shared chooser, session allowance, leave.
     text("p 5")
     check("prefix row enters safe mode", wait(lambda: call("workspace.snapshot").get("safe_mode") is True))

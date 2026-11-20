@@ -6,7 +6,7 @@ import { Peer, RpcError, type Json } from "./rpc";
 import { Palette } from "./theme";
 import { Terminals } from "./terminal";
 
-export const FEATURES = [...m.BASE_FEATURES, "icon_names", "current_when", "follow", "list_detail", "embedded_views"];
+export const FEATURES = [...m.BASE_FEATURES, "icon_names", "current_when", "follow", "list_detail", "embedded_views", "markdown", "pin"];
 export const PROFILES = ["base", "keys", "terminal"];
 const KINDS = ["panel", "terminal"];
 
@@ -866,32 +866,42 @@ function drawList(a: App, buf: OptimizedBuffer, area: Rect, key: string, value: 
   st.sel = Math.min(st.sel, rows.length - 1);
   if (!m.selectable(rows[st.sel].item)) { const j = rows.findIndex((r, i) => i >= st.sel && m.selectable(r.item)); st.sel = j >= 0 ? j : rows.findIndex((r) => m.selectable(r.item)); if (st.sel < 0) st.sel = 0; }
   const pinned = rows.filter((r) => r.pinned).length;
-  const line = (i: number, yy: number) => {
+  const line = (i: number, yy: number, limit: number) => {
     const r = rows[i];
-    const h = drawRow(a, buf, { x: area.x, y: yy, w: area.w, h: bottom - yy }, r, focused && i === st.sel, st.chip, (x, w, chip) => listed.hits.push({ y: yy, x, w, i, chip }));
-    return h;
+    return drawRow(a, buf, { x: area.x, y: yy, w: area.w, h: limit - yy }, r, focused && i === st.sel, st.chip, (x, w, chip) => listed.hits.push({ y: yy, x, w, i, chip }));
   };
-  for (let i = 0; i < pinned && y < bottom; i++) y += line(i, y);
+  for (let i = 0; i < pinned && y < bottom; i++) y += line(i, y, bottom);
   if (pinned && y < bottom) { text(buf, area.x, y, "─".repeat(area.w), p.color("border")); y += 1; }
-  const visible = bottom - y;
   const heights = rows.map((r) => rowHeight(r, area.w));
-  if (!st.manual) {
+  // pin: "bottom" rows (feature pin): below the list, never scrolled, at most half of what is left.
+  let end = rows.findIndex((r) => r.bottom);
+  if (end < 0) end = rows.length;
+  if (end < rows.length && bottom - y > 2) {
+    const wanted = heights.slice(end).reduce((n, h) => n + h, 1);
+    const by = bottom - Math.min(wanted, Math.max(2, Math.floor((bottom - y) / 2)));
+    text(buf, area.x, by, "─".repeat(area.w), p.color("border"));
+    for (let i = end, yy = by + 1; i < rows.length && yy < bottom; i++) yy += line(i, yy, bottom);
+    bottom = by;
+  }
+  const visible = bottom - y;
+  if (!st.manual && st.sel < end) {
     if (st.sel >= pinned && st.sel < st.top + pinned) st.top = st.sel - pinned;
     let used = 0;
-    for (let i = st.top + pinned; i <= st.sel && i < rows.length; i++) used += heights[i];
+    for (let i = st.top + pinned; i <= st.sel && i < end; i++) used += heights[i];
     while (st.sel >= pinned && used > visible && st.top + pinned < st.sel) { used -= heights[st.top + pinned]; st.top++; }
   }
-  st.top = Math.max(0, Math.min(st.top, rows.length - pinned - 1));
-  for (let i = pinned + st.top; i < rows.length && y < bottom; i++) y += line(i, y);
-  if (rows.length - pinned > visible) {
-    const n = rows.length - pinned;
+  st.top = Math.max(0, Math.min(st.top, end - pinned - 1));
+  for (let i = pinned + st.top; i < end && y < bottom; i++) y += line(i, y, bottom);
+  if (end - pinned > visible) {
+    const n = end - pinned;
     const thumb = Math.floor((st.top / Math.max(1, n)) * visible);
     for (let yy = 0; yy < visible; yy++) text(buf, area.x + area.w - 1, bottom - visible + yy, yy === thumb ? "┃" : "│", yy === thumb ? p.color("accent") : p.color("border"));
   }
 }
 
 const rowHeight = (r: m.Row, w: number) =>
-  m.kind(r.item) === "text" && r.item.wrap === true ? wrapText(clean2(r.item.text), Math.max(1, w - r.depth * 2)).length
+  m.kind(r.item) === "text" && r.item.format === "markdown" ? Math.max(1, m.markdownLines(clean2(r.item.text), Math.max(1, w - r.depth * 2)).length)
+    : m.kind(r.item) === "text" && r.item.wrap === true ? wrapText(clean2(r.item.text), Math.max(1, w - r.depth * 2)).length
     : m.kind(r.item) === "separator" ? 1 : 1 + (typeof r.item.description === "string" && r.item.description ? 1 : 0);
 
 const clean2 = (s: any) => String(s ?? "").replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "");
@@ -919,6 +929,25 @@ function drawRow(a: App, buf: OptimizedBuffer, r: Rect, row: m.Row, selected: bo
   let x = r.x + indent;
   const end = r.x + r.w;
   if (k === "separator") { text(buf, r.x, r.y, "─".repeat(r.w), p.color("border")); return 1; }
+  if (k === "text" && it.format === "markdown") {
+    // Formatted text (feature markdown): the shared layout, styled through the palette.
+    const lines = m.markdownLines(clean2(it.text), Math.max(1, r.w - indent));
+    const [base] = p.style(it.style ?? null);
+    const inverse = selected && !p.maybe("selection");
+    lines.slice(0, r.h).forEach((l, j) => {
+      if (selected) buf.fillRect(r.x, r.y + j, r.w, 1, p.maybe("selection") ?? p.bg);
+      let xx = x;
+      for (const [t, st] of l) {
+        const fg = st === "h" ? p.color("accent") : st === "c" || st === "pre" ? p.color("muted") : selected && !inverse ? p.maybe("selection_text") ?? base : base;
+        const attr = (st === "h" || st === "b" ? TextAttributes.BOLD : 0) | (inverse ? TextAttributes.INVERSE : 0);
+        if (xx >= r.x + r.w) break;
+        text(buf, xx, r.y + j, fit(t, r.x + r.w - xx), fg, undefined, attr);
+        xx += width(t);
+      }
+    });
+    hit(r.x, r.w);
+    return Math.min(lines.length, Math.max(1, r.h));
+  }
   if (k === "text" && it.wrap === true) {
     const lines = wrapText(clean2(it.text), Math.max(1, r.w - indent));
     const [fg, attr] = p.style(it.style ?? "muted");

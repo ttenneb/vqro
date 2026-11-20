@@ -147,22 +147,30 @@ def rows(value, page=0, filter="", open=None, features=BASE_FEATURES):
     parent, has_children, expanded, pinned}. `open` is the user's expansion by row id."""
     open, f, out = open or {}, filter.lower(), []
 
-    def walk(items, depth, parent, prefix):
-        for item, rid in _shown(items, prefix, features):
-            if f and not _subtree(item, rid, f, features):
-                continue
-            children = item.get("children") or []
-            expanded = bool(children) and (bool(f) or open.get(rid, item.get("expanded") is True))
-            shown = {k: v for k, v in item.items() if k != "children"}
-            me = len(out)
-            out.append({"item": shown, "depth": depth, "id": rid, "parent": parent, "has_children": bool(children),
-                        "expanded": expanded, "pinned": False})
-            if expanded:
-                walk(children, depth + (kind(item) != "header"), me, rid + "/")
+    def one(item, rid, depth, parent, f, bottom):
+        if f and not _subtree(item, rid, f, features):
+            return
+        children = item.get("children") or []
+        expanded = bool(children) and (bool(f) or open.get(rid, item.get("expanded") is True))
+        shown = {k: v for k, v in item.items() if k != "children"}
+        me = len(out)
+        out.append({"item": shown, "depth": depth, "id": rid, "parent": parent, "has_children": bool(children),
+                    "expanded": expanded, "pinned": False, "bottom": bottom})
+        if expanded:
+            for child, cid in _shown(children, rid + "/", features):
+                one(child, cid, depth + (kind(item) != "header"), me, f, bottom)
 
     for n, (item, _) in enumerate(_shown(value.get("toolbar") or [], "toolbar/", features)):
-        out.append({"item": item, "depth": 0, "id": f"toolbar/{n}", "parent": None, "has_children": False, "expanded": False, "pinned": True})
-    walk(page_items(value, page), 0, None, "")
+        out.append({"item": item, "depth": 0, "id": f"toolbar/{n}", "parent": None, "has_children": False, "expanded": False,
+                    "pinned": True, "bottom": False})
+    top = _shown(page_items(value, page), "", features)
+    pin = "pin" in features  # pin: "bottom" rows (feature pin) come last, never filtered out
+    for item, rid in top:
+        if not (pin and item.get("pin") == "bottom"):
+            one(item, rid, 0, None, f, False)
+    for item, rid in top:
+        if pin and item.get("pin") == "bottom":
+            one(item, rid, 0, None, "", True)
     return out
 
 
@@ -524,3 +532,196 @@ def mark_current(value, layout):
             if isinstance(page, dict):
                 rows(page.get("items"))
     return value
+
+
+# ---- formatted text (format: "markdown", feature markdown) ---------------------------------------------------
+
+import re as _re
+import unicodedata as _ud
+
+
+def _cw(c):
+    if _ud.combining(c):
+        return 0
+    return 2 if _ud.east_asian_width(c) in ("W", "F") else 1
+
+
+def _width(s):
+    return sum(_cw(c) for c in s)
+
+
+def _md_parse(text):
+    blocks, para, in_item = [], None, False
+    lines = iter(text.replace("\r", "").replace("\t", "    ").split("\n"))
+
+    def flush():
+        nonlocal para
+        if para is not None:
+            blocks.append(("para", para))
+            para = None
+    for line in lines:
+        trimmed = line.lstrip(" ")
+        if line.lstrip().startswith("```"):
+            flush()
+            code = []
+            for l in lines:
+                if l.lstrip().startswith("```"):
+                    break
+                code.append(l)
+            blocks.append(("code", code))
+            in_item = False
+            continue
+        if not line.strip():
+            flush()
+            if blocks and blocks[-1][0] != "blank":
+                blocks.append(("blank", None))
+            in_item = False
+            continue
+        hashes = len(line) - len(line.lstrip("#"))
+        if 1 <= hashes <= 3 and line[hashes:].startswith(" "):
+            flush()
+            blocks.append(("heading", line[hashes:].strip()))
+            in_item = False
+            continue
+        indent = len(line) - len(trimmed)
+        marker = None
+        if trimmed.startswith(("- ", "* ")):
+            marker = ("•", 2)
+        else:
+            m = _re.match(r"([0-9]{1,9})\. ", trimmed)
+            if m:
+                marker = (m.group(1) + ".", len(m.group(1)) + 2)
+        if marker:
+            flush()
+            blocks.append(("item", [min(indent // 2, 4), marker[0], trimmed[marker[1]:].strip()]))
+            in_item = True
+            continue
+        if in_item and indent >= 2:
+            blocks[-1][1][2] += " " + line.strip()
+            continue
+        in_item = False
+        para = line.strip() if para is None else para + " " + line.strip()
+    flush()
+    return blocks
+
+
+def _md_inline(s, plain):
+    out, buf, i = [], "", 0
+    while i < len(s):
+        if s[i] == "`":
+            j = s.find("`", i + 1)
+            if j != -1:
+                if buf:
+                    out.append((buf, plain))
+                    buf = ""
+                out.append((s[i + 1:j], "c"))
+                i = j + 1
+                continue
+        if s.startswith("**", i):
+            j = s.find("**", i + 2)
+            if j > i + 2:
+                if buf:
+                    out.append((buf, plain))
+                    buf = ""
+                out.append((s[i + 2:j], "h" if plain == "h" else "b"))
+                i = j + 2
+                continue
+        buf += s[i]
+        i += 1
+    if buf:
+        out.append((buf, plain))
+    return out
+
+
+def _md_merge(line):
+    out = []
+    for t, s in line:
+        if out and out[-1][1] == s:
+            out[-1] = (out[-1][0] + t, s)
+        else:
+            out.append((t, s))
+    return out
+
+
+def _md_wrap(spans, w):
+    w = max(1, w)
+    units, space = [], True
+    for text, style in spans:
+        word = ""
+        for c in text:
+            if c.isspace():
+                if word:
+                    if space or not units:
+                        units.append([(word, style)])
+                    else:
+                        units[-1].append((word, style))
+                    word = ""
+                space = True
+            else:
+                word += c
+        if word:
+            if space or not units:
+                units.append([(word, style)])
+            else:
+                units[-1].append((word, style))
+            space = False
+    out, line, used = [], [], 0
+    for unit in units:
+        uw = sum(_width(t) for t, _ in unit)
+        if used > 0 and used + 1 + uw > w:
+            out.append(line)
+            line, used = [], 0
+        if used > 0:
+            prev = line[-1][1] if line else ""
+            line.append((" ", prev if prev == unit[0][1] else ""))
+            used += 1
+        for text, style in unit:
+            for c in text:
+                cw = _cw(c)
+                if used + cw > w and used > 0:
+                    out.append(line)
+                    line, used = [], 0
+                line.append((c, style))
+                used += cw
+    if line or not out:
+        out.append(line)
+    return [_md_merge(l) for l in out]
+
+
+def _md_cut(s, w):
+    out, used = "", 0
+    for c in s:
+        if used + _cw(c) > max(0, w - 1):
+            break
+        out += c
+        used += _cw(c)
+    return out + "…"
+
+
+def markdown_lines(text, width):
+    """Formatted text laid out at `width` cells: a list of lines, each a list of (text, style) spans."""
+    w = max(1, width)
+    out, prev_item, gap = [], False, False
+    for kind_, value in _md_parse(text):
+        if kind_ == "blank":
+            gap = True
+            continue
+        is_item = kind_ == "item"
+        if out and (gap or not (prev_item and is_item)):
+            out.append([])
+        gap, prev_item = False, is_item
+        if kind_ == "heading":
+            out += _md_wrap(_md_inline(value, "h"), w)
+        elif kind_ == "para":
+            out += _md_wrap(_md_inline(value, ""), w)
+        elif kind_ == "item":
+            level, marker, text_ = value
+            prefix = "  " * level + marker + " "
+            pw = _width(prefix)
+            for n, l in enumerate(_md_wrap(_md_inline(text_, ""), max(1, w - pw))):
+                out.append(_md_merge([(prefix if n == 0 else " " * pw, "")] + l))
+        else:
+            for l in value:
+                shown = "  " + l
+                out.append([(_md_cut(shown, w) if _width(shown) > w else shown, "pre")])
+    return out

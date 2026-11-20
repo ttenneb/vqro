@@ -57,11 +57,13 @@ pub struct Flat {
     pub expanded: bool,
     /// A toolbar row: drawn above the list, never scrolled.
     pub pinned: bool,
+    /// A `pin: "bottom"` row (or its child): drawn below the list, never scrolled (feature `pin`).
+    pub bottom: bool,
 }
 
 
 /// Panel features this client renders. A panel may list what it needs in `requires`.
-pub const SUPPORTED: &[&str] = &["items", "pages", "tree", "badges", "menu", "input", "description", "filter", "toolbar", "chips", "select", "options", "badge_color", "icon", "icon_names", "list_detail", "wrap", "embedded_views", "current_when", "follow"];
+pub const SUPPORTED: &[&str] = &["items", "pages", "tree", "badges", "menu", "input", "description", "filter", "toolbar", "chips", "select", "options", "badge_color", "icon", "icon_names", "list_detail", "wrap", "embedded_views", "current_when", "follow", "markdown", "pin"];
 
 /// Features a panel needs that this client lacks.
 pub fn missing(v: &Value) -> Vec<String> { missing_for(v, SUPPORTED) }
@@ -163,36 +165,41 @@ fn subtree_matches(item: &Value, id: &str, f: &str, features: &[&str]) -> bool {
 /// The rows to show, in order, for this client's features.
 pub fn rows(v: &Value, st: &State) -> Vec<Flat> { rows_for(v, st, SUPPORTED) }
 
-/// The rows a client rendering `features` shows: toolbar, page, tree expansion, filter and element fallbacks.
+/// The rows a client rendering `features` shows: toolbar, page, tree expansion, filter and element fallbacks. With
+/// feature `pin`, top-level rows with `pin: "bottom"` (and their children) come last, marked `bottom`, never
+/// filtered out; clients without it show them where they are.
 pub fn rows_for(v: &Value, st: &State, features: &[&str]) -> Vec<Flat> {
     let f = st.filter.to_lowercase();
     let mut out = Vec::new();
     #[allow(clippy::too_many_arguments)]
-    fn walk(items: &[Value], depth: usize, parent: Option<usize>, prefix: &str, st: &State, f: &str, features: &[&str], out: &mut Vec<Flat>) {
-        for (item, id) in shown(items, prefix, features) {
-            if !f.is_empty() && !subtree_matches(&item, &id, f, features) {
-                continue;
-            }
-            let children = item["children"].as_array().cloned().unwrap_or_default();
-            let has_children = !children.is_empty();
-            // Filtering opens everything that matched below.
-            let expanded = has_children && (!f.is_empty() || st.open.get(&id).copied().unwrap_or(item["expanded"] == true));
-            let mut row = item.clone();
-            if let Some(o) = row.as_object_mut() {
-                o.remove("children");
-            }
-            let me = out.len();
-            out.push(Flat { item: row, depth, id: id.clone(), parent, has_children, expanded, pinned: false });
-            if expanded {
-                walk(&children, depth + (kind(&item)!="header") as usize, Some(me), &format!("{id}/"), st, f, features, out);
+    fn one(item: Value, id: String, depth: usize, parent: Option<usize>, st: &State, f: &str, features: &[&str], bottom: bool, out: &mut Vec<Flat>) {
+        if !f.is_empty() && !subtree_matches(&item, &id, f, features) {
+            return;
+        }
+        let children = item["children"].as_array().cloned().unwrap_or_default();
+        let has_children = !children.is_empty();
+        // Filtering opens everything that matched below.
+        let expanded = has_children && (!f.is_empty() || st.open.get(&id).copied().unwrap_or(item["expanded"] == true));
+        let mut row = item.clone();
+        if let Some(o) = row.as_object_mut() {
+            o.remove("children");
+        }
+        let me = out.len();
+        out.push(Flat { item: row, depth, id: id.clone(), parent, has_children, expanded, pinned: false, bottom });
+        if expanded {
+            for (child, cid) in shown(&children, &format!("{id}/"), features) {
+                one(child, cid, depth + (kind(&item) != "header") as usize, Some(me), st, f, features, bottom, out);
             }
         }
     }
     let toolbar = v["toolbar"].as_array().map(|a| a.as_slice()).unwrap_or(&[]);
     for (n, (item, _)) in shown(toolbar, "toolbar/", features).into_iter().enumerate() {
-        out.push(Flat { item, depth: 0, id: format!("toolbar/{n}"), parent: None, has_children: false, expanded: false, pinned: true });
+        out.push(Flat { item, depth: 0, id: format!("toolbar/{n}"), parent: None, has_children: false, expanded: false, pinned: true, bottom: false });
     }
-    walk(page_items(v, st), 0, None, "", st, &f, features, &mut out);
+    let pin = features.contains(&"pin");
+    let (bottom, list): (Vec<_>, Vec<_>) = shown(page_items(v, st), "", features).into_iter().partition(|(item, _)| pin && item["pin"] == "bottom");
+    for (item, id) in list { one(item, id, 0, None, st, &f, features, false, &mut out); }
+    for (item, id) in bottom { one(item, id, 0, None, st, "", features, true, &mut out); }
     out
 }
 

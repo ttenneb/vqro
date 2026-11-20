@@ -21,7 +21,8 @@ sys.path.insert(1, os.path.dirname(HERE))  # vqro_ext.py beside the bundled exte
 import vqro_client_model as model  # noqa: E402
 from vqro_ext import Vqro, VqroError  # noqa: E402
 
-FEATURES = model.BASE_FEATURES + ["icon_names", "current_when"]
+FEATURES = model.BASE_FEATURES + ["icon_names", "current_when", "markdown", "pin"]
+WIDTH = 100  # formatted text is laid out at this width
 HELP = """commands (numbers refer to the last listing):
   show                    this client's layout (workspace): tabs and numbered panes (* = focused)
   focus <pane>            focus a pane; `view` then shows it
@@ -254,7 +255,11 @@ class TextClient:
             lines.append("pages: " + "  ".join(f"[{i + 1}:{text_of(p.get('title'))}{'*' if i == min(st['page'], len(pages) - 1) else ''}]" for i, p in enumerate(pages)))
         if st["filter"]:
             lines.append(f"filter: {st['filter']}")
+        bottom = False
         for r in model.rows(value, st["page"], st["filter"], st["open"], FEATURES):
+            if r.get("bottom") and not bottom:  # pin: "bottom" rows, below the list
+                lines.append("    ===")
+                bottom = True
             # Only rows you can act on get a number.
             if model.selectable(r["item"]):
                 self.listed.append(r)
@@ -266,6 +271,10 @@ class TextClient:
         k = model.kind(item)
         if k == "separator":
             return f"{pad}    ---"
+        if k == "text" and item.get("format") == "markdown":  # formatted text: the shared layout, as plain lines
+            shown = ["".join(t for t, _ in line) for line in model.markdown_lines(text_of(item.get("text")), WIDTH - 5 - len(pad))]
+            first = f"{pad}{n:>3}. " if model.selectable(item) else f"{pad}     "
+            return "\n".join((first if i == 0 else pad + "     ") + l for i, l in enumerate(shown))
         icon = self.icon(item.get("icon"))
         text = (icon + " " if icon else "") + text_of(item.get("text"))
         if k == "header":

@@ -922,6 +922,19 @@ New row types, components and view kinds are progressive enhancements: every cli
   original id, with `shown_view` naming the view drawn. Popups and embedded references follow fallbacks too.
 - Manifests declare a kind as `works_with: ["ui/<kind>@<major>"]`, never `needs` (the fallback is mandatory).
 
+### Formatted text and bottom-pinned rows (D29)
+
+- **`format: "markdown"`** on a `text` row (feature `markdown`): a fixed subset, `#` to `###` headings, paragraphs,
+  `-`/`*` and `1.` list items (nested by two-space indents, continued by indented lines), `**bold**`,
+  `` `inline code` `` and fenced code blocks; everything else is shown literally. Clients lay it out the same way
+  (`tests/fixtures/client/markdown.json`: word wrap by display width, list markers `•`/`N.`, code lines indented two
+  and cut with `…`, one empty line between blocks except items of one list) and style it through the palette
+  (headings `accent` bold, bold, code `muted`). A client without the feature ignores `format` and shows the raw text;
+  add `wrap: true` so that fallback wraps. At most 64 KiB per row; split long transcripts into rows.
+- **`pin: "bottom"`** on a top-level row (feature `pin`): that row and its children are drawn below the scrolling
+  list, in order, never scrolled away (at most half the panel) and never hidden by the filter; they stay selectable.
+  Clients without the feature show them where they are, so producers put them at the end of `items`.
+
 ### Optional list with detail (`list_detail`)
 
 Any panel, or individual page, may carry `list_detail: {requires: ["list_detail"]}`. Its ordinary `items`

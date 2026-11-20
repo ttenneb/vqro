@@ -115,26 +115,28 @@ export function pageItems(value: Json, page = 0): Json[] {
   return Array.isArray(value.items) ? value.items : [];
 }
 
-export interface Row { item: Json; depth: number; id: string; parent: number | null; has_children: boolean; expanded: boolean; pinned: boolean }
+export interface Row { item: Json; depth: number; id: string; parent: number | null; has_children: boolean; expanded: boolean; pinned: boolean; bottom: boolean }
 
 /** Visible rows: toolbar, page, element fallbacks, tree expansion and filter. */
 export function rows(value: Json, page = 0, filter = "", open: Record<string, boolean> = {}, features = BASE_FEATURES): Row[] {
   const f = filter.toLowerCase();
   const out: Row[] = [];
-  const walk = (items: Json[], depth: number, parent: number | null, prefix: string) => {
-    for (const [item, rid] of shownRows(items, prefix, features)) {
-      if (f && !subtree(item, rid, f, features)) continue;
-      const children = Array.isArray(item.children) ? item.children : [];
-      const expanded = children.length > 0 && (!!f || (rid in open ? open[rid] : item.expanded === true));
-      const { children: _, ...shown } = item;
-      const me = out.length;
-      out.push({ item: shown, depth, id: rid, parent, has_children: children.length > 0, expanded, pinned: false });
-      if (expanded) walk(children, depth + (kind(item) !== "header" ? 1 : 0), me, rid + "/");
-    }
+  const one = (item: Json, rid: string, depth: number, parent: number | null, f: string, bottom: boolean) => {
+    if (f && !subtree(item, rid, f, features)) return;
+    const children = Array.isArray(item.children) ? item.children : [];
+    const expanded = children.length > 0 && (!!f || (rid in open ? open[rid] : item.expanded === true));
+    const { children: _, ...shown } = item;
+    const me = out.length;
+    out.push({ item: shown, depth, id: rid, parent, has_children: children.length > 0, expanded, pinned: false, bottom });
+    if (expanded) for (const [c, cid] of shownRows(children, rid + "/", features)) one(c, cid, depth + (kind(item) !== "header" ? 1 : 0), me, f, bottom);
   };
   shownRows(Array.isArray(value.toolbar) ? value.toolbar : [], "toolbar/", features).forEach(([item], n) =>
-    out.push({ item, depth: 0, id: `toolbar/${n}`, parent: null, has_children: false, expanded: false, pinned: true }));
-  walk(pageItems(value, page), 0, null, "");
+    out.push({ item, depth: 0, id: `toolbar/${n}`, parent: null, has_children: false, expanded: false, pinned: true, bottom: false }));
+  // pin: "bottom" rows (feature pin) come last and are never filtered out; without the feature they stay in place.
+  const pin = features.includes("pin");
+  const top = shownRows(pageItems(value, page), "", features);
+  for (const [item, rid] of top) if (!(pin && item.pin === "bottom")) one(item, rid, 0, null, f, false);
+  for (const [item, rid] of top) if (pin && item.pin === "bottom") one(item, rid, 0, null, "", true);
   return out;
 }
 
@@ -532,4 +534,126 @@ export function markCurrent(value: Json, layout: string | null): Json {
   };
   if (isObj(v)) { walk(v.items); walk(v.toolbar); for (const p of Array.isArray(v.pages) ? v.pages : []) if (isObj(p)) walk(p.items); }
   return v;
+}
+
+// ---- formatted text (format: "markdown", feature markdown) ------------------------------------------------------
+
+export type Span = [string, string];
+const cw = (c: string) => Bun.stringWidth(c);
+
+type MdBlock = { kind: "heading" | "para"; text: string } | { kind: "item"; level: number; marker: string; text: string } | { kind: "code"; lines: string[] } | { kind: "blank" };
+
+function mdParse(text: string): MdBlock[] {
+  const blocks: MdBlock[] = [];
+  let para: string | null = null, inItem = false;
+  const lines = text.replace(/\r/g, "").replace(/\t/g, "    ").split("\n");
+  const flush = () => { if (para !== null) { blocks.push({ kind: "para", text: para }); para = null; } };
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.replace(/^ +/, "");
+    if (line.trimStart().startsWith("```")) {
+      flush();
+      const code: string[] = [];
+      for (i++; i < lines.length && !lines[i].trimStart().startsWith("```"); i++) code.push(lines[i]);
+      blocks.push({ kind: "code", lines: code });
+      inItem = false;
+      continue;
+    }
+    if (!line.trim()) { flush(); if (blocks.length && blocks[blocks.length - 1].kind !== "blank") blocks.push({ kind: "blank" }); inItem = false; continue; }
+    const hashes = line.length - line.replace(/^#+/, "").length;
+    if (hashes >= 1 && hashes <= 3 && line[hashes] === " ") { flush(); blocks.push({ kind: "heading", text: line.slice(hashes).trim() }); inItem = false; continue; }
+    const indent = line.length - trimmed.length;
+    let marker: [string, number] | null = null;
+    if (trimmed.startsWith("- ") || trimmed.startsWith("* ")) marker = ["•", 2];
+    else { const mm = /^([0-9]{1,9})\. /.exec(trimmed); if (mm) marker = [mm[1] + ".", mm[1].length + 2]; }
+    if (marker) { flush(); blocks.push({ kind: "item", level: Math.min(Math.floor(indent / 2), 4), marker: marker[0], text: trimmed.slice(marker[1]).trim() }); inItem = true; continue; }
+    const last = blocks[blocks.length - 1];
+    if (inItem && indent >= 2 && last?.kind === "item") { last.text += " " + line.trim(); continue; }
+    inItem = false;
+    para = para === null ? line.trim() : para + " " + line.trim();
+  }
+  flush();
+  return blocks;
+}
+
+function mdInline(s: string, plain: string): Span[] {
+  const out: Span[] = [];
+  let buf = "", i = 0;
+  while (i < s.length) {
+    if (s[i] === "`") {
+      const j = s.indexOf("`", i + 1);
+      if (j !== -1) { if (buf) { out.push([buf, plain]); buf = ""; } out.push([s.slice(i + 1, j), "c"]); i = j + 1; continue; }
+    }
+    if (s.startsWith("**", i)) {
+      const j = s.indexOf("**", i + 2);
+      if (j > i + 2) { if (buf) { out.push([buf, plain]); buf = ""; } out.push([s.slice(i + 2, j), plain === "h" ? "h" : "b"]); i = j + 2; continue; }
+    }
+    const c = String.fromCodePoint(s.codePointAt(i)!);
+    buf += c;
+    i += c.length;
+  }
+  if (buf) out.push([buf, plain]);
+  return out;
+}
+
+const mdMerge = (line: Span[]): Span[] => line.reduce<Span[]>((out, [t, s]) => {
+  if (out.length && out[out.length - 1][1] === s) out[out.length - 1] = [out[out.length - 1][0] + t, s]; else out.push([t, s]);
+  return out;
+}, []);
+
+function mdWrap(spans: Span[], width: number): Span[][] {
+  const w = Math.max(1, width);
+  const units: Span[][] = [];
+  let space = true;
+  const push = (word: string, style: string) => { if (space || !units.length) units.push([[word, style]]); else units[units.length - 1].push([word, style]); };
+  for (const [text, style] of spans) {
+    let word = "";
+    for (const c of text) {
+      if (/\s/u.test(c)) { if (word) push(word, style); word = ""; space = true; }
+      else word += c;
+    }
+    if (word) { push(word, style); space = false; }
+  }
+  const out: Span[][] = [];
+  let line: Span[] = [], used = 0;
+  for (const unit of units) {
+    const uw = unit.reduce((n, [t]) => n + cw(t), 0);
+    if (used > 0 && used + 1 + uw > w) { out.push(line); line = []; used = 0; }
+    if (used > 0) { const prev = line.length ? line[line.length - 1][1] : ""; line.push([" ", prev === unit[0][1] ? prev : ""]); used += 1; }
+    for (const [text, style] of unit) for (const c of text) {
+      const k = cw(c);
+      if (used + k > w && used > 0) { out.push(line); line = []; used = 0; }
+      line.push([c, style]);
+      used += k;
+    }
+  }
+  if (line.length || !out.length) out.push(line);
+  return out.map(mdMerge);
+}
+
+function mdCut(s: string, w: number): string {
+  let out = "", used = 0;
+  for (const c of s) { if (used + cw(c) > Math.max(0, w - 1)) break; out += c; used += cw(c); }
+  return out + "…";
+}
+
+/** Formatted text laid out at `width` cells: lines of [text, style] spans (styles: "" h b c pre). */
+export function markdownLines(text: string, width: number): Span[][] {
+  const w = Math.max(1, width);
+  const out: Span[][] = [];
+  let prevItem = false, gap = false;
+  for (const b of mdParse(text)) {
+    if (b.kind === "blank") { gap = true; continue; }
+    const isItem = b.kind === "item";
+    if (out.length && (gap || !(prevItem && isItem))) out.push([]);
+    gap = false; prevItem = isItem;
+    if (b.kind === "heading") out.push(...mdWrap(mdInline(b.text, "h"), w));
+    else if (b.kind === "para") out.push(...mdWrap(mdInline(b.text, ""), w));
+    else if (b.kind === "item") {
+      const prefix = "  ".repeat(b.level) + b.marker + " ";
+      const pw = cw(prefix);
+      mdWrap(mdInline(b.text, ""), Math.max(1, w - pw)).forEach((l, n) => out.push(mdMerge([[n === 0 ? prefix : " ".repeat(pw), ""], ...l])));
+    } else if (b.kind === "code") for (const l of b.lines) { const shown = "  " + l; out.push([[cw(shown) > w ? mdCut(shown, w) : shown, "pre"]]); }
+  }
+  return out;
 }

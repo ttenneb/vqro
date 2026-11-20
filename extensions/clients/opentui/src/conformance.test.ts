@@ -13,9 +13,9 @@ test("panels", async () => {
   expect(doc.base_features).toEqual(m.BASE_FEATURES);
   for (const c of doc.cases) {
     const s = c.state, p = c.panel;
-    const got = m.rows(p, s.page ?? 0, s.filter ?? "", s.open ?? {}, m.BASE_FEATURES).map((r) => ({
+    const got = m.rows(p, s.page ?? 0, s.filter ?? "", s.open ?? {}, c.features ?? m.BASE_FEATURES).map((r) => ({
       id: r.id, depth: r.depth, text: r.item.text ?? null, type: m.kind(r.item), has_children: r.has_children, expanded: r.expanded,
-      pinned: r.pinned, selectable: m.selectable(r.item), chips: "chips" in r.item ? r.item.chips.map((x: any) => x.text ?? null) : null,
+      pinned: r.pinned, selectable: m.selectable(r.item), bottom: r.bottom, chips: "chips" in r.item ? r.item.chips.map((x: any) => x.text ?? null) : null,
     }));
     const enhancement = p.list_detail && typeof p.list_detail === "object" ? m.missingFor(p.list_detail, m.BASE_FEATURES).length === 0 : null;
     expect({ rows: got, missing: m.missingFor(p, m.BASE_FEATURES), list_detail: enhancement }, c.name).toEqual(c.expect);
@@ -102,4 +102,8 @@ test("embedded views are read-only, cycle-bounded and never attach terminals", (
   expect(panel.items[2].text).toBe("no terminals here");
   expect(panel.items[3].text).toBe("via fallback");
   expect([...deps].sort()).toEqual(["odd", "plain", "root", "source", "term"]);
+});
+
+test("markdown", async () => {
+  for (const c of (await fixture("markdown.json")).cases) expect(m.markdownLines(c.text, c.width), c.name).toEqual(c.expect);
 });
