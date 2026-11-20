@@ -3,7 +3,7 @@
 //! `clients/`) check themselves against the same files. `VQRO_FIXTURE_UPDATE=1 cargo test --test
 //! client_conformance` rewrites the `expect` fields from the model; review the diff before committing.
 use serde_json::{json, Value};
-use vqro::ui_model::{composer, markdown, panel, recovery, view, window::{self, Settled, Window}, workspace::{resolve, Workspace}};
+use vqro::ui_model::{composer, markdown, panel, recovery, tabbar, view, window::{self, Settled, Window}, workspace::{resolve, Workspace}};
 
 fn fixture(name: &str) -> (std::path::PathBuf, Value) {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/client").join(name);
@@ -163,5 +163,13 @@ fn composer_edits_like_the_model() {
             outcomes.push(outcome.name());
         }
         json!({"outcomes": outcomes, "text": c.editor.string(), "cursor": c.editor.cursor, "args": args})
+    });
+}
+
+#[test]
+fn tab_bar_labels_like_the_model() {
+    check("tabbar.json", |case| {
+        let titles: Vec<&str> = case["titles"].as_array().unwrap().iter().map(|t| t.as_str().unwrap()).collect();
+        tabbar::describe(case.get("setting"), &titles, case["active"].as_u64().unwrap() as usize)
     });
 }

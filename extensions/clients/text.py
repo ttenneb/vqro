@@ -175,7 +175,9 @@ class TextClient:
         def tabs_line(node, depth):
             tabs = node["tabs"]
             active = node.get("active", 0) if isinstance(node.get("active"), int) else 0
-            return "  " * depth + "tabs: " + "  ".join(f"[{i + 1}:{text_of((t or {}).get('title')) or 'tab'}{'*' if i == active else ''}]" for i, t in enumerate(tabs))
+            style = model.tab_style((self.ws.entries.get(model.TABS_ENTRY) or {}))
+            return "  " * depth + "tabs: " + "  ".join(f"[{model.tab_label(style, i, text_of((t or {}).get('title')) or 'tab').strip()}{'*' if i == active else ''}]"
+                                                      for i, t in enumerate(tabs))
 
         def walk(node, depth):
             if not isinstance(node, dict):

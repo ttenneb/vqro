@@ -108,6 +108,10 @@ test("embedded views are read-only, cycle-bounded and never attach terminals", (
   expect([...deps].sort()).toEqual(["odd", "plain", "root", "source", "term"]);
 });
 
+test("tab bar", async () => {
+  for (const c of (await fixture("tabbar.json")).cases) expect(m.tabBar(c.setting, c.titles, c.active), c.name).toEqual(c.expect);
+});
+
 test("markdown", async () => {
   for (const c of (await fixture("markdown.json")).cases) expect(m.markdownLines(c.text, c.width), c.name).toEqual(c.expect);
 });

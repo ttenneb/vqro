@@ -62,7 +62,8 @@ class Pi:
                 ext.apply([{"op": "set", "key": SETTINGS, "expect": 0, "value": value}], "pi: migrate/default runtimes")
         ext.retrying(initialize)
         ext.contribute({
-            "menu/pi.new": {"where": "tabbar", "label": "New Pi agent", "command": "pi.new", "order": 5},
+            # Off the tab bar (only "+" stays there): the tab menu, prefix a and the command list.
+            "menu/pi.new": {"where": "tab", "label": "New Pi agent", "command": "pi.new", "order": 5},
             "binding/pi.new": {"key": "a", "command": "pi.new", "label": "new Pi agent"},
             "view/pi-runtimes": {"kind": "panel", "title": "Pi runtimes", "items": []},
             "view/pi-settings": {"kind": "panel", "title": "Pi runtime settings", "items": []},

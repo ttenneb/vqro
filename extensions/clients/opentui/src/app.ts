@@ -746,10 +746,14 @@ export class Screen extends Renderable {
       const active = Math.min(node.active ?? 0, node.tabs.length - 1);
       buf.fillRect(r.x, r.y, r.w, 1, a.pal.color("tab_bar"));
       let x = r.x;
+      // Labels and chip spacing from the shared model (doc/settings/tabs); colours from the palette.
+      const style = m.tabStyle(a.ws.entries.get(m.TABS_ENTRY));
       node.tabs.forEach((t: Json, i: number) => {
-        const label = ` ${i + 1}:${clean(t?.title ?? "tab")} `;
+        if (i > 0 && style.chips) x += 1;
+        const label = m.tabLabel(style, i, clean(t?.title ?? "tab"));
         const on = i === active;
-        text(buf, x, r.y, fit(label, r.x + r.w - x), on ? a.pal.color("tab_active_text") : a.pal.color("muted"), on ? a.pal.color("tab_active") : a.pal.color("tab_bar"));
+        const bg = on ? a.pal.color("tab_active") : style.chips ? a.pal.color("surface") : a.pal.color("tab_bar");
+        text(buf, x, r.y, fit(label, r.x + r.w - x), on ? a.pal.color("tab_active_text") : a.pal.color("muted"), bg, on ? TextAttributes.BOLD : TextAttributes.NONE);
         const rect = { x, y: r.y, w: width(label), h: 1 };
         a.hits.push({ rect, act: (e) => {
           const gesture = e.button === 2 ? a.ws.gesture("mouse.right", "tab") : e.button === 1 ? a.ws.gesture("mouse.middle", "tab") : null;
@@ -759,6 +763,7 @@ export class Screen extends Renderable {
         } });
         x += width(label);
       });
+      if (style.chips) x += 1;
       if (path.length === 0 || !a.hits.some((h) => (h as any).tabbar)) {
         for (const item of a.ws.menuEntries("tabbar", a.win.invocationContext(a.ws, {}))) {
           const label = ` ${iconText(a, item.icon)}${item.label ? (iconText(a, item.icon) ? " " : "") + item.label : ""} `;

@@ -276,12 +276,50 @@ def resource_state(kind, event):
     ext.retrying(attempt)
 
 
+# Tab bar look: the shared setting doc/settings/tabs (core-protocol.md "Tab bar"); every client reads it with a
+# fallback. Missing means subscript numbers in chips.
+TAB_SETTING = "doc/settings/tabs"
+NUMBERS = [("subscript", "Subscript ₁"), ("superscript", "Superscript ¹"), ("plain", "Plain 1"), ("none", "None")]
+
+
+def settings_panel():
+    current = ext.value(TAB_SETTING) if isinstance(ext.value(TAB_SETTING), dict) else {}
+    numbers = current.get("numbers") if current.get("numbers") in dict(NUMBERS) else "subscript"
+    chips = current.get("chips") if isinstance(current.get("chips"), bool) else True
+    return {"title": "Tabs", "requires": ["select"], "items": [
+        {"type": "select", "text": "Number style", "value": numbers, "description": "the small number before each tab's name",
+         "options": [{"label": label, "value": value} for value, label in NUMBERS], "command": "tabs.set", "args": {"field": "numbers"}},
+        {"type": "select", "text": "Chips", "value": chips, "description": "padded tabs with a gap (off: the flat 1:name bar)",
+         "options": [{"label": "On", "value": True}, {"label": "Off", "value": False}], "command": "tabs.set", "args": {"field": "chips"}}]}
+
+
+@ext.command("tabs.settings", "Tab bar settings (number style, chips)")
+def tab_settings(args):
+    ext.publish("tabs-settings", settings_panel())
+    return {"client": {"popup": {"view": "tabs-settings", "width": 64}}}
+
+
+@ext.command("tabs.set", "Set a tab bar option (args: field numbers|chips, value)")
+def tab_set(args):
+    field, value = args.get("field"), args.get("value")
+    if not ((field == "numbers" and value in dict(NUMBERS)) or (field == "chips" and isinstance(value, bool))):
+        raise VqroError("choose numbers subscript|superscript|plain|none or chips true|false", "invalid")
+    def attempt():
+        current = ext.value(TAB_SETTING)
+        value_now = dict(current if isinstance(current, dict) else {}, **{field: value})
+        ext.apply([{"op": "set", "key": TAB_SETTING, "value": value_now, "expect": ext.version(TAB_SETTING)}], "tabs: bar " + field)
+    ext.retrying(attempt)
+    ext.publish("tabs-settings", settings_panel())
+
+
 ext.contribute({
+    "view/tabs-settings": {"kind": "panel", "title": "Tabs", "items": []},
     # An icon alone: the label stays empty so a set's `add` glyph replaces the `+`.
     "menu/tabs.new": {"where": "tabbar", "label": "", "icon": {"name": "add", "text": "+"}, "command": "tabs.open", "order": 0},
     "menu/tabs.rename": {"where": "tab", "label": "Rename tab", "command": "tabs.rename", "input": "Tab name", "prefill": {"context": "tab_title"}, "order": 10},
     "menu/tabs.close": {"where": "tab", "label": "Close tab", "command": "tabs.close", "order": 20},
-    "menu/tabs.close-ended": {"where": "tabbar", "label": "Close ended tabs", "command": "tabs.close_ended", "order": 30},
+    # The tab bar keeps only "+"; other actions live in menus and the command list.
+    "menu/tabs.close-ended": {"where": "tab", "label": "Close ended tabs", "command": "tabs.close_ended", "order": 30},
     "binding/tabs.new": {"key": "n", "command": "tabs.open", "label": "new shell in a tab"},
 })
 resource_state("missed", {})

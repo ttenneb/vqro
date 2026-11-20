@@ -574,6 +574,40 @@ def mark_current(value, layout):
     return value
 
 
+# ---- tab bar (doc/settings/tabs; ui_model::tabbar) --------------------------------------------------------------
+
+TABS_ENTRY = "doc/settings/tabs"
+_SUB = "₀₁₂₃₄₅₆₇₈₉"
+_SUP = "⁰¹²³⁴⁵⁶⁷⁸⁹"
+
+
+def tab_style(setting):
+    """(numbers, chips) from the shared tabs setting; missing: subscript and chips; unknown numbers: plain."""
+    numbers, chips = "subscript", True
+    if isinstance(setting, dict):
+        n = setting.get("numbers")
+        if isinstance(n, str):
+            numbers = n if n in ("subscript", "superscript", "none", "plain") else "plain"
+        if isinstance(setting.get("chips"), bool):
+            chips = setting["chips"]
+    return numbers, chips
+
+
+def tab_label(style, index, title):
+    numbers, chips = style
+    digits = str(index + 1)
+    number = {"subscript": "".join(_SUB[int(d)] for d in digits), "superscript": "".join(_SUP[int(d)] for d in digits),
+              "plain": digits, "none": ""}[numbers]
+    joiner = "" if numbers in ("none", "superscript") else (":" if numbers == "plain" and not chips else " ")
+    return f" {number}{joiner}{title} "
+
+
+def tab_bar(setting, titles, active):
+    style = tab_style(setting)
+    return {"labels": [tab_label(style, i, t) for i, t in enumerate(titles)], "active": active,
+            "gap": 1 if style[1] else 0, "chips": style[1]}
+
+
 # ---- formatted text (format: "markdown", feature markdown) ---------------------------------------------------
 
 import re as _re

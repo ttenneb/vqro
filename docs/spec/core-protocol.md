@@ -1115,9 +1115,23 @@ Colours: a name (the 16 ANSI names such as `cyan`, `darkgray`, `lightblue`), `#R
 | `border_focus` | the focused pane, popups and menus | `cyan` |
 | `selection`, `selection_text` | the selected row; unset `selection` means reverse video | unset |
 | `badge`, `badge_text` | neutral badge and unchecked chip fill; text on any filled background | `darkgray`, `black` |
-| `surface` | fill of plain chips | `#282830` |
-| `tab_active`, `tab_active_text` | the active tab | `blue`, `white` |
-| `tab_bar` | background of the whole tab bar row | `235` |
+| `surface` | fill of plain chips and inactive tab chips | `#282830` |
+| `tab_active`, `tab_active_text` | the active tab (bold) | `blue`, `white` |
+| `tab_bar` | background of the whole tab bar row and the gaps between tab chips | `235` |
+
+### Tab bar
+
+A layout `tabs` node draws as a one-row tab bar. Its look is the shared setting `doc/settings/tabs`
+`{numbers?: "subscript"|"superscript"|"plain"|"none", chips?: bool}`, written by the tabs extension (`tabs.settings`)
+and read by every client (renderer-independent model: `ui_model::tabbar`; conformance: `tests/fixtures/client/tabbar.json`).
+- **Label** for tab *i* (1-based) titled *t*, padding included: subscript ` ₁ t `, superscript ` ¹t `, plain ` 1 t `,
+  none ` t `; with `chips: false` and plain numbers the flat ` 1:t `. Numbers past 9 use more digits (`₁₀`).
+- **Chips** (default on): one `tab_bar` cell between labels; the active label on `tab_active`/`tab_active_text` in
+  bold, others on `surface` with `muted` text. Off: labels touch, inactive ones in `muted` on the bar.
+- **Fallbacks:** missing setting means subscript numbers in chips; an unknown `numbers` value reads as `plain`; a
+  non-boolean `chips` keeps the default; a client that cannot draw sub/superscript digits may show plain ones.
+- `menu/*` items with `where: "tabbar"` follow the labels after one gap. The bundled extensions keep only `+` (new tab)
+  there; their other actions live in the tab menu (`where: "tab"`), prefix keys and the command list.
 
 The bundled `themes` extension publishes its themes as live data `themes` and applies one with
 `themes.apply {name}`; settings shows them on its Theme page.
@@ -1186,7 +1200,7 @@ Only unchanged installed defaults with an old absolute program path are normaliz
 `since`). Each entry is offered once per state dir: all on first run; later, only entries newer than the recorded
 version. This is how existing installs gain new defaults (here herdr, tmux and the split Pi launcher). An entry that exists is left as it
 is, and a removed default stays removed. Client options live in `doc/settings/tui`, the theme in `doc/settings/theme`, the icon set in
-`doc/settings/icons`.
+`doc/settings/icons`, the tab bar look in `doc/settings/tabs`.
 
 Extensions may add a page to Settings by publishing live content `settings.page.<name>` = `{title, items}` (ordinary
 rows whose commands are their own, over their own state); Settings lists such pages after Interface and drops a
@@ -1237,7 +1251,7 @@ Fields:
   `vqro.agents`, `vqro.resource.forget`; third parties use their own namespace) and `ui/<client feature>`. `suggest`
   names a provider to offer for enabling or installing; any provider of the capability satisfies the need. The core
   provides `command/vqro.*` and the spec-defined shared settings `doc/settings/tui`, `doc/settings/theme` and
-  `doc/settings/icons` (their readers always have a fallback). Declarations are static: actual commands and live data
+  `doc/settings/icons` (their readers always have a fallback); `doc/settings/tabs` is provided by the tabs extension. Declarations are static: actual commands and live data
   stay authoritative. `scripts/check_manifest_deps.py` checks the bundled ones against their source.
 - `contributes: {commands?: [string], keys?: [string], menu_items?: [string], panels?: [string], settings?: [string]}`:
   human-readable summaries, not registrations. Actual commands/capabilities remain authoritative.

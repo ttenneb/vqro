@@ -2408,12 +2408,13 @@ impl App {
         match self.active_layout() {
             Some((_, root)) => {
                 let tabbar = self.menu_items("tabbar", &json!({}));
+                let tabstyle = crate::ui_model::tabbar::Style::from_setting(self.ws.entries.get(crate::ui_model::tabbar::ENTRY));
                 match self.zoomed.clone() {
-                    None => walk(&root, main, &mut Vec::new(), &self.overrides, &tabbar, &mut hit, f.buffer_mut(), &pal, &icons),
+                    None => walk(&root, main, &mut Vec::new(), &self.overrides, &tabbar, &tabstyle, &mut hit, f.buffer_mut(), &pal, &icons),
                     Some(z) => {
                         // Lay out normally off-screen to find the pane, then give it the whole area.
                         let mut scratch = Buffer::empty(main);
-                        walk(&root, main, &mut Vec::new(), &self.overrides, &tabbar, &mut hit, &mut scratch, &pal, &icons);
+                        walk(&root, main, &mut Vec::new(), &self.overrides, &tabbar, &tabstyle, &mut hit, &mut scratch, &pal, &icons);
                         match hit.leaves.iter().position(|(v, _, _)| *v == z) {
                             Some(i) => {
                                 let path = hit.leaf_paths[i].clone();
@@ -2426,7 +2427,7 @@ impl App {
                                 // The zoomed pane is gone (closed, other tab): stop zooming.
                                 self.zoomed = None;
                                 hit = Hit::default();
-                                walk(&root, main, &mut Vec::new(), &self.overrides, &tabbar, &mut hit, f.buffer_mut(), &pal, &icons);
+                                walk(&root, main, &mut Vec::new(), &self.overrides, &tabbar, &tabstyle, &mut hit, f.buffer_mut(), &pal, &icons);
                             }
                         }
                     }
@@ -2905,7 +2906,7 @@ fn node_at_mut<'a>(root: &'a mut Value, path: &[usize]) -> Option<&'a mut Value>
 
 /// Lay out a layout node: tabs, splits and view leaves, recording hit areas.
 #[allow(clippy::too_many_arguments)]
-fn walk(node: &Value, area: Rect, path: &mut Vec<usize>, overrides: &HashMap<Vec<usize>, Vec<u16>>, tabbar: &[Item], hit: &mut Hit, buf: &mut Buffer, pal: &Palette, icons: &Icons) {
+fn walk(node: &Value, area: Rect, path: &mut Vec<usize>, overrides: &HashMap<Vec<usize>, Vec<u16>>, tabbar: &[Item], tabstyle: &crate::ui_model::tabbar::Style, hit: &mut Hit, buf: &mut Buffer, pal: &Palette, icons: &Icons) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -2927,7 +2928,7 @@ fn walk(node: &Value, area: Rect, path: &mut Vec<usize>, overrides: &HashMap<Vec
         }
         for (i, (c, r)) in children.iter().zip(rects.iter()).enumerate() {
             path.push(i);
-            walk(c, *r, path, overrides, tabbar, hit, buf, pal, icons);
+            walk(c, *r, path, overrides, tabbar, tabstyle, hit, buf, pal, icons);
             path.pop();
         }
     } else if let Some(tabs) = node["tabs"].as_array() {
@@ -2935,13 +2936,27 @@ fn walk(node: &Value, area: Rect, path: &mut Vec<usize>, overrides: &HashMap<Vec
         let [bar, body] = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(area);
         let mut spans = Vec::new();
         let mut x = bar.x;
+        // Labels and chip spacing come from the shared model (ui_model::tabbar, the tabs setting); colours from the
+        // palette: active chip tab_active/tab_active_text (bold), inactive chip surface/muted, gaps tab_bar.
         for (i, t) in tabs.iter().enumerate() {
-            let label = format!(" {}:{} ", i + 1, t["title"].as_str().unwrap_or("tab"));
+            if i > 0 && tabstyle.gap() > 0 {
+                spans.push(Span::raw(" ".repeat(tabstyle.gap())));
+                x = x.saturating_add(tabstyle.gap() as u16);
+            }
+            let label = tabstyle.label(i, t["title"].as_str().unwrap_or("tab"));
             let w = icons::width(&label);
             hit.tabs.push((path.clone(), i, Rect { x, y: bar.y, width: w.min(bar.right().saturating_sub(x)), height: 1 }));
             x = x.saturating_add(w);
-            let style = if i == active { Style::new().bg(pal.tab_active).fg(pal.tab_active_text) } else { pal.style(Some("muted")) };
+            let style = match (i == active, tabstyle.chips) {
+                (true, _) => Style::new().bg(pal.tab_active).fg(pal.tab_active_text).add_modifier(Modifier::BOLD),
+                (false, true) => Style::new().bg(pal.surface).fg(pal.muted),
+                (false, false) => pal.style(Some("muted")),
+            };
             spans.push(Span::styled(label, style));
+        }
+        if tabstyle.chips && !tabbar.is_empty() {
+            spans.push(Span::raw(" "));
+            x = x.saturating_add(1);
         }
         // Contributed tab-bar buttons (e.g. `+` from the tabs extension), on the first tab bar.
         if !hit.buttons.iter().any(|(_, _, c)| c.get("tab_path").is_some()) {
@@ -2960,7 +2975,7 @@ fn walk(node: &Value, area: Rect, path: &mut Vec<usize>, overrides: &HashMap<Vec
         ratatui::widgets::Widget::render(Paragraph::new(Line::from(spans)).style(Style::new().bg(pal.tab_bar)), bar, buf);
         if let Some(t) = tabs.get(active) {
             path.push(active);
-            walk(&t["node"], body, path, overrides, tabbar, hit, buf, pal, icons);
+            walk(&t["node"], body, path, overrides, tabbar, tabstyle, hit, buf, pal, icons);
             path.pop();
         }
     }

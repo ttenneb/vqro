@@ -128,6 +128,10 @@ class Conformance(unittest.TestCase):
                     outcomes.append(outcome)
                 self.assertEqual({"outcomes": outcomes, "text": c.editor.string(), "cursor": c.editor.cursor, "args": args}, case["expect"])
 
+    def test_tab_bar(self):
+        for case in fixture("tabbar.json")["cases"]:
+            self.assertEqual(model.tab_bar(case.get("setting"), case["titles"], case["active"]), case["expect"], case["name"])
+
     def test_key_names_follow_the_spec(self):
         for raw, want in (("C-space", "C-Space"), ("Ctrl-Shift-Left", "C-S-Left"), ("C-Q", "C-q"), ("S-a", None), ("Hyper-x", None),
                           ("f12", "F12"), ("F13", None), ("C--", "C--"), ("M-x", "M-x"), (" ", "Space"), ("BackTab", "BackTab")):

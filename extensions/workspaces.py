@@ -375,7 +375,6 @@ def timer():
 ext.contribute({
     "view/workspaces.switch": {"kind": "panel", "title": "Switch workspace", "items": [{"type": "text", "text": "no content: the workspaces extension is stopped"}]},
     "binding/workspaces.switch": {"key": "w", "command": "workspaces.switch", "label": "switch workspace"},
-    "menu/workspaces.switch": {"where": "tabbar", "label": "Switch workspace…", "command": "workspaces.switch", "order": 40},
     # Each window names the workspace it shows (its layout's title), from its own context.
     "menu/workspaces.current": {"where": "status", "label": "", "label_context": "layout_title",
                                 "icon": {"name": "folder", "text": "▫"}, "command": "workspaces.switch", "order": 1},

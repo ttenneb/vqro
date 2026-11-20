@@ -244,7 +244,7 @@ class Agents:
             fn = self.answer if op == "answer" else lambda args, op=op: self.effect(op, args)
             ext.command("agents."+op, title)(self.guarded(fn))
         self.signature = self.current_signature()
-        declarations = {"menu/agents.list": {"where": "tabbar", "label": "Agents", "command": "agents.list", "order": 6},
+        declarations = {"binding/agents.list": {"key": "A", "command": "agents.list", "label": "agents"},  # off the tab bar
                         "view/agents-list": {"kind": "panel", "title": "Agents", "items": []},
                         # Prefix p: prompt the agent in the focused pane. `when` keeps it off other
                         # panes (the key falls through there), so no text is typed only to fail.

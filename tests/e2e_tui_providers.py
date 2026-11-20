@@ -104,6 +104,17 @@ try:
         check(f"{name}: TUI shows the provider's terminal and typing reaches it", bool(seen), screen()[-600:])
         call("resource.kill", {"resource": rid})
         time.sleep(1)
+    # Tab bar: chips with subscript numbers and only "+" (doc/settings/tabs default); other actions moved to menus.
+    bar = lambda: screen().splitlines()[0]
+    check("tab bar shows chips with subscript numbers and only +", bool(wait(lambda: " ₁ " in bar() and bar().rstrip().endswith(" +"), 10)) and not any(
+        word in bar() for word in ("New Pi agent", "Agents", "Close ended tabs", "Switch workspace", "1:")), bar())
+    colored = subprocess.run([*HARNESS, "capture-pane", "-p", "-e"], capture_output=True, text=True).stdout.splitlines()[0]
+    print("CAPTURE tabbar-chips\n" + bar() + "\nANSI: " + repr(colored), flush=True)
+    check("the active tab chip is bold", "\x1b[1m" in colored or ";1m" in colored or "[1;" in colored, repr(colored))
+    call("command.invoke", {"name": "tabs.set", "args": {"field": "numbers", "value": "superscript"}})
+    check("the tabs setting changes the number style", bool(wait(lambda: " ¹" in bar() and " ₁ " not in bar(), 10)), bar())
+    print("CAPTURE tabbar-superscript\n" + bar(), flush=True)
+    call("command.invoke", {"name": "tabs.set", "args": {"field": "numbers", "value": "subscript"}})
     # A running provider process is not proof of a reachable backend. An alternative remains connected.
     saved_herdr = call("workspace.snapshot")["entries"]["extension/herdr"]["value"]
     call("workspace.apply", {"ops":[{"op":"set","key":"extension/herdr","value":dict(saved_herdr,
