@@ -104,9 +104,7 @@ def disclosure(parts):
     across rows at line breaks and every DISCLOSURE_ROW_BYTES, never clipped. Returns (rows, complete); when the
     whole presentation would exceed DISCLOSURE_BYTES, complete is False and the request must not be approvable."""
     rows, total = [], 0
-    for prefix, value in parts:
-        if value is None:
-            continue
+    for prefix, value in parts:  # an explicit null is shown ("null"); absent fields are simply not in `parts`
         text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, separators=(",", ":"))
         for line in (prefix + text).split("\n"):
             line = plain(line)
@@ -125,10 +123,29 @@ def disclosure(parts):
     return rows, True
 
 
+def effect_words(choice):
+    effect = choice.get("effect")
+    return str(effect).replace("_", " ") if isinstance(effect, str) else None
+
+
+def choice_label(n, choice):
+    """A menu label that keeps what tells choices apart: its number and effect first, then the label (head-cut)."""
+    effect = effect_words(choice)
+    return head(f"{n}. " + (effect.capitalize() + ": " if effect else "") + plain(str(choice.get("label") or choice.get("id"))))
+
+
+def choices_of(q):
+    choices = q.get("choices")
+    return [c for c in choices if isinstance(c, dict) and isinstance(c.get("id"), str)] if isinstance(choices, list) else []
+
+
 def request_parts(q):
-    """What a v0 request asks (agent v0 section 5): its title, then every native param except presentation hints."""
+    """What a v0 request asks (agent v0 section 5): its title, every native param except presentation hints (an
+    explicit null included), and every choice whole with its id and effect; all in one completeness budget."""
     params = q.get("params") if isinstance(q.get("params"), dict) else {}
     return [("", q.get("title") or q["request"])] + [
+        (f"Choice {n} ({', '.join(x for x in (effect_words(c), 'id ' + c['id']) if x)}): ", c.get("label") or c["id"])
+        for n, c in enumerate(choices_of(q), 1)] + [
         ("" if key == "message" else key.replace("_", " ")+": ", value)
         for key, value in params.items() if key != "multiline"]
 
@@ -136,8 +153,9 @@ def request_parts(q):
 def legacy_parts(request):
     """What a provider-v0 request asks: its prompt, message, prefill and options (shown whole)."""
     detail = request.get("data") if isinstance(request.get("data"), dict) else {}
-    return [("", request.get("prompt") or request["id"]), ("", detail.get("message")),
-            ("Prefilled: ", detail.get("prefill")), ("Options: ", detail.get("options"))]
+    return [("", request.get("prompt") or request["id"])] + [
+        (prefix, detail[key]) for key, prefix in (("message", ""), ("prefill", "Prefilled: "), ("options", "Options: "))
+        if key in detail]  # absent optional fields are skipped; an explicit null is shown
 
 
 def owns_lifecycle(resource):
@@ -536,21 +554,23 @@ class Agents:
         state = args.get("state") if args.get("state") in TIER1_STATES else "unknown"
         with self.tier1_lock:
             previous = self.tier1.get(terminal)
-            if previous is not None and seq <= previous["seq"]:
-                return {"ok": True, "applied": False, "reason": "stale", "seq": previous["seq"]}
-            if previous is None and len(self.tier1) >= TIER1_MAX:
-                raise VqroError("too many reporting terminals; nothing recorded", "overloaded")
-            entry = {"app": app, "state": state, "seq": seq, "at_ms": int(time.time() * 1000),
-                     "status": {"state": TIER1_STATES[state], "app": app}}
-            size = len(json.dumps({terminal: entry}, ensure_ascii=False, separators=(",", ":")).encode())
-            if sum(self.tier1_size.values()) - self.tier1_size.get(terminal, 0) + size > TIER1_BYTES:
-                raise VqroError("the published status table would exceed its size bound; nothing recorded", "overloaded")
-            self.tier1[terminal], self.tier1_size[terminal] = entry, size
-            # A table left unpublished by a failed publication is sent again by the next report, changed or not.
-            changed = previous is None or (previous["state"], previous["app"]) != (state, app) or self.tier1_dirty
-        if changed:
+            stale = previous is not None and seq <= previous["seq"]
+            if not stale:
+                if previous is None and len(self.tier1) >= TIER1_MAX:
+                    raise VqroError("too many reporting terminals; nothing recorded", "overloaded")
+                entry = {"app": app, "state": state, "seq": seq, "at_ms": int(time.time() * 1000),
+                         "status": {"state": TIER1_STATES[state], "app": app}}
+                size = len(json.dumps({terminal: entry}, ensure_ascii=False, separators=(",", ":")).encode())
+                if sum(self.tier1_size.values()) - self.tier1_size.get(terminal, 0) + size > TIER1_BYTES:
+                    raise VqroError("the published status table would exceed its size bound; nothing recorded", "overloaded")
+                self.tier1[terminal], self.tier1_size[terminal] = entry, size
+            # Publish a change; and a table left unpublished by a failed publication goes out with any report,
+            # changed, unchanged or stale.
+            publish = self.tier1_dirty or not stale and (previous is None or (previous["state"], previous["app"]) != (state, app))
+            current = self.tier1[terminal]["seq"]
+        if publish:
             self.publish_tier1()
-        return {"ok": True, "applied": True}
+        return {"ok": True, "applied": False, "reason": "stale", "seq": current} if stale else {"ok": True, "applied": True}
 
     def publish_tier1(self):
         """Publish the current table. One publisher at a time, always from a fresh snapshot: a report arriving
@@ -627,12 +647,8 @@ class Agents:
             elif method == "confirm":
                 row["options"] = [{"label": "Yes", "value": True}, {"label": "No", "value": False}]
             elif method in ("choice", "permission") and isinstance(choices, list) and choices:
-                row["options"] = [{"label": head(plain(str(c.get("label") or c.get("id"))
-                                                  + (" ("+str(c["effect"]).replace("_", " ")+")" if isinstance(c.get("effect"), str) else ""))),
-                                   "value": c.get("id")}
-                                  for c in choices if isinstance(c, dict) and isinstance(c.get("id"), str)]
-                if any(option["label"].endswith("…") for option in row["options"]):
-                    items.extend(disclosure([("Choices: ", [c.get("label") for c in choices if isinstance(c, dict)])])[0])
+                # Each choice is disclosed whole above (request_parts); menu labels lead with number and effect.
+                row["options"] = [{"label": choice_label(n, c), "value": c["id"]} for n, c in enumerate(choices_of(q), 1)]
             elif method == "text":
                 row["input"] = label(params.get("placeholder") if isinstance(params.get("placeholder"), str)
                                      else q.get("title") or "Answer")
@@ -706,7 +722,7 @@ class Agents:
             elif kind == "confirm":
                 row["options"] = [{"label": "Yes", "value": True}, {"label": "No", "value": False}]
             elif kind == "select" and isinstance(detail.get("options"), list):
-                row["options"] = [{"label": head(plain(str(v))), "value": v} for v in detail["options"]]
+                row["options"] = [{"label": head(f"{n}. " + plain(str(v))), "value": v} for n, v in enumerate(detail["options"], 1)]
             elif kind in ("input", "editor"):
                 row["input"] = head(plain(request.get("prompt") or "Answer"))
             else:

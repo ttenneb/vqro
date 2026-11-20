@@ -661,7 +661,8 @@ class AgentV0RequestDetailTests(unittest.TestCase):
         self.assertEqual((text["input"], text["prefill"], text["multiline"]), ("Message", "fix: lint", True))
         self.assertIn("command: git push", [row.get("text") for row in items])
         push = next(row for row in items if row.get("options"))
-        self.assertEqual(push["options"], [{"label": "Allow (allow always)", "value": "a"}])
+        self.assertEqual(push["options"], [{"label": "1. Allow always: Allow", "value": "a"}])
+        self.assertIn("Choice 1 (allow always, id a): Allow", [row.get("text") for row in items])
 
     def check_whole_question(self, params):
         """K3a P1 (spike-panel-2): a legal summary whose presentation grows (escaped controls, JSON) is never
@@ -695,6 +696,35 @@ class AgentV0RequestDetailTests(unittest.TestCase):
         self.assertTrue(any("too long to show" in row.get("text", "") for row in items))
         with self.assertRaises(VqroError):
             self.command("answer", resource="r2", request="q1", epoch="e7", revision=2, value=True)
+
+    def k3a_permission(self, choices, params=None):
+        q = self.core.resources["r2"]["data"]["agent"]["requests"][0]
+        q.update(method="permission", params=params or {"message": "Authorize this operation?"}, choices=choices)
+        self.core.resources["r2"]["data"]["agent"]["requests"] = [q]
+        return self.panel()
+
+    def test_long_permission_labels_never_hide_which_choice_is_which(self):
+        """K3a delta (spike-panel-2): head-cut labels must not make allow_once and allow_always look the same."""
+        long = "Allow " + "this operation " * 16
+        items = self.k3a_permission([{"id": "a", "label": long, "effect": "allow_once"},
+                                     {"id": "b", "label": long, "effect": "allow_always"}])
+        options = next(row for row in items if row.get("options"))["options"]
+        self.assertTrue(options[0]["label"].startswith("1. Allow once: ") and options[1]["label"].startswith("2. Allow always: "))
+        texts = [row.get("text", "") for row in items]
+        self.assertTrue(any(t.startswith("Choice 2 (allow always, id b): Allow this") for t in texts), "each choice whole")
+        self.command("answer", resource="r2", request="q1", epoch="e7", revision=2, value="b")
+        self.assertEqual(self.native()[-1][1]["args"]["response"], {"choice": "b"})
+
+    def test_choices_count_in_the_same_disclosure_budget(self):
+        items = self.k3a_permission([{"id": "b", "label": "X" * 17000 + "SENSITIVE_SUFFIX", "effect": "allow_always"}])
+        self.assertFalse(any(row.get("options") for row in items))
+        with self.assertRaises(VqroError):
+            self.command("answer", resource="r2", request="q1", epoch="e7", revision=2, value="b")
+
+    def test_an_explicit_null_param_is_shown(self):
+        q = self.core.resources["r2"]["data"]["agent"]["requests"][0]
+        q["params"] = {"message": "Authorize access?", "expiry": None}
+        self.assertIn("expiry: null", [row.get("text") for row in self.panel()])
 
     def test_a_cut_or_missing_lifecycle_is_not_idle(self):
         facts = self.core.resources["r2"]["data"]["agent"]
@@ -772,6 +802,19 @@ class Tier1StatusTests(unittest.TestCase):
         self.core.publish = original
         self.report({"terminal": "r1", "app": "hook", "state": "idle", "seq": 2})
         self.assertEqual(self.core.live["agents.terminal_status"]["data"]["r1"]["seq"], 2)
+
+    def test_a_same_seq_retry_after_a_failed_publication_flushes_the_table(self):
+        original = self.core.publish
+
+        def fail(view, content):
+            raise VqroError("injected", "overloaded")
+        self.core.publish = fail
+        report = {"terminal": "r1", "app": "hook", "state": "idle", "seq": 1}
+        with self.assertRaises(VqroError):
+            self.report(report)
+        self.core.publish = original
+        self.assertEqual(self.report(report)["reason"], "stale", "not recorded twice")
+        self.assertEqual(self.core.live["agents.terminal_status"]["data"]["r1"]["seq"], 1)
 
     def test_the_published_table_stays_under_the_live_value_cap(self):
         """K3a delta N2: admission counts encoded bytes, so a full table still publishes (1 MiB core cap)."""
