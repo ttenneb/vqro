@@ -16,7 +16,7 @@ for k in ("vqro", "hook", "claude", "auth", "root"):
     ap.add_argument("--" + k, required=True)
 ap.add_argument("--model", default="haiku")
 ap.add_argument("--only", choices=["p", "tui"])
-ap.add_argument("--inbox", choices=["fake", "k2"], default="fake")
+ap.add_argument("--inbox", choices=["fake", "k2", "k2core"], default="fake")
 ap.add_argument("--coord-ext")
 a = ap.parse_args()
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -52,7 +52,7 @@ settings_file = os.path.join(root, "hooks-settings.json")
 open(settings_file, "w").write(subprocess.run([a.hook, "settings", os.path.abspath(a.hook)], capture_output=True, text=True).stdout)
 cenv = {"HOME": os.path.join(a.auth, "home"), "PATH": "/usr/bin:/bin", "CLAUDE_CONFIG_DIR": os.path.join(a.auth, "config"),
         "XDG_RUNTIME_DIR": h.env["XDG_RUNTIME_DIR"], "DISABLE_AUTOUPDATER": "1", "DISABLE_UPDATES": "1", "TERM": "xterm-256color",
-        "VQRO_SOCKET": h.sock, "VQRO_AGENT": AGENT, "VQRO_CLAUDE_STATE": P["hookstate"]}
+        "VQRO_SOCKET": h.sock, "VQRO_AGENT": AGENT, "VQRO_PRINCIPAL": h.PLUGIN, "VQRO_CLAUDE_STATE": P["hookstate"]}
 
 
 def get(d):

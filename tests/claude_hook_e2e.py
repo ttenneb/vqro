@@ -11,7 +11,7 @@ import argparse, json, os, re, shutil, subprocess, sys, tempfile, time
 ap = argparse.ArgumentParser()
 ap.add_argument("--vqro", required=True)
 ap.add_argument("--hook", required=True)
-ap.add_argument("--inbox", choices=["fake", "k2"], default="fake")
+ap.add_argument("--inbox", choices=["fake", "k2", "k2core"], default="fake")
 ap.add_argument("--coord-ext")
 ap.add_argument("--keep", action="store_true")
 a = ap.parse_args()
@@ -37,7 +37,7 @@ AGENT = h.agent({"points": ["turn", "settle", "idle"], "insert": "context", "evi
 CTX = ["context"]  # senders accept context insertion
 transcript = os.path.join(root, "transcript.jsonl")
 open(transcript, "w").close()
-hook_env = dict(h.env, VQRO_AGENT=AGENT, VQRO_CLAUDE_STATE=os.path.join(root, "hookstate"), CLAUDE_CODE_ENTRYPOINT="cli")
+hook_env = dict(h.env, VQRO_AGENT=AGENT, VQRO_PRINCIPAL=h.PLUGIN, VQRO_CLAUDE_STATE=os.path.join(root, "hookstate"), CLAUDE_CODE_ENTRYPOINT="cli")
 waiters = []
 
 

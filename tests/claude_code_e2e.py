@@ -18,7 +18,7 @@ ap.add_argument("--hook", required=True)
 ap.add_argument("--claude", required=True)
 ap.add_argument("--root")
 ap.add_argument("--model", default="claude-sonnet-4-5")
-ap.add_argument("--inbox", choices=["fake", "k2"], default="fake")
+ap.add_argument("--inbox", choices=["fake", "k2", "k2core"], default="fake")
 ap.add_argument("--coord-ext")
 a = ap.parse_args()
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -57,7 +57,7 @@ CTX = ["context"]
 base = dict(h.env, HOME=P["home"])
 settings = json.loads(subprocess.run([a.hook, "settings", os.path.abspath(a.hook)], capture_output=True, text=True).stdout)
 json.dump(settings, open(os.path.join(P["cfg"], "settings.json"), "w"), indent=1)
-cenv = dict(base, PATH=os.environ["PATH"], CLAUDE_CONFIG_DIR=P["cfg"], VQRO_AGENT=AGENT, VQRO_CLAUDE_STATE=P["hookstate"], DISABLE_TELEMETRY="1",
+cenv = dict(base, PATH=os.environ["PATH"], CLAUDE_CONFIG_DIR=P["cfg"], VQRO_AGENT=AGENT, VQRO_PRINCIPAL=h.PLUGIN, VQRO_CLAUDE_STATE=P["hookstate"], DISABLE_TELEMETRY="1",
             DISABLE_ERROR_REPORTING="1", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1", DISABLE_AUTOUPDATER="1",
             ANTHROPIC_BASE_URL=f"http://127.0.0.1:{port}", ANTHROPIC_API_KEY="sk-fake-not-a-key")
 version = subprocess.run([a.claude, "--version"], capture_output=True, text=True, env=cenv).stdout.strip()

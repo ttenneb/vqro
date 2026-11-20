@@ -41,12 +41,18 @@ armed waiter; a message sent while busy stays held until the next idle.
 
 | Entry | Meaning | Use |
 |---|---|---|
-| `attachment.type: hook_additional_context` | the context entry in the conversation | located (not reported) |
-| `type: user` (not `isMeta`) carrying the id | a rewake or peer message | located (not reported) |
-| `api-request-blob` carrying the id, then an `assistant` entry with a non-error `stop_reason` | the request payload that was sent, and a finished answer | `read` |
-| `attachment.type: hook_success` / `hook_non_blocking_error` | a record of hook stdout/stderr | **not evidence** |
+| `attachment.type: hook_additional_context`, `hookEvent` PostToolBatch/Stop, carrying the hand-off's nonce | the plugin's own context entry | the anchor |
+| `type: user` with `origin.kind: task-notification` carrying the nonce | the plugin's own rewake | the anchor |
+| `api-request-blob` carrying the nonce after the anchor, then an `assistant` entry with a non-error `stop_reason` | the request payload that was sent, and a finished answer | `read` |
+| tool results, human prompts, peer messages (`origin.kind: peer`), `hook_success` / `hook_non_blocking_error` | text anyone can put there | **never evidence** |
 
-The hand-off is reported `supplied` (context, no durable entry at that moment). `supplied` and `inserted` are
+Each hand-off carries a nonce in its header (`[ref <32 hex>]`) that only the plugin knows. Senders cannot forge it,
+because their content is rendered as a quote (`> …`) under the plugin's header. A tool result or a human prompt that
+echoes the nonce does not count. Tests cover a forged header in content, and a tool result or human quote of a real
+nonce.
+
+The hand-off is reported `supplied` only after the hook's output is written and flushed; if the write fails, its
+claims are released. `supplied` means context with no durable entry at that moment. `supplied` and `inserted` are
 separate evidence branches in K2, so the transcript only upgrades a hand-off to `read`. Because the transcript is
 written asynchronously, that usually happens one hook later. A new consumer (`SessionStart`) runs
 `coord.inbox.reconcile` with no entries: a claim taken but never handed over (a crash between take and hand-off)
@@ -60,8 +66,8 @@ Checked with `--resume` against K2.
 - In non-interactive sessions (`CLAUDE_CODE_ENTRYPOINT=sdk-cli`), a `Stop` `asyncRewake` hook keeps the process
   alive. The waiter therefore runs only when `CLAUDE_CODE_ENTRYPOINT=cli`.
 - Hooks have no controlling terminal, and `terminalSequence` allows only OSC 0/1/2/9/99/777 and BEL. **A Claude
-  Code hook cannot emit OSC 7501.** Tier-1 status therefore needs a status call. The plugin uses the placeholder
-  command `agents.terminal_status`.
+  Code hook cannot emit OSC 7501.** Tier-1 status therefore goes to K3's `agents.status {terminal, app, state,
+  seq}`. The endpoint is the terminal; `seq` is epoch ms; it is lossy and advisory.
 - Hook status is lossy:
   - Esc fires no `Stop`, so `working` lasts until the `idle_prompt` notification;
   - subagent hooks carry `agent_id` and are ignored.
@@ -121,6 +127,24 @@ released uninserted. K2 then offers it again at each safe point until it is edit
 
 **The core drops an unchanged `view.publish`** (`src/server.rs`, live view `unchanged`). A wake whose pending count
 did not change (an edit of a held record) would then never arrive. The wake content carries a revision counter.
+
+## Robustness (review A3)
+
+- **Lost take reply:** the same take (same op) is repeated on a fresh connection. It returns its claims, never
+  content again, and they are released. Tested with an injected 4.5 s reply delay (fake inbox), for both plugins.
+- **Context budget:** whole records only, up to 9,000 characters. The rest are released in order and taken at later
+  points.
+- **Content:** `take {accept: [...]}` (K2's filter). Claude accepts text; Pi accepts text and images. Other records
+  stay held `unsupported_content`, never flattened.
+- **Compaction and `/clear`:** `SessionStart` with these sources keeps the consumer and the open hand-offs; it is not
+  a restart.
+- **Reconnects:**
+  - The Claude idle waiter reconnects with backoff.
+  - The Pi plugin reconnects and resubscribes after a core restart, and reconciles again when its consumer is
+    fenced. Tested by restarting the core under a running Pi.
+- **Op ids:** report op ids are deterministic per claim and stage, and the command prefix is configurable
+  (`VQRO_COORD_PREFIX`).
+- **Hook state:** private (0700/0600; symlinked directories refused), with a rotated 1 MiB log.
 
 ## Open
 - **Real-model smoke:** this needs a native Claude Code login (I0 helper), a cheap model and coordinator approval.

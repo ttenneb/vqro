@@ -13,7 +13,7 @@ import argparse, fcntl, glob, json, os, pty, re, select, socket, struct, subproc
 ap = argparse.ArgumentParser()
 for k in ("vqro", "hook", "claude", "root"):
     ap.add_argument("--" + k, required=True)
-ap.add_argument("--inbox", choices=["fake", "k2"], default="fake")
+ap.add_argument("--inbox", choices=["fake", "k2", "k2core"], default="fake")
 ap.add_argument("--coord-ext")
 a = ap.parse_args()
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -52,7 +52,7 @@ json.dump({"hasCompletedOnboarding": True, "theme": "dark", "numStartups": 5,
            "customApiKeyResponses": {"approved": [key[-20:]], "rejected": []},
            "projects": {P["work"]: {"hasTrustDialogAccepted": True, "hasCompletedProjectOnboarding": True}}},
           open(os.path.join(P["cfg"], ".claude.json"), "w"))
-cenv = dict(base, CLAUDE_CONFIG_DIR=P["cfg"], VQRO_AGENT=AGENT, VQRO_CLAUDE_STATE=P["hookstate"], DISABLE_TELEMETRY="1",
+cenv = dict(base, CLAUDE_CONFIG_DIR=P["cfg"], VQRO_AGENT=AGENT, VQRO_PRINCIPAL=h.PLUGIN, VQRO_CLAUDE_STATE=P["hookstate"], DISABLE_TELEMETRY="1",
             DISABLE_ERROR_REPORTING="1", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1", DISABLE_AUTOUPDATER="1",
             ANTHROPIC_BASE_URL=f"http://127.0.0.1:{port}", ANTHROPIC_API_KEY=key, TERM="xterm-256color")
 

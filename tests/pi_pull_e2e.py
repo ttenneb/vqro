@@ -16,7 +16,7 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--vqro", required=True)
 ap.add_argument("--pi", required=True, help="Pi CLI entry (dist/bundle/cli.js)")
 ap.add_argument("--root")
-ap.add_argument("--inbox", choices=["fake", "k2"], default="fake")
+ap.add_argument("--inbox", choices=["fake", "k2", "k2core"], default="fake")
 ap.add_argument("--coord-ext", help="coord-ext checkout's extensions/ (for --inbox k2)")
 a = ap.parse_args()
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -74,7 +74,7 @@ class Pi:
     def __init__(self, fault="", resume=False):
         self.base = len(plugin_events("reconciled"))
         env = dict(base, PI_CODING_AGENT_DIR=P["agent"], PI_OFFLINE="1", PI_SKIP_VERSION_CHECK="1", PI_TELEMETRY="0",
-                   VQRO_AGENT=AGENT, VQRO_PULL_LOG=plugin_log, VQRO_PULL_TEST_FAULT=fault)
+                   VQRO_AGENT=AGENT, VQRO_PRINCIPAL=h.PLUGIN, VQRO_PULL_LOG=plugin_log, VQRO_PULL_TEST_FAULT=fault)
         argv = ["node", a.pi, "--mode", "rpc", "-ne", "-e", PLUGIN, "--no-skills", "--no-context-files",
                 "--no-prompt-templates", *OPTIONAL, "--session-dir", P["sessions"], "--tools", "bash"] + (["-c"] if resume else [])
         self.p = spawn(argv, cwd=P["work"], env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,

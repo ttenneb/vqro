@@ -10,7 +10,7 @@ import argparse, fcntl, json, os, pty, re, select, socket, struct, subprocess, s
 ap = argparse.ArgumentParser()
 for k in ("vqro", "pi", "root"):
     ap.add_argument("--" + k, required=True)
-ap.add_argument("--inbox", choices=["fake", "k2"], default="fake")
+ap.add_argument("--inbox", choices=["fake", "k2", "k2core"], default="fake")
 ap.add_argument("--coord-ext")
 a = ap.parse_args()
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -49,7 +49,7 @@ results["pi_version"] = subprocess.run(["node", a.pi, "--version"], capture_outp
 
 
 env = dict(base, TERM="xterm-256color", PI_CODING_AGENT_DIR=P["agent"], PI_OFFLINE="1", PI_SKIP_VERSION_CHECK="1",
-           PI_TELEMETRY="0", VQRO_AGENT=AGENT, VQRO_PULL_LOG=os.path.join(root, "plugin.jsonl"))
+           PI_TELEMETRY="0", VQRO_AGENT=AGENT, VQRO_PRINCIPAL=h.PLUGIN, VQRO_PULL_LOG=os.path.join(root, "plugin.jsonl"))
 pid, fd = pty.fork()
 if pid == 0:
     os.chdir(P["work"])
@@ -96,9 +96,9 @@ pump(4)
 typed("steps:2 sleep:2.5 tui-task"); os.write(fd, b"\r")
 wait_for(lambda: len(requests()) >= 1)
 pump(0.5)
+b = h.send(AGENT, "boundary", txt("MSG-TUI-BOUNDARY"))  # while tool 1 runs
 DRAFT = "HUMAN-DRAFT keep me intact 123"
 typed(DRAFT)
-b = h.send(AGENT, "boundary", txt("MSG-TUI-BOUNDARY"))
 wait_for(lambda: len(requests()) >= 3, 40)
 pump(2)
 n_idle = len(requests())
@@ -118,7 +118,7 @@ check("boundary in request 2 (after tool 1)", results["boundary_first"] == 2, re
 check("idle start wakes the TUI into the next request", results["start_first"] == n_idle + 1, results)
 check("human draft submitted byte-identical and never mixed into earlier requests",
       last_user == DRAFT and not any(DRAFT in m["text"] for r in reqs[:-1] for m in r["messages"]), last_user)
-check("messages rendered in the TUI with their delivery id", f"vqro message {b}" in plain and f"vqro message {s}" in plain)
+check("messages rendered in the TUI with their delivery id", f"vqro inbox message {b}" in plain and f"vqro inbox message {s}" in plain)
 check("both read", results["b"].get("state") == "read" and results["s"].get("state") == "read", (results["b"], results["s"]))
 json.dump(results, open(os.path.join(root, "tui-results.json"), "w"), indent=1, default=str)
 os.kill(pid, 9); os.waitpid(pid, 0)

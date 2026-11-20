@@ -23,7 +23,8 @@
 // `wake.pending[<rN>]` (never content). The connection is re-established with backoff after a core restart.
 // Tier-1 status: `agents.status {terminal, app: "pi", state, seq}` (the endpoint is the terminal), best effort.
 //
-// Environment: VQRO_SOCKET (core endpoint), VQRO_AGENT (this agent's terminal rN, injected by its launcher). Without
+// Environment: VQRO_SOCKET (core endpoint), VQRO_AGENT (this agent's terminal rN) and VQRO_PRINCIPAL (the plugin's
+// principal, bound at hello), injected by its launcher. Without the first
 // both the plugin does nothing. Errors never break Pi: they are logged to VQRO_PULL_LOG when set.
 // VQRO_PULL_TEST_FAULT is test-only fault injection (crash_after_take | drop_report | abort_after_take).
 import net from "node:net";
@@ -141,7 +142,9 @@ export default function (pi: any) {
       });
       await new Promise<void>((resolve, reject) => { socket.once("connect", () => resolve()); socket.once("error", reject); });
       conn = socket;
-      await call("hello", { client: "vqro-pi-pull" });
+      // The launcher injects the plugin's principal (C2: bound at hello, never per call).
+      const principal = process.env.VQRO_PRINCIPAL;
+      await call("hello", { client: "vqro-pi-pull", ...(principal ? { identity: { kind: "principal", principal } } : {}) });
       await call("events.subscribe", { types: ["view.content"], view_content: { names: [WAKE_VIEW] } });
       backoff = 500;
       epoch = "";
@@ -194,7 +197,7 @@ export default function (pi: any) {
   async function take(at: string): Promise<Rec[]> {
     if (!consumer || pending === 0) return []; // no inbox call at a safe point without mail
     if (!conn) { void ensureConnected().catch(() => scheduleReconnect()); return []; }
-    const args = { agent: AGENT, consumer, at, limit: LIMIT, content: [...CONTENT] };
+    const args = { agent: AGENT, consumer, at, limit: LIMIT, accept: [...CONTENT] }; // K2: block types we can insert
     const suffix = `${consumer}:take:${randomBytes(6).toString("hex")}`;
     let reply: any;
     try {

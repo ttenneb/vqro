@@ -1,5 +1,8 @@
-"""Shared harness for the tier-1 plugin tests: a private vqro core plus a coordination inbox, either the fake
-(`tests/fixtures/fake_inbox.py`) or K2 itself (`tests/fixtures/coord_k2.py`, needs the coord-ext checkout).
+"""Shared harness for the tier-1 plugin tests: a private vqro core plus a coordination inbox:
+- `fake`: `tests/fixtures/fake_inbox.py`;
+- `k2`: K2's code via `tests/fixtures/coord_k2.py` with stand-ins for C1/C2 (development only);
+- `k2core`: K2 as the core's supervised `coord` extension on a core with C1 (operational domains) and C2
+  (principals), e.g. the test-only agent-core-int binary. No stand-ins: the qualification path.
 
     h = Harness(root, vqro, inbox="k2", coord_ext=path)   # or inbox="fake"
     rid = h.agent(pull={"points": [...], "insert": "user", "evidence": "entry"})
@@ -25,6 +28,8 @@ def txt(s):
 
 
 class Harness:
+    PLUGIN = "p:plugin"  # the plugin's principal (k2core: bound by VQRO_PRINCIPAL at the plugin's hello)
+
     def __init__(self, root, vqro, *, inbox="fake", coord_ext=None):
         self.root, self.kind, self.vqro = root, inbox, vqro
         os.makedirs(root, exist_ok=True)
@@ -35,7 +40,9 @@ class Harness:
                     "VQRO_EXTENSIONS_DIR": os.path.join(root, "noext"), "VQRO_HERDR": '["/bin/false"]',
                     "HC_SOCKET": os.path.join(root, "h.sock"), "HC_SESSION": "tier1"}
         for d in ("home-core", "xrun", "st", "noext"):
-            os.makedirs(os.path.join(root, d), exist_ok=True)
+            os.makedirs(os.path.join(root, d), mode=0o700, exist_ok=True)
+        if inbox == "k2core":
+            self.env["VQRO_EXTENSIONS_DIR"] = self.k2_extensions(coord_ext)
         self.procs = []
         self.spawn([vqro, "serve", "--fake"], env=self.env, stdout=open(os.path.join(root, "core.log"), "w"), stderr=subprocess.STDOUT)
         while not os.path.exists(self.sock):
@@ -43,12 +50,19 @@ class Harness:
         if inbox == "k2":
             self.spawn([sys.executable, os.path.join(HERE, "fixtures", "coord_k2.py")], env=dict(self.env, COORD_EXT=coord_ext),
                        stderr=open(os.path.join(root, "inbox.err"), "w"))
-        else:
+        elif inbox == "fake":
             self.spawn([sys.executable, os.path.join(HERE, "fixtures", "fake_inbox.py"), self.inbox_log],
                        env=dict(self.env, VQRO_EXT_PATH=os.path.join(HERE, "..", "extensions")), stderr=open(os.path.join(root, "inbox.err"), "w"))
-        self.c = Client(self.sock)
+        self.c = Client(self.sock, owner=inbox == "k2core")
+        end = time.time() + 60
         while not any(x.get("name") == "coord.inbox.take" for x in self.c.call("command.list", {})["commands"]):
+            if time.time() > end:
+                raise RuntimeError("coord.inbox.take never registered; see core.log / inbox.err")
             time.sleep(0.1)
+        if inbox == "k2core":
+            while self.c.cmd("coord.status").get("state") != "ready" and time.time() < end:
+                time.sleep(0.2)
+            self.status = self.c.cmd("coord.status")
         self.n = 0
         if inbox == "k2":
             self.c.cmd("fixture.principal", author=self.c.me, principal="p:owner")
@@ -72,6 +86,20 @@ class Harness:
         while not any(x.get("name") == "coord.inbox.take" for x in self.c.call("command.list", {})["commands"]):
             time.sleep(0.1)
 
+    def k2_extensions(self, coord_ext):
+        """A private extension directory with only `coord` (K2) declared, copied from the given coord-ext tree."""
+        import json, shutil
+        dest = os.path.join(self.root, "extensions")
+        os.makedirs(os.path.join(dest, "manifests"), mode=0o700, exist_ok=True)
+        for name in os.listdir(coord_ext):
+            if name.endswith(".py"):
+                shutil.copy(os.path.join(coord_ext, name), dest)
+        shutil.copy(os.path.join(coord_ext, "manifests", "coord.json"), os.path.join(dest, "manifests"))
+        defaults = json.load(open(os.path.join(coord_ext, "defaults.json")))
+        defaults["extensions"] = [e for e in defaults["extensions"] if e["name"] == "coord"]
+        json.dump(defaults, open(os.path.join(dest, "defaults.json"), "w"))
+        return dest
+
     def spawn(self, argv, **kw):
         p = subprocess.Popen(argv, **kw)
         self.procs.append(p)
@@ -91,9 +119,9 @@ class Harness:
     def agent(self, pull):
         """A terminal endpoint (fake backend) declared for pull; returns its rN."""
         rid = self.c.call("resource.spawn", {"argv": ["sh"]})["resource"]["id"]
-        if self.kind == "k2":
+        if self.kind in ("k2", "k2core"):
             self.c.call("workspace.apply", {"ops": [
-                {"op": "set", "key": f"doc/agents/grants/plugin-{rid}", "value": {"who": "p:plugin", "on": "agent:" + rid, "can": ["receive"]}},
+                {"op": "set", "key": f"doc/agents/grants/plugin-{rid}", "value": {"who": self.PLUGIN, "on": "agent:" + rid, "can": ["receive"]}},
                 {"op": "set", "key": f"doc/agents/terminals/{rid}", "value": {"pull": pull}}]})
             time.sleep(0.5)
             self.resume(rid)
@@ -106,7 +134,7 @@ class Harness:
     def send(self, to, mode, content, render=None, **extra):
         op = self.op()
         args = {"op": op, "to": to, "mode": mode, "content": content, "send_new": True, **extra}
-        if self.kind == "k2":
+        if self.kind in ("k2", "k2core"):
             args["submission"] = op + ":sub"
         if render is not None:
             args["render"] = render
@@ -115,7 +143,7 @@ class Harness:
     def edit(self, delivery, content):
         rec = self.get(delivery)
         args = {"op": self.op(), "delivery": delivery, "content": content}
-        if self.kind == "k2":
+        if self.kind in ("k2", "k2core"):
             args["expect"] = rec.get("revision")
         return self.c.cmd("coord.inbox.edit", **args)
 
@@ -129,9 +157,10 @@ class Harness:
 
 
 class Client:
-    def __init__(self, sock):
+    def __init__(self, sock, owner=False):
         self.s = socket.socket(socket.AF_UNIX); self.s.connect(sock); self.f = self.s.makefile("rw"); self.n = 0
-        self.me = self.call("hello", {"client": "tier1-test"})["you"]
+        hello = {"client": "tier1-test", **({"identity": {"kind": "owner"}} if owner else {})}
+        self.me = self.call("hello", hello)["you"]
 
     def call(self, method, params):
         self.n += 1

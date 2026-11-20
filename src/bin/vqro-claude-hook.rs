@@ -30,7 +30,8 @@
 //! is repeated with the same op, which returns its claims (never content): they are reported `released`. The idle
 //! waiter wakes on the `coord-status` view's `wake.pending[<rN>]` and reconnects after a core restart.
 //!
-//! Environment: `VQRO_SOCKET` (core endpoint), `VQRO_AGENT` (this agent's `rN`, injected by its launcher). Without
+//! Environment: `VQRO_SOCKET` (core endpoint), `VQRO_AGENT` (this agent's `rN`), `VQRO_PRINCIPAL` (the plugin's
+//! principal, bound at hello), all injected by its launcher. Without the first two
 //! both the plugin does nothing. Every failure is silent towards Claude Code (a hook must never break the session)
 //! and logged to the private state directory. Status: hooks have no controlling terminal and Claude Code's
 //! `terminalSequence` allowlist excludes OSC 7501, so tier-1 status goes to `agents.status {terminal, app, state,
@@ -83,7 +84,12 @@ mod unix {
             w.set_read_timeout(Some(Duration::from_millis(CALL_MS))).ok();
             let r = BufReader::new(w.try_clone().map_err(|e| format!("transport: {e}"))?);
             let mut core = Core { r, w, next: 0, events: Vec::new() };
-            core.call("hello", json!({"client": "vqro-claude-hook", "version": env!("CARGO_PKG_VERSION")}))?;
+            // The launcher injects the plugin's principal (C2: bound at hello, never per call).
+            let mut hello = json!({"client": "vqro-claude-hook", "version": env!("CARGO_PKG_VERSION")});
+            if let Ok(principal) = std::env::var("VQRO_PRINCIPAL") {
+                hello["identity"] = json!({"kind": "principal", "principal": principal});
+            }
+            core.call("hello", hello)?;
             Ok(core)
         }
 
@@ -232,7 +238,14 @@ mod unix {
         let session = input.get("session_id").and_then(Value::as_str).unwrap_or("nosession").to_string();
         let dir = state_dir();
         // Private: delivery ids and consumers never become readable by other users.
-        if fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir).is_err() || !private_dir(&dir) {
+        if fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir).is_err() {
+            return 0;
+        }
+        if fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir()) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)); // only succeeds if it is ours
+        }
+        if !private_dir(&dir) {
             return 0;
         }
         let ctx = Ctx { agent, socket, dir, session, input };
@@ -364,8 +377,9 @@ mod unix {
     /// limit, are released uninserted (they stay held; nothing is flattened, truncated or dropped).
     fn take(ctx: &Ctx, core: &mut Core, at: &str) -> Option<Handoff> {
         let consumer = ctx.with_state(|s| s.get("consumer").as_str().map(String::from))?;
-        // `content` names the block types context insertion carries without loss (a proposed take filter).
-        let args = json!({"agent": ctx.agent, "consumer": consumer, "at": at, "limit": TAKE_LIMIT, "content": CONTENT});
+        // `accept` names the block types context insertion carries without loss; the inbox keeps others held
+        // (`unsupported_content`).
+        let args = json!({"agent": ctx.agent, "consumer": consumer, "at": at, "limit": TAKE_LIMIT, "accept": CONTENT});
         let suffix = format!("{}:take:{}", ctx.session, random_hex());
         let reply = match core.mutate(ctx, "inbox.take", args.clone(), &suffix) {
             Ok(r) => r,

@@ -4,7 +4,7 @@ prefixed with the window epoch, records whose state is their evidence stage, and
 `coord-status` live view. Not the coordination extension: no grants, gates, lanes, budgets or persistence. Every
 call is appended to the log given as argv[1] (the test oracle). `tests/fixtures/coord_k2.py` runs K2 itself.
 
-Extra (proposed, not in K2): `take {content: [...]}` names the block types a plugin can insert; other records stay
+`take {accept: [...]}` (default `["text"]`, as K2) names the block types a plugin can insert; other records stay
 held `unsupported_content`. `agents.status` records tier-1 status reports (K3's command, not in this inbox).
 """
 import json, os, sys, threading, time
@@ -126,8 +126,8 @@ def take(args):
         if len(out) >= min(int(args.get("limit", 16)), 16):
             break
         if r["to"] == agent and r["state"] == "held" and r["mode"] in ELIGIBLE[at]:
-            accepts = args.get("content")  # proposed: block types the plugin inserts without loss
-            if accepts is not None and any(b["type"] not in accepts for b in r["content"]):
+            accepts = args.get("accept", ["text"])  # as K2: block types the plugin inserts without loss
+            if any(b["type"] not in accepts for b in r["content"]):
                 r["reason"] = "unsupported_content"
                 continue
             claim = f"claim:{r['delivery']}.{len(r.get('attempts', [])) + 1}"
