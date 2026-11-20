@@ -47,7 +47,7 @@ impl Default for JournalConfig {
 impl JournalConfig {
     /// The `items` facts an adapter declares for these bounds (agent-v0 §8).
     pub fn facts(&self) -> serde_json::Value {
-        serde_json::json!({"retain_bytes": self.retain_bytes, "entities": self.max_entities, "entity_bytes": self.max_entity_bytes})
+        serde_json::json!({"retain_bytes": self.retain_bytes, "entities": self.max_entities, "entity_bytes": self.max_entity_bytes, "snapshot_buffer_bytes": self.snapshot_buffer_bytes})
     }
 }
 
@@ -138,6 +138,9 @@ impl ItemJournal {
         self.entities.clear();
         self.entity_bytes = 0;
         self.coverage = Coverage::AllRetained;
+        // Pins name old-epoch seqs: compared with the new log they would hold it up to the post-cut buffer for a
+        // cursor that will restart its snapshot anyway (a stalled old-epoch viewer held ~818 KB against 16 KB).
+        self.pins.lock().unwrap().clear();
     }
 
     /// What snapshots claim to contain from now on. Set `Tail` when native history is missing, `StateOnly` when only
@@ -378,8 +381,9 @@ impl ItemCursor {
     /// streamed in pieces from its cut; the records after the cut are held for it (bounded, see
     /// [`JournalConfig::snapshot_buffer_bytes`]).
     pub fn next(&mut self, j: &mut ItemJournal, max_bytes: usize) -> Next {
-        if self.epoch != j.epoch && self.snapshot.is_none() {
-            // Session switch or journal loss: a new snapshot fences the new epoch, in-stream.
+        if self.epoch != j.epoch {
+            // Session switch or journal loss: a new snapshot fences the new epoch, in-stream. An unfinished old-epoch
+            // cut is dropped, not finished: the new `begin` discards it at the viewer (it installs only at `end`).
             self.start_snapshot(j);
         }
         // A lost post-cut record invalidates an unfinished cut too: never emit its remaining
@@ -643,6 +647,45 @@ mod tests {
         assert_eq!(view.snapshots, 0, "never install an overflowed cut");
         assert!(view.is_empty());
         assert_eq!(view.errors.total(), 0);
+    }
+
+    #[test]
+    fn facts_declare_every_journal_bound() {
+        assert_eq!(JournalConfig::default().facts(), json!({"retain_bytes": 128 * 1024, "entities": 512,
+            "entity_bytes": 512 * 1024, "snapshot_buffer_bytes": 1024 * 1024}));
+    }
+
+    #[test]
+    fn a_new_epoch_releases_old_cursors_pins() {
+        let mut j = ItemJournal::new("e1", JournalConfig { retain_bytes: 2048, ..Default::default() });
+        for n in 0..3 { j.put("m", &format!("m{n}"), json!({"text": "x".repeat(100)})).unwrap(); }
+        let stalled = j.open(None); // holds its cut, never read again
+        assert!(stalled.snapshot_pending());
+        j.new_epoch("e2");
+        for n in 0..100 { j.put("m", &format!("n{n}"), json!({"text": "y".repeat(500)})).unwrap(); }
+        assert!(j.retained_bytes() <= 2048, "old-epoch pin held the new log: {} bytes", j.retained_bytes());
+        drop(stalled);
+    }
+
+    #[test]
+    fn an_epoch_change_mid_snapshot_restarts_the_snapshot_and_installs_only_the_new_one() {
+        let mut j = ItemJournal::new("e1", JournalConfig::default());
+        for n in 0..5 { j.put("m", &format!("m{n}"), json!({"text": "x".repeat(2048)})).unwrap(); }
+        let (mut c, mut v, mut salt) = (j.open(None), ItemView::new(), 1u64);
+        let Next::Data(first) = c.next(&mut j, 1024) else { panic!("first piece") };
+        v.feed(&first);
+        assert!(c.snapshot_pending());
+        j.new_epoch("e2");
+        for n in 0..2 { j.put("s", &format!("s{n}"), json!({"n": n})).unwrap(); }
+        let Next::Data(next) = c.next(&mut j, 1024) else { panic!("new snapshot") };
+        let head: Value = serde_json::from_slice(next.split(|b| *b == b'\n').next().unwrap()).unwrap();
+        assert_eq!((&head["op"], &head["phase"], &head["epoch"]), (&json!("snapshot"), &json!("begin"), &json!("e2")), "old pieces dropped");
+        feed_split(&mut v, &next, &mut salt);
+        assert_eq!(drain(&mut c, &mut j, &mut v, &mut salt), None);
+        assert_eq!((v.epoch(), v.digest(), v.seq()), (Some("e2"), j.digest(), j.seq()));
+        assert_eq!(v.snapshots, 1, "the old-epoch cut is never installed");
+        assert_eq!(v.errors.total(), 0);
+        assert!(j.pins.lock().unwrap().is_empty(), "caught up: no pin left");
     }
 
     #[test]
