@@ -137,7 +137,6 @@ pub trait Engine {
     /// Scroll back `n` lines (clamped to the history kept).
     fn set_scroll_offset(&mut self, n: usize);
     fn scrollback_len(&self) -> usize;
-    fn scrollback_capacity(&self) -> usize;
     /// Rows above the live screen so far (dropped plus kept).
     fn scrolled(&self) -> usize;
     /// One row's text with trailing blanks removed, the cell where each of its characters starts, and whether the
@@ -176,6 +175,9 @@ pub struct Emulator {
     wanted: EngineKind,
     /// Why the wanted engine isn't the one running (None: it is).
     fallback: Option<String>,
+    /// The history lines asked for. Kept here: an engine on its alternate screen reports no history capacity, and a
+    /// fresh terminal or an attach must still ask for these.
+    lines: usize,
 }
 
 impl Emulator {
@@ -186,8 +188,8 @@ impl Emulator {
     /// The same on the engine `wanted`; if it can't start, on vt100 (see `fallback`).
     pub fn with_engine(wanted: EngineKind, cols: u16, rows: u16, scrollback: usize) -> Self {
         match start(wanted, cols, rows, scrollback) {
-            Ok(engine) => Self { engine, kind: wanted, wanted, fallback: None },
-            Err(why) => Self { engine: Box::new(Vt100::new(cols, rows, scrollback)), kind: EngineKind::Vt100, wanted, fallback: Some(why) },
+            Ok(engine) => Self { engine, kind: wanted, wanted, fallback: None, lines: scrollback },
+            Err(why) => Self { engine: Box::new(Vt100::new(cols, rows, scrollback)), kind: EngineKind::Vt100, wanted, fallback: Some(why), lines: scrollback },
         }
     }
 
@@ -215,7 +217,8 @@ impl Emulator {
     pub fn scroll_offset(&self) -> usize { self.engine.scroll_offset() }
     pub fn set_scroll_offset(&mut self, n: usize) { self.engine.set_scroll_offset(n) }
     pub fn scrollback_len(&self) -> usize { self.engine.scrollback_len() }
-    pub fn scrollback_capacity(&self) -> usize { self.engine.scrollback_capacity() }
+    /// The history lines asked for (whichever screen is active).
+    pub fn scrollback_capacity(&self) -> usize { self.lines }
     pub fn scrolled(&self) -> usize { self.engine.scrolled() }
     pub fn row_text(&mut self, row: usize) -> Option<(Vec<char>, Vec<u16>, bool)> { self.engine.row_text(row) }
     pub fn draw(&self, buf: &mut Buffer, area: Rect) { self.engine.draw(buf, area) }
@@ -280,7 +283,6 @@ impl Engine for Vt100 {
     fn scroll_offset(&self) -> usize { self.parser.screen().scrollback() }
     fn set_scroll_offset(&mut self, n: usize) { self.parser.screen_mut().set_scrollback(n); }
     fn scrollback_len(&self) -> usize { self.parser.screen().scrollback_len() }
-    fn scrollback_capacity(&self) -> usize { self.parser.screen().scrollback_capacity() }
     fn scrolled(&self) -> usize { self.parser.callbacks().dropped + self.scrollback_len() }
 
     fn row_text(&mut self, row: usize) -> Option<(Vec<char>, Vec<u16>, bool)> {
@@ -546,16 +548,22 @@ mod fuzz {
                 }
                 let (rows, cols) = (e.rows(), e.cols());
                 assert!(rows >= 1 && cols >= 1, "{} round {i}: a size", kind.name());
-                assert!(e.scroll_offset() <= e.scrollback_len().max(e.scroll_offset()), "{} round {i}", kind.name());
-                assert!(e.scrollback_len() <= e.scrollback_capacity().max(e.scrollback_len()), "{} round {i}", kind.name());
-                if let Some((cr, cc, _)) = e.cursor() { assert!(cr < rows && cc <= cols, "{} round {i}: cursor {cr},{cc} in {rows}x{cols}", kind.name()); }
+                let k = kind.name();
+                // History stays within what was asked for, and the view within the history.
+                assert_eq!(e.scrollback_capacity(), 50, "{k} round {i}: the capacity is the lines asked for, on either screen");
+                assert!(e.scrollback_len() <= 50, "{k} round {i}: {} history lines > 50", e.scrollback_len());
+                assert!(e.scroll_offset() <= e.scrollback_len(), "{k} round {i}: view {} past history {}", e.scroll_offset(), e.scrollback_len());
+                if let Some((cr, cc, _)) = e.cursor() { assert!(cr < rows && cc <= cols, "{k} round {i}: cursor {cr},{cc} in {rows}x{cols}"); }
+                // Every exposed row reads (history and screen); nothing outside them does.
                 let scrolled = e.scrolled();
-                for row in [0, scrolled.saturating_sub(1), scrolled, scrolled + usize::from(rows) - 1, scrolled + usize::from(rows) + 5] {
-                    if let Some((chars, starts, _)) = e.row_text(row) {
-                        assert_eq!(chars.len(), starts.len(), "{} round {i}", kind.name());
-                        assert!(starts.iter().all(|c| *c < cols), "{} round {i}: cells inside the row", kind.name());
-                    }
+                let (oldest, newest) = (scrolled - e.scrollback_len(), scrolled + usize::from(rows) - 1);
+                for row in oldest..=newest {
+                    let (chars, starts, _) = e.row_text(row).unwrap_or_else(|| panic!("{k} round {i}: exposed row {row} ({oldest}..={newest}) reads nothing"));
+                    assert_eq!(chars.len(), starts.len(), "{k} round {i}");
+                    assert!(starts.iter().all(|c| *c < cols), "{k} round {i}: cells inside the row");
                 }
+                assert!(e.row_text(newest + 1).is_none(), "{k} round {i}: a row past the screen reads");
+                if oldest > 0 { assert!(e.row_text(oldest - 1).is_none(), "{k} round {i}: a row older than the history reads"); }
                 let _ = e.hyperlink_at(r.below(u64::from(rows)) as u16, r.below(u64::from(cols)) as u16);
                 let area = Rect::new(0, 0, cols, rows);
                 let mut buf = Buffer::empty(area);

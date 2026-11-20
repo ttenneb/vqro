@@ -326,6 +326,12 @@ impl Ghostty {
     /// Rows the screen holds above the live area (history kept by the library).
     fn kept(&self) -> usize { self.get::<usize>(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_SCROLLBACK_ROWS).unwrap_or(0) }
 
+    /// A view pinned on history that output or a resize (reflow) has carried past the exposed lines moves to the
+    /// oldest exposed line: the rows it showed are no longer history the user can reach.
+    fn clamp_view(&mut self) {
+        if self.scroll_offset() > self.exposed() { self.set_scroll_offset(self.exposed()); }
+    }
+
     /// History rows exposed: what the library keeps, up to the lines asked for.
     fn exposed(&self) -> usize { self.kept().min(self.scrollback) }
 
@@ -413,9 +419,7 @@ impl Engine for Ghostty {
             unsafe { ffi::ghostty_terminal_vt_write(self.raw, piece.as_ptr(), piece.len()) };
             self.count_dropped(was_alternate);
         }
-        // A view pinned on history that has since passed beyond the exposed lines moves to the oldest exposed line
-        // (the rows it showed are no longer history the user can reach).
-        if self.scroll_offset() > self.exposed() { self.set_scroll_offset(self.exposed()); }
+        self.clamp_view();
         let c = &mut *self.collected;
         if mem::take(&mut c.bells) > 0 && !self.effects.contains(&Effect::Bell) && self.effects.len() < MAX_EFFECTS { self.effects.push(Effect::Bell); }
         for data in c.clipboard.drain(..) {
@@ -432,6 +436,7 @@ impl Engine for Ghostty {
     fn resize(&mut self, cols: u16, rows: u16) {
         // SAFETY: a live terminal; cell pixel sizes are nominal (no pixel queries are answered).
         let _ = unsafe { ffi::ghostty_terminal_resize(self.raw, cols.max(1), rows.max(1), 1, 1) };
+        self.clamp_view();
     }
     fn rows(&self) -> u16 { self.get::<u16>(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_ROWS).unwrap_or(1) }
     fn cols(&self) -> u16 { self.get::<u16>(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_COLS).unwrap_or(1) }
@@ -478,7 +483,6 @@ impl Engine for Ghostty {
         self.scroll(ffi::GhosttyTerminalScrollViewportTag_GHOSTTY_SCROLL_VIEWPORT_ROW, ffi::GhosttyTerminalScrollViewportValue { row: top });
     }
     fn scrollback_len(&self) -> usize { self.exposed() }
-    fn scrollback_capacity(&self) -> usize { self.scrollback }
     fn scrolled(&self) -> usize { self.dropped + self.kept() }
     fn row_text(&mut self, row: usize) -> Option<(Vec<char>, Vec<u16>, bool)> {
         // Screen coordinates: 0 is the oldest kept row; `row` counts dropped rows too. Rows kept beyond the lines
