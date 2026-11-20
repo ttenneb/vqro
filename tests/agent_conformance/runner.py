@@ -29,7 +29,8 @@ async def run_case(case, root, manifest, vqro, hc, *, factory=PublicImplementati
     start, ctx, declarations, evidence = time.monotonic(), None, {}, []
     status, component, detail = "fail", "harness", "case did not complete"
     try:
-        script = {"script": [], "consume_input": True} if case.id == "D14" else None
+        script = ({"script": [], "consume_input": True} if case.id == "D14" else
+                  {"script": [], "abort_inserts_steering": True} if case.id == "D10" else None)
         ctx = factory(Path(root), manifest, vqro, hc, script=script)
         await ctx.start()
         facts = await ctx.facts()
@@ -44,7 +45,7 @@ async def run_case(case, root, manifest, vqro, hc, *, factory=PublicImplementati
         handler = (HANDLERS if handlers is None else handlers).get(case.id)
         if handler is None:
             raise HarnessGap("normative case has no executable runner yet")
-        if case.operation == "agent.send" or (case.operation == "agent.respond" and case.id != "R7") or case.id in ("C3", "C7", "L1") or (case.id == "C2" and "agent.send" in facts.get("caps", {})):
+        if case.operation == "agent.send" or (case.operation == "agent.respond" and case.id != "R7") or case.id.startswith("O") or case.id in ("C3", "C7", "L1") or (case.id == "C2" and "agent.send" in facts.get("caps", {})):
             facts = await ctx.ensure_session()
             declarations["resource"] = facts.get("caps", {})
         await handler(ctx)

@@ -106,6 +106,8 @@ class PublicImplementation:
         self.peers, self.views, self.early = [], {}, {}
         self.early_bytes, self.early_records = 0, 0
         self.events = deque(maxlen=128)
+        self.resource_cache, self.resource_sizes, self.removed = {}, {}, {}
+        self.resource_cache_bytes = 0
         self.evidence = []
         self.agents, self.provider, self.host = [], None, None
         self.endpoint_count = manifest.get("endpoints", 1)
@@ -159,13 +161,32 @@ class PublicImplementation:
             view.closed = reason
             view.reducer.ended(reason)
 
+    def _event(self, row):
+        if row.get("type") == "effect":
+            self.events.append(row)
+        elif row.get("type") == "resource":
+            resource = row.get("data", {})
+            ident = resource.get("id")
+            if not isinstance(ident, str):
+                raise WireFailure("resource event lacks exact id")
+            size = len(json.dumps(resource).encode())
+            total = self.resource_cache_bytes - self.resource_sizes.get(ident, 0) + size
+            if size > 256 << 10 or total > 16 << 20 or (ident not in self.resource_cache and len(self.resource_cache) >= 512):
+                raise WireFailure("lifecycle observer cache exceeds its count/byte bound")
+            self.resource_cache[ident], self.resource_sizes[ident] = deepcopy(resource), size
+            self.resource_cache_bytes = total
+        elif row.get("type") == "resource.removed":
+            if len(self.removed) >= 512 and row.get("data", {}).get("id") not in self.removed:
+                raise WireFailure("removed-resource observer bound exceeded")
+            self.removed[row["data"]["id"]] = deepcopy(row["data"])
+
     async def viewer(self):
         peer = await Peer.connect(self.backend.env["VQRO_SOCKET"], max_record=8 << 20)
         self.peers.append(peer)
-        await peer.call("hello", {"client": "agent-conformance"})
+        await peer.call("hello", {"client": "agent-conformance", "identity": {"kind": "owner"}})
         # Resource facts are read explicitly; do not queue token/fact events in
         # the generic viewer's diagnostic notification queue.
-        peer.on("event", lambda row: self.events.append(row) if row.get("type") == "effect" else None)
+        peer.on("event", self._event)
         for method in ("stream.data", "stream.closed", "stream.gap"):
             peer.on(method, lambda params, method=method: self._notice(peer, method, params))
         return peer
@@ -178,7 +199,7 @@ class PublicImplementation:
         await asyncio.to_thread(self.backend.start)
         self.peer = await self.viewer()
         snapshot = await self.peer.call("workspace.snapshot")
-        await self.peer.call("events.subscribe", {"epoch": snapshot["epoch"], "from": snapshot["seq"], "types": ["effect"]})
+        await self.peer.call("events.subscribe", {"epoch": snapshot["epoch"], "from": snapshot["seq"], "types": ["effect", "resource", "resource.removed"]})
         spawned = await self.peer.call("resource.spawn", {"bridge": True, "name": "agent-conformance",
             "argv": self.argv, "cwd": str(self.root / "work"), "env": {}, "deadline_ms": 1500})
         check(spawned.get("outcome") == "observed", "bridge launch not observed", component="fixture")
@@ -285,17 +306,19 @@ class PublicImplementation:
         self.serial += 1
         return f"k1-{self.root.parent.name}-{self.root.name}-{self.serial}"
 
-    async def send(self, text, mode=None, *, content=None, rid=None, peer=None, deadline_ms=1000, **args):
+    async def send(self, text, mode=None, *, content=None, rid=None, peer=None, deadline_ms=1000,
+                   cause=None, correlation=None, **args):
         facts = await self.facts(rid)
         modes = facts.get("caps", {}).get("agent.send", {}).get("modes", {})
         mode = mode or next((name for name in ("start", "admit") if name in modes), None)
         if mode is None:
             raise HarnessGap("scenario needs a start/admit mode but neither is declared")
         origin = {"principal": "owner", "actor": "conformance-human", "kind": "human"}
+        links = {key: value for key, value in (("cause", cause), ("correlation", correlation)) if value is not None}
         return await self.invoke("agent.send", {"mode": mode, "delivery": self.delivery(),
             "content": content if content is not None else [{"type": "text", "text": text}],
-            "origin": origin, "render": ["user", "participant", "attributed_user"], **args},
-            rid=rid, peer=peer, deadline_ms=deadline_ms)
+            "origin": origin, "render": ["user", "participant", "attributed_user"], **links, **args},
+            rid=rid, peer=peer, deadline_ms=deadline_ms, **links)
 
     async def attach(self, *, rid=None, peer=None, after=None, seed=None):
         peer = peer or self.peer
@@ -334,6 +357,11 @@ class PublicImplementation:
         await asyncio.to_thread(self.backend.stop, True)
         await asyncio.to_thread(self.backend.start)
         self.peer = await self.viewer()
+        snapshot = await self.peer.call("workspace.snapshot")
+        for resource in snapshot.get("resources", []):
+            self._event({"type": "resource", "data": resource})
+        await self.peer.call("events.subscribe", {"epoch": snapshot["epoch"], "from": snapshot["seq"],
+                                                 "types": ["effect", "resource", "resource.removed"]})
         self.evidence.append({"kind": "core_restart", "native_pid": self.native.state["pid"]})
 
     async def close(self):

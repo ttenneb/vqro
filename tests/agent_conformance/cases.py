@@ -233,6 +233,29 @@ async def literal_text(ctx):
         check(all(r.get("operation") == "send" for r in ctx.native.writes(mark)), "text caused an extra native control effect")
 
 
+@case("C9")
+async def qualified_causality(ctx):
+    snapshot, facts = await ctx.peer.call("workspace.snapshot"), await ctx.facts()
+    cause = {"kind": "effect", "id": "same-local-effect", "endpoint": ctx.agents[0]["id"],
+             "epoch": facts["epoch"], "boot": snapshot["epoch"], "provenance": "asserted"}
+    correlation = "C9-caller-thread"
+    result = await ctx.send("C9-qualified-cause", cause=cause, correlation=correlation)
+    receipt = accepted(result)
+    def effect_event():
+        return next((row["data"] for row in ctx.events if row.get("type") == "effect"
+                     and row.get("data", {}).get("effect") == result.get("effect")), None)
+    try:
+        event = await ctx.peer.wait(effect_event)
+    except asyncio.TimeoutError as error:
+        raise CheckFailed("core did not publish the effect audit", component="core") from error
+    ctx.evidence.append({"kind": "causality_echo", "expected": cause, "receipt": receipt, "effect_event": event})
+    check(event.get("cause") == cause and event.get("correlation") == correlation,
+          "generic core effect audit dropped caller causality", component="core")
+    check(receipt.get("cause") == cause and receipt.get("correlation") == correlation,
+          "adapter receipt dropped/changed asserted caller causality")
+    raise HarnessGap("C9 echo exercised; dual-endpoint request and reused-effect-after-restart branches pending")
+
+
 @case("C10")
 async def endpoint_model(ctx):
     groups = {}
@@ -431,6 +454,91 @@ async def admission_not_insertion(ctx):
     ctx.evidence.append({"kind": "native_input_count", "value": len(ctx.native.records("input_received"))})
 
 
+@case("D8")
+async def native_keys(ctx):
+    declaration = await caps(ctx, "agent.send")
+    if declaration.get("keys") is None:
+        mark = ctx.native.mark()
+        rejection(await ctx.send("D8-unsupported-key", key="native-key-not-declared"), kinds=("unsupported",))
+        check(not ctx.native.writes(mark), "unsupported key reached native runtime")
+        raise NotDeclared("agent.send.keys", None)
+    raise HarnessGap("native-key retention/restart fixture is not yet implemented")
+
+
+@case("D9")
+async def consume_settings(ctx):
+    await caps(ctx, "agent.configure")
+    raise HarnessGap("consume-time setting transition matrix not yet implemented")
+
+
+@case("D10")
+async def interrupt_pending(ctx):
+    declaration = await caps(ctx, "agent.interrupt")
+    await ctx.native.call("turn", state="settled")
+    before = await ctx.wait_facts(lambda f: f.get("state") == "idle")
+    mark = ctx.native.mark()
+    noop = await ctx.invoke("agent.interrupt")
+    check(noop.get("outcome") in ("accepted", "observed"), "idle interrupt was not a no-op acknowledgement")
+    check(not ctx.native.records("input_received", after=mark), "idle interrupt sent content")
+    check(not (await ctx.native.call("state"))["active"], "idle interrupt started native work")
+    await ctx.native.call("turn", state="start")
+    await ctx.wait_facts(lambda f: f.get("state") == "running")
+    send = before["caps"].get("agent.send", {})
+    for mode in ("boundary", "settle"):
+        if mode in send.get("modes", {}):
+            accepted(await ctx.send("D10-held-" + mode, mode))
+    mark = ctx.native.mark()
+    result = await ctx.invoke("agent.interrupt")
+    check(result.get("outcome") in ("accepted", "observed"), "interrupt was not acknowledged")
+    if declaration.get("waits") == "idle":
+        check(result["outcome"] == "observed", "waits:idle returned without observed settlement")
+    await ctx.wait_facts(lambda f: f.get("state") == "idle")
+    check(all(row.get("operation") == "interrupt" for row in ctx.native.writes(mark)),
+          "interrupt silently cleared queues, sent content or ran a composition")
+    if declaration.get("pending") == "unknown":
+        pending = (result.get("data") or {}).get("pending")
+        check(pending in (None, "unknown"), "pending:unknown was upgraded to a definite disposition")
+    ctx.evidence.append({"kind": "interrupt_pending", "declaration": declaration,
+                         "native_state": await ctx.native.call("state"),
+                         "inserted_during_abort": ctx.native.records("inserted", after=mark)})
+
+
+@case("D11")
+async def guarded_input(ctx):
+    declaration = await caps(ctx, "agent.send")
+    guards = declaration.get("guards", {})
+    facts = await ctx.facts()
+    for name in ("session", "run"):
+        strength = guards.get(name, "none")
+        mark = ctx.native.mark()
+        result = await ctx.send("D11-stale-" + name, guard={name: "definitely-stale-guard"})
+        rejection(result, kinds=("unsupported",) if strength == "none" else ("stale",))
+        check(not ctx.native.writes(mark), "locally stale/unsupported guard wrote to native runtime")
+    if guards.get("run") != "runtime":
+        ctx.evidence.append({"kind": "subcase", "case": "D11.atomic_native_race", "applicability": "not-applicable",
+                             "declaration": {"guards.run": guards.get("run", "none")}})
+        return
+    await ctx.native.call("turn", state="start")
+    active = await ctx.wait_facts(lambda f: f.get("state") == "running" and f.get("run"))
+    run = active["run"]
+    check(identifier(run), "run guard target is not an opaque run id")
+    await ctx.native.call("pause_before", phase="acceptance")
+    mark = ctx.native.mark()
+    task = asyncio.create_task(ctx.send("D11-native-race", "admit", guard={"run": run}, deadline_ms=1500))
+    try:
+        await ctx.native.wait(lambda rows: any(row["seq"] > mark and row["kind"] == "paused" and row.get("phase") == "acceptance" for row in rows))
+        await ctx.native.call("turn", state="settled")
+        await ctx.native.call("turn", state="start")
+        await ctx.native.call("release", phase="acceptance")
+        rejection(await task, kinds=("stale",))
+        check(not ctx.native.records("input_received", after=mark), "atomic native run guard admitted input into newer work")
+    finally:
+        await ctx.native.call("release", phase="all")
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
 @case("D12")
 async def idle_park(ctx):
     declaration = await caps(ctx, "agent.send")
@@ -478,6 +586,107 @@ async def interrupt_not_end(ctx):
     check((await ctx.native.call("state"))["pid"] == ctx.native.state["pid"], "interrupt killed/replaced runtime")
 
 
+def has_message(reducer, needle):
+    for (kind, _), entity in reducer.entities.items():
+        value = entity["value"]
+        if kind == "message" and value.get("final") and isinstance(value.get("content"), list):
+            if any(isinstance(block, dict) and isinstance(block.get("text"), str) and needle in block["text"] for block in value["content"]):
+                return True
+    return False
+
+
+async def fresh_view(ctx, *, peer=None, after=None, seed=None):
+    view = await ctx.attach(peer=peer, after=after, seed=seed)
+    if view.initial == "reset":
+        baseline = seed.snapshots if seed is not None else 0
+        await ctx.wait_view(view, lambda reducer: reducer.snapshots > baseline)
+    elif seed is None:
+        raise CheckFailed("fresh/foreign attach silently continued without a snapshot")
+    return view
+
+
+@case("O1")
+async def item_algebra(ctx):
+    view = await fresh_view(ctx)
+    baseline = deepcopy(view.reducer)
+    text = "O1-stream-αβ-tail"
+    await ctx.native.call("turn", state="start")
+    await ctx.native.call("retain", count=2, text=text, chunks=["O1-stream-", "αβ", "-tail"])
+    await ctx.wait_view(view, lambda reducer: has_message(reducer, "1:" + text))
+    other = await fresh_view(ctx, peer=await ctx.viewer())
+    cut = other.reducer.sequence
+    await ctx.wait_view(view, lambda reducer: reducer.sequence >= cut)
+    folded = deepcopy(baseline)
+    records = [row for row in view.reducer.trace if integer(row.get("seq")) and baseline.sequence < row["seq"] <= cut]
+    for row in records:
+        folded.accept(row)
+    if folded.sequence != cut:
+        raise HarnessGap("bounded oracle trace did not retain the selected snapshot cut")
+    check(folded.entities == other.reducer.entities, "live algebra and authoritative snapshot disagree at the same cut")
+    ctx.evidence.append({"kind": "item_algebra", "cut": cut, "ops": sorted({row["op"] for row in records}),
+                         "append_base_validation": "independent reducer; wrong bases never applied"})
+
+
+@case("O4")
+async def cursor_resets(ctx):
+    initial = await fresh_view(ctx)
+    old = deepcopy(initial.reducer.cursor)
+    foreign = await fresh_view(ctx, peer=await ctx.viewer(), after={"epoch": "foreign-item-epoch", "seq": 0})
+    check(foreign.initial == "reset", "foreign epoch silently joined a live stream")
+    await ctx.native.call("turn", state="start")
+    await ctx.native.call("retain", count=300, text="O4-retention-" + "x" * 1024)
+    await ctx.wait_view(initial, lambda reducer: has_message(reducer, "299:O4-retention-"))
+    reset = await fresh_view(ctx, peer=await ctx.viewer(), after=old)
+    check(reset.initial == "reset", "cursor outside journal retention silently continued")
+    ctx.evidence.append({"kind": "cursor_reset", "foreign_epoch": True, "old_cursor": old,
+                         "new_cursor": reset.reducer.cursor})
+
+
+@case("O5")
+async def session_epoch_fence(ctx):
+    declaration = await caps(ctx, "agent.session")
+    if "new" not in declaration.get("actions", []):
+        raise NotDeclared("agent.session.actions.new", declaration.get("actions"))
+    view = await fresh_view(ctx)
+    old_epoch, old_resource = view.reducer.epoch, ctx.agents[0]["id"]
+    result = await ctx.invoke("agent.session", {"action": "new"})
+    check(result.get("outcome") in ("accepted", "observed"), "native session switch not acknowledged")
+    await ctx.wait_view(view, lambda reducer: reducer.epoch != old_epoch)
+    check((await ctx.resource())["id"] == old_resource, "session switch replaced endpoint address")
+    begins = [row for row in view.reducer.trace if row.get("op") == "snapshot" and row.get("phase") == "begin"]
+    check(any(row.get("epoch") != old_epoch for row in begins), "new epoch had no preceding snapshot fence")
+
+
+@case("O6")
+async def viewer_order(ctx):
+    first = await fresh_view(ctx)
+    await ctx.native.call("turn", state="start")
+    await ctx.native.call("retain", count=3, text="O6-old")
+    await ctx.wait_view(first, lambda reducer: has_message(reducer, "2:O6-old"))
+    second = await fresh_view(ctx, peer=await ctx.viewer())
+    await ctx.native.call("retain", count=3, text="O6-new")
+    for view in (first, second):
+        await ctx.wait_view(view, lambda reducer: has_message(reducer, "2:O6-new"))
+    def positions(reducer):
+        return {key: entity["value"]["position"] for key, entity in reducer.entities.items() if "position" in entity["value"]}
+    left, right = positions(first.reducer), positions(second.reducer)
+    common = left.keys() & right.keys()
+    check(common and all(left[key] == right[key] for key in common), "viewers disagree about fixed timeline positions")
+    check(sorted(common, key=left.get) == sorted(common, key=right.get), "viewer timeline orders differ")
+
+
+@case("O8")
+async def unicode_frames(ctx):
+    text = "snow☃😀\u2028\n" * 2500
+    await ctx.native.call("turn", state="start")
+    await ctx.native.call("retain", count=2, text=text)
+    view = await fresh_view(ctx)
+    await ctx.wait_view(view, lambda reducer: has_message(reducer, "1:" + text))
+    check(not view.reducer.pending and view.reducer.failure is None, "UTF-8/JSONL reconstruction left a partial or invalid record")
+    ctx.evidence.append({"kind": "unicode_snapshot", "source_utf8_bytes": len(text.encode()),
+                         "byte_split_oracle": "self-tests feed every byte boundary, including Unicode separators"})
+
+
 async def make_request(ctx, method=None, **options):
     declaration = await caps(ctx, "agent.respond")
     methods = declaration.get("methods", [])
@@ -489,10 +698,14 @@ async def make_request(ctx, method=None, **options):
     await ctx.native.call("request", request=native_id, method=method, **options)
     facts = await ctx.wait_facts(lambda f: any(q.get("request") not in before for q in f.get("requests", [])))
     summary = next(q for q in facts["requests"] if q.get("request") not in before)
-    view = await ctx.attach()
-    key = ("request", summary["request"])
-    await ctx.wait_view(view, lambda reducer: key in reducer.entities)
-    entity = view.reducer.entities[key]["value"]
+    peer = await ctx.viewer()
+    try:
+        view = await ctx.attach(peer=peer)
+        key = ("request", summary["request"])
+        await ctx.wait_view(view, lambda reducer: key in reducer.entities)
+        entity = deepcopy(view.reducer.entities[key]["value"])
+    finally:
+        await peer.close()
     check(entity.get("method") == method, "request method changed during normalization")
     check(entity.get("revision") == summary.get("revision"), "request summary/entity revisions disagree")
     scope = entity.get("scope", {})
@@ -657,6 +870,87 @@ async def cancel_is_distinct(ctx):
               "valid denial/false/empty became cancel or an invalid native response")
         if method in ("confirm", "text"):
             check(normalized == response, "false/empty response changed during normalization")
+
+
+async def lifecycle_wait(ctx, predicate, description):
+    try:
+        return await ctx.peer.wait(predicate)
+    except asyncio.TimeoutError as error:
+        raise CheckFailed(description) from error
+
+
+@case("L2")
+async def stop_evidence(ctx):
+    declaration = await caps(ctx, "agent.stop")
+    mark = ctx.native.mark()
+    rejection(await ctx.invoke("agent.stop", {"v": 1, "covers": declaration.get("covers", [])}), kinds=("invalid", "unsupported"))
+    check(not ctx.native.writes(mark), "refused stop wrote to native runtime")
+    check((await ctx.facts()).get("lifecycle") == "live", "refused stop did not remain live")
+    pid = (await ctx.native.call("state"))["pid"]
+    result = await ctx.invoke("agent.stop", {"covers": declaration.get("covers", [])})
+    check(result.get("outcome") in ("accepted", "observed", "dispatched"), "declared stop failed")
+    data = result.get("data") or {}
+    applied = data.get("covers")
+    ctx.evidence.append({"kind": "stop_reply", "result": result, "declared": declaration})
+    check(isinstance(applied, list) and all(isinstance(value, str) for value in applied)
+          and set(applied) <= set(declaration.get("covers", [])), "stop did not report applied coverage within its declaration")
+    if data.get("covers_evidence") == "requested":
+        check(applied == declaration.get("covers", []), "requested-only stop coverage changed the request")
+    rid = ctx.agents[0]["id"]
+    def ended():
+        return ctx.resource_cache.get(rid, {}).get("data", {}).get("agent", {}).get("lifecycle") == "ended"
+    await lifecycle_wait(ctx, ended, "no native endpoint end evidence after stop")
+    ctx.evidence.append({"kind": "stop_end", "native_pid": pid, "result": result,
+                         "final_resource": ctx.resource_cache[rid], "removed": ctx.removed.get(rid)})
+    matching = [event["data"] for event in ctx.events if event.get("type") == "effect"
+                and event.get("data", {}).get("op") == "agent.stop" and event["data"].get("outcome") != "rejected"]
+    check(len(matching) == 1, "stop effect was duplicated")
+
+
+@case("L3")
+async def host_lifecycle(ctx):
+    facts = await ctx.facts()
+    owns = facts["host"]["owns_lifecycle"]
+    rid, host = ctx.agents[0]["id"], await ctx.resource(ctx.host)
+    result = await ctx.peer.call("resource.kill", {"resource": ctx.host, "deadline_ms": 1000})
+    check(result.get("outcome") in ("observed", "accepted"), "private host termination not acknowledged", component="core")
+    def finished():
+        value = ctx.resource_cache.get(ctx.host, {})
+        return value if value.get("state") == "finished" else None
+    final_host = await lifecycle_wait(ctx, finished, "bound host did not report its finish")
+    check(final_host.get("incarnation") == host.get("incarnation"), "host end evidence changed incarnation")
+    endpoint = ctx.resource_cache.get(rid, {})
+    if not owns:
+        check(endpoint.get("data", {}).get("agent", {}).get("lifecycle") != "ended",
+              "non-owning host disappearance fabricated endpoint end")
+    ctx.evidence.append({"kind": "host_end", "owns_lifecycle": owns, "bound_host": host,
+                         "observed_host": final_host, "endpoint": endpoint})
+    raise HarnessGap("L3 bound host end exercised; stale old-host end injection is not yet implemented")
+
+
+@case("L4")
+async def disconnect_not_end(ctx):
+    rid = ctx.agents[0]["id"]
+    pid = (await ctx.native.call("state"))["pid"]
+    await ctx.native.call("turn", state="start")
+    await ctx.wait_facts(lambda f: f.get("state") == "running")
+    await ctx.native.call("turn", state="settled")
+    await ctx.wait_facts(lambda f: f.get("state") == "idle")
+    check((await ctx.facts()).get("lifecycle") == "live", "idle completion was treated as endpoint end")
+    await ctx.peer.call("command.invoke", {"name": "vqro.safe_mode", "args": {"on": True}})
+    await lifecycle_wait(ctx, lambda: ctx.resource_cache.get(rid, {}).get("available") is False, "disconnect was not observable")
+    check((await ctx.native.call("state"))["pid"] == pid, "provider disconnect killed native execution")
+    check(ctx.resource_cache[rid].get("data", {}).get("agent", {}).get("lifecycle") != "ended",
+          "bridge disconnect fabricated end evidence")
+    await ctx.peer.call("command.invoke", {"name": "vqro.safe_mode", "args": {"on": False}})
+    await lifecycle_wait(ctx, lambda: ctx.resource_cache.get(rid, {}).get("available") is True, "endpoint did not reconnect")
+    check((await ctx.native.call("state"))["pid"] == pid, "reconnect replaced the native child")
+    await ctx.native.call("exit", code=0)
+    await lifecycle_wait(ctx, lambda: ctx.resource_cache.get(rid, {}).get("data", {}).get("agent", {}).get("lifecycle") == "ended", "native exit did not publish endpoint end")
+    await ctx.restart_core()
+    current = await ctx.resource(rid)
+    check(current is None or current.get("data", {}).get("agent", {}).get("lifecycle") == "ended", "reconnect undid known end evidence")
+    ctx.evidence.append({"kind": "lifecycle_reconnect", "same_pid_until_native_end": True, "ended_never_reopened": True})
 
 
 @case("D13")

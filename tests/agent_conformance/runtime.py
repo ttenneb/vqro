@@ -413,11 +413,20 @@ class Runtime:
             count = row.get("count", 1)
             if not isinstance(count, int) or not 0 <= count <= 1024:
                 raise ValueError("fixture retain count bound")
-            text = row.get("text", "fixture retained text")
+            text, chunks = row.get("text", "fixture retained text"), row.get("chunks")
+            if chunks is not None and (not isinstance(chunks, list) or len(chunks) > 256 or any(not isinstance(part, str) for part in chunks)):
+                raise ValueError("fixture delta work bound")
             for index in range(count):
-                await self.emit({"type": "message_start", "message": {"role": "assistant", "content": []}})
+                current = f"{index}:" if chunks is not None else ""
+                await self.emit({"type": "message_start", "message": {"role": "assistant", "content": [
+                    {"type": "text", "text": current}] if chunks is not None else []}})
+                for part in chunks or []:
+                    current += part
+                    await self.emit({"type": "message_update", "message": {"role": "assistant", "content": [
+                        {"type": "text", "text": current}]}, "assistantMessageEvent": {
+                        "type": "text_delta", "contentIndex": 0, "delta": part}})
                 await self.emit({"type": "message_end", "message": {"role": "assistant", "content": [
-                    {"type": "text", "text": f"{index}:{text}"}], "stopReason": "stop"}})
+                    {"type": "text", "text": current if chunks is not None else f"{index}:{text}"}], "stopReason": "stop"}})
         elif verb == "failure":
             await self.emit({"type": "message_end", "message": {"role": "assistant", "content": [],
                              "stopReason": "error", "errorMessage": row.get("message", "fixture failure")}})
