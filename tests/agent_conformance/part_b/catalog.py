@@ -69,6 +69,7 @@ GROUPS = {
         "query is not authorization; coordinated refusals write nothing",
         "shared-host tool identity is endpoint-evidenced or host, not first child",
         "owner/delegation mutation checks pre-transaction authority",
+        "handle grants pin subject/target; rebinding transfers no right",
     ),
     "T": (
         "marker mapping, no default typing and missing-plugin hold",
@@ -81,6 +82,8 @@ GROUPS = {
         "pending edits versus too_late and byte-identical editor draft",
         "plugin supersedes marker by recorded handover",
         "context/no-entry means supplied, never inserted, with origin",
+        "consumer content filtering never claims unsupported media",
+        "declared Claude hook paths preserve supplied/read and native framing evidence",
     ),
     "L": (
         "stop closes gate; exact declared host lifecycle or unsupported",

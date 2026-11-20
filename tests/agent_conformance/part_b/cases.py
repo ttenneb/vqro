@@ -186,23 +186,34 @@ async def principal_not_label(ctx):
     result = await ordinary(ctx, [{"op": "set", "key": "doc/part-b/label", "value": "alice", "expect": 0}], peer=caller, label="owner")
     hist = (await caller.call("workspace.history", {"limit": 1}))["txns"]
     ctx.check(hist and hist[-1].get("principal") == "worker:alice" and hist[-1].get("label") == "owner", "declared owner label does not change connection principal", transaction=result, history=hist)
-    raise FixtureFailed("G1 launcher-injected pane CLI/TUI identity branch requires actual managed launcher fixture")
+    from .launcher import cli_write,tui,undo
+    launched=await cli_write(ctx,"alice-cli","worker:alice",[{"op":"set","key":"doc/part-b/launched-alice","value":True}],label="owner")
+    ctx.check(launched.get("principal")=="worker:alice" and launched.get("label")=="owner",
+              "actual PTY CLI uses its configured launcher identity, never its declared label",component="core",transaction=launched)
+    await cli_write(ctx,"owner-cli","owner",[{"op":"set","key":"doc/part-b/default-tui-owner","value":True}])
+    async with tui(ctx,"default-owner-tui") as ui:
+        await undo(ctx,ui,"doc/part-b/default-tui-owner")
+    entries=(await ctx.peer.call("workspace.snapshot"))["entries"]
+    ctx.check("doc/part-b/launched-alice" in entries,"default TUI owner undo leaves the launched agent principal alone",component="core")
 
 
 @case("G2")
 async def per_principal_undo(ctx):
     alice, bob = await ctx.connect("worker:alice"), await ctx.connect("worker:bob")
-    a = await ordinary(ctx, [{"op": "set", "key": "doc/part-b/alice", "value": "A", "expect": 0}], peer=alice)
-    b = await ordinary(ctx, [{"op": "set", "key": "doc/part-b/bob", "value": "B", "expect": 0}], peer=bob)
-    await alice.call("command.invoke", {"name": "vqro.revert", "args": {}})
+    from .launcher import cli_write,tui,undo
+    a=await cli_write(ctx,"alice-pane-cli","worker:alice",[{"op":"set","key":"doc/part-b/alice","value":"A","expect":0}])
+    b=await cli_write(ctx,"bob-pane-cli","worker:bob",[{"op":"set","key":"doc/part-b/bob","value":"B","expect":0}])
+    ctx.check(a.get("principal")=="worker:alice" and b.get("principal")=="worker:bob","real pane CLI writes retain distinct configured principals",component="core")
+    async with tui(ctx,"alice-tui","worker:alice") as ui:
+        await undo(ctx,ui,"doc/part-b/alice")
     snapshot = await ctx.peer.call("workspace.snapshot")
     ctx.check("doc/part-b/alice" not in snapshot["entries"], "Alice undo removes Alice's change")
     ctx.check(snapshot["entries"]["doc/part-b/bob"]["value"] == "B", "Alice undo leaves Bob's later change")
-    await alice.call("workspace.revert", {"txn": b["txn"]})
+    await alice.call("workspace.revert", {"txn": b["id"]})
     snapshot = await ctx.peer.call("workspace.snapshot")
     ctx.check("doc/part-b/bob" not in snapshot["entries"], "Bob's transaction remains explicitly revertable by id")
     ctx.evidence.append({"alice_txn": a, "bob_txn": b})
-    raise FixtureFailed("G2 still requires actual launcher-tagged pane CLI and physical Alice TUI u; raw RPC is not a substitute")
+
 
 
 @case("G5")
@@ -485,6 +496,47 @@ async def unconfirmed_claim(ctx):
         ctx.check(confirmed is not None,"any later first delivery needs its own fresh confirmed claim",events=events)
     ctx.check(len(calls)<=1,"no duplicate native delivery after uncertain adoption/repair")
     ctx.evidence.append({"kind":"unconfirmed_claim","adopted":adopted,"repair":repair,"native_calls":calls})
+
+
+@case("G13")
+async def handle_grants_pin_both_ends(ctx):
+    original_principal,new_principal="worker:original-reviewer","worker:new-reviewer"
+    await ctx.native_set(1,principal=original_principal)
+    await ctx.native.call("add",ref="a2")
+    await ctx.native.call("add",ref="a3",fields={"principal":new_principal})
+    await ctx.wait_agents(4)
+    async def bind(handle,index,**fields):
+        key="doc/agents/names/"+handle
+        entries=(await ctx.peer.call("workspace.snapshot"))["entries"]
+        return await ctx.command("names",{"op":await ctx.operation(),"handle":handle,"agent":ctx.agents[index]["id"],
+            "expect":entries.get(key,{}).get("version",0),**fields})
+    await bind("@worker",0);await bind("@reviewer",1)
+    await ctx.grant("pinned-handles","@reviewer",["send:start"],"@worker")
+    grant=(await ctx.peer.call("workspace.snapshot"))["entries"]["doc/agents/grants/pinned-handles"]["value"]
+    ctx.check(grant["who"]==original_principal and grant["on"]=="agent:"+ctx.agents[0]["id"],
+              "public grant issuance stores exact principal and target")
+    await bind("@worker",2);await bind("@reviewer",3)
+    original=await ctx.connect(original_principal);new=await ctx.connect(new_principal)
+    sent=await ctx.send(peer=original,to=ctx.agents[0]["id"])
+    for peer,target in ((original,"@worker"),(new,ctx.agents[0]["id"]),(new,"@worker")):
+        await ctx.rejected("inbox.send",{"op":await ctx.operation(),"submission":await ctx.operation(),"to":target,
+            "mode":"start","content":[{"type":"text","text":"no transferred grant"}],"send_new":True},{"no_grant"},peer=peer)
+    await bind("@missing-principal",2)
+    await bind("@conflicting-principals",3,endpoint_principal="worker:another-binding")
+    for handle in ("@missing-principal","@conflicting-principals"):
+        await ctx.rejected("grants",{"op":await ctx.operation(),"id":"bad-"+handle[1:],"expect":0,
+            "value":{"who":handle,"on":"agent:"+ctx.agents[0]["id"],"can":["send:start"]}},{"invalid"})
+    await ctx.scope("resume");await settled(ctx,sent["delivery"])
+    calls=invocations(ctx,delivery=sent["delivery"])
+    ctx.check(len(calls)==1 and calls[0]["args"]["origin"]["principal"]==original_principal,
+              "only original bound principal reaches the original exact agent")
+    from .context import PublicCoordination
+    sub=PublicCoordination(ctx.root/"g",ctx.manifest,ctx.vqro)
+    try:
+        await sub.start();await additive_dynamic_grants(sub)
+        ctx.assertions+=sub.assertions
+    finally:
+        await sub.close();ctx.evidence.extend(sub.evidence)
 
 
 @case("H6")

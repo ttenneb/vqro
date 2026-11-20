@@ -23,15 +23,71 @@ def send_caps():
             "settle": {"point": "settled", "idle": "start", "batch": "one", "batch_at": "consume"}, "preempt": {"busy": "replace"}},
             "guards": {"session": "runtime", "run": "runtime"},
             "content": {"types": ["text"], "shape": "ordered"}, "receipts": {"retain": 256},
-            "correlation": "delivery", "literal": "literal", "handled": "accepted", "keys": None,
+            "correlation": "none", "literal": "always", "handled": "none", "keys": None,
             "origin": [{"as": "attributed_user", "role": "user", "frame": "sender_header"}]}
+
+
+def item_provider(base):
+    """SDK credit transport with a bounded agent-v0 items producer, not terminal emulation."""
+    class ItemsProvider(base):
+        async def call(self,method,params=None,*args,**kwargs):
+            if method=="provider.register":
+                params=deepcopy(params);params["limits"]["max_item_streams"]=1024
+            return await super().call(method,params,*args,**kwargs)
+
+        async def _open(self, params):
+            if params.get("channel") != "items": return await super()._open(params)
+            from vqro_provider import ProviderError,integer
+            from vqro_provider_stream import Stream
+            ident=integer(params.get("stream"));ref=params.get("ref")
+            row=self.oracle.agents.get(ref)
+            if not row or row["incarnation"]!=params.get("incarnation"):
+                raise ProviderError("stale","item endpoint changed")
+            if ident in self._stream_ids: raise ProviderError("conflict","used item stream id")
+            if len(self.streams)>=self.limits.max_streams: raise ProviderError("overloaded","item stream bound full")
+            integer(params.get("window_bytes"),1,self.window)
+            journal=self.oracle.journal(ref)
+            after=params.get("after")
+            reset=not (isinstance(after,dict) and after.get("epoch")==journal["epoch"] and
+                type(after.get("seq")) is int and 0<=after["seq"]<=journal["seq"] and
+                (after["seq"]==journal["seq"] or journal["rows"] and after["seq"]>=journal["rows"][0][0]-1))
+            cut=journal["seq"] if reset else after["seq"]
+            snapshot=list(journal["entities"].values()) if reset else None
+            self._stream_ids.add(ident,self.limits.identities)
+            stream=Stream(self,params);self.streams[ident]=stream
+            stream.on_end=lambda:journal["wake"].set()
+            self._work(self._serve_items(stream,journal,snapshot,cut))
+            return stream,{"initial":"reset" if reset else "continue","epoch":journal["epoch"]}
+
+        async def _serve_items(self,stream,journal,snapshot,cursor):
+            from vqro_provider import ProviderError
+            encode=lambda row:json.dumps(row,ensure_ascii=False,separators=(",",":")).encode()+b"\n"
+            try:
+                if snapshot is not None:
+                    await stream.send(encode({"op":"snapshot","phase":"begin","epoch":journal["epoch"],"coverage":"tail"}))
+                    for entity in snapshot: await stream.send(encode(entity))
+                    await stream.send(encode({"op":"snapshot","phase":"end","seq":cursor}))
+                while not stream.closed:
+                    if stream.ref not in self.oracle.agents or self.oracle.journal(stream.ref) is not journal:
+                        await stream.gap("backend_dropped");return
+                    rows=[(seq,data) for seq,data in journal["rows"] if seq>cursor]
+                    if journal["seq"]>cursor and (not rows or rows[0][0]!=cursor+1):
+                        await stream.gap("retention");return
+                    for seq,data in rows:
+                        await stream.send(data);cursor=seq
+                    journal["wake"].clear()
+                    if journal["seq"]>cursor: continue
+                    await journal["wake"].wait()
+            except ProviderError:
+                if not stream.closed: await stream.gap("viewer_slow")
+    return ItemsProvider
 
 
 class Native:
     def __init__(self, provider, root):
         self.provider, self.root = provider, root
         self.agents, self.plans, self.barriers = {}, {}, {}
-        self.queues, self.receipts = {}, {}
+        self.queues, self.receipts, self.items = {}, {}, {}
         self.serial = 0
         self.ledger = root / "native.jsonl"
         self.server = None
@@ -39,6 +95,7 @@ class Native:
 
     def attach(self, provider):
         self.provider = provider
+        provider.oracle = self
         for op in ("agent.send", "agent.interrupt", "agent.queue", "agent.respond", "agent.stop", "agent.receipt"):
             provider.effect(op)(lambda effect, args, op=op: self.effect(op, effect, args))
 
@@ -61,7 +118,8 @@ class Native:
         if pull is not None: native["pull"] = deepcopy(pull)
         if principal is not None: native["principal"] = principal
         row = {"ref": ref, "incarnation": "i:" + ref, "kind": "agent", "state": "live", "name": ref,
-               "status": {"state": "idle" if state == "idle" else "working"}, "data": {"agent": native}}
+               "status": {"state": "idle" if state == "idle" else "working"}, "data": {"agent": native,
+                   "items":{"retain_bytes":131072,"entities":512,"entity_bytes":524288}}}
         self.agents[ref] = row
         self.queues[ref], self.receipts[ref] = [], {}
         await self.provider.upsert(deepcopy(row))
@@ -73,12 +131,42 @@ class Native:
         row["status"] = {"state": "idle" if native["state"] == "idle" else "working"}
         await self.provider.upsert(deepcopy(row))
 
+    def journal(self,ref):
+        epoch=self.agents[ref]["data"]["agent"]["epoch"]
+        old=self.items.get(ref)
+        if old is None or old["epoch"]!=epoch:
+            if old is not None: old["wake"].set()
+            self.items[ref]={"epoch":epoch,"seq":0,"rows":[],"bytes":0,"entities":{},"wake":asyncio.Event(),"position":0}
+        return self.items[ref]
+
+    def item(self,ref,value):
+        journal=self.journal(ref);journal["position"]+=1
+        entity={"op":"put","kind":"message","id":"m"+str(journal["position"]),"rev":1,
+                "value":dict(value,position=journal["position"])}
+        encoded=lambda row:json.dumps(row,ensure_ascii=False,separators=(",",":")).encode()+b"\n"
+        if len(encoded(entity))>60000: raise RuntimeError("fake item exceeds declared record bound")
+        def append(row):
+            journal["seq"]+=1;data=encoded(dict(row,seq=journal["seq"]))
+            journal["rows"].append((journal["seq"],data));journal["bytes"]+=len(data)
+            while journal["bytes"]>131072:
+                _,old=journal["rows"].pop(0);journal["bytes"]-=len(old)
+        journal["entities"][entity["id"]]=entity
+        while len(journal["entities"])>512 or sum(len(encoded(row)) for row in journal["entities"].values())>524288:
+            identifier=next(iter(journal["entities"]));removed=journal["entities"].pop(identifier)
+            append({"op":"remove","kind":removed["kind"],"id":identifier,"rev":2})
+        append(entity);journal["wake"].set()
+
     def insert(self, ref, args):
         # This is a fake model request, not an API/model call. Preserve attribution as a sender
         # header and label any supplied quote as a claim, never as a system/owner instruction.
         self.append("model_request", ref=ref, delivery=args.get("delivery"), role="user",
                     sender=deepcopy(args.get("origin")), quoted_claim=deepcopy(args.get("quoted")),
                     content=deepcopy(args.get("content")))
+        native=self.agents[ref]["data"]["agent"]
+        native.update(state="running",run="run:"+str(self.serial))
+        self.item(ref,{"role":"user","content":deepcopy(args.get("content")),"final":True,
+            "origin":deepcopy(args.get("origin")),"quoted":deepcopy(args.get("quoted")),
+            "cause":{"kind":"delivery","id":args.get("delivery"),"provenance":"adapter"}})
         delivery = args.get("delivery")
         if delivery:
             saved = self.receipts[ref]
@@ -237,12 +325,14 @@ async def main():
         "agent.respond": {"v": 0, "methods": ["confirm"], "scopes": ["session"], "background_requests": False},
         "agent.stop": {"v": 0}, "agent.receipt": {"v": 0}}
     from vqro_provider import ProviderError
+    Provider=item_provider(Provider)
+    capabilities["items.stream"]={"retain_bytes":131072,"entities":512,"entity_bytes":524288}
     native, provider = None, None
     credential = os.environ.get("VQRO_BRIDGE_TOKEN")
     try:
         while True:
             provider = Provider("part-b-native", "part-b-instance", capabilities, role=args.role,
-                token=credential, limits=Limits(pending=256), software={"name": "coordination-native-oracle", "version": "0"})
+                token=credential, limits=Limits(pending=256,max_streams=1024), software={"name": "coordination-native-oracle", "version": "0"})
             if native is None: native = Native(provider, args.root)
             else: native.attach(provider)
             try:

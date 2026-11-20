@@ -12,12 +12,12 @@ import subprocess
 from types import SimpleNamespace
 
 from pi_provider_e2e import E2E, identity
-from ..core import Native
+from ..core import Native, PublicImplementation
 from ..results import CheckFailed, FixtureFailed, HarnessGap, check
 from ..wire import Peer, RpcError
 
 
-class PublicCoordination:
+class PublicCoordination(PublicImplementation):
     def __init__(self, root, manifest, vqro, hc=None):
         self.root, self.manifest, self.vqro = Path(root), manifest, Path(vqro)
         self.root.mkdir()
@@ -27,6 +27,8 @@ class PublicCoordination:
         self.peers, self.native_process, self.peer = {}, None, None
         self.assertions = 0
         self.serial, self.agents, self.evidence = 0, [], []
+        self.views,self.early={},{}
+        self.early_bytes=self.early_records=0
         self.native = Native(self.root / "n.sock", self.root / "native.jsonl")
         self.metadata = {"name": manifest["name"], "target_kind": "coordination", "fixture_native": True,
                          "real_runtime_certification": False, "extension_files": {}}
@@ -54,6 +56,8 @@ class PublicCoordination:
         elif principal is not None: params["identity"] = {"kind": "principal", "principal": principal}
         if label is not None: params["label"] = label
         hello = await peer.call("hello", params)
+        for method in ("stream.data","stream.closed","stream.gap"):
+            peer.on(method,lambda value,method=method:self._notice(peer,method,value))
         self.peers.setdefault(principal, []).append(peer)
         self.evidence.append({"kind": "connection", "requested_identity": params.get("identity"), "hello": hello})
         return peer

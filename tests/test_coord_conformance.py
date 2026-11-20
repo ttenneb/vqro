@@ -18,10 +18,10 @@ from agent_conformance.results import FixtureFailed, HarnessGap, report
 class Catalog(unittest.TestCase):
     def test_complete_part_b_inventory_and_no_silent_selection(self):
         expected = [*(f"I{i}" for i in range(1,21)), *(f"H{i}" for i in range(1,17)),
-                    *(f"G{i}" for i in range(1,13)), *(f"T{i}" for i in range(1,11)),
+                    *(f"G{i}" for i in range(1,14)), *(f"T{i}" for i in range(1,13)),
                     *(f"L{i}" for i in range(5,12)), "S1"]
         self.assertEqual([case.id for case in CASES], expected)
-        self.assertEqual(len(BY_ID), 66)
+        self.assertEqual(len(BY_ID), 69)
         self.assertEqual([case.id for case in select_cases(["T1", "I1"])], ["I1", "T1"])
         with self.assertRaises(ValueError): select_cases(["I0"])
 
@@ -81,7 +81,7 @@ class Runner(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row.evidence[0]["applicability"], "not-applicable")
         document = report({}, [row], [BY_ID["T10"]], part="B", inventory=CASES)
         self.assertFalse(document["complete_inventory"])
-        self.assertEqual(len(document["not_selected"]),65)
+        self.assertEqual(len(document["not_selected"]),68)
         self.assertEqual(document["summary"]["unsupported-declared"],0)
 
     async def test_cleanup_failure_overrides_pass(self):
