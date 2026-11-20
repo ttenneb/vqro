@@ -97,8 +97,15 @@ fn write_at_cut<F>(
 where
     F: FnOnce(&Path, &[u8]) -> Result<(), vqro::store::AtomicWriteError>,
 {
-    let publish =
-        |phase: &str| vqro::store::write_atomic(&state.join("fault-boundary"), phase.as_bytes());
+    let publish = |phase: &str, domain_renamed: bool| {
+        vqro::store::write_atomic(&state.join("fault-boundary"), phase.as_bytes()).map_err(
+            |mut error| {
+                // The caller adopts domain bytes, never the marker's rename status.
+                error.renamed = domain_renamed;
+                error
+            },
+        )
+    };
     let after = fault == "claim-after"
         || archive_cuts::mode(fault).is_some_and(|(_, action)| action == "after");
     let unconfirmed = fault.ends_with("unconfirmed");
@@ -112,7 +119,7 @@ where
         } else {
             "before-claim-write".to_owned()
         };
-        publish(&phase)?;
+        publish(&phase, false)?;
         if fault.ends_with("before") {
             wait_release(state);
         }
@@ -125,7 +132,7 @@ where
         let phase = archive_cuts::mode(fault)
             .map(|(stage, _)| format!("after-durable-archive-{stage}-before-receipt"))
             .unwrap_or_else(|| "after-durable-before-receipt".to_owned());
-        publish(&phase)?;
+        publish(&phase, true)?;
         wait_release(state);
     }
     if unconfirmed {
@@ -138,7 +145,7 @@ where
                     "after-rename-claim-unconfirmed".to_owned()
                 }
             });
-        publish(&phase)?;
+        publish(&phase, true)?;
         let mut error = vqro::store::AtomicWriteError::from(std::io::Error::other(
             "injected missing directory confirmation",
         ));
@@ -265,6 +272,33 @@ mod tests {
             let phase = std::fs::read_to_string(state.join("fault-boundary")).unwrap();
             assert!(phase.starts_with("after-"), "wrong phase {fault}: {phase}");
             assert!(!phase.is_empty());
+        }
+    }
+    #[test]
+    fn marker_failure_reports_domain_rename_not_marker_rename() {
+        for fault in [
+            "claim-before",
+            "claim-error",
+            "register-error",
+            "outcome-error",
+            "claim-after",
+            "claim-unconfirmed",
+            "outcome-unconfirmed",
+            "archive-free-after",
+            "archive-export-confirm-unconfirmed",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("domain.json");
+            std::fs::write(&path, b"old").unwrap();
+            std::fs::create_dir(root.path().join("fault-boundary")).unwrap();
+            let error = write_at_cut(root.path(), &path, b"new", fault, vqro::store::write_atomic)
+                .unwrap_err();
+            let renamed = fault.ends_with("after") || fault.ends_with("unconfirmed");
+            assert_eq!(error.renamed, renamed, "{fault}");
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                if renamed { b"new" } else { b"old" }
+            );
         }
     }
     fn outcome_case(before: Value, after: Value) -> bool {
