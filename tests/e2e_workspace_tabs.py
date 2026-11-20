@@ -32,7 +32,7 @@ class Client:
         self.lock, self.cv, self.ident, self.replies = threading.Lock(), threading.Condition(), 0, {}
         self.thread = threading.Thread(target=self.read, daemon=True)
         self.thread.start()
-        self.you = self.call("hello", {"client": "e2e-workspace-tabs"})["you"]
+        self.you = self.call("hello", {"client": "e2e-workspace-tabs", "identity": {"kind": "owner"}})["you"]
 
     def read(self):
         for wire in self.reader:
@@ -154,7 +154,8 @@ def main():
         checks.append("workspace b separate; switching back to a restores its two tabs without spawning")
         # D24: the switch is the invoker's change; default undo takes it back.
         last = client.call("workspace.history", {"limit": 1})["txns"][0]
-        assert last.get("on_behalf_of") == client.you and last["author"] == "ext:workspaces", last
+        assert last.get("principal") == "owner" and last.get("initiator") == "owner" and last["actor"] == "extension:workspaces", last
+        assert last["author"].startswith("client:"), last
         client.run("vqro.revert")
         assert active() == lb, active()
         checks.append("switch attributed to the invoker (D24) and undone by default undo")

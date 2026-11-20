@@ -124,7 +124,9 @@ class PiBridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_successful_native_retry_clears_current_failure_without_inventing_a_failed_turn(self):
         await self.client.invoke("prompt", {"message": "fixture-retry-success"})
-        facts = await self.client.wait_for_facts(lambda f: f["run"]["settled"])
+        # ACK/settled can be observed while the separate native-start gate is still pending.
+        # Wait for this turn's retry evidence and gate release, not an earlier settled snapshot.
+        facts = await self.client.wait_for_facts(lambda f: f["run"]["settled"] and not f["start_pending"] and (f.get("retry") or {}).get("success") is True)
         self.assertEqual(facts["status"], "done")
         self.assertIsNone(facts["failure"])
         self.assertEqual(facts["retry"]["attempt"], 4)

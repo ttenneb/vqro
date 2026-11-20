@@ -87,7 +87,7 @@ async fn retirement_rejects_queued_writes_but_adopts_an_already_dispatched_write
     let (control,_)=f.peer().await;
     let token_file=f._dir.path().join("managed.token");
     let seed=control.call("workspace.apply",json!({"ops":[{"op":"set","key":"extension/managed","value":managed::spec(&token_file)}]})).await.unwrap();
-    let (old,_old_rx)=f.peer().await;
+    let (old,_old_rx,_)=client::connect(&f.socket,"managed-probe").await.unwrap();
     old.call("hello",json!({"extension":"managed","extension_token":managed::token(&token_file).await})).await.unwrap();
     f.gate.armed.store(true,Ordering::SeqCst);
     let active=tokio::spawn({let old=old.clone();async move {old.call("workspace.apply",set(1,0)).await}});
