@@ -1391,7 +1391,9 @@ async def advertised_commands(ctx):
             accepted(await ctx.send(text))
             await ctx.native.wait(lambda rows: any(row.get("seq", 0) > mark and row.get("kind") == "input_received" for row in rows))
             inputs = ctx.native.records("input_received", after=mark)
-            check(len(inputs) == 1 and inputs[0].get("text") == text, "slash send did not remain literal native input")
+            check(len(inputs) == 1, "slash send did not produce exactly one native input")
+            framed = any(row.get("frame") == "sender_header" for row in send.get("origin", []))
+            compare_content([{"type": "text", "text": text}], inputs[0].get("content"), sender_header=framed)
             check(not ctx.native.records("command_executed", after=mark), "literal slash send executed a native command")
         else:
             ctx.evidence.append({"kind": "subcase", "case": "M4.literal_slash", "status": "not-applicable",
