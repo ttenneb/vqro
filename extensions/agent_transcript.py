@@ -67,7 +67,8 @@ def lines(text, style=None, limit=None):
     """Wrapped text rows, one per line (control-safe); `limit` keeps the first lines and says how many more."""
     out = str(text).split("\n")
     more = len(out) - limit if limit and len(out) > limit else 0
-    rows = [{"type": "text", "wrap": True, "text": clip(plain(line)), **({"style": style} if style else {})}
+    # focusable: the reader can move through the conversation, and `follow` keeps the newest row in view.
+    rows = [{"type": "text", "wrap": True, "focusable": True, "text": clip(plain(line)), **({"style": style} if style else {})}
             for line in (out[:limit] if more else out)]
     if more:
         rows.append({"type": "text", "style": "dim", "text": f"… {more} more lines"})
@@ -84,8 +85,8 @@ def markdown_rows(text, style=None):
             chunk = []
         chunk.append(clip(line, MARKDOWN_ROW_BYTES))
     rows.append(chunk)
-    return [{"type": "text", "wrap": True, "format": "markdown", "text": "\n".join(c), **({"style": style} if style else {})}
-            for c in rows]
+    return [{"type": "text", "wrap": True, "focusable": True, "format": "markdown", "text": "\n".join(c),
+             **({"style": style} if style else {})} for c in rows]
 
 
 def content_rows(content, style=None, limit=None):

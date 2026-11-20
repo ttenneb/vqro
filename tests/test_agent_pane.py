@@ -150,7 +150,7 @@ class FormattingAndFacts(unittest.TestCase):
         entities = {("message", "m"): (1, {"position": 1, "role": "assistant", "final": True, "content": [
             {"type": "text", "text": "# Plan\n- one\n- two", "format": "markdown"}, {"type": "text", "text": "# not\nmarkdown"}]})}
         rows = agent_transcript.rows(entities, names)
-        self.assertEqual(rows[1], {"type": "text", "wrap": True, "format": "markdown", "text": "# Plan\n- one\n- two"})
+        self.assertEqual(rows[1], {"type": "text", "wrap": True, "focusable": True, "format": "markdown", "text": "# Plan\n- one\n- two"})
         self.assertEqual([r["text"] for r in rows[2:]], ["# not", "markdown"], "plain is the default")
         self.assertNotIn("format", rows[2])
         big = agent_transcript.markdown_rows("\n".join("x" * 1000 for _ in range(200)))
@@ -245,6 +245,46 @@ class AgentPane(unittest.TestCase):
         self.assertNotIn("hidden_senders", self.core.value("doc/settings/agents")["view"], "senders are per pane")
         with self.assertRaises(Exception):
             self.core.handlers["agents.view"]({"resource": "r2", "set": "thinking", "value": "explode"})
+
+    def make_v0(self, state="idle", **facts):
+        self.core.providers["items"]["capabilities"].update({"agent.send": {"modes": {"start": {}, "settle": {}, "boundary": {}}},
+                                                             "agent.respond": {}, "agent.queue": {}})
+        self.core.resources["r2"]["data"] = {"agent": {"v": 0, "state": state, "lifecycle": "live", "epoch": "e1", "caps": {
+            "rev": 2, "agent.send": {"modes": {"start": {}, "settle": {}, "boundary": {}}}, "agent.respond": {},
+            "agent.queue": {"actions": ["list", "clear"]}}, **facts}}
+        self.agents.event("resource", {"id": "r2"})
+        self.feed(snapshot(CONVERSATION))
+        return self.core.live["agents-r2"]["items"]
+
+    def test_the_composer_offers_auto_and_the_declared_modes_and_sends(self):
+        items = self.make_v0()
+        composer = next(r for r in items if r.get("type") == "composer")
+        self.assertEqual((composer["pin"], composer["autofocus"], composer["submit"], composer["args"]),
+                         ("bottom", True, "Enter", {"resource": "r2", "caps_rev": 2}))
+        self.assertEqual([c["value"] for c in composer["controls"][0]["chips"]], ["auto", "boundary", "settle"], "steer before follow-up")
+        self.assertEqual(composer["fallback"]["multiline"], True)
+        self.assertEqual(items[-1]["pin"], "bottom", "the facts line comes last")
+        self.core.handlers["agents.send"](dict(composer["args"], mode="auto", text="go"))
+        sent = [p for m, p in self.core.calls if m == "resource.invoke"][-1]["args"]
+        self.assertEqual((sent["mode"], sent["content"]), ("start", [{"type": "text", "text": "go"}]))
+
+    def test_auto_on_a_busy_agent_asks_and_sends_nothing(self):
+        items = self.make_v0(state="running")
+        composer = next(r for r in items if r.get("type") == "composer")
+        before = len([1 for m, _ in self.core.calls if m == "resource.invoke"])
+        reply = self.core.handlers["agents.send"](dict(composer["args"], mode="auto", text="go"))
+        self.assertEqual(reply["client"]["popup"]["view"], "agents-send-r2")
+        self.assertEqual(len([1 for m, _ in self.core.calls if m == "resource.invoke"]), before)
+
+    def test_the_waiting_line_and_the_runtimes_queue_are_pinned(self):
+        items = self.make_v0(requests=[{"request": "q1", "revision": 1, "method": "confirm", "title": "Run git push?", "params": {}}],
+                             queue=[{"mode": "settle", "preview": "bump the lockfile"}])
+        waiting = next(r for r in items if r.get("id") == "waiting")
+        self.assertEqual((waiting["command"], waiting["pin"]), ("agents.answer", "bottom"))
+        self.assertIn("Run git push?", waiting["text"])
+        queue = next(r for r in items if r.get("id") == "queue")
+        self.assertEqual(queue["text"], "Messages · 1 held by Pi")
+        self.assertEqual(queue["menu"][0]["command"], "agents.clear_queue")
 
     def test_a_failed_attach_is_retried_later_not_in_a_loop(self):
         self.core.fail_attach = True

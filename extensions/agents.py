@@ -443,6 +443,40 @@ class Agents:
                  [{"label": ("✓ " if f in view["summary"] else "  ") + f, "value": f} for f in agent_transcript.SUMMARY_FIELDS]),
             {"text": "Make default", "command": "agents.view", "args": {"resource": rid, "set": "defaults"}}]}]
 
+    def bottom_rows(self, r):
+        """Pinned under the conversation (feature `pin`; otherwise simply last): what the runtime holds, what waits
+        for you, the composer. The facts line follows."""
+        rid, name = r["id"], plain(str(r.get("name") or r["id"]))
+        rows = []
+        queue = agent_facts(r).get("queue")
+        if isinstance(queue, list) and queue:  # null: the runtime doesn't show its queue; nothing claimed
+            held = [q for q in queue[:64] if isinstance(q, dict)]
+            rows.append({"id": "queue", "pin": "bottom", "text": f"Messages · {len(queue)} held by {name}", "style": "dim",
+                         "children": [{"type": "text", "style": "muted", "text": head(plain(f"{q.get('mode') or 'queued'}: {q.get('preview') or ''}"), 300)}
+                                      for q in held], "expanded": False,
+                         "menu": [{"label": "Clear queue", "command": "agents.clear_queue", "args": {"resource": rid}}]
+                                 if self.supported(r, "clear_queue") else []})
+        waiting = self.requests_v0(r) if self.v0(r, "respond") else None
+        if waiting:
+            more = f" (and {len(waiting) - 1} more)" if len(waiting) > 1 else ""
+            rows.append({"id": "waiting", "pin": "bottom", "style": "warn", "command": "agents.answer", "args": {"resource": rid},
+                         "text": f"⚠ {name} is waiting for your answer: " + head(plain(str(waiting[0].get("title") or waiting[0]["request"])), 160) + more,
+                         "description": "Enter: answer…"})
+        modes = self.modes(r)
+        if modes and r.get("available") and not ended(r):
+            names = {"start": "start", "boundary": "steer", "settle": "follow-up", "admit": "admit (weaker)",
+                     "preempt": "interrupt and send"}
+            chips = [{"text": "auto", "value": "auto", "checked": True}] + [
+                {"text": names.get(m, m), "value": m} for m in modes if m != "start"]
+            rows.append({"type": "composer", "id": "compose", "pin": "bottom", "text": "Message " + name,
+                         "command": "agents.send", "args": {"resource": rid, "caps_rev": caps(r).get("rev")},
+                         "placeholder": f"Write a message to {name}…", "rows": 3, "max_bytes": 65536, "submit": "Enter",
+                         "autofocus": True, "requires": ["composer"],
+                         "controls": [{"type": "chips", "arg": "mode", "text": "Mode", "chips": chips}],
+                         "fallback": {"text": f"Message {name}…", "command": "agents.send",
+                                      "args": {"resource": rid, "mode": "auto"}, "input": "Message", "multiline": True}})
+        return rows
+
     def conversation_rows(self, r):
         """The agent's conversation as rows, or None when it has no item stream (today's panel stays)."""
         c = self.conversations.get(r["id"])
@@ -745,6 +779,10 @@ class Agents:
             return self.choose_mode(r, text if isinstance(text, str) and text.strip() else None)
         if not isinstance(text, str) or not text.strip():
             raise VqroError("message must not be empty", "invalid")
+        if mode == "auto":  # the composer's default: start when evidenced idle, else ask (the agreed prefix-p rule)
+            if busy(r) or "start" not in self.modes(r):
+                return self.choose_mode(r, text)
+            mode = "start"
         if "caps_rev" in args and args["caps_rev"] != caps(r).get("rev"):
             # Chosen from a popup whose declaration has changed: show the current choice, never rebind consent.
             self.choose_mode(r, text)
@@ -1088,7 +1126,7 @@ class Agents:
             with c.lock:
                 seen = agent_transcript.senders(c.view.entities, agent_transcript.Names(self.ext.resources, r["id"]))
             content = {"title": title, "follow": True, "toolbar": self.view_toolbar(r["id"], self.view_of(r["id"]), seen), "items": [
-                {"text": title, "badges": [{"text": status(r), "style": "dim"}]}, *conversation,
+                {"text": title, "badges": [{"text": status(r), "style": "dim"}]}, *conversation, *self.bottom_rows(r),
                 agent_transcript.facts_footer(agent_facts(r), plain(str(r.get("name") or r["id"])))]}
         elif sources:
             # Keep controls/warnings here, but never copy a provider's transcript into another
