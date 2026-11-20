@@ -18,6 +18,20 @@ fn string<'a>(value:&'a Value,field:&str)->Result<&'a str,RpcError> {
         _=>Err(RpcError::invalid(format!("{field} must be a string of 1..=256 bytes without control/format characters"))),
     }
 }
+fn validate_cause(cause:&Value)->Result<(),RpcError> {
+    let object=cause.as_object().ok_or_else(||RpcError::invalid("cause must be an object"))?;
+    crate::limits::json_depth(cause,CAUSE_DEPTH).map_err(|_|RpcError::invalid("cause exceeds 64 containers"))?;
+    if crate::limits::encoded_bytes(cause)>CAUSE_BYTES{return Err(RpcError::invalid("cause exceeds 4096 encoded bytes"));}
+    for field in ["kind","id","provenance"] {string(&cause[field],field)?;}
+    for field in ["endpoint","epoch","boot"] {if let Some(value)=object.get(field){string(value,field)?;}}
+    // Qualification is structural only: prior boots/epochs and unknown enums remain data.
+    match cause["kind"].as_str().unwrap() {
+        "entity"|"request"=>{string(&cause["endpoint"],"cause.endpoint")?;string(&cause["epoch"],"cause.epoch")?;}
+        "effect"=>{string(&cause["boot"],"cause.boot")?;}
+        _=>{}
+    }
+    Ok(())
+}
 impl Causality {
     /// Explicit metadata must have a recording sink; accepting then stripping it would lose caller intent.
     pub(crate) fn check_method(method:&str,params:&Value)->Result<(),RpcError> {
@@ -30,18 +44,7 @@ impl Causality {
     }
     pub fn parse(params:&Value)->Result<Self,RpcError> {
         let cause=if let Some(cause)=params.get("cause") {
-            let object=cause.as_object().ok_or_else(||RpcError::invalid("cause must be an object"))?;
-            crate::limits::json_depth(cause,CAUSE_DEPTH).map_err(|_|RpcError::invalid("cause exceeds 64 containers"))?;
-            let bytes=crate::limits::encoded_bytes(cause);
-            if bytes>CAUSE_BYTES{return Err(RpcError::invalid("cause exceeds 4096 encoded bytes"));}
-            for field in ["kind","id","provenance"] {string(&cause[field],field)?;}
-            for field in ["endpoint","epoch","boot"] {if let Some(value)=object.get(field){string(value,field)?;}}
-            // Qualification is structural only: prior boots/epochs and unknown enums remain data.
-            match cause["kind"].as_str().unwrap() {
-                "entity"|"request"=>{string(&cause["endpoint"],"cause.endpoint")?;string(&cause["epoch"],"cause.epoch")?;}
-                "effect"=>{string(&cause["boot"],"cause.boot")?;}
-                _=>{}
-            }
+            validate_cause(cause)?;
             Some(cause.clone())
         } else {None};
         let correlation=params.get("correlation").map(|value|string(value,"correlation").map(String::from)).transpose()?;
@@ -55,10 +58,15 @@ impl Causality {
     /// Common resource-operation args may carry explicit links. Never rewrite the op's args.
     pub(crate) fn lift_args(params:&mut Value)->Result<(),RpcError> {
         for field in ["cause","correlation"] {
-            let Some(nested)=params.get("args").and_then(|args|args.get(field)).cloned() else{continue};
+            let Some(nested)=params.get("args").and_then(|args|args.get(field)) else{continue};
+            if field=="cause"{validate_cause(nested)?;}else{string(nested,field)?;}
             if let Some(explicit)=params.get(field) {
-                if *explicit!=nested{return Err(RpcError::invalid(format!("conflicting {field} in request and args")));}
-            } else if let Some(object)=params.as_object_mut(){object.insert(field.into(),nested);}
+                if explicit!=nested{return Err(RpcError::invalid(format!("conflicting {field} in request and args")));}
+            } else {
+                // Clone only after bounds/shape validation, never an unbounded/deep nested payload.
+                let nested=nested.clone();
+                if let Some(object)=params.as_object_mut(){object.insert(field.into(),nested);}
+            }
         }
         Ok(())
     }
@@ -69,4 +77,18 @@ impl Causality {
             if let Some(correlation)=&self.correlation {object.insert("correlation".into(),Value::String(correlation.clone()));}
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn nested_links_are_refused_before_lifting_into_the_root() {
+    for field in ["cause","correlation"] {
+        let value=if field=="cause"{serde_json::json!({"kind":"future","id":"id","provenance":"asserted","opaque":"x".repeat(900_000)})}else{Value::String("x".repeat(900_000))};
+        let mut params=serde_json::json!({"args":{}});params["args"][field]=value;
+        let error=Causality::lift_args(&mut params).expect_err("oversized nested field must fail at the lift stage, not after cloning/inserting it");
+        assert_eq!(error.kind(),"invalid");assert!(params.get(field).is_none());assert!(params["args"].get(field).is_some(),"operation args remain untouched");
+    }
+    let mut nested=Value::Null;for _ in 0..64{nested=serde_json::json!([nested]);}
+    let mut params=serde_json::json!({"args":{"cause":{"kind":"future","id":"id","provenance":"asserted","opaque":nested}}});
+    assert_eq!(Causality::lift_args(&mut params).unwrap_err().kind(),"invalid");assert!(params.get("cause").is_none());
 }
