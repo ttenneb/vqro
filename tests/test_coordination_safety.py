@@ -44,7 +44,7 @@ class SafetyTests(unittest.TestCase):
         self.assertTrue(repeated.exception.data['cached'])
         self.assertEqual(f.engine.operation(fixtures.OWNER["principal"], args["op"])["state"], "rejected")
 
-    def test_no_reply_slot_returns_actual_uncached_refusal_and_closes_epoch(self):
+    def test_no_reply_slot_returns_actual_uncached_refusal_and_fences_its_id(self):
         f = self.f
         original = f.engine._preflight_reservations
         def preflight(rows, before=None, **kwargs):
@@ -63,9 +63,10 @@ class SafetyTests(unittest.TestCase):
         self.assertEqual(str(failure.exception), 'actual live refusal')
         self.assertTrue(failure.exception.data['uncached'])
         self.assertEqual(failure.exception.data['window'], f.engine.window())
-        self.assertNotEqual(f.engine.window()["epoch"], epoch)
+        self.assertTrue(failure.exception.data['fenced'])
+        self.assertEqual(f.engine.window()["epoch"], epoch)
         with self.assertRaises(PolicyError) as expired:
-            f.engine._mutate("probe", {"op": op}, fixtures.OWNER, lambda *_: self.fail("recreated a closed-window operation"))
+            f.engine._mutate("probe", {"op": op}, fixtures.OWNER, lambda *_: self.fail("recreated a fenced operation"))
         self.assertEqual(expired.exception.kind, "expired_operation")
         self.assertEqual(f.ledger, [])
 

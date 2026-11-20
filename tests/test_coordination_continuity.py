@@ -15,6 +15,11 @@ class ContinuityTests(unittest.TestCase):
         take_args = {'op': take_op, 'agent': 'r1', 'consumer': 'c1', 'at': 'tool'}
         taken = f.engine.take(take_args, fixtures.OWNER)
         token = taken['records'][0]['claim']
+        # Inside the advertised window the cached reply is retained and content-free.
+        replay = f.engine.take(take_args, fixtures.OWNER)
+        self.assertTrue(replay['historical'])
+        self.assertEqual(replay['records'], [])
+        self.assertEqual(replay['claims'][0]['claim'], token)
         old_epoch = f.engine.window()['epoch']
         for _ in range(1300):
             try:
@@ -26,11 +31,17 @@ class ContinuityTests(unittest.TestCase):
         else:
             self.fail('window did not close')
         frozen, revision = f.engine.get(sent['delivery']), f.store.revision
-        replay = f.engine.take(take_args, fixtures.OWNER)
-        self.assertTrue(replay['historical'])
-        self.assertEqual(replay['records'], [])
-        self.assertEqual(replay['claims'][0]['claim'], token)
-        self.assertEqual(f.store.revision, revision, 'retained historical replay is read-only')
+        # A closed window may already have expired its result buckets. Either
+        # legal response is read-only and never returns insertion content.
+        try:
+            replay = f.engine.take(take_args, fixtures.OWNER)
+        except PolicyError as expired:
+            self.assertEqual(expired.kind, 'expired_operation')
+        else:
+            self.assertTrue(replay['historical'])
+            self.assertEqual(replay['records'], [])
+            self.assertEqual(replay['claims'][0]['claim'], token)
+        self.assertEqual(f.store.revision, revision, 'historical/expired replay is read-only')
         # Force actual eviction of the old cached result, rather than relying on
         # unrelated random buckets. All calls still go through public mutations.
         while True:

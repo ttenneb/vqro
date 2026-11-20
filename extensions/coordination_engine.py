@@ -96,6 +96,9 @@ class Coordinator:
         self.permits = set()
         self.attention = {}
         self.native_inflight = {}
+        self.refused_ops = set()
+        self.refusal_epoch = None
+        self.expire_ops = False
         self.current = True
         self.fair = FairQueue()
         self.maintenance_error = None
@@ -206,21 +209,35 @@ class Coordinator:
                     work.put(key, record)
             work.commit(control=True)
         work = Working(self)
-        meta = work.get("meta", {"window_epoch": nonce("w:"), "window_count": 0, "order": 0})
+        meta = work.get("meta", {"order": 0})
+        # Volatile refusal fences may be lost only behind a confirmed new epoch.
+        # Retained cached results still resolve before the admission-window check.
+        meta.update(window_epoch=nonce("w:"), window_count=0)
         work.put("meta", meta)
         prior = work.get("control", {})
         work.put("control", {"epoch": self.control_epoch, "revision": prior.get("revision", 0) + 1,
                              "gates": {}, "consumers": {}})
         work.commit(control=True)
+        self.refusal_epoch = meta["window_epoch"]
 
     def fence(self):
         with self.lock:
             self.current = False
             self.permits.clear()
 
+    def _fence_count(self, epoch):
+        return len(self.refused_ops) if self.refusal_epoch == epoch else 0
+
+    def _sync_refusals(self, meta):
+        if self.refusal_epoch != meta["window_epoch"]:
+            self.refused_ops.clear()
+            self.refusal_epoch = meta["window_epoch"]
+            self.expire_ops = True
+
     def window(self):
         meta = self.store.get("meta")["value"]
-        return {"epoch": meta["window_epoch"], "from": 0, "to": WINDOW, "used": meta["window_count"]}
+        return {"epoch": meta["window_epoch"], "from": 0, "to": WINDOW,
+                "used": meta["window_count"] + self._fence_count(meta["window_epoch"])}
 
     def _bucket(self, principal, op):
         return "ops/" + str(int(digest([principal, op])[:8], 16) % OP_BUCKETS)
@@ -299,6 +316,8 @@ class Coordinator:
             if not self.current:
                 raise CoordinationError("unavailable", "inbox owner was replaced")
             work = Working(self, archive=archive)
+            meta = work.get("meta")
+            self._sync_refusals(meta)
             saved = self._cached(work, principal, op)
             if saved:
                 if saved["fingerprint"] != fingerprint:
@@ -310,9 +329,8 @@ class Coordinator:
                                                 {"cached": True, "incomplete": True})
                     raise CoordinationError(refusal["kind"], refusal["message"], refusal["data"])
                 return self.operation(principal, op)
-            meta = work.get("meta")
-            if not op.startswith(meta["window_epoch"] + ":"):
-                raise CoordinationError("expired_operation", "operation is outside its window; inspect, never recreate")
+            if not op.startswith(meta["window_epoch"] + ":") or digest([principal, op]) in self.refused_ops:
+                raise CoordinationError("expired_operation", "operation is outside its window or fenced; inspect, never recreate")
             # Bound even an adversarial concentration in one hash bucket. Closing
             # the old epoch cannot make forgotten operation IDs admissible again.
             bucket = work.get(self._bucket(principal, op), {})
@@ -345,6 +363,7 @@ class Coordinator:
                 write_control = result.pop("_control", control)
                 self._cache_operation(work, command, principal, op, fingerprint, result)
                 work.commit(control=write_control, normal=normal)
+                self._sync_refusals(work.get("meta"))
             except (PolicyError, StoreError) as error:
                 if isinstance(error, StoreError) and error.kind not in ("quota", "too_large", "invalid", "conflict", "io"):
                     if uncertain and error.kind in ("durability_unconfirmed", "indeterminate", "timeout"):
@@ -369,30 +388,34 @@ class Coordinator:
                                   {"refusal": failure["kind"]}, compact=False)
             try:
                 work.commit(control=True, refusal=True)
+                self._sync_refusals(work.get("meta"))
                 return failure
             except (PolicyError, StoreError) as error:
                 if error.kind != "quota":
                     self.current = False
                     self.permits.clear()
                     raise
-        # No result slot: report the real refusal live, but first close its epoch
-        # durably. The refused ID can never become an admission after a grant or
-        # capacity change. Old result caches may expire; unresolved evidence lives
-        # in message/external records, not these result buckets.
+        # Fence only this refused ID: an ungranted flood cannot invalidate an
+        # unrelated owner's freshly fetched epoch. No eviction within an epoch;
+        # bootstrap rotates durably before admitting anything after restart.
         work = Working(self)
         meta = work.get("meta")
-        meta["window_epoch"], meta["window_count"] = nonce("w:"), 0
-        work.put("meta", meta)
-        for key in work.rows:
-            if key.startswith("ops/"):
-                work.delete(key)
-        try:
-            work.commit(control=True)
-        except (PolicyError, StoreError):
-            self.current = False
-            self.permits.clear()
-            raise
-        return dict(failure, data=dict(failure["data"], uncached=True, window=self.window()))
+        self._sync_refusals(meta)
+        self.refused_ops.add(digest([principal, op]))
+        if meta["window_count"] + len(self.refused_ops) >= WINDOW:
+            meta["window_epoch"], meta["window_count"] = nonce("w:"), 0
+            work.put("meta", meta)
+            for key in work.rows:
+                if key.startswith("ops/"):
+                    work.delete(key)
+            try:
+                work.commit(control=True)
+            except (PolicyError, StoreError):
+                self.current = False
+                self.permits.clear()
+                raise
+            self._sync_refusals(meta)
+        return dict(failure, data=dict(failure["data"], uncached=True, fenced=True, window=self.window()))
 
     @staticmethod
     def _bounded_refusal(error):
@@ -419,7 +442,7 @@ class Coordinator:
         bucket[digest([principal, op])] = {"fingerprint": fingerprint, "result": cached, "window": meta["window_epoch"]}
         work.put(key, bucket)
         meta["window_count"] += 1
-        if meta["window_count"] >= WINDOW:
+        if meta["window_count"] + self._fence_count(meta["window_epoch"]) >= WINDOW:
             meta["window_epoch"], meta["window_count"] = nonce("w:"), 0
         work.put("meta", meta)
 
@@ -1710,17 +1733,29 @@ class Coordinator:
         return changed_any
 
     def _safe_maintain(self):
-        try:
-            self.maintenance()
-            self.maintenance_error = None
-        except (StoreError, PolicyError) as error:
-            self.maintenance_error = {"kind": getattr(error, "kind", "unknown"), "message": str(error)[:512]}
+        with self.lock:
+            try:
+                self.maintenance()
+                self.maintenance_error = None
+            except (StoreError, PolicyError) as error:
+                self.maintenance_error = {"kind": getattr(error, "kind", "unknown"), "message": str(error)[:512]}
 
     def maintenance(self):
         """Bound decided history; never discard unresolved evidence or reopen intent."""
         if not self.current:
             return
         work = Working(self)
+        epoch = work.get("meta")["window_epoch"]
+        if self.expire_ops:
+            # Separate bounded GC preserves the maximum atomic handover/scope
+            # batch when its successful decision closes a combined window.
+            for key, row in work.rows.items():
+                if len(work.changes) >= 30:
+                    break
+                if key.startswith("ops/"):
+                    retained = {k: v for k, v in row["value"].items() if v.get("window") == epoch}
+                    if retained != row["value"]:
+                        work.put(key, retained) if retained else work.delete(key)
         finals = []
         frozen = {record_key for name, row in work.rows.items() if name.startswith("archive/")
                   and row["value"].get("state") in ("frozen", "exporting", "exported", "partial")
@@ -1796,6 +1831,9 @@ class Coordinator:
             if key.startswith("result/") and key not in refs:
                 work.delete(key)
         work.commit(control=True)
+        if self.expire_ops:
+            self.expire_ops = any(key.startswith("ops/") and any(value.get("window") != epoch for value in row["value"].values())
+                                  for key, row in self.store.view().items())
 
     def _archive_frozen(self, key):
         return any(key in row["value"].get("frozen", {}) for name, row in self.store.view().items()

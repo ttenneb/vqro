@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 import test_coordination_engine as fixtures
 from coordination_policy import PolicyError
 from coordination_engine import Coordinator
@@ -34,7 +35,7 @@ class RecoveryCapacityTests(unittest.TestCase):
         self.assertEqual(result['state'], 'accepted')
         self.assertEqual([(target, operation) for target, operation, _ in f.ledger], [('r1', 'agent.interrupt')])
 
-    def test_saturated_normal_ledger_reports_cached_quota_before_and_after_window_roll(self):
+    def test_saturated_normal_ledger_reports_quota_before_and_after_combined_window_roll(self):
         f = fixtures.EngineTests(); f.setUp()
         f.resources['r2'] = fixtures.resource('r2')
         f.config['doc/agents/grants/senders'] = {'version': 1, 'value': {'who': '*', 'can': ['send:start'], 'on': '*'}}
@@ -61,19 +62,22 @@ class RecoveryCapacityTests(unittest.TestCase):
                              (str(caught.exception), f.engine._reservation(f.store.view()), f.engine.window()))
             return caught.exception
         epochs = {f.engine.window()['epoch']}
-        for phase in range(2):
-            for n in range(4):
-                principal, op = 'p:new-' + str(phase) + '-' + str(n), f.op()
-                error = refused(principal, op)
-                epochs.add(f.engine.window()['epoch'])
-                if error.data.get('uncached'):
-                    with self.assertRaises(PolicyError) as expired:
-                        f.engine.send({'op': op}, {'principal': principal})
-                    self.assertEqual(expired.exception.kind, 'expired_operation')
-                else:
-                    self.assertEqual(f.engine.operation(principal, op)['reason'], 'quota')
-                    refused(principal, op)
-        self.assertGreater(len(epochs), 1, 'uncached refusals close their operation epochs')
+        # Exercise a genuinely full combined window, not a rollover per refusal.
+        with patch('coordination_engine.WINDOW', f.engine.window()['used'] + 4):
+            for phase in range(2):
+                for n in range(4):
+                    principal, op = 'p:new-' + str(phase) + '-' + str(n), f.op()
+                    error = refused(principal, op)
+                    epochs.add(f.engine.window()['epoch'])
+                    if error.data.get('uncached'):
+                        self.assertTrue(error.data['fenced'])
+                        with self.assertRaises(PolicyError) as expired:
+                            f.engine.send({'op': op}, {'principal': principal})
+                        self.assertEqual(expired.exception.kind, 'expired_operation')
+                    else:
+                        self.assertEqual(f.engine.operation(principal, op)['reason'], 'quota')
+                        refused(principal, op)
+        self.assertGreater(len(epochs), 1, 'a full combined window closes its epoch')
         self.assertEqual(len(f.ledger), native_count)
         self.assertTrue(f.engine.current)
         self.assertIsNone(f.engine.maintenance_error)
