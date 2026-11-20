@@ -39,6 +39,8 @@ fn reused_native_id_never_reuses_standard_identity_or_accepts_old_revision(){
     assert_eq!(registry.claim(&old,1,&json!({"value":true}),&old_entity).err().unwrap().kind,"stale");
     assert_eq!(registry.claim(&new,2,&json!({"value":true}),&value).err().unwrap().kind,"stale");
     assert!(registry.would_cancel_another(&old,&json!("native")));
+    let mut timed=row("confirm");timed["timeout"]=json!(5);
+    let Incoming::Cancel{replaced,..}=registry.observe(&timed)else{panic!("timed replacement");};assert_eq!(replaced,Some(new));
 }
 #[test]
 fn timed_unknown_oversized_and_excess_dialogs_cancel_without_approval(){

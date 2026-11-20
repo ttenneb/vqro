@@ -28,6 +28,11 @@ Installed Pi1 `dist/modes/rpc/rpc-mode.js:40-88,175-196,632-645` is the source e
 - UI answers have no ACK and remain `dispatched`. A later get_state read on the same pipe can fence the native
   synchronous response-map update; that is never reported as handled versus already cancelled.
 - notify/setStatus/setWidget/setTitle/set_editor_text are fire-and-forget UI, despite having IDs, not questions.
+- First valid answer claims the live request revision atomically. No-write failure can release a claim; an
+  uncertain write cannot. Reconnect/epoch changes expire unverifiable pending dialogs and cancel once.
+- Facts summaries carry params up to2KiB; larger params mark the summary incomplete/Cancel-only, while the full
+  request stays in items. Confirm messages and editor prefill/multiline must be displayed before approval.
+  K3's corresponding renderer fix is63da208 (not yet merged at this checkpoint).
 
 ## Native queue limits
 Pi1 `agent-session.js:709-715,2046-2053` emits/clears text arrays. Previews are native observations with null IDs;
@@ -43,5 +48,13 @@ kept as bounded `_control` observations keyed by their returned operation ID, wi
 Native JSONL/write budget1MiB,32 pending native calls,64KiB stderr tail. Input768KiB/32 blocks. Item journal128KiB,
 512 entities/512KiB aggregate,64KiB wire records,1MiB extra snapshot buffer; four viewers. Receipts retain256
 completed plus active native calls; no claimed persistent idempotency key. End evidence is fenced through gone and
-a scoped acknowledged read before provider teardown. Additional request/config bounds will be recorded with their
-implementation and tests, not promised here.
+a scoped acknowledged read before provider teardown. Requests: eight pending dialogs,16KiB each; at most16
+unconfirmed automatic cancellations and24 UI control/fence tasks. Cancellation-control overflow fails closed by
+stopping the owned child, not by approving or silently dropping a question. Config bounds remain pending.
+
+## Partial verification —1874677
+Native dialog normalizer/state and stop-coverage regressions pass; warning-free bridge build. Public
+C1/C2/D6/D13/R1/R3/R5/M1/L1 pass. L2 coverage/end checks passed, but its final effect-event count failed once;
+an unchanged-source repeat passes. K1 is diagnosing the observer-count assertion. R2 concurrent/stale first-valid
+checks and R4 unknown-method cancel-once execute, then report honest harness gaps for their unfinished branches.
+No full adapter certificate, installed-runtime regression, paid smoke, full gate or install is claimed.
