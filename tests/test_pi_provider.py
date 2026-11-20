@@ -508,6 +508,27 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.core.resources)
         self.assertIsNone(bridge.retirement_problem)
 
+    async def test_a_close_during_a_stalled_publication_does_not_stop_the_bridge_or_pi(self):
+        # A core stalled past a write deadline: control's finally closes the provider while the publisher's
+        # write is still flushing. The publisher must see an unavailable connection and the bridge reconnect;
+        # it must not end as cancelled, which run() treats as "bridge cancelled" and closes Pi.
+        bridge = await self.start()
+        provider = bridge.provider
+        stalled = asyncio.get_running_loop().create_future()
+        async def never_drains():
+            await stalled
+        provider.writer.drain = never_drains
+        bridge._facts = None  # the next publication upserts
+        bridge._publish_now.set()
+        await asyncio.sleep(.3)
+        self.assertTrue(provider._flushes, "the publisher must be blocked in a flush for this test to mean anything")
+        await provider.close()
+        await asyncio.sleep(.5)
+        self.assertFalse(bridge._publishing.done(), "publisher survived the closed connection")
+        self.assertFalse(self.task.done(), "bridge still running")
+        self.assertIsNone(bridge.pi.process.returncode, "Pi was not stopped")
+        self.assertFalse(bridge.connected)  # reported as a lost connection; control retries with backoff
+
     async def test_undeliverable_retirement_is_retried_once_then_reported(self):
         class Stub:
             def __init__(self, failures):

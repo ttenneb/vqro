@@ -229,6 +229,10 @@ class Provider:
                     # wait() rather than shield(): a cancelled caller leaves the flush running
                     # without logging its later outcome as unretrieved.
                     await asyncio.wait({flushed})
+                    if flushed.cancelled():
+                        # close() settled the flush, not this caller: a closed connection, never a
+                        # cancellation of a task that was not cancelled (it would end a bridge publisher).
+                        raise ProviderError("unavailable", "connection closed; delivery unknown")
                     flushed.result()
         except asyncio.CancelledError:
             # Only this caller loses its answer. Closing the connection here would also drop
@@ -506,9 +510,10 @@ class Provider:
             await asyncio.wait_for(asyncio.shield(self.writer.wait_closed()), 1)
         except (TimeoutError, OSError):
             pass
-        if self._flushes:
+        if self._flushes or self.writer.transport.get_write_buffer_size() > 0:
             # The peer did not take the queued lines within the close grace: abort the transport
-            # (delivery unknown, never resent) and settle the drains so nothing outlives close().
+            # (delivery unknown, never resent) and settle the drains so nothing outlives close(),
+            # including bytes below the high-water mark that no drain was waiting for.
             self.writer.transport.abort()
             flushes = list(self._flushes)
             for flush in flushes:

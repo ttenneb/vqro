@@ -520,6 +520,34 @@ class CancelledWriteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.pending_drains(), [])
         self.assertEqual(provider._outgoing, 0)
 
+    async def test_close_during_a_stalled_flush_is_unavailable_to_an_uncancelled_writer(self):
+        # close() (e.g. control's finally after another write timed out) settles the flush; the writer
+        # that was never cancelled must see a closed connection, not a CancelledError of its own.
+        provider, _, _ = await self.stalled()
+        publish = asyncio.create_task(provider.call("view.publish", {"view": "agent-r1", "content": {"blob": "x" * 900_000}}))
+        await asyncio.sleep(0.3)
+        self.assertFalse(publish.done())
+        await provider.close()
+        with self.assertRaises(ProviderError) as caught:
+            await publish
+        self.assertEqual(caught.exception.kind, "unavailable")
+        self.assertFalse(publish.cancelled())
+        self.assertEqual(self.pending_drains(), [])
+        self.assertEqual(provider._outgoing, 0)
+
+    async def test_close_aborts_bytes_left_below_the_high_water_mark(self):
+        provider, _, _ = await self.stalled()
+        # A 30 KB line on a stalled peer: the kernel takes a few KB, the rest stays in the transport buffer
+        # below the 64 KiB high-water mark, so drain() returns at once and no flush is pending at close().
+        publish = asyncio.create_task(provider.call("view.publish", {"view": "agent-r1", "content": {"blob": "x" * 30_000}}))
+        await asyncio.sleep(0.2)
+        transport = provider.writer.transport
+        self.assertEqual(self.pending_drains(), [])
+        self.assertGreater(transport.get_write_buffer_size(), 0)
+        await provider.close()
+        await asyncio.gather(publish, return_exceptions=True)
+        self.assertEqual(transport.get_write_buffer_size(), 0, "nothing left buffered after close()")
+
     async def test_close_settles_detached_flushes_when_the_peer_never_resumes(self):
         provider, _, _ = await self.stalled()
         await self.cancelled_publish(provider)
