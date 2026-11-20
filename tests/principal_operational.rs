@@ -7,7 +7,7 @@ async fn delegated_operational_callback_keeps_both_principals_without_global_his
     let root=tempfile::Builder::new().prefix("c2op").tempdir().unwrap();let state=root.path().join("st");std::fs::create_dir(&state).unwrap();
     let token_file=root.path().join("writer.token");
     let mut store=Store::open(state.join("workspace.json")).unwrap();
-    store.apply("fixture",None,vec![Op::Set{key:"extension/writer".into(),value:managed::spec(&token_file),expect:None}]).unwrap();drop(store);
+    store.apply("fixture",None,vec![Op::Set{key:"extension/writer".into(),value:managed::spec(&token_file),expect:None},Op::Set{key:"doc/principals/owner".into(),value:json!("owner"),expect:None}]).unwrap();drop(store);
     let socket=root.path().join("s");let core=server::start(socket.clone(),state.clone(),false,Backend::Fake,None).unwrap();
     let(owner,mut events,_)=client::connect_as(&socket,"owner","owner").await.unwrap();
     let(alice,_,_)=client::connect_as(&socket,"initiator","alice").await.unwrap();let(bob,_,_)=client::connect_as(&socket,"effective","bob").await.unwrap();
