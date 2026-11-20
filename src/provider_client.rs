@@ -321,6 +321,8 @@ pub enum StreamCommand {
 struct StreamState {
     ready: bool,
     closed: bool,
+    // Core close cancels output, but queued commands and the provider's final marker survive.
+    close_requested: bool,
     credit: u64,
     outstanding: u64,
     offset: u64,
@@ -395,7 +397,7 @@ impl ProviderStream {
                 wait.as_mut().enable();
                 {
                     let mut s = self.inner.state.lock().unwrap();
-                    if s.closed || self.shared.is_closed() {
+                    if s.closed || s.close_requested || self.shared.is_closed() {
                         return Err(ProviderError::new("unavailable", "stream ended"));
                     }
                     if s.ready && s.credit > 0 {
@@ -995,7 +997,7 @@ fn open_request(id: &Value, p: &Value, shared: &Arc<Shared>, config: &Arc<Config
     shared.stream_ids.lock().unwrap().begin(stream,config.max_streams.saturating_add(256))?;
     let (tx, rx) = mpsc::unbounded_channel();
     let inner = Arc::new(StreamInner {
-        state: Mutex::new(StreamState { ready: false, closed: false, credit: window, outstanding: 0, offset: 0, queued: 0 }),
+        state: Mutex::new(StreamState { ready: false, closed: false, close_requested: false, credit: window, outstanding: 0, offset: 0, queued: 0 }),
         changed: Notify::new(),
         wire: tokio::sync::Mutex::new(()),
         commands: Mutex::new(Some(tx)),
@@ -1016,6 +1018,7 @@ fn notification(method: &str, p: &Value, shared: &Arc<Shared>, config: &Arc<Conf
     }
     let Some(sid) = p["stream"].as_u64() else { return Err("protocol error: stream id required".into()) };
     let Some(inner) = shared.streams.lock().unwrap().get(&sid).cloned() else { return Ok(()) }; // closed or unknown: ignored
+    if inner.state.lock().unwrap().close_requested { return Ok(()) }
     let reject = |e: ProviderError| {
         let line = json!({"jsonrpc": "2.0", "method": "stream.error", "params": {"generation": shared.generation(),
             "stream": sid, "error": {"kind": e.kind, "message": e.message}, "outcome": "rejected"}});
@@ -1067,6 +1070,7 @@ fn notification(method: &str, p: &Value, shared: &Arc<Shared>, config: &Arc<Conf
     };
     let tx = inner.commands.lock().unwrap().clone();
     let Some(tx) = tx else { return Ok(()) };
+    let closing = command == StreamCommand::Close;
     {
         let mut s = inner.state.lock().unwrap();
         if command != StreamCommand::Close && s.queued >= config.stream_commands {
@@ -1075,8 +1079,10 @@ fn notification(method: &str, p: &Value, shared: &Arc<Shared>, config: &Arc<Conf
             return Ok(());
         }
         s.queued += 1;
+        if closing { s.close_requested = true; }
     }
     let _ = tx.send(command);
+    if closing { inner.changed.notify_waiters(); }
     Ok(())
 }
 

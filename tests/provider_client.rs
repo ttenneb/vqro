@@ -43,11 +43,16 @@ fn caps() -> Map<String, Value> {
 
 /// A registered provider (generation 7, window 10) and the fake core's end.
 async fn registered() -> (Provider, UnboundedReceiver<Request>, Core) {
+    registered_with_stream_limit(None).await
+}
+
+async fn registered_with_stream_limit(limit: Option<usize>) -> (Provider, UnboundedReceiver<Request>, Core) {
     let (a, b) = tokio::io::duplex(1 << 20);
     let (r, w) = tokio::io::split(b);
     let mut core = Core { r: BufReader::new(r), w };
     let mut config = Config::new("tmux@test", "inst-1", caps());
     config.extension = Some("tmux".into());
+    if let Some(limit) = limit { config.max_streams = limit; }
     let connect = tokio::spawn(Provider::connect(a, config));
     let hello = core.recv().await;
     assert_eq!(hello["method"], "hello");
@@ -282,6 +287,46 @@ async fn streams_wait_for_open_reply_and_credit_with_contiguous_offsets() {
     assert_eq!(s.next().await, Some(StreamCommand::Input(b"crossed".to_vec())), "input that crossed the gap still arrives");
     assert_eq!(s.next().await, Some(StreamCommand::Close));
     core.nothing().await;
+}
+
+#[tokio::test]
+async fn core_close_unblocks_snapshot_output_preserves_commands_and_reclaims_budget() {
+    let (_provider, mut rx, mut core) = registered_with_stream_limit(Some(1)).await;
+    let open = |id, stream| json!({"jsonrpc":"2.0", "id":id, "method":"stream.open", "params":{
+        "generation":7, "stream":stream, "ref":"%1", "incarnation":"", "cols":80, "rows":24,
+        "history_lines":0, "window_bytes":4}});
+    core.send(open(1, 1)).await;
+    let Some(Request::Open(request)) = rx.recv().await else { panic!("open") };
+    let mut stream = request.respond(Ok(Initial::None)).unwrap();
+    assert_eq!(core.recv().await["result"]["initial"], "none");
+    let sending = tokio::spawn(async move {
+        // The SDK transports bytes; this incomplete snapshot models an item producer's stalled
+        // first paint without depending on the separately developed items-channel support.
+        let error = stream.send(b"{\"op\":\"snapshot\",\"phase\":\"begin\"}\n").await.unwrap_err();
+        assert_eq!(error.kind, "unavailable");
+        assert_eq!(stream.offset(), 4, "close must not invent unsent output offsets");
+        assert_eq!(stream.next().await, Some(StreamCommand::Input(b"before-close".to_vec())));
+        assert_eq!(stream.next().await, Some(StreamCommand::Close));
+        stream.close(json!({"reason":"closed"})).await.unwrap();
+    });
+    let first = core.recv().await;
+    assert_eq!(first["method"], "stream.data");
+    assert_eq!(B64.decode(first["params"]["data"].as_str().unwrap()).unwrap(), b"{\"op");
+    assert!(!sending.is_finished(), "the remaining snapshot requires credit");
+    core.send(open(2, 2)).await;
+    assert_eq!(core.recv().await["error"]["data"]["kind"], "overloaded", "one-stream budget must be full");
+    core.send(json!({"jsonrpc":"2.0", "method":"stream.input", "params":{
+        "generation":7, "stream":1, "data":B64.encode(b"before-close")}})).await;
+    core.send(json!({"jsonrpc":"2.0", "method":"stream.close", "params":{"generation":7, "stream":1}})).await;
+    tokio::time::timeout(Duration::from_secs(2), sending).await.expect("core close wakes a credit-blocked send").unwrap();
+    let closed = core.recv().await;
+    assert_eq!(closed["method"], "stream.closed", "explicit close marker is not suppressed");
+    assert_eq!(closed["params"]["reason"]["reason"], "closed");
+    core.send(open(3, 3)).await;
+    let Some(Request::Open(request)) = rx.recv().await else { panic!("stream budget was not reclaimed") };
+    let reopened = request.respond(Ok(Initial::None)).unwrap();
+    assert_eq!(core.recv().await["result"]["initial"], "none");
+    drop(reopened);
 }
 
 #[tokio::test]
