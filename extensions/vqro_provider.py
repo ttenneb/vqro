@@ -146,6 +146,7 @@ class Provider:
         self._pending, self._tasks, self._workers = {}, set(), set()
         self._sequence = 0
         self._outgoing = 0
+        self._flushes = set()  # drains owned by the provider: bounded by their write deadline, settled by close()
         self._writer_lock = asyncio.Lock()
         self._closed = asyncio.Event()
         self._reader_task = None
@@ -221,10 +222,14 @@ class Provider:
                     # write() queued the whole line, so framing is intact whatever happens to
                     # this caller. The flush outlives a cancelled caller and keeps the line
                     # charged to the outgoing bound until the transport has taken it.
-                    flushed = asyncio.ensure_future(self.writer.drain())
+                    flushed = asyncio.ensure_future(self._flush(deadline))
+                    self._flushes.add(flushed)
                     charged = False
                     flushed.add_done_callback(lambda done, n=len(wire): self._flushed(done, n))
-                    await asyncio.shield(flushed)
+                    # wait() rather than shield(): a cancelled caller leaves the flush running
+                    # without logging its later outcome as unretrieved.
+                    await asyncio.wait({flushed})
+                    flushed.result()
         except asyncio.CancelledError:
             # Only this caller loses its answer. Closing the connection here would also drop
             # later records, such as a bridge's resource.gone after its publisher was
@@ -237,7 +242,14 @@ class Provider:
             if charged:
                 self._outgoing -= len(wire)
 
+    async def _flush(self, deadline):
+        # The write's own deadline still bounds the flush after its caller is gone: a peer that
+        # stops reading fails the connection exactly as an uncancelled writer would.
+        async with asyncio.timeout_at(deadline):
+            await self.writer.drain()
+
     def _flushed(self, done, size):
+        self._flushes.discard(done)
         self._outgoing -= size
         if not done.cancelled() and done.exception() is not None:
             self._disconnect("writer failed; delivery unknown")
@@ -489,6 +501,16 @@ class Provider:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         try:
-            await asyncio.wait_for(self.writer.wait_closed(), 1)
+            # Shielded: a timed-out wait must not cancel the transport's shared close future,
+            # which would make every later wait_closed() (a second close) raise CancelledError.
+            await asyncio.wait_for(asyncio.shield(self.writer.wait_closed()), 1)
         except (TimeoutError, OSError):
             pass
+        if self._flushes:
+            # The peer did not take the queued lines within the close grace: abort the transport
+            # (delivery unknown, never resent) and settle the drains so nothing outlives close().
+            self.writer.transport.abort()
+            flushes = list(self._flushes)
+            for flush in flushes:
+                flush.cancel()
+            await asyncio.gather(*flushes, return_exceptions=True)

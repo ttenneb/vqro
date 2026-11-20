@@ -428,9 +428,11 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
 
 class CancelledWriteTests(unittest.IsolatedAsyncioTestCase):
     """A caller cancelled while its line waits in drain() (a busy core) must not close the provider:
-    the line is already queued whole, and later records (a bridge's resource.gone) must still arrive."""
+    the line is already queued whole, and later records (a bridge's resource.gone) must still arrive.
+    The detached flush stays owned and bounded: its write deadline still applies, and close() settles it."""
 
-    async def test_cancel_in_drain_keeps_the_connection_and_later_records(self):
+    async def stalled(self, limits=None):
+        """A core that answers hello/register, then stops reading (set `reading` to resume)."""
         left, right = socket.socketpair()
         left.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
         right.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
@@ -467,31 +469,68 @@ class CancelledWriteTests(unittest.IsolatedAsyncioTestCase):
                 await writer.drain()
 
         task = asyncio.create_task(core())
-        provider = Provider("pi-x", "instance", {}, role="runtime", token="t")
-        try:
-            await provider.connect(sock=left)
-            big = {"blob": "x" * 900_000}
-            publish = asyncio.create_task(provider.call("view.publish", {"view": "agent-r1", "content": big}))
-            await asyncio.sleep(0.3)
-            self.assertFalse(publish.done(), "the write must be blocked in drain for this test to mean anything")
-            publish.cancel()  # Bridge.run() cleanup cancels its publisher
-            await asyncio.gather(publish, return_exceptions=True)
-            self.assertIsNone(provider.failure)
-            self.assertFalse(provider._closed.is_set())
-            gone = asyncio.create_task(provider.gone("agent", why={"reason": "exited", "exit_code": 23}))
-            reading.set()
-            await asyncio.wait_for(gone, 5)
-            while not any(r.get("method") == "resource.gone" for r in rows):
-                await asyncio.sleep(0.01)
-            methods = [r.get("method") for r in rows]
-            self.assertEqual(methods[-2:], ["view.publish", "resource.gone"], "whole, in order, nothing lost")
-            self.assertEqual(rows[-2]["params"]["content"], big)
-            self.assertEqual(provider._outgoing, 0)
-        finally:
+        provider = Provider("pi-x", "instance", {}, role="runtime", token="t", limits=limits)
+
+        async def cleanup():
             await provider.close()
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-            writer.close()
+            writer.transport.abort()
+        self.addAsyncCleanup(cleanup)
+        await provider.connect(sock=left)
+        return provider, rows, reading
+
+    @staticmethod
+    def pending_drains():
+        return [t for t in asyncio.all_tasks() if not t.done() and t is not asyncio.current_task()
+                and getattr(t.get_coro(), "__qualname__", "") in ("StreamWriter.drain", "Provider._flush")]
+
+    async def cancelled_publish(self, provider):
+        big = {"blob": "x" * 900_000}
+        publish = asyncio.create_task(provider.call("view.publish", {"view": "agent-r1", "content": big}))
+        await asyncio.sleep(0.3)
+        self.assertFalse(publish.done(), "the write must be blocked in drain for this test to mean anything")
+        publish.cancel()  # Bridge.run() cleanup cancels its publisher
+        await asyncio.gather(publish, return_exceptions=True)
+        return big
+
+    async def test_cancel_in_drain_keeps_the_connection_and_later_records(self):
+        provider, rows, reading = await self.stalled()
+        big = await self.cancelled_publish(provider)
+        self.assertIsNone(provider.failure)
+        self.assertFalse(provider._closed.is_set())
+        gone = asyncio.create_task(provider.gone("agent", why={"reason": "exited", "exit_code": 23}))
+        reading.set()
+        await asyncio.wait_for(gone, 5)
+        while not any(r.get("method") == "resource.gone" for r in rows):
+            await asyncio.sleep(0.01)
+        methods = [r.get("method") for r in rows]
+        self.assertEqual(methods[-2:], ["view.publish", "resource.gone"], "whole, in order, nothing lost")
+        self.assertEqual(rows[-2]["params"]["content"], big)
+        self.assertEqual(provider._outgoing, 0)
+
+    async def test_a_detached_flush_keeps_its_write_deadline(self):
+        # The peer never resumes: the cancelled caller's flush still ends at the write deadline and
+        # fails the connection, as an uncancelled writer would; its charge is released.
+        provider, _, _ = await self.stalled(Limits(deadline=0.8))
+        await self.cancelled_publish(provider)
+        self.assertIsNone(provider.failure)
+        await asyncio.wait_for(provider.wait_closed(), 2)
+        self.assertEqual(provider.failure, "writer failed; delivery unknown")
+        self.assertEqual(self.pending_drains(), [])
+        self.assertEqual(provider._outgoing, 0)
+
+    async def test_close_settles_detached_flushes_when_the_peer_never_resumes(self):
+        provider, _, _ = await self.stalled()
+        await self.cancelled_publish(provider)
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        await provider.close()
+        self.assertLess(loop.time() - started, 2.5, "close() stays bounded")
+        self.assertEqual(self.pending_drains(), [], "no drain outlives close()")
+        self.assertEqual(provider._outgoing, 0)
+        self.assertTrue(provider.writer.transport.is_closing())
+        self.assertEqual(provider.writer.transport.get_write_buffer_size(), 0)
 
 
 if __name__ == "__main__":
