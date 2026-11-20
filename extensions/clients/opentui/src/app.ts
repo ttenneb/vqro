@@ -1045,7 +1045,11 @@ function drawValue(a: App, buf: OptimizedBuffer, area: Rect, key: string, value:
   if (!listDetailOn(value, st.page)) { drawList(a, buf, body, key, value, focused, false); a.listed.delete(`${key}#detail`); return; }
   const wide = body.w >= 96;
   const rows = rowsOf(value, st);
-  const listH = Math.max(1, Math.min(Math.floor(body.h / 2), rows.reduce((h, r) => h + rowHeight(r, body.w), 1)));
+  // The list's chrome above its rows: the facet/sort line(s), a column header and the rule below them.
+  const facetH = facetLine(a, null, { ...body, h: 3 }, body.y, value, st);
+  const headerH = (m.declared(value, st.page, "columns") ?? []).some((c: Json) => typeof c?.label === "string") ? 1 : 0;
+  const chrome = facetH + headerH + (facetH + headerH > 0 ? 1 : 0);
+  const listH = Math.max(1, Math.min(Math.floor(body.h / 2), rows.reduce((h, r) => h + rowHeight(r, body.w), 1) + chrome));
   const lw = Math.max(36, Math.floor((body.w * 2) / 5));
   const list: Rect = wide ? { ...body, w: lw } : { ...body, h: listH };
   const detail: Rect = wide ? { x: body.x + lw + 1, y: body.y, w: body.w - lw - 1, h: body.h } : { x: body.x, y: body.y + listH + 1, w: body.w, h: body.h - listH - 1 };
@@ -1179,7 +1183,7 @@ function cycleSort(value: Json, st: PState): number | null {
 
 /** The facet/sort line (features facets, sort): `Show: All n · value n …  Sort: label ▾`, clickable, wrapping onto
  *  at most three lines. Returns its height. */
-function facetLine(a: App, buf: OptimizedBuffer, area: Rect, y0: number, value: Json, st: PState): number {
+function facetLine(a: App, buf: OptimizedBuffer | null, area: Rect, y0: number, value: Json, st: PState): number {
   const p = a.pal;
   const counts = m.facetCounts(value, st.page, st.filter, st.facets, FEATURES);
   const label = m.sortLabel(value, st.page, st.sort);
@@ -1190,8 +1194,10 @@ function facetLine(a: App, buf: OptimizedBuffer, area: Rect, y0: number, value: 
     const w = width(s);
     if (x > area.x && x + w > area.x + area.w) { x = area.x; y += 1; }
     if (y >= limit) return false;
-    text(buf, x, y, fit(s, area.x + area.w - x), fg, bg);
-    if (act) a.hits.push({ rect: { x, y, w, h: 1 }, act });
+    if (buf) {  // null: measure only
+      text(buf, x, y, fit(s, area.x + area.w - x), fg, bg);
+      if (act) a.hits.push({ rect: { x, y, w, h: 1 }, act });
+    }
     x += w;
     return true;
   };

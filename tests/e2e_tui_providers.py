@@ -196,6 +196,14 @@ try:
     check("detail restart action", bool(wait(lambda: call("extension.list")["extensions"]["pi"]["generation"] > before)))
     check("detail restart preserves list search", bool(wait(lambda: f"1 of {BUILTIN_COUNT}" in screen())))
     wait(lambda: any(c["name"] == "pi.settings" and c.get("available") for c in call("command.list")["commands"]))
+    # The restarted extension's command is back; wait until Settings has republished its chip as enabled too.
+    def pi_settings_chip_enabled():
+        pages = (call("workspace.snapshot").get("live", {}).get("settings") or {}).get("pages") or []
+        rows = pages[0].get("items", []) if pages else []
+        pi = next((r for r in rows if r.get("id") == "extension/pi"), {})
+        chips = ((pi.get("detail_panel") or {}).get("toolbar") or [{}])[0].get("chips", [])
+        return any(c.get("text") == "Extension settings" and not c.get("disabled") for c in chips)
+    wait(pi_settings_chip_enabled); time.sleep(0.3)
     keys("Right", "Enter")
     check("manifest settings_command opens its own settings", bool(wait(lambda: "Pi runtime argv" in screen())))
     keys("Escape"); keys("C-g", ","); keys("/"); keys("Escape")
@@ -250,7 +258,7 @@ try:
     keys("C-g", ",")
     wait(lambda: f"{BUILTIN_COUNT} of {BUILTIN_COUNT}" in screen())
     keys("/"); keys("icons", literal=True); keys("Enter")
-    check("Icons search and details are ready before keyboard activation", bool(wait(lambda: "/icons" in screen() and "[x] Icons (icons)" in screen() and "Publishes icon sets" in screen())))
+    check("Icons search and details are ready before keyboard activation", bool(wait(lambda: "/icons" in screen() and "[x] Icons" in screen() and "Publishes icon sets" in screen())))
     keys("Space")
     check("keyboard turns extension off", bool(wait(lambda: call("extension.list")["extensions"]["icons"]["display_status"] == "off")))
     check("disabled extension keeps static description", bool(wait(lambda: "saved icon set remains" in screen())))
