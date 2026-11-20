@@ -6,7 +6,8 @@ call is appended to the log given as argv[1] (the test oracle). `tests/fixtures/
 
 `take {accept: [...], max_bytes}` (as K2: default `["text"]` and 32 KiB) names the block types a plugin can insert and
 the largest content it takes (compact UTF-8 JSON bytes); other records stay held `unsupported_content` or
-`too_large_for_consumer`. `max_bytes` is ignored while `fixture.fault {no_max_bytes}` is set (an older inbox). A lost
+`too_large_for_consumer`. `max_bytes` is ignored while `fixture.fault {no_max_bytes}` is set (an older inbox); `{window_fail}` makes
+`coord.inbox.window` fail. A lost
 take reply is inspected with `coord.inbox.op {op}`: claims, never content. `agents.status` records tier-1 status reports (K3's command, not in this inbox).
 """
 import json, os, sys, threading, time
@@ -79,7 +80,11 @@ def command(name, title):
     return ext.command(name, title)
 
 
-command("coord.inbox.window", "window")(lambda args: dict(WINDOW))
+@command("coord.inbox.window", "window")
+def window(args):
+    if FAULT.get("window_fail"):
+        raise VqroError("test: window unavailable", "unavailable")
+    return dict(WINDOW)
 
 
 @command("coord.inbox.op", "inspect an op: a take returns its claims, never content")

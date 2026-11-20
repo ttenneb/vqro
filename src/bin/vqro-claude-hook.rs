@@ -140,6 +140,7 @@ mod unix {
         /// repeat must be recognised (reports, a lost take). An `expired_operation` created nothing, so one retry
         /// under a fresh epoch is safe.
         fn mutate(&mut self, ctx: &Ctx, name: &str, mut args: Value, suffix: &str) -> Result<Value, String> {
+            self.last_op.clear(); // set only once this mutation is actually sent
             for attempt in 0..2 {
                 let mut epoch = ctx.with_state(|s| s.get("epoch").as_str().map(String::from)).unwrap_or_default();
                 if epoch.is_empty() {
@@ -157,7 +158,10 @@ mod unix {
                         }
                         return Ok(reply);
                     }
-                    Err(e) if attempt == 0 && e.starts_with("expired_operation") => ctx.with_state(|s| s.set("epoch", json!(""))),
+                    Err(e) if attempt == 0 && e.starts_with("expired_operation") => {
+                        self.last_op.clear(); // refused: it created nothing
+                        ctx.with_state(|s| s.set("epoch", json!("")));
+                    }
                     Err(e) => return Err(e),
                 }
             }
@@ -354,9 +358,17 @@ mod unix {
     fn session_start(ctx: &Ctx, core: &mut Core) {
         let source = ctx.input.get("source").and_then(Value::as_str).unwrap_or("startup");
         let mut existing = ctx.with_state(|s| s.get("consumer").as_str().map(String::from));
-        // The agent's latest session: /clear starts a new session id (2.1.329, claude_code_tui I6).
+        // The latest session of this Claude Code process (the hooks' parent) in this agent: /clear starts a new
+        // session id (2.1.329, claude_code_tui I6). Only the same process carries a consumer over: another session in
+        // the same agent (a second Claude Code) never shares it.
+        let process = std::os::unix::process::parent_id();
         let pointer = ctx.dir.join(format!("agent-{}.session", sanitize(&ctx.agent)));
-        let previous = fs::read_to_string(&pointer).ok().filter(|p| !p.is_empty() && *p != ctx.session);
+        let mark = json!({"session": ctx.session, "process": process}).to_string();
+        let previous = fs::read_to_string(&pointer).ok()
+            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+            .filter(|p| p.get("process").and_then(Value::as_u64) == Some(u64::from(process)))
+            .and_then(|p| p.get("session").and_then(Value::as_str).map(String::from))
+            .filter(|p| !p.is_empty() && *p != ctx.session);
         // Compaction and /clear keep the process, its consumer and its window: not a restart. Under a new session id
         // they are carried over; that session's open hand-offs stay `supplied` (their context was cleared).
         if matches!(source, "compact" | "clear") {
@@ -375,13 +387,13 @@ mod unix {
                 }
             }
             if existing.is_some() {
-                ctx.log("session_continued", json!({"source": source, "from_session": previous}));
-                write_private(&pointer, &ctx.session);
+                ctx.log("session_continued", json!({"source": source, "from_session": previous, "process": process}));
+                write_private(&pointer, &mark);
                 return;
             }
         }
         let consumer = format!("claude:{}:{}", ctx.session, random_hex());
-        ctx.log("session", json!({"consumer": consumer, "source": source,
+        ctx.log("session", json!({"consumer": consumer, "source": source, "process": process,
             "messaging_socket": std::env::var("CLAUDE_CODE_MESSAGING_SOCKET").ok(),
             "entrypoint": std::env::var("CLAUDE_CODE_ENTRYPOINT").ok()}));
         ctx.with_state(|s| s.set("epoch", json!("")));
@@ -396,7 +408,7 @@ mod unix {
             s.set("open", json!([]));
             s.set("stop_continuations", json!(0));
         });
-        write_private(&pointer, &ctx.session);
+        write_private(&pointer, &mark);
     }
 
     /// Replace a small private file atomically (0600).
@@ -421,16 +433,14 @@ mod unix {
         let consumer = ctx.with_state(|s| s.get("consumer").as_str().map(String::from))?;
         // `accept` names the block types context insertion carries without loss; the inbox keeps others held
         // (`unsupported_content`).
-        // `max_bytes` keeps records this plugin cannot hand over whole held (`too_large_for_consumer`) instead of
-        // claiming and releasing them at every point. `narrow`: an inbox without that filter returned a record that
-        // did not fit; take one at a time until the head changes, so a stuck head costs one take and one release.
-        let narrow = ctx.with_state(|s| s.get("narrow").as_bool().unwrap_or(false));
-        let limit = if narrow { 1 } else { TAKE_LIMIT };
-        let args = json!({"agent": ctx.agent, "consumer": consumer, "at": at, "limit": limit, "accept": CONTENT, "max_bytes": RECORD_MAX});
+        // `max_bytes` (required) keeps records this plugin cannot hand over whole held (`too_large_for_consumer`):
+        // they are never claimed, so they never block later mail.
+        let args = json!({"agent": ctx.agent, "consumer": consumer, "at": at, "limit": TAKE_LIMIT, "accept": CONTENT, "max_bytes": RECORD_MAX});
         let suffix = format!("{}:take:{}", ctx.session, random_hex());
         let reply = match core.mutate(ctx, "inbox.take", args, &suffix) {
             Ok(r) => r,
-            Err(e) if uncertain(&e) => {
+            // Uncertain only if the take itself was sent (a failed window fetch sent nothing).
+            Err(e) if uncertain(&e) && !core.last_op.is_empty() => {
                 let op = core.last_op.clone();
                 recover_take(ctx, &op, &e);
                 return None;
@@ -456,21 +466,21 @@ mod unix {
             // No nonce, no hand-off: a guessable reference would let content forge evidence.
             let nonce = nonce();
             let piece = nonce.as_ref().map(|n| render(r, n)).unwrap_or_default();
-            if nonce.is_none() || !insertable || full || text.len() + piece.len() > MAX_CONTEXT {
-                full |= insertable; // keep order: nothing after a record that did not fit jumps ahead of it
-                let why = if nonce.is_none() { "no_randomness" } else if !insertable { "unsupported_content" } else { "context_limit" };
-                ctx.log("released", json!({"delivery": delivery, "why": why}));
+            // A record over max_bytes means the inbox ignored the filter: release just it and go on. It never blocks
+            // the records behind it (it fits no hand-off, so holding them back would starve them).
+            let size = r.get("content").map(|c| serde_json::to_vec(c).map(|v| v.len()).unwrap_or(usize::MAX)).unwrap_or(0);
+            let alone_too_big = size > RECORD_MAX || piece.len() > MAX_CONTEXT;
+            if nonce.is_none() || !insertable || alone_too_big || full || text.len() + piece.len() > MAX_CONTEXT {
+                // keep order among records that fit: nothing jumps ahead of one that only missed this batch
+                full |= insertable && nonce.is_some() && !alone_too_big;
+                let why = if nonce.is_none() { "no_randomness" } else if !insertable { "unsupported_content" }
+                    else if alone_too_big { "too_large_ignored_max_bytes" } else { "context_limit" };
+                ctx.log("released", json!({"delivery": delivery, "why": why, "bytes": size}));
                 report(ctx, core, &delivery, &r["claim"], "released");
                 continue;
             }
             text.push_str(&piece);
             taken.push((delivery, r["claim"].clone(), nonce.unwrap_or_default()));
-        }
-        // Narrow while the first record does not fit on its own; widen again once it does.
-        let stuck = taken.is_empty() && full;
-        if stuck != narrow {
-            ctx.log(if stuck { "narrowed" } else { "widened" }, json!({"head": records[0].get("delivery")}));
-            ctx.with_state(|s| s.set("narrow", json!(stuck)));
         }
         if taken.is_empty() {
             return None;

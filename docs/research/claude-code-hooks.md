@@ -140,8 +140,8 @@ did not change (an edit of a held record) would then never arrive. The wake cont
   - Quoting adds at most 3 bytes per line and a line costs at least 2 JSON bytes. Header fields are clipped to
     120 characters. So any record taken renders within the 9,000-character budget, even one that is all line breaks
     (tested).
-  - Against an inbox without `max_bytes`, a record that does not fit is released, and the plugin then takes one
-    record at a time until the head changes. A stuck head costs one take and one release per point, not the batch.
+  - `max_bytes` is required (K2 has it from ab310ac). If an inbox ignores it, a record that can never fit is released
+    alone and the records behind it are handed over at the same point: it never starves them.
 - **Context budget:** whole records only, up to 9,000 characters per hand-off. The rest are released in order and
   taken at later points.
 - **Content:** `take {accept: [...]}` (K2's filter). Claude accepts text; Pi accepts text and images. Other records
@@ -149,7 +149,11 @@ did not change (an edit of a held record) would then never arrive. The wake cont
 - **Compaction and `/clear`:**
   - `SessionStart` with these sources keeps the consumer and its window; it is not a restart.
   - Claude Code 2.1.329 gives `/clear` a **new session id** (verified in the real TUI, `claude_code_tui` I6). The hook
-    finds the agent's previous session through a per-agent pointer file and carries the consumer over.
+    finds the previous session through a per-agent pointer file that also records the Claude Code process (the hooks'
+    parent; it is also the pid in Claude Code's `cc-socks/<pid>.sock`). Only the same process carries the consumer
+    over. Another Claude Code in the same agent starts its own consumer (which fences the first: one per agent).
+  - An idle waiter armed before `/clear` stays alive and can wake the new session. Its hand-off is recorded in the old
+    session, whose transcript no longer grows, so it stays `supplied` and is never upgraded to `read`.
   - Hand-offs open in the cleared session stay `supplied` (their context is gone, so they are never `read`).
   - Mail keeps flowing in the new session (tested).
 - **Reconnects:**
