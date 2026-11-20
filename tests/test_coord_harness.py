@@ -32,13 +32,26 @@ STUB = textwrap.dedent("""\
 def alive(pid):
     try:
         os.kill(pid, 0)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):  # gone (a PermissionError means the pid now belongs to another user)
         return False
-    # A zombie is dead for our purposes (its parent has not reaped it yet).
+    # A zombie is dead for our purposes (its parent has not reaped it yet). The process can also exit between
+    # the check above and this read: reading /proc/<pid>/stat then fails with ESRCH or ENOENT, which is gone too.
     try:
-        return Path(f"/proc/{pid}/stat").read_text().split(") ", 1)[1][0] != "Z"
-    except (FileNotFoundError, IndexError):
+        return Path(f"/proc/{pid}/stat").read_text().split(") ", 1)[1][0] not in "ZX"
+    except (ProcessLookupError, FileNotFoundError, IndexError):
         return False
+
+
+def gone(pid, deadline):
+    """True once `pid` stays gone for two consecutive probes (an exiting process can briefly read as gone between
+    states), or False if it is still alive at the deadline."""
+    misses = 0
+    while time.time() < deadline:
+        misses = misses + 1 if not alive(pid) else 0
+        if misses >= 2:
+            return True
+        time.sleep(0.05)
+    return not alive(pid)
 
 
 class StartupFailureTests(unittest.TestCase):
@@ -65,19 +78,17 @@ class StartupFailureTests(unittest.TestCase):
             Harness(str(root), str(stub), inbox="fake", **kwargs)
         core, child = map(int, (root / "st" / "pids").read_text().split())
         deadline = time.time() + 5
-        while (alive(core) or alive(child)) and time.time() < deadline:
-            time.sleep(0.05)
-        return core, child
+        return gone(core, deadline), gone(child, deadline)
 
     def test_core_that_never_opens_its_socket_is_stopped_with_its_children(self):
         core, child = self.failed_start("silent", startup_s=1)
-        self.assertFalse(alive(core), "the core outlived a failed start")
-        self.assertFalse(alive(child), "a process the core started outlived a failed start")
+        self.assertTrue(core, "the core outlived a failed start")
+        self.assertTrue(child, "a process the core started outlived a failed start")
 
     def test_failure_after_the_socket_exists_stops_everything_too(self):
         core, child = self.failed_start("hello")
-        self.assertFalse(alive(core), "the core outlived a failed hello")
-        self.assertFalse(alive(child), "a process the core started outlived a failed hello")
+        self.assertTrue(core, "the core outlived a failed hello")
+        self.assertTrue(child, "a process the core started outlived a failed hello")
 
 
 if __name__ == "__main__":
