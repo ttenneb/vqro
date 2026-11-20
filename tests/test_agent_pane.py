@@ -505,6 +505,7 @@ class AgentPane(unittest.TestCase):
         items = pane["items"]
         self.assertEqual((pane["title"], pane["title_right"], pane["title_right_style"]), ("Pi r2 · ~/Projects/site", "● idle", "ok"))
         self.assertNotIn("toolbar", pane, "no top bar at all (the human, 17:00)")
+        self.assertEqual(self.core.entries["menu/agents.r2.pane"]["value"]["command"], "agents.pane", "⚙ also in the pane menu (D15)")
         gear = {"text": "", "icon": {"name": "settings", "text": "⚙"}, "command": "agents.pane", "args": {"resource": "r2"}}
         row = next(r for r in items if r.get("id") == "gear")
         self.assertEqual((row["chips"], row["pin"], "requires_absent" in row), ([gear], "bottom", False),

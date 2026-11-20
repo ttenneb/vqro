@@ -1483,6 +1483,9 @@ class Agents:
                                  ("send", "Send to agent"), ("pane", "Agent pane")):
                 entries[f"view/agents-{popup}-{rid}"] = {"kind": "panel", "title": f"{title} {rid}", "items": [
                     {"type": "text", "text": "Loading… (stays if the agents extension is not running)"}]}
+            # The ⚙ (view filters, settings, bridge terminal, stop) is also in the pane menu: recovery, D15.
+            entries["menu/agents."+rid+".pane"] = {"where": "pane", "label": "Pane options (⚙)…", "command": "agents.pane",
+                                                  "when": {"view": view(rid)}, "order": 98}
             entries["menu/agents."+rid+".stop"] = {"where": "pane", "label": "Stop agent…", "command": "agents.stop",
                                                   "when": {"view": view(rid)}, "order": 190}
             # Static (menus are workspace entries; no churn per disconnect): the command refuses connected agents.
