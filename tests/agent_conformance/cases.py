@@ -5,7 +5,8 @@ import json
 from pathlib import Path
 
 from .content import compare_content, examples
-from .results import CheckFailed, FixtureFailed, HarnessGap, NotDeclared, check, declared
+from .results import CheckFailed, FixtureFailed, HarnessGap, NotApplicable, NotDeclared, check, declared
+from .wire import ItemReducer, RpcError
 
 HANDLERS = {}
 
@@ -235,6 +236,31 @@ async def post_acceptance_failure(ctx):
     check(failed.get("lifecycle") != "ended", "turn failure incorrectly ended endpoint")
     check(result["outcome"] == "accepted", "earlier accepted input was retroactively rejected")
     ctx.evidence.append({"kind": "post_acceptance_error", "receipt": receipt, "completion": failed["completion"]})
+
+
+@case("C6")
+async def bounded_fact_summaries(ctx):
+    facts = await ctx.facts()
+    check(len(json.dumps(facts, ensure_ascii=False, separators=(",", ":")).encode()) <= 64 << 10,
+          "initial agent facts exceed64KiB")
+    respond = facts["caps"].get("agent.respond", {})
+    if "confirm" not in respond.get("methods", []):
+        raise HarnessGap("C6 non-confirm native facts-pressure fixture branch not yet implemented")
+    native_message = "C6-required-request-detail:" + "x" * 3072
+    _, request = await make_request(ctx, "confirm", message=native_message)
+    check(request.get("params", {}).get("message") == native_message,
+          "facts-pressure fixture did not preserve the actual native request detail", component="fixture")
+    fresh = await ctx.facts()
+    check(len(json.dumps(fresh, ensure_ascii=False, separators=(",", ":")).encode()) <= 64 << 10,
+          "agent facts exceeded64KiB under native request pressure")
+    summary = next(row for row in fresh.get("requests", []) if row.get("request") == request["request"])
+    if summary.get("params") != request.get("params"):
+        incomplete = summary.get("incomplete")
+        check(incomplete is True or (isinstance(incomplete, list) and "params" in incomplete),
+              "cut request facts silently looked empty/complete")
+    ctx.evidence.append({"kind": "bounded_facts", "fact_bytes": len(json.dumps(fresh).encode()),
+                         "native_detail_bytes": len(native_message.encode()), "summary": summary,
+                         "full_request_detail_preserved": True})
 
 
 @case("C7")
@@ -503,8 +529,33 @@ async def native_keys(ctx):
 
 @case("D9")
 async def consume_settings(ctx):
-    await caps(ctx, "agent.configure")
-    raise HarnessGap("consume-time setting transition matrix not yet implemented")
+    declaration = await caps(ctx, "agent.send")
+    modes = {name: value for name, value in declaration.get("modes", {}).items()
+             if name in ("boundary", "settle") and value.get("batch_at") == "consume"}
+    if not modes:
+        raise NotApplicable("agent.send.modes.*.batch_at", {name: value.get("batch_at") for name, value in declaration.get("modes", {}).items()})
+    for mode in modes:
+        await ctx.native.call("turn", state="start")
+        await ctx.wait_facts(lambda f: f.get("state") == "running")
+        mark = ctx.native.mark()
+        for index in range(3):
+            accepted(await ctx.send(f"D9-{mode}-{index}", mode))
+        # A native/user setting change is not a provider configure effect. Its
+        # absence from agent.configure cannot waive consume-time queue semantics.
+        await ctx.native.call("settings", queue_modes={mode: "one"})
+        await ctx.native.call("queue", mode=mode, action="consume")
+        check(len(ctx.native.records("inserted", after=mark)) == 1, "queue used the enqueue-time batch setting")
+        await ctx.native.call("settings", queue_modes={mode: "all"})
+        await ctx.native.call("queue", mode=mode, action="consume")
+        inserted = ctx.native.records("inserted", after=mark)
+        check(len(inserted) == 3, "consume-time all did not drain the remaining native batch once")
+        for index in range(3):
+            check(sum(f"D9-{mode}-{index}" in json.dumps(row) for row in inserted) == 1, "batch change lost/duplicated native input")
+        check(all(row.get("operation") == "send" for row in ctx.native.writes(mark)),
+              "sending input changed a native setting/ran a queue composition")
+        await ctx.native.call("turn", state="settled")
+        await ctx.wait_facts(lambda f: f.get("state") == "idle")
+    ctx.evidence.append({"kind": "consume_time_batch", "modes": list(modes), "native_only_setting_changes": True})
 
 
 @case("D10")
@@ -755,6 +806,42 @@ async def viewer_order(ctx):
     check(sorted(common, key=left.get) == sorted(common, key=right.get), "viewer timeline orders differ")
 
 
+@case("O2")
+async def serialized_snapshot_cut(ctx):
+    await flood_retained(ctx, "O2-baseline", count=10, size=8192)
+    wide = ItemReducer(trace_records=2048, trace_bytes=2 << 20)
+    first = await fresh_view(ctx, seed=wide)
+    baseline = deepcopy(first.reducer)
+    pump = asyncio.create_task(flood_retained(ctx, "O2-concurrent", count=64, size=1024))
+    try:
+        second = await fresh_view(ctx, peer=await ctx.viewer(), seed=wide)
+        needle = await pump
+        await ctx.wait_view(first, lambda reducer: has_message(reducer, needle))
+    finally:
+        if not pump.done():
+            pump.cancel()
+        await asyncio.gather(pump, return_exceptions=True)
+    cut = ItemReducer(trace_records=2048, trace_bytes=2 << 20)
+    for row in second.reducer.trace:
+        cut.accept(row)
+        if row.get("op") == "snapshot" and row.get("phase") == "end":
+            break
+    check(cut.snapshots == 1, "second snapshot trace is incomplete", component="harness")
+    reconstructed = deepcopy(baseline)
+    for row in first.reducer.trace:
+        if row.get("op") != "snapshot" and baseline.sequence < row.get("seq", -1) <= cut.sequence:
+            reconstructed.accept(row)
+    check(reconstructed.sequence == cut.sequence and reconstructed.epoch == cut.epoch,
+          "incremental viewer could not reconstruct the second serialized cut")
+    check(reconstructed.entities == cut.entities and reconstructed.coverage == cut.coverage,
+          "snapshot entities/revisions do not match the incremental state at its cut")
+    check(baseline.sequence < cut.sequence < first.reducer.sequence,
+          "snapshot test did not overlap updates on both sides of its cut", component="harness")
+    ctx.evidence.append({"kind": "serialized_cut", "baseline": baseline.sequence, "snapshot_cut": cut.sequence,
+                         "following": first.reducer.sequence, "snapshot_bytes": cut.entity_bytes,
+                         "same_entities_and_revisions_at_cut": True})
+
+
 async def flood_retained(ctx, prefix, *, count=96, size=8192):
     for index in range(count):
         await ctx.native.call("retain", text=f"{prefix}-{index}:" + "x" * size)
@@ -788,7 +875,7 @@ async def prune_preserves_live_state(ctx):
     await ctx.native.call("tool_call", id_ref="O9-live-tool", state="start")
     request = None
     if "agent.respond" in (await ctx.facts()).get("caps", {}):
-        _, request = await make_request(ctx, timeout_ms=60000)
+        _, request = await make_request(ctx)
     view = await fresh_view(ctx)
     await ctx.wait_view(view, lambda reducer: any(kind == "tool" and row["value"].get("status") == "running"
                                                 for (kind, _), row in reducer.entities.items()))
@@ -983,9 +1070,15 @@ async def first_valid_answer(ctx):
     mark = ctx.native.mark()
     rejection(await answer(ctx, request, response), kinds=("stale",))
     check(not ctx.native.writes(mark), "already-answered request was sent again")
-    ctx.evidence.append({"kind": "first_valid_answer", "native_responses": 1,
-                         "remaining_branches": "expiry and dead-scope traces follow in this incremental runner"})
-    raise HarnessGap("R2 core race/stale checks executed; expiry/dead-scope branches not yet implemented")
+    declaration = await caps(ctx, "agent.respond")
+    if declaration.get("native_timeout") == "unrepresentable_positive":
+        ctx.evidence.append({"kind": "subcase", "case": "R2.expiry", "status": "not-applicable",
+                             "exclusion": {"path": "agent.respond.native_timeout", "actual": "unrepresentable_positive"}})
+    else:
+        raise HarnessGap("R2 declared expiry behavior needs a native expiry fixture")
+    _, dead = await make_request(ctx)
+    await reject_answer_after_native_end(ctx, dead)
+    ctx.evidence.append({"kind": "first_valid_answer", "native_responses": 1, "dead_scope_rejected": True})
 
 
 @case("R3")
@@ -1008,7 +1101,29 @@ async def unrepresentable_requests(ctx):
     answers = ctx.native.records("answer", after=mark)
     check(len(answers) == 1 and answers[0].get("normalized_response") == {"action": "cancel"},
           "unknown request method was not cancelled exactly once")
-    raise HarnessGap("R4 unknown-method cancellation executed; oversized/incomplete approval branch not yet implemented")
+    declaration = await caps(ctx, "agent.respond")
+    method = next((name for name in ("confirm", "choice", "text", "permission", "form") if name in declaration.get("methods", [])), None)
+    if method is None:
+        raise HarnessGap("R4 has no native fixture for this declared request method")
+    view = await fresh_view(ctx)
+    pending_before = {row["request"] for row in (await ctx.facts()).get("requests", [])}
+    mark = ctx.native.mark()
+    native_id = "R4-oversized-native-request"
+    await ctx.native.call("request", request=native_id, method=method, title="oversized:" + "x" * 70000)
+    await ctx.native.wait(lambda rows: any(row["seq"] > mark and row["kind"] == "answer" for row in rows))
+    answers = ctx.native.records("answer", after=mark)
+    check(len(answers) == 1 and answers[0].get("normalized_response") == {"action": "cancel"},
+          "oversized request was not cancelled exactly once")
+    facts = await ctx.facts()
+    check({row["request"] for row in facts.get("requests", [])} <= pending_before, "unrepresentable request remained approvable")
+    for (kind, _), row in list(view.reducer.entities.items()):
+        request = row["value"]
+        if kind == "request" and request.get("incomplete") not in (None, False):
+            mark = ctx.native.mark()
+            rejection(await answer(ctx, request, {"value": True}), kinds=("invalid", "stale"))
+            check(not ctx.native.writes(mark), "an incomplete request was approved")
+    ctx.evidence.append({"kind": "unrepresentable_request", "native_cancel_once": True,
+                         "oversized_bytes": 70000, "no_new_approvable_request": True})
 
 
 @case("R5")
@@ -1042,6 +1157,71 @@ async def lifecycle_wait(ctx, predicate, description):
         raise CheckFailed(description) from error
 
 
+@case("R6")
+async def request_scope_withdrawal(ctx):
+    declaration = await caps(ctx, "agent.respond")
+    if not declaration.get("background_requests") and set(declaration.get("scopes", [])) <= {"operation"}:
+        raise NotApplicable("agent.respond", declaration)
+    raise HarnessGap("R6 declared session/run/background withdrawal fixture branches not yet implemented")
+
+
+async def reject_answer_after_native_end(ctx, request):
+    rid, facts = ctx.agents[0]["id"], await ctx.facts()
+    args = {"v": 0, "epoch": facts["epoch"], "request": request["request"],
+            "revision": request["revision"], "response": valid_response(request)}
+    mark = ctx.native.mark()
+    await ctx.native.call("exit", code=0)
+    await lifecycle_wait(ctx, lambda: rid in ctx.removed or ctx.resource_cache.get(rid, {}).get("available") is False,
+                         "native operation end/disconnection was not fenced before the stale response probe")
+    try:
+        result = await ctx.peer.call("resource.invoke", {"resource": rid, "op": "agent.respond", "args": args})
+    except RpcError as error:
+        ctx.evidence.append({"kind": "dead_scope_rpc_rejection", "error": error.error})
+        retired_lookup = rid in ctx.removed and error.data.get("kind") == "not_found" and not error.data.get("effect")
+        check(retired_lookup or error.error.get("code") == -32602 or error.data.get("outcome") == "rejected",
+              "dead request scope was not rejected before dispatch: " + json.dumps(error.error), component="core")
+    else:
+        rejection(result, kinds=("stale", "invalid", "unsupported"))
+    check(not ctx.native.records("answer", after=mark), "dead operation accepted a response after native end")
+
+
+@case("R7")
+async def pending_request_reconnect(ctx):
+    facts = await ctx.facts()
+    declaration = facts["caps"]["agent.respond"]
+    if not facts.get("session") and set(declaration.get("scopes", [])) & {"session", "run"}:
+        await ctx.ensure_session()
+    native_id, request = await make_request(ctx)
+    pid, mark = ctx.native.state["pid"], ctx.native.mark()
+    await ctx.restart_core()
+    facts = await ctx.wait_facts(lambda f: f.get("v") == 0)
+    check((await ctx.native.call("state"))["pid"] == pid, "core reconnect replaced the native request operation")
+    answers = ctx.native.records("answer", after=mark)
+    pending = [row for row in facts.get("requests", []) if row.get("status", "pending") == "pending"]
+    if pending:
+        check(len(pending) == 1, "reconnect duplicated pending requests")
+        check(not answers, "reconnect both retained and answered the pending request")
+    else:
+        check(answers and all(row.get("normalized_response") == {"action": "cancel"} for row in answers),
+              "unverified reconnect silently assumed the request resolved")
+        check(len(answers) == 1, "reconnect cancelled the same native request more than once")
+        _, request = await make_request(ctx)
+    await reject_answer_after_native_end(ctx, request)
+    ctx.evidence.append({"kind": "request_reconnect", "native_request": native_id,
+                         "pending_not_assumed_resolved": True, "dead_native_operation_rejected": True})
+
+
+async def audit_fence(ctx, result):
+    def final_event():
+        return next((row for row in ctx.events if row.get("type") == "effect"
+                     and row.get("data", {}).get("effect") == result.get("effect")
+                     and row["data"].get("outcome") is not None), None)
+    try:
+        return await ctx.peer.wait(final_event)
+    except asyncio.TimeoutError as error:
+        raise CheckFailed("final effect audit was not delivered", component="core") from error
+
+
 @case("M2")
 async def native_sessions(ctx):
     declaration = await caps(ctx, "agent.session")
@@ -1052,8 +1232,11 @@ async def native_sessions(ctx):
         raise HarnessGap("M2 resume-only/sessionless bootstrap fixture not yet implemented")
     result = await ctx.invoke("agent.session", {"action": "new"})
     check(result.get("outcome") in ("observed", "accepted"), "declared session:new failed")
-    fresh = ctx.resource_cache.get(rid, {}).get("data", {}).get("agent", {})
+    audit = await audit_fence(ctx, result)
+    fresh = ctx.facts_at_audit(rid, audit)
     first = (fresh.get("session") or {}).get("id")
+    ctx.evidence.append({"kind": "session_facts_at_audit", "result": result, "final_audit": audit,
+                         "facts_committed_at_or_before_final_audit": fresh})
     check(identifier(first), "new session facts were not visible before the reply")
     check(fresh.get("epoch") != initial["epoch"], "new session did not advance endpoint epoch")
     if "list" in actions:
@@ -1071,14 +1254,16 @@ async def native_sessions(ctx):
         check(not ctx.native.writes(before_invalid), "unadvertised fork position reached native runtime")
         fork = await ctx.invoke("agent.session", {"action": "fork", "session": first})
         check(fork.get("outcome") in ("observed", "accepted"), "declared native fork failed")
-        after = ctx.resource_cache.get(rid, {}).get("data", {}).get("agent", {})
+        audit = await audit_fence(ctx, fork)
+        after = ctx.facts_at_audit(rid, audit)
         check((after.get("session") or {}).get("id") not in (None, first), "fork returned before its new session facts")
         check(after.get("epoch") != fresh["epoch"], "fork did not change endpoint epoch")
         fresh = after
     if "resume" in actions:
         resumed = await ctx.invoke("agent.session", {"action": "resume", "session": first})
         check(resumed.get("outcome") in ("observed", "accepted"), "declared native resume failed")
-        after = ctx.resource_cache.get(rid, {}).get("data", {}).get("agent", {})
+        audit = await audit_fence(ctx, resumed)
+        after = ctx.facts_at_audit(rid, audit)
         check((after.get("session") or {}).get("id") == first, "resume facts followed the reply or selected wrong session")
         if (fresh.get("session") or {}).get("id") != first:
             check(after.get("epoch") != fresh["epoch"], "resume switch did not start a fresh epoch")
@@ -1163,7 +1348,18 @@ async def stop_evidence(ctx):
     matching = {event["data"].get("effect") for event in ctx.events if event.get("type") == "effect"
                 and event.get("data", {}).get("op") == "agent.stop"
                 and event["data"].get("outcome") in ("accepted", "observed", "dispatched", "indeterminate")}
-    check(len(matching) == 1, "stop effect was duplicated")
+    if not matching:
+        def final_audit():
+            return [event["data"] for event in ctx.events if event.get("type") == "effect"
+                    and event.get("data", {}).get("effect") == result.get("effect")
+                    and event["data"].get("outcome") in ("accepted", "observed", "dispatched", "indeterminate")]
+        try:
+            await ctx.peer.wait(final_audit)
+        except asyncio.TimeoutError as error:
+            raise CheckFailed("stop final effect audit was not delivered", component="core") from error
+        matching = {row.get("effect") for row in final_audit()}
+    ctx.evidence.append({"kind": "stop_audit", "observed_final_effect_ids": sorted(matching), "expected": result.get("effect")})
+    check(matching == {result.get("effect")}, "stop produced distinct unexpected final effect identities")
 
 
 @case("L3")

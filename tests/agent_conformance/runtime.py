@@ -378,6 +378,14 @@ class Runtime:
             self.record("model_call", model=row.get("id_ref", "model-1"), entries=[e["id"] for e in self.entries],
                         messages=[e["message"] for e in self.entries])
             await self.barrier("model", "after")
+        elif verb == "settings":
+            modes = row.get("queue_modes", {})
+            if not modes or any(key not in ("boundary", "settle") or value not in ("one", "all") for key, value in modes.items()):
+                raise ValueError("settings needs declared native one/all queue modes")
+            for key, value in modes.items():
+                name = "steering" if key == "boundary" else "follow_up"
+                self.queue_modes[name] = "one-at-a-time" if value == "one" else "all"
+            self.record("settings", queue_modes=dict(self.queue_modes), source="native-controller")
         elif verb == "queue":
             queue = self.steering if row["mode"] == "boundary" else self.follow_up
             images = self.steering_images if queue is self.steering else self.follow_up_images

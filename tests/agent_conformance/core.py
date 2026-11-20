@@ -108,6 +108,7 @@ class PublicImplementation:
         self.events = deque(maxlen=128)
         self.resource_cache, self.resource_sizes, self.removed = {}, {}, {}
         self.resource_cache_bytes = 0
+        self.resource_history, self.resource_history_bytes = deque(), 0
         self.evidence = []
         self.agents, self.provider, self.host = [], None, None
         self.endpoint_count = manifest.get("endpoints", 1)
@@ -176,10 +177,20 @@ class PublicImplementation:
                 raise WireFailure("lifecycle observer cache exceeds its count/byte bound")
             self.resource_cache[ident], self.resource_sizes[ident] = deepcopy(resource), size
             self.resource_cache_bytes = total
+            self.resource_history.append((row.get("epoch"), row.get("seq"), self.resource_cache[ident], size))
+            self.resource_history_bytes += size
+            while len(self.resource_history) > 64 or self.resource_history_bytes > 4 << 20:
+                self.resource_history_bytes -= self.resource_history.popleft()[3]
         elif row.get("type") == "resource.removed":
             if len(self.removed) >= 512 and row.get("data", {}).get("id") not in self.removed:
                 raise WireFailure("removed-resource observer bound exceeded")
             self.removed[row["data"]["id"]] = deepcopy(row["data"])
+
+    def facts_at_audit(self, rid, audit):
+        for epoch, sequence, resource, _ in reversed(self.resource_history):
+            if epoch == audit.get("epoch") and type(sequence) is int and sequence <= audit.get("seq", -1) and resource.get("id") == rid:
+                return deepcopy(resource.get("data", {}).get("agent", {}))
+        raise HarnessGap("resource fact event before final effect audit is absent from bounded observer history")
 
     async def viewer(self):
         peer = await Peer.connect(self.backend.env["VQRO_SOCKET"], max_record=8 << 20)
@@ -214,6 +225,9 @@ class PublicImplementation:
                     "sha256": hashlib.sha256(Path(f'/proc/{bridge["pid"]}/exe').read_bytes()).hexdigest()}
             except FileNotFoundError:
                 self.metadata["adapter_image"] = {"unavailable": "adapter exited before image hash"}
+        if self.manifest.get("expected_image_sha256"):
+            check(self.metadata.get("adapter_image", {}).get("sha256") == self.manifest["expected_image_sha256"],
+                  "executed adapter image differs from the pinned target manifest", component="fixture")
         async def ready():
             while True:
                 if self.native.endpoint.exists():

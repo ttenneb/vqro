@@ -16,7 +16,7 @@ from agent_conformance.core import PublicImplementation
 from agent_conformance.runtime import Runtime
 from agent_conformance.cases import declarations, restriction, schema_example
 from agent_conformance.content import compare_content, examples, png, wav
-from agent_conformance.results import CASES, BY_ID, Case, CheckFailed, FixtureFailed, NotApplicable, Result, markdown, report, select_cases
+from agent_conformance.results import CASES, BY_ID, Case, CheckFailed, FixtureFailed, HarnessGap, NotApplicable, Result, markdown, report, select_cases
 from agent_conformance.runner import run_case
 from agent_conformance.wire import ItemReducer, Peer, RpcError, WireFailure
 
@@ -418,6 +418,22 @@ class DeclarationTests(unittest.IsolatedAsyncioTestCase):
             await declarations(ctx)
 
 
+class AuditHistoryTests(unittest.TestCase):
+    def test_facts_are_selected_by_commit_order_not_observer_delivery_time(self):
+        ctx = PublicImplementation.__new__(PublicImplementation)
+        before = {"id": "r1", "data": {"agent": {"session": None}}}
+        after = {"id": "r1", "data": {"agent": {"session": {"id": "new-session"}}}}
+        ctx.resource_history = [("boot", 1, before, 1), ("boot", 3, after, 1)]
+        self.assertIsNone(ctx.facts_at_audit("r1", {"epoch": "boot", "seq": 2})["session"])
+        self.assertEqual(ctx.facts_at_audit("r1", {"epoch": "boot", "seq": 4})["session"]["id"], "new-session")
+
+    def test_audit_history_does_not_cross_core_epochs(self):
+        ctx = PublicImplementation.__new__(PublicImplementation)
+        ctx.resource_history = [("old-boot", 1, {"id": "r1", "data": {"agent": {}}}, 1)]
+        with self.assertRaises(HarnessGap):
+            ctx.facts_at_audit("r1", {"epoch": "new-boot", "seq": 2})
+
+
 class SessionBootstrapTests(unittest.IsolatedAsyncioTestCase):
     def context(self, visible=True):
         state = {"session": None, "caps": {"agent.session": {"actions": ["new"]}}}
@@ -483,6 +499,7 @@ class ClassificationTests(unittest.IsolatedAsyncioTestCase):
     async def test_declared_but_unimplemented_is_harness_failure(self):
         result = await self.run_one(factory=self.factory(), handlers={})
         self.assertEqual((result.status, result.component), ("fail", "harness"))
+        self.assertEqual(result.reason, "harness_gap")
 
     async def test_only_absent_optional_declaration_is_unsupported(self):
         result = await self.run_one(factory=self.factory(declared_send=False), handlers={})
