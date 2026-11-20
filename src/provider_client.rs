@@ -11,6 +11,8 @@
 //! the stream; recovery is a fresh `stream.open` from the core. Nothing is replayed or resent.
 //! Mirrors the Python SDK (`extensions/vqro_provider.py`) where the spec leaves room.
 
+pub mod items;
+
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
