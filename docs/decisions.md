@@ -575,7 +575,10 @@ replaced when the Pi bridge is ported.
 - Agent input origin binds `principal` to the core's effective principal, `actor` to the recorded transport actor,
   and carries the core's original `initiator` separately. A supplied mismatch is `forbidden` before native input;
   missing core identity is `undeclared`. Caller `kind`/`agent` classifications remain asserted claims, rendered as
-  claimed, never inferred from principal ids/prefixes or promoted into human-owner evidence.
+  claimed, never inferred from principal ids/prefixes or promoted into human-owner evidence. Inbox records keep
+  admission-time `from` unchanged; dispatch carries it separately in `origin.sender` with `provenance: "inbox-record"`,
+  asserted by the coordination extension from protected state, not a core attestation. Show from sender via actor.
+  Asynchronous forwarding has no end-to-end core proof in v0; no invented proof retention or implicit delegation.
 
 **Human answers (2026-11-19, CONFIRMED).**
 - **AS1, pause:** "vqro stops delivery": paused means vqro sends, hands out and wakes nothing until resumed; an agent

@@ -201,8 +201,10 @@ shared publication fences are not implemented.
 {"v": 0, "delivery": "d:7c1e…", "submission": "01JF8Q…",
  "to": {"agent": "r42", "incarnation": "…", "session": "s1", "as": "@reviewer"},  // pinned at send
  "follow_current_session": false,
- "from": {"principal": "p:coord", "actor": "p:coord", "author": "client:12"},   // recorded fields (§3), never from the body
- "origin": {"principal": "p:coord", "actor": "p:coord", "agent": "r7", "kind": "agent"},  // derived from `from`
+ "from": {"principal": "p:worker", "actor": "p:worker", "author": "client:12"}, // admission-time, unchanged
+ "origin": {"principal": "extension:coord", "actor": "extension:coord", // current core attribution; initiator only if core supplied
+            "sender": {"principal": "p:worker", "actor": "p:worker", "author": "client:12", "provenance": "inbox-record"},
+            "agent": "r7", "kind": "agent", "claimed": ["kind", "agent"]}, // sender/classification are extension assertions, not core attestations
  "quoted": null, "render": null,                                                  // sender-supplied; see §5.6
  "mode": "boundary", "priority": "normal",  // low | normal (default) | high; pending selection only
  "content": [{"type": "text", "text": "Run the linux tests too."}],  // as agent.send
@@ -274,10 +276,16 @@ Results use one **coordination envelope** `{state, reason?, attempt?: {id, steps
   `follow_current_session: true` (visible; rejected together with an explicit session guard). The claim records the
   effective session and sends it as the guard; a further switch before invoke makes it `stale`. Nothing rewrites
   `to.session`.
-- **Origin.** The inbox derives `origin` from the recorded `from` (effective principal, actor, the sender's agent and
-  kind); a sender cannot set it. A sender may add `quoted` (asserted provenance of forwarded content, shown as a claim)
-  and `render` (the renderings it accepts, `agent-v0.md` §3.2). If the target declares no accepted rendering, the record
-  is held `origin_unsupported`.
+- **Origin.** The record's `from` preserves the original core attribution captured at admission, unchanged; the
+  sender cannot forge it. Dispatched `origin.principal`, `actor` and `initiator` are bound to the **current** core
+  effect attribution (`agent-v0.md` §3.2), not equated with that original sender. For example, an autonomous
+  dispatch can have transport actor/effective principal `extension:coord` while the original sender is P.
+  `origin.sender` carries the record's `from` fields plus `provenance: "inbox-record"`, asserted by the coordination
+  extension from its protected record, not attested by the core. Render **from `<sender>` via `<actor>`**. Caller
+  `kind`/`agent` classifications remain asserted claims, never inferred from ids/prefixes. Asynchronous dispatch
+  has no end-to-end core proof of the original sender in v0; no invented proof retention or implicit delegation.
+  A sender may add `quoted` (asserted provenance of forwarded content, shown as a claim) and `render` (the renderings
+  it accepts). If the target declares no accepted rendering, the record is held `origin_unsupported`.
 - **Lanes:** `boundary`, `preempt` and `admit` are never blocked by `start`/`settle` records waiting for idle.
   Priority never crosses lanes. An `unknown` blocks only records whose ordering depends on it; priority never
   makes an otherwise ineligible record eligible. A record blocked by an unknown predecessor is shown as held

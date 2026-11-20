@@ -116,7 +116,11 @@ the declared types passes in order. D17 core-bound origin: invoke with core effe
 for actor, changing principal or changing initiator rejects `forbidden` with an empty native ledger. Missing core
 identity stays `undeclared`, never owner or a caller's assertion. Caller-classified `kind`/`agent` remain asserted
 claims in the model envelope and receipts; changing principal spelling/prefix never invents a kind or agent, and
-claiming `kind: human` alone cannot authorize plain human-owner rendering.
+claiming `kind: human` alone cannot authorize plain human-owner rendering. For inbox dispatch, the unchanged
+admission-time `from` appears in `origin.sender` with `provenance: "inbox-record"`; the envelope shows from that
+sender via the current actor and labels protected-record provenance as the extension's assertion, not a core
+attestation. An autonomous dispatch's current core principal/initiator are not rewritten to the original sender;
+no end-to-end core proof or implicit delegation is claimed.
 
 **O. Observation** (P3 prototype `proto/item-stream` fc1dd12 passes O1–O10 at 200 agents × 3 viewers; O11 untested).
 O1 put/append/remove algebra; append with a wrong `base` is a gap, never applied. O2 snapshot cut, through two public
@@ -275,9 +279,12 @@ for one fake agent; the rest need the full extension.
 - I19 control headroom: during a reconnect burst of 200 stream opens and an inbox flood, interrupts and answers are
   still admitted within the declared latency bound; stream opens use their own budget and never exhaust the control
   reservation.
-- I20 origin: agent A, holding only `send:start`, sends with `quoted {principal: owner, kind: human}`; the record's
-  `origin` is still A (derived from `from`), the model envelope identifies A as sender and shows the quote as a claim,
-  never as the owner's instruction; if B declares no rendering in `render`, the record is held `origin_unsupported`.
+- I20 origin: agent A, holding only `send:start`, sends with `quoted {principal: owner, kind: human}`; admission-time
+  `from` stays A, unchanged. Dispatch binds origin identity to current core attribution (for example actor
+  `extension:coord`) and carries A in `origin.sender` with asserted `inbox-record` provenance. The model envelope
+  shows from A via that actor, with both sender/classification provenance and the quote visibly asserted, never
+  as the owner's instruction or a core proof of asynchronous forwarding. If B declares no accepted rendering,
+  the record is held `origin_unsupported`.
 - I21 priority: highest eligible priority wins across senders within one target/lane; equal priorities use sender
   round-robin and then per-sender FIFO. A sender's high mail can overtake its earlier low mail. Default is normal;
   a pending priority edit races claim by CAS, never modifies a claimed record. High never bypasses a gate, quota,
