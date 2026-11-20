@@ -14,7 +14,7 @@ from coordination_engine import (Coordinator, digest, refusal_receipt, SCOPE_CAP
                                  CONTROL_ADMISSION_BYTES, CONTROL_ADMISSION_RECORDS, ARCHIVE_FUTURE_BYTES,
                                  ARCHIVE_ESCROW_BYTES, ARCHIVE_ESCROW_RECORDS, IDENTITY_SUMMARY_BYTES)
 from coordination_policy import PolicyError, bounded_page, QuotaLimits
-from coordination_streams import ItemReceiptStreams
+from coordination_streams import ItemReceiptStreams, ItemReceiptSink
 from dataclasses import asdict
 
 COMMANDS = (
@@ -141,6 +141,19 @@ class CoordinationService:
             # on_behalf_of=<proof>, which C2 interprets as a principal delegation.
             context.invocation = None
         try:
+            if method == "resource.attach" and "items" in params:
+                sink = ItemReceiptSink(self.items)
+                def attached(reply):
+                    stream = reply.get("stream")
+                    if type(stream) is int or isinstance(stream, str):
+                        sink.stream = stream
+                        self.ext.vqro.register_stream(stream, sink)
+                # Stream notes bypass the RPC handler in the SDK. Register on
+                # the reader thread before releasing/replaying any early bytes.
+                return self.ext.vqro.call(method, params, on_result=attached)
+            if method == "stream.close":
+                self.ext.close_stream(params["stream"])
+                return {}
             return self.ext.vqro.call(method, params)
         finally:
             if context is not None:

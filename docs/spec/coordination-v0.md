@@ -307,6 +307,9 @@ Results use one **coordination envelope** `{state, reason?, attempt?: {id, steps
 
 ### 5.6 Eligibility, order, fairness
 
+- Typed native item-stream receipts remain observable after final-record compaction or eviction into the bounded
+  settled index. Only declared matching correlation and a permitted monotone receipt transition can advance that
+  retained evidence; compaction is not a receipt cutoff. Observation and stream recovery never resend input.
 - One claim, or one take batch (§7), in flight per target; each record has its own attempt. Controls never enter the
   inbox (§6).
 - **Session.** A record is eligible only while the agent's current session is `to.session`, unless the sender set

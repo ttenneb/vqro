@@ -13,6 +13,21 @@ import time
 from coordination_receipts import ReceiptCollector, ReceiptError
 
 
+class ItemReceiptSink:
+    """SDK reader-thread sink: enqueue only, never call the core or apply evidence."""
+    def __init__(self, viewer):
+        self.viewer, self.stream = viewer, None
+
+    def data(self, data):
+        self.viewer.handle("stream.data", {"stream": self.stream}, decoded=data)
+
+    def error(self, error):
+        self.viewer.handle("stream.error", {"stream": self.stream, "error": error})
+
+    def ended(self, kind, reason):
+        self.viewer.handle("stream." + kind, {"stream": self.stream, "reason": reason})
+
+
 class ItemReceiptStreams:
     def __init__(self, call, apply, *, wake=None, clock=None, limit=256):
         self.call, self.apply = call, apply
@@ -28,7 +43,7 @@ class ItemReceiptStreams:
         self.issues = {}
         self.excess = 0
 
-    def handle(self, method, params):
+    def handle(self, method, params, *, decoded=None):
         if method not in ("stream.data", "stream.closed", "stream.gap", "stream.error"):
             return False
         stream = params.get("stream")
@@ -39,8 +54,8 @@ class ItemReceiptStreams:
         reason = method
         if method == "stream.data":
             try:
-                data = base64.b64decode(params.get("data", ""), validate=True)
-                if len(data) > 1024 * 1024:
+                data = base64.b64decode(params.get("data", ""), validate=True) if decoded is None else decoded
+                if not isinstance(data, bytes) or len(data) > 1024 * 1024:
                     raise ValueError("frame exceeds viewer budget")
             except (ValueError, TypeError):
                 reason = "invalid_base64_or_frame"
