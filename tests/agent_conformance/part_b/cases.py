@@ -516,7 +516,7 @@ async def consumer(ctx,row,name="consumer-1",records=None):
 
 
 async def take(ctx,row,*,name="consumer-1",at="turn",**fields):
-    return await ctx.command("inbox.take",{"op":await ctx.operation(),"agent":row["id"],"consumer":name,"at":at,**fields})
+    return await ctx.command("inbox.take",{"op":await ctx.operation(),"agent":row["id"],"consumer":name,"at":at,"max_bytes":65536,**fields})
 
 
 async def report_pull(ctx,row,taken,stage,*,name="consumer-1",**fields):
@@ -548,6 +548,121 @@ async def terminal_marker_without_plugin_never_types(ctx):
               "without plugin input remains held, not keyboard-typed or adapted to send")
 
 
+@case("T2")
+async def pull_points_single_flight_and_order(ctx):
+    row=await terminal(ctx,pull=user_pull());await consumer(ctx,row)
+    deliveries={}
+    for mode in ("boundary","settle","start","preempt"):
+        fields={"expires_at_ms":int(time.time()*1000)+60000} if mode=="preempt" else {}
+        deliveries[mode]=(await ctx.send(target=row["id"],mode=mode,text=mode,send_new=True,**fields))["delivery"]
+    await ctx.scope("resume","agent:"+row["id"])
+    first=await take(ctx,row,at="turn")
+    ctx.check([r["delivery"] for r in first["records"]]==[deliveries["boundary"]],"turn safe point excludes start, settle and preempt")
+    concurrent=await take(ctx,row,at="idle")
+    ctx.check(not concurrent.get("records"),"one outstanding take batch fences every other point on that target",reply=concurrent)
+    await insert_pull(ctx,row,first);await ctx.native.call("model",ref=row["backend_ref"])
+    midrun=await take(ctx,row,at="tool")
+    ctx.check(not midrun.get("records") and (await ctx.get(deliveries["settle"]))["state"]=="held","mid-run tool point leaves settle pending")
+    for point in ("turn","settle","idle","tool"):
+        batch=await take(ctx,row,at=point)
+        ctx.check(deliveries["preempt"] not in [r["delivery"] for r in batch.get("records",[])],"preempt is never pulled at "+point)
+        if batch.get("records"): await insert_pull(ctx,row,batch)
+    # Separate dense batch: more records than the take page, retaining full typed content.
+    other=await terminal(ctx,pull=user_pull());await consumer(ctx,other,"dense-consumer")
+    ids={};senders=[]
+    for index in range(3):
+        principal="dense-sender-"+str(index)
+        await ctx.grant("dense-grant-"+str(index),principal,["send:boundary"],"agent:"+other["id"])
+        senders.append((principal,await ctx.connect(principal)));ids[principal]=[]
+    for index in range(17):
+        principal,peer=senders[index%3]
+        delivery=(await ctx.send(target=other["id"],peer=peer,mode="boundary",text=str(index)+":"+"x"*17000,send_new=True))["delivery"]
+        ids[principal].append(delivery)
+    await ctx.scope("resume","agent:"+other["id"])
+    dense=await take(ctx,other,name="dense-consumer")
+    ctx.check(0<len(dense["records"])<17 and len(json.dumps(dense["records"]).encode())<=250*1024,"oversized queued batch returns only records fitting page bounds")
+    chosen=[r["delivery"] for r in dense["records"]]
+    for principal,expected in ids.items():
+        selected=[r["delivery"] for r in dense["records"] if r["from"]["principal"]==principal]
+        ctx.check(selected==expected[:len(selected)],"same sender records remain FIFO within the selected round",principal=principal)
+    await insert_pull(ctx,other,dense,name="dense-consumer")
+    before=ctx.native.mark();await ctx.native.call("model",ref=other["backend_ref"])
+    model=ctx.native.records("model_request",after=before)
+    ctx.check(len(model)==1 and model[0]["deliveries"]==chosen,"one next native model request contains the entire take exactly once in order")
+
+
+@case("T3")
+async def aborted_insert_and_start_markers_are_not_read(ctx):
+    row=await terminal(ctx,pull=user_pull());await consumer(ctx,row)
+    sent=await ctx.send(target=row["id"],mode="boundary");await ctx.scope("resume","agent:"+row["id"])
+    batch=await take(ctx,row);await insert_pull(ctx,row,batch)
+    await ctx.native.call("abort",ref=row["backend_ref"])
+    ctx.check((await ctx.get(sent["delivery"]))["state"]=="inserted" and not ctx.native.records("model_request"),"abort immediately after insertion leaves inserted/unread input")
+    await ctx.native.call("context",ref=row["backend_ref"],records=batch["records"])
+    await ctx.native.call("message_start",ref=row["backend_ref"])
+    ctx.check((await ctx.get(sent["delivery"]))["state"]=="inserted","context hook and message_start facts cannot manufacture read evidence")
+
+
+@case("T8")
+async def pending_edit_and_editor_draft_are_independent(ctx):
+    import base64
+    row=await terminal(ctx,pull=user_pull());await consumer(ctx,row)
+    stream=await ctx.peer.call("resource.attach",{"resource":row["id"],"cols":80,"rows":24,"history_lines":0})
+    await ctx.peer.call("stream.input",{"stream":stream["stream"],"data":base64.b64encode(b"manual-probe").decode()})
+    await ctx.wait(lambda:ctx.native.records("terminal_input"),label="actual raw terminal input spy")
+    draft=b"human draft: \xce\xbb\x00keep it unchanged"
+    await ctx.native.call("draft",ref=row["backend_ref"],data=base64.b64encode(draft).decode())
+    mark=ctx.native.mark();sent=await ctx.send(target=row["id"],mode="boundary",text="before edit")
+    old=await ctx.get(sent["delivery"])
+    content=[{"type":"text","text":"edited before take"}]
+    await ctx.command("inbox.edit",{"op":await ctx.operation(),"delivery":sent["delivery"],"expect":old["revision"],"content":content})
+    await ctx.scope("resume","agent:"+row["id"]);batch=await take(ctx,row)
+    ctx.check(batch["records"][0]["content"]==content,"latest pre-claim edit is exactly the pulled content")
+    current=await ctx.get(sent["delivery"])
+    await ctx.rejected("inbox.edit",{"op":await ctx.operation(),"delivery":sent["delivery"],"expect":current["revision"],"content":[{"type":"text","text":"too late"}]},{"too_late"})
+    await insert_pull(ctx,row,batch);await ctx.native.call("model",ref=row["backend_ref"])
+    after=await ctx.native.call("draft",ref=row["backend_ref"])
+    ctx.check(base64.b64decode(after["data"])==draft and not ctx.native.records("terminal_input",after=mark),"pull insertion leaves the actual fake editor byte-identical; input spy is proven live")
+    ctx.check(ctx.native.records("model_request")[-1]["entries"][0]["content"]==content,"model receives the pre-take edit, never the late payload")
+
+
+@case("T11")
+async def pull_filters_content_without_claiming_or_flattening(ctx):
+    import base64,struct,zlib
+    def chunk(kind,data): return struct.pack(">I",len(data))+kind+data+struct.pack(">I",zlib.crc32(kind+data)&0xffffffff)
+    png=b"\x89PNG\r\n\x1a\n"+chunk(b"IHDR",struct.pack(">IIBBBBB",1,1,8,2,0,0,0))+chunk(b"IDAT",zlib.compress(b"\x00\x00\x00\x00"))+chunk(b"IEND",b"")
+    row=await terminal(ctx,pull=user_pull());await consumer(ctx,row)
+    rich=[{"type":"image","mime":"image/png","data":base64.b64encode(png).decode()}]
+    image=await ctx.send(target=row["id"],mode="boundary",content=rich)
+    text=await ctx.send(target=row["id"],mode="boundary",text="eligible text",send_new=True)
+    await ctx.scope("resume","agent:"+row["id"])
+    batch=await take(ctx,row,accept=["text"])
+    ctx.check([r["delivery"] for r in batch["records"]]==[text["delivery"]],"text-only consumer leaves rich input unclaimed and still progresses text")
+    await insert_pull(ctx,row,batch)
+    for _ in range(3):
+        repeated=await take(ctx,row,accept=["text"])
+        record=await ctx.get(image["delivery"])
+        ctx.check(not repeated["records"] and repeated.get("held")=="unsupported_content" and record["state"]=="held" and not record.get("attempt"),"unsupported image stays held with zero claims/releases at repeated points",record=record,reply=repeated)
+    capable=await take(ctx,row,accept=["text","image"])
+    ctx.check(capable["records"][0]["content"]==rich,"image-capable consumer gets original typed blocks without flattening")
+
+
+@case("T14")
+async def consumer_record_budget_is_not_a_claim_loop(ctx):
+    row=await terminal(ctx,pull=user_pull());await consumer(ctx,row)
+    large=await ctx.send(target=row["id"],mode="boundary",text="L"*2000)
+    small=await ctx.send(target=row["id"],mode="boundary",text="small",send_new=True)
+    await ctx.scope("resume","agent:"+row["id"])
+    batch=await take(ctx,row,max_bytes=512)
+    ctx.check([r["delivery"] for r in batch["records"]]==[small["delivery"]],"consumer per-record budget skips large input but serves smaller eligible mail",reply=batch,max_bytes=512)
+    await insert_pull(ctx,row,batch)
+    for _ in range(3):
+        repeated=await take(ctx,row,max_bytes=512);record=await ctx.get(large["delivery"])
+        ctx.check(not repeated["records"] and repeated.get("held")=="too_large_for_consumer" and record["state"]=="held" and not record.get("attempt"),"too-large input stays held without claim/release or truncation")
+    sufficient=await take(ctx,row,max_bytes=5000)
+    ctx.check(sufficient["records"][0]["content"]==[{"type":"text","text":"L"*2000}],"sufficient budget admits original full content exactly once")
+
+
 @case("T4")
 async def released_or_crashed_before_entry(ctx):
     row=await terminal(ctx,pull=user_pull());await consumer(ctx,row)
@@ -571,7 +686,7 @@ async def reconcile_and_history_never_reinsert(ctx):
     inserted=await ctx.send(target=row["id"],mode="boundary",text="entry witness")
     absent=await ctx.send(target=row["id"],mode="boundary",text="no entry witness",send_new=True)
     await ctx.scope("resume","agent:"+row["id"])
-    op=await ctx.operation();args={"op":op,"agent":row["id"],"consumer":"consumer-1","at":"turn"}
+    op=await ctx.operation();args={"op":op,"agent":row["id"],"consumer":"consumer-1","at":"turn","max_bytes":65536}
     batch=await ctx.command("inbox.take",args);ctx.check(len(batch["claims"])==2,"two open claims acquired")
     entries=await ctx.native.call("entry",ref=row["backend_ref"],records=[next(r for r in batch["records"] if r["delivery"]==inserted["delivery"])])
     await ctx.restart()
@@ -615,7 +730,14 @@ async def context_evidence_never_claims_entry(ctx):
 
 @case("G11")
 async def shared_host_native_tool_provenance(ctx):
-    raise FixtureFailed("native shared-host endpoint tool-to-CLI route unavailable: C2 proves only host bootstrap fallback; A2 fake tool events do not execute a CLI. Asserted hello swaps cannot qualify G11")
+    for row in await ctx.resources():
+        value=(row.get("data") or {}).get("agent",{}).get("caps",{}).get("tool_principal")
+        path="resources."+row["id"]+".data.agent.caps.tool_principal"
+        if value!="env":
+            ctx.evidence.append({"subcase":"endpoint-env-tool","status":"not-applicable","declaration":{"path":path,"actual":value}})
+        else:
+            raise HarnessGap("declared tool_principal=env requires actual runtime-child tool-to-CLI fixture; asserted hello is not evidence")
+    raise HarnessGap("shared-host no-endpoint branch has no native runtime route; core-assigned host:<id> must not be asserted or faked")
 
 
 @case("T12")
@@ -720,6 +842,91 @@ async def handle_rebind_moves_no_tree_gate_or_unknown(ctx):
     await held(ctx,successor["delivery"],"paused")
     ctx.check(len(invocations(ctx,delivery=original["delivery"]))==1 and not invocations(ctx,delivery=successor["delivery"]),
               "old exact agent keeps its gate; new handle binding inherits no permit")
+
+
+async def team_fixture(ctx,count,*,chain=False):
+    await ctx.native.call("add-many",count=count)
+    await ctx.wait_agents(count)
+    operations=[]
+    for index,row in enumerate(ctx.agents):
+        parent=None if index==0 else ctx.agents[index-1 if chain else 0]["id"]
+        operations.append({"op":"set","key":"doc/agents/members/"+row["id"],
+            "value":{"project":"large-team","reports_to":parent},"expect":0})
+    for start in range(0,len(operations),64): await ordinary(ctx,operations[start:start+64])
+    return "team:"+ctx.agents[0]["id"]
+
+
+@case("H8")
+async def mixed_member_reasons_do_not_wait_for_parent(ctx):
+    await ctx.native.call("add-many",count=5);await ctx.wait_agents(5)
+    principal="mixed-sender";worker=await ctx.connect(principal)
+    for index in (4,0,1,2,3): await member(ctx,index,"mixed-project",None if index==4 else ctx.agents[4]["id"])
+    records=[]
+    for index in range(4):
+        await ctx.grant("mixed-"+str(index),principal,["send:start"],"agent:"+ctx.agents[index]["id"])
+        records.append(await ctx.send(target=ctx.agents[index]["id"],peer=worker,text="mixed-"+str(index)))
+    await ctx.native_set(4,state="running",run="parent-still-working")
+    await ctx.native_set(1,lifecycle="disconnected")
+    caps=deepcopy(ctx.agents[2]["data"]["agent"]["caps"]);caps["rev"]+=1;caps["agent.send"]["modes"]={}
+    await ctx.native_set(2,caps=caps)
+    grant=(await ctx.peer.call("workspace.snapshot"))["entries"]["doc/agents/grants/mixed-3"]
+    await ctx.command("grants",{"op":await ctx.operation(),"id":"mixed-3","value":None,"expect":grant["version"]})
+    await ctx.scope("resume","team:"+ctx.agents[4]["id"])
+    await settled(ctx,records[0]["delivery"])
+    for index,reason in ((1,"agent_absent"),(2,"unsupported_mode"),(3,"no_grant")):
+        await held(ctx,records[index]["delivery"],reason)
+        ctx.check(not invocations(ctx,delivery=records[index]["delivery"]),"ineligible member reports its own reason without native call: "+reason)
+    ctx.check(len(invocations(ctx,delivery=records[0]["delivery"]))==1 and
+              next(r for r in await ctx.resources() if r["id"]==ctx.agents[4]["id"])["data"]["agent"]["state"]=="running",
+              "ready child admits without waiting for the parent's work")
+
+
+@case("H14")
+async def bounded_nested_scope_with_stalled_viewer(ctx):
+    capacity=ctx.status["limits"]["scope_targets"]
+    if capacity<200 or capacity>1024: raise HarnessGap("deep-scope fixture requires declared200..1024 capacity")
+    count=capacity+1
+    await ctx.native.call("add-many",count=count);await ctx.wait_agents(count)
+    def operations(start,end):
+        return [{"op":"set","key":"doc/agents/members/"+ctx.agents[i]["id"],"expect":0,
+                 "value":{"project":"nested-project","reports_to":None if i==0 else ctx.agents[i-1 if i<32 else 31]["id"]}}
+                for i in range(start,end)]
+    for start in range(0,200,64): await ordinary(ctx,operations(start,min(start+64,200)))
+    for row in ctx.agents[100:140]: await ctx.native.call("remove",ref=row["backend_ref"])
+    viewer=await ctx.connect("owner");view=await ctx.attach(peer=viewer)
+    await ctx.wait_view(view,lambda reducer:reducer.snapshots>0)
+    flood=await ctx.native.call("items-flood",ref=ctx.agents[0]["backend_ref"],count=2000,size=1024)
+    scope="team:"+ctx.agents[0]["id"]
+    preview=await ctx.command("scope",{"action":"inspect","scope":scope})
+    result=await ctx.scope("resume",scope,preview=preview)
+    ctx.check(len(preview["targets"])==200 and result["selected"]==200 and len(result["targets"])<=64,
+              "deep hierarchy includes absent members, while expansion and first page remain bounded under withheld viewer credit",flood=flood)
+    for start in range(200,count,64): await ordinary(ctx,operations(start,min(start+64,count)))
+    small=await ctx.command("scope",{"action":"inspect","scope":"agent:"+ctx.agents[0]["id"]})
+    await ctx.rejected("scope",{"op":await ctx.operation(),"action":"resume","scope":scope,"expect":small["expect"]},{"too_large","quota"})
+    after=await ctx.command("scope",{"action":"inspect","scope":"agent:"+ctx.agents[0]["id"]})
+    ctx.check(after["expect"]==small["expect"],"over-capacity expansion refuses before gate/control changes")
+
+
+@case("H16")
+async def two_hundred_member_single_scope(ctx):
+    scope=await team_fixture(ctx,200)
+    preview=await ctx.command("scope",{"action":"inspect","scope":scope})
+    ctx.check(len(preview["targets"])==200,"exact200-member input is selected before one scope action")
+    first=await ctx.send(target=ctx.agents[0]["id"],text="ready root")
+    last=await ctx.send(target=ctx.agents[-1]["id"],text="ready leaf")
+    result=await ctx.scope("resume",scope,preview=preview)
+    ctx.check(result["selected"]==200 and len(result["targets"])<=64,"single committed scope result is paged, not a reduced input")
+    targets=list(result["targets"]);page=result.get("next");pages=1
+    while page is not None:
+        row=await ctx.command("scope",{"action":"result","receipt":result["receipt"],"page":page})
+        ctx.check(row["selected"]==200 and len(row["targets"])<=64,"each scope page retains the frozen result cut")
+        targets.extend(row["targets"]);page=row.get("next");pages+=1
+        if pages>10: raise HarnessGap("scope result cursor failed to terminate")
+    ctx.check(len(targets)==len(set(targets))==200 and set(targets)==set(preview["targets"]),"all pages enumerate exactly the original membership revision")
+    await settled(ctx,first["delivery"]);await settled(ctx,last["delivery"])
+    ctx.check(len(invocations(ctx,delivery=first["delivery"]))==len(invocations(ctx,delivery=last["delivery"]))==1,
+              "one action admits ready root and leaf independently")
 
 
 @case("H6")

@@ -157,7 +157,7 @@ class Native:
         old=self.items.get(ref)
         if old is None or old["epoch"]!=epoch:
             if old is not None: old["wake"].set()
-            self.items[ref]={"epoch":epoch,"seq":0,"rows":[],"bytes":0,"entities":{},"wake":asyncio.Event(),"position":0}
+            self.items[ref]={"epoch":epoch,"seq":0,"rows":[],"bytes":0,"entities":{},"entity_bytes":0,"wake":asyncio.Event(),"position":0}
         return self.items[ref]
 
     def item(self,ref,value):
@@ -171,9 +171,10 @@ class Native:
             journal["rows"].append((journal["seq"],data));journal["bytes"]+=len(data)
             while journal["bytes"]>131072:
                 _,old=journal["rows"].pop(0);journal["bytes"]-=len(old)
-        journal["entities"][entity["id"]]=entity
-        while len(journal["entities"])>512 or sum(len(encoded(row)) for row in journal["entities"].values())>524288:
+        journal["entities"][entity["id"]]=entity;journal["entity_bytes"]+=len(encoded(entity))
+        while len(journal["entities"])>512 or journal["entity_bytes"]>524288:
             identifier=next(iter(journal["entities"]));removed=journal["entities"].pop(identifier)
+            journal["entity_bytes"]-=len(encoded(removed))
             append({"op":"remove","kind":removed["kind"],"id":identifier,"rev":2})
         append(entity);journal["wake"].set()
 
@@ -233,7 +234,7 @@ class Native:
             elif not isinstance(content, list): kind = "invalid"
             elif any(not isinstance(block, dict) or block.get("type") not in declaration.get("content", {}).get("types", []) for block in content): kind = "unsupported"
         if op == "agent.send" and args.get("mode") == "start" and native["state"] != "idle": kind = "busy"
-        if op == "agent.send" and native.get("lifecycle") == "ended": kind = "stale"
+        if op == "agent.send" and native.get("lifecycle") != "live": kind = "stale"
         if guard.get("run", native.get("run")) != native.get("run"): kind = "stale"
         if op == "agent.queue" and args.get("epoch") != native["epoch"]: kind = "stale"
         supplied_result = plan.get("result") is not None
@@ -290,6 +291,21 @@ class Native:
         if verb == "state": return {"agents": self.agents, "ledger_seq": self.serial,
             "registration": {k: v for k, v in self.provider.registration.items() if "token" not in k}}
         if verb == "add": return await self.add(request["ref"], **request.get("fields", {}))
+        if verb == "add-many":
+            count=request["count"];prefix=request.get("prefix","a")
+            if type(count) is not int or not 1<=count<=2048: raise ValueError("fake endpoint bound")
+            for index in range(count):
+                ref=prefix+str(index)
+                if ref not in self.agents: await self.add(ref,**request.get("fields",{}))
+            return {"published":count}
+        if verb == "items-flood":
+            count=request.get("count",2000);size=request.get("size",1024);ref=request["ref"]
+            if not 1<=count<=10000 or not 1<=size<=32000: raise ValueError("fake item flood bound")
+            for index in range(count):
+                self.item(ref,{"role":"assistant","content":[{"type":"text","text":str(index)+":"+"x"*size}],"final":True})
+                if index%8==0: await asyncio.sleep(0)
+            journal=self.journal(ref)
+            return {"seq":journal["seq"],"retained_bytes":journal["bytes"],"entity_bytes":journal["entity_bytes"]}
         if verb == "entry":
             ref=request["ref"];supplied=request["records"]
             if not isinstance(supplied,list) or len(supplied)>16: raise ValueError("fake entry batch bound")
