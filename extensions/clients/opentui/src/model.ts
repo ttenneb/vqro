@@ -83,6 +83,10 @@ function matches(item: Json, f: string): boolean {
   return hay.toLowerCase().includes(f);
 }
 
+/** `requires_absent`: content standing in for an enhancement, dropped by a client with any of those features. */
+const superseded = (item: Json, features: string[]) =>
+  Array.isArray(item.requires_absent) && item.requires_absent.some((f: unknown) => isStr(f) && features.includes(f));
+
 const native = (item: Json, features: string[]) =>
   (ROW_TYPES.includes(kind(item)) || features.includes(kind(item))) && missingFor(item, features).length === 0;
 
@@ -90,6 +94,7 @@ function chips(item: Json, features: string[]): Json {
   if (kind(item) !== "chips" || !Array.isArray(item.chips)) return item;
   const shown: Json[] = [];
   for (let chip of item.chips) {
+    if (isObj(chip) && superseded(chip, features)) continue;
     for (let n = 0; n < 4; n++) {
       if (!isObj(chip) || missingFor(chip, features).length === 0) break;
       if (chip.fallback === "drop") { chip = null; break; }
@@ -104,6 +109,7 @@ function chips(item: Json, features: string[]): Json {
 /** Element fallback: the [row, id] pairs shown for one item. */
 export function expand(item: Json, rid: string, features: string[], depth = 0): [Json, string][] {
   const own = isStr(item.id) ? item.id : rid;
+  if (superseded(item, features)) return [];
   if (depth >= 4 || native(item, features) || !("fallback" in item)) return [[chips(item, features), own]];
   const fb = item.fallback;
   if (fb === "drop") return [];

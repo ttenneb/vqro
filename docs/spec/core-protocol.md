@@ -1114,6 +1114,9 @@ New row types, components and view kinds are progressive enhancements: every cli
   instead, applying the same rule (at most four levels). Without `fallback` the row stays a plain item, as before.
   Fallbacks apply before flattening, so filtering, selection and counts see what is shown; a fallback row without
   an `id` inherits the original's (`<id>~<n>` for list entries). A chip's fallback is a chip or `"drop"`.
+- **Stand-ins (`requires_absent`).** The other direction: a row or chip with `requires_absent: [feature]` stands in
+  for an enhancement placed elsewhere (a toolbar ⚙ chip for `title_actions`). A client with any of those features
+  drops it; older clients ignore the field and show it, so nothing is drawn twice.
 - **Views.** A view may carry `fallback: "<view id>"`. A client that can't render the view (unknown kind, or
   unmet outer `requires`) draws the first renderable view along the `fallback` chain (at most four steps, no
   cycles), else its labelled placeholder. Usually the fallback is a `panel` the extension publishes live, or a
@@ -1150,8 +1153,9 @@ New row types, components and view kinds are progressive enhancements: every cli
   `[text]` buttons in the frame's top border, before `title_right`: no line of their own (an agent pane's ⚙). A
   click runs the command in the panel's context, or opens `menu` (entries as a row's `menu`: `{label, command,
   args?}`). For a key: `client.panel {action: "title", index?}` (the first by default). Entries without a label, or
-  without a command or menu, are skipped; in a frame too narrow to show them they are not clickable. Keep the same
-  commands in the pane menu for clients without the feature (and for recovery, D15).
+  without a command or menu, are skipped; in a frame too narrow to show them they are not clickable. For clients
+  without the feature, add the same button as a toolbar chips row with `requires_absent: ["title_actions"]`
+  (Fallbacks), and keep the commands in the pane menu too (recovery, D15).
 - **Row `actions`** (feature `actions`): `[{text, command, args?, input?}]`. These are drawn right-aligned in the
   row as `[text]` buttons, before its detail and badges. A click runs the action in the row's context. Put the same
   entries in the row's `menu` for clients without the feature.

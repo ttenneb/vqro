@@ -164,6 +164,12 @@ pub fn composer_height_for(item: &Value, draft_lines: usize) -> u16 {
     draft_lines.clamp(1, usize::from(composer_height(item) - 1)) as u16 + 1
 }
 
+/// `requires_absent: [feature]`: content standing in for an enhancement, dropped by a client that has any of those
+/// features (it shows the enhancement instead); older clients ignore the field and show it.
+fn superseded(item: &Value, features: &[&str]) -> bool {
+    item["requires_absent"].as_array().is_some_and(|l| l.iter().filter_map(Value::as_str).any(|f| features.contains(&f)))
+}
+
 fn native(item: &Value, features: &[&str]) -> bool {
     let k = kind(item);
     (ROW_TYPES.contains(&k) || features.contains(&k)) && missing_for(item, features).is_empty()
@@ -176,6 +182,7 @@ fn native(item: &Value, features: &[&str]) -> bool {
 pub fn expand(item: &Value, id: &str, features: &[&str]) -> Vec<(Value, String)> {
     fn go(item: &Value, id: &str, features: &[&str], depth: usize, out: &mut Vec<(Value, String)>) {
         let own = item["id"].as_str().map(String::from).unwrap_or_else(|| id.to_string());
+        if superseded(item, features) { return; }
         if depth >= 4 || native(item, features) || item.get("fallback").is_none() {
             out.push((chips(item, features), own));
             return;
@@ -199,6 +206,7 @@ fn chips(item: &Value, features: &[&str]) -> Value {
     let mut shown = Vec::new();
     for chip in list {
         let mut c = chip.clone();
+        if superseded(&c, features) { continue; }
         for _ in 0..4 {
             if missing_for(&c, features).is_empty() { break; }
             match &c["fallback"] { Value::Object(_) => c = c["fallback"].clone(), Value::String(s) if s == "drop" => { c = Value::Null; break; } _ => break }

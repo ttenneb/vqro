@@ -99,6 +99,12 @@ ROW_TYPES = ["item", "toggle", "header", "separator", "text", "chips", "select"]
 MAX_CHAIN = 4
 
 
+def _superseded(item, features):
+    """`requires_absent`: content standing in for an enhancement, dropped by a client with any of those features."""
+    absent = item.get("requires_absent")
+    return isinstance(absent, list) and any(f in features for f in absent if isinstance(f, str))
+
+
 def _native(item, features):
     return (kind(item) in ROW_TYPES or kind(item) in features) and not missing_for(item, features)
 
@@ -108,6 +114,8 @@ def _chips(item, features):
         return item
     shown = []
     for chip in item["chips"]:
+        if isinstance(chip, dict) and _superseded(chip, features):
+            continue
         for _ in range(4):
             if not isinstance(chip, dict) or not missing_for(chip, features):
                 break
@@ -126,6 +134,8 @@ def _chips(item, features):
 def expand(item, rid, features, depth=0):
     """Element fallback: [(row, id)] shown for one item (D29)."""
     own = item["id"] if isinstance(item.get("id"), str) else rid
+    if _superseded(item, features):
+        return []
     if depth >= 4 or _native(item, features) or "fallback" not in item:
         return [(_chips(item, features), own)]
     fb = item["fallback"]
