@@ -63,7 +63,7 @@ impl CallAuthor {pub fn effective(&self)->Option<&str>{self.attribution.effectiv
 pub enum Identity {Owner,Principal {principal:String}}
 
 pub fn validate(id:&str)->Result<(),RpcError> {
-    if id.is_empty() || id.len()>ID_BYTES || id.chars().any(|c|c.is_control()||c.is_whitespace()) || id==UNDECLARED || id==OWNER_UNSET {
+    if id.is_empty() || id.len()>ID_BYTES || id.chars().any(|c|c.is_control()||c.is_whitespace()) || id.eq_ignore_ascii_case(UNDECLARED) || id.eq_ignore_ascii_case(OWNER_UNSET) {
         return Err(RpcError::invalid("principal must be 1..=256 bytes without whitespace/control characters; undeclared and owner-unset are reserved"));
     }
     Ok(())
@@ -71,7 +71,7 @@ pub fn validate(id:&str)->Result<(),RpcError> {
 /// Caller-assertable principal names are also the valid workspace-owner configuration domain.
 pub fn validate_assertable(principal:&str)->Result<(),RpcError> {
     validate(principal)?;
-    if principal=="system" || ["extension:","host:","system:"].iter().any(|prefix|principal.starts_with(*prefix)) {
+    if principal.eq_ignore_ascii_case("system") || ["extension:","host:","system:"].iter().any(|prefix|principal.get(..prefix.len()).is_some_and(|value|value.eq_ignore_ascii_case(prefix))) {
         return Err(RpcError::invalid("extension:, host: and system principals are core-derived, not caller-assertable"));
     }
     Ok(())

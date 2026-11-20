@@ -68,7 +68,8 @@ children). A managed helper deliberately opts in using public `client::supervisi
 `supervision_hello(hello)`, which copies a configured extension name/token pair only when neither field is explicit;
 core still verifies its lifetime. Extension/provider handshakes remain explicit. Inherited reserved identity without
 verified supervision is refused, not silently promoted. Verified supervised extensions resolve to `extension:<name>`. Callers cannot assert `extension:*`, `host:*`,
-`system` or `system:*` in `hello.identity`: these are core-derived; rejection is `invalid` and emits bounded
+`system` or `system:*` in `hello.identity`: these are core-derived (ASCII case-insensitive reservation,
+including the `undeclared`/`owner-unset` markers; ordinary principal names remain case-sensitive); rejection is `invalid` and emits bounded
 `identity.rejected {author,actor,outcome,error}` diagnostics (no claimed identity, token or proof is logged).
 A runtime registration without a configured actor
 resolves to `host:<host resource id>` from its existing bootstrap claim; the reply supplies `host` and `actor`.
