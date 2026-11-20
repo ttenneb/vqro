@@ -4,12 +4,22 @@
 import unittest
 import tempfile
 from pathlib import Path
-from agent_conformance.part_b.native_framing_case import first_message, framed, take_point, module_tree_digest
+from agent_conformance.part_b.native_framing_case import first_message, framed, take_point, module_tree_digest, notification_rendered
 from agent_conformance.results import FixtureFailed
 from coord_harness import pull_declaration
 
 
 class NativeFrames(unittest.TestCase):
+    def test_native_notification_is_not_a_plain_user_row(self):
+        row = {"type": "user", "origin": {"kind": "task-notification"},
+               "message": {"content": "vqro inbox message d1 token"}}
+        self.assertTrue(notification_rendered("● Stop hook feedback", [row], "d1", "token", "Stop hook feedback"))
+        self.assertFalse(notification_rendered("● Stop hook feedback\n❯ token", [row], "d1", "token", "Stop hook feedback"))
+        self.assertFalse(notification_rendered("● Stop hook feedback", [{**row, "origin": {"kind": "human"}}],
+                                              "d1", "token", "Stop hook feedback"))
+        self.assertFalse(notification_rendered("ordinary user", [row], "d1", "token", "Stop hook feedback"))
+        self.assertFalse(notification_rendered("● Stop hook feedback", [], "d1", "token", "Stop hook feedback"))
+
     def test_native_module_seal_changes_with_dependency_bytes(self):
         with tempfile.TemporaryDirectory() as root:
             path = Path(root) / "dependency.js"

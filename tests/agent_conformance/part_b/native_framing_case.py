@@ -82,6 +82,19 @@ def framed(message, role, frame):
             and (frame == "sender_header" or frame in body))
 
 
+def notification_rendered(screen, transcript, delivery, token, summary):
+    """Reviewed Claude 2.1.329 binding: task notification, not a human prompt."""
+    compact = lambda value: "".join(value.split()).casefold()
+    if not isinstance(summary, str) or not summary or compact(summary) not in compact(screen):
+        return False
+    if any("❯" in line and (token in line or "vqro inbox message " + delivery in line)
+           for line in screen.splitlines()):
+        return False
+    rows = [row for row in transcript if row.get("type") == "user"
+            and token in texts((row.get("message") or {}).get("content"))]
+    return len(rows) == 1 and (rows[0].get("origin") or {}).get("kind") == "task-notification"
+
+
 async def run_native(ctx, label, script, args, pins, parent):
     root = Path(tempfile.mkdtemp(prefix=label + "-", dir=parent))
     if len(str(root).encode()) > 68:
@@ -158,9 +171,11 @@ async def native_framing_and_precision(ctx):
         ("ui", "claude_code_tui.py", ["--claude", str(pins["claude"]), "--hook", str(pins["hook"])],
          [("MSG-WAKE-I1", "idle", "boundary"), ("MSG-RACE-I3", None, "boundary")]),
     ]
-    renderer_gaps = []
+    claude_version = None
     for label, script, args, checks in routes:
         root, result, models, journal, declaration = await run_native(ctx, label, script, args, pins, parent)
+        if label == "cc":
+            claude_version = result.get("claude_version")
         deliveries = []
         for token, expected_point, mode in checks:
             request, message = first_message(models, token)
@@ -196,10 +211,19 @@ async def native_framing_and_precision(ctx):
                 ctx.check(all("vqro inbox message " + delivery in screen for delivery in deliveries),
                           "Pi's actual renderer preserves both native sender-framed delivery headers", deliveries=deliveries)
             else:
-                if "NOT USER INPUT" not in screen:
-                    renderer_gaps.append(str(root / "framing-screen.txt"))
-                else:
-                    ctx.check(True, "Claude renderer retains the native rewake label rather than plain user input")
+                if not isinstance(claude_version, str) or not claude_version.startswith("2.1.329"):
+                    raise HarnessGap("T15 native renderer needs a reviewed binding for this Claude version")
+                _, native_message = first_message(models, "MSG-WAKE-I1")
+                summary = re.search(r"<summary>(.*?)</summary>", texts(native_message.get("content")), re.DOTALL)
+                paths = list((root / "cfg/projects").rglob("*.jsonl"))
+                if len(paths) > 16:
+                    raise FixtureFailed("native transcript fixture exceeds its bounded file count")
+                transcript = [row for path in paths for row in load_rows(path)]
+                ctx.check(summary is not None and notification_rendered(screen, transcript, deliveries[0],
+                          "MSG-WAKE-I1", summary[1]),
+                          "Claude renders the reviewed hook-feedback notification, not a human prompt; native wrapper stays in the model envelope",
+                          summary=summary[1] if summary else None, transcript_paths=[str(path) for path in paths],
+                          native_version=claude_version)
         if label == "ui":
             race = result.get("approximate_idle_race") or {}
             unsafe = race.get("unsafe_start") or {}
@@ -214,7 +238,3 @@ async def native_framing_and_precision(ctx):
     ctx.check(module_tree_digest(module_root) == modules["sha256"], "native Pi dependency closure stayed frozen")
     ctx.check(all(hashlib.sha256(Path(path).read_bytes()).hexdigest() == digest for path, digest in hashes.items()),
               "native fixture source stayed unchanged across all path captures")
-    if renderer_gaps:
-        raise HarnessGap("T15 native Claude renderer binding unverified: raw model wrapper exists but the incomplete "
-                         "PTY projection lacks its exact label; no product relabel or whole-row pass inferred. Artifacts: "
-                         + ", ".join(renderer_gaps))
