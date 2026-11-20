@@ -50,6 +50,12 @@ Accident-proofing, not security (D8): any same-user process can still bypass it,
 This section is the one definition both standards use; `core-protocol.md` adopts it when C2 lands. The core owns only
 the generic keys below (`doc/principals/…`) and never reads coordination grants (§4).
 
+**Principal-id domain.** Principal ids are opaque, case-sensitive strings of **1–256 UTF-8 bytes**, with no
+whitespace, Unicode `Cc` controls or the pinned **Unicode16 `Cf`** format characters used by the core's shared
+text-control guard. Ordinary combining/variation characters are neither stripped nor normalized; names compare
+exactly, without fallback. An invalid legacy owner name remains unresolved/`owner-unset`, never normalized or
+replaced implicitly; only the explicit guarded owner repair below can establish a valid owner.
+
 **Recorded fields** on every transaction, event and `effect.invoke` (P2 built the first four as
 `principal`/`actual_author`/`on_behalf_of_principal`; identifiers ≤ 256 bytes):
 
@@ -72,6 +78,16 @@ the generic keys below (`doc/principals/…`) and never reads coordination grant
   core-assigned only; asserting one at `hello` is rejected `invalid`. Backends and supervised children never
   inherit `VQRO_PRINCIPAL` or other caller-identity variables from the parent environment; launcher tagging is
   explicit, not ambient identity inheritance.
+- **Launcher-assignment observation.** A terminal's `resource.principal` is a core-recorded launch observation,
+  not its current process identity or an authority/authentication proof. An explicit native `VQRO_PRINCIPAL` value
+  stays opaque and unchanged in the environment; it is recorded as a known assignment only through the shared
+  `validate_assertable` guard (including the id domain above and rejection of reserved namespaces/markers and their
+  case variants). Exact `undeclared` is the explicit no-identity exception, not authority. An invalid/reserved
+  explicit value leaves the observation null, never a guessed replacement principal. Provider/OSC/child reports
+  and opaque `data.principal` do not populate or overwrite it. Assignments are in-memory: after **every core
+  restart**, existing terminals have unknown/null assignments until relaunch or a new observed launch assignment.
+  No surviving process environment, restored registry/provider fact or child report backfills them; no new
+  persistence or lifetime guarantee follows from the field.
 - **Tool-process attribution** `(pending C2)`: the route is the environment of the process running the tool.
   For tier-1 agents, the launcher tags the agent's pane with `VQRO_PRINCIPAL`, so a tool's `vqro` CLI call
   inherits that agent principal. Headless adapters declare `data.agent.caps.agent.tool_principal: "env"` only
@@ -547,10 +563,13 @@ shapes of `agent-v0.md` §2.3, holding only what the plugin read from its runtim
 Claude Code hooks report `cwd` (hook input) and the model id (the transcript's latest assistant entry). Pi reports
 `cwd`, the model with label and thinking level as `effort`, and its own context figure
 (`usage.context {window, used?}`). Neither exposes session token totals or cost to a plugin, so those are absent.
-**Reporter ownership** `(pending C2)`: once callers carry a principal, only the terminal's own launcher-tagged
-principal or the workspace owner may report for it; other callers get `not_authorized`, never an applied report.
-The current command does not authenticate the reporter: any caller can report for any terminal. This is a known
-v0 gap, not evidence of ownership or a security boundary.
+**Reporter ownership (bundled tier-1 extension policy).** Only the terminal's own known launcher-tagged principal
+or the **valid workspace owner** may report; other callers get `not_authorized`, never an applied report. With a
+null/unknown or `undeclared` `resource.principal`, only the valid owner may report until relaunch or a new observed
+launch assignment. In particular, core restart does not recover an agent reporter from a surviving environment,
+provider fact or child assertion. Owner names use §3's exact validation domain; an invalid legacy owner does not
+become authorized by fallback. This is the bundled agents extension's policy over a core observation, not a core
+ownership policy, authentication proof or persistence promise.
 
 Live data `agents.terminal_status` is `{data: {<terminal>: {app, state, seq, at_ms, status}}}`, where `at_ms` is
 receipt time and `status` is OSC 7501-shaped `{app, state}`: `running` → `working`, `requires_action` → `blocked`,
