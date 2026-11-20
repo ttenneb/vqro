@@ -30,12 +30,21 @@ pub struct JournalConfig {
     pub retain_bytes: usize,
     /// One whole encoded record, newline included. 64 KiB.
     pub max_record_bytes: usize,
-    /// All current entities together (encoded values). Bounds every snapshot.
+    /// Retained entities per endpoint (agent-v0 §8: declared in facts as `items.entities`, default 512).
+    pub max_entities: usize,
+    /// All current entities together, encoded values (`items.entity_bytes`, default 512 KiB). Bounds every snapshot.
     pub max_entity_bytes: usize,
 }
 
 impl Default for JournalConfig {
-    fn default() -> Self { JournalConfig { retain_bytes: 128 * 1024, max_record_bytes: 64 * 1024, max_entity_bytes: 4 * 1024 * 1024 } }
+    fn default() -> Self { JournalConfig { retain_bytes: 128 * 1024, max_record_bytes: 64 * 1024, max_entities: 512, max_entity_bytes: 512 * 1024 } }
+}
+
+impl JournalConfig {
+    /// The `items` facts an adapter declares for these bounds (agent-v0 §8).
+    pub fn facts(&self) -> serde_json::Value {
+        serde_json::json!({"retain_bytes": self.retain_bytes, "entities": self.max_entities, "entity_bytes": self.max_entity_bytes})
+    }
 }
 
 struct Entity {
@@ -142,6 +151,9 @@ impl ItemJournal {
         Self::check_ids(kind, id)?;
         let key = (kind.to_string(), id.to_string());
         let (rev, old) = self.entities.get(&key).map(|e| (e.rev + 1, e.bytes)).unwrap_or((1, 0));
+        if rev == 1 && self.entities.len() >= self.cfg.max_entities {
+            return Err(ProviderError::new("overloaded", format!("more than {} entities", self.cfg.max_entities)));
+        }
         let record = json!({"op": "put", "seq": 0, "kind": kind, "id": id, "rev": rev, "value": value.clone()});
         self.fits(&record)?;
         let bytes = serde_json::to_vec(&value).map(|v| v.len()).unwrap_or(0);
@@ -598,6 +610,11 @@ mod tests {
 
     #[test]
     fn bounds_reject_oversized_records_and_entity_overflow_without_emitting() {
+        let mut j = ItemJournal::new("e1", JournalConfig { max_entities: 2, ..Default::default() });
+        j.put("m", "a", json!({})).unwrap();
+        j.put("m", "b", json!({})).unwrap();
+        assert_eq!(j.put("m", "c", json!({})).unwrap_err().kind, "overloaded");
+        j.put("m", "a", json!({"replaced": true})).unwrap(); // replacing an entity is not a new one
         let cfg = JournalConfig { max_entity_bytes: 1024, ..Default::default() };
         let mut j = ItemJournal::new("e1", cfg);
         assert_eq!(j.put("m", "big", json!({"text": "x".repeat(70 * 1024)})).unwrap_err().kind, "too_large");

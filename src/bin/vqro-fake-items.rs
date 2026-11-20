@@ -103,7 +103,7 @@ async fn main() {
         paused: AtomicBool::new(false), boot, stats: Stats::default(),
     });
     let mut caps = Map::new();
-    caps.insert("items.stream".into(), json!({"retain_bytes": retain}));
+    caps.insert("items.stream".into(), cfg.facts());
     for op in ["agent.session.switch", "items.pause", "items.digest"] { caps.insert(op.into(), json!({})); }
     let mut config = Config::new(name, instance.clone(), caps);
     config.max_item_streams = arg("--max-item-streams", "1024").parse().unwrap();
@@ -111,7 +111,7 @@ async fn main() {
     let sock = tokio::net::UnixStream::connect(&endpoint).await.expect("core");
     let (provider, mut requests) = Provider::connect(sock, config).await.expect("register");
     let facts: Vec<Value> = (0..n).map(|i| json!({"ref": format!("a{i}"), "incarnation": instance, "kind": "agent", "state": "live",
-        "name": format!("fake-agent-{i}"), "data": {"items": {"retain_bytes": retain}}})).collect();
+        "name": format!("fake-agent-{i}"), "data": {"items": cfg.facts()}})).collect();
     provider.full_sync(facts).await.expect("sync");
 
     // Generator: every agent advances `rate` records per second, never waiting for viewers.
