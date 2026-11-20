@@ -267,9 +267,10 @@ def fault(args):
     return {"fault": FAULT}
 
 
-@command("agents.status", "tier-1 status report (K3 shape: terminal, app, state, seq)")
+@command("agents.status", "tier-1 status report (K3 shape: terminal, app, state, seq, facts?)")
 def terminal_status(args):
-    log("status", terminal=args.get("terminal"), app=args.get("app"), state=args.get("state"), seq=args.get("seq"))
+    log("status", terminal=args.get("terminal"), app=args.get("app"), state=args.get("state"), seq=args.get("seq"),
+        facts=args.get("facts"))
     return {"ok": True, "applied": True}
 
 

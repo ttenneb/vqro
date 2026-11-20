@@ -781,6 +781,35 @@ class Tier1StatusTests(unittest.TestCase):
         self.assertEqual(self.core.live["agents.terminal_status"]["data"]["r1"]["state"], "unknown", "no state without evidence")
         self.assertEqual([m for m, _ in self.core.calls if m.startswith("resource.")], [], "advisory: nothing native")
 
+    def test_view_facts_are_validated_kept_and_replaced(self):
+        facts = {"session": {"cwd": "/work", "model": {"id": "claude-haiku-5-5", "effort": "high"}},
+                 "usage": {"context": {"used": 1200, "window": 200000}, "tokens": {"input": 10, "output": 5},
+                           "cost": {"amount": 0.01, "currency": "USD", "basis": "reported"}, "at_ms": 5},
+                 "future": {"ignored": True}}
+        self.report({"terminal": "r1", "app": "claude", "state": "running", "seq": 1, "facts": facts})
+        entry = self.core.live["agents.terminal_status"]["data"]["r1"]
+        self.assertEqual(entry["facts"]["session"]["model"]["id"], "claude-haiku-5-5")
+        self.assertNotIn("future", entry["facts"], "unknown keys are dropped, not published")
+        self.report({"terminal": "r1", "app": "claude", "state": "idle", "seq": 2})
+        self.assertEqual(self.core.live["agents.terminal_status"]["data"]["r1"]["facts"]["session"]["cwd"], "/work",
+                         "a report without facts keeps the last ones")
+        self.report({"terminal": "r1", "app": "claude", "state": "idle", "seq": 3, "facts": {"session": {"cwd": "/other"}}})
+        entry = self.core.live["agents.terminal_status"]["data"]["r1"]
+        self.assertEqual(entry["facts"], {"session": {"cwd": "/other"}}, "facts are replaced, never merged")
+        self.assertEqual(entry["seq"], 3, "a facts-only change is published")
+
+    def test_bad_view_facts_are_refused_and_record_nothing(self):
+        for bad in ({"session": {"cwd": ""}}, {"session": {"model": {"label": "no id"}}},
+                    {"usage": {"context": {"used": 5}}}, {"usage": {"tokens": {"input": -1, "output": 0}}},
+                    {"usage": {"cost": {"amount": 1, "currency": "USD", "basis": "guessed"}}},
+                    {"usage": {"cost": {"amount": float("nan"), "currency": "USD", "basis": "reported"}}},
+                    {"session": {"cwd": "/" + "x" * 600}}, "not an object",
+                    {"session": {"model": {"id": "m", "label": "y" * 250}, "cwd": "/" + "\u00e9" * 400},
+                     "usage": {"cost": {"amount": 1, "currency": "USD", "basis": "reported", "plan": "p" * 64}}}):
+            with self.subTest(bad=str(bad)[:60]), self.assertRaises(VqroError):
+                self.report({"terminal": "r1", "app": "claude", "state": "idle", "seq": 1, "facts": bad})
+        self.assertNotIn("r1", self.agents.tier1)
+
     def test_bad_reports_are_refused_to_the_caller_without_notices(self):
         for bad in ({"terminal": "r9", "app": "c", "state": "idle", "seq": 1}, {"terminal": "r1", "app": "", "seq": 1},
                     {"terminal": "r1", "app": "c", "state": "idle", "seq": -1}, {"terminal": "r1", "app": "c", "seq": "1"}):

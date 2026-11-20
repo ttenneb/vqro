@@ -533,6 +533,18 @@ may report, with an additional 960 KiB encoded-table admission budget to fit the
 exceeding either bound returns `overloaded` and records nothing.
 Sequence is not scoped to a reporting process or incarnation; a restarted reporter must advance it. Reports live
 only in extension memory, disappear when the terminal ends or is removed, and do not survive an extension restart.
+
+A report may carry optional `facts {session?: {cwd?, model? {id, label?, effort?}}, usage?}`. These are the view-fact
+shapes of `agent-v0.md` §2.3, holding only what the plugin read from its runtime: absent is unknown, never inferred.
+- Unknown keys are dropped; a known key with the wrong shape refuses the report (`invalid`).
+- At most 1 KiB encoded per terminal, counted in the table budget.
+- A report without `facts` keeps the terminal's last ones; a report with `facts` replaces them (never merged).
+- They are published as the entry's `facts` in `agents.terminal_status`, with the same seq rule as `state`.
+- A plugin whose facts are refused reports its state without them.
+
+Claude Code hooks report `cwd` (hook input) and the model id (the transcript's latest assistant entry). Pi reports
+`cwd`, the model with label and thinking level as `effort`, and its own context figure
+(`usage.context {window, used?}`). Neither exposes session token totals or cost to a plugin, so those are absent.
 **Reporter ownership** `(pending C2)`: once callers carry a principal, only the terminal's own launcher-tagged
 principal or the workspace owner may report for it; other callers get `not_authorized`, never an applied report.
 The current command does not authenticate the reporter: any caller can report for any terminal. This is a known

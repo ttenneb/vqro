@@ -352,11 +352,21 @@ if a.inbox == "fake":
           and not any(e["event"] == "take_uncertain" for e in hooklog()[-5:]), (h.get(W).get("state"), hooklog()[-3:]))
     rc, out, _ = hook("PostToolBatch", {"tool_calls": []})
     check("...and it is taken at the next point", W in context(out), out[:200])
-# 10. status reports (fake inbox only: no standard status command exists)
+# 10. status reports with view facts Claude Code reports itself: cwd from the hook input, model from the transcript
+transcript_add({"type": "assistant", "uuid": "m-1", "message": {"role": "assistant", "model": "claude-fixture-1",
+                "stop_reason": "end_turn", "content": [{"type": "text", "text": "ok"}]}})
+hook("UserPromptSubmit", {"prompt": "facts"})
 if a.inbox == "fake":
     seen = [s["state"] for s in h.statuses() if s.get("terminal") == AGENT and s.get("app") == "claude"]
     check("status (agents.status, K3 shape): unknown at start, running on a prompt/tool, idle at Stop",
           {"unknown", "running", "idle"} <= set(seen) and all(isinstance(s.get("seq"), int) for s in h.statuses()), seen)
+    last = h.statuses()[-1].get("facts") or {}
+    check("status carries reported view facts only: cwd and the transcript's model; no usage invented",
+          last.get("session", {}).get("cwd") == root and last["session"].get("model") == {"id": "claude-fixture-1"}
+          and "usage" not in last, last)
+if a.inbox == "k2core":  # K3 agents.status itself accepts the reports and their facts
+    refused = [e for e in hooklog() if e["event"] in ("status_failed", "status_facts_refused")]
+    check("K3 agents.status accepts every report and its facts", not refused, refused[:2])
 # 11. hook latency without mail: what every tool batch costs
 t = time.time()
 for _ in range(10):

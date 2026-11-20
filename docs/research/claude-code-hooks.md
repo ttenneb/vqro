@@ -199,6 +199,10 @@ did not change (an edit of a held record) would then never arrive. The wake cont
     its input closes and never reconnects afterwards.
   - Test harnesses must drain Pi's stdout: Node writes to a pipe synchronously, so an undrained pipe blocks Pi mid-run.
     That was the cause of an intermittent "lost take, window moved on" failure.
+- **View facts in tier-1 status:** `agents.status {…, facts}` (coordination-v0 §7.1) carries only what each runtime
+  reports. Claude Code gives `cwd` and the transcript's model. Pi gives `cwd`, model, label, thinking level and its own
+  context window and figure. Session token totals and cost are not available to either plugin, so they stay absent,
+  never summed. A refused fact never costs the state report: it is resent without facts.
 - **Report order (Pi):** `read` is sent only after its `inserted` report has completed.
 - **Evidence nonce:** 128 bits from the OS. If randomness fails, nothing is handed over and the claims are released.
 - **Op ids:** report op ids are deterministic per claim and stage, and the command prefix is configurable

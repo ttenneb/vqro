@@ -285,6 +285,17 @@ if a.inbox == "fake":
     check("L2 failed recovery is retried; then delivered", got and plugin_events("take_recovery_failed")
           and len(plugin_events("take_recovered")) > base_recovered and h.get(lt2)["state"] in ("inserted", "read"),
           {"failed": plugin_events("take_recovery_failed")[-1:], "state": h.get(lt2).get("state")})
+# S. tier-1 status with view facts Pi reports itself (ctx.cwd, model, thinking level, context window/usage)
+if a.inbox == "fake":
+    facts = next((st.get("facts") for st in reversed(h.statuses()) if st.get("app") == "pi" and st.get("facts")), None) or {}
+    session, context = facts.get("session", {}), facts.get("usage", {}).get("context", {})
+    check("S status carries Pi's own view facts: cwd, model, context window; no tokens or cost invented",
+          session.get("cwd") == os.path.realpath(P["work"]) and session.get("model", {}).get("id") == "fake-1"
+          and isinstance(context.get("window"), int) and not {"tokens", "cost"} & set(facts.get("usage", {})), facts)
+else:  # K3 agents.status itself accepts the reports and their facts
+    refused = plugin_events("status_failed") + plugin_events("status_facts_refused")
+    check("S K3 agents.status accepts every report and its facts", not refused, refused[:2])
+
 # P. print mode (`pi -p`) ends when its answer is done: the plugin's connection and timers never keep it running
 penv = dict(base, PI_CODING_AGENT_DIR=P["agent"], PI_OFFLINE="1", PI_SKIP_VERSION_CHECK="1", PI_TELEMETRY="0",
             VQRO_AGENT=AGENT, VQRO_PRINCIPAL=h.PLUGIN, VQRO_PULL_LOG=plugin_log)

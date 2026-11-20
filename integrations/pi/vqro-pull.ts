@@ -219,10 +219,50 @@ function plugin(pi: any, hooks: TestHooks) {
     throw new Error("reconcile: still reconciling after 64 pages");
   }
 
+  // View facts Pi itself reports (agent-v0 section 2.3), nothing inferred: ctx.cwd, the active model and thinking
+  // level, and ctx.getContextUsage() (Pi's own current context figure, the one its footer shows; `used` is absent
+  // when Pi has none, e.g. right after compaction). Session token totals and cost are not exposed to extensions, so
+  // they stay absent rather than summed here.
+  function viewFacts(): any {
+    const ctx = current;
+    if (!ctx) return undefined;
+    const fits = (v: unknown, most: number) => typeof v === "string" && v.length > 0 && [...v].length <= most && !/\p{C}/u.test(v);
+    const session: any = {};
+    if (fits(ctx.cwd, 512)) session.cwd = ctx.cwd;
+    const model = ctx.model;
+    if (model && fits(model.id, 256)) {
+      session.model = { id: model.id };
+      if (fits(model.name, 256) && model.name !== model.id) session.model.label = model.name;
+      if (fits(ctx.thinkingLevel, 64)) session.model.effort = ctx.thinkingLevel;
+    }
+    const facts: any = {};
+    if (Object.keys(session).length) facts.session = session;
+    let context: any;
+    try { context = ctx.getContextUsage?.(); } catch { context = undefined; }
+    const count = (v: unknown) => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
+    if (context && count(context.contextWindow)) {
+      facts.usage = { context: { window: context.contextWindow, ...(count(context.tokens) ? { used: context.tokens } : {}) }, at_ms: Date.now() };
+    }
+    return Object.keys(facts).length ? facts : undefined;
+  }
+
   async function status(state: string, source: string) {
+    const args: any = { terminal: AGENT, app: "pi", state, seq: Date.now() };
+    const facts = viewFacts();
+    if (facts) args.facts = facts;
     try {
-      await call("command.invoke", { name: "agents.status", args: { terminal: AGENT, app: "pi", state, seq: Date.now() }, deadline_ms: 2000 });
-    } catch (e) { log("status_failed", { state, source, error: String(e) }); }
+      await call("command.invoke", { name: "agents.status", args, deadline_ms: 2000 });
+    } catch (e) {
+      if (facts && String(e).includes("invalid")) {
+        // Facts are optional: a refused fact never costs the state report.
+        log("status_facts_refused", { error: String(e), facts });
+        delete args.facts;
+        args.seq = Date.now() + 1;
+        try { return void (await call("command.invoke", { name: "agents.status", args, deadline_ms: 2000 })); }
+        catch (again) { e = again; }
+      }
+      log("status_failed", { state, source, error: String(e) });
+    }
   }
 
   const sender = (rec: Rec) => typeof rec.from === "string" ? rec.from : rec.from?.principal ?? "?";

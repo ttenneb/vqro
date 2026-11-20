@@ -98,16 +98,18 @@ class Harness:
             time.sleep(0.1)
 
     def k2_extensions(self, coord_ext):
-        """A private extension directory with only `coord` (K2) declared, copied from the given coord-ext tree."""
+        """A private extension directory with only `coord` (K2) and `agents` (K3) declared, copied from the given tree."""
         import json, shutil
         dest = os.path.join(self.root, "extensions")
         os.makedirs(os.path.join(dest, "manifests"), mode=0o700, exist_ok=True)
         for name in os.listdir(coord_ext):
             if name.endswith(".py"):
                 shutil.copy(os.path.join(coord_ext, name), dest)
-        shutil.copy(os.path.join(coord_ext, "manifests", "coord.json"), os.path.join(dest, "manifests"))
+        for name in ("coord", "agents"):
+            shutil.copy(os.path.join(coord_ext, "manifests", name + ".json"), os.path.join(dest, "manifests"))
         defaults = json.load(open(os.path.join(coord_ext, "defaults.json")))
-        defaults["extensions"] = [e for e in defaults["extensions"] if e["name"] == "coord"]
+        # coord (K2) and agents (K3: agents.status, the tier-1 status table); nothing else
+        defaults["extensions"] = [e for e in defaults["extensions"] if e["name"] in ("coord", "agents")]
         json.dump(defaults, open(os.path.join(dest, "defaults.json"), "w"))
         return dest
 

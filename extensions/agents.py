@@ -31,6 +31,56 @@ TIER1_STATES = {"idle": "idle", "running": "working", "requires_action": "blocke
 TIER1_MAX = 1024
 TIER1_BYTES = 1024 * 1024 - 64 * 1024
 TIER1_SEQ_MAX = 2 ** 53 - 1  # exact in every JSON reader
+# Optional view facts a tier-1 plugin reads from its runtime (agent-v0 section 2.3 shapes): at most this many encoded
+# bytes per terminal, counted in TIER1_BYTES; with facts, fewer terminals fit the table before `overloaded`.
+TIER1_FACTS_BYTES = 1024
+
+
+def tier1_facts(value):
+    """Validate agents.status `facts` {session?: {cwd?, model?}, usage?}: the agent-v0 view-fact shapes. Unknown keys
+    are dropped (forward compatible); a known key with the wrong shape is refused, never coerced."""
+    def text(v, most, name):
+        if not isinstance(v, str) or not v or len(v) > most or not v.isprintable():
+            raise VqroError(f"{name} must be 1 to {most} printable characters", "invalid")
+        return v
+
+    def count(v, name):
+        if type(v) is not int or not 0 <= v <= TIER1_SEQ_MAX:
+            raise VqroError(f"{name} must be a non-negative integer", "invalid")
+        return v
+
+    def section(v, name, fields, required=()):
+        if not isinstance(v, dict):
+            raise VqroError(f"{name} must be an object", "invalid")
+        out = {key: check(v[key], f"{name}.{key}") for key, check in fields.items() if key in v}
+        missing = [key for key in required if key not in out]
+        if missing:
+            raise VqroError(f"{name} needs {', '.join(missing)}", "invalid")
+        return out
+
+    def amount(v, name):
+        if type(v) not in (int, float) or v != v or not 0 <= v < 1e15:
+            raise VqroError(f"{name} must be a non-negative number", "invalid")
+        return v
+
+    def basis(v, name):
+        if v not in ("reported", "estimated"):
+            raise VqroError(f"{name} must be reported or estimated", "invalid")
+        return v
+    model = lambda v, name: section(v, name, {"id": lambda x, n: text(x, 256, n), "label": lambda x, n: text(x, 256, n),
+                                               "effort": lambda x, n: text(x, 64, n)}, ("id",))
+    session = lambda v, name: section(v, name, {"cwd": lambda x, n: text(x, 512, n), "model": model})
+    usage = lambda v, name: section(v, name, {
+        "context": lambda x, n: section(x, n, {"used": count, "window": count, "limit": count}, ("window",)),
+        "tokens": lambda x, n: section(x, n, {"input": count, "output": count, "cache_read": count, "cache_write": count},
+                                       ("input", "output")),
+        "cost": lambda x, n: section(x, n, {"amount": amount, "currency": lambda y, m: text(y, 16, m), "basis": basis,
+                                            "plan": lambda y, m: text(y, 64, m)}, ("amount", "currency", "basis")),
+        "at_ms": count})
+    facts = section(value, "facts", {"session": session, "usage": usage})
+    if len(json.dumps(facts, ensure_ascii=False, separators=(",", ":")).encode()) > TIER1_FACTS_BYTES:
+        raise VqroError(f"facts exceed {TIER1_FACTS_BYTES} encoded bytes; nothing recorded", "invalid")
+    return facts
 MODE_ORDER = ("start", "boundary", "settle", "admit", "preempt")
 MODE_SHORT = {"start": "Prompt", "boundary": "Steer", "settle": "Queue", "admit": "Admit", "preempt": "Interrupt and send"}
 RECEIPT_TEXT = {"admitted": "admitted; where it landed is unknown", "queued": "held by the runtime",
@@ -293,7 +343,7 @@ class Agents:
         self.tier1_size = {}  # terminal id -> encoded bytes of its published entry
         self.tier1_lock = threading.Lock()
         self.tier1_dirty = self.tier1_publishing = False
-        ext.command("agents.status", "Report a tier-1 agent's state for its terminal (args: terminal, app, state, seq)")(self.report_status)
+        ext.command("agents.status", "Report a tier-1 agent's state for its terminal (args: terminal, app, state, seq, facts?)")(self.report_status)
         for name, fn, title in [("list", self.list_agents, "Show agents"), ("show", self.show, "Show an agent in a tab"),
                                 ("config", self.settings, "Agent settings and commands (popup)"),
                                 ("configure", self.configure, "Change an agent setting (args: id, value)"),
@@ -842,13 +892,15 @@ class Agents:
         return self.send_mode(r, mode, text)
 
     def report_status(self, args):
-        """agents.status {terminal, app, state, seq}: a tier-1 plugin's report for its own terminal.
+        """agents.status {terminal, app, state, seq, facts?}: a tier-1 plugin's report for its own terminal.
 
         Published as live data `agents.terminal_status` ({data: {terminal: {app, state, seq, at_ms, status}}}), where
         `status` is OSC 7501-shaped for readers of terminal status. Lossy and advisory: an unknown state value
         becomes `unknown`, a report with seq not above the last one is ignored, and nothing is kept across a
         restart of this extension. Not attributed: any caller can report for any terminal until callers carry
-        a principal (C2). Errors go to the caller only, never to a notice.
+        a principal (C2). Errors go to the caller only, never to a notice. Optional `facts` are view facts the
+        plugin read from its runtime (`tier1_facts`); a report without `facts` keeps the last ones, and a report
+        with `facts` replaces them. They are published as the entry's `facts`, never inferred or merged.
         """
         terminal, app, seq = args.get("terminal"), args.get("app"), args.get("seq")
         if not isinstance(terminal, str) or not terminal or len(terminal) > 64:
@@ -864,6 +916,7 @@ class Agents:
         if r is None or r.get("kind", "terminal") != "terminal" or ended(r):
             raise VqroError(f"{label(terminal, 64)} is not a live terminal; nothing recorded", "not_found")
         state = args.get("state") if args.get("state") in TIER1_STATES else "unknown"
+        facts = tier1_facts(args["facts"]) if args.get("facts") is not None else None
         with self.tier1_lock:
             previous = self.tier1.get(terminal)
             stale = previous is not None and seq <= previous["seq"]
@@ -872,13 +925,17 @@ class Agents:
                     raise VqroError("too many reporting terminals; nothing recorded", "overloaded")
                 entry = {"app": app, "state": state, "seq": seq, "at_ms": int(time.time() * 1000),
                          "status": {"state": TIER1_STATES[state], "app": app}}
+                kept = facts if facts is not None else (previous or {}).get("facts")
+                if kept:
+                    entry["facts"] = kept
                 size = len(json.dumps({terminal: entry}, ensure_ascii=False, separators=(",", ":")).encode())
                 if sum(self.tier1_size.values()) - self.tier1_size.get(terminal, 0) + size > TIER1_BYTES:
                     raise VqroError("the published status table would exceed its size bound; nothing recorded", "overloaded")
                 self.tier1[terminal], self.tier1_size[terminal] = entry, size
             # Publish a change; and a table left unpublished by a failed publication goes out with any report,
             # changed, unchanged or stale.
-            publish = self.tier1_dirty or not stale and (previous is None or (previous["state"], previous["app"]) != (state, app))
+            publish = self.tier1_dirty or not stale and (previous is None or (previous["state"], previous["app"], previous.get("facts"))
+                                                          != (state, app, self.tier1[terminal].get("facts")))
             current = self.tier1[terminal]["seq"]
         if publish:
             self.publish_tier1()

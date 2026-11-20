@@ -714,8 +714,19 @@ mod unix {
             "idle" | "error" => "idle",
             _ => "unknown",
         };
-        let args = json!({"terminal": ctx.agent, "app": "claude", "state": state, "seq": now_ms() as u64});
-        let error = core.call("command.invoke", json!({"name": command, "args": args, "deadline_ms": CALL_MS})).err();
+        let mut args = json!({"terminal": ctx.agent, "app": "claude", "state": state, "seq": now_ms() as u64});
+        let facts = view_facts(ctx);
+        if let Some(facts) = &facts {
+            args["facts"] = facts.clone();
+        }
+        let mut error = core.call("command.invoke", json!({"name": command, "args": args, "deadline_ms": CALL_MS})).err();
+        if facts.is_some() && error.as_deref().is_some_and(|e| e.starts_with("invalid")) {
+            // Facts are optional: a refused fact never costs the state report.
+            ctx.log("status_facts_refused", json!({"error": error, "facts": facts}));
+            args.as_object_mut().map(|a| a.remove("facts"));
+            args["seq"] = json!(now_ms() as u64 + 1);
+            error = core.call("command.invoke", json!({"name": command, "args": args, "deadline_ms": CALL_MS})).err();
+        }
         let changed = ctx.with_state(|s| {
             let previous = s.get("status_error").as_str().map(String::from);
             s.set("status_error", json!(error));
@@ -724,6 +735,39 @@ mod unix {
         if let (Some(e), true) = (error, changed) {
             ctx.log("status_failed", json!({"state": state, "hook": event, "error": e}));
         }
+    }
+
+    /// View facts Claude Code itself reports (agent-v0 section 2.3), nothing inferred: the working directory from
+    /// the hook input, and the model id of the latest assistant entry in the transcript (the API's own model field).
+    /// Context window, occupancy, session token totals and cost are not reported to hooks, so they stay absent.
+    fn view_facts(ctx: &Ctx) -> Option<Value> {
+        let fits = |s: &str, most: usize| !s.is_empty() && s.chars().count() <= most && s.chars().all(|c| !c.is_control());
+        let mut session = serde_json::Map::new();
+        if let Some(cwd) = ctx.input.get("cwd").and_then(Value::as_str).filter(|c| fits(c, 512)) {
+            session.insert("cwd".into(), json!(cwd));
+        }
+        if let Some(model) = transcript_model(ctx).filter(|m| fits(m, 256)) {
+            session.insert("model".into(), json!({"id": model}));
+        }
+        (!session.is_empty()).then(|| json!({"session": session}))
+    }
+
+    /// The `message.model` of the last assistant entry, read from at most the transcript's last 256 KiB.
+    fn transcript_model(ctx: &Ctx) -> Option<String> {
+        use std::io::{Read, Seek, SeekFrom};
+        let path = ctx.input.get("transcript_path").and_then(Value::as_str)?;
+        let mut file = fs::File::open(path).ok()?;
+        let len = file.metadata().ok()?.len();
+        file.seek(SeekFrom::Start(len.saturating_sub(256 * 1024))).ok()?;
+        let mut tail = Vec::new();
+        file.read_to_end(&mut tail).ok()?;
+        String::from_utf8_lossy(&tail).lines().rev().filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .find_map(|row| {
+                (row.get("type").and_then(Value::as_str) == Some("assistant"))
+                    .then(|| row.pointer("/message/model").and_then(Value::as_str).map(String::from))
+                    .flatten()
+                    .filter(|m| !m.starts_with('<')) // "<synthetic>": a local error entry, not a model
+            })
     }
 
     fn subscribe(ctx: &Ctx) -> Option<Core> {
