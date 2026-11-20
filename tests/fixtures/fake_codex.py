@@ -8,6 +8,7 @@ The wire contains only native methods; there are no production test-effect opera
 import argparse
 import json
 import os
+from pathlib import Path
 import sys
 import threading
 import time
@@ -21,7 +22,13 @@ parser.add_argument("--ledger", default=os.environ.get("AGENT_CONFORMANCE_LEDGER
 parser.add_argument("--reply-delay-ms", type=int, default=int(os.environ.get("CODEX_FAKE_REPLY_DELAY_MS", "0")))
 parser.add_argument("--hold", action="store_true", default=os.environ.get("CODEX_FAKE_HOLD") == "1")
 parser.add_argument("--exit-after-init", action="store_true")
+parser.add_argument("--control", type=Path, help="K1 private control socket; enables controlled mode")
+parser.add_argument("--script", type=Path)
+parser.add_argument("--harness-root", type=Path, help="fixture-only path to K1 tests while branches differ")
 args = parser.parse_args()
+if args.control:
+    from codex_control import run_controlled
+    raise SystemExit(run_controlled(args))
 ledger = args.ledger
 
 
