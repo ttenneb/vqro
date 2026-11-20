@@ -3,7 +3,7 @@ import asyncio
 from copy import deepcopy
 import json
 
-from .content import examples
+from .content import compare_content, examples
 from .results import CheckFailed, FixtureFailed, HarnessGap, NotDeclared, check, declared
 
 HANDLERS = {}
@@ -75,20 +75,26 @@ async def mode_caps(ctx, mode):
 async def declarations(ctx):
     upper = ctx.provider.get("capabilities", {})
     agent = upper.get("agent")
-    check(isinstance(agent, dict) and agent.get("v") == 0, "provider did not declare agent {v:0,modules}")
-    check(isinstance(agent.get("modules"), dict), "provider agent.modules is not an object")
+    check(isinstance(agent, dict) and type(agent.get("v")) is int and agent["v"] == 0, "provider did not declare agent {v:0,modules}")
+    modules = agent.get("modules")
+    check(isinstance(modules, dict), "provider agent.modules is not an object map")
+    known_modules = {"queue", "sessions", "config", "history", "children", "terminals", "stop"}
+    for name, module in modules.items():
+        check(name in known_modules or name.startswith("_"), "unknown non-namespaced module " + name)
+        check(isinstance(module, dict) and integer(module.get("v")), "module needs an explicit version: " + name)
     check("items.stream" in upper, "structured adapter did not declare mandatory item observation")
     check(ctx.provider.get("host") == ctx.host, "provider not bound to its actual private execution host")
     for resource in ctx.agents:
         facts = resource.get("data", {}).get("agent", {})
-        check(facts.get("v") == 0, "resource lacks data.agent.v:0")
+        check(type(facts.get("v")) is int and facts["v"] == 0, "resource lacks data.agent.v:0")
         check(len(json.dumps(facts, ensure_ascii=False, separators=(",", ":")).encode()) <= 64 << 10, "agent facts exceed 64 KiB")
         check(identifier(facts.get("epoch")), "missing/oversized observation epoch")
         check(isinstance(facts.get("state"), str) and isinstance(facts.get("lifecycle"), str), "missing state/lifecycle")
         state = facts["state"]
         coarse = "error" if state == "idle" and (facts.get("completion") or {}).get("reason") == "error" else {
             "idle": "idle", "running": "working", "requires_action": "blocked"}.get(state, "working")
-        check((resource.get("status") or {}).get("state") == coarse, "coarse status disagrees with native-evidence facts")
+        check(isinstance(resource.get("status"), dict) and resource["status"].get("state") == coarse,
+              "coarse status disagrees with native-evidence facts")
         check(isinstance(facts.get("incomplete"), list), "facts need explicit incomplete list")
         host = facts.get("host", {})
         check(identifier(host.get("id")) and isinstance(host.get("kind"), str) and isinstance(host.get("owns_lifecycle"), bool), "invalid host declaration")
@@ -157,7 +163,7 @@ async def preconditions(ctx):
         op, base, unknown = "agent.interrupt", {}, None
     else:
         raise HarnessGap("C2 needs a valid argument factory for the declared non-send/non-interrupt operation")
-    invalids = [{"v": 1}, {"epoch": "foreign-conformance-epoch"}, {"caps_rev": fact["caps"]["rev"] + 1}]
+    invalids = [{"v": 1}, {"v": False}, {"v": None}, {"epoch": "foreign-conformance-epoch"}, {"caps_rev": fact["caps"]["rev"] + 1}]
     if unknown:
         invalids.append(unknown)
     for invalid in invalids:
@@ -254,8 +260,10 @@ async def endpoint_model(ctx):
 
 @case("D6")
 async def unsupported_content(ctx):
-    declaration = (await caps(ctx, "agent.send"))["content"]
+    send = await caps(ctx, "agent.send")
+    declaration = send["content"]
     types, shape, blocks = declaration["types"], declaration["shape"], examples()
+    framed = any(item.get("frame") == "sender_header" for item in send.get("origin", []))
     invalid = [[{"type": "_conformance_undeclared", "data": "not-a-text-fallback"}],
                "a string is not a block array", {"type": "text", "text": "one object is not an array"}]
     invalid += [[block] for tag, block in blocks.items() if tag not in types]
@@ -290,14 +298,7 @@ async def unsupported_content(ctx):
         actual = received[0].get("content")
         if actual is None:
             raise FixtureFailed("native wire driver lacks a typed-content ledger oracle")
-        check([block.get("type") for block in actual] == [block["type"] for block in content],
-              "typed content was reordered, dropped, flattened or concatenated")
-        for before, after in zip(content, actual):
-            for field, value in before.items():
-                if field == "text" and before["type"] == "text":
-                    check(value in after.get(field, ""), "literal text changed inside its declared origin frame")
-                else:
-                    check(after.get(field) == value, f"native {before['type']}.{field} changed")
+        compare_content(content, actual, sender_header=framed)
     ctx.evidence.append({"kind": "content_matrix", "shape": shape, "types": types,
                          "valid_arrays": len(positive), "rejected_arrays": len(invalid)})
 
@@ -367,6 +368,187 @@ async def interrupt_not_end(ctx):
     check(facts.get("lifecycle") == "live", "interrupt incorrectly ended the endpoint")
     check(not ctx.native.records("input_received", after=mark), "interrupt sent content")
     check((await ctx.native.call("state"))["pid"] == ctx.native.state["pid"], "interrupt killed/replaced runtime")
+
+
+async def make_request(ctx, method=None, **options):
+    declaration = await caps(ctx, "agent.respond")
+    methods = declaration.get("methods", [])
+    method = method or next((name for name in ("confirm", "choice", "text", "permission", "form", "url") if name in methods), None)
+    if method is None:
+        raise HarnessGap("no request fixture for the declared methods")
+    before = {q["request"] for q in (await ctx.facts()).get("requests", [])}
+    native_id = "native-" + ctx.delivery()
+    await ctx.native.call("request", request=native_id, method=method, **options)
+    facts = await ctx.wait_facts(lambda f: any(q.get("request") not in before for q in f.get("requests", [])))
+    summary = next(q for q in facts["requests"] if q.get("request") not in before)
+    view = await ctx.attach()
+    key = ("request", summary["request"])
+    await ctx.wait_view(view, lambda reducer: key in reducer.entities)
+    entity = view.reducer.entities[key]["value"]
+    check(entity.get("method") == method, "request method changed during normalization")
+    check(entity.get("revision") == summary.get("revision"), "request summary/entity revisions disagree")
+    scope = entity.get("scope", {})
+    check(isinstance(scope, dict) and (("session" in scope) != ("operation" in scope)), "request scope is ambiguous or missing")
+    return native_id, entity
+
+
+def schema_example(schema, depth=0):
+    if depth > 16 or not isinstance(schema, dict):
+        raise HarnessGap("form fixture schema is not a bounded object")
+    supported = {"$schema", "$id", "title", "description", "default", "examples", "type", "properties", "required",
+                 "additionalProperties", "enum", "const", "oneOf", "anyOf", "items", "minItems", "maxItems",
+                 "minLength", "maxLength", "minimum", "maximum"}
+    if set(schema) - supported:
+        raise HarnessGap("form fixture cannot safely generate unsupported schema constraints")
+    if "const" in schema:
+        return deepcopy(schema["const"])
+    if schema.get("enum"):
+        return deepcopy(schema["enum"][0])
+    for union in ("oneOf", "anyOf"):
+        if schema.get(union):
+            return schema_example(schema[union][0], depth + 1)
+    kind = schema.get("type", "object" if "properties" in schema else "string")
+    if isinstance(kind, list):
+        kind = next((value for value in kind if value != "null"), "null")
+    if kind == "object":
+        properties, required = schema.get("properties", {}), schema.get("required", [])
+        if len(required) > 32:
+            raise HarnessGap("form fixture property-count bound")
+        return {name: schema_example(properties.get(name, {}), depth + 1) for name in required}
+    if kind == "array":
+        count = schema.get("minItems", 0)
+        if not integer(count) or count > 16:
+            raise HarnessGap("form fixture array-count bound")
+        return [schema_example(schema.get("items", {}), depth + 1) for _ in range(count)]
+    if kind == "string":
+        length = schema.get("minLength", 0)
+        if not integer(length) or length > 4096:
+            raise HarnessGap("form fixture string-size bound")
+        return "x" * length
+    if kind in ("integer", "number"):
+        value = schema.get("minimum", min(0, schema.get("maximum", 0)))
+        if kind == "integer" and not isinstance(value, int):
+            raise HarnessGap("form fixture integer bounds are not integral")
+        return value
+    if kind == "boolean":
+        return False
+    if kind == "null":
+        return None
+    raise HarnessGap("no valid-response fixture for form schema type " + repr(kind))
+
+
+def valid_response(request):
+    method = request["method"]
+    if method in ("permission", "choice"):
+        choices = request.get("choices", [])
+        if not choices:
+            raise HarnessGap("choice/permission fixture has no advertised choice")
+        choice = choices[0]
+        if not isinstance(choice, dict) or not identifier(choice.get("id")):
+            raise HarnessGap("choice fixture needs an advertised opaque choice id")
+        return {"choice": choice["id"]}
+    if method == "confirm":
+        return {"value": False}
+    if method == "text":
+        return {"value": ""}
+    if method == "form":
+        return {"action": "accept", "content": schema_example(request.get("schema", {}))}
+    if method == "url":
+        return {"action": "decline"}
+    raise HarnessGap("unknown response method " + method)
+
+
+async def answer(ctx, request, response_value, **overrides):
+    args = {"request": request["request"], "revision": request["revision"], "response": response_value, **overrides}
+    return await ctx.invoke("agent.respond", args)
+
+
+@case("R1")
+async def requests_observed(ctx):
+    await ctx.native.call("turn", state="start")
+    await ctx.wait_facts(lambda f: f.get("state") == "running")
+    declaration = await caps(ctx, "agent.respond")
+    for method in declaration["methods"]:
+        _, request = await make_request(ctx, method)
+        check(request.get("status") == "pending" and not request.get("incomplete"), "new representable request not fully pending")
+        scope_kind = "operation" if "operation" in request["scope"] else "run" if "run" in request["scope"] else "session"
+        check(scope_kind in declaration.get("scopes", []), "request scope exceeds declaration")
+        await ctx.wait_facts(lambda f: f.get("state") == "requires_action")
+        result = await answer(ctx, request, {"action": "cancel"})
+        check(result.get("outcome") in ("accepted", "dispatched"), "explicit request cancel was not handed over")
+
+
+@case("R2")
+async def first_valid_answer(ctx):
+    _, request = await make_request(ctx)
+    response = valid_response(request)
+    for invalid in ({"revision": request["revision"] + 1}, {"epoch": "foreign-request-epoch"},
+                    {"response": {"_conformance_invalid": True}}):
+        mark = ctx.native.mark()
+        rejection(await answer(ctx, request, response, **invalid))
+        check(not ctx.native.writes(mark), "stale/invalid request response wrote to native runtime")
+    second = await ctx.viewer()
+    mark = ctx.native.mark()
+    one, two = await asyncio.gather(answer(ctx, request, response),
+        ctx.invoke("agent.respond", {"request": request["request"], "revision": request["revision"], "response": response}, peer=second))
+    check(sum(row.get("outcome") in ("accepted", "dispatched") for row in (one, two)) == 1, "two concurrent answers won or neither did")
+    rejection(next(row for row in (one, two) if row.get("outcome") not in ("accepted", "dispatched")), kinds=("stale",))
+    await ctx.native.wait(lambda rows: any(r["seq"] > mark and r["kind"] == "answer" for r in rows))
+    await asyncio.sleep(.1)
+    check(len(ctx.native.records("answer", after=mark)) == 1, "concurrent answers produced more than one native response")
+    mark = ctx.native.mark()
+    rejection(await answer(ctx, request, response), kinds=("stale",))
+    check(not ctx.native.writes(mark), "already-answered request was sent again")
+    ctx.evidence.append({"kind": "first_valid_answer", "native_responses": 1,
+                         "remaining_branches": "expiry and dead-scope traces follow in this incremental runner"})
+    raise HarnessGap("R2 core race/stale checks executed; expiry/dead-scope branches not yet implemented")
+
+
+@case("R3")
+async def answer_ack_precision(ctx):
+    declaration = await caps(ctx, "agent.respond")
+    _, request = await make_request(ctx)
+    result = await answer(ctx, request, valid_response(request))
+    expected = declaration.get("ack")
+    if expected not in ("accepted", "dispatched"):
+        raise HarnessGap("unknown request acknowledgement declaration " + repr(expected))
+    check(result.get("outcome") == expected, f"answer acknowledgement over/underclaimed: {result}")
+
+
+@case("R4")
+async def unrepresentable_requests(ctx):
+    mark = ctx.native.mark()
+    await ctx.native.call("request", request="unknown-native-method", method="_conformance_unknown_dialog")
+    await ctx.native.wait(lambda rows: any(r["seq"] > mark and r["kind"] == "answer" for r in rows))
+    await asyncio.sleep(.1)
+    answers = ctx.native.records("answer", after=mark)
+    check(len(answers) == 1 and answers[0].get("normalized_response") == {"action": "cancel"},
+          "unknown request method was not cancelled exactly once")
+    raise HarnessGap("R4 unknown-method cancellation executed; oversized/incomplete approval branch not yet implemented")
+
+
+@case("R5")
+async def cancel_is_distinct(ctx):
+    declaration = await caps(ctx, "agent.respond")
+    for method in declaration["methods"]:
+        mark = ctx.native.mark()
+        _, request = await make_request(ctx, method)
+        result = await answer(ctx, request, {"action": "cancel"})
+        check(result.get("outcome") in ("accepted", "dispatched"), "cancel not handed over")
+        await ctx.native.wait(lambda rows: any(r["seq"] > mark and r["kind"] == "answer" for r in rows))
+        native = ctx.native.records("answer", after=mark)[-1]
+        check(native.get("normalized_response") == {"action": "cancel"}, "cancel became denial/false/empty")
+        mark = ctx.native.mark()
+        _, request = await make_request(ctx, method)
+        response = valid_response(request)
+        await answer(ctx, request, response)
+        await ctx.native.wait(lambda rows: any(r["seq"] > mark and r["kind"] == "answer" for r in rows))
+        native = ctx.native.records("answer", after=mark)[-1]
+        normalized = native.get("normalized_response")
+        check(isinstance(normalized, dict) and normalized.get("action") not in ("cancel", "_invalid"),
+              "valid denial/false/empty became cancel or an invalid native response")
+        if method in ("confirm", "text"):
+            check(normalized == response, "false/empty response changed during normalization")
 
 
 @case("D13")

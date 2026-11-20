@@ -5,6 +5,8 @@ import struct
 import wave
 import zlib
 
+from .results import check
+
 
 def png():
     def chunk(tag, data):
@@ -22,6 +24,30 @@ def wav():
         output.setframerate(8000)
         output.writeframes(b"\x00\x00" * 8)
     return target.getvalue()
+
+
+def compare_content(expected, actual, *, sender_header=False):
+    """Compare literal blocks without prescribing where attribution is framed.
+
+    The actual native ledger is never changed. A declared sender header may be
+    text-only prefix blocks, or a prefix inside text; original block boundaries/order
+    and data must survive. D15 separately checks the header's authority/content.
+    """
+    check(isinstance(actual, list), "native fixture content oracle is not a block array", component="fixture")
+    original = actual
+    extra = len(actual) - len(expected)
+    if sender_header and extra > 0 and all(block.get("type") == "text" for block in actual[:extra]):
+        actual = actual[extra:]
+    check([block.get("type") for block in actual] == [block["type"] for block in expected],
+          "typed content was reordered, dropped, flattened or concatenated")
+    for before, after in zip(expected, actual):
+        for field, value in before.items():
+            if field == "text" and before["type"] == "text" and sender_header:
+                check(isinstance(after.get(field), str) and after[field].endswith(value),
+                      "literal text changed inside its declared sender frame")
+            else:
+                check(after.get(field) == value, f"native {before['type']}.{field} changed")
+    return {"extra_sender_blocks": len(original) - len(expected)}
 
 
 def examples():

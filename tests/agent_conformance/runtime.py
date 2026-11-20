@@ -274,7 +274,19 @@ class Runtime:
             await self.reply(command, removed)
         elif kind == "extension_ui_response":
             request = self.requests.pop(command.get("id"), None)
-            self.record("answer", request=command.get("id"), response=command, pending=request is not None)
+            method = (request or {}).get("method")
+            if command.get("cancelled") is True:
+                response = {"action": "cancel"}
+            elif method == "confirm" and isinstance(command.get("confirmed"), bool):
+                response = {"value": command["confirmed"]}
+            elif method == "choice" and isinstance(command.get("value"), str):
+                response = {"choice": command["value"]}
+            elif method == "text" and isinstance(command.get("value"), str):
+                response = {"value": command["value"]}
+            else:
+                response = {"action": "_invalid"}
+            self.record("answer", request=command.get("id"), response=command, normalized_response=response,
+                        pending=request is not None)
             # Pi extension UI responses have no acknowledgement.
         elif kind in ("set_steering_mode", "set_follow_up_mode"):
             name = "steering" if kind == "set_steering_mode" else "follow_up"
@@ -386,9 +398,13 @@ class Runtime:
                 raise ValueError("native pending request identity reused")
             self.requests[ident] = dict(row)
             self.record("request", request=ident, method=method)
-            await self.emit({"type": "extension_ui_request", "id": ident, "method": method,
-                             "title": row.get("title", "Fixture question"), "message": row.get("message", ""),
-                             "options": row.get("options", ["one", "two"]), "timeout": row.get("timeout", 0)})
+            native_method = {"choice": "select", "text": "editor" if row.get("multiline") else "input"}.get(method, method)
+            event = {"type": "extension_ui_request", "id": ident, "method": native_method,
+                     "title": row.get("title", "Fixture question"), "message": row.get("message", ""),
+                     "options": row.get("options", ["one", "two"])}
+            if "timeout" in row:
+                event["timeout"] = row["timeout"]
+            await self.emit(event)
         elif verb == "session_switch":
             self.session += 1
             self.entries.clear()
@@ -484,6 +500,7 @@ class Runtime:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--wire", choices=("pi", "codex", "acp"), default="pi")
+    parser.add_argument("--mode", choices=("rpc",), help="real Pi native launch flag")
     parser.add_argument("--control", type=Path)
     parser.add_argument("--ledger", type=Path)
     parser.add_argument("--script", type=Path)

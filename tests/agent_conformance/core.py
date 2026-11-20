@@ -221,13 +221,20 @@ class PublicImplementation:
     async def facts(self, rid=None, *, peer=None):
         row = await self.resource(rid, peer=peer)
         check(row is not None, "endpoint disappeared without inspectable end facts")
-        return row.get("data", {}).get("agent", {})
+        data = row.get("data") or {}
+        check(isinstance(data, dict), "structured endpoint data is not an object")
+        facts = data.get("agent", {})
+        check(isinstance(facts, dict), "data.agent is not an object")
+        return facts
 
     async def wait_facts(self, predicate, rid=None, *, timeout=2):
         async def waiting():
             while True:
                 resource = await self.resource(rid)
-                fact = resource.get("data", {}).get("agent", {}) if resource else {}
+                data = (resource.get("data") or {}) if resource else {}
+                check(isinstance(data, dict), "structured endpoint data is not an object")
+                fact = data.get("agent", {})
+                check(isinstance(fact, dict), "data.agent is not an object")
                 if fact and predicate(fact):
                     return fact
                 await asyncio.sleep(.01)
@@ -247,6 +254,21 @@ class PublicImplementation:
             # Preserve the actual core outcome; an unqualified JSON-RPC error
             # must not be dressed up as a definite provider rejection.
             return {"outcome": error.data.get("outcome"), "error": error.error, "rpc_error": True}
+
+    async def ensure_session(self, rid=None):
+        facts = await self.facts(rid)
+        if (facts.get("session") or {}).get("id"):
+            return facts
+        session = facts.get("caps", {}).get("agent.session", {})
+        if "new" not in session.get("actions", []):
+            raise HarnessGap("send/work fixture needs a session but cannot bootstrap one through declared agent.session:new")
+        result = await self.invoke("agent.session", {"action": "new"}, rid=rid)
+        check(result.get("outcome") in ("accepted", "observed"), f"fixture session bootstrap failed: {result}")
+        fresh = await self.facts(rid)
+        check((fresh.get("session") or {}).get("id"), "session result was returned before its facts became visible")
+        self.evidence.append({"kind": "session_bootstrap", "resource": rid or self.agents[0]["id"],
+                              "session": fresh["session"]["id"], "native_input_sent": False})
+        return fresh
 
     def delivery(self):
         self.serial += 1

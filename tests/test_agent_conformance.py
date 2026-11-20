@@ -12,9 +12,10 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 
+from agent_conformance.core import PublicImplementation
 from agent_conformance.runtime import Runtime
-from agent_conformance.cases import declarations, restriction
-from agent_conformance.content import examples, png, wav
+from agent_conformance.cases import declarations, restriction, schema_example
+from agent_conformance.content import compare_content, examples, png, wav
 from agent_conformance.results import CASES, BY_ID, Case, CheckFailed, FixtureFailed, Result, markdown, report, select_cases
 from agent_conformance.runner import run_case
 from agent_conformance.wire import ItemReducer, Peer, RpcError, WireFailure
@@ -303,6 +304,19 @@ class ContentFixtureTests(unittest.TestCase):
         self.assertEqual(tags, [b"IHDR", b"IDAT", b"IEND"])
         self.assertEqual(cursor, len(data))
 
+    def test_sender_header_does_not_force_a_native_block_layout(self):
+        expected = [{"type": "text", "text": "first"}, {"type": "text", "text": "second"}]
+        compare_content(expected, [{"type": "text", "text": "sender: A\nfirst"}, expected[1]], sender_header=True)
+        compare_content(expected, [{"type": "text", "text": "sender: A"}, *expected], sender_header=True)
+        with self.assertRaises(CheckFailed):
+            compare_content(expected, [{"type": "text", "text": "sender: A\nfirstsecond"}], sender_header=True)
+        with self.assertRaises(CheckFailed):
+            compare_content(expected, [{"type": "text", "text": "first changed"}, expected[1]], sender_header=True)
+        with self.assertRaises(CheckFailed):
+            compare_content(expected, [{"type": "text", "text": "unexpected header"}, *expected])
+        image = examples()["image"]
+        compare_content([image], [{"type": "text", "text": "sender: A"}, image], sender_header=True)
+
     def test_audio_is_a_valid_small_pcm_wave_not_fake_base64(self):
         with wave.open(io.BytesIO(wav()), "rb") as source:
             self.assertEqual((source.getnchannels(), source.getsampwidth(), source.getframerate()), (1, 2, 8000))
@@ -355,6 +369,16 @@ class ResultTests(unittest.TestCase):
         self.assertFalse(restriction({"batch": "one"}, {"batch": "one"}))
 
 
+class SchemaFixtureTests(unittest.TestCase):
+    def test_valid_simple_form_and_bounded_generation(self):
+        self.assertEqual(schema_example({"type": "object", "required": ["a"], "properties": {
+            "a": {"type": "string", "enum": ["one", "two"]}}, "additionalProperties": False}), {"a": "one"})
+        for schema in ({"type": "string", "minLength": 10**9}, {"type": "array", "minItems": 10**9},
+                       {"type": "string", "pattern": "[0-9]+"}):
+            with self.subTest(schema=schema), self.assertRaises(CheckFailed):
+                schema_example(schema)
+
+
 class DeclarationTests(unittest.IsolatedAsyncioTestCase):
     async def test_valid_single_endpoint_declaration_and_provider_enum_sets_pass(self):
         send = {"modes": {"start": {"busy": "reject", "preflight": "serialized"}},
@@ -369,7 +393,7 @@ class DeclarationTests(unittest.IsolatedAsyncioTestCase):
             if isinstance(value, list):
                 return [upper(item) if isinstance(item, dict) else item for item in value]
             return [value] if isinstance(value, str) else value
-        provider = {"host": "r1", "capabilities": {"agent": {"v": 0, "modules": {"interaction": {}}}, **upper(lower)}}
+        provider = {"host": "r1", "capabilities": {"agent": {"v": 0, "modules": {}}, **upper(lower)}}
         facts = {"v": 0, "epoch": "e1", "state": "idle", "lifecycle": "live", "completion": None, "incomplete": [],
                  "host": {"id": "r1", "kind": "terminal", "owns_lifecycle": True}, "caps": {"rev": 1, **lower}}
         ctx = SimpleNamespace(host="r1", provider=provider, evidence=[],
@@ -379,6 +403,33 @@ class DeclarationTests(unittest.IsolatedAsyncioTestCase):
         provider["capabilities"]["agent.send"] = {}
         with self.assertRaisesRegex(CheckFailed, "exceeds"):
             await declarations(ctx)
+
+
+class SessionBootstrapTests(unittest.IsolatedAsyncioTestCase):
+    def context(self, visible=True):
+        state = {"session": None, "caps": {"agent.session": {"actions": ["new"]}}}
+        calls = []
+        async def facts(rid=None):
+            return state
+        async def invoke(op, args, rid=None):
+            calls.append((op, args))
+            if visible:
+                state["session"] = {"id": "native-s1"}
+            return {"outcome": "observed"}
+        return SimpleNamespace(facts=facts, invoke=invoke, agents=[{"id": "r2"}], evidence=[]), calls
+
+    async def test_sessionless_fixture_bootstraps_without_a_prompt(self):
+        ctx, calls = self.context()
+        result = await PublicImplementation.ensure_session(ctx)
+        self.assertEqual(result["session"]["id"], "native-s1")
+        await PublicImplementation.ensure_session(ctx)
+        self.assertEqual(calls, [("agent.session", {"action": "new"})])
+        self.assertFalse(ctx.evidence[0]["native_input_sent"])
+
+    async def test_session_effect_must_publish_facts_before_reply(self):
+        ctx, _ = self.context(visible=False)
+        with self.assertRaisesRegex(CheckFailed, "before its facts"):
+            await PublicImplementation.ensure_session(ctx)
 
 
 class ClassificationTests(unittest.IsolatedAsyncioTestCase):
@@ -402,6 +453,8 @@ class ClassificationTests(unittest.IsolatedAsyncioTestCase):
                     raise startup_error
             async def facts(self):
                 return {"v": 0, "caps": {"agent.send": {}} if declared_send else {}}
+            async def ensure_session(self):
+                return await self.facts()
             async def close(self):
                 self.closed = True
                 if cleanup_error:
@@ -445,7 +498,7 @@ class NativeFixtureTests(unittest.IsolatedAsyncioTestCase):
         (self.root / "home").mkdir()
         self.control_path, self.ledger = self.root / "c", self.root / "ledger.jsonl"
         self.process = await asyncio.create_subprocess_exec(sys.executable, str(RUNTIME), "--control", str(self.control_path),
-            "--ledger", str(self.ledger), "--no-extensions", "--no-skills", "--no-prompt-templates",
+            "--ledger", str(self.ledger), "--mode", "rpc", "--no-extensions", "--no-skills", "--no-prompt-templates",
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             env={"HOME": str(self.root / "home"), "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "PYTHONDONTWRITEBYTECODE": "1"})
         async def ready():
@@ -566,6 +619,25 @@ class NativeFixtureTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "unimplemented fixture verb"):
             await self.control("nonexistent")
         self.assertEqual((await self.control("state"))["wire"], "pi")
+
+    async def test_neutral_ui_methods_and_cancel_are_not_false(self):
+        await self.control("request", request="q-choice", method="choice")
+        event = json.loads(await asyncio.wait_for(self.process.stdout.readline(), 2))
+        self.assertEqual(event["method"], "select")
+        self.assertNotIn("timeout", event)  # absent is not immediate expiry
+        await self.send_native({"type": "extension_ui_response", "id": "q-choice", "value": "one"})
+        await self.wait_ledger(lambda rows: any(row["kind"] == "answer" for row in rows))
+        self.assertEqual(self.records("answer")[-1]["normalized_response"], {"choice": "one"})
+        await self.control("request", request="q-false", method="confirm")
+        await asyncio.wait_for(self.process.stdout.readline(), 2)
+        await self.send_native({"type": "extension_ui_response", "id": "q-false", "confirmed": False})
+        await self.wait_ledger(lambda rows: len([row for row in rows if row["kind"] == "answer"]) == 2)
+        self.assertEqual(self.records("answer")[-1]["normalized_response"], {"value": False})
+        await self.control("request", request="q-cancel", method="confirm")
+        await asyncio.wait_for(self.process.stdout.readline(), 2)
+        await self.send_native({"type": "extension_ui_response", "id": "q-cancel", "cancelled": True})
+        await self.wait_ledger(lambda rows: len([row for row in rows if row["kind"] == "answer"]) == 3)
+        self.assertEqual(self.records("answer")[-1]["normalized_response"], {"action": "cancel"})
 
     async def test_semantic_drop_reply_does_not_drop_or_repeat_native_input(self):
         await self.control("drop_reply", operation="send")

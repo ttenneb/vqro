@@ -35,13 +35,18 @@ async def run_case(case, root, manifest, vqro, hc, *, factory=PublicImplementati
         facts = await ctx.facts()
         declarations = {"provider": ctx.provider.get("capabilities", {}), "resource": facts.get("caps", {}),
                         "host": facts.get("host"), "versions": ctx.metadata}
-        if case.id != "C1" and (facts.get("v") != 0 or declarations["provider"].get("agent", {}).get("v") != 0):
+        provider_version = declarations["provider"].get("agent", {}).get("v")
+        if case.id != "C1" and (type(facts.get("v")) is not int or facts["v"] != 0
+                                 or type(provider_version) is not int or provider_version != 0):
             raise CheckFailed("not a declared agent-v0 implementation; no capability omission inferred")
         if case.operation:
             declared(facts.get("caps", {}), case.operation)
         handler = (HANDLERS if handlers is None else handlers).get(case.id)
         if handler is None:
             raise HarnessGap("normative case has no executable runner yet")
+        if case.operation == "agent.send" or (case.operation == "agent.respond" and case.id != "R7") or case.id in ("C3", "C7", "L1") or (case.id == "C2" and "agent.send" in facts.get("caps", {})):
+            facts = await ctx.ensure_session()
+            declarations["resource"] = facts.get("caps", {})
         await handler(ctx)
         status, component, detail = "pass", None, "public-wire assertions passed"
     except NotDeclared as error:

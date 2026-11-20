@@ -83,12 +83,15 @@ private core/backend per case, and writes `results.json`, `results.md`, per-case
 always name all omitted cases. Leaving `--cases` out includes all 55 Part A groups;
 currently unimplemented applicable handlers fail as `component:harness`.
 
-Current executable slice: C1, C2, C3, C5, C7, C8, C10, D6, D7, D12, D13, D14, L1.
-This is an incremental harness release, **not complete Part A or Part B**.
+Current executable slice: C1, C2, C3, C5, C7, C8, C10, D6, D7, D12, D13, D14,
+R1–R5, L1. Applicable R2/R4 still report a visible harness gap after their partial
+checks. This is an incremental harness release, **not complete Part A or Part B**.
 
 Provider descriptors are supersets: enum values are sets, numeric limits maxima,
 boolean true permits resource true. Resource descriptors choose current values.
-An empty provider op object is not unrestricted. Content declares
+An empty provider op object is not unrestricted. `agent.modules` is an object
+map of canonical optional module names to descriptors containing `v`, never a
+list. The Pi fixture accepts real native `--mode rpc` launch arguments. Content declares
 `{types:[...],shape:ordered|text_then_media}`. C10 records the many-endpoint branch
 as not-applicable for an explicitly one-endpoint host, without inventing an
 unsupported feature or an extra top-level result status.
