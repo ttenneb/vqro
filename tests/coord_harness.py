@@ -89,13 +89,13 @@ class Harness:
             # Resolve the core's actual bootstrapped owner, then configure this
             # fixture's owner through an authorized public transaction. A label
             # or an arbitrary ordinary principal confers no such standing.
-            bootstrap = Client(self.sock, owner=True)
+            bootstrap = Client(self.sock, owner=True, connect_timeout=max(1.0, end - time.time()))
             try:
                 bootstrap.call("workspace.apply", {"ops": [{"op": "set", "key": "doc/principals/owner",
                                                            "value": "p:owner"}], "note": "private native pull fixture owner"})
             finally:
                 bootstrap.close()
-        self.c = Client(self.sock, owner=inbox == "k2core")
+        self.c = Client(self.sock, owner=inbox == "k2core", connect_timeout=max(1.0, end - time.time()))
         self.wait_commands(end)
         if inbox == "k2core":
             # Command registration is incremental; inbox.take can precede status.
@@ -130,7 +130,10 @@ class Harness:
         with open(os.path.join(self.root, "core2.log"), "w") as log:
             self.procs[0] = subprocess.Popen([self.vqro, "serve", "--fake"], env=self.env, stdout=log,
                                              stderr=subprocess.STDOUT, start_new_session=True)
+        end = time.time() + 60
         while not os.path.exists(self.sock):
+            if time.time() > end or self.procs[0].poll() is not None:
+                raise RuntimeError(f"restarted core did not start (exit {self.procs[0].poll()}); see {self.root}/core2.log")
             time.sleep(0.05)
         with open(os.path.join(self.root, "inbox2.err"), "w") as log:
             self.procs[1] = subprocess.Popen([sys.executable, os.path.join(HERE, "fixtures", "fake_inbox.py"), self.inbox_log],
@@ -252,15 +255,23 @@ class RpcFailure(RuntimeError):
         super().__init__(error)
 
 
+CALL_TIMEOUT = 60.0  # seconds a harness call waits for its reply: generous, but a silent peer cannot hang a test
+
+
 class Client:
-    def __init__(self, sock, owner=False, principal=None):
-        self.s = socket.socket(socket.AF_UNIX); self.f = None; self.n = 0
+    """A JSON-RPC client for tests. Every call has a deadline (`timeout`, default CALL_TIMEOUT): a peer that never
+    answers fails the call with TimeoutError and closes the connection; nothing is retried (the outcome is unknown)."""
+
+    def __init__(self, sock, owner=False, principal=None, timeout=CALL_TIMEOUT, connect_timeout=None):
+        self.s = socket.socket(socket.AF_UNIX); self.f = None; self.n = 0; self.timeout = timeout
+        first = timeout if connect_timeout is None else connect_timeout  # connect and hello (a startup bound)
         try:
+            self.s.settimeout(first)
             self.s.connect(sock); self.f = self.s.makefile("rw")
             identity = ({"kind": "principal", "principal": principal} if principal is not None else
                         {"kind": "owner"} if owner else None)
             hello = {"client": "tier1-test", **({"identity": identity} if identity is not None else {})}
-            self.me = self.call("hello", hello)["you"]
+            self.me = self.call("hello", hello, timeout=first)["you"]
         except BaseException:
             self.close()  # a failed connect or hello leaves nothing open
             raise
@@ -273,18 +284,26 @@ class Client:
             except OSError:
                 pass
 
-    def call(self, method, params):
+    def call(self, method, params, timeout=None):
         self.n += 1
-        self.f.write(json.dumps({"jsonrpc": "2.0", "id": self.n, "method": method, "params": params}) + "\n"); self.f.flush()
-        while True:
-            line = self.f.readline()
-            if not line:
-                raise ConnectionError("core closed the connection")
-            row = json.loads(line)
-            if row.get("id") == self.n:
-                if "error" in row:
-                    raise RpcFailure(row["error"])
-                return row["result"]
+        limit = self.timeout if timeout is None else timeout
+        deadline = time.monotonic() + limit
+        try:
+            self.s.settimeout(limit)
+            self.f.write(json.dumps({"jsonrpc": "2.0", "id": self.n, "method": method, "params": params}) + "\n"); self.f.flush()
+            while True:
+                self.s.settimeout(max(0.001, deadline - time.monotonic()))
+                line = self.f.readline()
+                if not line:
+                    raise ConnectionError("core closed the connection")
+                row = json.loads(line)
+                if row.get("id") == self.n:
+                    if "error" in row:
+                        raise RpcFailure(row["error"])
+                    return row["result"]
+        except (socket.timeout, TimeoutError):
+            self.close()  # a partly read reply leaves the stream unusable
+            raise TimeoutError(f"{method}: no reply within {limit:g} s (connection closed; not retried, outcome unknown)") from None
 
     def cmd(self, name, **args):
         return self.call("command.invoke", {"name": name, "args": args})

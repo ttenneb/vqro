@@ -12,7 +12,9 @@ import unittest
 import warnings
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from coord_harness import Harness  # noqa: E402
+from coord_harness import Client, Harness  # noqa: E402
+import socket  # noqa: E402
+import threading  # noqa: E402
 
 STUB = textwrap.dedent("""\
     #!/usr/bin/env python3
@@ -27,6 +29,13 @@ STUB = textwrap.dedent("""\
         s.listen(8)
         while True:
             s.accept()[0].close()
+    if mode == "mute":  # listen and keep every connection open, but never answer anything
+        s = socket.socket(socket.AF_UNIX)
+        s.bind(os.environ["VQRO_SOCKET"])
+        s.listen(8)
+        held = []
+        while True:
+            held.append(s.accept()[0])
     time.sleep(600)  # "silent": never create the socket
     """)
 
@@ -97,6 +106,53 @@ class StartupFailureTests(unittest.TestCase):
         core, child = self.failed_start("hello")
         self.assertTrue(core, "the core outlived a failed hello")
         self.assertTrue(child, "a process the core started outlived a failed hello")
+
+    def test_a_core_that_never_answers_fails_startup_within_its_bound(self):
+        """Testing audit item 3: a silent peer used to hold the harness in readline until killed from outside."""
+        started = time.monotonic()
+        core, child = self.failed_start("mute", startup_s=2)
+        self.assertLess(time.monotonic() - started, 15, "startup waited past its bound for a silent core")
+        self.assertTrue(core, "the core outlived a failed start")
+        self.assertTrue(child, "a process the core started outlived a failed start")
+
+
+class SilentPeerTests(unittest.TestCase):
+    def test_a_call_to_a_silent_peer_times_out_closes_and_is_not_retried(self):
+        with tempfile.TemporaryDirectory(prefix="vq-silent-") as d:
+            path = os.path.join(d, "s.sock")
+            server = socket.socket(socket.AF_UNIX)
+            server.bind(path)
+            server.listen(1)
+            received, done = [], threading.Event()
+
+            def peer():  # accept, read what the client sends, never answer
+                conn, _ = server.accept()
+                with conn:
+                    conn.settimeout(5)
+                    try:
+                        while not done.is_set():
+                            data = conn.recv(65536)
+                            if not data:
+                                break
+                            received.append(data)
+                    except OSError:
+                        pass
+            thread = threading.Thread(target=peer, daemon=True)
+            thread.start()
+            started = time.monotonic()
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always", ResourceWarning)
+                with self.assertRaises(TimeoutError) as error:
+                    Client(path, timeout=0.5)
+                gc.collect()
+            elapsed = time.monotonic() - started
+            done.set()
+            thread.join(6)
+            server.close()
+            self.assertLess(elapsed, 3, "the call waited past its deadline")
+            self.assertIn("hello: no reply within 0.5 s", str(error.exception))
+            self.assertEqual(b"".join(received).count(b'"method": "hello"'), 1, "sent once, never retried")
+            self.assertEqual([str(w.message) for w in caught if issubclass(w.category, ResourceWarning)], [])
 
 
 if __name__ == "__main__":

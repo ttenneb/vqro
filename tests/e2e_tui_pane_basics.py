@@ -39,17 +39,27 @@ def check(name, ok, detail=""):
     print(("PASS " if ok else "FAIL ") + name + (f"\n{detail}" if detail and not ok else ""), flush=True)
 
 
+CALL_TIMEOUT = 10  # seconds for one call (hello and reply) to the core: a silent core fails the call, not the run
+
+
 def call(method, params=None):
-    s = socket.socket(socket.AF_UNIX)
-    s.connect(ENV["VQRO_SOCKET"])
-    f = s.makefile("rwb", buffering=0)
-    for i, (m, p) in enumerate([("hello", {"client": "e2e-panes"}), (method, params or {})]):
-        f.write((json.dumps({"jsonrpc": "2.0", "id": i, "method": m, "params": p}) + "\n").encode())
-        while True:
-            msg = json.loads(f.readline())
-            if msg.get("id") == i:
-                break
-    s.close()
+    """One request on its own connection, bounded by CALL_TIMEOUT (socket.timeout; inside wait() it counts as "not
+    yet"). Nothing is retried here."""
+    deadline = time.monotonic() + CALL_TIMEOUT
+    with socket.socket(socket.AF_UNIX) as s:
+        s.settimeout(CALL_TIMEOUT)
+        s.connect(ENV["VQRO_SOCKET"])
+        with s.makefile("rwb", buffering=0) as f:
+            for i, (m, p) in enumerate([("hello", {"client": "e2e-panes"}), (method, params or {})]):
+                f.write((json.dumps({"jsonrpc": "2.0", "id": i, "method": m, "params": p}) + "\n").encode())
+                while True:
+                    s.settimeout(max(0.001, deadline - time.monotonic()))
+                    line = f.readline()
+                    if not line:
+                        raise ConnectionError(f"{method}: core closed the connection")
+                    msg = json.loads(line)
+                    if msg.get("id") == i:
+                        break
     if "error" in msg:
         raise RuntimeError(f"{method}: {msg['error']}")
     return msg["result"]
