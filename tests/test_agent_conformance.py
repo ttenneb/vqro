@@ -441,7 +441,7 @@ class ClassificationTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         self.temp.cleanup()
 
-    def factory(self, *, declared_send=True, startup_error=None, cleanup_error=None):
+    def factory(self, *, declared_send=True, startup_error=None, cleanup_error=None, modules=None):
         class Fake:
             def __init__(self, root, manifest, vqro, hc, script=None):
                 root.mkdir()
@@ -452,7 +452,10 @@ class ClassificationTests(unittest.IsolatedAsyncioTestCase):
                 if startup_error:
                     raise startup_error
             async def facts(self):
-                return {"v": 0, "caps": {"agent.send": {}} if declared_send else {}}
+                caps = {"agent.send": {}} if declared_send else {}
+                if modules is not None:
+                    caps["agent"] = {"modules": modules}
+                return {"v": 0, "caps": caps}
             async def ensure_session(self):
                 return await self.facts()
             async def close(self):
@@ -472,6 +475,22 @@ class ClassificationTests(unittest.IsolatedAsyncioTestCase):
         result = await self.run_one(factory=self.factory(declared_send=False), handlers={})
         self.assertEqual(result.status, "unsupported-declared")
         self.assertEqual(result.declarations["omission"]["path"], "agent.send")
+
+    async def test_terminal_module_without_invented_operation_requires_handler(self):
+        result = await run_case(BY_ID["M7"], self.root, self.manifest, Path("/vqro"), Path("/hc"),
+                                factory=self.factory(modules={"terminals": {"v": 0}}), handlers={})
+        self.assertEqual((result.status, result.component), ("fail", "harness"))
+
+    async def test_absent_terminal_module_is_explicit_omission(self):
+        result = await run_case(BY_ID["M8"], self.root, self.manifest, Path("/vqro"), Path("/hc"),
+                                factory=self.factory(), handlers={})
+        self.assertEqual(result.status, "unsupported-declared")
+        self.assertEqual(result.declarations["omission"]["path"], "agent.modules.terminals")
+
+    async def test_children_module_does_not_require_object_cancel_operation(self):
+        result = await run_case(BY_ID["M6"], self.root, self.manifest, Path("/vqro"), Path("/hc"),
+                                factory=self.factory(modules={"children": {"v": 0}}), handlers={})
+        self.assertEqual((result.status, result.component), ("fail", "harness"))
 
     async def test_fixture_failure_is_not_capability_omission(self):
         result = await self.run_one(factory=self.factory(startup_error=FixtureFailed("no fake control")), handlers={})

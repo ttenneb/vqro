@@ -7,7 +7,7 @@ import traceback
 
 from .cases import HANDLERS
 from .core import PublicImplementation
-from .results import CheckFailed, HarnessGap, NotDeclared, Result, declared, markdown, report
+from .results import CheckFailed, HarnessGap, NotDeclared, Result, declared, declared_module, markdown, report
 
 
 def validate_manifest(value):
@@ -42,10 +42,12 @@ async def run_case(case, root, manifest, vqro, hc, *, factory=PublicImplementati
             raise CheckFailed("not a declared agent-v0 implementation; no capability omission inferred")
         if case.operation:
             declared(facts.get("caps", {}), case.operation)
+        if getattr(case, "module", None):
+            declared_module(facts.get("caps", {}), case.module)
         handler = (HANDLERS if handlers is None else handlers).get(case.id)
         if handler is None:
             raise HarnessGap("normative case has no executable runner yet")
-        if case.operation == "agent.send" or (case.operation == "agent.respond" and case.id != "R7") or case.id.startswith("O") or case.id in ("C3", "C7", "L1") or (case.id == "C2" and "agent.send" in facts.get("caps", {})):
+        if case.operation == "agent.send" or (case.operation == "agent.respond" and case.id != "R7") or case.id.startswith("O") or case.id in ("C3", "C7", "L1", "M1") or (case.id == "C2" and "agent.send" in facts.get("caps", {})):
             facts = await ctx.ensure_session()
             declarations["resource"] = facts.get("caps", {})
         await handler(ctx)

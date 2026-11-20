@@ -586,6 +586,50 @@ async def interrupt_not_end(ctx):
     check((await ctx.native.call("state"))["pid"] == ctx.native.state["pid"], "interrupt killed/replaced runtime")
 
 
+@case("D15")
+async def origin_authority(ctx):
+    declaration = await caps(ctx, "agent.send")
+    renderings = {value["as"]: value for value in declaration.get("origin", [])}
+    origin = {"principal": "D15-sender-principal", "actor": "D15-sender-actor", "agent": "D15-sender-endpoint", "kind": "agent"}
+    quoted = {"label": "claimed owner instruction", "principal": "owner", "kind": "human"}
+    permitted = ["participant", "attributed_user"]
+    selected = next((name for name in permitted if name in renderings), None)
+    mark = ctx.native.mark()
+    result = await ctx.send("D15-model-envelope", origin=origin, quoted=quoted, render=permitted)
+    if selected is None:
+        rejection(result, kinds=("unsupported",))
+        check(not ctx.native.writes(mark), "agent origin fell back to unframed user/context authority")
+    else:
+        accepted(result)
+        await ctx.native.wait(lambda rows: any(row["seq"] > mark and row["kind"] == "inserted" for row in rows))
+        await ctx.native.call("model_call", id_ref="D15-model")
+        model = ctx.native.records("model_call", after=mark)[-1]
+        messages = model.get("messages")
+        if not isinstance(messages, list):
+            raise FixtureFailed("native driver omitted actual model-request envelope")
+        matched = []
+        for message in messages:
+            content = message.get("content", [])
+            if isinstance(content, list):
+                text = "\n".join(block.get("text", "") for block in content if isinstance(block, dict))
+                if "D15-model-envelope" in text:
+                    matched.append((message, text))
+        check(len(matched) == 1, "origin-bearing input missing/duplicated in model envelope")
+        message, text = matched[0]
+        check(message.get("role") == renderings[selected].get("role"), "native model role differs from declaration")
+        check(message.get("role") not in ("system", "developer"), "agent content gained system/developer authority")
+        check(origin["principal"] in text and origin["actor"] in text, "native envelope omitted the effective sender frame")
+        check("owner" in text and any(word in text.lower() for word in ("quoted", "claim", "asserted")),
+              "quoted owner provenance was rendered as effective authority")
+        ctx.evidence.append({"kind": "model_origin", "rendering": selected, "native_message": message})
+    if "context" not in renderings:
+        mark = ctx.native.mark()
+        rejection(await ctx.send("D15-context-not-declared", origin=origin, render=["context"]), kinds=("unsupported",))
+        check(not ctx.native.writes(mark), "context rendering used without a declaration")
+    else:
+        raise HarnessGap("D15 declared context-rendering fixture branch not yet implemented")
+
+
 def has_message(reducer, needle):
     for (kind, _), entity in reducer.entities.items():
         value = entity["value"]
@@ -877,6 +921,101 @@ async def lifecycle_wait(ctx, predicate, description):
         return await ctx.peer.wait(predicate)
     except asyncio.TimeoutError as error:
         raise CheckFailed(description) from error
+
+
+@case("M2")
+async def native_sessions(ctx):
+    declaration = await caps(ctx, "agent.session")
+    actions = declaration.get("actions", [])
+    rid, initial = ctx.agents[0]["id"], await ctx.facts()
+    mark = ctx.native.mark()
+    if "new" not in actions:
+        raise HarnessGap("M2 resume-only/sessionless bootstrap fixture not yet implemented")
+    result = await ctx.invoke("agent.session", {"action": "new"})
+    check(result.get("outcome") in ("observed", "accepted"), "declared session:new failed")
+    fresh = ctx.resource_cache.get(rid, {}).get("data", {}).get("agent", {})
+    first = (fresh.get("session") or {}).get("id")
+    check(identifier(first), "new session facts were not visible before the reply")
+    check(fresh.get("epoch") != initial["epoch"], "new session did not advance endpoint epoch")
+    if "list" in actions:
+        listing = await ctx.invoke("agent.session", {"action": "list"})
+        rows = (listing.get("data") or {}).get("sessions")
+        check(isinstance(rows, list) and len(rows) <= 256 and len(json.dumps(rows).encode()) <= 64 << 10,
+              "session list is not a bounded advertised page")
+        check(any(row.get("id") == first for row in rows), "new session is absent from native list")
+        if (listing.get("data") or {}).get("next") is not None:
+            raise HarnessGap("M2 multi-page native session listing not yet implemented")
+    if "fork" in actions:
+        before_invalid = ctx.native.mark()
+        rejected = await ctx.invoke("agent.session", {"action": "fork", "session": first, "at": "not-an-advertised-position"})
+        rejection(rejected, kinds=("invalid", "unsupported"))
+        check(not ctx.native.writes(before_invalid), "unadvertised fork position reached native runtime")
+        fork = await ctx.invoke("agent.session", {"action": "fork", "session": first})
+        check(fork.get("outcome") in ("observed", "accepted"), "declared native fork failed")
+        after = ctx.resource_cache.get(rid, {}).get("data", {}).get("agent", {})
+        check((after.get("session") or {}).get("id") not in (None, first), "fork returned before its new session facts")
+        check(after.get("epoch") != fresh["epoch"], "fork did not change endpoint epoch")
+        fresh = after
+    if "resume" in actions:
+        resumed = await ctx.invoke("agent.session", {"action": "resume", "session": first})
+        check(resumed.get("outcome") in ("observed", "accepted"), "declared native resume failed")
+        after = ctx.resource_cache.get(rid, {}).get("data", {}).get("agent", {})
+        check((after.get("session") or {}).get("id") == first, "resume facts followed the reply or selected wrong session")
+        if (fresh.get("session") or {}).get("id") != first:
+            check(after.get("epoch") != fresh["epoch"], "resume switch did not start a fresh epoch")
+    check(not ctx.native.records("input_received", after=mark), "session new/resume/fork sent a prompt")
+    check((await ctx.resource(rid))["id"] == rid, "session switch replaced the endpoint resource")
+    ctx.evidence.append({"kind": "session_actions", "actions": actions, "sessionless_at_start": initial.get("session") is None,
+                         "stable_resource": rid, "first_session": first, "no_prompt": True})
+    if any(action in actions for action in ("close", "delete")):
+        raise HarnessGap("M2 declared close/delete fixture branches not yet implemented")
+
+
+@case("M1")
+async def native_queue(ctx):
+    declaration = await caps(ctx, "agent.queue")
+    actions = declaration.get("actions", [])
+    if declaration.get("ids") == "none":
+        check(set(actions) <= {"list", "clear"}, "null native IDs falsely permit per-item actions")
+    await ctx.native.call("turn", state="start")
+    facts = await ctx.wait_facts(lambda f: f.get("state") == "running")
+    expected = []
+    for mode in ("boundary", "settle"):
+        if mode in facts["caps"].get("agent.send", {}).get("modes", {}):
+            text = "M1-native-" + mode
+            accepted(await ctx.send(text, mode))
+            expected.append(text)
+    if not expected:
+        raise HarnessGap("queue module present without a declared enqueue mode fixture")
+    facts = await ctx.wait_facts(lambda f: isinstance(f.get("queue"), list) and len(f["queue"]) == len(expected))
+    if declaration.get("ids") == "none":
+        check(all(row.get("id") is None for row in facts["queue"]), "adapter invented IDs from delivery tracking")
+        mark = ctx.native.mark()
+        for action in ("withdraw", "replace"):
+            rejection(await ctx.invoke("agent.queue", {"epoch": facts["epoch"], "action": action, "id": "not-a-native-id"}), kinds=("unsupported",))
+        check(not ctx.native.writes(mark), "null-ID per-item action reached native runtime")
+    else:
+        raise HarnessGap("M1 native-ID withdraw/replace fixture branch not yet implemented")
+    if "list" in actions:
+        listed = await ctx.invoke("agent.queue", {"epoch": facts["epoch"], "action": "list"})
+        check(listed.get("outcome") == "observed" and (listed.get("data") or {}).get("queue") == facts["queue"],
+              "native queue list differs from observed queue facts")
+    if "clear" not in actions:
+        return
+    mark = ctx.native.mark()
+    cleared = await ctx.invoke("agent.queue", {"epoch": facts["epoch"], "action": "clear"})
+    check(cleared.get("outcome") == "observed", "clear did not return its declared native removed content")
+    removed = (cleared.get("data") or {}).get("removed")
+    check(isinstance(removed, list) and len(removed) == len(expected), "clear lost/duplicated native removed content")
+    for text in expected:
+        matches = [row for row in removed if text in json.dumps(row.get("content", []))]
+        check(len(matches) == 1, "removed content changed or duplicated a native queue item")
+        compare_content([{"type": "text", "text": text}], matches[0]["content"], sender_header=True)
+    check(not ctx.native.records("inserted", after=mark), "queue disappearance falsely claimed insertion")
+    again = await ctx.invoke("agent.queue", {"epoch": facts["epoch"], "action": "clear"})
+    check(again.get("outcome") == "observed" and (again.get("data") or {}).get("removed") == [], "clear returned the same removed content twice")
+    ctx.evidence.append({"kind": "queue_clear_once", "first": cleared, "second": again,
+                         "media_declaration": declaration.get("removed", {}).get("media")})
 
 
 @case("L2")

@@ -36,6 +36,7 @@ class Case:
     id: str
     title: str
     operation: str | None = None
+    module: str | None = None
 
 
 # All normative Part A groups, including unimplemented ones. Their absence from
@@ -89,9 +90,9 @@ CASES = (
     Case("M3", "observed configuration and caps revisions", "agent.configure"),
     Case("M4", "advertised explicit commands", "agent.command"),
     Case("M5", "frozen history pages to live cursor", "agent.history"),
-    Case("M6", "child capabilities and scoped object cancel", "agent.object"),
-    Case("M7", "display terminal bytes and exit", "agent.terminal"),
-    Case("M8", "byte-safe chunk append and snapshot continuation", "agent.terminal"),
+    Case("M6", "child capabilities and scoped object cancel", module="children"),
+    Case("M7", "display terminal bytes and exit", module="terminals"),
+    Case("M8", "byte-safe chunk append and snapshot continuation", module="terminals"),
     Case("L1", "interrupt is not endpoint stop", "agent.interrupt"),
     Case("L2", "stop coverage and end evidence", "agent.stop"),
     Case("L3", "declared host lifecycle and incarnation"),
@@ -117,6 +118,17 @@ def declared(caps, operation):
     value = caps[operation]
     if not isinstance(value, dict):
         raise CheckFailed(f"{operation} declaration is not an object")
+    return value
+
+
+def declared_module(caps, name):
+    modules = caps.get("agent", {}).get("modules", {})
+    check(isinstance(modules, dict), "agent.modules is not the canonical descriptor map")
+    if name not in modules:
+        raise NotDeclared("agent.modules." + name)
+    value = modules[name]
+    check(isinstance(value, dict) and type(value.get("v")) is int and value["v"] == 0,
+          "optional module lacks its v0 descriptor")
     return value
 
 

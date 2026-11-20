@@ -84,9 +84,12 @@ private core/backend per case, and writes `results.json`, `results.md`, per-case
 always name all omitted cases. Leaving `--cases` out includes all 55 Part A groups;
 currently unimplemented applicable handlers fail as `component:harness`.
 
-Current executable slice: C1, C2, C3, C5, C7, C8, C10, D1–D7, D12, D13, D14,
-R1–R5, L1. Applicable R2/R4 still report a visible harness gap after their partial
-checks. This is an incremental harness release, **not complete Part A or Part B**.
+Current executable slice: C1–C3, C5, C7–C10, D1–D15, O1/O4/O5/O6/O8,
+R1–R5, M1/M2 and L1–L4. Applicable C9/R2/R4/L3 and several optional declared
+branches still report a visible harness gap after their partial checks. Core
+causality loss and missing stop reply coverage are separate implementation failures.
+Children/display-terminal applicability uses canonical module descriptors, not an
+invented `agent.terminal` operation. This is an incremental harness release, **not complete Part A or Part B**.
 
 Provider descriptors are supersets: enum values are sets, numeric limits maxima,
 boolean true permits resource true. Resource descriptors choose current values.
