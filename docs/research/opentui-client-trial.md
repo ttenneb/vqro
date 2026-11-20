@@ -52,6 +52,8 @@ No contract change was needed. The client contract, the fixtures and the fallbac
 third client without reading the Rust client's code (the protocol spec and fixtures sufficed, plus one lookup of the
 attach history parameter type, now named in the spec's Resources table).
 
-## Recommendation
-Keep it as a non-default trial client. Revisit making it installable once OpenTUI's release cadence settles and the
-LGPL question is decided; the Rust crate (same native library) may later let the built-in client share the VT.
+## Decision (human, 2026-11-19, Q-UI-5)
+The OpenTUI client stays an optional, separately installed client and is never bundled with vqro (so its
+dependencies, including the FFmpeg/LGPL native library, are the installer's choice). The built-in TUI stays the
+default and the rescue client. Its gaps (mouse forwarding, `list_detail`, `embedded_views`) are being closed
+(Q-UI-6).

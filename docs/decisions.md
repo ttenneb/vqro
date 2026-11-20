@@ -581,3 +581,5 @@ Nothing is stable until Pi and the two other real runtimes pass conformance.
 features (2026-11-19), and chose per-command granularity, allow-with-warning and the minimal chooser.
 **Consequences.** Manifests gain `provides`/`needs`/`works_with`; `extension.list` gains `dependencies`; a release
 check (`scripts/check_manifest_deps.py`) keeps bundled manifests honest. Design: `research/declarations-and-ui-clients.md`.
+The OpenTUI client stays optional and separately installed, never bundled (human, 2026-11-19, Q-UI-5;
+`research/opentui-client-trial.md`).

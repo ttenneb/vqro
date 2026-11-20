@@ -2,8 +2,9 @@
 
 A second terminal client for vqro on [OpenTUI](https://github.com/anomalyco/opentui), approved as a trial by the
 human (Q-UI-4). It implements the `base`, `keys` and `terminal` profiles (D29, `docs/spec/core-protocol.md`,
-"Clients and profiles"). Not installed by `scripts/dev-install.sh`; the built-in TUI stays the default and the
-rescue client.
+"Clients and profiles"). **Optional and separately installed, never bundled** (human decision 2026-11-19, D29):
+`scripts/dev-install.sh` and vqro's own installs leave it out; the built-in TUI stays the default and the rescue
+client.
 
     cd extensions/clients/opentui && bun install   # once: pinned packages from bun.lock
     vqro ui opentui                                 # from a checkout whose extensions dir is this one
