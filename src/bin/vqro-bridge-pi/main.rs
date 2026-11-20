@@ -193,10 +193,11 @@ async fn invoke(shared:&Arc<Shared>,effect:&EffectRequest)->Result<Outcome,Provi
             if covers.iter().any(|cover|!matches!(cover.as_str(),Some("foreground"|"queued"))){return rejected("unsupported","stop does not cover that work");}
             if effect.deadline<=Instant::now(){return rejected("timeout","deadline before stop dispatch");}
             let native=shared.native.get().unwrap();native.stop();
-            match tokio::time::timeout_at(effect.deadline,native.exited()).await {Ok(exit)=>Ok(Outcome::Observed(Some(json!({"exit":{"code":exit.code},"pending":"unknown"})))),Err(_)=>Ok(Outcome::Dispatched(None))}
+            match tokio::time::timeout_at(effect.deadline,native.exited()).await {Ok(exit)=>Ok(Outcome::Observed(Some(stop_report(covers,Some(&exit))))),Err(_)=>Ok(Outcome::Dispatched(Some(stop_report(covers,None))))}
         }
         _=>rejected("unsupported","undeclared agent operation"),
     }
+fn stop_report(covers:&[Value],exit:Option<&native::Exit>)->Value {json!({"covers":covers,"covers_evidence":"requested","exit":exit.map(|exit|json!({"code":exit.code})),"pending":"unknown"})}
 }
 fn native_message(reply:&native::Reply)->String {reply.error.as_str().unwrap_or("native operation failed; outcome unknown").chars().take(1024).collect()}
 fn record_receipt(shared:&Shared,delivery:&str,value:Value){shared.agent.lock().unwrap().receipt(delivery,value);shared.wake();}
@@ -276,4 +277,17 @@ async fn direct(native:&Native,command:&str,args:Value,deadline:Instant,receipt:
     let written=ticket.written();
     tokio::spawn(async move{let result=ticket.reply().await;receipt(ticket.id.clone(),result);});
     if written {Admission::Dispatched {native:id}}else{Admission::Unknown(native::Error {kind:"timeout",message:"native write incomplete at deadline; outcome unknown".into(),may_have_acted:true})}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn stop_reply_preserves_requested_coverage_without_claiming_wider_effects(){
+        let covers=vec![json!("foreground")];
+        for exit in [None,Some(native::Exit {code:Some(0),success:true})]{
+            let result=stop_report(&covers,exit.as_ref());assert_eq!(result["covers"],json!(["foreground"]));
+            assert_eq!(result["covers_evidence"],"requested");assert_eq!(result["pending"],"unknown");
+        }
+    }
 }
