@@ -2,7 +2,7 @@
 use std::collections::{BTreeMap,BTreeSet,HashMap,VecDeque};
 use std::sync::Arc;
 use serde_json::{json,Map,Value};
-use vqro::provider_client::items::{ItemJournal,JournalConfig};
+use vqro::provider_client::items::{Coverage,ItemJournal,JournalConfig};
 use super::admission::Signals;
 use super::native::{Event,Exit};
 
@@ -26,7 +26,8 @@ impl Agent {
     pub fn new(instance:String,signals:Arc<Signals>)->Self {
         let mut bytes=[0u8;16];getrandom::fill(&mut bytes).expect("fresh observation epoch");
         let boot=bytes.iter().map(|byte|format!("{byte:02x}")).collect::<String>();
-        let journal=ItemJournal::new(format!("{boot}.e1"),JournalConfig {max_entity_bytes:ENTITY_TOTAL,..Default::default()});
+        let mut journal=ItemJournal::new(format!("{boot}.e1"),JournalConfig {max_entity_bytes:ENTITY_TOTAL,..Default::default()});
+        journal.set_coverage(Coverage::Tail);
         let mut agent=Self {journal,signals,incomplete:BTreeSet::new(),receipts:BTreeMap::new(),receipt_order:VecDeque::new(),history:VecDeque::new(),tools:HashMap::new(),current_message:None,
             position:0,serial:0,epoch_number:1,instance,boot,session:None,run:None,completion:None,reason:"unknown".into(),error:None,exit:None,caps:Value::Null};
         agent.refresh();agent
@@ -184,7 +185,7 @@ impl Agent {
                 Some("response") if record["command"]=="get_state" && record["success"]==true=>{
                     if let Some(id)=record["data"]["sessionId"].as_str().filter(|id|!id.is_empty() && id.len()<=128) {
                         if self.session.as_ref().is_some_and(|session|session["id"]!=id) {
-                            self.epoch_number+=1;self.journal.new_epoch(format!("{}.e{}",self.boot,self.epoch_number));self.history.clear();self.tools.clear();self.current_message=None;self.run=None;self.completion=None;
+                            self.epoch_number+=1;self.journal.new_epoch(format!("{}.e{}",self.boot,self.epoch_number));self.journal.set_coverage(Coverage::Tail);self.history.clear();self.tools.clear();self.current_message=None;self.run=None;self.completion=None;
                         }
                         self.session=Some(json!({"id":id,"title":record["data"]["sessionName"]}));
                         self.store("session","current",self.session.clone().unwrap(),false);

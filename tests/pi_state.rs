@@ -67,6 +67,8 @@ fn session_switch_changes_epoch_not_endpoint_or_receipt_lookup() {
     a.receipt("d1",json!({"stage":"admitted"}));message(&mut a,"old session","stop");
     metadata(&mut a,"s2","all");
     assert_ne!(a.epoch(),old);assert_eq!(a.facts("pi","private")["ref"],endpoint);
+    let begin:Value=serde_json::from_str(String::from_utf8(a.journal.snapshot()).unwrap().lines().next().unwrap()).unwrap();
+    assert_eq!(begin["coverage"],"tail");
     assert!(entities(&a,"message").is_empty());assert_eq!(a.receipts["d1"]["stage"],"admitted");
     assert_eq!(a.caps()["agent.send"]["modes"]["boundary"]["batch"],"all");
     assert_eq!(a.provider_capabilities()["agent.send"]["modes"]["boundary"]["batch"],json!(["one","all"]));
