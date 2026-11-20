@@ -572,6 +572,10 @@ replaced when the Pi bridge is ported.
 - Keep the audited startup owner bootstrap. Missing/invalid owner configuration can also be repaired by an explicit
   public bootstrap supplying a principal, guarded by the row still being missing/invalid at serialized prepare.
   It is an audited system transaction, not a `u` target; refuse once a valid owner exists. Never guess an owner.
+- Agent input origin binds `principal` to the core's effective principal, `actor` to the recorded transport actor,
+  and carries the core's original `initiator` separately. A supplied mismatch is `forbidden` before native input;
+  missing core identity is `undeclared`. Caller `kind`/`agent` classifications remain asserted claims, rendered as
+  claimed, never inferred from principal ids/prefixes or promoted into human-owner evidence.
 
 **Human answers (2026-11-19, CONFIRMED).**
 - **AS1, pause:** "vqro stops delivery": paused means vqro sends, hands out and wakes nothing until resumed; an agent

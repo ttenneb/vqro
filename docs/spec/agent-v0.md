@@ -234,10 +234,16 @@ of the declared types; `text_then_media` (Pi) accepts only zero or one text bloc
 blocks. Anything else is rejected `unsupported` before any native write; blocks are never reordered, flattened or
 concatenated.
 
-- **Origin.** `origin {principal, actor, agent?, kind: human | agent | tool | _}` is the effective sender, taken by
-  the caller layer from the recorded caller (`coordination-v0.md` §3), never from request text. `quoted? {label,
-  principal?, kind?}` is separately asserted provenance (a forwarded message's original author) and is rendered as a
-  claim, never as the sender.
+- **Origin.** `origin {principal, actor, initiator?, agent?, kind: human | agent | tool | _}` separates core identity
+  from caller claims (`coordination-v0.md` §3). `principal` is the core's **effective principal**; `actor` is the
+  recorded transport actor (for example `extension:coord`), not the original invoker. `initiator` carries the
+  original invoker separately, exactly from the core's attribution. Missing core identity is `undeclared`, never
+  guessed from request text, ids, prefixes or the workspace owner. The adapter binds these identity fields to the
+  core-supplied effect attribution: any supplied value that differs is rejected **`forbidden` before any native
+  write**. Caller-classified `kind` and `agent` are retained only as claims with **asserted provenance**, rendered
+  as claimed rather than inferred or certified from a principal's spelling. Such a classification alone never
+  proves a human-owner rendering is authorized. `quoted? {label, principal?, kind?}` is separately asserted
+  provenance (a forwarded message's original author) and is rendered as a claim, never as the sender.
 - **Rendering** is declared per runtime, each with its native role and resulting authority:
   `"origin": [{"as": "user", "role": "user"}, {"as": "attributed_user", "role": "user", "frame": "sender_header"},
   {"as": "participant", "role": "<native>"}, {"as": "context", "role": "system_reminder", "authority":

@@ -45,7 +45,7 @@ equality, and every exercised behaviour must lie within the resource's current c
 | `agent {v, modules}` (`modules` an object map name → `{v, …}`; a list is invalid), ops | `provider.register` | C1 |
 | per-resource `caps` with `rev`; `caps.host {kind, endpoints}`; facts `host` with `owns_lifecycle` | `data.agent` | C2, C10, D9 |
 | per mode: `busy`, `idle` (`start \| reject \| park`), `point`, `batch`, `batch_at`, `preflight` | `agent.send.modes` | D1–D5, D9, D12, D13 |
-| `content {types, shape}`, `correlation`, `keys {scope, retention}`, `guards`, `receipts.retain`, `literal`, `handled`, `origin` | `agent.send` | C8, D6–D8, D14–D16 |
+| `content {types, shape}`, `correlation`, `keys {scope, retention}`, `guards`, `receipts.retain`, `literal`, `handled`, `origin` | `agent.send` | C8, D6–D8, D14–D17 |
 | `pending`, `scope`, `waits` | `agent.interrupt` | D10 |
 | `items` bounds (per entity and aggregate), `retain_bytes`, optional `snapshot_buffer_bytes`; snapshot coverage | `agent`, snapshot begin | O1–O14 |
 | request `methods`, `scopes`, `background_requests`, answer acknowledgement | `agent.respond` | R1–R7 |
@@ -111,7 +111,12 @@ provenance is shown as a claim; a user-role-only runtime and a context-hook runt
 `render` accepts (`context` only when named); nothing acceptable → `unsupported`. D16 content shape: with `shape:
 "text_then_media"` (Pi), `[text, image]` and `[image]` pass, and `[image, text]` and `[text, image, text]` are rejected
 `unsupported` with an empty ledger; nothing is reordered, flattened or concatenated; with `ordered`, any sequence of
-the declared types passes in order.
+the declared types passes in order. D17 core-bound origin: invoke with core effective principal P, transport actor
+`extension:coord`, and initiator W. Supplied `origin` must identify P/`extension:coord`/W separately; substituting W
+for actor, changing principal or changing initiator rejects `forbidden` with an empty native ledger. Missing core
+identity stays `undeclared`, never owner or a caller's assertion. Caller-classified `kind`/`agent` remain asserted
+claims in the model envelope and receipts; changing principal spelling/prefix never invents a kind or agent, and
+claiming `kind: human` alone cannot authorize plain human-owner rendering.
 
 **O. Observation** (P3 prototype `proto/item-stream` fc1dd12 passes O1–O10 at 200 agents × 3 viewers; O11 untested).
 O1 put/append/remove algebra; append with a wrong `base` is a gap, never applied. O2 snapshot cut, through two public
