@@ -257,7 +257,9 @@ fn render_list(buf:&mut Buffer,mut area:Rect,v:&Arc<Value>,st:&mut State,focused
     let heights: Vec<u32> = list.iter().map(|r| lines(&r.item, area.width.saturating_sub(1), icons) as u32).collect();
     let total: u32 = heights.iter().sum();
     let mut top = st.top.min(u32::MAX as usize) as u32;
-    if st.sel >= pinned && st.sel < first_bottom && !st.manual_scroll {
+    if v["follow"] == true && !st.manual_scroll && !(st.sel >= pinned && st.sel < first_bottom) {
+        top = u32::MAX;  // following while the selection is on a pinned row: keep the list at its end
+    } else if st.sel >= pinned && st.sel < first_bottom && !st.manual_scroll {
         let s = st.sel - pinned;
         let sel_start: u32 = heights[..s].iter().sum();
         let sel_end = sel_start + heights[s];

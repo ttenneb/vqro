@@ -270,8 +270,15 @@ pub fn follow(v: &Value, rows: &[Flat], st: &mut State) {
     if v["follow"] != true || st.manual_scroll || rows.is_empty() {
         return;
     }
-    let end = last(rows);
-    if st.follow_end.is_none_or(|was| st.sel >= was) {
+    // The end of the conversation: the last selectable row of the scrolling list, not a toolbar or bottom-pinned
+    // row (a composer, a waiting line). A selection on those stays put; the renderer keeps the list at its end.
+    let Some(end) = rows.iter().rposition(|r| selectable(&r.item) && !r.pinned && !r.bottom) else { return };
+    // Typing in a composer: the selection follows the composer row as rows arrive above it.
+    if let Some(at) = st.editing.as_deref().and_then(|id| rows.iter().position(|r| r.id == id)) { st.sel = at; }
+    let in_list = rows.get(st.sel).is_some_and(|r| !r.pinned && !r.bottom);
+    // First shown (and not typing): start at the end. Later: keep the end while the reader is there.
+    let first = st.follow_end.is_none() && st.editing.is_none();
+    if first || in_list && st.follow_end.is_some_and(|was| st.sel >= was) {
         st.sel = end;
     }
     st.follow_end = Some(end);
@@ -351,6 +358,20 @@ mod tests {
         let mut plain = State::default();
         let still = serde_json::json!({"items": [{"type": "text", "text": "a", "focusable": true}, {"type": "text", "text": "b", "focusable": true}]});
         assert_eq!(shown(&still, &mut plain), 0, "without follow nothing moves");
+        // A bottom-pinned composer: the end is the last list row, and a selection on the composer stays there.
+        let with_pin = |n: usize| { let mut v = panel(n); v["items"].as_array_mut().unwrap().push(serde_json::json!({"type": "composer", "id": "c", "text": "Message", "pin": "bottom"})); v };
+        let pin_rows = |v: &Value, st: &mut State| { let r = rows_for(v, st, &["pin", "composer"]); follow(v, &r, st); st.sel };
+        let mut st = State::default();
+        assert_eq!(pin_rows(&with_pin(3), &mut st), 2, "the end is the last conversation row, not the composer");
+        st.sel = 3;
+        st.editing = Some("c".into());
+        assert_eq!(pin_rows(&with_pin(5), &mut st), 5, "typing in the composer: the selection stays on it as rows arrive");
+        assert_eq!(st.follow_end, Some(4));
+        // First shown with the selection on a toolbar row (a log viewer's source picker): start at the end.
+        let mut tb = panel(3);
+        tb["toolbar"] = serde_json::json!([{"type": "select", "text": "Source", "options": []}]);
+        let mut st = State::default();
+        assert_eq!(pin_rows(&tb, &mut st), 3, "toolbar row 0, then list rows 1..=3");
     }
 
     #[test]

@@ -309,7 +309,7 @@ export class App {
             case "up": st.sel = [...sel].reverse().find((i) => i < st.sel) ?? st.sel; break;
             case "first": st.sel = sel[0] ?? 0; break;
             case "last": st.sel = sel[sel.length - 1] ?? 0; break;
-            case "end": st.sel = sel[sel.length - 1] ?? 0; st.followEnd = null; break;
+            case "end": { const listed = sel.filter((i) => !rows[i].pinned && !rows[i].bottom); st.sel = listed[listed.length - 1] ?? st.sel; st.followEnd = null; break; }
             case "next": case "prev": { const i = m.findRow(rows, st.sel, args.action === "next", args.match); if (i !== null) st.sel = i; break; }
             case "toggle": { const r = rows[st.sel]; if (r?.has_children) st.open[r.id] = !r.expanded; break; }
             default: this.message = `client.panel: unknown action ${args.action}`;
@@ -993,11 +993,20 @@ function drawList(a: App, buf: OptimizedBuffer, area: Rect, key: string, value: 
   a.listed.set(key, listed);
   if (!rows.length) { text(buf, area.x, y, st.filter ? "(no matches)" : "(empty)", p.color("dim")); return; }
   // follow: stay at the end while the reader is there (core-protocol.md, Optional list with detail).
+  // The end is the last selectable list row, not a toolbar or bottom-pinned row (a composer stays selected).
+  let following = false;
   if (value.follow === true && !st.manual) {
-    let end = 0;
-    for (let i = rows.length - 1; i >= 0; i--) if (m.selectable(rows[i].item)) { end = i; break; }
-    if (st.followEnd === null || st.sel >= st.followEnd) st.sel = end;
-    st.followEnd = end;
+    let end = -1;
+    for (let i = rows.length - 1; i >= 0; i--) if (m.selectable(rows[i].item) && !rows[i].pinned && !rows[i].bottom) { end = i; break; }
+    if (st.editing) { const at = rows.findIndex((r) => r.id === st.editing); if (at >= 0) st.sel = at; }  // typing: stay on the composer
+    const inList = !!rows[st.sel] && !rows[st.sel].pinned && !rows[st.sel].bottom;
+    if (end >= 0) {
+      // First shown (and not typing): start at the end. Later: keep the end while the reader is there.
+      const first = st.followEnd === null && !st.editing;
+      if (first || (inList && st.followEnd !== null && st.sel >= st.followEnd)) st.sel = end;
+      st.followEnd = end;
+      following = !first && !inList;
+    }
   }
   st.sel = Math.min(st.sel, rows.length - 1);
   if (!m.selectable(rows[st.sel].item)) { const j = rows.findIndex((r, i) => i >= st.sel && m.selectable(r.item)); st.sel = j >= 0 ? j : rows.findIndex((r) => m.selectable(r.item)); if (st.sel < 0) st.sel = 0; }
@@ -1021,7 +1030,11 @@ function drawList(a: App, buf: OptimizedBuffer, area: Rect, key: string, value: 
     bottom = by;
   }
   const visible = bottom - y;
-  if (!st.manual && st.sel < end) {
+  if (following) {  // selection on a pinned row: keep the list at its end
+    let top = end - pinned, used = 0;
+    while (top > 0 && used + heights[pinned + top - 1] <= visible) { top--; used += heights[pinned + top]; }
+    st.top = top;
+  } else if (!st.manual && st.sel < end) {
     if (st.sel >= pinned && st.sel < st.top + pinned) st.top = st.sel - pinned;
     let used = 0;
     for (let i = st.top + pinned; i <= st.sel && i < end; i++) used += heights[i];

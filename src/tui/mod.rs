@@ -1782,7 +1782,7 @@ impl App {
                             "up" => st.sel = panel::step(&rows, st.sel, -1),
                             "first" => st.sel = panel::first(&rows),
                             "last" => st.sel = panel::last(&rows),
-                            "end" => { st.sel = panel::last(&rows); st.follow_end = None; }
+                            "end" => { st.sel = rows.iter().rposition(|r| panel::selectable(&r.item) && !r.pinned && !r.bottom).unwrap_or(st.sel); st.follow_end = None; }
                             "next" | "prev" => if let Some(i) = panel::find_row(&rows, st.sel, action == "next", &args["match"]) { st.sel = i; },
                             _ => if let Some(r) = rows.get(st.sel).filter(|r| r.has_children) { st.open.insert(r.id.clone(), !r.expanded); },
                         }
