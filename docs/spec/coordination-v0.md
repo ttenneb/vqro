@@ -418,6 +418,27 @@ by path: tool-result / Stop context uses native system-reminder framing; rewake 
 NOT USER INPUT`. Senders must accept context rendering. Non-interactive sessions do not support this idle wake.
 The native session inbox socket is a separate `admit` route without vqro-side edit after posting.
 
+### 7.1 Advisory terminal status
+
+The agents extension provides `agents.status {terminal, app, state, seq}` for tier-1 hooks without a tty or an
+OSC 7501 path (Claude Code hooks, for example). This is lossy observation, not a coordination mutation or native
+effect. `terminal` names a live terminal resource; `app` is a non-empty string of at most 64 characters; `seq` is a
+non-negative integer (Unix epoch milliseconds recommended). `state` is `idle | running | requires_action | unknown`;
+an absent or unknown value becomes `unknown`, never inferred idle.
+
+Reports are last-writer-by-sequence **per terminal**, across apps: only `seq` strictly above the last report applies.
+The reply is `{ok: true, applied: true}`, or `{ok: true, applied: false, reason: "stale", seq: <last>}`. Invalid
+arguments, a missing/ended terminal or the 4096-report bound are refused to the caller only, without a notice.
+Sequence is not scoped to a reporting process or incarnation; a restarted reporter must advance it. Reports live
+only in extension memory, disappear when the terminal ends or is removed, and do not survive an extension restart.
+This advisory channel is not an authority boundary: the implemented command does not authenticate the reporter.
+
+Live data `agents.terminal_status` is `{data: {<terminal>: {app, state, seq, at_ms, status}}}`, where `at_ms` is
+receipt time and `status` is OSC 7501-shaped `{app, state}`: `running` → `working`, `requires_action` → `blocked`,
+`idle` / `unknown` unchanged. Publications may coalesce reports with unchanged app/state; this is not a report log.
+The sidebar uses this fallback **only without the terminal's own OSC status**. No report means unknown, not idle;
+a report alone proves neither delivery, a model read nor lifecycle end.
+
 ## 8. Causality
 
 Admissions record `cause` and `correlation` in the qualified form of `agent-v0.md` §2.5 and pass them to

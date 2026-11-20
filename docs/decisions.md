@@ -492,6 +492,11 @@ stopped. Silence is `disconnected`, then after a declared grace (60 s) `unavaila
 globally unique delivery id at admission, which is what crosses the runtime seam. `provider-v0.md` section 6 ops are
 replaced when the Pi bridge is ported.
 
+**Further implementation rulings (2026-11-19, spec batch 2).**
+- Tier-1 `agents.status {terminal, app, state, seq}` is lossy advisory live data, like OSC 7501, for hooks without
+  a terminal status path. Reports use last sequence per terminal and disappear on terminal end/removal or extension
+  restart. The sidebar uses `agents.terminal_status` only when the terminal has no OSC status; unknown stays unknown.
+
 **Human answers (2026-11-19, CONFIRMED).**
 - **AS1, pause:** "vqro stops delivery": paused means vqro sends, hands out and wakes nothing until resumed; an agent
   still working shows as working; a runtime with a real pause may offer it as an extra capability. Physical

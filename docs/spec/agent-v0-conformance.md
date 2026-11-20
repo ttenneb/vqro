@@ -193,7 +193,7 @@ Checked against fake adapters. Level **P** (pull): a terminal agent plus a plugi
 | Declaration | Where | Checked by |
 |---|---|---|
 | operation window, scope capacity, quotas, protected-domain budget, identity cache size | the extension | I10, I17–I19, H14, H16, L7–L9 |
-| `pull {points, insert, evidence}`, `consumer` | plugin's endpoint | T1–T10 |
+| `pull {points, insert, evidence}`, `consumer`; advisory terminal status | plugin's endpoint, agents extension | T1–T13 |
 
 **I. Inbox.** P1's prototype (`proto/inbox-seam` b26cf0a, fake native ledger recording every invocation) passes I1–I6
 for one fake agent; the rest need the full extension.
@@ -315,6 +315,11 @@ T12 Claude Code context evidence: PostToolBatch/Stop and interactive rewake hand
 `inserted`; `hook_success`, a tool result or a human quote of the hand-off never yields `read`. Only a correlated
 model-visible request plus normal completion may yield `read`; verify native framing on each path, including
 `NOT USER INPUT` on rewake. Non-interactive idle wake is not declared.
+
+T13 advisory terminal status: `agents.status` publishes OSC-shaped live data; unknown/missing states become
+`unknown`. Duplicate/lower sequence reports are ignored per terminal, even from a different app; invalid reports
+produce no notice or native effect. Reports are bounded, dropped at terminal end/removal and lost on extension
+restart. The sidebar prefers terminal OSC status and falls back only without it; no report never implies idle.
 
 **L. Lifecycle policy.** L5 stop closes the gate first; without a declared `agent.stop`, `host_kill` is offered only
 when the host is a core resource of the bound incarnation with a declared termination primitive, after showing
