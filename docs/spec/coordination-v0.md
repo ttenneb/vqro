@@ -435,10 +435,15 @@ without ever losing it:
 2. **Export:** write a manifest (archive id, delivery ids, versions, content hash) and the records to the destination,
    and confirm it is durable (synced and read back against the hash).
 3. **Free:** one CAS against the frozen versions replaces the records with a compact archive marker `{archive,
-   locator, manifest_hash, deliveries}`. A record whose version changed meanwhile (a late receipt, an edit) is left in
-   place and reported.
+   locator, manifest_hash, deliveries}`. A record whose version changed meanwhile (genuine newly observed receipt
+   evidence) is left in place and reported. Intent edits and handover writes on frozen records are refused.
 4. Uncertain export, a failed write or a CAS conflict keeps the evidence and leaves the archive visibly pending;
    nothing is freed. Repeating the `op` inspects that archive, never exports a different set or frees blindly.
+5. **Abort:** the workspace owner's explicit `coord.inbox.archive {op, action: abort, archive}` records the caller,
+   releases the freeze and pending-plan slot, and retains source evidence and existing export files. Genuine late
+   receipts are never suppressed to keep a frozen version unchanged: after abort, inspect and create a fresh plan.
+   Abort changes no admission permit and invokes no native agent operation. It does not cancel filesystem I/O already
+   running; a finishing exporter reports any file it wrote but cannot resurrect an aborted/completed plan or free data.
 
 A lookup of an archived delivery returns its locator. A missing or unreadable archive answers `unknown`, never "no
 effect". Archive is never triggered by memory pressure. At most four archive plans are pending. Every accepted
