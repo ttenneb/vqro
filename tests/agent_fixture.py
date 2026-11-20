@@ -97,6 +97,19 @@ class FakeCore:
 
     def invoke(self, name, args=None):
         self.calls.append((name, copy.deepcopy(args)))
+        # Models coord's public callback for UI/launcher components only; policy
+        # authorization and native fencing have separate engine/public tests.
+        if name == 'coord.inbox.window':
+            return {'epoch': 'fixture-window'}
+        if name == 'coord.control':
+            result = self.call('resource.invoke', {'resource': args['target'], 'op': 'agent.respond', 'args': args['args']})
+            return {'state': result['outcome'], 'native': result}
+        if name == 'coord.request_route':
+            key = 'doc/agents/request-routes/' + args['agent']
+            if args.get('action') == 'initialize':
+                self.entries[key] = {'version': 1, 'value': {'route': 'human'}}
+                return {'state': 'accepted'}
+            return {'route': 'human', 'human': True, 'fallback_reason': None}
         if name == "agents.show" and self.fail_agents or name == "tabs.show" and self.fail_tabs:
             raise VqroError("extension stopped", "unavailable")
         return {"ok": True}
@@ -108,6 +121,8 @@ class FakeCore:
 
     def call(self, method, params):
         self.calls.append((method, copy.deepcopy(params)))
+        if method == 'command.list':
+            return {'commands': [{'name': 'coord.inbox.window'}, {'name': 'coord.control'}]}
         if method == "workspace.get":
             return copy.deepcopy(self.entries.get(params["key"]))
         if method == "resource.list":

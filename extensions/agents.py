@@ -12,6 +12,7 @@ from vqro_ext import Extension, VqroError, views_in
 from vqro_display import label, plain
 from vqro_views import ended, unknown_since
 from vqro_items import ItemView
+from agent_request_routes import REQUEST_ROUTES, request_key
 import agent_transcript
 
 EFFECTS = {"prompt": "Prompt", "steer": "Steer", "follow_up": "Follow-up", "abort": "Abort",
@@ -567,6 +568,23 @@ class Agents:
             chips.append({"text": "⋯ Bridge terminal", "command": "tabs.show", "args": {"resource": host["id"]}})
         return [{"type": "chips", "chips": chips}] if chips else []
 
+    def request_presentation(self, r, waiting):
+        configured = self.ext.value(REQUEST_ROUTES + r['id'])
+        if configured is None or configured == {'route': 'human'}:
+            return True, None
+        if not isinstance(configured, dict) or configured.get('route') not in ('human', 'coordinator', 'both'):
+            return True, 'Invalid request route; human fallback'
+        if configured['route'] == 'human':
+            return True, None
+        route = self.ext.live.get('coord-requests-' + r['id'])
+        keys = {request_key(r, question) for question in waiting}
+        projected = route.get('request_keys') if isinstance(route, dict) else None
+        if (not isinstance(projected, list) or any(not isinstance(key, str) for key in projected)
+                or route.get('version') != self.ext.version(REQUEST_ROUTES + r['id'])
+                or None in keys or keys != set(projected)):
+            return True, 'Request routing unavailable or catching up; human fallback'
+        return route.get('human') is not False, route.get('fallback_reason')
+
     def bottom_rows(self, r):
         """Pinned under the conversation (feature `pin`; otherwise simply last): what the runtime holds, what waits
         for you, the composer. The facts line follows."""
@@ -581,11 +599,19 @@ class Agents:
                          "menu": [{"label": "Clear queue", "command": "agents.clear_queue", "args": {"resource": rid}}]
                                  if self.supported(r, "clear_queue") else []})
         waiting = self.requests_v0(r) if self.v0(r, "respond") else None
-        if waiting:
+        human, fallback = self.request_presentation(r, waiting) if waiting else (False, None)
+        # Exactly one waiting row; non-transcript panels also select it by id.
+        if waiting and not human:
+            route = self.ext.live.get('coord-requests-' + rid) or {}
+            coordinator = label(plain(str(route.get('coordinator') or 'the recorded coordinator')), 120)
+            rows.append({'id': 'waiting', 'pin': 'bottom', 'style': 'warn',
+                         'text': f'⚠ {name} is waiting for {coordinator}',
+                         'description': 'Request routed to the coordinator; manual Control remains available'})
+        if waiting and human:
             more = f" (and {len(waiting) - 1} more)" if len(waiting) > 1 else ""
             rows.append({"id": "waiting", "pin": "bottom", "style": "warn", "command": "agents.answer", "args": {"resource": rid},
                          "text": f"⚠ {name} is waiting for your answer: " + head(plain(str(waiting[0].get("title") or waiting[0]["request"])), 160) + more,
-                         "description": "Enter: answer…"})
+                         "description": (str(fallback) + ' · ' if fallback else '') + "Enter: answer…"})
         modes = self.modes(r)
         if modes and r.get("available") and not ended(r):
             names = {"start": "start", "boundary": "steer", "settle": "follow-up", "admit": "admit (weaker)",
@@ -1111,9 +1137,26 @@ class Agents:
             raise VqroError("choose a valid answer for this request", "invalid")
         native = {"v": 0, "request": request["request"], "response": response, "revision": args["revision"],
                   "epoch": args["epoch"]}
-        result = self.ext.vqro.call("resource.invoke", {"resource": r["id"], "op": "agent.respond", "args": native})
-        self.outcome("answer", result)
-        return {**result, "client": {"close": True}}
+        registered = self.ext.vqro.call('command.list', {}).get('commands')
+        if not isinstance(registered, list):
+            raise VqroError('command registration could not be inspected; nothing sent', 'unavailable')
+        names = {row['name'] for row in registered if isinstance(row, dict) and isinstance(row.get('name'), str)}
+        if not {'coord.inbox.window', 'coord.control'} <= names:
+            # D15: positively absent commands, before attempting a coord effect.
+            # Never fall back after ANY registered command error/timeout.
+            result = self.ext.vqro.call('resource.invoke', {'resource': r['id'], 'op': 'agent.respond', 'args': native})
+            observed = result
+        else:
+            window = self.ext.invoke('coord.inbox.window', {})
+            if not isinstance(window, dict) or not isinstance(window.get('epoch'), str):
+                raise VqroError('coordination response path unavailable; nothing sent', 'unavailable')
+            # A deliberate retry is a new op; the adapter's epoch/revision fence
+            # (not a replay) preserves first-valid-answer-wins.
+            result = self.ext.invoke('coord.control', {'op': window['epoch'] + ':agents-answer:' + uuid.uuid4().hex,
+                                     'target': r['id'], 'action': 'respond', 'args': native})
+            observed = result.get('native') or {'outcome': result.get('state', 'unknown')}
+        self.outcome('answer', observed)
+        return {**result, 'outcome': observed.get('outcome', 'unknown'), 'client': {'close': True}}
 
     def requests_panel(self, r):
         if self.v0(r, "respond"):
@@ -1305,6 +1348,10 @@ class Agents:
             items.append({"type": "text", "text": "Pending requests: "+(str(len(requests)) if isinstance(requests, list) else "unknown")})
             items.append({"type": "text", "text": label(json.dumps(details, ensure_ascii=False), 8192)})
             content = {"title": title, "requires": ["badges", "description"], "items": items}
+        if conversation is None:
+            # Waiting is agent state, not a transcript feature; keep it visible
+            # for runtimes without an item stream or with an embedded view too.
+            content['items'].extend(row for row in self.bottom_rows(r) if row.get('id') == 'waiting')
         details = data(r)
         failure = details.get("failure")
         if isinstance(failure, dict) and isinstance(failure.get("message"), str) and failure["message"]:
@@ -1526,6 +1573,10 @@ class Agents:
                 else:
                     self.ext.publish("agents-requests-"+rid, {"items": [{"type": "text", "text": "Agent is gone; nothing sent."}]})
                     self.open_requests.discard(rid)
+        elif kind == 'view.content' and str(event.get('view', '')).startswith('coord-requests-'):
+            r = self.ext.resources.get(event['view'][len('coord-requests-'):])
+            if r and r.get('kind') == 'agent':
+                self.publish_panel(r)
         elif kind == "view.content" and str(event.get("view", "")).startswith("agent-"):
             r = self.ext.resources.get(event["view"][6:])
             if r and r.get("kind") == "agent":
@@ -1534,7 +1585,7 @@ class Agents:
 
 def main():
     ext = Extension("agents", event_types=["entries", "resource", "resource.removed", "provider", "view.content"],
-                    view_content={"prefixes": ["agent-"]})
+                    view_content={"prefixes": ["agent-", "coord-requests-"]})
     Agents(ext)
     ext.run()
 

@@ -596,6 +596,95 @@ def case_recipe_history(principal=None):
             'duplicate_recreated': False, 'principal_hash': marked}
 
 
+def case_request_routing():
+    delivered, source_calls = [], []
+    answered = [False]
+    def receive(method, params):
+        delivered.append(params)
+        return {'outcome': 'accepted', 'data': {'receipt': {'stage': 'admitted'}}}
+    def source(method, params):
+        source_calls.append(params)
+        args = params.get('args') or {}
+        if (params['op'] == 'agent.respond' and not answered[0]
+                and (args.get('epoch'), args.get('request'), args.get('revision')) == ('e1', 'q-route', 3)):
+            answered[0] = True
+            return {'outcome': 'observed', 'data': {'response_recorded': True}}
+        return {'outcome': 'rejected', 'error': {'kind': 'stale', 'message': 'request already answered or fences changed'}}
+    coordinator = native(principal='p:route-coordinator')
+    coordinator['caps']['agent.send'] = {'modes': {'admit': {}}, 'origin': [{'as': 'attributed_user', 'role': 'user', 'frame': 'sender_header'}]}
+    parent = agent('request-parent', coordinator, handler=receive)
+    requester = native(principal='p:requester')
+    requester['caps']['agent.respond'] = {'methods': ['confirm'], 'scopes': ['session']}
+    requester['requests'] = [{'request': 'q-route', 'revision': 3, 'method': 'confirm', 'title': 'Continue?',
+                              'params': {}, 'scope': {'session': 's1'}, 'status': 'pending', 'agent': 'spoof'}]
+    child = agent('request-child', requester, handler=source)
+    raw_set('doc/agents/members/' + parent, {'project': None, 'reports_to': None})
+    raw_set('doc/agents/members/' + child, {'project': None, 'reports_to': parent})
+    grant = 'doc/agents/grants/request-answer'
+    raw_set(grant, {'who': 'p:route-coordinator', 'on': 'agent:' + child, 'can': ['answer']})
+    other = Client({'kind': 'principal', 'principal': 'p:route-stranger'})
+    try:
+        cmd('request_route', {'op': op('route-denied'), 'action': 'set', 'agent': child, 'route': 'both', 'expect': 0}, other)
+        raise AssertionError('ungranted configure accepted')
+    except RPCError as error:
+        assert error.kind == 'no_grant', error.kind
+    cmd('request_route', {'op': op('route-set'), 'action': 'set', 'agent': child, 'route': 'coordinator', 'expect': 0})
+    def mail():
+        rows = cmd('inbox.list', {'target': parent})['items']
+        return next((r for r in rows if r.get('request_notice', {}).get('agent') == child), None)
+    row = wait(mail)
+    assert not delivered, delivered  # new receiver gates have not been resumed
+    payload = json.loads(row['content'][0]['text'].split('\n', 1)[1])
+    assert (payload['agent'], payload['epoch'], payload['request'], payload['revision'], payload['scope']) == (child, 'e1', 'q-route', 3, {'session': 's1'}), payload
+    assert row['from']['principal'] == 'extension:coord', row
+    def projection():
+        return owner.call('workspace.snapshot')['live'].get('coord-requests-' + child)
+    wait(lambda: projection() and projection()['human'] is False)
+    assert not source_calls, source_calls  # routing never answers
+    raw_set(grant, {'who': 'p:elsewhere', 'on': 'agent:' + child, 'can': ['answer']})
+    wait(lambda: projection() and projection()['fallback_reason'] == 'coordinator_no_answer_right')
+    raw_set(grant, {'who': 'p:route-coordinator', 'on': 'agent:' + child, 'can': ['answer']})
+    scope('resume')
+    wait(lambda: len(delivered) == 1)
+    agents_decl = {'enabled': True, 'argv': ['/usr/bin/python3', str(EXT / 'agents.py')], 'cwd': str(EXT),
+                   'manifest': json.loads((EXT / 'manifests/agents.json').read_text())}
+    raw_set('extension/agents', agents_decl)
+    def show_agent():
+        try:
+            owner.call('command.invoke', {'name': 'agents.show', 'args': {'resource': child}})
+        except RPCError as error:
+            if error.kind not in ('not_found', 'unavailable'):
+                raise
+        panel = owner.call('workspace.snapshot')['live'].get('agents-' + child) or {}
+        return next((r for r in panel.get('items', []) if r.get('id') == 'waiting'), None)
+    def routed_waiting():
+        row = show_agent()
+        return row if row and 'command' not in row and 'is waiting for ' + parent in row.get('text', '') else None
+    routed_row = wait(routed_waiting)
+    current = cmd('request_route', {'action': 'inspect', 'agent': child})
+    cmd('request_route', {'op': op('route-both'), 'action': 'set', 'agent': child, 'route': 'both', 'expect': current['version']})
+    wait(lambda: projection() and projection()['configured'] == 'both' and projection()['human'])
+    wait(lambda: (show_agent() or {}).get('command') == 'agents.answer')
+    assert len(delivered) == 1 and not source_calls
+    coord_entry = owner.call('workspace.get', {'key': 'extension/coord'})
+    original = coord_entry['value']
+    raw_set('extension/coord', dict(original, enabled=False))
+    wait(lambda: 'coord.control' not in {c['name'] for c in owner.call('command.list')['commands']})
+    owner.call('command.invoke', {'name': 'agents.answer', 'args': {'resource': child, 'request': 'q-route',
+                    'epoch': 'e1', 'revision': 3, 'value': True}})
+    assert len(source_calls) == 1 and source_calls[0]['op'] == 'agent.respond', source_calls
+    assert source_calls[0]['args']['epoch'] == 'e1' and source_calls[0]['args']['revision'] == 3
+    raw_set('extension/coord', original)
+    wait(lambda: cmd('status')['state'] == 'ready')
+    scope('resume')
+    wait(lambda: projection() and projection()['human'])
+    assert len(delivered) == 1, 'router restart recreated a notice'
+    return {'exact_coordinator': True, 'source_scope_correlated': True, 'held_is_recorded_not_refused': True,
+            'revoked_right_human_fallback': True, 'both_human': True, 'coordinator_waiting_row': True,
+            'native_notice_writes': 1, 'automatic_native_answers': 0, 'explicit_raw_recovery_attempts': 1,
+            'restart_recreated_notice': False}
+
+
 def case_declarations():
     status = cmd('status')
     snapshot = owner.call('workspace.snapshot')
@@ -812,7 +901,7 @@ def case_archive_abort():
 
 
 # Witness the bounded attention view before bulk uncertain-history fixtures fill it.
-CASES = {'ordering_visibility': case_ordering_visibility, 'brick': case_brick, 'idle': case_idle, 'membership': case_membership, 'identity': case_identity, 'reconcile': case_reconcile, 'names': case_names,
+CASES = {'request_routing': case_request_routing, 'ordering_visibility': case_ordering_visibility, 'brick': case_brick, 'idle': case_idle, 'membership': case_membership, 'identity': case_identity, 'reconcile': case_reconcile, 'names': case_names,
          'rawcycle': case_rawcycle, 'invalid_declaration': case_invalid_declaration,
          'window': case_window, 'handover': case_handover, 'archive': case_archive, 'queue_epoch': case_queue_epoch, 'handover_withdrawn': case_handover_withdrawn, 'archive_abort': case_archive_abort, 'handover_archive': case_handover_archive, 'pause_reporting': case_pause_reporting, 'recipe_history': case_recipe_history, 'compaction_identities': case_compaction_identities, 'declarations': case_declarations}
 core = None
