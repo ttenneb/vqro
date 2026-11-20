@@ -21,6 +21,7 @@ LOG = sys.argv[1] if len(sys.argv) > 1 else os.devnull
 ext = Extension("coord-fake")
 lock = threading.RLock()
 records, ops, consumers = {}, {}, {}
+FAULT = {}
 seq = [0, 0]  # admission order, wake revision
 
 
@@ -60,7 +61,12 @@ def mutation(fn):
             if op in ops:
                 return ops[op]
             result = dict(fn(args), window=WINDOW)
+            # A repeated take returns its claims (history), never content again.
             ops[op] = result if "records" not in result else dict(result, records=[], historical=True)
+            if FAULT.get("take_delay_s") and "records" in result and result["records"]:
+                delay = FAULT.pop("take_delay_s")
+                log("fault_delay", seconds=delay)
+                time.sleep(delay)  # the caller's reply deadline passes: a lost take reply
             return result
     return run
 
@@ -78,7 +84,8 @@ def send(args):
     valid_content(args.get("content"))
     seq[0] += 1
     d = f"d:{seq[0]}"
-    records[d] = {"delivery": d, "to": args["to"], "from": {"principal": args.get("from", "p:owner")}, "mode": args["mode"],
+    records[d] = {"delivery": d, "to": args["to"], "from": {"principal": args.get("from", "p:owner")},
+                  "origin": {"principal": args.get("from", "p:owner"), "kind": "tool", "actor": "client:test"}, "mode": args["mode"],
                   "content": args["content"], "render": args.get("render"), "state": "held", "reason": None, "rev": 1, "order": seq[0]}
     log("sent", delivery=d, mode=args["mode"])
     wake(args["to"])
@@ -126,12 +133,13 @@ def take(args):
             claim = f"claim:{r['delivery']}.{len(r.get('attempts', [])) + 1}"
             r.update(state="claimed", reason=None, claim=claim, consumer=args["consumer"], at=at)
             r.setdefault("attempts", []).append({"claim": claim, "at": at, "t": time.time()})
-            out.append({"delivery": r["delivery"], "from": r["from"], "origin": None, "render": r["render"],
+            out.append({"delivery": r["delivery"], "from": r["from"], "origin": r["origin"], "render": r["render"],
                         "mode": r["mode"], "content": r["content"], "claim": claim})
     log("take", agent=agent, at=at, deliveries=[o["delivery"] for o in out])
     if out:
         wake(agent)
-    return {"state": "claimed" if out else "held", "records": out, "held": None if out else "no_eligible_input"}
+    return {"state": "claimed" if out else "held", "records": out, "claims": [{"delivery": o["delivery"], "claim": o["claim"]} for o in out],
+            "held": None if out else "no_eligible_input"}
 
 
 @command("coord.inbox.report", "pull: report evidence for a claim")
@@ -181,6 +189,12 @@ def resolve(args):
         raise VqroError("only unknown records are resolved", "conflict")
     r.update(state="resolved", resolution=args["as"])
     return {"state": "resolved", "delivery": r["delivery"]}
+
+
+@command("fixture.fault", "test: inject one fault (take_delay_s: hold the next non-empty take reply)")
+def fault(args):
+    FAULT.update(args)
+    return {"fault": FAULT}
 
 
 @command("agents.terminal_status", "tier-1 status report (placeholder; no standard command yet)")

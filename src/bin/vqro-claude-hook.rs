@@ -5,27 +5,34 @@
 //!
 //! | Hook | Point | What it does |
 //! |---|---|---|
-//! | `SessionStart` | — | new consumer; `inbox.reconcile` open claims against the transcript; status unknown |
+//! | `SessionStart` (`startup`, `resume`) | — | new consumer; `reconcile` (open claims become `unknown`); status unknown |
+//! | `SessionStart` (`compact`, `clear`) | — | same process and consumer: nothing is reconciled |
 //! | `UserPromptSubmit`, `PreToolUse` | — | status working; marks the session busy and retires an armed idle waiter |
 //! | `PermissionRequest` | — | status blocked |
-//! | `PostToolBatch` | `turn` | `inbox.take {at: turn}` → `additionalContext` before the next model call |
-//! | `Stop` | `settle` | `inbox.take {at: settle}` → `additionalContext` (the turn continues once) |
+//! | `PostToolBatch` | `turn` | `take {at: turn}` → `additionalContext` before the next model call |
+//! | `Stop` | `settle` | `take {at: settle}` → `additionalContext` (the turn continues once) |
 //! | `Stop`, `Notification` `idle_prompt` (`wait`, `asyncRewake`, interactive only) | `idle` | waits for the inbox wake, takes, exits 2 → Claude wakes |
 //! | `StopFailure`, `Notification` (`idle_prompt`) | — | status error / idle |
-//! | `SessionEnd` | — | last chance to turn transcript evidence into `inserted` / `read` |
+//! | `SessionEnd` | — | last chance to turn transcript evidence into `read` |
 //!
 //! The endpoint's declaration (written by its launcher in `doc/agents/terminals/<rN>`) is
-//! `pull {points: [turn, settle, idle], insert: context, evidence: none}`: a hand-off is a system reminder with no
-//! durable entry at that moment, reported `supplied`; `read` follows once the transcript shows the request that
-//! carried it and a finished assistant entry. Senders must accept `render: ["context"]`. Hooks inside subagents
-//! (`agent_id`) are ignored: their context is not the agent's.
+//! `pull {points: [turn, settle, idle], insert: context, evidence: none}`. Senders must accept `render: ["context"]`.
+//! - A hand-off is a system reminder with no durable entry at that moment. It is reported `supplied` only after the
+//!   hook's output has been written.
+//! - `read` follows only from the transcript: the plugin's own context entry carrying a per-hand-off nonce (known
+//!   only to this plugin, never to senders), then the request payload carrying that nonce, then a finished
+//!   assistant entry. Tool results, human prompts and quoted text are never evidence.
+//! - Content is rendered as a quote under the plugin's own header, so a sender cannot forge another header.
+//! - Hooks inside subagents (`agent_id`) are ignored: their context is not the agent's.
 //!
-//! Wire: `coord.inbox.window/reconcile/take/report` (the default coordination extension) via `command.invoke`;
-//! mutation ops carry the window epoch. The idle waiter wakes on the `coord-status` view's `wake.pending[<rN>]`.
+//! Wire: `<prefix>inbox.window/reconcile/take/report` via `command.invoke`, prefix `coord.` (the default
+//! coordination extension) or `$VQRO_COORD_PREFIX`. Mutation ops carry the window epoch. A take whose reply is lost
+//! is repeated with the same op, which returns its claims (never content): they are reported `released`. The idle
+//! waiter wakes on the `coord-status` view's `wake.pending[<rN>]` and reconnects after a core restart.
 //!
 //! Environment: `VQRO_SOCKET` (core endpoint), `VQRO_AGENT` (this agent's `rN`, injected by its launcher). Without
 //! both the plugin does nothing. Every failure is silent towards Claude Code (a hook must never break the session)
-//! and logged to the state directory. Status: hooks have no controlling terminal and Claude Code's
+//! and logged to the private state directory. Status: hooks have no controlling terminal and Claude Code's
 //! `terminalSequence` allowlist excludes OSC 7501, so tier-1 status needs a call the standard does not name yet; it
 //! is sent only to the command named by `VQRO_CLAUDE_STATUS_COMMAND`.
 
@@ -44,18 +51,24 @@ mod unix {
     use serde_json::{json, Value};
     use std::fs::{self, OpenOptions};
     use std::io::{BufRead, BufReader, Read, Write};
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
     use std::os::unix::net::UnixStream;
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
-    const MARK: &str = "vqro message ";
     const TAKE_LIMIT: u64 = 16;
-    /// Content block types this plugin inserts without loss (`additionalContext` is a string).
-    const CONTENT: &[&str] = &["text", "resource_link"];
+    /// Content block types inserted without loss: `additionalContext` is plain text.
+    const CONTENT: &[&str] = &["text"];
     const CALL_MS: u64 = 3000;
-    const MAX_CONTEXT: usize = 9000; // Claude Code moves >10,000 characters out to a file
+    /// Claude Code moves `additionalContext` over 10,000 characters out to a file; whole records only, below that.
+    const MAX_CONTEXT: usize = 9000;
     /// The coordination extension's live status view; `wake.pending[<rN>]` is a count, never content.
     const WAKE_VIEW: &str = "coord-status";
+    const LOG_BYTES: u64 = 1 << 20;
+
+    fn prefix() -> String {
+        std::env::var("VQRO_COORD_PREFIX").unwrap_or_else(|_| "coord.".into())
+    }
 
     struct Core {
         r: BufReader<UnixStream>,
@@ -66,9 +79,9 @@ mod unix {
 
     impl Core {
         fn connect(path: &str) -> Result<Core, String> {
-            let w = UnixStream::connect(path).map_err(|e| format!("connect: {e}"))?;
+            let w = UnixStream::connect(path).map_err(|e| format!("transport: connect: {e}"))?;
             w.set_read_timeout(Some(Duration::from_millis(CALL_MS))).ok();
-            let r = BufReader::new(w.try_clone().map_err(|e| e.to_string())?);
+            let r = BufReader::new(w.try_clone().map_err(|e| format!("transport: {e}"))?);
             let mut core = Core { r, w, next: 0, events: Vec::new() };
             core.call("hello", json!({"client": "vqro-claude-hook", "version": env!("CARGO_PKG_VERSION")}))?;
             Ok(core)
@@ -78,7 +91,7 @@ mod unix {
             self.next += 1;
             let id = self.next;
             let line = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}).to_string() + "\n";
-            self.w.write_all(line.as_bytes()).map_err(|e| format!("write: {e}"))?;
+            self.w.write_all(line.as_bytes()).map_err(|e| format!("transport: write: {e}"))?;
             loop {
                 let row = self.read()?;
                 if row.get("id").and_then(Value::as_u64) == Some(id) {
@@ -97,29 +110,28 @@ mod unix {
         fn read(&mut self) -> Result<Value, String> {
             let mut line = String::new();
             match self.r.read_line(&mut line) {
-                Ok(0) => Err("core closed the connection".into()),
-                Ok(_) => serde_json::from_str(&line).map_err(|e| format!("bad reply: {e}")),
-                Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => Err("timeout".into()),
-                Err(e) => Err(format!("read: {e}")),
+                Ok(0) => Err("transport: core closed the connection".into()),
+                Ok(_) => serde_json::from_str(&line).map_err(|e| format!("transport: bad reply: {e}")),
+                Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => Err("transport: timeout".into()),
+                Err(e) => Err(format!("transport: read: {e}")),
             }
         }
 
-        /// A coordination command (`coord.<name>`, the default coordination extension) through the core's command
-        /// registry.
         fn coord(&mut self, name: &str, args: Value) -> Result<Value, String> {
-            self.call("command.invoke", json!({"name": format!("coord.{name}"), "args": args, "deadline_ms": CALL_MS}))
+            self.call("command.invoke", json!({"name": format!("{}{name}", prefix()), "args": args, "deadline_ms": CALL_MS}))
         }
 
-        /// A coordination mutation: its `op` carries the current window epoch (cached per session). An
-        /// `expired_operation` created nothing, so one retry under a fresh epoch is safe.
-        fn mutate(&mut self, ctx: &Ctx, name: &str, mut args: Value) -> Result<Value, String> {
+        /// A coordination mutation. Its op is `<window epoch>:<suffix>`: callers pass a deterministic suffix when a
+        /// repeat must be recognised (reports, a lost take). An `expired_operation` created nothing, so one retry
+        /// under a fresh epoch is safe.
+        fn mutate(&mut self, ctx: &Ctx, name: &str, mut args: Value, suffix: &str) -> Result<Value, String> {
             for attempt in 0..2 {
                 let mut epoch = ctx.with_state(|s| s.get("epoch").as_str().map(String::from)).unwrap_or_default();
                 if epoch.is_empty() {
                     epoch = self.coord("inbox.window", json!({}))?.get("epoch").and_then(Value::as_str).unwrap_or("").to_string();
                     ctx.with_state(|s| s.set("epoch", json!(epoch)));
                 }
-                args["op"] = json!(format!("{epoch}:{}:{}", ctx.session, random_hex()));
+                args["op"] = json!(format!("{epoch}:{suffix}"));
                 match self.coord(name, args.clone()) {
                     Ok(reply) => {
                         if let Some(e) = reply.pointer("/window/epoch").and_then(Value::as_str) {
@@ -129,12 +141,17 @@ mod unix {
                         }
                         return Ok(reply);
                     }
-                    Err(e) if attempt == 0 && e.contains("expired_operation") => ctx.with_state(|s| s.set("epoch", json!(""))),
+                    Err(e) if attempt == 0 && e.starts_with("expired_operation") => ctx.with_state(|s| s.set("epoch", json!(""))),
                     Err(e) => return Err(e),
                 }
             }
             Err("expired_operation twice".into())
         }
+    }
+
+    /// An error after which the call may or may not have happened.
+    fn uncertain(error: &str) -> bool {
+        error.starts_with("transport:") || error.starts_with("timeout") || error.starts_with("unavailable") || error.starts_with("indeterminate")
     }
 
     /// Per-session plugin state, shared by the hook processes of one Claude Code session (file-locked).
@@ -170,22 +187,29 @@ mod unix {
             self.dir.join(format!("{}.json", sanitize(&self.session)))
         }
         fn log(&self, what: &str, detail: Value) {
+            let path = self.dir.join("hook.log");
+            if fs::metadata(&path).map(|m| m.len() > LOG_BYTES).unwrap_or(false) {
+                let _ = fs::rename(&path, self.dir.join("hook.log.1")); // bounded: one rotated file
+            }
             let line = json!({"t": now_ms(), "pid": std::process::id(), "session": self.session, "event": what, "detail": detail}).to_string() + "\n";
-            if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(self.dir.join("hook.log")) {
+            if let Ok(mut f) = OpenOptions::new().create(true).append(true).mode(0o600).open(path) {
                 let _ = f.write_all(line.as_bytes());
             }
         }
         /// Run `f` with the session state locked; the state is written back afterwards.
         fn with_state<T>(&self, f: impl FnOnce(&mut State) -> T) -> T {
-            let lock = OpenOptions::new().create(true).truncate(false).write(true).open(self.dir.join(format!("{}.lock", sanitize(&self.session)))).ok();
+            let lock = OpenOptions::new().create(true).truncate(false).write(true).mode(0o600)
+                .open(self.dir.join(format!("{}.lock", sanitize(&self.session)))).ok();
             if let Some(l) = &lock {
                 let _ = l.lock();
             }
             let mut state = State { v: fs::read_to_string(self.state_path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(json!({})) };
             let out = f(&mut state);
             let tmp = self.state_path().with_extension("tmp");
-            if fs::write(&tmp, state.v.to_string()).is_ok() {
-                let _ = fs::rename(&tmp, self.state_path());
+            if let Ok(mut file) = OpenOptions::new().create(true).truncate(true).write(true).mode(0o600).open(&tmp) {
+                if file.write_all(state.v.to_string().as_bytes()).is_ok() {
+                    let _ = fs::rename(&tmp, self.state_path());
+                }
             }
             out
         }
@@ -207,7 +231,10 @@ mod unix {
         }
         let session = input.get("session_id").and_then(Value::as_str).unwrap_or("nosession").to_string();
         let dir = state_dir();
-        let _ = fs::create_dir_all(&dir);
+        // Private: delivery ids and consumers never become readable by other users.
+        if fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir).is_err() || !private_dir(&dir) {
+            return 0;
+        }
         let ctx = Ctx { agent, socket, dir, session, input };
         match mode {
             "wait" => wait(&ctx),
@@ -216,6 +243,13 @@ mod unix {
                 0
             }
         }
+    }
+
+    /// The state directory must be a real directory (no planted symlink) closed to group and others. A 0700
+    /// directory someone else owns is unusable to us anyway: every write below would fail.
+    fn private_dir(dir: &Path) -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir() && m.permissions().mode() & 0o077 == 0)
     }
 
     fn hook(ctx: &Ctx) {
@@ -249,23 +283,31 @@ mod unix {
             }
             "PostToolBatch" => {
                 ctx.with_state(|s| s.set("stop_continuations", json!(0)));
-                if let Some(text) = take(ctx, &mut core, "turn") {
-                    emit(&json!({"hookSpecificOutput": {"hookEventName": "PostToolBatch", "additionalContext": text}}));
+                if let Some(handoff) = take(ctx, &mut core, "turn") {
+                    if emit(&json!({"hookSpecificOutput": {"hookEventName": "PostToolBatch", "additionalContext": handoff.text}})) {
+                        supplied(ctx, &mut core, &handoff);
+                    } else {
+                        release(ctx, &mut core, &handoff);
+                    }
                 }
             }
             "Stop" => {
                 // Claude Code ends the turn after 8 consecutive continuations; stay well below so a taken record
                 // is never handed to a continuation Claude Code then overrides.
                 let continued = ctx.with_state(|s| s.get("stop_continuations").as_u64().unwrap_or(0));
-                let text = if continued < 4 { take(ctx, &mut core, "settle") } else { None };
-                match text {
-                    Some(text) => {
+                let handoff = if continued < 4 { take(ctx, &mut core, "settle") } else { None };
+                match handoff {
+                    Some(handoff) => {
                         ctx.with_state(|s| {
                             s.set("stop_continuations", json!(continued + 1));
                             s.set("busy", json!(true));
                         });
                         status(ctx, &mut core, "working", &event); // the turn continues with the message
-                        emit(&json!({"hookSpecificOutput": {"hookEventName": "Stop", "additionalContext": text}}));
+                        if emit(&json!({"hookSpecificOutput": {"hookEventName": "Stop", "additionalContext": handoff.text}})) {
+                            supplied(ctx, &mut core, &handoff);
+                        } else {
+                            release(ctx, &mut core, &handoff);
+                        }
                     }
                     None => {
                         ctx.with_state(|s| {
@@ -280,19 +322,27 @@ mod unix {
         }
     }
 
-    fn emit(output: &Value) {
-        let _ = std::io::stdout().write_all(output.to_string().as_bytes());
+    /// Write the hook's JSON output; `true` once it is written and flushed.
+    fn emit(output: &Value) -> bool {
+        let mut out = std::io::stdout();
+        out.write_all(output.to_string().as_bytes()).is_ok() && out.flush().is_ok()
     }
 
     fn session_start(ctx: &Ctx, core: &mut Core) {
+        let source = ctx.input.get("source").and_then(Value::as_str).unwrap_or("startup");
+        let existing = ctx.with_state(|s| s.get("consumer").as_str().map(String::from));
+        // Compaction and /clear keep the process, its consumer and its open hand-offs: not a restart.
+        if matches!(source, "compact" | "clear") && existing.is_some() {
+            ctx.log("session_continued", json!({"source": source}));
+            return;
+        }
         let consumer = format!("claude:{}:{}", ctx.session, random_hex());
-        // Context insertion has no durable entry carrying the delivery at hand-off time, so the declaration is
-        // `evidence: none`: a new consumer proves nothing, and the inbox makes every open claim `unknown`.
-        // Claude Code's native per-session inbox (an `admit` route, evaluated separately); recorded for diagnosis.
-        ctx.log("session", json!({"consumer": consumer, "messaging_socket": std::env::var("CLAUDE_CODE_MESSAGING_SOCKET").ok(),
+        ctx.log("session", json!({"consumer": consumer, "source": source,
+            "messaging_socket": std::env::var("CLAUDE_CODE_MESSAGING_SOCKET").ok(),
             "entrypoint": std::env::var("CLAUDE_CODE_ENTRYPOINT").ok()}));
         ctx.with_state(|s| s.set("epoch", json!("")));
-        match core.mutate(ctx, "inbox.reconcile", json!({"agent": ctx.agent, "consumer": consumer, "records": []})) {
+        // `evidence: none`: a new consumer proves nothing; the inbox makes every open claim `unknown`.
+        match core.mutate(ctx, "inbox.reconcile", json!({"agent": ctx.agent, "consumer": consumer, "records": []}), &format!("{consumer}:reconcile")) {
             Ok(r) => ctx.log("reconciled", r),
             Err(e) => ctx.log("reconcile_failed", json!(e)),
         }
@@ -304,61 +354,120 @@ mod unix {
         });
     }
 
-    /// One batch take at a safe point. Returns the context text to hand to Claude Code, after reporting
-    /// `supplied` for each record (the reminder is given to the runtime, with no durable record yet).
-    fn take(ctx: &Ctx, core: &mut Core, at: &str) -> Option<String> {
+    /// What a take hands to Claude Code: the context text and, per record, `[delivery, claim, nonce]`.
+    struct Handoff {
+        text: String,
+        records: Vec<(String, Value, String)>,
+    }
+
+    /// One batch take at a safe point. Records this plugin cannot insert, and records beyond the context size
+    /// limit, are released uninserted (they stay held; nothing is flattened, truncated or dropped).
+    fn take(ctx: &Ctx, core: &mut Core, at: &str) -> Option<Handoff> {
         let consumer = ctx.with_state(|s| s.get("consumer").as_str().map(String::from))?;
-        // `content` names the block types context insertion carries without loss (a proposed take filter; an inbox
-        // that ignores it may still hand over others, which are released uninserted, never flattened or dropped).
-        let reply = match core.mutate(ctx, "inbox.take", json!({"agent": ctx.agent, "consumer": consumer, "at": at, "limit": TAKE_LIMIT, "content": CONTENT})) {
+        // `content` names the block types context insertion carries without loss (a proposed take filter).
+        let args = json!({"agent": ctx.agent, "consumer": consumer, "at": at, "limit": TAKE_LIMIT, "content": CONTENT});
+        let suffix = format!("{}:take:{}", ctx.session, random_hex());
+        let reply = match core.mutate(ctx, "inbox.take", args.clone(), &suffix) {
             Ok(r) => r,
+            Err(e) if uncertain(&e) => {
+                recover_take(ctx, args, &suffix, &e);
+                return None;
+            }
             Err(e) => {
                 ctx.log("take_failed", json!({"at": at, "error": e}));
                 return None;
             }
         };
-        let mut records = reply.get("records").and_then(Value::as_array).cloned().unwrap_or_default();
+        let records = reply.get("records").and_then(Value::as_array).cloned().unwrap_or_default();
         if records.is_empty() {
             if let Some(held) = reply.get("held").and_then(Value::as_str) {
                 ctx.log("held", json!({"at": at, "held": held}));
             }
             return None;
         }
-        let insertable = |r: &Value| r.get("content").and_then(Value::as_array).is_some_and(|b| b.iter().all(|b| b.get("type").and_then(Value::as_str).is_some_and(|t| CONTENT.contains(&t))));
-        for r in records.iter().filter(|r| !insertable(r)) {
-            report(ctx, core, r["delivery"].as_str().unwrap_or(""), &r["claim"], "released");
+        let mut text = String::new();
+        let mut taken = Vec::new();
+        let mut full = false;
+        for r in &records {
+            let delivery = r.get("delivery").and_then(Value::as_str).unwrap_or("").to_string();
+            let insertable = r.get("content").and_then(Value::as_array).is_some_and(|b| b.iter().all(|b| b.get("type").and_then(Value::as_str).is_some_and(|t| CONTENT.contains(&t))));
+            let nonce = random_hex() + &random_hex();
+            let piece = render(r, &nonce);
+            if !insertable || full || text.len() + piece.len() > MAX_CONTEXT {
+                full |= insertable; // keep order: nothing after a record that did not fit jumps ahead of it
+                ctx.log("released", json!({"delivery": delivery, "why": if insertable { "context_limit" } else { "unsupported_content" }}));
+                report(ctx, core, &delivery, &r["claim"], "released");
+                continue;
+            }
+            text.push_str(&piece);
+            taken.push((delivery, r["claim"].clone(), nonce));
         }
-        records.retain(insertable);
-        if records.is_empty() {
+        if taken.is_empty() {
             return None;
         }
-        let mut text = String::new();
-        for r in &records {
-            let delivery = r.get("delivery").and_then(Value::as_str).unwrap_or("?");
-            let from = r.get("from").map(|v| v.as_str().or_else(|| v.get("principal").and_then(Value::as_str)).map(String::from).unwrap_or_else(|| v.to_string())).unwrap_or_default();
-            let mode = r.get("mode").and_then(Value::as_str).unwrap_or("?");
-            // Factual framing (Claude Code treats imperative out-of-band text as possible prompt injection).
-            text.push_str(&format!("{MARK}{delivery} from {from} (mode {mode}, delivered by the vqro inbox):\n{}\n\n", content_text(r.get("content"))));
+        ctx.log("taken", json!({"at": at, "deliveries": taken.iter().map(|t| t.0.clone()).collect::<Vec<_>>(), "chars": text.len()}));
+        Some(Handoff { text: text.trim_end().to_string(), records: taken })
+    }
+
+    /// A take reply was lost: repeat the identical take (same op) on a fresh connection. A repeat returns the claims
+    /// it made, never content again; release them so the mail stays deliverable instead of claimed until restart.
+    fn recover_take(ctx: &Ctx, args: Value, suffix: &str, error: &str) {
+        ctx.log("take_uncertain", json!({"error": error}));
+        let Ok(mut fresh) = Core::connect(&ctx.socket) else { return };
+        match fresh.mutate(ctx, "inbox.take", args, suffix) {
+            Ok(reply) => {
+                let claims = reply.get("claims").and_then(Value::as_array).cloned().unwrap_or_default();
+                let records = reply.get("records").and_then(Value::as_array).cloned().unwrap_or_default();
+                for c in claims.iter().chain(records.iter()) {
+                    let delivery = c.get("delivery").and_then(Value::as_str).unwrap_or("");
+                    report(ctx, &mut fresh, delivery, &c["claim"], "released");
+                }
+                ctx.log("take_recovered", json!({"released": claims.len() + records.len()}));
+            }
+            Err(e) => ctx.log("take_recovery_failed", json!(e)),
         }
-        if text.len() > MAX_CONTEXT {
-            ctx.log("context_too_large", json!({"bytes": text.len()})); // the evidence marker stays in the preview
-        }
+    }
+
+    /// The plugin's own header, then the content as a quote: content cannot pose as a header.
+    fn render(r: &Value, nonce: &str) -> String {
+        let delivery = r.get("delivery").and_then(Value::as_str).unwrap_or("?");
+        let mode = r.get("mode").and_then(Value::as_str).unwrap_or("?");
+        let from = r.get("from").map(|v| v.as_str().or_else(|| v.get("principal").and_then(Value::as_str)).unwrap_or("?").to_string()).unwrap_or_else(|| "?".into());
+        let origin = r.get("origin").filter(|o| o.is_object()).map(|o| {
+            let kind = o.get("kind").and_then(Value::as_str).unwrap_or("?");
+            let actor = o.get("actor").and_then(Value::as_str).map(|a| format!(" {a}")).unwrap_or_default();
+            format!(", origin {kind}{actor}")
+        }).unwrap_or_default();
+        let body: String = content_text(r.get("content")).lines().map(|l| format!("> {l}\n")).collect();
+        // Factual framing (Claude Code treats imperative out-of-band text as possible prompt injection).
+        format!("vqro inbox message {delivery} [ref {nonce}] from {from}{origin} (mode {mode}); the quoted lines are the sender's content:\n{body}\n")
+    }
+
+    /// The output is written: record each hand-off as open (for `read` evidence) and report `supplied`.
+    fn supplied(ctx: &Ctx, core: &mut Core, handoff: &Handoff) {
         ctx.with_state(|s| {
             let mut open = s.open();
-            for r in &records {
-                open.push(json!({"delivery": r["delivery"], "claim": r["claim"], "stage": "supplied", "at": at}));
+            for (delivery, claim, nonce) in &handoff.records {
+                open.push(json!({"delivery": delivery, "claim": claim, "nonce": nonce}));
             }
             s.set("open", json!(open));
         });
-        for r in &records {
-            report(ctx, core, r["delivery"].as_str().unwrap_or(""), &r["claim"], "supplied");
+        for (delivery, claim, _) in &handoff.records {
+            report(ctx, core, delivery, claim, "supplied");
         }
-        ctx.log("taken", json!({"at": at, "deliveries": records.iter().map(|r| r["delivery"].clone()).collect::<Vec<_>>()}));
-        Some(text.trim_end().to_string())
+    }
+
+    /// The output could not be written: nothing reached Claude Code, so the claims go back uninserted.
+    fn release(ctx: &Ctx, core: &mut Core, handoff: &Handoff) {
+        for (delivery, claim, _) in &handoff.records {
+            report(ctx, core, delivery, claim, "released");
+        }
     }
 
     fn report(ctx: &Ctx, core: &mut Core, delivery: &str, claim: &Value, stage: &str) -> bool {
-        match core.mutate(ctx, "inbox.report", json!({"delivery": delivery, "claim": claim, "stage": stage})) {
+        // Deterministic op: a repeat of the same report is recognised; a re-claimed delivery has a new claim.
+        let suffix = format!("report:{delivery}:{}:{stage}", claim.as_str().unwrap_or(""));
+        match core.mutate(ctx, "inbox.report", json!({"delivery": delivery, "claim": claim, "stage": stage}), &suffix) {
             Ok(_) => true,
             Err(e) => {
                 ctx.log("report_failed", json!({"delivery": delivery, "stage": stage, "error": e}));
@@ -367,8 +476,7 @@ mod unix {
         }
     }
 
-    /// Upgrade `supplied` hand-offs to `read` from transcript evidence: a model-visible entry carrying the delivery
-    /// id, the request payload that carried it, then a finished assistant entry. The transcript is written
+    /// Upgrade `supplied` hand-offs to `read` from transcript evidence (see `evidence`). The transcript is written
     /// asynchronously, so absence proves nothing. (`inserted` is not reported: the declaration is `evidence: none`,
     /// and `supplied` and `inserted` are separate evidence branches.)
     fn advance_evidence(ctx: &Ctx, core: &mut Core) {
@@ -377,78 +485,55 @@ mod unix {
         if open.is_empty() {
             return;
         }
-        let seen = evidence(Path::new(transcript));
-        let mut still = Vec::new();
-        for mut o in open {
-            let delivery = o["delivery"].as_str().unwrap_or("").to_string();
-            if let Some((_, entry, read)) = seen.iter().find(|(d, _, _)| *d == delivery) {
-                if o.get("entry").is_none() {
-                    ctx.log("in_transcript", json!({"delivery": delivery, "entry": entry}));
-                    o["entry"] = entry.clone();
-                }
-                if *read && report(ctx, core, &delivery, &o["claim"], "read") {
-                    ctx.log("read", json!({"delivery": delivery}));
-                    continue;
+        let rows: Vec<Value> = fs::read_to_string(transcript).map(|t| t.lines().filter_map(|l| serde_json::from_str(l).ok()).collect()).unwrap_or_default();
+        let mut done = Vec::new();
+        for o in &open {
+            let (Some(delivery), Some(nonce)) = (o["delivery"].as_str(), o["nonce"].as_str()) else { continue };
+            if let Some((entry, true)) = evidence(&rows, nonce) {
+                if report(ctx, core, delivery, &o["claim"], "read") {
+                    ctx.log("read", json!({"delivery": delivery, "entry": entry}));
+                    done.push(delivery.to_string());
                 }
             }
-            still.push(o);
         }
-        ctx.with_state(|s| s.set("open", json!(still)));
+        if !done.is_empty() {
+            // Merge, never overwrite: an idle waiter may have added hand-offs meanwhile.
+            ctx.with_state(|s| {
+                let open: Vec<Value> = s.open().into_iter().filter(|o| !done.iter().any(|d| o["delivery"].as_str() == Some(d))).collect();
+                s.set("open", json!(open));
+            });
+        }
     }
 
-    /// Transcript entry types that put hook context into the conversation (measured on 2.1.329). The entries that
-    /// merely record a hook's stdout/stderr (`hook_success`, `hook_non_blocking_error`) are not evidence: an
-    /// asyncRewake exit 2 from a `SessionStart` hook is recorded as `hook_non_blocking_error` and never reaches the
-    /// model.
-    const INSERTED: &[&str] = &["hook_additional_context", "async_hook_response", "hook_async_rewake"];
+    fn kind(row: &Value) -> &str {
+        match row.get("type").and_then(Value::as_str) {
+            Some("attachment") => row.pointer("/attachment/type").and_then(Value::as_str).unwrap_or(""),
+            Some(t) => t,
+            None => "",
+        }
+    }
 
-    /// (delivery, entry uuid, read) for every delivery id in a model-visible transcript entry. `read`: a later
-    /// `api-request-blob` (the request payload Claude Code sent) contains it and a later assistant entry finished
-    /// without error.
-    fn evidence(transcript: &Path) -> Vec<(String, Value, bool)> {
-        let Ok(text) = fs::read_to_string(transcript) else { return Vec::new() };
-        let lines: Vec<Value> = text.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
-        let ids = |row: &Value| -> Vec<String> {
-            let s = row.to_string();
-            let mut rest = s.as_str();
-            let mut out = Vec::new();
-            while let Some(p) = rest.find(MARK) {
-                let tail = &rest[p + MARK.len()..];
-                let id: String = tail.chars().take_while(|c| c.is_ascii_alphanumeric() || "-_:.".contains(*c)).collect();
-                rest = &tail[id.len()..];
-                if !id.is_empty() && !out.contains(&id) {
-                    out.push(id);
-                }
-            }
-            out
-        };
-        fn kind(row: &Value) -> &str {
-            match row.get("type").and_then(Value::as_str) {
-                Some("attachment") => row.pointer("/attachment/type").and_then(Value::as_str).unwrap_or(""),
-                Some(t) => t,
-                None => "",
-            }
+    /// The plugin's own conversation entries (measured on 2.1.329): `PostToolBatch`/`Stop` context is a
+    /// `hook_additional_context` attachment; an asyncRewake wake is a `user` row whose origin is a
+    /// `task-notification`. Tool results, human prompts, peer messages and hook stdout records
+    /// (`hook_success`, `hook_non_blocking_error`) never count.
+    fn own_entry(row: &Value) -> bool {
+        match kind(row) {
+            "hook_additional_context" => matches!(row.pointer("/attachment/hookEvent").and_then(Value::as_str), Some("PostToolBatch" | "Stop")),
+            "user" => row.pointer("/origin/kind").and_then(Value::as_str) == Some("task-notification"),
+            _ => false,
         }
-        let mut out: Vec<(String, Value, bool)> = Vec::new();
-        for (i, row) in lines.iter().enumerate() {
-            let k = kind(row);
-            let model_visible = INSERTED.contains(&k) || (k == "user" && row.get("isMeta").is_none_or(|m| m != true));
-            if !model_visible {
-                continue;
-            }
-            for id in ids(row) {
-                if out.iter().any(|(d, _, _)| *d == id) {
-                    continue;
-                }
-                let read = lines[i + 1..].iter().position(|r| kind(r) == "api-request-blob" && ids(r).contains(&id)).is_some_and(|j| {
-                    lines[i + 1 + j..].iter().any(|r| {
-                        kind(r) == "assistant" && r.pointer("/message/stop_reason").and_then(Value::as_str).is_some_and(|s| s != "error")
-                    })
-                });
-                out.push((id, row.get("uuid").cloned().unwrap_or(json!(i)), read));
-            }
-        }
-        out
+    }
+
+    /// `(entry uuid, read)` when an own entry carries this hand-off's nonce. `read`: a later `api-request-blob` (the
+    /// request payload Claude Code sent) carries the nonce and a later assistant entry finished without error.
+    fn evidence(rows: &[Value], nonce: &str) -> Option<(Value, bool)> {
+        let tag = format!("[ref {nonce}]");
+        let i = rows.iter().position(|r| own_entry(r) && r.to_string().contains(&tag))?;
+        let read = rows[i + 1..].iter().position(|r| kind(r) == "api-request-blob" && r.to_string().contains(&tag)).is_some_and(|j| {
+            rows[i + 1 + j..].iter().any(|r| kind(r) == "assistant" && r.pointer("/message/stop_reason").and_then(Value::as_str).is_some_and(|s| s != "error"))
+        });
+        Some((rows[i].get("uuid").cloned().unwrap_or(json!(i)), read))
     }
 
     fn status(ctx: &Ctx, core: &mut Core, state: &str, event: &str) {
@@ -460,8 +545,16 @@ mod unix {
         }
     }
 
+    fn subscribe(ctx: &Ctx) -> Option<Core> {
+        let mut core = Core::connect(&ctx.socket).map_err(|e| ctx.log("waiter_core_unavailable", json!(e))).ok()?;
+        core.call("events.subscribe", json!({"types": ["view.content"], "view_content": {"names": [WAKE_VIEW]}}))
+            .map_err(|e| ctx.log("waiter_subscribe_failed", json!(e))).ok()?;
+        Some(core)
+    }
+
     /// `asyncRewake` waiter for the `idle` point: arm, take once, else wait for the inbox wake (counts only),
-    /// then take at `idle`. Exit 2 with the text on stderr wakes Claude Code; exit 0 does nothing.
+    /// then take at `idle`. Exit 2 with the text on stderr wakes Claude Code; exit 0 does nothing. A lost core
+    /// connection is re-established with backoff (a core restart must not leave an idle session deaf).
     fn wait(ctx: &Ctx) -> i32 {
         // Non-interactive sessions (`-p`, SDK) wait for a running asyncRewake hook before they exit (measured with
         // 2.1.329), and their idle is the end of the process: there is no idle point to serve.
@@ -471,19 +564,10 @@ mod unix {
         let me = std::process::id() as u64;
         ctx.with_state(|s| s.set("waiter", json!(me)));
         ctx.log("waiter_armed", json!({}));
-        let mut core = match Core::connect(&ctx.socket) {
-            Ok(c) => c,
-            Err(e) => {
-                ctx.log("waiter_core_unavailable", json!(e));
-                return 0;
-            }
-        };
-        if let Err(e) = core.call("events.subscribe", json!({"types": ["view.content"], "view_content": {"names": [WAKE_VIEW]}})) {
-            ctx.log("waiter_subscribe_failed", json!(e));
-            return 0;
-        }
         let deadline = std::time::Instant::now() + Duration::from_secs(23 * 3600);
-        let mut woken = true; // take once when armed, then only after a wake event: never poll
+        let mut backoff = Duration::from_millis(500);
+        let mut core: Option<Core> = None;
+        let mut woken = true; // take once when armed or reconnected, then only after a wake event: never poll
         loop {
             // Only an idle, current waiter may take: a new turn or a newer waiter retires this one.
             let (busy, current) = ctx.with_state(|s| (s.get("busy").as_bool().unwrap_or(false), s.get("waiter").as_u64() == Some(me)));
@@ -491,32 +575,48 @@ mod unix {
                 ctx.log("waiter_retired", json!({}));
                 return 0;
             }
+            let Some(c) = core.as_mut() else {
+                core = subscribe(ctx);
+                if core.is_none() {
+                    std::thread::sleep(backoff);
+                    backoff = (backoff * 2).min(Duration::from_secs(30));
+                } else {
+                    backoff = Duration::from_millis(500);
+                    woken = true;
+                }
+                continue;
+            };
             if !busy && woken {
                 woken = false;
-                core.events.clear();
-                if let Some(text) = take(ctx, &mut core, "idle") {
+                c.events.clear();
+                if let Some(handoff) = take(ctx, c, "idle") {
                     ctx.with_state(|s| s.set("busy", json!(true)));
-                    ctx.log("waiter_wake", json!({}));
-                    eprint!("{text}");
-                    return 2;
+                    let mut err = std::io::stderr();
+                    if err.write_all(handoff.text.as_bytes()).is_ok() && err.flush().is_ok() {
+                        supplied(ctx, c, &handoff);
+                        ctx.log("waiter_wake", json!({}));
+                        return 2;
+                    }
+                    release(ctx, c, &handoff);
+                    return 0;
                 }
             }
             // Wait for the next wake event; a short timeout re-checks retirement (no content is read).
             let pending = |row: &Value| row.pointer("/params/data/content/wake/pending").and_then(|p| p.get(&ctx.agent)).and_then(Value::as_u64).unwrap_or(0) > 0;
-            if !core.events.is_empty() {
-                woken = core.events.iter().any(pending);
-                core.events.clear();
+            if !c.events.is_empty() {
+                woken = c.events.iter().any(pending);
+                c.events.clear();
             } else {
-                match core.read() {
+                match c.read() {
                     Ok(row) => {
                         if row.get("method").and_then(Value::as_str) == Some("event") {
                             woken = pending(&row);
                         }
                     }
-                    Err(e) if e == "timeout" => {}
+                    Err(e) if e == "transport: timeout" => {}
                     Err(e) => {
                         ctx.log("waiter_lost_core", json!(e));
-                        return 0;
+                        core = None;
                     }
                 }
             }
@@ -530,21 +630,10 @@ mod unix {
         });
     }
 
-    /// Content is always an array of typed blocks; only `CONTENT` types are ever taken.
+    /// Content is always an array of typed blocks; only `CONTENT` (text) is ever rendered.
     fn content_text(content: Option<&Value>) -> String {
         let blocks = content.and_then(Value::as_array).cloned().unwrap_or_default();
-        blocks
-            .iter()
-            .map(|b| match b.get("type").and_then(Value::as_str) {
-                Some("text") => b.get("text").and_then(Value::as_str).unwrap_or("").to_string(),
-                Some("resource_link") => {
-                    let uri = b.get("uri").and_then(Value::as_str).unwrap_or("");
-                    format!("[link: {} <{uri}>]", b.get("name").and_then(Value::as_str).unwrap_or(uri))
-                }
-                other => format!("[unsupported {} block]", other.unwrap_or("?")), // not taken: see CONTENT
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+        blocks.iter().filter_map(|b| b.get("text").and_then(Value::as_str)).collect::<Vec<_>>().join("\n")
     }
 
     /// The Claude Code `hooks` settings block for this plugin (merge into a settings file).
