@@ -551,6 +551,11 @@ replaced when the Pi bridge is ported.
   otherwise the capability is absent and G11 records visible host attribution, never guessed or emulated tags.
   The principal is launcher-assigned independently of `rN`; a single-endpoint host forwards its launcher-given
   values, never claims that an owner inherited from a human shell is an endpoint's tagged principal.
+- Optional `items.snapshot_buffer_bytes` declares the post-cut buffer (absence is not a declaration of zero).
+  The journal keeps one record: bound `max(retain_bytes + snapshot_buffer_bytes, max_record_bytes)`, with the
+  default sum unchanged and no new configuration restriction. Account old versions up to `entity_bytes` per mid-snapshot cursor beyond current entities; one stalled viewer
+  can hold 300 MiB of extra encoded payload at 200 default agents. This is a calculated bound, not a measured
+  RSS cap; C3's gate now covers attached retention gaps and a stalled viewer with all 200 streams.
 
 **Human answers (2026-11-19, CONFIRMED).**
 - **AS1, pause:** "vqro stops delivery": paused means vqro sends, hands out and wakes nothing until resumed; an agent

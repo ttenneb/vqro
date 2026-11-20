@@ -47,7 +47,7 @@ equality, and every exercised behaviour must lie within the resource's current c
 | per mode: `busy`, `idle` (`start \| reject \| park`), `point`, `batch`, `batch_at`, `preflight` | `agent.send.modes` | D1–D5, D9, D12, D13 |
 | `content {types, shape}`, `correlation`, `keys {scope, retention}`, `guards`, `receipts.retain`, `literal`, `handled`, `origin` | `agent.send` | C8, D6–D8, D14–D16 |
 | `pending`, `scope`, `waits` | `agent.interrupt` | D10 |
-| `items` bounds (per entity and aggregate), `retain_bytes`; snapshot coverage | `agent`, snapshot begin | O1–O13 |
+| `items` bounds (per entity and aggregate), `retain_bytes`, optional `snapshot_buffer_bytes`; snapshot coverage | `agent`, snapshot begin | O1–O13 |
 | request `methods`, `scopes`, `background_requests`, answer acknowledgement | `agent.respond` | R1–R7 |
 | module actions (queue, session, config, command, history, object, display terminals) | each op | M1–M7 |
 | `covers`, `waits`; per-call reply `covers`, `covers_evidence` when requested-only | `agent.stop` | L2 |
@@ -126,11 +126,15 @@ duplicates. O6 two viewers attaching at different times show the same timeline o
 viewers, one stalled: only its connection closes; native draining continues; it resumes from its last applied record.
 O8 JSONL lines split across frames and UTF-8 boundaries. O9 coverage `tail`/`state_only` never shown as complete;
 current state and pending requests survive pruning. O10 retained memory stays within the declared bounds: measure
-journal retention plus `snapshot_buffer_bytes` and old shared entity versions held by active snapshot cuts, current
-entities and adapter/transport overhead separately. Check ordinary retention again after snapshot pins release.
-P3's measured journal plateau of 200 × 128 KiB = 26.2 MB is not an all-in slow-viewer cap. O11 (untested) a viewer draining steadily but slower than generation gets gap reason
-`retention`; a stalled viewer holding all 200 of its streams loses them together and harms nobody; an unknown gap
-reason ends the stream. O12 producer append bounds: a small append whose resulting whole snapshot `put` exceeds
+journal `max(retain_bytes + snapshot_buffer_bytes, max_record_bytes)` (the one-record floor) and old shared
+entity versions held by active snapshot cuts, current
+entities and adapter/transport overhead separately. A mid-snapshot cursor may retain up to `entity_bytes` of old
+versions; include that per cursor and verify release on close/gap or the next cursor step after epoch change.
+Optional `items.snapshot_buffer_bytes` exposes the configured buffer; absence means not declared, not zero.
+P3's journal plateau of 26.2 MB is not an all-in slow-viewer cap (agent-v0 §8). O11 (C3 covers attached retention
+gaps and a 200-stream stall) a viewer draining steadily but slower than generation gets gap reason `retention`;
+a stalled viewer holding all 200 streams loses them together and harms nobody; an unknown gap reason ends the
+stream. O12 producer append bounds: a small append whose resulting whole snapshot `put` exceeds
 the record bound returns `too_large`, leaving entity, revision and `seq` unchanged; both text and decoded-byte
 appends are covered. Adapters record how they handle this refusal without silently losing content. O13 optional
 view metadata: plain/default, markdown and unknown text formats render independently per block (unknown falls back

@@ -334,7 +334,8 @@ A per-viewer credited stream of JSON records (core addition §9.1). P3 confirmed
   draining never wait. Closure follows the per-stream rule within one stream budget shared by the connection, so it
   may end all of a viewer's streams at once. A viewer discards a partial line when a stream ends. Falling out of
   retention while attached ends the stream with gap reason `retention`; an unknown gap reason is a protocol error that
-  still ends the stream. Adapters declare `items.retain_bytes` in facts.
+  still ends the stream. Adapters declare `items.retain_bytes` in facts. Optional `items.snapshot_buffer_bytes`
+  is declared beside `retain_bytes`, `entities` and `entity_bytes`; absent means not declared, never zero.
 - **Coverage.** Adapters declare each snapshot's coverage: `all_retained` (every retained entity), `tail` (only
   recent history, including when native history is missing) or `state_only` (current state and pending requests,
   no timeline). `tail`/`state_only` is never shown as complete; current state and pending requests survive pruning.
@@ -475,21 +476,34 @@ SIGKILL: identical reconstruction, 0 errors; one run each on a shared 8-core set
   slow-viewer memory bound;
 - while one viewer was slow or stalled, the other viewers' p99 latency stayed 3–11 ms;
 - core RSS ≤ 62 MB with 600–678 streams; runtime RSS ≤ 98 MB; core CPU ≤ 44% of one core at 10,000 records/s;
-- untested: the provider-side `retention` gap while attached, and a stalled viewer holding more than 78 streams.
+- C3's `e2e-item-streams` gate (shared producer, 200 agents; receipt `7b4b3cf`) covers a stalled viewer holding
+  all 200 streams and provider-side `retention` gaps while attached (40–44 per viewer, burst agents with 8 KiB
+  retention). All viewers reconstruct 200/200 identically with zero reconstruction/protocol errors; healthy
+  viewers' sampled p99 is 8–12 ms. The run also records 1200 `attach_errors` per viewer, not a zero-refusal claim.
+  Evidence: `program/impl/c3-evidence/`.
 
 | Item | Per entity / record | Aggregate |
 |---|---|---|
 | Ids | 128 B | — |
 | Facts `data.agent` | 64 KiB | provider-v0 resource budget |
-| Stream record / entity | 64 KiB / 64 KiB | per endpoint, declared in `items`: journal `retain_bytes` (default 128 KiB), retained entities `entities` and `entity_bytes` in aggregate (defaults 512 and 512 KiB), receipts and request maps. During slow snapshots, journal payload may reach `retain_bytes + snapshot_buffer_bytes` (shared producer default buffer 1 MiB), **plus old shared entity versions** held by snapshot cuts; also charge current entities, indexes, cursors and readers. P3's 26.2 MB is the journal alone, not this sum. Item streams ≥ agents × max viewers per provider (`limits.max_item_streams`, §9.2); per-viewer connection stream budget 1 MiB |
+| Stream record / entity | 64 KiB / 64 KiB | per endpoint, declared in `items`: journal `retain_bytes` (default 128 KiB), optional `snapshot_buffer_bytes` (shared producer default 1 MiB), retained entities `entities` and `entity_bytes` in aggregate (defaults 512 and 512 KiB), receipts and request maps. During slow snapshots, journal payload is bounded by `max(retain_bytes + snapshot_buffer_bytes, max_record_bytes)` (one whole record is always retained), **plus old shared entity versions** held by snapshot cuts; also charge current entities, indexes, cursors and readers. P3's 26.2 MB is the journal alone, not this sum. Item streams ≥ agents × max viewers per provider (`limits.max_item_streams`, §9.2); per-viewer connection stream budget 1 MiB |
 | Receipts | — | ≥ 256 per endpoint |
 | Pages (history, session list) | ≤ 64 items, ≤ 256 KiB | — |
 
-The shared producer's post-cut journal buffer is per endpoint, shared by its snapshot cursors, not a full copy
-per viewer. Copy-on-write snapshots can retain old entity versions beyond the current `entity_bytes`; account for
-those separately across active snapshot cuts. The encoded payload accounting is **journal retention + post-cut
-buffer + old shared versions**, in addition to current entities and other adapter/transport overhead. A slow viewer
-must not make any of these grow without the declared entity, cursor, journal and connection bounds.
+The shared producer's post-cut journal buffer is per endpoint (per agent), shared by snapshot cursors, not a
+copy per viewer. While a cursor is mid-snapshot or catching up, the agent's journal is bounded by
+`max(retain_bytes + snapshot_buffer_bytes, max_record_bytes)`: the newest whole record is always retained,
+including when custom retention/buffer budgets sum to less than the record bound (64 KiB). At defaults this is
+128 KiB + 1 MiB. Each mid-snapshot cursor also retains its cut's
+old entity versions, at most `entity_bytes` (default 512 KiB) beyond the current entities. Thus one viewer stalled
+during first paint can hold up to `agents × (snapshot_buffer_bytes + entity_bytes)` extra encoded payload:
+**300 MiB (about 315 MB)** at 200 agents with defaults, not a measured RSS cap. Size the buffer with this sum in mind.
+
+Those holds release when the streams close (`slow_consumer` or explicit close) or the cursor gets `retention`;
+a lost post-cut record produces that gap before another snapshot piece is emitted. An epoch change immediately
+releases old journal pins; old-cut versions release when the cursor next runs or closes. Account **journal
+retention + post-cut buffer + old shared versions**, plus current entities and adapter/transport overhead; none
+may grow beyond its declared entity, cursor, journal and connection bounds.
 
 ## 9. Core additions (generic)
 
