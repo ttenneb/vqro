@@ -66,7 +66,7 @@ try:
     listed = vqro("ui", "--list").stdout
     check("vqro ui --list names the built-in and the text client", listed.startswith("tui\t") and "\ntext\tText client" in listed, listed)
     out = text("show")
-    check("show outlines the layout with a numbered pane", "tabs: [₁ " in out and "*pane 1:" in out, out)
+    check("show outlines the layout with a numbered pane", "₁*]" in out and "tabs: [" in out and "*pane 1:" in out, out)
     out = text("view 1")
     check("terminal panes are named, not drawn (no terminal profile)", "this client does not show terminal contents" in out, out)
     out = text("p")

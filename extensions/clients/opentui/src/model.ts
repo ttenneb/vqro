@@ -784,13 +784,15 @@ export class Composer {
 
 export const TABS_ENTRY = "doc/settings/tabs";
 const SUB = "₀₁₂₃₄₅₆₇₈₉", SUP = "⁰¹²³⁴⁵⁶⁷⁸⁹";
-export type TabStyle = { numbers: "subscript" | "superscript" | "plain" | "none"; chips: boolean };
+export type TabStyle = { numbers: "subscript" | "superscript" | "plain" | "none"; before: boolean; chips: boolean };
 
-/** The shared tabs setting: missing means subscript numbers and chips; an unknown `numbers` value reads as plain. */
+/** The shared tabs setting: missing means subscript numbers after the name, in chips; an unknown `numbers` value
+ * reads as plain, an unknown `position` as after. */
 export function tabStyle(setting: Json): TabStyle {
-  const style: TabStyle = { numbers: "subscript", chips: true };
+  const style: TabStyle = { numbers: "subscript", before: false, chips: true };
   if (setting && typeof setting === "object" && !Array.isArray(setting)) {
     if (typeof setting.numbers === "string") style.numbers = ["subscript", "superscript", "none", "plain"].includes(setting.numbers) ? setting.numbers : "plain";
+    style.before = setting.position === "before";
     if (typeof setting.chips === "boolean") style.chips = setting.chips;
   }
   return style;
@@ -800,7 +802,9 @@ export function tabLabel(style: TabStyle, index: number, title: string): string 
   const digits = String(index + 1);
   const number = style.numbers === "subscript" ? [...digits].map((d) => SUB[+d]).join("")
     : style.numbers === "superscript" ? [...digits].map((d) => SUP[+d]).join("") : style.numbers === "plain" ? digits : "";
-  const joiner = style.numbers === "none" || style.numbers === "superscript" ? "" : style.numbers === "plain" && !style.chips ? ":" : " ";
+  if (!number) return ` ${title} `;
+  if (!style.before) return ` ${title}${style.numbers === "plain" ? " " : ""}${number} `;
+  const joiner = style.numbers === "superscript" ? "" : style.numbers === "plain" && !style.chips ? ":" : " ";
   return ` ${number}${joiner}${title} `;
 }
 

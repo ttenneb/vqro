@@ -9,5 +9,5 @@
   "works_with":[{"cap":"command/agents.show","suggest":"agents","without":"A new agent opens as its bridge terminal, not an agent panel"},
                 {"cap":"command/tabs.show","suggest":"tabs","without":"A new agent is not opened in a tab"}],
   "settings_command":"pi.settings",
-  "contributes":{"commands":["pi.new","pi.settings","pi.configure"],"keys":["Prefix a: new Pi agent"],"menu_items":["New Pi agent (tab menu)"],"panels":["Pi runtimes"],"settings":["doc/settings/pi"]}
+  "contributes":{"commands":["pi.new","pi.settings","pi.configure"],"keys":["Prefix a: new Pi agent"],"menu_items":["New Pi agent (the +◆ tab-bar button)"],"panels":["Pi runtimes"],"settings":["doc/settings/pi"]}
 }

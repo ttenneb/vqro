@@ -104,17 +104,20 @@ try:
         check(f"{name}: TUI shows the provider's terminal and typing reaches it", bool(seen), screen()[-600:])
         call("resource.kill", {"resource": rid})
         time.sleep(1)
-    # Tab bar: chips with subscript numbers and only "+" (doc/settings/tabs default); other actions moved to menus.
+    # Tab bar: chips with subscript numbers after the name (doc/settings/tabs default), then only "+" (new tab) and
+    # the compact new-agent "+<agent icon>"; the other buttons moved to menus and keys.
     bar = lambda: screen().splitlines()[0]
-    check("tab bar shows chips with subscript numbers and only +", bool(wait(lambda: " ₁ " in bar() and bar().rstrip().endswith(" +"), 10)) and not any(
+    check("tab bar shows chips with subscript numbers and only + and +agent", bool(wait(lambda: "]₁ " in bar() and
+        bar().rstrip().endswith(" +  +◆"), 10)) and not any(
         word in bar() for word in ("New Pi agent", "Agents", "Close ended tabs", "Switch workspace", "1:")), bar())
     colored = subprocess.run([*HARNESS, "capture-pane", "-p", "-e"], capture_output=True, text=True).stdout.splitlines()[0]
     print("CAPTURE tabbar-chips\n" + bar() + "\nANSI: " + repr(colored), flush=True)
     check("the active tab chip is bold", "\x1b[1m" in colored or ";1m" in colored or "[1;" in colored, repr(colored))
     call("command.invoke", {"name": "tabs.set", "args": {"field": "numbers", "value": "superscript"}})
-    check("the tabs setting changes the number style", bool(wait(lambda: " ¹" in bar() and " ₁ " not in bar(), 10)), bar())
-    print("CAPTURE tabbar-superscript\n" + bar(), flush=True)
-    call("command.invoke", {"name": "tabs.set", "args": {"field": "numbers", "value": "subscript"}})
+    call("command.invoke", {"name": "tabs.set", "args": {"field": "position", "value": "before"}})
+    check("the tabs setting changes the number style and position", bool(wait(lambda: " ¹tui-" in bar() and "₁" not in bar(), 10)), bar())
+    print("CAPTURE tabbar-superscript-before\n" + bar(), flush=True)
+    call("workspace.apply", {"ops": [{"op": "delete", "key": "doc/settings/tabs"}]})
     # A running provider process is not proof of a reachable backend. An alternative remains connected.
     saved_herdr = call("workspace.snapshot")["entries"]["extension/herdr"]["value"]
     call("workspace.apply", {"ops":[{"op":"set","key":"extension/herdr","value":dict(saved_herdr,
@@ -187,7 +190,7 @@ try:
         log.write("".join(f"e2e-tail-{n}\n" for n in range(5)))
     keys("/"); keys("tabs", literal=True); keys("Enter")
     wait(lambda: "1 of 16" in screen() and "View log" in screen())
-    keys("Tab", "Right", "Right", "Enter")
+    keys("Tab", "Right", "Right", "Right", "Enter")  # Turn off, Restart, Extension settings, View log
     check("View log opens the log viewer through its fallback panel", bool(wait(lambda: "Log: tabs" in screen() and "e2e-tail-4" in screen())), screen())
     with open(f"{R}/st/ext-tabs.log", "a") as log:
         log.write("".join(f"e2e-tail-{n}\n" for n in range(5, 80)))

@@ -149,6 +149,8 @@ struct Item {
     label: String,
     /// Drawn before the label where items are shown (status bar, tab bar, menus); see `icons.rs`.
     icon: Value,
+    /// Draw the icon right after the label instead (a compact `+◆` button).
+    icon_after: bool,
     command: String,
     args: Value,
     input: Option<String>,
@@ -170,6 +172,7 @@ impl Item {
         Item {
             label: v["label"].as_str().unwrap_or("").to_string(),
             icon: v["icon"].clone(),
+            icon_after: v["icon_after"].as_bool().unwrap_or(false),
             command: v["command"].as_str().unwrap_or("").to_string(),
             args: v["args"].clone(),
             input: v["input"].as_str().map(String::from),
@@ -1317,6 +1320,7 @@ impl App {
                 Item {
                     label: format!("{mark}{}", o["label"].as_str().or_else(|| o["value"].as_str()).unwrap_or("?")),
                     icon: Value::Null,
+                    icon_after: false,
                     command: item["command"].as_str().unwrap_or("").to_string(),
                     args: with_arg(&item["args"], "value", o["value"].clone()),
                     // An option with `input` asks for its value instead (e.g. "custom…"), as `text`.
@@ -2662,7 +2666,7 @@ impl App {
                     t => (icons.label(if l["icon"].is_null() { &item.icon } else { &l["icon"] }, t), pal.style(Some(l["style"].as_str().unwrap_or("accent")))),
                 },
                 None if item.view.is_some() => continue,
-                None => (icons.label(&item.icon, &item.label), pal.style(Some("accent"))),
+                None => (icons.item_label(&item.icon, &item.label, item.icon_after), pal.style(Some("accent"))),
             };
             if text.is_empty() {
                 continue;
@@ -2961,7 +2965,7 @@ fn walk(node: &Value, area: Rect, path: &mut Vec<usize>, overrides: &HashMap<Vec
         // Contributed tab-bar buttons (e.g. `+` from the tabs extension), on the first tab bar.
         if !hit.buttons.iter().any(|(_, _, c)| c.get("tab_path").is_some()) {
             for item in tabbar {
-                let label = format!(" {} ", icons.label(&item.icon, &item.label));
+                let label = format!(" {} ", icons.item_label(&item.icon, &item.label, item.icon_after));
                 let w = icons::width(&label);
                 if x + w > bar.right() {
                     break;

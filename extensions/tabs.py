@@ -277,33 +277,38 @@ def resource_state(kind, event):
 
 
 # Tab bar look: the shared setting doc/settings/tabs (core-protocol.md "Tab bar"); every client reads it with a
-# fallback. Missing means subscript numbers in chips.
+# fallback. Missing means subscript numbers after the name, in chips.
 TAB_SETTING = "doc/settings/tabs"
 NUMBERS = [("subscript", "Subscript ₁"), ("superscript", "Superscript ¹"), ("plain", "Plain 1"), ("none", "None")]
+POSITIONS = [("after", "After the name"), ("before", "Before the name")]
 
 
 def settings_panel():
     current = ext.value(TAB_SETTING) if isinstance(ext.value(TAB_SETTING), dict) else {}
     numbers = current.get("numbers") if current.get("numbers") in dict(NUMBERS) else "subscript"
+    position = current.get("position") if current.get("position") in dict(POSITIONS) else "after"
     chips = current.get("chips") if isinstance(current.get("chips"), bool) else True
     return {"title": "Tabs", "requires": ["select"], "items": [
         {"type": "select", "text": "Number style", "value": numbers, "description": "the small number before each tab's name",
          "options": [{"label": label, "value": value} for value, label in NUMBERS], "command": "tabs.set", "args": {"field": "numbers"}},
+        {"type": "select", "text": "Number position", "value": position, "description": "Liaison₁ (after) or ₁ Liaison (before)",
+         "options": [{"label": label, "value": value} for value, label in POSITIONS], "command": "tabs.set", "args": {"field": "position"}},
         {"type": "select", "text": "Chips", "value": chips, "description": "padded tabs with a gap (off: the flat 1:name bar)",
          "options": [{"label": "On", "value": True}, {"label": "Off", "value": False}], "command": "tabs.set", "args": {"field": "chips"}}]}
 
 
-@ext.command("tabs.settings", "Tab bar settings (number style, chips)")
+@ext.command("tabs.settings", "Tab bar settings (number style and position, chips)")
 def tab_settings(args):
     ext.publish("tabs-settings", settings_panel())
     return {"client": {"popup": {"view": "tabs-settings", "width": 64}}}
 
 
-@ext.command("tabs.set", "Set a tab bar option (args: field numbers|chips, value)")
+@ext.command("tabs.set", "Set a tab bar option (args: field numbers|position|chips, value)")
 def tab_set(args):
     field, value = args.get("field"), args.get("value")
-    if not ((field == "numbers" and value in dict(NUMBERS)) or (field == "chips" and isinstance(value, bool))):
-        raise VqroError("choose numbers subscript|superscript|plain|none or chips true|false", "invalid")
+    if not ((field == "numbers" and value in dict(NUMBERS)) or (field == "position" and value in dict(POSITIONS))
+            or (field == "chips" and isinstance(value, bool))):
+        raise VqroError("choose numbers subscript|superscript|plain|none, position after|before or chips true|false", "invalid")
     def attempt():
         current = ext.value(TAB_SETTING)
         value_now = dict(current if isinstance(current, dict) else {}, **{field: value})

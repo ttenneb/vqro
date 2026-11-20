@@ -109,6 +109,15 @@ impl Icons {
             None => text.to_string(),
         }
     }
+
+    /// A menu item's inline label: `label`, except that `icon_after` puts the icon right after the text with no
+    /// space, for compact buttons such as `+◆` (core-protocol.md, `menu/<id>`).
+    pub fn item_label(&self, icon: &Value, text: &str, icon_after: bool) -> String {
+        match self.resolve(icon) {
+            Some(g) if icon_after => format!("{text}{g}"),
+            _ => self.label(icon, text),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -193,6 +202,8 @@ mod tests {
         assert_eq!(icons.label(&json!({"name": "settings", "text": "⚙"}), "settings"), "🔧 settings");
         assert_eq!(icons.label(&json!({"name": "add", "text": "+"}), ""), "+");
         assert_eq!(icons.label(&Value::Null, "plain"), "plain");
+        assert_eq!(icons.item_label(&json!({"name": "settings", "text": "⚙"}), "+", true), "+🔧");
+        assert_eq!(icons.item_label(&json!({"name": "nothing"}), "+", true), "+");
     }
 
     #[test]

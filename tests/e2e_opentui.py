@@ -92,7 +92,7 @@ try:
     subprocess.run([*HARNESS, "new-session", "-d", "-x", "110", "-y", "30", f"/bin/sh {R}/client.sh"], env={"PATH": "/usr/bin:/bin", "HOME": f"{R}/home"})
     found = wait(lambda: next((c for c in call("client.list")["clients"] if c.get("client") == "opentui"), None))
     check("hello declares base, keys and terminal profiles", found and found["profiles"] == ["base", "keys", "terminal"] and "follow" in found["features"], found)
-    check("tab bar and status bar render", bool(wait(lambda: " ₁ " in screen() and "vqro ▾" in screen())), screen())
+    check("tab bar and status bar render", bool(wait(lambda: "₁ " in screen() and "vqro ▾" in screen())), screen())
     shown = None
     for _ in range(3):
         keys("echo ot-$((6*7))", literal=True); keys("Enter")

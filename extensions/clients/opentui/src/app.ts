@@ -766,7 +766,9 @@ export class Screen extends Renderable {
       if (style.chips) x += 1;
       if (path.length === 0 || !a.hits.some((h) => (h as any).tabbar)) {
         for (const item of a.ws.menuEntries("tabbar", a.win.invocationContext(a.ws, {}))) {
-          const label = ` ${iconText(a, item.icon)}${item.label ? (iconText(a, item.icon) ? " " : "") + item.label : ""} `;
+          const glyph = iconText(a, item.icon);
+          const label = item.icon_after && glyph ? ` ${item.label ?? ""}${glyph} `  // compact "+◆" button
+            : ` ${glyph}${item.label ? (glyph ? " " : "") + item.label : ""} `;
           if (x + width(label) > r.x + r.w) break;
           text(buf, x, r.y, label, a.pal.color("accent"), a.pal.color("tab_bar"));
           const hit: any = { rect: { x, y: r.y, w: width(label), h: 1 }, act: () => a.activate(item, a.win.invocationContext(a.ws, { tab_path: path })), tabbar: true };
@@ -863,7 +865,8 @@ export class Screen extends Renderable {
       let style = "muted";
       if (typeof item.view === "string") { const live = a.ws.live.get(item.view); label = live?.label ?? ""; style = live?.style ?? style; if (!label) continue; }
       if (typeof item.label_context === "string") label = String(wctx[item.label_context] ?? label);
-      const shown = `${iconText(a, item.icon)}${iconText(a, item.icon) && label ? " " : ""}${label}`;
+      const glyph = iconText(a, item.icon);
+      const shown = item.icon_after && glyph ? `${label}${glyph}` : `${glyph}${glyph && label ? " " : ""}${label}`;
       if (x + width(shown) >= r.w) break;
       text(buf, x, r.y, shown, p.color(style));
       a.hits.push({ rect: { x, y: r.y, w: width(shown), h: 1 }, act: () => a.activate(item, a.win.invocationContext(a.ws, {})) });

@@ -784,7 +784,9 @@ other namespaces are never touched. Extensions that contribute over several call
 reconcile later with their full set (`exclusive=True`). Other runtimes should follow the same rule.
 
 - `menu/<id>`: `{where: "pane"|"tab"|"tabbar"|"status", label, icon?, command, args?, input?, prefill?, pick?: "resource", when?,
-  order?}`. `icon` (see Icons) is drawn before the label; an empty label shows the icon alone. `input` makes the client prompt for text (passed as `args.text`); `pick` makes it offer a choice (`args.picked`);
+  order?, icon_after?}`. `icon` (see Icons) is drawn before the label; an empty label shows the icon alone;
+  `icon_after: true` draws it right after the label with no space, for compact inline buttons (`+◆`; clients
+  without it draw the icon before). `input` makes the client prompt for text (passed as `args.text`); `pick` makes it offer a choice (`args.picked`);
   `when` is matched field by field against the invocation context.
 - `binding/<id>`: `{key, command, args?, where?, label?, priority?, input?, prefill?, pick?, hidden?, when?}`. `key` is a prefix key
   (`"n"`, `"Left"`, see Keys) or a gesture (`"mouse.right"`, `"mouse.middle"`) with `where` = `"pane"` or `"tab"`.
@@ -1122,16 +1124,19 @@ Colours: a name (the 16 ANSI names such as `cyan`, `darkgray`, `lightblue`), `#R
 ### Tab bar
 
 A layout `tabs` node draws as a one-row tab bar. Its look is the shared setting `doc/settings/tabs`
-`{numbers?: "subscript"|"superscript"|"plain"|"none", chips?: bool}`, written by the tabs extension (`tabs.settings`)
+`{numbers?: "subscript"|"superscript"|"plain"|"none", position?: "after"|"before", chips?: bool}`, written by the
+tabs extension (`tabs.settings`)
 and read by every client (renderer-independent model: `ui_model::tabbar`; conformance: `tests/fixtures/client/tabbar.json`).
-- **Label** for tab *i* (1-based) titled *t*, padding included: subscript ` ₁ t `, superscript ` ¹t `, plain ` 1 t `,
-  none ` t `; with `chips: false` and plain numbers the flat ` 1:t `. Numbers past 9 use more digits (`₁₀`).
+- **Label** for tab *i* (1-based) titled *t*, padding included. After the name (default): ` t₁ `, ` t¹ `, ` t 1 `.
+  Before it: ` ₁ t `, ` ¹t `, ` 1 t `, or the flat ` 1:t ` with `chips: false` and plain numbers. `none`: ` t `.
+  Numbers past 9 use more digits (`₁₀`).
 - **Chips** (default on): one `tab_bar` cell between labels; the active label on `tab_active`/`tab_active_text` in
   bold, others on `surface` with `muted` text. Off: labels touch, inactive ones in `muted` on the bar.
-- **Fallbacks:** missing setting means subscript numbers in chips; an unknown `numbers` value reads as `plain`; a
-  non-boolean `chips` keeps the default; a client that cannot draw sub/superscript digits may show plain ones.
+- **Fallbacks:** missing setting means subscript numbers after the name, in chips; an unknown `numbers` value reads
+  as `plain`, an unknown `position` as `after`; a non-boolean `chips` keeps the default; a client that cannot draw sub/superscript digits may show plain ones.
 - `menu/*` items with `where: "tabbar"` follow the labels after one gap. The bundled extensions keep only `+` (new tab)
-  there; their other actions live in the tab menu (`where: "tab"`), prefix keys and the command list.
+  there: `+` (new tab) and the compact new-agent `+◆` (`icon_after`); their other actions live in the tab menu
+  (`where: "tab"`), prefix keys and the command list.
 
 The bundled `themes` extension publishes its themes as live data `themes` and applies one with
 `themes.apply {name}`; settings shows them on its Theme page.

@@ -1,7 +1,7 @@
 //! Tab bar labels (core-protocol.md "Tab bar"). The look is the tabs extension's choice, stored in the shared
-//! setting `doc/settings/tabs`: `{numbers: "subscript"|"superscript"|"plain"|"none", chips: bool}`. Missing means
-//! the default (subscript numbers, chips); an unknown `numbers` value reads as `plain`, a non-boolean `chips` as
-//! the default. Colours stay with the client's palette: active chip `tab_active`/`tab_active_text` (bold),
+//! setting `doc/settings/tabs`: `{numbers: "subscript"|"superscript"|"plain"|"none", position: "after"|"before",
+//! chips: bool}`. Missing means the default (subscript numbers after the name, chips); an unknown `numbers` value
+//! reads as `plain`, an unknown `position` as `after`, a non-boolean `chips` as the default. Colours stay with the client's palette: active chip `tab_active`/`tab_active_text` (bold),
 //! inactive chip `surface` with `muted` text, the gap and the rest of the row `tab_bar`.
 use serde_json::{json, Value};
 
@@ -13,10 +13,10 @@ const SUPERSCRIPT: [char; 10] = ['⁰', '¹', '²', '³', '⁴', '⁵', '⁶', '
 pub enum Numbers { Subscript, Superscript, Plain, None }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Style { pub numbers: Numbers, pub chips: bool }
+pub struct Style { pub numbers: Numbers, pub before: bool, pub chips: bool }
 
 impl Default for Style {
-    fn default() -> Self { Style { numbers: Numbers::Subscript, chips: true } }
+    fn default() -> Self { Style { numbers: Numbers::Subscript, before: false, chips: true } }
 }
 
 impl Style {
@@ -31,6 +31,7 @@ impl Style {
             Some("none") => Numbers::None,
             Some(_) => Numbers::Plain,
         };
+        style.before = v.get("position").and_then(Value::as_str) == Some("before");
         if let Some(chips) = v.get("chips").and_then(Value::as_bool) { style.chips = chips; }
         style
     }
@@ -46,12 +47,17 @@ impl Style {
         }
     }
 
-    /// The label text for tab `index` (0-based), padding included: ` ₁ zsh `, ` ¹zsh `, ` 1 zsh `, ` zsh `, or the
-    /// flat ` 1:zsh ` when chips are off and numbers are plain.
+    /// The label text for tab `index` (0-based), padding included. After the name (default): ` zsh₁ `, ` zsh¹ `,
+    /// ` zsh 1 `. Before it: ` ₁ zsh `, ` ¹zsh `, ` 1 zsh `, or the flat ` 1:zsh ` when chips are off and numbers
+    /// are plain. No number: ` zsh `.
     pub fn label(&self, index: usize, title: &str) -> String {
         let number = self.number(index + 1);
+        if number.is_empty() { return format!(" {title} "); }
+        if !self.before {
+            let joiner = if self.numbers == Numbers::Plain { " " } else { "" };
+            return format!(" {title}{joiner}{number} ");
+        }
         let joiner = match (self.numbers, self.chips) {
-            (Numbers::None, _) => "",
             (Numbers::Superscript, _) => "",
             (Numbers::Plain, false) => ":",
             _ => " ",

@@ -582,30 +582,36 @@ _SUP = "⁰¹²³⁴⁵⁶⁷⁸⁹"
 
 
 def tab_style(setting):
-    """(numbers, chips) from the shared tabs setting; missing: subscript and chips; unknown numbers: plain."""
-    numbers, chips = "subscript", True
+    """(numbers, before, chips) from the shared tabs setting; missing: subscript after the name in chips;
+    unknown numbers: plain; unknown position: after."""
+    numbers, before, chips = "subscript", False, True
     if isinstance(setting, dict):
         n = setting.get("numbers")
         if isinstance(n, str):
             numbers = n if n in ("subscript", "superscript", "none", "plain") else "plain"
+        before = setting.get("position") == "before"
         if isinstance(setting.get("chips"), bool):
             chips = setting["chips"]
-    return numbers, chips
+    return numbers, before, chips
 
 
 def tab_label(style, index, title):
-    numbers, chips = style
+    numbers, before, chips = style
     digits = str(index + 1)
     number = {"subscript": "".join(_SUB[int(d)] for d in digits), "superscript": "".join(_SUP[int(d)] for d in digits),
               "plain": digits, "none": ""}[numbers]
-    joiner = "" if numbers in ("none", "superscript") else (":" if numbers == "plain" and not chips else " ")
+    if not number:
+        return f" {title} "
+    if not before:
+        return f" {title}{' ' if numbers == 'plain' else ''}{number} "
+    joiner = "" if numbers == "superscript" else (":" if numbers == "plain" and not chips else " ")
     return f" {number}{joiner}{title} "
 
 
 def tab_bar(setting, titles, active):
     style = tab_style(setting)
     return {"labels": [tab_label(style, i, t) for i, t in enumerate(titles)], "active": active,
-            "gap": 1 if style[1] else 0, "chips": style[1]}
+            "gap": 1 if style[2] else 0, "chips": style[2]}
 
 
 # ---- formatted text (format: "markdown", feature markdown) ---------------------------------------------------
