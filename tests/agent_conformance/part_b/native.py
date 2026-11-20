@@ -397,8 +397,9 @@ class Native:
                 row = json.loads(line)
                 if row.get("kind") == "model_request" and row.get("ref") == ref and row.get("delivery") == delivery:
                     linked = row["seq"]
-            # The revision is the seq this put will carry: monotonic within the epoch, so it exceeds every earlier put or
-            # remove of this receipt (including after eviction or a reused delivery id) with no per-id state to bound.
+            # The revision is the journal seq before this put (a floor: evictions appended first can make the put's own
+            # row seq higher). Seqs only grow within the epoch, so it exceeds every earlier put or remove of this receipt
+            # (including after eviction or a reused delivery id) with no per-id state to bound.
             revision = self.journal(ref)["seq"] + 1
             value = deepcopy(stored)
             self.publish_entity(ref, {"op": "put", "kind": "receipt", "id": delivery, "rev": revision, "value": value})
