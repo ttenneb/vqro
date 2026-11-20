@@ -530,7 +530,7 @@ impl ItemView {
             if self.broken { continue; }
             let Ok(text) = std::str::from_utf8(&l[..l.len() - 1]) else { self.errors.bad_utf8 += 1; continue };
             let Ok(r) = serde_json::from_str::<Value>(text) else { self.errors.bad_json += 1; continue };
-            let lossy = |e: &ViewErrors| e.missing + e.stale_base + e.over_bound + e.unknown_entity;
+            let lossy = |e: &ViewErrors| e.missing + e.stale_base + e.over_bound + e.unknown_entity + e.bad_record;
             let (before, errors) = (self.records, lossy(&self.errors));
             if let Some(n) = self.apply(&r) { notices.push(n); }
             if self.records != before { on_record(&r); }
@@ -584,38 +584,47 @@ impl ItemView {
         let (Some(seq), Some(k), Some(rev)) = (r["seq"].as_u64(), key(), r["rev"].as_u64()) else { self.errors.bad_record += 1; return None };
         if self.epoch.is_none() { self.errors.out_of_snapshot += 1; return None; }
         if seq <= self.seq { self.errors.duplicate += 1; return None; }
-        if seq != self.seq + 1 { self.errors.missing += 1; }
-        self.seq = seq;
-        self.records += 1;
+        // `after` is the last applied record, never the record that exposed a loss. Validate
+        // the entire mutation, including encoded-byte admission, before changing state or callbacks.
+        if seq != self.seq + 1 { self.errors.missing += 1; return None; }
         match op {
-            "put" if r.get("value").is_some() => match Self::admit(&self.entities, self.entity_bytes, &k, &r["value"], &self.bounds()) {
-                Some(total) => { self.entity_bytes = total; self.entities.insert(k, (rev, r["value"].clone())); }
-                None => self.errors.over_bound += 1,
-            },
+            "put" if r.get("value").is_some() => {
+                let Some(total) = Self::admit(&self.entities, self.entity_bytes, &k, &r["value"], &self.bounds()) else {
+                    self.errors.over_bound += 1; return None;
+                };
+                self.entities.insert(k, (rev, r["value"].clone()));
+                self.entity_bytes = total;
+            }
             "remove" => match self.entities.remove(&k) {
                 Some((_, v)) => self.entity_bytes = self.entity_bytes.saturating_sub(serde_json::to_vec(&v).map(|v| v.len()).unwrap_or(0)),
+                // The requested absence is already achieved: count the diagnostic, but commit
+                // this no-op removal (matching the Python twin) before the broken latch.
                 None => self.errors.unknown_entity += 1,
             },
             "append" => {
-                let Some((cur, value)) = self.entities.get_mut(&k) else { self.errors.unknown_entity += 1; return None };
+                let Some((cur, value)) = self.entities.get(&k) else { self.errors.unknown_entity += 1; return None };
                 if r["base"].as_u64() != Some(*cur) { self.errors.stale_base += 1; return None; }
                 let Some(field) = r["field"].as_str() else { self.errors.bad_record += 1; return None };
-                let Some(Value::String(s)) = value.pointer_mut(field) else { self.errors.bad_record += 1; return None };
-                let before = s.len();
-                match (r["text"].as_str(), r["bytes"].as_str()) {
-                    (Some(t), None) => s.push_str(t),
-                    (None, Some(b)) => match (B64.decode(s.as_bytes()), B64.decode(b)) {
+                let mut candidate = value.clone();
+                let Some(Value::String(s)) = candidate.pointer_mut(field) else { self.errors.bad_record += 1; return None };
+                match (r.get("text"), r.get("bytes")) {
+                    (Some(Value::String(t)), None) => s.push_str(t),
+                    (None, Some(Value::String(b))) => match (B64.decode(s.as_bytes()), B64.decode(b)) {
                         (Ok(mut buf), Ok(chunk)) => { buf.extend(chunk); *s = B64.encode(buf); }
                         _ => { self.errors.bad_record += 1; return None; }
                     },
                     _ => { self.errors.bad_record += 1; return None; }
                 }
-                *cur = rev;
-                self.entity_bytes += s.len().saturating_sub(before);
-                if self.entity_bytes > self.bounds().max_entity_bytes { self.errors.over_bound += 1; }
+                let Some(total) = Self::admit(&self.entities, self.entity_bytes, &k, &candidate, &self.bounds()) else {
+                    self.errors.over_bound += 1; return None;
+                };
+                self.entities.insert(k, (rev, candidate));
+                self.entity_bytes = total;
             }
-            _ => self.errors.bad_record += 1,
+            _ => { self.errors.bad_record += 1; return None; }
         }
+        self.seq = seq;
+        self.records += 1;
         None
     }
 }
@@ -706,6 +715,142 @@ mod tests {
         let after = json!({"epoch":"e","seq":j.seq()});
         let continued = j.open(Some(&after));
         assert!(!continued.reset() && !continued.snapshot_pending());
+    }
+
+    #[test]
+    fn a_missing_seq_preserves_the_last_applied_watermark() {
+        let mut j = ItemJournal::new("e", JournalConfig::default());
+        j.put("m", "a", json!({"text":"a"})).unwrap();
+        let mut v = ItemView::new();
+        v.feed(&j.snapshot());
+        let before = (v.after(), v.digest(), v.records);
+        j.put("m", "a", json!({"text":"ab"})).unwrap();
+        j.put("m", "a", json!({"text":"abc"})).unwrap();
+        let rows: Vec<_> = j.log.iter().filter(|(s, _)| *s > 1).map(|(_, l)| l.to_vec()).collect();
+        let mut callbacks = 0;
+        v.feed_records(&rows[1], |_| callbacks += 1);
+        assert!(v.broken());
+        assert_eq!(v.errors.missing, 1);
+        assert_eq!((v.after(), v.digest(), v.records), before);
+        assert_eq!(callbacks, 0, "a rejected record is not an applied-record callback");
+        v.feed(&rows[0]);
+        assert_eq!(v.seq(), 1, "ignore replay until the broken stream ends");
+        v.stream_ended();
+        for row in &rows { v.feed(row); }
+        assert!(!v.broken());
+        assert_eq!(v.seq(), 3);
+        assert_eq!(v.digest(), j.digest(), "continuation from last applied repairs the loss");
+    }
+
+    #[test]
+    fn a_stale_or_unknown_append_preserves_the_last_applied_watermark() {
+        for unknown in [false, true] {
+            let mut j = ItemJournal::new("e", JournalConfig::default());
+            j.put("m", "a", json!({"text":"a"})).unwrap();
+            let mut v = ItemView::new();
+            v.feed(&j.snapshot());
+            let before = (v.after(), v.digest(), v.records);
+            j.append_text("m", "a", "/text", "b").unwrap();
+            let row = j.log.back().unwrap().1.to_vec();
+            let mut bad: Value = serde_json::from_slice(&row).unwrap();
+            if unknown { bad["id"] = json!("missing"); } else { bad["base"] = json!(999); }
+            let mut callbacks = 0;
+            v.feed_records(&line(&bad), |_| callbacks += 1);
+            assert!(v.broken());
+            assert_eq!(if unknown { v.errors.unknown_entity } else { v.errors.stale_base }, 1);
+            assert_eq!((v.after(), v.digest(), v.records), before);
+            assert_eq!(callbacks, 0);
+            v.feed(&row);
+            assert_eq!(v.seq(), 1);
+            v.stream_ended();
+            v.feed(&row);
+            assert!(!v.broken());
+            assert_eq!(v.seq(), 2);
+            assert_eq!(v.digest(), j.digest());
+        }
+    }
+
+    #[test]
+    fn an_unknown_remove_advances_the_absence_watermark() {
+        let mut j = ItemJournal::new("e", JournalConfig::default());
+        j.put("m", "a", json!({"text":"a"})).unwrap();
+        let mut v = ItemView::new();
+        v.feed(&j.snapshot());
+        let before = v.digest();
+        v.feed(&line(&json!({"op":"remove","seq":2,"kind":"m","id":"missing","rev":2})));
+        assert!(v.broken());
+        assert_eq!(v.errors.unknown_entity, 1);
+        assert_eq!((v.seq(), v.records), (2, 1), "removal already achieved: match the Python twin");
+        assert_eq!(v.digest(), before);
+        assert_eq!(v.after(), json!({"epoch":"e","seq":2}));
+    }
+
+    #[test]
+    fn malformed_live_records_reject_atomically_and_break_until_replay() {
+        let invalid = [
+            json!({"op":"future_record"}), json!({"op":"put"}),
+            json!({"text":"b"}), json!({"field":3,"text":"b"}),
+            json!({"field":"/missing","text":"b"}), json!({"field":"/number","text":"b"}),
+            json!({"field":"/text"}), json!({"field":"/text","text":null}),
+            json!({"field":"/text","text":"b","bytes":"Yg=="}),
+            json!({"field":"/text","text":"b","bytes":null}),
+            json!({"field":"/text","text":"b","bytes":3}),
+            json!({"field":"/text","bytes":"!"}), json!({"field":"/text","bytes":"Yg=="}),
+        ];
+        for fields in invalid {
+            let mut j = ItemJournal::new("e", JournalConfig::default());
+            j.put("m", "a", json!({"text":"a","number":3})).unwrap();
+            let mut v = ItemView::new(); v.feed(&j.snapshot());
+            let before = (v.after(), v.digest(), v.records, v.entity_bytes);
+            let mut bad = json!({"op":"append","seq":2,"kind":"m","id":"a","base":1,"rev":2});
+            bad.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
+            let mut callbacks = 0;
+            v.feed_records(&line(&bad), |_| callbacks += 1);
+            assert!(v.broken(), "malformed append must be lossy: {fields}");
+            assert_eq!(v.errors.bad_record, 1);
+            assert_eq!((v.after(), v.digest(), v.records, v.entity_bytes), before, "{fields}");
+            assert_eq!(callbacks, 0);
+            j.append_text("m", "a", "/text", "b").unwrap();
+            let valid = j.log.back().unwrap().1.to_vec();
+            v.feed(&valid); assert_eq!(v.seq(), 1);
+            v.stream_ended(); v.feed(&valid);
+            assert!(!v.broken()); assert_eq!(v.digest(), j.digest());
+        }
+    }
+
+    #[test]
+    fn over_bound_live_puts_and_appends_preserve_after_state_and_callbacks() {
+        for (append, count) in [(false, false), (true, false), (false, true)] {
+            let mut j = ItemJournal::new("e", JournalConfig::default());
+            j.put("m", "a", json!({"text":"a"})).unwrap();
+            let mut v = ItemView::with_bounds(JournalConfig { max_entity_bytes:32, max_entities:if count {1} else {512}, ..Default::default() });
+            v.feed(&j.snapshot());
+            let before = (v.after(), v.digest(), v.records, v.entity_bytes);
+            let bad = if count {
+                json!({"op":"put","seq":2,"kind":"m","id":"new","rev":2,"value":{"text":"b"}})
+            } else if append {
+                json!({"op":"append","seq":2,"kind":"m","id":"a","base":1,"rev":2,"field":"/text","text":"x".repeat(128)})
+            } else { json!({"op":"put","seq":2,"kind":"m","id":"a","rev":2,"value":{"text":"x".repeat(128)}}) };
+            let mut callbacks = 0; v.feed_records(&line(&bad), |_| callbacks += 1);
+            assert!(v.broken()); assert_eq!(v.errors.over_bound, 1);
+            assert_eq!((v.after(), v.digest(), v.records, v.entity_bytes), before);
+            assert_eq!(callbacks, 0);
+            j.put("m", "a", json!({"text":"b"})).unwrap();
+            v.stream_ended(); v.feed(&j.log.back().unwrap().1);
+            assert!(!v.broken()); assert_eq!(v.digest(), j.digest());
+        }
+    }
+
+    #[test]
+    fn append_bound_admission_counts_json_escaping_before_mutation() {
+        let mut j = ItemJournal::new("e", JournalConfig::default());
+        j.put("m", "a", json!({"text":"a"})).unwrap();
+        let mut v = ItemView::with_bounds(JournalConfig { max_entity_bytes:15, ..Default::default() });
+        v.feed(&j.snapshot()); let before = (v.after(), v.digest(), v.entity_bytes);
+        j.append_text("m", "a", "/text", "\"\n").unwrap();
+        v.feed(&j.log.back().unwrap().1);
+        assert!(v.broken()); assert_eq!(v.errors.over_bound, 1);
+        assert_eq!((v.after(), v.digest(), v.entity_bytes), before);
     }
 
     const TEXT: &[&str] = &["héllo ", "日本語 ", "🙂🚀 ", "naïve ", "Ω≈ç√ ", "ok "];
@@ -1053,7 +1198,7 @@ mod tests {
         v.feed(&lines[0]);
         assert_eq!(v.errors.duplicate, 1);
         v.feed(&lines[2]);
-        assert_eq!((v.errors.missing, v.errors.stale_base), (1, 1));
+        assert_eq!((v.errors.missing, v.errors.stale_base), (1, 0), "a missing record is rejected before inspecting its append base");
     }
 
     impl Next {
