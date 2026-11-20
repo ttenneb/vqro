@@ -452,6 +452,7 @@ pub async fn run(socket: &Path) -> Result<()> {
     let mut terminal = ratatui::init();
     // Asked before the input thread starts reading: the query reads the terminal's reply.
     app.kbd_enhance = crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
+    keys::set_shift_enter_reported(app.kbd_enhance);
     let restore_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         keys::enhance(keys::Enhance::Off);
@@ -531,7 +532,7 @@ pub async fn run(socket: &Path) -> Result<()> {
             if app.kbd_enhance {
                 keys::enhance(if prefix_open {
                     keys::Enhance::Full
-                } else if app.focused_extended() != keys::Extended::Legacy {
+                } else if app.focused_extended() != keys::Extended::Legacy || app.typing_lines() {
                     keys::Enhance::Disambiguate
                 } else {
                     keys::Enhance::Off
@@ -1532,6 +1533,14 @@ impl App {
     fn panel_view_for(&self, key: &str) -> String {
         if key == "@popup" { if let Some(Overlay::Popup { view, .. }) = &self.overlay { return view.clone(); } }
         key.to_string()
+    }
+
+    /// Typing in a composer or a multi-line prompt: the outer terminal should report Shift-Enter apart from Enter.
+    fn typing_lines(&self) -> bool {
+        let editing = |key: &str| self.pstate.get(key).is_some_and(|s| s.editing.is_some());
+        matches!(&self.overlay, Some(Overlay::Input { multi: Some(_), .. }))
+            || (matches!(&self.overlay, Some(Overlay::Popup { .. })) && editing("@popup"))
+            || self.leaves.get(self.focus).is_some_and(|v| editing(v))
     }
 
     /// `doc/settings/tui.scrollback_lines`, bounded (see `SCROLLBACK_RANGE`); new and reattached panes use it.
@@ -3272,7 +3281,7 @@ impl App {
         let rows = (lines.len() as u16).clamp(3, 10);
         let r = Rect { x: area.x + (area.width.saturating_sub(w)) / 2, y: area.bottom().saturating_sub(rows + 3), width: w, height: rows + 2 };
         f.render_widget(Clear, r);
-        let block = Block::bordered().title(format!(" {prompt} ")).title_bottom(" Enter send · Alt-Enter new line · Escape cancel ").border_style(Style::new().fg(pal.prompt));
+        let block = Block::bordered().title(format!(" {prompt} ")).title_bottom(if keys::shift_enter_reported() { " Enter send · Shift-Enter new line · Escape cancel " } else { " Enter send · Alt-Enter new line · Escape cancel " }).border_style(Style::new().fg(pal.prompt));
         let inner = block.inner(r);
         f.render_widget(block, r);
         let first = cl.saturating_sub(inner.height as usize - 1);
@@ -3764,6 +3773,46 @@ mod tests {
         app.pstate.get_mut("@popup").unwrap().filter = "ans".into();
         app.on_msg(Msg::Popup { view: "req".into(), width: 60, ctx: json!({}) });
         assert_eq!(app.pstate["@popup"].filter, "ans");
+    }
+
+    #[tokio::test]
+    async fn a_composer_grows_with_its_draft_and_names_the_new_line_key_that_works() {
+        let (mut app, _) = app();
+        app.load(&json!({"epoch":"e","seq":1,"entries":{"view/p":{"value":{"kind":"panel","items":[
+            {"text":"conversation"},{"type":"composer","id":"c","text":"Message","rows":5,"pin":"bottom","command":"x"}]}}}}));
+        app.leaves = vec!["p".into()];
+        let draw = |app: &mut App| {
+            let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(70, 16)).unwrap();
+            let mut out = Vec::new();
+            terminal.draw(|f| { app.draw_view(f, "p", Rect::new(0, 0, 70, 16), true, &Palette::default(), &Icons::new(None, false));
+                let b = f.buffer_mut(); out = (0..16).map(|y| (0..70).map(|x| b[(x, y)].symbol().to_string()).collect::<String>()).collect(); }).unwrap();
+            out
+        };
+        let composer_rows = |screen: &[String]| screen.iter().filter(|l| l.contains('▌')).count();
+        keys::set_shift_enter_reported(false);
+        let screen = draw(&mut app);
+        assert_eq!(composer_rows(&screen), 1, "an empty composer is one line: {screen:#?}");
+        assert!(screen.iter().any(|l| l.contains("Alt-Enter new line")));
+        let st = app.pstate.get_mut("p").unwrap();
+        st.composers.entry("c".into()).or_insert_with(|| crate::ui_model::composer::Composer::new(&json!({"type":"composer"}))).editor =
+            crate::ui_model::composer::Editor::new("one\ntwo\nthree", None, None);
+        keys::set_shift_enter_reported(true);
+        let screen = draw(&mut app);
+        assert_eq!(composer_rows(&screen), 3, "it grows with the draft: {screen:#?}");
+        assert!(screen.iter().any(|l| l.contains("Shift-Enter new line")), "the terminal reports Shift-Enter");
+        st_cap(&mut app);
+        keys::set_shift_enter_reported(false);
+    }
+
+    /// A draft longer than `rows` stops growing at `rows`.
+    fn st_cap(app: &mut App) {
+        let st = app.pstate.get_mut("p").unwrap();
+        st.composers.get_mut("c").unwrap().editor = crate::ui_model::composer::Editor::new("1\n2\n3\n4\n5\n6\n7", None, None);
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(70, 16)).unwrap();
+        let mut n = 0;
+        terminal.draw(|f| { app.draw_view(f, "p", Rect::new(0, 0, 70, 16), true, &Palette::default(), &Icons::new(None, false));
+            let b = f.buffer_mut(); n = (0..16).filter(|y| (0..70).any(|x| b[(x, *y)].symbol() == "▌")).count(); }).unwrap();
+        assert_eq!(n, 5);
     }
 
     #[tokio::test]

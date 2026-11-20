@@ -1135,7 +1135,9 @@ New row types, components and view kinds are progressive enhancements: every cli
   reports it), Alt-Enter and Ctrl-J add a line, arrows/Home/End move, Backspace/Delete edit, Esc leaves with the
   draft kept, Tab moves to the controls; a paste is inserted (refused whole over `max_bytes`); the prefix key always
   wins. On the row: Enter, Space or `i` starts typing; Left/Right walk the controls. `autofocus: true` starts
-  typing when the pane gains focus.
+  typing when the pane gains focus. The text area starts at one line and grows with the draft up to `rows`. The
+  key hint names the new-line key that works: Shift-Enter when the terminal reports it (the Rust TUI asks for
+  keyboard disambiguation while a composer or multi-line prompt is being typed in), else Alt-Enter; Ctrl-J always.
 - **`client.composer {action, panel?, row?, ...}`** (client-local): `focus` (start typing in the panel's composer),
   `set {arg, value}`, `send {set?: {arg: value}}` (set values, then send the draft). Bindings use it (for example
   send as steer).

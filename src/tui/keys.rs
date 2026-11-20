@@ -291,6 +291,12 @@ pub enum Enhance {
     Full = 2,
 }
 
+/// Whether the outer terminal reports Shift-Enter apart from Enter (it supports keyboard enhancement, which the
+/// client turns on while a composer or multi-line prompt is being typed in). Set once at startup.
+static SHIFT_ENTER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub fn set_shift_enter_reported(on: bool) { SHIFT_ENTER.store(on, Ordering::Relaxed); }
+pub fn shift_enter_reported() -> bool { SHIFT_ENTER.load(Ordering::Relaxed) }
+
 /// Which level we pushed; global so every exit path, panics included, can pop it.
 static PUSHED: AtomicU8 = AtomicU8::new(0);
 

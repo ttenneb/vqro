@@ -137,6 +137,12 @@ pub const ROW_TYPES: &[&str] = &["item", "toggle", "header", "separator", "text"
 /// A composer row's height: its text lines (`rows`, default 3, 1-12) and the control line.
 pub fn composer_height(item: &Value) -> u16 { item["rows"].as_u64().unwrap_or(3).clamp(1, 12) as u16 + 1 }
 
+/// A composer's height with a draft of `draft_lines` lines: it starts at one text line and grows with the draft up to
+/// its `rows`, plus the control line.
+pub fn composer_height_for(item: &Value, draft_lines: usize) -> u16 {
+    (draft_lines.max(1) as u16).min(composer_height(item) - 1) + 1
+}
+
 fn native(item: &Value, features: &[&str]) -> bool {
     let k = kind(item);
     (ROW_TYPES.contains(&k) || features.contains(&k)) && missing_for(item, features).is_empty()

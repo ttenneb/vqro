@@ -95,6 +95,15 @@ fn chip_layout(item: &Value, width: u16, icons: &Icons) -> Vec<(u16, u16, u16)> 
     out
 }
 
+/// A row's height; a composer's follows its draft (it grows as you type, up to its `rows`).
+fn row_lines(r: &Flat, st: &State, width: u16, icons: &Icons) -> u16 {
+    if kind(&r.item) == "composer" {
+        let draft = st.composers.get(&r.id).map(|c| c.editor.lines().0.len()).unwrap_or(1);
+        return crate::ui_model::panel::composer_height_for(&r.item, draft);
+    }
+    lines(&r.item, width, icons)
+}
+
 fn lines(item: &Value, width: u16, icons: &Icons) -> u16 {
     if kind(item)=="composer" {return composer_height(item);}
     if kind(item)=="text" && item["format"]=="markdown" {return crate::ui_model::markdown::lines(item["text"].as_str().unwrap_or(""),width as usize).len().clamp(1,u16::MAX as usize) as u16;}
@@ -111,7 +120,7 @@ pub fn height(v: &Value, st: &State, width: u16, icons: &Icons) -> u16 {
     if list_detail(v,st){return bar+28;}
     let rows = rows(v, st);
     let rule = rows.iter().any(|r| r.pinned) as u16;
-    bar.saturating_add(rule).saturating_add(rows.iter().fold(0u16,|sum,r|sum.saturating_add(lines(&r.item,width,icons))))
+    bar.saturating_add(rule).saturating_add(rows.iter().fold(0u16,|sum,r|sum.saturating_add(row_lines(r,st,width,icons))))
 }
 
 fn text_style(item: &Value, pal: &Palette) -> Style {
@@ -224,7 +233,7 @@ fn render_list(buf:&mut Buffer,mut area:Rect,v:&Arc<Value>,st:&mut State,focused
     let pinned = rows.iter().take_while(|r| r.pinned).count();
     let mut y = area.y;
     for (i, r) in rows.iter().enumerate().take(pinned) {
-        let h = lines(&r.item, area.width, icons).min(area.bottom().saturating_sub(y));
+        let h = row_lines(r, st, area.width, icons).min(area.bottom().saturating_sub(y));
         if h == 0 {
             break;
         }
@@ -253,13 +262,13 @@ fn render_list(buf:&mut Buffer,mut area:Rect,v:&Arc<Value>,st:&mut State,focused
     let first_bottom = rows.iter().position(|r| r.bottom).unwrap_or(rows.len());
     let mut bottom_y = area.bottom();
     if first_bottom < rows.len() && area.bottom() > y + 2 {
-        let wanted: u16 = rows[first_bottom..].iter().fold(1u16, |h, r| h.saturating_add(lines(&r.item, area.width, icons)));
+        let wanted: u16 = rows[first_bottom..].iter().fold(1u16, |h, r| h.saturating_add(row_lines(r, st, area.width, icons)));
         let room = area.bottom() - y;
         bottom_y = area.bottom() - wanted.min((room / 2).max(2));
         buf.set_string(area.x, bottom_y, "─".repeat(area.width as usize), pal.border(false));
         let mut by = bottom_y + 1;
         for (i, r) in rows.iter().enumerate().skip(first_bottom) {
-            let h = lines(&r.item, area.width, icons).min(area.bottom().saturating_sub(by));
+            let h = row_lines(r, st, area.width, icons).min(area.bottom().saturating_sub(by));
             if h == 0 {
                 break;
             }
@@ -274,7 +283,7 @@ fn render_list(buf:&mut Buffer,mut area:Rect,v:&Arc<Value>,st:&mut State,focused
     let list = &rows[pinned..first_bottom];
 
     // Scroll so the selection is visible, in lines.
-    let heights: Vec<u32> = list.iter().map(|r| lines(&r.item, area.width.saturating_sub(1), icons) as u32).collect();
+    let heights: Vec<u32> = list.iter().map(|r| row_lines(r, st, area.width.saturating_sub(1), icons) as u32).collect();
     let total: u32 = heights.iter().sum();
     let mut top = st.top.min(u32::MAX as usize) as u32;
     if v["follow"] == true && !st.manual_scroll && !(st.sel >= pinned && st.sel < first_bottom) {
@@ -528,7 +537,14 @@ fn draw_composer(buf: &mut Buffer, row: Rect, item: &Value, selected: bool, chip
     }
     button("[Send]".into(), pal.style(Some("accent")).add_modifier(Modifier::BOLD), &mut x, buf, hits);
     let n = lines.len();
-    let send = if item["submit"] == "C-Enter" { "Ctrl-Enter send · Enter new line" } else { "Enter send · Alt-Enter new line" };
+    // The new-line key that works here: Shift-Enter when the terminal reports it (keyboard enhancement), else Alt-Enter
+    // (Ctrl-J works everywhere).
+    let shift = super::keys::shift_enter_reported();
+    let send = match (item["submit"] == "C-Enter", shift) {
+        (true, _) => "Ctrl-Enter send · Enter new line",
+        (false, true) => "Enter send · Shift-Enter new line",
+        (false, false) => "Enter send · Alt-Enter new line",
+    };
     let hint = format!("{n} line{} · {send}", if n == 1 { "" } else { "s" });
     let hw = icons::width(&hint);
     if x + hw < row.right() { buf.set_string(row.right() - hw, y, &hint, pal.style(Some("dim"))); }
