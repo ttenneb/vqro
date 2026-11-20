@@ -24,6 +24,9 @@ class IdentityWitnessTests(unittest.TestCase):
         valid = {"pid": 7, "principal": None, "present": {key: False for key in IDENTITY_KEYS}}
         self.assertTrue(child_identity_is_scrubbed(valid))
         self.assertFalse(child_identity_is_scrubbed({**valid, "principal": "owner"}))
+        explicit = {**valid, "principal": "worker:explicit", "present": {**valid["present"], "VQRO_PRINCIPAL": True}}
+        self.assertTrue(child_identity_is_scrubbed(explicit, "worker:explicit"))
+        self.assertFalse(child_identity_is_scrubbed(explicit, "owner"))
         self.assertFalse(child_identity_is_scrubbed({**valid, "present": {**valid["present"], "VQRO_PRINCIPAL": True}}))
         for invalid in ({}, {**valid, "pid": True}, {**valid, "present": {}},
                         {**valid, "present": {key: None for key in IDENTITY_KEYS}}):

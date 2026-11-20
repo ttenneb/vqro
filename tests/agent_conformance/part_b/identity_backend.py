@@ -9,25 +9,30 @@ No real Herdr socket, credentials, model/runtime or target engine is accessed.
 import asyncio
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import shutil
 import tempfile
+import socket
+import struct
 
 from ..results import CheckFailed, FixtureFailed
 from .context import PublicCoordination
+from pi_provider_e2e import identity
 
 
 IDENTITY_KEYS = ("VQRO_PRINCIPAL", "VQRO_EXTENSION", "VQRO_EXTENSION_TOKEN", "VQRO_EXTENSION_LIFETIME")
 
 
-def child_identity_is_scrubbed(observed):
+def child_identity_is_scrubbed(observed, expected_principal=None):
     if (not isinstance(observed, dict) or type(observed.get("pid")) is not int or observed["pid"] <= 0 or
             "principal" not in observed or observed["principal"] is not None and not isinstance(observed["principal"], str) or
             not isinstance(observed.get("present"), dict) or set(observed["present"]) != set(IDENTITY_KEYS) or
             any(type(value) is not bool for value in observed["present"].values())):
         raise FixtureFailed("malformed actual backend child observation")
-    return observed["principal"] is None and not any(observed["present"].values())
+    expected = {key: key == "VQRO_PRINCIPAL" and expected_principal is not None for key in IDENTITY_KEYS}
+    return observed["principal"] == expected_principal and observed["present"] == expected
 
 
 def empty_terminal_inventory(observed):
@@ -107,13 +112,35 @@ async def backend_child_environment(parent):
             ctx.evidence.append({"kind": "backend_fixture_startup_failure", "snapshot": await ctx.peer.call("workspace.snapshot")})
             raise FixtureFailed("owned executing backend did not become ready") from error
         ctx.track_children()
+        # resource.spawn intentionally supplies a configured principal (7d7c382
+        # server.rs:880). Prove backend scrubbing on the native service BEFORE that
+        # explicit child configuration, not by forbidding a legitimate terminal tag.
+        services = []
+        for path in native_root.rglob("*"):
+            if not path.is_socket(): continue
+            if not path.resolve().is_relative_to(native_root) or len(str(path).encode()) > 103:
+                raise FixtureFailed("native HC socket escaped its owned portable root")
+            with socket.socket(socket.AF_UNIX) as peer:
+                peer.settimeout(2); peer.connect(str(path))
+                pid, uid, _ = struct.unpack("3i", peer.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+            if uid != os.getuid(): raise FixtureFailed("native HC socket peer is not the owned fixture user")
+            record = identity(pid)
+            if not record: raise FixtureFailed("native HC kernel peer has no live birth identity")
+            if record not in ctx.backend.tracked: ctx.backend.tracked.append(record)
+            names = {entry.split(b"=", 1)[0] for entry in Path(f"/proc/{pid}/environ").read_bytes().split(b"\0") if entry}
+            services.append({"socket": str(path), "pid_identity": record,
+                "present": {key: key.encode() in names for key in IDENTITY_KEYS}})
+        if not services: raise FixtureFailed("no owned native HC socket peer available for environment witness")
+        ctx.check(all(not any(row["present"].values()) for row in services),
+            "actual backend-started HC service inherits no caller identity/token variables", component="core", services=services)
+        explicit_principal = "worker:g14-explicit"
         spawned = await ctx.peer.call("resource.spawn", {"provider": "herdr", "argv": ["/usr/bin/python3", str(script)],
-            "name": "owned-g14-environment", "cwd": str(ctx.root / "work")}, timeout=8)
+            "env": {"VQRO_PRINCIPAL": explicit_principal}, "name": "owned-g14-environment", "cwd": str(ctx.root / "work")}, timeout=8)
         rid = spawned["resource"]["id"]
         await ctx.wait(lambda: artifact.is_file(), label="actual backend child's environment artifact")
         observed = json.loads(artifact.read_text())
-        ctx.check(child_identity_is_scrubbed(observed),
-            "actual executing backend child inherits no caller identity/token variables", component="core", observation=observed)
+        ctx.check(child_identity_is_scrubbed(observed, explicit_principal),
+            "actual backend child gets only its explicit principal, no inherited caller identity/tokens", component="core", observation=observed)
         async def finished():
             resources = (await ctx.peer.call("resource.list", {"provider": "herdr"}))["resources"]
             return next((row for row in resources if row["id"] == rid and row["state"] == "finished"), None)
@@ -125,7 +152,7 @@ async def backend_child_environment(parent):
         removed = empty_terminal_inventory(native_before_stop)
         ctx.check(removed, "every created terminal is removed from private HC", component="harness", native=native_before_stop)
         ctx.evidence.append({"kind": "executing_backend_environment", "pins": pins, "activation": activation,
-            "provider": provider, "spawn": spawned, "child": observed, "finished": end, "forget": forgotten,
+            "provider": provider, "services": services, "spawn": spawned, "child": observed, "finished": end, "forget": forgotten,
             "native_terminal_count_after_forget": len(native_before_stop.get("terminals", []))})
     except BaseException as error:
         primary_error = error
