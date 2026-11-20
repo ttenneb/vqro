@@ -291,11 +291,12 @@ async def full_durable_budget(ctx):
                 at_budget.append({"kind": error.kind, "message": str(error)[:120],
                                   "budget": any(word in str(error) for word in ("reserve", "domain", "budget", "slot"))})
             if sum(bool(row.get("budget")) for row in at_budget) >= 4: break
-        # Observation (not graded by L8): an admitted, never-claimed record is not dispatched at the budget.
-        await sub.scope("resume", "agent:" + late_agent["id"])
-        await asyncio.sleep(.5)
-        sub.evidence.append({"kind": "unclaimed_admitted_at_budget", "record": await sub.get(late["delivery"]),
-                             "invocations": len(invocations(sub, delivery=late["delivery"]))})
+        # Ungraded read-only observation. Keep this gate intentionally paused:
+        # starting the native barrier now spends its deadline during registration
+        # and archive work. Budget-caused non-dispatch is not inferred here.
+        sub.evidence.append({"kind": "paused_admitted_before_archive", "record": await sub.get(late["delivery"]),
+                             "invocations": len(invocations(sub, delivery=late["delivery"])),
+                             "gate": "intentionally_paused", "budget_causation": "not_asserted"})
         # Registration still succeeds at the budget.
         await sub.native.call("add", ref="l8-registered")
         async def registered():

@@ -2,11 +2,13 @@
 # Copyright 2026 Bennett Garcia
 """Observed inventory and post-roll refill controls, never real runtime qualification."""
 from types import SimpleNamespace
+import ast
+import inspect
 import unittest
 from unittest.mock import AsyncMock, patch
 
 from agent_conformance.part_b.lifecycle_cases import observed_scope_inventory
-from agent_conformance.part_b.scale_cases import refill_after_window_roll
+from agent_conformance.part_b.scale_cases import refill_after_window_roll, full_durable_budget
 from agent_conformance.results import CheckFailed
 from agent_conformance.wire import RpcError
 
@@ -60,6 +62,29 @@ class RemainingOracles(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(CheckFailed):
             await observed_scope_inventory(ctx, ['r1'])
         self.assertEqual(ctx.evidence[-1]['kind'], 'scope_inventory_incomplete')
+
+    async def test_late_native_deadline_starts_only_after_archive_free(self):
+        source = inspect.getsource(full_durable_budget)
+        tree = ast.parse(source)
+        resumes, frees = [], []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            if not isinstance(node.func.value, ast.Name) or node.func.value.id != 'sub':
+                continue
+            if node.func.attr == 'scope' and len(node.args) > 1 and isinstance(node.args[0], ast.Constant):
+                if node.args[0].value == 'resume' and 'late_agent' in ast.unparse(node.args[1]):
+                    resumes.append(node.lineno)
+            if node.func.attr == 'command' and len(node.args) > 1 and isinstance(node.args[1], ast.Dict):
+                args = {key.value: value.value for key, value in zip(node.args[1].keys, node.args[1].values)
+                        if isinstance(key, ast.Constant) and isinstance(value, ast.Constant)}
+                if args.get('action') == 'free':
+                    frees.append(node.lineno)
+        self.assertEqual(len(resumes), 1)
+        self.assertEqual(len(frees), 1)
+        self.assertGreater(resumes[0], frees[0])
+        self.assertIn('"budget_causation": "not_asserted"', source)
+        self.assertIn('a late native reply to an admitted record records its outcome at the budget', source)
 
     def context(self):
         def check(condition, message, **fields):
