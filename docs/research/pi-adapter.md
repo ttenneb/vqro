@@ -141,8 +141,12 @@ credentials/configuration and every HERDR variable stay excluded. The launcher a
 After registration a public workspace.get(doc/principals/owner) distinguishes an agent launch from the workspace
 owner. Only a provided non-owner principal with known owner evidence declares caps.agent.tool_principal:"env";
 unknown/owner launches omit it. The upper bound is agent.tool_principal:["env"], not a scalar top-level descriptor.
-No identity is invented or asserted as a reserved core name. Actual tool CLI hello binding depends on C2's core
-principal changes; environment isolation and the declaration are component-tested here.
+No identity is invented or asserted as a reserved core name. Opt-in `tests/pi_real_tool_principal.rs` now proves
+the product Native filter -> actual installed Pi1.5.2 RPC -> native bash tool -> actual vqro CLI -> private C2
+core path: one explicit tool write records principal/actor `p:a1-native-tool`, not workspace owner or the supplied
+`label:"owner"`. Two file-only fake model turns, zero paid calls, private user/network namespace and empty HOME/
+agent configuration; native and private core exits verified. This uses an explicit public fake-provider extension
+and certifies that component path, not the controlled-launch whole-adapter profile or other runtimes.
 
 ## Partial verification —1874677
 Native dialog normalizer/state and stop-coverage regressions pass; warning-free bridge build. Public
