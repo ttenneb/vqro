@@ -2,7 +2,7 @@
 - `fake`: `tests/fixtures/fake_inbox.py`;
 - `k2`: K2's code via `tests/fixtures/coord_k2.py` with stand-ins for C1/C2 (development only);
 - `k2core`: K2 as the core's supervised `coord` extension on a core with C1 (operational domains) and C2
-  (principals), e.g. the test-only agent-core-int binary. No stand-ins: the qualification path.
+  (principals): main has both. No stand-ins: the qualification path.
 
     h = Harness(root, vqro, inbox="k2", coord_ext=path)   # or inbox="fake"
     rid = h.agent(pull={"points": [...], "insert": "user", "evidence": "entry"})
@@ -64,6 +64,7 @@ class Harness:
                 time.sleep(0.2)
             self.status = self.c.cmd("coord.status")
         self.n = 0
+        self.declared = {}
         if inbox == "k2":
             self.c.cmd("fixture.principal", author=self.c.me, principal="p:owner")
             self.c.call("workspace.apply", {"ops": [{"op": "set", "key": "doc/principals/owner", "value": "p:owner"}]})
@@ -85,6 +86,8 @@ class Harness:
         self.c = Client(self.sock)
         while not any(x.get("name") == "coord.inbox.take" for x in self.c.call("command.list", {})["commands"]):
             time.sleep(0.1)
+        for rid, pull in self.declared.items():  # the launcher's declarations are workspace state, not inbox state
+            self.c.cmd("fixture.declare", agent=rid, pull=pull)
 
     def k2_extensions(self, coord_ext):
         """A private extension directory with only `coord` (K2) declared, copied from the given coord-ext tree."""
@@ -119,6 +122,10 @@ class Harness:
     def agent(self, pull):
         """A terminal endpoint (fake backend) declared for pull; returns its rN."""
         rid = self.c.call("resource.spawn", {"argv": ["sh"]})["resource"]["id"]
+        assert isinstance(pull.get("points"), dict), "pull.points is a map {point: {precision}} (coordination-v0 §7)"
+        if self.kind == "fake":
+            self.declared[rid] = pull
+            self.c.cmd("fixture.declare", agent=rid, pull=pull)
         if self.kind in ("k2", "k2core"):
             self.c.call("workspace.apply", {"ops": [
                 {"op": "set", "key": f"doc/agents/grants/plugin-{rid}", "value": {"who": self.PLUGIN, "on": "agent:" + rid, "can": ["receive"]}},

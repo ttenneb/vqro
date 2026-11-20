@@ -33,7 +33,7 @@ h = Harness(root, a.vqro, inbox=a.inbox, coord_ext=a.coord_ext)
 import atexit  # noqa: E402
 atexit.register(h.stop)
 procs = h.procs
-AGENT = h.agent({"points": ["turn", "settle", "idle"], "insert": "context", "evidence": "none"})
+AGENT = h.agent(json.loads(subprocess.run([a.hook, "declaration"], capture_output=True, text=True, check=True).stdout)["pull"])  # the launcher writes what the plugin declares
 CTX = ["context"]
 
 
@@ -167,7 +167,7 @@ if a.only in (None, "tui"):
     armed = wait_for(lambda: any(e["event"] == "waiter_armed" for e in hooklog()), 120)
     check("smoke TUI: first turn ended and the idle waiter is armed", armed, plain()[-600:])
     pump(2)
-    s = h.send(AGENT, "start", txt("Teammate note for the vqro smoke test: reply with just the word MANGO."), render=CTX)
+    s = h.send(AGENT, "settle", txt("Teammate note for the vqro smoke test: reply with just the word MANGO."), render=CTX)
     woke = wait_for(lambda: any("MANGO" in json.dumps(r) and r.get("type") == "assistant" for r in transcript_rows()), 120)
     pump(3)
     tr = transcript_rows()
@@ -179,7 +179,7 @@ if a.only in (None, "tui"):
     n, usage = usage_of(tr)
     results["tui"] = {"record": get(s), "kinds_with_msg": kinds_with(tr, "reply with just the word MANGO"), "assistant_requests": n,
                       "usage": usage, "screen_tail": plain()[-800:]}
-    check("smoke TUI: a start message wakes the idle session and the model answers it", woke, results["tui"])
+    check("smoke TUI: a settle message wakes the idle session and the model answers it", woke, results["tui"])
     print(json.dumps({"tui_requests": n, "usage": usage, "state": results["tui"]["record"].get("state")}), flush=True)
 
 json.dump(results, open(os.path.join(root, "smoke-results.json"), "w"), indent=1, default=str)

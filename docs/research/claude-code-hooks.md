@@ -20,8 +20,17 @@ plugin's principal `receive`. A new coordination owner starts with the gate clos
 
 ## Result
 
-The declaration is `pull {points: [turn, settle, idle], insert: context, evidence: none}`. Senders must accept
-`render: ["context"]`.
+The declaration is printed by `vqro-claude-hook declaration`, and launchers write it to
+`doc/agents/terminals/<rN>`. It contains:
+- `points` as a map: `turn` and `settle` are exact; `idle` is **approximate**.
+- `insert: context` and `evidence: none`.
+- `framing` per point: hook context arrives as a system reminder above the user; a rewake is a task notification
+  labelled `NOT USER INPUT`.
+
+Senders must accept `render: ["context"]`. Because idle is approximate, the inbox serves only boundary and settle
+records there, never `start` (coordinator ruling, 2026-11-20). Starting an idle Claude Code session goes through the
+native session socket (`admit`) or the human. An older inbox that ignores precision and hands a `start` record to
+the idle waiter gets it back released, and the hook backs off.
 
 | Point | Hook | Measured |
 |---|---|---|
@@ -75,7 +84,8 @@ Checked with `--resume` against K2.
   Herdr dropped hook-based Claude state for the same reasons (its CHANGELOG, #198 and #349).
 - `Stop` continuations are capped at 8 in a row. The plugin stops taking at `settle` after 4.
 - The `idle` point is approximate: a take can race a prompt the human is submitting at that moment. In that case the
-  message shares the human's turn as a background notification. It is reported honestly as `supplied`.
+  message shares the human's turn as a background notification. It is reported honestly as `supplied`. This is why
+  only boundary and settle records are served there.
 
 ## Native per-session inbox socket (`admit` route)
 
@@ -95,8 +105,12 @@ better framing.
 
 ## Pi plugin (`integrations/pi/vqro-pull.ts`)
 
-The P5 prototype, productised on the coordination-v0 surface. It declares
-`pull {points: [turn, settle, idle], insert: user, evidence: entry}` and runs inside Pi, holding one core connection.
+The P5 prototype, productised on the coordination-v0 surface. It exports its declaration as `PULL_DECLARATION`:
+- every point is exact, because idle is Pi's in-process `isIdle`, and an idle take is a followUp that never steers a
+  run that started meanwhile;
+- `insert: user`, `evidence: entry`, framed with the plugin's sender header.
+
+It runs inside Pi, holding one core connection.
 Its tests pass against K2 and the fake. K2 has no take content filter, so a record with a block Pi cannot insert is
 released uninserted. K2 then offers it again at each safe point until it is edited; it is never flattened.
 - **Points:** `turn_end` (turn) and `agent_before_settle` (settle) return `custom_message` drafts with

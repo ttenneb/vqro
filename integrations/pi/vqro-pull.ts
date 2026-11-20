@@ -9,8 +9,9 @@
 //   idle                 a counts-only wake while Pi is idle                      -> take {at: "idle"}, start a turn
 //
 // Insertion is a `custom_message` entry (user role in the next request). The endpoint's declaration, written by its
-// launcher in `doc/agents/terminals/<rN>`, is `pull {points: [turn, settle, idle], insert: user, evidence: entry}`,
-// and the launcher grants the plugin's principal `receive` on that endpoint. Stages come from evidence only:
+// launcher in `doc/agents/terminals/<rN>`, is `PULL_DECLARATION` below (every point exact: idle is Pi's in-process
+// isIdle, and an idle take is delivered as a followUp, never steering a run that started meanwhile), and the
+// launcher grants the plugin's principal `receive` on that endpoint. Stages come from evidence only:
 //   inserted  the `context` hook shows our entry (structured `details`, never sent to the model or forgeable by
 //             content) in the conversation Pi is about to send, and that entry is in the durable session;
 //   read      an assistant message for a request containing it finished normally (an abort right after a take is
@@ -18,8 +19,9 @@
 // A new consumer (every session_start) reconciles open claims against the session's entries before taking.
 //
 // Wire: `<prefix>inbox.window/reconcile/take/report` via command.invoke (prefix `coord.` or $VQRO_COORD_PREFIX);
-// every mutation's op carries the window epoch. A take whose reply is lost is repeated with the same op, which
-// returns its claims (never content): they are released. Wake: the `coord-status` live view's
+// every mutation's op carries the window epoch. A take whose reply is lost is inspected by its op (inbox.op), which
+// returns its claims (never content): they are released, and the op is kept until that succeeds. Reconciliation
+// follows its pages until `reconciled`. Wake: the `coord-status` live view's
 // `wake.pending[<rN>]` (never content). The connection is re-established with backoff after a core restart.
 // Tier-1 status: `agents.status {terminal, app: "pi", state, seq}` (the endpoint is the terminal), best effort.
 //
@@ -30,6 +32,9 @@
 import net from "node:net";
 import fs from "node:fs";
 import { randomBytes } from "node:crypto";
+
+// The endpoint declaration for launchers (coordination-v0.md §7). One line of JSON: tests read it from this file.
+export const PULL_DECLARATION = {"pull": {"points": {"turn": {"precision": "exact"}, "settle": {"precision": "exact"}, "idle": {"precision": "exact"}}, "insert": "user", "evidence": "entry", "framing": {"turn": {"role": "user", "frame": "sender_header"}, "settle": {"role": "user", "frame": "sender_header"}, "idle": {"role": "user", "frame": "sender_header"}}}};
 
 const SOCK = process.env.VQRO_SOCKET;
 const AGENT = process.env.VQRO_AGENT;

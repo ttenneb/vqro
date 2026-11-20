@@ -10,7 +10,7 @@ D edit while held reaches the model, edit after take is too_late; C idle start w
 unknown, never resent; F lost report -> reconciled inserted from the session; G abort after take -> inserted, read
 only by the next answered request; I image block inserted as an image; U a block Pi cannot insert stays held.
 """
-import argparse, json, os, queue, socket, subprocess, sys, tempfile, threading, time
+import argparse, json, os, queue, socket, subprocess, sys, tempfile, threading, time, re
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--vqro", required=True)
@@ -59,7 +59,7 @@ def spawn(argv, **kw):
 
 
 spawn([sys.executable, os.path.join(HERE, "fixtures", "fake_openai.py"), "--port", str(port), "--log", model_log])
-AGENT = h.agent({"points": ["turn", "settle", "idle"], "insert": "user", "evidence": "entry"})
+AGENT = h.agent(json.loads(re.search(r"^export const PULL_DECLARATION = (.*);$", open(PLUGIN).read(), re.M).group(1))["pull"])  # as the plugin declares
 json.dump({"providers": {"fake": {"baseUrl": f"http://127.0.0.1:{port}/v1", "api": "openai-completions", "apiKey": "fake",
                                   "models": [{"id": "fake-1", "input": ["text", "image"]}]}}},
           open(os.path.join(P["agent"], "models.json"), "w"))

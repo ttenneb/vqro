@@ -52,7 +52,7 @@ def spawn(argv, **kw):
 
 
 spawn([sys.executable, os.path.join(HERE, "fixtures", "fake_anthropic.py"), "--port", str(port), "--log", model_log])
-AGENT = h.agent({"points": ["turn", "settle", "idle"], "insert": "context", "evidence": "none"})
+AGENT = h.agent(json.loads(subprocess.run([a.hook, "declaration"], capture_output=True, text=True, check=True).stdout)["pull"])  # the launcher writes what the plugin declares
 CTX = ["context"]
 base = dict(h.env, HOME=P["home"])
 settings = json.loads(subprocess.run([a.hook, "settings", os.path.abspath(a.hook)], capture_output=True, text=True).stdout)

@@ -42,7 +42,7 @@ def check(name, ok, detail=""):
 
 
 h.spawn([sys.executable, os.path.join(HERE, "fixtures", "fake_anthropic.py"), "--port", str(port), "--log", model_log])
-AGENT = h.agent({"points": ["turn", "settle", "idle"], "insert": "context", "evidence": "none"})
+AGENT = h.agent(json.loads(subprocess.run([a.hook, "declaration"], capture_output=True, text=True, check=True).stdout)["pull"])  # the launcher writes what the plugin declares
 CTX = ["context"]
 base = dict(h.env, HOME=P["home"], PATH=os.environ["PATH"])
 settings = json.loads(subprocess.run([a.hook, "settings", os.path.abspath(a.hook)], capture_output=True, text=True).stdout)
@@ -124,10 +124,10 @@ DRAFT = "HUMAN DRAFT keep me 42"
 typed(DRAFT)
 pump(0.5)
 n_before = len(requests())
-d1 = h.send(AGENT, "start", txt("MSG-WAKE-I1: a teammate says the build is green"), render=CTX)
+d1 = h.send(AGENT, "settle", txt("MSG-WAKE-I1: a teammate says the build is green"), render=CTX)
 woke = wait_for(lambda: first_request_with("MSG-WAKE-I1") is not None, 40)
 nreq = first_request_with("MSG-WAKE-I1")
-check("I1 a start message wakes the idle TUI session and reaches the model", woke and nreq == n_before + 1, {"n_before": n_before, "first": nreq})
+check("I1 a settle message wakes the idle TUI session (approximate idle never serves start) and reaches the model", woke and nreq == n_before + 1, {"n_before": n_before, "first": nreq})
 r = next((x for x in requests() if x["n"] == nreq), None)
 blk = r and next((b["text"] for m in r["messages"] for b in m["blocks"] if "MSG-WAKE-I1" in b["text"]), None)
 results["I1_insert_block"] = blk and blk[:400]
@@ -158,13 +158,13 @@ typed("steps:1 sleep:3 second task"); os.write(fd, b"\r")
 # Claude Code ran UserPromptSubmit for this prompt.
 wait_for(lambda: sum(1 for e in hooklog() if e["event"] == "hook" and e["detail"].get("hook") == "UserPromptSubmit") > prompts, 15)
 wait_for(lambda: any(e["event"] == "waiter_retired" for e in hooklog()), 15)
-d2 = h.send(AGENT, "start", txt("MSG-BUSY-I3"), render=CTX)
+d2 = h.send(AGENT, "settle", txt("MSG-BUSY-I3"), render=CTX)
 pump(1.0)
 state_busy = h.get(d2)["state"]
-check("I3 a new prompt retires the waiter; a start message stays held while busy", state_busy in ("held", "recorded")
+check("I3 a new prompt retires the waiter; a settle message stays held while busy", state_busy in ("held", "recorded")
       and any(e["event"] == "waiter_retired" for e in hooklog()), {"state": state_busy, "events": [e["event"] for e in hooklog()][-8:]})
 wait_for(lambda: first_request_with("MSG-BUSY-I3") is not None, 40)
-check("I3 the held start message is delivered once the session is idle again", first_request_with("MSG-BUSY-I3") is not None)
+check("I3 the held settle message is delivered at the next settle or idle point", first_request_with("MSG-BUSY-I3") is not None)
 
 # --- I4/I5: Claude Code's native per-session inbox socket as an `admit` route (wire format from the 2.1.329 binary:
 # an optional auth line, then {"type":"user","message":{...}}). vqro cannot edit or withdraw after posting. ---

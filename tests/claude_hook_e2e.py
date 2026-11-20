@@ -33,7 +33,7 @@ def check(name, ok, detail=""):
         fails.append(name)
 
 
-AGENT = h.agent({"points": ["turn", "settle", "idle"], "insert": "context", "evidence": "none"})
+AGENT = h.agent(json.loads(subprocess.run([a.hook, "declaration"], capture_output=True, text=True, check=True).stdout)["pull"])  # the launcher writes what the plugin declares
 CTX = ["context"]  # senders accept context insertion
 transcript = os.path.join(root, "transcript.jsonl")
 open(transcript, "w").close()
@@ -161,21 +161,26 @@ check("settle take at Stop returns S1, not start", s1 in ctx2 and st1 not in ctx
 check("Stop output is hook feedback (additionalContext) for Stop", bool(out) and json.loads(out)["hookSpecificOutput"]["hookEventName"] == "Stop")
 rc, out, _ = hook("Stop", {"stop_hook_active": True, "last_assistant_message": "done"})
 check("second Stop with nothing eligible ends the turn", out == "")
-# 6. idle waiter: takes the start message at once (idle), exits 2 with the text on stderr
+# 6. idle waiter. Hook idle is approximate (a take can race a human prompt): it never takes `start` (ST1 stays held
+# for the native admit route or the human), but takes a settle message at once and exits 2 with it on stderr
 w = hook("Stop", None, mode="wait", wait=False)
+time.sleep(1.5)
+check("approximate idle never takes a start message (it stays held)", w.poll() is None and state(st1) == "held", (w.poll(), state(st1)))
+si1 = h.send(AGENT, "settle", txt("SI1 settle while idle"), render=CTX)
 try:
     w.wait(15)
 except subprocess.TimeoutExpired:
     pass
 werr = w.stderr.read() if w.returncode is not None else ""
-check("idle waiter takes start and exits 2 (asyncRewake)", w.returncode == 2 and st1 in werr, f"rc={w.returncode} err={werr[:200]}")
-# 7. a waiter armed while idle wakes on a later admission (counts-only wake), not by polling
+check("idle waiter takes a settle message and exits 2 (asyncRewake)", w.returncode == 2 and si1 in werr and st1 not in werr, f"rc={w.returncode} err={werr[:200]}")
+h.withdraw(st1)
+# 7. a waiter armed while idle wakes on a later (boundary) admission (counts-only wake), not by polling
 hook("Notification", {"notification_type": "idle_prompt", "message": "Claude is waiting"})
 w2 = hook("Notification", None, mode="wait", wait=False)
 time.sleep(1.0)
 check("armed waiter with nothing eligible keeps waiting", w2.poll() is None)
 t0 = time.time()
-st2 = h.send(AGENT, "start", txt("ST2 later"), render=CTX)
+st2 = h.send(AGENT, "boundary", txt("ST2 later"), render=CTX)
 try:
     w2.wait(10)
 except subprocess.TimeoutExpired:
@@ -187,7 +192,7 @@ hook("Notification", {"notification_type": "idle_prompt", "message": "idle"})
 w3 = hook("Notification", None, mode="wait", wait=False)
 time.sleep(0.8)
 hook("UserPromptSubmit", {"prompt": "human typed this"})
-st3 = h.send(AGENT, "start", txt("ST3 while busy"), render=CTX)
+st3 = h.send(AGENT, "settle", txt("ST3 while busy"), render=CTX)
 try:
     w3.wait(40)
 except subprocess.TimeoutExpired:

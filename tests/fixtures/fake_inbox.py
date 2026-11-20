@@ -4,7 +4,8 @@ prefixed with the window epoch, records whose state is their evidence stage, and
 `coord-status` live view. Not the coordination extension: no grants, gates, lanes, budgets or persistence. Every
 call is appended to the log given as argv[1] (the test oracle). `tests/fixtures/coord_k2.py` runs K2 itself.
 
-`take {accept: [...], max_bytes}` (as K2: default `["text"]` and 32 KiB) names the block types a plugin can insert and
+Eligibility follows the endpoint's declared `pull.points` precision (`fixture.declare`): approximate idle never
+serves `start`; a list form is invalid. `take {accept: [...], max_bytes}` (as K2: default `["text"]` and 32 KiB) names the block types a plugin can insert and
 the largest content it takes (compact UTF-8 JSON bytes); other records stay held `unsupported_content` or
 `too_large_for_consumer`. `max_bytes` is ignored while `fixture.fault {no_max_bytes}` is set (an older inbox); `{window_fail}` makes
 `coord.inbox.window` fail; `{op_fail: n}` fails the next n `coord.inbox.op` calls;
@@ -18,6 +19,8 @@ sys.path.insert(0, os.environ.get("VQRO_EXT_PATH", os.path.join(os.path.dirname(
 from vqro_ext import Extension, VqroError  # noqa: E402
 
 ELIGIBLE = {"turn": {"boundary"}, "settle": {"boundary", "settle"}, "idle": {"start", "boundary", "settle"}}
+APPROXIMATE_IDLE = {"boundary", "settle"}  # an approximate idle point never serves start (K2 a8968e9)
+declared = {}  # agent -> pull declaration (fixture.declare; K2 reads doc/agents/terminals/<rN>)
 LEVEL = {"claimed": 0, "supplied": 1, "inserted": 1, "read": 2, "handled": 2}
 BLOCKS = {"text": ("text",), "image": ("mime", "data"), "audio": ("mime", "data"), "resource_link": ("uri",), "resource": ("uri",)}
 WINDOW = {"epoch": "w:fake", "from": 0, "to": 1024}
@@ -158,13 +161,18 @@ def take(args):
         raise VqroError("take must name a declared safe point", "invalid")
     if consumers.get(agent) != args.get("consumer"):
         raise VqroError("consumer must reconcile before taking", "conflict")
+    point = ((declared.get(agent) or {}).get("points") or {})
+    point = point.get(at) if isinstance(point, dict) else None
+    if not isinstance(point, dict) or point.get("precision") not in ("exact", "approximate"):
+        return {"state": "held", "records": [], "held": "integration_unavailable"}  # as K2: list form is invalid
+    modes = APPROXIMATE_IDLE if at == "idle" and point["precision"] == "approximate" else ELIGIBLE[at]
     if any(r["to"] == agent and r["state"] == "claimed" for r in records.values()):
         return {"state": "held", "records": [], "held": "claim_in_flight"}
     out, held = [], "no_eligible_input"
     for r in sorted(records.values(), key=lambda r: r["order"]):
         if len(out) >= min(int(args.get("limit", 16)), 16):
             break
-        if r["to"] == agent and r["state"] == "held" and r["mode"] in ELIGIBLE[at]:
+        if r["to"] == agent and r["state"] == "held" and r["mode"] in modes:
             accepts = args.get("accept", ["text"])  # as K2: block types the plugin inserts without loss
             if any(b["type"] not in accepts for b in r["content"]):
                 r["reason"] = held = "unsupported_content"
@@ -245,6 +253,12 @@ def resolve(args):
         raise VqroError("only unknown records are resolved", "conflict")
     r.update(state="resolved", resolution=args["as"])
     return {"state": "resolved", "delivery": r["delivery"]}
+
+
+@command("fixture.declare", "test: an endpoint's pull declaration {agent, pull}")
+def declare(args):
+    declared[args["agent"]] = args["pull"]
+    return {"declared": args["agent"]}
 
 
 @command("fixture.fault", "test: inject one fault (take_delay_s: hold the next non-empty take reply)")

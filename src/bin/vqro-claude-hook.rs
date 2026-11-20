@@ -15,8 +15,11 @@
 //! | `StopFailure`, `Notification` (`idle_prompt`) | — | status error / idle |
 //! | `SessionEnd` | — | last chance to turn transcript evidence into `read` |
 //!
-//! The endpoint's declaration (written by its launcher in `doc/agents/terminals/<rN>`) is
-//! `pull {points: [turn, settle, idle], insert: context, evidence: none}`. Senders must accept `render: ["context"]`.
+//! The endpoint's declaration, written by its launcher in `doc/agents/terminals/<rN>`, is printed by
+//! `vqro-claude-hook declaration` (`DECLARATION`): `turn` and `settle` are exact; hook-based `idle` is approximate (a
+//! take can race a human prompt), so the inbox serves only boundary/settle records there, never `start`. Starting an
+//! idle Claude Code session goes through its native session socket (`admit`) or the human. `insert: context`,
+//! `evidence: none`. Senders must accept `render: ["context"]`.
 //! - A hand-off is a system reminder with no durable entry at that moment. It is reported `supplied` only after the
 //!   hook's output has been written.
 //! - `read` follows only from the transcript: the plugin's own context entry carrying a per-hand-off nonce (known
@@ -27,7 +30,8 @@
 //!
 //! Wire: `<prefix>inbox.window/reconcile/take/report` via `command.invoke`, prefix `coord.` (the default
 //! coordination extension) or `$VQRO_COORD_PREFIX`. Mutation ops carry the window epoch. A take whose reply is lost
-//! is repeated with the same op, which returns its claims (never content): they are reported `released`. The idle
+//! is inspected by its op (`inbox.op`), which returns its claims (never content): they are reported `released`, and
+//! the op is kept until that succeeds. Reconciliation follows its pages until `reconciled`. The idle
 //! waiter wakes on the `coord-status` view's `wake.pending[<rN>]` and reconnects after a core restart.
 //!
 //! Environment: `VQRO_SOCKET` (core endpoint), `VQRO_AGENT` (this agent's `rN`), `VQRO_PRINCIPAL` (the plugin's
@@ -238,6 +242,10 @@ mod unix {
     pub fn main() -> i32 {
         let args: Vec<String> = std::env::args().collect();
         let mode = args.get(1).map(String::as_str).unwrap_or("hook");
+        if mode == "declaration" {
+            println!("{}", serde_json::to_string_pretty(&declaration()).unwrap());
+            return 0;
+        }
         if mode == "settings" {
             println!("{}", serde_json::to_string_pretty(&settings(args.get(2).map(String::as_str).unwrap_or("vqro-claude-hook"))).unwrap());
             return 0;
@@ -510,11 +518,16 @@ mod unix {
             // the records behind it (it fits no hand-off, so holding them back would starve them).
             let size = r.get("content").map(|c| serde_json::to_vec(c).map(|v| v.len()).unwrap_or(usize::MAX)).unwrap_or(0);
             let alone_too_big = size > RECORD_MAX || piece.len() > MAX_CONTEXT;
-            if nonce.is_none() || !insertable || alone_too_big || full || text.len() + piece.len() > MAX_CONTEXT {
+            // Hook idle is declared approximate: an inbox must not hand a `start` record there. One that does (an
+            // older inbox) gets it back unclaimed; it is never handed over as if the session were surely idle.
+            let start_at_idle = at == "idle" && r.get("mode").and_then(Value::as_str) == Some("start");
+            let refused = alone_too_big || start_at_idle;
+            if nonce.is_none() || !insertable || refused || full || text.len() + piece.len() > MAX_CONTEXT {
                 // keep order among records that fit: nothing jumps ahead of one that only missed this batch
-                full |= insertable && nonce.is_some() && !alone_too_big;
-                oversized += usize::from(insertable && nonce.is_some() && alone_too_big);
+                full |= insertable && nonce.is_some() && !refused;
+                oversized += usize::from(insertable && nonce.is_some() && refused);
                 let why = if nonce.is_none() { "no_randomness" } else if !insertable { "unsupported_content" }
+                    else if start_at_idle { "start_at_approximate_idle" }
                     else if alone_too_big { "too_large_ignored_max_bytes" } else { "context_limit" };
                 ctx.log("released", json!({"delivery": delivery, "why": why, "bytes": size}));
                 report(ctx, core, &delivery, &r["claim"], "released");
@@ -523,8 +536,8 @@ mod unix {
             text.push_str(&piece);
             taken.push((delivery, r["claim"].clone(), nonce.unwrap_or_default()));
         }
-        // An inbox that ignores max_bytes hands the same oversized record back at every point (a take and a
-        // release each time). While a take yields nothing else, back off: 2 s doubling to 60 s.
+        // An inbox that ignores max_bytes (or point precision) hands the same refused record back at every point (a
+        // take and a release each time). While a take yields nothing else, back off: 2 s doubling to 60 s.
         ctx.with_state(|s| {
             let previous = s.get("oversize_backoff_ms").as_u64().unwrap_or(0);
             if oversized > 0 && taken.is_empty() {
@@ -537,7 +550,7 @@ mod unix {
             }
         });
         if oversized > 0 {
-            ctx.log("max_bytes_ignored", json!({"oversized": oversized}));
+            ctx.log("inbox_filter_ignored", json!({"refused": oversized}));
         }
         if taken.is_empty() {
             return None;
@@ -811,6 +824,20 @@ mod unix {
     fn content_text(content: Option<&Value>) -> String {
         let blocks = content.and_then(Value::as_array).cloned().unwrap_or_default();
         blocks.iter().filter_map(|b| b.get("text").and_then(Value::as_str)).collect::<Vec<_>>().join("\n")
+    }
+
+    /// The endpoint declaration a launcher writes to `doc/agents/terminals/<rN>` (`coordination-v0.md` §7). Framing per
+    /// path: hook context arrives as a system reminder above the user; a rewake is a task notification Claude Code
+    /// labels `SYSTEM NOTIFICATION - NOT USER INPUT`.
+    fn declaration() -> Value {
+        let reminder = json!({"role": "system_reminder", "frame": "hook_additional_context", "authority": "above_user"});
+        json!({"pull": {
+            "points": {"turn": {"precision": "exact"}, "settle": {"precision": "exact"}, "idle": {"precision": "approximate"}},
+            "insert": "context",
+            "evidence": "none",
+            "framing": {"turn": reminder, "settle": reminder,
+                        "idle": {"role": "user", "frame": "task_notification_not_user_input"}},
+        }})
     }
 
     /// The Claude Code `hooks` settings block for this plugin (merge into a settings file).
