@@ -17,6 +17,7 @@ class FakeCore:
         self.fail_agents, self.fail_tabs, self.fail_effect, self.make_agent = False, False, None, True
         self.shells = []  # ids for plain shell spawns (resource.spawn without argv), consumed in order
         self.contributed = False
+        self.sinks, self.fail_attach = {}, False
 
     def fresh(self):
         pass
@@ -73,6 +74,19 @@ class FakeCore:
     def publish(self, view, content):
         self.live[view] = copy.deepcopy(content)
         return {}
+
+    def attach_items(self, resource, sink, after=None):
+        """An item stream: the test feeds `self.sinks[stream]` directly, as the SDK reader thread would."""
+        self.calls.append(("resource.attach", {"resource": resource, "items": {"after": after} if after else {}}))
+        if self.fail_attach:
+            raise VqroError("provider busy", "overloaded")
+        stream = self.next_stream = getattr(self, "next_stream", 0) + 1
+        self.sinks[stream] = sink
+        return {"stream": stream, "initial": "reset", "epoch": "e1"}
+
+    def close_stream(self, stream):
+        self.calls.append(("stream.close", {"stream": stream}))
+        self.sinks.pop(stream, None)
 
     def invoke(self, name, args=None):
         self.calls.append((name, copy.deepcopy(args)))

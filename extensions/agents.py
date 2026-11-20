@@ -11,6 +11,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from vqro_ext import Extension, VqroError, views_in
 from vqro_display import label, plain
 from vqro_views import ended, unknown_since
+from vqro_items import ItemView
+import agent_transcript
 
 EFFECTS = {"prompt": "Prompt", "steer": "Steer", "follow_up": "Follow-up", "abort": "Abort",
            "clear_queue": "Clear queue", "answer": "Answer pending request"}
@@ -220,12 +222,44 @@ def unknown_badge(ext, r):
     return {"text": "unknown since "+since if since else "unknown", "style": "warn"}
 
 
+class Conversation:
+    """One agent's item stream (agent-v0 section 4) and its reconstruction. The SDK calls the sink on its reader
+    thread: it only feeds bytes and wakes the worker, never calls the core."""
+
+    def __init__(self, rid, wake, bounds):
+        self.rid, self.wake = rid, wake
+        self.view = ItemView(**bounds)
+        self.lock = threading.Lock()
+        self.stream = None
+        self.generation = 0  # bumped when a stream ends, so a late attach reply can't revive it
+
+    def data(self, data):
+        with self.lock:
+            self.view.feed(data)
+            broken = self.view.broken
+        self.wake(self.rid, reattach=broken)
+
+    def error(self, error):
+        pass
+
+    def ended(self, kind, reason):
+        with self.lock:
+            self.view.stream_ended()
+            self.stream = None
+            self.generation += 1
+        self.wake(self.rid, reattach=True)
+
+
 class Agents:
     def __init__(self, ext):
         self.ext, self.lock = ext, threading.RLock()
         self.open_requests = set()
         self.open_settings = set()
         self.published = {}  # Only current agents; suppress unchanged derived panel RPCs.
+        # Conversations from item streams; a worker attaches, reattaches and republishes (coalesced).
+        self.conversations, self.conv_lock, self.conv_event = {}, threading.Lock(), threading.Event()
+        self.conv_dirty, self.conv_attach = set(), set()
+        threading.Thread(target=self.conversation_worker, daemon=True, name="agents-conversations").start()
         self.list_open = False
         self.tier1 = {}  # terminal id -> {app, state, seq, at_ms, status}
         self.tier1_size = {}  # terminal id -> encoded bytes of its published entry
@@ -263,6 +297,109 @@ class Agents:
         ext.on_event(self.event)
         self.publish_panels()
         self.refresh(prune_views=True)
+        self.sync_conversations()
+
+    def streams_items(self, r):
+        """The agent's runtime publishes an item stream and the agent is reachable now."""
+        return (r.get("kind") == "agent" and r.get("available") is not False and not ended(r)
+                and isinstance(self.provider_caps(r).get("items.stream"), dict))
+
+    def wake(self, rid, reattach=False):
+        with self.conv_lock:
+            self.conv_dirty.add(rid)
+            if reattach:
+                self.conv_attach.add(rid)
+        self.conv_event.set()
+
+    def sync_conversations(self):
+        """Follow the resources: a conversation for every agent with an item stream; a gone agent's is dropped, an
+        unavailable one's stream is closed but its last state is kept (shown as stale)."""
+        for r in list(self.ext.resources.values()):
+            if self.streams_items(r):
+                bounds = self.provider_caps(r)["items.stream"]
+                if r["id"] not in self.conversations:
+                    self.conversations[r["id"]] = Conversation(r["id"], self.wake, {
+                        k: bounds[f] for k, f in (("max_entities", "entities"), ("max_entity_bytes", "entity_bytes"))
+                        if type(bounds.get(f)) is int and bounds[f] > 0})
+                    self.wake(r["id"], reattach=True)
+                elif self.conversations[r["id"]].stream is None:
+                    self.wake(r["id"], reattach=True)
+        for rid, c in list(self.conversations.items()):
+            r = self.ext.resources.get(rid)
+            if r is None or not self.streams_items(r):
+                if c.stream is not None:
+                    self.ext.close_stream(c.stream)
+                    with c.lock:
+                        c.view.stream_ended()
+                        c.stream = None
+                        c.generation += 1
+                if r is None:
+                    del self.conversations[rid]
+
+    def attach(self, rid):
+        c, r = self.conversations.get(rid), self.ext.resources.get(rid)
+        if c is None or r is None or not self.streams_items(r):
+            return
+        with c.lock:
+            if c.stream is not None and not c.view.broken:
+                return
+            old, c.stream = c.stream, None
+            # After lost records the cursor can't be trusted (a record past the loss may already be applied, as in
+            # the Rust ItemView): start over from a fresh snapshot rather than continue from it.
+            lost = c.view.broken
+            if old is not None:
+                c.view.stream_ended()
+                c.generation += 1
+            after, generation = None if lost else c.view.after(), c.generation
+        if old is not None:
+            self.ext.close_stream(old)  # data was lost: reattach from the last installed cursor
+        try:
+            reply = self.ext.attach_items(rid, c, after)
+        except VqroError:
+            timer = threading.Timer(1.0, self.wake, (rid,), {"reattach": True})
+            timer.daemon = True
+            timer.start()
+            return
+        with c.lock:
+            if c.generation == generation and isinstance(reply.get("stream"), int):
+                c.stream = reply["stream"]
+
+    def flush_conversations(self):
+        """One worker pass: (re)attach what needs it, then republish changed panes."""
+        with self.conv_lock:
+            attach, dirty = self.conv_attach, self.conv_dirty
+            self.conv_attach, self.conv_dirty = set(), set()
+        for rid in attach:
+            self.attach(rid)
+        for rid in dirty:
+            r = self.ext.resources.get(rid)
+            if r is not None:
+                self.publish_panel(r)
+
+    def conversation_worker(self):
+        while True:
+            self.conv_event.wait()
+            time.sleep(0.15)  # coalesce a burst of streamed text into one publication
+            self.conv_event.clear()
+            try:
+                self.flush_conversations()
+            except Exception as error:  # report, keep the worker alive
+                print(f"agents: conversation update failed: {error}", file=sys.stderr, flush=True)
+
+    def conversation_rows(self, r):
+        """The agent's conversation as rows, or None when it has no item stream (today's panel stays)."""
+        c = self.conversations.get(r["id"])
+        if c is None:
+            return None
+        # Until callers carry principals (C2), a human sender without a principal is the workspace's user ("You").
+        names = agent_transcript.Names(self.ext.resources, r["id"])
+        with c.lock:
+            if c.view.epoch is None:
+                return [{"type": "text", "style": "dim", "text": "Loading the conversation…"}]
+            out = agent_transcript.rows(c.view.entities, names, c.view.coverage)
+        if c.stream is None and r.get("available") is not False:
+            out.append({"type": "text", "style": "dim", "text": "Reconnecting to the conversation…"})
+        return out or [{"type": "text", "style": "dim", "text": "No messages yet."}]
 
     def provider_caps(self, resource):
         caps = self.ext.providers.get(resource.get("provider"), {}).get("capabilities", {})
@@ -887,7 +1024,12 @@ class Agents:
         else:
             canonical = "agent-"+r["id"]
             sources = [canonical] if canonical in self.ext.live or "view/"+canonical in self.ext.entries else []
-        if sources:
+        conversation = self.conversation_rows(r)
+        if conversation is not None:
+            # The agent's own item stream: the conversation is drawn here (agent pane, K3 phase 2).
+            content = {"title": title, "follow": True, "items": [
+                {"text": title, "badges": [{"text": status(r), "style": "dim"}]}, *conversation]}
+        elif sources:
             # Keep controls/warnings here, but never copy a provider's transcript into another
             # publication. Generic client composition enforces read-only source rows.
             content = {"title": title, "requires": ["embedded_views"], "items": [
@@ -934,9 +1076,10 @@ class Agents:
             content["items"].insert(0, {"type": "text", "style": "warn", "text": "Agent ended; no operation will be sent. Close this tab or use Close ended tabs."})
         elif not r.get("available"):
             content["items"].insert(0, {"type": "text", "style": "warn", "text": self.disconnected(r)})
-        if len(json.dumps(content, ensure_ascii=False).encode()) > 32768:
+        bound = 32768 if conversation is None else agent_transcript.BUDGET + 32768  # the conversation bounds itself
+        if len(json.dumps(content, ensure_ascii=False).encode()) > bound:
             content["items"].insert(0, {"type": "text", "style": "warn", "text": "Bounded agent panel: some provider output omitted."})
-            while len(json.dumps(content, ensure_ascii=False).encode()) > 32768 and len(content["items"]) > 1:
+            while len(json.dumps(content, ensure_ascii=False).encode()) > bound and len(content["items"]) > 1:
                 del content["items"][1]
         return content
 
@@ -1077,6 +1220,8 @@ class Agents:
     def event(self, kind, event):
         if kind in ("entries", "resource", "resource.removed", "provider", "missed"):
             self.refresh(prune_views=kind in ("entries", "resource.removed", "missed"))
+            if kind != "entries":
+                self.sync_conversations()
             if kind in ("resource", "resource.removed", "missed") and self.tier1:
                 self.prune_tier1()
             if kind == "entries":
