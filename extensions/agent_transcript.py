@@ -22,6 +22,7 @@ MARKDOWN_ROW_BYTES = 60 * 1024  # under the 64 KiB per formatted row (core-proto
 LINE_BYTES = 4096  # one row; longer lines are cut with a mark (display only, never a request's question)
 TOOL_LINES = 12  # lines of a tool's output shown before "… N more lines" (redesign mockup)
 HIDDEN_ROWS, HIDDEN_BYTES = 200, 8 * 1024
+ARGS_BYTES = 8 * 1024  # of those, the extra arguments: the output keeps the rest
 STEP_CHILD_BYTES = 24 * 1024  # one tool line's details; with its copy (TOOL_COPY_BYTES) a step stays well under 40 KiB
 ACTIVITY_BYTES = 64 * 1024  # one Activity row's steps (newest kept), well inside the panel's BUDGET
 # A tool's output lines and copy, kept small: a turn can have dozens of calls, and the panel's BUDGET is shared.
@@ -374,15 +375,16 @@ def output_rows(text, limit=TOOL_LINES):
     return rows
 
 
-def bounded_children(children):
+def bounded_children(children, limit=None, what="lines"):
     """One tool line's details (arguments, locations, output, other content) within STEP_CHILD_BYTES, in order, then a
     count of what was left out: a small entity with thousands of arguments must not outgrow the panel (#74)."""
     kept, size = [], 0
     for i, child in enumerate(children):
         size += len(json.dumps(child, ensure_ascii=False).encode()) + 2
-        if size > STEP_CHILD_BYTES:
+        if size > (limit or STEP_CHILD_BYTES):
             left = len(children) - i
-            kept.append({"type": "text", "style": "dim", "text": f"… {left} more {'line' if left == 1 else 'lines'} not shown here (pane limit)"})
+            noun = what[:-1] if left == 1 else what
+            kept.append({"type": "text", "style": "dim", "text": f"… {left} more {noun} not shown here (pane limit)"})
             break
         kept.append(child)
     return kept
@@ -407,6 +409,8 @@ def tool_row(eid, value, cwd=None):
                 continue
             shown = arg if isinstance(arg, str) else json.dumps(arg, ensure_ascii=False)
             children.append({"type": "text", "wrap": True, "style": "dim", "text": clip(plain(f"{key} {shown}"), 1024)})
+    # The extra arguments get at most ARGS_BYTES, so the output always has room (prim-opus-review P3).
+    children = bounded_children(children, ARGS_BYTES, "arguments")
     for loc in value.get("locations") if isinstance(value.get("locations"), list) else []:
         if isinstance(loc, dict) and isinstance(loc.get("path"), str):
             line = f":{loc['line']}" if type(loc.get("line")) is int else ""

@@ -241,7 +241,10 @@ class TranscriptRows(unittest.TestCase):
             if count == 10:
                 self.assertEqual(len(step["children"]), 10, "small: every argument shown")
             else:
-                self.assertRegex(step["children"][-1]["text"], r"^… \d+ more lines not shown here \(pane limit\)$")
+                self.assertRegex(step["children"][-1]["text"], r"^… \d+ more arguments not shown here \(pane limit\)$")
+        big = agent_transcript.tool_row("b", {"title": "custom", "status": "completed", "content": text("THE OUTPUT"),
+                                              "input": {f"a{i}": "z" * 900 for i in range(40)}})
+        self.assertIn("THE OUTPUT", [c.get("text") for c in big["children"]], "many big arguments never push the output out")
 
     def test_hiding_tools_never_hides_the_thinking_between_them(self):
         """vqro-lead-secondary #74: Tools=hide with Thinking=show erased an intervening thought with no disclosure."""
