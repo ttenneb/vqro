@@ -314,7 +314,9 @@ standing ability afterwards. An opaque callback proof in legacy `on_behalf_of` i
 the callback proof field, while explicit `on_behalf_of: P` uses the delegation row rule.
 G11 tool-process attribution: a tier-1 tool's CLI inherits the launcher-tagged pane principal. Select the
 headless per-endpoint environment case only for `caps.tool_principal: "env"`: each tool process receives its
-own endpoint's `VQRO_PRINCIPAL` and workspace `VQRO_SOCKET`. With a many-endpoint host, tools from two endpoints
+own endpoint's launcher-tagged `VQRO_PRINCIPAL` and workspace `VQRO_SOCKET`. That id is independent of `rN`;
+a single-endpoint host passes its launcher-given values to the child, never an inherited human-shell owner
+principal under an `env` claim. With a many-endpoint host, tools from two endpoints
 must still resolve to distinct correct endpoint principals using native per-endpoint/per-thread support or
 separate runtime children; a shared process-wide principal fails that declaration. If the native route is not
 provided, omit the capability and record the attribution gap: calls resolve to `host:<id>`, shown as such,

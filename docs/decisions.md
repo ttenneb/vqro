@@ -549,6 +549,8 @@ replaced when the Pi bridge is ported.
 - `caps.tool_principal: "env"` promises each tool-running process receives its own endpoint principal and socket
   explicitly. Multi-endpoint hosts need native per-endpoint/thread environment support or a child per endpoint;
   otherwise the capability is absent and G11 records visible host attribution, never guessed or emulated tags.
+  The principal is launcher-assigned independently of `rN`; a single-endpoint host forwards its launcher-given
+  values, never claims that an owner inherited from a human shell is an endpoint's tagged principal.
 
 **Human answers (2026-11-19, CONFIRMED).**
 - **AS1, pause:** "vqro stops delivery": paused means vqro sends, hands out and wakes nothing until resumed; an agent

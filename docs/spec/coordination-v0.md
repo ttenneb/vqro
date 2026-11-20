@@ -75,7 +75,10 @@ the generic keys below (`doc/principals/…`) and never reads coordination grant
 - **Tool-process attribution** `(pending C2)`: the route is the environment of the process running the tool.
   For tier-1 agents, the launcher tags the agent's pane with `VQRO_PRINCIPAL`, so a tool's `vqro` CLI call
   inherits that agent principal. Headless adapters declare `caps.tool_principal: "env"` only when each endpoint's
-  tool processes receive its own principal and `VQRO_SOCKET` explicitly. A many-endpoint runtime needs native
+  tool processes receive its own launcher-tagged principal and `VQRO_SOCKET` explicitly. The agent principal
+  is a launcher-assigned id independent of `rN`. A single-endpoint host passes its own launcher-given principal
+  and socket to its runtime child; an inherited owner principal from a human shell is not this route.
+  A many-endpoint runtime needs native
   per-endpoint/per-thread environment support (or a child per endpoint), not one shared principal for all tools.
   Without that native route, the capability is absent and attribution remains the host's principal, visibly a
   gap, never guessed as one endpoint. This is not permission to assert core-reserved principal names at hello.

@@ -148,8 +148,11 @@ Adapters publish only what the runtime reports, including estimates labelled as 
 - `caps.host {kind: terminal | process | server, endpoints: "one" | "many"}` declares whether the adapter's host can
   serve several endpoints (an app-server) or exactly one (a bridge that owns its runtime child).
 - `caps.tool_principal: "env"` declares that **each tool-running process** receives `VQRO_PRINCIPAL` for its
-  own endpoint's agent principal and `VQRO_SOCKET` for the workspace; absent means this route is not provided.
-  Headless adapters (Pi RPC, Codex app-server) claiming it must set the environment explicitly. A many-endpoint
+  own endpoint's launcher-tagged agent principal and `VQRO_SOCKET` for the workspace; absent means this route is
+  not provided. The principal is a launcher-assigned id independent of `rN`, never derived from that address.
+  A single-endpoint host passes its own launcher-given principal/socket to its runtime child. An owner's
+  principal inherited from a human shell does not satisfy this declaration. Headless adapters (Pi RPC, Codex
+  app-server) claiming it must set the environment explicitly. A many-endpoint
   host must use native per-endpoint/per-thread environment support or a runtime child per endpoint; one shared
   process-wide principal is not per-endpoint attribution. If the runtime cannot provide that, omit the capability
   and report the host-attribution gap (conformance G11), never guess, emulate or assert a reserved principal at hello.
