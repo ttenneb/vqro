@@ -1157,6 +1157,79 @@ mod tests {
     }
 
     #[test]
+    fn journal_accounting_obeys_retention_buffer_and_one_record_floor() {
+        let cfg = JournalConfig { retain_bytes: 512, snapshot_buffer_bytes: 2048,
+            max_record_bytes: 4096, max_entity_bytes: 16 * 1024, ..Default::default() };
+        let mut j = ItemJournal::new("e1", cfg.clone());
+        // One record is larger than retention + buffer: it is the explicit floor,
+        // not an unbounded allowance for multiple records.
+        j.put("m", "floor", json!({"text": "x".repeat(3000)})).unwrap();
+        assert!(j.retained_bytes() > cfg.retain_bytes + cfg.snapshot_buffer_bytes);
+        assert_eq!(j.log.len(), 1);
+        assert!(j.retained_bytes() <= cfg.max_record_bytes);
+        j.remove("m", "floor").unwrap();
+        for i in 0..3 { j.put("m", &i.to_string(), json!({"text": "x".repeat(700)})).unwrap(); }
+        let mut c = j.open(None);
+        assert!(matches!(c.next(&mut j, 1), Next::Data(_)));
+        assert!(c.snapshot_pending());
+        for n in 0..100 {
+            j.put("m", "0", json!({"text": format!("{n}:{}", "y".repeat(700))})).unwrap();
+            assert_eq!(j.retained_bytes(), j.log.iter().map(|(_, bytes)| bytes.len()).sum::<usize>());
+            assert_eq!(j.entity_bytes(), j.entities.values().map(|e| serde_json::to_vec(e.value.as_ref()).unwrap().len()).sum::<usize>());
+            assert!(j.retained_bytes() <= (cfg.retain_bytes + cfg.snapshot_buffer_bytes).max(cfg.max_record_bytes));
+            assert!(j.entity_bytes() <= cfg.max_entity_bytes);
+        }
+        drop(c);
+        assert!(j.pins.lock().unwrap().is_empty());
+        j.put("m", "0", json!({"text": "after close"})).unwrap();
+        assert!(j.retained_bytes() <= cfg.retain_bytes.max(cfg.max_record_bytes));
+    }
+
+    #[test]
+    fn active_cut_accounting_releases_old_versions_on_close_gap_and_epoch_step() {
+        for release in ["close", "gap", "epoch"] {
+            let cfg = JournalConfig { retain_bytes: 256, snapshot_buffer_bytes: 0,
+                max_record_bytes: 4096, max_entity_bytes: 16 * 1024, ..Default::default() };
+            let mut j = ItemJournal::new("e1", cfg.clone());
+            for i in 0..3 { j.put("m", &i.to_string(), json!({"text": "x".repeat(1000)})).unwrap(); }
+            let mut cuts = Vec::new();
+            let mut old_versions = Vec::new();
+            for generation in 0..2 {
+                let mut c = j.open(None);
+                assert!(matches!(c.next(&mut j, 1), Next::Data(_)));
+                assert!(c.snapshot_pending());
+                old_versions.push(c.snapshot.as_ref().unwrap().entities.iter()
+                    .map(|(_, _, value)| Arc::downgrade(value)).collect::<Vec<_>>());
+                cuts.push(Some(c));
+                for i in 0..3 { j.put("m", &i.to_string(), json!({"text": format!("{generation}:{}", "y".repeat(1000))})).unwrap(); }
+            }
+            let mut total_old = 0;
+            for versions in &old_versions {
+                let bytes: usize = versions.iter().map(|weak| serde_json::to_vec(weak.upgrade().unwrap().as_ref()).unwrap().len()).sum();
+                assert!(bytes <= cfg.max_entity_bytes, "each cut has its own declared entity-byte allowance");
+                total_old += bytes;
+            }
+            assert!(total_old <= cuts.len() * cfg.max_entity_bytes);
+            assert_eq!(j.entity_bytes(), j.entities.values().map(|e| e.bytes).sum::<usize>());
+            assert!(j.entity_bytes() <= cfg.max_entity_bytes);
+            if release == "epoch" { j.new_epoch("e2"); }
+            for index in 0..cuts.len() {
+                if release == "gap" {
+                    assert!(matches!(cuts[index].as_mut().unwrap().next(&mut j, 1), Next::Gap("retention")));
+                } else if release == "epoch" {
+                    assert!(matches!(cuts[index].as_mut().unwrap().next(&mut j, 1), Next::Data(_)));
+                } else {
+                    drop(cuts[index].take());
+                }
+                assert!(old_versions[index].iter().all(|weak| weak.upgrade().is_none()), "{release} retained old versions");
+                if index + 1 < cuts.len() {
+                    assert!(old_versions[index + 1].iter().all(|weak| weak.upgrade().is_some()), "one cursor released a different cursor's cut");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn revisions_only_increase_within_an_epoch_even_across_remove_and_put() {
         let mut j = ItemJournal::new("e1", JournalConfig::default());
         j.put("m", "a", json!({"t": ""})).unwrap();
