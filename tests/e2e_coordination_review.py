@@ -569,9 +569,52 @@ def case_handover_withdrawn():
     return {'variants': results, 'nonpending_never_replayed': True}
 
 
+def case_archive_abort():
+    src = agent('archive-abort-source', native())
+    dst = agent('archive-abort-destination', native())
+    scope('pause')
+    deliveries = []
+    for n in range(6):
+        o = op('archive-abort-send')
+        deliveries.append(cmd('inbox.send', {'op': o, 'submission': o, 'to': src, 'mode': 'start',
+                          'send_new': True, 'content': [{'type': 'text', 'text': str(n)}]})['delivery'])
+    peer, generation, facts = GEN['archive-abort-source']
+    facts['data']['agent']['lifecycle'] = 'ended'
+    peer.call('provider.sync', {'generation': generation, 'resources': [facts], 'final': True})
+    wait(lambda: cmd('inbox.get', {'delivery': deliveries[0]})['reason'] == 'agent_ended')
+    destination = ROOT / 'archive-abort'; destination.mkdir()
+    archive = cmd('inbox.archive', {'op': op('freeze-abort'), 'agents': [src], 'destination': str(destination)})['archive']
+    for _ in range(3):
+        cmd('inbox.archive', {'op': op('empty-plan'), 'agents': [src], 'deliveries': [], 'destination': str(destination)})
+    frozen = cmd('inbox.get', {'delivery': deliveries[0]})
+    try:
+        cmd('handover', {'op': op('frozen-handover'), 'from': {'agent': src, 'incarnation': 'i1'},
+                        'to': {'agent': dst, 'incarnation': 'i1'}, 'deliveries': [deliveries[0]]})
+        raise AssertionError('handover changed frozen evidence')
+    except RPCError as error:
+        assert error.kind == 'conflict' and 'frozen' in str(error), str(error)
+    assert cmd('inbox.get', {'delivery': deliveries[0]}) == frozen
+    raw_set('doc/agents/grants/archive-abort-recover', {'who': 'p:archive-recover', 'on': 'agent:' + src, 'can': ['recover']})
+    recoverer = Client({'kind': 'principal', 'principal': 'p:archive-recover'})
+    try:
+        cmd('inbox.archive', {'op': op('nonowner-abort'), 'action': 'abort', 'archive': archive}, recoverer)
+        raise AssertionError('recover right conferred archive-abort ownership')
+    except RPCError as error:
+        assert error.kind == 'no_grant', str(error)
+    aborted = cmd('inbox.archive', {'op': op('owner-abort'), 'action': 'abort', 'archive': archive})
+    assert aborted['state'] == 'aborted' and aborted['released'] == 6, aborted
+    audit = cmd('inbox.archive', {'action': 'inspect', 'archive': archive})
+    assert audit['abort']['principal'] == frozen['from']['principal'], audit
+    replanned = cmd('inbox.archive', {'op': op('replan'), 'agents': [src], 'destination': str(destination)})['archive']
+    assert cmd('inbox.archive', {'op': op('re-export'), 'action': 'export', 'archive': replanned})['state'] == 'accepted'
+    freed = cmd('inbox.archive', {'op': op('re-free'), 'action': 'free', 'archive': replanned})
+    assert freed['state'] == 'completed' and len(freed['freed']) == 6 and freed['changed'] == [], freed
+    return {'owner_only': True, 'handover_frozen_refused': True, 'released_slot_reused': True, 'replanned_freed': 6}
+
+
 CASES = {'brick': case_brick, 'idle': case_idle, 'membership': case_membership, 'identity': case_identity, 'reconcile': case_reconcile, 'names': case_names,
          'rawcycle': case_rawcycle, 'invalid_declaration': case_invalid_declaration,
-         'window': case_window, 'handover': case_handover, 'archive': case_archive, 'queue_epoch': case_queue_epoch, 'handover_withdrawn': case_handover_withdrawn}
+         'window': case_window, 'handover': case_handover, 'archive': case_archive, 'queue_epoch': case_queue_epoch, 'handover_withdrawn': case_handover_withdrawn, 'archive_abort': case_archive_abort}
 core = None
 try:
     core = subprocess.Popen([str(BIN), 'serve', '--fake'], env=ENV, cwd=ROOT, stdout=open(ROOT / 'core.log', 'wb'), stderr=subprocess.STDOUT)

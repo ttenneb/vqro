@@ -1439,6 +1439,8 @@ class Coordinator:
                     policy.require(context["principal"], "handover", target["agent"])
                 for delivery in plan["deliveries"]:
                     record = self._record(work, delivery)
+                    if self._archive_frozen("message/" + delivery):
+                        raise CoordinationError("conflict", "delivery is frozen for explicit archive")
                     if record["state"] not in PENDING:
                         if record.get("handover_plan") == plan_id:
                             record.pop("handover_plan")
@@ -1469,6 +1471,8 @@ class Coordinator:
                 successor_session = (native.get("session") or {}).get("id")
                 for delivery in plan["deliveries"]:
                     record = self._record(work, delivery)
+                    if self._archive_frozen("message/" + delivery):
+                        raise CoordinationError("conflict", "delivery is frozen for explicit archive")
                     if record["state"] not in PENDING:
                         if record.get("handover_plan") == args["plan"]:
                             record.pop("handover_plan")
@@ -1517,6 +1521,8 @@ class Coordinator:
             plan_id = nonce("handover:")
             for delivery in deliveries:
                 record = self._record(work, delivery)
+                if self._archive_frozen("message/" + delivery):
+                    raise CoordinationError("conflict", "delivery is frozen for explicit archive")
                 if record["state"] not in PENDING or record["to"]["agent"] != source["agent"] or record["to"]["incarnation"] != source["incarnation"]:
                     raise CoordinationError("too_late", "handover can move only listed exact pending intent")
                 record["handed_over_from"] = copy.deepcopy(record["to"])
@@ -1804,7 +1810,10 @@ class Coordinator:
                 return {"archive": archive_id}
             def execute(intent):
                 with self.lock:
-                    plan = self.store.get("archive/" + archive_id)["value"]
+                    row = self.store.get("archive/" + archive_id)
+                    if not row or row["value"]["state"] not in ("frozen", "exporting", "exported"):
+                        return {"outcome": "rejected", "error": {"kind": "conflict", "message": "archive closed before export"}}
+                    plan = row["value"]
                     records = []
                     for key, version in plan["frozen"].items():
                         row = self.store.get(key)
@@ -1815,12 +1824,32 @@ class Coordinator:
                 with self.lock:
                     work = Working(self, archive=True)
                     current = work.get("archive/" + archive_id)
+                    if (not current or current["state"] not in ("frozen", "exporting", "exported")
+                            or current["frozen"] != plan["frozen"]):
+                        # Abort does not cancel filesystem I/O or erase a file
+                        # already written, but that I/O cannot resurrect the plan.
+                        return {"outcome": "observed", "data": {"export": exported, "published": False,
+                                "plan_state": current["state"] if current else "missing"}}
                     current.update(exported, state="exported")
                     work.put("archive/" + archive_id, current)
                     work.commit(control=True)
                 return {"outcome": "accepted", "data": exported}
             return self._external("coord.inbox.archive.export", args, context, prepare, execute)
         def mutate(work, policy):
+            if action == "abort":
+                if context["principal"] != policy.owner:
+                    raise CoordinationError("no_grant", "only the workspace owner may abort an archive")
+                plan = work.get("archive/" + str(archive_id))
+                if not plan:
+                    raise CoordinationError("not_found", "unknown archive plan")
+                if plan["state"] == "completed":
+                    raise CoordinationError("conflict", "a completed archive cannot be aborted")
+                if plan["state"] != "aborted":
+                    plan.update(state="aborted", abort={**{key: context.get(key) for key in
+                                ("principal", "actor", "author", "initiator")}, "at_ms": self.clock()})
+                    work.put("archive/" + str(archive_id), plan)
+                return {"state": "aborted", "archive": archive_id, "released": len(plan["frozen"]),
+                        "gates": "unchanged", "execution": "not_asserted", "export_may_finish": True}
             if action == "freeze":
                 agents = args.get("agents")
                 if not isinstance(agents, list) or not agents or len(agents) > 64 or len(set(agents)) != len(agents):
@@ -1847,7 +1876,7 @@ class Coordinator:
                     raise CoordinationError("too_large", "archive capacity is 48 records; inspect an explicit smaller delivery set")
                 if any(self._archive_frozen(key) for key in chosen):
                     raise CoordinationError("conflict", "another archive already froze this evidence")
-                open_archives = sum(key.startswith("archive/") and row["value"].get("state") != "completed" for key, row in work.rows.items())
+                open_archives = sum(key.startswith("archive/") and row["value"].get("state") not in ("completed", "aborted") for key, row in work.rows.items())
                 if open_archives >= 4:
                     raise CoordinationError("quota", "four pending archives already use the reserved plan capacity")
                 archive = uuid.uuid4().hex
@@ -1882,7 +1911,7 @@ class Coordinator:
                 work.put("archive/" + archive_id, plan)
                 return {"state": plan["state"], "archive": archive_id, "freed": freed, "changed": changed,
                         "locator": plan["locator"], "manifest_hash": plan["manifest_hash"]}
-            raise CoordinationError("invalid", "archive action must be freeze, export, free or inspect")
+            raise CoordinationError("invalid", "archive action must be freeze, export, free, abort or inspect")
         return self._mutate("coord.inbox.archive", args, context, mutate, control=True)
 
     def archive_locator(self, key):
