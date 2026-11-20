@@ -105,8 +105,10 @@ class ItemViewTests(unittest.TestCase):
         view.feed(producer.append("m1", "b"))
         self.assertTrue(view.broken)
         self.assertEqual(view.errors["missing"], 1)
+        self.assertEqual(view.after(), {"epoch": "e1", "seq": 1}, "the cursor stays at the last record applied")
+        self.assertEqual(view.entities[("message", "m1")][1]["content"][0]["text"], "a", "the record past the loss is not applied")
         view.feed(producer.append("m1", "c"))
-        self.assertEqual(view.entities[("message", "m1")][1]["content"][0]["text"], "ab", "nothing applied after loss")
+        self.assertEqual(view.entities[("message", "m1")][1]["content"][0]["text"], "a", "nothing applied after loss")
         view.stream_ended()
         self.assertFalse(view.broken)
 
@@ -117,10 +119,14 @@ class ItemViewTests(unittest.TestCase):
         self.assertEqual((view.errors["duplicate"], view.broken), (1, False), "a duplicate is ignored, not a loss")
         view.feed(line({"op": "append", "seq": 2, "kind": "message", "id": "m1", "base": 9, "rev": 10,
                         "field": "/content/0/text", "text": "x"}))
-        self.assertEqual((view.errors["stale_base"], view.broken), (1, True))
+        self.assertEqual((view.errors["stale_base"], view.broken, view.seq), (1, True, 1), "a stale append doesn't advance")
         other = ItemView()
         other.feed(snapshot() + line({"op": "remove", "seq": 1, "kind": "tool", "id": "t9", "rev": 2}))
         self.assertEqual((other.errors["unknown_entity"], other.broken), (1, True))
+        appended = ItemView()
+        appended.feed(snapshot() + line({"op": "append", "seq": 1, "kind": "tool", "id": "t9", "base": 1, "rev": 2,
+                                         "field": "/x", "text": "y"}))
+        self.assertEqual((appended.errors["unknown_entity"], appended.seq), (1, 0))
 
     def test_bounds_and_bad_lines(self):
         view = ItemView(max_record_bytes=64)

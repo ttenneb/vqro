@@ -344,8 +344,8 @@ class Agents:
             if c.stream is not None and not c.view.broken:
                 return
             old, c.stream = c.stream, None
-            # After lost records the cursor can't be trusted (a record past the loss may already be applied, as in
-            # the Rust ItemView): start over from a fresh snapshot rather than continue from it.
+            # After lost records, start over from a fresh snapshot: simple, bounded, and right whatever the loss was
+            # (vqro_items keeps after() at the last record applied, but a snapshot also repairs an over-bound view).
             lost = c.view.broken
             if old is not None:
                 c.view.stream_ended()

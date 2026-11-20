@@ -5,7 +5,8 @@ same error counts, so the two implementations can be checked against each other.
 
 Feed it the stream's bytes in any split. A snapshot is installed only at its `end`; live records apply in `seq` order.
 After any error that loses data (`broken`), the caller closes the stream and reattaches with `after()`; the installed
-state is never patched from a stream that lost records. Bounded like the producer: a longer line, more entities or
+state is never patched from a stream that lost records. A missing `seq` or an append to an unknown entity or a stale
+`base` applies nothing and leaves `after()` at the last record applied (parity with the Rust fix, spike-rev-a). Bounded like the producer: a longer line, more entities or
 more entity bytes than declared is an error, never unbounded growth.
 """
 import base64
@@ -180,7 +181,15 @@ class ItemView:
             self._error("duplicate")
             return None
         if seq != self.seq + 1:
+            # Records were lost: apply nothing and keep the cursor at the last record applied, so after() never
+            # points past the loss (the caller reattaches from it, or from a fresh snapshot).
             self._error("missing")
+            return None
+        if op == "append":
+            current = self.entities.get(key)
+            if current is None or r.get("base") != current[0]:
+                self._error("unknown_entity" if current is None else "stale_base")  # also a loss: nothing advances
+                return None
         self.seq = seq
         self.records += 1
         if op == "put" and "value" in r:
@@ -196,13 +205,7 @@ class ItemView:
             else:
                 self.entity_bytes = max(0, self.entity_bytes - encoded_size(old[1]))
         elif op == "append":
-            current = self.entities.get(key)
-            if current is None:
-                self._error("unknown_entity")
-                return None
-            if r.get("base") != current[0]:
-                self._error("stale_base")
-                return None
+            current = self.entities[key]
             target = _pointer(current[1], r.get("field"))
             if target is None:
                 self._error("bad_record")
