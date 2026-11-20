@@ -87,5 +87,65 @@ class ErrorDataTests(unittest.TestCase):
         self.assertIsNone(error.wire_error)
 
 
+class OutboundErrorDataTests(unittest.TestCase):
+    def dispatch_error(self, error):
+        client = object.__new__(sdk.Vqro)
+        sent = []
+        client._send = sent.append
+        def handler(*args):
+            raise error
+        client.handler = handler
+        self.assertFalse(client._dispatch({'id': 1, 'method': 'command.invoke', 'params': {}}))
+        self.assertEqual(len(sent), 1)
+        return sent[0]['error']
+
+    def test_structured_metadata_is_forwarded_with_authoritative_kind(self):
+        data = {'kind': 'not-authoritative', 'uncached': True, 'window': {'epoch': 'new'}, 'future': [1]}
+        reply = self.dispatch_error(sdk.VqroError('actual refusal', 'quota', data=data))
+        self.assertEqual(reply['message'], 'actual refusal')
+        self.assertEqual(reply['data'], dict(data, kind='quota'))
+        self.assertEqual(data['kind'], 'not-authoritative', 'forwarding must not mutate the exception')
+        self.assertIs(reply['data']['future'], data['future'])
+
+    def test_unserialisable_or_nonfinite_object_data_falls_back_before_send(self):
+        cyclic = {}; cyclic['self'] = cyclic
+        for value in ({'bad': {1}}, {'bad': b'bytes'}, {'bad': Path('opaque')},
+                      {'bad': float('nan')}, {'bad': '\ud800'}, cyclic):
+            with self.subTest(value=repr(value)):
+                reply = self.dispatch_error(sdk.VqroError('refused', 'quota', data=value))
+                self.assertEqual(reply['data'], {'kind': 'quota'})
+
+    def test_oversized_metadata_falls_back_inside_the_reply_cap(self):
+        with patch.object(sdk, 'MAX_RECORD_BYTES', 256):
+            reply = self.dispatch_error(sdk.VqroError('refused', 'quota', data={'huge': 'x' * 1024}))
+        self.assertEqual(reply['data'], {'kind': 'quota'})
+
+    def test_unrepresentable_kind_or_message_has_a_small_generic_fallback(self):
+        with patch.object(sdk, 'MAX_RECORD_BYTES', 256):
+            reply = self.dispatch_error(sdk.VqroError('m' * 1024, 'quota', data={'bad': {1}}))
+        self.assertEqual(reply['data']['kind'], 'extension')
+        self.assertTrue(reply['data']['incomplete'])
+
+    def test_transport_failure_is_not_retried_as_a_fallback(self):
+        client = object.__new__(sdk.Vqro)
+        calls = []
+        def send(message):
+            calls.append(message)
+            raise OSError('owned test transport failed')
+        def handler(*args):
+            raise sdk.VqroError('refused', 'quota', data={'uncached': True})
+        client._send, client.handler = send, handler
+        with self.assertRaises(OSError):
+            client._dispatch({'id': 1, 'method': 'command.invoke', 'params': {}})
+        self.assertEqual(len(calls), 1)
+
+    def test_missing_or_nonobject_metadata_keeps_legacy_error_shape(self):
+        for data in (None, False, 7, 'opaque', ['opaque']):
+            with self.subTest(data=data):
+                reply = self.dispatch_error(sdk.VqroError('refused', 'conflict', data=data))
+                self.assertEqual(reply['data'], {'kind': 'conflict'})
+        self.assertEqual(self.dispatch_error(RuntimeError('plain'))['data'], {'kind': 'extension'})
+
+
 if __name__ == '__main__':
     unittest.main()

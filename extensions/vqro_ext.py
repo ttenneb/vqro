@@ -362,7 +362,23 @@ class Vqro:
         except Exception as e:  # report, don't crash
             if "id" in msg:
                 kind = getattr(e, "kind", None) or "extension"
-                self._send({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32000, "message": str(e), "data": {"kind": kind}}})
+                metadata = getattr(e, "data", None)
+                data = dict(metadata) if isinstance(metadata, dict) else {}
+                data["kind"] = kind  # exception classification is authoritative
+                error = {"code": -32000, "message": str(e), "data": data}
+                reply = {"jsonrpc": "2.0", "id": msg["id"], "error": error}
+                for message, details in ((str(e), data), (str(e), {"kind": kind}),
+                                         ("extension failed; error details unavailable", {"kind": "extension", "incomplete": True})):
+                    error.update(message=message, data=details)
+                    try:
+                        # Validate BEFORE transport I/O. Never retry a partly
+                        # written reply just because its socket send failed.
+                        json.dumps(reply, ensure_ascii=False, allow_nan=False).encode("utf-8")
+                        if len((json.dumps(reply) + "\n").encode()) <= MAX_RECORD_BYTES:
+                            break
+                    except (TypeError, ValueError, OverflowError, RecursionError, UnicodeError):
+                        pass
+                self._send(reply)
             return False
         finally:
             context.invocation = previous
