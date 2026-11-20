@@ -39,12 +39,30 @@ async fn partial_resource_events_send_the_full_record_first_then_only_changes() 
     assert!(first.get("partial").is_none(), "first event for a resource is the full record: {first}");
     assert_eq!(first["data"]["argv"][0], "agent");
 
-    let (_, second) = next_event(&mut rx).await;
-    assert_eq!(second["type"], "resource", "only subscribed types arrive: {second}");
-    assert_eq!(second["partial"], true);
-    assert_eq!(second["data"]["id"], id.as_str());
-    assert!(second["data"]["status"]["n"].is_u64());
-    assert!(second["data"].get("argv").is_none(), "unchanged fields are left out: {second}");
+    assert!(first["data"]["principal"].is_null(), "pre-receipt resource has no inferred assignment");
+    // Fake can publish before its spawn receipt. The later exact launcher assignment is a real
+    // partial update; status can interleave. Accept ONLY these two recognized shapes, preserving
+    // every original status assertion under one unchanged 3 s bound, not an arbitrary event drain.
+    tokio::time::timeout(Duration::from_secs(3), async {
+        let(mut principal,mut status)=(false,false);
+        while !principal || !status {
+            let(_,second)=next_event(&mut rx).await;
+            assert_eq!(second["type"], "resource", "only subscribed types arrive: {second}");
+            assert_eq!(second["partial"], true);
+            assert_eq!(second["data"]["id"], id.as_str());
+            assert!(second["data"].get("argv").is_none(), "unchanged fields are left out: {second}");
+            let fields=second["data"].as_object().unwrap();
+            assert_eq!(fields.len(),2,"only id plus the recognized changed field: {second}");
+            if fields.contains_key("principal") {
+                assert!(!principal,"launcher assignment is immutable: {second}");
+                assert_eq!(second["data"]["principal"],"undeclared");
+                principal=true;
+            } else {
+                assert!(second["data"]["status"]["n"].is_u64());
+                status=true;
+            }
+        }
+    }).await.expect("principal and status deltas within the unchanged bound");
 }
 
 #[tokio::test]
