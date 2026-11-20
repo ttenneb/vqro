@@ -2813,7 +2813,11 @@ impl App {
         let (value,mut st)=if in_detail {let Some((id,v))=panel::selected_detail(&value,&container)else{return false};panel::sync_detail(&mut container,&id);(Arc::new(v),*container.detail.take().unwrap_or_default())}else{(value,container.clone())};
         let rows=panel::rows(&value,&st);
         let save=|mut root:panel::State,state:panel::State|{if in_detail{root.detail=Some(Box::new(state));root}else{state}};
-        st.sel = i;st.manual_scroll=false;
+        // While typing in the composer (agent panes autofocus it), a click on another row acts on that row without
+        // the view jumping back to the end or the keys leaving the draft: the view stays where it is (as if
+        // scrolled) and typing goes on; a key typed into the draft follows the end again.
+        let typing = st.editing.clone().filter(|_| rows.get(i).is_some_and(|r| panel::kind(&r.item) != "composer"));
+        st.sel = i;st.manual_scroll = typing.is_some();
         if expander.is_some() {
             if let Some(r) = rows.get(i) {
                 // A tree row opens or closes; a folding row (its "▸ N more lines" / "▾ less" line) unfolds or folds.
@@ -2825,6 +2829,20 @@ impl App {
         }
         // A click on a composer's text while typing keeps typing (as a key, Enter would send the draft).
         if st.editing.is_some() && rows.get(i).is_some_and(|r| panel::kind(&r.item) == "composer") { self.pstate.insert(key.to_string(), save(container,st)); return true; }
+        if let Some(id) = typing.filter(|_| !in_detail) {
+            // Activate the clicked row as Enter would, but not through the draft (Enter there sends it).
+            st.editing = None;
+            self.pstate.insert(key.to_string(), save(container, st));
+            if button == MouseButton::Left { self.panel_key(key, view, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), ctx); }
+            else if button == MouseButton::Right {
+                let item = rows.get(i).map(|r| r.item.clone()).unwrap_or(Value::Null);
+                if item["menu"].is_array() { self.row_menu(&item, ctx, Some(pos)); }
+            }
+            let st = self.pstate.entry(key.to_string()).or_default();
+            if st.editing.is_none() { st.editing = Some(id); }
+            st.manual_scroll = true;
+            return true;
+        }
         self.pstate.insert(key.to_string(), save(container,st));
         if !in_detail && !toggle && button==MouseButton::Left && rows.get(i).is_some_and(|r|r.item["detail_panel"].is_object()){return true;}
         match button {
@@ -4130,6 +4148,41 @@ mod tests {
         app.panel_key("p", "p", KeyEvent::new(KeyCode::Right, KeyModifiers::NONE), json!({}));
         app.panel_key("p", "p", KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), json!({}));
         assert!(matches!(app.overlay, Some(Overlay::Menu { .. })), "the select's options open");
+    }
+
+    #[tokio::test]
+    async fn while_typing_a_click_on_a_scrolled_up_row_opens_it_in_place() {
+        let (mut app, _) = app();
+        let mut items: Vec<Value> = (0..40).map(|i| json!({"type":"text","text":format!("message {i}"),"focusable":true})).collect();
+        items.insert(10, json!({"id":"act","text":"Activity · 7 tools","children":[{"text":"✓ bash ls"},{"text":"✓ read README.md"}]}));
+        items.push(json!({"type":"composer","id":"c","text":"Message","pin":"bottom","command":"agents.send"}));
+        app.load(&json!({"epoch":"e","seq":1,"entries":{"view/p":{"value":{"kind":"panel","follow":true,"items":items}}}}));
+        app.leaves = vec!["p".into()];
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 16)).unwrap();
+        let mut draw = |app: &mut App| -> Vec<String> {
+            let mut out = Vec::new();
+            terminal.draw(|f| { app.draw_view(f, "p", Rect::new(0, 0, 60, 16), true, &Palette::default(), &Icons::new(None, false));
+                let b = f.buffer_mut(); out = (0..16).map(|y| (0..60).map(|x| b[(x, y)].symbol().to_string()).collect::<String>()).collect(); }).unwrap();
+            out
+        };
+        draw(&mut app);
+        let st = app.pstate.get_mut("p").unwrap();
+        st.editing = Some("c".into());
+        st.composers.entry("c".into()).or_insert_with(|| Composer::new(&json!({"type":"composer"}))).editor = crate::ui_model::composer::Editor::new("draft", None, None);
+        draw(&mut app);
+        for _ in 0..12 { app.panel_scroll("p", "p", Position { x: 3, y: 4 }, true, json!({})); }
+        let screen = draw(&mut app);
+        let y = screen.iter().position(|l| l.contains("Activity · 7 tools")).expect("the group is in view after scrolling up") as u16;
+        for x in [1u16, 6] {  // its expander, then the row's text
+            app.panel_click("p", "p", Position { x, y }, MouseButton::Left, json!({}));
+            let after = draw(&mut app);
+            assert!(after.iter().any(|l| l.contains("Activity · 7 tools")), "the view stays where it was: {after:#?}");
+            assert_eq!(app.pstate["p"].editing.as_deref(), Some("c"), "typing goes on");
+            assert_eq!(app.pstate["p"].composers["c"].editor.string(), "draft", "the draft is not sent");
+            assert!(!app.message.starts_with("running agents.send"), "{}", app.message);
+        }
+        let after = draw(&mut app);
+        assert!(!after.iter().any(|l| l.contains("✓ bash ls")), "clicked twice: opened, then closed: {after:#?}");
     }
 
     #[tokio::test]
