@@ -98,8 +98,13 @@ async fn main() {
     let instance = arg("--instance", "fake-items");
     let boot = format!("b{}", now_ms());
     let cfg = JournalConfig { retain_bytes: retain, ..Default::default() };
+    // Burst agents (the gate's retention path): a small journal and, every `--burst-every` seconds, more records in
+    // one locked step than it retains, so a caught-up viewer's cursor is out of retention when it next wakes.
+    let burst_agents: usize = arg("--burst-agents", "0").parse().unwrap();
+    let burst_every: f64 = arg("--burst-every", "10").parse().unwrap();
+    let burst_cfg = JournalConfig { retain_bytes: arg("--burst-retain", "8192").parse().unwrap(), ..Default::default() };
     let shared = Arc::new(Shared {
-        agents: (0..n).map(|i| (Mutex::new(Agent { journal: ItemJournal::new(format!("{boot}.{i}.0"), cfg.clone()), next_id: 0, position: 0, current: None, open: Default::default(), session: 0 }), Notify::new())).collect(),
+        agents: (0..n).map(|i| (Mutex::new(Agent { journal: ItemJournal::new(format!("{boot}.{i}.0"), if i < burst_agents { burst_cfg.clone() } else { cfg.clone() }), next_id: 0, position: 0, current: None, open: Default::default(), session: 0 }), Notify::new())).collect(),
         paused: AtomicBool::new(false), boot, stats: Stats::default(),
     });
     let mut caps = Map::new();
@@ -114,6 +119,25 @@ async fn main() {
         "name": format!("fake-agent-{i}"), "data": {"items": cfg.facts()}})).collect();
     provider.full_sync(facts).await.expect("sync");
 
+    if burst_agents > 0 {
+        let b = shared.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs_f64(burst_every));
+            tick.tick().await;
+            loop {
+                tick.tick().await;
+                if b.paused.load(Ordering::Relaxed) { continue; }
+                for (i, (a, notify)) in b.agents.iter().take(burst_agents).enumerate() {
+                    let mut a = a.lock().unwrap();
+                    // 200 records (about 50 KB) in one step: well past the burst agents' retention.
+                    let start = a.journal.seq();
+                    for k in 0..200u64 { a.step((start + k + i as u64).wrapping_mul(7919), text_bytes); }
+                    drop(a);
+                    notify.notify_waiters();
+                }
+            }
+        });
+    }
     // Generator: every agent advances `rate` records per second, never waiting for viewers.
     let g = shared.clone();
     tokio::spawn(async move {
@@ -208,9 +232,9 @@ async fn viewer(shared: Arc<Shared>, i: usize, mut stream: ProviderStream, mut c
             tokio::pin!(wake);
             wake.as_mut().enable();
             let (next, epoch_changed) = {
-                let a = shared.agents[i].0.lock().unwrap();
+                let mut a = shared.agents[i].0.lock().unwrap();
                 let before = cursor.epoch().to_string();
-                let next = cursor.next(&a.journal, 65536);
+                let next = cursor.next(&mut a.journal, 65536);
                 (next, before != cursor.epoch())
             };
             if epoch_changed { shared.stats.epoch_snapshots.fetch_add(1, Ordering::Relaxed); }

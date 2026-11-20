@@ -339,7 +339,7 @@ This section is the implementable contract; where sections 1–6 differ, this wi
 
 | Method | Dir | Kind | Params | Result |
 |---|---|---|---|---|
-| `provider.register` | P→C | request | `name`, `role` (`backend`\|`runtime`), `instance` (string), `software {name, version}`, `provider_version`, `capabilities` (object), `limits? {max_streams?, max_item_streams?, stream_window_bytes?}`, `token?` (required for `runtime`) | `{provider, generation, limits: {stream_window_bytes, max_record_bytes}}` |
+| `provider.register` | P→C | request | `name`, `role` (`backend`\|`runtime`), `instance` (string), `software {name, version}`, `provider_version`, `capabilities` (object), `limits? {max_streams?, max_item_streams?, stream_window_bytes?}`, `token?` (required for `runtime`) | `{provider, generation, limits: {stream_window_bytes, max_record_bytes, max_streams, max_item_streams}}` (the granted values) |
 | `provider.sync` | P→C | request | `generation`, `resources: [Facts]`, `final` (bool) | `{}` once applied |
 | `resource.upsert` | P→C | notification | `generation`, `facts: Facts` | — |
 | `resource.gone` | P→C | notification | `generation`, `ref`, `incarnation`, `reason` | — |
@@ -493,8 +493,11 @@ parameters remain ignorable; this adds no core sizing arbitration.
   follow from there), otherwise `reset` (an in-stream snapshot fence, then records after its cut), always with the
   current `epoch`. The payload is UTF-8 JSON Lines; the core forwards bytes unparsed. A viewer that falls out of
   retention while attached gets `stream.gap` with gap `retention`. A gap with an unknown or malformed reason is a
-  protocol error that still ends the stream (`reason: invalid`); the Rust SDK's `gap()` ends the stream as
-  `invalid` too, never leaving it open.
+  protocol error that ends **that stream only** (`reason: invalid`); the connection and the provider's other streams
+  and resources are unaffected. The Rust SDK's `gap()` ends the stream as `invalid` too, never leaving it open. The core
+  accepts `continue` only for an open that carried `after`, in that same epoch; anything else ends the stream as
+  `invalid`. The producer side is the Rust SDK's `provider_client::items` (`ItemJournal`, `ItemCursor`, `ItemView`);
+  the Python SDK does not serve item streams yet (Rust only).
 - **Stream ids** are chosen by the core, unique for the life of the provider connection, never reused. Messages for
   a stream that is closed or unknown are ignored by the provider (`stream.credit`, `stream.input` after close) and
   dropped by the core; neither is an error.

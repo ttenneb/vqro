@@ -34,10 +34,14 @@ pub struct JournalConfig {
     pub max_entities: usize,
     /// All current entities together, encoded values (`items.entity_bytes`, default 512 KiB). Bounds every snapshot.
     pub max_entity_bytes: usize,
+    /// Records kept beyond `retain_bytes` for cursors still sending a snapshot (the post-cut buffer, agent-v0 §4).
+    /// A viewer that drains a snapshot while the agent writes up to this much more can still continue; past it, it
+    /// gets the gap reason `retention` (never an endless reset loop at the supported rate). Default 1 MiB.
+    pub snapshot_buffer_bytes: usize,
 }
 
 impl Default for JournalConfig {
-    fn default() -> Self { JournalConfig { retain_bytes: 128 * 1024, max_record_bytes: 64 * 1024, max_entities: 512, max_entity_bytes: 512 * 1024 } }
+    fn default() -> Self { JournalConfig { retain_bytes: 128 * 1024, max_record_bytes: 64 * 1024, max_entities: 512, max_entity_bytes: 512 * 1024, snapshot_buffer_bytes: 1024 * 1024 } }
 }
 
 impl JournalConfig {
@@ -66,7 +70,8 @@ impl Coverage {
 
 struct Entity {
     rev: u64,
-    value: Value,
+    /// Shared with snapshot cursors: a change replaces the Arc, so an open snapshot keeps its cut (copy-on-write).
+    value: Arc<Value>,
     bytes: usize,
 }
 
@@ -80,6 +85,9 @@ pub struct ItemJournal {
     entities: BTreeMap<(String, String), Entity>,
     entity_bytes: usize,
     coverage: Coverage,
+    /// Cursors sending a snapshot: pin id -> the seq after which they still need records.
+    pins: Arc<std::sync::Mutex<BTreeMap<u64, u64>>>,
+    next_pin: u64,
 }
 
 fn line(v: &Value) -> Vec<u8> {
@@ -101,7 +109,7 @@ fn string_at<'a>(value: &'a mut Value, field: &str) -> Result<&'a mut String, Pr
 
 impl ItemJournal {
     pub fn new(epoch: impl Into<String>, cfg: JournalConfig) -> Self {
-        ItemJournal { cfg, epoch: epoch.into(), seq: 0, log: VecDeque::new(), log_bytes: 0, entities: BTreeMap::new(), entity_bytes: 0, coverage: Coverage::AllRetained }
+        ItemJournal { cfg, epoch: epoch.into(), seq: 0, log: VecDeque::new(), log_bytes: 0, entities: BTreeMap::new(), entity_bytes: 0, coverage: Coverage::AllRetained, pins: Default::default(), next_pin: 0 }
     }
     pub fn epoch(&self) -> &str { &self.epoch }
     /// The last emitted `seq` (0 before any record in this epoch).
@@ -113,7 +121,7 @@ impl ItemJournal {
     pub fn retain_bytes(&self) -> usize { self.cfg.retain_bytes }
     /// The entity's `(rev, value)` as of the last record.
     pub fn entity(&self, kind: &str, id: &str) -> Option<(u64, &Value)> {
-        self.entities.get(&(kind.to_string(), id.to_string())).map(|e| (e.rev, &e.value))
+        self.entities.get(&(kind.to_string(), id.to_string())).map(|e| (e.rev, e.value.as_ref()))
     }
     pub fn len(&self) -> usize { self.entities.len() }
     pub fn is_empty(&self) -> bool { self.entities.is_empty() }
@@ -163,7 +171,11 @@ impl ItemJournal {
         let l: Arc<[u8]> = line(&record).into();
         self.log_bytes += l.len();
         self.log.push_back((self.seq, l));
+        // Records a snapshot cursor still needs stay, up to `snapshot_buffer_bytes` beyond retention.
+        let pinned = self.pins.lock().unwrap().values().min().copied();
         while self.log_bytes > self.cfg.retain_bytes && self.log.len() > 1 {
+            let front = self.log.front().unwrap().0;
+            if pinned.is_some_and(|p| front > p) && self.log_bytes <= self.cfg.retain_bytes + self.cfg.snapshot_buffer_bytes { break; }
             let (_, old) = self.log.pop_front().unwrap();
             self.log_bytes -= old.len();
         }
@@ -188,8 +200,10 @@ impl ItemJournal {
     pub fn put(&mut self, kind: &str, id: &str, value: Value) -> Result<u64, ProviderError> {
         Self::check_ids(kind, id)?;
         let key = (kind.to_string(), id.to_string());
-        let (rev, old) = self.entities.get(&key).map(|e| (e.rev + 1, e.bytes)).unwrap_or((1, 0));
-        if rev == 1 && self.entities.len() >= self.cfg.max_entities {
+        // A new (or re-created) entity starts at this record's seq, so revisions only increase within the epoch.
+        let existing = self.entities.get(&key).map(|e| (e.rev + 1, e.bytes));
+        let (rev, old) = existing.unwrap_or((self.seq + 1, 0));
+        if existing.is_none() && self.entities.len() >= self.cfg.max_entities {
             return Err(ProviderError::new("overloaded", format!("more than {} entities", self.cfg.max_entities)));
         }
         let record = json!({"op": "put", "seq": 0, "kind": kind, "id": id, "rev": rev, "value": value.clone()});
@@ -198,7 +212,7 @@ impl ItemJournal {
         self.charge(old, bytes)?;
         self.entity_bytes = self.entity_bytes - old + bytes;
         let seq = self.emit(record);
-        self.entities.insert(key, Entity { rev, value, bytes });
+        self.entities.insert(key, Entity { rev, value: Arc::new(value), bytes });
         Ok(seq)
     }
 
@@ -224,7 +238,7 @@ impl ItemJournal {
         let key = (kind.to_string(), id.to_string());
         let e = self.entities.get(&key).ok_or_else(|| ProviderError::new("not_found", format!("no entity {kind}/{id}")))?;
         let (base, old) = (e.rev, e.bytes);
-        let mut value = e.value.clone();
+        let mut value = Value::clone(&e.value);
         apply(string_at(&mut value, field)?)?;
         let mut record = json!({"op": "append", "seq": 0, "kind": kind, "id": id, "base": base, "rev": base + 1, "field": field});
         for (k, v) in payload.as_object().unwrap() { record[k] = v.clone(); }
@@ -236,7 +250,7 @@ impl ItemJournal {
         self.charge(old, bytes)?;
         self.entity_bytes = self.entity_bytes - old + bytes;
         let seq = self.emit(record);
-        self.entities.insert(key, Entity { rev: base + 1, value, bytes });
+        self.entities.insert(key, Entity { rev: base + 1, value: Arc::new(value), bytes });
         Ok(seq)
     }
 
@@ -255,7 +269,7 @@ impl ItemJournal {
     pub fn snapshot(&self) -> Vec<u8> {
         let mut out = line(&json!({"op": "snapshot", "phase": "begin", "epoch": self.epoch, "coverage": self.coverage.as_str()}));
         for ((kind, id), e) in &self.entities {
-            out.extend(line(&json!({"op": "put", "kind": kind, "id": id, "rev": e.rev, "value": e.value})));
+            out.extend(line(&json!({"op": "put", "kind": kind, "id": id, "rev": e.rev, "value": *e.value})));
         }
         out.extend(line(&json!({"op": "snapshot", "phase": "end", "seq": self.seq})));
         out
@@ -263,19 +277,29 @@ impl ItemJournal {
 
     /// Open a viewer at its `after` (`{epoch, seq}` or null): `continue` if it is in this epoch and still retained,
     /// else `reset` with a snapshot at the current cut. Reply with `respond_items(cursor.reset(), cursor.epoch())`.
-    pub fn open(&self, after: Option<&Value>) -> ItemCursor {
+    pub fn open(&mut self, after: Option<&Value>) -> ItemCursor {
         let after = after.and_then(|a| Some((a["epoch"].as_str()?.to_string(), a["seq"].as_u64()?)));
         match after {
             Some((epoch, seq)) if epoch == self.epoch && seq <= self.seq && seq + 1 >= self.first_retained() => {
-                ItemCursor { epoch, seq, reset: false, pending: None }
+                ItemCursor { epoch, seq, reset: false, snapshot: None, pin: None }
             }
-            _ => ItemCursor { epoch: self.epoch.clone(), seq: self.seq, reset: true, pending: Some(self.snapshot()) },
+            _ => {
+                let mut c = ItemCursor { epoch: self.epoch.clone(), seq: self.seq, reset: true, snapshot: None, pin: None };
+                c.start_snapshot(self);
+                c
+            }
         }
+    }
+
+    fn pin(&mut self, seq: u64) -> Pin {
+        self.next_pin += 1;
+        self.pins.lock().unwrap().insert(self.next_pin, seq);
+        Pin { id: self.next_pin, table: self.pins.clone() }
     }
 
     /// A live `seq` → JSON digest of the current entities (tests and conformance compare producer and viewer).
     pub fn digest(&self) -> String {
-        digest(self.entities.iter().map(|((k, i), e)| ((k.as_str(), i.as_str()), e.rev, &e.value)))
+        digest(self.entities.iter().map(|((k, i), e)| ((k.as_str(), i.as_str()), e.rev, e.value.as_ref())))
     }
 }
 
@@ -299,14 +323,34 @@ pub enum Next {
     Idle,
 }
 
+/// A cursor's hold on the records after its snapshot cut; released on drop.
+#[derive(Debug)]
+struct Pin {
+    id: u64,
+    table: Arc<std::sync::Mutex<BTreeMap<u64, u64>>>,
+}
+impl Drop for Pin {
+    fn drop(&mut self) { self.table.lock().unwrap().remove(&self.id); }
+}
+
+/// A snapshot being sent: the cut's entities (shared values, no byte copy) and how far it got.
+#[derive(Debug)]
+struct Snapshot {
+    begin: Option<Vec<u8>>,
+    entities: Vec<((String, String), u64, Arc<Value>)>,
+    pos: usize,
+    cut: u64,
+}
+
 /// One viewer's position in an [`ItemJournal`]. Hold it per open stream; call [`ItemCursor::next`] under the
 /// journal's lock, then send outside it.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ItemCursor {
     epoch: String,
     seq: u64,
     reset: bool,
-    pending: Option<Vec<u8>>,
+    snapshot: Option<Snapshot>,
+    pin: Option<Pin>,
 }
 
 impl ItemCursor {
@@ -317,22 +361,50 @@ impl ItemCursor {
     /// The last `seq` this cursor has emitted (or the snapshot cut).
     pub fn seq(&self) -> u64 { self.seq }
 
-    /// The next bytes for this viewer, at most about `max_bytes` (whole lines; a snapshot is sent whole).
-    pub fn next(&mut self, j: &ItemJournal, max_bytes: usize) -> Next {
-        if let Some(snapshot) = self.pending.take() { return Next::Data(snapshot); }
-        if self.epoch != j.epoch {
+    /// Take one serialized cut of `j` (shared entity values) and pin the records after it.
+    fn start_snapshot(&mut self, j: &mut ItemJournal) {
+        let begin = line(&json!({"op": "snapshot", "phase": "begin", "epoch": j.epoch, "coverage": j.coverage.as_str()}));
+        let entities = j.entities.iter().map(|(k, e)| (k.clone(), e.rev, e.value.clone())).collect();
+        self.epoch = j.epoch.clone();
+        self.seq = j.seq;
+        self.snapshot = Some(Snapshot { begin: Some(begin), entities, pos: 0, cut: j.seq });
+        self.pin = Some(j.pin(j.seq));
+    }
+
+    /// The next bytes for this viewer, at most about `max_bytes` of whole lines (at least one line). A snapshot is
+    /// streamed in pieces from its cut; the records after the cut are held for it (bounded, see
+    /// [`JournalConfig::snapshot_buffer_bytes`]).
+    pub fn next(&mut self, j: &mut ItemJournal, max_bytes: usize) -> Next {
+        if self.epoch != j.epoch && self.snapshot.is_none() {
             // Session switch or journal loss: a new snapshot fences the new epoch, in-stream.
-            self.epoch = j.epoch.clone();
-            self.seq = j.seq;
-            return Next::Data(j.snapshot());
+            self.start_snapshot(j);
         }
-        if self.seq < j.seq && self.seq + 1 < j.first_retained() { return Next::Gap("retention"); }
+        if let Some(snap) = self.snapshot.as_mut() {
+            let mut out = snap.begin.take().unwrap_or_default();
+            while snap.pos < snap.entities.len() && (out.is_empty() || out.len() < max_bytes) {
+                let ((kind, id), rev, value) = &snap.entities[snap.pos];
+                out.extend(line(&json!({"op": "put", "kind": kind, "id": id, "rev": rev, "value": **value})));
+                snap.pos += 1;
+            }
+            if snap.pos == snap.entities.len() {
+                out.extend(line(&json!({"op": "snapshot", "phase": "end", "seq": snap.cut})));
+                self.snapshot = None;
+            }
+            return Next::Data(out);
+        }
+        if self.seq < j.seq && self.seq + 1 < j.first_retained() { self.pin = None; return Next::Gap("retention"); }
         let mut out = Vec::new();
         let from = self.seq;
         for (s, l) in j.log.iter().filter(|(s, _)| *s > from) {
             if !out.is_empty() && out.len() + l.len() > max_bytes { break; }
             out.extend_from_slice(l);
             self.seq = *s;
+        }
+        match &self.pin {
+            // Caught up after the snapshot: plain retention from now on.
+            Some(_) if self.seq == j.seq => self.pin = None,
+            Some(p) => { p.table.lock().unwrap().insert(p.id, self.seq); }
+            None => {}
         }
         if out.is_empty() { Next::Idle } else { Next::Data(out) }
     }
@@ -441,6 +513,8 @@ impl ItemView {
             };
             if pos >= max_line { self.buf.drain(..=pos); self.errors.oversize += 1; self.broken = true; continue; }
             let l: Vec<u8> = self.buf.drain(..=pos).collect();
+            // After data loss nothing more is applied: the caller closes the stream and reattaches (agent-v0 §4).
+            if self.broken { continue; }
             let Ok(text) = std::str::from_utf8(&l[..l.len() - 1]) else { self.errors.bad_utf8 += 1; continue };
             let Ok(r) = serde_json::from_str::<Value>(text) else { self.errors.bad_json += 1; continue };
             let lossy = |e: &ViewErrors| e.missing + e.stale_base + e.over_bound + e.unknown_entity;
@@ -566,7 +640,7 @@ mod tests {
         }
     }
 
-    fn drain(c: &mut ItemCursor, j: &ItemJournal, v: &mut ItemView, salt: &mut u64) -> Option<&'static str> {
+    fn drain(c: &mut ItemCursor, j: &mut ItemJournal, v: &mut ItemView, salt: &mut u64) -> Option<&'static str> {
         loop {
             match c.next(j, 4096) {
                 Next::Data(d) => feed_split(v, &d, salt),
@@ -586,7 +660,7 @@ mod tests {
         assert!(c.reset());
         for _ in 0..40 {
             for _ in 0..25 { g.step(&mut j); }
-            assert_eq!(drain(&mut c, &j, &mut v, &mut salt), None);
+            assert_eq!(drain(&mut c, &mut j, &mut v, &mut salt), None);
             assert_eq!(v.digest(), j.digest());
             assert_eq!(v.seq(), j.seq());
         }
@@ -603,13 +677,13 @@ mod tests {
         for _ in 0..20 { g.step(&mut j); }
         let (mut v, mut salt) = (ItemView::new(), 5u64);
         let mut c = j.open(None);
-        drain(&mut c, &j, &mut v, &mut salt);
+        drain(&mut c, &mut j, &mut v, &mut salt);
         // Stream ends; a few records later the viewer is still covered: continue from exactly its cursor.
         v.stream_ended();
         for _ in 0..5 { g.step(&mut j); }
         let mut c = j.open(Some(&v.after()));
         assert!(!c.reset());
-        drain(&mut c, &j, &mut v, &mut salt);
+        drain(&mut c, &mut j, &mut v, &mut salt);
         assert_eq!(v.digest(), j.digest());
         // Far beyond retention: reset with a fresh snapshot, never a partial history.
         v.stream_ended();
@@ -617,7 +691,7 @@ mod tests {
         assert!(v.seq() + 1 < j.first_retained());
         let mut c = j.open(Some(&v.after()));
         assert!(c.reset());
-        drain(&mut c, &j, &mut v, &mut salt);
+        drain(&mut c, &mut j, &mut v, &mut salt);
         assert_eq!((v.digest(), v.seq()), (j.digest(), j.seq()));
         assert_eq!(v.errors, ViewErrors::default());
         // A wrong epoch is a reset too.
@@ -626,8 +700,9 @@ mod tests {
 
     #[test]
     fn a_slow_viewer_gets_a_retention_gap_deterministically_and_recovers_by_reset() {
-        // Producer-side overflow: the viewer reads one small batch per 40 records; retention holds far fewer.
-        let cfg = JournalConfig { retain_bytes: 4 * 1024, ..Default::default() };
+        // Producer-side overflow: the viewer reads one small batch per 40 records; retention plus the post-cut
+        // buffer (held only while this cursor has not caught up since its snapshot) hold far fewer.
+        let cfg = JournalConfig { retain_bytes: 4 * 1024, snapshot_buffer_bytes: 8 * 1024, ..Default::default() };
         let mut j = ItemJournal::new("e1", cfg);
         let mut g = Gen(11);
         let (mut v, mut salt) = (ItemView::new(), 9u64);
@@ -635,7 +710,7 @@ mod tests {
         let mut gap = None;
         for _ in 0..50 {
             for _ in 0..40 { g.step(&mut j); }
-            match c.next(&j, 256) {
+            match c.next(&mut j, 256) {
                 Next::Data(d) => feed_split(&mut v, &d, &mut salt),
                 Next::Gap(r) => { gap = Some(r); break; }
                 Next::Idle => {}
@@ -646,7 +721,7 @@ mod tests {
         v.stream_ended();
         let mut c = j.open(Some(&v.after()));
         assert!(c.reset());
-        assert_eq!(drain(&mut c, &j, &mut v, &mut salt), None);
+        assert_eq!(drain(&mut c, &mut j, &mut v, &mut salt), None);
         assert_eq!((v.digest(), v.seq()), (j.digest(), j.seq()));
     }
 
@@ -657,12 +732,12 @@ mod tests {
         for _ in 0..30 { g.step(&mut j); }
         let (mut v, mut salt) = (ItemView::new(), 2u64);
         let mut c = j.open(None);
-        drain(&mut c, &j, &mut v, &mut salt);
+        drain(&mut c, &mut j, &mut v, &mut salt);
         let before = (v.digest(), v.seq());
         // Session switch: the open cursor sends a new snapshot begin before any new-epoch record.
         j.new_epoch("e2");
         j.put("state", "current", json!({"state": "idle"})).unwrap();
-        let Next::Data(snap) = c.next(&j, 4096) else { panic!("expected a snapshot") };
+        let Next::Data(snap) = c.next(&mut j, 4096) else { panic!("expected a snapshot") };
         assert!(std::str::from_utf8(&snap).unwrap().starts_with(r#"{"coverage":"all_retained","epoch":"e2","op":"snapshot","phase":"begin"}"#));
         // The stream ends halfway through that snapshot: the old state stays installed, untouched.
         feed_split(&mut v, &snap[..snap.len() - 10], &mut salt);
@@ -671,7 +746,7 @@ mod tests {
         assert_eq!(v.epoch(), Some("e1"));
         let mut c = j.open(Some(&v.after()));
         assert!(c.reset());
-        drain(&mut c, &j, &mut v, &mut salt);
+        drain(&mut c, &mut j, &mut v, &mut salt);
         assert_eq!((v.epoch(), v.digest(), v.seq()), (Some("e2"), j.digest(), j.seq()));
         assert_eq!(v.errors, ViewErrors::default());
     }
@@ -705,7 +780,7 @@ mod tests {
         let mut c2 = j2.open(Some(&json!({"epoch": "e1", "seq": 0})));
         assert!(!c2.reset());
         v2.feed(&ItemJournal::new("e1", JournalConfig::default()).snapshot());
-        v2.feed(&c2.next(&j2, 1 << 20).into_data());
+        v2.feed(&c2.next(&mut j2, 1 << 20).into_data());
         assert_eq!(v2.entity("t", "x").unwrap().1["raw"], "/wA=");
         assert_eq!(v2.errors, ViewErrors::default());
     }
@@ -758,7 +833,7 @@ mod tests {
         assert_eq!(begin(&j)["coverage"], "all_retained");
         let (mut live, mut salt) = (ItemView::new(), 3u64);
         let mut c = j.open(None);
-        drain(&mut c, &j, &mut live, &mut salt);
+        drain(&mut c, &mut j, &mut live, &mut salt);
         assert!(j.prune("message", "old"));
         assert_eq!(begin(&j)["coverage"], "tail");
         assert!(j.entity("message", "old").is_none());
@@ -789,7 +864,7 @@ mod tests {
         for i in 0..10 { j.put("m", &format!("{i}"), json!({})).unwrap(); }
         let mut v = ItemView::with_bounds(JournalConfig { max_entities: 5, ..Default::default() });
         v.feed(&j.snapshot());
-        assert_eq!(v.errors.over_bound, 5);
+        assert!(v.errors.over_bound >= 1);
         assert!(v.broken() && v.is_empty() && v.epoch().is_none(), "nothing installed from an overflowing snapshot");
         // Live puts past the bound are dropped and flagged too.
         let mut v = ItemView::with_bounds(JournalConfig { max_entities: 2, ..Default::default() });
@@ -797,10 +872,75 @@ mod tests {
         v.feed(&j.snapshot());
         let mut c = j.open(Some(&json!({"epoch": "e1", "seq": 0})));
         for i in 0..3 { j.put("m", &format!("{i}"), json!({})).unwrap(); }
-        let Next::Data(d) = c.next(&j, 1 << 20) else { panic!() };
+        let Next::Data(d) = c.next(&mut j, 1 << 20) else { panic!() };
         v.feed(&d);
         assert_eq!((v.len(), v.errors.over_bound), (2, 1));
         assert!(v.broken());
+    }
+
+    #[test]
+    fn a_large_snapshot_is_streamed_in_pieces_and_its_post_cut_records_are_held() {
+        // 40 entities of ~6 KiB (240 KiB) against 16 KiB retention: the agent keeps writing while the viewer drains.
+        let cfg = JournalConfig { retain_bytes: 16 * 1024, max_entity_bytes: 1 << 20, snapshot_buffer_bytes: 512 * 1024, ..Default::default() };
+        let mut j = ItemJournal::new("e1", cfg);
+        for i in 0..40 { j.put("m", &format!("{i:02}"), json!({"text": "x".repeat(6000)})).unwrap(); }
+        let (mut v, mut salt) = (ItemView::new(), 4u64);
+        let mut c = j.open(None);
+        let mut pieces = 0;
+        loop {
+            // While the snapshot drains (about 15 pieces) the agent writes ~2 KiB more between pieces.
+            if pieces < 16 { for k in 0..4 { j.append_text("m", &format!("{:02}", (pieces * 4 + k) % 40), "/text", &"y".repeat(500)).unwrap(); } }
+            match c.next(&mut j, 16 * 1024) {
+                Next::Data(d) => { assert!(d.len() <= 16 * 1024 + 8 * 1024, "pieces stay near max_bytes"); feed_split(&mut v, &d, &mut salt); pieces += 1; }
+                Next::Gap(g) => panic!("snapshot within the buffer must make progress, got {g}"),
+                Next::Idle => break,
+            }
+        }
+        assert!(pieces > 10, "streamed in pieces, not one {pieces}");
+        assert_eq!((v.digest(), v.seq()), (j.digest(), j.seq()));
+        assert_eq!(v.errors, ViewErrors::default());
+        // Caught up: the pin is released and retention is back to its bound.
+        for _ in 0..50 { j.append_text("m", "00", "/text", "z").unwrap(); }
+        assert!(j.retained_bytes() <= 16 * 1024 + 1024);
+        // With no post-cut buffer the same drain falls out of retention: an explicit gap, not a silent loss.
+        let mut j = ItemJournal::new("e1", JournalConfig { retain_bytes: 4 * 1024, snapshot_buffer_bytes: 0, max_entity_bytes: 1 << 20, ..Default::default() });
+        for i in 0..40 { j.put("m", &format!("{i:02}"), json!({"text": "x".repeat(6000)})).unwrap(); }
+        let mut c = j.open(None);
+        let mut gap = None;
+        for n in 0..200 {
+            for k in 0..4 { j.append_text("m", &format!("{:02}", (n * 4 + k) % 40), "/text", &"y".repeat(500)).unwrap(); }
+            match c.next(&mut j, 16 * 1024) { Next::Gap(g) => { gap = Some(g); break; } Next::Idle => break, Next::Data(_) => {} }
+        }
+        assert_eq!(gap, Some("retention"));
+    }
+
+    #[test]
+    fn revisions_only_increase_within_an_epoch_even_across_remove_and_put() {
+        let mut j = ItemJournal::new("e1", JournalConfig::default());
+        j.put("m", "a", json!({"t": ""})).unwrap();
+        for _ in 0..5 { j.append_text("m", "a", "/t", "x").unwrap(); }
+        let before = j.entity("m", "a").unwrap().0;
+        j.remove("m", "a").unwrap();
+        j.put("m", "a", json!({"t": ""})).unwrap();
+        assert!(j.entity("m", "a").unwrap().0 > before);
+    }
+
+    #[test]
+    fn a_broken_view_stops_applying_until_the_stream_ends() {
+        let mut j = ItemJournal::new("e1", JournalConfig::default());
+        j.put("m", "a", json!({"t": ""})).unwrap();
+        for _ in 0..3 { j.append_text("m", "a", "/t", "x").unwrap(); }
+        let lines: Vec<Vec<u8>> = j.log.iter().map(|(_, l)| l.to_vec()).collect();
+        let mut v = ItemView::new();
+        v.feed(&ItemJournal::new("e1", JournalConfig::default()).snapshot());
+        v.feed(&lines[0]);
+        v.feed(&lines[2]); // seq 3 after 1: missing -> broken
+        assert!(v.broken());
+        let (seq, records) = (v.seq(), v.records);
+        v.feed(&lines[3]);
+        assert_eq!((v.seq(), v.records), (seq, records), "nothing applied while broken");
+        v.stream_ended();
+        assert!(!v.broken());
     }
 
     #[test]

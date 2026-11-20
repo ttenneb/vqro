@@ -14,7 +14,11 @@ AGENTS, RATE, TEXT = int(arg("--agents", "200")), arg("--rate", "2"), arg("--tex
 SCALE = float(arg("--timescale", "1"))  # shrink the timeline for smoke runs
 BIN = Path(os.environ.get("CARGO_TARGET_DIR", str(Path(__file__).resolve().parents[2] / "target"))) / "release"
 CPUS = arg("--cpus", "")  # pin with taskset only when asked (measurements: 8-15); the gate inherits its own set
-R = Path(tempfile.mkdtemp(prefix="p3", dir="/tmp"))
+SCRATCH = Path.home() / ".local/share/herdr/scratch"
+SCRATCH.mkdir(parents=True, exist_ok=True)
+R = Path(tempfile.mkdtemp(prefix="p3", dir=SCRATCH))  # socket path stays short (< 103 bytes)
+STOP_FILE = R / "stop"
+BURST_AGENTS, BURST_EVERY = arg("--burst-agents", "4"), arg("--burst-every", "8")
 for d in ("home", "st", "ext", "run"): (R / d).mkdir()
 (R / "run").chmod(0o700)
 (R / "ext/defaults.json").write_text('{"version":4,"extensions":[]}')
@@ -71,7 +75,7 @@ def at(t):
     while time.monotonic() - T0 < t: time.sleep(0.2)
 
 def provider_argv():
-    return [BIN / "vqro-fake-items", "--agents", AGENTS, "--rate", RATE, "--text", TEXT]
+    return [BIN / "vqro-fake-items", "--agents", AGENTS, "--rate", RATE, "--text", TEXT, "--burst-agents", BURST_AGENTS, "--burst-every", BURST_EVERY]
 
 try:
     start("core", [BIN / "vqro", "serve", "--fake"], OUT / "core.log")
@@ -83,7 +87,7 @@ try:
         time.sleep(0.2)
     total = int(400 * SCALE)
     for v in ("v1", "v2", "v3"):
-        start(v, [BIN / "vqro-items-viewer", "--name", v, "--seconds", total, "--out", OUT / f"{v}.json"], OUT / f"{v}.out")
+        start(v, [BIN / "vqro-items-viewer", "--name", v, "--seconds", total + 300, "--stop-file", STOP_FILE, "--out", OUT / f"{v}.json"], OUT / f"{v}.out")
     threading.Thread(target=sampler, daemon=True).start()
     PHASE[0] = "steady"; at(90)
     if "--no-stall" not in sys.argv:
@@ -92,7 +96,7 @@ try:
     if "--no-slow" not in sys.argv:
         # A slow viewer that comes back: v3 stops reading for 20 s (SIGSTOP), then reattaches from its cursor.
         PHASE[0] = "slow_v3"; procs["v3"].send_signal(signal.SIGSTOP); log("v3 SIGSTOP")
-        time.sleep(float(arg("--slow-seconds", "20")) * SCALE); procs["v3"].send_signal(signal.SIGCONT); log("v3 SIGCONT"); PHASE[0] = "stall"
+        time.sleep(float(arg("--slow-seconds", "60")) * SCALE); procs["v3"].send_signal(signal.SIGCONT); log("v3 SIGCONT"); PHASE[0] = "stall"
     at(210)
     PHASE[0] = "switch"
     agents = [x["id"] for x in rpc("resource.list", {})["result"]["resources"] if x["kind"] == "agent"]
@@ -118,7 +122,8 @@ try:
         r = rpc("resource.invoke", {"resource": x["id"], "op": "items.digest", "args": {}})
         truth[x["id"]] = r.get("result", {}).get("data")
     (OUT / "truth.json").write_text(json.dumps(truth, indent=1))
-    for v in ("v1", "v2", "v3"): procs[v].wait(timeout=int(60 * SCALE) + 60)
+    STOP_FILE.touch()  # viewers finish after the truth is taken, never on a fixed clock
+    for v in ("v1", "v2", "v3"): procs[v].wait(timeout=120)
     STOP.set()
     # Compare each viewer's reconstruction with the runtime at the paused cut.
     summary = {}
@@ -133,6 +138,15 @@ try:
     failures = [f"{v}: {s['identical_to_runtime']}/{s['agents']} identical" for v, s in summary.items() if isinstance(s, dict) and s["identical_to_runtime"] != s["agents"]]
     failures += [f"{v}: {k}={s['counters'][k]}" for v, s in summary.items() if isinstance(s, dict) for k in BAD if s["counters"].get(k)]
     if "--no-stall" not in sys.argv and summary["stalled_attached"] != AGENTS: failures.append(f"stalled viewer attached {summary['stalled_attached']} of {AGENTS}")
+    # The paths the gate claims to cover must actually happen at its parameters (review C3 P2-5).
+    v3 = summary["v3"]["counters"]
+    if "--no-slow" not in sys.argv:
+        if not v3.get("closed_slow"): failures.append("slow viewer v3 was never closed slow_consumer")
+        if not v3.get("opens_continue"): failures.append("slow viewer v3 never reattached with continue")
+    if int(BURST_AGENTS) > 0 and not sum(summary[v]["counters"].get("gaps_retention", 0) for v in ("v1", "v2", "v3")):
+        failures.append("no retention gap reached a viewer")
+    summary["coverage"] = {v: {k: summary[v]["counters"].get(k, 0) for k in ("opens_continue", "opens_reset", "closed_slow", "gaps_retention", "in_stream_resets")} for v in ("v1", "v2", "v3")}
+    (OUT / "summary.json").write_text(json.dumps(summary, indent=1))
     RESULT[0] = failures
 finally:
     STOP.set()

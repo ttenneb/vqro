@@ -31,7 +31,7 @@ struct View {
 #[derive(Default, serde::Serialize)]
 struct Counters {
     records: u64, bytes: u64, opens_reset: u64, opens_continue: u64, in_stream_resets: u64, gaps: u64, closed: u64,
-    reattach: u64, attach_errors: u64, rpc_bad_json: u64,
+    reattach: u64, attach_errors: u64, rpc_bad_json: u64, closed_slow: u64, gaps_retention: u64,
     #[serde(flatten)]
     errors: ViewErrors,
 }
@@ -75,6 +75,8 @@ async fn main() {
     let seconds: u64 = arg("--seconds", "60").parse().unwrap();
     let stall = std::env::args().any(|a| a == "--stall");
     let out = arg("--out", "");
+    // The harness ends viewers by creating this file after it has taken the runtime's truth (never a fixed time).
+    let stop_file = arg("--stop-file", "");
     let sock = tokio::net::UnixStream::connect(std::env::var("VQRO_SOCKET").unwrap()).await.unwrap();
     let (rd, mut wr) = sock.into_split();
     let mut rd = BufReader::with_capacity(1 << 20, rd);
@@ -136,6 +138,7 @@ async fn main() {
                 let now = Instant::now();
                 let due: Vec<String> = retry.iter().filter(|(t, _)| *t <= now).map(|(_, r)| r.clone()).collect();
                 retry.retain(|(t, _)| *t > now);
+                if !stop_file.is_empty() && std::path::Path::new(&stop_file).exists() { break; }
                 queue.extend(due);
                 while pending.len() < 64 {
                     let Some(res) = queue.pop_front() else { break };
@@ -176,6 +179,8 @@ async fn main() {
                 }
                 m @ ("stream.gap" | "stream.closed") => {
                     if m == "stream.gap" { c.gaps += 1 } else { c.closed += 1 }
+                    if p["reason"]["reason"] == "slow_consumer" { c.closed_slow += 1; }
+                    if p["reason"]["gap"] == "retention" { c.gaps_retention += 1; }
                     if let Some(res) = by_stream.remove(&sid) {
                         let v = views.get_mut(&res).unwrap();
                         // A partial line or an unfinished snapshot is never carried onto a new stream.
