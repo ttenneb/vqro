@@ -4,6 +4,7 @@ mod admission;
 mod contract;
 mod state;
 mod retirement;
+mod queue;
 use std::collections::HashMap;
 use std::sync::{Arc,Mutex,OnceLock};
 use std::time::Duration;
@@ -181,6 +182,7 @@ async fn invoke(shared:&Arc<Shared>,effect:&EffectRequest)->Result<Outcome,Provi
             let agent=shared.agent.lock().unwrap();Ok(Outcome::Observed(Some(agent.receipts.get(delivery).cloned().unwrap_or_else(||json!({"stage":"unknown"})))))
         }
         "agent.send"=>send(shared,args,effect.deadline).await,
+        "agent.queue"=>queue_op(shared,args,effect.deadline).await,
         "agent.interrupt"=>{
             if shared.agent.lock().unwrap().signals.current().idle(){return Ok(Outcome::Observed(Some(json!({"noop":true}))));}
             let result=shared.native.get().unwrap().call("abort",json!({}),effect.deadline.saturating_duration_since(Instant::now())).await;
@@ -208,6 +210,7 @@ async fn send(shared:&Arc<Shared>,args:&Value,deadline:Instant)->Result<Outcome,
         if agent.receipts.contains_key(&prepared.delivery){return rejected("conflict","delivery already recorded; lookup is not a native insertion key");}
         prepared
     };
+    shared.agent.lock().unwrap().invalidate_queue();shared.wake();
     let delivery=prepared.delivery;let native_args=prepared.args;let command=prepared.command;let mode=prepared.mode;
     let base=json!({"delivery":delivery,"origin":prepared.origin,"quoted":prepared.quoted,"rendering":prepared.rendering,"cause":prepared.cause,"correlation":prepared.correlation});
     let weak=Arc::downgrade(shared);let d=delivery.clone();let metadata=base.clone();
@@ -228,6 +231,39 @@ async fn send(shared:&Arc<Shared>,args:&Value,deadline:Instant)->Result<Outcome,
             let mut value=base;value["stage"]=json!("admitted");value["native"]=json!({"request":native});Ok(Outcome::Accepted(Some(json!({"receipt":value}))))
         }
         Admission::Dispatched {native}=>{let mut value=base;value["stage"]=json!("dispatched");value["native"]=json!({"request":native});record_receipt(shared,&delivery,value.clone());Ok(Outcome::Dispatched(Some(json!({"receipt":value}))))}
+        Admission::Refused(error)=>rejected(error.kind,error.message),Admission::Unknown(error)=>native_failure(error),
+    }
+}
+async fn queue_op(shared:&Arc<Shared>,args:&Value,deadline:Instant)->Result<Outcome,ProviderError> {
+    if args.get("epoch").is_none(){return rejected("invalid","queue action requires an epoch");}
+    if args.get("id").is_some() || args.get("content").is_some(){return rejected("unsupported","native queue IDs/replacement are unavailable");}
+    match args["action"].as_str(){
+        Some("list")=>{let agent=shared.agent.lock().unwrap();return Ok(Outcome::Observed(Some(json!({"queue":agent.queue,"incomplete":agent.queue.is_none()}))));}
+        Some("clear")=>{},_=>return rejected("unsupported","undeclared queue action"),
+    }
+    let operation=format!("queue-{}",fresh());
+    let (epoch,version)={let agent=shared.agent.lock().unwrap();(agent.epoch().to_string(),agent.queue_version)};
+    let weak=Arc::downgrade(shared);let op=operation.clone();let cause=args.get("cause").cloned();let correlation=args.get("correlation").cloned();
+    let receipt:admission::Receipt=Arc::new(move|native,result|{
+        if let Some(shared)=weak.upgrade(){
+            let mut value=json!({"operation":op,"op":"agent.queue","action":"clear","epoch":epoch,"native":{"request":native},"cause":cause,"correlation":correlation});
+            let mut agent=shared.agent.lock().unwrap();
+            match result {
+                Ok(reply) if reply.success=>{
+                    value["outcome"]=json!("observed");value["result"]=queue::removed(&reply.data);
+                    // Do not erase a newer native queue update or another input's invalidation.
+                    if agent.epoch()==epoch && agent.queue_version==version{agent.queue=Some(json!([]));agent.queue_version=agent.queue_version.wrapping_add(1);}
+                }
+                Err(error) if !error.may_have_acted=>value["outcome"]=json!("rejected"),
+                _=>value["outcome"]=json!("unknown"),
+            }
+            agent.control_result(&op,value);drop(agent);shared.wake();
+        }
+    });
+    match direct(shared.native.get().unwrap(),"clear_queue",json!({}),deadline,receipt).await {
+        Admission::Acknowledged {reply,..} if reply.success=>{let mut value=queue::removed(&reply.data);value["operation"]=json!(operation);Ok(Outcome::Observed(Some(value)))},
+        Admission::Acknowledged {reply,..}=>Err(ProviderError::new("backend",native_message(&reply))),
+        Admission::Dispatched {..}=>Ok(Outcome::Dispatched(Some(json!({"operation":operation})))),
         Admission::Refused(error)=>rejected(error.kind,error.message),Admission::Unknown(error)=>native_failure(error),
     }
 }

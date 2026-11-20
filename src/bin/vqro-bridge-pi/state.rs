@@ -14,6 +14,7 @@ pub struct Agent {
     pub signals:Arc<Signals>,
     pub incomplete:BTreeSet<String>,
     pub receipts:BTreeMap<String,Value>,
+    pub queue:Option<Value>,pub queue_version:u64,
     receipt_order:VecDeque<String>,
     history:VecDeque<(String,String)>,
     tools:HashMap<String,String>,
@@ -28,7 +29,7 @@ impl Agent {
         let boot=bytes.iter().map(|byte|format!("{byte:02x}")).collect::<String>();
         let mut journal=ItemJournal::new(format!("{boot}.e1"),JournalConfig {max_entity_bytes:ENTITY_TOTAL,..Default::default()});
         journal.set_coverage(Coverage::Tail);
-        let mut agent=Self {journal,signals,incomplete:BTreeSet::new(),receipts:BTreeMap::new(),receipt_order:VecDeque::new(),history:VecDeque::new(),tools:HashMap::new(),current_message:None,
+        let mut agent=Self {journal,signals,incomplete:BTreeSet::new(),receipts:BTreeMap::new(),queue:None,queue_version:0,receipt_order:VecDeque::new(),history:VecDeque::new(),tools:HashMap::new(),current_message:None,
             position:0,serial:0,epoch_number:1,instance,boot,session:None,run:None,completion:None,reason:"unknown".into(),error:None,exit:None,caps:Value::Null};
         agent.refresh();agent
     }
@@ -50,12 +51,13 @@ impl Agent {
                 modes[mode]=json!({"point":point,"batch":batch,"batch_at":"consume","idle":"park"});
             }
         }
-        json!({"agent":{"v":0,"modules":{"stop":{"v":0}}},"host":{"kind":"process","endpoints":"one"},
+        json!({"agent":{"v":0,"modules":{"queue":{"v":0},"stop":{"v":0}}},"host":{"kind":"process","endpoints":"one"},
             "agent.send":{"modes":modes,"content":{"types":if images {vec!["text","image"]} else {vec!["text"]},"shape":"text_then_media","max_bytes":super::contract::input_bytes()},
                 "literal":"controlled_launch","origin":[{"as":"attributed_user","role":"user","frame":"sender_header"}],
                 "correlation":"none","handled":"none","keys":null,"guards":{"session":"adapter","run":"none"},"receipts":{"retain":256}},
             "agent.interrupt":{"pending":"unknown","scope":"foreground","waits":"none"},"agent.receipt":{},
             "agent.stop":{"covers":["foreground","queued"],"waits":"exit"},
+            "agent.queue":{"actions":["list","clear"],"ids":"none","removed":{"content":["text"],"media":"unknown"}},
             "items.stream":{"retain_bytes":131072,"entities":ENTITY_COUNT,"entity_bytes":ENTITY_TOTAL,"max_viewers":4}})
     }
     pub fn provider_capabilities(&self)->Map<String,Value> {
@@ -77,7 +79,7 @@ impl Agent {
             "status":{"state":phase},
             "data":{"agent":{"v":0,"state":self.state(),"lifecycle":if self.exit.is_some(){"ended"}else{"live"},
                 "host":{"id":format!("{}.child",self.boot),"provider":provider,"instance":self.instance,"incarnation":"","kind":"process","owns_lifecycle":true},
-                "session":self.session,"epoch":self.epoch(),"caps":self.caps,"completion":self.completion,"queue":null,"requests":[],"background":null,
+                "session":self.session,"epoch":self.epoch(),"caps":self.caps,"completion":self.completion,"queue":self.queue,"requests":[],"background":null,
                 "config":[],"commands":[],"usage":null,"incomplete":self.incomplete,
                 "items":{"retain_bytes":131072,"entities":ENTITY_COUNT,"entity_bytes":ENTITY_TOTAL,"coverage":"tail"}}}})
     }
@@ -99,6 +101,8 @@ impl Agent {
         while self.receipt_order.len()>256 {if let Some(old)=self.receipt_order.pop_front(){self.receipts.remove(&old);}}
         self.store("receipt",delivery,value,true);
     }
+    pub fn invalidate_queue(&mut self) {self.queue=None;self.queue_version=self.queue_version.wrapping_add(1);}
+    pub fn control_result(&mut self,id:&str,value:Value) {self.store("_control",id,value,true);}
     fn prune(&mut self,except:(&str,&str))->bool {
         let count=self.history.len();
         for _ in 0..count {
@@ -182,7 +186,15 @@ impl Agent {
             Event::Exited(exit)=>{self.exit=Some(exit.clone());self.run=None;},
             Event::ProtocolError(_)=>{self.incomplete.insert("native".into());},
             Event::Record(record)=>match record["type"].as_str() {
+                Some("queue_update")=>{
+                    self.queue=super::queue::summary(record);self.queue_version=self.queue_version.wrapping_add(1);
+                    if self.queue.is_none(){self.incomplete.insert("queue".into());}else{self.incomplete.remove("queue");}
+                }
                 Some("response") if record["command"]=="get_state" && record["success"]==true=>{
+                    if let Some(count)=record["data"]["pendingMessageCount"].as_u64(){
+                        if count==0 {self.queue=Some(json!([]));self.queue_version=self.queue_version.wrapping_add(1);}
+                        else if self.queue.as_ref().and_then(Value::as_array).is_some_and(|rows|rows.len() as u64!=count){self.invalidate_queue();}
+                    }
                     if let Some(id)=record["data"]["sessionId"].as_str().filter(|id|!id.is_empty() && id.len()<=128) {
                         if self.session.as_ref().is_some_and(|session|session["id"]!=id) {
                             self.epoch_number+=1;self.journal.new_epoch(format!("{}.e{}",self.boot,self.epoch_number));self.journal.set_coverage(Coverage::Tail);self.history.clear();self.tools.clear();self.current_message=None;self.run=None;self.completion=None;

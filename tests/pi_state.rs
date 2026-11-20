@@ -2,6 +2,7 @@
 #[allow(dead_code)] #[path="../src/bin/vqro-bridge-pi/native.rs"] mod native;
 #[allow(dead_code)] #[path="../src/bin/vqro-bridge-pi/admission.rs"] mod admission;
 #[allow(dead_code)] #[path="../src/bin/vqro-bridge-pi/contract.rs"] mod contract;
+#[allow(dead_code)] #[path="../src/bin/vqro-bridge-pi/queue.rs"] mod queue;
 #[path="../src/bin/vqro-bridge-pi/state.rs"] mod state;
 use admission::Signals;
 use native::{Event,Exit};
@@ -22,7 +23,8 @@ fn modules_are_versioned_descriptor_maps_for_resource_and_provider() {
         let modules=&caps["agent"]["modules"];
         assert!(modules.is_object(),"module lists are not part of agent-v0");
         assert_eq!(modules["stop"]["v"],0);
-        assert!(modules.get("queue").is_none(),"absence must not invent support");
+        assert_eq!(modules["queue"]["v"],0);
+        assert!(modules.get("history").is_none(),"absence must not invent support");
         assert!(modules.as_object().unwrap().values().all(|descriptor|descriptor.is_object() && descriptor["v"].as_u64().is_some()));
     }
 }
@@ -84,6 +86,19 @@ fn session_switch_changes_epoch_not_endpoint_or_receipt_lookup() {
     assert!(entities(&a,"message").is_empty());assert_eq!(a.receipts["d1"]["stage"],"admitted");
     assert_eq!(a.caps()["agent.send"]["modes"]["boundary"]["batch"],"all");
     assert_eq!(a.provider_capabilities()["agent.send"]["modes"]["boundary"]["batch"],json!(["one","all"]));
+}
+
+#[test]
+fn native_queue_membership_is_observed_not_inferred_from_admission() {
+    let mut a=make();
+    event(&mut a,json!({"type":"queue_update","steering":["queued"],"followUp":[]}));
+    assert_eq!(a.queue.as_ref().unwrap()[0]["preview"],"queued");
+    a.receipt("d",json!({"stage":"admitted"}));
+    assert!(entities(&a,"message").is_empty());
+    a.invalidate_queue();assert!(a.queue.is_none(),"another native input invalidates old membership");
+    event(&mut a,json!({"type":"response","command":"get_state","success":true,"data":{"pendingMessageCount":0}}));
+    assert_eq!(a.queue,Some(json!([])));
+    a.control_result("op",json!({"outcome":"observed"}));assert!(a.journal.entity("_control","op").is_some());
 }
 
 #[test]
