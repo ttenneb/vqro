@@ -96,18 +96,8 @@ async fn new_fake_instance_cannot_reuse_a_previous_vqro_id() {
     assert_eq!(_old.lock().unwrap().resources.len(),1,"stopped cores ignore late backend state mutations");
     // The fake starts empty with refs f1, f2... again, but belongs to a new instance.
     let socket = e._dir.path().join("new.sock");
-    // Other tests in this binary spawn children; one forked while the old core's lock file was open shares
-    // that flock until its exec closes the fd, so allow that brief window (see the store fence test).
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    let _new = loop {
-        match start(socket.clone(), e.state.clone(), false, Backend::Fake, None) {
-            Ok(core) => break core,
-            Err(err) if std::time::Instant::now() < deadline && err.to_string().contains("still in use") => {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await
-            }
-            Err(err) => panic!("{err}"),
-        }
-    };
+    // A child another test forked may share the old lock until its exec; start waits that out.
+    let _new = start(socket.clone(), e.state.clone(), false, Backend::Fake, None).unwrap();
     let (new, _rx, _) = client::connect(&socket, "test").await.unwrap();
     let second = new.call("resource.spawn", json!({"argv": ["sh"]})).await.unwrap()["resource"]["id"].clone();
     assert_ne!(first, second, "same ref on a new backend instance is not the same resource");

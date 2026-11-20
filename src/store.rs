@@ -37,6 +37,14 @@ use crate::rpc::RpcError;
 const HISTORY: usize = 500;
 pub const HISTORY_BYTES: usize = 8 * 1024 * 1024;
 pub const NOTE_BYTES: usize = 4096;
+/// How long a starting core waits for the state lock. flock locks belong to the open file
+/// description: any child forked while a core holds the lock (by that core, an extension spawn,
+/// or another test in the same process) shares it until its exec, even with CLOEXEC, and a
+/// stopping core's late durable writer holds it until it finishes. Both are brief, so a
+/// replacement waits a bounded time instead of failing at once; a lock still held after this is a
+/// live core or a stuck writer and fails as before. Process-associated fcntl locks would avoid
+/// fork inheritance but cannot fence two cores in one process and drop on any close.
+pub const STATE_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 pub(crate) fn validate_note(note:Option<&str>)->Result<(),RpcError> {
     if let Some(note)=note {
         if note.len()>NOTE_BYTES {
@@ -280,17 +288,33 @@ impl Store {
     }
 
     /// Acquire before reading state; blocking writers retain the same process-held lock.
+    /// A core start waits up to `STATE_LOCK_WAIT` for a previous holder to let go (see there).
     pub(crate) fn open_locked(path:PathBuf) -> anyhow::Result<Store> {
-        let lock=Self::lock_state(&path)?;
+        Self::open_locked_within(path, STATE_LOCK_WAIT)
+    }
+
+    pub(crate) fn open_locked_within(path:PathBuf, wait:std::time::Duration) -> anyhow::Result<Store> {
+        let lock=Self::lock_state_within(&path, wait)?;
         let mut store=Self::open(path)?;
         store.lifetime=Some(lock);
         Ok(store)
     }
 
+    /// Immediate probe (the TUI's "is a core using this state?" check): never waits.
     pub(crate) fn lock_state(path:&Path) -> anyhow::Result<std::sync::Arc<std::fs::File>> {
+        Self::lock_state_within(path, std::time::Duration::ZERO)
+    }
+
+    pub(crate) fn lock_state_within(path:&Path, wait:std::time::Duration) -> anyhow::Result<std::sync::Arc<std::fs::File>> {
         let lock=std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(path.with_file_name(".workspace.lock"))?;
-        lock.try_lock().map_err(|error|anyhow::anyhow!("workspace state still in use (possibly a late durable write); wait for the previous core to finish, do not replay: {error}"))?;
-        Ok(std::sync::Arc::new(lock))
+        let deadline=std::time::Instant::now()+wait;
+        loop {
+            match lock.try_lock() {
+                Ok(()) => return Ok(std::sync::Arc::new(lock)),
+                Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now()<deadline => std::thread::sleep(std::time::Duration::from_millis(10)),
+                Err(error) => return Err(anyhow::anyhow!("workspace state still in use (possibly a late durable write); wait for the previous core to finish, do not replay: {error}")),
+            }
+        }
     }
 
     pub(crate) fn release_state(&mut self) { self.lifetime=None; }
@@ -718,16 +742,34 @@ mod tests {
         let root=tempfile::tempdir().unwrap();let path=root.path().join("workspace.json");
         let store=Store::open_locked(path.clone()).unwrap();
         let writer=store.committed_copy();drop(store);
-        assert!(Store::open_locked(path.clone()).is_err(),"a late old writer must fence replacement startup");
+        assert!(Store::open_locked_within(path.clone(),std::time::Duration::ZERO).is_err(),"a late old writer must fence replacement startup");
         drop(writer);
-        // Other tests in this process spawn children; a child forked while the lock file is open
-        // shares its open file description (and so the flock) until its exec closes the fd. Allow
-        // that brief window instead of failing on it.
-        let deadline=std::time::Instant::now()+std::time::Duration::from_secs(5);
-        while Store::open_locked(path.clone()).is_err() {
-            assert!(std::time::Instant::now()<deadline,"the lock must be free once the last writer handle drops");
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        // A child forked meanwhile (other tests spawn) may share the flock until its exec:
+        // open_locked's bounded wait covers that window.
+        Store::open_locked(path.clone()).expect("the lock is free once the last writer handle drops");
+    }
+
+    #[test]
+    fn a_starting_core_waits_out_a_briefly_shared_lock_but_not_a_held_one() {
+        // Regression for the recurring "workspace state still in use" test flake: a forked child
+        // shares the lock until its exec; the replacement must wait for it, not fail at once.
+        let root=tempfile::tempdir().unwrap();let path=root.path().join("workspace.json");
+        let old=Store::open_locked(path.clone()).unwrap();
+        let shared=old.lifetime.clone().unwrap();  // stands in for the forked child's copy of the fd
+        drop(old);
+        let release=std::thread::spawn(move||{std::thread::sleep(std::time::Duration::from_millis(300));drop(shared);});
+        let started=std::time::Instant::now();
+        let replacement=Store::open_locked(path.clone());
+        assert!(replacement.is_ok(),"{:?}",replacement.as_ref().err());
+        assert!(started.elapsed()>=std::time::Duration::from_millis(250),"it waited for the release");
+        release.join().unwrap();
+        // Still a real fence: a lock held past the bound fails, and the TUI's probe never waits.
+        let started=std::time::Instant::now();
+        assert!(Store::open_locked_within(path.clone(),std::time::Duration::from_millis(200)).is_err());
+        assert!(started.elapsed()<std::time::Duration::from_secs(2));
+        assert!(Store::lock_state(&path).is_err());
+        drop(replacement);
+        assert!(Store::lock_state(&path).is_ok());
     }
 
     #[test]

@@ -342,7 +342,7 @@ mod tests {
         let error=second.await.unwrap().unwrap_err();assert_eq!(error.data.unwrap()["outcome"],"rejected");
         assert_eq!(core.lock().unwrap().committer.enqueue(&core,256,plan()).unwrap_err().kind(),"unavailable");
         { let mut c=core.lock().unwrap();c.store.release_state();c.shutdown.finish(); }
-        assert!(crate::store::Store::open_locked(root.path().join("workspace.json")).is_err(),"late writer still owns the fence after endpoint shutdown");
+        assert!(crate::store::Store::open_locked_within(root.path().join("workspace.json"),std::time::Duration::ZERO).is_err(),"late writer still owns the fence after endpoint shutdown");
         *gate.0.lock().unwrap()=true;gate.1.notify_all();
         first.await.unwrap().unwrap();
         assert!(core.lock().unwrap().safe_mode,"late active completion must still run adoption hook");

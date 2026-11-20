@@ -273,7 +273,7 @@ mod tests {
     fn metadata_does_not_pin_shutdown_but_a_dispatched_writer_does() {
         let(root,mut parent,mut registry)=fixture();let mut domain=registry.prepare("test","owner",None).unwrap();domain.register(attribution()).unwrap();registry.adopt(domain);
         let writer=registry.prepare("test","owner",None).unwrap();parent.release_state();
-        assert!(crate::store::Store::open_locked(root.path().join("workspace.json")).is_err());drop(writer);
+        assert!(crate::store::Store::open_locked_within(root.path().join("workspace.json"),std::time::Duration::ZERO).is_err());drop(writer);
         let replacement=crate::store::Store::open_locked(root.path().join("workspace.json")).unwrap();drop(replacement);
         assert!(registry.get("test").is_ok());assert_eq!(registry.prepare("test","owner",None).err().unwrap().kind(),"unavailable");
     }

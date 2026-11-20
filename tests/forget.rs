@@ -61,14 +61,7 @@ async fn forget_refuses_live_and_retires_finished_ids() {
     // Restart: ids continue past the forgotten one, never reusing it.
     vqro::server::shutdown(&core).await;
     let socket = e._dir.path().join("again.sock");
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    let _again = loop {
-        match start(socket.clone(), e.state.clone(), false, Backend::Fake, None) {
-            Ok(core) => break core,
-            Err(err) if std::time::Instant::now() < deadline && err.to_string().contains("still in use") => tokio::time::sleep(Duration::from_millis(10)).await,
-            Err(err) => panic!("{err}"),
-        }
-    };
+    let _again = start(socket.clone(), e.state.clone(), false, Backend::Fake, None).unwrap();
     let (q, _rx2) = connect(&socket).await;
     let next = q.call("resource.spawn", json!({"argv": ["sh"]})).await.unwrap()["resource"]["id"].clone();
     assert!(number(&next) > number(&id), "{next} must not reuse or precede forgotten {id}");
