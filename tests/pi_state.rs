@@ -16,6 +16,18 @@ fn entities(agent:&Agent,kind:&str)->Vec<Value> {String::from_utf8(agent.journal
 fn message(agent:&mut Agent,text:&str,reason:&str) {event(agent,json!({"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":text}],"stopReason":reason}}));}
 
 #[test]
+fn modules_are_versioned_descriptor_maps_for_resource_and_provider() {
+    let a=make();
+    for caps in [a.caps().clone(),json!(a.provider_capabilities())] {
+        let modules=&caps["agent"]["modules"];
+        assert!(modules.is_object(),"module lists are not part of agent-v0");
+        assert_eq!(modules["stop"]["v"],0);
+        assert!(modules.get("queue").is_none(),"absence must not invent support");
+        assert!(modules.as_object().unwrap().values().all(|descriptor|descriptor.is_object() && descriptor["v"].as_u64().is_some()));
+    }
+}
+
+#[test]
 fn message_deltas_are_append_records_and_materialize_identically() {
     let mut a=make();event(&mut a,json!({"type":"agent_start"}));
     event(&mut a,json!({"type":"message_start","message":{"role":"assistant","content":[]}}));

@@ -50,7 +50,7 @@ impl Agent {
                 modes[mode]=json!({"point":point,"batch":batch,"batch_at":"consume","idle":"park"});
             }
         }
-        json!({"agent":{"v":0,"modules":["stop"]},"host":{"kind":"process","endpoints":"one"},
+        json!({"agent":{"v":0,"modules":{"stop":{"v":0}}},"host":{"kind":"process","endpoints":"one"},
             "agent.send":{"modes":modes,"content":{"types":if images {vec!["text","image"]} else {vec!["text"]},"shape":"text_then_media","max_bytes":super::contract::input_bytes()},
                 "literal":"controlled_launch","origin":[{"as":"attributed_user","role":"user","frame":"sender_header"}],
                 "correlation":"none","handled":"none","keys":null,"guards":{"session":"adapter","run":"none"},"receipts":{"retain":256}},
