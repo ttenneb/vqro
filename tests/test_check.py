@@ -12,6 +12,12 @@ SOURCE = (ROOT / "scripts/check.sh").read_text()
 RECEIPT_PROGRAM = SOURCE.rsplit("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
 SCHEDULER = SOURCE[SOURCE.index("# Registration order"):SOURCE.index("sensitive()")]
 MODEL = SOURCE[SOURCE.index("opentui_model() {"):SOURCE.index("\nstep opentui-model")]
+RUNNER = SOURCE[SOURCE.index("# Registration order"):SOURCE.index("\nno_warnings()")]
+
+
+def shell_function(name):
+    start = SOURCE.index(name + "() {")
+    return SOURCE[start:SOURCE.index("\n}", start) + 2]
 
 
 class CheckTests(unittest.TestCase):
@@ -32,12 +38,177 @@ class CheckTests(unittest.TestCase):
                                "quick", "fixture", str(self.root), "", "private fixture", stamp],
                               input=RECEIPT_PROGRAM, text=True, capture_output=True, env=self.env, umask=0o077)
 
+    def gate(self, commands, mode="full", jobs=2, cleanup=""):
+        """Actual scheduler -> atomic step results -> ordered table -> actual receipt/exit status.
+
+        Only the supplied private commands run; never source the real gate's backend/cgroup setup.
+        """
+        body = '\n'.join(['set -u', 'SKIP_EXIT=77', f'MODE={shlex.quote(mode)}',
+                          f'CHECK_JOBS={jobs}', 'LOGS=$1', 'STEPS=$LOGS/steps.tsv', ': > "$STEPS"',
+                          RUNNER, shell_function('no_warnings'), commands, 'run_steps', cleanup,
+                          'python3 - "$STEPS" "$LOGS/check-receipt.json" "$MODE" fixture "$LOGS" "${LEFT:-}" "${SCOPE:-fixture}" stamp <<\'RECEIPT\'',
+                          RECEIPT_PROGRAM, 'RECEIPT'])
+        logs = Path(tempfile.mkdtemp(dir=self.root))
+        result = subprocess.run(['/bin/bash', '-c', body, 'gate-fixture', str(logs)],
+                                capture_output=True, text=True, env=self.env, timeout=15)
+        latest = logs/'check-receipt.json'
+        receipt = json.loads(latest.read_text()) if latest.exists() else None
+        return result, receipt, logs
+
+    def test_failed_build_with_no_binary_does_not_start_dependents(self):
+        for mode in ('quick', 'full'):
+            with self.subTest(mode=mode):
+                result, receipt, logs = self.gate('''
+step licenses true
+step build-zero-warnings test -x "$LOGS/missing-binary"
+step e2e-dependent touch "$LOGS/dependent-ran"
+step cargo-test touch "$LOGS/sensitive-ran"
+''', mode=mode)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertEqual(receipt['result'], 'fail')
+                self.assertIn('build-zero-warnings', receipt['failed'])
+                self.assertFalse((logs/'dependent-ran').exists(), 'missing build must stop dependent commands')
+                self.assertFalse((logs/'sensitive-ran').exists(), 'missing build must stop timing probes too')
+                self.assertEqual([s['name'] for s in receipt['steps']],
+                                 ['licenses', 'build-zero-warnings', 'e2e-dependent', 'cargo-test'])
+                for name in ('e2e-dependent', 'cargo-test'):
+                    self.assertIn(name, receipt['failed'])
+                    self.assertEqual((logs/f'{name}.log').read_text(), 'not run: build failed\n')
+
+    def test_skipped_build_does_not_qualify_dependent_steps(self):
+        result, receipt, logs = self.gate('''
+step build-zero-warnings /bin/bash -c 'exit 77'
+step dependent touch "$LOGS/dependent-ran"
+''')
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(receipt['skipped'], ['build-zero-warnings'])
+        self.assertEqual(receipt['failed'], ['dependent'])
+        self.assertFalse((logs/'dependent-ran').exists())
+
+    def test_missing_build_result_fails_closed_with_the_full_census(self):
+        publish = shell_function('run_step').replace('run_step()', 'publish()', 1)
+        commands = publish + '''
+run_step() {
+    if [ "${STEP_NAMES[$1]}" = "$BUILD_STEP" ]; then return; fi
+    publish "$@"
+}
+step licenses true
+step build-zero-warnings true
+step dependent touch "$LOGS/dependent-ran"
+'''
+        result, receipt, logs = self.gate(commands)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(receipt['failed'], ['build-zero-warnings', 'dependent'])
+        self.assertFalse((logs/'dependent-ran').exists())
+        self.assertIn('build stopped before recording its result', (logs/'build-zero-warnings.log').read_text())
+
+    def test_failing_command_fails_the_gate_and_receipt(self):
+        result, receipt, logs = self.gate('''
+step build-zero-warnings true
+step broken /bin/bash -c 'echo fixture-failure; exit 7'
+step healthy true
+step cargo-test true
+''')
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(receipt['result'], 'fail')
+        self.assertEqual(receipt['failed'], ['broken'])
+        self.assertIn('fixture-failure', (logs/'broken.log').read_text())
+        self.assertEqual([s['name'] for s in receipt['steps']],
+                         ['build-zero-warnings', 'broken', 'healthy', 'cargo-test'])
+
+    def test_exit_77_through_the_scheduler_is_not_counted_as_passed(self):
+        result, receipt, _ = self.gate('''
+step build-zero-warnings true
+step optional /bin/bash -c 'exit 77'
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(receipt['skipped'], ['optional'])
+        self.assertEqual(receipt['steps'][1]['result'], 'skip')
+        self.assertIn('PASS: 1/2, 1 skipped', result.stdout)
+        self.assertIn('SKIP', result.stdout)
+
+    def test_worker_killed_before_result_is_a_named_failure_not_a_missing_row(self):
+        # This command only kills its own private run_step parent, never the test runner or a real service.
+        result, receipt, logs = self.gate('''
+step build-zero-warnings true
+step crashed /bin/bash -c 'kill -KILL "$PPID"'
+step healthy true
+step cargo-test true
+''')
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(receipt['failed'], ['crashed'])
+        self.assertEqual([s['name'] for s in receipt['steps']],
+                         ['build-zero-warnings', 'crashed', 'healthy', 'cargo-test'])
+        self.assertIn('worker stopped before recording its result', (logs/'crashed.log').read_text())
+
+    def test_zero_warning_build_rejects_warnings_and_compiler_errors(self):
+        for output, code, expected in (('', 0, 'pass'), ('warning: fixture', 0, 'fail'), ('', 9, 'fail')):
+            with self.subTest(output=output, code=code):
+                commands = ("CARGO=()\ncargo() { printf '%s\\n' " + shlex.quote(output) +
+                            f'; return {code}; }}\nstep build-zero-warnings no_warnings\n')
+                result, receipt, _ = self.gate(commands)
+                self.assertEqual(receipt['result'], expected, result.stderr)
+                self.assertEqual(result.returncode, 0 if expected == 'pass' else 1)
+
+    def test_leftover_classification_is_fail_only_when_scoped_and_never_kills_unscoped(self):
+        classification = SOURCE[SOURCE.index('LEFT=${LEFT% }'):SOURCE.index('\nrm -rf "$RUN"')]
+        for scoped, leaked, expected in ((False, False, 'UNSCOPED'), (False, True, 'UNSCOPED'),
+                                         (True, False, 'PASS'), (True, True, 'FAIL')):
+            with self.subTest(scoped=scoped, leaked=leaked):
+                # Fixture PID is the owned shell itself, not a leak. Intercept kill: no real signal is sent.
+                cleanup = '\n'.join(['CGROUP=' + ('fixture' if scoped else ''),
+                                     'LEFT=' + ('$$' if leaked else ''), 'SCOPE=fixture',
+                                     'kill() { printf "%s\\n" "$*" >> "$LOGS/kill-calls"; }', classification])
+                result, receipt, logs = self.gate('step build-zero-warnings true', cleanup=cleanup)
+                self.assertEqual(receipt['steps'][-1]['result'], expected, result.stderr)
+                self.assertEqual(result.returncode, 1 if expected == 'FAIL' else 0)
+                self.assertEqual((logs/'kill-calls').exists(), scoped and leaked)
+                if scoped and leaked:
+                    self.assertEqual((logs/'kill-calls').read_text().strip(), '-9 ' + receipt['leftover_pids'][0])
+                if not scoped:
+                    self.assertNotEqual(receipt['steps'][-1]['result'], 'PASS', 'UNSCOPED is not verified clean')
+
+    def test_concurrency_bound_and_drained_serial_phase(self):
+        worker = self.root/'worker.py'
+        worker.write_text('''import fcntl, json, pathlib, sys, time
+root, kind = pathlib.Path(sys.argv[1]), sys.argv[2]
+def update(start):
+    with (root/'work.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        path = root/'work.json'
+        data = json.loads(path.read_text()) if path.exists() else dict(active=0, peak=0, done=0, sensitive=[])
+        if kind == 'sensitive':
+            assert data['active'] == 0 and data['done'] == 6, data
+            data['sensitive'].append(sys.argv[3])
+        else:
+            data['active'] += 1 if start else -1
+            data['peak'] = max(data['peak'], data['active'])
+            if not start: data['done'] += 1
+        path.write_text(json.dumps(data))
+update(True)
+if kind != 'sensitive':
+    time.sleep(.05)  # Workload overlap, not a wall-time assertion: only counts/order are checked.
+    update(False)
+''')
+        for mode in ('quick', 'full'):
+            with self.subTest(mode=mode):
+                command = shlex.quote(sys.executable) + ' ' + shlex.quote(str(worker)) + ' "$LOGS" '
+                steps = ['step build-zero-warnings true']
+                steps.extend(f'step worker-{i} {command}work' for i in range(6))
+                sensitive = [f'step {name} {command}sensitive {name}' for name in ('cargo-test', 'history-budget')]
+                if mode == 'full': steps[2:2] = sensitive  # Registration order must not choose phase order.
+                else: steps.extend(sensitive)
+                result, receipt, logs = self.gate('\n'.join(steps), mode=mode, jobs=2)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(receipt['failed'], [])
+                data = json.loads((logs/'work.json').read_text())
+                self.assertLessEqual(data['peak'], 2 if mode == 'full' else 1)
+                self.assertEqual(data['done'], 6)
+                self.assertEqual(data['sensitive'], ['cargo-test', 'history-budget'])
+
     def scheduled(self, names, mode="full"):
         """Run check.sh's own run_steps over fake steps: the build step marks the binaries ready, the others say
         whether they ran before or after it."""
-        def function(name):
-            start = SOURCE.index(name + "() {")
-            return SOURCE[start:SOURCE.index("\n}", start) + 2]
         body = "\n".join(["set -u", f"MODE={mode}", "CHECK_JOBS=6", "LOGS=$1",
                           "STEP_NAMES=(" + " ".join(names) + ")", "show_ready(){ :; }",
                           'run_step(){ local i=$1 name=${STEP_NAMES[$1]}',
@@ -45,7 +216,7 @@ class CheckTests(unittest.TestCase):
                           '  elif [ -f "$LOGS/built" ]; then echo "AFTER $name"; else echo "BEFORE $name"; fi',
                           '  printf "%s\\tPASS\\t0\\t-\\n" "$name" > "$LOGS/step-$i.tsv"; }',
                           SOURCE[SOURCE.index("BUILD_STEP="):SOURCE.index("\n", SOURCE.index("BUILD_STEP="))],
-                          function("sensitive"), function("run_steps"), "run_steps"])
+                          shell_function("sensitive"), shell_function("run_steps"), "run_steps"])
         logs = Path(tempfile.mkdtemp(dir=self.root))
         r = subprocess.run(["/bin/bash", "-c", body, "sched", str(logs)], capture_output=True, text=True, env=self.env)
         return r.returncode, r.stdout.split("\n")

@@ -140,6 +140,20 @@ run_steps() {
   done
   if [ "$prefix" -eq 0 ]; then echo "check: no $BUILD_STEP step registered" >&2; return 2; fi
   for ((index=0; index<prefix; index++)); do run_step "$index"; show_ready; done
+  local build_result=FAIL ignored
+  if ! IFS=$'\t' read -r ignored build_result ignored < "$LOGS/step-$((prefix-1)).tsv"; then
+    build_result=FAIL
+    printf 'build stopped before recording its result\n' > "$LOGS/$BUILD_STEP.log"
+    printf '%s\tFAIL\t0\t%s\n' "$BUILD_STEP" "$LOGS/$BUILD_STEP.log" > "$LOGS/step-$((prefix-1)).tsv"
+  fi
+  if [ "$build_result" != PASS ]; then
+    for ((index=prefix; index<${#STEP_NAMES[@]}; index++)); do
+      printf 'not run: build failed\n' > "$LOGS/${STEP_NAMES[$index]}.log"
+      printf '%s\tFAIL\t0\t%s\n' "${STEP_NAMES[$index]}" "$LOGS/${STEP_NAMES[$index]}.log" > "$LOGS/step-$index.tsv"
+    done
+    show_ready
+    return 1
+  fi
   if [ "$MODE" = quick ]; then
     for ((index=prefix; index<${#STEP_NAMES[@]}; index++)); do run_step "$index"; show_ready; done
     return
