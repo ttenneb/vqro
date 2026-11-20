@@ -648,6 +648,9 @@ state/notice. Whole identity-file syntax/I/O failure remains strict: no unseen h
 `workspace.snapshot.identity_reservations` reports count, encoded bytes, limits, actual file-backed `persistent`,
 `durability_confirmed` and `recovery_notice` (not private RSS). This is identity bookkeeping only: no pause, membership,
 grants, mail or execution state is inferred/changed. Extensions still own restart-held/paused policy.
+The Python SDK keeps non-collection snapshot fields in `Extension.snapshot_header` (excluding entries, resources,
+providers and live content). Reload replaces it, including unknown fields; it is snapshot evidence, not live counters.
+An extension can project reported capacity without another full snapshot RPC or hardcoded core limits.
 
 This is not a fallback for native `resource.forget`; older cores
 reject the distinct unknown method rather than accidentally executing a native effect.

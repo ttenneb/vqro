@@ -15,6 +15,7 @@ them while the extension is off. Everything goes through the public core protoco
 """
 import base64
 import collections
+import copy
 import json
 import os
 import queue
@@ -645,6 +646,10 @@ class Extension:
     # -- internals ----------------------------------------------------------------------------
 
     def _load(self, snap):
+        # Generic snapshot facts, not live counters. Preserve unknown headers
+        # without duplicating the large independently cached collections.
+        self.snapshot_header = copy.deepcopy({key: value for key, value in snap.items()
+                                             if key not in ("entries", "resources", "providers", "live")})
         self.entries = dict(snap["entries"])
         # Live view content from every extension: also a way to share derived data.
         self.live = dict(snap.get("live") or {})
