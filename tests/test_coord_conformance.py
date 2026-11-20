@@ -57,6 +57,34 @@ class Catalog(unittest.TestCase):
         self.assertEqual(validate_manifest({"name":"coord", "extensions":"/private/ext"})["name"], "coord")
 
 
+class SaturationOrder(unittest.IsolatedAsyncioTestCase):
+    async def test_probe_grant_precedes_fill_but_first_input_follows_it(self):
+        from agent_conformance.part_b.scale_cases import saturate_domain
+        from agent_conformance.wire import RpcError
+        test = self
+
+        class Sub:
+            filled = False
+            inputs = []
+
+            async def grant(self, *args):
+                test.assertFalse(self.filled, "configuration cannot be added after saturation")
+
+            async def connect(self, name):
+                return name
+
+            async def send(self, *, peer, **fields):
+                self.filled = True
+                self.inputs.append(peer)
+                raise RpcError({"message": "domain quota", "data": {"kind": "quota"}})
+
+        sub = Sub()
+        ctx = SimpleNamespace(evidence=[])
+        accepted, probe, refusal = await saturate_domain(ctx, sub, [{"id": "r1"}], senders=1, size=16)
+        self.assertEqual(sub.inputs, ["sat-s0"] * 5 + ["sat-probe"])
+        self.assertEqual((accepted, probe, refusal["kind"]), ({"r1": []}, "sat-probe", "quota"))
+
+
 class Dummy:
     instances = []
     def __init__(self, root, manifest, vqro, hc):

@@ -177,6 +177,10 @@ async def sub_coordination(ctx, name, agents):
 async def saturate_domain(ctx, sub, targets, *, senders=16, size=30000):
     """Fill the normal budget with open records from many senders over many targets; returns accepted deliveries
     per target and the proof refusal: a fresh sender's 1-byte send to the least-loaded target refused `quota`."""
+    # Grants are normal configuration writes: prepare the unused probe before
+    # saturating, but do not send its first input until the existing checkpoint.
+    await sub.grant("sat-probe", "sat-probe", ["send:admit"], "*")
+    probe = await sub.connect("sat-probe")
     peers = []
     for index in range(senders):
         name = f"sat-s{index}"
@@ -194,8 +198,6 @@ async def saturate_domain(ctx, sub, targets, *, senders=16, size=30000):
                     if error.kind not in ("quota", "busy"): raise
                     refusals[error.kind] = refusals.get(error.kind, 0) + 1
                     break
-    await sub.grant("sat-probe", "sat-probe", ["send:admit"], "*")
-    probe = await sub.connect("sat-probe")
     lightest = min(targets, key=lambda row: len(accepted[row["id"]]))
     try:
         sent = await sub.send(peer=probe, target=lightest["id"], mode="admit", text="p")
@@ -237,6 +239,8 @@ async def full_durable_budget(ctx):
         oldest = await sub.get(gc_sent[0])
         ctx.check(oldest.get("incomplete") or not oldest.get("content"), "history GC compacted the oldest settled record before the fill",
                   settled=len(gc_sent), oldest={k: oldest.get(k) for k in ("state", "incomplete")})
+        await sub.grant("l8-fresh", "l8-fresh", ["send:admit"], "*")
+        fresh = await sub.connect("l8-fresh")
         fill_targets = sub.agents[1:-1]
         accepted, probe, refusal = await saturate_domain(ctx, sub, fill_targets)
         # Operation-window eviction under saturation: refusals also take window slots.
@@ -258,8 +262,6 @@ async def full_durable_budget(ctx):
         except RpcError as error: after_roll = {"kind": error.kind, "message": str(error)}
         # New sends at the budget from a never-used sender, rotating targets so per-pair quotas never mask the budget
         # (prim-final-review): count only refusals that name the budget; every one must be quota.
-        await sub.grant("l8-fresh", "l8-fresh", ["send:admit"], "*")
-        fresh = await sub.connect("l8-fresh")
         at_budget = []
         for index in range(40):
             target = fill_targets[1 + index % (len(fill_targets) - 1)]  # never the GC target
