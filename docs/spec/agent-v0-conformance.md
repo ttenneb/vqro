@@ -51,6 +51,7 @@ equality, and every exercised behaviour must lie within the resource's current c
 | request `methods`, `scopes`, `background_requests`, answer acknowledgement | `agent.respond` | R1–R7 |
 | module actions (queue, session, config, command, history, object, display terminals) | each op | M1–M7 |
 | `covers`, `waits`; per-call reply `covers`, `covers_evidence` when requested-only | `agent.stop` | L2 |
+| `tool_principal: "env"` (absent = not provided) | `data.agent.caps` | G11 |
 
 ## A2. Levels
 
@@ -311,11 +312,17 @@ op id through E stay separate; combined: W, acting `on_behalf_of: P`, invokes E'
 callback record `author` E, `actor` E, `initiator` W, `principal` P; P's `u` undoes them, W's and E's do not; E has no
 standing ability afterwards. An opaque callback proof in legacy `on_behalf_of` is refused; `invocation` remains
 the callback proof field, while explicit `on_behalf_of: P` uses the delegation row rule.
-G11 shared host: tools run for two endpoints on one app-server host resolve to their own endpoint tags when evidenced,
-else to `host:<id>`, never to the host's first endpoint; `host:<id>` acts for an endpoint's principal only through a
-delegation row with `on_behalf_of`. G12 write ownership, checked against the state before the
-transaction and the connection's **actor**, never its effective/delegated principal: a non-owner actor's write,
-delete or revert of `doc/principals/owner` is refused; W cannot create `{from: P, to:
+G11 tool-process attribution: a tier-1 tool's CLI inherits the launcher-tagged pane principal. Select the
+headless per-endpoint environment case only for `caps.tool_principal: "env"`: each tool process receives its
+own endpoint's `VQRO_PRINCIPAL` and workspace `VQRO_SOCKET`. With a many-endpoint host, tools from two endpoints
+must still resolve to distinct correct endpoint principals using native per-endpoint/per-thread support or
+separate runtime children; a shared process-wide principal fails that declaration. If the native route is not
+provided, omit the capability and record the attribution gap: calls resolve to `host:<id>`, shown as such,
+never the host's first endpoint by guess. Reserved principal names are not asserted at hello; `host:<id>` acts
+for an endpoint's principal only through a delegation row with `on_behalf_of`.
+G12 write ownership, checked against the state before the transaction and the connection's **actor**, never its
+effective/delegated principal: a non-owner actor's write, delete or revert of `doc/principals/owner` is refused;
+W cannot create `{from: P, to:
 W}`, cannot replace its own `{from: W, to: W}` with `{from: P, to: W}`, and cannot overwrite P's row by changing
 `from` to W; deleting or reverting a row needs its existing `from` or the owner; a row created in a transaction grants
 nothing within it. Even when acting for P/owner through a delegation or callback, actor W/E cannot create,

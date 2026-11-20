@@ -72,6 +72,13 @@ the generic keys below (`doc/principals/…`) and never reads coordination grant
   core-assigned only; asserting one at `hello` is rejected `invalid`. Backends and supervised children never
   inherit `VQRO_PRINCIPAL` or other caller-identity variables from the parent environment; launcher tagging is
   explicit, not ambient identity inheritance.
+- **Tool-process attribution** `(pending C2)`: the route is the environment of the process running the tool.
+  For tier-1 agents, the launcher tags the agent's pane with `VQRO_PRINCIPAL`, so a tool's `vqro` CLI call
+  inherits that agent principal. Headless adapters declare `caps.tool_principal: "env"` only when each endpoint's
+  tool processes receive its own principal and `VQRO_SOCKET` explicitly. A many-endpoint runtime needs native
+  per-endpoint/per-thread environment support (or a child per endpoint), not one shared principal for all tools.
+  Without that native route, the capability is absent and attribution remains the host's principal, visibly a
+  gap, never guessed as one endpoint. This is not permission to assert core-reserved principal names at hello.
 - **Callback proofs** travel in the `invocation` request field (an opaque proof). A live invocation proof captures
   the invoking call's effective principal and its original initiator separately; writes made under the proof carry
   that effective principal and that initiator. Example: A holds a B→A delegation and invokes `on_behalf_of` B; the

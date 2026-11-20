@@ -546,6 +546,9 @@ replaced when the Pi bridge is ported.
   role/frame/authority descriptors per safe point. Fixed native framing (including `NOT USER INPUT` on Claude
   rewake) is declared/shown, never silently upgraded. Approximate idle must preserve the record's boundary/settle
   contract if a human prompt wins the race; it never authorizes a start that assumes idle.
+- `caps.tool_principal: "env"` promises each tool-running process receives its own endpoint principal and socket
+  explicitly. Multi-endpoint hosts need native per-endpoint/thread environment support or a child per endpoint;
+  otherwise the capability is absent and G11 records visible host attribution, never guessed or emulated tags.
 
 **Human answers (2026-11-19, CONFIRMED).**
 - **AS1, pause:** "vqro stops delivery": paused means vqro sends, hands out and wakes nothing until resumed; an agent
