@@ -129,7 +129,7 @@ impl Native {
         let mut command = Command::new(program);
         command.args(&argv[1..]).current_dir(cwd).env_clear();
         for (key,value) in env {
-            if !key.starts_with("HERDR_") && !key.starts_with("VQRO_") { command.env(key,value); }
+            if !key.starts_with("HERDR_") && (!key.starts_with("VQRO_") || matches!(key.as_str(),"VQRO_SOCKET"|"VQRO_PRINCIPAL")) { command.env(key,value); }
         }
         command.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
         let mut child = command.spawn().map_err(|e| Error::new("backend",format!("start native Pi: {e}")))?;

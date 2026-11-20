@@ -34,6 +34,10 @@ impl Shared {
     fn facts(&self,name:&str)->Value {self.agent.lock().unwrap().facts(name,&self.cwd)}
     fn wake(&self) {self.changed.notify_waiters();}
 }
+fn agent_tool_principal(provided:&str,owner:&Value)->bool{
+    if provided.is_empty() || provided=="undeclared"{return false;}
+    match owner.get("value"){Some(Value::Null)=>provided!="owner",Some(Value::String(owner))=>provided!=owner,_=>false}
+}
 fn fresh()->String {let mut bytes=[0;16];getrandom::fill(&mut bytes).expect("fresh provider identity");bytes.iter().map(|b|format!("{b:02x}")).collect()}
 fn rejected(kind:impl Into<String>,message:impl Into<String>)->Result<Outcome,ProviderError> {Ok(Outcome::Rejected {kind:kind.into(),message:message.into()})}
 fn native_failure(error:native::Error)->Result<Outcome,ProviderError> {
@@ -96,6 +100,10 @@ async fn main()->Result<()> {
             Ok((provider,mut requests))=>{
                 // Remember acknowledged rotation before any later sync/view setup can fail.
                 if let Some(token)=provider.resume_token(){credential=token.into();}
+                if let Ok(principal)=std::env::var("VQRO_PRINCIPAL"){
+                    let evidenced=match provider.call("workspace.get",json!({"key":"doc/principals/owner"})).await{Ok(owner)=>agent_tool_principal(&principal,&owner),Err(_)=>false};
+                    let mut agent=shared.agent.lock().unwrap();agent.tool_principal_env=evidenced;agent.refresh();
+                }
                 if registrations>0{shared.agent.lock().unwrap().cancel_requests("reconnect_not_verifiable");drive_ui_cancels(&shared);}
                 registrations+=1;
                 match provider.full_sync(vec![shared.facts(&name)]).await {

@@ -91,6 +91,15 @@ Native CLI resume arguments remain available at launch. Optional resume/fork/lis
 history paging are not declared here: the native RPC does not expose bounded all-session/history discovery or a
 proven paginated cut. No filesystem discovery or guessed session/entry IDs is substituted.
 
+## Tool principal environment (G11)
+The owned child inherits only VQRO_SOCKET and VQRO_PRINCIPAL from the VQRO namespace, unchanged; supervision
+credentials/configuration and every HERDR variable stay excluded. The launcher assigns the principal, not rN.
+After registration a public workspace.get(doc/principals/owner) distinguishes an agent launch from the workspace
+owner. Only a provided non-owner principal with known owner evidence declares caps.agent.tool_principal:"env";
+unknown/owner launches omit it. The upper bound is agent.tool_principal:["env"], not a scalar top-level descriptor.
+No identity is invented or asserted as a reserved core name. Actual tool CLI hello binding depends on C2's core
+principal changes; environment isolation and the declaration are component-tested here.
+
 ## Partial verification —1874677
 Native dialog normalizer/state and stop-coverage regressions pass; warning-free bridge build. Public
 C1/C2/D6/D13/R1/R3/R5/M1/L1 pass. L2 coverage/end checks passed, but its final effect-event count failed once;

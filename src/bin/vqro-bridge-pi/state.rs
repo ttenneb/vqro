@@ -15,6 +15,7 @@ pub struct Agent {
     pub incomplete:BTreeSet<String>,
     pub receipts:BTreeMap<String,Value>,
     pub queue:Option<Value>,pub queue_version:u64,
+    pub tool_principal_env:bool,
     pub configuration:super::configuration::Configuration,pub commands:super::commands::Commands,
     pub requests:super::requests::Requests,ui_cancels:Vec<(String,Value)>,ui_unconfirmed:BTreeSet<String>,pub ui_overflow:bool,
     receipt_order:VecDeque<String>,
@@ -31,7 +32,7 @@ impl Agent {
         let boot=bytes.iter().map(|byte|format!("{byte:02x}")).collect::<String>();
         let mut journal=ItemJournal::new(format!("{boot}.e1"),JournalConfig {max_entities:ENTITY_COUNT,max_entity_bytes:ENTITY_TOTAL,snapshot_buffer_bytes:1024*1024,..Default::default()});
         journal.set_coverage(Coverage::Tail);
-        let mut agent=Self {journal,signals,incomplete:BTreeSet::new(),receipts:BTreeMap::new(),queue:None,queue_version:0,configuration:Default::default(),commands:Default::default(),requests:Default::default(),ui_cancels:Vec::new(),ui_unconfirmed:BTreeSet::new(),ui_overflow:false,receipt_order:VecDeque::new(),history:VecDeque::new(),tools:HashMap::new(),current_message:None,
+        let mut agent=Self {journal,signals,incomplete:BTreeSet::new(),receipts:BTreeMap::new(),queue:None,queue_version:0,tool_principal_env:false,configuration:Default::default(),commands:Default::default(),requests:Default::default(),ui_cancels:Vec::new(),ui_unconfirmed:BTreeSet::new(),ui_overflow:false,receipt_order:VecDeque::new(),history:VecDeque::new(),tools:HashMap::new(),current_message:None,
             position:0,serial:0,epoch_number:1,instance,boot,session:None,session_pending:false,run:None,completion:None,reason:"unknown".into(),error:None,exit:None,caps:Value::Null};
         agent.refresh();agent
     }
@@ -56,7 +57,7 @@ impl Agent {
                 modes[mode]=json!({"point":point,"batch":batch,"batch_at":"consume","idle":"park"});
             }
         }
-        json!({"agent":{"v":0,"modules":{"queue":{"v":0},"stop":{"v":0},"config":{"v":0},"sessions":{"v":0}}},"host":{"kind":"process","endpoints":"one"},
+        let mut caps=json!({"agent":{"v":0,"modules":{"queue":{"v":0},"stop":{"v":0},"config":{"v":0},"sessions":{"v":0}}},"host":{"kind":"process","endpoints":"one"},
             "agent.send":{"modes":modes,"content":{"types":if images {vec!["text","image"]} else {vec!["text"]},"shape":"text_then_media","max_bytes":super::contract::input_bytes()},
                 "literal":"controlled_launch","origin":[{"as":"attributed_user","role":"user","frame":"sender_header"}],
                 "correlation":"none","handled":"none","keys":null,"guards":{"session":"adapter","run":"none"},"receipts":{"retain":256}},
@@ -65,14 +66,15 @@ impl Agent {
             "agent.configure":{},"agent.command":{},"agent.session":{"actions":["new"]},
             "agent.stop":{"covers":["foreground","queued"],"waits":"exit"},
             "agent.queue":{"actions":["list","clear"],"ids":"none","removed":{"content":["text"],"media":"unknown"}},
-            "items.stream":{"retain_bytes":131072,"entities":ENTITY_COUNT,"entity_bytes":ENTITY_TOTAL,"snapshot_buffer_bytes":1048576,"max_viewers":4}})
+            "items.stream":{"retain_bytes":131072,"entities":ENTITY_COUNT,"entity_bytes":ENTITY_TOTAL,"snapshot_buffer_bytes":1048576,"max_viewers":4}});
+        if self.tool_principal_env{caps["agent"]["tool_principal"]=json!("env");}caps
     }
     pub fn provider_capabilities(&self)->Map<String,Value> {
         fn bound(value:Value)->Value {match value {
             Value::String(s)=>json!([s]),Value::Object(object)=>Value::Object(object.into_iter().filter(|(key,_)|key!="rev").map(|(key,value)|(key,bound(value))).collect()),
             Value::Array(values)=>Value::Array(values.into_iter().map(|v|if v.is_object(){bound(v)}else{v}).collect()),other=>other,
         }}
-        let mut caps=self.declarations();
+        let mut caps=self.declarations();caps["agent"]["tool_principal"]=json!("env");
         // Registration covers either consume-time batch setting and either native model input class.
         for (mode,point) in [("boundary","after_tool_calls"),("settle","would_stop")] {
             caps["agent.send"]["modes"][mode]=json!({"point":point,"batch":["one","all"],"batch_at":"consume","idle":"park"});

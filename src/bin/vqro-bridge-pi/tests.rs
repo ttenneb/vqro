@@ -9,6 +9,15 @@ fn stop_reply_preserves_requested_coverage_without_claiming_wider_effects(){
         assert_eq!(result["covers_evidence"],"requested");assert_eq!(result["pending"],"unknown");
     }
 }
+#[test]
+fn tool_principal_claim_excludes_workspace_owner_and_unknown_owner_evidence(){
+    assert!(agent_tool_principal("p:agent",&json!({"value":"human-owner"})));
+    assert!(!agent_tool_principal("human-owner",&json!({"value":"human-owner"})));
+    assert!(!agent_tool_principal("owner",&json!({"value":null})));
+    assert!(!agent_tool_principal("p:agent",&json!({})));
+    let mut agent=Agent::new("fixture".into(),admission::Signals::new());assert!(agent.caps()["agent"].get("tool_principal").is_none());
+    assert_eq!(agent.provider_capabilities()["agent"]["tool_principal"],json!(["env"]));agent.tool_principal_env=true;agent.refresh();assert_eq!(agent.caps()["agent"]["tool_principal"],"env");
+}
 // Same SDK duplex handshake/fence pattern as tests/pi_retirement.rs.
 struct Core {r:BufReader<ReadHalf<DuplexStream>>,w:WriteHalf<DuplexStream>}
 impl Core {

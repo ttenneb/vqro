@@ -35,7 +35,7 @@ for line in sys.stdin:
     elif kind=='get_commands': data={'commands':[{'name':'fixture','description':'native'}]}
     elif kind=='array_commands': data=[{'name':'fixture'}]
     elif kind=='get_available_models': data={'models':[{'id':'fake','provider':'offline'}]}
-    elif kind=='probe_env': data={'home':os.environ['HOME'],'herdr':any(k.startswith('HERDR_') for k in os.environ),'vqro':any(k.startswith('VQRO_') for k in os.environ)}
+    elif kind=='probe_env': data={'home':os.environ['HOME'],'herdr':any(k.startswith('HERDR_') for k in os.environ),'supervision':any(k.startswith('VQRO_') and k not in ('VQRO_SOCKET','VQRO_PRINCIPAL') for k in os.environ),'principal':os.environ.get('VQRO_PRINCIPAL'),'socket':os.environ.get('VQRO_SOCKET')}
     else: data={}
     command='wrong' if kind=='mismatch' else kind
     print(json.dumps({'type':'response','id':row['id'],'command':command,'success':True,'data':data}),flush=True)
@@ -58,6 +58,9 @@ impl Fixture {
             ("PI_FIXTURE_RELEASE".into(),root.path().join("release").to_string_lossy().into_owned()),
             ("HERDR_FAKE".into(),"must-not-reach-child".into()),
             ("VQRO_BRIDGE_TOKEN".into(),"must-not-reach-child".into()),
+            ("VQRO_EXTENSION_TOKEN".into(),"must-not-reach-child".into()),
+            ("VQRO_PRINCIPAL".into(),"p:fixture-agent".into()),
+            ("VQRO_SOCKET".into(),root.path().join("v.sock").to_string_lossy().into_owned()),
         ]);
         let events = Arc::new(Mutex::new(Vec::new()));
         let observed = events.clone();
@@ -88,7 +91,8 @@ async fn native_metadata_shapes_missing_fields_and_private_environment() {
     assert!(f.native.call("array_commands",json!({}),Duration::from_secs(2)).await.unwrap().data.is_array());
     assert!(f.native.call("get_available_models",json!({}),Duration::from_secs(2)).await.unwrap().data["models"].is_array());
     let env = f.native.call("probe_env",json!({}),Duration::from_secs(2)).await.unwrap().data;
-    assert_eq!(env["herdr"],false); assert_eq!(env["vqro"],false);
+    assert_eq!(env["herdr"],false); assert_eq!(env["supervision"],false);
+    assert_eq!(env["principal"],"p:fixture-agent");assert_eq!(env["socket"],f.root.path().join("v.sock").to_string_lossy().as_ref());
     assert_eq!(env["home"],f.root.path().join("home").to_string_lossy().as_ref());
     let start = Instant::now();
     while f.native.stderr_tail().1 < 100_000 && start.elapsed() < Duration::from_secs(2) { tokio::time::sleep(Duration::from_millis(5)).await; }
