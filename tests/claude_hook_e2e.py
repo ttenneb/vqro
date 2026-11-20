@@ -290,15 +290,14 @@ if a.inbox == "fake":
     check("next point: recovery retried first, then the record is handed over", stuck in context(out) and not kept, (kept, state(stuck), out[:120]))
 # 9e. a record larger than this plugin hands over whole stays held (take max_bytes) and never blocks later mail.
 # The largest record taken renders within the budget even when it is all line breaks (quoting adds per line).
-# (take max_bytes is required: K2 has it from ab310ac)
+# (take max_bytes is required: K2 has it from ab310ac; the per-consumer hold reason from c67f818)
 HUGE = h.send(AGENT, "boundary", txt("HUGE " + "y" * 9500), render=CTX)
 if True:
     SMALL = h.send(AGENT, "boundary", txt("SMALL after huge"), render=CTX)
     time.sleep(0.3)
     rc, out, _ = hook("PostToolBatch", {"tool_calls": []})
-    # K2 may record a different held reason; the fake records too_large_for_consumer
-    check("a record over max_bytes is never claimed; the next record is handed over", SMALL in context(out) and HUGE not in out
-          and state(HUGE) == "held" and (a.inbox != "fake" or h.get(HUGE).get("reason") == "too_large_for_consumer"),
+    check("a record over max_bytes is never claimed and held too_large_for_consumer; the next record is handed over",
+          SMALL in context(out) and HUGE not in out and state(HUGE) == "held" and h.get(HUGE).get("reason") == "too_large_for_consumer",
           ({k: h.get(HUGE).get(k) for k in ("state", "reason", "reason_consumer")}, state(SMALL), out[:200]))
     check("...and was never taken (no take/release churn)", not any(HUGE in json.dumps(e) for e in hooklog() if e["event"] in ("released", "taken")))
     h.withdraw(HUGE)
