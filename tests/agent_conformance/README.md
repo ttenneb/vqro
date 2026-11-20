@@ -84,7 +84,7 @@ private core/backend per case, and writes `results.json`, `results.md`, per-case
 always name all omitted cases. Leaving `--cases` out includes all 55 Part A groups;
 currently unimplemented applicable handlers fail as `component:harness`.
 
-Current executable slice: C1–C10, D1–D15, O1–O11, R1–R7, M1–M3 and L1–L4.
+Current executable slice: C1–C10, D1–D15, O1–O11, R1–R7, M1–M4 and L1–L4.
 Some optional declared branches still have explicit harness gaps (including native
 preempt/keys, richer requests/configuration and a many-endpoint host rebind).
 Core causality forwarding and the old producer unfinished-cut overflow remain

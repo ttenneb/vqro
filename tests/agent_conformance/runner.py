@@ -47,7 +47,7 @@ async def run_case(case, root, manifest, vqro, hc, *, factory=PublicImplementati
         handler = (HANDLERS if handlers is None else handlers).get(case.id)
         if handler is None:
             raise HarnessGap("normative case has no executable runner yet")
-        if case.operation == "agent.send" or (case.operation == "agent.respond" and case.id != "R7") or case.id.startswith("O") or case.id in ("C3", "C7", "L1", "M1") or (case.id == "C2" and "agent.send" in facts.get("caps", {})):
+        if case.operation == "agent.send" or (case.operation == "agent.respond" and case.id != "R7") or case.id.startswith("O") or case.id in ("C3", "C7", "L1", "M1", "D10", "L4") or (case.id == "C2" and "agent.send" in facts.get("caps", {})):
             facts = await ctx.ensure_session()
             declarations["resource"] = facts.get("caps", {})
         await handler(ctx)

@@ -291,7 +291,9 @@ async def literal_text(ctx):
         accepted(await ctx.send(text))
         await ctx.native.wait(lambda rows: any(r["kind"] == "input_received" and r["seq"] > mark for r in rows))
         received = ctx.native.records("input_received", after=mark)
-        check(len(received) == 1 and text in received[0]["text"], "literal input changed, split or duplicated")
+        check(len(received) == 1, "literal input split or duplicated")
+        framed = any(row.get("frame") == "sender_header" for row in declaration.get("origin", []))
+        compare_content([{"type": "text", "text": text}], received[0].get("content"), sender_header=framed)
         check(not ctx.native.records("command_executed", after=mark), "slash text ran a native command/template")
         check(all(r.get("operation") == "send" for r in ctx.native.writes(mark)), "text caused an extra native control effect")
 
@@ -1264,6 +1266,27 @@ async def audit_fence(ctx, result):
         return await ctx.peer.wait(final_event)
     except asyncio.TimeoutError as error:
         raise CheckFailed("final effect audit was not delivered", component="core") from error
+
+
+@case("M4")
+async def advertised_commands(ctx):
+    await caps(ctx, "agent.command")
+    facts = await ctx.facts()
+    commands = facts.get("commands", [])
+    check(isinstance(commands, list) and len(commands) <= 256, "advertised command list is not bounded")
+    mark = ctx.native.mark()
+    rejection(await ctx.invoke("agent.command", {"name": "_conformance-not-advertised", "args": ""}), kinds=("unsupported", "invalid"))
+    check(not ctx.native.writes(mark), "unadvertised command reached native runtime")
+    executed = []
+    for command in commands:
+        await ctx.native.call("turn", state="settled")
+        await ctx.wait_facts(lambda f: f.get("state") == "idle")
+        mark = ctx.native.mark()
+        result = await ctx.invoke("agent.command", {"name": command["name"], "args": ""})
+        check(result.get("outcome") in ("observed", "accepted", "dispatched"), "advertised command was not dispatched: " + command["name"])
+        check(ctx.native.writes(mark), "command acknowledged without any native control effect")
+        executed.append({"name": command["name"], "outcome": result["outcome"], "native_writes": ctx.native.writes(mark)})
+    ctx.evidence.append({"kind": "advertised_commands", "commands": executed, "unknown_rejected_before_native": True})
 
 
 @case("M3")

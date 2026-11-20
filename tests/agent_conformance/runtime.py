@@ -194,7 +194,7 @@ class Runtime:
                 {"name": "fixture-template", "description": "Fixture template", "source": "prompt"}]
             await self.reply(command, {"commands": commands})
         elif kind == "get_available_models":
-            await self.reply(command, {"models": [self.model, dict(MODEL, id="fixture-large", name="Fixture Large")]})
+            await self.reply(command, {"models": [dict(MODEL), dict(MODEL, id="fixture-large", name="Fixture Large")]})
         elif kind == "get_available_thinking_levels":
             await self.reply(command, {"levels": ["off", "low", "high"]})
         elif kind == "get_messages":
@@ -295,6 +295,15 @@ class Runtime:
                 return
             self.queue_modes[name] = command["mode"]
             await self.reply(command)
+        elif kind == "cycle_model":
+            ident = "fixture-large" if self.model["id"] == "fixture-small" else "fixture-small"
+            self.model = dict(MODEL, id=ident, name="Fixture Large" if ident == "fixture-large" else "Fixture Small")
+            self.record("command_executed", name="cycle_model")
+            await self.reply(command, {"model": self.model, "thinkingLevel": self.thinking, "isScoped": False})
+        elif kind == "compact":
+            self.record("command_executed", name="compact", custom_instructions=command.get("customInstructions"))
+            await self.reply(command, {"summary": "Fixture-only compaction summary", "firstKeptEntryId": self.entries[0]["id"] if self.entries else "fixture-start",
+                                       "tokensBefore": 100, "estimatedTokensAfter": 20})
         elif kind == "set_model":
             if command.get("modelId") not in ("fixture-small", "fixture-large"):
                 await self.reply(command, None, False)

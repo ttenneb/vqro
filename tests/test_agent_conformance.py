@@ -619,6 +619,20 @@ class NativeFixtureTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(.005)
         return await asyncio.wait_for(waiting(), 2)
 
+    async def test_documented_native_cycle_and_compact_commands(self):
+        cycled = await self.native(type="cycle_model")
+        self.assertTrue(cycled["success"])
+        self.assertEqual(cycled["data"]["model"]["id"], "fixture-large")
+        state = await self.native(type="get_state")
+        self.assertEqual(state["data"]["model"]["id"], "fixture-large")
+        catalogue = await self.native(type="get_available_models")
+        self.assertEqual([row["id"] for row in catalogue["data"]["models"]], ["fixture-small", "fixture-large"])
+        compacted = await self.native(type="compact", customInstructions="fixture instructions")
+        self.assertTrue(compacted["success"])
+        self.assertEqual(compacted["data"]["summary"], "Fixture-only compaction summary")
+        self.assertEqual([row["name"] for row in self.records("command_executed")], ["cycle_model", "compact"])
+        self.assertFalse(self.records("input_received"))
+
     async def test_admission_is_not_insertion_and_native_environment_is_private(self):
         await self.control("pause_before", phase="insertion")
         reply = await self.native(type="prompt", message="/literal\r\n snow ☃ \u2028 end")
