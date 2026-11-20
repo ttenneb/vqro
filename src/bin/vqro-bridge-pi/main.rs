@@ -216,7 +216,9 @@ async fn viewer(shared:Arc<Shared>,mut stream:ProviderStream,mut cursor:ItemCurs
 }
 async fn invoke(shared:&Arc<Shared>,provider:&Provider,effect:&EffectRequest)->Result<Outcome,ProviderError> {
     if effect.r#ref.as_deref()!=Some("agent") || !effect.incarnation.is_empty() {return rejected("not_found","unknown endpoint incarnation");}
-    let args=&effect.args;
+    // C2 lifts root/args causal links into canonical SDK metadata while leaving args unchanged.
+    // Reuse its public annotation mechanism so root-only links reach receipts without invention.
+    let mut args=effect.args.clone();effect.attribution.causality.annotate(&mut args);let args=&args;
     {
         let agent=shared.agent.lock().unwrap();let current=agent.signals.current();
         let context=contract::Context {caps_rev:agent.caps()["rev"].as_u64().unwrap(),epoch:agent.epoch(),session:if agent.session_pending{None}else{current.metadata["sessionId"].as_str()},owner_proven:false,

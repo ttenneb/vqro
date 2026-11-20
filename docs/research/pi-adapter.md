@@ -132,8 +132,11 @@ proof of that original sender; this asynchronous provenance gap remains explicit
 `from <sender> via <actor>` and labels that inbox sender coordination-asserted, not core-proven. Quoted provenance remains
 asserted and unchanged. Plain user rendering remains unsupported without verified
 owner evidence. Receipts retain the same bound origin; neither ACK nor identity binding proves insertion or
-handling. Private SDK/native tests prove spoofed principal/actor/initiator write nothing, and one delegated
-send yields exactly one native prompt with distinct effective sender/transport actor/initiator.
+handling. C2's canonical SDK causal metadata is annotated into validation/receipt arguments with the shared
+`Causality::annotate` mechanism, so root-only cause/correlation are retained exactly, with no provenance upgrade
+or link inferred from text/timing. Private SDK/native tests prove spoofed principal/actor/initiator write nothing,
+and one delegated send yields exactly one native prompt with distinct effective sender/transport actor/initiator
+plus unchanged root-only causal metadata.
 
 ## Tool principal environment (G11)
 The owned child inherits only VQRO_SOCKET and VQRO_PRINCIPAL from the VQRO namespace, unchanged; supervision
