@@ -12,6 +12,7 @@ import sys
 import tempfile
 import unittest
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 from agent_conformance.core import PublicImplementation
 from agent_conformance.runtime import Runtime
@@ -467,6 +468,29 @@ class SchemaFixtureTests(unittest.TestCase):
                        {"type": "string", "pattern": "[0-9]+"}):
             with self.subTest(schema=schema), self.assertRaises(CheckFailed):
                 schema_example(schema)
+
+
+class HandledDeclarationTests(unittest.IsolatedAsyncioTestCase):
+    def context(self, stage="admitted", consumed=False):
+        return SimpleNamespace(evidence=[], facts=AsyncMock(return_value={"caps": {"agent.send": {"handled": "none"}}}),
+            send=AsyncMock(return_value={"outcome": "accepted", "data": {"receipt": {"delivery": "d1", "stage": stage}}}),
+            native=SimpleNamespace(records=lambda kind: [{}] if consumed and kind == "hook_consumed" else [], call=AsyncMock()),
+            wait_facts=AsyncMock())
+
+    async def test_negative_branch_does_not_require_an_invented_native_hook(self):
+        from agent_conformance.cases import consumed_input
+        ctx = self.context()
+        with patch("agent_conformance.cases.fresh_view", AsyncMock(return_value=SimpleNamespace(reducer=SimpleNamespace(entities={})))):
+            await consumed_input(ctx)
+        self.assertEqual(ctx.evidence[0]["status"], "not-applicable")
+        self.assertEqual(ctx.evidence[0]["exclusion"], {"path": "agent.send.handled", "actual": "none"})
+        self.assertFalse(ctx.evidence[-1]["native_consumption_witnessed"])
+
+    async def test_none_never_reports_handled_and_consumed_never_reports_inserted(self):
+        from agent_conformance.cases import consumed_input
+        for stage, consumed in (("handled", False), ("inserted", True)):
+            with self.subTest(stage=stage), self.assertRaises(CheckFailed):
+                await consumed_input(self.context(stage, consumed))
 
 
 class DeclarationTests(unittest.IsolatedAsyncioTestCase):

@@ -679,16 +679,30 @@ async def idle_park(ctx):
 
 @case("D14")
 async def consumed_input(ctx):
-    await caps(ctx, "agent.send")
+    declaration = await caps(ctx, "agent.send")
+    if declaration.get("handled") != "none":
+        raise HarnessGap("D14 declared positive handled witness needs its native consumption fixture")
+    ctx.evidence.append({"kind": "subcase", "case": "D14.positive_handled", "status": "not-applicable",
+                         "exclusion": {"path": "agent.send.handled", "actual": "none"}})
     before = await ctx.facts()
     receipt = accepted(await ctx.send("D14-hook-consumed"))
-    check(receipt.get("stage") == "admitted", "hook-consumed weak ACK fabricated handled/inserted")
-    check(len(ctx.native.records("hook_consumed")) == 1, "fixture did not consume the input", component="fixture")
-    check(not ctx.native.records("inserted"), "hook-consumed input was durably inserted", component="fixture")
-    await asyncio.sleep(.25)
-    after = await ctx.facts()
-    check(after.get("run") == before.get("run") and after.get("completion") == before.get("completion"),
-          "weak ACK fabricated a run/completion for consumed input")
+    check(receipt.get("stage") != "handled", "handled:none fabricated a handled receipt")
+    consumed = ctx.native.records("hook_consumed")
+    if consumed:
+        check(receipt.get("stage") == "admitted", "hook-consumed input fabricated an inserted receipt")
+        check(len(consumed) == 1, "fixture consumed the input more than once", component="fixture")
+        check(not ctx.native.records("inserted"), "hook-consumed input was durably inserted", component="fixture")
+        after = await ctx.facts()
+        check(after.get("run") == before.get("run") and after.get("completion") == before.get("completion"),
+              "weak ACK fabricated a run/completion for consumed input")
+    else:
+        await ctx.native.call("turn", state="settled")
+        await ctx.wait_facts(lambda f: f.get("state") == "idle")
+    view = await fresh_view(ctx)
+    check(all(row["value"].get("stage") != "handled" for (kind, _), row in view.reducer.entities.items() if kind == "receipt"),
+          "handled:none later published a handled receipt")
+    ctx.evidence.append({"kind": "negative_handled", "native_consumption_witnessed": bool(consumed),
+                         "handled_never_reported": True})
 
 
 @case("L1")
